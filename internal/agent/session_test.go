@@ -400,6 +400,25 @@ func TestSpawnArgvForceAndTrust(t *testing.T) {
 	})
 }
 
+func TestUnknownModeRejected(t *testing.T) {
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=echo"},
+		Workspace: t.TempDir(),
+		Force:     true,
+		Mode:      "not-a-mode",
+		Stderr:    io.Discard,
+	})
+	err := s.Start(t.Context())
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("expected unknown mode error")
+	}
+	if !strings.Contains(err.Error(), "did not advertise") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestSetModeOnStart(t *testing.T) {
 	s := newSession(Options{
 		Binary:    fakeAgentPath(t),

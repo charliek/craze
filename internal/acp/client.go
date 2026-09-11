@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"sync"
 
 	"github.com/charliek/craze/internal/version"
@@ -100,7 +101,11 @@ func (c *Client) Authenticate(ctx context.Context) error {
 }
 
 func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult, error) {
-	params := NewSessionParams{CWD: cwd, MCPServers: []any{}}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, err
+	}
+	params := NewSessionParams{CWD: abs, MCPServers: []any{}}
 	var result NewSessionResult
 	if err := c.conn.Call(ctx, MethodSessionNew, params, &result); err != nil {
 		return nil, err

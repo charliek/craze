@@ -111,4 +111,11 @@ func TestPickYoloAllowUsesRequestOptionID(t *testing.T) {
 	if !ok || id != "opt-always" {
 		t.Fatalf("yolo should prefer allow_always, got %q %v", id, ok)
 	}
+
+	idAsKind := []PermissionOption{
+		{OptionID: KindAllowOnce, Name: "No", Kind: KindRejectOnce},
+	}
+	if _, ok := PickYoloAllow(idAsKind); ok {
+		t.Fatal("must not treat optionId as a kind")
+	}
 }

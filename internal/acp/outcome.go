@@ -6,11 +6,6 @@ func PickKind(opts []PermissionOption, kind string) (string, bool) {
 			return o.OptionID, true
 		}
 	}
-	for _, o := range opts {
-		if o.OptionID == kind {
-			return o.OptionID, true
-		}
-	}
 	return "", false
 }
 

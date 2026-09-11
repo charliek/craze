@@ -21,5 +21,6 @@ Headless tests (after `make build`): `make test-cli`.
 
 ## Status
 
-Early POC. The interactive TUI and `craze prompt` are landing in follow-up
-commits. Shed-lane integration is explicitly later work.
+POC on Linux: `craze` opens a TUI; `craze prompt --json` is the headless path.
+Tests use `craze-fake-agent` (no Cursor credentials in CI). Shed-lane integration
+is explicitly later work.

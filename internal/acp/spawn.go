@@ -46,10 +46,11 @@ func ResolveBinary(explicit string) (string, error) {
 }
 
 type Child struct {
-	cmd     *exec.Cmd
-	pgid    int
-	waitCh  chan struct{}
-	waitErr error
+	cmd        *exec.Cmd
+	pgid       int
+	waitCh     chan struct{}
+	waitErr    error
+	stderrDone chan struct{}
 }
 
 func (ch *Child) PID() int {
@@ -64,6 +65,9 @@ func (ch *Child) Wait() {
 		return
 	}
 	<-ch.waitCh
+	if ch.stderrDone != nil {
+		<-ch.stderrDone
+	}
 }
 
 func (ch *Child) Shutdown() {
@@ -121,9 +125,10 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	}
 
 	child := &Child{
-		cmd:    cmd,
-		pgid:   cmd.Process.Pid,
-		waitCh: make(chan struct{}),
+		cmd:        cmd,
+		pgid:       cmd.Process.Pid,
+		waitCh:     make(chan struct{}),
+		stderrDone: make(chan struct{}),
 	}
 	go func() {
 		child.waitErr = cmd.Wait()
@@ -136,6 +141,7 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	}
 	go func() {
 		_, _ = io.Copy(stderrDst, stderr)
+		close(child.stderrDone)
 	}()
 
 	conn := NewConn(stdout, stdin)

@@ -116,7 +116,8 @@ func (s *session) Start(ctx context.Context) error {
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, availableModeIDs(sess.Modes))
 		if !ok {
-			modeID = s.opts.Mode
+			_ = s.Close()
+			return fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
 		}
 		if err := client.SetMode(ctx, modeID); err != nil {
 			_ = s.Close()
