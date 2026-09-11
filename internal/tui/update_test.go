@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -182,6 +183,71 @@ func TestPermissionOverlayKeys(t *testing.T) {
 	}
 }
 
+func TestPermissionOverlayPinnedKeys(t *testing.T) {
+	t.Run("q quits", func(t *testing.T) {
+		m := withOverlay(t)
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("q should quit during permission overlay")
+		}
+		assertQuitCmd(t, cmd)
+	})
+	t.Run("ctrl+c quits", func(t *testing.T) {
+		m := withOverlay(t)
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("ctrl+c should quit during permission overlay")
+		}
+		assertQuitCmd(t, cmd)
+	})
+	t.Run("ctrl+d quits", func(t *testing.T) {
+		m := withOverlay(t)
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("ctrl+d should quit during permission overlay")
+		}
+		assertQuitCmd(t, cmd)
+	})
+	t.Run("esc cancels overlay", func(t *testing.T) {
+		m := withOverlay(t)
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = tm.(Model)
+		if m.pending != nil {
+			t.Fatal("esc should clear the permission overlay")
+		}
+		if m.quitting {
+			t.Fatal("esc should cancel the turn, not quit")
+		}
+		if cmd == nil {
+			t.Fatal("expected cancel/answer cmd")
+		}
+	})
+}
+
+func TestTranscriptPageUpStaysPut(t *testing.T) {
+	m := sized(t)
+	for i := 0; i < 60; i++ {
+		m.addLine("assistant", fmt.Sprintf("line-%02d padding so the transcript is taller than the viewport", i))
+	}
+	if m.vp.YOffset == 0 {
+		t.Fatal("expected stick-to-bottom to leave a non-zero YOffset")
+	}
+	bottom := m.vp.YOffset
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = tm.(Model)
+	if m.vp.YOffset >= bottom {
+		t.Fatalf("page up did not scroll: YOffset %d (bottom %d)", m.vp.YOffset, bottom)
+	}
+	scrolled := m.vp.YOffset
+	m.addLine("assistant", "new-line-while-scrolled-up")
+	if m.vp.YOffset != scrolled {
+		t.Fatalf("new lines jumped the viewport while scrolled up: %d -> %d", scrolled, m.vp.YOffset)
+	}
+}
+
 func TestPresets(t *testing.T) {
 	if Preset("tokyo-night").Name != "tokyo-night" {
 		t.Fatal("default")
@@ -202,4 +268,34 @@ func texts(m Model, kind string) []string {
 		}
 	}
 	return out
+}
+
+func withOverlay(t *testing.T) Model {
+	t.Helper()
+	m := sized(t)
+	m.yolo = false
+	tm, _ := m.Update(eventMsg{agent.Event{
+		Type: agent.EventPermission,
+		Permission: &agent.PermissionEvent{
+			ID:   "perm-1",
+			Tool: "Shell",
+			Options: []agent.PermissionOption{
+				{OptionID: "opt-once", Kind: "allow_once"},
+				{OptionID: "opt-reject", Kind: "reject_once"},
+			},
+		},
+	}})
+	m = tm.(Model)
+	if m.pending == nil {
+		t.Fatal("expected overlay")
+	}
+	return m
+}
+
+func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("quit cmd returned %T, want tea.QuitMsg", msg)
+	}
 }

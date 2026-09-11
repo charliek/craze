@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -92,9 +94,15 @@ func New(cfg Config) Model {
 		cwd = abs
 	}
 
+	vp := viewport.New(0, 0)
+	vp.KeyMap = viewport.KeyMap{
+		PageUp:   key.NewBinding(key.WithKeys("pgup")),
+		PageDown: key.NewBinding(key.WithKeys("pgdown")),
+	}
+
 	m := Model{
 		theme: Preset(cfg.Theme),
-		vp:    viewport.New(0, 0),
+		vp:    vp,
 		input: ti,
 		sess:  cfg.Session,
 		cwd:   cwd,
@@ -177,26 +185,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.pending != nil {
-		return m.handlePermissionKey(msg)
-	}
 	switch msg.Type {
 	case tea.KeyCtrlC, tea.KeyCtrlD:
 		return m.requestQuit()
 	case tea.KeyEsc:
-		if m.status == statusWorking {
-			return m, m.cancelCmd()
+		if m.pending != nil || m.status == statusWorking {
+			return m.cancelTurn()
 		}
 		m.input.Blur()
 		return m, nil
+	case tea.KeyPgUp, tea.KeyPgDown:
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 	case tea.KeyEnter:
-		if m.status == statusWorking || !m.started {
+		if m.pending != nil || m.status == statusWorking || !m.started {
 			return m, nil
 		}
 		return m.send()
 	}
 	if msg.String() == "q" && m.input.Value() == "" {
 		return m.requestQuit()
+	}
+	if m.pending != nil {
+		return m.handlePermissionKey(msg)
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
@@ -209,8 +221,6 @@ func (m Model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.answerPending("allow_once")
 	case "n", "r", "2":
 		return m.answerPending("reject_once")
-	case "esc", "ctrl+c":
-		return m.answerPending("")
 	}
 	return m, nil
 }
@@ -221,6 +231,7 @@ func (m Model) answerPending(kind string) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
 	}
+	m.layout()
 	id := ""
 	if kind != "" {
 		for _, o := range p.Options {
@@ -254,10 +265,27 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	if m.pending != nil {
+		tm, cmd := m.answerPending("")
+		m = tm.(Model)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if m.status == statusWorking {
+		cmds = append(cmds, m.cancelCmd())
+	}
+	return m, tea.Batch(cmds...)
+}
+
 func (m Model) cancelCmd() tea.Cmd {
 	sess := m.sess
 	return func() tea.Msg {
-		_ = sess.Cancel(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = sess.Cancel(ctx)
 		return nil
 	}
 }
@@ -265,14 +293,10 @@ func (m Model) cancelCmd() tea.Cmd {
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	sess := m.sess
-	working := m.status == statusWorking
-	return m, tea.Sequence(func() tea.Msg {
-		if working {
-			_ = sess.Cancel(context.Background())
-		}
+	return m, func() tea.Msg {
 		_ = sess.Close()
-		return nil
-	}, tea.Quit)
+		return tea.Quit()
+	}
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
@@ -287,6 +311,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.addLine("tool", fmt.Sprintf("%s %s %s", name, status, id))
 	case agent.EventPermission:
 		m.pending = ev.Permission
+		m.layout()
 	case agent.EventDone:
 		if ev.StopReason == "cancelled" {
 			m.status = statusIdle
@@ -325,10 +350,10 @@ func (m *Model) layout() {
 	m.vp.Width = m.width
 	m.vp.Height = h
 	m.input.Width = max(1, m.width-2)
-	m.refreshViewport()
 }
 
 func (m *Model) refreshViewport() {
+	stick := m.vp.Height == 0 || m.vp.AtBottom()
 	var b strings.Builder
 	for _, ln := range m.lines {
 		switch ln.kind {
@@ -344,7 +369,9 @@ func (m *Model) refreshViewport() {
 		b.WriteByte('\n')
 	}
 	m.vp.SetContent(strings.TrimRight(b.String(), "\n"))
-	m.vp.GotoBottom()
+	if stick {
+		m.vp.GotoBottom()
+	}
 }
 
 func (m Model) View() string {

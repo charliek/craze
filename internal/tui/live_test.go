@@ -68,7 +68,10 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	if !m.quitting || qcmd == nil {
 		t.Fatal("expected quit")
 	}
-	_ = sess.Close()
+	msg := qcmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("quit cmd returned %T, want tea.QuitMsg", msg)
+	}
 
 	if runtime.GOOS == "linux" {
 		deadline := time.Now().Add(3 * time.Second)
@@ -79,6 +82,64 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		t.Fatal("fake-agent child still running after quit/close")
+	}
+}
+
+func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
+	bin := buildFakeAgent(t)
+	ws := t.TempDir()
+	sess := agent.New(agent.Options{
+		Binary:    bin,
+		ExtraArgs: []string{"-script=hang"},
+		Workspace: ws,
+		Force:     true,
+		Stderr:    io.Discard,
+	})
+	if err := sess.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	m.started = true
+	m.input.SetValue("hang")
+	tm, promptCmd := m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking || promptCmd == nil {
+		t.Fatal("expected a working prompt")
+	}
+	promptDone := make(chan struct{})
+	go func() {
+		defer close(promptDone)
+		_ = promptCmd()
+	}()
+
+	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = tm.(Model)
+	if !m.quitting || qcmd == nil {
+		t.Fatal("expected quit")
+	}
+
+	quitDone := make(chan tea.Msg, 1)
+	go func() { quitDone <- qcmd() }()
+	select {
+	case msg := <-quitDone:
+		if _, ok := msg.(tea.QuitMsg); !ok {
+			t.Fatalf("quit cmd returned %T, want tea.QuitMsg", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("quit cmd hung waiting for cancel")
+	}
+
+	select {
+	case <-promptDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prompt did not return after quit")
+	}
+
+	if runtime.GOOS == "linux" && processRunning(bin) {
+		t.Fatal("fake-agent child still running after quit while working")
 	}
 }
 
