@@ -242,10 +242,10 @@ func TestPermissionAllowAndReject(t *testing.T) {
 		if res.StopReason != StopEndTurn {
 			t.Fatalf("stopReason %q", res.StopReason)
 		}
-		if used != KindAllowOnce {
-			t.Fatalf("used %q, want request optionId allow_once", used)
+		if used != "opt-once" {
+			t.Fatalf("used %q, want request optionId opt-once", used)
 		}
-		if textFrom(up.snapshot()) != "decision:allow_once" {
+		if textFrom(up.snapshot()) != "decision:opt-once" {
 			t.Fatalf("text %q", textFrom(up.snapshot()))
 		}
 	})
@@ -269,7 +269,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 		if res.StopReason != StopEndTurn {
 			t.Fatalf("stopReason %q", res.StopReason)
 		}
-		if textFrom(up.snapshot()) != "decision:reject_once" {
+		if textFrom(up.snapshot()) != "decision:opt-reject" {
 			t.Fatalf("text %q", textFrom(up.snapshot()))
 		}
 	})

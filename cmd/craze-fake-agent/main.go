@@ -30,6 +30,9 @@ stand in for cursor-agent acp.
 
 func main() {
 	script := "echo"
+	if env := os.Getenv("CRAZE_FAKE_SCRIPT"); env != "" {
+		script = env
+	}
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		a := args[i]

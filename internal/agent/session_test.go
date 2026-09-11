@@ -165,7 +165,7 @@ func TestYoloAutoAllow(t *testing.T) {
 	if res.StopReason != acp.StopEndTurn {
 		t.Fatalf("stop %q", res.StopReason)
 	}
-	log.waitTexts(t, "decision:allow_once")
+	log.waitTexts(t, "decision:opt-always")
 	for _, ev := range log.snapshot() {
 		if ev.Type == EventPermission {
 			t.Fatal("yolo should auto-answer without exposing a pending permission")
@@ -186,13 +186,13 @@ func TestPromptModePermissionAllowAndReject(t *testing.T) {
 		if ev.Permission == nil || len(ev.Permission.Options) == 0 {
 			t.Fatal("missing permission options")
 		}
-		if err := s.AnswerPermission(ev.Permission.ID, "allow_once"); err != nil {
+		if err := s.AnswerPermission(ev.Permission.ID, "opt-once"); err != nil {
 			t.Fatal(err)
 		}
 		if err := <-errCh; err != nil {
 			t.Fatal(err)
 		}
-		log.waitTexts(t, "decision:allow_once")
+		log.waitTexts(t, "decision:opt-once")
 	})
 
 	t.Run("reject", func(t *testing.T) {
@@ -204,13 +204,13 @@ func TestPromptModePermissionAllowAndReject(t *testing.T) {
 			errCh <- err
 		}()
 		ev := log.waitType(t, EventPermission)
-		if err := s.AnswerPermission(ev.Permission.ID, "reject_once"); err != nil {
+		if err := s.AnswerPermission(ev.Permission.ID, "opt-reject"); err != nil {
 			t.Fatal(err)
 		}
 		if err := <-errCh; err != nil {
 			t.Fatal(err)
 		}
-		log.waitTexts(t, "decision:reject_once")
+		log.waitTexts(t, "decision:opt-reject")
 	})
 }
 

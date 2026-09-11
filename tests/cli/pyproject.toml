@@ -1,0 +1,12 @@
+[project]
+name = "craze-cli-tests"
+version = "0.0.0"
+description = "Headless CLI tests for craze against craze-fake-agent"
+requires-python = ">=3.11"
+dependencies = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+addopts = "-q"

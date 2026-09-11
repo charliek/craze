@@ -228,6 +228,14 @@ func (s *session) AnswerPermission(id, optionID string) error {
 	if !ok {
 		return fmt.Errorf("agent: unknown permission request %q", id)
 	}
+	if optionID == "" {
+		select {
+		case p.decide <- acp.PermissionDecision{Cancelled: true}:
+			return nil
+		case <-s.done:
+			return fmt.Errorf("agent: session closed")
+		}
+	}
 	found := false
 	for _, o := range p.options {
 		if o.OptionID == optionID {
@@ -236,6 +244,10 @@ func (s *session) AnswerPermission(id, optionID string) error {
 		}
 	}
 	if !found {
+		select {
+		case p.decide <- acp.PermissionDecision{Cancelled: true}:
+		default:
+		}
 		return fmt.Errorf("agent: optionId %q is not in the permission request", optionID)
 	}
 	select {

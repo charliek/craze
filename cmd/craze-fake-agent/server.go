@@ -192,8 +192,9 @@ func (s *server) permission(id json.RawMessage) {
 			Status:     "pending",
 		},
 		Options: []acp.PermissionOption{
-			{OptionID: acp.KindAllowOnce, Name: "Allow once", Kind: acp.KindAllowOnce},
-			{OptionID: acp.KindRejectOnce, Name: "Reject once", Kind: acp.KindRejectOnce},
+			{OptionID: "opt-always", Name: "Allow always", Kind: acp.KindAllowAlways},
+			{OptionID: "opt-once", Name: "Allow once", Kind: acp.KindAllowOnce},
+			{OptionID: "opt-reject", Name: "Reject once", Kind: acp.KindRejectOnce},
 		},
 	}
 	var result struct {

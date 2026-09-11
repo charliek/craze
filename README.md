@@ -14,7 +14,10 @@ A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
 ```shell
 make build
 ./bin/craze version
+./bin/craze prompt --json --agent-bin ./bin/craze-fake-agent "hello"
 ```
+
+Headless tests (after `make build`): `make test-cli`.
 
 ## Status
 
