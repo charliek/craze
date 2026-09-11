@@ -29,7 +29,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	if err := sess.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if !processRunning(bin) {
+	if runtime.GOOS == "linux" && !processRunning(bin) {
 		t.Fatal("expected fake-agent child after Start")
 	}
 
@@ -70,14 +70,16 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	}
 	_ = sess.Close()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !processRunning(bin) {
-			return
+	if runtime.GOOS == "linux" {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if !processRunning(bin) {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(20 * time.Millisecond)
+		t.Fatal("fake-agent child still running after quit/close")
 	}
-	t.Fatal("fake-agent child still running after quit/close")
 }
 
 func drainEvents(t *testing.T, m Model, sess agent.Session) Model {

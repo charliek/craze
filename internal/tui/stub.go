@@ -23,7 +23,7 @@ func NewStub() *Stub {
 	return &Stub{
 		events: make(chan agent.Event, 256),
 		closed: make(chan struct{}),
-		cancel: make(chan struct{}),
+		cancel: make(chan struct{}, 1),
 	}
 }
 

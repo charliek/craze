@@ -238,7 +238,7 @@ func pickPermission(opts []agent.PermissionOption, queue []string) (optionID str
 		}
 	}
 	if id, ok := optionIDForKind(opts, "reject_once"); ok {
-		return id, true, nil, nil
+		return id, true, queue, nil
 	}
 	return "", true, nil, fmt.Errorf("craze: no permission decision remaining")
 }

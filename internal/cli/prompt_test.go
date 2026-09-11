@@ -103,3 +103,16 @@ func TestEventJSON(t *testing.T) {
 		t.Fatalf("%+v %v", j, ok)
 	}
 }
+
+func TestPickPermissionKeepsUnusedDecisions(t *testing.T) {
+	opts := []agent.PermissionOption{
+		{OptionID: "opt-reject", Kind: "reject_once"},
+	}
+	id, rejected, rest, err := pickPermission(opts, []string{"allow-once"})
+	if err != nil || !rejected || id != "opt-reject" {
+		t.Fatalf("id=%q rejected=%v err=%v", id, rejected, err)
+	}
+	if len(rest) != 1 || rest[0] != "allow-once" {
+		t.Fatalf("queue should keep unused allow-once, got %v", rest)
+	}
+}

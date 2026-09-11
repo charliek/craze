@@ -231,7 +231,9 @@ func (m Model) answerPending(kind string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, func() tea.Msg {
-		_ = m.sess.AnswerPermission(p.ID, id)
+		if err := m.sess.AnswerPermission(p.ID, id); err != nil {
+			return errMsg{err}
+		}
 		return nil
 	}
 }
