@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/*']
+  pull_request:
+    branches: [main, 'feature/*']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - run: go test -timeout 5m -v ./...
+      - run: go test -timeout 5m -race ./internal/acp ./internal/agent
+        if: hashFiles('internal/acp/*.go', 'internal/agent/*.go') != ''
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.10.1
+
+  cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: hashFiles('tests/cli/pyproject.toml') != ''
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - uses: astral-sh/setup-uv@v6
+      - run: make build
+      - run: make test-cli

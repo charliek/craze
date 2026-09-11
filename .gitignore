@@ -1,0 +1,23 @@
+/bin/
+/scratch/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test artifacts
+coverage.out
+*.test
+tests/cli/.venv/
+
+# OS files
+.DS_Store
+
+# Python/uv
+.venv/
+
+# Claude Code local/user-specific files
+.claude/settings.local.json
+.claude/projects/
