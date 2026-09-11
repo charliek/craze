@@ -11,6 +11,8 @@
 coverage.out
 *.test
 tests/cli/.venv/
+__pycache__/
+*.pyc
 
 # OS files
 .DS_Store

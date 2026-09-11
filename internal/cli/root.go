@@ -11,6 +11,7 @@ import (
 )
 
 func NewRootCmd() *cobra.Command {
+	flags := &tuiFlags{force: true, theme: "tokyo-night"}
 	cmd := &cobra.Command{
 		Use:           "craze",
 		Short:         "A Cursor ACP client TUI",
@@ -19,25 +20,24 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version.Version,
 		Args:          cobra.NoArgs,
-		RunE:          runRoot,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			if f, ok := out.(*os.File); ok {
+				st, err := f.Stat()
+				if err == nil && st.Mode()&os.ModeCharDevice == 0 {
+					return usagef("craze: refusing to start TUI on a non-tty")
+				}
+			} else if !stdoutIsTTY() {
+				return usagef("craze: refusing to start TUI on a non-tty")
+			}
+			return runTUI(flags)
+		},
 	}
 	cmd.SetVersionTemplate("{{.Version}}\n")
+	registerTUIFlags(cmd, flags)
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newPromptCmd())
 	return cmd
-}
-
-func runRoot(cmd *cobra.Command, _ []string) error {
-	out := cmd.OutOrStdout()
-	if f, ok := out.(*os.File); ok {
-		st, err := f.Stat()
-		if err == nil && st.Mode()&os.ModeCharDevice == 0 {
-			return usagef("craze: refusing to start TUI on a non-tty")
-		}
-	} else {
-		return usagef("craze: refusing to start TUI on a non-tty")
-	}
-	return usagef("craze: interactive TUI is not available yet; use `craze prompt`")
 }
 
 func newVersionCmd() *cobra.Command {
