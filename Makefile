@@ -9,6 +9,7 @@ LDFLAGS := -X github.com/charliek/craze/internal/version.Version=$(VERSION)
 build:
 	mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/craze ./cmd/craze
+	go build -o bin/craze-fake-agent ./cmd/craze-fake-agent
 
 lint:
 	golangci-lint run
