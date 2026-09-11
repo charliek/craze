@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -41,8 +42,23 @@ func runTUI(f *tuiFlags) error {
 	if err != nil {
 		return err
 	}
+	mode := ""
+	switch {
+	case f.ask:
+		mode = "ask"
+	case f.plan:
+		mode = "plan"
+	}
+	sess := agent.New(agent.Options{
+		Binary:    f.agentBin,
+		Workspace: ws,
+		Force:     f.force,
+		Model:     f.model,
+		Mode:      mode,
+		Stderr:    os.Stderr,
+	})
 	return tui.Run(tui.Config{
-		Session:   tui.NewStub(),
+		Session:   sess,
 		Theme:     f.theme,
 		Workspace: ws,
 		Model:     f.model,
