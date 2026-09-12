@@ -117,15 +117,17 @@ func (m Model) stripItems() []agent.ToolEvent {
 	return out
 }
 
-func (m Model) stripView() string {
+// stripRowsView draws at most limit rows; the cap comes from the layout, which
+// is where degradation decided how many fit.
+func (m Model) stripRowsView(limit int) string {
 	items := m.stripItems()
-	if len(items) == 0 {
+	if limit <= 0 || len(items) == 0 {
 		return ""
 	}
-	sel := m.stripSel
-	if sel < 0 || sel >= len(items) {
-		sel = 0
+	if len(items) > limit {
+		items = items[:limit]
 	}
+	sel := m.stripSelection(len(items))
 	var b strings.Builder
 	for i, t := range items {
 		line := formatStripRow(t)
@@ -139,13 +141,34 @@ func (m Model) stripView() string {
 		b.WriteString(st.Render(line))
 		b.WriteByte('\n')
 	}
-	if m.stripPeek {
-		if peek := formatStripPeek(items[sel], m.width); peek != "" {
-			b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Dim).Render(peek))
-			b.WriteByte('\n')
-		}
-	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) stripPeekView() string {
+	items := m.stripItems()
+	if !m.stripPeek || len(items) == 0 {
+		return ""
+	}
+	peek := formatStripPeek(items[m.stripSelection(len(items))], m.width)
+	if peek == "" {
+		return ""
+	}
+	return lipgloss.NewStyle().Foreground(m.theme.Dim).Render(peek)
+}
+
+func (m Model) peekRows() int {
+	v := m.stripPeekView()
+	if v == "" {
+		return 0
+	}
+	return lipgloss.Height(v)
+}
+
+func (m Model) stripSelection(n int) int {
+	if m.stripSel < 0 || m.stripSel >= n {
+		return 0
+	}
+	return m.stripSel
 }
 
 func formatStripRow(t agent.ToolEvent) string {

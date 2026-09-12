@@ -1,3 +1,5 @@
+❯ go                                                                            
++ Thought for 0s                                                                
 Heading                                                                         
                                                                                 
 • first item                                                                    
@@ -16,9 +18,7 @@ ut aliquip ex ea commodo consequat duis aute.
                                                                                 
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbb  
 bbbbbbbbbbbbbbbbbbbbbbcccccccccccccccccccccccccccccccccccccccccccccccccc        
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ message  / for commands                                                      │
-│                                                                              │
-│                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────
+❯ message  / for commands                                                       
+────────────────────────────────────────────────────────────────────────────────
 default  medium  agent  yolo  ws  idle                                          

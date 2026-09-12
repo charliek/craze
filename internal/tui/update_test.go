@@ -40,6 +40,24 @@ func startSized(t *testing.T, ws string) Model {
 
 func enter() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
 
+// runCmd runs the command a handler returned. Update batches the tick chain in
+// behind it, so a batch is unwrapped and only its first member runs: executing
+// the tick would wait out a real timer.
+func runCmd(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return msg
+	}
+	if len(batch) == 0 || batch[0] == nil {
+		return nil
+	}
+	return batch[0]()
+}
+
 func TestViewFooterAndComposer(t *testing.T) {
 	m := sized(t)
 	view := m.View()
@@ -1017,7 +1035,7 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected SetMode cmd")
 	}
-	msg := cmd()
+	msg := runCmd(cmd)
 	tm, _ = m.Update(msg)
 	m = tm.(Model)
 	if m.status != statusWorking {

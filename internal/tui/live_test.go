@@ -47,7 +47,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt cmd")
 	}
-	doneMsg := cmd()
+	doneMsg := runCmd(cmd)
 	m = drainEvents(t, m, sess)
 	tm, _ = m.Update(doneMsg)
 	m = tm.(Model)
@@ -58,7 +58,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	m.input.SetValue("two")
 	tm, cmd = m.Update(enter())
 	m = tm.(Model)
-	doneMsg = cmd()
+	doneMsg = runCmd(cmd)
 	m = drainEvents(t, m, sess)
 	tm, _ = m.Update(doneMsg)
 	m = tm.(Model)
@@ -71,7 +71,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	if !m.quitting || qcmd == nil {
 		t.Fatal("expected quit")
 	}
-	msg := qcmd()
+	msg := runCmd(qcmd)
 	if _, ok := msg.(tea.QuitMsg); !ok {
 		t.Fatalf("quit cmd returned %T, want tea.QuitMsg", msg)
 	}
@@ -115,7 +115,7 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 	promptDone := make(chan struct{})
 	go func() {
 		defer close(promptDone)
-		_ = promptCmd()
+		_ = runCmd(promptCmd)
 	}()
 
 	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
@@ -125,7 +125,7 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 	}
 
 	quitDone := make(chan tea.Msg, 1)
-	go func() { quitDone <- qcmd() }()
+	go func() { quitDone <- runCmd(qcmd) }()
 	select {
 	case msg := <-quitDone:
 		if _, ok := msg.(tea.QuitMsg); !ok {

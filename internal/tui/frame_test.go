@@ -157,12 +157,17 @@ func runStubFrame(t *testing.T, cols, rows int, script string) string {
 	return plain
 }
 
-func assertGolden(t *testing.T, name string, cols int, got string) {
+func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	t.Helper()
 	for _, ln := range strings.Split(got, "\n") {
 		if w := lipgloss.Width(ln); w > cols {
 			t.Fatalf("line is %d wide, max is %d: %q", w, cols, ln)
 		}
+	}
+	// The frame owes the terminal every row it has and not one more; this is
+	// the height contract the layout engine exists to keep.
+	if h := lipgloss.Height(got); h != rows {
+		t.Fatalf("frame is %d rows, want %d:\n%s", h, rows, got)
 	}
 	path := filepath.Join("testdata", name+".golden")
 	if *updateGoldens {
@@ -195,7 +200,7 @@ func TestFrameGoldenEcho80x24(t *testing.T) {
 		t.Fatalf("prompt is %d chars, want 224", len(prompt))
 	}
 	got := runStubFrame(t, 80, 24, "<wait:idle>"+prompt+"<enter><wait:text:echo:><wait:idle>")
-	assertGolden(t, "echo-80x24", 80, got)
+	assertGolden(t, "echo-80x24", 80, 24, got)
 
 	broken := 0
 	for _, ln := range strings.Split(got, "\n") {
@@ -213,7 +218,7 @@ func TestFrameGoldenEcho80x24(t *testing.T) {
 
 func TestFrameGoldenQuickNotQuit(t *testing.T) {
 	got := runStubFrame(t, 80, 24, "<wait:idle>quick question")
-	assertGolden(t, "quick-not-quit", 80, got)
+	assertGolden(t, "quick-not-quit", 80, 24, got)
 	if !strings.Contains(got, "quick question") {
 		t.Fatalf("composer lost the typed text:\n%s", got)
 	}
@@ -391,7 +396,7 @@ func runFakeFrame(t *testing.T, script string, cols, rows int, keys string) stri
 
 func TestFrameGoldenMarkdown80x24(t *testing.T) {
 	got := runFakeFrame(t, "markdown", 80, 24, "<wait:idle>go<enter><wait:text:Inline><wait:idle>")
-	assertGolden(t, "markdown-80x24", 80, got)
+	assertGolden(t, "markdown-80x24", 80, 24, got)
 	if strings.ContainsAny(got, "`*") {
 		t.Fatalf("markdown markers reached the screen:\n%s", got)
 	}
@@ -399,7 +404,7 @@ func TestFrameGoldenMarkdown80x24(t *testing.T) {
 
 func TestFrameGoldenMarkdown120x40(t *testing.T) {
 	got := runFakeFrame(t, "markdown", 120, 40, "<wait:idle>go<enter><wait:text:Inline><wait:idle>")
-	assertGolden(t, "markdown-120x40", 120, got)
+	assertGolden(t, "markdown-120x40", 120, 40, got)
 	for _, want := range []string{"+ Thought for ", "Heading", "• first item", "  │ go", "  │ func main() {"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
@@ -413,7 +418,7 @@ func TestFrameGoldenMarkdown120x40(t *testing.T) {
 func TestFrameGoldenThoughtExpanded120x40(t *testing.T) {
 	got := runFakeFrame(t, "markdown", 120, 40,
 		"<wait:idle>go<enter><wait:text:Inline><wait:idle><ctrl-o><wait:text:shape of this reply>")
-	assertGolden(t, "thought-expanded-120x40", 120, got)
+	assertGolden(t, "thought-expanded-120x40", 120, 40, got)
 	if !strings.Contains(got, "+ Thought for ") {
 		t.Fatalf("the summary row stays above the expansion:\n%s", got)
 	}
@@ -421,7 +426,7 @@ func TestFrameGoldenThoughtExpanded120x40(t *testing.T) {
 
 func TestFrameGoldenDiff80x24(t *testing.T) {
 	got := runFakeFrame(t, "diff", 80, 24, "<wait:idle>go<enter><wait:text:done diff><wait:idle>")
-	assertGolden(t, "diff-80x24", 80, got)
+	assertGolden(t, "diff-80x24", 80, 24, got)
 	for _, want := range []string{"✓ read  main.go", "✓ edit  main.go  +1 −1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
@@ -435,12 +440,12 @@ func TestFrameGoldenDiff80x24(t *testing.T) {
 func TestFrameGoldenDiffExpanded120x40(t *testing.T) {
 	got := runFakeFrame(t, "diff", 120, 40,
 		"<wait:idle>go<enter><wait:text:done diff><wait:idle><ctrl-o><wait:text:package main>")
-	assertGolden(t, "diff-expanded-120x40", 120, got)
+	assertGolden(t, "diff-expanded-120x40", 120, 40, got)
 }
 
 func TestFrameGoldenBash80x24(t *testing.T) {
 	got := runFakeFrame(t, "bash", 80, 24, "<wait:idle>go<enter><wait:text:done bash><wait:idle>")
-	assertGolden(t, "bash-80x24", 80, got)
+	assertGolden(t, "bash-80x24", 80, 24, got)
 	if !strings.Contains(got, "✓ bash  go vet ./...  exit 127") {
 		t.Fatalf("missing the exit code row:\n%s", got)
 	}
@@ -451,7 +456,7 @@ func TestFrameGoldenBash80x24(t *testing.T) {
 
 func TestFrameGoldenTask80x24(t *testing.T) {
 	got := runFakeFrame(t, "task", 80, 24, "<wait:idle>go<enter><wait:text:done task><wait:idle>")
-	assertGolden(t, "task-80x24", 80, got)
+	assertGolden(t, "task-80x24", 80, 24, got)
 	if !strings.Contains(got, "✓ agent  Count main.go lines  8.0s · grok-4.6-high-fast") {
 		t.Fatalf("missing the completed agent row:\n%s", got)
 	}
@@ -459,7 +464,7 @@ func TestFrameGoldenTask80x24(t *testing.T) {
 
 func TestFrameGoldenTaskLate80x24(t *testing.T) {
 	got := runFakeFrame(t, "task-late", 80, 24, "<wait:idle>go<enter><wait:text:done task><wait:idle>")
-	assertGolden(t, "task-late-80x24", 80, got)
+	assertGolden(t, "task-late-80x24", 80, 24, got)
 	if !strings.Contains(got, "✓ agent  Count main.go lines  8.0s · grok-4.6-high-fast") {
 		t.Fatalf("a receipt that arrived first must still join:\n%s", got)
 	}
@@ -467,7 +472,7 @@ func TestFrameGoldenTaskLate80x24(t *testing.T) {
 
 func TestFrameGoldenTasks80x24(t *testing.T) {
 	got := runFakeFrame(t, "tasks", 80, 24, "<wait:idle>go<enter><wait:text:done tasks><wait:idle>")
-	assertGolden(t, "tasks-80x24", 80, got)
+	assertGolden(t, "tasks-80x24", 80, 24, got)
 	if !strings.Contains(got, "✓ agent  Subagent research") {
 		t.Fatalf("the regex fallback should still make an agent row:\n%s", got)
 	}
@@ -478,11 +483,51 @@ func TestFrameGoldenTasks80x24(t *testing.T) {
 
 func TestFrameGoldenTodosHidesTheTodoTool(t *testing.T) {
 	got := runFakeFrame(t, "todos", 80, 24, "<wait:idle>go<enter><wait:text:done todos><wait:idle>")
-	assertGolden(t, "todos-notes-80x24", 80, got)
+	assertGolden(t, "todos-notes-80x24", 80, 24, got)
 	if strings.Contains(got, "Update TODOs") {
 		t.Fatalf("the todo writer reached the transcript:\n%s", got)
 	}
 	if !strings.Contains(got, "tasks: 3 planned") {
 		t.Fatalf("missing the todo note:\n%s", got)
+	}
+	// 24 rows is the short form: header only, no task rows.
+	if !strings.Contains(got, "TASKS 1/3") {
+		t.Fatalf("missing the pinned panel header:\n%s", got)
+	}
+	if strings.Contains(got, "▸ Edit main.go") {
+		t.Fatalf("a 24-row terminal degrades to a header-only panel:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTodos100x30(t *testing.T) {
+	got := runFakeFrame(t, "todos", 100, 30, "<wait:idle>go<enter><wait:text:done todos><wait:idle>")
+	assertGolden(t, "todos-100x30", 100, 30, got)
+	for _, want := range []string{"TASKS 1/3", "┃ ▸ Edit main.go", "┃ ○ Run go vet"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Read main.go") {
+		t.Fatalf("a completed item folds into the count:\n%s", got)
+	}
+	if strings.Contains(got, "esc to interrupt") {
+		t.Fatalf("an idle frame has no spinner line:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTodosExpanded100x30(t *testing.T) {
+	got := runFakeFrame(t, "todos", 100, 30,
+		"<wait:idle>go<enter><wait:text:done todos><wait:idle><ctrl-t><wait:text:Read main.go>")
+	assertGolden(t, "todos-expanded-100x30", 100, 30, got)
+	if !strings.Contains(got, "┃ ✓ Read main.go") {
+		t.Fatalf("expanded lists the completed item:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTooSmall30x8(t *testing.T) {
+	got := runStubFrame(t, 30, 8, "<wait:idle>")
+	assertGolden(t, "too-small-30x8", 30, 8, got)
+	if !strings.Contains(got, "terminal too small") {
+		t.Fatalf("missing the minimum-size message:\n%s", got)
 	}
 }

@@ -70,6 +70,10 @@ type Model struct {
 	quitting bool
 	started  bool
 
+	// lay is the one layout computation per Update; View and the mouse
+	// hit-tester both read it rather than measuring anything themselves.
+	lay frameLayout
+
 	pending *agent.PermissionEvent
 	snap    agent.Snapshot
 
@@ -91,6 +95,17 @@ type Model struct {
 	stripSel    int
 	stripID     string
 	stripPeek   bool
+
+	tasksState    tasksPanelState
+	todosSeen     bool
+	todosClosedAt time.Time
+
+	tickGen     int
+	tickLive    bool
+	tickFast    bool
+	spinFrame   int
+	turnStart   time.Time
+	lastThought bool
 
 	ctrlCDeadline time.Time
 	clock         func() time.Time
@@ -141,10 +156,11 @@ func New(cfg Config) Model {
 		PageDown: key.NewBinding(key.WithKeys("pgdown")),
 	}
 
+	th := Preset(cfg.Theme)
 	m := Model{
-		theme: Preset(cfg.Theme),
+		theme: th,
 		vp:    vp,
-		input: newComposer(),
+		input: newComposer(th),
 		sess:  cfg.Session,
 		cwd:   cwd,
 		model: cfg.Model,
@@ -187,17 +203,38 @@ func (m Model) startCmd() tea.Cmd {
 	}
 }
 
+// Update runs the handler and then lays the frame out exactly once, from the
+// state the handler left behind, and keeps the single tick chain alive.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	tm, cmd := m.update(msg)
+	next, ok := tm.(Model)
+	if !ok {
+		return tm, cmd
+	}
+	// The handler has already decided where the transcript sits: sticking now
+	// only follows it down when the chrome above it changed shape.
+	next.relayout(next.vp.Height == 0 || next.vp.AtBottom())
+	// The tick chain is batched last, so a test can run the handler's own
+	// command without waiting out a timer.
+	if tick := next.armTick(); tick != nil {
+		cmd = tea.Batch(cmd, tick)
+	}
+	return next, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		// Stickiness is decided before the viewport changes shape, so a resize
-		// while scrolled up does not jump to the bottom.
 		stick := !m.ready || m.vp.Height == 0 || m.vp.AtBottom()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
-		m.layout()
+		m.relayout(stick)
 		m.setViewportContent(stick)
+		return m, nil
+
+	case tickMsg:
+		m.handleTick(msg)
 		return m, nil
 
 	case startedMsg:
@@ -283,6 +320,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()
+	}
+	if msg.Type == tea.KeyCtrlT {
+		return m.cycleTasks()
 	}
 	if msg.Type == tea.KeyShiftTab {
 		return m.cycleMode()
@@ -500,7 +540,6 @@ func (m Model) answerPending(kind string) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
 	}
-	m.layout()
 	id := ""
 	if kind != "" {
 		for _, o := range p.Options {
@@ -527,6 +566,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.slashSel = 0
 	m.addUser(text)
 	m.status = statusWorking
+	m.turnStart = m.now()
 	m.err = ""
 	sess := m.sess
 	return m, func() tea.Msg {
@@ -545,7 +585,6 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.pending = nil
-	m.layout()
 	sess := m.sess
 	return m, func() tea.Msg {
 		if p != nil {
@@ -572,6 +611,9 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
+	// The spinner names what the turn is doing; only a thought chunk leaves it
+	// on "Thinking…".
+	m.lastThought = ev.Type == agent.EventThought
 	switch ev.Type {
 	case agent.EventText:
 		m.appendStream(entryAssistant, ev.Text, ev.At)
@@ -584,17 +626,17 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.upsertTool(ev.Tool)
 		}
 		m.syncStrip()
-		m.layout()
 	case agent.EventTodos:
 		m.refreshSnap()
-		m.noteTodos(m.todosOf(ev))
+		todos := m.todosOf(ev)
+		m.noteTodoLifecycle(todos)
+		m.noteTodos(todos)
 	case agent.EventPermission:
 		m.breakStream()
 		m.pending = ev.Permission
 		m.help = false
 		m.picking = false
 		m.effortStep = false
-		m.layout()
 	case agent.EventDone:
 		m.breakStream()
 		if ev.StopReason == "cancelled" {
@@ -638,68 +680,55 @@ func (m *Model) refreshSnap() {
 	}
 }
 
-func (m *Model) layout() {
-	if m.width <= 0 || m.height <= 0 {
-		return
-	}
-	footerH := max(1, lipgloss.Height(m.footer()))
-	composerH := composerBoxHeight()
-	extra := 0
-	if m.pending != nil {
-		extra += max(1, lipgloss.Height(m.permissionOverlay()))
-	}
-	if m.help {
-		extra += lipgloss.Height(m.helpView())
-	}
-	if m.picking {
-		extra += lipgloss.Height(m.modelPickerView())
-	}
-	if m.slashMenuOpen() && !m.help && !m.picking {
-		if h := lipgloss.Height(m.slashMenuView()); h > 0 {
-			extra += h
-		}
-	}
-	if s := m.stripView(); s != "" {
-		extra += lipgloss.Height(s)
-	}
-	h := m.height - footerH - composerH - extra
-	if h < 1 {
-		h = 1
-	}
-	m.vp.Width = m.width
-	m.vp.Height = h
-	m.input.SetWidth(max(1, m.width-4))
-}
-
+// View places the regions the layout decided, each forced to exactly its own
+// row count, so the frame is always exactly as tall as the terminal.
 func (m Model) View() string {
-	if !m.ready {
+	if !m.ready || m.width <= 0 || m.height <= 0 {
 		return "craze"
 	}
-	m.layout()
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Border).
-		Width(max(1, m.width-2)).
-		Render(m.input.View())
-	parts := []string{m.vp.View()}
-	if m.help {
-		parts = append(parts, m.helpView())
+	lay := m.lay
+	if lay.Width != m.width || lay.Height != m.height {
+		lay = m.computeLayout()
 	}
-	if m.picking {
-		parts = append(parts, m.modelPickerView())
+	if lay.TooSmall {
+		return tooSmallView(m.width, m.height)
 	}
-	if m.slashMenuOpen() && !m.help && !m.picking {
-		parts = append(parts, m.slashMenuView())
+	rows := make([]string, 0, m.height)
+	add := func(block string, r yRange) {
+		rows = append(rows, fitRows(block, r.Height(), m.width)...)
 	}
-	parts = append(parts, box)
-	if s := m.stripView(); s != "" {
-		parts = append(parts, s)
+	add(m.vp.View(), lay.Transcript)
+	add(m.overlayView(), lay.Overlay)
+	add(m.tasksView(lay), lay.Tasks)
+	add(m.spinnerView(), lay.Spinner)
+	add(m.composerView(), lay.Composer)
+	add(m.stripRowsView(lay.AgentRows), lay.Agents)
+	add(m.stripPeekView(), lay.Peek)
+	add(m.permissionOverlay(), lay.Modal)
+	add(m.footer(), lay.Status)
+	return strings.Join(rows, "\n")
+}
+
+// overlayView is the one lower overlay that draws under the transcript; the
+// layout crops it rather than letting it squeeze the transcript away.
+func (m Model) overlayView() string {
+	switch {
+	case m.help:
+		return m.helpView()
+	case m.picking:
+		return m.modelPickerView()
+	case m.slashMenuOpen():
+		return m.slashMenuView()
 	}
-	if m.pending != nil {
-		parts = append(parts, m.permissionOverlay())
+	return ""
+}
+
+func (m Model) overlayRows() int {
+	v := m.overlayView()
+	if v == "" {
+		return 0
 	}
-	parts = append(parts, m.footer())
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return lipgloss.Height(v)
 }
 
 func (m Model) slashMenuView() string {
@@ -723,37 +752,21 @@ func (m Model) slashMenuView() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m Model) overlayReserve() int {
-	h := composerBoxHeight() + max(1, lipgloss.Height(m.footer()))
-	if m.pending != nil {
-		h += max(1, lipgloss.Height(m.permissionOverlay()))
-	}
-	if s := m.stripView(); s != "" {
-		h += lipgloss.Height(s)
-	}
-	return h
-}
-
 func (m Model) helpView() string {
 	lines := []string{
 		"enter send   shift/alt+enter or ctrl+j newline   shift+tab cycle mode",
 		"esc cancel   ctrl+c cancel then quit   ctrl+d quit   pgup/pgdn scroll",
+		"ctrl+t tasks panel   ctrl+o expand detail",
 		"commands:",
 	}
 	for _, it := range m.slashCatalog() {
 		lines = append(lines, fmt.Sprintf("  /%s  %s", it.Name, it.labeledDesc()))
 	}
-	st := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Title).
-		Width(max(1, m.width-2))
-	if m.height > 0 {
-		budget := m.height - m.overlayReserve() - 1
-		if budget > 0 {
-			st = st.MaxHeight(budget)
-		}
-	}
-	return st.Render(strings.Join(lines, "\n"))
+		Width(max(1, m.width-2)).
+		Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) modelPickerView() string {
@@ -780,24 +793,18 @@ func (m Model) modelPickerView() string {
 			fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, md.ID, md.Name)
 		}
 	}
-	st := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Title).
-		Width(max(1, m.width-2))
-	if m.height > 0 {
-		budget := m.height - m.overlayReserve() - 1
-		if budget > 0 {
-			st = st.MaxHeight(budget)
-		}
-	}
-	return st.Render(strings.TrimRight(b.String(), "\n"))
+		Width(max(1, m.width-2)).
+		Render(strings.TrimRight(b.String(), "\n"))
 }
 
 func (m Model) permissionOverlay() string {
-	tool := ""
-	if m.pending != nil {
-		tool = m.pending.Tool
+	if m.pending == nil {
+		return ""
 	}
+	tool := m.pending.Tool
 	return lipgloss.NewStyle().Foreground(m.theme.Warn).Render(
 		fmt.Sprintf("permission %s  [a]llow-once  [n] reject-once", tool),
 	)
