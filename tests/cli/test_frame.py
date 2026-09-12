@@ -181,6 +181,10 @@ def test_frame_scripts(
     # The status rows are the bottom of every frame, and the workspace basename
     # is this suite's fixed directory rather than whatever pytest called it.
     assert f"{WORKDIR} │ cursor" in text, text
+    # 005 §3.2 put the mode chip at the front of status row 2. Every script here
+    # runs in the mode the fake starts a session in, so the chip is the same one
+    # on all of them.
+    assert "◆ agent" in text, text
 
 
 def test_frame_hides_the_todo_writer(
@@ -230,6 +234,166 @@ def test_frame_plan_card_accepts(
     text = "\n".join(frame_lines(proc, 100, 30))
     assert "PLAN Fake Plan" in text, text
     assert "planned:accepted" in text, text
+
+
+# --------------------------------------------------------------- 005 (cut two)
+#
+# The tokens below (`<tab>`, `<click:>`, `<press:>`, `<motion:>`, `<release:>`,
+# `<drag:>`, `<wait:copied>`) exist in internal/tui/frame.go; what these cases
+# own is that they survive the trip through the command's --keys flag, and that
+# what cut two added is on the frame the command prints.
+
+# PLAN_OFFERED drives the planmode script to the point where the offer stands.
+# The fake starts that script in plan mode. Waiting on the placeholder rather
+# than on <wait:idle> is deliberate: the offer needs both of the turn's endings
+# and those two race, so what the composer draws is the proof both landed.
+PLAN_OFFERED = (
+    "<wait:idle>plan it<enter>"
+    "<wait:text:planned: plan it><wait:text:enter implements this plan>"
+)
+
+
+def test_frame_plan_mode_offers_then_implements(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """§3.3 through the command: the offer, then Enter on an empty composer.
+
+    The fake answers "implementing" only when session/set_mode reached it before
+    session/prompt, so "WRONG ORDER" on the frame is craze having raced its own
+    chain rather than chaining it.
+    """
+    offered = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="planmode",
+        cols=100,
+        rows=30,
+        keys=PLAN_OFFERED,
+    )
+    text = "\n".join(frame_lines(offered, 100, 30))
+    assert "◆ plan" in text, text
+    assert "enter implements this plan  ·  type to refine" in text, text
+
+    implemented = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="planmode",
+        cols=100,
+        rows=30,
+        keys=PLAN_OFFERED + "<enter><wait:text:implementing:><wait:idle>",
+    )
+    text = "\n".join(frame_lines(implemented, 100, 30))
+    assert "WRONG ORDER" not in text, text
+    for want in ("mode → agent", "❯ Implement the plan above.", "◆ agent"):
+        assert want in text, f"missing {want!r}:\n{text}"
+    assert "implementing: Implement the plan above." in text, text
+
+
+def test_frame_model_dialog_turns_fast_on(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """§3.4 through the command: /model opens the dialog and Enter applies fast.
+
+    Tab twice reaches the fast row and one right arms it; the note says what was
+    applied and status row 1 says it came back, which together are the proof the
+    value went out to the agent rather than only into the dialog's own state.
+    """
+    opened = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="echo",
+        cols=100,
+        rows=30,
+        keys="<wait:idle>/model<enter>",
+    )
+    text = "\n".join(frame_lines(opened, 100, 30))
+    for want in ("> Default", "current", "effort  low  [medium]  high", "fast  [off]  on"):
+        assert want in text, f"missing {want!r}:\n{text}"
+
+    applied = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="echo",
+        cols=100,
+        rows=30,
+        keys="<wait:idle>/model<enter><tab><tab><right><enter><wait:text:fast → on>",
+    )
+    text = "\n".join(frame_lines(applied, 100, 30))
+    assert "fast → on" in text, text
+    assert "Default (medium · fast)" in text, text
+    # The dialog is a layer over the transcript, and applying closes it.
+    assert "type to filter" not in text, text
+
+
+def test_frame_mode_chip_click_cycles(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The chip is clickable, not just drawn: a press on it cycles the mode.
+
+    Status row 2 is the last row of the frame, so its y is rows-1, and the chip
+    is the first thing on it — x 1 is inside `◆ agent`.
+    """
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="echo",
+        cols=80,
+        rows=24,
+        keys="<wait:idle><click:1,23><wait:text:mode →>",
+    )
+    text = "\n".join(frame_lines(proc, 80, 24))
+    assert "mode → plan" in text, text
+    assert "◆ plan" in text, text
+    assert "◆ agent" not in text, text
+
+
+def test_frame_drag_over_the_reply_copies_it(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """§3.5 through the command: a drag over two transcript rows copies them.
+
+    Rows 0 and 1 of a finished `echo` turn are the user line and the reply, so a
+    drag from the first cell to the middle of the second row covers exactly two
+    rows. The same gesture is sent twice — once as one `<drag:>` and once as the
+    three reports it stands for — because `<release:>` deliberately reports no
+    button, the way an X10 terminal does, and the two spellings have to land on
+    the same frame.
+    """
+    said = "<wait:idle>go<enter><wait:text:echo: go><wait:idle>"
+
+    def select(gesture: str) -> list[str]:
+        proc = frame(
+            craze_bin,
+            fake_agent_bin,
+            tmp_path,
+            script="echo",
+            cols=100,
+            rows=30,
+            keys=said + gesture + "<wait:copied>",
+        )
+        lines = frame_lines(proc, 100, 30)
+        text = "\n".join(lines)
+        assert "copied 2 lines" in text, text
+        # Nothing may reach the developer's clipboard, and an OSC 52 sequence in
+        # this stream would corrupt the frame: the runner records both writes.
+        assert "\x1b]52" not in proc.stdout, proc.stdout
+        # Status row 1 carries the session clock, so it is the one row two runs
+        # are allowed to differ on.
+        return [ln for ln in lines if f"{WORKDIR} │ cursor" not in ln]
+
+    dragged = select("<drag:0,0,7,1>")
+    reports = select("<press:0,0><motion:7,1><release:7,1>")
+    assert reports == dragged, (
+        "press/motion/release did not draw the same frame as <drag:>\n"
+        + "\n".join(reports)
+        + "\n--- drag ---\n"
+        + "\n".join(dragged)
+    )
 
 
 def test_frame_permission_line_needs_no_force(

@@ -1,4 +1,4 @@
-"""tmux smoke driver — plan 004 §3.15 layer 4.
+"""tmux smoke driver — plan 004 §3.15 layer 4, extended by 005 §5 (V6).
 
 This is the only layer that drives the *real* TUI in a *real* terminal: craze
 runs inside a detached tmux pane of an exact size, keys go in through
@@ -6,6 +6,14 @@ runs inside a detached tmux pane of an exact size, keys go in through
 other layer (goldens, ``craze frame``, the PTY tests) renders the model without
 a terminal emulator in the loop, so this is what proves the alt screen, the
 height contract and the key handling against something that redraws.
+
+The mouse comes in the same way. ``send-keys`` writes bytes straight into the
+pane's tty, so a drag is the three SGR reports (``ESC [ < b ; x ; y M|m``) an
+xterm would have sent, delivered with ``send-keys -H``; bubbletea parses mouse
+sequences off stdin unconditionally, so what craze receives is exactly what a
+hand on a mouse produces. tmux's own ``mouse`` option is not involved — that one
+only decides what tmux does with events from the *outer* terminal, and there is
+no outer terminal here.
 
 It is deliberately **not in CI** and not collected by ``make test-cli``: the
 file name does not match pytest's ``python_files``, so it is only collected
@@ -15,9 +23,9 @@ when it is named on the command line, and even then every case skips unless
 Run it either way, after ``make build``::
 
     cd tests/cli && CRAZE_TMUX=1 uv run pytest -v tmux_smoke.py
-    cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --scripts echo,todos
+    cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --cases echo,todos
 
-Captures land in ``<out>/<script>-<cols>x<rows>-<step>.txt``, with ``<out>``
+Captures land in ``<out>/<case>-<cols>x<rows>-<step>.txt``, with ``<out>``
 defaulting to ``./smoke-captures/`` (git-ignored), relative to the repo root
 (``CRAZE_SMOKE_OUT`` or ``--out`` override it).
 """
@@ -54,6 +62,12 @@ EXIT_TIMEOUT = 10.0
 # "1", " ", "3" arriving together would reach the question card as one key.
 KEY_GAP = 0.15
 
+# 005 §3.2 put the mode chip at the start of status row 2, which is the bottom
+# of the frame. Every script that gets a session shows one of these; `authfail`
+# never gets one, so its row 2 starts with the permission chip instead.
+MODE_CHIPS = ("\u25c6 agent", "\u25c6 plan", "\u25c6 ask")
+PERMISSION_CHIPS = ("\u25b8\u25b8 ", "\u25b8 ")
+
 TMUX = shutil.which("tmux")
 ENABLED = os.environ.get("CRAZE_TMUX", "") not in ("", "0")
 SKIP_REASON = (
@@ -88,6 +102,30 @@ class Gone:
 
 
 @dataclass(frozen=True)
+class Ends:
+    """Poll the pane until some line *ends* with ``text``, then capture it.
+
+    A substring is not enough for the titled rule: 005 §3.1 puts the session
+    title at the right *end* of the composer's top rule, and only a line that
+    finishes with it proves that. capture-pane strips trailing blanks, so the
+    end of a captured line is the last cell craze drew on it.
+    """
+
+    text: str
+    step: str
+
+
+@dataclass(frozen=True)
+class Drag:
+    """One left-button drag over the pane, from cell to cell, 0-based."""
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+@dataclass(frozen=True)
 class Watch:
     """Two expectations on one transient sequence.
 
@@ -102,30 +140,51 @@ class Watch:
     until_step: str
 
 
-Step = Send | Wait | Gone | Watch
+Step = Send | Wait | Gone | Ends | Watch | Drag
 
 # Named tmux keys, to keep the tables readable. Everything else is sent with
 # `send-keys -l`, so a bare "a" is the letter and never a key name.
 ENTER = "Enter"
 ESC = "Escape"
+TAB = "Tab"
+RIGHT = "Right"
 QUIT = "C-d"
-NAMED_KEYS = frozenset({ENTER, ESC, QUIT})
+NAMED_KEYS = frozenset({ENTER, ESC, TAB, RIGHT, QUIT})
+
+# SGR mouse button codes. A drag is press, one motion with the button-held bit
+# set, then the release; the release repeats the button code and ends in a
+# lowercase `m`, which is how bubbletea tells it from a press.
+SGR_LEFT = 0
+SGR_LEFT_MOTION = 32
 
 
 @dataclass(frozen=True)
 class Case:
-    """One fake script and what §3.15 says its screen must show."""
+    """One run of craze and what the plan says its screen must show."""
 
     prompt: str | None = "go"
     steps: tuple[Step, ...] = ()
     no_force: bool = False
     clean_exit: bool = True
     note: str = ""
+    # script is the CRAZE_FAKE_SCRIPT to run when it is not the case's own name.
+    # Cut two added cases that exercise craze rather than the wire (the model
+    # dialog, a drag), and those ride on an existing script.
+    script: str | None = None
+    # chip is the mode chip every capture of this case must show, which is 005
+    # §7's "`◆ agent` on every script". None is for the two cases where no one
+    # chip holds all the way through: `planmode` starts in plan mode and ends in
+    # agent, and `authfail` never gets a session to have a mode at all.
+    chip: str | None = MODE_CHIPS[0]
+    # clipboard is what the copy must have handed the platform clipboard tool,
+    # checked against the stub run.sh puts on PATH.
+    clipboard: str | None = None
 
 
-# The per-script expectations are §3.15's, verbatim. Scripts §3.15 does not
-# name still run: they get the height contract, the clean exit, and a wait on
-# their own reply text so the turn is actually finished when craze is quit.
+# The per-case expectations are §3.15's (004) and §5 V6's (005), verbatim.
+# Scripts neither names still run: they get the height contract, the mode chip,
+# the clean exit, and a wait on their own reply text so the turn is actually
+# finished when craze is quit.
 CASES: dict[str, Case] = {
     "echo": Case(steps=(Wait("echo: go", "reply"),)),
     "followup": Case(steps=(Wait("first reply", "reply"),)),
@@ -164,7 +223,7 @@ CASES: dict[str, Case] = {
     # rule, so the screen is where it is checked now; the reply is waited on
     # first because the title update rides ahead of it.
     "title": Case(
-        steps=(Wait("echo: go", "reply"), Wait("Fake Title ─", "title-rule")),
+        steps=(Wait("echo: go", "reply"), Ends(" Fake Title \u2500", "title-rule")),
         note="the session title is the right end of the composer's top rule",
     ),
     "permission": Case(
@@ -205,10 +264,12 @@ CASES: dict[str, Case] = {
             "visible effect is the spinner going away"
         ),
     ),
-    # authfail never gets a session, so there is no prompt to send.
+    # authfail never gets a session, so there is no prompt to send and no mode
+    # to put in a chip.
     "authfail": Case(
         prompt=None,
         clean_exit=False,
+        chip=None,
         steps=(Wait("authentication failed", "auth-error"),),
         note=(
             "craze shows the error and stays up, but Model.startErr has to ride out "
@@ -217,16 +278,109 @@ CASES: dict[str, Case] = {
         ),
     ),
     "noauth": Case(steps=(Wait("echo: go", "reply"),)),
+    # ------------------------------------------------------------ 005 §5 (V6)
+    # The plan-mode exit on a real terminal. The fake starts this script in plan
+    # mode, so the offer is reachable; the placeholder is waited on rather than
+    # the reply alone because the offer needs both of the turn's endings and
+    # those two race, so what the composer draws is the proof both landed.
+    #
+    # Enter then goes in on an *empty* composer, and the fake answers
+    # "implementing" only if session/set_mode reached it before session/prompt —
+    # a screen that says "WRONG ORDER" is craze having raced its own chain.
+    "planmode": Case(
+        prompt="plan it",
+        chip=None,
+        steps=(
+            Wait("\u25c6 plan", "plan-chip"),
+            Wait("planned: plan it", "reply"),
+            Wait(
+                "enter implements this plan  \u00b7  type to refine",
+                "offer-placeholder",
+            ),
+            Send(ENTER),
+            Wait("implementing: Implement the plan above.", "implementing"),
+            Wait("\u25c6 agent", "agent-chip"),
+        ),
+        note=(
+            "the offer is armed by internal/tui/app.go's turnSeq bookkeeping and "
+            "drawn by composer.go's planOfferPlaceholder; WRONG ORDER on the screen "
+            "means the set_mode/prompt chain was batched instead"
+        ),
+    ),
+    # 005 §3.4's dialog, opened by /model and driven with the keys the golden
+    # uses: tab twice reaches the fast row, one right turns it on, Enter applies
+    # just that step. Status row 1 carrying "· fast" is the proof the advertised
+    # value went out to the agent and came back on a snapshot.
+    "model-dialog": Case(
+        script="echo",
+        prompt=None,
+        steps=(
+            Send("/model"),
+            Send(ENTER),
+            Wait("type to filter \u00b7 \u2191\u2193 \u00b7 tab effort/fast", "dialog"),
+            Send(TAB, TAB, RIGHT),
+            Wait("fast  off  [on]", "fast-row-armed"),
+            Send(ENTER),
+            Wait("fast \u2192 on", "fast-note"),
+            Wait("Default (medium \u00b7 fast)", "fast-status-row"),
+        ),
+        note=(
+            "the fast toggle's value is a string ('true'), not a JSON boolean \u2014 see "
+            "\u00a710's V1 plan correction \u2014 so a dialog that applied but left row 1 "
+            "unchanged means the round-trip through configOptions broke"
+        ),
+    ),
+    # 005 §3.5 through a real terminal's mouse: the drag covers the user line and
+    # the reply, so it copies two rows and says so in status row 2. The payload
+    # is checked against the stub clipboard tool, which is what proves the copy
+    # actually left craze rather than only that the note was painted.
+    "drag": Case(
+        script="echo",
+        steps=(
+            Wait("echo: go", "reply"),
+            Drag(0, 0, 7, 1),
+            Wait("copied 2 lines", "copied"),
+        ),
+        clipboard="\u276f go\necho: go",
+        note=(
+            "the release is what finalises the selection and copies; an X10-style "
+            "release reports no button, so internal/tui/app.go tracks the button "
+            "that went down"
+        ),
+    ),
 }
 
-SCRIPTS = tuple(CASES)
+CASE_IDS = tuple(CASES)
 
 
 # ------------------------------------------------------------------ the pane
 
 
 class SmokeFailure(AssertionError):
-    """A per-script expectation that the screen did not meet."""
+    """A per-case expectation that the screen did not meet."""
+
+
+# CLIP_STUB stands in for the platform clipboard tool. craze's copy is OSC 52
+# first and then the native tool, and the native half would otherwise shell out
+# to the developer's own wl-copy or xclip and replace whatever they had on their
+# clipboard — the same reason `go test` stubs nativeCopy. Stubbing it here keeps
+# the real code path (the binary is looked up and executed for real) and turns
+# the payload into something a case can assert on.
+#
+# atotto/clipboard picks its tool at init from the environment, so all four names
+# it might choose are installed: wl-copy/wl-paste when WAYLAND_DISPLAY is set,
+# otherwise xclip, otherwise xsel. A paste invocation is the one carrying an
+# output flag; everything else is a copy.
+CLIP_STUB = """#!/bin/sh
+# generated by tests/cli/tmux_smoke.py
+for arg in "$@"; do
+    case "$arg" in
+        -out|--output|--no-newline) exec cat "$CRAZE_SMOKE_CLIPBOARD" ;;
+    esac
+done
+exec cat > "$CRAZE_SMOKE_CLIPBOARD"
+"""
+CLIP_STUB_NAMES = ("wl-copy", "wl-paste", "xclip", "xsel")
 
 
 class TmuxPane:
@@ -237,28 +391,40 @@ class TmuxPane:
         *,
         craze: Path,
         fake_agent: Path,
+        name: str,
         script: str,
         cols: int,
         rows: int,
         work: Path,
         out_dir: Path,
         no_force: bool,
+        chip: str | None,
     ) -> None:
+        self.name = name
         self.script = script
         self.cols = cols
         self.rows = rows
         self.work = work
         self.out_dir = out_dir
         self.fake_agent = fake_agent
+        self.chip = chip
         self.socket = f"craze-smoke-{os.getpid()}"
-        self.session = f"{script}-{cols}x{rows}"
+        self.session = f"{name}-{cols}x{rows}"
         self.home = work / "home"
         self.ws = work / "ws"
         self.exit_file = work / "exit.txt"
         self.stderr_file = work / "stderr.txt"
+        self.clipboard_file = work / "clipboard.txt"
         self.home.mkdir(parents=True, exist_ok=True)
         self.ws.mkdir(parents=True, exist_ok=True)
         self.captured: list[Path] = []
+
+        stub_bin = work / "bin"
+        stub_bin.mkdir(parents=True, exist_ok=True)
+        for stub in CLIP_STUB_NAMES:
+            path = stub_bin / stub
+            path.write_text(CLIP_STUB)
+            path.chmod(0o755)
 
         argv = [
             str(craze),
@@ -278,6 +444,8 @@ class TmuxPane:
             "#!/bin/sh\n"
             "# generated by tests/cli/tmux_smoke.py\n"
             f"export HOME={shlex.quote(str(self.home))}\n"
+            f"export PATH={shlex.quote(str(stub_bin))}:$PATH\n"
+            f"export CRAZE_SMOKE_CLIPBOARD={shlex.quote(str(self.clipboard_file))}\n"
             "export TERM=xterm-256color\n"
             f"export CRAZE_FAKE_SCRIPT={shlex.quote(script)}\n"
             "unset CRAZE_AGENT_BIN\n"
@@ -350,13 +518,34 @@ class TmuxPane:
                 self._tmux("send-keys", "-t", self.session, "-l", key)
             time.sleep(KEY_GAP)
 
+    def drag(self, spec: Drag) -> None:
+        """One left-button drag, as three SGR reports into the pane's tty.
+
+        This is a real gesture, not an injected message: the bytes are what an
+        xterm in 1006 mode sends, and bubbletea parses them off stdin. The three
+        reports are spaced like keystrokes so each one arrives in its own read —
+        a report split across reads would still be reassembled, but a failure
+        then points at one report instead of at the batch.
+        """
+        self._sgr(SGR_LEFT, spec.x1, spec.y1, "M")
+        self._sgr(SGR_LEFT_MOTION, spec.x2, spec.y2, "M")
+        self._sgr(SGR_LEFT, spec.x2, spec.y2, "m")
+
+    def _sgr(self, button: int, x: int, y: int, final: str) -> None:
+        # SGR coordinates are 1-based; bubbletea takes the one back off. -H
+        # rather than -l because the sequence starts with ESC, which tmux would
+        # otherwise have to be trusted to pass through as a byte and not as a key.
+        seq = f"\x1b[<{button};{x + 1};{y + 1}{final}".encode()
+        self._tmux("send-keys", "-t", self.session, "-H", *[f"{b:02x}" for b in seq])
+        time.sleep(KEY_GAP)
+
     def alive(self) -> bool:
         return not self.exit_file.exists()
 
     # -- assertions
 
     def check_frame(self, lines: list[str]) -> None:
-        """The height contract, measured on a real terminal.
+        """The height contract and the mode chip, measured on a real terminal.
 
         craze computes one frame per Update and pads it to the window, so the
         pane must be exactly as tall as it was made and nothing may wrap: a
@@ -370,18 +559,25 @@ class TmuxPane:
         widest = max((len(ln) for ln in lines), default=0)
         if widest > self.cols:
             raise SmokeFailure(f"a line is {widest} cells wide, wanted <= {self.cols}")
-        # Status row 2 (the permission chip) is the bottom of the frame, except
-        # for the sub-agent rows §3.9 puts underneath it (4 plus an overflow).
+        # Status row 2 is the bottom of the frame, except for the sub-agent rows
+        # §3.9 puts underneath it (4 plus an overflow). 005 §3.2 moved the mode
+        # chip to the front of that row, so the chip is now both the "the frame
+        # reached the bottom" probe and §7's "◆ agent on every script"; when the
+        # session never advertised a mode, the permission chip leads instead.
         tail = lines[-6:]
-        if not any(ln.startswith("\u25b8") for ln in tail):
+        if not any(ln.startswith(MODE_CHIPS + PERMISSION_CHIPS) for ln in tail):
             raise SmokeFailure(
                 "the frame does not reach the bottom of the pane:\n" + "\n".join(lines)
+            )
+        if self.chip and not any(ln.startswith(self.chip) for ln in tail):
+            raise SmokeFailure(
+                f"status row 2 does not start with {self.chip!r}:\n" + "\n".join(lines)
             )
 
     def capture(self, step: str, lines: list[str] | None = None) -> Path:
         rows = self.lines() if lines is None else lines
         self.check_frame(rows)
-        path = self.out_dir / f"{self.script}-{self.cols}x{self.rows}-{step}.txt"
+        path = self.out_dir / f"{self.name}-{self.cols}x{self.rows}-{step}.txt"
         path.write_text("\n".join(rows) + "\n")
         self.captured.append(path)
         return path
@@ -415,6 +611,23 @@ class TmuxPane:
                 )
             time.sleep(0.05)
         raise SmokeFailure(f"timed out waiting for {text!r} to go away:\n" + "\n".join(lines))
+
+    def wait_ends(self, text: str, step: str, timeout: float = WAIT_TIMEOUT) -> list[str]:
+        deadline = time.monotonic() + timeout
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            lines = self.lines()
+            if any(ln.endswith(text) for ln in lines):
+                self.capture(step, lines)
+                return lines
+            if not self.alive():
+                raise SmokeFailure(
+                    f"craze exited before a line ended with {text!r}:\n" + "\n".join(lines)
+                )
+            time.sleep(0.05)
+        raise SmokeFailure(
+            f"timed out waiting for a line ending in {text!r}:\n" + "\n".join(lines)
+        )
 
     def watch(self, spec: Watch, timeout: float = WAIT_TIMEOUT) -> None:
         """Poll flat out for a state the screen only passes through."""
@@ -456,7 +669,7 @@ class TmuxPane:
 
 
 def run_case(
-    script: str,
+    name: str,
     cols: int,
     rows: int,
     *,
@@ -465,10 +678,10 @@ def run_case(
     work: Path,
     out_dir: Path,
 ) -> list[Path]:
-    case = CASES[script]
+    case = CASES[name]
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
-        return _run_case(script, case, cols, rows, craze, fake_agent, work, out_dir)
+        return _run_case(name, case, cols, rows, craze, fake_agent, work, out_dir)
     except AssertionError as err:
         # The note names what was already known about this expectation, so a
         # failure points at the unit that owns it instead of at the driver.
@@ -478,7 +691,7 @@ def run_case(
 
 
 def _run_case(
-    script: str,
+    name: str,
     case: Case,
     cols: int,
     rows: int,
@@ -490,12 +703,14 @@ def _run_case(
     with TmuxPane(
         craze=craze,
         fake_agent=fake_agent,
-        script=script,
+        name=name,
+        script=case.script or name,
         cols=cols,
         rows=rows,
         work=work,
         out_dir=out_dir,
         no_force=case.no_force,
+        chip=case.chip,
     ) as pane:
         # The status rows carry no status word; `cursor` is the provider
         # segment of row 1, which only exists once the frame is drawn.
@@ -509,8 +724,13 @@ def _run_case(
                 pane.wait_for(step.text, step.step)
             elif isinstance(step, Gone):
                 pane.wait_gone(step.text, step.step)
+            elif isinstance(step, Ends):
+                pane.wait_ends(step.text, step.step)
+            elif isinstance(step, Drag):
+                pane.drag(step)
             else:
                 pane.watch(step)
+        check_clipboard(pane, case)
         code = pane.quit_and_wait()
         if case.clean_exit and code != 0:
             err = pane.stderr_file.read_text() if pane.stderr_file.exists() else ""
@@ -521,14 +741,31 @@ def _run_case(
         return pane.captured
 
 
+def check_clipboard(pane: TmuxPane, case: Case) -> None:
+    """What the copy handed the clipboard tool, once the note says it happened.
+
+    The note is painted from the message the copy command returns, so by the
+    time a `copied` wait has matched the stub has already been run and reaped.
+    """
+    if case.clipboard is None:
+        return
+    if not pane.clipboard_file.exists():
+        raise SmokeFailure(
+            "craze said it copied but never ran the clipboard tool:\n" + pane.screen()
+        )
+    got = pane.clipboard_file.read_text()
+    if got != case.clipboard:
+        raise SmokeFailure(f"clipboard holds {got!r}, wanted {case.clipboard!r}")
+
+
 # ---------------------------------------------------------------- pytest use
 
 
 @pytest.mark.skipif(not (TMUX and ENABLED), reason=SKIP_REASON)
 @pytest.mark.parametrize("cols,rows", SIZES, ids=[f"{c}x{r}" for c, r in SIZES])
-@pytest.mark.parametrize("script", SCRIPTS)
+@pytest.mark.parametrize("case", CASE_IDS)
 def test_tmux_smoke(
-    script: str,
+    case: str,
     cols: int,
     rows: int,
     craze_bin: Path,
@@ -536,7 +773,7 @@ def test_tmux_smoke(
     tmp_path: Path,
 ) -> None:
     run_case(
-        script,
+        case,
         cols,
         rows,
         craze=craze_bin,
@@ -569,7 +806,9 @@ def _parse_sizes(raw: str) -> list[tuple[int, int]]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=os.environ.get("CRAZE_SMOKE_OUT") or str(DEFAULT_OUT))
-    ap.add_argument("--scripts", default=",".join(SCRIPTS))
+    # --scripts is the old spelling, kept so a recorded command line still runs;
+    # the values are case names, which for every 004 case is the script's name.
+    ap.add_argument("--cases", "--scripts", dest="cases", default=",".join(CASE_IDS))
     ap.add_argument("--sizes", default=",".join(f"{c}x{r}" for c, r in SIZES))
     ap.add_argument("--keep", action="store_true", help="keep the per-case temp dirs")
     args = ap.parse_args(argv)
@@ -585,22 +824,22 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    scripts = [s.strip() for s in args.scripts.split(",") if s.strip()]
-    unknown = [s for s in scripts if s not in CASES]
+    cases = [s.strip() for s in args.cases.split(",") if s.strip()]
+    unknown = [s for s in cases if s not in CASES]
     if unknown:
-        raise SystemExit(f"unknown script(s): {', '.join(unknown)}")
+        raise SystemExit(f"unknown case(s): {', '.join(unknown)}")
 
     failures: list[tuple[str, str]] = []
     root = Path(tempfile.mkdtemp(prefix="craze-smoke-"))
     try:
         for cols, rows in _parse_sizes(args.sizes):
-            for script in scripts:
-                name = f"{script} {cols}x{rows}"
-                work = root / f"{script}-{cols}x{rows}"
+            for case in cases:
+                label = f"{case} {cols}x{rows}"
+                work = root / f"{case}-{cols}x{rows}"
                 work.mkdir(parents=True, exist_ok=True)
                 try:
                     run_case(
-                        script,
+                        case,
                         cols,
                         rows,
                         craze=craze,
@@ -609,11 +848,11 @@ def main(argv: list[str] | None = None) -> int:
                         out_dir=out_dir,
                     )
                 except AssertionError as err:
-                    failures.append((name, str(err)))
-                    print(f"FAIL  {name}")
+                    failures.append((label, str(err)))
+                    print(f"FAIL  {label}")
                     print("      " + str(err).replace("\n", "\n      "))
                 else:
-                    print(f"ok    {name}")
+                    print(f"ok    {label}")
     finally:
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
@@ -622,7 +861,7 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print(f"{len(failures)} failed: " + ", ".join(n for n, _ in failures))
         return 1
-    print("all scripts passed")
+    print("all cases passed")
     return 0
 
 
