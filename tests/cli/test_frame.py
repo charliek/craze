@@ -291,6 +291,71 @@ def test_frame_plan_mode_offers_then_implements(
     assert "implementing: Implement the plan above." in text, text
 
 
+def test_frame_plan_offer_survives_the_card_cursor_sends(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """`planmode-card` is the plan turn a real cursor-agent sends.
+
+    The card arrives before the events that arm the offer, so it used to retire
+    the offer outright and a live plan-mode turn could never make one. What this
+    pins is the wire-level shape: nothing offered while the card is up, the
+    placeholder once it has been answered, and Enter then sending the implement
+    prompt. The middle frame is the one that fails without the fix.
+    """
+    carded = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="planmode-card",
+        cols=100,
+        rows=30,
+        keys="<wait:idle>plan it<enter><wait:card>",
+    )
+    text = "\n".join(frame_lines(carded, 100, 30))
+    for want in ("drafting: plan it", "PLAN Print current time", "[a]ccept", "◆ plan"):
+        assert want in text, f"missing {want!r}:\n{text}"
+    # Nothing is offered yet, because the fake is blocked on the answer: the turn
+    # has not ended, and a card is not a turn ending. The other half of the rule
+    # — an offer already armed when a card opens — needs the card to land between
+    # the turn's two endings, which a blocking cursor/create_plan cannot be
+    # scripted into; internal/tui's own card/offer tests own that gap.
+    assert "enter implements this plan" not in text, text
+
+    answered = "<wait:idle>plan it<enter><wait:card>a<wait:text:planned: plan it>"
+    offered = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="planmode-card",
+        cols=100,
+        rows=30,
+        keys=answered + "<wait:text:enter implements this plan>",
+    )
+    text = "\n".join(frame_lines(offered, 100, 30))
+    assert "plan Print current time → accepted" in text, text
+    assert "enter implements this plan  ·  type to refine" in text, text
+
+    implemented = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="planmode-card",
+        cols=100,
+        rows=30,
+        keys=answered
+        + "<wait:text:enter implements this plan><enter><wait:text:implementing:><wait:idle>",
+    )
+    text = "\n".join(frame_lines(implemented, 100, 30))
+    assert "WRONG ORDER" not in text, text
+    for want in (
+        "mode → agent",
+        "❯ Implement the plan above.",
+        "implementing: Implement the plan above.",
+        "◆ agent",
+    ):
+        assert want in text, f"missing {want!r}:\n{text}"
+
+
 def test_frame_model_dialog_turns_fast_on(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 ) -> None:

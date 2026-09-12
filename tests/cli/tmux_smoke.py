@@ -102,6 +102,20 @@ class Gone:
 
 
 @dataclass(frozen=True)
+class Absent:
+    """Capture the pane as it stands and assert ``text`` is *not* on it.
+
+    Unlike ``Gone`` this does not wait, so it is only sound where a preceding
+    ``Wait`` has pinned a state the screen cannot leave on its own — a card up
+    with the agent blocked on the answer, say. Anywhere else "not there yet" and
+    "not there" would be the same thing and the step would prove nothing.
+    """
+
+    text: str
+    step: str
+
+
+@dataclass(frozen=True)
 class Ends:
     """Poll the pane until some line *ends* with ``text``, then capture it.
 
@@ -140,7 +154,7 @@ class Watch:
     until_step: str
 
 
-Step = Send | Wait | Gone | Ends | Watch | Drag
+Step = Send | Wait | Gone | Absent | Ends | Watch | Drag
 
 # Named tmux keys, to keep the tables readable. Everything else is sent with
 # `send-keys -l`, so a bare "a" is the letter and never a key name.
@@ -305,6 +319,35 @@ CASES: dict[str, Case] = {
             "the offer is armed by internal/tui/app.go's turnSeq bookkeeping and "
             "drawn by composer.go's planOfferPlaceholder; WRONG ORDER on the screen "
             "means the set_mode/prompt chain was batched instead"
+        ),
+    ),
+    # The plan-mode turn a real cursor-agent sends, which `planmode` alone does
+    # not model: assistant text, then a cursor/create_plan card, then more
+    # assistant text, and only then the turn's ending. The card therefore lands
+    # before the events that arm the offer, which is exactly what used to retire
+    # the offer for good — so `offer-after-card` is the step that fails without
+    # the fix. `no-offer-while-carded` is the weaker half: the fake is blocked on
+    # the answer, so what it pins is that a card on its own is not a turn ending.
+    "planmode-card": Case(
+        prompt="plan it",
+        chip=None,
+        steps=(
+            Wait("PLAN Print current time", "plan-card"),
+            Absent("enter implements this plan", "no-offer-while-carded"),
+            Send("a"),
+            Wait("planned: plan it", "reply"),
+            Wait(
+                "enter implements this plan  \u00b7  type to refine",
+                "offer-after-card",
+            ),
+            Send(ENTER),
+            Wait("implementing: Implement the plan above.", "implementing"),
+            Wait("\u25c6 agent", "agent-chip"),
+        ),
+        note=(
+            "the card must not kill the offer: internal/tui/cards.go's pushCard "
+            "leaves it standing, and internal/tui/app.go's planOffering is what "
+            "hides it while a card is open"
         ),
     ),
     # 005 §3.4's dialog, opened by /model and driven with the keys the golden
@@ -612,6 +655,13 @@ class TmuxPane:
             time.sleep(0.05)
         raise SmokeFailure(f"timed out waiting for {text!r} to go away:\n" + "\n".join(lines))
 
+    def check_absent(self, text: str, step: str) -> list[str]:
+        lines = self.lines()
+        self.capture(step, lines)
+        if text in "\n".join(lines):
+            raise SmokeFailure(f"{text!r} should not be on the pane:\n" + "\n".join(lines))
+        return lines
+
     def wait_ends(self, text: str, step: str, timeout: float = WAIT_TIMEOUT) -> list[str]:
         deadline = time.monotonic() + timeout
         lines: list[str] = []
@@ -724,6 +774,8 @@ def _run_case(
                 pane.wait_for(step.text, step.step)
             elif isinstance(step, Gone):
                 pane.wait_gone(step.text, step.step)
+            elif isinstance(step, Absent):
+                pane.check_absent(step.text, step.step)
             elif isinstance(step, Ends):
                 pane.wait_ends(step.text, step.step)
             elif isinstance(step, Drag):

@@ -111,9 +111,9 @@ func (s *server) onRequest(msg *acp.Message) {
 		s.mu.Lock()
 		cfg := s.config
 		s.mu.Unlock()
-		// The plan-exit script has to start where the offer can be made.
+		// The plan-exit scripts have to start where the offer can be made.
 		currentMode := "agent"
-		if s.script == "planmode" {
+		if planExitScript(s.script) {
 			currentMode = "plan"
 		}
 		s.reply(msg.ID, map[string]any{
@@ -237,6 +237,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.title(msg.ID, text)
 	case "planmode":
 		s.planmode(msg.ID, text, n)
+	case "planmode-card":
+		s.planmodeCard(msg.ID, text, n)
 	default:
 		s.echo(msg.ID, text)
 	}
@@ -429,7 +431,7 @@ func (s *server) ask(id json.RawMessage) {
 }
 
 func (s *server) plan(id json.RawMessage) {
-	params := map[string]any{
+	outcome, err := s.createPlan(map[string]any{
 		"name":     "Fake Plan",
 		"overview": "Two steps, then stop.",
 		"plan":     "## Steps\n\n- read main.go\n- edit main.go\n",
@@ -437,22 +439,37 @@ func (s *server) plan(id json.RawMessage) {
 			{"id": "1", "content": "Read main.go", "status": "pending"},
 			{"id": "2", "content": "Edit main.go", "status": "pending"},
 		},
+	})
+	if err != nil || outcome == "cancelled" {
+		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
+		return
 	}
+	s.say("planned:" + outcome)
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+// createPlan raises a cursor/create_plan card and returns the outcome the
+// client answered with. Conn.Call blocks until that answer arrives, which is
+// what makes a card a card.
+func (s *server) createPlan(params map[string]any) (string, error) {
 	var result struct {
 		Outcome struct {
 			Outcome string `json:"outcome"`
 		} `json:"outcome"`
 	}
-	err := s.conn.Call(context.Background(), acp.MethodCursorCreatePlan, params, &result)
-	if err != nil || result.Outcome.Outcome == "cancelled" {
-		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
-		return
+	if err := s.conn.Call(context.Background(), acp.MethodCursorCreatePlan, params, &result); err != nil {
+		return "", err
 	}
+	return result.Outcome.Outcome, nil
+}
+
+// say is one agent_message_chunk, the smallest thing a turn can put in the
+// transcript.
+func (s *server) say(text string) {
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
-		Content:       &acp.ContentBlock{Type: "text", Text: "planned:" + result.Outcome.Outcome},
+		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
-	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
 
 func (s *server) update(sessionID string, upd any) {
@@ -807,10 +824,64 @@ func (s *server) planmode(id json.RawMessage, text string, n int) {
 	case seenMode:
 		reply = "WRONG ORDER"
 	}
-	s.update(fakeSessionID, acp.SessionUpdate{
-		SessionUpdate: acp.UpdateAgentMessage,
-		Content:       &acp.ContentBlock{Type: "text", Text: reply},
+	s.say(reply)
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+// planExitScript reports whether a script's session starts in plan mode, which
+// is where the plan-exit offer can be reached at all.
+func planExitScript(script string) bool {
+	switch script {
+	case "planmode", "planmode-card":
+		return true
+	}
+	return false
+}
+
+// planmodeCard is the plan-mode turn cursor actually sends, which `planmode`
+// alone does not model. Driving a real cursor-agent (005's
+// live/{acp.out,step2-plan-offer.txt}) showed a plan turn answering with
+// assistant text, then a cursor/create_plan card, then more assistant text, and
+// only then the turn's ending — so the card always lands *before* the events
+// that arm the plan offer. That order is what made craze retire the offer
+// before it could ever be made, and this script is the wire-level guard on the
+// fix: the offer survives the card and stands once the card has been answered.
+//
+// One honest difference from the live turn: Conn.Call blocks until the card is
+// answered, so the chunk after the card follows it on the wire (as live) but
+// reaches craze once the card is gone rather than while it is still up. The
+// ordering the offer depends on — card before the ending — is the same either
+// way.
+//
+// The implement turn gets no card, because cursor sent create_plan for the plan
+// turn only; the ordering rules are `planmode`'s, so WRONG ORDER still catches a
+// prompt that overtook its own set_mode.
+func (s *server) planmodeCard(id json.RawMessage, text string, n int) {
+	before, seenMode := s.setModeBefore(n)
+	switch {
+	case before:
+		s.say("implementing: " + text)
+		s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+		return
+	case seenMode:
+		s.say("WRONG ORDER")
+		s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+		return
+	}
+	s.say("drafting: " + text)
+	// Name, overview and body, the three fields the live card carried; todos is
+	// empty there too, so the plan turn draws a card and not a task panel.
+	outcome, err := s.createPlan(map[string]any{
+		"name":     "Print current time",
+		"overview": "Change main.go so it prints the current time instead of hi.",
+		"plan":     "# Print current time\n\nReplace the `hi` print with the current time. No other files.\n",
+		"todos":    []map[string]string{},
 	})
+	if err != nil || outcome == "cancelled" {
+		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
+		return
+	}
+	s.say("planned: " + text)
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
 

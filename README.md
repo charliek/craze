@@ -211,13 +211,14 @@ binary, for the same scripts the Go goldens cover) and `test_tui.py` (a real
 PTY). Everything uses `craze-fake-agent`, so no Cursor credentials are needed.
 
 `tests/cli/tmux_smoke.py` is the tmux smoke layer: it drives the real binary in
-a real terminal at 100x30 and 80x24 for every fake script. It is opt-in and
+a real terminal at 100x30 and 80x24, one run per case: every fake script, plus
+cases for the model dialog and for a real mouse drag. It is opt-in and
 never runs in CI — pytest only collects it when it is named explicitly, and it
 skips unless `tmux` is on PATH and `CRAZE_TMUX` is set.
 
 ```shell
 cd tests/cli && CRAZE_TMUX=1 uv run pytest -v tmux_smoke.py
-cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --scripts echo,todos
+cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --cases echo,todos
 ```
 
 Screen captures land in `./smoke-captures/` (git-ignored), overridden with
