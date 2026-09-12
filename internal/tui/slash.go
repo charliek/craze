@@ -195,7 +195,7 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	m.snap.CurrentMode = id
-	m.addNote("mode → " + id)
+	m.addNote(modeNote(m.snap.Modes, id))
 	sess := m.sess
 	return m, func() tea.Msg {
 		if err := sess.SetMode(context.Background(), id); err != nil {
@@ -203,6 +203,19 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 		}
 		return nil
 	}
+}
+
+// modeNote is what a mode change writes to the transcript: the id, and the
+// agent's own description of the mode when it advertised one. Notes render
+// dim as a whole, so the description needs no style of its own.
+func modeNote(modes []agent.ModeInfo, id string) string {
+	note := "mode → " + id
+	for _, md := range modes {
+		if md.ID == id && md.Description != "" {
+			return note + " · " + sanitizeLine(md.Description)
+		}
+	}
+	return note
 }
 
 func (m Model) applyModel(id string) (tea.Model, tea.Cmd) {

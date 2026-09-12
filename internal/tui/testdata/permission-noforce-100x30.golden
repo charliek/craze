@@ -26,5 +26,5 @@
 ❯ message  / for commands                                                                           
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 permission Shell  [a]llow once  [A]lways  [n] reject                                                
-ws │ cursor │ Default (medium) │ agent │ 0m                                                         
-▸ prompting for permissions                                                                         
+ws │ cursor │ Default (medium) │ 0m                                                                 
+◆ agent · shift+tab · ▸ prompting for permissions                                                   

@@ -115,6 +115,9 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 		{"ChipBypass", dark.ChipBypass, dark.Err, "Err"},
 		{"ChipPrompt", dark.ChipPrompt, dark.Warn, "Warn"},
 		{"Provider", dark.Provider, dark.Teal, "Teal"},
+		{"ModeImplement", dark.ModeImplement, dark.Accent, "Accent"},
+		{"ModePlan", dark.ModePlan, dark.Purple, "Purple"},
+		{"ModeReadOnly", dark.ModeReadOnly, dark.Teal, "Teal"},
 	} {
 		if tc.got != tc.want {
 			t.Fatalf("%s = %s, want %s (%s)", tc.name, tc.got, tc.want, tc.derivation)

@@ -122,19 +122,19 @@ func TestStatusRowShowsTheBranchAndRefreshesAtTurnEnd(t *testing.T) {
 
 	// The branch is re-read when a turn ends, never polled.
 	writeRepo(t, ws, "ref: refs/heads/side\n")
-	if strings.Contains(plain(m.statusRow1()), "side") {
+	if strings.Contains(statusText(m.statusRow1()), "side") {
 		t.Fatal("the branch must not be re-read on every frame")
 	}
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
-	if !strings.Contains(plain(m.statusRow1()), "side") {
-		t.Fatalf("the turn ended, so the branch should refresh:\n%s", plain(m.statusRow1()))
+	if !strings.Contains(statusText(m.statusRow1()), "side") {
+		t.Fatalf("the turn ended, so the branch should refresh:\n%s", statusText(m.statusRow1()))
 	}
 }
 
 func TestNoRepoDropsTheBranchSegment(t *testing.T) {
 	m := startSized(t, t.TempDir())
-	row := plain(m.statusRow1())
+	row := statusText(m.statusRow1())
 	if strings.Contains(row, " │  │ ") {
 		t.Fatalf("an empty branch must not leave an empty segment: %q", row)
 	}

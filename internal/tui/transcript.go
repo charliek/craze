@@ -441,14 +441,35 @@ type seg struct {
 	style lipgloss.Style
 }
 
+// idSeg is a seg a click can land on. Only the status rows draw any; every
+// other row is plain segs and reports no spans.
+type idSeg struct {
+	seg
+	id spanID
+}
+
 func styleFG(c lipgloss.Color) lipgloss.Style { return lipgloss.NewStyle().Foreground(c) }
 
 // renderSegs styles and concatenates segs, clamping the result to width.
 func renderSegs(width int, segs ...seg) string {
+	ids := make([]idSeg, len(segs))
+	for i, s := range segs {
+		ids[i] = idSeg{seg: s}
+	}
+	row, _ := renderSegSpans(width, ids)
+	return row
+}
+
+// renderSegSpans is renderSegs plus where each identified seg landed. The
+// spans come out of the same walk that wrote the row — separators, drops,
+// display widths and the truncating clamp included — so a hit test can never
+// be a second guess at what was drawn.
+func renderSegSpans(width int, segs []idSeg) (string, []segSpan) {
 	if width <= 0 {
-		return ""
+		return "", nil
 	}
 	var b strings.Builder
+	var spans []segSpan
 	used := 0
 	for _, s := range segs {
 		if s.text == "" {
@@ -461,12 +482,18 @@ func renderSegs(width int, segs ...seg) string {
 		w := lipgloss.Width(s.text)
 		if w > avail {
 			b.WriteString(s.style.Render(clampWidth(s.text, avail)))
+			if s.id != spanNone {
+				spans = append(spans, segSpan{id: s.id, x0: used, x1: used + avail})
+			}
 			break
 		}
 		b.WriteString(s.style.Render(s.text))
+		if s.id != spanNone {
+			spans = append(spans, segSpan{id: s.id, x0: used, x1: used + w})
+		}
 		used += w
 	}
-	return b.String()
+	return b.String(), spans
 }
 
 // clampWidth truncates to w display cells, marking the cut with an ellipsis.

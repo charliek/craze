@@ -47,8 +47,9 @@ func parseModes(raw json.RawMessage) (current string, modes []ModeInfo) {
 	var parsed struct {
 		CurrentModeID  string `json:"currentModeId"`
 		AvailableModes []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
 		} `json:"availableModes"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
@@ -64,7 +65,7 @@ func parseModes(raw json.RawMessage) (current string, modes []ModeInfo) {
 		if name == "" {
 			name = id
 		}
-		modes = append(modes, ModeInfo{ID: id, Name: name})
+		modes = append(modes, ModeInfo{ID: id, Name: name, Description: sanitizeText(m.Description)})
 	}
 	return current, modes
 }
@@ -373,11 +374,13 @@ func effortRank(opt ConfigOption) int {
 
 // EffortOption returns the advertised effort/reasoning select, preferring
 // category model_option, then id effort, then thought_level, else the first match.
+// Which options qualify is the session provider's call.
 func EffortOption(snap Snapshot) *ConfigOption {
+	p := snap.Provider.provider()
 	bestI := -1
 	bestRank := 4
 	for i, opt := range snap.Config {
-		if !isEffortSelect(opt) {
+		if !p.isEffortOption(opt) {
 			continue
 		}
 		r := effortRank(opt)
@@ -391,6 +394,19 @@ func EffortOption(snap Snapshot) *ConfigOption {
 	}
 	opt := snap.Config[bestI]
 	return &opt
+}
+
+// FastOption returns the advertised fast toggle — cursor's model_config
+// `fast` — or nil when the session offers none.
+func FastOption(snap Snapshot) *ConfigOption {
+	p := snap.Provider.provider()
+	for _, c := range snap.Config {
+		if p.isFastOption(c) {
+			opt := c
+			return &opt
+		}
+	}
+	return nil
 }
 
 // ModelConfigOption returns the first config option with category "model".

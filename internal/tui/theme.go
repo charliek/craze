@@ -67,6 +67,9 @@ type Theme struct {
 	DiffAddBG, DiffDelBG               lipgloss.Color
 	LineNo, TaskRail, Selection, Rule  lipgloss.Color
 	ChipBypass, ChipPrompt, Provider   lipgloss.Color
+	// One colour per mode kind, not per mode id: the chip has to stay
+	// readable for an agent that spells plan mode "architect".
+	ModeImplement, ModePlan, ModeReadOnly lipgloss.Color
 }
 
 // theme expands a palette into every slot the UI can ask for.
@@ -100,6 +103,9 @@ func (p paletteSpec) theme() Theme {
 	th.ChipBypass = th.Err
 	th.ChipPrompt = th.Warn
 	th.Provider = th.Teal
+	th.ModeImplement = th.Accent
+	th.ModePlan = th.Purple
+	th.ModeReadOnly = th.Teal
 	return th
 }
 

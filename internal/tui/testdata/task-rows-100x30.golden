@@ -25,6 +25,6 @@ done task
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
 ❯ message  / for commands                                                                           
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-ws │ cursor │ Default (medium) │ agent │ 0m                                                         
-▸▸ bypass permissions on                                                                            
+ws │ cursor │ Default (medium) │ 0m                                                                 
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
 ✓ task  Count main.go lines  8.0s · grok-4.6-high-fast                                              

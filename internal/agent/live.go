@@ -67,7 +67,7 @@ func New(opts Options) Session {
 }
 
 func newSession(opts Options) *session {
-	return &session{
+	s := &session{
 		opts:      opts,
 		events:    make(chan Event, 256),
 		done:      make(chan struct{}),
@@ -78,6 +78,18 @@ func newSession(opts Options) *session {
 
 		taskReceipts: make(map[string]TaskInfo),
 	}
+	// The provider is decided once, here, so every snapshot — including one
+	// taken before Start — names it.
+	s.snap.Provider = s.provider().Info()
+	return s
+}
+
+// provider is the agent behind this session; nil Options.Provider is cursor.
+func (s *session) provider() Provider {
+	if s.opts.Provider != nil {
+		return *s.opts.Provider
+	}
+	return CursorProvider()
 }
 
 // clientRef reads the spawned client under the lock; it is nil before Start
@@ -171,6 +183,7 @@ func (s *session) Start(ctx context.Context) error {
 		return err
 	}
 	snap := snapshotFromNew(sess)
+	snap.Provider = s.provider().Info()
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(snap.Modes))
 		if !ok {

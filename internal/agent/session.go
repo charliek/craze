@@ -31,8 +31,9 @@ type ModelInfo struct {
 }
 
 type ModeInfo struct {
-	ID   string
-	Name string
+	ID          string
+	Name        string
+	Description string
 }
 
 type CommandInfo struct {
@@ -51,6 +52,9 @@ type Snapshot struct {
 	Title          string
 	CurrentModel   string
 	CurrentMode    string
+	// Provider is a value copy of the session's provider, so the UI can read
+	// what a mode id means and what the agent is called without a session.
+	Provider ProviderInfo
 }
 
 // Todo is one entry of the cursor todo list. Status is normalised to
@@ -200,6 +204,9 @@ type Options struct {
 	Mode      string
 	Stderr    io.Writer
 	Env       []string
+	// Provider is the agent behind the session; nil is cursor, the only one
+	// implemented. Callers outside this package never build one.
+	Provider *Provider
 	// Interactive makes question and plan requests block on the session so a
 	// UI can answer them; headless callers leave it false and craze
 	// auto-answers.

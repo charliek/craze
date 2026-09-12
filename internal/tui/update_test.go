@@ -25,6 +25,10 @@ func plainView(m Model) string { return plain(m.View()) }
 
 func plain(s string) string { return ansi.Strip(s) }
 
+// statusText is a status row as plain text: the rows return their spans too,
+// and most assertions only want the characters.
+func statusText(row string, _ []segSpan) string { return plain(row) }
+
 func sized(t *testing.T) Model {
 	t.Helper()
 	isolateSkillsHome(t)
@@ -72,8 +76,11 @@ func TestViewStatusRowsAndComposer(t *testing.T) {
 	if !strings.Contains(view, chipYolo) {
 		t.Fatalf("missing the permission chip:\n%s", view)
 	}
-	if !strings.Contains(view, "cursor │ Grok (medium) │ agent │ 0m") {
-		t.Fatalf("row 1 should be provider, model (effort), mode, elapsed:\n%s", view)
+	if !strings.Contains(view, "cursor │ Grok (medium) │ 0m") {
+		t.Fatalf("row 1 should be provider, model (effort), elapsed:\n%s", view)
+	}
+	if !strings.Contains(view, modeChipAgent+statusDot+modeHint+statusDot+chipYolo) {
+		t.Fatalf("row 2 leads with the mode chip and its hint:\n%s", view)
 	}
 	if !strings.Contains(view, "message") {
 		t.Fatalf("missing the composer placeholder:\n%s", view)
@@ -921,7 +928,7 @@ func TestModelSlashSetsModelAndEffort(t *testing.T) {
 	if !strings.Contains(plainView(m), "high") {
 		t.Fatalf("footer missing high:\n%s", plainView(m))
 	}
-	if !strings.Contains(plainView(m), "Grok (high) │ agent") {
+	if !strings.Contains(plainView(m), "Grok (high) │ 0m") {
 		t.Fatalf("status row 1 tokens:\n%s", plainView(m))
 	}
 }
@@ -985,7 +992,7 @@ func TestSetModelFailNoEffortOverlay(t *testing.T) {
 		t.Fatalf("model should revert, got %q", m.snap.CurrentModel)
 	}
 	view := plainView(m)
-	if !strings.Contains(view, "Grok (medium) │ agent") {
+	if !strings.Contains(view, "Grok (medium) │ 0m") {
 		t.Fatalf("status row 1 should be unchanged:\n%s", view)
 	}
 	if len(texts(m, entryError)) == 0 {

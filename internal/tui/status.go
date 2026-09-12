@@ -14,9 +14,38 @@ const (
 	// statusSep joins the row-1 segments, statusDot the row-2 groups.
 	statusSep = " │ "
 	statusDot = " · "
-	// statusProvider is the only backend this cut speaks to.
-	statusProvider = "cursor"
+	// modeHint is the dim reminder that the chip beside it has a key too. It
+	// is the first thing row 2 gives up, and with its separator it costs 12
+	// cells, so it only ever appears on a row with the room to spare.
+	modeHint = "shift+tab"
 )
+
+// spanID names a status segment a click can land on. spanNone is the zero
+// value, so a seg is unclickable unless it says otherwise.
+type spanID int
+
+const (
+	spanNone spanID = iota
+	spanMode
+	spanModel
+)
+
+// segSpan is where one identified segment was drawn: [x0, x1) in display cells
+// of its row. renderSegSpans fills these in as it writes the row.
+type segSpan struct {
+	id     spanID
+	x0, x1 int
+}
+
+// spanAt is the segment under x, or spanNone between and beyond them.
+func spanAt(spans []segSpan, x int) spanID {
+	for _, s := range spans {
+		if x >= s.x0 && x < s.x1 {
+			return s.id
+		}
+	}
+	return spanNone
+}
 
 // statusKindOrder is the fixed order the in-flight counts are listed in, so a
 // row does not reshuffle between frames; statusKindName maps an ACP tool kind
@@ -41,18 +70,24 @@ type statusPart struct {
 	style  lipgloss.Style
 	drop   int
 	hidden bool
+	id     spanID
 }
 
 // statusView is the two pinned status rows, which replaced the old footer.
+// The spans each row reports are thrown away here and asked for again by the
+// hit-tester: both callers run the same fitting pass over the same state.
 func (m Model) statusView(lay frameLayout) string {
-	return m.statusRow1() + "\n" + m.statusRow2(lay)
+	row1, _ := m.statusRow1()
+	row2, _ := m.statusRow2(lay)
+	return row1 + "\n" + row2
 }
 
-// statusRow1 is workspace · branch · provider · model (effort) · mode ·
-// elapsed. It drops from the right in the pinned order — elapsed, branch,
-// mode, provider — and gives the model up last, so the narrowest row is still
-// the workspace name.
-func (m Model) statusRow1() string {
+// statusRow1 is workspace · branch · provider · model (effort) · elapsed. It
+// drops from the right in the pinned order — elapsed, branch, provider — and
+// gives the model up last, so the narrowest row is still the workspace name.
+// The mode is not here: it is row 2's chip, and it appears in exactly one
+// place.
+func (m Model) statusRow1() (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	ws := statusPart{text: workspaceName(m.cwd), style: styleFG(m.theme.Bright).Bold(true)}
 	if !m.started && m.status != statusError {
@@ -64,34 +99,69 @@ func (m Model) statusRow1() string {
 	return fitStatus([]statusPart{
 		ws,
 		{text: m.branch, style: dim, drop: 2},
-		{text: statusProvider, style: styleFG(m.theme.Provider), drop: 4},
-		{text: m.modelLabel(), style: styleFG(m.theme.FG), drop: 5},
-		{text: sanitizeLine(m.snap.CurrentMode), style: dim, drop: 3},
+		{text: m.snap.Provider.Label(), style: styleFG(m.theme.Provider), drop: 3},
+		// The model span is what V3's dialog will open from; nothing
+		// hit-tests it yet.
+		{text: m.modelLabel(), style: styleFG(m.theme.FG), drop: 4, id: spanModel},
 		{text: m.sessionElapsed(), style: dim, drop: 1},
 	}, statusSep, dim, m.width)
 }
 
-// statusRow2 is the permission chip, the in-flight tool counts and the
-// sub-agent count. The agent count goes first when the row is narrow, then
-// the counts; the chip stays and truncates instead.
-func (m Model) statusRow2(lay frameLayout) string {
+// statusRow2 is the mode chip, the permission chip, the in-flight tool counts
+// and the sub-agent count. The hint beside the mode goes first when the row is
+// narrow, then the agent count, then the counts; neither chip ever drops, and
+// when the two of them alone do not fit it is the permission chip that
+// truncates, because it comes second.
+func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	chip, chipStyle := m.permissionChip()
-	parts := make([]statusPart, 0, 4)
+	mode, modeStyle := m.modeChip()
+	hint := ""
+	if mode != "" {
+		hint = modeHint
+	}
+	parts := make([]statusPart, 0, 6)
 	if lay.SpinnerMerged {
 		// Degradation step 6 took the spinner line away; this is all that is
-		// left of it, and it is worth more than either neighbour.
+		// left of it, and it is worth more than any of its neighbours.
 		parts = append(parts, statusPart{
 			text:  m.spinnerGlyph() + " " + m.turnElapsed(),
 			style: styleFG(m.theme.Accent),
 		})
 	}
 	parts = append(parts,
+		statusPart{text: mode, style: modeStyle, id: spanMode},
+		statusPart{text: hint, style: dim, drop: 1},
 		statusPart{text: chip, style: chipStyle},
-		statusPart{text: m.inFlightCounts(), style: dim, drop: 2},
-		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 1},
+		statusPart{text: m.inFlightCounts(), style: dim, drop: 3},
+		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 2},
 	)
 	return fitStatus(parts, statusDot, dim, m.width)
+}
+
+// modeChip is the current mode, coloured by what the provider says it means
+// rather than by its id, so an agent that calls plan mode "architect" still
+// gets the plan colour. Clicking it cycles the mode, as shift+tab does.
+func (m Model) modeChip() (string, lipgloss.Style) {
+	id := sanitizeLine(m.snap.CurrentMode)
+	if id == "" {
+		return "", lipgloss.NewStyle()
+	}
+	return "◆ " + id, styleFG(m.modeColor(m.snap.Provider.Kind(m.snap.CurrentMode)))
+}
+
+// modeColor is the chip colour for a mode kind. A mode craze does not
+// recognise is dim rather than miscoloured.
+func (m Model) modeColor(kind agent.ModeKind) lipgloss.Color {
+	switch kind {
+	case agent.ModeImplement:
+		return m.theme.ModeImplement
+	case agent.ModePlan:
+		return m.theme.ModePlan
+	case agent.ModeReadOnly:
+		return m.theme.ModeReadOnly
+	}
+	return m.theme.Dim
 }
 
 // permissionChip is the pinned permission state: red bypass under --force,
@@ -181,8 +251,9 @@ func formatCoarse(d time.Duration) string {
 }
 
 // fitStatus hides parts in their pinned drop order until the row fits, then
-// renders what is left joined by sep.
-func fitStatus(parts []statusPart, sep string, sepStyle lipgloss.Style, width int) string {
+// renders what is left joined by sep. It returns the spans of the parts that
+// asked for one, measured on the row it just wrote.
+func fitStatus(parts []statusPart, sep string, sepStyle lipgloss.Style, width int) (string, []segSpan) {
 	last := 0
 	for _, p := range parts {
 		if p.drop > last {
@@ -196,17 +267,17 @@ func fitStatus(parts []statusPart, sep string, sepStyle lipgloss.Style, width in
 			}
 		}
 	}
-	segs := make([]seg, 0, 2*len(parts))
+	segs := make([]idSeg, 0, 2*len(parts))
 	for _, p := range parts {
 		if p.hidden || p.text == "" {
 			continue
 		}
 		if len(segs) > 0 {
-			segs = append(segs, seg{sep, sepStyle})
+			segs = append(segs, idSeg{seg: seg{sep, sepStyle}})
 		}
-		segs = append(segs, seg{p.text, p.style})
+		segs = append(segs, idSeg{seg: seg{p.text, p.style}, id: p.id})
 	}
-	return renderSegs(width, segs...)
+	return renderSegSpans(width, segs)
 }
 
 func statusWidth(parts []statusPart, sep string) int {

@@ -60,10 +60,12 @@ func NewStub() *Stub {
 				{ID: "grok", Name: "Grok"},
 				{ID: "fast", Name: "Fast"},
 			},
+			// The descriptions mirror what cursor advertises, so the note a
+			// mode change writes is exercised the way a live session writes it.
 			Modes: []agent.ModeInfo{
-				{ID: "agent", Name: "Agent"},
-				{ID: "plan", Name: "Plan"},
-				{ID: "ask", Name: "Ask"},
+				{ID: "agent", Name: "Agent", Description: "Full agent capabilities with tool access"},
+				{ID: "plan", Name: "Plan", Description: "Read-only mode for planning and designing before implementation"},
+				{ID: "ask", Name: "Ask", Description: "Q&A mode - no edits or command execution"},
 			},
 			Commands: []agent.CommandInfo{
 				{Name: "research", Description: "Agent-advertised command"},

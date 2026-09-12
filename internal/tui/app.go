@@ -377,14 +377,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseButtonWheelDown:
 		m.vp.ScrollDown(wheelLines)
 	case tea.MouseButtonLeft:
-		return m.handleClick(msg.Y)
+		return m.handleClick(msg.X, msg.Y)
 	}
 	return m, nil
 }
 
 // handleClick reads the same frameLayout View() drew from, so what is on the
 // screen and what is clickable cannot drift apart.
-func (m Model) handleClick(y int) (tea.Model, tea.Cmd) {
+func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	lay := m.lay
 	if lay.TooSmall {
 		return m, nil
@@ -409,6 +409,25 @@ func (m Model) handleClick(y int) (tea.Model, tea.Cmd) {
 	case lay.Region(regionAgents).Contains(y):
 		// The last row can be "… +n more", which is not a sub-agent.
 		m.selectAgent(lay.Region(regionAgents).Row(y))
+	case lay.Region(regionStatus).Contains(y):
+		return m.clickStatus(x, lay.Region(regionStatus).Row(y), lay)
+	}
+	return m, nil
+}
+
+// clickStatus hit-tests a status row against the spans the fitting pass that
+// drew it reported, so a click cannot land on a segment that was dropped or
+// truncated away. Row 1's model span is reported too, for V3's dialog, but
+// nothing acts on it yet.
+func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
+	if row != 1 {
+		return m, nil
+	}
+	_, spans := m.statusRow2(lay)
+	if spanAt(spans, x) == spanMode {
+		// The chip is shift+tab under the pointer, gating included: a card
+		// blocks it (handleMouse already returned), working does not.
+		return m.cycleMode()
 	}
 	return m, nil
 }

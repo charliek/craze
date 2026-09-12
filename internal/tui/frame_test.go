@@ -697,7 +697,10 @@ func TestFrameGoldenTaskRows100x30(t *testing.T) {
 func TestFrameGoldenStatus60x24(t *testing.T) {
 	got := runStubFrame(t, 60, 24, "<wait:idle>")
 	assertGolden(t, "status-60x24", 60, 24, got)
-	for _, want := range []string{"ws │ cursor │ Grok (medium) │ agent │ 0m", "▸▸ bypass permissions on"} {
+	for _, want := range []string{
+		"ws │ cursor │ Grok (medium) │ 0m",
+		"◆ agent · shift+tab · ▸▸ bypass permissions on",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
 		}

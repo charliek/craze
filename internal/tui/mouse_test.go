@@ -13,13 +13,83 @@ import (
 
 func clickAt(t *testing.T, m Model, y int) Model {
 	t.Helper()
-	tm, _ := m.Update(tea.MouseMsg{
+	return clickXY(t, m, 1, y)
+}
+
+func clickXY(t *testing.T, m Model, x, y int) Model {
+	t.Helper()
+	tm, cmd := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
-		X:      1,
+		X:      x,
 		Y:      y,
 	})
-	return tm.(Model)
+	m = tm.(Model)
+	if cmd != nil {
+		// A click that changed the session (the mode chip) leaves its work in
+		// a command; running it is what makes the stub agree with the model.
+		runCmd(cmd)
+	}
+	return m
+}
+
+// modeChipClick is the middle of row 2's mode chip, from the row's own spans.
+func modeChipClick(t *testing.T, m Model) (x, y int) {
+	t.Helper()
+	_, spans := m.statusRow2(m.lay)
+	s := spanRange(t, spans, spanMode)
+	return (s.x0 + s.x1) / 2, m.lay.Region(regionStatus).Top + 1
+}
+
+// TestClickOnTheModeChipCycles: the chip is shift+tab under the pointer, and
+// the note it writes carries the agent's description of the new mode.
+func TestClickOnTheModeChipCycles(t *testing.T) {
+	m := sized(t)
+	x, y := modeChipClick(t, m)
+	next := clickXY(t, m, x, y)
+	if next.snap.CurrentMode != "plan" {
+		t.Fatalf("clicking the chip cycled to %q", next.snap.CurrentMode)
+	}
+	notes := texts(next, entryNote)
+	want := "mode → plan · Read-only mode for planning and designing before implementation"
+	if len(notes) == 0 || notes[len(notes)-1] != want {
+		t.Fatalf("note %q, want %q", notes, want)
+	}
+	if !strings.Contains(plainView(next), "◆ plan") {
+		t.Fatalf("the chip should follow the mode:\n%s", plainView(next))
+	}
+
+	// Just past the chip is the hint, which is not clickable.
+	_, spans := m.statusRow2(m.lay)
+	past := spanRange(t, spans, spanMode).x1
+	if same := clickXY(t, m, past, y); same.snap.CurrentMode != "agent" {
+		t.Fatalf("a click on the separator cycled to %q", same.snap.CurrentMode)
+	}
+	// Neither is row 1, where the model span lives and V3 has not landed yet.
+	if same := clickXY(t, m, x, y-1); same.snap.CurrentMode != "agent" {
+		t.Fatalf("a click on row 1 cycled to %q", same.snap.CurrentMode)
+	}
+}
+
+// TestClickOnTheModeChipWhileWorking mirrors shift+tab's gating: a turn in
+// flight does not block a mode change, a card does.
+func TestClickOnTheModeChipWhileWorking(t *testing.T) {
+	m := sized(t)
+	m.status = statusWorking
+	x, y := modeChipClick(t, m)
+	if got := clickXY(t, m, x, y); got.snap.CurrentMode != "plan" {
+		t.Fatalf("working must not block the chip, mode %q", got.snap.CurrentMode)
+	}
+
+	card, stub := sizedCards(t)
+	card = cardEvent(t, card, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
+	if !card.cardOpen() {
+		t.Fatal("expected a card")
+	}
+	x, y = modeChipClick(t, card)
+	if got := clickXY(t, card, x, y); got.snap.CurrentMode != "agent" {
+		t.Fatalf("a card owns the mouse, mode %q", got.snap.CurrentMode)
+	}
 }
 
 func wheel(t *testing.T, m Model, button tea.MouseButton) Model {
