@@ -510,3 +510,50 @@ func TestCancelledTurnLeavesANote(t *testing.T) {
 		t.Fatalf("a normal turn end should be silent, got %q", notes)
 	}
 }
+
+// TestSearchRowDoesNotRepeatTheQuery: cursor titles a search with the pattern
+// it is searching for and sends the same pattern as rawInput, so the row used
+// to print it twice, the second time as raw JSON.
+func TestSearchRowDoesNotRepeatTheQuery(t *testing.T) {
+	m := sized(t)
+	cases := []struct {
+		name     string
+		title    string
+		rawInput string
+		want     string
+		notWant  string
+	}{
+		{
+			name:     "title already shows the pattern",
+			title:    "Find `**/main.go`",
+			rawInput: `{"pattern":"**/main.go"}`,
+			want:     "Find `**/main.go`",
+			notWant:  `{"pattern"`,
+		},
+		{
+			name:     "title hides the query, so show it",
+			title:    "Search",
+			rawInput: `{"pattern":"needle"}`,
+			want:     "needle",
+		},
+		{
+			name:     "unparsable rawInput still shows",
+			title:    "Search",
+			rawInput: "needle",
+			want:     "needle",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := &agent.ToolEvent{ID: "s1", Kind: "search", Status: "completed", Title: tc.title, RawInput: tc.rawInput}
+			rows := m.otherRows(ev, 80)
+			got := strings.Join(rows, "\n")
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("row %q does not contain %q", got, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Fatalf("row %q still repeats the query (%q)", got, tc.notWant)
+			}
+		})
+	}
+}

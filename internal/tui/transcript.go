@@ -714,7 +714,9 @@ func (m *Model) otherRows(t *agent.ToolEvent, width int) []string {
 	}
 	target := sanitizeLine(t.Title)
 	if (t.Kind == "search" || t.Kind == "fetch") && t.RawInput != "" {
-		target = strings.TrimSpace(target + " " + sanitizeLine(t.RawInput))
+		if q := queryNotInTitle(t.RawInput, target); q != "" {
+			target = strings.TrimSpace(target + " " + sanitizeLine(q))
+		}
 	}
 	return []string{m.toolHead(t, label, target, "", styleFG(m.theme.Dim), width)}
 }
@@ -762,6 +764,40 @@ func (m *Model) toolTarget(t *agent.ToolEvent) string {
 
 // toolPath finds the file a read or edit acted on: the location cursor reports,
 // else rawInput.path, else the diff it produced.
+// queryNotInTitle returns raw only when it would tell the user something the
+// title does not already say. Cursor titles its search "Find `**/main.go`" and
+// sends rawInput `{"pattern":"**/main.go"}`, so appending it verbatim printed
+// the pattern twice, the second time as raw JSON.
+func queryNotInTitle(raw, title string) string {
+	vals := rawInputValues(raw)
+	if len(vals) == 0 {
+		return raw
+	}
+	for _, v := range vals {
+		if !strings.Contains(title, v) {
+			return raw
+		}
+	}
+	return ""
+}
+
+// rawInputValues pulls the quoted string values out of a JSON object, ignoring
+// the keys. A non-object, or one with no string values, yields nothing and the
+// caller falls back to showing raw.
+func rawInputValues(raw string) []string {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return nil
+	}
+	vals := make([]string, 0, len(obj))
+	for _, v := range obj {
+		if s, ok := v.(string); ok && s != "" {
+			vals = append(vals, s)
+		}
+	}
+	return vals
+}
+
 func toolPath(t *agent.ToolEvent) string {
 	if len(t.Locations) > 0 && t.Locations[0] != "" {
 		return t.Locations[0]
