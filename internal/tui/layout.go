@@ -81,7 +81,7 @@ type frameRegion struct {
 var frameRegions = [regionCount]frameRegion{
 	regionTranscript: {
 		rows: func(s frameSizes) int { return s.transcript },
-		view: func(m Model, _ frameLayout) string { return m.vp.View() },
+		view: func(m Model, _ frameLayout) string { return m.transcriptView() },
 	},
 	regionOverlay: {
 		rows: func(s frameSizes) int { return s.overlay },

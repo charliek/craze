@@ -30,6 +30,7 @@ Top to bottom:
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) |
+| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`) |
 | `↑` `↓` | with an empty composer, select a sub-agent row; in a picker or the slash menu, move the cursor |
 | `Enter` on a selected sub-agent | peek at its prompt; `Esc` closes the peek without cancelling the turn |
 | `PgUp` / `PgDn`, wheel | scroll the transcript |
@@ -88,10 +89,62 @@ builtins.
 
 ## Mouse
 
-Mouse reporting is on by default. The wheel scrolls the transcript three lines
-per notch; a left click picks a row in the model or theme picker, cycles the
-tasks panel from its header, or selects a sub-agent row.
+Mouse reporting is on by default; `--no-mouse` turns it off.
 
-Turning mouse reporting on takes native drag-select away from the terminal. To
-select text anyway, hold `Shift` while dragging (`Option` in macOS terminals),
-or start craze with `--no-mouse`.
+The wheel scrolls the transcript three lines per notch. A left click hit-tests
+the same layout the frame was drawn from, so what is on screen and what is
+clickable cannot drift apart:
+
+| Target | Effect |
+|---|---|
+| Tasks panel header | Cycles the panel (same as `Ctrl+T`) |
+| Sub-agent row under the status rows | Selects that sub-agent and opens its peek |
+| Model name in status row 1 | Opens the model dialog (same as `/model`) |
+| `◆ agent` mode chip in status row 2 | Cycles the mode (same as `Shift+Tab`) |
+| A row inside an open dialog | Picks that row |
+| Anywhere outside an open dialog | Closes it, applying nothing |
+| The transcript | Starts a selection |
+
+Task rows, the `… +n more` row, the separators between status segments and a
+segment the row truncated away are all inert.
+
+### Selection and copy
+
+Dragging over the transcript highlights the cells between the press and the
+pointer and copies them when the button comes up. The range is inclusive of both
+endpoints and normalises, so dragging backwards selects the same text. A
+double-click — two presses on the same cell inside 400 ms — selects the word
+under the pointer and copies that.
+
+A drag that reaches the top or bottom row of the transcript scrolls one line and
+keeps extending. Cell-motion reporting only sends an event when the pointer
+changes cell, so a pointer held still on the edge stops scrolling; nudge it to
+carry on.
+
+Status row 2 says `copied 2 lines`, or `copied "the first thirty characters…"`
+for a single row, for two seconds. The highlight outlives the note: it stays
+until the next key, the next click, the next thing the agent says (any change to
+the transcript, a resize or `/clear` included), or a blocking card.
+
+`Ctrl+Y` copies the current selection. With no selection it copies the last
+reply — the agent's own text, not the rows it was wrapped onto. It is a keyboard
+feature, so it works under `--no-mouse` as well.
+
+Every copy is written twice: once as a bare OSC 52 escape sequence, which is the
+one that survives ssh, and once to the system clipboard. Copies are capped at
+64 KiB, cut on a rune boundary, and the note then ends `… (truncated)`.
+
+For OSC 52 to land in the system clipboard:
+
+- **tmux** needs `set -g set-clipboard on`. craze sends the sequence bare, so
+  `allow-passthrough` is not required.
+- Some terminals need it enabled: **xterm** wants
+  `XTerm*disallowedWindowOps: 20,21,SetXprop`. **Alacritty**, **kitty**,
+  **WezTerm**, **foot** and **iTerm2** allow it out of the box. **GNOME
+  Terminal** does not implement OSC 52, which is what the second, native write
+  is for.
+
+Turning mouse reporting on takes native drag-select away from the terminal, and
+craze's own selection replaces it. To reach the terminal's instead — to select
+across the whole scrollback, say — hold `Shift` while dragging (`Option` in
+macOS terminals), or start craze with `--no-mouse`.

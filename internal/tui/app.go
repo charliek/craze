@@ -90,6 +90,35 @@ type Model struct {
 	quitting bool
 	started  bool
 
+	// transcriptRows is exactly what setViewportContent handed the viewport,
+	// and transcriptPlain is the same rows stripped and right-trimmed. The
+	// selection, the highlight and the copy all read these rather than
+	// vp.View(), so a selection whose anchor has scrolled off the screen still
+	// knows what it holds.
+	transcriptRows  []string
+	transcriptPlain []string
+
+	// mouseEnabled is --no-mouse kept on the model: the flag decides what
+	// bubbletea reports, and this decides what craze does with a mouse message
+	// that reached it anyway (the frame runner injects them).
+	mouseEnabled bool
+
+	// sel is the drag in progress or the highlight it left; pressed is the
+	// button that went down, because an X10 terminal reports ButtonNone on the
+	// release that ends it.
+	sel     selection
+	pressed tea.MouseButton
+	// The double-click state machine: the last press's cell and time, and how
+	// many presses have landed on it inside the window.
+	clickPos cellPos
+	clickAt  time.Time
+	clicks   int
+
+	// copyNote is what the last copy did, shown in status row 2 until
+	// copyUntil.
+	copyNote  string
+	copyUntil time.Time
+
 	// lay is the one layout computation per Update; View and the mouse
 	// hit-tester both read it rather than measuring anything themselves.
 	// layouts counts the computations relayout made, so a test can hold
@@ -190,6 +219,10 @@ type revertModelMsg struct {
 }
 type refreshSnapMsg struct{}
 
+// dblClickMsg is the frame runner's <dblclick:X,Y>: the gesture without the
+// two presses and the 400 ms between them.
+type dblClickMsg struct{ X, Y int }
+
 // planImplementMsg says the mode change the plan offer asked for landed, so
 // the implement turn may now be written and sent. planImplementFailedMsg is
 // the other half: nothing was sent, so the offer survives.
@@ -216,13 +249,14 @@ func New(cfg Config) Model {
 
 	th := Preset(cfg.Theme)
 	m := Model{
-		theme: th,
-		vp:    vp,
-		input: newComposer(th),
-		sess:  cfg.Session,
-		cwd:   cwd,
-		model: cfg.Model,
-		yolo:  cfg.Yolo,
+		theme:        th,
+		vp:           vp,
+		input:        newComposer(th),
+		sess:         cfg.Session,
+		cwd:          cwd,
+		model:        cfg.Model,
+		yolo:         cfg.Yolo,
+		mouseEnabled: !cfg.NoMouse,
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
@@ -241,10 +275,15 @@ func New(cfg Config) Model {
 
 func Run(cfg Config) error {
 	m := New(cfg)
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
+	// are written from different goroutines, and a copy landing inside a frame
+	// would tear it, so both go through the same lock.
+	out := newSyncWriter(os.Stdout)
+	clipboardOut = out
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithOutput(out)}
 	if !cfg.NoMouse {
-		// Cell motion, not all motion: craze ignores drags, and the quieter
-		// mode keeps the terminal from streaming a report per cell.
+		// Cell motion, not all motion: the quieter mode reports a drag once per
+		// cell rather than per pixel, which is all the selection needs.
 		opts = append(opts, tea.WithMouseCellMotion())
 	}
 	p := tea.NewProgram(m, opts...)
@@ -364,6 +403,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshSnap()
 		return m, nil
 
+	case clipboardDoneMsg:
+		m.copyNote = msg.note
+		m.copyUntil = m.now().Add(copyNoteLinger)
+		return m, nil
+
+	case dblClickMsg:
+		// The frame runner's deterministic double-click: two real presses would
+		// make a golden depend on the clock. The state machine itself is
+		// unit-tested against the injected one.
+		if !m.mouseEnabled || m.cardOpen() || !m.selectable(msg.X, msg.Y) {
+			return m, nil
+		}
+		pos, ok := m.transcriptCell(msg.X, msg.Y)
+		if !ok {
+			return m, nil
+		}
+		// The token stands in for the whole gesture, release included, so it
+		// copies the way the real release does.
+		return m.selectWord(pos).copySelection()
+
 	case planImplementMsg:
 		// The session is in the implement mode now, so the note and the user
 		// entry are honest and the prompt goes out behind them.
@@ -406,23 +465,167 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse is the pinned mouse contract: the wheel scrolls the transcript,
-// a left press hit-tests the regions frameLayout drew. Drag, motion and every
-// other button are ignored.
+// handleMouse is the mouse contract: the wheel scrolls the transcript, a left
+// press either starts a selection over the transcript or hit-tests the regions
+// frameLayout drew, and motion and release carry the drag.
+//
+// --no-mouse is kept on the model as well as withheld from bubbletea, so a
+// mouse message that reached craze another way (the frame runner injects them)
+// is ignored too.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress || m.cardOpen() {
-		// A card owns the mouse as well as the keyboard, wheel included.
+	if !m.mouseEnabled || m.cardOpen() {
+		// A card owns the mouse as well as the keyboard, wheel included. It
+		// arrived while the button was down, so the drag goes with it.
 		return m, nil
 	}
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		m.vp.ScrollUp(wheelLines)
-	case tea.MouseButtonWheelDown:
-		m.vp.ScrollDown(wheelLines)
-	case tea.MouseButtonLeft:
-		return m.handleClick(msg.X, msg.Y)
+	switch msg.Action {
+	case tea.MouseActionPress:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			// The selection is in transcript rows, not screen rows, so it
+			// scrolls with the text it holds and survives the wheel.
+			m.vp.ScrollUp(wheelLines)
+		case tea.MouseButtonWheelDown:
+			m.vp.ScrollDown(wheelLines)
+		case tea.MouseButtonLeft:
+			return m.handlePress(msg.X, msg.Y)
+		}
+	case tea.MouseActionMotion:
+		// Only a drag extends. A double-click's word is already the selection
+		// it meant, and the pointer wobbling over it must not eat into it.
+		if m.pressed == tea.MouseButtonLeft && m.sel.drag {
+			return m.handleDrag(msg.X, msg.Y), nil
+		}
+	case tea.MouseActionRelease:
+		// X10 terminals report ButtonNone on release, so the button that went
+		// down is the only record of which one came up.
+		if m.pressed == tea.MouseButtonLeft {
+			return m.handleRelease(msg.X, msg.Y)
+		}
 	}
 	return m, nil
+}
+
+// handlePress is the left button going down: over the transcript it anchors a
+// selection (or picks a word, on the second press inside the double-click
+// window), and anywhere else it is the click the regions already understood.
+func (m Model) handlePress(x, y int) (tea.Model, tea.Cmd) {
+	now := m.now()
+	if !m.selectable(x, y) {
+		// The press belongs to another band, so whatever was highlighted is
+		// the previous gesture and goes.
+		m.sel = selection{}
+		m.clicks = 0
+		return m.handleClick(x, y)
+	}
+	m.pressed = tea.MouseButtonLeft
+	pos, ok := m.transcriptCell(x, y)
+	if !ok {
+		return m, nil
+	}
+	// A second press on the same cell inside the window is a double-click; a
+	// third one inside it starts over, so a rattle of clicks does not keep
+	// re-selecting the word.
+	double := m.clicks == 1 && pos == m.clickPos && now.Sub(m.clickAt) < doubleClickWindow
+	m.clickPos, m.clickAt = pos, now
+	if double {
+		// The word is selected now and copied by the release that follows,
+		// exactly as a drag over it would be.
+		m.clicks = 2
+		return m.selectWord(pos), nil
+	}
+	m.clicks = 1
+	m.sel = selection{on: true, drag: true, anchor: pos, head: pos}
+	return m, nil
+}
+
+// handleDrag extends the selection to the cell under the pointer. A motion
+// event on the top or bottom row of the band scrolls one line first, so a drag
+// can reach past the screen.
+//
+// Cell motion only reports a change of cell: a pointer held still on the edge
+// does not keep scrolling. That is the mode's contract, not a bug to fix.
+func (m Model) handleDrag(x, y int) tea.Model {
+	tr := m.lay.Region(regionTranscript)
+	if tr.Empty() {
+		return m
+	}
+	switch {
+	case y <= tr.Top:
+		m.vp.ScrollUp(1)
+	case y >= tr.Bottom-1:
+		m.vp.ScrollDown(1)
+	}
+	if pos, ok := m.transcriptCell(x, y); ok {
+		m.sel.head = pos
+	}
+	return m
+}
+
+// handleRelease finalises the drag: the head is the cell under the pointer, and
+// a selection of more than the one cell the press made is copied.
+func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
+	m.pressed = tea.MouseButtonNone
+	if !m.sel.on {
+		return m, nil
+	}
+	if pos, ok := m.transcriptCell(x, y); ok && m.sel.drag {
+		m.sel.head = pos
+	}
+	m.sel.drag = false
+	return m.copySelection()
+}
+
+// selectWord is the double-click: the run of non-space cells under the pointer.
+// The selection is not a drag, so nothing afterwards moves its head — a word is
+// the gesture's whole answer.
+func (m Model) selectWord(pos cellPos) Model {
+	m.sel = selection{}
+	if pos.line >= len(m.transcriptPlain) {
+		return m
+	}
+	lo, hi, ok := wordAt(m.transcriptPlain[pos.line], pos.col)
+	if !ok {
+		return m
+	}
+	m.sel = selection{
+		on:     true,
+		anchor: cellPos{line: pos.line, col: lo},
+		head:   cellPos{line: pos.line, col: hi},
+	}
+	return m
+}
+
+// copySelection puts the highlighted cells on the clipboard. An empty
+// selection — a plain click, or a double-click on whitespace — copies nothing
+// and says nothing.
+func (m Model) copySelection() (tea.Model, tea.Cmd) {
+	text := m.selectionText()
+	if text == "" {
+		return m, nil
+	}
+	return m, copyText(text, copyNote(text, m.selectionLines()))
+}
+
+// copySelectionOrLastReply is Ctrl+Y. Without a selection it copies the last
+// reply's own text rather than the rows it was wrapped into, so what lands on
+// the clipboard is the agent's paragraph and not the screen's line breaks.
+func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
+	if !m.sel.empty() {
+		return m.copySelection()
+	}
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if e := &m.entries[i]; e.kind == entryAssistant && e.text != "" {
+			return m, copyText(e.text, "copied last reply")
+		}
+	}
+	return m, nil
+}
+
+// copyLingering is the note's 2-second window, which is also why the tick chain
+// has to stay fast until it closes.
+func (m Model) copyLingering() bool {
+	return !m.copyUntil.IsZero() && m.now().Before(m.copyUntil)
 }
 
 // handleClick reads the same frameLayout View() drew from, so what is on the
@@ -500,6 +703,11 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The highlight is a mouse gesture: any key but the one that copies it
+	// means the user has moved on.
+	if msg.Type != tea.KeyCtrlY {
+		m.sel = selection{}
+	}
 	switch msg.Type {
 	case tea.KeyCtrlD:
 		return m.requestQuit()
@@ -525,6 +733,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHelpKey(msg)
 	}
 
+	if msg.Type == tea.KeyCtrlY {
+		// A keyboard feature, so it works under --no-mouse as well.
+		return m.copySelectionOrLastReply()
+	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()
 	}
@@ -986,6 +1198,7 @@ func (m Model) helpView() string {
 		"enter send   shift/alt+enter or ctrl+j newline   shift+tab cycle mode",
 		"esc cancel   ctrl+c cancel then quit   ctrl+d quit   pgup/pgdn scroll",
 		"ctrl+t tasks panel   ctrl+g theme   ctrl+o expand detail",
+		"ctrl+y copy the selection, or the last reply   drag to select",
 		"commands:",
 	}
 	for _, it := range m.slashCatalog() {

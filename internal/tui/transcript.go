@@ -305,7 +305,12 @@ func (m *Model) refreshViewport() {
 // then scrolls, so "stick to bottom" is decided by where the user was before
 // the change, not after it.
 func (m *Model) setViewportContent(stick bool) {
+	// Every rebuild moves the text under the selection — a streaming chunk, a
+	// tool update, /clear, a resize or a theme change — so the highlight goes
+	// with it rather than pointing at rows that are no longer there.
+	m.sel = selection{}
 	if m.width <= 0 {
+		m.transcriptRows, m.transcriptPlain = nil, nil
 		m.vp.SetContent("")
 		return
 	}
@@ -323,6 +328,13 @@ func (m *Model) setViewportContent(stick bool) {
 			m.renders++
 		}
 		lines = append(lines, e.rendered...)
+	}
+	// The canonical rows: exactly what the viewport is about to hold, plus the
+	// plain form the selection cuts and copies from.
+	m.transcriptRows = lines
+	m.transcriptPlain = make([]string, len(lines))
+	for i, ln := range lines {
+		m.transcriptPlain[i] = strings.TrimRight(ansi.Strip(ln), " ")
 	}
 	m.vp.SetContent(strings.Join(lines, "\n"))
 	if stick {

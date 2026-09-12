@@ -106,15 +106,43 @@ never clobbered, and the save that refused to overwrite it is reported in the
 transcript. An explicit `--theme` beats the config file, which beats
 `craze-dark`.
 
-## Mouse
+## Mouse and copy
 
 Mouse reporting is on by default. The wheel scrolls the transcript three lines
-per notch; a left click picks a row in the model or theme picker, cycles the
-tasks panel from its header, or selects a sub-agent row.
+per notch. A left click picks a row in the model or theme dialog, cycles the
+tasks panel from its header, cycles the mode from the `◆ agent` chip in status
+row 2, opens the model dialog from the model name in status row 1, or selects a
+sub-agent row.
+
+Dragging over the transcript draws a selection and copies it on release; a
+double-click selects the word under the pointer. The status row says `copied 2
+lines` (or the start of the one line) for two seconds, and the highlight stays
+until the next key, the next click or the next thing the agent says. A drag that
+reaches the top or bottom row of the transcript scrolls one line and keeps
+going — cell-motion reporting only sends an event when the pointer changes cell,
+so a pointer held still on the edge stops scrolling; nudge it to continue.
+
+`Ctrl+Y` copies the selection, or the last reply when there is none. It is a
+keyboard feature, so it works with `--no-mouse` too.
+
+A copy is written twice: as an OSC 52 escape sequence, which is the one that
+works over ssh, and to the system clipboard. For OSC 52 to reach the system
+clipboard:
+
+- **tmux** needs `set -g set-clipboard on` (craze sends the bare sequence, so
+  `allow-passthrough` is not needed).
+- Some terminals have to be told to allow it — in **xterm**,
+  `XTerm*disallowedWindowOps: 20,21,SetXprop`; **Alacritty**, **kitty**,
+  **WezTerm**, **foot** and **iTerm2** allow it by default. **GNOME Terminal**
+  does not support OSC 52 at all, which is what the system-clipboard write is
+  for.
+
+Copies are capped at 64 KiB; past that the note says `… (truncated)`.
 
 **Turning mouse reporting on takes native drag-select away from the terminal.**
-To select text anyway, hold `Shift` while dragging (`Option` in macOS
-terminals), or start craze with `--no-mouse`.
+craze's own selection replaces it. To use the terminal's instead — to select
+across the whole scrollback, for instance — hold `Shift` while dragging
+(`Option` in macOS terminals), or start craze with `--no-mouse`.
 
 ## `craze frame` — the headless renderer
 
@@ -150,8 +178,9 @@ brackets is a token:
 <enter> <esc> <tab> <backspace> <space> <up> <down> <left> <right>
 <pgup> <pgdn> <shift-tab> <alt-enter> <ctrl-a>..<ctrl-z> <lt>
 <wheel-up> <wheel-down> <click:X,Y> <resize:COLS,ROWS> <sleep:250ms>
+<press:X,Y> <motion:X,Y> <release:X,Y> <drag:X1,Y1,X2,Y2> <dblclick:X,Y>
 <paste:one\ntwo>
-<wait:idle> <wait:working> <wait:card> <wait:text:foo> <wait:gone:foo>
+<wait:idle> <wait:working> <wait:card> <wait:copied> <wait:text:foo> <wait:gone:foo>
 ```
 
 Exit 0 prints the final frame, 2 is a bad script, and 3 is a wait that timed

@@ -175,6 +175,10 @@ func drainEvents(t *testing.T, m Model, sess agent.Session) Model {
 func TestMain(m *testing.M) {
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
+	// No test may shell out to xclip and overwrite the developer's clipboard.
+	// The seam itself stays real so the OSC 52 bytes are still asserted; only
+	// the native tool is stubbed out, and the tests that care install their own.
+	nativeCopy = func(string) error { return nil }
 	code := m.Run()
 	if fakeAgentDir != "" {
 		_ = os.RemoveAll(fakeAgentDir)

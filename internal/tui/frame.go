@@ -69,13 +69,15 @@ type waitSpec struct {
 }
 
 type frameToken struct {
-	kind  frameTokenKind
-	text  string
-	key   tea.KeyMsg
-	mouse tea.MouseMsg
-	size  tea.WindowSizeMsg
-	dur   time.Duration
-	wait  waitSpec
+	kind frameTokenKind
+	text string
+	key  tea.KeyMsg
+	// msgs is what a tokMouse sends, in order: one message for a click or a
+	// wheel notch, three for a <drag:>.
+	msgs []tea.Msg
+	size tea.WindowSizeMsg
+	dur  time.Duration
+	wait waitSpec
 }
 
 var simpleFrameKeys = map[string]tea.KeyMsg{
@@ -97,6 +99,12 @@ var simpleFrameKeys = map[string]tea.KeyMsg{
 var simpleFrameMouse = map[string]tea.MouseMsg{
 	"wheel-up":   {Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress},
 	"wheel-down": {Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress},
+}
+
+// leftMouse is one left-button report at a cell, which is what every selection
+// token is made of.
+func leftMouse(x, y int, action tea.MouseAction) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: action}
 }
 
 func runeKey(r rune) tea.KeyMsg {
@@ -141,7 +149,7 @@ func parseFrameToken(body string) (frameToken, error) {
 		return frameToken{kind: tokKey, text: raw, key: k}, nil
 	}
 	if mm, ok := simpleFrameMouse[name]; ok {
-		return frameToken{kind: tokMouse, text: raw, mouse: mm}, nil
+		return frameToken{kind: tokMouse, text: raw, msgs: []tea.Msg{mm}}, nil
 	}
 	switch {
 	case name == "lt":
@@ -162,13 +170,23 @@ func parseFrameToken(body string) (frameToken, error) {
 		}
 		return frameToken{kind: tokSleep, text: raw, dur: d}, nil
 
-	case strings.HasPrefix(name, "click:"):
-		x, y, err := parseFramePair(strings.TrimPrefix(name, "click:"))
+	case strings.HasPrefix(name, "click:"), strings.HasPrefix(name, "press:"),
+		strings.HasPrefix(name, "motion:"), strings.HasPrefix(name, "release:"),
+		strings.HasPrefix(name, "dblclick:"):
+		return parseMouseToken(raw, name)
+
+	case strings.HasPrefix(name, "drag:"):
+		// One gesture, three reports: a drag is exactly what the terminal
+		// would send, so the script exercises the same path a mouse does.
+		x1, y1, x2, y2, err := parseFrameQuad(strings.TrimPrefix(name, "drag:"))
 		if err != nil {
-			return frameToken{}, &ScriptError{Token: raw, Reason: "want <click:X,Y>"}
+			return frameToken{}, &ScriptError{Token: raw, Reason: "want <drag:X1,Y1,X2,Y2>"}
 		}
-		mm := tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
-		return frameToken{kind: tokMouse, text: raw, mouse: mm}, nil
+		return frameToken{kind: tokMouse, text: raw, msgs: []tea.Msg{
+			leftMouse(x1, y1, tea.MouseActionPress),
+			leftMouse(x2, y2, tea.MouseActionMotion),
+			leftMouse(x2, y2, tea.MouseActionRelease),
+		}}, nil
 
 	case strings.HasPrefix(name, "resize:"):
 		c, r, err := parseFramePair(strings.TrimPrefix(name, "resize:"))
@@ -194,10 +212,35 @@ func parseFrameToken(body string) (frameToken, error) {
 	return frameToken{}, &ScriptError{Token: raw, Reason: "unknown token"}
 }
 
+// parseMouseToken handles the one-cell mouse tokens. <click:> and <press:> are
+// the same message; they are spelled twice because a click is a hit-test and a
+// press is the start of a selection, and a script reads better saying which.
+func parseMouseToken(raw, name string) (frameToken, error) {
+	kind, rest, _ := strings.Cut(name, ":")
+	x, y, err := parseFramePair(rest)
+	if err != nil {
+		return frameToken{}, &ScriptError{Token: raw, Reason: "want <" + kind + ":X,Y>"}
+	}
+	var msg tea.Msg
+	switch kind {
+	case "click", "press":
+		msg = leftMouse(x, y, tea.MouseActionPress)
+	case "motion":
+		msg = leftMouse(x, y, tea.MouseActionMotion)
+	case "release":
+		// Deliberately ButtonNone: that is what an X10 terminal reports, and
+		// the release has to finalise the drag anyway.
+		msg = tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease}
+	case "dblclick":
+		msg = dblClickMsg{X: x, Y: y}
+	}
+	return frameToken{kind: tokMouse, text: raw, msgs: []tea.Msg{msg}}, nil
+}
+
 func parseWaitToken(raw, rest string) (frameToken, error) {
 	lower := strings.ToLower(rest)
 	switch lower {
-	case "idle", "working", "card":
+	case "idle", "working", "card", "copied":
 		return frameToken{kind: tokWait, text: raw, wait: waitSpec{kind: lower}}, nil
 	}
 	for _, kind := range []string{"text", "gone"} {
@@ -229,6 +272,30 @@ func parseFramePair(s string) (int, int, error) {
 	return x, y, nil
 }
 
+func parseFrameQuad(s string) (int, int, int, int, error) {
+	a, rest, ok := strings.Cut(s, ",")
+	if !ok {
+		return 0, 0, 0, 0, fmt.Errorf("want four numbers")
+	}
+	b, tail, ok := strings.Cut(rest, ",")
+	if !ok {
+		return 0, 0, 0, 0, fmt.Errorf("want four numbers")
+	}
+	x1, err := strconv.Atoi(strings.TrimSpace(a))
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	y1, err := strconv.Atoi(strings.TrimSpace(b))
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	x2, y2, err := parseFramePair(tail)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return x1, y1, x2, y2, nil
+}
+
 func (w waitSpec) match(s frameState) bool {
 	switch w.kind {
 	case "idle":
@@ -237,6 +304,8 @@ func (w waitSpec) match(s frameState) bool {
 		return s.status == statusWorking
 	case "card":
 		return s.card
+	case "copied":
+		return s.copied
 	case "text":
 		return strings.Contains(s.plain, w.needle)
 	case "gone":
@@ -252,6 +321,7 @@ type frameState struct {
 	status  status
 	started bool
 	card    bool
+	copied  bool
 	sync    int
 }
 
@@ -385,6 +455,7 @@ func (f frameModel) publish() {
 		status:  f.inner.status,
 		started: f.inner.started,
 		card:    f.inner.cardOpen(),
+		copied:  f.inner.copyLingering(),
 		sync:    f.sync,
 	})
 }
@@ -426,6 +497,13 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		return "", "", err
 	}
 	defer restoreHome()
+
+	// The runner prints its final frame to stdout, so an OSC 52 sequence in
+	// that stream would corrupt it — and nothing under `make test` may reach for
+	// the developer's own clipboard. Both writes are recorded instead. The
+	// swap is safe because isolateFrameHome already serialises frame runs.
+	_, restoreClipboard := recordCopies()
+	defer restoreClipboard()
 
 	if opts.ANSI {
 		prev := lipgloss.ColorProfile()
@@ -494,7 +572,11 @@ func (r *frameRunner) run(toks []frameToken, cols, rows int) error {
 		case tokKey:
 			err = r.send(tok.key, tok.text)
 		case tokMouse:
-			err = r.send(tok.mouse, tok.text)
+			for _, mm := range tok.msgs {
+				if err = r.send(mm, tok.text); err != nil {
+					break
+				}
+			}
 		case tokResize:
 			err = r.send(tok.size, tok.text)
 		case tokSleep:

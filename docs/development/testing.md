@@ -64,8 +64,9 @@ brackets is a token:
 <enter> <esc> <tab> <backspace> <space> <up> <down> <left> <right>
 <pgup> <pgdn> <shift-tab> <alt-enter> <ctrl-a>..<ctrl-z> <lt>
 <wheel-up> <wheel-down> <click:X,Y> <resize:COLS,ROWS> <sleep:250ms>
+<press:X,Y> <motion:X,Y> <release:X,Y> <drag:X1,Y1,X2,Y2> <dblclick:X,Y>
 <paste:one\ntwo>
-<wait:idle> <wait:working> <wait:card> <wait:text:foo> <wait:gone:foo>
+<wait:idle> <wait:working> <wait:card> <wait:copied> <wait:text:foo> <wait:gone:foo>
 ```
 
 | Exit | Meaning |

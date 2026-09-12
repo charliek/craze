@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,4 +237,51 @@ func waitPTY(t *testing.T, ptmx *os.File, needle string, d time.Duration) bool {
 		}
 	}
 	return false
+}
+
+// TestPTYSyncWriterKeepsTheWindowSize is the regression the writer nearly was.
+// bubbletea only finds the terminal size through an output it can take a file
+// descriptor from: wrapping stdout in a plain io.Writer leaves it with no
+// window size at all, so craze would never receive a WindowSizeMsg and would
+// draw nothing. The wrapper has to stay a file to bubbletea.
+func TestPTYSyncWriterKeepsTheWindowSize(t *testing.T) {
+	isolateSkillsHome(t)
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("no pty: %v", err)
+	}
+	defer func() { _ = ptmx.Close() }()
+	defer func() { _ = tty.Close() }()
+	if err := pty.Setsize(tty, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Skipf("pty resize: %v", err)
+	}
+
+	out := newSyncWriter(tty)
+	m := New(Config{
+		Session:   NewStub(),
+		Theme:     "tokyo-night",
+		Workspace: t.TempDir(),
+		Yolo:      true,
+	})
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(out))
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Run()
+		done <- err
+	}()
+	defer func() {
+		p.Quit()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			p.Kill()
+		}
+	}()
+
+	// The composer rule is only drawn once the model has a width, and it is
+	// drawn to exactly that width: 80 cells, the last eight of which are the
+	// placeholder title.
+	if !waitPTY(t, ptmx, strings.Repeat("─", 72)+" craze ─", 5*time.Second) {
+		t.Fatal("no frame at the pty's own size: bubbletea lost the descriptor")
+	}
 }

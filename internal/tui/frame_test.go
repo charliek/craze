@@ -57,11 +57,11 @@ func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 	if len(toks) != 10 {
 		t.Fatalf("got %d tokens", len(toks))
 	}
-	if toks[0].mouse.Button != tea.MouseButtonWheelUp || toks[1].mouse.Button != tea.MouseButtonWheelDown {
-		t.Fatalf("wheel tokens %+v %+v", toks[0].mouse, toks[1].mouse)
+	if mouseOf(t, toks[0]).Button != tea.MouseButtonWheelUp || mouseOf(t, toks[1]).Button != tea.MouseButtonWheelDown {
+		t.Fatalf("wheel tokens %+v %+v", toks[0].msgs, toks[1].msgs)
 	}
-	if toks[2].mouse.X != 10 || toks[2].mouse.Y != 5 || toks[2].mouse.Button != tea.MouseButtonLeft {
-		t.Fatalf("click %+v", toks[2].mouse)
+	if mm := mouseOf(t, toks[2]); mm.X != 10 || mm.Y != 5 || mm.Button != tea.MouseButtonLeft {
+		t.Fatalf("click %+v", mm)
 	}
 	if toks[3].size.Width != 120 || toks[3].size.Height != 40 {
 		t.Fatalf("resize %+v", toks[3].size)
@@ -81,6 +81,62 @@ func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 		if got != want {
 			t.Fatalf("wait %d = %+v, want %+v", i, got, want)
 		}
+	}
+}
+
+// mouseOf is the single mouse report a one-cell token carries.
+func mouseOf(t *testing.T, tok frameToken) tea.MouseMsg {
+	t.Helper()
+	if tok.kind != tokMouse || len(tok.msgs) != 1 {
+		t.Fatalf("token %+v is not one mouse report", tok)
+	}
+	mm, ok := tok.msgs[0].(tea.MouseMsg)
+	if !ok {
+		t.Fatalf("token message is %T, want tea.MouseMsg", tok.msgs[0])
+	}
+	return mm
+}
+
+// TestParseFrameScriptSelectionTokens is §3.5's token set: the three halves of a
+// gesture, the shorthand that sends all three, and the deterministic
+// double-click.
+func TestParseFrameScriptSelectionTokens(t *testing.T) {
+	toks, err := parseFrameScript("<press:3,4><motion:5,4><release:7,6><drag:1,2,8,9><dblclick:2,3><wait:copied>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 6 {
+		t.Fatalf("got %d tokens", len(toks))
+	}
+	for i, want := range []tea.MouseMsg{
+		{X: 3, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
+		{X: 5, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion},
+		// A release reports ButtonNone, the way an X10 terminal does.
+		{X: 7, Y: 6, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease},
+	} {
+		if got := mouseOf(t, toks[i]); got != want {
+			t.Fatalf("token %d = %+v, want %+v", i, got, want)
+		}
+	}
+	// One <drag:> is the whole gesture: press, motion, release.
+	drag := toks[3]
+	if len(drag.msgs) != 3 {
+		t.Fatalf("<drag:> sent %d messages, want 3", len(drag.msgs))
+	}
+	for i, want := range []tea.MouseMsg{
+		{X: 1, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
+		{X: 8, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion},
+		{X: 8, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease},
+	} {
+		if got := drag.msgs[i].(tea.MouseMsg); got != want {
+			t.Fatalf("drag message %d = %+v, want %+v", i, got, want)
+		}
+	}
+	if got, want := toks[4].msgs[0], (dblClickMsg{X: 2, Y: 3}); got != want {
+		t.Fatalf("dblclick = %+v, want %+v", got, want)
+	}
+	if got := toks[5].wait; got != (waitSpec{kind: "copied"}) {
+		t.Fatalf("wait = %+v", got)
 	}
 }
 
@@ -107,6 +163,9 @@ func TestParseFrameScriptRejects(t *testing.T) {
 		"<enter",
 		"<sleep:soon>",
 		"<click:10>",
+		"<press:10>",
+		"<drag:1,2,3>",
+		"<dblclick:x,y>",
 		"<resize:0,10>",
 		"<wait:done>",
 		"<wait:text:>",
@@ -171,6 +230,25 @@ func runStubFrame(t *testing.T, cols, rows int, script string) string {
 		t.Fatalf("run frame script: %v", err)
 	}
 	return plain
+}
+
+// runStubFrameRaw is runStubFrame with the raw frame kept, so a test can assert
+// on the escape sequences as well as the text. TestMain already forces a
+// true-colour profile, so the raw frame carries real colours.
+func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, string) {
+	t.Helper()
+	isolateSkillsHome(t)
+	plain, raw, err := RunFrameScript(Config{
+		Session:   NewStub(),
+		Theme:     "tokyo-night",
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
+	return plain, raw
 }
 
 // runThemeFrame is runStubFrame with the theme named explicitly and the raw
@@ -972,5 +1050,121 @@ func TestFrameGoldenThemeDialog100x30(t *testing.T) {
 	_, reverted := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g><down><esc>")
 	if !strings.Contains(reverted, ansiFG("#e8a33d")) {
 		t.Fatal("esc did not restore the craze-dark accent")
+	}
+}
+
+// TestFrameGoldenSelection is §3.5 through the real program: a drag highlights
+// the rows it covers, copies them, and says so in status row 2. The goldens are
+// ANSI-stripped, so the highlight itself is asserted on the raw frame.
+func TestFrameGoldenSelection(t *testing.T) {
+	// "hi" gives two adjacent transcript rows at the top of the band: the user
+	// line and the reply.
+	const said = "<wait:idle>hi<enter><wait:text:echo: hi><wait:idle>"
+	for _, tc := range []struct {
+		name string
+		keys string
+		want []string
+		// cells are (row, col) pairs that must carry the selection background.
+		cells [][2]int
+		// clear are cells that must not.
+		clear [][2]int
+	}{
+		{
+			// Forwards, from the start of the user line to the middle of the
+			// reply.
+			name:  "select-two-lines-100x30",
+			keys:  said + "<drag:0,0,5,1><wait:copied>",
+			want:  []string{"copied 2 lines", "❯ hi", "echo: hi"},
+			cells: [][2]int{{0, 0}, {0, 99}, {1, 0}, {1, 5}},
+			clear: [][2]int{{1, 6}, {2, 0}},
+		},
+		{
+			// The same selection drawn backwards: press on the later cell and
+			// release on the earlier one.
+			name:  "select-reverse-100x30",
+			keys:  said + "<drag:5,1,0,0><wait:copied>",
+			want:  []string{"copied 2 lines"},
+			cells: [][2]int{{0, 0}, {0, 99}, {1, 0}, {1, 5}},
+			clear: [][2]int{{1, 6}, {2, 0}},
+		},
+		{
+			// The deterministic double-click: the word under the pointer, with
+			// no dependence on the clock.
+			name:  "dblclick-word-100x30",
+			keys:  said + "<dblclick:2,1><wait:copied>",
+			want:  []string{`copied "echo:"`},
+			cells: [][2]int{{1, 0}, {1, 4}},
+			clear: [][2]int{{1, 5}, {0, 0}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain, raw := runStubFrameRaw(t, 100, 30, tc.keys)
+			assertGolden(t, tc.name, 100, 30, plain)
+			for _, want := range tc.want {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("frame is missing %q:\n%s", want, plain)
+				}
+			}
+			assertSelected(t, raw, tc.cells, tc.clear)
+		})
+	}
+}
+
+// TestFrameGoldenSelectStyledRow drags over a diff row, which already has a
+// background of its own: the selection's has to win for the cells it covers and
+// the row has to keep its width.
+func TestFrameGoldenSelectStyledRow(t *testing.T) {
+	bin := buildFakeAgent(t)
+	isolateSkillsHome(t)
+	ws := frameWorkspace(t)
+	sess := agent.New(agent.Options{
+		Binary:      bin,
+		ExtraArgs:   []string{"-script=diff"},
+		Workspace:   ws,
+		Force:       true,
+		Interactive: true,
+		Stderr:      io.Discard,
+	})
+	// Rows 10 and 11 of the expanded diff are the − and + lines.
+	plain, raw, err := RunFrameScript(Config{
+		Session:   sess,
+		Theme:     "tokyo-night",
+		Workspace: ws,
+		Yolo:      true,
+	}, 100, 30, "<wait:idle>go<enter><wait:text:done diff><wait:idle><ctrl-o>"+
+		"<wait:text:package main><drag:5,10,45,11><wait:copied>", FrameOpts{Timeout: 15 * time.Second})
+	if err != nil {
+		t.Fatalf("run diff frame: %v", err)
+	}
+	assertGolden(t, "select-styled-row-100x30", 100, 30, plain)
+	if !strings.Contains(plain, "copied 2 lines") {
+		t.Fatalf("the drag over the diff did not copy:\n%s", plain)
+	}
+	assertSelected(t, raw, [][2]int{{10, 5}, {10, 99}, {11, 0}, {11, 45}}, [][2]int{{11, 46}, {10, 4}})
+}
+
+// assertSelected checks the selection background cell by cell on the raw frame,
+// which is the only place the highlight exists: the goldens are stripped.
+func assertSelected(t *testing.T, raw string, on, off [][2]int) {
+	t.Helper()
+	bg := selectionSeq(Preset("tokyo-night").SelectionBG)
+	if bg == "" {
+		t.Skip("no colour profile")
+	}
+	rows := strings.Split(raw, "\n")
+	for _, want := range [][2]interface{}{{on, true}, {off, false}} {
+		for _, cell := range want[0].([][2]int) {
+			row, col := cell[0], cell[1]
+			if row >= len(rows) {
+				t.Fatalf("row %d is off the frame", row)
+			}
+			cells := selectedCells(rows[row], bg)
+			if col >= len(cells) {
+				t.Fatalf("cell %d,%d is off the row (%d cells)", row, col, len(cells))
+			}
+			if got := cells[col]; got != want[1].(bool) {
+				t.Fatalf("cell %d,%d selected=%v, want %v\nrow: %q", row, col, got, want[1], rows[row])
+			}
+		}
 	}
 }

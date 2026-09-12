@@ -132,6 +132,9 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	parts = append(parts,
 		statusPart{text: mode, style: modeStyle, id: spanMode},
 		statusPart{text: hint, style: dim, drop: 1},
+		// The copy note is here for two seconds and gone; it never drops,
+		// because the row it is crowding is the only feedback a copy gets.
+		statusPart{text: m.copyChip(), style: styleFG(m.theme.Accent)},
 		statusPart{text: chip, style: chipStyle},
 		statusPart{text: m.inFlightCounts(), style: dim, drop: 3},
 		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 2},
@@ -162,6 +165,15 @@ func (m Model) modeColor(kind agent.ModeKind) lipgloss.Color {
 		return m.theme.ModeReadOnly
 	}
 	return m.theme.Dim
+}
+
+// copyChip is what the last copy did, for as long as the note lingers. It is
+// the only acknowledgement a copy gets, so it outranks the counts beside it.
+func (m Model) copyChip() string {
+	if !m.copyLingering() {
+		return ""
+	}
+	return sanitizeLine(m.copyNote)
 }
 
 // permissionChip is the pinned permission state: red bypass under --force,

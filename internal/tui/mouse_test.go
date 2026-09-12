@@ -129,10 +129,15 @@ func TestWheelScrollsTheTranscript(t *testing.T) {
 		t.Fatalf("wheel down moved to %d, want %d", got, bottom)
 	}
 
-	// A drag is not a scroll and not a click.
+	// Motion with nothing pressed is not a drag: the selection needs a press to
+	// anchor it, so a bare motion report changes nothing at all.
 	tm, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Y: m.lay.Region(regionStatus).Top})
-	if got := tm.(Model).vp.YOffset; got != bottom {
-		t.Fatalf("a drag moved the viewport to %d", got)
+	next := tm.(Model)
+	if got := next.vp.YOffset; got != bottom {
+		t.Fatalf("a motion with no press moved the viewport to %d", got)
+	}
+	if next.sel.on {
+		t.Fatal("a motion with no press started a selection")
 	}
 }
 

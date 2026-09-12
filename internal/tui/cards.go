@@ -117,6 +117,10 @@ func (m *Model) pushCard(c card) {
 	m.planOffer = false
 	// The draft itself is never touched (pinned), only the menu it opened.
 	m.slashHide = true
+	// A card takes the mouse too, so an in-progress drag is dropped rather
+	// than left waiting for a release that will never be handled.
+	m.sel = selection{}
+	m.pressed = tea.MouseButtonNone
 	// Either dialog goes with the rest: the model dialog applies nothing on
 	// the way out, and the theme dialog takes its live preview with it.
 	*m = m.closeDialog(true)
