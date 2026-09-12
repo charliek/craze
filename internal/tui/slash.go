@@ -12,6 +12,17 @@ import (
 type slashItem struct {
 	Name, Desc string
 	Builtin    bool
+	Skill      bool
+}
+
+func (it slashItem) labeledDesc() string {
+	if !it.Skill {
+		return it.Desc
+	}
+	if strings.TrimSpace(it.Desc) == "" {
+		return "(skill)"
+	}
+	return it.Desc + " (skill)"
 }
 
 func builtinSlash() []slashItem {
@@ -69,6 +80,17 @@ func (m Model) slashCatalog() []slashItem {
 		}
 		seen[n] = struct{}{}
 		items = append(items, slashItem{Name: c.Name, Desc: c.Description, Builtin: false})
+	}
+	for _, sk := range m.skills {
+		n := strings.ToLower(sk.Name)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		items = append(items, slashItem{Name: sk.Name, Desc: sk.Desc, Skill: true})
 	}
 	return items
 }

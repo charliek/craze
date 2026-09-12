@@ -73,6 +73,7 @@ type Model struct {
 	effortSel  int
 	slashSel   int
 	slashHide  bool
+	skills     []slashItem
 	streamOpen bool
 
 	toolLine  map[string]int
@@ -179,6 +180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.started = true
 		m.status = statusIdle
 		m.refreshSnap()
+		m.rescanSkills()
 		return m, waitEvent(m.sess)
 
 	case errMsg:
@@ -323,6 +325,9 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	m.input, cmd = m.input.Update(msg)
 	if m.input.Value() != prev {
 		m.slashHide = false
+		if name, _, ok := parseSlashLine(m.input.Value()); ok && name == "" {
+			m.rescanSkills()
+		}
 	}
 	return cmd
 }
@@ -753,7 +758,7 @@ func (m Model) slashMenuView() string {
 	}
 	var b strings.Builder
 	for i, it := range items {
-		line := fmt.Sprintf("/%s  %s", it.Name, it.Desc)
+		line := fmt.Sprintf("/%s  %s", it.Name, it.labeledDesc())
 		st := lipgloss.NewStyle().Foreground(m.theme.Dim)
 		if i == m.slashSel {
 			st = lipgloss.NewStyle().Foreground(m.theme.Title)
@@ -764,6 +769,17 @@ func (m Model) slashMenuView() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func (m Model) overlayReserve() int {
+	h := composerBoxHeight() + max(1, lipgloss.Height(m.footer()))
+	if m.pending != nil {
+		h += max(1, lipgloss.Height(m.permissionOverlay()))
+	}
+	if s := m.stripView(); s != "" {
+		h += lipgloss.Height(s)
+	}
+	return h
+}
+
 func (m Model) helpView() string {
 	lines := []string{
 		"enter send   shift/alt+enter or ctrl+j newline   shift+tab cycle mode",
@@ -771,13 +787,19 @@ func (m Model) helpView() string {
 		"commands:",
 	}
 	for _, it := range m.slashCatalog() {
-		lines = append(lines, fmt.Sprintf("  /%s  %s", it.Name, it.Desc))
+		lines = append(lines, fmt.Sprintf("  /%s  %s", it.Name, it.labeledDesc()))
 	}
-	return lipgloss.NewStyle().
+	st := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Title).
-		Width(max(1, m.width-2)).
-		Render(strings.Join(lines, "\n"))
+		Width(max(1, m.width-2))
+	if m.height > 0 {
+		budget := m.height - m.overlayReserve() - 1
+		if budget > 0 {
+			st = st.MaxHeight(budget)
+		}
+	}
+	return st.Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) modelPickerView() string {

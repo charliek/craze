@@ -12,6 +12,7 @@ import (
 )
 
 func TestPTYAltScreenAndQuit(t *testing.T) {
+	isolateSkillsHome(t)
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		t.Skipf("no pty: %v", err)

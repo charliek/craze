@@ -11,12 +11,23 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
+func isolateSkillsHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+}
+
 func sized(t *testing.T) Model {
+	t.Helper()
+	isolateSkillsHome(t)
+	return startSized(t, t.TempDir())
+}
+
+func startSized(t *testing.T, ws string) Model {
 	t.Helper()
 	m := New(Config{
 		Session:   NewStub(),
 		Theme:     "tokyo-night",
-		Workspace: t.TempDir(),
+		Workspace: ws,
 		Model:     "grok",
 		Yolo:      true,
 	})
@@ -150,6 +161,7 @@ func TestQQuitsWhenComposerEmpty(t *testing.T) {
 }
 
 func TestEscCancelsWorkingTurn(t *testing.T) {
+	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.HangNext()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
@@ -700,6 +712,7 @@ func TestSetConfigFailAfterModel(t *testing.T) {
 }
 
 func TestSetModelFailNoEffortOverlay(t *testing.T) {
+	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.FailNextSetModel()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
@@ -732,6 +745,7 @@ func TestSetModelFailNoEffortOverlay(t *testing.T) {
 }
 
 func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
+	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.FailNextSetMode()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
@@ -812,6 +826,7 @@ func applyInFlight(t *testing.T, m Model, tools []agent.ToolEvent) Model {
 
 func hangWorking(t *testing.T) Model {
 	t.Helper()
+	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.HangNext()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
