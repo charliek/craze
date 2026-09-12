@@ -546,6 +546,49 @@ func TestHandlerArrivingAfterCancelDoesNotPark(t *testing.T) {
 	}
 }
 
+// A cancel can land after a request parked and before its card event was
+// published. It has already answered the request and taken it out of waiting,
+// so publishing anyway would put a card on screen that nobody could answer:
+// every pick on it would come back as an unknown request.
+func TestCancelledRequestRaisesNoCard(t *testing.T) {
+	for _, kind := range []string{askPermission, askQuestion, askPlan} {
+		t.Run(kind, func(t *testing.T) {
+			s := newSession(Options{Interactive: true})
+			beginTurn(s)
+			id, _, ok := s.park(kind, pendingAsk{})
+			if !ok {
+				t.Fatal("park refused")
+			}
+			// The whole window, forced open.
+			s.cancelWaiting()
+			if s.emitParked(id, Event{Type: EventQuestion, Question: &QuestionEvent{ID: id}}) {
+				t.Fatal("a request a cancel already answered must not raise a card")
+			}
+			select {
+			case ev := <-s.events:
+				t.Fatalf("a cancelled request published %+v", ev)
+			default:
+			}
+
+			// A request that is still parked does publish, so the guard is not
+			// simply "never emit".
+			beginTurn(s)
+			live, _, ok := s.park(kind, pendingAsk{})
+			if !ok {
+				t.Fatal("park refused in a fresh turn")
+			}
+			if !s.emitParked(live, Event{Type: EventQuestion, Question: &QuestionEvent{ID: live}}) {
+				t.Fatal("a live request must publish its card")
+			}
+			select {
+			case <-s.events:
+			default:
+				t.Fatal("nothing was published for a live request")
+			}
+		})
+	}
+}
+
 // A new turn clears the cancel, so the next request parks normally.
 func TestNextTurnParksAgain(t *testing.T) {
 	s := newSession(Options{Interactive: true})

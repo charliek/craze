@@ -35,6 +35,7 @@ const (
 	entryThought
 	entryTool
 	entryNote
+	entryPlan
 	entryError
 )
 
@@ -52,6 +53,7 @@ type entry struct {
 	kind entryKind
 	text string
 	tool *agent.ToolEvent
+	plan *agent.PlanEvent
 	at   time.Time
 	// end closes a thought run: the At of the first non-thought event after it.
 	end time.Time
@@ -112,6 +114,16 @@ func (m *Model) addNote(text string) {
 		return
 	}
 	m.appendEntry(entry{kind: entryNote, text: text})
+}
+
+// addPlan puts the plan cursor proposed into the transcript as a note block,
+// which is why the card itself only has to carry the three answers.
+func (m *Model) addPlan(p *agent.PlanEvent) {
+	if p == nil {
+		return
+	}
+	plan := *p
+	m.appendEntry(entry{kind: entryPlan, plan: &plan})
 }
 
 func (m *Model) addError(text string) {
@@ -328,6 +340,8 @@ func (m *Model) renderEntry(e *entry, key renderKey) []string {
 		return m.renderTool(e.tool, key)
 	case entryNote:
 		return hangingRows(e.text, "", "", key.width, styleFG(m.theme.Dim))
+	case entryPlan:
+		return m.planRows(e.plan, key)
 	case entryError:
 		return hangingRows(e.text, "error: ", "  ", key.width, styleFG(m.theme.Err))
 	}
@@ -346,6 +360,33 @@ func (m *Model) thoughtRows(e *entry, key renderKey) []string {
 	}
 	st := lipgloss.NewStyle().Foreground(m.theme.Thought).Italic(true)
 	return append(rows, hangingRows(e.text, "  ", "  ", key.width, st)...)
+}
+
+// planRows is the plan block: a header, the overview, the plan body through
+// markdown-lite and the todos it proposes. The card on the modal band answers
+// it; this is the only place the plan text itself is readable.
+func (m *Model) planRows(p *agent.PlanEvent, key renderKey) []string {
+	if p == nil {
+		return nil
+	}
+	rows := []string{renderSegs(key.width,
+		seg{"PLAN ", styleFG(m.theme.Accent).Bold(true)},
+		seg{planName(p), styleFG(m.theme.Bright).Bold(true)},
+	)}
+	if strings.TrimSpace(p.Overview) != "" {
+		rows = append(rows, hangingRows(p.Overview, "", "", key.width, styleFG(m.theme.Dim))...)
+	}
+	if strings.TrimSpace(p.Plan) != "" {
+		rows = append(rows, renderMarkdown(p.Plan, key.width, m.theme)...)
+	}
+	for _, td := range p.Todos {
+		glyph, gst := m.todoGlyph(td.Status)
+		rows = append(rows, renderSegs(key.width,
+			seg{"  " + glyph + " ", gst},
+			seg{sanitizeLine(td.Content), styleFG(m.theme.Dim)},
+		))
+	}
+	return rows
 }
 
 // hangingRows wraps prose and indents the continuation rows under the first.

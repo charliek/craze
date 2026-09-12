@@ -1,0 +1,30 @@
+❯ go                                                                                                
+PLAN Fake Plan                                                                                      
+Two steps, then stop.                                                                               
+Steps                                                                                               
+                                                                                                    
+• read main.go                                                                                      
+• edit main.go                                                                                      
+  ○ Read main.go                                                                                    
+  ○ Edit main.go                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+✳ Waiting for your answer                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ message  / for commands                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────
+plan Fake Plan                                                                                      
+[a]ccept  [r]eject  esc cancel                                                                      
+ws │ cursor │ Default (medium) │ agent │ 0m                                                         
+▸▸ bypass permissions on                                                                            

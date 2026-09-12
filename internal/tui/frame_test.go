@@ -394,21 +394,29 @@ func TestRunFrameScriptRejectsBadScript(t *testing.T) {
 // the only way a golden exercises the whole protocol-to-transcript path.
 func runFakeFrame(t *testing.T, script string, cols, rows int, keys string) string {
 	t.Helper()
+	return runFakeFrameForce(t, script, cols, rows, keys, true)
+}
+
+// runFakeFrameForce makes yolo explicit: --no-force is the only way the
+// permission line is ever drawn.
+func runFakeFrameForce(t *testing.T, script string, cols, rows int, keys string, force bool) string {
+	t.Helper()
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
 	ws := frameWorkspace(t)
 	sess := agent.New(agent.Options{
-		Binary:    bin,
-		ExtraArgs: []string{"-script=" + script},
-		Workspace: ws,
-		Force:     true,
-		Stderr:    io.Discard,
+		Binary:      bin,
+		ExtraArgs:   []string{"-script=" + script},
+		Workspace:   ws,
+		Force:       force,
+		Interactive: true,
+		Stderr:      io.Discard,
 	})
 	plain, _, err := RunFrameScript(Config{
 		Session:   sess,
 		Theme:     "tokyo-night",
 		Workspace: ws,
-		Yolo:      true,
+		Yolo:      force,
 	}, cols, rows, keys, FrameOpts{Timeout: 15 * time.Second})
 	if err != nil {
 		t.Fatalf("run %s frame: %v", script, err)
@@ -574,6 +582,121 @@ func TestFrameGoldenStatus60x24(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestFrameGoldenAsk100x30 is the question card as cursor's own request drew
+// it: one question at a time, with its position in the request.
+func TestFrameGoldenAsk100x30(t *testing.T) {
+	got := runFakeFrame(t, "ask", 100, 30, "<wait:idle>go<enter><wait:card>")
+	assertGolden(t, "ask-100x30", 100, 30, got)
+	for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip", "Waiting for your answer"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Pick any") {
+		t.Fatalf("only the question on screen is drawn:\n%s", got)
+	}
+}
+
+// TestFrameAskAnswersBothQuestions walks the whole request: a number picks the
+// single-select and advances, space and a number toggle the multi-select, and
+// Enter on the last question sends the answer.
+//
+// §5's key string is `1<enter>` then `1<space>3<enter>`; Enter is not needed to
+// leave a single-select (a number already picks and advances, §3.11), and an
+// Enter there would confirm the second question with nothing picked, so the
+// two questions are answered as `1` and `<space>3<enter>`.
+func TestFrameAskAnswersBothQuestions(t *testing.T) {
+	got := runFakeFrame(t, "ask", 100, 30,
+		"<wait:idle>go<enter><wait:card>1<wait:text:question 2/2><space>3<enter><wait:text:asked:><wait:idle>")
+	if !strings.Contains(got, "asked:answered:q1=opt-a;q2=opt-x,opt-z") {
+		t.Fatalf("the agent did not see the answer:\n%s", got)
+	}
+	for _, want := range []string{"? Pick one → A", "? Pick any → X, Z"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing note %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "question 1/2") {
+		t.Fatalf("the card should be gone once it is answered:\n%s", got)
+	}
+}
+
+func TestFrameAskEscSkips(t *testing.T) {
+	got := runFakeFrame(t, "ask", 100, 30, "<wait:idle>go<enter><wait:card><esc><wait:text:asked:><wait:idle>")
+	if !strings.Contains(got, "asked:skipped:") {
+		t.Fatalf("esc should skip the whole request:\n%s", got)
+	}
+	if !strings.Contains(got, "? Question → skipped") {
+		t.Fatalf("missing the skipped note:\n%s", got)
+	}
+}
+
+// TestFrameGoldenPlan100x30 shows both halves of §3.11's plan card: the plan
+// itself as a transcript note block, and the two lines that answer it.
+func TestFrameGoldenPlan100x30(t *testing.T) {
+	got := runFakeFrame(t, "plan", 100, 30, "<wait:idle>go<enter><wait:card>")
+	assertGolden(t, "plan-100x30", 100, 30, got)
+	for _, want := range []string{
+		"PLAN Fake Plan", "Two steps, then stop.", "Steps", "• read main.go",
+		"○ Read main.go", "plan Fake Plan", "[a]ccept  [r]eject  esc cancel",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestFramePlanDecisions(t *testing.T) {
+	for _, tc := range []struct{ name, keys, want string }{
+		{"accept", "a", "planned:accepted"},
+		{"reject", "r", "planned:rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runFakeFrame(t, "plan", 100, 30,
+				"<wait:idle>go<enter><wait:card>"+tc.keys+"<wait:text:planned:><wait:idle>")
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("missing %q:\n%s", tc.want, got)
+			}
+			if !strings.Contains(got, "plan Fake Plan → "+tc.name+"ed") {
+				t.Fatalf("missing the decision note:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestFramePlanEscCancels(t *testing.T) {
+	got := runFakeFrame(t, "plan", 100, 30, "<wait:idle>go<enter><wait:card><esc><wait:idle>")
+	if strings.Contains(got, "planned:") {
+		t.Fatalf("a cancelled plan produces no decision:\n%s", got)
+	}
+	if strings.Contains(got, "[a]ccept") {
+		t.Fatalf("the card should be gone:\n%s", got)
+	}
+}
+
+// TestFrameGoldenPermissionNoForce100x30 is the permission line in its pinned
+// position, with the [A]lways the fake request offers.
+func TestFrameGoldenPermissionNoForce100x30(t *testing.T) {
+	got := runFakeFrameForce(t, "permission", 100, 30, "<wait:idle>go<enter><wait:card>", false)
+	assertGolden(t, "permission-noforce-100x30", 100, 30, got)
+	for _, want := range []string{
+		"permission Shell  [a]llow once  [A]lways  [n] reject",
+		"▸ prompting for permissions",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestFramePermissionAlwaysPicksTheRequestsOwnID(t *testing.T) {
+	got := runFakeFrameForce(t, "permission", 100, 30,
+		"<wait:idle>go<enter><wait:card>A<wait:text:decision:><wait:idle>", false)
+	if !strings.Contains(got, "decision:opt-always") {
+		t.Fatalf("A should pick the allow_always option by its own id:\n%s", got)
 	}
 }
 

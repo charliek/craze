@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfigFile(t *testing.T, body string) string {
@@ -57,17 +58,28 @@ timeout = 30
 		t.Fatalf("agent table = %v", cfg["agent"])
 	}
 
-	// The write is a rename over the target, so nothing else is left behind.
+	// The write is a rename over the target, so no half-written copy is left
+	// behind; the lock file the save serialises on is expected to stay.
+	assertNoConfigTempFiles(t, path)
+}
+
+// assertNoConfigTempFiles holds the atomic-write contract: the directory ends
+// up with the config and the lock file SaveTheme flocks, and nothing else.
+func assertNoConfigTempFiles(t *testing.T, path string) {
+	t.Helper()
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "config.toml" {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	want := map[string]bool{filepath.Base(path): true, filepath.Base(path) + configLockSuffix: true}
+	for _, n := range names {
+		if !want[n] {
+			t.Fatalf("temp files left behind: %v", names)
 		}
-		t.Fatalf("temp files left behind: %v", names)
 	}
 }
 
@@ -97,9 +109,56 @@ func TestSaveThemeLeavesAMalformedConfigAlone(t *testing.T) {
 	if got := ConfigTheme(); got != "" {
 		t.Fatalf("an unreadable config has no theme, got %q", got)
 	}
-	entries, _ := os.ReadDir(filepath.Dir(path))
-	if len(entries) != 1 {
-		t.Fatalf("a failed save left files behind: %v", entries)
+	assertNoConfigTempFiles(t, path)
+}
+
+// TestSaveThemeSerialisesWithAnotherWriter is the data-loss property: a second
+// writer that reads the file, takes its time and then renames its own copy back
+// must not be able to drop the theme craze wrote in between. SaveTheme holds
+// the lock across its whole read-modify-write, so the other writer's rename
+// lands first and craze reads what it left.
+func TestSaveThemeSerialisesWithAnotherWriter(t *testing.T) {
+	path := writeConfigFile(t, "theme = \"dark\"\n")
+
+	// The other writer takes the lock and reads, exactly as SaveTheme does.
+	unlock, err := lockConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := readConfigAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	saved := make(chan error, 1)
+	go func() { saved <- SaveTheme("gruvbox") }()
+	// Long enough for the save to reach the lock and block on it.
+	time.Sleep(100 * time.Millisecond)
+
+	other["mouse"] = false
+	if err := writeConfig(path, other); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+
+	select {
+	case err := <-saved:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SaveTheme never got the lock")
+	}
+
+	cfg, err := readConfigAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["theme"] != "gruvbox" {
+		t.Fatalf("the other writer's stale copy overwrote the theme: %v", cfg)
+	}
+	if cfg["mouse"] != false {
+		t.Fatalf("the other writer's key was lost: %v", cfg)
 	}
 }
 

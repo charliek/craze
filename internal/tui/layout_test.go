@@ -47,6 +47,14 @@ func stubAgentTools(n int) []agent.ToolEvent {
 // rows and a card, all on at once.
 func loadedModel(t *testing.T, cols, rows int) Model {
 	t.Helper()
+	return loadedModelCard(t, cols, rows, true)
+}
+
+// loadedModelCard is the same fixture with the card made optional: a card
+// suspends the lower overlays (§3.11), so the bands they own are only drawable
+// without one.
+func loadedModelCard(t *testing.T, cols, rows int, withCard bool) Model {
+	t.Helper()
 	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.HangNext()
@@ -74,6 +82,9 @@ func loadedModel(t *testing.T, cols, rows int) Model {
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 
+	if !withCard {
+		return m
+	}
 	tm, _ = m.Update(eventMsg{agent.Event{
 		Type:       agent.EventPermission,
 		Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "bash"},
@@ -316,44 +327,106 @@ func TestFrameRegionsAreOneOrderedList(t *testing.T) {
 // TestEveryDrawnRegionOwnsItsRows walks the frame region by region and checks
 // each nonempty band renders its own content at its own coordinates. This is
 // what stops computeLayout's ordering and View's ordering from drifting.
+//
+// It takes two frames rather than one, because §3.11 forbids a frame with
+// everything on: a card suspends the lower overlays, so the overlay and the
+// peek can only be drawn while no card is up. Between the two every regionID
+// is covered, which the tail of the test holds.
 func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
-	m := loadedModel(t, 100, 30)
-	// Open every band the fixture leaves closed, so none is untested.
-	m.help = true
-	m.agentPeek = true
-	tm, _ := m.Update(refreshSnapMsg{})
-	m = tm.(Model)
+	covered := make(map[regionID]bool, regionCount)
+	for _, tc := range []struct {
+		name    string
+		card    bool
+		needles map[regionID]string
+	}{
+		{
+			name: "card up",
+			card: true,
+			needles: map[regionID]string{
+				// The transcript's own sub-agent rows read "● agent"; the agent
+				// rows under the status rows read "○ task", so the two cannot be
+				// confused.
+				regionTranscript: "● agent  count lines",
+				regionTasks:      "TASKS",
+				regionSpinner:    "Waiting for your answer",
+				regionComposer:   "───",
+				regionModal:      "permission bash",
+				regionStatus:     chipYolo,
+				regionAgents:     "○ task  count lines",
+			},
+		},
+		{
+			name: "lower overlays",
+			needles: map[regionID]string{
+				regionOverlay: "ctrl+o expand detail",
+				regionPeek:    "count the lines in file",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := loadedModelCard(t, 100, 30, tc.card)
+			// Open every band this frame is allowed to draw.
+			m.help = !tc.card
+			m.agentPeek = !tc.card
+			tm, _ := m.Update(refreshSnapMsg{})
+			m = tm.(Model)
 
-	view := plainView(m)
-	lines := strings.Split(view, "\n")
-	needles := map[regionID]string{
-		// The transcript's own sub-agent rows read "● agent"; the agent rows
-		// under the status rows read "○ task", so the two cannot be confused.
-		regionTranscript: "● agent  count lines",
-		regionOverlay:    "ctrl+o expand detail",
-		regionTasks:      "TASKS",
-		regionSpinner:    "Waiting for your answer",
-		regionComposer:   "───",
-		regionPeek:       "count the lines in file",
-		regionModal:      "permission bash",
-		regionStatus:     chipYolo,
-		regionAgents:     "○ task  count lines",
+			view := plainView(m)
+			lines := strings.Split(view, "\n")
+			for id := regionID(0); id < regionCount; id++ {
+				needle, want := tc.needles[id]
+				r := m.lay.Region(id)
+				if !want {
+					continue
+				}
+				covered[id] = true
+				if r.Empty() {
+					t.Fatalf("region %d is not drawn, so this test does not cover it: %+v", id, m.lay)
+				}
+				found := false
+				for y := r.Top; y < r.Bottom && y < len(lines); y++ {
+					if strings.Contains(lines[y], needle) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("region %d claims rows [%d,%d) but none of them contains %q:\n%s",
+						id, r.Top, r.Bottom, needle, view)
+				}
+			}
+		})
 	}
 	for id := regionID(0); id < regionCount; id++ {
-		r := m.lay.Region(id)
-		if r.Empty() {
-			t.Fatalf("region %d is not drawn, so this test does not cover it: %+v", id, m.lay)
+		if !covered[id] {
+			t.Fatalf("region %d is drawn by no case, so nothing checks it owns its rows", id)
 		}
+	}
+}
+
+// TestQuestionCardOwnsTheModalBand is the same contract for the other card the
+// modal band draws: the box is a block of rows, not one line, and every one of
+// them is inside the band the layout handed it.
+func TestQuestionCardOwnsTheModalBand(t *testing.T) {
+	m := loadedModelCard(t, 100, 30, false)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventQuestion, Question: stubQuestion()}})
+	m = tm.(Model)
+
+	band := m.lay.Region(regionModal)
+	if band.Height() < 5 {
+		t.Fatalf("the question card should own a block of rows, got %+v", band)
+	}
+	lines := strings.Split(plainView(m), "\n")
+	for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip"} {
 		found := false
-		for y := r.Top; y < r.Bottom && y < len(lines); y++ {
-			if strings.Contains(lines[y], needles[id]) {
+		for y := band.Top; y < band.Bottom && y < len(lines); y++ {
+			if strings.Contains(lines[y], want) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Fatalf("region %d claims rows [%d,%d) but none of them contains %q:\n%s",
-				id, r.Top, r.Bottom, needles[id], view)
+			t.Fatalf("the modal band [%d,%d) does not contain %q:\n%s", band.Top, band.Bottom, want, strings.Join(lines, "\n"))
 		}
 	}
 }

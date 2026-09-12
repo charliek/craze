@@ -458,14 +458,16 @@ func (s *session) onPermission(req acp.PermissionRequest) acp.PermissionDecision
 			Kind:     o.Kind,
 		})
 	}
-	s.emit(Event{
+	if !s.emitParked(id, Event{
 		Type: EventPermission,
 		Permission: &PermissionEvent{
 			ID:      id,
 			Tool:    sanitizeText(req.ToolCall.Title),
 			Options: opts,
 		},
-	})
+	}) {
+		return acp.PermissionDecision{Cancelled: true}
+	}
 	return awaitDecision(s, ch, acp.PermissionDecision{Cancelled: true})
 }
 
@@ -488,7 +490,9 @@ func (s *session) onAskQuestion(req acp.AskQuestionRequest) acp.AskDecision {
 		return acp.AskDecision{Cancelled: true}
 	}
 	ev.ID = id
-	s.emit(Event{Type: EventQuestion, Question: ev})
+	if !s.emitParked(id, Event{Type: EventQuestion, Question: ev}) {
+		return acp.AskDecision{Cancelled: true}
+	}
 	return awaitDecision(s, ch, acp.AskDecision{Cancelled: true})
 }
 
@@ -536,7 +540,9 @@ func (s *session) onCreatePlan(req acp.CreatePlanRequest) acp.PlanDecision {
 		return acp.PlanDecision{Cancelled: true}
 	}
 	ev.ID = id
-	s.emit(Event{Type: EventPlan, Plan: ev})
+	if !s.emitParked(id, Event{Type: EventPlan, Plan: ev}) {
+		return acp.PlanDecision{Cancelled: true}
+	}
 	return awaitDecision(s, ch, acp.PlanDecision{Cancelled: true})
 }
 
@@ -560,6 +566,24 @@ func (s *session) park(kind string, p pendingAsk) (string, chan any, bool) {
 	id := fmt.Sprintf("%s-%d", kind, s.seq[kind])
 	s.waiting[id] = p
 	return id, ch, true
+}
+
+// emitParked publishes a card event only while its request is still parked. A
+// cancel that landed between the park and the emit has already answered the
+// request and taken it out of waiting, so emitting anyway would raise a card
+// for a request nobody can answer any more. The check takes the same lock
+// cancelWaiting does; it cannot be held across the emit, because emit blocks
+// on the event channel and the reader of that channel is the goroutine that
+// answers cards.
+func (s *session) emitParked(id string, ev Event) bool {
+	s.mu.Lock()
+	_, live := s.waiting[id]
+	s.mu.Unlock()
+	if !live {
+		return false
+	}
+	s.emit(ev)
+	return true
 }
 
 func (s *session) nextID(kind string) string {

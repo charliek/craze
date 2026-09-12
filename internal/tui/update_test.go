@@ -275,24 +275,23 @@ func TestCtrlCStateMachine(t *testing.T) {
 	t.Run("working with a pending permission cancels once", func(t *testing.T) {
 		m := hangWorking(t)
 		m.clock = func() time.Time { return base }
-		tm, _ := m.Update(eventMsg{agent.Event{
+		m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
 			Type: agent.EventPermission,
 			Permission: &agent.PermissionEvent{
 				ID:      "perm-1",
 				Tool:    "Shell",
 				Options: []agent.PermissionOption{{OptionID: "opt-once", Kind: "allow_once"}},
 			},
-		}})
-		m = tm.(Model)
-		if m.pending == nil || m.status != statusWorking {
-			t.Fatalf("setup: pending=%v status=%s", m.pending != nil, m.status)
+		})
+		if !m.cardOpen() || m.status != statusWorking {
+			t.Fatalf("setup: pending=%v status=%s", m.cardOpen(), m.status)
 		}
 		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 		m = tm.(Model)
 		if m.quitting {
 			t.Fatal("ctrl+c with a pending request should cancel, not quit")
 		}
-		if m.pending != nil {
+		if m.cardOpen() {
 			t.Fatal("cancel should clear the pending request")
 		}
 		if cmd == nil {
@@ -362,7 +361,7 @@ func TestEscCancelsWorkingTurn(t *testing.T) {
 func TestPermissionOverlayKeys(t *testing.T) {
 	m := sized(t)
 	m.yolo = false
-	tm, _ := m.Update(eventMsg{agent.Event{
+	m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
 		Type: agent.EventPermission,
 		Permission: &agent.PermissionEvent{
 			ID:   "perm-1",
@@ -372,21 +371,22 @@ func TestPermissionOverlayKeys(t *testing.T) {
 				{OptionID: "opt-reject", Kind: "reject_once"},
 			},
 		},
-	}})
-	m = tm.(Model)
-	if m.pending == nil {
+	})
+	if !m.cardOpen() {
 		t.Fatal("expected overlay")
 	}
 	if !strings.Contains(plainView(m), "permission Shell") {
 		t.Fatalf("missing overlay:\n%s", plainView(m))
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m = tm.(Model)
-	if m.pending != nil {
+	if m.cardOpen() {
 		t.Fatal("overlay should clear")
 	}
-	if cmd == nil {
-		t.Fatal("expected answer cmd")
+	// The answer goes out in this same update, not in a command that runs later.
+	calls := m.sess.(*Stub).Calls()
+	if len(calls) != 1 || calls[0].Method != "permission" || calls[0].Option != "opt-once" {
+		t.Fatalf("allow once sent %+v", calls)
 	}
 }
 
@@ -398,7 +398,7 @@ func TestPermissionOverlayPinnedKeys(t *testing.T) {
 		if m.quitting || cmd != nil {
 			t.Fatal("bare q must not quit during a permission overlay")
 		}
-		if m.pending == nil {
+		if !m.cardOpen() {
 			t.Fatal("overlay should remain")
 		}
 	})
@@ -424,7 +424,7 @@ func TestPermissionOverlayPinnedKeys(t *testing.T) {
 		m := withOverlay(t)
 		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 		m = tm.(Model)
-		if m.pending != nil {
+		if m.cardOpen() {
 			t.Fatal("esc should clear the permission overlay")
 		}
 		if m.quitting {
@@ -483,7 +483,7 @@ func withOverlay(t *testing.T) Model {
 	t.Helper()
 	m := sized(t)
 	m.yolo = false
-	tm, _ := m.Update(eventMsg{agent.Event{
+	m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
 		Type: agent.EventPermission,
 		Permission: &agent.PermissionEvent{
 			ID:   "perm-1",
@@ -493,9 +493,8 @@ func withOverlay(t *testing.T) Model {
 				{OptionID: "opt-reject", Kind: "reject_once"},
 			},
 		},
-	}})
-	m = tm.(Model)
-	if m.pending == nil {
+	})
+	if !m.cardOpen() {
 		t.Fatal("expected overlay")
 	}
 	return m
@@ -590,7 +589,7 @@ func TestShiftTabIgnoredDuringPermission(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("shift+tab should be ignored on the permission overlay")
 	}
-	if m.pending == nil {
+	if !m.cardOpen() {
 		t.Fatal("overlay should remain")
 	}
 	if m.snap.CurrentMode != "agent" {

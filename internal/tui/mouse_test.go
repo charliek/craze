@@ -149,3 +149,25 @@ func TestClicksAreIgnoredWhileACardIsUp(t *testing.T) {
 		t.Fatal("a card owns the keyboard and the mouse")
 	}
 }
+
+// TestWheelIsIgnoredWhileACardIsUp: the card owns the whole mouse, not only
+// the clicks, so the transcript does not scroll away underneath it.
+func TestWheelIsIgnoredWhileACardIsUp(t *testing.T) {
+	m, stub := sizedCards(t)
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		fmt.Fprintf(&b, "line %02d\n\n", i)
+	}
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: b.String()}})
+	m = cardEvent(t, tm.(Model), stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
+	bottom := m.vp.YOffset
+	if bottom < 2*wheelLines {
+		t.Fatalf("not enough scrollback to test with: offset %d", bottom)
+	}
+	if got := wheel(t, m, tea.MouseButtonWheelUp).vp.YOffset; got != bottom {
+		t.Fatalf("the wheel scrolled to %d behind the card, want %d", got, bottom)
+	}
+	if got := wheel(t, m, tea.MouseButtonWheelDown).vp.YOffset; got != bottom {
+		t.Fatalf("the wheel scrolled to %d behind the card, want %d", got, bottom)
+	}
+}

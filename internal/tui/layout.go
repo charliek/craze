@@ -60,7 +60,7 @@ const (
 	regionSpinner                    // spinner line
 	regionComposer                   // rule + input rows + rule
 	regionPeek                       // sub-agent prompt peek
-	regionModal                      // permission line, later the card stack
+	regionModal                      // the blocking-card band (§3.11)
 	regionStatus                     // the two status rows
 	regionAgents                     // sub-agent rows, under the status rows
 	regionCount
@@ -105,7 +105,7 @@ var frameRegions = [regionCount]frameRegion{
 	},
 	regionModal: {
 		rows: func(s frameSizes) int { return s.modal },
-		view: func(m Model, _ frameLayout) string { return m.permissionOverlay() },
+		view: func(m Model, lay frameLayout) string { return m.modalBandView(lay) },
 	},
 	regionStatus: {
 		rows: func(s frameSizes) int { return s.status },
@@ -262,13 +262,11 @@ func (m *Model) computeLayout() frameLayout {
 		agentsAll: len(m.agentItems()),
 		agentsCap: agentRowsMax,
 		peek:      m.peekRows(),
+		modal:     m.modalRows(),
 		status:    statusRows,
 	}
 	if m.spinnerVisible() {
 		base.spinner = 1
-	}
-	if m.pending != nil {
-		base.modal = 1
 	}
 
 	steps := 0

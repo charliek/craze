@@ -95,8 +95,15 @@ type Model struct {
 	lay     frameLayout
 	layouts int
 
-	pending *agent.PermissionEvent
-	snap    agent.Snapshot
+	// cards is the blocking-request queue (§3.11): permission, question and
+	// plan requests in arrival order. Only the head is drawn.
+	//
+	// cardsCancelled holds from a cancel until the turn ends: the session has
+	// answered everything it was holding and will not park another request for
+	// this turn, so a card event still in flight must not raise a card.
+	cards          []card
+	cardsCancelled bool
+	snap           agent.Snapshot
 
 	help       bool
 	picking    bool
@@ -153,10 +160,6 @@ func (m Model) now() time.Time {
 	}
 	return time.Now()
 }
-
-// cardOpen reports whether a blocking card owns the keyboard. U0 only has the
-// permission line; question and plan cards land later.
-func (m Model) cardOpen() bool { return m.pending != nil }
 
 type eventMsg struct{ ev agent.Event }
 type startedMsg struct{}
@@ -348,7 +351,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // a left press hit-tests the regions frameLayout drew. Drag, motion and every
 // other button are ignored.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress {
+	if msg.Action != tea.MouseActionPress || m.cardOpen() {
+		// A card owns the mouse as well as the keyboard, wheel included.
 		return m, nil
 	}
 	switch msg.Button {
@@ -366,7 +370,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // screen and what is clickable cannot drift apart.
 func (m Model) handleClick(y int) (tea.Model, tea.Cmd) {
 	lay := m.lay
-	if lay.TooSmall || m.cardOpen() {
+	if lay.TooSmall {
 		return m, nil
 	}
 	switch {
@@ -402,11 +406,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.ctrlCDeadline = time.Time{}
 
-	if m.pending != nil {
-		if msg.Type == tea.KeyEsc {
-			return m.cancelTurn()
-		}
-		return m.handlePermissionKey(msg)
+	// A card owns the keyboard: everything below this, Ctrl+T / Ctrl+G /
+	// Ctrl+O and the agent-row arrows included, is out of reach until it is
+	// answered.
+	if m.cardOpen() {
+		return m.handleCardKey(msg)
 	}
 
 	if m.themePicking {
@@ -613,7 +617,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		m.agentPeek = true
 		return m, nil
 	}
-	if m.pending != nil || m.status == statusWorking || !m.started {
+	if m.cardOpen() || m.status == statusWorking || !m.started {
 		return m, nil
 	}
 	if ok && name != "" && builtinNamed(name) {
@@ -623,44 +627,11 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) cycleMode() (tea.Model, tea.Cmd) {
-	if m.pending != nil || len(m.snap.Modes) == 0 {
+	if m.cardOpen() || len(m.snap.Modes) == 0 {
 		return m, nil
 	}
 	id := agent.NextModeID(m.snap)
 	return m.applyMode(id)
-}
-
-func (m Model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "a", "y", "1":
-		return m.answerPending("allow_once")
-	case "n", "r", "2":
-		return m.answerPending("reject_once")
-	}
-	return m, nil
-}
-
-func (m Model) answerPending(kind string) (tea.Model, tea.Cmd) {
-	p := m.pending
-	m.pending = nil
-	if p == nil {
-		return m, nil
-	}
-	id := ""
-	if kind != "" {
-		for _, o := range p.Options {
-			if o.Kind == kind {
-				id = o.OptionID
-				break
-			}
-		}
-	}
-	return m, func() tea.Msg {
-		if err := m.sess.AnswerPermission(p.ID, id); err != nil {
-			return actionErrMsg{err}
-		}
-		return nil
-	}
 }
 
 func (m Model) send() (tea.Model, tea.Cmd) {
@@ -672,6 +643,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.slashSel = 0
 	m.addUser(text)
 	m.status = statusWorking
+	m.cardsCancelled = false
 	m.turnStart = m.now()
 	m.err = ""
 	sess := m.sess
@@ -681,32 +653,30 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	}
 }
 
-// cancelTurn answers a pending permission request and only then cancels, in one
-// command: Cancel itself cancels every waiting request, so running the two
-// concurrently makes the answer lose the race and report an unknown id.
+// cancelTurn drops the whole card queue and cancels. Cancel answers every
+// request the session is still holding — permission, question and plan alike —
+// with that kind's cancelled outcome, exactly once each, so the UI must not
+// answer them itself and race it.
 func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
-	p := m.pending
+	cards := len(m.cards)
 	working := m.status == statusWorking
-	if p == nil && !working {
+	if cards == 0 && !working {
 		return m, nil
 	}
-	m.pending = nil
+	m.cards = nil
+	m.cardsCancelled = true
 	sess := m.sess
 	return m, func() tea.Msg {
-		if p != nil {
-			// An unknown id here only means the agent already withdrew the
-			// request, so it is not worth an error row.
-			_ = sess.AnswerPermission(p.ID, "")
-		}
-		if working {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = sess.Cancel(ctx)
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = sess.Cancel(ctx)
 		return nil
 	}
 }
 
+// requestQuit closes the session, which answers every card still queued with
+// its cancelled outcome on the way out. The queue is left alone: the model is
+// on its way out with it, and clearing it would only restart the tick chain.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	sess := m.sess
@@ -738,16 +708,25 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.noteTodoLifecycle(todos)
 		m.noteTodos(todos)
 	case agent.EventPermission:
-		m.breakStream()
-		m.pending = ev.Permission
-		m.help = false
-		m.picking = false
-		m.effortStep = false
-		// A card owns the screen, so the lower overlays close — and the theme
-		// picker takes its live preview back out with it.
-		*m = m.closeThemePicker(true)
+		if ev.Permission != nil {
+			m.pushCard(card{kind: cardPermission, perm: ev.Permission})
+		}
+	case agent.EventQuestion:
+		// An auto-answered request (headless) is already decided; only an
+		// interactive one is a card.
+		if ev.Question != nil && !ev.Question.Auto {
+			m.pushCard(card{kind: cardQuestion, ask: ev.Question})
+		}
+	case agent.EventPlan:
+		if ev.Plan != nil && !ev.Plan.Auto {
+			// The plan itself is transcript material; the card is only the
+			// three answers it needs.
+			m.addPlan(ev.Plan)
+			m.pushCard(card{kind: cardPlan, plan: ev.Plan})
+		}
 	case agent.EventDone:
 		m.breakStream()
+		m.cardsCancelled = false
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
 		m.branch = m.git.branch()
@@ -821,7 +800,13 @@ func (m Model) View() string {
 
 // overlayView is the one lower overlay that draws under the transcript; the
 // layout crops it rather than letting it squeeze the transcript away.
+//
+// A card outranks every one of them (§3.11): the ones it did not close are
+// suspended — kept in state, not drawn — until it has been answered.
 func (m Model) overlayView() string {
+	if m.cardOpen() {
+		return ""
+	}
 	switch {
 	case m.help:
 		return m.helpView()
@@ -910,16 +895,6 @@ func (m Model) modelPickerView() string {
 		BorderForeground(m.theme.Accent).
 		Width(max(1, m.width-2)).
 		Render(strings.TrimRight(b.String(), "\n"))
-}
-
-func (m Model) permissionOverlay() string {
-	if m.pending == nil {
-		return ""
-	}
-	tool := m.pending.Tool
-	return lipgloss.NewStyle().Foreground(m.theme.Warn).Render(
-		fmt.Sprintf("permission %s  [a]llow-once  [n] reject-once", tool),
-	)
 }
 
 // workspaceName is the basename of the workspace, falling back to the path

@@ -10,6 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 func TestPTYAltScreenAndCtrlDQuit(t *testing.T) {
@@ -125,6 +127,92 @@ func TestPTYWheelScrollsTranscript(t *testing.T) {
 	}
 	if !waitPTY(t, ptmx, "scrollback line 00", 3*time.Second) {
 		t.Fatal("the wheel sequence did not scroll the transcript")
+	}
+}
+
+// TestPTYCardsAnswerFromARealTerminal drives the two blocking cards against
+// the scripted agent through a PTY, where the keys arrive as the bytes a
+// terminal actually sends.
+func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		// steps are (wait for this, then type that) pairs.
+		steps [][2]string
+		want  string
+	}{
+		{
+			name:   "ask",
+			script: "ask",
+			steps: [][2]string{
+				{"question 1/2", "1"},
+				{"question 2/2", " 3\r"},
+			},
+			want: "asked:answered:q1=opt-a;q2=opt-x,opt-z",
+		},
+		{
+			name:   "plan",
+			script: "plan",
+			steps:  [][2]string{{"[a]ccept", "a"}},
+			want:   "planned:accepted",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := buildFakeAgent(t)
+			isolateSkillsHome(t)
+			ptmx, tty, err := pty.Open()
+			if err != nil {
+				t.Skipf("no pty: %v", err)
+			}
+			defer func() { _ = ptmx.Close() }()
+			defer func() { _ = tty.Close() }()
+			if err := pty.Setsize(tty, &pty.Winsize{Rows: 30, Cols: 100}); err != nil {
+				t.Skipf("pty resize: %v", err)
+			}
+
+			ws := frameWorkspace(t)
+			sess := agent.New(agent.Options{
+				Binary:      bin,
+				ExtraArgs:   []string{"-script=" + tc.script},
+				Workspace:   ws,
+				Force:       true,
+				Interactive: true,
+				Stderr:      io.Discard,
+			})
+			m := New(Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true})
+			p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(tty))
+			done := make(chan error, 1)
+			go func() {
+				_, err := p.Run()
+				done <- err
+			}()
+			defer func() {
+				p.Quit()
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+					p.Kill()
+				}
+				_ = sess.Close()
+			}()
+
+			if !waitPTY(t, ptmx, "cursor", 10*time.Second) {
+				t.Fatal("craze never started")
+			}
+			if _, err := ptmx.Write([]byte("go\r")); err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range tc.steps {
+				if !waitPTY(t, ptmx, step[0], 10*time.Second) {
+					t.Fatalf("card never showed %q", step[0])
+				}
+				if _, err := ptmx.Write([]byte(step[1])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !waitPTY(t, ptmx, tc.want, 10*time.Second) {
+				t.Fatalf("the agent never saw the answer %q", tc.want)
+			}
+		})
 	}
 }
 

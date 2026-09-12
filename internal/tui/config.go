@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 )
@@ -17,6 +18,9 @@ const (
 	// replaces the whole path.
 	configDir  = ".craze"
 	configName = "config.toml"
+	// configLockSuffix names the sibling file SaveTheme flocks. It is never
+	// renamed, so every writer locks the same inode.
+	configLockSuffix = ".lock"
 )
 
 // ErrConfigMalformed is a config file craze could not parse. It is never
@@ -43,6 +47,10 @@ func readConfig() (map[string]any, error) {
 	if path == "" {
 		return map[string]any{}, nil
 	}
+	return readConfigAt(path)
+}
+
+func readConfigAt(path string) (map[string]any, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]any{}, nil
@@ -72,17 +80,50 @@ func ConfigTheme() string {
 // SaveTheme persists the theme name, keeping every other key in the file. The
 // write lands in a temp file in the same directory and is renamed over the
 // target, so an interrupted write cannot truncate a config.
+//
+// Read, modify and rename all happen under an exclusive lock on a sibling lock
+// file, so two crazes cannot each read the file and then rename their own stale
+// copy over the other's keys. The lock is on a file that is never renamed,
+// because a lock on the config itself would be a lock on an inode the next
+// rename replaces.
 func SaveTheme(name string) error {
 	path := configPath()
 	if path == "" {
 		return errors.New("craze: no home directory to save the theme in")
 	}
-	cfg, err := readConfig()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := lockConfig(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	cfg, err := readConfigAt(path)
 	if err != nil {
 		return fmt.Errorf("craze: not saving the theme: %w", err)
 	}
 	cfg["theme"] = name
 	return writeConfig(path, cfg)
+}
+
+// lockConfig takes the exclusive lock that covers one read-modify-write. Linux
+// only, per the repo's pin. A lock craze cannot take (a read-only directory,
+// say) is not a reason to refuse to save: the write itself still reports that.
+func lockConfig(path string) (func(), error) {
+	f, err := os.OpenFile(path+configLockSuffix, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return func() {}, nil //nolint:nilerr // the write below reports the real problem
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return func() {}, nil //nolint:nilerr // as above: never block a save on the lock
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 func writeConfig(path string, cfg map[string]any) error {

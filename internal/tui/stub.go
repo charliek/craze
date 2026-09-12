@@ -23,9 +23,29 @@ type Stub struct {
 	failModel  bool
 	failConfig bool
 	snap       agent.Snapshot
+	// open are the blocking requests the stub has announced and is still
+	// waiting on, in arrival order, and calls is every answer it received.
+	// Together they are how a test holds §3.11's "every card answers exactly
+	// once": an id can only be answered while it is open.
+	open  []stubOpen
+	calls []stubCall
 	// Clock stamps Event.At; tests inject one to drive lingers and elapsed
 	// times without sleeping.
 	Clock func() time.Time
+}
+
+type stubOpen struct{ id, method string }
+
+// stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close
+// produced for a request nobody answered.
+type stubCall struct {
+	Method    string // permission | question | plan
+	ID        string
+	Option    string
+	Answers   map[string][]string
+	Skip      bool
+	Accept    bool
+	Cancelled bool
 }
 
 func NewStub() *Stub {
@@ -163,6 +183,7 @@ func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 }
 
 func (s *Stub) Cancel(context.Context) error {
+	s.cancelOpen()
 	select {
 	case s.cancel <- struct{}{}:
 	default:
@@ -170,16 +191,74 @@ func (s *Stub) Cancel(context.Context) error {
 	return nil
 }
 
-func (s *Stub) AnswerPermission(string, string) error {
-	return fmt.Errorf("stub: no permission request")
+func (s *Stub) AnswerPermission(id, optionID string) error {
+	return s.answer(stubCall{Method: "permission", ID: id, Option: optionID, Cancelled: optionID == ""})
 }
 
-func (s *Stub) AnswerQuestion(string, map[string][]string, bool) error {
-	return fmt.Errorf("stub: no question request")
+func (s *Stub) AnswerQuestion(id string, answers map[string][]string, skip bool) error {
+	return s.answer(stubCall{Method: "question", ID: id, Answers: answers, Skip: skip})
 }
 
-func (s *Stub) AnswerPlan(string, bool) error {
-	return fmt.Errorf("stub: no plan request")
+func (s *Stub) AnswerPlan(id string, accept bool) error {
+	return s.answer(stubCall{Method: "plan", ID: id, Accept: accept})
+}
+
+// Calls is every answer the stub has taken, in order.
+func (s *Stub) Calls() []stubCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]stubCall(nil), s.calls...)
+}
+
+// answer records one answer. An id that is not waiting is an error, exactly as
+// the live session reports one, which is what makes a second answer to the
+// same card visible instead of silent.
+func (s *Stub) answer(c stubCall) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, o := range s.open {
+		if o.id != c.ID {
+			continue
+		}
+		if o.method != c.Method {
+			break
+		}
+		s.open = append(s.open[:i], s.open[i+1:]...)
+		s.calls = append(s.calls, c)
+		return nil
+	}
+	return fmt.Errorf("stub: unknown %s request %q", c.Method, c.ID)
+}
+
+// cancelOpen answers every request still waiting with its cancelled outcome,
+// which is what the live session's Cancel and Close both do.
+func (s *Stub) cancelOpen() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, o := range s.open {
+		s.calls = append(s.calls, stubCall{Method: o.method, ID: o.id, Cancelled: true})
+	}
+	s.open = nil
+}
+
+// noteOpen registers a blocking request the stub has just announced, the way
+// the live session parks one before emitting its event.
+func (s *Stub) noteOpen(ev agent.Event) {
+	var id, method string
+	switch {
+	case ev.Permission != nil:
+		id, method = ev.Permission.ID, "permission"
+	case ev.Question != nil && !ev.Question.Auto:
+		id, method = ev.Question.ID, "question"
+	case ev.Plan != nil && !ev.Plan.Auto:
+		id, method = ev.Plan.ID, "plan"
+	}
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	s.open = append(s.open, stubOpen{id: id, method: method})
+	s.mu.Unlock()
 }
 
 func (s *Stub) SetModel(_ context.Context, id string) error {
@@ -268,6 +347,7 @@ func cloneStubTools(in []agent.ToolEvent) []agent.ToolEvent {
 }
 
 func (s *Stub) Close() error {
+	s.cancelOpen()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	select {
@@ -290,6 +370,7 @@ func (s *Stub) emit(ev agent.Event) {
 	if ev.At.IsZero() {
 		ev.At = s.now()
 	}
+	s.noteOpen(ev)
 	select {
 	case <-s.closed:
 		return
