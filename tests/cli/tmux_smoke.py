@@ -160,12 +160,12 @@ CASES: dict[str, Case] = {
         note="same as `task`: taskRunFor is what makes the running row observable",
     ),
     "markdown": Case(steps=(Wait("\u2022", "bullets"),)),
-    # §3.15: the session title is only surfaced through `prompt --json`, so the
-    # screen never changes; the wait is only there to let the turn finish
-    # before Ctrl+D, and a clean exit is the whole expectation.
+    # 005 §3.1 put the session title at the right end of the composer's top
+    # rule, so the screen is where it is checked now; the reply is waited on
+    # first because the title update rides ahead of it.
     "title": Case(
-        steps=(Wait("echo: go", "reply"),),
-        note="title is invisible by design; clean exit is the expectation",
+        steps=(Wait("echo: go", "reply"), Wait("Fake Title ─", "title-rule")),
+        note="the session title is the right end of the composer's top rule",
     ),
     "permission": Case(
         no_force=True,

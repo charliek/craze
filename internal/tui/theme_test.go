@@ -128,6 +128,11 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 	if got, want := blend("#000000", "#ffffff", 10), lipgloss.Color("#1a1a1a"); got != want {
 		t.Fatalf("blend 10%% = %s, want %s", got, want)
 	}
+	// The composer's two rules sit one step off Border, towards the text they
+	// frame; Border itself is too dim to read as a frame.
+	if got, want := dark.Rule, blend("#24242f", "#c9c9d4", ruleMix); got != want || got == dark.Border {
+		t.Fatalf("Rule = %s, want Border blended %d%% towards FG (%s)", got, ruleMix, want)
+	}
 }
 
 func TestPresetNamesAndFallback(t *testing.T) {

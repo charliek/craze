@@ -1,6 +1,3 @@
-❯ go                                                                                                
-tasks: 3 planned                                                                                    
-planningdone todos                                                                                  
                                                                                                     
                                                                                                     
                                                                                                     
@@ -20,11 +17,14 @@ planningdone todos
                                                                                                     
                                                                                                     
                                                                                                     
-TASKS 1/3                                                                                           
-┃ ▸ Edit main.go                                                                                    
-┃ ○ Run go vet                                                                                      
+                                                                                                    
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
-❯ message  / for commands                                                                           
+  line 4 of the draft                                                                               
+  line 5 of the draft                                                                               
+  line 6 of the draft                                                                               
+  line 7 of the draft                                                                               
+  line 8 of the draft                                                                               
+  line 9 of the draft                                                                               
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-ws │ cursor │ Default (medium) │ agent │ 0m                                                         
+ws │ cursor │ Grok (medium) │ agent │ 0m                                                            
 ▸▸ bypass permissions on                                                                            

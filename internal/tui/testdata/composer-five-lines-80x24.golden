@@ -1,12 +1,10 @@
-❯ go                                                                            
-✓ read  main.go                                                                 
-✓ edit  main.go  +1 −1                                                          
-     4                                                                          
-     5   func main() {                                                          
-     6 -     fmt.Println("hello")                                               
-     6 +     fmt.Println("hello, world")                                        
-     7   }                                                                      
-done diff                                                                       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 
@@ -18,7 +16,9 @@ done diff
                                                                                 
                                                                                 
 ──────────────────────────────────────────────────────────────────────── craze ─
-❯ message  / for commands                                                       
+  line 3 of the draft                                                           
+  line 4 of the draft                                                           
+  line 5 of the draft                                                           
 ────────────────────────────────────────────────────────────────────────────────
-ws │ cursor │ Default (medium) │ agent │ 0m                                     
+ws │ cursor │ Grok (medium) │ agent │ 0m                                        
 ▸▸ bypass permissions on                                                        

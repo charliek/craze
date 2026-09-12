@@ -509,6 +509,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	prev := m.input.Value()
+	// bubbles repositions its own viewport inside Update (textarea.go:1087),
+	// against the height in force *before* the key, and never rewinds slack
+	// afterwards: at height 1 a second line scrolled the first one — and the
+	// `❯` that only ever marks display row 0 — off the top, and SetHeight does
+	// not reposition. Lending the textarea more rows than any draft can have
+	// keeps the cursor inside the view, so the offset stays 0 through newline,
+	// wrap boundary and bracketed paste. relayout puts the real height back
+	// before anything is drawn.
+	m.input.SetHeight(composerHeadroom)
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	if m.input.Value() != prev {

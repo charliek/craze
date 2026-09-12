@@ -253,8 +253,8 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 	if m.lay.ComposerRows != 4 {
 		t.Fatalf("a pasted paragraph is %d rows, want 4", m.lay.ComposerRows)
 	}
-	if m.input.Height() != m.lay.ComposerRows {
-		t.Fatalf("SetHeight was not called: textarea is %d, layout says %d", m.input.Height(), m.lay.ComposerRows)
+	if m.input.Height() != m.composerRows() {
+		t.Fatalf("SetHeight was not called: textarea is %d, the draft is %d", m.input.Height(), m.composerRows())
 	}
 	if h := lipgloss.Height(plainView(m)); h != 40 {
 		t.Fatalf("a grown composer broke the height contract: %d rows", h)
@@ -265,6 +265,11 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 	m = tm.(Model)
 	if m.lay.ComposerRows != composerMaxRows {
 		t.Fatalf("composer grew to %d rows, want the %d cap", m.lay.ComposerRows, composerMaxRows)
+	}
+	// Only the band is capped. The textarea keeps every row of the draft, so
+	// its own viewport never has to scroll and the window is drawn here.
+	if got, want := m.input.Height(), m.composerRows(); got != want || want <= composerMaxRows {
+		t.Fatalf("textarea holds %d rows, want the whole %d-row draft", got, want)
 	}
 
 	// Past the visible cap the buffer must still take new logical lines.
@@ -280,6 +285,9 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 	}
 	if m.lay.ComposerRows != composerMaxRows {
 		t.Fatalf("composer shows %d rows, want the %d cap", m.lay.ComposerRows, composerMaxRows)
+	}
+	if m.input.Height() != 10 {
+		t.Fatalf("textarea is %d rows, want the 10 logical lines", m.input.Height())
 	}
 }
 

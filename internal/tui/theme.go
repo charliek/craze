@@ -17,6 +17,11 @@ const DefaultTheme = "craze-dark"
 // for a diff row: enough to tint it, not enough to fight the foreground.
 const diffBGMix = 10
 
+// ruleMix lifts the composer rules one step off Border: the two lines frame
+// the thing the user types into, so they read as structure rather than as
+// another divider.
+const ruleMix = 30
+
 // paletteSpec is the hand-picked part of a theme. Every other slot is derived
 // from these eleven colours, so a new preset is one row of this table.
 type paletteSpec struct {
@@ -60,7 +65,7 @@ type Theme struct {
 	User, Assistant, Thought, ToolKind lipgloss.Color
 	DiffAdd, DiffDel                   lipgloss.Color
 	DiffAddBG, DiffDelBG               lipgloss.Color
-	LineNo, TaskRail, Selection        lipgloss.Color
+	LineNo, TaskRail, Selection, Rule  lipgloss.Color
 	ChipBypass, ChipPrompt, Provider   lipgloss.Color
 }
 
@@ -91,6 +96,7 @@ func (p paletteSpec) theme() Theme {
 	th.LineNo = th.Dim
 	th.TaskRail = th.Accent
 	th.Selection = th.Accent
+	th.Rule = blend(p.border, p.fg, ruleMix)
 	th.ChipBypass = th.Err
 	th.ChipPrompt = th.Warn
 	th.Provider = th.Teal

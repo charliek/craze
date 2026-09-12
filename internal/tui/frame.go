@@ -177,6 +177,17 @@ func parseFrameToken(body string) (frameToken, error) {
 		}
 		return frameToken{kind: tokResize, text: raw, size: tea.WindowSizeMsg{Width: c, Height: r}}, nil
 
+	case strings.HasPrefix(name, "paste:"):
+		// One bracketed paste, the way a terminal delivers it: `\n` in the
+		// token body is a line break, so a multi-line paste is one message and
+		// not a run of keys.
+		text := strings.ReplaceAll(body[len("paste:"):], `\n`, "\n")
+		if text == "" {
+			return frameToken{}, &ScriptError{Token: raw, Reason: "want <paste:TEXT>"}
+		}
+		key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true}
+		return frameToken{kind: tokKey, text: raw, key: key}, nil
+
 	case strings.HasPrefix(name, "wait:"):
 		return parseWaitToken(raw, body[len("wait:"):])
 	}

@@ -97,7 +97,7 @@ var frameRegions = [regionCount]frameRegion{
 	},
 	regionComposer: {
 		rows: frameSizes.composer,
-		view: func(m Model, _ frameLayout) string { return m.composerView() },
+		view: Model.composerView,
 	},
 	regionPeek: {
 		rows: func(s frameSizes) int { return s.peek },
@@ -258,7 +258,8 @@ func (m *Model) computeLayout() frameLayout {
 	base := frameSizes{
 		tasksOpen: m.tasksPanelVisible(),
 		tasksBody: m.tasksBodyRows(),
-		input:     m.composerRows(),
+		// The band caps what is shown; composerRows is the whole draft.
+		input:     min(m.composerRows(), composerMaxRows),
 		agentsAll: len(m.agentItems()),
 		agentsCap: agentRowsMax,
 		peek:      m.peekRows(),
@@ -326,10 +327,12 @@ func (m *Model) relayout(stick bool) {
 	}
 	m.vp.Width = m.width
 	m.vp.Height = max(1, m.lay.Region(regionTranscript).Height())
-	// bubbles never grows the textarea on its own, so the height the layout
-	// decided has to be pushed into it explicitly.
+	// bubbles never grows the textarea on its own, so the height it holds has
+	// to be pushed into it explicitly — and it is the whole draft, not the
+	// band: a textarea tall enough for everything it holds never scrolls, and
+	// composerView windows onto the rows it renders.
 	m.input.SetWidth(max(1, m.width))
-	m.input.SetHeight(max(1, m.lay.ComposerRows))
+	m.input.SetHeight(m.composerRows())
 	if stick {
 		m.vp.GotoBottom()
 	}

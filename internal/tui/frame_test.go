@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -83,9 +84,24 @@ func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 	}
 }
 
+func TestParseFrameScriptPaste(t *testing.T) {
+	toks, err := parseFrameScript(`<paste:one\ntwo>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 1 || toks[0].kind != tokKey {
+		t.Fatalf("got %+v", toks)
+	}
+	key := toks[0].key
+	if !key.Paste || key.Type != tea.KeyRunes || string(key.Runes) != "one\ntwo" {
+		t.Fatalf("paste token is %+v, want one bracketed paste of two lines", key)
+	}
+}
+
 func TestParseFrameScriptRejects(t *testing.T) {
 	for _, script := range []string{
 		"<nope>",
+		"<paste:>",
 		"<ctrl-1>",
 		"<ctrl-aa>",
 		"<enter",
@@ -210,6 +226,90 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 // with a 150-character unbroken token that only a hard wrap can break.
 func echoPrompt() string {
 	return strings.Repeat("x", 150) + " alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+}
+
+// composerLines is a draft of n numbered logical lines, typed the way a user
+// makes one: alt+enter between them.
+func composerLines(n int) string {
+	out := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, fmt.Sprintf("line %d of the draft", i))
+	}
+	return strings.Join(out, "<alt-enter>")
+}
+
+// composerRow is the nth row under the composer's titled top rule, so row 0 is
+// the first input row and row ComposerRows is the closing rule.
+func composerRow(t *testing.T, frame string, n int) string {
+	t.Helper()
+	rows := strings.Split(frame, "\n")
+	for i, ln := range rows {
+		if strings.HasSuffix(ln, " craze ─") && i+1+n < len(rows) {
+			return rows[i+1+n]
+		}
+	}
+	t.Fatalf("no titled composer rule in:\n%s", frame)
+	return ""
+}
+
+// TestFrameGoldenComposer is §3.1's shape at every size the window has to
+// cope with: the first row of the draft stays on screen with its prompt for
+// as long as the draft fits the band, and the band follows the cursor once it
+// does not.
+func TestFrameGoldenComposer(t *testing.T) {
+	const inner = 100 - composerPromptW
+	for _, tc := range []struct {
+		name       string
+		cols, rows int
+		keys       string
+		wantFirst  string
+		bandRows   int
+	}{
+		{"composer-one-line-100x30", 100, 30, "one line of draft", "❯ one line of draft", 1},
+		{"composer-two-lines-100x30", 100, 30, "line one<alt-enter>line two", "❯ line one", 2},
+		// 250 unbroken characters hard-wrap onto three rows and still start at
+		// the prompt.
+		{"composer-long-line-100x30", 100, 30, strings.Repeat("z", 250), "❯ " + strings.Repeat("z", inner), 3},
+		// An exactly-full line is two rows, not one: bubbles spills the tail.
+		{"composer-full-line-100x30", 100, 30, strings.Repeat("y", inner), "❯ " + strings.Repeat("y", inner), 2},
+		{"composer-paste-100x30", 100, 30, `<paste:one\ntwo\nthree\nfour\nfive>`, "❯ one", 5},
+		{"composer-six-lines-100x30", 100, 30, composerLines(6), "❯ line 1 of the draft", 6},
+		// Nine lines window to six and the band follows the cursor down.
+		{"composer-nine-lines-100x30", 100, 30, composerLines(9), "  line 4 of the draft", 6},
+		{"composer-nine-lines-top-100x30", 100, 30,
+			composerLines(9) + "<up><up><up><up><up><up><up><up>", "❯ line 1 of the draft", 6},
+		// Under 30 rows the band caps at three, so five lines window there too.
+		{"composer-five-lines-80x24", 80, 24, composerLines(5), "  line 3 of the draft", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStubFrame(t, tc.cols, tc.rows, "<wait:idle>"+tc.keys)
+			assertGolden(t, tc.name, tc.cols, tc.rows, got)
+			if first := composerRow(t, got, 0); !strings.HasPrefix(first, tc.wantFirst) {
+				t.Fatalf("first composer row is %q, want it to start %q", first, tc.wantFirst)
+			}
+			// The band is exactly the rows the window promised, between its
+			// two rules.
+			if row := composerRow(t, got, tc.bandRows); !strings.HasPrefix(row, "───") {
+				t.Fatalf("row %d of the band is %q, want the closing rule", tc.bandRows, row)
+			}
+		})
+	}
+}
+
+// TestFrameGoldenTitleRule is the other half of §3.1: the session title cursor
+// sends lands at the right end of the top rule.
+func TestFrameGoldenTitleRule(t *testing.T) {
+	// The title update rides ahead of the reply, so the reply is what the
+	// frame waits on and the title only has to have landed by the end.
+	got := runFakeFrame(t, "title", 100, 30,
+		"<wait:idle>go<enter><wait:text:echo: go><wait:idle><wait:text:Fake Title>")
+	assertGolden(t, "title-100x30", 100, 30, got)
+	if !strings.Contains(got, " Fake Title ─") {
+		t.Fatalf("the title is missing from the rule:\n%s", got)
+	}
+	if strings.Contains(got, " craze ─") {
+		t.Fatalf("the placeholder title survived the session title:\n%s", got)
+	}
 }
 
 func TestFrameGoldenEcho80x24(t *testing.T) {

@@ -150,6 +150,7 @@ brackets is a token:
 <enter> <esc> <tab> <backspace> <space> <up> <down> <left> <right>
 <pgup> <pgdn> <shift-tab> <alt-enter> <ctrl-a>..<ctrl-z> <lt>
 <wheel-up> <wheel-down> <click:X,Y> <resize:COLS,ROWS> <sleep:250ms>
+<paste:one\ntwo>
 <wait:idle> <wait:working> <wait:card> <wait:text:foo> <wait:gone:foo>
 ```
 
