@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -1244,5 +1246,349 @@ func TestHelpOverlayFitsWithInFlightTools(t *testing.T) {
 	}
 	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
 		t.Fatalf("help body missing:\n%s", view)
+	}
+}
+
+// --- §3.3 plan-mode exit -------------------------------------------------
+
+// intoPlanMode cycles the session into plan mode the way Shift+Tab does and
+// runs the SetMode through, so the stub's own snapshot agrees with the model's
+// and a refreshSnap cannot put the mode back.
+func intoPlanMode(t *testing.T, m Model) Model {
+	t.Helper()
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = tm.(Model)
+	if msg := runCmd(cmd); msg != nil {
+		t.Fatalf("SetMode returned %+v", msg)
+	}
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("mode %q, want plan", m.snap.CurrentMode)
+	}
+	return m
+}
+
+// feed applies events the way the event pump does.
+func feed(t *testing.T, m Model, evs ...agent.Event) Model {
+	t.Helper()
+	for _, ev := range evs {
+		tm, _ := m.Update(eventMsg{ev})
+		m = tm.(Model)
+	}
+	return m
+}
+
+// planTurn is a turn that ended with a reply: both endings, in the order the
+// live session usually produces them.
+func planTurn(t *testing.T, m Model) Model {
+	t.Helper()
+	m = feed(t, m,
+		agent.Event{Type: agent.EventText, Text: "here is the plan"},
+		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+	return tm.(Model)
+}
+
+func planOfferModel(t *testing.T) Model {
+	t.Helper()
+	m := planTurn(t, intoPlanMode(t, sized(t)))
+	if !m.planOffering() {
+		t.Fatalf("a finished plan-mode turn should offer:\n%s", plainView(m))
+	}
+	return m
+}
+
+// TestPlanOfferWaitsForBothEndings holds the ordering pin: EventDone arms the
+// offer and promptDoneMsg settles the status, and neither order may show a
+// placeholder Enter would not honour.
+func TestPlanOfferWaitsForBothEndings(t *testing.T) {
+	done := eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}}
+	settled := promptDoneMsg{res: agent.Result{StopReason: "end_turn"}}
+	for _, tc := range []struct {
+		name string
+		msgs []tea.Msg
+	}{
+		{"done first", []tea.Msg{done, settled}},
+		{"status first", []tea.Msg{settled, done}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := intoPlanMode(t, sized(t))
+			m.input.SetValue("plan it")
+			// The prompt command is dropped: this test drives the turn's two
+			// endings by hand, so the stub must not also answer.
+			tm, _ := m.Update(enter())
+			m = tm.(Model)
+			m = feed(t, m, agent.Event{Type: agent.EventText, Text: "here is the plan"})
+			for i, msg := range tc.msgs {
+				tm, _ = m.Update(msg)
+				m = tm.(Model)
+				if i == 0 && m.planOffering() {
+					t.Fatal("the offer is only actionable once both endings have landed")
+				}
+			}
+			if !m.planOffering() {
+				t.Fatal("expected the offer once both endings had landed")
+			}
+			if !strings.Contains(plainView(m), planOfferPlaceholder) {
+				t.Fatalf("the placeholder is missing:\n%s", plainView(m))
+			}
+		})
+	}
+}
+
+// TestPlanOfferNeedsAPlanToOffer covers the turns that leave nothing behind.
+func TestPlanOfferNeedsAPlanToOffer(t *testing.T) {
+	text := agent.Event{Type: agent.EventText, Text: "here is the plan"}
+	ended := agent.Event{Type: agent.EventDone, StopReason: "end_turn"}
+	for _, tc := range []struct {
+		name string
+		evs  []agent.Event
+	}{
+		{"cancelled", []agent.Event{text, {Type: agent.EventDone, StopReason: "cancelled"}}},
+		{"error", []agent.Event{text, {Type: agent.EventError, Err: errors.New("boom")}, ended}},
+		{"thought only", []agent.Event{{Type: agent.EventThought, Text: "hmm"}, ended}},
+		{"tool only", []agent.Event{{Type: agent.EventTool, Tool: &agent.ToolEvent{
+			ID: "sh-1", Kind: "execute", Title: "Shell", Status: "completed",
+		}}, ended}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := feed(t, intoPlanMode(t, sized(t)), tc.evs...)
+			tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+			m = tm.(Model)
+			if m.planOffer || m.planOffering() {
+				t.Fatal("this turn left no plan to implement")
+			}
+			if strings.Contains(plainView(m), planOfferPlaceholder) {
+				t.Fatalf("placeholder drawn anyway:\n%s", plainView(m))
+			}
+		})
+	}
+}
+
+// TestPlanOfferNeedsAnImplementMode: an agent that advertises no way to build
+// the plan is never offered one.
+func TestPlanOfferNeedsAnImplementMode(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	stub.snap.CurrentMode = "plan"
+	stub.snap.Modes = []agent.ModeInfo{{ID: "plan", Name: "Plan"}, {ID: "ask", Name: "Ask"}}
+	m := New(Config{Session: stub, Theme: "tokyo-night", Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = planTurn(t, tm.(Model))
+	if m.implementModeID() != "" {
+		t.Fatalf("implement mode %q, want none", m.implementModeID())
+	}
+	if m.planOffer {
+		t.Fatal("nothing to switch to, so nothing to offer")
+	}
+}
+
+func TestPlanOfferCleared(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func(*testing.T, Model) Model
+	}{
+		{"a card arrives", func(t *testing.T, m Model) Model {
+			return feed(t, m, agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+				ID:      "perm-1",
+				Tool:    "Shell",
+				Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
+			}})
+		}},
+		{"/clear", func(t *testing.T, m Model) Model {
+			m.input.SetValue("/clear")
+			tm, _ := m.Update(enter())
+			return tm.(Model)
+		}},
+		{"the agent changes the mode", func(t *testing.T, m Model) Model {
+			if err := m.sess.SetMode(context.Background(), "agent"); err != nil {
+				t.Fatal(err)
+			}
+			return feed(t, m, agent.Event{Type: agent.EventMeta})
+		}},
+		{"the user changes the mode", func(t *testing.T, m Model) Model {
+			tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+			return tm.(Model)
+		}},
+		{"the next send", func(t *testing.T, m Model) Model {
+			m.input.SetValue("something else entirely")
+			tm, _ := m.Update(enter())
+			return tm.(Model)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.do(t, planOfferModel(t))
+			if m.planOffer {
+				t.Fatal("the offer should be gone")
+			}
+			if strings.Contains(plainView(m), planOfferPlaceholder) {
+				t.Fatalf("the placeholder survived:\n%s", plainView(m))
+			}
+		})
+	}
+}
+
+// TestPlanOfferHiddenWhileTyping: the placeholder keys on Value()=="", the same
+// rule the textarea draws any placeholder by, so it comes back on backspace.
+func TestPlanOfferHiddenWhileTyping(t *testing.T) {
+	m := planOfferModel(t)
+	tm, _ := m.Update(runeKey('h'))
+	m = tm.(Model)
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("a draft hides the placeholder:\n%s", plainView(m))
+	}
+	if !m.planOffer {
+		t.Fatal("typing refines the plan, it does not decline the offer")
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = tm.(Model)
+	if m.input.Value() != "" {
+		t.Fatalf("draft %q", m.input.Value())
+	}
+	if !strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the offer should be back:\n%s", plainView(m))
+	}
+}
+
+func TestPlanOfferEscKeepsFocus(t *testing.T) {
+	m := planOfferModel(t)
+	if !m.input.Focused() {
+		t.Fatal("the composer starts focused")
+	}
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.planOffer {
+		t.Fatal("esc declines the offer")
+	}
+	if !m.input.Focused() {
+		t.Fatal("esc on the offer must not blur the composer")
+	}
+}
+
+// TestPlanOfferBeatsAgentPeek: Enter on an empty composer peeks at a running
+// sub-agent, unless there is a plan on offer.
+func TestPlanOfferBeatsAgentPeek(t *testing.T) {
+	m := intoPlanMode(t, sized(t))
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	m = planTurn(t, m)
+	if len(m.visibleAgents()) == 0 {
+		t.Fatal("expected a lingering agent row")
+	}
+	if !m.planOffering() {
+		t.Fatal("expected the offer")
+	}
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.agentPeek {
+		t.Fatal("the offer outranks the peek")
+	}
+	if cmd == nil {
+		t.Fatal("expected the SetMode command")
+	}
+}
+
+// TestPlanImplementChainsSetModeThenPrompt is the whole success path: the mode
+// lands first, the note and the user entry follow it, and only then is a prompt
+// sent.
+func TestPlanImplementChainsSetModeThenPrompt(t *testing.T) {
+	m := planOfferModel(t)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("expected the SetMode command")
+	}
+	if m.snap.CurrentMode != "agent" {
+		t.Fatalf("mode %q, want the optimistic agent", m.snap.CurrentMode)
+	}
+	if m.status != statusIdle || len(texts(m, entryUser)) != 0 {
+		t.Fatalf("nothing is written or sent before SetMode comes back: status %s, users %q",
+			m.status, texts(m, entryUser))
+	}
+	msg := runCmd(cmd)
+	if _, ok := msg.(planImplementMsg); !ok {
+		t.Fatalf("SetMode returned %T, want planImplementMsg", msg)
+	}
+	tm, cmd = m.Update(msg)
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("expected the prompt command")
+	}
+	if m.status != statusWorking {
+		t.Fatalf("status %s", m.status)
+	}
+	// The note is written before the turn it explains.
+	note, user := -1, -1
+	for i, e := range m.entries {
+		if e.kind == entryNote && strings.HasPrefix(e.text, "mode → agent") {
+			note = i
+		}
+		if e.kind == entryUser && e.text == "Implement the plan above." {
+			user = i
+		}
+	}
+	if note < 0 || user < 0 || note > user {
+		t.Fatalf("want the mode note then the user entry, got %d and %d:\n%s", note, user, plainView(m))
+	}
+	if m.planOffer {
+		t.Fatal("the offer is spent")
+	}
+	if got := runCmd(cmd); got == nil {
+		t.Fatal("the prompt command should answer")
+	}
+}
+
+func TestPlanImplementSetModeFailureSendsNoPrompt(t *testing.T) {
+	m := planOfferModel(t)
+	m.sess.(*Stub).FailNextSetMode()
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	msg := runCmd(cmd)
+	if _, ok := msg.(planImplementFailedMsg); !ok {
+		t.Fatalf("SetMode returned %T, want planImplementFailedMsg", msg)
+	}
+	tm, cmd = m.Update(msg)
+	m = tm.(Model)
+	if cmd != nil {
+		t.Fatal("a failed mode change sends no prompt")
+	}
+	if len(texts(m, entryUser)) != 0 {
+		t.Fatalf("nothing was sent, so nothing is in the transcript: %q", texts(m, entryUser))
+	}
+	if m.status != statusIdle {
+		t.Fatalf("status %s", m.status)
+	}
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("mode %q, want it reverted", m.snap.CurrentMode)
+	}
+	if len(texts(m, entryError)) == 0 {
+		t.Fatal("expected an error note")
+	}
+	if !m.planOffering() {
+		t.Fatal("the plan is still on screen, so it is still on offer")
+	}
+}
+
+// TestPlanRefineStaysInPlanMode: typing instead of accepting is an ordinary
+// send.
+func TestPlanRefineStaysInPlanMode(t *testing.T) {
+	m := planOfferModel(t)
+	m.input.SetValue("more detail on step two")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("expected a prompt")
+	}
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("mode %q, want plan", m.snap.CurrentMode)
+	}
+	if m.planOffer {
+		t.Fatal("the send retires the offer")
+	}
+	if got := texts(m, entryUser); len(got) != 1 || got[0] != "more detail on step two" {
+		t.Fatalf("user entries %q", got)
+	}
+	if m.status != statusWorking {
+		t.Fatalf("status %s", m.status)
 	}
 }

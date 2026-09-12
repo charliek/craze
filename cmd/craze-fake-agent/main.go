@@ -27,6 +27,7 @@ Flags:
           task-late   same, receipt sent before the tool_call
           markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
+          planmode    session/new in plan mode; replies planned/implementing
           effort      same as echo (session/new includes effort configOptions)
           permission  request allow_once / reject_once and wait for the client
           ask         emit cursor/ask_question then finish the turn
@@ -67,7 +68,7 @@ func main() {
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
-		"bash", "task", "task-late", "markdown", "title":
+		"bash", "task", "task-late", "markdown", "title", "planmode":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

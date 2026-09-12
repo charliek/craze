@@ -30,7 +30,17 @@ type server struct {
 	cancelled atomic.Bool
 	hangWait  chan struct{}
 	config    []map[string]any
+	// order is every session/set_mode and session/prompt in arrival order. It
+	// is what lets the planmode script prove craze chained the two rather than
+	// racing them; recording it anywhere but the read loop would record the
+	// order the handler goroutines happened to wake in.
+	order []string
 }
+
+const (
+	orderSetMode = "set_mode"
+	orderPrompt  = "prompt"
+)
 
 func defaultConfigOptions() []map[string]any {
 	return []map[string]any{
@@ -88,10 +98,15 @@ func (s *server) onRequest(msg *acp.Message) {
 		s.mu.Lock()
 		cfg := s.config
 		s.mu.Unlock()
+		// The plan-exit script has to start where the offer can be made.
+		currentMode := "agent"
+		if s.script == "planmode" {
+			currentMode = "plan"
+		}
 		s.reply(msg.ID, map[string]any{
 			"sessionId": fakeSessionID,
 			"modes": map[string]any{
-				"currentModeId": "agent",
+				"currentModeId": currentMode,
 				"availableModes": []map[string]string{
 					{"id": "agent", "name": "Agent"},
 					{"id": "plan", "name": "Plan"},
@@ -114,10 +129,12 @@ func (s *server) onRequest(msg *acp.Message) {
 			},
 		})
 	case acp.MethodSessionPrompt:
+		s.noteOrder(orderPrompt)
 		go s.handlePrompt(msg)
 	case acp.MethodSessionSetModel:
 		s.reply(msg.ID, map[string]any{})
 	case acp.MethodSessionSetMode:
+		s.noteOrder(orderSetMode)
 		var p acp.SetModeParams
 		_ = json.Unmarshal(msg.Params, &p)
 		s.reply(msg.ID, map[string]any{})
@@ -205,6 +222,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.markdown(msg.ID)
 	case "title":
 		s.title(msg.ID, text)
+	case "planmode":
+		s.planmode(msg.ID, text, n)
 	default:
 		s.echo(msg.ID, text)
 	}
@@ -731,6 +750,53 @@ func (s *server) markdown(id json.RawMessage) {
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: markdownReply},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+// noteOrder records one of the two methods the planmode script compares.
+func (s *server) noteOrder(method string) {
+	s.mu.Lock()
+	s.order = append(s.order, method)
+	s.mu.Unlock()
+}
+
+// setModeBefore reports whether a session/set_mode arrived before the nth
+// session/prompt, and whether one has arrived at all by now.
+func (s *server) setModeBefore(n int) (before, seen bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prompts := 0
+	for _, m := range s.order {
+		if m != orderSetMode {
+			prompts++
+			continue
+		}
+		seen = true
+		if prompts < n {
+			before = true
+		}
+	}
+	return before, seen
+}
+
+// planmode is the plan-exit script. Leaving plan mode must be a set_mode
+// followed by a prompt, so a turn that arrives after one answers
+// "implementing", a turn with no set_mode anywhere is a refinement and answers
+// "planned", and a turn that overtook its own set_mode — the race the chained
+// command exists to prevent — answers WRONG ORDER and fails the golden.
+func (s *server) planmode(id json.RawMessage, text string, n int) {
+	before, seenMode := s.setModeBefore(n)
+	reply := "planned: " + text
+	switch {
+	case before:
+		reply = "implementing: " + text
+	case seenMode:
+		reply = "WRONG ORDER"
+	}
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: reply},
 	})
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }

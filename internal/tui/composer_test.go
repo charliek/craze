@@ -234,3 +234,25 @@ func TestComposerRuleFallsBackWhenTheTitleCannotFit(t *testing.T) {
 		t.Fatalf("narrow top rule is %q, want %q", got, want)
 	}
 }
+
+// TestPlanOfferPlaceholderFitsTheBand: the offer is longer than a narrow
+// composer, so it is cut to the row's own width and the prompt survives.
+func TestPlanOfferPlaceholderFitsTheBand(t *testing.T) {
+	m := planOfferModel(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = tm.(Model)
+	band := composerBand(t, m)
+	row := band[1]
+	if !strings.HasPrefix(row, "❯ ") {
+		t.Fatalf("the prompt is gone: %q", row)
+	}
+	if !strings.Contains(row, "…") {
+		t.Fatalf("row %q should have been truncated", row)
+	}
+	if w := lipgloss.Width(row); w != 40 {
+		t.Fatalf("row is %d cells, want 40: %q", w, row)
+	}
+	if m.lay.ComposerRows != 1 {
+		t.Fatalf("the offer is one row, got %d", m.lay.ComposerRows)
+	}
+}

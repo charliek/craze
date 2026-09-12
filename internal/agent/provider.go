@@ -88,19 +88,21 @@ func (p Provider) isFastOption(opt ConfigOption) bool {
 
 // Info is the value copy a Snapshot carries.
 func (p Provider) Info() ProviderInfo {
-	return ProviderInfo{Name: p.name, modeKinds: p.modeKinds, ImplementPrompt: p.implementPrompt}
+	return ProviderInfo{Name: p.name, modeKinds: p.modeKinds, implementPrompt: p.implementPrompt}
 }
 
 // ProviderInfo is a Provider flattened into plain fields so it can ride along
-// in a Snapshot. The mode table stays unexported and is shared by every
-// snapshot rather than cloned into each one: it is written once, when
-// CursorProvider builds it, and read from the TUI goroutine thereafter, so
-// keeping it out of reach is what makes "immutable" a fact and not a comment.
-// Kind is how anything outside this package asks.
+// in a Snapshot. Everything but the name is unexported and reached through a
+// method, so the zero value — a stub session, a snapshot taken before
+// session/new landed — can answer as cursor's and the default lives in this
+// package alone. The mode table is shared by every snapshot rather than cloned
+// into each one: it is written once, when CursorProvider builds it, and read
+// from the TUI goroutine thereafter, so keeping it out of reach is what makes
+// "immutable" a fact and not a comment.
 type ProviderInfo struct {
 	Name            string
 	modeKinds       map[string]ModeKind
-	ImplementPrompt string
+	implementPrompt string
 }
 
 // provider rebuilds the value with methods. A zero ProviderInfo — a stub
@@ -110,7 +112,7 @@ func (p ProviderInfo) provider() Provider {
 	if p.Name == "" {
 		return CursorProvider()
 	}
-	return Provider{name: p.Name, modeKinds: p.modeKinds, implementPrompt: p.ImplementPrompt}
+	return Provider{name: p.Name, modeKinds: p.modeKinds, implementPrompt: p.implementPrompt}
 }
 
 // Label is the provider name the status row shows.
@@ -118,3 +120,6 @@ func (p ProviderInfo) Label() string { return p.provider().Name() }
 
 // Kind is what the session's provider means by a mode id.
 func (p ProviderInfo) Kind(id string) ModeKind { return p.provider().ModeKind(id) }
+
+// ImplementPrompt is the turn craze sends when the user accepts a plan.
+func (p ProviderInfo) ImplementPrompt() string { return p.provider().ImplementPrompt() }

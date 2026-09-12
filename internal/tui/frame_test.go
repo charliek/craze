@@ -312,6 +312,53 @@ func TestFrameGoldenTitleRule(t *testing.T) {
 	}
 }
 
+// TestFrameGoldenPlanMode is §3.3 end to end against the wire: the offer after
+// a plan-mode turn, Enter on it, and a refinement instead.
+//
+// The waits are on the placeholder rather than on <wait:idle>, because the
+// offer needs both EventDone and promptDoneMsg and those two race; waiting for
+// what the offer draws is waiting for both.
+func TestFrameGoldenPlanMode(t *testing.T) {
+	const offered = "<wait:text:planned:><wait:text:enter implements this plan>"
+	for _, tc := range []struct {
+		name, keys string
+		want       []string
+	}{
+		{
+			"planmode-offer-100x30",
+			"<wait:idle>plan it<enter>" + offered,
+			[]string{"◆ plan", planOfferPlaceholder},
+		},
+		{
+			// The fake answers "implementing" only if session/set_mode reached
+			// it before session/prompt, so this golden is the proof that the
+			// two are chained and not batched.
+			"planmode-enter-100x30",
+			"<wait:idle>plan it<enter>" + offered + "<enter><wait:text:implementing:><wait:idle>",
+			[]string{"◆ agent", "mode → agent", "❯ Implement the plan above.", "implementing: Implement the plan above."},
+		},
+		{
+			"planmode-refine-100x30",
+			"<wait:idle>plan it<enter>" + offered +
+				"add more detail<enter><wait:text:planned: add more detail><wait:text:enter implements this plan>",
+			[]string{"◆ plan", "❯ add more detail", "planned: add more detail"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runFakeFrame(t, "planmode", 100, 30, tc.keys)
+			assertGolden(t, tc.name, 100, 30, got)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("frame is missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "WRONG ORDER") {
+				t.Fatalf("the fake saw session/prompt before session/set_mode:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestFrameGoldenEcho80x24(t *testing.T) {
 	prompt := echoPrompt()
 	if len(prompt) != 224 {

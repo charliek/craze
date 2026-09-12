@@ -27,6 +27,9 @@ const (
 	composerTitleShare = 2
 	// composerDefaultTitle is what the top rule reads before a title arrives.
 	composerDefaultTitle = "craze"
+	// planOfferPlaceholder is the composer's half of the plan-mode exit: the
+	// three things Enter, typing and Shift+Tab do while a plan is on offer.
+	planOfferPlaceholder = "enter implements this plan  ·  type to refine  ·  shift+tab leaves plan mode"
 )
 
 func newComposer(th Theme) textarea.Model {
@@ -179,6 +182,16 @@ func wrapRows(line string, width int) int {
 	return row + 1
 }
 
+// planPlaceholder is the plan offer's placeholder, or "" when the composer
+// keeps its own. The gate is Value()=="" because that, not composerEmpty, is
+// the rule the textarea draws a placeholder by at all.
+func (m Model) planPlaceholder() string {
+	if !m.planOffering() || m.input.Value() != "" {
+		return ""
+	}
+	return clampWidth(planOfferPlaceholder, m.composerInner())
+}
+
 // composerTitle is the right end of the top rule: the session title cursor
 // sent, or the program's name until one arrives.
 func (m Model) composerTitle() string {
@@ -196,6 +209,10 @@ func (m Model) composerTitle() string {
 // of the band is the first row of the draft until the cursor pushes past the
 // bottom, which is what keeps the `❯` on screen.
 func (m Model) composerView(lay frameLayout) string {
+	if p := m.planPlaceholder(); p != "" {
+		// m is a copy, so this swaps the placeholder for this frame only.
+		m.input.Placeholder = p
+	}
 	rows := m.composerRows()
 	shown := max(1, lay.ComposerRows)
 	view := strings.Split(m.input.View(), "\n")

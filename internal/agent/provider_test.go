@@ -66,8 +66,11 @@ func TestNilProviderBehavesLikeCursor(t *testing.T) {
 	if zero.Kind("plan") != ModePlan || zero.Kind("nope") != ModeUnknown {
 		t.Fatal("a zero ProviderInfo reads cursor's vocabulary")
 	}
+	if zero.ImplementPrompt() != "Implement the plan above." {
+		t.Fatalf("zero implement prompt %q", zero.ImplementPrompt())
+	}
 	if got := newSession(Options{}).Snapshot().Provider; got.Name != "cursor" ||
-		got.ImplementPrompt != "Implement the plan above." || got.modeKinds["architect"] != ModePlan {
+		got.ImplementPrompt() != "Implement the plan above." || got.modeKinds["architect"] != ModePlan {
 		t.Fatalf("a nil Options.Provider is cursor's, got %+v", got)
 	}
 	custom := CursorProvider()

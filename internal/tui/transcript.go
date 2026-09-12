@@ -266,6 +266,8 @@ func (m *Model) clearTranscript() {
 	m.streamOpen = false
 	m.todoPlanned = 0
 	m.todoDone = false
+	// "the plan above" is gone, so there is nothing left to offer.
+	m.planOffer = false
 	m.refreshViewport()
 }
 

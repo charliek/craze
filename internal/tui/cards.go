@@ -114,6 +114,9 @@ func (m *Model) pushCard(c card) {
 	m.picking = false
 	m.effortStep = false
 	m.agentPeek = false
+	// A card is a question the user has to answer first, so the plan offer
+	// stands down rather than competing with it for Enter.
+	m.planOffer = false
 	// The draft itself is never touched (pinned), only the menu it opened.
 	m.slashHide = true
 	*m = m.closeThemePicker(true)
