@@ -103,3 +103,8 @@ cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --cases echo,todos
 
 Screen captures land in `./smoke-captures/` (git-ignored), overridden with
 `--out` or `CRAZE_SMOKE_OUT`.
+
+The suite is isolated from your machine: its own tmux socket (`-L`), its own
+configuration (`-f /dev/null`, so no `~/.tmux.conf` hook can reach the panes),
+its own `HOME`, and stub `wl-copy`/`xclip`/`xsel` on the pane's `PATH` so a copy
+never touches your real clipboard.

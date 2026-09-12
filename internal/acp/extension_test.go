@@ -245,15 +245,15 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(3)
 	block := func() { defer wg.Done(); <-release }
-	p.client.SetPermissionHandler(func(PermissionRequest) PermissionDecision {
+	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
 		block()
 		return PermissionDecision{OptionID: "yes"}
 	})
-	p.client.SetAskHandler(func(AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
 		block()
 		return AskDecision{Answers: map[string][]string{"q1": {"opt-a"}}}
 	})
-	p.client.SetPlanHandler(func(CreatePlanRequest) PlanDecision {
+	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision {
 		block()
 		return PlanDecision{Accept: true}
 	})
@@ -297,7 +297,7 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 func TestTwoQueuedQuestionsAnsweredIndependently(t *testing.T) {
 	p := newRawPipe(t)
 	gate := make(chan struct{})
-	p.client.SetAskHandler(func(req AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(_ int, req AskQuestionRequest) AskDecision {
 		<-gate
 		return AskDecision{Answers: map[string][]string{req.Questions[0].ID: {req.Questions[0].Options[0].ID}}}
 	})
@@ -324,7 +324,7 @@ func TestTwoQueuedQuestionsAnsweredIndependently(t *testing.T) {
 
 func TestAskOutcomeDropsOptionIDsNotOffered(t *testing.T) {
 	p := newRawPipe(t)
-	p.client.SetAskHandler(func(AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
 		return AskDecision{Answers: map[string][]string{"q1": {"invented"}}}
 	})
 	p.send(t, 1, MethodCursorAskQuestion, `{"toolCallId":"t1","questions":[{"id":"q1","prompt":"?","options":[{"id":"opt-a","label":"A"}]}]}`)
@@ -337,8 +337,8 @@ func TestAskOutcomeDropsOptionIDsNotOffered(t *testing.T) {
 
 func TestAskSkipAndPlanRejectOutcomes(t *testing.T) {
 	p := newRawPipe(t)
-	p.client.SetAskHandler(func(AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
-	p.client.SetPlanHandler(func(CreatePlanRequest) PlanDecision { return PlanDecision{} })
+	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
+	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision { return PlanDecision{} })
 	p.send(t, 1, MethodCursorAskQuestion, `{"toolCallId":"t1","questions":[{"id":"q1","prompt":"?","options":[]}]}`)
 	if got := string(p.read(t).Result); got != `{"outcome":{"outcome":"skipped"}}` {
 		t.Fatalf("skip reply %s", got)
@@ -378,7 +378,7 @@ func TestCancelAnswersRequestsWhoseHandlerHasNotRunYet(t *testing.T) {
 	p := newRawPipe(t)
 	gate := make(chan struct{})
 	t.Cleanup(func() { close(gate) })
-	p.client.SetAskHandler(func(AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
 		<-gate
 		return AskDecision{Skip: true}
 	})
@@ -407,6 +407,101 @@ func TestCancelAnswersRequestsWhoseHandlerHasNotRunYet(t *testing.T) {
 	}
 }
 
+// The other half of the window above: the handler goroutine the runtime never
+// scheduled eventually wakes up, and by then the request it was dispatched for
+// can be answered already — or its whole turn can be over and another one
+// running. Running the handler then is what publishes a card for a turn that
+// has ended, so it does not run; the request is answered cancelled, which is a
+// no-op for one a cancel already answered. runIncoming is called by hand here
+// because that is precisely what a delayed goroutine does: run the body late.
+func TestDelayedHandlerDoesNotRunForARequestThatIsOver(t *testing.T) {
+	planParams := json.RawMessage(`{"name":"P","plan":"do it"}`)
+
+	t.Run("already answered", func(t *testing.T) {
+		p := newRawPipe(t)
+		in := p.client.register(&Message{
+			JSONRPC: jsonrpcVersion,
+			ID:      json.RawMessage(`7`),
+			Method:  MethodCursorCreatePlan,
+			Params:  planParams,
+		})
+		// The cancel's own reply goes out on the unbuffered pipe, so it has to
+		// be read while the cancel is writing it.
+		go p.client.completeIncomingCancelled()
+		msg := p.readWithin(t, 3*time.Second, "the cancel's reply")
+		if string(msg.Result) != `{"outcome":{"outcome":"cancelled"}}` {
+			t.Fatalf("cancel replied %s", msg.Result)
+		}
+
+		ran := false
+		p.client.runIncoming(in, func(*pendingReq) { ran = true })
+		if ran {
+			t.Fatal("the handler ran for a request the cancel had already answered")
+		}
+		p.noReply(t)
+	})
+
+	t.Run("turn is over", func(t *testing.T) {
+		p := newRawPipe(t)
+		in := p.client.register(&Message{
+			JSONRPC: jsonrpcVersion,
+			ID:      json.RawMessage(`8`),
+			Method:  MethodCursorCreatePlan,
+			Params:  planParams,
+		})
+		if !p.client.TurnLive(in.turn) {
+			t.Fatal("the turn a request arrived in must be live to begin with")
+		}
+		// A turn of the user's own, started while the goroutine was waiting.
+		p.client.mu.Lock()
+		p.client.turn++
+		p.client.mu.Unlock()
+		if p.client.TurnLive(in.turn) {
+			t.Fatal("a turn that has been superseded is not live")
+		}
+
+		ran := make(chan struct{})
+		go func() {
+			p.client.runIncoming(in, func(*pendingReq) { close(ran) })
+		}()
+		msg := p.readWithin(t, 3*time.Second, "the stale request's reply")
+		if string(msg.Result) != `{"outcome":{"outcome":"cancelled"}}` {
+			t.Fatalf("stale request replied %s", msg.Result)
+		}
+		select {
+		case <-ran:
+			t.Fatal("the handler ran for a request whose turn was over")
+		default:
+		}
+	})
+}
+
+// A handler for the turn that is running does run: the guard above is not
+// simply "never run a delayed handler".
+func TestHandlerRunsForTheRunningTurn(t *testing.T) {
+	p := newRawPipe(t)
+	in := p.client.register(&Message{
+		JSONRPC: jsonrpcVersion,
+		ID:      json.RawMessage(`9`),
+		Method:  MethodCursorCreatePlan,
+		Params:  json.RawMessage(`{"name":"P","plan":"do it"}`),
+	})
+	ran := make(chan struct{})
+	go p.client.runIncoming(in, func(*pendingReq) {
+		close(ran)
+		p.client.replyIncoming(in, planOutcome(PlanDecision{Accept: true}))
+	})
+	msg := p.readWithin(t, 3*time.Second, "the handler's reply")
+	if string(msg.Result) != `{"outcome":{"outcome":"accepted"}}` {
+		t.Fatalf("handler replied %s", msg.Result)
+	}
+	select {
+	case <-ran:
+	default:
+		t.Fatal("the handler never ran")
+	}
+}
+
 func TestNullParamsRejected(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -428,12 +523,12 @@ func TestNullParamsRejected(t *testing.T) {
 			called := false
 			p.client.SetTodosHandler(func(UpdateTodosRequest) []TodoItem { called = true; return nil })
 			p.client.SetTaskHandler(func(TaskRequest) { called = true })
-			p.client.SetPermissionHandler(func(PermissionRequest) PermissionDecision {
+			p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
 				called = true
 				return PermissionDecision{Cancelled: true}
 			})
-			p.client.SetAskHandler(func(AskQuestionRequest) AskDecision { called = true; return AskDecision{} })
-			p.client.SetPlanHandler(func(CreatePlanRequest) PlanDecision { called = true; return PlanDecision{} })
+			p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { called = true; return AskDecision{} })
+			p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision { called = true; return PlanDecision{} })
 
 			p.send(t, 9, tc.method, tc.params)
 			msg := p.readWithin(t, 3*time.Second, "InvalidParams reply")

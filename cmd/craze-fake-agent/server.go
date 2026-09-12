@@ -30,16 +30,30 @@ type server struct {
 	cancelled atomic.Bool
 	hangWait  chan struct{}
 	config    []map[string]any
-	// order is every session/set_mode and session/prompt in arrival order. It
-	// is what lets the planmode script prove craze chained the two rather than
-	// racing them; recording it anywhere but the read loop would record the
-	// order the handler goroutines happened to wake in.
-	order []string
+	// order is every session/set_mode and session/prompt in arrival order, with
+	// the mode each set_mode asked for. It is what lets the planmode scripts
+	// prove craze chained the two rather than racing them; recording it anywhere
+	// but the read loop would record the order the handler goroutines happened
+	// to wake in.
+	order []orderEntry
+}
+
+// orderEntry is one recorded call. mode is the mode a set_mode asked for and is
+// empty for a prompt. Method names alone cannot answer the question the goldens
+// rest on — a prompt whose own mode change arrived first, and to which mode —
+// because a set_mode belongs to the prompt that follows it and only the mode it
+// asked for says whether that prompt is an implement turn.
+type orderEntry struct {
+	method string
+	mode   string
 }
 
 const (
 	orderSetMode = "set_mode"
 	orderPrompt  = "prompt"
+	// implementModeID is the mode craze switches to on its way out of plan mode,
+	// so a prompt preceded by a set_mode to it is the implement turn.
+	implementModeID = "agent"
 )
 
 func defaultConfigOptions() []map[string]any {
@@ -142,14 +156,15 @@ func (s *server) onRequest(msg *acp.Message) {
 			},
 		})
 	case acp.MethodSessionPrompt:
-		s.noteOrder(orderPrompt)
+		s.noteOrder(orderPrompt, "")
 		go s.handlePrompt(msg)
 	case acp.MethodSessionSetModel:
 		s.reply(msg.ID, map[string]any{})
 	case acp.MethodSessionSetMode:
-		s.noteOrder(orderSetMode)
 		var p acp.SetModeParams
 		_ = json.Unmarshal(msg.Params, &p)
+		// Still on the read loop, so the mode is recorded in arrival order.
+		s.noteOrder(orderSetMode, p.ModeID)
 		s.reply(msg.ID, map[string]any{})
 		if p.ModeID != "" {
 			s.update(fakeSessionID, acp.SessionUpdate{
@@ -784,44 +799,91 @@ func (s *server) markdown(id json.RawMessage) {
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
 
-// noteOrder records one of the two methods the planmode script compares.
-func (s *server) noteOrder(method string) {
+// noteOrder records one of the two calls the planmode scripts compare. mode is
+// the mode a set_mode asked for, and empty for a prompt.
+func (s *server) noteOrder(method, mode string) {
 	s.mu.Lock()
-	s.order = append(s.order, method)
+	s.order = append(s.order, orderEntry{method: method, mode: mode})
 	s.mu.Unlock()
 }
 
-// setModeBefore reports whether a session/set_mode arrived before the nth
-// session/prompt, and whether one has arrived at all by now.
-func (s *server) setModeBefore(n int) (before, seen bool) {
+// promptMode answers the only question the planmode goldens rest on: did the nth
+// session/prompt's *own* mode change arrive before it, and which mode did it ask
+// for? A set_mode belongs to the prompt that follows it, so only the ones that
+// arrived since the previous prompt count — an earlier turn's set_mode says
+// nothing about this one, and the last of several is the one in force. mode is
+// empty when nothing preceded this prompt. overtaken is the race the chained
+// command exists to prevent: the mode change meant for this prompt arrived
+// *after* it, with no prompt of its own in between.
+func (s *server) promptMode(n int) (mode string, overtaken bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prompts := 0
-	for _, m := range s.order {
-		if m != orderSetMode {
-			prompts++
+	last := "" // the newest set_mode since the previous prompt
+	for _, e := range s.order {
+		if e.method == orderSetMode {
+			if prompts == n {
+				overtaken = overtaken || (mode == "" && e.mode == implementModeID)
+				continue
+			}
+			last = e.mode
 			continue
 		}
-		seen = true
-		if prompts < n {
-			before = true
+		prompts++
+		if prompts == n {
+			mode, last = last, ""
+			continue
 		}
+		if prompts > n {
+			// A later prompt owns everything after it.
+			break
+		}
+		last = ""
 	}
-	return before, seen
+	return mode, overtaken
 }
 
-// planmode is the plan-exit script. Leaving plan mode must be a set_mode
-// followed by a prompt, so a turn that arrives after one answers
-// "implementing", a turn with no set_mode anywhere is a refinement and answers
-// "planned", and a turn that overtook its own set_mode — the race the chained
-// command exists to prevent — answers WRONG ORDER and fails the golden.
-func (s *server) planmode(id json.RawMessage, text string, n int) {
-	before, seenMode := s.setModeBefore(n)
-	reply := "planned: " + text
+// planTurn is what a planmode prompt is, decided by the mode change that came
+// with it.
+type planTurn int
+
+const (
+	// planTurnPlan has no mode change of its own: the first plan, or a
+	// refinement typed while still in plan mode.
+	planTurnPlan planTurn = iota
+	// planTurnImplement is the plan exit: its own set_mode to the implement mode
+	// arrived first, which is what the chained command guarantees.
+	planTurnImplement
+	// planTurnRaced is a prompt that overtook the mode change meant for it.
+	planTurnRaced
+)
+
+// planTurnFor classifies the nth prompt. A set_mode that arrived first but asked
+// for some other mode — plan again, or ask — leaves the session planning, so the
+// turn is a plan turn and not an implement one.
+func (s *server) planTurnFor(n int) planTurn {
+	mode, overtaken := s.promptMode(n)
 	switch {
-	case before:
+	case mode == implementModeID:
+		return planTurnImplement
+	case overtaken:
+		return planTurnRaced
+	default:
+		return planTurnPlan
+	}
+}
+
+// planmode is the plan-exit script. Leaving plan mode must be a set_mode to the
+// implement mode followed by a prompt, so a turn that arrives after one answers
+// "implementing", a turn with no mode change of its own is a refinement and
+// answers "planned", and a turn that overtook its own set_mode — the race the
+// chained command exists to prevent — answers WRONG ORDER and fails the golden.
+func (s *server) planmode(id json.RawMessage, text string, n int) {
+	reply := "planned: " + text
+	switch s.planTurnFor(n) {
+	case planTurnImplement:
 		reply = "implementing: " + text
-	case seenMode:
+	case planTurnRaced:
 		reply = "WRONG ORDER"
 	}
 	s.say(reply)
@@ -857,13 +919,12 @@ func planExitScript(script string) bool {
 // turn only; the ordering rules are `planmode`'s, so WRONG ORDER still catches a
 // prompt that overtook its own set_mode.
 func (s *server) planmodeCard(id json.RawMessage, text string, n int) {
-	before, seenMode := s.setModeBefore(n)
-	switch {
-	case before:
+	switch s.planTurnFor(n) {
+	case planTurnImplement:
 		s.say("implementing: " + text)
 		s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 		return
-	case seenMode:
+	case planTurnRaced:
 		s.say("WRONG ORDER")
 		s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 		return

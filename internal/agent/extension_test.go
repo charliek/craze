@@ -414,9 +414,9 @@ func acpTask(id, model, agentID string, ms int) acp.TaskRequest {
 
 func TestCancelWaitingAnswersEachKindWithItsOwnDecision(t *testing.T) {
 	s := newSession(Options{})
-	permID, permCh, okPerm := s.park(askPermission, pendingAsk{})
-	askID, askCh, okAsk := s.park(askQuestion, pendingAsk{})
-	planID, planCh, okPlan := s.park(askPlan, pendingAsk{})
+	permID, permCh, okPerm := s.park(askPermission, 0, pendingAsk{})
+	askID, askCh, okAsk := s.park(askQuestion, 0, pendingAsk{})
+	planID, planCh, okPlan := s.park(askPlan, 0, pendingAsk{})
 	if !okPerm || !okAsk || !okPlan {
 		t.Fatal("park refused outside a cancelled turn")
 	}
@@ -447,8 +447,8 @@ func TestCancelWaitingAnswersEachKindWithItsOwnDecision(t *testing.T) {
 // A second local id per kind keeps its own counter, never a JSON-RPC id.
 func TestLocalIDsAreNumberedPerKind(t *testing.T) {
 	s := newSession(Options{})
-	s.park(askQuestion, pendingAsk{})
-	id, _, _ := s.park(askQuestion, pendingAsk{})
+	s.park(askQuestion, 0, pendingAsk{})
+	id, _, _ := s.park(askQuestion, 0, pendingAsk{})
 	if id != "ask-2" {
 		t.Fatalf("id %q", id)
 	}
@@ -513,10 +513,10 @@ func TestHandlerArrivingAfterCancelDoesNotPark(t *testing.T) {
 		name string
 		run  func(s *session) bool
 	}{
-		{"question", func(s *session) bool { return s.onAskQuestion(askReq()).Cancelled }},
-		{"plan", func(s *session) bool { return s.onCreatePlan(acp.CreatePlanRequest{Name: "P"}).Cancelled }},
+		{"question", func(s *session) bool { return s.onAskQuestion(0, askReq()).Cancelled }},
+		{"plan", func(s *session) bool { return s.onCreatePlan(0, acp.CreatePlanRequest{Name: "P"}).Cancelled }},
 		{"permission", func(s *session) bool {
-			return s.onPermission(acp.PermissionRequest{
+			return s.onPermission(0, acp.PermissionRequest{
 				Options: []acp.PermissionOption{{OptionID: "yes", Kind: acp.KindAllowOnce}},
 			}).Cancelled
 		}},
@@ -555,7 +555,7 @@ func TestCancelledRequestRaisesNoCard(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			s := newSession(Options{Interactive: true})
 			beginTurn(s)
-			id, _, ok := s.park(kind, pendingAsk{})
+			id, _, ok := s.park(kind, 0, pendingAsk{})
 			if !ok {
 				t.Fatal("park refused")
 			}
@@ -573,7 +573,7 @@ func TestCancelledRequestRaisesNoCard(t *testing.T) {
 			// A request that is still parked does publish, so the guard is not
 			// simply "never emit".
 			beginTurn(s)
-			live, _, ok := s.park(kind, pendingAsk{})
+			live, _, ok := s.park(kind, 0, pendingAsk{})
 			if !ok {
 				t.Fatal("park refused in a fresh turn")
 			}
@@ -595,9 +595,81 @@ func TestNextTurnParksAgain(t *testing.T) {
 	beginTurn(s)
 	s.cancelWaiting()
 	beginTurn(s)
-	id, ch, ok := s.park(askQuestion, pendingAsk{})
+	id, ch, ok := s.park(askQuestion, 0, pendingAsk{})
 	if !ok || id == "" || ch == nil {
 		t.Fatal("park refused in a fresh turn")
+	}
+}
+
+// A card belongs to the turn that asked for it. A handler goroutine the runtime
+// delayed can start after its turn was cancelled and the next one began, and
+// the turn it arrived in is the only thing that says so: the session's own
+// "current turn" is the new one by then, and the request it is holding is the
+// old one's. Publishing it would put a plan the user cancelled in front of a
+// turn that never made it, and answering that card would uncover the new turn's
+// plan offer underneath it.
+//
+// Two guards, one per window: park refuses a request whose turn is already
+// over, and emitParked refuses one whose turn ended between the park and the
+// emit.
+func TestCardFromAnEndedTurnIsNeverPublished(t *testing.T) {
+	s := startScriptOpts(t, "echo", Options{Interactive: true})
+	log := collect(t, s)
+	if _, err := s.Prompt(t.Context(), "one"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 0 is the session before that prompt: over, and not the turn running.
+	if _, _, ok := s.park(askPlan, 0, pendingAsk{}); ok {
+		t.Fatal("park must refuse a request whose turn is over")
+	}
+	if dec := s.onCreatePlan(0, acp.CreatePlanRequest{Name: "stale"}); !dec.Cancelled {
+		t.Fatal("a handler from an ended turn must answer cancelled")
+	}
+	s.mu.Lock()
+	waiting := len(s.waiting)
+	s.mu.Unlock()
+	if waiting != 0 {
+		t.Fatalf("%d requests parked for an ended turn", waiting)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventPlan {
+			t.Fatalf("an ended turn published %+v", ev.Plan)
+		}
+	}
+
+	// The turn the prompt above ran in still is the client's turn, so its own
+	// card does publish: the guard is not "never publish".
+	done := make(chan acp.PlanDecision, 1)
+	go func() { done <- s.onCreatePlan(1, acp.CreatePlanRequest{Name: "live"}) }()
+	ev := log.waitType(t, EventPlan)
+	if ev.Plan == nil || ev.Plan.Name != "live" {
+		t.Fatalf("published %+v", ev.Plan)
+	}
+	if err := s.AnswerPlan(ev.Plan.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if dec := <-done; dec.Cancelled {
+		t.Fatal("a card of the running turn was answered as cancelled")
+	}
+
+	// The narrow window: parked while the turn was live, emitted after the next
+	// turn had started.
+	id, _, ok := s.park(askPlan, 1, pendingAsk{})
+	if !ok {
+		t.Fatal("park refused for the running turn")
+	}
+	if _, err := s.Prompt(t.Context(), "two"); err != nil {
+		t.Fatal(err)
+	}
+	if s.emitParked(id, Event{Type: EventPlan, Plan: &PlanEvent{ID: id, Name: "late"}}) {
+		t.Fatal("a card whose turn ended before the emit must not publish")
+	}
+	s.mu.Lock()
+	_, held := s.waiting[id]
+	s.mu.Unlock()
+	if held {
+		t.Fatal("a request nobody can answer was left parked")
 	}
 }
 
@@ -606,7 +678,7 @@ func TestParkRefusedAfterClose(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := s.park(askQuestion, pendingAsk{}); ok {
+	if _, _, ok := s.park(askQuestion, 0, pendingAsk{}); ok {
 		t.Fatal("park must refuse on a closed session")
 	}
 }

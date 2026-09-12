@@ -225,7 +225,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 		c := spawnScript(t, "permission")
 		up := attachUpdates(c)
 		var used string
-		c.SetPermissionHandler(func(req PermissionRequest) PermissionDecision {
+		c.SetPermissionHandler(func(_ int, req PermissionRequest) PermissionDecision {
 			id, ok := PickKind(req.Options, KindAllowOnce)
 			if !ok {
 				t.Error("no allow_once in request")
@@ -253,7 +253,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 	t.Run("reject", func(t *testing.T) {
 		c := spawnScript(t, "permission")
 		up := attachUpdates(c)
-		c.SetPermissionHandler(func(req PermissionRequest) PermissionDecision {
+		c.SetPermissionHandler(func(_ int, req PermissionRequest) PermissionDecision {
 			id, ok := PickKind(req.Options, KindRejectOnce)
 			if !ok {
 				t.Error("no reject_once")
@@ -277,7 +277,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 
 func TestPermissionNeverInventsOptionID(t *testing.T) {
 	c := spawnScript(t, "permission")
-	c.SetPermissionHandler(func(PermissionRequest) PermissionDecision {
+	c.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
 		return PermissionDecision{OptionID: "invented-not-in-request"}
 	})
 	handshake(t, c)
@@ -472,7 +472,7 @@ func TestPermissionRepliesUseRequestOptionID(t *testing.T) {
 	})
 	srv.Start()
 
-	client.SetPermissionHandler(func(req PermissionRequest) PermissionDecision {
+	client.SetPermissionHandler(func(_ int, req PermissionRequest) PermissionDecision {
 		id, ok := PickYoloAllow(req.Options)
 		if !ok {
 			return PermissionDecision{Cancelled: true}

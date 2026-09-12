@@ -14,12 +14,16 @@ type Client struct {
 	conn  *Conn
 	child *Child
 
-	mu             sync.Mutex
-	sessionID      string
-	inPrompt       bool
-	permHandler    func(PermissionRequest) PermissionDecision
-	askHandler     func(AskQuestionRequest) AskDecision
-	planHandler    func(CreatePlanRequest) PlanDecision
+	mu        sync.Mutex
+	sessionID string
+	inPrompt  bool
+	// turn counts prompts. It is the identity of a turn: a blocking request
+	// records the turn it arrived in, so a handler that starts late can tell
+	// that the turn it belongs to is over.
+	turn           int
+	permHandler    func(turn int, req PermissionRequest) PermissionDecision
+	askHandler     func(turn int, req AskQuestionRequest) AskDecision
+	planHandler    func(turn int, req CreatePlanRequest) PlanDecision
 	todosHandler   func(UpdateTodosRequest) []TodoItem
 	taskHandler    func(TaskRequest)
 	onUpdate       func(SessionNotification)
@@ -32,9 +36,11 @@ type Client struct {
 // pendingReq is one blocking agent→client request. decide carries the kind's
 // own decision type (PermissionDecision, AskDecision, PlanDecision); replied
 // makes sure cancel, close and the handler between them answer exactly once.
+// turn is the turn the read loop registered it in.
 type pendingReq struct {
 	id      json.RawMessage
 	method  string
+	turn    int
 	decide  chan any
 	replied bool
 }
@@ -71,7 +77,10 @@ func (c *Client) PromptInFlight() bool {
 	return c.inPrompt
 }
 
-func (c *Client) SetPermissionHandler(h func(PermissionRequest) PermissionDecision) {
+// SetPermissionHandler installs a session/request_permission handler. Every
+// blocking handler is handed the turn its request arrived in, so anything it
+// puts on screen can be dropped once that turn is over (see TurnLive).
+func (c *Client) SetPermissionHandler(h func(turn int, req PermissionRequest) PermissionDecision) {
 	c.mu.Lock()
 	c.permHandler = h
 	c.mu.Unlock()
@@ -79,7 +88,7 @@ func (c *Client) SetPermissionHandler(h func(PermissionRequest) PermissionDecisi
 
 // SetAskHandler installs a cursor/ask_question handler. Without one the client
 // auto-answers with each question's first option.
-func (c *Client) SetAskHandler(h func(AskQuestionRequest) AskDecision) {
+func (c *Client) SetAskHandler(h func(turn int, req AskQuestionRequest) AskDecision) {
 	c.mu.Lock()
 	c.askHandler = h
 	c.mu.Unlock()
@@ -87,7 +96,7 @@ func (c *Client) SetAskHandler(h func(AskQuestionRequest) AskDecision) {
 
 // SetPlanHandler installs a cursor/create_plan handler. Without one the client
 // auto-accepts.
-func (c *Client) SetPlanHandler(h func(CreatePlanRequest) PlanDecision) {
+func (c *Client) SetPlanHandler(h func(turn int, req CreatePlanRequest) PlanDecision) {
 	c.mu.Lock()
 	c.planHandler = h
 	c.mu.Unlock()
@@ -165,6 +174,9 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		return nil, ErrPromptInFlight
 	}
 	c.inPrompt = true
+	// A new turn: every blocking request registered from here on belongs to it,
+	// and every request of the turn before it is now stale.
+	c.turn++
 	sid := c.sessionID
 	c.mu.Unlock()
 	defer func() {
@@ -289,15 +301,60 @@ func (c *Client) onRequest(msg *Message) {
 // dispatch registers a blocking request, then runs its handler off the read
 // loop so the connection keeps draining while the user decides.
 func (c *Client) dispatch(msg *Message, run func(*pendingReq)) {
-	in := &pendingReq{id: msg.ID, method: msg.Method, decide: make(chan any, 1)}
+	in := c.register(msg)
+	go c.runIncoming(in, run)
+}
+
+// register records a blocking request on the read loop, stamped with the turn
+// it arrived in.
+func (c *Client) register(msg *Message) *pendingReq {
+	c.mu.Lock()
+	turn := c.turn
+	c.mu.Unlock()
+	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, decide: make(chan any, 1)}
 	key := idKey(msg.ID)
 	c.incomingMu.Lock()
 	c.incoming[key] = in
 	c.incomingMu.Unlock()
-	go func() {
-		defer c.dropIncoming(key)
-		run(in)
-	}()
+	return in
+}
+
+// runIncoming is the handler goroutine's body. A goroutine the runtime did not
+// schedule for a while can wake up long after its request stopped mattering:
+// a cancel may have answered it already, or its whole turn may have ended and
+// another one begun. Either way the handler must not run, because a handler is
+// what raises a card, and a card from a turn that is over would be answered
+// into the turn now running. The request is answered cancelled instead — for an
+// already-answered one that is a no-op, and for the rest it is the reply the
+// agent is still waiting for.
+func (c *Client) runIncoming(in *pendingReq, run func(*pendingReq)) {
+	defer c.dropIncoming(idKey(in.id))
+	if !c.liveIncoming(in) {
+		c.replyIncoming(in, cancelledOutcome())
+		return
+	}
+	run(in)
+}
+
+// liveIncoming reports whether a registered request still deserves its handler:
+// nothing has answered it yet and the turn it arrived in is still the one
+// running.
+func (c *Client) liveIncoming(in *pendingReq) bool {
+	c.mu.Lock()
+	turn := c.turn
+	c.mu.Unlock()
+	c.incomingMu.Lock()
+	defer c.incomingMu.Unlock()
+	return !in.replied && in.turn == turn
+}
+
+// TurnLive reports whether turn is still the one the client is running. A
+// blocking request is handed the turn it arrived in, so its handler can ask
+// this before it publishes anything for a turn that has since ended.
+func (c *Client) TurnLive(turn int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return turn == c.turn
 }
 
 func (c *Client) onNotify(msg *Message) {
@@ -394,7 +451,7 @@ func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {
 	h := c.permHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.finishPermission(in, req, h(req))
+		c.finishPermission(in, req, h(in.turn, req))
 		return
 	}
 	select {
@@ -419,7 +476,7 @@ func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
 	h := c.askHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.replyIncoming(in, askOutcome(req, h(req)))
+		c.replyIncoming(in, askOutcome(req, h(in.turn, req)))
 		return
 	}
 	select {
@@ -435,7 +492,7 @@ func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
 	h := c.planHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.replyIncoming(in, planOutcome(h(req)))
+		c.replyIncoming(in, planOutcome(h(in.turn, req)))
 		return
 	}
 	select {

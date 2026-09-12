@@ -13,8 +13,15 @@
 go install github.com/charliek/craze/cmd/craze@main
 ```
 
-Use `@main`, not `@latest`: no tag exists yet, so `@latest` fails. Until the
-first tag, `craze version` reports `dev`.
+`@main` pins the branch explicitly. `go install` writes the binary to `$GOBIN`,
+or `$GOPATH/bin` when that is unset — `$HOME/go/bin` by default — so with that
+directory on your `PATH` the command is `craze`:
+
+```bash
+craze version
+```
+
+Until the first tag, it reports `dev`.
 
 ## Build from source
 
@@ -31,6 +38,9 @@ is for tests; a live session uses `cursor-agent` on `PATH` (or `--agent-bin` /
 `.mise.toml`; `mise install`).
 
 ## First run
+
+`./bin/craze` is the build-from-source path; an installed craze is on your
+`PATH`, so drop the `./bin/`.
 
 ```bash
 ./bin/craze                      # the TUI, in the current directory

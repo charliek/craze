@@ -14,8 +14,15 @@ A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
    go install github.com/charliek/craze/cmd/craze@main
    ```
 
-   Use `@main`, not `@latest` — no tag exists yet, so `@latest` fails.
-   `craze version` reports `dev` until the first tag lands.
+   `@main` pins the branch explicitly. `go install` writes the binary to
+   `$GOBIN`, or `$GOPATH/bin` when that is unset — `$HOME/go/bin` by default —
+   so with that directory on your `PATH` the command is `craze`:
+
+   ```shell
+   craze version
+   ```
+
+   It reports `dev` until the first tag lands.
 
 ## Build from source
 
@@ -30,6 +37,9 @@ make build
 Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
 
 ## Running
+
+`./bin/craze` below is the build-from-source path; an installed craze is on your
+`PATH`, so drop the `./bin/`.
 
 ```shell
 ./bin/craze                      # the TUI, in the current directory

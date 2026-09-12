@@ -499,8 +499,17 @@ class TmuxPane:
     # -- tmux plumbing
 
     def _tmux(self, *args: str, check: bool = True) -> str:
+        # `-f /dev/null` as well as the private `-L` socket: the socket keeps the
+        # suite out of the developer's server, but without `-f` the server it
+        # starts still reads their ~/.tmux.conf. A config with
+        # `set-clipboard on` plus a `pane-set-clipboard` hook pipes the pane's
+        # OSC 52 straight into the real clipboard, and the hook runs in tmux's
+        # environment, not the pane's, so the stubs on the pane PATH would not
+        # catch it — the assertion would pass while the developer's clipboard
+        # changed. tmux only reads the file when it starts the server, so
+        # passing the flag on every command is harmless.
         proc = subprocess.run(
-            [TMUX, "-L", self.socket, *args],
+            [TMUX, "-f", "/dev/null", "-L", self.socket, *args],
             capture_output=True,
             text=True,
         )
@@ -833,6 +842,70 @@ def test_tmux_smoke(
         work=tmp_path,
         out_dir=Path(os.environ.get("CRAZE_SMOKE_OUT") or DEFAULT_OUT),
     )
+
+
+@pytest.mark.skipif(not (TMUX and ENABLED), reason=SKIP_REASON)
+def test_user_tmux_config_is_not_loaded(
+    craze_bin: Path,
+    fake_agent_bin: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The suite's server must not read the developer's tmux configuration.
+
+    ``-L`` gives the suite its own socket but not its own config, and a
+    ``~/.tmux.conf`` with ``set-clipboard on`` plus a ``pane-set-clipboard`` hook
+    pipes the pane's OSC 52 into the real clipboard — from tmux's environment,
+    which the pane's stub PATH never reaches, so the stub assertion would still
+    pass while the developer's clipboard changed. A user option stands in for the
+    hook here because it is the same question (was the file read?) and needs no
+    clipboard tool to answer. The control is the argv without ``-f``: it proves
+    the poisoned file is real and would have been loaded.
+    """
+    option = "@craze-smoke-poison"
+    home = tmp_path / "poison-home"
+    (home / ".config" / "tmux").mkdir(parents=True)
+    conf = f"set -g {option} yes\n"
+    (home / ".tmux.conf").write_text(conf)
+    # tmux 3.1+ reads the XDG path too; poison both so the test does not depend
+    # on which one this tmux prefers.
+    (home / ".config" / "tmux" / "tmux.conf").write_text(conf)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+    pane = TmuxPane(
+        craze=craze_bin,
+        fake_agent=fake_agent_bin,
+        name="tmux-conf",
+        script="echo",
+        cols=80,
+        rows=24,
+        work=tmp_path,
+        out_dir=tmp_path,
+        no_force=False,
+        chip=None,
+    )
+    try:
+        # `sleep`, not craze: what is under test is the server's configuration,
+        # and the pane's contents do not matter.
+        pane._tmux("new-session", "-d", "-s", pane.session, "sleep 30")
+        got = pane._tmux("show-options", "-gv", option, check=False).strip()
+    finally:
+        pane.close()
+    if got:
+        raise SmokeFailure(f"the suite's tmux server loaded ~/.tmux.conf ({option}={got})")
+
+    socket = f"craze-poison-{os.getpid()}"
+    control = [TMUX, "-L", socket]
+    try:
+        subprocess.run([*control, "new-session", "-d", "-s", "control", "sleep 30"], check=True)
+        seen = subprocess.run(
+            [*control, "show-options", "-gv", option], capture_output=True, text=True
+        ).stdout.strip()
+    finally:
+        subprocess.run([*control, "kill-server"], capture_output=True)
+    if seen != "yes":
+        raise SmokeFailure("the poisoned config never took effect, so the check above proves nothing")
 
 
 # ------------------------------------------------------------------ CLI use

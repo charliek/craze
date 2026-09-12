@@ -31,7 +31,9 @@ type session struct {
 	seq        map[string]int
 	// turn counts prompts; cancelledTurn records the one a cancel was issued
 	// for, so a request that arrives while the turn is being cancelled is
-	// answered instead of parked.
+	// answered instead of parked. Which turn a *card* belongs to is the client's
+	// turn, not this one: only the client knows when a request arrived, and a
+	// handler goroutine can start long after that (see park).
 	turn          int
 	cancelledTurn int
 	snap          Snapshot
@@ -49,9 +51,11 @@ const taskReceiptCap = 32
 
 // pendingAsk is one blocking request the UI still owes an answer to. kind is
 // askPermission, askQuestion or askPlan; decide carries that kind's own
-// acp decision type.
+// acp decision type. turn is the client turn the request arrived in, which is
+// what keeps a card out of a later turn.
 type pendingAsk struct {
 	kind    string
+	turn    int
 	options []acp.PermissionOption
 	decide  chan any
 }
@@ -450,7 +454,7 @@ func (s *session) Close() error {
 	return nil
 }
 
-func (s *session) onPermission(req acp.PermissionRequest) acp.PermissionDecision {
+func (s *session) onPermission(turn int, req acp.PermissionRequest) acp.PermissionDecision {
 	if s.opts.Force {
 		id, ok := acp.PickYoloAllow(req.Options)
 		if !ok {
@@ -458,7 +462,7 @@ func (s *session) onPermission(req acp.PermissionRequest) acp.PermissionDecision
 		}
 		return acp.PermissionDecision{OptionID: id}
 	}
-	id, ch, ok := s.park(askPermission, pendingAsk{options: req.Options})
+	id, ch, ok := s.park(askPermission, turn, pendingAsk{options: req.Options})
 	if !ok {
 		return acp.PermissionDecision{Cancelled: true}
 	}
@@ -486,7 +490,7 @@ func (s *session) onPermission(req acp.PermissionRequest) acp.PermissionDecision
 
 // onAskQuestion blocks on the UI when Interactive, and otherwise answers with
 // each question's first option and reports what it sent.
-func (s *session) onAskQuestion(req acp.AskQuestionRequest) acp.AskDecision {
+func (s *session) onAskQuestion(turn int, req acp.AskQuestionRequest) acp.AskDecision {
 	ev := &QuestionEvent{
 		Title:     sanitizeText(req.Title),
 		Questions: questionsFromRequest(req),
@@ -498,7 +502,7 @@ func (s *session) onAskQuestion(req acp.AskQuestionRequest) acp.AskDecision {
 		s.emit(Event{Type: EventQuestion, Question: ev})
 		return acp.AskDecision{Answers: ev.Answers}
 	}
-	id, ch, ok := s.park(askQuestion, pendingAsk{})
+	id, ch, ok := s.park(askQuestion, turn, pendingAsk{})
 	if !ok {
 		return acp.AskDecision{Cancelled: true}
 	}
@@ -534,7 +538,7 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 
 // onCreatePlan mirrors onAskQuestion: block when Interactive, accept and
 // report otherwise.
-func (s *session) onCreatePlan(req acp.CreatePlanRequest) acp.PlanDecision {
+func (s *session) onCreatePlan(turn int, req acp.CreatePlanRequest) acp.PlanDecision {
 	ev := &PlanEvent{
 		Name:     sanitizeText(req.DisplayName()),
 		Overview: sanitizeText(req.Overview),
@@ -548,7 +552,7 @@ func (s *session) onCreatePlan(req acp.CreatePlanRequest) acp.PlanDecision {
 		s.emit(Event{Type: EventPlan, Plan: ev})
 		return acp.PlanDecision{Accept: true}
 	}
-	id, ch, ok := s.park(askPlan, pendingAsk{})
+	id, ch, ok := s.park(askPlan, turn, pendingAsk{})
 	if !ok {
 		return acp.PlanDecision{Cancelled: true}
 	}
@@ -561,18 +565,24 @@ func (s *session) onCreatePlan(req acp.CreatePlanRequest) acp.PlanDecision {
 
 // park registers a blocking request and returns its craze-local id (perm-N,
 // ask-N, plan-N — never a JSON-RPC id or a toolCallId) and decision channel.
+// turn is the turn the request arrived in, handed to the handler by the client.
 //
-// It refuses once the current turn has been cancelled or the session closed:
-// cancelWaiting only drains what is already in the map, so without this a
-// request that arrives while a cancel is in flight would park forever and
-// leave the agent waiting on a reply that never comes.
-func (s *session) park(kind string, p pendingAsk) (string, chan any, bool) {
+// It refuses once the request's own turn is over, the current turn has been
+// cancelled, or the session closed. The turn check is what a handler goroutine
+// the runtime delayed past the end of its turn runs into: cancelWaiting only
+// drains what is already in the map, so without it a late request would park
+// into the turn now running and raise a card for a plan that turn never made —
+// and without the cancelled-turn check a request arriving while a cancel is in
+// flight would park forever and leave the agent waiting on a reply that never
+// comes.
+func (s *session) park(kind string, turn int, p pendingAsk) (string, chan any, bool) {
 	ch := make(chan any, 1)
 	p.kind = kind
+	p.turn = turn
 	p.decide = ch
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || (s.turn > 0 && s.cancelledTurn == s.turn) {
+	if s.closed || !s.turnLiveLocked(turn) || (s.turn > 0 && s.cancelledTurn == s.turn) {
 		return "", nil, false
 	}
 	s.seq[kind]++
@@ -581,22 +591,42 @@ func (s *session) park(kind string, p pendingAsk) (string, chan any, bool) {
 	return id, ch, true
 }
 
-// emitParked publishes a card event only while its request is still parked. A
-// cancel that landed between the park and the emit has already answered the
-// request and taken it out of waiting, so emitting anyway would raise a card
-// for a request nobody can answer any more. The check takes the same lock
-// cancelWaiting does; it cannot be held across the emit, because emit blocks
-// on the event channel and the reader of that channel is the goroutine that
-// answers cards.
+// emitParked publishes a card event only while its request is still parked and
+// still belongs to the turn it arrived in. A cancel that landed between the
+// park and the emit has already answered the request and taken it out of
+// waiting, so emitting anyway would raise a card for a request nobody can
+// answer any more; a turn that ended in that same window would put the card in
+// front of the next turn, which is not the turn that asked for it. The waiting
+// check takes the same lock cancelWaiting does; it cannot be held across the
+// emit, because emit blocks on the event channel and the reader of that channel
+// is the goroutine that answers cards.
 func (s *session) emitParked(id string, ev Event) bool {
 	s.mu.Lock()
-	_, live := s.waiting[id]
+	p, live := s.waiting[id]
+	if live && !s.turnLiveLocked(p.turn) {
+		// Nobody will ever answer it now, so it does not stay in the map: the
+		// handler replies cancelled on its way out instead.
+		delete(s.waiting, id)
+		live = false
+	}
 	s.mu.Unlock()
 	if !live {
 		return false
 	}
 	s.emit(ev)
 	return true
+}
+
+// turnLiveLocked reports whether the turn a request arrived in is still the one
+// the client is running; callers hold s.mu. With no client — before Start, and
+// in the unit tests — there is one turn and it is turn 0. The lock order is
+// session then client: the client answers this without taking any lock the
+// session holds, and it never calls back into the session under its own.
+func (s *session) turnLiveLocked(turn int) bool {
+	if s.client == nil {
+		return turn == 0
+	}
+	return s.client.TurnLive(turn)
 }
 
 func (s *session) nextID(kind string) string {
