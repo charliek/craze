@@ -190,13 +190,37 @@ func TestThoughtRunCollapsesToOneRow(t *testing.T) {
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "answer"}})
 	m = tm.(Model)
 	view = plainView(m)
-	if !strings.Contains(view, "+ Thought for ") {
-		t.Fatalf("a closed thought run should say Thought for:\n%s", view)
+	if !strings.Contains(view, "+ Thought") {
+		t.Fatalf("a closed thought run should say Thought:\n%s", view)
+	}
+	// These chunks carry no timestamps, so nothing was measured: the row says
+	// so by leaving the duration off rather than claiming "for 0s".
+	if strings.Contains(view, "0s") {
+		t.Fatalf("a thought run that took no measurable time must not print a duration:\n%s", view)
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	m = tm.(Model)
 	if !strings.Contains(plainView(m), "weighing the options") {
 		t.Fatalf("ctrl+o did not expand the thought:\n%s", plainView(m))
+	}
+}
+
+// TestThoughtRunShowsAMeasuredDuration is the other half: cursor bursts a run
+// inside a second often enough that "+ Thought for 0s" read like a bug, but a
+// run that really did take time still says how long.
+func TestThoughtRunShowsAMeasuredDuration(t *testing.T) {
+	m := sized(t)
+	base := time.Now()
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{
+		Type: agent.EventText,
+		Text: "answer",
+		At:   base.Add(5 * time.Second),
+	}})
+	m = tm.(Model)
+	if view := plainView(m); !strings.Contains(view, "+ Thought for 5s") {
+		t.Fatalf("a measured thought run should print its duration:\n%s", view)
 	}
 }
 
@@ -461,5 +485,28 @@ func TestModeChangeLeavesANote(t *testing.T) {
 	notes := texts(m, entryNote)
 	if len(notes) != 1 || !strings.HasPrefix(notes[0], "mode → ") {
 		t.Fatalf("mode note %q", notes)
+	}
+}
+
+// TestCancelledTurnLeavesANote pins the acknowledgement Esc used to lack. The
+// spinner going away is the only other sign the cancel landed, and that is
+// indistinguishable from the turn having finished on its own.
+func TestCancelledTurnLeavesANote(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
+	m = tm.(Model)
+	if notes := texts(m, entryNote); len(notes) != 1 || notes[0] != "cancelled" {
+		t.Fatalf("cancel note %q", notes)
+	}
+	if m.status != statusIdle {
+		t.Fatalf("status %v after a cancel", m.status)
+	}
+
+	// A turn that ended on its own says nothing.
+	m = sized(t)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	m = tm.(Model)
+	if notes := texts(m, entryNote); len(notes) != 0 {
+		t.Fatalf("a normal turn end should be silent, got %q", notes)
 	}
 }

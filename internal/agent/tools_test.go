@@ -111,3 +111,47 @@ func TestLocationPathsCap(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// TestTaskClassification pins the order IsTask checks things in. The live bug
+// this exists for: cursor rewrites its todo tool's title to
+// "Update TODOs: <the user's todo text>", so a turn told to "spawn a subagent"
+// made the title fallback classify the todo writer as a sub-agent and put a
+// bogus row under the status rows.
+func TestTaskClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		tool           ToolEvent
+		task, todoTool bool
+	}{
+		{"cursor sub-agent", ToolEvent{ToolName: "task", Title: "Task: Count main.go lines"}, true, false},
+		{"todo writer", ToolEvent{ToolName: "updateTodos", Title: "Update TODOs"}, false, true},
+		{
+			"todo writer quoting the user's todo text",
+			ToolEvent{ToolName: "updateTodos", Title: "Update TODOs: Spawn a subagent to count lines in main.go"},
+			false, true,
+		},
+		{
+			"todo writer with only the title to go on",
+			ToolEvent{Title: "Update TODOs: Spawn a subagent to count lines"},
+			false, true,
+		},
+		{
+			"a declared tool is not reclassified by user text in its title",
+			ToolEvent{ToolName: "read", Title: "Read the subagent task notes"},
+			false, false,
+		},
+		{"003 fallback: title only", ToolEvent{Title: "Subagent research"}, true, false},
+		{"003 fallback: Task: prefix", ToolEvent{Title: "Task: something"}, true, false},
+		{"plain shell", ToolEvent{ToolName: "shell", Title: "`go vet ./...`"}, false, false},
+		{"empty", ToolEvent{}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.tool.IsTask(); got != tc.task {
+				t.Fatalf("IsTask() = %v, want %v", got, tc.task)
+			}
+			if got := tc.tool.IsTodoTool(); got != tc.todoTool {
+				t.Fatalf("IsTodoTool() = %v, want %v", got, tc.todoTool)
+			}
+		})
+	}
+}

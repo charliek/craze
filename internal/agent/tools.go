@@ -29,9 +29,25 @@ const (
 var subagentTitleRe = regexp.MustCompile(`(?i)\bsubagent\b|\btask\b`)
 
 // IsTask reports whether the tool call is a sub-agent.
+//
+// The order matters. A todo tool is never a sub-agent: cursor rewrites its
+// title to "Update TODOs: <the user's todo text>", so a live turn asked to
+// "spawn a subagent to count lines" made the title fallback below classify the
+// todo writer as a sub-agent and put a bogus row under the status rows.
+//
+// After that, a tool that declares a _toolName is classified by that name
+// alone. The title heuristics are the 003 fallback for tools that declare
+// nothing (cursor's own sub-agent calls, and the `tasks` fake), and they are
+// the only part that can be fooled by text the user wrote, so they only run
+// when there is nothing better to go on.
 func (t ToolEvent) IsTask() bool {
-	return t.ToolName == "task" ||
-		strings.HasPrefix(t.Title, "Task:") ||
+	if t.IsTodoTool() {
+		return false
+	}
+	if t.ToolName != "" {
+		return t.ToolName == "task"
+	}
+	return strings.HasPrefix(t.Title, "Task:") ||
 		(t.Title != "" && subagentTitleRe.MatchString(t.Title))
 }
 

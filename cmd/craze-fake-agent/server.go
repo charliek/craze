@@ -8,11 +8,18 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
 
 const fakeSessionID = "fake-session-1"
+
+// taskRunFor is how long the sub-agent tool stays in_progress. A real
+// sub-agent runs for seconds; without a pause here the running row lives
+// for less than one render frame, so no terminal ever paints it and the
+// tmux smoke's "● agent then ✓ agent" expectation is vacuous.
+const taskRunFor = 250 * time.Millisecond
 
 type server struct {
 	conn   *acp.Conn
@@ -660,6 +667,7 @@ func (s *server) task(id json.RawMessage, late bool) {
 		"toolCallId":    taskToolCallID,
 		"status":        "in_progress",
 	})
+	time.Sleep(taskRunFor)
 	if !late {
 		s.taskReceipt()
 	}

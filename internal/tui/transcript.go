@@ -350,9 +350,15 @@ func (m *Model) renderEntry(e *entry, key renderKey) []string {
 
 // thoughtRows collapses a whole thought run to one row; Ctrl+O reveals the text.
 func (m *Model) thoughtRows(e *entry, key renderKey) []string {
-	head := "+ Thought for " + formatElapsed(e.end.Sub(e.at))
+	// Cursor delivers a thought run in a burst, so a whole run can land inside
+	// one second and the row is honestly "0s" — which reads like a bug seven
+	// rows in a row. Nothing was measured, so nothing is shown.
+	head, sep := "+ Thought", " for "
 	if e.open {
-		head = "+ Thinking… " + formatElapsed(e.end.Sub(e.at))
+		head, sep = "+ Thinking…", " "
+	}
+	if d := e.end.Sub(e.at); d.Round(time.Second) > 0 {
+		head += sep + formatElapsed(d)
 	}
 	rows := []string{renderSegs(key.width, seg{head, styleFG(m.theme.Thought)})}
 	if !key.expanded {

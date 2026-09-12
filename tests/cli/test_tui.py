@@ -45,7 +45,13 @@ def _cmdline_has(needle: str) -> bool:
 
 
 class PTYCraze:
-    def __init__(self, craze_bin: Path, fake_agent_bin: Path, workspace: Path) -> None:
+    def __init__(
+        self,
+        craze_bin: Path,
+        fake_agent_bin: Path,
+        workspace: Path,
+        script: str = "echo",
+    ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
         self._closed = threading.Event()
@@ -54,7 +60,7 @@ class PTYCraze:
         _set_winsize(master)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        env["CRAZE_FAKE_SCRIPT"] = "echo"
+        env["CRAZE_FAKE_SCRIPT"] = script
         env["HOME"] = str(workspace)
         env.pop("CRAZE_AGENT_BIN", None)
         try:
@@ -199,4 +205,20 @@ def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path:
         tui.write(b"\x04")
         code = tui.wait_exit()
         assert code == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_authfail_exits_nonzero(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """A session that never started must not exit 0.
+
+    craze deliberately stays up and shows the error — you can read it, and a
+    login is the fix — but the process has to tell a script that nothing ran.
+    """
+    with PTYCraze(craze_bin, fake_agent_bin, tmp_path, script="authfail") as tui:
+        tui.wait_contains("authentication failed")
+        tui.write(b"\x04")
+        code = tui.wait_exit()
+        assert code != 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)

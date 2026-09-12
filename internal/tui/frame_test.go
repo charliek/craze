@@ -435,7 +435,7 @@ func TestFrameGoldenMarkdown80x24(t *testing.T) {
 func TestFrameGoldenMarkdown120x40(t *testing.T) {
 	got := runFakeFrame(t, "markdown", 120, 40, "<wait:idle>go<enter><wait:text:Inline><wait:idle>")
 	assertGolden(t, "markdown-120x40", 120, 40, got)
-	for _, want := range []string{"+ Thought for ", "Heading", "• first item", "  │ go", "  │ func main() {"} {
+	for _, want := range []string{"+ Thought", "Heading", "• first item", "  │ go", "  │ func main() {"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
 		}
@@ -449,7 +449,7 @@ func TestFrameGoldenThoughtExpanded120x40(t *testing.T) {
 	got := runFakeFrame(t, "markdown", 120, 40,
 		"<wait:idle>go<enter><wait:text:Inline><wait:idle><ctrl-o><wait:text:shape of this reply>")
 	assertGolden(t, "thought-expanded-120x40", 120, 40, got)
-	if !strings.Contains(got, "+ Thought for ") {
+	if !strings.Contains(got, "+ Thought") {
 		t.Fatalf("the summary row stays above the expansion:\n%s", got)
 	}
 }
@@ -497,6 +497,25 @@ func TestFrameGoldenTaskLate80x24(t *testing.T) {
 	assertGolden(t, "task-late-80x24", 80, 24, got)
 	if !strings.Contains(got, "✓ agent  Count main.go lines  8.0s · grok-4.6-high-fast") {
 		t.Fatalf("a receipt that arrived first must still join:\n%s", got)
+	}
+}
+
+// TestFrameTaskRowIsPaintedWhileRunning pins the state §3.4 gives the task row
+// before its receipt lands. Nothing asserted it until now, and the fake used to
+// send in_progress and completed back to back, so the running row existed for
+// less than one render frame and no terminal ever drew it — the tmux smoke's
+// "● agent then ✓ agent" expectation was unfalsifiable. The <wait:text:> is the
+// assertion: it fails the run if that row is never published.
+func TestFrameTaskRowIsPaintedWhileRunning(t *testing.T) {
+	for _, script := range []string{"task", "task-late"} {
+		t.Run(script, func(t *testing.T) {
+			got := runFakeFrame(t, script, 80, 24,
+				"<wait:idle>go<enter><wait:text:● agent  Count main.go lines  running>"+
+					"<wait:text:done task><wait:idle>")
+			if !strings.Contains(got, "✓ agent  Count main.go lines  8.0s") {
+				t.Fatalf("the running row must end up completed:\n%s", got)
+			}
+		})
 	}
 }
 

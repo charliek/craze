@@ -70,6 +70,9 @@ type Model struct {
 	yolo   bool
 	status status
 	err    string
+	// startErr is the session that never came up. It is the only error that
+	// reaches craze's exit status: Run returns it once the program is over.
+	startErr error
 
 	// git is found once, at start; branch is re-read when a turn ends.
 	git    gitInfo
@@ -228,11 +231,20 @@ func Run(cfg Config) error {
 		opts = append(opts, tea.WithMouseCellMotion())
 	}
 	p := tea.NewProgram(m, opts...)
-	_, err := p.Run()
+	final, err := p.Run()
 	if m.sess != nil {
 		_ = m.sess.Close()
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// A quit is clean unless the session never started. Only startCmd's
+	// failure counts: an error mid-session leaves a usable craze, and quitting
+	// out of one is a normal exit.
+	if fm, ok := final.(Model); ok {
+		return fm.startErr
+	}
+	return nil
 }
 
 func (m Model) Init() tea.Cmd {
@@ -294,8 +306,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitEvent(m.sess)
 
 	case errMsg:
+		// errMsg is only ever startCmd's: the session never came up. The TUI
+		// stays on screen so the error is readable, but craze must not exit 0
+		// afterwards, so the failure rides out on the final model.
 		m.status = statusError
 		m.err = msg.err.Error()
+		m.startErr = msg.err
 		m.addError(m.err)
 		return m, nil
 
@@ -732,6 +748,10 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.branch = m.git.branch()
 		if ev.StopReason == "cancelled" {
 			m.status = statusIdle
+			// Esc leaves nothing else behind: the spinner going away is the
+			// only other sign the cancel landed, and it is indistinguishable
+			// from the turn having finished on its own.
+			m.addNote("cancelled")
 		}
 	case agent.EventError:
 		m.status = statusError
