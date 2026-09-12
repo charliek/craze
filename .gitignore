@@ -20,6 +20,12 @@ __pycache__/
 # Python/uv
 .venv/
 
+# Docs build output
+site-build/
+
+# Zensical differential-build cache (root only)
+/.cache/
+
 # Claude Code local/user-specific files
 .claude/settings.local.json
 .claude/projects/

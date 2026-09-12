@@ -1,4 +1,4 @@
-.PHONY: build lint test test-cli clean
+.PHONY: build lint test test-cli docs docs-serve clean
 
 # mise shims first so `make` works in a non-activated shell.
 export PATH := $(HOME)/.local/share/mise/shims:$(PATH)
@@ -20,6 +20,12 @@ test:
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi
 	cd tests/cli && uv sync --frozen && uv run pytest -v
+
+docs:
+	uv sync --locked --group docs && uv run --locked zensical build --strict
+
+docs-serve:
+	uv sync --locked --group docs && uv run --locked zensical serve
 
 clean:
 	rm -rf bin

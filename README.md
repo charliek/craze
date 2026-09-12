@@ -180,6 +180,25 @@ cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --scripts echo,todos
 Screen captures land in `~/.cursor/plans/craze/004-harness-tui/smoke/`
 (`--out` or `CRAZE_SMOKE_OUT` moves them).
 
+## Documentation
+
+Published site: https://charliek.github.io/craze/
+
+Sources live under `docs/`:
+
+- [Quick Start](docs/getting-started/quick-start.md)
+- [CLI](docs/reference/cli.md)
+- [TUI](docs/reference/tui.md)
+- [Configuration](docs/reference/configuration.md)
+- [Development](docs/development/setup.md)
+
+```shell
+make docs         # same as CI: zensical build --strict
+make docs-serve   # preview on :7070 (all interfaces)
+```
+
+Documentation is automatically published to GitHub Pages on push to main.
+
 ## Status
 
 POC on Linux: `craze` opens a TUI; `craze prompt --json` is the headless path.
