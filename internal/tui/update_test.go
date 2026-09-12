@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -520,6 +521,55 @@ func TestQOnModelPickerClosesNotQuits(t *testing.T) {
 	}
 	if m.quitting || cmd != nil {
 		t.Fatal("q on picker must not quit")
+	}
+}
+
+func TestEscSlashKeepsComposerText(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/he")
+	if !m.slashMenuOpen() {
+		t.Fatal("expected slash menu")
+	}
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.input.Value() != "/he" {
+		t.Fatalf("esc cleared composer: %q", m.input.Value())
+	}
+	if m.slashMenuOpen() {
+		t.Fatal("esc should hide the slash menu")
+	}
+	if m.quitting {
+		t.Fatal("esc on slash must not quit")
+	}
+}
+
+func TestHelpOverlayFitsTerminal(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/help")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if !m.help {
+		t.Fatal("expected help")
+	}
+	view := m.View()
+	if h := lipgloss.Height(view); h > 24 {
+		t.Fatalf("help view is %d rows, crops 24-row terminal:\n%s", h, view)
+	}
+	if !strings.Contains(view, "yolo") {
+		t.Fatalf("footer cropped:\n%s", view)
+	}
+	if !strings.Contains(view, "message") {
+		t.Fatalf("composer cropped:\n%s", view)
+	}
+	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
+		t.Fatalf("help body missing:\n%s", view)
+	}
+}
+
+func TestParseSlashFields(t *testing.T) {
+	name, args, ok := parseSlashLine("/model\tfast")
+	if !ok || name != "model" || args != "fast" {
+		t.Fatalf("got %q %q %v", name, args, ok)
 	}
 }
 

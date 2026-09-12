@@ -70,6 +70,7 @@ type Model struct {
 	picking    bool
 	modelSel   int
 	slashSel   int
+	slashHide  bool
 	streamOpen bool
 }
 
@@ -242,7 +243,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.Type == tea.KeyEsc {
 		if m.slashMenuOpen() {
-			m.input.SetValue("")
+			m.slashHide = true
 			m.slashSel = 0
 			return m, nil
 		}
@@ -258,9 +259,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if isNewlineKey(msg) {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+		return m, m.updateComposer(msg)
 	}
 	if msg.Type == tea.KeyEnter {
 		return m.handleEnter()
@@ -288,9 +287,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	return m, m.updateComposer(msg)
+}
+
+func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
+	prev := m.input.Value()
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	return m, cmd
+	if m.input.Value() != prev {
+		m.slashHide = false
+	}
+	return cmd
 }
 
 func (m Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -530,16 +537,18 @@ func (m *Model) layout() {
 	composerH := composerBoxHeight()
 	extra := 0
 	if m.pending != nil {
-		extra++
+		extra += max(1, lipgloss.Height(m.permissionOverlay()))
 	}
 	if m.help {
-		extra += 8
+		extra += lipgloss.Height(m.helpView())
 	}
 	if m.picking {
-		extra += min(8, max(1, len(m.snap.Models)))
+		extra += lipgloss.Height(m.modelPickerView())
 	}
 	if m.slashMenuOpen() && !m.help && !m.picking {
-		extra += min(6, max(1, len(m.filteredSlash())))
+		if h := lipgloss.Height(m.slashMenuView()); h > 0 {
+			extra += h
+		}
 	}
 	h := m.height - footerH - composerH - extra
 	if h < 1 {
@@ -708,13 +717,6 @@ func waitEvent(sess agent.Session) tea.Cmd {
 
 func max(a, b int) int {
 	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
 		return a
 	}
 	return b

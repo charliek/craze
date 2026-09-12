@@ -47,8 +47,10 @@ func parseSlashLine(s string) (name, args string, ok bool) {
 	if rest == "" {
 		return "", "", true
 	}
-	name, args, _ = strings.Cut(rest, " ")
-	return strings.ToLower(name), strings.TrimSpace(args), true
+	fields := strings.Fields(rest)
+	name = strings.ToLower(fields[0])
+	args = strings.Join(fields[1:], " ")
+	return name, args, true
 }
 
 func (m Model) slashCatalog() []slashItem {
@@ -72,12 +74,11 @@ func (m Model) slashCatalog() []slashItem {
 }
 
 func (m Model) slashMenuOpen() bool {
-	name, args, ok := parseSlashLine(m.input.Value())
-	if !ok || args != "" {
+	if m.slashHide {
 		return false
 	}
-	_ = name
-	return true
+	_, args, ok := parseSlashLine(m.input.Value())
+	return ok && args == ""
 }
 
 func (m Model) filteredSlash() []slashItem {
