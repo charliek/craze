@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -54,23 +58,75 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	case f.plan:
 		mode = "plan"
 	}
+	// The TUI owns the alt screen for the whole run, so nothing else may write
+	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
+	// takes none of the renderer's locks, and would garble it. The agent's
+	// stderr and craze's own warnings are held here and printed once the screen
+	// is back.
+	diag := &deferredStderr{}
 	sess := agent.New(agent.Options{
 		Binary:      f.agentBin,
 		Workspace:   ws,
 		Force:       f.force,
 		Model:       f.model,
 		Mode:        mode,
-		Stderr:      os.Stderr,
+		Stderr:      diag,
 		Interactive: true,
 	})
-	return tui.Run(tui.Config{
+	err = tui.Run(tui.Config{
 		Session:   sess,
 		Theme:     resolveTheme(cmd, f.theme),
 		Workspace: ws,
 		Model:     f.model,
 		Yolo:      f.force,
 		NoMouse:   f.noMouse,
+		Diag:      diag,
 	})
+	diag.flush(os.Stderr)
+	return err
+}
+
+// deferredStderr holds what the agent said until the terminal is craze's to
+// write on again. internal/acp copies the child's stderr from a goroutine of
+// its own, so the buffer is guarded.
+type deferredStderr struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	dropped int
+}
+
+// deferredStderrMax is how much diagnostic craze will hold. An agent looping on
+// stderr for an hour must not grow the buffer without bound; past the cap the
+// tail is dropped and counted, because the first thing it said is the thing
+// worth reading.
+const deferredStderrMax = 256 << 10
+
+func (d *deferredStderr) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if room := deferredStderrMax - d.buf.Len(); room < len(p) {
+		d.dropped += len(p) - max(room, 0)
+		if room <= 0 {
+			return len(p), nil
+		}
+		p = p[:room]
+	}
+	return d.buf.Write(p)
+}
+
+// flush prints the diagnostics to the real stderr. It is called after Run has
+// returned, which is after bubbletea has left the alt screen.
+func (d *deferredStderr) flush(w io.Writer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.buf.Len() > 0 {
+		_, _ = w.Write(d.buf.Bytes())
+		d.buf.Reset()
+	}
+	if d.dropped > 0 {
+		_, _ = fmt.Fprintf(w, "craze: dropped %d further bytes of agent diagnostics\n", d.dropped)
+		d.dropped = 0
+	}
 }
 
 // themeFlagUsage names the presets once, for both commands that take --theme.

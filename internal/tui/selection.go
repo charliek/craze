@@ -32,11 +32,21 @@ func (p cellPos) before(q cellPos) bool {
 type selection struct {
 	on     bool // a press has happened; anchor and head are meaningful
 	drag   bool // the button is still down
+	exact  bool // the endpoints were chosen, not dragged: one cell is enough
 	anchor cellPos
 	head   cellPos
 }
 
-func (s selection) empty() bool { return !s.on || s.anchor == s.head }
+// empty is "nothing to highlight or copy". A drag that never left its cell is
+// an ordinary click and selects nothing, but a gesture that picked its own
+// endpoints — a double-clicked one-letter word — means the single cell it
+// named, because the range is inclusive.
+func (s selection) empty() bool {
+	if !s.on {
+		return true
+	}
+	return s.anchor == s.head && !s.exact
+}
 
 // bounds normalises a reverse drag: the range is always stated in reading
 // order, whichever way the pointer travelled.
@@ -87,7 +97,15 @@ func (m Model) selectable(x, y int) bool {
 	if !m.mouseEnabled || m.lay.TooSmall || !m.lay.Dialog.Empty() {
 		return false
 	}
-	if !m.lay.Region(regionTranscript).Contains(y) || len(m.transcriptRows) == 0 {
+	tr := m.lay.Region(regionTranscript)
+	if !tr.Contains(y) || len(m.transcriptRows) == 0 {
+		return false
+	}
+	// The band is taller than the content until the transcript fills it, and
+	// the blank cells below the last row hold no text: a press there starts
+	// nothing. transcriptCell clamps onto the last row on purpose — that is for
+	// a drag already under way running off the end, not for a press.
+	if m.vp.YOffset+(y-tr.Top) >= len(m.transcriptRows) {
 		return false
 	}
 	return x >= 0 && x < m.width
@@ -113,20 +131,16 @@ func (m Model) selectionText() string {
 		plain := m.transcriptPlain[line]
 		w := ansi.StringWidth(plain)
 		b.WriteString(cutCells(plain, lo, min(hi+1, w)))
-		if hi+1 > w {
+		// Every row but the last one of the selection is followed by the row
+		// under it, so it keeps its line break whatever its width — a row that
+		// happens to fill the terminal exactly would otherwise be glued to the
+		// next one. On the last row the break is the span's own: it is there
+		// only when the selection reached past the end of the text.
+		if line < to.line || hi+1 > w {
 			b.WriteByte('\n')
 		}
 	}
 	return b.String()
-}
-
-// selectionLines is how many transcript rows the selection touches, which is
-// what the note counts. It is not len(strings.Split(text, "\n")): a selection
-// that stops short of the last row's end copies no final newline and would
-// otherwise be reported one line short.
-func (m Model) selectionLines() int {
-	from, to := m.sel.bounds()
-	return to.line - from.line + 1
 }
 
 // cutCells returns the graphemes of s covering display cells [lo, hi). A
@@ -234,6 +248,12 @@ func selectionSeq(c lipgloss.Color) string {
 // Inside the span the background is re-emitted after every escape sequence,
 // reset or not, which is what makes a diff row's own background, a bold
 // markdown run and an OSC-8 link all keep the highlight.
+//
+// Both cuts snap outward, the way cutCells does, so the highlight covers
+// exactly the graphemes the copy takes. The head falls short of a grapheme
+// straddling `from`, which leaves it in the middle; the right edge needs a
+// nudge, because Truncate would leave a straddling grapheme in the tail —
+// copied but unpainted.
 func highlightSpan(line string, from, to int, bg string) string {
 	w := ansi.StringWidth(line)
 	if bg == "" || w == 0 || to < from || from > w-1 {
@@ -245,8 +265,15 @@ func highlightSpan(line string, from, to int, bg string) string {
 	head := ansi.Truncate(line, from, "")
 	hw := ansi.StringWidth(head)
 	rest := ansi.TruncateLeft(line, hw, "")
-	mid := ansi.Truncate(rest, to+1-hw, "")
+	span := to + 1 - hw
+	mid := ansi.Truncate(rest, span, "")
 	mw := ansi.StringWidth(mid)
+	// Ask for one more cell until the cut reaches the end of the span. mw only
+	// grows, and hw+mw == w is the whole row, so this terminates.
+	for n := span + 1; mw < span && hw+mw < w; n++ {
+		mid = ansi.Truncate(rest, n, "")
+		mw = ansi.StringWidth(mid)
+	}
 	tail := ""
 	if hw+mw < w {
 		tail = ansi.TruncateLeft(rest, mw, "")

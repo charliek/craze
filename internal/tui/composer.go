@@ -56,6 +56,11 @@ func newComposer(th Theme) textarea.Model {
 	// ctrl+t is the tasks panel, not transpose; ctrl+d is left unbound so it
 	// quits rather than deleting forward.
 	km.TransposeCharacterBackward = key.NewBinding()
+	// bubbles' own ctrl+v runs clipboard.ReadAll inside the textarea
+	// (textarea.go:1391), which shells out to xclip / wl-paste with no seam a
+	// test or `craze frame` could stand in front of. craze keeps the key and
+	// handles it itself, through the same kind of seam a copy goes through.
+	km.Paste = key.NewBinding()
 	ta.KeyMap = km
 
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()

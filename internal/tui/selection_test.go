@@ -635,3 +635,181 @@ func TestWordAt(t *testing.T) {
 		}
 	}
 }
+
+// fakeRows replaces the canonical rows with exactly these. It is the only way
+// to put a row of precisely the terminal's width in the transcript: the
+// renderer wraps before it fills the last cell.
+func fakeRows(m Model, rows ...string) Model {
+	m.transcriptRows = rows
+	m.transcriptPlain = rows
+	m.vp.SetContent(strings.Join(rows, "\n"))
+	m.vp.GotoTop()
+	return m
+}
+
+// TestFullWidthRowKeepsItsNewline: a row that fills the terminal exactly is
+// still followed by the row under it. The span on that row ends at cell
+// width-1, which is not past the end of an 80-cell row, so only "this is not
+// the last row of the selection" can supply the line break.
+func TestFullWidthRowKeepsItsNewline(t *testing.T) {
+	base := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name                   string
+		x1, dy1, x2, dy2, want int
+	}{
+		{name: "forward", x1: 78, dy1: 0, x2: 0, dy2: 1},
+		{name: "reverse", x1: 0, dy1: 1, x2: 78, dy2: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := base
+			rec := captureCopies(t)
+			m := selModel(t, &now, "filler")
+			tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+			m = fakeRows(tm.(Model), strings.Repeat("A", 80), "BC")
+			top := m.lay.Region(regionTranscript).Top
+			m = drag(t, m, tc.x1, top+tc.dy1, tc.x2, top+tc.dy2)
+
+			const want = "AA\nB"
+			if copies := rec.copies(); len(copies) != 1 || copies[0] != want {
+				t.Fatalf("clipboard got %q, want [%q]", copies, want)
+			}
+			if !strings.Contains(plainView(m), "copied 2 lines") {
+				t.Fatalf("missing the note:\n%s", plainView(m))
+			}
+		})
+	}
+}
+
+// TestPressBelowTheContentStartsNoSelection: the band is taller than the one
+// row of text in it, and the cells under that row hold nothing. Clamping a
+// press there onto the last row of content would copy text the pointer was
+// never on and highlight a row two above the gesture.
+func TestPressBelowTheContentStartsNoSelection(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	rec := captureCopies(t)
+	m := selModel(t, &now, "alpha bravo")
+	if len(m.transcriptPlain) != 1 {
+		t.Fatalf("the fixture wants one content row, got %d", len(m.transcriptPlain))
+	}
+	tr := m.lay.Region(regionTranscript)
+	if tr.Height() < 5 {
+		t.Fatalf("the band is only %d rows", tr.Height())
+	}
+
+	m = drag(t, m, 0, tr.Top+2, 4, tr.Top+2)
+	if m.sel.on {
+		t.Fatalf("a press on a blank cell started a selection: %+v", m.sel)
+	}
+	if copies := rec.copies(); len(copies) != 0 {
+		t.Fatalf("blank space copied %q", copies)
+	}
+	if bg := selectionSeq(m.theme.SelectionBG); bg != "" && strings.Contains(m.View(), bg) {
+		t.Fatalf("a highlight was painted for a gesture over blank space:\n%s", plainView(m))
+	}
+	// A press on the last row of content is still a press, one row above the
+	// blank: the rule is "past the text", not "not the first row".
+	if got := mousePress(t, m, 0, tr.Top); !got.sel.on {
+		t.Fatal("the content row stopped being selectable")
+	}
+}
+
+// TestDoubleClickSelectsAOneCellWord: a one-letter word is a word. The range is
+// inclusive, so its endpoints are the same cell — which must not be mistaken
+// for the press-and-release-on-one-cell that is an ordinary click.
+func TestDoubleClickSelectsAOneCellWord(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	rec := captureCopies(t)
+	m := selModel(t, &now, "I agree")
+	top := m.lay.Region(regionTranscript).Top
+
+	m = mousePress(t, m, 0, top)
+	m = release(t, m, 0, top)
+	if !m.sel.empty() {
+		t.Fatal("a single click is not a selection")
+	}
+	now = now.Add(100 * time.Millisecond)
+	m = mousePress(t, m, 0, top)
+	if m.sel.empty() {
+		t.Fatalf("the double-clicked word is one cell wide, not nothing: %+v", m.sel)
+	}
+	if got := m.selectionText(); got != "I" {
+		t.Fatalf("selected %q, want %q", got, "I")
+	}
+	if bg := selectionSeq(m.theme.SelectionBG); bg != "" && !strings.Contains(m.View(), bg) {
+		t.Fatal("the one-cell word is not highlighted")
+	}
+	m = release(t, m, 0, top)
+	if copies := rec.copies(); len(copies) != 1 || copies[0] != "I" {
+		t.Fatalf("clipboard got %q, want [\"I\"]", copies)
+	}
+	if !strings.Contains(plainView(m), `copied "I"`) {
+		t.Fatalf("missing the note:\n%s", plainView(m))
+	}
+	// And Ctrl+Y takes that word, not the whole reply behind it.
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	m = tm.(Model)
+	if msg := runCmd(cmd); msg != nil {
+		tm, _ = m.Update(msg)
+		m = tm.(Model)
+	}
+	if copies := rec.copies(); len(copies) != 2 || copies[1] != "I" {
+		t.Fatalf("Ctrl+Y copied %q, want the selected word", copies)
+	}
+}
+
+// selectedText is the text the selection background was in force over, which is
+// what the eye sees as selected.
+func selectedText(s, bg string) string {
+	var b strings.Builder
+	on := false
+	walkANSI(s, func(chunk string, esc bool) {
+		if esc {
+			on = chunk == bg
+			return
+		}
+		if on {
+			b.WriteString(chunk)
+		}
+	})
+	return b.String()
+}
+
+// TestHighlightCoversWhatTheCopyTakes: cutCells snaps a grapheme straddling
+// either edge of the span outward, and ansi.Truncate snaps inward, so a wide
+// grapheme across the right endpoint used to be copied and left unpainted. The
+// two have to name the same graphemes — without breaking the width invariant.
+func TestHighlightCoversWhatTheCopyTakes(t *testing.T) {
+	th := Preset("tokyo-night")
+	bg := selectionSeq(th.SelectionBG)
+	if bg == "" {
+		t.Skip("no colour profile")
+	}
+	bold := lipgloss.NewStyle().Bold(true)
+	for _, tc := range []struct {
+		name   string
+		line   string
+		lo, hi int
+	}{
+		// "A界B" is cells 0, 1-2 and 3: the span 0..1 ends inside 界.
+		{"wide across the right endpoint", bold.Render("A界B"), 0, 1},
+		{"wide across the left endpoint", bold.Render("A界B"), 2, 3},
+		{"wide across both endpoints", "A界界B", 1, 4},
+		{"wide, clean edges", "A界B", 0, 2},
+		{"one cell", "alpha", 2, 2},
+		{"whole row", bold.Render("A界B"), 0, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := highlightSpan(tc.line, tc.lo, tc.hi, bg)
+			if w, want := lipgloss.Width(got), lipgloss.Width(tc.line); w != want {
+				t.Fatalf("width %d, want %d: %q", w, want, got)
+			}
+			if plain(got) != plain(tc.line) {
+				t.Fatalf("text changed: %q vs %q", plain(got), plain(tc.line))
+			}
+			want := cutCells(plain(tc.line), tc.lo, tc.hi+1)
+			if painted := selectedText(got, bg); painted != want {
+				t.Fatalf("painted %q, the copy takes %q", painted, want)
+			}
+		})
+	}
+}

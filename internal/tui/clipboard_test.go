@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -21,15 +23,15 @@ func swapClipboard(t *testing.T) (*bytes.Buffer, *[]string) {
 	t.Helper()
 	var buf bytes.Buffer
 	var native []string
-	prevOut, prevNative, prevWrite := clipboardOut, nativeCopy, clipboardWrite
-	clipboardOut = &buf
-	nativeCopy = func(s string) error {
+	prevWrite := clipboardWrite
+	prevOut, prevNative, prevPaste := swapClipboardSeams(&buf, func(s string) error {
 		native = append(native, s)
 		return nil
-	}
+	}, func() (string, error) { return "", nil })
 	clipboardWrite = systemCopy
 	t.Cleanup(func() {
-		clipboardOut, nativeCopy, clipboardWrite = prevOut, prevNative, prevWrite
+		clipboardWrite = prevWrite
+		swapClipboardSeams(prevOut, prevNative, prevPaste)
 	})
 	return &buf, &native
 }
@@ -62,10 +64,14 @@ func TestCopyWritesBareOSC52(t *testing.T) {
 // A terminal that refuses OSC 52 and a box with no clipboard tool still owe the
 // user the acknowledgement.
 func TestCopySurvivesAFailedWrite(t *testing.T) {
-	prevOut, prevNative, prevWrite := clipboardOut, nativeCopy, clipboardWrite
-	t.Cleanup(func() { clipboardOut, nativeCopy, clipboardWrite = prevOut, prevNative, prevWrite })
-	clipboardOut = errWriter{}
-	nativeCopy = func(string) error { return errors.New("no clipboard tool") }
+	prevWrite := clipboardWrite
+	prevOut, prevNative, prevPaste := swapClipboardSeams(errWriter{},
+		func(string) error { return errors.New("no clipboard tool") },
+		func() (string, error) { return "", errors.New("no clipboard tool") })
+	t.Cleanup(func() {
+		clipboardWrite = prevWrite
+		swapClipboardSeams(prevOut, prevNative, prevPaste)
+	})
 	clipboardWrite = systemCopy
 
 	msg := copyText("alpha", "copied \"alpha\"")()
@@ -171,11 +177,11 @@ func TestFrameOutputCarriesNoClipboardBytes(t *testing.T) {
 	// The frame runner installs its own recorder; this one proves the default
 	// writer is not what runs, by leaving a real writer in place around it.
 	var buf bytes.Buffer
-	prevOut, prevNative := clipboardOut, nativeCopy
 	var native []string
-	clipboardOut = &buf
-	nativeCopy = func(s string) error { native = append(native, s); return nil }
-	t.Cleanup(func() { clipboardOut, nativeCopy = prevOut, prevNative })
+	prevOut, prevNative, prevPaste := swapClipboardSeams(&buf,
+		func(s string) error { native = append(native, s); return nil },
+		func() (string, error) { return "", nil })
+	t.Cleanup(func() { swapClipboardSeams(prevOut, prevNative, prevPaste) })
 
 	plain, raw := runStubFrameRaw(t, 100, 30,
 		"<wait:idle>hi<enter><wait:text:echo: hi><wait:idle><drag:0,0,7,1><wait:copied>")
@@ -272,5 +278,132 @@ func TestCtrlYWorksWithNoMouse(t *testing.T) {
 	}
 	if copies := rec.copies(); len(copies) != 1 || copies[0] != "the reply" {
 		t.Fatalf("Ctrl+Y copied %q under --no-mouse", copies)
+	}
+}
+
+// TestTruncatedCopyNoteCountsTheRowsThatWent: the cap cuts the payload, so the
+// note has to count what reached the clipboard. A thousand rows capped at 64 KiB
+// are about 650 rows, and "copied 1000 lines (truncated)" would be a lie about
+// both halves.
+func TestTruncatedCopyNoteCountsTheRowsThatWent(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	rec := captureCopies(t)
+	m := selModel(t, &now, "filler")
+	rows := make([]string, 1000)
+	for i := range rows {
+		rows[i] = strings.Repeat("x", 99)
+	}
+	m = fakeRows(m, rows...)
+	// The whole transcript, selected end to end.
+	m.sel = selection{on: true, anchor: cellPos{line: 0, col: 0}, head: cellPos{line: 999, col: 98}}
+
+	tm, cmd := m.copySelection()
+	m = tm.(Model)
+	msg := runCmd(cmd)
+	done, ok := msg.(clipboardDoneMsg)
+	if !ok {
+		t.Fatalf("got %T, want clipboardDoneMsg", msg)
+	}
+	copies := rec.copies()
+	if len(copies) != 1 {
+		t.Fatalf("copies %d", len(copies))
+	}
+	// Counted here rather than with lineCount, so the assertion does not lean on
+	// the code under test: no row of this fixture is empty and the payload does
+	// not end on a break, so the rows are the breaks plus one.
+	sent := strings.Count(copies[0], "\n") + 1
+	if sent >= 1000 || sent < 500 {
+		t.Fatalf("the cap left %d rows, which is not a truncation worth testing", sent)
+	}
+	want := fmt.Sprintf("copied %d lines %s", sent, clipboardTruncated)
+	if done.note != want {
+		t.Fatalf("note %q, want %q", done.note, want)
+	}
+}
+
+// TestClipboardSeamsAreGuarded is the -race leg's test. bubbletea never waits
+// for a command goroutine, so an interactive session can return with a copy
+// still inside systemCopy while the next frame run in the same process installs
+// its recorder. Serialising frame runs cannot help: the racing command belongs
+// to a session that has already ended.
+func TestClipboardSeamsAreGuarded(t *testing.T) {
+	prevOut, prevNative, prevPaste := swapClipboardSeams(io.Discard,
+		func(string) error { return nil },
+		func() (string, error) { return "", nil })
+	t.Cleanup(func() { swapClipboardSeams(prevOut, prevNative, prevPaste) })
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// The two reads a leaked command makes.
+				_ = systemCopy("alpha")
+				_, _ = systemPaste()
+			}
+		}()
+	}
+	for i := 0; i < 200; i++ {
+		_, restore := recordCopies()
+		restore()
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestCtrlVPastesThroughTheSeam: bubbles binds ctrl+v to a command that calls
+// clipboard.ReadAll inside the textarea (textarea.go:1391), with no seam in
+// front of it — so a frame script containing <ctrl-v> could shell out to xclip
+// or wl-paste however thoroughly the copy side was stubbed. craze keeps the key
+// and reads through its own seam.
+func TestCtrlVPastesThroughTheSeam(t *testing.T) {
+	m := sized(t)
+	// bubbles' binding has to be gone, or the textarea reaches the tool itself.
+	if keys := m.input.KeyMap.Paste.Keys(); len(keys) != 0 {
+		t.Fatalf("the textarea still binds paste to %v", keys)
+	}
+	// Nothing native may be reachable: a call here is the bug.
+	var native int
+	prevOut, prevNative, prevPaste := swapClipboardSeams(io.Discard,
+		func(string) error { native++; return nil },
+		func() (string, error) { native++; return "xclip", nil })
+	prevRead := clipboardRead
+	clipboardRead = func() (string, error) { return "pasted text", nil }
+	t.Cleanup(func() {
+		clipboardRead = prevRead
+		swapClipboardSeams(prevOut, prevNative, prevPaste)
+	})
+
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	m = tm.(Model)
+	msg := runCmd(cmd)
+	if got, want := msg, (pasteMsg{text: "pasted text"}); got != want {
+		t.Fatalf("ctrl+v produced %#v, want %#v", got, want)
+	}
+	tm, _ = m.Update(msg)
+	m = tm.(Model)
+	if got := m.input.Value(); got != "pasted text" {
+		t.Fatalf("the composer holds %q", got)
+	}
+	if native != 0 {
+		t.Fatalf("a native clipboard tool ran %d times", native)
+	}
+}
+
+// TestFramePasteStaysInsideTheRecorder: `craze frame` installs the recorder for
+// both directions, so a script's ctrl+v reads back what its ctrl+y copied and
+// never reaches a clipboard tool.
+func TestFramePasteStaysInsideTheRecorder(t *testing.T) {
+	plain := runStubFrame(t, 100, 30,
+		"<wait:idle>hi<enter><wait:text:echo: hi><wait:idle><ctrl-y><wait:copied><ctrl-v><wait:text:❯ echo: hi>")
+	if !strings.Contains(plain, "❯ echo: hi") {
+		t.Fatalf("the paste never reached the composer:\n%s", plain)
 	}
 }

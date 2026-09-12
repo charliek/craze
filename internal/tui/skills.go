@@ -165,11 +165,14 @@ func isCursorPlugins(path string) bool {
 	return false
 }
 
+// warnSkill names a skill craze could not read, once per path. It goes to the
+// diagnostics seam and not to os.Stderr: the scan runs while the TUI owns the
+// screen, so the line would otherwise be drawn over the frame.
 func warnSkill(path string, err error) {
 	if _, dup := skillWarnOnce.LoadOrStore(path, struct{}{}); dup {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "craze: skip skill %s: %v\n", path, err)
+	diagf("craze: skip skill %s: %v\n", path, err)
 }
 
 func parseSkillMarkdown(path string, data []byte) (string, string, error) {

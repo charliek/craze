@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,11 @@ type Config struct {
 	// NoMouse turns mouse reporting off, which gives the terminal its native
 	// drag-select back.
 	NoMouse bool
+	// Diag is where craze's own diagnostics go for the duration of Run. While
+	// the alt screen is up a write to the terminal lands on top of a frame, so
+	// the caller passes a buffer it flushes afterwards. nil leaves them on
+	// stderr, which is right for anything that does not own the screen.
+	Diag io.Writer
 }
 
 type Model struct {
@@ -314,7 +320,15 @@ func Run(cfg Config) error {
 	// are written from different goroutines, and a copy landing inside a frame
 	// would tear it, so both go through the same lock.
 	out := newSyncWriter(os.Stdout)
-	clipboardOut = out
+	prevOut := setClipboardOut(out)
+	defer setClipboardOut(prevOut)
+	// Nothing craze owns may write to the terminal behind the renderer's back
+	// while the alt screen is up: the agent's stderr and craze's own warnings
+	// are buffered by the caller and flushed once the screen is back.
+	if cfg.Diag != nil {
+		prevDiag := setDiag(cfg.Diag)
+		defer setDiag(prevDiag)
+	}
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithOutput(out)}
 	if !cfg.NoMouse {
 		// Cell motion, not all motion: the quieter mode reports a drag once per
@@ -449,6 +463,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copyNote = msg.note
 		m.copyUntil = m.now().Add(copyNoteLinger)
 		return m, nil
+
+	case pasteMsg:
+		// The read is asynchronous, so the composer may no longer be where the
+		// keyboard is by the time the text arrives.
+		if msg.text == "" || m.cardOpen() || m.dialogOpen() || m.help {
+			return m, nil
+		}
+		// One bracketed paste, the way a terminal delivers it: the textarea
+		// inserts the whole thing as text instead of reading it as keys.
+		return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
 
 	case dblClickMsg:
 		// The frame runner's deterministic double-click: two real presses would
@@ -648,8 +672,11 @@ func (m Model) selectWord(pos cellPos) Model {
 	if !ok {
 		return m
 	}
+	// exact, because a one-letter word is a whole word: the range is inclusive,
+	// so its two endpoints are the same cell and that is still a selection.
 	m.sel = selection{
 		on:     true,
+		exact:  true,
 		anchor: cellPos{line: pos.line, col: lo},
 		head:   cellPos{line: pos.line, col: hi},
 	}
@@ -664,7 +691,7 @@ func (m Model) copySelection() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
-	return m, copyText(text, copyNote(text, m.selectionLines()))
+	return m, copyRows(text)
 }
 
 // copySelectionOrLastReply is Ctrl+Y. Without a selection it copies the last
@@ -796,6 +823,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlY {
 		// A keyboard feature, so it works under --no-mouse as well.
 		return m.copySelectionOrLastReply()
+	}
+	if msg.Type == tea.KeyCtrlV {
+		return m, pasteFromClipboard()
 	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()
