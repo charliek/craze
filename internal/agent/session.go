@@ -40,8 +40,24 @@ type Snapshot struct {
 	Models       []ModelInfo
 	Modes        []ModeInfo
 	Commands     []CommandInfo
+	Config       []ConfigOption
+	Tools        []ToolEvent
 	CurrentModel string
 	CurrentMode  string
+}
+
+type ConfigOption struct {
+	ID           string
+	Name         string
+	Category     string
+	Type         string
+	Current      string
+	SelectValues []SelectValue
+}
+
+type SelectValue struct {
+	Value string
+	Name  string
 }
 
 type Event struct {
@@ -54,9 +70,14 @@ type Event struct {
 }
 
 type ToolEvent struct {
-	ID     string
-	Name   string
-	Status string
+	ID          string
+	Name        string
+	Status      string
+	Kind        string
+	Title       string
+	RawInput    string
+	ContentText string
+	Locations   []string
 }
 
 type PermissionOption struct {
@@ -94,6 +115,7 @@ type Session interface {
 	AnswerPermission(id, optionID string) error
 	SetModel(ctx context.Context, modelID string) error
 	SetMode(ctx context.Context, modeID string) error
+	SetConfig(ctx context.Context, id, value string) error
 	Snapshot() Snapshot
 	Close() error
 }

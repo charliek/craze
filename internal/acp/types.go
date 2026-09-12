@@ -25,6 +25,7 @@ const (
 	UpdateToolCallUpd       = "tool_call_update"
 	UpdateAvailableCommands = "available_commands_update"
 	UpdateCurrentMode       = "current_mode_update"
+	UpdateConfigOption      = "config_option_update"
 
 	KindAllowOnce    = "allow_once"
 	KindAllowAlways  = "allow_always"
@@ -88,9 +89,10 @@ type NewSessionParams struct {
 }
 
 type NewSessionResult struct {
-	SessionID string          `json:"sessionId"`
-	Models    json.RawMessage `json:"models,omitempty"`
-	Modes     json.RawMessage `json:"modes,omitempty"`
+	SessionID     string          `json:"sessionId"`
+	Models        json.RawMessage `json:"models,omitempty"`
+	Modes         json.RawMessage `json:"modes,omitempty"`
+	ConfigOptions json.RawMessage `json:"configOptions,omitempty"`
 }
 
 type ContentBlock struct {
@@ -119,6 +121,26 @@ type SetModelParams struct {
 type SetModeParams struct {
 	SessionID string `json:"sessionId"`
 	ModeID    string `json:"modeId"`
+}
+
+// SetConfigParams is the string variant of session/set_config_option.
+// It must not include a type field (boolean variant is out this cut).
+type SetConfigParams struct {
+	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+}
+
+type ToolCallLocation struct {
+	Path string `json:"path"`
+	Line int    `json:"line,omitempty"`
+}
+
+// ToolContent is one tool_call content[] item. Nested Content is a
+// ContentBlock (type/text); non-text nested types are ignored by the agent.
+type ToolContent struct {
+	Type    string        `json:"type"`
+	Content *ContentBlock `json:"content,omitempty"`
 }
 
 type SessionNotification struct {

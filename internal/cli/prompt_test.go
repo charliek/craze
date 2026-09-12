@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -101,6 +102,38 @@ func TestEventJSON(t *testing.T) {
 	j, ok := eventJSON(agent.Event{Type: agent.EventText, Text: "hi"})
 	if !ok || j.Type != "text" || j.Text != "hi" {
 		t.Fatalf("%+v %v", j, ok)
+	}
+	j, ok = eventJSON(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		ID: "call-1", Name: "Shell", Status: "pending", Kind: "execute", Title: "Shell", RawInput: "echo hi",
+	}})
+	if !ok || j.Kind != "execute" || j.Title != "Shell" || j.Name != "Shell" {
+		t.Fatalf("tool json %+v %v", j, ok)
+	}
+	b, err := json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["rawInput"]; ok {
+		t.Fatalf("must not dump rawInput: %s", b)
+	}
+	j, _ = eventJSON(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "c1", Name: "n", Status: "s"}})
+	b, err = json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = map[string]any{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["kind"]; ok {
+		t.Fatalf("empty kind should omit: %s", b)
+	}
+	if _, ok := m["title"]; ok {
+		t.Fatalf("empty title should omit: %s", b)
 	}
 }
 

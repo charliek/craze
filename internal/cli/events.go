@@ -13,6 +13,8 @@ type jsonEvent struct {
 	Name       string   `json:"name,omitempty"`
 	Status     string   `json:"status,omitempty"`
 	ID         string   `json:"id,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Title      string   `json:"title,omitempty"`
 	OptionIDs  []string `json:"optionIds,omitempty"`
 	Tool       string   `json:"tool,omitempty"`
 	StopReason string   `json:"stopReason,omitempty"`
@@ -42,6 +44,8 @@ func eventJSON(ev agent.Event) (jsonEvent, bool) {
 			j.Name = ev.Tool.Name
 			j.Status = ev.Tool.Status
 			j.ID = ev.Tool.ID
+			j.Kind = ev.Tool.Kind
+			j.Title = ev.Tool.Title
 		}
 		return j, true
 	case agent.EventPermission:

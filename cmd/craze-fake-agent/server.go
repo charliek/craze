@@ -20,11 +20,29 @@ type server struct {
 	promptN   int
 	cancelled atomic.Bool
 	hangWait  chan struct{}
+	config    []map[string]any
+}
+
+func defaultConfigOptions() []map[string]any {
+	return []map[string]any{
+		{
+			"id":           "effort",
+			"name":         "Effort",
+			"category":     "thought_level",
+			"type":         "select",
+			"currentValue": "medium",
+			"options": []map[string]string{
+				{"value": "low", "name": "Low"},
+				{"value": "medium", "name": "Medium"},
+				{"value": "high", "name": "High"},
+			},
+		},
+	}
 }
 
 func run(script string) error {
 	conn := acp.NewConn(os.Stdin, os.Stdout)
-	s := &server{conn: conn, script: script}
+	s := &server{conn: conn, script: script, config: defaultConfigOptions()}
 	conn.SetRequestHandler(s.onRequest)
 	conn.SetNotifyHandler(s.onNotify)
 	conn.Start()
@@ -58,6 +76,9 @@ func (s *server) onRequest(msg *acp.Message) {
 		}
 		s.reply(msg.ID, map[string]any{})
 	case acp.MethodSessionNew:
+		s.mu.Lock()
+		cfg := s.config
+		s.mu.Unlock()
 		s.reply(msg.ID, map[string]any{
 			"sessionId": fakeSessionID,
 			"modes": map[string]any{
@@ -75,6 +96,7 @@ func (s *server) onRequest(msg *acp.Message) {
 					{"modelId": "composer", "name": "Composer"},
 				},
 			},
+			"configOptions": cfg,
 		})
 		s.update(fakeSessionID, acp.SessionUpdate{
 			SessionUpdate: acp.UpdateAvailableCommands,
@@ -97,6 +119,24 @@ func (s *server) onRequest(msg *acp.Message) {
 			})
 		}
 	case acp.MethodSessionSetConfig:
+		var p struct {
+			ConfigID string `json:"configId"`
+			Value    string `json:"value"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		s.mu.Lock()
+		for _, opt := range s.config {
+			id, _ := opt["id"].(string)
+			if id == p.ConfigID {
+				opt["currentValue"] = p.Value
+			}
+		}
+		cfg := s.config
+		s.mu.Unlock()
+		s.update(fakeSessionID, map[string]any{
+			"sessionUpdate": acp.UpdateConfigOption,
+			"configOptions": cfg,
+		})
 		s.reply(msg.ID, map[string]any{})
 	default:
 		_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
@@ -130,6 +170,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.followup(msg.ID, n)
 	case "tool":
 		s.tool(msg.ID)
+	case "tasks":
+		s.tasks(msg.ID)
 	case "permission":
 		s.permission(msg.ID)
 	case "ask":
@@ -197,6 +239,46 @@ func (s *server) tool(id json.RawMessage) {
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: "after tool"},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+func (s *server) tasks(id json.RawMessage) {
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    "task-1",
+		"kind":          "other",
+		"title":         "Subagent research",
+		"status":        "pending",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    "sh-1",
+		"kind":          "execute",
+		"title":         "Shell",
+		"status":        "in_progress",
+		"rawInput":      map[string]string{"command": "echo hi"},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    "task-1",
+		"content": []map[string]any{
+			{"type": "content", "content": map[string]any{"type": "text", "text": "scanning workspace"}},
+		},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    "sh-1",
+		"status":        "completed",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    "task-1",
+		"status":        "completed",
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "done tasks"},
 	})
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
@@ -283,7 +365,7 @@ func (s *server) plan(id json.RawMessage) {
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
 
-func (s *server) update(sessionID string, upd acp.SessionUpdate) {
+func (s *server) update(sessionID string, upd any) {
 	raw, err := json.Marshal(upd)
 	if err != nil {
 		return

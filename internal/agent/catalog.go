@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -72,6 +74,7 @@ func snapshotFromNew(res *acp.NewSessionResult) Snapshot {
 	return Snapshot{
 		Models:       models,
 		Modes:        modes,
+		Config:       parseConfigOptions(res.ConfigOptions),
 		CurrentModel: curModel,
 		CurrentMode:  curMode,
 	}
@@ -84,6 +87,118 @@ func commandsFromUpdate(cmds []acp.AvailableCommand) []CommandInfo {
 			continue
 		}
 		out = append(out, CommandInfo{Name: c.Name, Description: c.Description})
+	}
+	return out
+}
+
+func parseConfigOptions(raw json.RawMessage) []ConfigOption {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	out := make([]ConfigOption, 0, len(items))
+	for _, item := range items {
+		opt, ok := parseConfigOption(item)
+		if !ok {
+			continue
+		}
+		out = append(out, opt)
+	}
+	return out
+}
+
+func parseConfigOption(raw json.RawMessage) (ConfigOption, bool) {
+	var parsed struct {
+		ID           string          `json:"id"`
+		Name         string          `json:"name"`
+		Category     string          `json:"category"`
+		Type         string          `json:"type"`
+		CurrentValue json.RawMessage `json:"currentValue"`
+		Options      json.RawMessage `json:"options"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.ID == "" {
+		return ConfigOption{}, false
+	}
+	name := parsed.Name
+	if name == "" {
+		name = parsed.ID
+	}
+	typ := parsed.Type
+	opt := ConfigOption{
+		ID:       parsed.ID,
+		Name:     name,
+		Category: parsed.Category,
+		Type:     typ,
+		Current:  parseConfigCurrent(typ, parsed.CurrentValue),
+	}
+	if typ == "select" || typ == "" {
+		opt.SelectValues = parseSelectValues(parsed.Options)
+		if typ == "" {
+			opt.Type = "select"
+		}
+	}
+	return opt, true
+}
+
+func parseConfigCurrent(typ string, raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	if typ == "boolean" {
+		var b bool
+		if err := json.Unmarshal(raw, &b); err == nil {
+			return strconv.FormatBool(b)
+		}
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err == nil {
+		return strconv.FormatBool(b)
+	}
+	return ""
+}
+
+func parseSelectValues(raw json.RawMessage) []SelectValue {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	out := make([]SelectValue, 0, len(items))
+	for _, item := range items {
+		var probe struct {
+			Value   string          `json:"value"`
+			Name    string          `json:"name"`
+			Group   string          `json:"group"`
+			Options json.RawMessage `json:"options"`
+		}
+		if err := json.Unmarshal(item, &probe); err != nil {
+			continue
+		}
+		nested := bytes.TrimSpace(probe.Options)
+		if probe.Group != "" || (len(nested) > 0 && nested[0] == '[') {
+			out = append(out, parseSelectValues(probe.Options)...)
+			continue
+		}
+		if probe.Value == "" {
+			continue
+		}
+		name := probe.Name
+		if name == "" {
+			name = probe.Value
+		}
+		out = append(out, SelectValue{Value: probe.Value, Name: name})
 	}
 	return out
 }

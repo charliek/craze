@@ -557,3 +557,84 @@ func TestOffersCursorLogin(t *testing.T) {
 		t.Fatal("cursor_login should be detected")
 	}
 }
+
+func TestSetConfigJSONShape(t *testing.T) {
+	b, err := json.Marshal(SetConfigParams{
+		SessionID: "s1",
+		ConfigID:  "effort",
+		Value:     "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["type"]; ok {
+		t.Fatalf("must not include type: %s", b)
+	}
+	if m["sessionId"] != "s1" || m["configId"] != "effort" {
+		t.Fatalf("%s", b)
+	}
+	if _, ok := m["value"].(string); !ok || m["value"] != "high" {
+		t.Fatalf("value must be string: %s", b)
+	}
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	t.Cleanup(func() {
+		_ = clientR.Close()
+		_ = clientW.Close()
+		_ = serverR.Close()
+		_ = serverW.Close()
+	})
+	client := Dial(clientR, clientW)
+	t.Cleanup(func() { _ = client.Close() })
+
+	srv := NewConn(serverR, serverW)
+	got := make(chan json.RawMessage, 1)
+	srv.SetRequestHandler(func(msg *Message) {
+		switch msg.Method {
+		case MethodInitialize:
+			_ = srv.Reply(msg.ID, map[string]any{"protocolVersion": 1})
+		case MethodAuthenticate:
+			_ = srv.Reply(msg.ID, map[string]any{})
+		case MethodSessionNew:
+			_ = srv.Reply(msg.ID, map[string]any{"sessionId": "s1"})
+		case MethodSessionSetConfig:
+			got <- append(json.RawMessage(nil), msg.Params...)
+			_ = srv.Reply(msg.ID, map[string]any{})
+		default:
+			_ = srv.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+		}
+	})
+	srv.Start()
+
+	ctx := t.Context()
+	if _, err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Authenticate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.NewSession(ctx, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetConfig(ctx, "effort", "high"); err != nil {
+		t.Fatal(err)
+	}
+	params := <-got
+	if err := json.Unmarshal(params, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["type"]; ok {
+		t.Fatalf("wire must not include type: %s", params)
+	}
+	if _, ok := m["value"].(string); !ok || m["value"] != "high" {
+		t.Fatalf("wire value must be string: %s", params)
+	}
+	if m["configId"] != "effort" || m["sessionId"] != "s1" {
+		t.Fatalf("wire %s", params)
+	}
+}

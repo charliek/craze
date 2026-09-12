@@ -25,6 +25,8 @@ type session struct {
 	waiting    map[string]pendingPerm
 	permSeq    int
 	snap       Snapshot
+	tools      map[string]ToolEvent
+	toolOrder  []string
 }
 
 type pendingPerm struct {
@@ -42,6 +44,7 @@ func newSession(opts Options) *session {
 		events:  make(chan Event, 256),
 		done:    make(chan struct{}),
 		waiting: make(map[string]pendingPerm),
+		tools:   make(map[string]ToolEvent),
 	}
 }
 
@@ -206,6 +209,24 @@ func (s *session) SetMode(ctx context.Context, modeID string) error {
 	return nil
 }
 
+func (s *session) SetConfig(ctx context.Context, id, value string) error {
+	if s.client == nil {
+		return fmt.Errorf("agent: session not started")
+	}
+	if err := s.client.SetConfig(ctx, id, value); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for i := range s.snap.Config {
+		if s.snap.Config[i].ID == id {
+			s.snap.Config[i].Current = value
+			break
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -213,6 +234,8 @@ func (s *session) Snapshot() Snapshot {
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
+	out.Config = cloneConfig(s.snap.Config)
+	out.Tools = snapshotTools(s.toolOrder, s.tools)
 	return out
 }
 
@@ -349,30 +372,39 @@ func (s *session) nextPermID() string {
 	return fmt.Sprintf("perm-%d", s.permSeq)
 }
 
+type sessionUpdateWire struct {
+	SessionUpdate     string                 `json:"sessionUpdate"`
+	Content           json.RawMessage        `json:"content,omitempty"`
+	ToolCallID        string                 `json:"toolCallId,omitempty"`
+	Title             *string                `json:"title,omitempty"`
+	Kind              *string                `json:"kind,omitempty"`
+	Status            *string                `json:"status,omitempty"`
+	RawInput          json.RawMessage        `json:"rawInput,omitempty"`
+	Locations         json.RawMessage        `json:"locations,omitempty"`
+	AvailableCommands []acp.AvailableCommand `json:"availableCommands,omitempty"`
+	CurrentModeID     string                 `json:"currentModeId,omitempty"`
+	ConfigOptions     json.RawMessage        `json:"configOptions,omitempty"`
+}
+
 func (s *session) onUpdate(n acp.SessionNotification) {
-	var u acp.SessionUpdate
+	var u sessionUpdateWire
 	if err := json.Unmarshal(n.Update, &u); err != nil {
 		return
 	}
 	switch u.SessionUpdate {
 	case acp.UpdateAgentMessage:
-		text := ""
-		if u.Content != nil {
-			text = u.Content.Text
-		}
-		s.emit(Event{Type: EventText, Text: text})
+		s.emit(Event{Type: EventText, Text: messageText(u.Content)})
 	case acp.UpdateAgentThought:
-		text := ""
-		if u.Content != nil {
-			text = u.Content.Text
-		}
-		s.emit(Event{Type: EventThought, Text: text})
+		s.emit(Event{Type: EventThought, Text: messageText(u.Content)})
 	case acp.UpdateToolCall, acp.UpdateToolCallUpd:
-		s.emit(Event{Type: EventTool, Tool: &ToolEvent{
-			ID:     u.ToolCallID,
-			Name:   u.Title,
-			Status: u.Status,
-		}})
+		delta, ok := toolDeltaFromWire(u)
+		if !ok {
+			return
+		}
+		tool, emit := s.mergeTool(delta)
+		if emit {
+			s.emit(Event{Type: EventTool, Tool: &tool})
+		}
 	case acp.UpdateAvailableCommands:
 		s.mu.Lock()
 		s.snap.Commands = commandsFromUpdate(u.AvailableCommands)
@@ -385,7 +417,50 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			s.mu.Unlock()
 			s.emit(Event{Type: EventMeta})
 		}
+	case acp.UpdateConfigOption:
+		cfg := parseConfigOptions(u.ConfigOptions)
+		s.mu.Lock()
+		s.snap.Config = cfg
+		s.mu.Unlock()
+		s.emit(Event{Type: EventMeta})
 	}
+}
+
+func toolDeltaFromWire(u sessionUpdateWire) (toolDelta, bool) {
+	if u.ToolCallID == "" {
+		return toolDelta{}, false
+	}
+	d := toolDelta{
+		id:     u.ToolCallID,
+		title:  u.Title,
+		kind:   u.Kind,
+		status: u.Status,
+	}
+	if raw, ok := presentJSON(u.RawInput); ok {
+		d.rawInput = raw
+		d.hasRawInput = true
+	}
+	if raw, ok := presentJSON(u.Content); ok && raw[0] == '[' {
+		d.content = raw
+		d.hasContent = true
+	}
+	if raw, ok := presentJSON(u.Locations); ok {
+		d.locations = raw
+		d.hasLocations = true
+	}
+	return d, true
+}
+
+func messageText(raw json.RawMessage) string {
+	raw, ok := presentJSON(raw)
+	if !ok || raw[0] != '{' {
+		return ""
+	}
+	var b acp.ContentBlock
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return ""
+	}
+	return b.Text
 }
 
 func (s *session) emit(ev Event) {

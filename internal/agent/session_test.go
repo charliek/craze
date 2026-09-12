@@ -354,6 +354,84 @@ func TestToolEvent(t *testing.T) {
 	log.waitTexts(t, "after tool")
 }
 
+func TestTasksToolsSnapshot(t *testing.T) {
+	s := startScript(t, "tasks", true)
+	log := collect(t, s)
+	if _, err := s.Prompt(t.Context(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	log.waitTexts(t, "done tasks")
+	log.waitType(t, EventDone)
+	snap := s.Snapshot()
+	if len(snap.Tools) != 2 {
+		t.Fatalf("tools %+v", snap.Tools)
+	}
+	task := toolByID(t, snap.Tools, "task-1")
+	sh := toolByID(t, snap.Tools, "sh-1")
+	if task.Status != "completed" || sh.Status != "completed" {
+		t.Fatalf("status task=%q sh=%q", task.Status, sh.Status)
+	}
+	if task.Title != "Subagent research" || task.Kind != "other" {
+		t.Fatalf("task %+v", task)
+	}
+	if sh.Title != "Shell" || sh.Kind != "execute" {
+		t.Fatalf("sh %+v", sh)
+	}
+	if !strings.Contains(sh.RawInput, "echo hi") {
+		t.Fatalf("rawInput %q", sh.RawInput)
+	}
+	if snap.Tools[0].ID != "task-1" || snap.Tools[1].ID != "sh-1" {
+		t.Fatalf("create order %+v", snap.Tools)
+	}
+	n := 0
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventTool {
+			n++
+		}
+	}
+	if n < 2 || n > 16 {
+		t.Fatalf("EventTool count %d (want small, not one-per-byte)", n)
+	}
+}
+
+func TestSetConfigEffort(t *testing.T) {
+	s := startScript(t, "effort", true)
+	if got := configCurrent(s.Snapshot(), "effort"); got != "medium" {
+		t.Fatalf("current %q, config %+v", got, s.Snapshot().Config)
+	}
+	if err := s.SetConfig(t.Context(), "effort", "high"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if configCurrent(s.Snapshot(), "effort") == "high" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("current %q, config %+v", configCurrent(s.Snapshot(), "effort"), s.Snapshot().Config)
+}
+
+func toolByID(t *testing.T, tools []ToolEvent, id string) ToolEvent {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.ID == id {
+			return tool
+		}
+	}
+	t.Fatalf("missing tool %s in %+v", id, tools)
+	return ToolEvent{}
+}
+
+func configCurrent(snap Snapshot, id string) string {
+	for _, c := range snap.Config {
+		if c.ID == id {
+			return c.Current
+		}
+	}
+	return ""
+}
+
 func TestAskAndPlanYolo(t *testing.T) {
 	t.Run("ask", func(t *testing.T) {
 		s := startScript(t, "ask", true)

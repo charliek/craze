@@ -161,8 +161,12 @@ func (c *Client) SetMode(ctx context.Context, modeID string) error {
 	}, nil)
 }
 
-func (c *Client) SetConfigOption(ctx context.Context, params any) error {
-	return c.conn.Call(ctx, MethodSessionSetConfig, params, nil)
+func (c *Client) SetConfig(ctx context.Context, configID, value string) error {
+	return c.conn.Call(ctx, MethodSessionSetConfig, SetConfigParams{
+		SessionID: c.SessionID(),
+		ConfigID:  configID,
+		Value:     value,
+	}, nil)
 }
 
 func (c *Client) Cancel(ctx context.Context) error {

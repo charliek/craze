@@ -17,6 +17,8 @@ Flags:
           echo        initialize, authenticate, session/new; echo prompt text
           followup    first prompt and second prompt return different replies
           tool        emit a tool_call update then a text chunk
+          tasks       emit two tool_calls with updates, then text "done tasks"
+          effort      same as echo (session/new includes effort configOptions)
           permission  request allow_once / reject_once and wait for the client
           ask         emit cursor/ask_question then finish the turn
           plan        emit cursor/create_plan then finish the turn
@@ -54,7 +56,7 @@ func main() {
 		}
 	}
 	switch script {
-	case "echo", "followup", "tool", "permission", "ask", "plan", "hang", "authfail", "noauth":
+	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan", "hang", "authfail", "noauth":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

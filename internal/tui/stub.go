@@ -133,6 +133,18 @@ func (s *Stub) SetMode(_ context.Context, id string) error {
 	return nil
 }
 
+func (s *Stub) SetConfig(_ context.Context, id, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.snap.Config {
+		if s.snap.Config[i].ID == id {
+			s.snap.Config[i].Current = value
+			break
+		}
+	}
+	return nil
+}
+
 func (s *Stub) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,6 +152,36 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Models = append([]agent.ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
+	out.Config = cloneStubConfig(s.snap.Config)
+	out.Tools = cloneStubTools(s.snap.Tools)
+	return out
+}
+
+func cloneStubConfig(in []agent.ConfigOption) []agent.ConfigOption {
+	if in == nil {
+		return nil
+	}
+	out := make([]agent.ConfigOption, len(in))
+	for i, c := range in {
+		out[i] = c
+		if c.SelectValues != nil {
+			out[i].SelectValues = append([]agent.SelectValue(nil), c.SelectValues...)
+		}
+	}
+	return out
+}
+
+func cloneStubTools(in []agent.ToolEvent) []agent.ToolEvent {
+	if in == nil {
+		return nil
+	}
+	out := make([]agent.ToolEvent, len(in))
+	for i, t := range in {
+		out[i] = t
+		if t.Locations != nil {
+			out[i].Locations = append([]string(nil), t.Locations...)
+		}
+	}
 	return out
 }
 
