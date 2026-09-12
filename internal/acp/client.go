@@ -14,11 +14,12 @@ type Client struct {
 	conn  *Conn
 	child *Child
 
-	mu          sync.Mutex
-	sessionID   string
-	inPrompt    bool
-	permHandler func(PermissionRequest) PermissionDecision
-	onUpdate    func(SessionNotification)
+	mu             sync.Mutex
+	sessionID      string
+	inPrompt       bool
+	permHandler    func(PermissionRequest) PermissionDecision
+	onUpdate       func(SessionNotification)
+	pendingUpdates []SessionNotification
 
 	incomingMu sync.Mutex
 	incoming   map[string]*incomingReq
@@ -112,7 +113,11 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	}
 	c.mu.Lock()
 	c.sessionID = result.SessionID
+	pending := c.pendingUpdates
+	c.pendingUpdates = nil
+	h := c.onUpdate
 	c.mu.Unlock()
+	flushSessionUpdates(result.SessionID, pending, h)
 	return &result, nil
 }
 
@@ -223,15 +228,31 @@ func (c *Client) onNotify(msg *Message) {
 	if err := json.Unmarshal(msg.Params, &n); err != nil {
 		return
 	}
-	active := c.SessionID()
-	if active == "" || n.SessionID != active {
+	c.mu.Lock()
+	if c.sessionID == "" {
+		c.pendingUpdates = append(c.pendingUpdates, n)
+		c.mu.Unlock()
 		return
 	}
-	c.mu.Lock()
+	active := c.sessionID
 	h := c.onUpdate
 	c.mu.Unlock()
+	if n.SessionID != active {
+		return
+	}
 	if h != nil {
 		h(n)
+	}
+}
+
+func flushSessionUpdates(sid string, pending []SessionNotification, h func(SessionNotification)) {
+	if h == nil {
+		return
+	}
+	for _, n := range pending {
+		if n.SessionID == sid {
+			h(n)
+		}
 	}
 }
 

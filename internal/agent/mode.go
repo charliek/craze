@@ -1,7 +1,5 @@
 package agent
 
-import "encoding/json"
-
 var modeAliases = map[string][]string{
 	"plan":  {"plan", "architect"},
 	"ask":   {"ask"},
@@ -28,23 +26,10 @@ func ResolveMode(want string, available []string) (string, bool) {
 	return "", false
 }
 
-func availableModeIDs(raw json.RawMessage) []string {
-	if len(raw) == 0 {
-		return nil
-	}
-	var parsed struct {
-		AvailableModes []struct {
-			ID string `json:"id"`
-		} `json:"availableModes"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil
-	}
-	ids := make([]string, 0, len(parsed.AvailableModes))
-	for _, m := range parsed.AvailableModes {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
-		}
+func modeIDs(modes []ModeInfo) []string {
+	ids := make([]string, 0, len(modes))
+	for _, m := range modes {
+		ids = append(ids, m.ID)
 	}
 	return ids
 }

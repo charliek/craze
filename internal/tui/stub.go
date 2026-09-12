@@ -11,12 +11,15 @@ import (
 // Stub is an in-process Session used by TUI chrome tests. It echoes each
 // prompt as assistant text and does not spawn cursor-agent.
 type Stub struct {
-	mu     sync.Mutex
-	events chan agent.Event
-	closed chan struct{}
-	cancel chan struct{}
-	hang   bool
-	n      int
+	mu        sync.Mutex
+	events    chan agent.Event
+	closed    chan struct{}
+	cancel    chan struct{}
+	hang      bool
+	n         int
+	failMode  bool
+	failModel bool
+	snap      agent.Snapshot
 }
 
 func NewStub() *Stub {
@@ -24,12 +27,40 @@ func NewStub() *Stub {
 		events: make(chan agent.Event, 256),
 		closed: make(chan struct{}),
 		cancel: make(chan struct{}, 1),
+		snap: agent.Snapshot{
+			CurrentModel: "grok",
+			CurrentMode:  "agent",
+			Models: []agent.ModelInfo{
+				{ID: "grok", Name: "Grok"},
+				{ID: "fast", Name: "Fast"},
+			},
+			Modes: []agent.ModeInfo{
+				{ID: "agent", Name: "Agent"},
+				{ID: "plan", Name: "Plan"},
+				{ID: "ask", Name: "Ask"},
+			},
+			Commands: []agent.CommandInfo{
+				{Name: "research", Description: "Agent-advertised command"},
+			},
+		},
 	}
 }
 
 func (s *Stub) HangNext() {
 	s.mu.Lock()
 	s.hang = true
+	s.mu.Unlock()
+}
+
+func (s *Stub) FailNextSetMode() {
+	s.mu.Lock()
+	s.failMode = true
+	s.mu.Unlock()
+}
+
+func (s *Stub) FailNextSetModel() {
+	s.mu.Lock()
+	s.failModel = true
 	s.mu.Unlock()
 }
 
@@ -76,8 +107,41 @@ func (s *Stub) AnswerPermission(string, string) error {
 	return fmt.Errorf("stub: no permission request")
 }
 
-func (s *Stub) SetModel(context.Context, string) error { return nil }
-func (s *Stub) SetMode(context.Context, string) error  { return nil }
+func (s *Stub) SetModel(_ context.Context, id string) error {
+	s.mu.Lock()
+	fail := s.failModel
+	s.failModel = false
+	if fail {
+		s.mu.Unlock()
+		return fmt.Errorf("stub: set model failed")
+	}
+	s.snap.CurrentModel = id
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Stub) SetMode(_ context.Context, id string) error {
+	s.mu.Lock()
+	fail := s.failMode
+	s.failMode = false
+	if fail {
+		s.mu.Unlock()
+		return fmt.Errorf("stub: set mode failed")
+	}
+	s.snap.CurrentMode = id
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Stub) Snapshot() agent.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.snap
+	out.Models = append([]agent.ModelInfo(nil), s.snap.Models...)
+	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
+	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
+	return out
+}
 
 func (s *Stub) Close() error {
 	s.mu.Lock()

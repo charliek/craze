@@ -72,12 +72,31 @@ func (s *server) onRequest(msg *acp.Message) {
 				"currentModelId": "default",
 				"availableModels": []map[string]string{
 					{"modelId": "default", "name": "Default"},
+					{"modelId": "composer", "name": "Composer"},
 				},
+			},
+		})
+		s.update(fakeSessionID, acp.SessionUpdate{
+			SessionUpdate: acp.UpdateAvailableCommands,
+			AvailableCommands: []acp.AvailableCommand{
+				{Name: "research", Description: "Agent-advertised command"},
 			},
 		})
 	case acp.MethodSessionPrompt:
 		go s.handlePrompt(msg)
-	case acp.MethodSessionSetModel, acp.MethodSessionSetMode, acp.MethodSessionSetConfig:
+	case acp.MethodSessionSetModel:
+		s.reply(msg.ID, map[string]any{})
+	case acp.MethodSessionSetMode:
+		var p acp.SetModeParams
+		_ = json.Unmarshal(msg.Params, &p)
+		s.reply(msg.ID, map[string]any{})
+		if p.ModeID != "" {
+			s.update(fakeSessionID, acp.SessionUpdate{
+				SessionUpdate: acp.UpdateCurrentMode,
+				CurrentModeID: p.ModeID,
+			})
+		}
+	case acp.MethodSessionSetConfig:
 		s.reply(msg.ID, map[string]any{})
 	default:
 		_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))

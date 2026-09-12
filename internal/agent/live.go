@@ -24,6 +24,7 @@ type session struct {
 	promptDone chan struct{}
 	waiting    map[string]pendingPerm
 	permSeq    int
+	snap       Snapshot
 }
 
 type pendingPerm struct {
@@ -113,8 +114,9 @@ func (s *session) Start(ctx context.Context) error {
 		_ = s.Close()
 		return err
 	}
+	snap := snapshotFromNew(sess)
 	if s.opts.Mode != "" {
-		modeID, ok := ResolveMode(s.opts.Mode, availableModeIDs(sess.Modes))
+		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(snap.Modes))
 		if !ok {
 			_ = s.Close()
 			return fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
@@ -123,13 +125,22 @@ func (s *session) Start(ctx context.Context) error {
 			_ = s.Close()
 			return err
 		}
+		snap.CurrentMode = modeID
 	}
 	if s.opts.Model != "" {
 		if err := client.SetModel(ctx, s.opts.Model); err != nil {
 			_ = s.Close()
 			return err
 		}
+		snap.CurrentModel = s.opts.Model
 	}
+	s.mu.Lock()
+	commands := s.snap.Commands
+	s.snap = snap
+	if len(s.snap.Commands) == 0 {
+		s.snap.Commands = commands
+	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -173,14 +184,36 @@ func (s *session) SetModel(ctx context.Context, modelID string) error {
 	if s.client == nil {
 		return fmt.Errorf("agent: session not started")
 	}
-	return s.client.SetModel(ctx, modelID)
+	if err := s.client.SetModel(ctx, modelID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.snap.CurrentModel = modelID
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *session) SetMode(ctx context.Context, modeID string) error {
 	if s.client == nil {
 		return fmt.Errorf("agent: session not started")
 	}
-	return s.client.SetMode(ctx, modeID)
+	if err := s.client.SetMode(ctx, modeID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.snap.CurrentMode = modeID
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *session) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.snap
+	out.Models = append([]ModelInfo(nil), s.snap.Models...)
+	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
+	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
+	return out
 }
 
 func (s *session) Cancel(ctx context.Context) error {
@@ -340,6 +373,18 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			Name:   u.Title,
 			Status: u.Status,
 		}})
+	case acp.UpdateAvailableCommands:
+		s.mu.Lock()
+		s.snap.Commands = commandsFromUpdate(u.AvailableCommands)
+		s.mu.Unlock()
+		s.emit(Event{Type: EventMeta})
+	case acp.UpdateCurrentMode:
+		if u.CurrentModeID != "" {
+			s.mu.Lock()
+			s.snap.CurrentMode = u.CurrentModeID
+			s.mu.Unlock()
+			s.emit(Event{Type: EventMeta})
+		}
 	}
 }
 

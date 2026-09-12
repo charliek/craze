@@ -19,10 +19,12 @@ const (
 	MethodCursorAskQuestion = "cursor/ask_question"
 	MethodCursorCreatePlan  = "cursor/create_plan"
 
-	UpdateAgentMessage = "agent_message_chunk"
-	UpdateAgentThought = "agent_thought_chunk"
-	UpdateToolCall     = "tool_call"
-	UpdateToolCallUpd  = "tool_call_update"
+	UpdateAgentMessage      = "agent_message_chunk"
+	UpdateAgentThought      = "agent_thought_chunk"
+	UpdateToolCall          = "tool_call"
+	UpdateToolCallUpd       = "tool_call_update"
+	UpdateAvailableCommands = "available_commands_update"
+	UpdateCurrentMode       = "current_mode_update"
 
 	KindAllowOnce    = "allow_once"
 	KindAllowAlways  = "allow_always"
@@ -125,12 +127,19 @@ type SessionNotification struct {
 }
 
 type SessionUpdate struct {
-	SessionUpdate string        `json:"sessionUpdate"`
-	Content       *ContentBlock `json:"content,omitempty"`
-	ToolCallID    string        `json:"toolCallId,omitempty"`
-	Title         string        `json:"title,omitempty"`
-	Kind          string        `json:"kind,omitempty"`
-	Status        string        `json:"status,omitempty"`
+	SessionUpdate     string             `json:"sessionUpdate"`
+	Content           *ContentBlock      `json:"content,omitempty"`
+	ToolCallID        string             `json:"toolCallId,omitempty"`
+	Title             string             `json:"title,omitempty"`
+	Kind              string             `json:"kind,omitempty"`
+	Status            string             `json:"status,omitempty"`
+	AvailableCommands []AvailableCommand `json:"availableCommands,omitempty"`
+	CurrentModeID     string             `json:"currentModeId,omitempty"`
+}
+
+type AvailableCommand struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 type PermissionOption struct {

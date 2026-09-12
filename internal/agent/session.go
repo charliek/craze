@@ -18,7 +18,31 @@ const (
 	EventPermission EventType = "permission"
 	EventDone       EventType = "done"
 	EventError      EventType = "error"
+	EventMeta       EventType = "meta"
 )
+
+type ModelInfo struct {
+	ID   string
+	Name string
+}
+
+type ModeInfo struct {
+	ID   string
+	Name string
+}
+
+type CommandInfo struct {
+	Name        string
+	Description string
+}
+
+type Snapshot struct {
+	Models       []ModelInfo
+	Modes        []ModeInfo
+	Commands     []CommandInfo
+	CurrentModel string
+	CurrentMode  string
+}
 
 type Event struct {
 	Type       EventType
@@ -70,5 +94,6 @@ type Session interface {
 	AnswerPermission(id, optionID string) error
 	SetModel(ctx context.Context, modelID string) error
 	SetMode(ctx context.Context, modeID string) error
+	Snapshot() Snapshot
 	Close() error
 }

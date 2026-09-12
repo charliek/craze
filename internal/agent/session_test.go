@@ -155,6 +155,46 @@ func TestSessionPromptStreamFollowUp(t *testing.T) {
 	log.waitTexts(t, "first replysecond reply")
 }
 
+func TestSnapshotModelsModesCommands(t *testing.T) {
+	s := startScript(t, "echo", true)
+	deadline := time.Now().Add(5 * time.Second)
+	var snap Snapshot
+	for time.Now().Before(deadline) {
+		snap = s.Snapshot()
+		if commandNamed(snap, "research") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snap.CurrentModel != "default" || snap.CurrentMode != "agent" {
+		t.Fatalf("%+v", snap)
+	}
+	if len(snap.Models) < 2 || snap.Models[1].ID != "composer" {
+		t.Fatalf("models %+v", snap.Models)
+	}
+	if len(snap.Modes) != 3 {
+		t.Fatalf("modes %+v", snap.Modes)
+	}
+	if !commandNamed(snap, "research") {
+		t.Fatalf("commands %+v", snap.Commands)
+	}
+	if err := s.SetMode(t.Context(), "plan"); err != nil {
+		t.Fatal(err)
+	}
+	if s.Snapshot().CurrentMode != "plan" {
+		t.Fatalf("mode %q", s.Snapshot().CurrentMode)
+	}
+}
+
+func commandNamed(snap Snapshot, name string) bool {
+	for _, c := range snap.Commands {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestYoloAutoAllow(t *testing.T) {
 	s := startScript(t, "permission", true)
 	log := collect(t, s)
