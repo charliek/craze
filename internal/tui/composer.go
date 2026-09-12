@@ -20,8 +20,10 @@ const (
 	// composerPromptW is the width of "❯ ", reserved on every input row.
 	composerPromptW = 2
 	// composerHeadroom is the height the textarea is lent for the duration of
-	// one key. See updateComposer.
-	composerHeadroom = 1 << 16
+	// one key. See updateComposer. It has to exceed the display rows of any
+	// draft: a draft that reached this many rows would be gigabytes of text,
+	// which is past what the composer could hold anyway.
+	composerHeadroom = 1 << 30
 	// composerTitleShare is the fraction of the width the session title may
 	// take on the top rule.
 	composerTitleShare = 2
@@ -41,6 +43,10 @@ func newComposer(th Theme) textarea.Model {
 	// line once the buffer reaches MaxHeight, so setting it would turn the
 	// visible height into a text limit instead of a window.
 	ta.MaxHeight = 0
+	// MaxWidth defaults to 500, and SetWidth silently clamps to it: past that
+	// the textarea would wrap at 498 cells while composerRows counted at the
+	// terminal's real width, and a count that disagrees loses rows.
+	ta.MaxWidth = 0
 	ta.SetPromptFunc(composerPromptW, composerPrompt)
 	ta.SetHeight(1)
 
@@ -221,8 +227,15 @@ func (m Model) composerView(lay frameLayout) string {
 		top = min(max(m.composerCursorRow()-(shown-1), 0), rows-shown)
 	}
 	top = min(top, max(0, len(view)-shown))
+	band := view[top:min(len(view), top+shown)]
+	// The band owes the layout exactly shown rows. The textarea returns fewer
+	// only if its height and the layout disagree, but the bottom rule has to
+	// stay at the bottom either way.
+	for len(band) < shown {
+		band = append(band, "")
+	}
 	return m.composerRule(true) + "\n" +
-		strings.Join(view[top:min(len(view), top+shown)], "\n") + "\n" +
+		strings.Join(band, "\n") + "\n" +
 		m.composerRule(false)
 }
 

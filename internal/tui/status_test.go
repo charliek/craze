@@ -340,3 +340,50 @@ func TestSessionElapsedFormat(t *testing.T) {
 		}
 	}
 }
+
+// A truncated segment's span has to end where the text stopped being drawn.
+// clampWidth can land a cell short when it cannot split a wide rune, and a
+// click on that undrawn cell must not act on the segment.
+func TestTruncatedSpanEndsWhereTheTextDoes(t *testing.T) {
+	const width = 40
+	dim := lipgloss.NewStyle()
+	parts := []statusPart{{text: "◆ " + strings.Repeat("界", 20), id: spanMode}}
+	row, spans := fitStatus(parts, statusDot, dim, width)
+	drawn := lipgloss.Width(row)
+	if drawn >= width {
+		t.Fatalf("this case needs a row that stops short of %d, got %d", width, drawn)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("want one span, got %+v", spans)
+	}
+	if spans[0].x1 != drawn {
+		t.Fatalf("span ends at %d, but the row is %d cells wide", spans[0].x1, drawn)
+	}
+	if spanAt(spans, drawn) == spanMode {
+		t.Fatalf("cell %d was never drawn, but a click there hits the mode chip", drawn)
+	}
+}
+
+// The hint is worth 12 cells with its separator, and drop step 1 is what
+// enforces the "only when there is room" rule.
+func TestModeHintNeedsTwelveSpareCells(t *testing.T) {
+	dim := lipgloss.NewStyle()
+	parts := func() []statusPart {
+		return []statusPart{
+			{text: "◆ agent", id: spanMode},
+			{text: modeHint, drop: 1},
+			{text: "▸▸ bypass permissions on"},
+		}
+	}
+	const bare = 34 // the two chips and one separator
+	for _, tc := range []struct {
+		width int
+		want  bool
+	}{{bare + 11, false}, {bare + 12, true}} {
+		row, _ := fitStatus(parts(), statusDot, dim, tc.width)
+		if got := strings.Contains(row, modeHint); got != tc.want {
+			t.Fatalf("width %d (%d spare): hint shown = %v, want %v (%q)",
+				tc.width, tc.width-bare, got, tc.want, row)
+		}
+	}
+}

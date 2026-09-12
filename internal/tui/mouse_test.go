@@ -241,3 +241,39 @@ func TestWheelIsIgnoredWhileACardIsUp(t *testing.T) {
 		t.Fatalf("the wheel scrolled to %d behind the card, want %d", got, bottom)
 	}
 }
+
+// Clicking the mode chip is shift+tab under the pointer, so an overlay that
+// swallows the key has to swallow the click too.
+func TestChipClickBlockedByOverlays(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(*Model)
+	}{
+		{"help", func(m *Model) { m.help = true }},
+		{"model picker", func(m *Model) { m.picking = true }},
+		{"theme picker", func(m *Model) { m.themePicking = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t)
+			tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = tm.(Model)
+			before := m.snap.CurrentMode
+			tc.open(&m)
+			_, spans := m.statusRow2(m.lay)
+			x := -1
+			for _, s := range spans {
+				if s.id == spanMode {
+					x = s.x0
+				}
+			}
+			if x < 0 {
+				t.Fatal("no mode span to click")
+			}
+			out, _ := m.clickStatus(x, 1, m.lay)
+			if got := out.(Model).snap.CurrentMode; got != before {
+				t.Fatalf("%s open: click cycled mode %q → %q; shift+tab would not have",
+					tc.name, before, got)
+			}
+		})
+	}
+}

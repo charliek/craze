@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // composerBand is the rows this frame actually gave the composer: the top
@@ -254,5 +255,44 @@ func TestPlanOfferPlaceholderFitsTheBand(t *testing.T) {
 	}
 	if m.lay.ComposerRows != 1 {
 		t.Fatalf("the offer is one row, got %d", m.lay.ComposerRows)
+	}
+}
+
+// A terminal wider than bubbles' default MaxWidth of 500 used to wrap the
+// textarea at 498 cells while composerRows counted at the real width, so the
+// count under-reported and the layout cut rows off the bottom.
+func TestComposerCountsAtWideWidths(t *testing.T) {
+	const width = 600
+	m := sized(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+	m = tm.(Model)
+	line := strings.Repeat("x", 499)
+	m.input.SetValue(line)
+	if got, want := m.composerRows(), 1; got != want {
+		t.Fatalf("composerRows = %d, want %d at width %d", got, want, width)
+	}
+	// The textarea has to agree: one row, wrapped at the terminal's width.
+	m.relayout(false)
+	if got := m.input.LineInfo().Height; got != 1 {
+		t.Fatalf("textarea wrapped a %d-cell line to %d rows at width %d", len(line), got, width)
+	}
+}
+
+// The band owes the layout exactly the rows it was given, so the bottom rule
+// stays at the bottom even when the textarea hands back fewer.
+func TestComposerBandKeepsItsBottomRule(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
+	m = tm.(Model)
+	m.input.SetValue("abc")
+	m.input.SetHeight(1)
+	lay := m.lay
+	lay.ComposerRows = 3
+	got := strings.Split(m.composerView(lay), "\n")
+	if len(got) != 5 {
+		t.Fatalf("band is %d rows, want 5 (rule + 3 + rule): %q", len(got), got)
+	}
+	if !strings.HasPrefix(ansi.Strip(got[4]), "─") {
+		t.Fatalf("last band row is %q, want the bottom rule", got[4])
 	}
 }

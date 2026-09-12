@@ -459,10 +459,14 @@ func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
 	if row != 1 {
 		return m, nil
 	}
+	// The chip is shift+tab under the pointer, gating included: a card blocks
+	// it (handleMouse already returned), an overlay that swallows the key
+	// swallows the click, and working blocks neither.
+	if m.themePicking || m.picking || m.help {
+		return m, nil
+	}
 	_, spans := m.statusRow2(lay)
 	if spanAt(spans, x) == spanMode {
-		// The chip is shift+tab under the pointer, gating included: a card
-		// blocks it (handleMouse already returned), working does not.
 		return m.cycleMode()
 	}
 	return m, nil

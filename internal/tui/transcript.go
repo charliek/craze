@@ -483,9 +483,13 @@ func renderSegSpans(width int, segs []idSeg) (string, []segSpan) {
 		}
 		w := lipgloss.Width(s.text)
 		if w > avail {
-			b.WriteString(s.style.Render(clampWidth(s.text, avail)))
+			cut := clampWidth(s.text, avail)
+			b.WriteString(s.style.Render(cut))
 			if s.id != spanNone {
-				spans = append(spans, segSpan{id: s.id, x0: used, x1: used + avail})
+				// clampWidth can land short of avail — a wide rune it could
+				// not split, plus the ellipsis — and the cells it did not use
+				// were never drawn, so a click there must not land on it.
+				spans = append(spans, segSpan{id: s.id, x0: used, x1: used + lipgloss.Width(cut)})
 			}
 			break
 		}
