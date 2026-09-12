@@ -52,6 +52,14 @@ func (s *Stub) HangNext() {
 	s.mu.Unlock()
 }
 
+// SetTools replaces Snapshot.Tools (copy-on-write). Tests send EventTool
+// afterwards so the TUI refreshSnap() picks the in-flight set up.
+func (s *Stub) SetTools(tools []agent.ToolEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Tools = cloneStubTools(tools)
+}
+
 func (s *Stub) FailNextSetMode() {
 	s.mu.Lock()
 	s.failMode = true

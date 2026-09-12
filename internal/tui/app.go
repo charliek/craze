@@ -72,6 +72,11 @@ type Model struct {
 	slashSel   int
 	slashHide  bool
 	streamOpen bool
+
+	toolLine  map[string]int
+	toolTouch []string
+	stripSel  int
+	stripPeek bool
 }
 
 type transcriptLine struct {
@@ -242,6 +247,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleMode()
 	}
 	if msg.Type == tea.KeyEsc {
+		if m.stripPeek {
+			m.stripPeek = false
+			return m, nil
+		}
 		if m.slashMenuOpen() {
 			m.slashHide = true
 			m.slashSel = 0
@@ -285,6 +294,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.slashSel = (m.slashSel - 1 + len(items)) % len(items)
 		}
+		return m, nil
+	}
+	if composerEmpty(m.input) && len(m.stripItems()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
+		delta := 1
+		if msg.Type == tea.KeyUp {
+			delta = -1
+		}
+		m.moveStrip(delta)
 		return m, nil
 	}
 	return m, m.updateComposer(msg)
@@ -354,10 +371,17 @@ func (m Model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
+	name, args, ok := parseSlashLine(m.input.Value())
+	if ok && (name == "exit" || name == "quit") {
+		return m.runBuiltin(name, args)
+	}
+	if composerEmpty(m.input) && len(m.stripItems()) > 0 {
+		m.stripPeek = true
+		return m, nil
+	}
 	if m.pending != nil || m.status == statusWorking || !m.started {
 		return m, nil
 	}
-	name, args, ok := parseSlashLine(m.input.Value())
 	if ok && name != "" && builtinNamed(name) {
 		return m.runBuiltin(name, args)
 	}
@@ -465,12 +489,14 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case agent.EventThought:
 		m.appendStream("thought", ev.Text)
 	case agent.EventTool:
+		m.refreshSnap()
 		m.breakStream()
-		name, status, id := "", "", ""
 		if ev.Tool != nil {
-			name, status, id = ev.Tool.Name, ev.Tool.Status, ev.Tool.ID
+			m.noteToolUpdate(ev.Tool.ID)
+			m.upsertToolLine(ev.Tool)
 		}
-		m.addLine("tool", fmt.Sprintf("%s %s %s", name, status, id))
+		m.syncStrip()
+		m.layout()
 	case agent.EventPermission:
 		m.breakStream()
 		m.pending = ev.Permission
@@ -519,6 +545,54 @@ func (m *Model) addLine(kind, text string) {
 	m.refreshViewport()
 }
 
+func formatToolLine(t *agent.ToolEvent) string {
+	if t == nil {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	if t.Kind != "" {
+		parts = append(parts, t.Kind)
+	}
+	if t.Status != "" {
+		parts = append(parts, t.Status)
+	}
+	if t.Title != "" {
+		parts = append(parts, t.Title)
+	}
+	if t.ID != "" {
+		parts = append(parts, t.ID)
+	}
+	s := strings.Join(parts, " ")
+	if t.RawInput != "" {
+		s += " (" + t.RawInput + ")"
+	}
+	return s
+}
+
+func (m *Model) upsertToolLine(t *agent.ToolEvent) {
+	if t == nil {
+		return
+	}
+	text := formatToolLine(t)
+	if text == "" {
+		return
+	}
+	if t.ID != "" && m.toolLine != nil {
+		if idx, ok := m.toolLine[t.ID]; ok && idx >= 0 && idx < len(m.lines) && m.lines[idx].kind == "tool" {
+			m.lines[idx].text = text
+			m.refreshViewport()
+			return
+		}
+	}
+	m.addLine("tool", text)
+	if t.ID != "" {
+		if m.toolLine == nil {
+			m.toolLine = make(map[string]int)
+		}
+		m.toolLine[t.ID] = len(m.lines) - 1
+	}
+}
+
 func (m *Model) refreshSnap() {
 	if m.sess == nil {
 		return
@@ -549,6 +623,9 @@ func (m *Model) layout() {
 		if h := lipgloss.Height(m.slashMenuView()); h > 0 {
 			extra += h
 		}
+	}
+	if s := m.stripView(); s != "" {
+		extra += lipgloss.Height(s)
 	}
 	h := m.height - footerH - composerH - extra
 	if h < 1 {
@@ -604,6 +681,9 @@ func (m Model) View() string {
 		parts = append(parts, m.slashMenuView())
 	}
 	parts = append(parts, box)
+	if s := m.stripView(); s != "" {
+		parts = append(parts, s)
+	}
 	if m.pending != nil {
 		parts = append(parts, m.permissionOverlay())
 	}

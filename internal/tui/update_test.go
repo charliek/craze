@@ -544,7 +544,7 @@ func TestEscSlashKeepsComposerText(t *testing.T) {
 }
 
 func TestHelpOverlayFitsTerminal(t *testing.T) {
-	m := sized(t)
+	m := applyInFlight(t, sized(t), inFlightTools())
 	m.input.SetValue("/help")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
@@ -604,5 +604,292 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	}
 	if len(texts(m, "error")) == 0 {
 		t.Fatal("expected error toast")
+	}
+}
+
+func belowComposer(view string) (string, bool) {
+	i := strings.Index(view, "message")
+	j := strings.Index(view, "yolo")
+	if i < 0 || j < 0 || j <= i {
+		return "", false
+	}
+	return view[i:j], true
+}
+
+func inFlightTools() []agent.ToolEvent {
+	return []agent.ToolEvent{
+		{
+			ID:          "task-1",
+			Kind:        "other",
+			Title:       "Subagent research",
+			Status:      "pending",
+			ContentText: "scanning workspace",
+			RawInput:    "PEEK-TASK-RAW",
+		},
+		{
+			ID:          "sh-1",
+			Kind:        "execute",
+			Title:       "Shell",
+			Status:      "in_progress",
+			ContentText: "running",
+			RawInput:    "PEEK-SHELL-RAW",
+		},
+	}
+}
+
+func applyInFlight(t *testing.T, m Model, tools []agent.ToolEvent) Model {
+	t.Helper()
+	stub, ok := m.sess.(*Stub)
+	if !ok {
+		t.Fatalf("sess is %T, want *Stub", m.sess)
+	}
+	stub.SetTools(tools)
+	for i := range tools {
+		tool := tools[i]
+		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tool}})
+		m = tm.(Model)
+	}
+	return m
+}
+
+func hangWorking(t *testing.T) Model {
+	t.Helper()
+	stub := NewStub()
+	stub.HangNext()
+	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	m.input.SetValue("wait")
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking {
+		t.Fatal("want working")
+	}
+	return m
+}
+
+func TestInPlaceToolLineSameID(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		ID: "call-1", Kind: "execute", Status: "pending", Title: "Shell",
+	}}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		ID: "call-1", Kind: "execute", Status: "completed", Title: "Shell", RawInput: "echo hi",
+	}}})
+	m = tm.(Model)
+	got := texts(m, "tool")
+	if len(got) != 1 {
+		t.Fatalf("tool lines %q", got)
+	}
+	if !strings.Contains(got[0], "completed") {
+		t.Fatalf("final status missing: %q", got[0])
+	}
+	if strings.Contains(got[0], "pending") {
+		t.Fatalf("stale pending status: %q", got[0])
+	}
+	view := m.View()
+	if strings.Contains(view, "tool tool") {
+		t.Fatalf("renderer prefixed tool twice:\n%s", view)
+	}
+	if !strings.Contains(view, "tool ") {
+		t.Fatalf("missing tool prefix:\n%s", view)
+	}
+}
+
+func TestWorkStripPlacementAndSubagentLabel(t *testing.T) {
+	m := applyInFlight(t, sized(t), inFlightTools())
+	view := m.View()
+	below, ok := belowComposer(view)
+	if !ok {
+		t.Fatalf("composer/footer missing:\n%s", view)
+	}
+	if !strings.Contains(below, "Shell") {
+		t.Fatalf("Shell missing below composer:\n%s", below)
+	}
+	if !strings.Contains(below, "Subagent research") {
+		t.Fatalf("Subagent research missing below composer:\n%s", below)
+	}
+	if strings.Contains(below, "subagent Shell") {
+		t.Fatalf("Shell must not be labeled subagent:\n%s", below)
+	}
+	if !strings.Contains(below, "subagent") {
+		t.Fatalf("Subagent research should be labeled subagent:\n%s", below)
+	}
+
+	done := inFlightTools()
+	for i := range done {
+		done[i].Status = "completed"
+	}
+	m = applyInFlight(t, m, done)
+	view = m.View()
+	below, ok = belowComposer(view)
+	if !ok {
+		t.Fatalf("composer/footer missing after complete:\n%s", view)
+	}
+	if strings.Contains(below, "Shell") || strings.Contains(below, "Subagent research") {
+		t.Fatalf("strip should be gone after completed:\n%s", below)
+	}
+}
+
+func TestStripPeekEnterEsc(t *testing.T) {
+	m := applyInFlight(t, sized(t), inFlightTools())
+	m.status = statusWorking
+	m.input.SetValue("")
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd != nil {
+		t.Fatal("peek enter must not send")
+	}
+	if !m.stripPeek {
+		t.Fatal("expected peek")
+	}
+	view := m.View()
+	below, ok := belowComposer(view)
+	if !ok {
+		t.Fatalf("composer/footer missing:\n%s", view)
+	}
+	if !strings.Contains(below, "PEEK-TASK-RAW") && !strings.Contains(below, "PEEK-SHELL-RAW") {
+		t.Fatalf("peek missing content snippet:\n%s", below)
+	}
+	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.stripPeek {
+		t.Fatal("esc should collapse peek")
+	}
+	if m.status != statusWorking {
+		t.Fatalf("status %s, want working", m.status)
+	}
+	if m.quitting {
+		t.Fatal("esc on peek must not quit")
+	}
+	if cmd != nil {
+		t.Fatal("esc on peek must not cancelTurn")
+	}
+	below, _ = belowComposer(m.View())
+	if strings.Contains(below, "PEEK-TASK-RAW") || strings.Contains(below, "PEEK-SHELL-RAW") {
+		t.Fatalf("peek snippet still visible:\n%s", below)
+	}
+}
+
+func TestStripNavUpDownAndJTypes(t *testing.T) {
+	m := applyInFlight(t, sized(t), inFlightTools())
+	if m.stripSel != 0 {
+		t.Fatalf("sel %d", m.stripSel)
+	}
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if m.stripSel != 1 {
+		t.Fatalf("down sel %d", m.stripSel)
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(Model)
+	if m.stripSel != 0 {
+		t.Fatalf("up sel %d", m.stripSel)
+	}
+
+	m.input.SetValue("hey")
+	sel := m.stripSel
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = tm.(Model)
+	if !strings.Contains(m.input.Value(), "j") {
+		t.Fatalf("j should type, got %q", m.input.Value())
+	}
+	if m.stripSel != sel {
+		t.Fatal("j must not move strip selection")
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if m.stripSel != sel {
+		t.Fatal("down with composer text must not move strip")
+	}
+}
+
+func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
+	t.Run("exit", func(t *testing.T) {
+		m := hangWorking(t)
+		m.input.SetValue("/exit")
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("/exit while working should quit")
+		}
+		assertQuitCmd(t, cmd)
+	})
+	t.Run("help", func(t *testing.T) {
+		m := hangWorking(t)
+		m.input.SetValue("/help")
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		if m.help {
+			t.Fatal("/help while working should be ignored")
+		}
+		if m.quitting {
+			t.Fatal("/help while working must not quit")
+		}
+		if cmd != nil {
+			t.Fatal("/help while working should not run a command")
+		}
+		if m.status != statusWorking {
+			t.Fatalf("status %s", m.status)
+		}
+	})
+}
+
+func TestClearThenToolUpdateAppends(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		ID: "old-1", Kind: "execute", Status: "pending", Title: "Shell",
+	}}})
+	m = tm.(Model)
+	if len(texts(m, "tool")) != 1 {
+		t.Fatalf("setup lines %q", texts(m, "tool"))
+	}
+	m.input.SetValue("/clear")
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	if len(m.lines) != 0 {
+		t.Fatalf("clear left lines %+v", m.lines)
+	}
+	if len(m.toolLine) != 0 {
+		t.Fatalf("clear left toolLine %+v", m.toolLine)
+	}
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		ID: "old-1", Kind: "execute", Status: "completed", Title: "Shell",
+	}}})
+	m = tm.(Model)
+	got := texts(m, "tool")
+	if len(got) != 1 {
+		t.Fatalf("expected one new tool row, got %q", got)
+	}
+	if !strings.Contains(got[0], "completed") {
+		t.Fatalf("new row %q", got[0])
+	}
+}
+
+func TestHelpOverlayFitsWithInFlightTools(t *testing.T) {
+	m := applyInFlight(t, sized(t), inFlightTools())
+	m.input.SetValue("/help")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if !m.help {
+		t.Fatal("expected help")
+	}
+	view := m.View()
+	if h := lipgloss.Height(view); h > 24 {
+		t.Fatalf("help+strip view is %d rows, crops 24-row terminal:\n%s", h, view)
+	}
+	if !strings.Contains(view, "yolo") {
+		t.Fatalf("footer cropped:\n%s", view)
+	}
+	if !strings.Contains(view, "message") {
+		t.Fatalf("composer cropped:\n%s", view)
+	}
+	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
+		t.Fatalf("help body missing:\n%s", view)
 	}
 }

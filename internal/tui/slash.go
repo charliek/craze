@@ -110,6 +110,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		return m.requestQuit()
 	case "clear":
 		m.lines = nil
+		m.toolLine = nil
 		m.input.SetValue("")
 		m.refreshViewport()
 		return m, nil
