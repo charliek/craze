@@ -345,6 +345,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		card    bool
+		dialog  bool
 		needles map[regionID]string
 	}{
 		{
@@ -370,12 +371,30 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 				regionPeek:    "count the lines in file",
 			},
 		},
+		{
+			// The modal layer is drawn over the transcript and nowhere else, so
+			// every band under it still owns the rows the layout gave it.
+			name:   "dialog layer",
+			dialog: true,
+			needles: map[regionID]string{
+				regionTasks: "TASKS",
+				// Without a card the spinner names the turn, not the answer it
+				// is waiting for.
+				regionSpinner:  "esc to interrupt",
+				regionComposer: "───",
+				regionStatus:   chipYolo,
+				regionAgents:   "○ task  count lines",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := loadedModelCard(t, 100, 30, tc.card)
 			// Open every band this frame is allowed to draw.
-			m.help = !tc.card
-			m.agentPeek = !tc.card
+			m.help = !tc.card && !tc.dialog
+			m.agentPeek = !tc.card && !tc.dialog
+			if tc.dialog {
+				m = m.openModelDialog()
+			}
 			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)
 
@@ -402,6 +421,16 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 					t.Fatalf("region %d claims rows [%d,%d) but none of them contains %q:\n%s",
 						id, r.Top, r.Bottom, needle, view)
 				}
+			}
+			if !tc.dialog {
+				return
+			}
+			box, tr := m.lay.Dialog, m.lay.Region(regionTranscript)
+			if box.Empty() {
+				t.Fatalf("the layer has no rectangle: %+v", m.lay)
+			}
+			if box.Y < tr.Top || box.Y+box.H > tr.Bottom {
+				t.Fatalf("the box %+v covers a band outside the transcript %+v", box, tr)
 			}
 		})
 	}

@@ -55,7 +55,7 @@ type regionID int
 
 const (
 	regionTranscript regionID = iota // scrollback viewport
-	regionOverlay                    // help, model picker or slash menu
+	regionOverlay                    // help or the slash menu
 	regionTasks                      // pinned tasks panel
 	regionSpinner                    // spinner line
 	regionComposer                   // rule + input rows + rule
@@ -130,6 +130,11 @@ type frameLayout struct {
 	TooSmall bool
 
 	regions [regionCount]yRange
+
+	// Dialog is the modal layer's outer box, borders included, and zero when
+	// no dialog is open. It is not a region: it is drawn over the transcript
+	// after the band loop, and hit-tested before any of them.
+	Dialog rect
 
 	// What degradation left of the regions that can shrink.
 	TasksRows     int  // task rows under the header; 0 means header-only
@@ -302,6 +307,9 @@ func (m *Model) computeLayout() frameLayout {
 	lay.AgentRows = s.agentRows()
 	lay.SpinnerMerged = s.merged
 	lay.Degraded = steps
+	// The layer is measured last, from the transcript range the bands just
+	// settled on, so the box can never be laid out over a band.
+	lay.Dialog = m.dialogRect(lay)
 	return lay
 }
 

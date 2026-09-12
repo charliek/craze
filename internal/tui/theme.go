@@ -22,6 +22,10 @@ const diffBGMix = 10
 // another divider.
 const ruleMix = 30
 
+// selectionMix is how much accent is mixed into the background for a selected
+// row: enough to read as "this one", not enough to hide the text on it.
+const selectionMix = 25
+
 // paletteSpec is the hand-picked part of a theme. Every other slot is derived
 // from these eleven colours, so a new preset is one row of this table.
 type paletteSpec struct {
@@ -66,7 +70,10 @@ type Theme struct {
 	DiffAdd, DiffDel                   lipgloss.Color
 	DiffAddBG, DiffDelBG               lipgloss.Color
 	LineNo, TaskRail, Selection, Rule  lipgloss.Color
-	ChipBypass, ChipPrompt, Provider   lipgloss.Color
+	// SelectionBG is the background the dialog cursor row (and V4's mouse
+	// selection) paints with; Selection stays a foreground slot.
+	SelectionBG                      lipgloss.Color
+	ChipBypass, ChipPrompt, Provider lipgloss.Color
 	// One colour per mode kind, not per mode id: the chip has to stay
 	// readable for an agent that spells plan mode "architect".
 	ModeImplement, ModePlan, ModeReadOnly lipgloss.Color
@@ -99,6 +106,7 @@ func (p paletteSpec) theme() Theme {
 	th.LineNo = th.Dim
 	th.TaskRail = th.Accent
 	th.Selection = th.Accent
+	th.SelectionBG = blend(p.bg, p.accent, selectionMix)
 	th.Rule = blend(p.border, p.fg, ruleMix)
 	th.ChipBypass = th.Err
 	th.ChipPrompt = th.Warn
@@ -197,9 +205,8 @@ func (m *Model) applyTheme(th Theme) {
 // rows under the cursor.
 func (m Model) openThemePicker() Model {
 	m.help = false
-	m.picking = false
-	m.effortStep = false
-	m.themePicking = true
+	m = m.closeDialog(true)
+	m.dialog = dialogTheme
 	m.themePrev = m.theme
 	m.themeNames = themeOrder(m.theme.Name)
 	m.themeSel = 0
@@ -223,32 +230,17 @@ func themeOrder(current string) []string {
 	return out
 }
 
-// closeThemePicker leaves the picker; revert puts back the theme that was
-// active when it opened, which is what Esc and an arriving card both want.
-func (m Model) closeThemePicker(revert bool) Model {
-	if !m.themePicking {
-		return m
-	}
-	m.themePicking = false
-	if revert {
-		m.applyTheme(m.themePrev)
-	}
-	m.themeNames = nil
-	m.themeSel = 0
-	return m
-}
-
-func (m Model) handleThemePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleThemeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	n := len(m.themeNames)
 	if n == 0 {
-		return m.closeThemePicker(true), nil
+		return m.closeDialog(true), nil
 	}
 	if m.themeSel < 0 || m.themeSel >= n {
 		m.themeSel = 0
 	}
 	switch msg.Type {
 	case tea.KeyEsc:
-		return m.closeThemePicker(true), nil
+		return m.closeDialog(true), nil
 	case tea.KeyEnter:
 		return m.keepTheme(), nil
 	case tea.KeyDown:
@@ -283,7 +275,7 @@ func (m Model) handleThemePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // keepTheme closes the picker on the previewed theme and persists it.
 func (m Model) keepTheme() Model {
 	name := m.theme.Name
-	m.themePicking = false
+	m.dialog = dialogNone
 	m.themeNames = nil
 	m.themeSel = 0
 	if name == m.themePrev.Name {
@@ -318,22 +310,42 @@ func (m Model) noteAndSaveTheme(name string) Model {
 	return m
 }
 
-// themePickerView is the names-only picker: no swatches, because the live
-// preview is the swatch.
-func (m Model) themePickerView() string {
-	var b strings.Builder
-	b.WriteString("theme  (enter keep, esc revert)\n")
-	for i, name := range m.themeNames {
-		mark, st := " ", styleFG(m.theme.FG)
-		if i == m.themeSel {
-			mark, st = ">", styleFG(m.theme.Selection)
-		}
-		b.WriteString(st.Render(fmt.Sprintf("%s %d %s", mark, i+1, name)))
-		b.WriteByte('\n')
+// themeDialogBody is the names-only list in the shared dialog frame: no
+// swatches, because the live preview is the swatch, and no filter, because
+// seven names need none. It drops the list first and then the footer, the same
+// order the model dialog uses.
+func (m Model) themeDialogBody(inner, budget int) []string {
+	top, shown, footer := m.themeDialogPlan(budget)
+	rows := []string{m.dialogTitle(themeDialogTitle, inner)}
+	for i := 0; i < shown; i++ {
+		name := m.themeNames[top+i]
+		rows = append(rows, m.dialogRow(name, dialogScrollTag(i, top, shown, len(m.themeNames)), top+i == m.themeSel, inner))
 	}
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Accent).
-		Width(max(1, m.width-2)).
-		Render(strings.TrimRight(b.String(), "\n"))
+	if footer {
+		rows = append(rows, m.dialogFooter(themeDialogHint, inner))
+	}
+	return rows
+}
+
+// themeDialogPlan is the window onto the name list and whether the footer
+// survived: title + list + footer, with the list giving its rows up one at a
+// time and the footer only once even one list row no longer fits. The renderer
+// and the hit-tester both take it.
+func (m Model) themeDialogPlan(budget int) (top, shown int, footer bool) {
+	list := min(max(budget-2, 0), len(m.themeNames))
+	top, shown = dialogListWindow(len(m.themeNames), m.themeSel, list)
+	return top, shown, budget >= 2
+}
+
+// themeDialogClick picks the name under the pointer and keeps it, which is
+// Enter under the pointer.
+func (m Model) themeDialogClick(i int) (tea.Model, tea.Cmd) {
+	top, shown, _ := m.themeDialogPlan(m.lay.Dialog.H - dialogBorder)
+	row := i - 1 // the title row
+	if row < 0 || row >= shown {
+		return m, nil
+	}
+	m.themeSel = top + row
+	m.applyTheme(Preset(m.themeNames[m.themeSel]))
+	return m.keepTheme(), nil
 }

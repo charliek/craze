@@ -96,9 +96,9 @@ func (m Model) headCard() (card, bool) {
 	return m.cards[0], true
 }
 
-// pushCard queues a blocking request. The lower overlays close on arrival
-// (§3.11) — the theme picker takes its live preview back out with it, or the
-// preview would survive underneath the card.
+// pushCard queues a blocking request. The lower overlays and the modal layer
+// close on arrival (§3.11) — the theme dialog takes its live preview back out
+// with it, or the preview would survive underneath the card.
 //
 // A card event that was already on its way when the turn was cancelled is
 // dropped: Cancel answered every request the session was holding and the
@@ -111,15 +111,15 @@ func (m *Model) pushCard(c card) {
 	m.breakStream()
 	m.cards = append(append([]card(nil), m.cards...), c)
 	m.help = false
-	m.picking = false
-	m.effortStep = false
 	m.agentPeek = false
 	// A card is a question the user has to answer first, so the plan offer
 	// stands down rather than competing with it for Enter.
 	m.planOffer = false
 	// The draft itself is never touched (pinned), only the menu it opened.
 	m.slashHide = true
-	*m = m.closeThemePicker(true)
+	// Either dialog goes with the rest: the model dialog applies nothing on
+	// the way out, and the theme dialog takes its live preview with it.
+	*m = m.closeDialog(true)
 }
 
 // setHead replaces the visible card. The queue is copied rather than written

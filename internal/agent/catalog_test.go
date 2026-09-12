@@ -80,8 +80,53 @@ func TestParseConfigOptions(t *testing.T) {
 	if len(opts[1].SelectValues) != 2 || opts[1].SelectValues[0].Value != "a" || opts[1].SelectValues[0].Name != "A" {
 		t.Fatalf("grouped should skip headers: %+v", opts[1].SelectValues)
 	}
-	if opts[2].Type != "boolean" || opts[2].Current != "true" {
+	// A boolean arrives as a two-value select, so the dialog's toggle rows do
+	// not need a second shape.
+	if opts[2].Type != "select" || opts[2].Current != "true" {
 		t.Fatalf("boolean %+v", opts[2])
+	}
+	off, on, ok := FastOnOff(&opts[2])
+	if !ok || off != "false" || on != "true" {
+		t.Fatalf("boolean off/on = %q/%q (%v)", off, on, ok)
+	}
+}
+
+// TestParseSelectValuesStringifiesScalars is hardening, not a fix: every live
+// capture advertises fast as strings. A shape change to bare JSON scalars must
+// not silently drop the option's values.
+func TestParseSelectValuesStringifiesScalars(t *testing.T) {
+	got := parseSelectValues(json.RawMessage(
+		`[{"value":false,"name":"Off"},{"value":true,"name":"Fast"},{"value":3,"name":"Three"}]`))
+	if len(got) != 3 {
+		t.Fatalf("len %d: %+v", len(got), got)
+	}
+	for i, want := range []string{"false", "true", "3"} {
+		if got[i].Value != want {
+			t.Fatalf("value %d = %q, want %q", i, got[i].Value, want)
+		}
+	}
+}
+
+// TestFastOptionLiveShape is the fast toggle exactly as cursor advertises it,
+// U+200B padding and all.
+func TestFastOptionLiveShape(t *testing.T) {
+	raw := json.RawMessage(`[{"id":"fast","name":"Fast","description":"Significantly faster",
+		"category":"model_config","type":"select","currentValue":"true",
+		"options":[{"value":"false","name":"Off"},{"value":"true","name":"Fast\u200b\u200b"}]}]`)
+	snap := Snapshot{Config: parseConfigOptions(raw)}
+	opt := FastOption(snap)
+	if opt == nil {
+		t.Fatal("the live fast option should be found")
+	}
+	if opt.SelectValues[1].Name != "Fast" {
+		t.Fatalf("the zero-width padding survived: %q", opt.SelectValues[1].Name)
+	}
+	off, on, ok := FastOnOff(opt)
+	if !ok || off != "false" || on != "true" {
+		t.Fatalf("off/on = %q/%q (%v)", off, on, ok)
+	}
+	if !FastOn(snap) {
+		t.Fatal("currentValue true means fast is on")
 	}
 }
 

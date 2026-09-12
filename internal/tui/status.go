@@ -173,8 +173,10 @@ func (m Model) permissionChip() (string, lipgloss.Style) {
 	return "▸ prompting for permissions", styleFG(m.theme.ChipPrompt)
 }
 
-// modelLabel is the advertised display name of the current model, plus the
-// effort when the agent offers one.
+// modelLabel is the advertised display name of the current model, plus what
+// the agent lets craze set beside it: the effort when one is offered, and
+// "fast" only when that toggle exists and is on — off is the quiet default and
+// says nothing.
 func (m Model) modelLabel() string {
 	id := m.snap.CurrentModel
 	if id == "" {
@@ -188,8 +190,15 @@ func (m Model) modelLabel() string {
 		}
 	}
 	name = sanitizeLine(name)
+	var bits []string
 	if opt := agent.EffortOption(m.snap); opt != nil && opt.Current != "" {
-		name += " (" + sanitizeLine(opt.Current) + ")"
+		bits = append(bits, sanitizeLine(opt.Current))
+	}
+	if agent.FastOn(m.snap) {
+		bits = append(bits, "fast")
+	}
+	if len(bits) > 0 {
+		name += " (" + strings.Join(bits, statusDot) + ")"
 	}
 	return name
 }

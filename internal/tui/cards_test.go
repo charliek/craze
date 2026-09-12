@@ -572,7 +572,7 @@ func TestCardsOwnTheKeyboard(t *testing.T) {
 	if m.tasksState != tasksCompact {
 		t.Fatalf("ctrl+t cycled the panel behind the card: %v", m.tasksState)
 	}
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("ctrl+g opened the theme picker behind the card")
 	}
 	if m.expanded {
@@ -606,7 +606,7 @@ func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 	}
 
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("a card closes the theme picker")
 	}
 	if m.theme.Name != "tokyo-night" {

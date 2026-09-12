@@ -25,13 +25,8 @@ const ctrlCWindow = time.Second
 // imports internal/acp, so the string is spelled here.
 const stopCancelled = "cancelled"
 
-const (
-	// wheelLines is how far one wheel notch scrolls the transcript.
-	wheelLines = 3
-	// pickerHeaderRows is the box border plus the picker's own title row,
-	// which sit above option 1.
-	pickerHeaderRows = 2
-)
+// wheelLines is how far one wheel notch scrolls the transcript.
+const wheelLines = 3
 
 type status int
 
@@ -112,19 +107,20 @@ type Model struct {
 	cardsCancelled bool
 	snap           agent.Snapshot
 
-	help       bool
-	picking    bool
-	effortStep bool
-	modelSel   int
-	effortSel  int
+	help bool
 
-	// Theme picker: the list is frozen when it opens because the live preview
+	// dialog is the modal layer: at most one is up, drawn over the transcript
+	// region and hit-tested before any band. mdlg is the model dialog's own
+	// state.
+	dialog dialogKind
+	mdlg   modelDialog
+
+	// Theme dialog: the list is frozen when it opens because the live preview
 	// changes the current theme on every move, and themePrev is the theme Esc
-	// (or an arriving card) puts back.
-	themePicking bool
-	themeSel     int
-	themeNames   []string
-	themePrev    Theme
+	// (or a click outside, or an arriving card) puts back.
+	themeSel   int
+	themeNames []string
+	themePrev  Theme
 
 	slashSel   int
 	slashHide  bool
@@ -348,9 +344,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case revertModelMsg:
 		m.snap.CurrentModel = msg.prev
 		m.model = msg.prev
-		m.picking = false
-		m.effortStep = false
 		m.addError(msg.err.Error())
+		return m, nil
+
+	case modelApplyMsg:
+		// The steps that landed are the truth; the one that did not is named,
+		// and the snapshot is re-read so the rows show what the agent has
+		// rather than what the dialog hoped for.
+		for _, note := range msg.done {
+			m.addNote(note)
+		}
+		if msg.err != nil {
+			m.refreshSnap()
+			m.addError(msg.step + ": " + msg.err.Error())
+		}
 		return m, nil
 
 	case refreshSnapMsg:
@@ -420,24 +427,22 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // handleClick reads the same frameLayout View() drew from, so what is on the
 // screen and what is clickable cannot drift apart.
+//
+// The modal layer is hit-tested first and swallows the click either way: a
+// press inside it is a dialog row, and a press anywhere else closes it the way
+// Esc does — applying nothing, reverting a theme preview.
 func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	lay := m.lay
 	if lay.TooSmall {
 		return m, nil
 	}
+	if r := lay.Dialog; !r.Empty() {
+		if r.Contains(x, y) {
+			return m.dialogClick(y - r.Y)
+		}
+		return m.closeDialog(true), nil
+	}
 	switch {
-	case m.picking && lay.Region(regionOverlay).Contains(y):
-		// The picker is a bordered box: its top border and its header sit
-		// above the first option.
-		if i := lay.Region(regionOverlay).Row(y) - pickerHeaderRows; i >= 0 {
-			return m.applyPickerIndex(i)
-		}
-	case m.themePicking && lay.Region(regionOverlay).Contains(y):
-		if i := lay.Region(regionOverlay).Row(y) - pickerHeaderRows; i >= 0 && i < len(m.themeNames) {
-			m.themeSel = i
-			m.applyTheme(Preset(m.themeNames[i]))
-			return m.keepTheme(), nil
-		}
 	case lay.Region(regionTasks).Contains(y):
 		if lay.Region(regionTasks).Row(y) == 0 {
 			return m.cycleTasks()
@@ -453,21 +458,43 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 
 // clickStatus hit-tests a status row against the spans the fitting pass that
 // drew it reported, so a click cannot land on a segment that was dropped or
-// truncated away. Row 1's model span is reported too, for V3's dialog, but
-// nothing acts on it yet.
+// truncated away: row 1's model name opens the model dialog, row 2's chip
+// cycles the mode.
 func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
-	if row != 1 {
-		return m, nil
-	}
-	// The chip is shift+tab under the pointer, gating included: a card blocks
-	// it (handleMouse already returned), an overlay that swallows the key
+	// Both are a key under the pointer, gating included: a card blocks them
+	// (handleMouse already returned), an overlay that swallows the key
 	// swallows the click, and working blocks neither.
-	if m.themePicking || m.picking || m.help {
+	if m.dialogOpen() || m.help {
 		return m, nil
 	}
-	_, spans := m.statusRow2(lay)
-	if spanAt(spans, x) == spanMode {
-		return m.cycleMode()
+	switch row {
+	case 0:
+		_, spans := m.statusRow1()
+		if spanAt(spans, x) == spanModel {
+			return m.openModelDialog(), nil
+		}
+	case 1:
+		_, spans := m.statusRow2(lay)
+		if spanAt(spans, x) == spanMode {
+			return m.cycleMode()
+		}
+	}
+	return m, nil
+}
+
+// dialogClick turns a press inside the box into the row it landed on: the
+// border and the rows above the list are not options.
+func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
+	body := m.dialogBody(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
+	i := row - 1 // the top border
+	if i < 0 || i >= len(body) {
+		return m, nil
+	}
+	switch m.dialog {
+	case dialogModel:
+		return m.modelDialogClick(i)
+	case dialogTheme:
+		return m.themeDialogClick(i)
 	}
 	return m, nil
 }
@@ -488,11 +515,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCardKey(msg)
 	}
 
-	if m.themePicking {
-		return m.handleThemePickerKey(msg)
-	}
-	if m.picking {
-		return m.handleModelPickerKey(msg)
+	switch m.dialog {
+	case dialogTheme:
+		return m.handleThemeDialogKey(msg)
+	case dialogModel:
+		return m.handleModelDialogKey(msg)
 	}
 	if m.help {
 		return m.handleHelpKey(msg)
@@ -616,86 +643,6 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 	next := tm.(Model)
 	next.ctrlCDeadline = now.Add(ctrlCWindow)
 	return next, cmd
-}
-
-func (m Model) pickerCount() int {
-	if m.effortStep {
-		if opt := agent.EffortOption(m.snap); opt != nil {
-			return len(opt.SelectValues)
-		}
-		return 0
-	}
-	return len(agent.OrderModels(m.snap))
-}
-
-func (m Model) applyPickerIndex(i int) (tea.Model, tea.Cmd) {
-	if m.effortStep {
-		opt := agent.EffortOption(m.snap)
-		if opt == nil || i < 0 || i >= len(opt.SelectValues) {
-			return m, nil
-		}
-		return m.applyEffort(opt.SelectValues[i].Value)
-	}
-	models := agent.OrderModels(m.snap)
-	if i < 0 || i >= len(models) {
-		return m, nil
-	}
-	return m.applyModel(models[i].ID)
-}
-
-func (m Model) closePicker() Model {
-	m.picking = false
-	m.effortStep = false
-	return m
-}
-
-func (m Model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	n := m.pickerCount()
-	if n == 0 {
-		return m.closePicker(), nil
-	}
-	if m.effortStep {
-		if m.effortSel < 0 || m.effortSel >= n {
-			m.effortSel = 0
-		}
-	} else if m.modelSel < 0 || m.modelSel >= n {
-		m.modelSel = 0
-	}
-	sel := m.modelSel
-	if m.effortStep {
-		sel = m.effortSel
-	}
-	switch msg.Type {
-	case tea.KeyEsc:
-		return m.closePicker(), nil
-	case tea.KeyEnter:
-		return m.applyPickerIndex(sel)
-	case tea.KeyDown:
-		sel = (sel + 1) % n
-	case tea.KeyUp:
-		sel = (sel - 1 + n) % n
-	default:
-		s := msg.String()
-		if s == "j" {
-			sel = (sel + 1) % n
-		} else if s == "k" {
-			sel = (sel - 1 + n) % n
-		} else if len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
-			i := int(s[0] - '1')
-			if i < n {
-				return m.applyPickerIndex(i)
-			}
-			return m, nil
-		} else {
-			return m, nil
-		}
-	}
-	if m.effortStep {
-		m.effortSel = sel
-	} else {
-		m.modelSel = sel
-	}
-	return m, nil
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
@@ -975,14 +922,23 @@ func (m Model) View() string {
 		}
 		rows = append(rows, fitRows(frameRegions[i].view(m, lay), r.Height(), m.width)...)
 	}
-	return strings.Join(rows, "\n")
+	base := strings.Join(rows, "\n")
+	// The dialog is a layer, not a band: it is composited over the frame the
+	// region list just drew, so the bands keep their rows and the box covers
+	// only the transcript.
+	if r := lay.Dialog; !r.Empty() {
+		base = overlay(base, m.dialogView(r), r)
+	}
+	return base
 }
 
 // overlayView is the one lower overlay that draws under the transcript; the
-// layout crops it rather than letting it squeeze the transcript away.
+// layout crops it rather than letting it squeeze the transcript away. The
+// pickers left it in V3: a dialog is a layer over the transcript, not a band
+// under it.
 //
-// A card outranks every one of them (§3.11): the ones it did not close are
-// suspended — kept in state, not drawn — until it has been answered.
+// A card outranks both (§3.11): the one it did not close is suspended — kept
+// in state, not drawn — until it has been answered.
 func (m Model) overlayView() string {
 	if m.cardOpen() {
 		return ""
@@ -990,10 +946,6 @@ func (m Model) overlayView() string {
 	switch {
 	case m.help:
 		return m.helpView()
-	case m.themePicking:
-		return m.themePickerView()
-	case m.picking:
-		return m.modelPickerView()
 	case m.slashMenuOpen():
 		return m.slashMenuView()
 	}
@@ -1044,37 +996,6 @@ func (m Model) helpView() string {
 		BorderForeground(m.theme.Accent).
 		Width(max(1, m.width-2)).
 		Render(strings.Join(lines, "\n"))
-}
-
-func (m Model) modelPickerView() string {
-	var b strings.Builder
-	if m.effortStep {
-		b.WriteString("effort  (enter select, esc close)\n")
-		opt := agent.EffortOption(m.snap)
-		if opt != nil {
-			for i, v := range opt.SelectValues {
-				mark := " "
-				if i == m.effortSel {
-					mark = ">"
-				}
-				fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, v.Value, v.Name)
-			}
-		}
-	} else {
-		b.WriteString("model  (enter select, esc close)\n")
-		for i, md := range agent.OrderModels(m.snap) {
-			mark := " "
-			if i == m.modelSel {
-				mark = ">"
-			}
-			fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, md.ID, md.Name)
-		}
-	}
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Accent).
-		Width(max(1, m.width-2)).
-		Render(strings.TrimRight(b.String(), "\n"))
 }
 
 // workspaceName is the basename of the workspace, falling back to the path

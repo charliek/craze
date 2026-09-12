@@ -21,8 +21,12 @@ type Stub struct {
 	n          int
 	failMode   bool
 	failModel  bool
-	failConfig bool
-	snap       agent.Snapshot
+	// failConfigAt is the SetConfig call that fails, counted from the next
+	// one, or -1 for none. The dialog's apply chain sends more than one, so a
+	// test has to be able to fail the second and not the first.
+	failConfigAt int
+	configCalls  int
+	snap         agent.Snapshot
 	// open are the blocking requests the stub has announced and is still
 	// waiting on, in arrival order, and calls is every answer it received.
 	// Together they are how a test holds §3.11's "every card answers exactly
@@ -50,9 +54,10 @@ type stubCall struct {
 
 func NewStub() *Stub {
 	return &Stub{
-		events: make(chan agent.Event, 256),
-		closed: make(chan struct{}),
-		cancel: make(chan struct{}, 1),
+		failConfigAt: -1,
+		events:       make(chan agent.Event, 256),
+		closed:       make(chan struct{}),
+		cancel:       make(chan struct{}, 1),
 		snap: agent.Snapshot{
 			CurrentModel: "grok",
 			CurrentMode:  "agent",
@@ -81,6 +86,20 @@ func NewStub() *Stub {
 						{Value: "low", Name: "Low"},
 						{Value: "medium", Name: "Medium"},
 						{Value: "high", Name: "High"},
+					},
+				},
+				{
+					// Cursor's fast toggle as the live captures advertise it:
+					// string values, off by default, so the status row says
+					// nothing about it until it is switched on.
+					ID:       "fast",
+					Name:     "Fast",
+					Category: "model_config",
+					Type:     "select",
+					Current:  "false",
+					SelectValues: []agent.SelectValue{
+						{Value: "false", Name: "Off"},
+						{Value: "true", Name: "Fast"},
 					},
 				},
 			},
@@ -132,9 +151,13 @@ func (s *Stub) FailNextSetModel() {
 	s.mu.Unlock()
 }
 
-func (s *Stub) FailNextSetConfig() {
+func (s *Stub) FailNextSetConfig() { s.FailNextSetConfigAfter(0) }
+
+// FailNextSetConfigAfter makes the nth SetConfig from now fail, counting from
+// zero.
+func (s *Stub) FailNextSetConfigAfter(n int) {
 	s.mu.Lock()
-	s.failConfig = true
+	s.failConfigAt = s.configCalls + n
 	s.mu.Unlock()
 }
 
@@ -291,9 +314,10 @@ func (s *Stub) SetMode(_ context.Context, id string) error {
 
 func (s *Stub) SetConfig(_ context.Context, id, value string) error {
 	s.mu.Lock()
-	fail := s.failConfig
-	s.failConfig = false
-	if fail {
+	n := s.configCalls
+	s.configCalls++
+	if s.failConfigAt == n {
+		s.failConfigAt = -1
 		s.mu.Unlock()
 		return fmt.Errorf("stub: set config failed")
 	}

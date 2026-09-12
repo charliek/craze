@@ -142,33 +142,49 @@ func parseConfigOption(raw json.RawMessage) (ConfigOption, bool) {
 		Type:     typ,
 		Current:  parseConfigCurrent(typ, parsed.CurrentValue),
 	}
-	if typ == "select" || typ == "" {
+	switch typ {
+	case "select", "":
 		opt.SelectValues = parseSelectValues(parsed.Options)
-		if typ == "" {
-			opt.Type = "select"
+		opt.Type = "select"
+	case "boolean":
+		// A boolean is a two-value select wearing another hat, so it is
+		// flattened into one here and nothing downstream — the effort
+		// heuristics, the model dialog's toggle rows — has to know which shape
+		// the agent happened to advertise.
+		opt.SelectValues = parseSelectValues(parsed.Options)
+		if len(opt.SelectValues) == 0 {
+			opt.SelectValues = []SelectValue{{Value: "false", Name: "Off"}, {Value: "true", Name: "On"}}
 		}
+		opt.Type = "select"
 	}
 	return opt, true
 }
 
 func parseConfigCurrent(typ string, raw json.RawMessage) string {
+	_ = typ // every scalar shape is handled the same way
+	return sanitizeText(scalarString(raw))
+}
+
+// scalarString renders a JSON scalar as the string craze sends back on the
+// wire. Cursor advertises its fast toggle as strings ("false"/"true") in every
+// capture craze has; accepting a bare JSON true or a number is hardening
+// against that shape changing, not a fix for anything observed.
+func scalarString(raw json.RawMessage) string {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
 	}
-	if typ == "boolean" {
-		var b bool
-		if err := json.Unmarshal(raw, &b); err == nil {
-			return strconv.FormatBool(b)
-		}
-	}
 	var str string
 	if err := json.Unmarshal(raw, &str); err == nil {
-		return sanitizeText(str)
+		return str
 	}
 	var b bool
 	if err := json.Unmarshal(raw, &b); err == nil {
 		return strconv.FormatBool(b)
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String()
 	}
 	return ""
 }
@@ -185,7 +201,7 @@ func parseSelectValues(raw json.RawMessage) []SelectValue {
 	out := make([]SelectValue, 0, len(items))
 	for _, item := range items {
 		var probe struct {
-			Value   string          `json:"value"`
+			Value   json.RawMessage `json:"value"`
 			Name    string          `json:"name"`
 			Group   string          `json:"group"`
 			Options json.RawMessage `json:"options"`
@@ -198,7 +214,7 @@ func parseSelectValues(raw json.RawMessage) []SelectValue {
 			out = append(out, parseSelectValues(probe.Options)...)
 			continue
 		}
-		value := sanitizeText(probe.Value)
+		value := sanitizeText(scalarString(probe.Value))
 		if value == "" {
 			continue
 		}
@@ -407,6 +423,39 @@ func FastOption(snap Snapshot) *ConfigOption {
 		}
 	}
 	return nil
+}
+
+// fastOffName is the name cursor gives the fast toggle's off value. The values
+// themselves are cursor's spelling ("false"/"true") and craze sends them back
+// verbatim, so the name — not the value — is what says which way is on.
+const fastOffName = "off"
+
+// FastOnOff splits the fast toggle's advertised values into the one that means
+// off and the one that means on. An option that names neither falls back to
+// its own order, which is how every capture lists them.
+func FastOnOff(opt *ConfigOption) (off, on string, ok bool) {
+	if opt == nil || len(opt.SelectValues) < 2 {
+		return "", "", false
+	}
+	for i, v := range opt.SelectValues {
+		if !strings.EqualFold(strings.TrimSpace(v.Name), fastOffName) {
+			continue
+		}
+		other := 0
+		if i == 0 {
+			other = 1
+		}
+		return v.Value, opt.SelectValues[other].Value, true
+	}
+	return opt.SelectValues[0].Value, opt.SelectValues[1].Value, true
+}
+
+// FastOn reports whether the session's fast toggle exists and is on, which is
+// the only case the status row names it.
+func FastOn(snap Snapshot) bool {
+	opt := FastOption(snap)
+	_, on, ok := FastOnOff(opt)
+	return ok && opt.Current == on
 }
 
 // ModelConfigOption returns the first config option with category "model".

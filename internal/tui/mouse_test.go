@@ -190,23 +190,69 @@ func TestClickOnTheTasksHeaderCycles(t *testing.T) {
 	}
 }
 
+// TestClickPicksAModelRow drives the modal layer with the mouse: a press on a
+// list row picks that model, a press on the box border picks nothing, and a
+// press outside the box closes it without applying anything.
 func TestClickPicksAModelRow(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("/model")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.picking {
-		t.Fatal("expected the model picker")
+	if m.dialog != dialogModel {
+		t.Fatal("expected the model dialog")
 	}
-	next := clickAt(t, m, m.lay.Region(regionOverlay).Top+pickerHeaderRows+1)
+	r := m.lay.Dialog
+	if r.Empty() {
+		t.Fatalf("the dialog has no rectangle: %+v", m.lay)
+	}
+	// Row 0 is the border, row 1 the title, row 2 the filter, so row 3 is the
+	// first model and row 4 the second.
+	next := clickXY(t, m, r.X+2, r.Y+4)
 	if next.snap.CurrentModel != "fast" {
-		t.Fatalf("clicking option 2 chose %q", next.snap.CurrentModel)
+		t.Fatalf("clicking the second model chose %q", next.snap.CurrentModel)
 	}
-	// The border and the title row are not options.
-	same := clickAt(t, m, m.lay.Region(regionOverlay).Top)
-	if same.snap.CurrentModel != "grok" || same.effortStep {
-		t.Fatalf("the picker border is not an option: %q", same.snap.CurrentModel)
+	if next.dialog != dialogNone {
+		t.Fatal("picking a model closes the dialog")
 	}
+	same := clickXY(t, m, r.X+2, r.Y)
+	if same.snap.CurrentModel != "grok" || same.dialog != dialogModel {
+		t.Fatalf("the box border is not an option: %q %v", same.snap.CurrentModel, same.dialog)
+	}
+	out := clickXY(t, m, 0, r.Y)
+	if out.dialog != dialogNone || out.snap.CurrentModel != "grok" {
+		t.Fatalf("a press outside closes without applying: %v %q", out.dialog, out.snap.CurrentModel)
+	}
+}
+
+// TestClickModelSpanOpensTheDialog is the third opener (§3.4): the model name
+// in status row 1.
+func TestClickModelSpanOpensTheDialog(t *testing.T) {
+	m := sized(t)
+	x, y := modelSpanClick(t, m)
+	next := clickXY(t, m, x, y)
+	if next.dialog != dialogModel {
+		t.Fatalf("clicking the model span left dialog=%v", next.dialog)
+	}
+	if !strings.Contains(plainView(next), modelDialogHint) {
+		t.Fatalf("the dialog is not on screen:\n%s", plainView(next))
+	}
+	// Just past the span is not the model.
+	s := spanRange(t, spans1(m), spanModel)
+	if after := clickXY(t, m, s.x1, y); after.dialog != dialogNone {
+		t.Fatal("a press past the model span opened the dialog")
+	}
+}
+
+// modelSpanClick is the middle of row 1's model name, from the row's own spans.
+func modelSpanClick(t *testing.T, m Model) (x, y int) {
+	t.Helper()
+	s := spanRange(t, spans1(m), spanModel)
+	return (s.x0 + s.x1) / 2, m.lay.Region(regionStatus).Top
+}
+
+func spans1(m Model) []segSpan {
+	_, spans := m.statusRow1()
+	return spans
 }
 
 func TestClicksAreIgnoredWhileACardIsUp(t *testing.T) {
@@ -250,8 +296,8 @@ func TestChipClickBlockedByOverlays(t *testing.T) {
 		open func(*Model)
 	}{
 		{"help", func(m *Model) { m.help = true }},
-		{"model picker", func(m *Model) { m.picking = true }},
-		{"theme picker", func(m *Model) { m.themePicking = true }},
+		{"model dialog", func(m *Model) { *m = m.openModelDialog() }},
+		{"theme dialog", func(m *Model) { *m = m.openThemePicker() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := sized(t)

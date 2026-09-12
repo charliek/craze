@@ -23,6 +23,14 @@ func TestSanitizeText(t *testing.T) {
 		{"del", "a\x7fb", "ab"},
 		{"invalid utf8", "a\xffb", "a�b"},
 		{"keeps valid utf8", "héllo ✓", "héllo ✓"},
+		// Cursor pads its fast label with two zero-width spaces.
+		{"live fast label", "Fast\u200b\u200b", "Fast"},
+		{"word joiner", "a\u2060b", "ab"},
+		{"bom", "\ufeffhello", "hello"},
+		// ZWNJ is a letter in Persian and ZWJ holds an emoji together, so
+		// neither is a zero-width character craze may drop.
+		{"persian zwnj", "می\u200cخواهم", "می\u200cخواهم"},
+		{"zwj emoji", "👩\u200d💻", "👩\u200d💻"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

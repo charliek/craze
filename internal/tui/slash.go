@@ -125,10 +125,9 @@ func (m Model) filteredSlash() []slashItem {
 func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	switch name {
 	case "help":
-		m.help = true
-		m.picking = false
-		m.effortStep = false
 		m.input.SetValue("")
+		m = m.closeDialog(true)
+		m.help = true
 		return m, nil
 	case "exit", "quit":
 		m.input.SetValue("")
@@ -148,18 +147,8 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		return m.setThemeNamed(args), nil
 	case "model", "models":
 		if args == "" {
-			m.picking = true
-			m.effortStep = false
-			m.help = false
-			m.modelSel = 0
 			m.input.SetValue("")
-			for i, md := range agent.OrderModels(m.snap) {
-				if md.ID == m.snap.CurrentModel {
-					m.modelSel = i
-					break
-				}
-			}
-			return m, nil
+			return m.openModelDialog(), nil
 		}
 		modelArg, effortArg := agent.SplitModelEffort(args, m.snap)
 		id, err := agent.MatchModel(m.snap, modelArg)
@@ -220,41 +209,14 @@ func modeNote(modes []agent.ModeInfo, id string) string {
 	return note
 }
 
-func (m Model) applyModel(id string) (tea.Model, tea.Cmd) {
-	return m.applyModelEffort(id, "")
-}
-
-func (m Model) enterEffortStep() Model {
-	opt := agent.EffortOption(m.snap)
-	if opt == nil || len(opt.SelectValues) == 0 {
-		m.picking = false
-		m.effortStep = false
-		return m
-	}
-	m.picking = true
-	m.effortStep = true
-	m.effortSel = 0
-	for i, v := range opt.SelectValues {
-		if v.Value == opt.Current {
-			m.effortSel = i
-			break
-		}
-	}
-	return m
-}
-
+// applyModelEffort is `/model <id> [effort]`: optimistic, with the same
+// SetModel → SetConfig(model_config) fallback the dialog's model step uses.
 func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	prev := m.snap.CurrentModel
 	m.snap.CurrentModel = id
 	m.model = id
 	m.input.SetValue("")
 	explicit := effort != ""
-	if explicit {
-		m.picking = false
-		m.effortStep = false
-	} else {
-		m = m.enterEffortStep()
-	}
 
 	sess := m.sess
 	modelCfgID := ""
@@ -287,24 +249,6 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 			return refreshSnapMsg{}
 		}
 		return nil
-	}
-}
-
-func (m Model) applyEffort(value string) (tea.Model, tea.Cmd) {
-	opt := agent.EffortOption(m.snap)
-	m.picking = false
-	m.effortStep = false
-	m.input.SetValue("")
-	if opt == nil || value == "" {
-		return m, nil
-	}
-	id := opt.ID
-	sess := m.sess
-	return m, func() tea.Msg {
-		if err := sess.SetConfig(context.Background(), id, value); err != nil {
-			return actionErrMsg{err}
-		}
-		return refreshSnapMsg{}
 	}
 }
 

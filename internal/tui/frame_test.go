@@ -869,12 +869,86 @@ func TestFramePermissionAlwaysPicksTheRequestsOwnID(t *testing.T) {
 	}
 }
 
-// TestFrameGoldenThemePicker100x30 runs the picker through the real program:
-// the names-only list, and the palette changing under the cursor before Enter
-// has been pressed.
-func TestFrameGoldenThemePicker100x30(t *testing.T) {
+// TestFrameGoldenModelDialog is §3.4 end to end: the centred box over the
+// transcript, the filter, and the effort and fast rows under the list.
+func TestFrameGoldenModelDialog(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cols, rows int
+		keys       string
+		want       []string
+	}{
+		{"model-dialog-100x30", 100, 30, "<wait:idle>/model<enter>gro",
+			[]string{"\u276f gro", "> Grok", "current", "effort", "fast", "esc"}},
+		// Tab twice reaches the fast row, one right turns it on, and Enter
+		// applies just that step: the note and status row 1 are the proof the
+		// advertised value went out and came back.
+		{"model-dialog-fast-100x30", 100, 30,
+			"<wait:idle>/model<enter><tab><tab><right><enter><wait:text:fast \u2192 on>",
+			[]string{"fast \u2192 on", "Grok (medium \u00b7 fast)"}},
+		{"model-dialog-80x24", 80, 24, "<wait:idle>/model<enter>", []string{"model", "[medium]", "[off]"}},
+		// 40x12 is the smallest frame craze draws: the box shrinks, and every
+		// band still owns its own rows.
+		{"model-dialog-40x12", 40, 12, "<wait:idle>/model<enter>", []string{"model"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStubFrame(t, tc.cols, tc.rows, tc.keys)
+			assertGolden(t, tc.name, tc.cols, tc.rows, got)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("frame is missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestFrameClickOpensModelDialog is the third opener through the real program:
+// a press on the model name in status row 1 draws the same frame /model does.
+func TestFrameClickOpensModelDialog(t *testing.T) {
+	x, y := frameModelSpan(t, 100, 30)
+	clicked := runStubFrame(t, 100, 30, fmt.Sprintf("<wait:idle><click:%d,%d>", x, y))
+	typed := runStubFrame(t, 100, 30, "<wait:idle>/model<enter>")
+	if clicked != typed {
+		t.Fatalf("the click frame differs from the /model frame\n--- click ---\n%s\n--- /model ---\n%s", clicked, typed)
+	}
+	if !strings.Contains(clicked, modelDialogHint) {
+		t.Fatalf("clicking the model span drew no dialog:\n%s", clicked)
+	}
+}
+
+// frameModelSpan is the middle of row 1's model name in a frame of this size,
+// taken from the same fitting pass the frame runs.
+func frameModelSpan(t *testing.T, cols, rows int) (x, y int) {
+	t.Helper()
+	isolateSkillsHome(t)
+	m := New(Config{
+		Session:   NewStub(),
+		Theme:     "tokyo-night",
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: cols, Height: rows})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	_, spans := m.statusRow1()
+	for _, s := range spans {
+		if s.id == spanModel {
+			return (s.x0 + s.x1) / 2, m.lay.Region(regionStatus).Top
+		}
+	}
+	t.Fatal("no model span in status row 1")
+	return 0, 0
+}
+
+// TestFrameGoldenThemeDialog100x30 runs the picker through the real program in
+// its V3 home, the shared dialog frame: the names-only list, and the palette
+// changing under the cursor before Enter has been pressed.
+func TestFrameGoldenThemeDialog100x30(t *testing.T) {
 	got, raw := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g>")
-	assertGolden(t, "theme-picker-100x30", 100, 30, got)
+	assertGolden(t, "theme-dialog-100x30", 100, 30, got)
 	for _, want := range ThemeNames() {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the picker should list %q:\n%s", want, got)

@@ -22,6 +22,33 @@ func ansiFG(hex string) string {
 	return "\x1b[" + termenv.TrueColor.Color(hex).Sequence(false) + "m"
 }
 
+// ansiBG is the same for a background, which is the only way to tell
+// SelectionBG apart from the foreground slot beside it.
+func ansiBG(hex string) string {
+	return termenv.TrueColor.Color(hex).Sequence(true)
+}
+
+// TestSelectionBGIsADerivedBackground: SelectionBG is a derived slot mixed off
+// the palette's own background and accent, and the dialog's cursor row is what
+// paints with it. Selection stays a foreground slot beside it.
+func TestSelectionBGIsADerivedBackground(t *testing.T) {
+	th := Preset("craze-dark")
+	want := blend("#0c0c11", "#e8a33d", selectionMix)
+	if th.SelectionBG != want {
+		t.Fatalf("SelectionBG = %q, want %q", th.SelectionBG, want)
+	}
+	if th.Selection != th.Accent {
+		t.Fatalf("Selection should still be the accent foreground, got %q", th.Selection)
+	}
+	m := themeModel(t, "craze-dark")
+	m = m.openModelDialog()
+	tm, _ := m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+	if !strings.Contains(m.View(), ansiBG(string(want))) {
+		t.Fatal("the dialog cursor row does not paint with SelectionBG")
+	}
+}
+
 func themeModel(t *testing.T, name string) Model {
 	t.Helper()
 	isolateSkillsHome(t)
@@ -164,7 +191,7 @@ func TestThemePickerPreviewsLiveAndEscRestores(t *testing.T) {
 
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
 	m = tm.(Model)
-	if !m.themePicking {
+	if m.dialog != dialogTheme {
 		t.Fatal("ctrl+g should open the theme picker")
 	}
 	if got := plainView(m); !strings.Contains(got, "craze-light") || !strings.Contains(got, "gruvbox") {
@@ -192,7 +219,7 @@ func TestThemePickerPreviewsLiveAndEscRestores(t *testing.T) {
 
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("esc should close the picker")
 	}
 	if m.theme.Name != "craze-dark" {
@@ -215,7 +242,7 @@ func TestThemePickerEnterKeepsAndPersists(t *testing.T) {
 		tm, _ := m.Update(key)
 		m = tm.(Model)
 	}
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("enter should close the picker")
 	}
 	if m.theme.Name != "craze-light" {
@@ -282,7 +309,7 @@ func TestSlashThemeSetsDirectlyAndRejectsUnknown(t *testing.T) {
 	if m.theme.Name != "gruvbox" {
 		t.Fatalf("/theme <name> should set directly, got %q", m.theme.Name)
 	}
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("/theme <name> should not open the picker")
 	}
 	if got := ConfigTheme(); got != "gruvbox" {
@@ -309,7 +336,7 @@ func TestSlashThemeNoArgsOpensThePicker(t *testing.T) {
 	m.input.SetValue("/theme")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.themePicking {
+	if m.dialog != dialogTheme {
 		t.Fatal("/theme should open the picker")
 	}
 	if m.input.Value() != "" {
@@ -324,8 +351,8 @@ func TestThemePickerNumberKeyPicksAndKeeps(t *testing.T) {
 	want := m.themeNames[2]
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	m = tm.(Model)
-	if m.themePicking || m.theme.Name != want {
-		t.Fatalf("a number key picks and keeps: picking=%v theme=%q want %q", m.themePicking, m.theme.Name, want)
+	if m.dialog == dialogTheme || m.theme.Name != want {
+		t.Fatalf("a number key picks and keeps: dialog=%v theme=%q want %q", m.dialog, m.theme.Name, want)
 	}
 	if got := ConfigTheme(); got != want {
 		t.Fatalf("persisted %q, want %q", got, want)
@@ -354,7 +381,7 @@ func TestCardClosesThePickerAndRevertsThePreview(t *testing.T) {
 		},
 	}})
 	m = tm.(Model)
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("a card closes the picker")
 	}
 	if m.theme.Name != "craze-dark" {
@@ -367,7 +394,7 @@ func TestThemePickerIgnoredWhileACardIsUp(t *testing.T) {
 	m := withOverlay(t)
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
 	m = tm.(Model)
-	if m.themePicking {
+	if m.dialog == dialogTheme {
 		t.Fatal("ctrl+g must be ignored while a card is up")
 	}
 }

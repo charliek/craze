@@ -635,11 +635,6 @@ func TestSlashHelpExitAndModel(t *testing.T) {
 	if msg := cmd(); msg != nil {
 		t.Fatalf("stub SetModel returned %v", msg)
 	}
-	if m.picking {
-		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-		m = tm.(Model)
-	}
-
 	m.input.SetValue("/exit")
 	tm, cmd = m.Update(enter())
 	m = tm.(Model)
@@ -711,29 +706,32 @@ func TestEscOnHelpClosesNotQuits(t *testing.T) {
 	}
 }
 
-func TestEscOnModelPickerClosesNotQuits(t *testing.T) {
+func TestEscOnModelDialogClosesNotQuits(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("/model")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.picking {
-		t.Fatal("expected model picker")
+	if m.dialog != dialogModel {
+		t.Fatal("expected the model dialog")
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	m = tm.(Model)
-	if !m.picking {
-		t.Fatal("q must not close the picker")
+	if m.dialog != dialogModel {
+		t.Fatal("q must not close the dialog")
+	}
+	if m.quitting {
+		t.Fatal("q on the dialog must not quit")
+	}
+	if m.mdlg.filter.Value() != "q" {
+		t.Fatalf("q should have filtered, got %q", m.mdlg.filter.Value())
+	}
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.dialog != dialogNone {
+		t.Fatal("esc should close the dialog")
 	}
 	if m.quitting || cmd != nil {
-		t.Fatal("q on the picker must not quit or run a command")
-	}
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if m.picking {
-		t.Fatal("esc should close picker")
-	}
-	if m.quitting || cmd != nil {
-		t.Fatal("esc on picker must not quit")
+		t.Fatal("esc on the dialog must not quit")
 	}
 }
 
@@ -845,23 +843,42 @@ func flushCmd(t *testing.T, m Model, cmd tea.Cmd) Model {
 	return m
 }
 
-func TestModelPickerCurrentFastFirst(t *testing.T) {
+func TestModelDialogCurrentFirstAndFilters(t *testing.T) {
 	m := sized(t)
 	m.snap.CurrentModel = "fast"
 	m.model = "fast"
 	m.input.SetValue("/model")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.picking || m.effortStep {
-		t.Fatal("expected model picker")
+	if m.dialog != dialogModel {
+		t.Fatal("expected the model dialog")
 	}
 	view := plainView(m)
-	if !strings.Contains(view, "> 1 fast") {
-		t.Fatalf("current fast should be first:\n%s", view)
+	if !strings.Contains(view, "> Fast") || !strings.Contains(view, "current") {
+		t.Fatalf("the current model should be first and tagged:\n%s", view)
+	}
+	// The filter matches the display name or the id, case-insensitively.
+	m = typeInto(t, m, "GRO")
+	if got := len(m.dialogModelList()); got != 1 {
+		t.Fatalf("filter GRO matched %d models", got)
+	}
+	if view := plainView(m); !strings.Contains(view, "❯ GRO") || strings.Contains(view, "> Fast") {
+		t.Fatalf("filter row and list disagree:\n%s", view)
 	}
 }
 
-func TestModelPickerFitsTerminal(t *testing.T) {
+func typeInto(t *testing.T, m Model, text string) Model {
+	t.Helper()
+	for _, r := range text {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = tm.(Model)
+	}
+	return m
+}
+
+// TestModelDialogFitsTerminal: a long catalogue scrolls inside the box rather
+// than growing it past the transcript region.
+func TestModelDialogFitsTerminal(t *testing.T) {
 	m := sized(t)
 	for i := 0; i < 30; i++ {
 		m.snap.Models = append(m.snap.Models, agent.ModelInfo{
@@ -872,46 +889,152 @@ func TestModelPickerFitsTerminal(t *testing.T) {
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
 	view := plainView(m)
-	if h := lipgloss.Height(view); h > 24 {
-		t.Fatalf("picker view is %d rows:\n%s", h, view)
+	if h := lipgloss.Height(view); h != 24 {
+		t.Fatalf("frame is %d rows:\n%s", h, view)
 	}
-	if !strings.Contains(view, "grok") {
-		t.Fatalf("current grok cropped:\n%s", view)
+	tr := m.lay.Region(regionTranscript)
+	r := m.lay.Dialog
+	if r.Y < tr.Top || r.Y+r.H > tr.Bottom {
+		t.Fatalf("the box %+v escaped the transcript %+v", r, tr)
+	}
+	if !strings.Contains(view, "▼") {
+		t.Fatalf("a clipped list should say so:\n%s", view)
 	}
 	if !strings.Contains(view, chipYolo) {
-		t.Fatalf("status rows cropped:\n%s", view)
+		t.Fatalf("the status rows were covered:\n%s", view)
 	}
 }
 
-func TestModelPickerThenEffort(t *testing.T) {
+// TestModelDialogAppliesModelEffortAndFast is §3.4's apply chain: three steps
+// in order, each only when it changed, one note per step that landed.
+func TestModelDialogAppliesModelEffortAndFast(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("/model")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.picking || m.effortStep {
-		t.Fatal("expected model step")
-	}
+	// Model: the second row. Effort: one right. Fast: one right.
+	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyRight)
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyRight)
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
+	if m.dialog != dialogNone {
+		t.Fatal("enter closes the dialog optimistically")
+	}
 	m = flushCmd(t, m, cmd)
-	if m.snap.CurrentModel != "grok" {
-		t.Fatalf("model %q", m.snap.CurrentModel)
+
+	if got := texts(m, entryNote); len(got) != 3 ||
+		got[0] != "model → fast" || got[1] != "effort → high" || got[2] != "fast → on" {
+		t.Fatalf("notes %v", got)
 	}
-	if !m.picking || !m.effortStep {
-		t.Fatal("expected effort step after model")
+	stub := m.sess.(*Stub)
+	snap := stub.Snapshot()
+	if snap.CurrentModel != "fast" {
+		t.Fatalf("model %q", snap.CurrentModel)
 	}
-	view := plainView(m)
-	if !strings.Contains(view, "effort") || !strings.Contains(view, "medium") {
-		t.Fatalf("effort overlay missing:\n%s", view)
+	// "on" is the advertised value, which is the string "true" and not a bool.
+	opt := agent.FastOption(snap)
+	if opt == nil || opt.Current != "true" {
+		t.Fatalf("fast should have been sent the string \"true\": %+v", opt)
 	}
-	tm, cmd = m.Update(enter())
+	if !strings.Contains(plainView(m), "Fast (high · fast)") {
+		t.Fatalf("status row 1 should name the effort and fast:\n%s", plainView(m))
+	}
+}
+
+func pressKey(t *testing.T, m Model, k tea.KeyType) Model {
+	t.Helper()
+	tm, _ := m.Update(tea.KeyMsg{Type: k})
+	return tm.(Model)
+}
+
+// TestModelDialogUnchangedAppliesNothing: Enter with nothing moved sends no
+// request and writes no note.
+func TestModelDialogUnchangedAppliesNothing(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	m = flushCmd(t, m, cmd)
-	if m.picking {
-		t.Fatal("picker should close after effort")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd != nil {
+		t.Fatal("nothing changed, so there is nothing to send")
 	}
-	if !strings.Contains(plainView(m), "medium") {
-		t.Fatalf("footer missing medium:\n%s", plainView(m))
+	if got := texts(m, entryNote); len(got) != 0 {
+		t.Fatalf("notes %v", got)
+	}
+}
+
+// TestModelDialogStepFailures fails each of the three steps in turn: the steps
+// before it keep their notes, the failing one is named, and nothing after it
+// runs.
+func TestModelDialogStepFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fail      func(*Stub)
+		wantNotes []string
+		wantStep  string
+	}{
+		{"model", (*Stub).FailNextSetModel, nil, "model"},
+		{"effort", func(s *Stub) { s.FailNextSetConfigAfter(0) }, []string{"model → fast"}, "effort"},
+		{"fast", func(s *Stub) { s.FailNextSetConfigAfter(1) }, []string{"model → fast", "effort → high"}, "fast"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t)
+			stub := m.sess.(*Stub)
+			m.input.SetValue("/model")
+			tm, _ := m.Update(enter())
+			m = tm.(Model)
+			m = pressKey(t, m, tea.KeyDown)
+			m = pressKey(t, m, tea.KeyTab)
+			m = pressKey(t, m, tea.KeyRight)
+			m = pressKey(t, m, tea.KeyTab)
+			m = pressKey(t, m, tea.KeyRight)
+			tc.fail(stub)
+			tm, cmd := m.Update(enter())
+			m = tm.(Model)
+			m = flushCmd(t, m, cmd)
+
+			if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(tc.wantNotes, "|") {
+				t.Fatalf("notes %v, want %v", got, tc.wantNotes)
+			}
+			errs := texts(m, entryError)
+			if len(errs) != 1 || !strings.HasPrefix(errs[0], tc.wantStep+": ") {
+				t.Fatalf("errors %v, want one naming %q", errs, tc.wantStep)
+			}
+			// The failure re-reads the snapshot, so the rows show the agent's
+			// state and not the dialog's hope.
+			snap := stub.Snapshot()
+			if m.snap.CurrentModel != snap.CurrentModel {
+				t.Fatalf("model %q, agent has %q", m.snap.CurrentModel, snap.CurrentModel)
+			}
+			if got, want := agent.FastOn(m.snap), agent.FastOn(snap); got != want {
+				t.Fatalf("fast %v, agent has %v", got, want)
+			}
+		})
+	}
+}
+
+// TestModelDialogTabSkipsMissingRows: without a fast option Tab cycles between
+// the list and effort only, and the row is not drawn.
+func TestModelDialogTabSkipsMissingRows(t *testing.T) {
+	m := sized(t)
+	m.snap.Config = m.snap.Config[:1]
+	m = m.openModelDialog()
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	if strings.Contains(plainView(m), "[off]") {
+		t.Fatalf("a session with no fast option draws no fast row:\n%s", plainView(m))
+	}
+	m = pressKey(t, m, tea.KeyTab)
+	if m.mdlg.focus != focusEffort {
+		t.Fatalf("focus %v", m.mdlg.focus)
+	}
+	m = pressKey(t, m, tea.KeyTab)
+	if m.mdlg.focus != focusList {
+		t.Fatalf("tab should wrap back to the list, got %v", m.mdlg.focus)
 	}
 }
 
@@ -921,8 +1044,8 @@ func TestModelSlashSetsModelAndEffort(t *testing.T) {
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	m = flushCmd(t, m, cmd)
-	if m.picking {
-		t.Fatal("picker should stay closed")
+	if m.dialog != dialogNone {
+		t.Fatal("/model with args opens no dialog")
 	}
 	if m.snap.CurrentModel != "grok" {
 		t.Fatalf("model %q", m.snap.CurrentModel)
@@ -935,41 +1058,7 @@ func TestModelSlashSetsModelAndEffort(t *testing.T) {
 	}
 }
 
-func TestSetConfigFailAfterModel(t *testing.T) {
-	m := sized(t)
-	stub := m.sess.(*Stub)
-	m.input.SetValue("/model")
-	tm, _ := m.Update(enter())
-	m = tm.(Model)
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	m = flushCmd(t, m, cmd)
-	if !m.effortStep {
-		t.Fatal("expected effort step")
-	}
-	stub.FailNextSetConfig()
-	tm, cmd = m.Update(enter())
-	m = tm.(Model)
-	m = flushCmd(t, m, cmd)
-	if m.picking {
-		t.Fatal("picker should close")
-	}
-	if m.snap.CurrentModel != "grok" {
-		t.Fatalf("model %q", m.snap.CurrentModel)
-	}
-	view := plainView(m)
-	if !strings.Contains(view, "medium") {
-		t.Fatalf("effort should stay medium:\n%s", view)
-	}
-	if strings.Contains(view, "grok  high") {
-		t.Fatalf("effort should not become high:\n%s", view)
-	}
-	if len(texts(m, entryError)) == 0 {
-		t.Fatal("expected error toast")
-	}
-}
-
-func TestSetModelFailNoEffortOverlay(t *testing.T) {
+func TestSetModelFailReverts(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.FailNextSetModel()
@@ -978,18 +1067,13 @@ func TestSetModelFailNoEffortOverlay(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
 	m = tm.(Model)
-	m.input.SetValue("/model")
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m.input.SetValue("/model fast")
+	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	if m.snap.CurrentModel != "fast" {
 		t.Fatalf("optimistic %q", m.snap.CurrentModel)
 	}
 	m = flushCmd(t, m, cmd)
-	if m.picking || m.effortStep {
-		t.Fatal("SetModel fail must not leave the effort overlay open")
-	}
 	if m.snap.CurrentModel != "grok" {
 		t.Fatalf("model should revert, got %q", m.snap.CurrentModel)
 	}

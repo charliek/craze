@@ -56,6 +56,19 @@ func defaultConfigOptions() []map[string]any {
 				{"value": "high", "name": "High"},
 			},
 		},
+		{
+			// Cursor's fast toggle, verbatim from the live captures: string
+			// values, and two U+200B in the on label.
+			"id":           "fast",
+			"name":         "Fast",
+			"category":     "model_config",
+			"type":         "select",
+			"currentValue": "false",
+			"options": []map[string]string{
+				{"value": "false", "name": "Off"},
+				{"value": "true", "name": "Fast\u200b\u200b"},
+			},
+		},
 	}
 }
 
