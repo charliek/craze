@@ -130,6 +130,61 @@ func TestFastOptionLiveShape(t *testing.T) {
 	}
 }
 
+// TestFastOnOffReadsNamesNotOrder: the off value is the one the agent names
+// "off" or spells "false", and whatever else it advertises is on. Reading the
+// list positionally inverted a renamed pair — "on" then sent the off value —
+// and refused a list with only the on value in it.
+func TestFastOnOffReadsNamesNotOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		current  string
+		values   []SelectValue
+		off, on  string
+		ok, fast bool
+	}{
+		{
+			// The live shape, which must keep mapping exactly as it did.
+			"cursor", "true",
+			[]SelectValue{{Value: "false", Name: "Off"}, {Value: "true", Name: "Fast"}},
+			"false", "true", true, true,
+		},
+		{
+			"renamed, on listed first", "true",
+			[]SelectValue{{Value: "true", Name: "Turbo"}, {Value: "false", Name: "Disabled"}},
+			"false", "true", true, true,
+		},
+		{
+			"only the on value advertised", "true",
+			[]SelectValue{{Value: "true", Name: "Fast"}},
+			"", "true", true, true,
+		},
+		{
+			"only the off value advertised", "false",
+			[]SelectValue{{Value: "false", Name: "Off"}},
+			"false", "", false, false,
+		},
+		{
+			"named off, spelled otherwise", "yes",
+			[]SelectValue{{Value: "no", Name: "Off"}, {Value: "yes", Name: "On"}},
+			"no", "yes", true, true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opt := ConfigOption{
+				ID: "fast", Name: "Fast", Category: "model_config", Type: "select",
+				Current: tc.current, SelectValues: tc.values,
+			}
+			off, on, ok := FastOnOff(&opt)
+			if off != tc.off || on != tc.on || ok != tc.ok {
+				t.Fatalf("off/on = %q/%q (%v), want %q/%q (%v)", off, on, ok, tc.off, tc.on, tc.ok)
+			}
+			if got := FastOn(Snapshot{Config: []ConfigOption{opt}}); got != tc.fast {
+				t.Fatalf("FastOn = %v, want %v", got, tc.fast)
+			}
+		})
+	}
+}
+
 func modelIDs(ms []ModelInfo) string {
 	ids := make([]string, len(ms))
 	for i, m := range ms {

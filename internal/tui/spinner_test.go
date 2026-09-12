@@ -91,6 +91,13 @@ func TestIdleUsesTheSlowChain(t *testing.T) {
 	if !m.tickFast || m.tickGen != gen+1 {
 		t.Fatalf("working: fast=%v gen=%d", m.tickFast, m.tickGen)
 	}
+	// Both endings, because the turn is only over — and the chain only slow
+	// again — once the stream has closed as well as the prompt returned.
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	m = tm.(Model)
+	if !m.tickFast {
+		t.Fatalf("still working until the prompt returns: fast=%v", m.tickFast)
+	}
 	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
 	m = tm.(Model)
 	if m.tickFast || m.tickGen != gen+2 {

@@ -184,8 +184,9 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	m.snap.CurrentMode = id
-	// Leaving the mode the plan was made in retires the offer with it.
-	m.planOffer = false
+	// Leaving the mode the plan was made in retires the offer with it, and the
+	// kill is recorded against the turn so a late ending cannot bring it back.
+	m.retirePlanOffer()
 	m.addNote(modeNote(m.snap.Modes, id))
 	sess := m.sess
 	return m, func() tea.Msg {

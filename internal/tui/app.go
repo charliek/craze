@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -143,6 +144,10 @@ type Model struct {
 	// state.
 	dialog dialogKind
 	mdlg   modelDialog
+	// applyGen counts the model dialog's applies. The box closes optimistically,
+	// so a second apply can be under way before the first one answers, and only
+	// the newest one is allowed to settle what the rows show.
+	applyGen int
 
 	// Theme dialog: the list is frozen when it opens because the live preview
 	// changes the current theme on every move, and themePrev is the theme Esc
@@ -174,13 +179,29 @@ type Model struct {
 	todosSeen     bool
 	todosClosedAt time.Time
 
-	// planOffer is set when a plan-mode turn ended with something to implement,
-	// and turnSawAssistant is what "something" means: a turn that only thought
-	// or only ran tools left no plan behind. The offer is armed by EventDone
-	// but only becomes actionable once the status has settled, because the two
-	// arrive in either order — see planOffering.
-	planOffer        bool
-	turnSawAssistant bool
+	// turnSeq identifies the turn. It starts at 1 — the session before the
+	// first prompt is a turn too, so every event has an identity — and is
+	// bumped on every turn start, and every piece of plan-offer state is
+	// recorded against it. A turn start therefore retires the last turn's
+	// evidence, offer and kill without clearing a single flag, and nothing a
+	// finished turn left behind can arm anything for the turn after it.
+	turnSeq int
+	// sawAssistantSeq is the turn that said something implementable: a turn
+	// that only thought, only ran tools or only sent empty chunks left no plan
+	// behind. planOfferSeq is the turn whose ending armed the offer, and
+	// planDeadSeq the turn whose offer an action has killed — which is what
+	// stops a late EventDone re-arming an offer Esc, /clear or a card retired.
+	sawAssistantSeq int
+	planOfferSeq    int
+	planDeadSeq     int
+	// promptEndSeq and streamEndSeq are the turn whose Prompt returned and the
+	// turn whose event stream closed. The two race, so a turn is only over —
+	// and the status only idle — once both have landed for the same turn. That
+	// is also what keeps the next turn from starting while this one's buffered
+	// events are still draining, which is what would let a late chunk count as
+	// the next turn's evidence.
+	promptEndSeq int
+	streamEndSeq int
 
 	tickGen     int
 	tickLive    bool
@@ -226,8 +247,17 @@ type dblClickMsg struct{ X, Y int }
 // planImplementMsg says the mode change the plan offer asked for landed, so
 // the implement turn may now be written and sent. planImplementFailedMsg is
 // the other half: nothing was sent, so the offer survives.
-type planImplementMsg struct{ mode string }
+//
+// Both carry the turn they were asked for. A SetMode that comes back after the
+// user has already started a turn of their own is answering for a turn that no
+// longer exists: writing its note and its user entry then would put a prompt in
+// the transcript that the session rejects as already in flight.
+type planImplementMsg struct {
+	seq  int
+	mode string
+}
 type planImplementFailedMsg struct {
+	seq  int
 	prev string
 	err  error
 }
@@ -257,6 +287,11 @@ func New(cfg Config) Model {
 		model:        cfg.Model,
 		yolo:         cfg.Yolo,
 		mouseEnabled: !cfg.NoMouse,
+		// Turn 1 is the session before the first prompt, and it is over before
+		// it starts: nothing is in flight, so both of its endings have landed.
+		turnSeq:      1,
+		promptEndSeq: 1,
+		streamEndSeq: 1,
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
@@ -387,15 +422,22 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modelApplyMsg:
-		// The steps that landed are the truth; the one that did not is named,
-		// and the snapshot is re-read so the rows show what the agent has
-		// rather than what the dialog hoped for.
-		for _, note := range msg.done {
-			m.addNote(note)
+		// The steps that landed are the truth; the one that did not is named.
+		for _, st := range msg.done {
+			m.addNote(st.note)
 		}
 		if msg.err != nil {
-			m.refreshSnap()
 			m.addError(msg.step + ": " + msg.err.Error())
+		}
+		if msg.gen == m.applyGen {
+			// Only the newest apply settles the rows: the snapshot is re-read
+			// so they show what the agent has, and the steps this apply landed
+			// are written over it. An older apply is not allowed to speak —
+			// its failure would undo a value the user has changed since.
+			m.refreshSnap()
+			for _, st := range msg.done {
+				m = m.settleStep(st)
+			}
 		}
 		return m, nil
 
@@ -424,18 +466,29 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.selectWord(pos).copySelection()
 
 	case planImplementMsg:
-		// The session is in the implement mode now, so the note and the user
-		// entry are honest and the prompt goes out behind them.
+		// The session is in the implement mode now, so the note is honest
+		// whatever else has happened meanwhile.
 		m.addNote(modeNote(m.snap.Modes, msg.mode))
+		if msg.seq != m.turnSeq {
+			// A turn of the user's own started while SetMode was in flight, so
+			// the offer this answers is gone. Writing the implement entry now
+			// would put a prompt in the transcript that the session refuses as
+			// already in flight.
+			return m, nil
+		}
+		// The user entry is honest too, and the prompt goes out behind it.
 		return m.sendText(m.snap.Provider.ImplementPrompt())
 
 	case planImplementFailedMsg:
 		// Nothing was sent: the mode reverts the way any failed SetMode does,
 		// and the plan is still the last thing on screen, so it is still on
-		// offer.
-		tm, cmd := m.update(revertModeMsg(msg))
+		// offer — unless something retired it while SetMode was in flight, in
+		// which case there is no plan above to implement any more.
+		tm, cmd := m.update(revertModeMsg{prev: msg.prev, err: msg.err})
 		next := tm.(Model)
-		next.planOffer = true
+		if msg.seq == next.turnSeq && next.planDeadSeq != next.turnSeq {
+			next.planOfferSeq = next.turnSeq
+		}
 		return next, cmd
 
 	case eventMsg:
@@ -445,15 +498,22 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case promptDoneMsg:
 		// The stream is closed by EventDone, which shares the event channel with
 		// the chunks; this message races them and would split a run in two.
+		m.promptEndSeq = m.turnSeq
 		if msg.err != nil {
+			// A prompt the session never accepted emits no events at all, so
+			// its stream is over too: waiting for an ending that cannot come
+			// would leave the turn unfinishable. Any other failure was emitted
+			// as EventError before Prompt returned, so that ending is on its
+			// way.
+			if errors.Is(msg.err, agent.ErrPromptInFlight) {
+				m.streamEndSeq = m.turnSeq
+			}
 			m.status = statusError
 			m.err = msg.err.Error()
 			m.addError(m.err)
 			return m, nil
 		}
-		if m.status != statusError {
-			m.status = statusIdle
-		}
+		m.settleStatus()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -763,10 +823,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.status == statusWorking {
 			return m.cancelTurn()
 		}
-		if m.planOffer {
+		if m.planArmed() {
 			// Esc declines the plan offer and nothing else: the composer is
 			// still where the user is, so it keeps the focus.
-			m.planOffer = false
+			m.retirePlanOffer()
 			return m, nil
 		}
 		m.input.Blur()
@@ -909,10 +969,10 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	m.cardsCancelled = false
 	m.turnStart = m.now()
 	m.err = ""
-	// A new turn retires whatever the last one offered and starts counting its
-	// own evidence again.
-	m.planOffer = false
-	m.turnSawAssistant = false
+	// The new turn's identity is the one thing that retires the last one: its
+	// evidence, its offer and the kill that retired it all belong to a number
+	// this turn no longer has.
+	m.turnSeq++
 	sess := m.sess
 	return m, func() tea.Msg {
 		res, err := sess.Prompt(context.Background(), text)
@@ -920,11 +980,40 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	}
 }
 
-// planOffering is the offer once it can be acted on. EventDone arms it and
-// promptDoneMsg settles the status, in either order, so everything the user
-// can see or press waits for both — which is what makes the two orderings
+// turnSettled reports whether the turn that was started has finished both ways:
+// the prompt has returned and the stream has closed. They race, so the status
+// waits for both — and so does the next turn, which is what stops one turn's
+// buffered chunks arriving inside the next one.
+func (m Model) turnSettled() bool {
+	return m.promptEndSeq == m.turnSeq && m.streamEndSeq == m.turnSeq
+}
+
+// settleStatus puts the status back to idle once the running turn is over. An
+// error state stands: the turn that failed said so, and only the next send
+// clears it.
+func (m *Model) settleStatus() {
+	if m.status != statusError && m.turnSettled() {
+		m.status = statusIdle
+	}
+}
+
+// planArmed is the offer as state: it belongs to the turn that earned it, so a
+// turn start retires it and a late event from a retired turn cannot revive it.
+func (m Model) planArmed() bool { return m.turnSeq != 0 && m.planOfferSeq == m.turnSeq }
+
+// retirePlanOffer kills the offer for the turn that is running and records the
+// kill against it, so an EventDone still on its way — or a SetMode that comes
+// back after the action — cannot arm it again.
+func (m *Model) retirePlanOffer() {
+	m.planOfferSeq = 0
+	m.planDeadSeq = m.turnSeq
+}
+
+// planOffering is the offer once it can be acted on. EventDone arms it and the
+// turn's two endings settle the status, in either order, so everything the user
+// can see or press waits for both — which is what makes the orderings
 // indistinguishable.
-func (m Model) planOffering() bool { return m.planOffer && m.status == statusIdle }
+func (m Model) planOffering() bool { return m.planArmed() && m.status == statusIdle }
 
 // implementModeID is the advertised mode that means "do the work". Without one
 // there is nowhere for the offer to go, so it is never made.
@@ -943,8 +1032,14 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 	if stopReason == stopCancelled || m.status == statusError {
 		return false
 	}
-	// A turn that only thought, or only ran tools, said nothing to implement.
-	if !m.turnSawAssistant {
+	// An action retired this turn's offer, so the ending that would have armed
+	// it is answering for a plan nobody is looking at any more.
+	if m.planDeadSeq == m.turnSeq {
+		return false
+	}
+	// A turn that only thought, or only ran tools, said nothing to implement —
+	// and so did one whose chunks were all empty.
+	if m.sawAssistantSeq != m.turnSeq {
 		return false
 	}
 	if m.snap.Provider.Kind(m.snap.CurrentMode) != agent.ModePlan {
@@ -966,13 +1061,16 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	// Optimistic, the way applyMode is: the chip flips now and reverts if the
 	// agent refuses.
 	m.snap.CurrentMode = id
-	m.planOffer = false
+	// The offer is spent, not retired: a SetMode that fails leaves the plan on
+	// screen, and that path is allowed to put the offer back.
+	m.planOfferSeq = 0
+	seq := m.turnSeq
 	sess := m.sess
 	return m, func() tea.Msg {
 		if err := sess.SetMode(context.Background(), id); err != nil {
-			return planImplementFailedMsg{prev: prev, err: err}
+			return planImplementFailedMsg{seq: seq, prev: prev, err: err}
 		}
-		return planImplementMsg{mode: id}
+		return planImplementMsg{seq: seq, mode: id}
 	}
 }
 
@@ -988,6 +1086,10 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	}
 	m.cards = nil
 	m.cardsCancelled = true
+	// A cancelled turn offers nothing, whichever of its two endings the cancel
+	// beat: the kill is recorded against the turn, so the EventDone still on
+	// its way cannot arm what Esc just declined.
+	m.retirePlanOffer()
 	sess := m.sess
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1015,7 +1117,12 @@ func (m *Model) applyEvent(ev agent.Event) {
 	m.lastThought = ev.Type == agent.EventThought
 	switch ev.Type {
 	case agent.EventText:
-		m.turnSawAssistant = true
+		if ev.Text != "" {
+			// Only a chunk that says something is evidence: appendStream drops
+			// an empty one, and a turn whose whole reply was empty left no plan
+			// on the screen to implement.
+			m.sawAssistantSeq = m.turnSeq
+		}
 		m.appendStream(entryAssistant, ev.Text, ev.At)
 	case agent.EventThought:
 		m.appendStream(entryThought, ev.Text, ev.At)
@@ -1051,11 +1158,11 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case agent.EventDone:
 		m.breakStream()
 		m.cardsCancelled = false
+		m.streamEndSeq = m.turnSeq
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
 		m.branch = m.git.branch()
 		if ev.StopReason == stopCancelled {
-			m.status = statusIdle
 			// Esc leaves nothing else behind: the spinner going away is the
 			// only other sign the cancel landed, and it is indistinguishable
 			// from the turn having finished on its own.
@@ -1064,15 +1171,25 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// EventDone, not promptDoneMsg, is what orders the transcript, so it is
 		// also what decides whether the turn left a plan behind.
 		if m.planEarnsOffer(ev.StopReason) {
-			m.planOffer = true
+			m.planOfferSeq = m.turnSeq
 		}
+		m.settleStatus()
 	case agent.EventError:
+		// The error is the prompt's other ending: Prompt emits it and returns,
+		// so no EventDone follows it.
+		m.streamEndSeq = m.turnSeq
 		m.status = statusError
 		if ev.Err != nil {
 			m.err = ev.Err.Error()
 			m.addError(m.err)
 		}
 	case agent.EventMeta:
+		if ev.Mode != "" {
+			// Any mode update at all retires the offer, even one that names the
+			// mode craze already thought it was in: the agent may have gone
+			// plan → ask → plan, and comparing snapshots cannot see the trip.
+			m.retirePlanOffer()
+		}
 		m.refreshSnap()
 	}
 }
@@ -1094,19 +1211,17 @@ func (m Model) todosOf(ev agent.Event) []agent.Todo {
 	return m.snap.Todos
 }
 
+// refreshSnap re-reads the session's snapshot. It draws no conclusions from
+// what changed: a mode change is reported by the event that carries it, because
+// applyMode has already written the user's own change into the snapshot and an
+// agent-side change that went round in a circle leaves nothing to compare.
 func (m *Model) refreshSnap() {
 	if m.sess == nil {
 		return
 	}
-	prevMode := m.snap.CurrentMode
 	m.snap = m.sess.Snapshot()
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
-	}
-	if m.snap.CurrentMode != prevMode {
-		// The agent changed the mode under craze, so whatever plan the last
-		// turn left belongs to a mode the session is no longer in.
-		m.planOffer = false
 	}
 }
 

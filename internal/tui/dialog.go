@@ -110,7 +110,10 @@ func (m Model) dialogRow(text, tag string, selected bool, inner int) string {
 	if selected {
 		mark = "> "
 	}
-	body := mark + text
+	// One row is one line. An agent-supplied name with a newline in it would
+	// otherwise draw two, and then the box would be taller than the rectangle
+	// the layout measured and the hit test would answer for the wrong row.
+	body := mark + sanitizeLine(text)
 	// The tag is right-aligned, and dropped rather than crowded when the row
 	// is not wide enough to keep a space between the two.
 	if pad := inner - lipgloss.Width(body) - lipgloss.Width(tag); tag != "" && pad >= 1 {
@@ -214,13 +217,24 @@ func spliceRow(line, box string, x, w int) string {
 	}
 	left := ansi.Truncate(line, x, "")
 	if pad := x - ansi.StringWidth(left); pad > 0 {
-		left += strings.Repeat(" ", pad)
+		// A wide grapheme straddles the left edge. The blanks that replace it
+		// are handed to Truncate as its tail, which writes them at the cut and
+		// therefore inside the SGR state the base line had there, so the cells
+		// keep the base's background instead of falling back to the default.
+		left = ansi.Truncate(line, x, strings.Repeat(" ", pad))
 	}
 	right := ""
 	if end := x + w; end < full {
 		right = ansi.TruncateLeft(line, end, "")
 		if ansi.StringWidth(right) > full-end {
-			right = " " + ansi.TruncateLeft(line, end+1, "")
+			// Same at the right edge, and the prefix is the same trick:
+			// TruncateLeft writes it after the escape sequences it replays.
+			right = ansi.TruncateLeft(line, end+1, " ")
+		}
+		if pad := full - end - ansi.StringWidth(right); pad > 0 {
+			// The straddler was the last thing on the line, so the cut took
+			// everything and there was no prefix for it to write.
+			right = strings.Repeat(" ", pad) + right
 		}
 	}
 	var b strings.Builder
@@ -229,9 +243,11 @@ func spliceRow(line, box string, x, w int) string {
 		b.WriteString(ansi.ResetStyle)
 	}
 	b.WriteString(box)
-	if right != "" {
+	// The box's styling is closed whether or not there is a suffix to close it:
+	// a box flush against the right edge would otherwise paint the row after it.
+	if right != "" || strings.ContainsRune(box, ansi.ESC) {
 		b.WriteString(ansi.ResetStyle)
-		b.WriteString(right)
 	}
+	b.WriteString(right)
 	return b.String()
 }

@@ -80,8 +80,13 @@ type SelectValue struct {
 }
 
 type Event struct {
-	Type       EventType
-	Text       string
+	Type EventType
+	Text string
+	// Mode is the mode an EventMeta reports, set only for a current-mode
+	// update. The snapshot alone cannot say a mode changed — one that went
+	// plan → ask → plan leaves it exactly as it was — so the event has to
+	// carry the fact that it changed at all.
+	Mode       string
 	Tool       *ToolEvent
 	Todos      []Todo
 	Permission *PermissionEvent

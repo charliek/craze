@@ -114,7 +114,7 @@ func (m *Model) pushCard(c card) {
 	m.agentPeek = false
 	// A card is a question the user has to answer first, so the plan offer
 	// stands down rather than competing with it for Enter.
-	m.planOffer = false
+	m.retirePlanOffer()
 	// The draft itself is never touched (pinned), only the menu it opened.
 	m.slashHide = true
 	// A card takes the mouse too, so an in-progress drag is dropped rather

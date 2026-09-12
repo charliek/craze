@@ -52,11 +52,17 @@ type modelDialog struct {
 	fast   string
 }
 
-// modelApplyMsg is the result of the apply chain: the notes for the steps that
-// landed, and the step that did not. A tea.Cmd cannot append to the transcript
-// — only Update can — so the chain reports what happened and Update writes it.
+// modelApplyMsg is the result of the apply chain: the steps that landed, and
+// the one that did not. A tea.Cmd cannot append to the transcript — only Update
+// can — so the chain reports what happened and Update writes it.
+//
+// gen is the apply it belongs to. Two applies can be in flight at once (the box
+// closes optimistically, so it can be reopened while the first chain is still
+// running) and only the newest one speaks for what the rows show: an older
+// one's failure must not put back a value the user has changed since.
 type modelApplyMsg struct {
-	done []string
+	gen  int
+	done []applyStep
 	step string
 	err  error
 }
@@ -275,19 +281,35 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	if opt := agent.ModelConfigOption(m.snap); opt != nil {
 		modelCfgID = opt.ID
 	}
+	m.applyGen++
+	gen := m.applyGen
 	return m, func() tea.Msg {
 		ctx := context.Background()
-		var out modelApplyMsg
+		out := modelApplyMsg{gen: gen}
 		for _, st := range steps {
 			err := applyOneStep(ctx, sess, st, modelCfgID)
 			if err != nil {
 				out.step, out.err = st.label, err
 				return out
 			}
-			out.done = append(out.done, st.note)
+			out.done = append(out.done, st)
 		}
 		return out
 	}
+}
+
+// settleStep writes a step the agent accepted into the snapshot. It is the
+// optimistic write made good: the session's own snapshot does not always carry
+// what landed — the model step's fallback writes a config option and leaves
+// CurrentModel alone — so the steps that succeeded have the last word over the
+// refresh.
+func (m Model) settleStep(st applyStep) Model {
+	if st.cfgID != "" {
+		return m.setConfigCurrent(st.cfgID, st.value)
+	}
+	m.snap.CurrentModel = st.value
+	m.model = st.value
+	return m
 }
 
 // applyOneStep runs one leg. The model step keeps the fallback /model has
@@ -481,9 +503,11 @@ func (m Model) dialogValueRow(label string, opt *agent.ConfigOption, chosen stri
 	}
 	segs := []seg{{label, labelStyle}}
 	for _, v := range opt.SelectValues {
-		text := v.Value
+		// The values are the agent's text too, so they are folded onto the one
+		// line the row is allowed to be.
+		text := sanitizeLine(v.Value)
 		if name != nil {
-			text = name(v.Value)
+			text = sanitizeLine(name(v.Value))
 		}
 		st := styleFG(m.theme.Dim)
 		if v.Value == chosen {

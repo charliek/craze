@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
@@ -277,5 +278,138 @@ func TestFastOnSendsTheAdvertisedValue(t *testing.T) {
 	}
 	if got := texts(m, entryNote); len(got) != 1 || got[0] != "fast → on" {
 		t.Fatalf("notes %v", got)
+	}
+}
+
+// TestOverlayClosesTheBoxStyleWithoutASuffix is the right-edge leak: with
+// nothing after the box there was no reset either, so a box that painted its
+// last cell painted every row after it too.
+func TestOverlayClosesTheBoxStyleWithoutASuffix(t *testing.T) {
+	out := overlay("abcd\nEFGH", "\x1b[31mXX", rect{X: 2, Y: 0, W: 2, H: 1})
+	first, second := rows(out)[0], rows(out)[1]
+	if plain(first) != "abXX" || second != "EFGH" {
+		t.Fatalf("rows %q and %q", plain(first), second)
+	}
+	if !strings.HasSuffix(first, ansi.ResetStyle) {
+		t.Fatalf("the box's styling ran off the end of the row: %q", first)
+	}
+}
+
+// TestSpliceRowEdgeBlanksKeepTheBaseBackground: half a wide character becomes a
+// blank, and the blank belongs to the base line, so it is drawn in the base's
+// own colours and not in the terminal's default.
+func TestSpliceRowEdgeBlanksKeepTheBaseBackground(t *testing.T) {
+	const red = "\x1b[41m"
+	base := red + "日本語で" + "\x1b[0m"
+	// Right edge: the splice cuts 本 in half, so the cell after the box is a
+	// blank that still owes the row a red background.
+	out := spliceRow(base, "###", 0, 3)
+	if w := ansi.StringWidth(out); w != 8 {
+		t.Fatalf("row is %d cells: %q", w, plain(out))
+	}
+	if !strings.Contains(out, red+" ") {
+		t.Fatalf("the right-edge blank lost the base background: %q", out)
+	}
+	// Left edge: the same cut on the other side, where the blank is the last
+	// cell before the box.
+	out = spliceRow(base, "###", 3, 3)
+	if w := ansi.StringWidth(out); w != 8 {
+		t.Fatalf("row is %d cells: %q", w, plain(out))
+	}
+	if !strings.Contains(out, "日 ") {
+		t.Fatalf("the left-edge blank lost the base background: %q", out)
+	}
+}
+
+// TestModelDialogDrawsEveryRowAsOneLine: a model name with a newline in it drew
+// two rows, so the box was a row taller than the rectangle the layout measured
+// — the overlay dropped the bottom border and a click landed a row out.
+func TestModelDialogDrawsEveryRowAsOneLine(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	stub := m.sess.(*Stub)
+	// Agent sanitisation keeps \n: it is a line break in a reply, and only the
+	// rows that must not wrap fold it away.
+	stub.snap.Models = []agent.ModelInfo{{ID: "a", Name: "A\nB"}, {ID: "b", Name: "C"}}
+	stub.snap.CurrentModel = "a"
+	// A toggle row's values are the agent's text too, and the row has the same
+	// one line to fit in.
+	stub.snap.Config = []agent.ConfigOption{{
+		ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: "low",
+		SelectValues: []agent.SelectValue{{Value: "low", Name: "Low"}, {Value: "hi\ngh", Name: "High"}},
+	}}
+	tm, _ = m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+	m = m.openModelDialog()
+	tm, _ = m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+
+	r := m.lay.Dialog
+	if h := lipgloss.Height(m.dialogView(r)); h != r.H {
+		t.Fatalf("the box drew %d rows into a %d-row rectangle", h, r.H)
+	}
+	lines := rows(plainView(m))
+	if len(lines) != 30 {
+		t.Fatalf("frame is %d rows", len(lines))
+	}
+	if c := cellAt(lines[r.Y+r.H-1], r.X); c != "╰" {
+		t.Fatalf("the bottom border is %q, not ╰:\n%s", c, plainView(m))
+	}
+	if !strings.Contains(lines[r.Y+3], "A B") {
+		t.Fatalf("the name should be folded onto its own row:\n%s", plainView(m))
+	}
+	// The row under it is model b's, and it is the row a click there applies.
+	if !strings.Contains(lines[r.Y+4], "C") {
+		t.Fatalf("row %d should show model b:\n%s", r.Y+4, plainView(m))
+	}
+	out := clickXY(t, m, r.X+2, r.Y+4)
+	if out.snap.CurrentModel != "b" {
+		t.Fatalf("the click applied %q, but the row shows model b", out.snap.CurrentModel)
+	}
+}
+
+// TestFastRowReadsWhatTheValuesMean is finding 7 in the dialog: on and off are
+// read off the values' names and spellings, never off their order, so an agent
+// that renames or shortens its list cannot invert the row.
+func TestFastRowReadsWhatTheValuesMean(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values []agent.SelectValue
+		want   string
+	}{
+		{
+			"renamed and reversed",
+			[]agent.SelectValue{{Value: "true", Name: "Turbo"}, {Value: "false", Name: "Disabled"}},
+			"fast  [on]  off",
+		},
+		{
+			"only the on value advertised",
+			[]agent.SelectValue{{Value: "true", Name: "Fast"}},
+			"fast  [on]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t)
+			stub := m.sess.(*Stub)
+			stub.snap.Config = []agent.ConfigOption{{
+				ID: "fast", Name: "Fast", Category: "model_config", Type: "select",
+				Current: "true", SelectValues: tc.values,
+			}}
+			tm, _ := m.Update(refreshSnapMsg{})
+			m = tm.(Model)
+			m = m.openModelDialog()
+			tm, _ = m.Update(refreshSnapMsg{})
+			m = tm.(Model)
+			view := plainView(m)
+			if !strings.Contains(view, tc.want) {
+				t.Fatalf("want the row %q:\n%s", tc.want, view)
+			}
+			// The status row names fast only when it is on, which is the same
+			// reading of the same values.
+			if !strings.Contains(view, "(fast)") {
+				t.Fatalf("status row 1 should name fast:\n%s", view)
+			}
+		})
 	}
 }

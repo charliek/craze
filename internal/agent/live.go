@@ -702,10 +702,13 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.emit(Event{Type: EventMeta})
 	case acp.UpdateCurrentMode:
 		if u.CurrentModeID != "" {
+			mode := sanitizeText(u.CurrentModeID)
 			s.mu.Lock()
-			s.snap.CurrentMode = sanitizeText(u.CurrentModeID)
+			s.snap.CurrentMode = mode
 			s.mu.Unlock()
-			s.emit(Event{Type: EventMeta})
+			// The mode rides on the event: a mode that changed and changed
+			// back is invisible in the snapshot, and the UI has to see it.
+			s.emit(Event{Type: EventMeta, Mode: mode})
 		}
 	case acp.UpdateSessionInfo:
 		// session_info_update reuses the tool title field on the wire.

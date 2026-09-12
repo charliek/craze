@@ -144,6 +144,13 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "echo: hello"}})
 	m = tm.(Model)
+	// A turn is over when both of its endings have landed, so the status waits
+	// for the stream as well as for the prompt.
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	m = tm.(Model)
+	if m.status != statusWorking {
+		t.Fatalf("status %s before the prompt returned", m.status)
+	}
 	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
 	m = tm.(Model)
 	if m.status != statusIdle {
@@ -1017,6 +1024,57 @@ func TestModelDialogStepFailures(t *testing.T) {
 	}
 }
 
+// TestModelDialogStaleFailureKeepsTheNewerChoice: the box closes optimistically,
+// so a second apply can be under way before the first one answers. Only the
+// newest apply settles the rows — an older one's failure re-read the snapshot
+// and put back a value the user had already changed — and a successful apply
+// settles them, so the rows cannot end up showing a value the agent does not
+// have.
+func TestModelDialogStaleFailureKeepsTheNewerChoice(t *testing.T) {
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	if got := agent.EffortOption(m.snap); got == nil || got.Current != "medium" {
+		t.Fatalf("effort starts at %+v", got)
+	}
+	// medium → high, holding its command.
+	m = m.openModelDialog()
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyRight)
+	tm, high := m.Update(enter())
+	m = tm.(Model)
+	// The user reopens the box and picks low, which answers second.
+	m = m.openModelDialog()
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyLeft)
+	m = pressKey(t, m, tea.KeyLeft)
+	if m.mdlg.effort != "low" {
+		t.Fatalf("the reopened box is on %q", m.mdlg.effort)
+	}
+	tm, low := m.Update(enter())
+	m = tm.(Model)
+
+	// The first apply fails, late; the second then lands.
+	stub.FailNextSetConfig()
+	m = flushCmd(t, m, high)
+	m = flushCmd(t, m, low)
+
+	if got := agent.EffortOption(stub.Snapshot()); got == nil || got.Current != "low" {
+		t.Fatalf("the agent is on %+v, want low", got)
+	}
+	if got := agent.EffortOption(m.snap); got == nil || got.Current != "low" {
+		t.Fatalf("the rows show %+v while the agent is on low", got)
+	}
+	if !strings.Contains(plainView(m), "(low)") {
+		t.Fatalf("status row 1 should name the effort the agent has:\n%s", plainView(m))
+	}
+	if got := texts(m, entryNote); len(got) != 1 || got[0] != "effort → low" {
+		t.Fatalf("notes %v, want only the step that landed", got)
+	}
+	if errs := texts(m, entryError); len(errs) != 1 || !strings.HasPrefix(errs[0], "effort: ") {
+		t.Fatalf("errors %v, want the failure named", errs)
+	}
+}
+
 // TestModelDialogTabSkipsMissingRows: without a fast option Tab cycles between
 // the list and effort only, and the row is not drawn.
 func TestModelDialogTabSkipsMissingRows(t *testing.T) {
@@ -1361,11 +1419,23 @@ func feed(t *testing.T, m Model, evs ...agent.Event) Model {
 	return m
 }
 
-// planTurn is a turn that ended with a reply: both endings, in the order the
-// live session usually produces them.
+// startTurn sends a prompt the way Enter does and drops the command it
+// returned, so a test can drive the turn's endings by hand without the stub
+// answering as well. Every turn state below goes through it: the offer belongs
+// to a turn, so a test that skipped the prompt would be holding a state craze
+// cannot reach.
+func startTurn(t *testing.T, m Model, text string) Model {
+	t.Helper()
+	m.input.SetValue(text)
+	tm, _ := m.Update(enter())
+	return tm.(Model)
+}
+
+// planTurn is a turn that ended with a reply: the prompt, then both endings in
+// the order the live session usually produces them.
 func planTurn(t *testing.T, m Model) Model {
 	t.Helper()
-	m = feed(t, m,
+	m = feed(t, startTurn(t, m, "plan it"),
 		agent.Event{Type: agent.EventText, Text: "here is the plan"},
 		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
 	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
@@ -1395,13 +1465,9 @@ func TestPlanOfferWaitsForBothEndings(t *testing.T) {
 		{"status first", []tea.Msg{settled, done}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := intoPlanMode(t, sized(t))
-			m.input.SetValue("plan it")
-			// The prompt command is dropped: this test drives the turn's two
-			// endings by hand, so the stub must not also answer.
-			tm, _ := m.Update(enter())
-			m = tm.(Model)
+			m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
 			m = feed(t, m, agent.Event{Type: agent.EventText, Text: "here is the plan"})
+			var tm tea.Model
 			for i, msg := range tc.msgs {
 				tm, _ = m.Update(msg)
 				m = tm.(Model)
@@ -1435,10 +1501,10 @@ func TestPlanOfferNeedsAPlanToOffer(t *testing.T) {
 		}}, ended}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := feed(t, intoPlanMode(t, sized(t)), tc.evs...)
+			m := feed(t, startTurn(t, intoPlanMode(t, sized(t)), "plan it"), tc.evs...)
 			tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
 			m = tm.(Model)
-			if m.planOffer || m.planOffering() {
+			if m.planArmed() || m.planOffering() {
 				t.Fatal("this turn left no plan to implement")
 			}
 			if strings.Contains(plainView(m), planOfferPlaceholder) {
@@ -1463,7 +1529,7 @@ func TestPlanOfferNeedsAnImplementMode(t *testing.T) {
 	if m.implementModeID() != "" {
 		t.Fatalf("implement mode %q, want none", m.implementModeID())
 	}
-	if m.planOffer {
+	if m.planArmed() {
 		t.Fatal("nothing to switch to, so nothing to offer")
 	}
 }
@@ -1489,7 +1555,12 @@ func TestPlanOfferCleared(t *testing.T) {
 			if err := m.sess.SetMode(context.Background(), "agent"); err != nil {
 				t.Fatal(err)
 			}
-			return feed(t, m, agent.Event{Type: agent.EventMeta})
+			return feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "agent"})
+		}},
+		{"the agent changes the mode and changes it back", func(t *testing.T, m Model) Model {
+			// The snapshot says "plan" before and after, so only the event
+			// itself can say the mode moved at all.
+			return feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "plan"})
 		}},
 		{"the user changes the mode", func(t *testing.T, m Model) Model {
 			tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
@@ -1503,7 +1574,7 @@ func TestPlanOfferCleared(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := tc.do(t, planOfferModel(t))
-			if m.planOffer {
+			if m.planArmed() {
 				t.Fatal("the offer should be gone")
 			}
 			if strings.Contains(plainView(m), planOfferPlaceholder) {
@@ -1522,7 +1593,7 @@ func TestPlanOfferHiddenWhileTyping(t *testing.T) {
 	if strings.Contains(plainView(m), planOfferPlaceholder) {
 		t.Fatalf("a draft hides the placeholder:\n%s", plainView(m))
 	}
-	if !m.planOffer {
+	if !m.planArmed() {
 		t.Fatal("typing refines the plan, it does not decline the offer")
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
@@ -1542,7 +1613,7 @@ func TestPlanOfferEscKeepsFocus(t *testing.T) {
 	}
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
-	if m.planOffer {
+	if m.planArmed() {
 		t.Fatal("esc declines the offer")
 	}
 	if !m.input.Focused() {
@@ -1585,7 +1656,7 @@ func TestPlanImplementChainsSetModeThenPrompt(t *testing.T) {
 	if m.snap.CurrentMode != "agent" {
 		t.Fatalf("mode %q, want the optimistic agent", m.snap.CurrentMode)
 	}
-	if m.status != statusIdle || len(texts(m, entryUser)) != 0 {
+	if m.status != statusIdle || len(texts(m, entryUser)) != 1 {
 		t.Fatalf("nothing is written or sent before SetMode comes back: status %s, users %q",
 			m.status, texts(m, entryUser))
 	}
@@ -1614,7 +1685,7 @@ func TestPlanImplementChainsSetModeThenPrompt(t *testing.T) {
 	if note < 0 || user < 0 || note > user {
 		t.Fatalf("want the mode note then the user entry, got %d and %d:\n%s", note, user, plainView(m))
 	}
-	if m.planOffer {
+	if m.planArmed() {
 		t.Fatal("the offer is spent")
 	}
 	if got := runCmd(cmd); got == nil {
@@ -1636,8 +1707,8 @@ func TestPlanImplementSetModeFailureSendsNoPrompt(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a failed mode change sends no prompt")
 	}
-	if len(texts(m, entryUser)) != 0 {
-		t.Fatalf("nothing was sent, so nothing is in the transcript: %q", texts(m, entryUser))
+	if got := texts(m, entryUser); len(got) != 1 || got[0] != "plan it" {
+		t.Fatalf("nothing was sent, so nothing was added to the transcript: %q", got)
 	}
 	if m.status != statusIdle {
 		t.Fatalf("status %s", m.status)
@@ -1666,13 +1737,204 @@ func TestPlanRefineStaysInPlanMode(t *testing.T) {
 	if m.snap.CurrentMode != "plan" {
 		t.Fatalf("mode %q, want plan", m.snap.CurrentMode)
 	}
-	if m.planOffer {
+	if m.planArmed() {
 		t.Fatal("the send retires the offer")
 	}
-	if got := texts(m, entryUser); len(got) != 1 || got[0] != "more detail on step two" {
+	if got := texts(m, entryUser); len(got) != 2 || got[1] != "more detail on step two" {
 		t.Fatalf("user entries %q", got)
 	}
 	if m.status != statusWorking {
 		t.Fatalf("status %s", m.status)
+	}
+}
+
+// TestPlanImplementDropsAnAnswerForAFinishedTurn is the competing-turn defect:
+// the offer is accepted, the user sends a prompt of their own while SetMode is
+// still in flight, and the mode change comes back to a turn that no longer
+// exists. Writing its note and its user entry then would put a prompt in the
+// transcript that the session refuses as already in flight.
+func TestPlanImplementDropsAnAnswerForAFinishedTurn(t *testing.T) {
+	m := planOfferModel(t)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("expected the SetMode command")
+	}
+	// The user does not wait for it.
+	m = startTurn(t, m, "something else entirely")
+	if got := texts(m, entryUser); len(got) != 2 || got[1] != "something else entirely" {
+		t.Fatalf("the user's own prompt should have started: %q", got)
+	}
+	msg := runCmd(cmd)
+	if _, ok := msg.(planImplementMsg); !ok {
+		t.Fatalf("SetMode returned %T", msg)
+	}
+	tm, cmd = m.Update(msg)
+	m = tm.(Model)
+	if cmd != nil {
+		t.Fatal("a mode change for a finished turn sends no prompt")
+	}
+	for _, u := range texts(m, entryUser) {
+		if u == "Implement the plan above." {
+			t.Fatalf("the implement prompt was written anyway:\n%s", plainView(m))
+		}
+	}
+	// The mode did change, so it is still noted — it is the entry and the
+	// prompt behind it that belonged to the turn that is gone.
+	noted := false
+	for _, n := range texts(m, entryNote) {
+		noted = noted || strings.HasPrefix(n, "mode → agent")
+	}
+	if !noted {
+		t.Fatalf("the mode change should still be noted:\n%s", plainView(m))
+	}
+}
+
+// TestPlanImplementFailureDoesNotReviveAClearedPlan: /clear while SetMode is in
+// flight retires the offer, so the failure that would otherwise put it back has
+// nothing to put back — the plan it described is no longer on screen.
+func TestPlanImplementFailureDoesNotReviveAClearedPlan(t *testing.T) {
+	m := planOfferModel(t)
+	m.sess.(*Stub).FailNextSetMode()
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	m.input.SetValue("/clear")
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	if len(m.entries) != 0 {
+		t.Fatalf("/clear should have emptied the transcript: %d entries", len(m.entries))
+	}
+	msg := runCmd(cmd)
+	if _, ok := msg.(planImplementFailedMsg); !ok {
+		t.Fatalf("SetMode returned %T", msg)
+	}
+	tm, _ = m.Update(msg)
+	m = tm.(Model)
+	if m.planArmed() || m.planOffering() {
+		t.Fatal("a cleared transcript has no plan above to implement")
+	}
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the placeholder came back:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferIgnoresAnAbandonedTurnsLateEvents is the misattribution defect: a
+// cancelled turn's buffered text and its own EventDone reach craze after its
+// prompt returned, and neither may count for the turn after it. The turn is not
+// over until both of its endings have landed, so no next turn can start over the
+// events still draining and mistake them for its own.
+func TestPlanOfferIgnoresAnAbandonedTurnsLateEvents(t *testing.T) {
+	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("esc while working cancels")
+	}
+	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
+	m = tm.(Model)
+	if m.status != statusWorking {
+		t.Fatalf("the stream has not closed, so the turn is not over: status %s", m.status)
+	}
+	m = startTurn(t, m, "and now this")
+	if got := texts(m, entryUser); len(got) != 1 {
+		t.Fatalf("no turn may start while the last one is still draining: %q", got)
+	}
+	// The cancelled turn's own events land now, against the turn that made them.
+	m = feed(t, m,
+		agent.Event{Type: agent.EventText, Text: "here is the plan"},
+		agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
+	if m.status != statusIdle {
+		t.Fatalf("both endings have landed: status %s", m.status)
+	}
+	if m.planArmed() {
+		t.Fatal("a cancelled turn offers nothing")
+	}
+	// The next turn starts clean: the chunk that arrived late was not its own,
+	// so its ending has no evidence to arm an offer with.
+	m = startTurn(t, m, "and now this")
+	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+	m = tm.(Model)
+	if m.planArmed() || m.planOffering() {
+		t.Fatalf("this turn said nothing, so it left no plan:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferIgnoresEmptyAssistantChunks: appendStream drops an empty chunk,
+// so it is not on the screen and cannot be a plan — and the live adapter does
+// emit them for content it cannot read as text.
+func TestPlanOfferIgnoresEmptyAssistantChunks(t *testing.T) {
+	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
+	m = feed(t, m,
+		agent.Event{Type: agent.EventText, Text: ""},
+		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+	m = tm.(Model)
+	if m.planArmed() || m.planOffering() {
+		t.Fatal("an empty reply left nothing to implement")
+	}
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the placeholder was drawn for an empty reply:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferRetiredByACardInEitherOrder: an action between the turn's two
+// endings kills the offer whichever ending it landed between, so the two
+// orderings stay indistinguishable.
+func TestPlanOfferRetiredByACardInEitherOrder(t *testing.T) {
+	done := eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}}
+	settled := promptDoneMsg{res: agent.Result{StopReason: "end_turn"}}
+	card := eventMsg{agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+		ID:      "perm-1",
+		Tool:    "Shell",
+		Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
+	}}}
+	for _, tc := range []struct {
+		name string
+		msgs []tea.Msg
+	}{
+		{"done, card, status", []tea.Msg{done, card, settled}},
+		{"status, card, done", []tea.Msg{settled, card, done}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
+			m = feed(t, m, agent.Event{Type: agent.EventText, Text: "here is the plan"})
+			for _, msg := range tc.msgs {
+				tm, _ := m.Update(msg)
+				m = tm.(Model)
+			}
+			if m.planArmed() || m.planOffering() {
+				t.Fatal("the card retired the offer, and no ending may bring it back")
+			}
+		})
+	}
+}
+
+// TestPlanOfferEscWhileWorkingRetiresIt: the offer is armed by EventDone while
+// the prompt has yet to return, so Esc is still a cancel — and a cancel declines
+// the offer as surely as an Esc on the composer does.
+func TestPlanOfferEscWhileWorkingRetiresIt(t *testing.T) {
+	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
+	m = feed(t, m,
+		agent.Event{Type: agent.EventText, Text: "here is the plan"},
+		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	if !m.planArmed() {
+		t.Fatal("EventDone arms the offer")
+	}
+	if m.status != statusWorking {
+		t.Fatalf("the prompt has not returned: status %s", m.status)
+	}
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("esc while working cancels the turn")
+	}
+	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
+	m = tm.(Model)
+	if m.planArmed() || m.planOffering() {
+		t.Fatalf("the cancel declined the offer:\n%s", plainView(m))
+	}
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the placeholder survived the cancel:\n%s", plainView(m))
 	}
 }

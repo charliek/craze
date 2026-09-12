@@ -425,29 +425,44 @@ func FastOption(snap Snapshot) *ConfigOption {
 	return nil
 }
 
-// fastOffName is the name cursor gives the fast toggle's off value. The values
-// themselves are cursor's spelling ("false"/"true") and craze sends them back
-// verbatim, so the name — not the value — is what says which way is on.
-const fastOffName = "off"
+// fastOffName is the name cursor gives the fast toggle's off value, and
+// fastOffValue the value it gives it. The values are cursor's spelling and
+// craze sends them back verbatim, so what a value means has to be read off its
+// name or its own spelling — never off its position in the list.
+const (
+	fastOffName  = "off"
+	fastOffValue = "false"
+)
 
 // FastOnOff splits the fast toggle's advertised values into the one that means
-// off and the one that means on. An option that names neither falls back to
-// its own order, which is how every capture lists them.
+// off and the one that means on. Off is the value the agent names "off" or
+// spells "false"; whatever else it advertises is on. Position is not evidence:
+// an agent that lists its on value first, or renames both, would otherwise
+// invert the row and send "on" as off.
 func FastOnOff(opt *ConfigOption) (off, on string, ok bool) {
-	if opt == nil || len(opt.SelectValues) < 2 {
+	if opt == nil {
 		return "", "", false
 	}
-	for i, v := range opt.SelectValues {
-		if !strings.EqualFold(strings.TrimSpace(v.Name), fastOffName) {
-			continue
+	for _, v := range opt.SelectValues {
+		switch {
+		case isFastOff(v):
+			if off == "" {
+				off = v.Value
+			}
+		case on == "":
+			on = v.Value
 		}
-		other := 0
-		if i == 0 {
-			other = 1
-		}
-		return v.Value, opt.SelectValues[other].Value, true
 	}
-	return opt.SelectValues[0].Value, opt.SelectValues[1].Value, true
+	// Without an on value there is nothing to switch to, so the row falls back
+	// to the raw values rather than guessing one of them means on.
+	return off, on, on != ""
+}
+
+// isFastOff recognises the toggle's off value either way the agent can spell
+// it, so a singleton or a renamed pair still reads the right way round.
+func isFastOff(v SelectValue) bool {
+	return strings.EqualFold(strings.TrimSpace(v.Name), fastOffName) ||
+		strings.EqualFold(strings.TrimSpace(v.Value), fastOffValue)
 }
 
 // FastOn reports whether the session's fast toggle exists and is on, which is

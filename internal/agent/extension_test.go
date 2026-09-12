@@ -713,8 +713,14 @@ func TestCurrentModeUpdateSanitised(t *testing.T) {
 		"sessionUpdate": acp.UpdateCurrentMode,
 		"currentModeId": "\x1b[2Jplan",
 	})})
-	<-s.Events()
+	ev := <-s.Events()
 	if got := s.Snapshot().CurrentMode; got != "plan" {
 		t.Fatalf("mode %q", got)
+	}
+	// The event carries the mode as well as the snapshot: a mode that changed
+	// and changed back leaves the snapshot exactly as it was, so only the event
+	// can tell the UI it moved at all.
+	if ev.Type != EventMeta || ev.Mode != "plan" {
+		t.Fatalf("event %+v, want a meta event naming the mode", ev)
 	}
 }
