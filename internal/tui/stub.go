@@ -23,6 +23,9 @@ type Stub struct {
 	failModel  bool
 	failConfig bool
 	snap       agent.Snapshot
+	// Clock stamps Event.At; tests inject one to drive lingers and elapsed
+	// times without sleeping.
+	Clock func() time.Time
 }
 
 func NewStub() *Stub {
@@ -76,6 +79,24 @@ func (s *Stub) SetTools(tools []agent.ToolEvent) {
 	defer s.mu.Unlock()
 	s.snap.Tools = cloneStubTools(tools)
 }
+
+// SetTodos replaces Snapshot.Todos. Tests send EventTodos afterwards.
+func (s *Stub) SetTodos(todos []agent.Todo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Todos = append([]agent.Todo(nil), todos...)
+	s.snap.TodosUpdatedAt = s.now()
+}
+
+// SetTitle replaces Snapshot.Title.
+func (s *Stub) SetTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Title = title
+}
+
+// Emit publishes an event as the live session would, stamped with Clock.
+func (s *Stub) Emit(ev agent.Event) { s.emit(ev) }
 
 func (s *Stub) FailNextSetMode() {
 	s.mu.Lock()
@@ -153,6 +174,14 @@ func (s *Stub) AnswerPermission(string, string) error {
 	return fmt.Errorf("stub: no permission request")
 }
 
+func (s *Stub) AnswerQuestion(string, map[string][]string, bool) error {
+	return fmt.Errorf("stub: no question request")
+}
+
+func (s *Stub) AnswerPlan(string, bool) error {
+	return fmt.Errorf("stub: no plan request")
+}
+
 func (s *Stub) SetModel(_ context.Context, id string) error {
 	s.mu.Lock()
 	fail := s.failModel
@@ -205,6 +234,7 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
 	out.Config = cloneStubConfig(s.snap.Config)
+	out.Todos = append([]agent.Todo(nil), s.snap.Todos...)
 	out.Tools = cloneStubTools(s.snap.Tools)
 	return out
 }
@@ -248,7 +278,18 @@ func (s *Stub) Close() error {
 	return nil
 }
 
+// now reads Clock through an indirection so tests can inject one.
+func (s *Stub) now() time.Time {
+	if s.Clock != nil {
+		return s.Clock()
+	}
+	return time.Now()
+}
+
 func (s *Stub) emit(ev agent.Event) {
+	if ev.At.IsZero() {
+		ev.At = s.now()
+	}
 	select {
 	case <-s.closed:
 		return

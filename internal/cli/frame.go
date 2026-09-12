@@ -67,10 +67,11 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		}
 	}
 	sess := agent.New(agent.Options{
-		Binary:    o.agentBin,
-		Workspace: ws,
-		Force:     force,
-		Stderr:    cmd.ErrOrStderr(),
+		Binary:      o.agentBin,
+		Workspace:   ws,
+		Force:       force,
+		Stderr:      cmd.ErrOrStderr(),
+		Interactive: true,
 	})
 
 	plain, raw, err := tui.RunFrameScript(tui.Config{

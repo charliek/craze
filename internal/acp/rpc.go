@@ -9,7 +9,7 @@ const (
 	jsonrpcVersion = "2.0"
 
 	CodeMethodNotFound = -32601
-	codeInvalidParams  = -32602
+	CodeInvalidParams  = -32602
 )
 
 type Message struct {

@@ -439,7 +439,7 @@ func TestAskAndPlanYolo(t *testing.T) {
 		if _, err := s.Prompt(t.Context(), "q"); err != nil {
 			t.Fatal(err)
 		}
-		log.waitTexts(t, "asked:answered")
+		log.waitTexts(t, "asked:answered:q1=opt-a;q2=opt-x")
 	})
 	t.Run("plan", func(t *testing.T) {
 		s := startScript(t, "plan", true)

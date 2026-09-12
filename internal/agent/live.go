@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -25,17 +27,40 @@ type session struct {
 	closed     bool
 	inPrompt   bool
 	promptDone chan struct{}
-	waiting    map[string]pendingPerm
-	permSeq    int
-	snap       Snapshot
-	tools      map[string]ToolEvent
-	toolOrder  []string
+	waiting    map[string]pendingAsk
+	seq        map[string]int
+	// turn counts prompts; cancelledTurn records the one a cancel was issued
+	// for, so a request that arrives while the turn is being cancelled is
+	// answered instead of parked.
+	turn          int
+	cancelledTurn int
+	snap          Snapshot
+	tools         map[string]ToolEvent
+	toolOrder     []string
+	// taskReceipts holds cursor/task receipts whose tool_call has not landed
+	// yet; it is bounded and cleared at turn end so an unmatched receipt can
+	// never leak or attach itself to a later tool with a reused id.
+	taskReceipts     map[string]TaskInfo
+	taskReceiptOrder []string
 }
 
-type pendingPerm struct {
+// taskReceiptCap bounds the parked receipts of a single turn.
+const taskReceiptCap = 32
+
+// pendingAsk is one blocking request the UI still owes an answer to. kind is
+// askPermission, askQuestion or askPlan; decide carries that kind's own
+// acp decision type.
+type pendingAsk struct {
+	kind    string
 	options []acp.PermissionOption
-	decide  chan acp.PermissionDecision
+	decide  chan any
 }
+
+const (
+	askPermission = "perm"
+	askQuestion   = "ask"
+	askPlan       = "plan"
+)
 
 func New(opts Options) Session {
 	return newSession(opts)
@@ -47,8 +72,11 @@ func newSession(opts Options) *session {
 		events:    make(chan Event, 256),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
-		waiting:   make(map[string]pendingPerm),
+		waiting:   make(map[string]pendingAsk),
+		seq:       make(map[string]int),
 		tools:     make(map[string]ToolEvent),
+
+		taskReceipts: make(map[string]TaskInfo),
 	}
 }
 
@@ -121,6 +149,10 @@ func (s *session) Start(ctx context.Context) error {
 	s.mu.Unlock()
 	client.SetUpdateHandler(s.onUpdate)
 	client.SetPermissionHandler(s.onPermission)
+	client.SetAskHandler(s.onAskQuestion)
+	client.SetPlanHandler(s.onCreatePlan)
+	client.SetTodosHandler(s.onUpdateTodos)
+	client.SetTaskHandler(s.onTaskReceipt)
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
@@ -186,12 +218,14 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		return Result{}, acp.ErrPromptInFlight
 	}
 	s.inPrompt = true
+	s.turn++
 	done := make(chan struct{})
 	s.promptDone = done
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.inPrompt = false
+		s.clearTaskReceiptsLocked()
 		close(done)
 		s.mu.Unlock()
 	}()
@@ -260,6 +294,7 @@ func (s *session) Snapshot() Snapshot {
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
 	out.Config = cloneConfig(s.snap.Config)
+	out.Todos = append([]Todo(nil), s.snap.Todos...)
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
 	return out
 }
@@ -269,7 +304,7 @@ func (s *session) Cancel(ctx context.Context) error {
 	if client == nil {
 		return nil
 	}
-	s.cancelWaitingPerms()
+	s.cancelWaiting()
 	if err := client.Cancel(ctx); err != nil {
 		return err
 	}
@@ -288,36 +323,61 @@ func (s *session) Cancel(ctx context.Context) error {
 	}
 }
 
-func (s *session) cancelWaitingPerms() {
+// cancelWaiting answers every blocking request of every kind, exactly once:
+// the map is swapped out under the lock so a concurrent Answer* finds nothing.
+func (s *session) cancelWaiting() {
 	s.mu.Lock()
+	s.cancelledTurn = s.turn
 	pending := s.waiting
-	s.waiting = make(map[string]pendingPerm)
+	s.waiting = make(map[string]pendingAsk)
 	s.mu.Unlock()
 	for _, p := range pending {
-		select {
-		case p.decide <- acp.PermissionDecision{Cancelled: true}:
-		default:
-		}
+		p.answer(cancelledFor(p.kind))
 	}
 }
 
-func (s *session) AnswerPermission(id, optionID string) error {
+func cancelledFor(kind string) any {
+	switch kind {
+	case askQuestion:
+		return acp.AskDecision{Cancelled: true}
+	case askPlan:
+		return acp.PlanDecision{Cancelled: true}
+	default:
+		return acp.PermissionDecision{Cancelled: true}
+	}
+}
+
+// answer never blocks: the channel is buffered and each pendingAsk is taken
+// out of the map before it is answered, so at most one value is ever sent.
+func (p pendingAsk) answer(v any) {
+	select {
+	case p.decide <- v:
+	default:
+	}
+}
+
+// take removes a waiting request of the expected kind.
+func (s *session) take(id, kind string) (pendingAsk, error) {
 	s.mu.Lock()
 	p, ok := s.waiting[id]
-	if ok {
+	if ok && p.kind == kind {
 		delete(s.waiting, id)
 	}
 	s.mu.Unlock()
-	if !ok {
+	if !ok || p.kind != kind {
+		return pendingAsk{}, fmt.Errorf("agent: unknown %s request %q", kind, id)
+	}
+	return p, nil
+}
+
+func (s *session) AnswerPermission(id, optionID string) error {
+	p, err := s.take(id, askPermission)
+	if err != nil {
 		return fmt.Errorf("agent: unknown permission request %q", id)
 	}
 	if optionID == "" {
-		select {
-		case p.decide <- acp.PermissionDecision{Cancelled: true}:
-			return nil
-		case <-s.done:
-			return fmt.Errorf("agent: session closed")
-		}
+		p.answer(acp.PermissionDecision{Cancelled: true})
+		return nil
 	}
 	found := false
 	for _, o := range p.options {
@@ -327,18 +387,36 @@ func (s *session) AnswerPermission(id, optionID string) error {
 		}
 	}
 	if !found {
-		select {
-		case p.decide <- acp.PermissionDecision{Cancelled: true}:
-		default:
-		}
+		p.answer(acp.PermissionDecision{Cancelled: true})
 		return fmt.Errorf("agent: optionId %q is not in the permission request", optionID)
 	}
-	select {
-	case p.decide <- acp.PermissionDecision{OptionID: optionID}:
-		return nil
-	case <-s.done:
-		return fmt.Errorf("agent: session closed")
+	p.answer(acp.PermissionDecision{OptionID: optionID})
+	return nil
+}
+
+// AnswerQuestion answers a cursor/ask_question card. Option ids that the
+// request did not offer are dropped when the reply is built.
+func (s *session) AnswerQuestion(id string, answers map[string][]string, skip bool) error {
+	p, err := s.take(id, askQuestion)
+	if err != nil {
+		return err
 	}
+	if skip {
+		p.answer(acp.AskDecision{Skip: true})
+		return nil
+	}
+	p.answer(acp.AskDecision{Answers: answers})
+	return nil
+}
+
+// AnswerPlan accepts or rejects a cursor/create_plan card.
+func (s *session) AnswerPlan(id string, accept bool) error {
+	p, err := s.take(id, askPlan)
+	if err != nil {
+		return err
+	}
+	p.answer(acp.PlanDecision{Accept: accept})
+	return nil
 }
 
 // Close reaps the child exactly once; later callers block until that reap has
@@ -367,37 +445,183 @@ func (s *session) onPermission(req acp.PermissionRequest) acp.PermissionDecision
 		}
 		return acp.PermissionDecision{OptionID: id}
 	}
-	id := s.nextPermID()
-	ch := make(chan acp.PermissionDecision, 1)
-	s.mu.Lock()
-	s.waiting[id] = pendingPerm{options: req.Options, decide: ch}
-	s.mu.Unlock()
+	id, ch, ok := s.park(askPermission, pendingAsk{options: req.Options})
+	if !ok {
+		return acp.PermissionDecision{Cancelled: true}
+	}
 
 	opts := make([]PermissionOption, 0, len(req.Options))
 	for _, o := range req.Options {
-		opts = append(opts, PermissionOption{OptionID: o.OptionID, Name: o.Name, Kind: o.Kind})
+		opts = append(opts, PermissionOption{
+			OptionID: o.OptionID,
+			Name:     sanitizeText(o.Name),
+			Kind:     o.Kind,
+		})
 	}
 	s.emit(Event{
 		Type: EventPermission,
 		Permission: &PermissionEvent{
 			ID:      id,
-			Tool:    req.ToolCall.Title,
+			Tool:    sanitizeText(req.ToolCall.Title),
 			Options: opts,
 		},
 	})
+	return awaitDecision(s, ch, acp.PermissionDecision{Cancelled: true})
+}
+
+// onAskQuestion blocks on the UI when Interactive, and otherwise answers with
+// each question's first option and reports what it sent.
+func (s *session) onAskQuestion(req acp.AskQuestionRequest) acp.AskDecision {
+	ev := &QuestionEvent{
+		Title:     sanitizeText(req.Title),
+		Questions: questionsFromRequest(req),
+	}
+	if !s.opts.Interactive {
+		ev.ID = s.nextID(askQuestion)
+		ev.Auto = true
+		ev.Answers = acp.AskAutoAnswers(req)
+		s.emit(Event{Type: EventQuestion, Question: ev})
+		return acp.AskDecision{Answers: ev.Answers}
+	}
+	id, ch, ok := s.park(askQuestion, pendingAsk{})
+	if !ok {
+		return acp.AskDecision{Cancelled: true}
+	}
+	ev.ID = id
+	s.emit(Event{Type: EventQuestion, Question: ev})
+	return awaitDecision(s, ch, acp.AskDecision{Cancelled: true})
+}
+
+func questionsFromRequest(req acp.AskQuestionRequest) []Question {
+	out := make([]Question, 0, len(req.Questions))
+	for _, q := range req.Questions {
+		opts := make([]Option, 0, len(q.Options))
+		for _, o := range q.Options {
+			opts = append(opts, Option{ID: o.ID, Label: sanitizeText(o.Label)})
+		}
+		if len(opts) == 0 {
+			// A question with no options still needs something to press; the
+			// empty id is dropped when the reply is built, so craze never
+			// invents an option id.
+			opts = append(opts, Option{Label: "OK"})
+		}
+		out = append(out, Question{
+			ID:            q.ID,
+			Prompt:        sanitizeText(q.Prompt),
+			Options:       opts,
+			AllowMultiple: q.AllowMultiple,
+		})
+	}
+	return out
+}
+
+// onCreatePlan mirrors onAskQuestion: block when Interactive, accept and
+// report otherwise.
+func (s *session) onCreatePlan(req acp.CreatePlanRequest) acp.PlanDecision {
+	ev := &PlanEvent{
+		Name:     sanitizeText(req.DisplayName()),
+		Overview: sanitizeText(req.Overview),
+		Plan:     sanitizeText(req.PlanText()),
+		Todos:    todosFromWire(req.Todos),
+	}
+	if !s.opts.Interactive {
+		ev.ID = s.nextID(askPlan)
+		ev.Auto = true
+		ev.Accepted = true
+		s.emit(Event{Type: EventPlan, Plan: ev})
+		return acp.PlanDecision{Accept: true}
+	}
+	id, ch, ok := s.park(askPlan, pendingAsk{})
+	if !ok {
+		return acp.PlanDecision{Cancelled: true}
+	}
+	ev.ID = id
+	s.emit(Event{Type: EventPlan, Plan: ev})
+	return awaitDecision(s, ch, acp.PlanDecision{Cancelled: true})
+}
+
+// park registers a blocking request and returns its craze-local id (perm-N,
+// ask-N, plan-N — never a JSON-RPC id or a toolCallId) and decision channel.
+//
+// It refuses once the current turn has been cancelled or the session closed:
+// cancelWaiting only drains what is already in the map, so without this a
+// request that arrives while a cancel is in flight would park forever and
+// leave the agent waiting on a reply that never comes.
+func (s *session) park(kind string, p pendingAsk) (string, chan any, bool) {
+	ch := make(chan any, 1)
+	p.kind = kind
+	p.decide = ch
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || (s.turn > 0 && s.cancelledTurn == s.turn) {
+		return "", nil, false
+	}
+	s.seq[kind]++
+	id := fmt.Sprintf("%s-%d", kind, s.seq[kind])
+	s.waiting[id] = p
+	return id, ch, true
+}
+
+func (s *session) nextID(kind string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seq[kind]++
+	return fmt.Sprintf("%s-%d", kind, s.seq[kind])
+}
+
+// awaitDecision blocks for the UI's answer, falling back to onClose once the
+// session is closing or if another kind's decision arrived.
+func awaitDecision[T any](s *session, ch chan any, onClose T) T {
 	select {
-	case dec := <-ch:
-		return dec
+	case v := <-ch:
+		if d, ok := v.(T); ok {
+			return d
+		}
+		return onClose
 	case <-s.done:
-		return acp.PermissionDecision{Cancelled: true}
+		return onClose
 	}
 }
 
-func (s *session) nextPermID() string {
+// onUpdateTodos merges the request into Snapshot.Todos and returns the merged
+// list, which the client echoes back to cursor.
+func (s *session) onUpdateTodos(req acp.UpdateTodosRequest) []acp.TodoItem {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.permSeq++
-	return fmt.Sprintf("perm-%d", s.permSeq)
+	s.snap.Todos = mergeTodos(s.snap.Todos, todosFromWire(req.Todos), req.Merge)
+	s.snap.TodosUpdatedAt = time.Now()
+	todos := append([]Todo(nil), s.snap.Todos...)
+	s.mu.Unlock()
+	s.emit(Event{Type: EventTodos, Todos: todos})
+	return todosToWire(todos)
+}
+
+// onTaskReceipt joins the sub-agent receipt onto its tool call, in either
+// arrival order: the receipt is parked when the tool_call has not landed yet.
+func (s *session) onTaskReceipt(req acp.TaskRequest) {
+	if req.ToolCallID == "" {
+		return
+	}
+	info := TaskInfo{
+		Description:  sanitizeText(req.Description),
+		Prompt:       truncateUTF8(sanitizeText(req.Prompt), taskPromptCap),
+		Model:        sanitizeText(req.Model),
+		AgentID:      sanitizeText(req.AgentID),
+		SubagentType: subagentTypeName(req.SubagentType),
+		DurationMs:   req.DurationMs,
+		Receipt:      true,
+	}
+	s.mu.Lock()
+	tool, ok := s.tools[req.ToolCallID]
+	if !ok {
+		s.parkTaskReceiptLocked(req.ToolCallID, info)
+		s.mu.Unlock()
+		return
+	}
+	tool.Task = mergeTaskInfo(tool.Task, info)
+	s.tools[req.ToolCallID] = tool
+	out := cloneTool(tool)
+	s.mu.Unlock()
+	s.emit(Event{Type: EventTool, Tool: &out})
 }
 
 type sessionUpdateWire struct {
@@ -408,6 +632,7 @@ type sessionUpdateWire struct {
 	Kind              *string                `json:"kind,omitempty"`
 	Status            *string                `json:"status,omitempty"`
 	RawInput          json.RawMessage        `json:"rawInput,omitempty"`
+	RawOutput         json.RawMessage        `json:"rawOutput,omitempty"`
 	Locations         json.RawMessage        `json:"locations,omitempty"`
 	AvailableCommands []acp.AvailableCommand `json:"availableCommands,omitempty"`
 	CurrentModeID     string                 `json:"currentModeId,omitempty"`
@@ -441,10 +666,25 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 	case acp.UpdateCurrentMode:
 		if u.CurrentModeID != "" {
 			s.mu.Lock()
-			s.snap.CurrentMode = u.CurrentModeID
+			s.snap.CurrentMode = sanitizeText(u.CurrentModeID)
 			s.mu.Unlock()
 			s.emit(Event{Type: EventMeta})
 		}
+	case acp.UpdateSessionInfo:
+		// session_info_update reuses the tool title field on the wire.
+		title := ""
+		if u.Title != nil {
+			title = sanitizeText(*u.Title)
+		}
+		if title == "" {
+			return
+		}
+		s.mu.Lock()
+		s.snap.Title = title
+		s.mu.Unlock()
+		// EventMeta carries the new title so `prompt --json` can emit a
+		// title line; the TUI only re-reads the snapshot.
+		s.emit(Event{Type: EventMeta, Text: title})
 	case acp.UpdateConfigOption:
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
@@ -468,6 +708,10 @@ func toolDeltaFromWire(u sessionUpdateWire) (toolDelta, bool) {
 		d.rawInput = raw
 		d.hasRawInput = true
 	}
+	if raw, ok := presentJSON(u.RawOutput); ok {
+		d.rawOutput = raw
+		d.hasRawOutput = true
+	}
 	if raw, ok := presentJSON(u.Content); ok && raw[0] == '[' {
 		d.content = raw
 		d.hasContent = true
@@ -488,10 +732,13 @@ func messageText(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return ""
 	}
-	return b.Text
+	return sanitizeText(b.Text)
 }
 
 func (s *session) emit(ev Event) {
+	if ev.At.IsZero() {
+		ev.At = time.Now()
+	}
 	select {
 	case <-s.done:
 		return
@@ -507,4 +754,118 @@ func (s *session) promptInFlight() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.inPrompt
+}
+
+// mergeTodos applies one cursor/update_todos request. merge=false replaces the
+// list in request order; merge=true upserts by id, keeping the existing order
+// and appending ids it has not seen. Duplicate ids inside one request: last
+// wins, at the position of the first occurrence.
+func mergeTodos(prev, in []Todo, merge bool) []Todo {
+	if !merge {
+		return dedupeTodos(in)
+	}
+	out := append([]Todo(nil), prev...)
+	index := make(map[string]int, len(out))
+	for i, t := range out {
+		index[t.ID] = i
+	}
+	for _, t := range in {
+		if i, ok := index[t.ID]; ok {
+			out[i] = t
+			continue
+		}
+		index[t.ID] = len(out)
+		out = append(out, t)
+	}
+	return out
+}
+
+func dedupeTodos(in []Todo) []Todo {
+	out := make([]Todo, 0, len(in))
+	index := make(map[string]int, len(in))
+	for _, t := range in {
+		if i, ok := index[t.ID]; ok {
+			out[i] = t
+			continue
+		}
+		index[t.ID] = len(out)
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func todosFromWire(in []acp.TodoItem) []Todo {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Todo, 0, len(in))
+	for _, t := range in {
+		out = append(out, Todo{
+			ID:      sanitizeText(t.ID),
+			Content: sanitizeText(t.Content),
+			Status:  normalizeTodoStatus(t.Status),
+		})
+	}
+	return out
+}
+
+func todosToWire(in []Todo) []acp.TodoItem {
+	out := make([]acp.TodoItem, 0, len(in))
+	for _, t := range in {
+		out = append(out, acp.TodoItem{ID: t.ID, Content: t.Content, Status: t.Status})
+	}
+	return out
+}
+
+// normalizeTodoStatus accepts the documented lowercase values, cursor's
+// TODO_STATUS_* enum names and the camelCase inProgress spelling.
+func normalizeTodoStatus(s string) string {
+	v := strings.ToLower(strings.TrimSpace(sanitizeText(s)))
+	v = strings.TrimPrefix(v, "todo_status_")
+	v = strings.ReplaceAll(v, "-", "_")
+	switch v {
+	case "in_progress", "inprogress":
+		return "in_progress"
+	case "completed", "complete", "done":
+		return "completed"
+	case "cancelled", "canceled":
+		return "cancelled"
+	default:
+		return "pending"
+	}
+}
+
+// parkTaskReceiptLocked stores a receipt whose tool_call has not arrived,
+// dropping the oldest once the turn's cap is reached.
+func (s *session) parkTaskReceiptLocked(id string, info TaskInfo) {
+	if _, dup := s.taskReceipts[id]; !dup {
+		s.taskReceiptOrder = append(s.taskReceiptOrder, id)
+	}
+	s.taskReceipts[id] = info
+	for len(s.taskReceiptOrder) > taskReceiptCap {
+		oldest := s.taskReceiptOrder[0]
+		s.taskReceiptOrder = s.taskReceiptOrder[1:]
+		delete(s.taskReceipts, oldest)
+	}
+}
+
+func (s *session) dropTaskReceiptLocked(id string) {
+	delete(s.taskReceipts, id)
+	for i, x := range s.taskReceiptOrder {
+		if x == id {
+			s.taskReceiptOrder = append(s.taskReceiptOrder[:i], s.taskReceiptOrder[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *session) clearTaskReceiptsLocked() {
+	if len(s.taskReceiptOrder) == 0 {
+		return
+	}
+	s.taskReceipts = make(map[string]TaskInfo)
+	s.taskReceiptOrder = nil
 }

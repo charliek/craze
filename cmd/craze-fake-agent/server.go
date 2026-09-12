@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -178,6 +180,24 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.ask(msg.ID)
 	case "plan":
 		s.plan(msg.ID)
+	case "todos":
+		s.todos(msg.ID, true)
+	case "todos-notify":
+		s.todos(msg.ID, false)
+	case "diff":
+		s.diff(msg.ID)
+	case "bigdiff":
+		s.bigdiff(msg.ID)
+	case "bash":
+		s.bash(msg.ID)
+	case "task":
+		s.task(msg.ID, false)
+	case "task-late":
+		s.task(msg.ID, true)
+	case "markdown":
+		s.markdown(msg.ID)
+	case "title":
+		s.title(msg.ID, text)
 	default:
 		s.echo(msg.ID, text)
 	}
@@ -318,20 +338,36 @@ func (s *server) permission(id json.RawMessage) {
 
 func (s *server) ask(id json.RawMessage) {
 	params := acp.AskQuestionRequest{
-		ToolCallID: "ask-1",
+		ToolCallID: askToolCallID,
 		Title:      "Question",
-		Questions: []acp.AskQuestion{{
-			ID:     "q1",
-			Prompt: "Pick one",
-			Options: []acp.AskOption{
-				{ID: "opt-a", Label: "A"},
-				{ID: "opt-b", Label: "B"},
+		Questions: []acp.AskQuestion{
+			{
+				ID:     "q1",
+				Prompt: "Pick one",
+				Options: []acp.AskOption{
+					{ID: "opt-a", Label: "A"},
+					{ID: "opt-b", Label: "B"},
+				},
 			},
-		}},
+			{
+				ID:            "q2",
+				Prompt:        "Pick any",
+				AllowMultiple: true,
+				Options: []acp.AskOption{
+					{ID: "opt-x", Label: "X"},
+					{ID: "opt-y", Label: "Y"},
+					{ID: "opt-z", Label: "Z"},
+				},
+			},
+		},
 	}
 	var result struct {
 		Outcome struct {
 			Outcome string `json:"outcome"`
+			Answers []struct {
+				QuestionID        string   `json:"questionId"`
+				SelectedOptionIDs []string `json:"selectedOptionIds"`
+			} `json:"answers"`
 		} `json:"outcome"`
 	}
 	err := s.conn.Call(context.Background(), acp.MethodCursorAskQuestion, params, &result)
@@ -339,15 +375,30 @@ func (s *server) ask(id json.RawMessage) {
 		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
 		return
 	}
+	picks := make([]string, 0, len(result.Outcome.Answers))
+	for _, a := range result.Outcome.Answers {
+		picks = append(picks, a.QuestionID+"="+strings.Join(a.SelectedOptionIDs, ","))
+	}
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
-		Content:       &acp.ContentBlock{Type: "text", Text: "asked:" + result.Outcome.Outcome},
+		Content: &acp.ContentBlock{
+			Type: "text",
+			Text: "asked:" + result.Outcome.Outcome + ":" + strings.Join(picks, ";"),
+		},
 	})
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
 
 func (s *server) plan(id json.RawMessage) {
-	params := map[string]any{"title": "Plan", "plan": "do the thing"}
+	params := map[string]any{
+		"name":     "Fake Plan",
+		"overview": "Two steps, then stop.",
+		"plan":     "## Steps\n\n- read main.go\n- edit main.go\n",
+		"todos": []map[string]string{
+			{"id": "1", "content": "Read main.go", "status": "pending"},
+			{"id": "2", "content": "Edit main.go", "status": "pending"},
+		},
+	}
 	var result struct {
 		Outcome struct {
 			Outcome string `json:"outcome"`
@@ -392,4 +443,286 @@ func promptText(params json.RawMessage) string {
 		}
 	}
 	return out
+}
+
+// Real cursor toolCallIds carry a literal newline; the new scripts keep that
+// shape so craze is exercised against it.
+const (
+	askToolCallID  = "call-ask-0\nfc_ask"
+	todoToolCallID = "call-todo-0\nfc_todo"
+	readToolCallID = "call-read-1\nfc_read"
+	editToolCallID = "call-edit-2\nfc_edit"
+	bashToolCallID = "call-bash-3\nfc_bash"
+	taskToolCallID = "call-task-4\nfc_task"
+)
+
+// todos drives the cursor/update_todos stream: a full list, then a merge that
+// closes #1 and starts #2. asRequest picks the envelope.
+func (s *server) todos(id json.RawMessage, asRequest bool) {
+	s.sendTodos(asRequest, false, []map[string]string{
+		{"id": "1", "content": "Read main.go", "status": "in_progress"},
+		{"id": "2", "content": "Edit main.go", "status": "pending"},
+		{"id": "3", "content": "Run go vet", "status": "pending"},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "planning"},
+	})
+	s.sendTodos(asRequest, true, []map[string]string{
+		{"id": "1", "content": "Read main.go", "status": "completed"},
+		{"id": "2", "content": "Edit main.go", "status": "in_progress"},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "done todos"},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+func (s *server) sendTodos(asRequest, merge bool, todos []map[string]string) {
+	params := map[string]any{
+		"toolCallId": todoToolCallID,
+		"todos":      todos,
+		"merge":      merge,
+	}
+	if !asRequest {
+		_ = s.conn.Notify(context.Background(), acp.MethodCursorUpdateTodos, params)
+		return
+	}
+	var result struct {
+		Outcome struct {
+			Outcome string `json:"outcome"`
+		} `json:"outcome"`
+	}
+	if err := s.conn.Call(context.Background(), acp.MethodCursorUpdateTodos, params, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "craze-fake-agent: update_todos failed: %v\n", err)
+		return
+	}
+	if result.Outcome.Outcome != "accepted" {
+		fmt.Fprintf(os.Stderr, "craze-fake-agent: update_todos outcome %q\n", result.Outcome.Outcome)
+	}
+}
+
+const (
+	diffOldText = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n"
+	diffNewText = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello, world\")\n}\n"
+)
+
+// diff emits a read tool that returns file content and an edit tool that
+// completes with a diff item changing one of six lines.
+func (s *server) diff(id json.RawMessage) {
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    readToolCallID,
+		"title":         "Read File",
+		"kind":          "read",
+		"status":        "pending",
+		"rawInput":      map[string]any{},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    readToolCallID,
+		"title":         "Read main.go",
+		"rawInput":      map[string]string{"path": "/tmp/ws/main.go"},
+		"locations":     []map[string]string{{"path": "/tmp/ws/main.go"}},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    readToolCallID,
+		"status":        "completed",
+		"rawOutput":     map[string]string{"content": diffOldText},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    editToolCallID,
+		"title":         "Edit File",
+		"kind":          "edit",
+		"status":        "pending",
+		"rawInput":      map[string]any{},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    editToolCallID,
+		"title":         "Edit `/tmp/ws/main.go`",
+		"rawInput":      map[string]string{"path": "/tmp/ws/main.go"},
+		"locations":     []map[string]string{{"path": "/tmp/ws/main.go"}},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    editToolCallID,
+		"status":        "completed",
+		"content": []map[string]any{{
+			"type":    "diff",
+			"path":    "/tmp/ws/main.go",
+			"oldText": diffOldText,
+			"newText": diffNewText,
+		}},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "done diff"},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+// bigdiff changes one line of a 200 KiB file so the counts stay checkable
+// while both sides blow past the per-side cap.
+func (s *server) bigdiff(id json.RawMessage) {
+	oldText := bigFile("line")
+	newText := bigFile("line") + "tail changed\n"
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    editToolCallID,
+		"title":         "Edit `/tmp/ws/big.txt`",
+		"kind":          "edit",
+		"status":        "in_progress",
+		"rawInput":      map[string]string{"path": "/tmp/ws/big.txt"},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    editToolCallID,
+		"status":        "completed",
+		"content": []map[string]any{{
+			"type":    "diff",
+			"path":    "/tmp/ws/big.txt",
+			"oldText": oldText,
+			"newText": newText,
+		}},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "done bigdiff"},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+func bigFile(prefix string) string {
+	var b strings.Builder
+	for i := 0; b.Len() < 200*1024; i++ {
+		fmt.Fprintf(&b, "%s %06d %s\n", prefix, i, strings.Repeat("x", 32))
+	}
+	return b.String()
+}
+
+// bash completes an execute tool the way cursor does: output only at the end.
+func (s *server) bash(id json.RawMessage) {
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    bashToolCallID,
+		"title":         "`go vet ./...`",
+		"kind":          "execute",
+		"status":        "pending",
+		"rawInput":      map[string]string{"command": "go vet ./..."},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    bashToolCallID,
+		"status":        "in_progress",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    bashToolCallID,
+		"status":        "completed",
+		"rawOutput": map[string]any{
+			"exitCode": 127,
+			"stdout":   "",
+			"stderr":   "Command 'go' not found, but can be installed with:\nsudo apt install golang-go\n",
+		},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "done bash"},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+// task runs a sub-agent tool with its cursor/task receipt. late sends the
+// receipt before the tool_call, the order craze must also survive.
+func (s *server) task(id json.RawMessage, late bool) {
+	if late {
+		s.taskReceipt()
+	}
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCall,
+		"toolCallId":    taskToolCallID,
+		"title":         "Task: Count main.go lines",
+		"kind":          "other",
+		"status":        "pending",
+		"rawInput": map[string]any{
+			"_toolName":    "task",
+			"prompt":       "Count the number of lines in main.go and report only the number.",
+			"description":  "Count main.go lines",
+			"subagentType": map[string]any{"unspecified": map[string]any{}},
+		},
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    taskToolCallID,
+		"status":        "in_progress",
+	})
+	if !late {
+		s.taskReceipt()
+	}
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateToolCallUpd,
+		"toolCallId":    taskToolCallID,
+		"status":        "completed",
+		"rawOutput":     map[string]any{"durationMs": 8010, "isBackground": false},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "done task"},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+func (s *server) taskReceipt() {
+	params := map[string]any{
+		"toolCallId":   taskToolCallID,
+		"description":  "Count main.go lines",
+		"prompt":       "Count the number of lines in main.go and report only the number.",
+		"subagentType": map[string]any{"custom": map[string]any{"unspecified": map[string]any{}}},
+		"model":        "cursor-grok-4.6-high-fast",
+		"agentId":      "agent-1234",
+		"durationMs":   8010,
+	}
+	var result struct {
+		Outcome struct {
+			Outcome string `json:"outcome"`
+		} `json:"outcome"`
+	}
+	if err := s.conn.Call(context.Background(), acp.MethodCursorTask, params, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "craze-fake-agent: cursor/task failed: %v\n", err)
+		return
+	}
+	if result.Outcome.Outcome != "completed" {
+		fmt.Fprintf(os.Stderr, "craze-fake-agent: cursor/task outcome %q\n", result.Outcome.Outcome)
+	}
+}
+
+const markdownReply = "## Heading\n\n" +
+	"- first item\n- second item\n- third item\n\n" +
+	"```go\nfunc main() {\n\tfmt.Println(\"hi\")\n}\n```\n\n" +
+	"Inline `code` and **bold** together. " +
+	"Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor " +
+	"incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud " +
+	"exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute.\n\n" +
+	"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+	"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" +
+	"cccccccccccccccccccccccccccccccccccccccccccccccccc\n"
+
+func (s *server) markdown(id json.RawMessage) {
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: markdownReply},
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+func (s *server) title(id json.RawMessage, text string) {
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateSessionInfo,
+		"title":         "Fake Title",
+	})
+	s.echo(id, text)
 }

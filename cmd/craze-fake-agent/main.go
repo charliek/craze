@@ -18,6 +18,15 @@ Flags:
           followup    first prompt and second prompt return different replies
           tool        emit a tool_call update then a text chunk
           tasks       emit two tool_calls with updates, then text "done tasks"
+          todos       cursor/update_todos requests (replace then merge)
+          todos-notify same list sent as notifications (no JSON-RPC id)
+          diff        read tool with rawOutput plus an edit tool with a diff
+          bigdiff     edit tool with 200 KiB diff sides
+          bash        execute tool completing with exitCode 127
+          task        sub-agent tool with a cursor/task receipt
+          task-late   same, receipt sent before the tool_call
+          markdown    one reply exercising the markdown-lite renderer
+          title       session_info_update then echo
           effort      same as echo (session/new includes effort configOptions)
           permission  request allow_once / reject_once and wait for the client
           ask         emit cursor/ask_question then finish the turn
@@ -56,7 +65,9 @@ func main() {
 		}
 	}
 	switch script {
-	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan", "hang", "authfail", "noauth":
+	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
+		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
+		"bash", "task", "task-late", "markdown", "title":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

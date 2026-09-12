@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -15,7 +16,10 @@ const (
 	EventText       EventType = "text"
 	EventThought    EventType = "thought"
 	EventTool       EventType = "tool"
+	EventTodos      EventType = "todos"
 	EventPermission EventType = "permission"
+	EventQuestion   EventType = "question"
+	EventPlan       EventType = "plan"
 	EventDone       EventType = "done"
 	EventError      EventType = "error"
 	EventMeta       EventType = "meta"
@@ -37,13 +41,24 @@ type CommandInfo struct {
 }
 
 type Snapshot struct {
-	Models       []ModelInfo
-	Modes        []ModeInfo
-	Commands     []CommandInfo
-	Config       []ConfigOption
-	Tools        []ToolEvent
-	CurrentModel string
-	CurrentMode  string
+	Models         []ModelInfo
+	Modes          []ModeInfo
+	Commands       []CommandInfo
+	Config         []ConfigOption
+	Tools          []ToolEvent
+	Todos          []Todo
+	TodosUpdatedAt time.Time
+	Title          string
+	CurrentModel   string
+	CurrentMode    string
+}
+
+// Todo is one entry of the cursor todo list. Status is normalised to
+// pending | in_progress | completed | cancelled.
+type Todo struct {
+	ID      string
+	Content string
+	Status  string
 }
 
 type ConfigOption struct {
@@ -64,9 +79,13 @@ type Event struct {
 	Type       EventType
 	Text       string
 	Tool       *ToolEvent
+	Todos      []Todo
 	Permission *PermissionEvent
+	Question   *QuestionEvent
+	Plan       *PlanEvent
 	Err        error
 	StopReason string
+	At         time.Time
 }
 
 type ToolEvent struct {
@@ -75,9 +94,50 @@ type ToolEvent struct {
 	Status      string
 	Kind        string
 	Title       string
+	ToolName    string // rawInput._toolName, the cursor-side tool identity
 	RawInput    string
 	ContentText string
 	Locations   []string
+	Output      *ToolOutput
+	Diffs       []ToolDiff
+	Task        *TaskInfo
+	At          time.Time
+}
+
+// ToolOutput is a tool_call rawOutput. Stdout/Stderr/Content are the 8 KiB
+// tail, the *Head fields the first 512 B; Truncated is set if any cap hit.
+type ToolOutput struct {
+	ExitCode   *int
+	Stdout     string
+	Stderr     string
+	Content    string
+	StdoutHead string
+	StderrHead string
+	Truncated  bool
+}
+
+// ToolDiff is one diff content item. Added/Removed are counted on the
+// uncapped text; Truncated means the stored text was capped (or the diff was
+// too large to compute), so callers must not diff OldText/NewText themselves.
+type ToolDiff struct {
+	Path      string
+	OldText   string
+	NewText   string
+	Added     int
+	Removed   int
+	Truncated bool
+}
+
+// TaskInfo describes a sub-agent tool call. Receipt is set once the matching
+// cursor/task receipt has been joined in.
+type TaskInfo struct {
+	Description  string
+	Prompt       string
+	Model        string
+	AgentID      string
+	SubagentType string
+	DurationMs   int
+	Receipt      bool
 }
 
 type PermissionOption struct {
@@ -90,6 +150,41 @@ type PermissionEvent struct {
 	ID      string
 	Tool    string
 	Options []PermissionOption
+}
+
+// Option is one answer choice of a question.
+type Option struct {
+	ID    string
+	Label string
+}
+
+type Question struct {
+	ID            string
+	Prompt        string
+	Options       []Option
+	AllowMultiple bool
+}
+
+// QuestionEvent carries a cursor/ask_question request. Auto is set when craze
+// answered it without a user (headless); Answers is then what it sent.
+type QuestionEvent struct {
+	ID        string
+	Title     string
+	Questions []Question
+	Auto      bool
+	Answers   map[string][]string
+}
+
+// PlanEvent carries a cursor/create_plan request. Auto/Accepted mirror
+// QuestionEvent for the headless path.
+type PlanEvent struct {
+	ID       string
+	Name     string
+	Overview string
+	Plan     string
+	Todos    []Todo
+	Auto     bool
+	Accepted bool
 }
 
 type Result struct {
@@ -105,6 +200,10 @@ type Options struct {
 	Mode      string
 	Stderr    io.Writer
 	Env       []string
+	// Interactive makes question and plan requests block on the session so a
+	// UI can answer them; headless callers leave it false and craze
+	// auto-answers.
+	Interactive bool
 }
 
 type Session interface {
@@ -113,6 +212,8 @@ type Session interface {
 	Events() <-chan Event
 	Cancel(ctx context.Context) error
 	AnswerPermission(id, optionID string) error
+	AnswerQuestion(id string, answers map[string][]string, skip bool) error
+	AnswerPlan(id string, accept bool) error
 	SetModel(ctx context.Context, modelID string) error
 	SetMode(ctx context.Context, modeID string) error
 	SetConfig(ctx context.Context, id, value string) error

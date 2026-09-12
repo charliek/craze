@@ -50,12 +50,13 @@ func runTUI(f *tuiFlags) error {
 		mode = "plan"
 	}
 	sess := agent.New(agent.Options{
-		Binary:    f.agentBin,
-		Workspace: ws,
-		Force:     f.force,
-		Model:     f.model,
-		Mode:      mode,
-		Stderr:    os.Stderr,
+		Binary:      f.agentBin,
+		Workspace:   ws,
+		Force:       f.force,
+		Model:       f.model,
+		Mode:        mode,
+		Stderr:      os.Stderr,
+		Interactive: true,
 	})
 	return tui.Run(tui.Config{
 		Session:   sess,

@@ -25,16 +25,17 @@ func parseModels(raw json.RawMessage) (current string, models []ModelInfo) {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", nil
 	}
-	current = parsed.CurrentModelID
+	current = sanitizeText(parsed.CurrentModelID)
 	for _, m := range parsed.AvailableModels {
-		if m.ModelID == "" {
+		id := sanitizeText(m.ModelID)
+		if id == "" {
 			continue
 		}
-		name := m.Name
+		name := sanitizeText(m.Name)
 		if name == "" {
-			name = m.ModelID
+			name = id
 		}
-		models = append(models, ModelInfo{ID: m.ModelID, Name: name})
+		models = append(models, ModelInfo{ID: id, Name: name})
 	}
 	return current, models
 }
@@ -53,16 +54,17 @@ func parseModes(raw json.RawMessage) (current string, modes []ModeInfo) {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return "", nil
 	}
-	current = parsed.CurrentModeID
+	current = sanitizeText(parsed.CurrentModeID)
 	for _, m := range parsed.AvailableModes {
-		if m.ID == "" {
+		id := sanitizeText(m.ID)
+		if id == "" {
 			continue
 		}
-		name := m.Name
+		name := sanitizeText(m.Name)
 		if name == "" {
-			name = m.ID
+			name = id
 		}
-		modes = append(modes, ModeInfo{ID: m.ID, Name: name})
+		modes = append(modes, ModeInfo{ID: id, Name: name})
 	}
 	return current, modes
 }
@@ -85,10 +87,11 @@ func snapshotFromNew(res *acp.NewSessionResult) Snapshot {
 func commandsFromUpdate(cmds []acp.AvailableCommand) []CommandInfo {
 	out := make([]CommandInfo, 0, len(cmds))
 	for _, c := range cmds {
-		if c.Name == "" {
+		name := sanitizeText(c.Name)
+		if name == "" {
 			continue
 		}
-		out = append(out, CommandInfo{Name: c.Name, Description: c.Description})
+		out = append(out, CommandInfo{Name: name, Description: sanitizeText(c.Description)})
 	}
 	return out
 }
@@ -125,15 +128,16 @@ func parseConfigOption(raw json.RawMessage) (ConfigOption, bool) {
 	if err := json.Unmarshal(raw, &parsed); err != nil || parsed.ID == "" {
 		return ConfigOption{}, false
 	}
-	name := parsed.Name
+	id := sanitizeText(parsed.ID)
+	name := sanitizeText(parsed.Name)
 	if name == "" {
-		name = parsed.ID
+		name = id
 	}
-	typ := parsed.Type
+	typ := sanitizeText(parsed.Type)
 	opt := ConfigOption{
-		ID:       parsed.ID,
+		ID:       id,
 		Name:     name,
-		Category: parsed.Category,
+		Category: sanitizeText(parsed.Category),
 		Type:     typ,
 		Current:  parseConfigCurrent(typ, parsed.CurrentValue),
 	}
@@ -157,9 +161,9 @@ func parseConfigCurrent(typ string, raw json.RawMessage) string {
 			return strconv.FormatBool(b)
 		}
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		return sanitizeText(str)
 	}
 	var b bool
 	if err := json.Unmarshal(raw, &b); err == nil {
@@ -193,14 +197,15 @@ func parseSelectValues(raw json.RawMessage) []SelectValue {
 			out = append(out, parseSelectValues(probe.Options)...)
 			continue
 		}
-		if probe.Value == "" {
+		value := sanitizeText(probe.Value)
+		if value == "" {
 			continue
 		}
-		name := probe.Name
+		name := sanitizeText(probe.Name)
 		if name == "" {
-			name = probe.Value
+			name = value
 		}
-		out = append(out, SelectValue{Value: probe.Value, Name: name})
+		out = append(out, SelectValue{Value: value, Name: name})
 	}
 	return out
 }

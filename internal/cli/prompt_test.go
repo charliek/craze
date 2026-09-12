@@ -96,8 +96,8 @@ func TestDecisionKind(t *testing.T) {
 }
 
 func TestEventJSON(t *testing.T) {
-	if _, ok := eventJSON(agent.Event{Type: agent.EventThought, Text: "secret"}); ok {
-		t.Fatal("thoughts should not be serialized")
+	if j, ok := eventJSON(agent.Event{Type: agent.EventThought, Text: "thinking"}); !ok || j.Type != "thought" || j.Text != "thinking" {
+		t.Fatalf("thought json %+v %v", j, ok)
 	}
 	j, ok := eventJSON(agent.Event{Type: agent.EventText, Text: "hi"})
 	if !ok || j.Type != "text" || j.Text != "hi" {

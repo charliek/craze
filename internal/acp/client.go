@@ -18,18 +18,24 @@ type Client struct {
 	sessionID      string
 	inPrompt       bool
 	permHandler    func(PermissionRequest) PermissionDecision
+	askHandler     func(AskQuestionRequest) AskDecision
+	planHandler    func(CreatePlanRequest) PlanDecision
+	todosHandler   func(UpdateTodosRequest) []TodoItem
+	taskHandler    func(TaskRequest)
 	onUpdate       func(SessionNotification)
 	pendingUpdates []SessionNotification
 
 	incomingMu sync.Mutex
-	incoming   map[string]*incomingReq
+	incoming   map[string]*pendingReq
 }
 
-type incomingReq struct {
+// pendingReq is one blocking agent→client request. decide carries the kind's
+// own decision type (PermissionDecision, AskDecision, PlanDecision); replied
+// makes sure cancel, close and the handler between them answer exactly once.
+type pendingReq struct {
 	id      json.RawMessage
 	method  string
-	req     PermissionRequest
-	decide  chan PermissionDecision
+	decide  chan any
 	replied bool
 }
 
@@ -37,7 +43,7 @@ func newClient(conn *Conn, child *Child) *Client {
 	c := &Client{
 		conn:     conn,
 		child:    child,
-		incoming: make(map[string]*incomingReq),
+		incoming: make(map[string]*pendingReq),
 	}
 	conn.SetRequestHandler(c.onRequest)
 	conn.SetNotifyHandler(c.onNotify)
@@ -71,9 +77,34 @@ func (c *Client) SetPermissionHandler(h func(PermissionRequest) PermissionDecisi
 	c.mu.Unlock()
 }
 
-func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
+// SetAskHandler installs a cursor/ask_question handler. Without one the client
+// auto-answers with each question's first option.
+func (c *Client) SetAskHandler(h func(AskQuestionRequest) AskDecision) {
 	c.mu.Lock()
-	c.onUpdate = h
+	c.askHandler = h
+	c.mu.Unlock()
+}
+
+// SetPlanHandler installs a cursor/create_plan handler. Without one the client
+// auto-accepts.
+func (c *Client) SetPlanHandler(h func(CreatePlanRequest) PlanDecision) {
+	c.mu.Lock()
+	c.planHandler = h
+	c.mu.Unlock()
+}
+
+// SetTodosHandler installs a cursor/update_todos handler; it returns the
+// merged list craze echoes back. Without one the request's own list is echoed.
+func (c *Client) SetTodosHandler(h func(UpdateTodosRequest) []TodoItem) {
+	c.mu.Lock()
+	c.todosHandler = h
+	c.mu.Unlock()
+}
+
+// SetTaskHandler installs a cursor/task receipt handler.
+func (c *Client) SetTaskHandler(h func(TaskRequest)) {
+	c.mu.Lock()
+	c.taskHandler = h
 	c.mu.Unlock()
 }
 
@@ -119,6 +150,12 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	c.mu.Unlock()
 	flushSessionUpdates(result.SessionID, pending, h)
 	return &result, nil
+}
+
+func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
+	c.mu.Lock()
+	c.onUpdate = h
+	c.mu.Unlock()
 }
 
 func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error) {
@@ -211,23 +248,70 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// onRequest and onNotify route the cursor extension methods identically; the
+// only difference is that a request gets a reply and a notification does not.
+//
+// Params are validated and the blocking kinds are registered here, on the read
+// loop, before their handler goroutine starts: a cancel landing in between
+// must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
 	switch msg.Method {
 	case MethodRequestPermission:
-		go c.handlePermission(msg)
+		var req PermissionRequest
+		if err := decodeObject(msg.Params, &req); err != nil {
+			c.replyInvalidParams(msg.ID, "invalid permission request")
+			return
+		}
+		c.dispatch(msg, func(in *pendingReq) { c.handlePermission(in, req) })
 	case MethodCursorAskQuestion:
-		go c.handleAskQuestion(msg)
+		var req AskQuestionRequest
+		if err := decodeObject(msg.Params, &req); err != nil {
+			c.replyInvalidParams(msg.ID, "invalid cursor/ask_question params")
+			return
+		}
+		c.dispatch(msg, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodCursorCreatePlan:
-		go c.handleCreatePlan(msg)
+		var req CreatePlanRequest
+		if err := decodeObject(msg.Params, &req); err != nil {
+			c.replyInvalidParams(msg.ID, "invalid cursor/create_plan params")
+			return
+		}
+		c.dispatch(msg, func(in *pendingReq) { c.handleCreatePlan(in, req) })
+	case MethodCursorUpdateTodos:
+		c.handleUpdateTodos(msg.ID, msg.Params)
+	case MethodCursorTask:
+		c.handleTask(msg.ID, msg.Params)
 	default:
 		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
 	}
 }
 
+// dispatch registers a blocking request, then runs its handler off the read
+// loop so the connection keeps draining while the user decides.
+func (c *Client) dispatch(msg *Message, run func(*pendingReq)) {
+	in := &pendingReq{id: msg.ID, method: msg.Method, decide: make(chan any, 1)}
+	key := idKey(msg.ID)
+	c.incomingMu.Lock()
+	c.incoming[key] = in
+	c.incomingMu.Unlock()
+	go func() {
+		defer c.dropIncoming(key)
+		run(in)
+	}()
+}
+
 func (c *Client) onNotify(msg *Message) {
-	if msg.Method != MethodSessionUpdate {
-		return
+	switch msg.Method {
+	case MethodSessionUpdate:
+		c.handleSessionUpdate(msg)
+	case MethodCursorUpdateTodos:
+		c.handleUpdateTodos(nil, msg.Params)
+	case MethodCursorTask:
+		c.handleTask(nil, msg.Params)
 	}
+}
+
+func (c *Client) handleSessionUpdate(msg *Message) {
 	var n SessionNotification
 	if err := json.Unmarshal(msg.Params, &n); err != nil {
 		return
@@ -249,6 +333,51 @@ func (c *Client) onNotify(msg *Message) {
 	}
 }
 
+// handleUpdateTodos is shared by both envelopes: id is nil for a notification.
+// Malformed params leave the todo list untouched, and only a request gets the
+// InvalidParams reply.
+func (c *Client) handleUpdateTodos(id json.RawMessage, params json.RawMessage) {
+	req, err := parseUpdateTodos(params)
+	if err != nil {
+		c.replyInvalidParams(id, "invalid cursor/update_todos params")
+		return
+	}
+	c.mu.Lock()
+	h := c.todosHandler
+	c.mu.Unlock()
+	merged := req.Todos
+	if h != nil {
+		merged = h(req)
+	}
+	if len(id) > 0 {
+		_ = c.conn.Reply(id, todosAcceptedOutcome(merged))
+	}
+}
+
+func (c *Client) handleTask(id json.RawMessage, params json.RawMessage) {
+	req, err := parseTaskRequest(params)
+	if err != nil {
+		c.replyInvalidParams(id, "invalid cursor/task params")
+		return
+	}
+	c.mu.Lock()
+	h := c.taskHandler
+	c.mu.Unlock()
+	if h != nil {
+		h(req)
+	}
+	if len(id) > 0 {
+		_ = c.conn.Reply(id, taskCompletedOutcome(req.AgentID, req.DurationMs))
+	}
+}
+
+func (c *Client) replyInvalidParams(id json.RawMessage, msg string) {
+	if len(id) == 0 {
+		return
+	}
+	_ = c.conn.ReplyErr(id, &RPCError{Code: CodeInvalidParams, Message: msg})
+}
+
 func flushSessionUpdates(sid string, pending []SessionNotification, h func(SessionNotification)) {
 	if h == nil {
 		return
@@ -260,90 +389,64 @@ func flushSessionUpdates(sid string, pending []SessionNotification, h func(Sessi
 	}
 }
 
-func (c *Client) handlePermission(msg *Message) {
-	var req PermissionRequest
-	if err := json.Unmarshal(msg.Params, &req); err != nil {
-		_ = c.conn.ReplyErr(msg.ID, &RPCError{Code: codeInvalidParams, Message: "invalid permission request"})
-		return
-	}
-	in := &incomingReq{
-		id:     msg.ID,
-		method: msg.Method,
-		req:    req,
-		decide: make(chan PermissionDecision, 1),
-	}
-	key := idKey(msg.ID)
-	c.incomingMu.Lock()
-	c.incoming[key] = in
-	c.incomingMu.Unlock()
-	defer c.dropIncoming(key)
-
+func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {
 	c.mu.Lock()
 	h := c.permHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.finishPermission(in, h(req))
+		c.finishPermission(in, req, h(req))
 		return
 	}
 	select {
 	case dec := <-in.decide:
-		c.finishPermission(in, dec)
+		p, _ := dec.(PermissionDecision)
+		c.finishPermission(in, req, p)
 	case <-c.conn.Done():
-		c.finishPermission(in, PermissionDecision{Cancelled: true})
+		c.finishPermission(in, req, PermissionDecision{Cancelled: true})
 	}
 }
 
-func (c *Client) finishPermission(in *incomingReq, dec PermissionDecision) {
-	c.incomingMu.Lock()
-	if in.replied {
-		c.incomingMu.Unlock()
+func (c *Client) finishPermission(in *pendingReq, req PermissionRequest, dec PermissionDecision) {
+	if dec.Cancelled || !optionIDInRequest(req.Options, dec.OptionID) {
+		c.replyIncoming(in, cancelledOutcome())
 		return
 	}
-	in.replied = true
-	c.incomingMu.Unlock()
-
-	if dec.Cancelled || !optionIDInRequest(in.req.Options, dec.OptionID) {
-		_ = c.conn.Reply(in.id, cancelledOutcome())
-		return
-	}
-	_ = c.conn.Reply(in.id, selectedOutcome(dec.OptionID))
+	c.replyIncoming(in, selectedOutcome(dec.OptionID))
 }
 
-func (c *Client) handleAskQuestion(msg *Message) {
-	var req AskQuestionRequest
-	_ = json.Unmarshal(msg.Params, &req)
-	in := &incomingReq{id: msg.ID, method: msg.Method}
-	key := idKey(msg.ID)
-	c.incomingMu.Lock()
-	c.incoming[key] = in
-	c.incomingMu.Unlock()
-	defer c.dropIncoming(key)
-
+func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
+	c.mu.Lock()
+	h := c.askHandler
+	c.mu.Unlock()
+	if h != nil {
+		c.replyIncoming(in, askOutcome(req, h(req)))
+		return
+	}
 	select {
 	case <-c.conn.Done():
 		c.replyIncoming(in, cancelledOutcome())
 	default:
-		c.replyIncoming(in, askAnsweredOutcome(req))
+		c.replyIncoming(in, askOutcome(req, AskDecision{Answers: AskAutoAnswers(req)}))
 	}
 }
 
-func (c *Client) handleCreatePlan(msg *Message) {
-	in := &incomingReq{id: msg.ID, method: msg.Method}
-	key := idKey(msg.ID)
-	c.incomingMu.Lock()
-	c.incoming[key] = in
-	c.incomingMu.Unlock()
-	defer c.dropIncoming(key)
-
+func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
+	c.mu.Lock()
+	h := c.planHandler
+	c.mu.Unlock()
+	if h != nil {
+		c.replyIncoming(in, planOutcome(h(req)))
+		return
+	}
 	select {
 	case <-c.conn.Done():
 		c.replyIncoming(in, cancelledOutcome())
 	default:
-		c.replyIncoming(in, planAcceptedOutcome())
+		c.replyIncoming(in, planOutcome(PlanDecision{Accept: true}))
 	}
 }
 
-func (c *Client) replyIncoming(in *incomingReq, result any) {
+func (c *Client) replyIncoming(in *pendingReq, result any) {
 	c.incomingMu.Lock()
 	if in.replied {
 		c.incomingMu.Unlock()
@@ -360,20 +463,33 @@ func (c *Client) dropIncoming(key string) {
 	c.incomingMu.Unlock()
 }
 
+// completeIncomingCancelled answers every blocking request exactly once, with
+// the cancelled decision its own kind understands.
 func (c *Client) completeIncomingCancelled() {
 	c.incomingMu.Lock()
-	pending := make([]*incomingReq, 0, len(c.incoming))
+	pending := make([]*pendingReq, 0, len(c.incoming))
 	for _, in := range c.incoming {
 		pending = append(pending, in)
 	}
 	c.incomingMu.Unlock()
 	for _, in := range pending {
-		if in.method == MethodRequestPermission && in.decide != nil {
+		if in.decide != nil {
 			select {
-			case in.decide <- PermissionDecision{Cancelled: true}:
+			case in.decide <- cancelDecision(in.method):
 			default:
 			}
 		}
 		c.replyIncoming(in, cancelledOutcome())
+	}
+}
+
+func cancelDecision(method string) any {
+	switch method {
+	case MethodCursorAskQuestion:
+		return AskDecision{Cancelled: true}
+	case MethodCursorCreatePlan:
+		return PlanDecision{Cancelled: true}
+	default:
+		return PermissionDecision{Cancelled: true}
 	}
 }
