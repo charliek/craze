@@ -6,22 +6,64 @@ on:
   pull_request:
     branches: [main, 'feature/*']
 
+# Linux only, on purpose: craze drives cursor-agent over a pty and is not
+# supported on macOS (see CLAUDE.md), so a darwin leg would test a platform
+# nobody runs.
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Hard backstop. Without this a job inherits GitHub's 6-hour default, so a
+    # deadlocked test — or a hung fake agent holding the job's stdout pipe open,
+    # which Go's own -timeout cannot interrupt — burns runner minutes until
+    # someone notices. The suite takes ~30s locally; hosted runners are slower
+    # and have fewer cores, so this is generous but bounded.
     timeout-minutes: 15
     steps:
+      # persist-credentials: false — actions/checkout otherwise leaves the job
+      # token in .git/config, and the very next step runs `go test ./...`, i.e.
+      # this repo's code AND every dependency's test code, with a writable
+      # credential sitting on disk. Nothing here talks to the API.
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
+      # -timeout must match the Makefile's, or a local pass and a CI pass do not
+      # mean the same thing: with no flag `go test` uses its own 10m default, so
+      # a run that passes under `make test` could die on a CI panic dump.
       - run: go test -timeout 5m -v ./...
+      # The three packages with concurrency worth the 10x slowdown: the ACP
+      # client's reader and writer goroutines, the session's event fan-out, and
+      # the TUI's clipboard seams and leaked command goroutines. Unconditional —
+      # a race check that silently skips itself is worse than none.
       - run: go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/tui
-        if: hashFiles('internal/acp/*.go', 'internal/agent/*.go', 'internal/tui/*.go') != ''
 
   lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # See the test job: the linter loads and analyses the same third-party
+      # code, so the token has no business being on disk here either.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Pinned to the same version .mise.toml installs locally, so `make lint`
+      # and this job cannot disagree about what a lint failure is.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.10.1
+      # go.mod / go.sum drift is not a lint rule, and it breaks
+      # `go install ...@main` for everyone else rather than anything in here.
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -30,22 +72,27 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.10.1
+          go-version-file: go.mod
+      # `go test ./...` compiles the packages but not the two binaries, and the
+      # ldflags version stamp is only exercised here.
+      - run: make build
+      - run: ./bin/craze --version
 
   cli:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: hashFiles('tests/cli/pyproject.toml') != ''
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - uses: astral-sh/setup-uv@v6
+      # The pytest suites drive the real binaries — `craze frame`'s token
+      # scripts and `craze prompt` against the fake agent — so the build is a
+      # prerequisite, not a duplicate of the build job. The tmux smoke suite is
+      # deliberately not collected here: it needs a terminal emulator and
+      # CRAZE_TMUX=1, and is run by hand.
       - run: make build
       - run: make test-cli
