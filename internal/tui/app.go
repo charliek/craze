@@ -143,13 +143,12 @@ type Model struct {
 	cardsCancelled bool
 	snap           agent.Snapshot
 
-	help bool
-
 	// dialog is the modal layer: at most one is up, drawn over the transcript
 	// region and hit-tested before any band. mdlg is the model dialog's own
-	// state.
-	dialog dialogKind
-	mdlg   modelDialog
+	// state, helpTop the help box's scroll position.
+	dialog  dialogKind
+	mdlg    modelDialog
+	helpTop int
 	// applyGen counts the model dialog's applies. The box closes optimistically,
 	// so a second apply can be under way before the first one answers, and only
 	// the newest one is allowed to settle what the rows show.
@@ -467,7 +466,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
 		// keyboard is by the time the text arrives.
-		if msg.text == "" || m.cardOpen() || m.dialogOpen() || m.help {
+		if msg.text == "" || m.cardOpen() || m.dialogOpen() {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -754,7 +753,7 @@ func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
 	// Both are a key under the pointer, gating included: a card blocks them
 	// (handleMouse already returned), an overlay that swallows the key
 	// swallows the click, and working blocks neither.
-	if m.dialogOpen() || m.help {
+	if m.dialogOpen() {
 		return m, nil
 	}
 	switch row {
@@ -815,9 +814,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleThemeDialogKey(msg)
 	case dialogModel:
 		return m.handleModelDialogKey(msg)
-	}
-	if m.help {
-		return m.handleHelpKey(msg)
+	case dialogHelp:
+		return m.handleHelpDialogKey(msg)
 	}
 
 	if msg.Type == tea.KeyCtrlY {
@@ -923,13 +921,6 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
-func (m Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyEsc {
-		m.help = false
-	}
-	return m, nil
-}
-
 // handleCtrlC implements the pinned state machine: working cancels and arms a
 // one-second window, a second press inside the window quits, and idle or an
 // error state quits outright.
@@ -949,7 +940,7 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	name, args, ok := parseSlashLine(m.input.Value())
-	if ok && (name == "exit" || name == "quit") {
+	if ok && name == "exit" {
 		return m.runBuiltin(name, args)
 	}
 	// The offer outranks the peek: an empty composer under a live offer means
@@ -1292,24 +1283,18 @@ func (m Model) View() string {
 	return base
 }
 
-// overlayView is the one lower overlay that draws under the transcript; the
-// layout crops it rather than letting it squeeze the transcript away. The
-// pickers left it in V3: a dialog is a layer over the transcript, not a band
-// under it.
+// overlayView is the slash menu, the one overlay that still draws as a band
+// under the transcript; the layout crops it rather than letting it squeeze the
+// transcript away. The pickers left it in V3 and help left it here: a dialog is
+// a layer over the transcript, not a band under it.
 //
-// A card outranks both (§3.11): the one it did not close is suspended — kept
-// in state, not drawn — until it has been answered.
+// A card outranks it (§3.11): the menu it did not close is suspended — kept in
+// state, not drawn — until it has been answered.
 func (m Model) overlayView() string {
-	if m.cardOpen() {
+	if m.cardOpen() || !m.slashMenuOpen() {
 		return ""
 	}
-	switch {
-	case m.help:
-		return m.helpView()
-	case m.slashMenuOpen():
-		return m.slashMenuView()
-	}
-	return ""
+	return m.slashMenuView()
 }
 
 func (m Model) overlayRows() int {
@@ -1339,24 +1324,6 @@ func (m Model) slashMenuView() string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
-}
-
-func (m Model) helpView() string {
-	lines := []string{
-		"enter send   shift/alt+enter or ctrl+j newline   shift+tab cycle mode",
-		"esc cancel   ctrl+c cancel then quit   ctrl+d quit   pgup/pgdn scroll",
-		"ctrl+t tasks panel   ctrl+g theme   ctrl+o expand detail",
-		"ctrl+y copy the selection, or the last reply   drag to select",
-		"commands:",
-	}
-	for _, it := range m.slashCatalog() {
-		lines = append(lines, fmt.Sprintf("  /%s  %s", it.Name, it.labeledDesc()))
-	}
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Accent).
-		Width(max(1, m.width-2)).
-		Render(strings.Join(lines, "\n"))
 }
 
 // workspaceName is the basename of the workspace, falling back to the path

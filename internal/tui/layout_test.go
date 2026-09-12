@@ -346,6 +346,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 		name    string
 		card    bool
 		dialog  bool
+		slash   bool
 		needles map[regionID]string
 	}{
 		{
@@ -365,9 +366,12 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			},
 		},
 		{
-			name: "lower overlays",
+			// The slash menu is the last overlay that draws as a band: help
+			// moved into the dialog layer, so regionOverlay is the menu alone.
+			name:  "lower overlays",
+			slash: true,
 			needles: map[regionID]string{
-				regionOverlay: "ctrl+o expand detail",
+				regionOverlay: "/help  Keybindings and commands",
 				regionPeek:    "count the lines in file",
 			},
 		},
@@ -390,7 +394,10 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := loadedModelCard(t, 100, 30, tc.card)
 			// Open every band this frame is allowed to draw.
-			m.help = !tc.card && !tc.dialog
+			if tc.slash {
+				m.input.SetValue("/")
+				m.slashHide = false
+			}
 			m.agentPeek = !tc.card && !tc.dialog
 			if tc.dialog {
 				m = m.openModelDialog()

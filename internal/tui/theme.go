@@ -204,7 +204,6 @@ func (m *Model) applyTheme(th Theme) {
 // current theme on every move, and "current first" would otherwise reorder the
 // rows under the cursor.
 func (m Model) openThemePicker() Model {
-	m.help = false
 	m = m.closeDialog(true)
 	m.dialog = dialogTheme
 	m.themePrev = m.theme
@@ -319,7 +318,8 @@ func (m Model) themeDialogBody(inner, budget int) []string {
 	rows := []string{m.dialogTitle(themeDialogTitle, inner)}
 	for i := 0; i < shown; i++ {
 		name := m.themeNames[top+i]
-		rows = append(rows, m.dialogRow(name, dialogScrollTag(i, top, shown, len(m.themeNames)), top+i == m.themeSel, inner))
+		// The theme dialog has one focus target, so its list always has it.
+		rows = append(rows, m.dialogRow(name, dialogScrollTag(i, top, shown, len(m.themeNames)), top+i == m.themeSel, true, inner))
 	}
 	if footer {
 		rows = append(rows, m.dialogFooter(themeDialogHint, inner))

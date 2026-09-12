@@ -544,7 +544,7 @@ func TestFrameQuitScriptDoesNotTimeOut(t *testing.T) {
 	// no-op: the sync barrier must not wait them out.
 	for _, script := range []string{
 		"<wait:idle><ctrl-d>",
-		"<wait:idle>/quit<enter><sleep:100ms><esc>",
+		"<wait:idle>/exit<enter><sleep:100ms><esc>",
 		"<ctrl-d><sleep:100ms><esc><esc>",
 	} {
 		t.Run(script, func(t *testing.T) {
@@ -964,10 +964,74 @@ func TestFrameGoldenModelDialog(t *testing.T) {
 		{"model-dialog-fast-100x30", 100, 30,
 			"<wait:idle>/model<enter><tab><tab><right><enter><wait:text:fast \u2192 on>",
 			[]string{"fast \u2192 on", "Grok (medium \u00b7 fast)"}},
+		// The three focus states, pinned as three frames: Tab moves the "> "
+		// gutter off the list and onto a toggle row, and the footer says which
+		// keys are live. All of it survives the ANSI strip these goldens are.
+		{"model-dialog-effort-100x30", 100, 30, "<wait:idle>/model<enter>gro<tab>",
+			[]string{"· Grok", "> effort  low  [medium]  high", "  fast", "←→ change"}},
+		{"model-dialog-fast-focus-100x30", 100, 30, "<wait:idle>/model<enter>gro<tab><tab>",
+			[]string{"· Grok", "  effort", "> fast  [off]  on", "←→ change"}},
 		{"model-dialog-80x24", 80, 24, "<wait:idle>/model<enter>", []string{"model", "[medium]", "[off]"}},
 		// 40x12 is the smallest frame craze draws: the box shrinks, and every
 		// band still owns its own rows.
 		{"model-dialog-40x12", 40, 12, "<wait:idle>/model<enter>", []string{"model"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStubFrame(t, tc.cols, tc.rows, tc.keys)
+			assertGolden(t, tc.name, tc.cols, tc.rows, got)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("frame is missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestFrameModelDialogFocusDrawsThreeFrames is the bug the goldens above could
+// not see before this change: Tab cycled the focus and the stripped frame came
+// out identical, so nothing on screen said which row the arrows would move.
+func TestFrameModelDialogFocusDrawsThreeFrames(t *testing.T) {
+	seen := map[string]string{}
+	for _, tc := range []struct{ name, keys string }{
+		{"list", "<wait:idle>/model<enter>gro"},
+		{"effort", "<wait:idle>/model<enter>gro<tab>"},
+		{"fast", "<wait:idle>/model<enter>gro<tab><tab>"},
+	} {
+		got := runStubFrame(t, 100, 30, tc.keys)
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("focus %q draws the same frame as %q:\n%s", tc.name, prev, got)
+		}
+		seen[got] = tc.name
+		if n := strings.Count(got, dialogCursorMark); n != 1 {
+			t.Fatalf("focus %q draws %d cursor gutters, want exactly one:\n%s", tc.name, n, got)
+		}
+	}
+}
+
+// TestFrameGoldenHelpDialog is Task 2's help box in the shared dialog frame:
+// centred, grouped under headings, one key per row in two aligned columns, and
+// scrolled rather than overflowing. 40x12 is the floor, where the box is a
+// title and nothing else.
+func TestFrameGoldenHelpDialog(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cols, rows int
+		keys       string
+		want       []string
+	}{
+		{"help-100x30", 100, 30, "<wait:idle>/help<enter>", []string{
+			"help", "sending and editing", "  enter             send the draft",
+			"  shift+tab         cycle the mode: agent, plan, ask", "▼",
+		}},
+		// Paged to the bottom: the command sections, and the agent's own
+		// commands under their own heading so they cannot read as builtins.
+		{"help-bottom-100x30", 100, 30, "<wait:idle>/help<enter><pgdn><pgdn><pgdn><pgdn>", []string{
+			"commands", "  /model            Switch model", "  /exit             Quit craze",
+			"this session's commands", "  /research         Agent-advertised command", "▲",
+		}},
+		{"help-80x24", 80, 24, "<wait:idle>/help<enter>", []string{"help", "sending and editing"}},
+		{"help-40x12", 40, 12, "<wait:idle>/help<enter>", []string{"help"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := runStubFrame(t, tc.cols, tc.rows, tc.keys)

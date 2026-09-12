@@ -1,0 +1,30 @@
+              ╭──────────────────────────────────────────────────────────────────────╮              
+              │help                                                                  │              
+              │  ctrl+t            tasks panel: compact, expanded, hidden           ▲│              
+              │  ctrl+g            theme dialog                                      │              
+              │  ctrl+o            expand or collapse transcript detail              │              
+              │  enter on a row    peek at a selected sub-agent's prompt             │              
+              │  click the model   model dialog, from status row 1                   │              
+              │selection and clipboard                                               │              
+              │  drag              select transcript rows and copy them              │              
+              │  double-click      select the word under the pointer                 │              
+              │  ctrl+y            copy the selection, or the last reply             │              
+              │commands                                                              │              
+              │  /help             Keybindings and commands                          │              
+              │  /model            Switch model                                      │              
+              │  /clear            Clear transcript                                  │              
+              │  /tasks            Tasks panel: compact, expanded, hidden            │              
+              │  /theme            Theme picker, or /theme <name>                    │              
+              │  /plan             Set plan mode                                     │              
+              │  /ask              Set ask mode                                      │              
+              │  /agent            Set agent mode                                    │              
+              │  /exit             Quit craze                                        │              
+              │this session's commands                                               │              
+              │  /research         Agent-advertised command                          │              
+              │↑↓ · pgup/pgdn · esc closes                                           │              
+              ╰──────────────────────────────────────────────────────────────────────╯              
+──────────────────────────────────────────────────────────────────────────────────────────── craze ─
+❯ message  / for commands                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ws │ cursor │ Grok (medium) │ 0m                                                                    
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      

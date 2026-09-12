@@ -18,7 +18,11 @@ const (
 	modelDialogTitle = "model"
 	themeDialogTitle = "theme"
 	modelDialogHint  = "type to filter · ↑↓ · tab effort/fast · enter · esc"
-	themeDialogHint  = "↑↓ · enter keeps · esc reverts"
+	// modelValueHint is the footer once focus is on a toggle row: ←/→ is the
+	// key that now does something, and the filter still takes what is typed, so
+	// the hint says both rather than dropping one of them.
+	modelValueHint  = "←→ change · tab cycles · type filters · enter · esc"
+	themeDialogHint = "↑↓ · enter keeps · esc reverts"
 	// modelFilterPrompt is the filter's own prompt, two cells like the
 	// composer's.
 	modelFilterPrompt = "❯ "
@@ -77,7 +81,6 @@ type applyStep struct {
 }
 
 func (m Model) openModelDialog() Model {
-	m.help = false
 	m = m.closeDialog(true)
 	ti := textinput.New()
 	ti.Prompt = modelFilterPrompt
@@ -130,6 +133,9 @@ func (m Model) closeDialog(revert bool) Model {
 	case dialogModel:
 		m.dialog = dialogNone
 		m.mdlg = modelDialog{}
+	case dialogHelp:
+		m.dialog = dialogNone
+		m.helpTop = 0
 	}
 	return m
 }
@@ -432,7 +438,7 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		if md.ID == m.snap.CurrentModel {
 			tag = strings.TrimSpace("current " + tag)
 		}
-		rows = append(rows, m.dialogRow(modelRowText(md), tag, p.top+i == m.mdlg.sel, inner))
+		rows = append(rows, m.dialogRow(modelRowText(md), tag, p.top+i == m.mdlg.sel, m.mdlg.focus == focusList, inner))
 	}
 	if p.rows.effortRow {
 		rows = append(rows, m.dialogValueRow("effort", p.effort, m.mdlg.effort, m.mdlg.focus == focusEffort, inner, nil))
@@ -441,7 +447,11 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		rows = append(rows, m.dialogValueRow("fast", p.fast, m.mdlg.fast, m.mdlg.focus == focusFast, inner, fastLabel(p.fast)))
 	}
 	if p.rows.footer {
-		rows = append(rows, m.dialogFooter(modelDialogHint, inner))
+		hint := modelDialogHint
+		if m.mdlg.focus != focusList {
+			hint = modelValueHint
+		}
+		rows = append(rows, m.dialogFooter(hint, inner))
 	}
 	return rows
 }
@@ -493,15 +503,23 @@ func fastLabel(opt *agent.ConfigOption) func(string) string {
 	return func(v string) string { return fastWord(opt, v) }
 }
 
-// dialogValueRow is one toggle row: the label, then every advertised value
-// with the chosen one in brackets. The focused row's label is lit, so Tab has
-// somewhere visible to land.
+// dialogValueRow is one toggle row: the focus gutter, the label, then every
+// advertised value with the chosen one in brackets. "[value]" says which value
+// is picked and the gutter says whether this row is where the keys are — two
+// different questions, so they get two different marks.
+//
+// The focused row also takes the SelectionBG band the list cursor uses, which
+// is reinforcement and not the signal: the gutter is what survives an ANSI
+// strip.
 func (m Model) dialogValueRow(label string, opt *agent.ConfigOption, chosen string, focused bool, inner int, name func(string) string) string {
-	labelStyle := styleFG(m.theme.Dim)
+	base, pick := styleFG(m.theme.Dim), styleFG(m.theme.Bright)
 	if focused {
-		labelStyle = styleFG(m.theme.Accent).Bold(true)
+		band := lipgloss.NewStyle().Background(m.theme.SelectionBG)
+		base, pick = band.Foreground(m.theme.FG), band.Foreground(m.theme.Bright).Bold(true)
 	}
-	segs := []seg{{label, labelStyle}}
+	head := dialogMark(focused, false) + label
+	segs := []seg{{head, base}}
+	used := lipgloss.Width(head)
 	for _, v := range opt.SelectValues {
 		// The values are the agent's text too, so they are folded onto the one
 		// line the row is allowed to be.
@@ -509,11 +527,17 @@ func (m Model) dialogValueRow(label string, opt *agent.ConfigOption, chosen stri
 		if name != nil {
 			text = sanitizeLine(name(v.Value))
 		}
-		st := styleFG(m.theme.Dim)
+		st := base
 		if v.Value == chosen {
-			text, st = "["+text+"]", styleFG(m.theme.Bright)
+			text, st = "["+text+"]", pick
 		}
-		segs = append(segs, seg{dialogValueSep, labelStyle}, seg{text, st})
+		segs = append(segs, seg{dialogValueSep, base}, seg{text, st})
+		used += lipgloss.Width(dialogValueSep) + lipgloss.Width(text)
+	}
+	// The band is only a band if it reaches the far border, so the row pays for
+	// its own padding instead of leaving it to the unstyled fill in dialogView.
+	if pad := inner - used; focused && pad > 0 {
+		segs = append(segs, seg{strings.Repeat(" ", pad), base})
 	}
 	return renderSegs(inner, segs...)
 }

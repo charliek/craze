@@ -21,6 +21,14 @@ const (
 	// dialogListMax caps the list so a 38-model catalogue is still a dialog
 	// and not a panel; past it the list scrolls and says so.
 	dialogListMax = 12
+	// dialogCursorMark is the focus gutter: the row the keys are on. The list
+	// has always drawn it, and the toggle rows draw the same one, so a stripped
+	// frame says which of the three focus targets is live.
+	dialogCursorMark = "> "
+	// dialogSelMark marks a list selection whose keys have moved to a toggle
+	// row: still what Enter would apply, no longer where Tab left the focus.
+	dialogSelMark = "· "
+	dialogNoMark  = "  "
 )
 
 // dialogKind is which modal layer is up. dialogNone is the zero value, so a
@@ -31,6 +39,7 @@ const (
 	dialogNone dialogKind = iota
 	dialogModel
 	dialogTheme
+	dialogHelp
 )
 
 // rect is the modal layer's box in screen cells: the outer rectangle, borders
@@ -57,7 +66,7 @@ func (m Model) dialogRect(lay frameLayout) rect {
 	if tr.Height() <= 0 {
 		return rect{}
 	}
-	w := min(dialogMaxWidth, m.width-dialogGutter)
+	w := min(m.dialogMaxWidth(), m.width-dialogGutter)
 	if w < dialogBorder+1 {
 		return rect{}
 	}
@@ -71,6 +80,16 @@ func (m Model) dialogRect(lay frameLayout) rect {
 		W: w,
 		H: h,
 	}
+}
+
+// dialogMaxWidth is how wide this dialog is allowed to get. Help is the one
+// that carries a two-column key table, and 54 cells would truncate half the
+// descriptions it exists to show.
+func (m Model) dialogMaxWidth() int {
+	if m.dialog == dialogHelp {
+		return helpDialogWidth
+	}
+	return dialogMaxWidth
 }
 
 // dialogRows is the box's natural height at this width, borders included.
@@ -87,6 +106,8 @@ func (m Model) dialogBody(inner, budget int) []string {
 		return m.modelDialogBody(inner, budget)
 	case dialogTheme:
 		return m.themeDialogBody(inner, budget)
+	case dialogHelp:
+		return m.helpDialogBody(inner, budget)
 	}
 	return nil
 }
@@ -102,18 +123,30 @@ func (m Model) dialogFooter(hint string, inner int) string {
 	return styleFG(m.theme.Dim).Render(clampWidth(hint, inner))
 }
 
-// dialogRow is one list row: the cursor mark, the text, and a right-aligned
-// tag. The selected row is painted with SelectionBG across the whole inner
-// width, so the cursor reads as a band and not as a stray ">".
-func (m Model) dialogRow(text, tag string, selected bool, inner int) string {
-	mark := "  "
-	if selected {
-		mark = "> "
+// dialogMark is the two-cell gutter every dialog row opens with. It is a
+// character and not a colour on purpose: the frame goldens are ANSI-stripped,
+// so a colour-only focus cue is invisible to them — and to any terminal that
+// drops the colour.
+func dialogMark(cursor, selected bool) string {
+	switch {
+	case cursor:
+		return dialogCursorMark
+	case selected:
+		return dialogSelMark
 	}
+	return dialogNoMark
+}
+
+// dialogRow is one list row: the focus gutter, the text, and a right-aligned
+// tag. focused is whether the list is the dialog's focus target, so a selection
+// the keys have left keeps its "·" but gives up the cursor mark and the
+// SelectionBG band — exactly one thing in the box looks active at a time.
+func (m Model) dialogRow(text, tag string, selected, focused bool, inner int) string {
+	cursor := selected && focused
 	// One row is one line. An agent-supplied name with a newline in it would
 	// otherwise draw two, and then the box would be taller than the rectangle
 	// the layout measured and the hit test would answer for the wrong row.
-	body := mark + sanitizeLine(text)
+	body := dialogMark(cursor, selected) + sanitizeLine(text)
 	// The tag is right-aligned, and dropped rather than crowded when the row
 	// is not wide enough to keep a space between the two.
 	if pad := inner - lipgloss.Width(body) - lipgloss.Width(tag); tag != "" && pad >= 1 {
@@ -121,10 +154,21 @@ func (m Model) dialogRow(text, tag string, selected bool, inner int) string {
 	}
 	body = padRow(clampWidth(body, inner), inner)
 	st := styleFG(m.theme.FG)
-	if selected {
+	if cursor {
 		st = lipgloss.NewStyle().Foreground(m.theme.Bright).Background(m.theme.SelectionBG)
 	}
 	return st.Render(body)
+}
+
+// dialogTagSeg right-aligns a scroll marker after a row whose text is already
+// used cells wide, and drops it rather than crowd a row that has no room for a
+// space before it.
+func (m Model) dialogTagSeg(used int, tag string, inner int) seg {
+	pad := inner - used - lipgloss.Width(tag)
+	if tag == "" || pad < 1 {
+		return seg{}
+	}
+	return seg{strings.Repeat(" ", pad) + tag, styleFG(m.theme.Dim)}
 }
 
 // dialogListWindow is the slice of a list that fits, scrolled only as far as

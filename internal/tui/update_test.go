@@ -204,7 +204,7 @@ func TestTypingQuickDoesNotQuit(t *testing.T) {
 		if m.quitting {
 			t.Fatalf("typing %q quit craze", r)
 		}
-		if m.help {
+		if m.dialog == dialogHelp {
 			t.Fatalf("typing %q opened help", r)
 		}
 	}
@@ -618,18 +618,19 @@ func TestSlashHelpExitAndModel(t *testing.T) {
 	m.input.SetValue("/help")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.help {
-		t.Fatal("expected help overlay")
+	if m.dialog != dialogHelp {
+		t.Fatal("expected the help dialog")
 	}
 	view := plainView(m)
-	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
+	// A row of the box itself, not the "shift+tab" hint status row 2 also draws.
+	if !strings.Contains(view, "enter             send the draft") {
 		t.Fatalf("help missing keys:\n%s", view)
 	}
 	if strings.Contains(view, "/btw") {
 		t.Fatal("help must not hardcode /btw")
 	}
 
-	m.help = false
+	m = m.closeDialog(true)
 	m.input.SetValue("/model fast")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
@@ -692,12 +693,12 @@ func TestEscOnHelpClosesNotQuits(t *testing.T) {
 	m.input.SetValue("/help")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.help {
+	if m.dialog != dialogHelp {
 		t.Fatal("expected help")
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	m = tm.(Model)
-	if !m.help {
+	if m.dialog != dialogHelp {
 		t.Fatal("q must not close help")
 	}
 	if m.quitting || cmd != nil {
@@ -705,7 +706,7 @@ func TestEscOnHelpClosesNotQuits(t *testing.T) {
 	}
 	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
-	if m.help {
+	if m.dialog == dialogHelp {
 		t.Fatal("esc should close help")
 	}
 	if m.quitting || cmd != nil {
@@ -761,26 +762,40 @@ func TestEscSlashKeepsComposerText(t *testing.T) {
 	}
 }
 
-func TestHelpOverlayFitsTerminal(t *testing.T) {
+// TestHelpDialogFitsTerminal: help is a modal layer now, so it owes the frame
+// the same contract the other two dialogs do — the box sits inside the
+// transcript region and every band under it keeps its rows — with in-flight
+// agent rows on screen, which is the tightest transcript craze draws.
+//
+// It replaces TestHelpOverlayFitsTerminal and TestHelpOverlayFitsWithInFlightTools,
+// which had the same fixture as each other and only checked the frame's height.
+func TestHelpDialogFitsTerminal(t *testing.T) {
 	m := applyInFlight(t, sized(t), inFlightTools())
 	m.input.SetValue("/help")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if !m.help {
-		t.Fatal("expected help")
+	if m.dialog != dialogHelp {
+		t.Fatalf("expected the help dialog, got %v", m.dialog)
 	}
 	view := plainView(m)
-	if h := lipgloss.Height(view); h > 24 {
-		t.Fatalf("help view is %d rows, crops 24-row terminal:\n%s", h, view)
+	if h := lipgloss.Height(view); h != 24 {
+		t.Fatalf("help view is %d rows, want exactly 24:\n%s", h, view)
+	}
+	r, tr := m.lay.Dialog, m.lay.Region(regionTranscript)
+	if r.Empty() {
+		t.Fatalf("no dialog rectangle: %+v", m.lay)
+	}
+	if r.Y < tr.Top || r.Y+r.H > tr.Bottom {
+		t.Fatalf("the box %+v is not inside the transcript %+v:\n%s", r, tr, view)
 	}
 	if !strings.Contains(view, chipYolo) {
-		t.Fatalf("status rows cropped:\n%s", view)
+		t.Fatalf("status rows covered:\n%s", view)
 	}
 	if !strings.Contains(view, "message") {
-		t.Fatalf("composer cropped:\n%s", view)
+		t.Fatalf("composer covered:\n%s", view)
 	}
-	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
-		t.Fatalf("help body missing:\n%s", view)
+	if !strings.Contains(strings.Split(view, "\n")[r.Y+1], helpDialogTitle) {
+		t.Fatalf("the box drew no title row:\n%s", view)
 	}
 }
 
@@ -1304,22 +1319,12 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		}
 		assertQuitCmd(t, cmd)
 	})
-	t.Run("quit", func(t *testing.T) {
-		m := hangWorking(t)
-		m.input.SetValue("/quit")
-		tm, cmd := m.Update(enter())
-		m = tm.(Model)
-		if !m.quitting || cmd == nil {
-			t.Fatal("/quit while working should quit")
-		}
-		assertQuitCmd(t, cmd)
-	})
 	t.Run("help", func(t *testing.T) {
 		m := hangWorking(t)
 		m.input.SetValue("/help")
 		tm, cmd := m.Update(enter())
 		m = tm.(Model)
-		if m.help {
+		if m.dialog == dialogHelp {
 			t.Fatal("/help while working should be ignored")
 		}
 		if m.quitting {
@@ -1365,29 +1370,6 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 	}
 	if !strings.HasPrefix(got[0], "✓ bash") {
 		t.Fatalf("new row %q", got[0])
-	}
-}
-
-func TestHelpOverlayFitsWithInFlightTools(t *testing.T) {
-	m := applyInFlight(t, sized(t), inFlightTools())
-	m.input.SetValue("/help")
-	tm, _ := m.Update(enter())
-	m = tm.(Model)
-	if !m.help {
-		t.Fatal("expected help")
-	}
-	view := plainView(m)
-	if h := lipgloss.Height(view); h > 24 {
-		t.Fatalf("help+agents view is %d rows, crops 24-row terminal:\n%s", h, view)
-	}
-	if !strings.Contains(view, chipYolo) {
-		t.Fatalf("footer cropped:\n%s", view)
-	}
-	if !strings.Contains(view, "message") {
-		t.Fatalf("composer cropped:\n%s", view)
-	}
-	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
-		t.Fatalf("help body missing:\n%s", view)
 	}
 }
 

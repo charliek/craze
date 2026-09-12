@@ -28,7 +28,7 @@ width, or `craze` before one arrives.
 |---|---|
 | `Enter` | send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | close a peek, then the slash menu, then a picker or `/help`; answer the card on top; otherwise cancel the running turn (the transcript says `cancelled`) |
+| `Esc` | close a peek, then the slash menu, then a dialog (`/help` included); answer the card on top; otherwise cancel the running turn (the transcript says `cancelled`) |
 | `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask) |
@@ -36,14 +36,14 @@ width, or `craze` before one arrives.
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`) |
-| `↑` `↓` | with an empty composer, select a sub-agent row; in a picker or the slash menu, move the cursor |
+| `↑` `↓` | with an empty composer, select a sub-agent row; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
 | `Enter` on a selected sub-agent | peek at its prompt; `Esc` closes the peek without cancelling the turn |
-| `PgUp` / `PgDn`, wheel | scroll the transcript |
+| `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
 | `Tab` | complete the slash command being typed |
 
-`/help` lists the same keys plus every slash command. `/exit` and `/quit` quit;
-there are no bare `q` or `?` bindings, so a message that starts with either is
-just a message.
+`/help` lists the same keys plus every slash command — see
+[Help dialog](#help-dialog). `/exit` quits; there are no bare `q` or `?`
+bindings, so a message that starts with either is just a message.
 
 !!! note
     Shift+Enter is unreliable under bubbletea v1. Most terminals send a bare
@@ -102,14 +102,14 @@ reach the agent as anything other than an accept or a reject.
 | Command | Action |
 |---------|--------|
 | `/help` | Keybindings and commands |
-| `/model`, `/models` | Switch model |
+| `/model` | Switch model |
 | `/clear` | Clear transcript |
 | `/tasks` | Tasks panel: compact, expanded, hidden |
 | `/theme` | Theme picker, or `/theme <name>` |
 | `/plan` | Set plan mode |
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |
-| `/exit`, `/quit` | Quit craze |
+| `/exit` | Quit craze |
 
 Workspace and home `SKILL.md` files are listed on slash without a skills RPC.
 Agent-advertised commands from the ACP session are listed too, after the
@@ -117,13 +117,21 @@ builtins.
 
 ## Model dialog
 
-`/model`, `/models`, or a click on the model name in status row 1, open a
-centred box over the transcript: a filter (`❯ `, type to narrow by name or
-id), the model list (current model first, then the agent's own order, a `>`
-cursor, `current` tagged, `▲`/`▼` when it scrolls), and, only when the agent
-advertises them, an `effort` row (`low medium high xhigh`, the picked one
-bracketed) and a `fast` row (`on`/`off`). The footer reads
-`type to filter · ↑↓ · tab effort/fast · enter · esc`.
+`/model`, or a click on the model name in status row 1, opens a centred box
+over the transcript: a filter (`❯ `, type to narrow by name or id), the model
+list (current model first, then the agent's own order, `current` tagged,
+`▲`/`▼` when it scrolls), and, only when the agent advertises them, an `effort`
+row (`low medium high xhigh`, the picked one bracketed) and a `fast` row
+(`on`/`off`).
+
+The list, `effort` and `fast` are three focus targets, and the one the keys are
+on carries a `> ` gutter and the selection background — so exactly one row looks
+active, in a screenshot and with the colour stripped alike. A model that is
+selected but no longer focused keeps a dimmer `· ` mark: `[value]` says which
+value is *picked*, the gutter says which row is *focused*. The footer says which
+keys are live, `type to filter · ↑↓ · tab effort/fast · enter · esc` on the list
+and `←→ change · tab cycles · type filters · enter · esc` on a toggle row.
+Typing filters the list whatever has focus.
 
 `Tab`/`Shift+Tab` move focus between the list, effort and fast; `←`/`→` change
 the focused row's value; clicking a row focuses it. `Enter` closes the dialog
@@ -134,13 +142,30 @@ outside the box, closes it and applies nothing. Status row 1 then reads
 `Name (effort · fast)`, with `fast` shown only when it is on.
 
 `/model <id>` and `/model <id> <effort>` still work without opening the
-dialog. There is no full-width picker band and no `Ctrl+M` binding.
+dialog. There is no full-width picker band and no `Ctrl+M` binding; the only
+band left under the transcript is the slash menu.
 
 `Ctrl+G`/`/theme` opens the same kind of box (title `theme`, no filter);
 `↑`/`↓` preview live, `Enter` keeps it, and `Esc` or a click outside reverts to
 the theme that was active when it opened. A card arriving from the agent
-closes either dialog — the model dialog applies nothing, the theme dialog
+closes any dialog — the model dialog applies nothing, the theme dialog
 reverts.
+
+## Help dialog
+
+`/help` opens a third box in the same frame (title `help`, 72 cells wide
+because it is a two-column table). The keys are one per row, the key in a fixed
+left gutter and what it does beside it, grouped under headings — sending and
+editing, mode, moving and scrolling, panels and views, selection and clipboard
+— then `commands` for craze's own slash commands and
+`this session's commands` for whatever the agent advertises and the skills
+found on disk, which vary by session.
+
+The content is taller than any terminal, so the box clips to the transcript
+region and scrolls: `↑`/`↓` a row, `PgUp`/`PgDn` a page, with `▲`/`▼` marking
+what is off screen. It shrinks the same way the other two do — content rows
+first, then the footer — down to a title-only box. `Esc`, a click outside, or a
+card arriving closes it; nothing else is bound while it is up.
 
 ## Mouse
 
@@ -156,7 +181,7 @@ clickable cannot drift apart:
 | Sub-agent row under the status rows | Selects that sub-agent and opens its peek |
 | Model name in status row 1 | Opens the model dialog (same as `/model`) |
 | `◆ agent` mode chip in status row 2 | Cycles the mode (same as `Shift+Tab`) |
-| A row inside an open dialog | Picks that row |
+| A row inside an open dialog | Picks that row; a `/help` row is inert |
 | Anywhere outside an open dialog | Closes it, applying nothing |
 | The transcript | Starts a selection |
 

@@ -29,7 +29,6 @@ func builtinSlash() []slashItem {
 	return []slashItem{
 		{Name: "help", Desc: "Keybindings and commands", Builtin: true},
 		{Name: "model", Desc: "Switch model", Builtin: true},
-		{Name: "models", Desc: "Switch model", Builtin: true},
 		{Name: "clear", Desc: "Clear transcript", Builtin: true},
 		{Name: "tasks", Desc: "Tasks panel: compact, expanded, hidden", Builtin: true},
 		{Name: "theme", Desc: "Theme picker, or /theme <name>", Builtin: true},
@@ -37,7 +36,6 @@ func builtinSlash() []slashItem {
 		{Name: "ask", Desc: "Set ask mode", Builtin: true},
 		{Name: "agent", Desc: "Set agent mode", Builtin: true},
 		{Name: "exit", Desc: "Quit craze", Builtin: true},
-		{Name: "quit", Desc: "Quit craze", Builtin: true},
 	}
 }
 
@@ -126,10 +124,8 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	switch name {
 	case "help":
 		m.input.SetValue("")
-		m = m.closeDialog(true)
-		m.help = true
-		return m, nil
-	case "exit", "quit":
+		return m.openHelp(), nil
+	case "exit":
 		m.input.SetValue("")
 		return m.requestQuit()
 	case "clear":
@@ -145,7 +141,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			return m.openThemePicker(), nil
 		}
 		return m.setThemeNamed(args), nil
-	case "model", "models":
+	case "model":
 		if args == "" {
 			m.input.SetValue("")
 			return m.openModelDialog(), nil

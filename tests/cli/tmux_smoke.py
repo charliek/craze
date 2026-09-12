@@ -373,6 +373,22 @@ CASES: dict[str, Case] = {
             "unchanged means the round-trip through configOptions broke"
         ),
     ),
+    # /help is a dialog in the same frame as /model now, so a real terminal is
+    # where its geometry is actually painted: the box is centred, the status rows
+    # underneath it survive (the chip probe every capture runs), and the content
+    # is clipped with a ▼ rather than overflowing.
+    "help-dialog": Case(
+        script="echo",
+        prompt=None,
+        steps=(
+            Send("/help"),
+            Send(ENTER),
+            Wait("sending and editing", "help-open"),
+            Wait("▼", "help-clipped"),
+            Send(ESC),
+            Gone("sending and editing", "help-closed"),
+        ),
+    ),
     # 005 §3.5 through a real terminal's mouse: the drag covers the user line and
     # the reply, so it copies two rows and says so in status row 2. The payload
     # is checked against the stub clipboard tool, which is what proves the copy

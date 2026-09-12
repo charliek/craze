@@ -1,0 +1,24 @@
+    ╭──────────────────────────────────────────────────────────────────────╮    
+    │help                                                                  │    
+    │sending and editing                                                   │    
+    │  enter             send the draft                                    │    
+    │  alt+enter, ctrl+j newline (shift+enter where the terminal sends it) │    
+    │  ctrl+v            paste                                             │    
+    │  esc               cancel the turn, or close what is open            │    
+    │  ctrl+c            cancel the turn, then quit                        │    
+    │  ctrl+d            quit                                              │    
+    │mode                                                                  │    
+    │  shift+tab         cycle the mode: agent, plan, ask                  │    
+    │  click ◆ chip      cycle the mode from status row 2                  │    
+    │moving and scrolling                                                  │    
+    │  ↑ ↓               sub-agent rows, or a list inside a dialog         │    
+    │  pgup pgdn, wheel  scroll the transcript                             │    
+    │  tab               complete the slash command being typed            │    
+    │panels and views                                                     ▼│    
+    │↑↓ · pgup/pgdn · esc closes                                           │    
+    ╰──────────────────────────────────────────────────────────────────────╯    
+──────────────────────────────────────────────────────────────────────── craze ─
+❯ message  / for commands                                                       
+────────────────────────────────────────────────────────────────────────────────
+ws │ cursor │ Grok (medium) │ 0m                                                
+◆ agent · shift+tab · ▸▸ bypass permissions on                                  

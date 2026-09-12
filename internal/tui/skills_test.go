@@ -50,11 +50,16 @@ description: %s
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
 	view := plainView(m)
-	if h := lipgloss.Height(view); h > 24 {
+	if h := lipgloss.Height(view); h != 24 {
 		t.Fatalf("help view is %d rows with disk skills:\n%s", h, view)
 	}
-	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
-		t.Fatalf("help header cropped:\n%s", view)
+	// 30 skills with 200-character descriptions cannot push the box past the
+	// transcript region: it scrolls instead.
+	if r, tr := m.lay.Dialog, m.lay.Region(regionTranscript); r.Y < tr.Top || r.Y+r.H > tr.Bottom {
+		t.Fatalf("the box %+v escaped the transcript %+v:\n%s", r, tr, view)
+	}
+	if !strings.Contains(view, "send the draft") {
+		t.Fatalf("the top of the help box is missing:\n%s", view)
 	}
 }
 
@@ -83,8 +88,13 @@ body must not be injected
 	m.input.SetValue("/help")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if !m.help {
-		t.Fatal("expected help overlay")
+	if m.dialog != dialogHelp {
+		t.Fatal("expected the help dialog")
+	}
+	// The catalog is the last section of a box that scrolls, so the skill row
+	// is only on screen once the box has been paged to the bottom.
+	for i := 0; i < 10; i++ {
+		m = pressKey(t, m, tea.KeyPgDown)
 	}
 	view := plainView(m)
 	if !strings.Contains(view, "/demo") {

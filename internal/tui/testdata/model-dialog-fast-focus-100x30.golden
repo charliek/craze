@@ -9,10 +9,10 @@
                        ╭────────────────────────────────────────────────────╮                       
                        │model                                               │                       
                        │❯ gro                                               │                       
-                       │> Grok                                       current│                       
+                       │· Grok                                       current│                       
                        │  effort  low  [medium]  high                       │                       
-                       │  fast  [off]  on                                   │                       
-                       │type to filter · ↑↓ · tab effort/fast · enter · esc │                       
+                       │> fast  [off]  on                                   │                       
+                       │←→ change · tab cycles · type filters · enter · esc │                       
                        ╰────────────────────────────────────────────────────╯                       
                                                                                                     
                                                                                                     

@@ -110,7 +110,6 @@ func (m *Model) pushCard(c card) {
 	}
 	m.breakStream()
 	m.cards = append(append([]card(nil), m.cards...), c)
-	m.help = false
 	m.agentPeek = false
 	// A card is a question the user has to answer first, so the offer stands
 	// down while it is up — but it is not retired. cursor answers a plan-mode

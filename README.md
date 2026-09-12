@@ -69,7 +69,7 @@ craze, so quitting out of one is an ordinary exit 0.
 |---|---|
 | `Enter` | send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | close a peek, then the slash menu, then a picker or `/help`; answer the card on top; otherwise cancel the running turn (the transcript says `cancelled`) |
+| `Esc` | close a peek, then the slash menu, then a dialog (`/help` included); answer the card on top; otherwise cancel the running turn (the transcript says `cancelled`) |
 | `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask) |
@@ -77,14 +77,14 @@ craze, so quitting out of one is an ordinary exit 0.
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`) |
-| `↑` `↓` | with an empty composer, select a sub-agent row; in a picker or the slash menu, move the cursor |
+| `↑` `↓` | with an empty composer, select a sub-agent row; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
 | `Enter` on a selected sub-agent | peek at its prompt; `Esc` closes the peek without cancelling the turn |
-| `PgUp` / `PgDn`, wheel | scroll the transcript |
+| `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
 | `Tab` | complete the slash command being typed |
 
-`/help` lists the same keys plus every slash command. `/exit` and `/quit` quit;
-there are no bare `q` or `?` bindings, so a message that starts with either is
-just a message.
+`/help` opens a centred, scrollable box listing the same keys — grouped, one
+per row — plus every slash command. `/exit` quits; there are no bare `q` or `?`
+bindings, so a message that starts with either is just a message.
 
 **Shift+Enter is unreliable under bubbletea v1.** Most terminals send a bare
 `Enter` for it, and craze cannot tell the two apart, so it sends the message.

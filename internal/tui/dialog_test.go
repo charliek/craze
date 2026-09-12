@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -243,20 +244,6 @@ func TestThemeDialogClickKeeps(t *testing.T) {
 	}
 }
 
-// TestModelsSlashOpensTheDialog: /models is the same opener as /model.
-func TestModelsSlashOpensTheDialog(t *testing.T) {
-	m := sized(t)
-	m.input.SetValue("/models")
-	tm, _ := m.Update(enter())
-	m = tm.(Model)
-	if m.dialog != dialogModel {
-		t.Fatalf("/models left dialog=%v", m.dialog)
-	}
-	if m.input.Value() != "" {
-		t.Fatalf("the command should have been consumed: %q", m.input.Value())
-	}
-}
-
 // TestFastOnSendsTheAdvertisedValue: the dialog's "on" is whatever the agent
 // called the value that is not "Off" — the string "true" in every capture.
 func TestFastOnSendsTheAdvertisedValue(t *testing.T) {
@@ -411,5 +398,370 @@ func TestFastRowReadsWhatTheValuesMean(t *testing.T) {
 				t.Fatalf("status row 1 should name fast:\n%s", view)
 			}
 		})
+	}
+}
+
+// dialogGutterAt is the two cells a dialog row opens with, read off a drawn
+// frame with the escapes stripped. It is where the focus mark lives.
+func dialogGutterAt(m Model, view string, y int) string {
+	r := m.lay.Dialog
+	return ansi.Cut(rows(view)[y], r.X+1, r.X+3)
+}
+
+// markedDialogRows is every content row of the box carrying the "> " cursor
+// gutter. Exactly one of them is the whole point: it is the answer to "which
+// row do the arrows move", and before this change there was none.
+func markedDialogRows(m Model) []string {
+	r := m.lay.Dialog
+	view := plainView(m)
+	var out []string
+	for y := r.Y + 1; y < r.Y+r.H-1; y++ {
+		if dialogGutterAt(m, view, y) == dialogCursorMark {
+			// The text after the gutter, which is what the row says it is.
+			out = append(out, strings.TrimRight(ansi.Cut(rows(view)[y], r.X+3, r.X+r.W-1), " "))
+		}
+	}
+	return out
+}
+
+// TestModelDialogFocusSurvivesAnANSIStrip is the regression this task exists
+// for: Tab moved the focus and the only cue was the label's colour, so the
+// stripped frame — which is exactly what the goldens and a diff review see —
+// came out byte-identical for all three focus states. The gutter is the cue
+// now, one row carries it at a time, and the list gives up its cursor mark and
+// its band while a toggle row has the keys.
+func TestModelDialogFocusSurvivesAnANSIStrip(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	m = m.openModelDialog()
+	tm, _ = m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+
+	seen := map[string]string{}
+	for _, tc := range []struct {
+		name, want string
+		tabs       int
+	}{
+		{"list", "Grok", 0},
+		{"effort", "effort  low  [medium]  high", 1},
+		{"fast", "fast  [off]  on", 2},
+	} {
+		f := m
+		for i := 0; i < tc.tabs; i++ {
+			f = pressKey(t, f, tea.KeyTab)
+		}
+		marked := markedDialogRows(f)
+		if len(marked) != 1 {
+			t.Fatalf("focus %s marks %d rows, want exactly one: %q\n%s", tc.name, len(marked), marked, plainView(f))
+		}
+		if !strings.HasPrefix(marked[0], tc.want) {
+			t.Fatalf("focus %s marks %q, want %q", tc.name, marked[0], tc.want)
+		}
+		// Three focus states, three different frames. The bug was that they
+		// were one frame three times.
+		view := plainView(f)
+		if prev, dup := seen[view]; dup {
+			t.Fatalf("focus %s draws the same frame as %s:\n%s", tc.name, prev, view)
+		}
+		seen[view] = tc.name
+		// The selected model is still marked as the selection, just not as the
+		// focus: "[value]" and the gutter answer two different questions.
+		gutter := dialogGutterAt(f, view, f.lay.Dialog.Y+3)
+		if tc.tabs == 0 && gutter != dialogCursorMark {
+			t.Fatalf("the focused list should carry the cursor, got %q", gutter)
+		}
+		if tc.tabs > 0 && gutter != dialogSelMark {
+			t.Fatalf("an unfocused list should keep its selection mark, got %q", gutter)
+		}
+	}
+}
+
+// TestModelDialogFocusPaintsTheFocusedRow is the styling half, the way
+// status_test.go asserts chip colours: SelectionBG reinforces the gutter on a
+// real terminal, and a change that keeps the marks but drops the paint (or
+// paints two rows at once) fails here rather than silently.
+func TestModelDialogFocusPaintsTheFocusedRow(t *testing.T) {
+	m := themeModel(t, "craze-dark")
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	m = m.openModelDialog()
+	tm, _ = m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+	band := ansiBG(string(m.theme.SelectionBG))
+
+	for _, tc := range []struct {
+		name, want string
+		tabs       int
+	}{
+		{"list", "Grok", 0},
+		{"effort", "effort", 1},
+		{"fast", "fast  [off]", 2},
+	} {
+		f := m
+		for i := 0; i < tc.tabs; i++ {
+			f = pressKey(t, f, tea.KeyTab)
+		}
+		raw, plainRows := rows(f.View()), rows(plainView(f))
+		painted := 0
+		for y := range raw {
+			if !strings.Contains(raw[y], band) {
+				continue
+			}
+			painted++
+			if !strings.Contains(plainRows[y], tc.want) {
+				t.Fatalf("focus %s paints row %d (%q), want the %s row", tc.name, y, plainRows[y], tc.want)
+			}
+		}
+		if painted != 1 {
+			t.Fatalf("focus %s paints %d rows with SelectionBG, want exactly one:\n%s", tc.name, painted, plainView(f))
+		}
+	}
+}
+
+// TestModelDialogFooterTellsTheTruth: the pinned footer promises ↑↓ and the
+// filter, which are still live from a toggle row, but says nothing about ←/→ —
+// the only keys that do anything there. Focus swaps the hint.
+func TestModelDialogFooterTellsTheTruth(t *testing.T) {
+	m := sized(t)
+	m = m.openModelDialog()
+	tm, _ := m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+	if !strings.Contains(plainView(m), modelDialogHint) {
+		t.Fatalf("the list's footer is missing:\n%s", plainView(m))
+	}
+	f := pressKey(t, m, tea.KeyTab)
+	if !strings.Contains(plainView(f), modelValueHint) {
+		t.Fatalf("a toggle row's footer should name ←→:\n%s", plainView(f))
+	}
+	// Typing still filters whatever has the focus, which is why the hint keeps
+	// saying so.
+	for _, r := range "fas" {
+		tm, _ := f.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		f = tm.(Model)
+	}
+	if got := f.dialogModelList(); len(got) != 1 || got[0].ID != "fast" {
+		t.Fatalf("typing on a toggle row stopped filtering: %+v", got)
+	}
+	if f.mdlg.focus != focusEffort {
+		t.Fatalf("typing moved the focus: %v", f.mdlg.focus)
+	}
+}
+
+// helpModel is the help box open at a size, laid out and ready to draw.
+func helpModel(t *testing.T, cols, rows int) Model {
+	t.Helper()
+	m := sized(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: cols, Height: rows})
+	m = tm.(Model)
+	m.input.SetValue("/help")
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	if m.dialog != dialogHelp {
+		t.Fatalf("/help left dialog=%v", m.dialog)
+	}
+	return m
+}
+
+// TestHelpDialogIsCentredInTheSameFrame: help is a modal layer like the other
+// two, so it inherits the centring, the rectangle and the "never covers another
+// band" guarantee instead of being a full-width band above the composer.
+func TestHelpDialogIsCentredInTheSameFrame(t *testing.T) {
+	for _, size := range [][2]int{{100, 30}, {80, 24}, {40, 12}} {
+		m := helpModel(t, size[0], size[1])
+		r, tr := m.lay.Dialog, m.lay.Region(regionTranscript)
+		if r.Empty() {
+			t.Fatalf("%v: no rectangle for the help box: %+v", size, m.lay)
+		}
+		if r.X != (size[0]-r.W)/2 {
+			t.Fatalf("%v: the box is at x=%d, not centred (%d wide)", size, r.X, r.W)
+		}
+		if r.Y < tr.Top || r.Y+r.H > tr.Bottom {
+			t.Fatalf("%v: the box %+v escapes the transcript %+v", size, r, tr)
+		}
+		// The band that used to host help is the slash menu's alone now.
+		if !m.lay.Region(regionOverlay).Empty() {
+			t.Fatalf("%v: help still draws as a band: %+v", size, m.lay.Region(regionOverlay))
+		}
+		lines := rows(plainView(m))
+		if len(lines) != size[1] {
+			t.Fatalf("%v: frame is %d rows", size, len(lines))
+		}
+		if !strings.Contains(lines[m.lay.Region(regionStatus).Top], "cursor") {
+			t.Fatalf("%v: status row 1 was covered:\n%s", size, plainView(m))
+		}
+		if !strings.Contains(lines[r.Y+1], helpDialogTitle) {
+			t.Fatalf("%v: no title row:\n%s", size, plainView(m))
+		}
+	}
+}
+
+// TestHelpDialogScrollsRatherThanOverflowing: the content is taller than any
+// terminal craze draws in, so the box clips to the transcript region, says so
+// with ▲/▼, and the keys move the window instead of growing the box.
+func TestHelpDialogScrollsRatherThanOverflowing(t *testing.T) {
+	m := helpModel(t, 100, 30)
+	if m.helpShown() >= len(m.helpLines()) {
+		t.Fatalf("fixture: the box is not clipped (%d of %d rows)", m.helpShown(), len(m.helpLines()))
+	}
+	if !strings.Contains(plainView(m), "▼") {
+		t.Fatalf("a clipped box owes the reader a ▼:\n%s", plainView(m))
+	}
+	if strings.Contains(plainView(m), "▲") {
+		t.Fatalf("nothing is above the first row yet:\n%s", plainView(m))
+	}
+	down := pressKey(t, m, tea.KeyDown)
+	if down.helpTop != 1 {
+		t.Fatalf("↓ moved the window to %d", down.helpTop)
+	}
+	if !strings.Contains(plainView(down), "▲") {
+		t.Fatalf("a scrolled box owes the reader a ▲:\n%s", plainView(down))
+	}
+	// Up from the top and down past the bottom both clamp, so the box can never
+	// scroll past its own content.
+	if up := pressKey(t, m, tea.KeyUp); up.helpTop != 0 {
+		t.Fatalf("↑ at the top scrolled to %d", up.helpTop)
+	}
+	end := m
+	for i := 0; i < 20; i++ {
+		end = pressKey(t, end, tea.KeyPgDown)
+	}
+	if want := len(end.helpLines()) - end.helpShown(); end.helpTop != want {
+		t.Fatalf("pgdn settled at %d, want the last page at %d", end.helpTop, want)
+	}
+	view := plainView(end)
+	if !strings.Contains(view, "▲") || strings.Contains(view, "▼") {
+		t.Fatalf("the last page marks only ▲:\n%s", view)
+	}
+	// The last row of the content is the last row of the last page.
+	last := end.helpLines()[len(end.helpLines())-1]
+	if !strings.Contains(view, last.desc) {
+		t.Fatalf("the bottom of the box is missing %q:\n%s", last.desc, view)
+	}
+}
+
+// TestHelpDialogFloorIsTitleOnly: the box degrades to the same floor the other
+// dialogs respect — one row, the title — rather than covering a band.
+func TestHelpDialogFloorIsTitleOnly(t *testing.T) {
+	m := helpModel(t, 100, 30)
+	for budget, want := range map[int]int{1: 1, 2: 2, 3: 3} {
+		if got := len(m.helpDialogBody(helpDialogWidth-dialogBorder, budget)); got != want {
+			t.Fatalf("a %d-row budget drew %d rows, want %d", budget, got, want)
+		}
+	}
+	body := m.helpDialogBody(helpDialogWidth-dialogBorder, 1)
+	if !strings.Contains(plain(body[0]), helpDialogTitle) {
+		t.Fatalf("the one row a squeezed box keeps is the title, got %q", plain(body[0]))
+	}
+}
+
+// TestHelpDialogGroupsAndNamesItsSections: one key per row, aligned in two
+// columns under a heading, and the session's own commands kept apart from
+// craze's builtins because they vary by session.
+func TestHelpDialogGroupsAndNamesItsSections(t *testing.T) {
+	m := helpModel(t, 100, 30)
+	lines := m.helpLines()
+	var headings []string
+	for _, l := range lines {
+		if l.heading() {
+			headings = append(headings, l.desc)
+			continue
+		}
+		if l.desc == "" {
+			t.Fatalf("key %q has nothing beside it", l.key)
+		}
+		if w := lipgloss.Width(l.key); w > helpKeyCol-1 {
+			t.Fatalf("key %q is %d cells, past the %d-cell gutter", l.key, w, helpKeyCol)
+		}
+	}
+	want := []string{
+		"sending and editing", "mode", "moving and scrolling", "panels and views",
+		"selection and clipboard", "commands", "this session's commands",
+	}
+	if !reflect.DeepEqual(headings, want) {
+		t.Fatalf("headings %q, want %q", headings, want)
+	}
+	// Every row is rendered one line wide and no wider than the box.
+	inner := helpDialogWidth - dialogBorder
+	for _, l := range lines {
+		row := m.helpRow(l, "", inner)
+		if strings.Contains(row, "\n") {
+			t.Fatalf("row %q drew two lines", plain(row))
+		}
+		if w := lipgloss.Width(row); w > inner {
+			t.Fatalf("row %q is %d cells, the box has %d", plain(row), w, inner)
+		}
+	}
+	// The agent's command is under its own heading, after the builtins.
+	agentAt, sessionAt := -1, -1
+	for i, l := range lines {
+		switch {
+		case l.desc == "this session's commands":
+			sessionAt = i
+		case l.key == "/research":
+			agentAt = i
+		}
+	}
+	if sessionAt < 0 || agentAt < sessionAt {
+		t.Fatalf("/research is at %d, the session heading at %d", agentAt, sessionAt)
+	}
+}
+
+// TestHelpDialogListsOneNamePerCommand: /models and /quit are gone, so help has
+// no duplicate rows to collapse and neither spelling exists anywhere.
+func TestHelpDialogListsOneNamePerCommand(t *testing.T) {
+	m := helpModel(t, 100, 30)
+	seen := map[string]int{}
+	for _, l := range m.helpLines() {
+		if !l.heading() {
+			seen[l.desc]++
+		}
+	}
+	for desc, n := range seen {
+		if n > 1 {
+			t.Fatalf("%d rows say %q; a command belongs on one row", n, desc)
+		}
+	}
+	for _, gone := range []string{"/models", "/quit"} {
+		for _, l := range m.helpLines() {
+			if l.key == gone {
+				t.Fatalf("%s is not a command any more", gone)
+			}
+		}
+		if builtinNamed(strings.TrimPrefix(gone, "/")) {
+			t.Fatalf("%s is still a builtin", gone)
+		}
+	}
+}
+
+// TestHelpDialogClosesLikeTheOthers: Esc closes it, a click outside closes it,
+// and a card arriving takes it down with the rest of the stack.
+func TestHelpDialogClosesLikeTheOthers(t *testing.T) {
+	m := helpModel(t, 100, 30)
+	if out := pressKey(t, m, tea.KeyEsc); out.dialog != dialogNone {
+		t.Fatalf("esc left dialog=%v", out.dialog)
+	}
+	if out := clickXY(t, m, 0, m.lay.Dialog.Y); out.dialog != dialogNone {
+		t.Fatal("a press outside closes the help box")
+	}
+	// A press inside is inert: there is nothing in there to pick.
+	if out := clickXY(t, m, m.lay.Dialog.X+2, m.lay.Dialog.Y+2); out.dialog != dialogHelp {
+		t.Fatal("a press inside the help box must not close it")
+	}
+}
+
+// TestHelpAndTheOtherDialogsAreExclusive: one modal layer at a time, whichever
+// order they are opened in.
+func TestHelpAndTheOtherDialogsAreExclusive(t *testing.T) {
+	m := helpModel(t, 100, 30)
+	if got := m.openModelDialog(); got.dialog != dialogModel || got.helpTop != 0 {
+		t.Fatalf("/model over help left dialog=%v helpTop=%d", got.dialog, got.helpTop)
+	}
+	if got := m.openThemePicker(); got.dialog != dialogTheme {
+		t.Fatalf("/theme over help left dialog=%v", got.dialog)
+	}
+	back := m.openModelDialog().openHelp()
+	if back.dialog != dialogHelp || back.mdlg.filter.Value() != "" {
+		t.Fatalf("help over /model left dialog=%v filter=%q", back.dialog, back.mdlg.filter.Value())
 	}
 }

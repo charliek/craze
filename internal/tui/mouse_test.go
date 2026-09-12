@@ -300,7 +300,7 @@ func TestChipClickBlockedByOverlays(t *testing.T) {
 		name string
 		open func(*Model)
 	}{
-		{"help", func(m *Model) { m.help = true }},
+		{"help", func(m *Model) { *m = m.openHelp() }},
 		{"model dialog", func(m *Model) { *m = m.openModelDialog() }},
 		{"theme dialog", func(m *Model) { *m = m.openThemePicker() }},
 	} {

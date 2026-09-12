@@ -623,10 +623,10 @@ func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 // TestCardArrivalClosesTheHelpAndThePeek covers the rest of the stack.
 func TestCardArrivalClosesTheHelpAndThePeek(t *testing.T) {
 	m, stub := sizedCards(t)
-	m.help = true
+	m = m.openHelp()
 	m.agentPeek = true
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(true)})
-	if m.help || m.agentPeek {
-		t.Fatalf("a card closes the lower overlays: help=%v peek=%v", m.help, m.agentPeek)
+	if m.dialog == dialogHelp || m.agentPeek {
+		t.Fatalf("a card closes help and the peek: dialog=%v peek=%v", m.dialog, m.agentPeek)
 	}
 }

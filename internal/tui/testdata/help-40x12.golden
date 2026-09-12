@@ -1,9 +1,9 @@
   ╭──────────────────────────────────╮  
-  │model                             │  
-  │❯                                 │  
-  │  effort  low  [medium]  high     │  
-  │  fast  [off]  on                 │  
-  │type to filter · ↑↓ · tab effort/…│  
+  │help                              │  
+  │sending and editing               │  
+  │  enter             send the draft│  
+  │  alt+enter, ctrl+j newline (sh… ▼│  
+  │↑↓ · pgup/pgdn · esc closes       │  
   ╰──────────────────────────────────╯  
 ──────────────────────────────── craze ─
 ❯ message  / for commands               
