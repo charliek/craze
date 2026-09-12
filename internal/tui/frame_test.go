@@ -362,3 +362,127 @@ func TestRunFrameScriptRejectsBadScript(t *testing.T) {
 		t.Fatalf("got %T (%v), want *ScriptError", err, err)
 	}
 }
+
+// runFakeFrame drives a real Model against the scripted ACP server, which is
+// the only way a golden exercises the whole protocol-to-transcript path.
+func runFakeFrame(t *testing.T, script string, cols, rows int, keys string) string {
+	t.Helper()
+	bin := buildFakeAgent(t)
+	isolateSkillsHome(t)
+	ws := frameWorkspace(t)
+	sess := agent.New(agent.Options{
+		Binary:    bin,
+		ExtraArgs: []string{"-script=" + script},
+		Workspace: ws,
+		Force:     true,
+		Stderr:    io.Discard,
+	})
+	plain, _, err := RunFrameScript(Config{
+		Session:   sess,
+		Theme:     "tokyo-night",
+		Workspace: ws,
+		Yolo:      true,
+	}, cols, rows, keys, FrameOpts{Timeout: 15 * time.Second})
+	if err != nil {
+		t.Fatalf("run %s frame: %v", script, err)
+	}
+	return plain
+}
+
+func TestFrameGoldenMarkdown80x24(t *testing.T) {
+	got := runFakeFrame(t, "markdown", 80, 24, "<wait:idle>go<enter><wait:text:Inline><wait:idle>")
+	assertGolden(t, "markdown-80x24", 80, got)
+	if strings.ContainsAny(got, "`*") {
+		t.Fatalf("markdown markers reached the screen:\n%s", got)
+	}
+}
+
+func TestFrameGoldenMarkdown120x40(t *testing.T) {
+	got := runFakeFrame(t, "markdown", 120, 40, "<wait:idle>go<enter><wait:text:Inline><wait:idle>")
+	assertGolden(t, "markdown-120x40", 120, got)
+	for _, want := range []string{"+ Thought for ", "Heading", "• first item", "  │ go", "  │ func main() {"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "the shape of this reply") {
+		t.Fatalf("a collapsed thought must not show its text:\n%s", got)
+	}
+}
+
+func TestFrameGoldenThoughtExpanded120x40(t *testing.T) {
+	got := runFakeFrame(t, "markdown", 120, 40,
+		"<wait:idle>go<enter><wait:text:Inline><wait:idle><ctrl-o><wait:text:shape of this reply>")
+	assertGolden(t, "thought-expanded-120x40", 120, got)
+	if !strings.Contains(got, "+ Thought for ") {
+		t.Fatalf("the summary row stays above the expansion:\n%s", got)
+	}
+}
+
+func TestFrameGoldenDiff80x24(t *testing.T) {
+	got := runFakeFrame(t, "diff", 80, 24, "<wait:idle>go<enter><wait:text:done diff><wait:idle>")
+	assertGolden(t, "diff-80x24", 80, got)
+	for _, want := range []string{"✓ read  main.go", "✓ edit  main.go  +1 −1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "✓ edit") != 1 {
+		t.Fatalf("one row per tool call:\n%s", got)
+	}
+}
+
+func TestFrameGoldenDiffExpanded120x40(t *testing.T) {
+	got := runFakeFrame(t, "diff", 120, 40,
+		"<wait:idle>go<enter><wait:text:done diff><wait:idle><ctrl-o><wait:text:package main>")
+	assertGolden(t, "diff-expanded-120x40", 120, got)
+}
+
+func TestFrameGoldenBash80x24(t *testing.T) {
+	got := runFakeFrame(t, "bash", 80, 24, "<wait:idle>go<enter><wait:text:done bash><wait:idle>")
+	assertGolden(t, "bash-80x24", 80, got)
+	if !strings.Contains(got, "✓ bash  go vet ./...  exit 127") {
+		t.Fatalf("missing the exit code row:\n%s", got)
+	}
+	if !strings.Contains(got, "Command 'go' not found") {
+		t.Fatalf("missing the stderr preview:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTask80x24(t *testing.T) {
+	got := runFakeFrame(t, "task", 80, 24, "<wait:idle>go<enter><wait:text:done task><wait:idle>")
+	assertGolden(t, "task-80x24", 80, got)
+	if !strings.Contains(got, "✓ agent  Count main.go lines  8.0s · grok-4.6-high-fast") {
+		t.Fatalf("missing the completed agent row:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTaskLate80x24(t *testing.T) {
+	got := runFakeFrame(t, "task-late", 80, 24, "<wait:idle>go<enter><wait:text:done task><wait:idle>")
+	assertGolden(t, "task-late-80x24", 80, got)
+	if !strings.Contains(got, "✓ agent  Count main.go lines  8.0s · grok-4.6-high-fast") {
+		t.Fatalf("a receipt that arrived first must still join:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTasks80x24(t *testing.T) {
+	got := runFakeFrame(t, "tasks", 80, 24, "<wait:idle>go<enter><wait:text:done tasks><wait:idle>")
+	assertGolden(t, "tasks-80x24", 80, got)
+	if !strings.Contains(got, "✓ agent  Subagent research") {
+		t.Fatalf("the regex fallback should still make an agent row:\n%s", got)
+	}
+	if !strings.Contains(got, "✓ bash  echo hi") {
+		t.Fatalf("missing the shell row:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTodosHidesTheTodoTool(t *testing.T) {
+	got := runFakeFrame(t, "todos", 80, 24, "<wait:idle>go<enter><wait:text:done todos><wait:idle>")
+	assertGolden(t, "todos-notes-80x24", 80, got)
+	if strings.Contains(got, "Update TODOs") {
+		t.Fatalf("the todo writer reached the transcript:\n%s", got)
+	}
+	if !strings.Contains(got, "tasks: 3 planned") {
+		t.Fatalf("missing the todo note:\n%s", got)
+	}
+}

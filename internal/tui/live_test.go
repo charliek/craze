@@ -2,12 +2,15 @@ package tui
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,22 +165,52 @@ func drainEvents(t *testing.T, m Model, sess agent.Session) Model {
 	return m
 }
 
+// TestMain records the environment before any test rewrites HOME, so the one
+// fake-agent build below keeps the developer's warm build cache.
+func TestMain(m *testing.M) {
+	pristineEnv = os.Environ()
+	code := m.Run()
+	if fakeAgentDir != "" {
+		_ = os.RemoveAll(fakeAgentDir)
+	}
+	os.Exit(code)
+}
+
+var (
+	pristineEnv   []string
+	fakeAgentOnce sync.Once
+	fakeAgentDir  string
+	fakeAgentBin  string
+	fakeAgentErr  error
+)
+
+// buildFakeAgent builds the scripted ACP server once per test binary: several
+// suites spawn it and a rebuild per test dominates the run.
 func buildFakeAgent(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller")
+	fakeAgentOnce.Do(func() {
+		_, file, _, ok := runtime.Caller(0)
+		if !ok {
+			fakeAgentErr = errors.New("runtime.Caller")
+			return
+		}
+		root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+		fakeAgentDir, fakeAgentErr = os.MkdirTemp("", "craze-fake-agent")
+		if fakeAgentErr != nil {
+			return
+		}
+		fakeAgentBin = filepath.Join(fakeAgentDir, "craze-fake-agent-wire")
+		cmd := exec.Command("go", "build", "-o", fakeAgentBin, "./cmd/craze-fake-agent")
+		cmd.Dir = root
+		cmd.Env = pristineEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			fakeAgentErr = fmt.Errorf("build fake agent: %w\n%s", err, out)
+		}
+	})
+	if fakeAgentErr != nil {
+		t.Fatal(fakeAgentErr)
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "craze-fake-agent-wire")
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/craze-fake-agent")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build fake agent: %v\n%s", err, out)
-	}
-	return bin
+	return fakeAgentBin
 }
 
 func processRunning(bin string) bool {

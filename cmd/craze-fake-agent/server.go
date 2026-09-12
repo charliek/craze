@@ -711,7 +711,15 @@ const markdownReply = "## Heading\n\n" +
 	"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" +
 	"cccccccccccccccccccccccccccccccccccccccccccccccccc\n"
 
+// markdown also opens with a thought run: it is the only script that emits
+// agent_thought_chunk, so the collapse/expand path has something to show.
 func (s *server) markdown(id json.RawMessage) {
+	for _, part := range []string{"Let me think about ", "the shape of this reply."} {
+		s.update(fakeSessionID, acp.SessionUpdate{
+			SessionUpdate: acp.UpdateAgentThought,
+			Content:       &acp.ContentBlock{Type: "text", Text: part},
+		})
+	}
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: markdownReply},

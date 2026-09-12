@@ -1,10 +1,10 @@
-❯ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    
-  alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima     
-echo:                                                                           
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx        
-alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima       
+❯ go                                                                            
+✓ agent  Count main.go lines  8.0s · grok-4.6-high-fast                         
+done task                                                                       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +21,4 @@ alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-grok  medium  agent  yolo  ws  idle                                             
+default  medium  agent  yolo  ws  idle                                          

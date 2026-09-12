@@ -1,12 +1,12 @@
-❯ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    
-  alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima     
-echo:                                                                           
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx        
-alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima       
-                                                                                
-                                                                                
+❯ go                                                                            
+✓ read  main.go                                                                 
+✓ edit  main.go  +1 −1                                                          
+     4                                                                          
+     5   func main() {                                                          
+     6 -     fmt.Println("hello")                                               
+     6 +     fmt.Println("hello, world")                                        
+     7   }                                                                      
+done diff                                                                       
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +21,4 @@ alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-grok  medium  agent  yolo  ws  idle                                             
+default  medium  agent  yolo  ws  idle                                          

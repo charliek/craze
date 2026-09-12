@@ -25,7 +25,7 @@ Flags:
           bash        execute tool completing with exitCode 127
           task        sub-agent tool with a cursor/task receipt
           task-late   same, receipt sent before the tool_call
-          markdown    one reply exercising the markdown-lite renderer
+          markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
           effort      same as echo (session/new includes effort configOptions)
           permission  request allow_once / reject_once and wait for the client

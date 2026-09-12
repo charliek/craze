@@ -1,0 +1,24 @@
+Heading                                                                         
+                                                                                
+• first item                                                                    
+• second item                                                                   
+• third item                                                                    
+                                                                                
+  │ go                                                                          
+  │ func main() {                                                               
+  │     fmt.Println("hi")                                                       
+  │ }                                                                           
+                                                                                
+Inline code and bold together. Lorem ipsum dolor sit amet consectetur           
+adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna      
+aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi   
+ut aliquip ex ea commodo consequat duis aute.                                   
+                                                                                
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbb  
+bbbbbbbbbbbbbbbbbbbbbbcccccccccccccccccccccccccccccccccccccccccccccccccc        
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ message  / for commands                                                      │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+default  medium  agent  yolo  ws  idle                                          

@@ -13,7 +13,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -21,9 +20,6 @@ import (
 // ctrlCWindow is how long a Ctrl+C that cancelled a turn stays armed; a second
 // press inside it quits.
 const ctrlCWindow = time.Second
-
-// proseMaxWidth caps transcript wrapping so wide terminals stay readable.
-const proseMaxWidth = 100
 
 type status int
 
@@ -64,7 +60,10 @@ type Model struct {
 	status status
 	err    string
 
-	lines    []transcriptLine
+	entries  []entry
+	expanded bool
+	trimmed  bool
+	renders  int
 	width    int
 	height   int
 	ready    bool
@@ -84,11 +83,14 @@ type Model struct {
 	skills     []slashItem
 	streamOpen bool
 
-	toolLine  map[string]int
-	toolTouch []string
-	stripSel  int
-	stripID   string
-	stripPeek bool
+	toolLine    map[string]int
+	toolTouch   []string
+	pathDirs    map[string]map[string]struct{}
+	todoPlanned int
+	todoDone    bool
+	stripSel    int
+	stripID     string
+	stripPeek   bool
 
 	ctrlCDeadline time.Time
 	clock         func() time.Time
@@ -105,11 +107,6 @@ func (m Model) now() time.Time {
 // cardOpen reports whether a blocking card owns the keyboard. U0 only has the
 // permission line; question and plan cards land later.
 func (m Model) cardOpen() bool { return m.pending != nil }
-
-type transcriptLine struct {
-	kind string
-	text string
-}
 
 type eventMsg struct{ ev agent.Event }
 type startedMsg struct{}
@@ -193,11 +190,14 @@ func (m Model) startCmd() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Stickiness is decided before the viewport changes shape, so a resize
+		// while scrolled up does not jump to the bottom.
+		stick := !m.ready || m.vp.Height == 0 || m.vp.AtBottom()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
 		m.layout()
-		m.refreshViewport()
+		m.setViewportContent(stick)
 		return m, nil
 
 	case startedMsg:
@@ -210,16 +210,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.status = statusError
 		m.err = msg.err.Error()
-		m.addLine("error", m.err)
+		m.addError(m.err)
 		return m, nil
 
 	case actionErrMsg:
-		m.addLine("error", msg.err.Error())
+		m.addError(msg.err.Error())
 		return m, nil
 
 	case revertModeMsg:
 		m.snap.CurrentMode = msg.prev
-		m.addLine("error", msg.err.Error())
+		m.addError(msg.err.Error())
 		return m, nil
 
 	case revertModelMsg:
@@ -227,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.model = msg.prev
 		m.picking = false
 		m.effortStep = false
-		m.addLine("error", msg.err.Error())
+		m.addError(msg.err.Error())
 		return m, nil
 
 	case refreshSnapMsg:
@@ -239,11 +239,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitEvent(m.sess)
 
 	case promptDoneMsg:
-		m.breakStream()
+		// The stream is closed by EventDone, which shares the event channel with
+		// the chunks; this message races them and would split a run in two.
 		if msg.err != nil {
 			m.status = statusError
 			m.err = msg.err.Error()
-			m.addLine("error", m.err)
+			m.addError(m.err)
 			return m, nil
 		}
 		if m.status != statusError {
@@ -280,6 +281,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHelpKey(msg)
 	}
 
+	if msg.Type == tea.KeyCtrlO {
+		return m.toggleExpanded()
+	}
 	if msg.Type == tea.KeyShiftTab {
 		return m.cycleMode()
 	}
@@ -521,8 +525,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	}
 	m.input.SetValue("")
 	m.slashSel = 0
-	m.breakStream()
-	m.addLine("user", text)
+	m.addUser(text)
 	m.status = statusWorking
 	m.err = ""
 	sess := m.sess
@@ -571,18 +574,20 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 func (m *Model) applyEvent(ev agent.Event) {
 	switch ev.Type {
 	case agent.EventText:
-		m.appendStream("assistant", ev.Text)
+		m.appendStream(entryAssistant, ev.Text, ev.At)
 	case agent.EventThought:
-		m.appendStream("thought", ev.Text)
+		m.appendStream(entryThought, ev.Text, ev.At)
 	case agent.EventTool:
 		m.refreshSnap()
-		m.breakStream()
 		if ev.Tool != nil {
 			m.noteToolUpdate(ev.Tool.ID)
-			m.upsertToolLine(ev.Tool)
+			m.upsertTool(ev.Tool)
 		}
 		m.syncStrip()
 		m.layout()
+	case agent.EventTodos:
+		m.refreshSnap()
+		m.noteTodos(m.todosOf(ev))
 	case agent.EventPermission:
 		m.breakStream()
 		m.pending = ev.Permission
@@ -596,107 +601,31 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.status = statusIdle
 		}
 	case agent.EventError:
-		m.breakStream()
 		m.status = statusError
 		if ev.Err != nil {
 			m.err = ev.Err.Error()
-			m.addLine("error", m.err)
+			m.addError(m.err)
 		}
 	case agent.EventMeta:
 		m.refreshSnap()
 	}
 }
 
-func (m *Model) appendStream(kind, text string) {
-	if text == "" {
-		return
-	}
-	if m.streamOpen && len(m.lines) > 0 && m.lines[len(m.lines)-1].kind == kind {
-		m.lines[len(m.lines)-1].text += text
-		m.refreshViewport()
-		return
-	}
-	m.streamOpen = true
-	m.addLine(kind, text)
+// toggleExpanded is the global Ctrl+O detail toggle; every entry redraws
+// because the render key changed.
+func (m Model) toggleExpanded() (tea.Model, tea.Cmd) {
+	stick := m.vp.Height == 0 || m.vp.AtBottom()
+	m.expanded = !m.expanded
+	m.setViewportContent(stick)
+	return m, nil
 }
 
-func (m *Model) breakStream() {
-	m.streamOpen = false
-}
-
-func (m *Model) addLine(kind, text string) {
-	if text == "" && kind != "user" {
-		return
+// todosOf prefers the list the event carried and falls back to the snapshot.
+func (m Model) todosOf(ev agent.Event) []agent.Todo {
+	if len(ev.Todos) > 0 {
+		return ev.Todos
 	}
-	m.lines = append(m.lines, transcriptLine{kind: kind, text: text})
-	m.refreshViewport()
-}
-
-// formatToolLine renders one row per tool call. The id is deliberately absent:
-// cursor ids embed a literal newline, so they stay map keys only.
-func formatToolLine(t *agent.ToolEvent) string {
-	if t == nil {
-		return ""
-	}
-	parts := make([]string, 0, 3)
-	if t.Kind != "" {
-		parts = append(parts, t.Kind)
-	}
-	if t.Status != "" {
-		parts = append(parts, t.Status)
-	}
-	if t.Title != "" {
-		parts = append(parts, t.Title)
-	}
-	s := strings.Join(parts, " ")
-	if t.RawInput != "" {
-		s += " (" + t.RawInput + ")"
-	}
-	return sanitizeLine(s)
-}
-
-// sanitizeLine folds a string onto one line: control characters become spaces
-// and runs of whitespace collapse. Full ingestion-side sanitising lands later.
-func sanitizeLine(s string) string {
-	if s == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n' || r == '\r' || r == '\t':
-			b.WriteByte(' ')
-		case r < 0x20 || r == 0x7f:
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return strings.Join(strings.Fields(b.String()), " ")
-}
-
-func (m *Model) upsertToolLine(t *agent.ToolEvent) {
-	if t == nil {
-		return
-	}
-	text := formatToolLine(t)
-	if text == "" {
-		return
-	}
-	if t.ID != "" && m.toolLine != nil {
-		if idx, ok := m.toolLine[t.ID]; ok && idx >= 0 && idx < len(m.lines) && m.lines[idx].kind == "tool" {
-			m.lines[idx].text = text
-			m.refreshViewport()
-			return
-		}
-	}
-	m.addLine("tool", text)
-	if t.ID != "" {
-		if m.toolLine == nil {
-			m.toolLine = make(map[string]int)
-		}
-		m.toolLine[t.ID] = len(m.lines) - 1
-	}
+	return m.snap.Todos
 }
 
 func (m *Model) refreshSnap() {
@@ -740,60 +669,6 @@ func (m *Model) layout() {
 	m.vp.Width = m.width
 	m.vp.Height = h
 	m.input.SetWidth(max(1, m.width-4))
-}
-
-// wrapProse word-wraps and then hard-wraps, so an unbroken token longer than
-// the terminal is broken instead of being cut by the viewport.
-func wrapProse(s string, width int) string {
-	if width <= 0 {
-		return s
-	}
-	w := width - 2
-	if w > proseMaxWidth {
-		w = proseMaxWidth
-	}
-	if w < 1 {
-		w = 1
-	}
-	return ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
-}
-
-func (m *Model) refreshViewport() {
-	stick := m.vp.Height == 0 || m.vp.AtBottom()
-	var b strings.Builder
-	for _, ln := range m.lines {
-		var st lipgloss.Style
-		text := ln.text
-		switch ln.kind {
-		case "user":
-			st = lipgloss.NewStyle().Foreground(m.theme.User)
-			text = "you: " + text
-		case "tool":
-			st = lipgloss.NewStyle().Foreground(m.theme.Tool)
-			text = "tool " + text
-		case "error":
-			st = lipgloss.NewStyle().Foreground(m.theme.Err)
-			text = "error: " + text
-		case "thought":
-			st = lipgloss.NewStyle().Foreground(m.theme.Dim).Italic(true)
-		default:
-			st = lipgloss.NewStyle().Foreground(m.theme.Assistant)
-		}
-		if ln.kind == "tool" {
-			// One tool call is one row; long titles are clipped, never wrapped.
-			if m.width > 0 {
-				text = clampWidth(text, m.width)
-			}
-		} else {
-			text = wrapProse(text, m.width)
-		}
-		b.WriteString(st.Render(text))
-		b.WriteByte('\n')
-	}
-	m.vp.SetContent(strings.TrimRight(b.String(), "\n"))
-	if stick {
-		m.vp.GotoBottom()
-	}
 }
 
 func (m Model) View() string {

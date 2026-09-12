@@ -202,27 +202,3 @@ func formatStripPeek(t agent.ToolEvent, width int) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
-func clampWidth(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	if w == 1 {
-		return "…"
-	}
-	var b strings.Builder
-	used := 0
-	limit := w - 1
-	for _, r := range s {
-		rw := lipgloss.Width(string(r))
-		if used+rw > limit {
-			break
-		}
-		b.WriteRune(r)
-		used += rw
-	}
-	return b.String() + "…"
-}

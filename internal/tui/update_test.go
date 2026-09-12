@@ -104,7 +104,7 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt cmd")
 	}
-	if got := strings.Join(texts(m, "user"), ""); got != "hello" {
+	if got := strings.Join(texts(m, entryUser), ""); got != "hello" {
 		t.Fatalf("user %q", got)
 	}
 	tm, cmd = m.Update(enter())
@@ -180,7 +180,7 @@ func TestTypingQuickDoesNotQuit(t *testing.T) {
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("quick question should send")
 	}
-	if got := strings.Join(texts(m, "user"), ""); got != "quick question" {
+	if got := strings.Join(texts(m, entryUser), ""); got != "quick question" {
 		t.Fatalf("user %q", got)
 	}
 }
@@ -283,7 +283,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 		if msg := cmd(); msg != nil {
 			t.Fatalf("cancel cmd returned %T %v", msg, msg)
 		}
-		if got := texts(m, "error"); len(got) != 0 {
+		if got := texts(m, entryError); len(got) != 0 {
 			t.Fatalf("cancel painted error rows %q", got)
 		}
 	})
@@ -419,7 +419,7 @@ func TestPermissionOverlayPinnedKeys(t *testing.T) {
 func TestTranscriptPageUpStaysPut(t *testing.T) {
 	m := sized(t)
 	for i := 0; i < 60; i++ {
-		m.addLine("assistant", fmt.Sprintf("line-%02d padding so the transcript is taller than the viewport", i))
+		m.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("line-%02d padding so the transcript is taller than the viewport", i)})
 	}
 	if m.vp.YOffset == 0 {
 		t.Fatal("expected stick-to-bottom to leave a non-zero YOffset")
@@ -431,7 +431,7 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 		t.Fatalf("page up did not scroll: YOffset %d (bottom %d)", m.vp.YOffset, bottom)
 	}
 	scrolled := m.vp.YOffset
-	m.addLine("assistant", "new-line-while-scrolled-up")
+	m.appendEntry(entry{kind: entryAssistant, text: "new-line-while-scrolled-up"})
 	if m.vp.YOffset != scrolled {
 		t.Fatalf("new lines jumped the viewport while scrolled up: %d -> %d", scrolled, m.vp.YOffset)
 	}
@@ -449,11 +449,23 @@ func TestPresets(t *testing.T) {
 	}
 }
 
-func texts(m Model, kind string) []string {
+func texts(m Model, kind entryKind) []string {
 	var out []string
-	for _, ln := range m.lines {
-		if ln.kind == kind {
-			out = append(out, ln.text)
+	for _, e := range m.entries {
+		if e.kind == kind {
+			out = append(out, e.text)
+		}
+	}
+	return out
+}
+
+// toolRows is what the transcript actually draws for each tool call, one entry
+// per element and its rendered rows joined.
+func toolRows(m Model) []string {
+	var out []string
+	for _, e := range m.entries {
+		if e.kind == entryTool {
+			out = append(out, strings.Join(e.rendered, "\n"))
 		}
 	}
 	return out
@@ -495,7 +507,7 @@ func TestCoalesceStreamChunks(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "ONG"}})
 	m = tm.(Model)
-	got := texts(m, "assistant")
+	got := texts(m, entryAssistant)
 	if len(got) != 1 || got[0] != "PONG" {
 		t.Fatalf("coalesce %q", got)
 	}
@@ -506,7 +518,7 @@ func TestCoalesceStreamChunks(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "next"}})
 	m = tm.(Model)
-	got = texts(m, "assistant")
+	got = texts(m, entryAssistant)
 	if len(got) != 2 || got[1] != "next" {
 		t.Fatalf("EventDone should break stream, got %q", got)
 	}
@@ -518,7 +530,7 @@ func TestThoughtsCoalesceSeparately(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "ink"}})
 	m = tm.(Model)
-	got := texts(m, "thought")
+	got := texts(m, entryThought)
 	if len(got) != 1 || got[0] != "think" {
 		t.Fatalf("thoughts %q", got)
 	}
@@ -639,7 +651,7 @@ func TestAdvertisedSlashSendsPrompt(t *testing.T) {
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("/research should send a prompt")
 	}
-	if got := strings.Join(texts(m, "user"), ""); got != "/research" {
+	if got := strings.Join(texts(m, entryUser), ""); got != "/research" {
 		t.Fatalf("user %q", got)
 	}
 }
@@ -652,7 +664,7 @@ func TestUnknownSlashSendsAsPrompt(t *testing.T) {
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("unknown slash should send as prompt")
 	}
-	if got := strings.Join(texts(m, "user"), ""); got != "/hepl" {
+	if got := strings.Join(texts(m, entryUser), ""); got != "/hepl" {
 		t.Fatalf("user %q", got)
 	}
 }
@@ -778,7 +790,7 @@ func TestToolRowsStayOneRow(t *testing.T) {
 		Title:  "Shell\x1b]0;x\x07 go vet\n./...",
 	}}})
 	m = tm.(Model)
-	got := texts(m, "tool")
+	got := toolRows(m)
 	if len(got) != 1 {
 		t.Fatalf("tool lines %q", got)
 	}
@@ -787,6 +799,9 @@ func TestToolRowsStayOneRow(t *testing.T) {
 	}
 	if strings.Contains(got[0], "fc_123") {
 		t.Fatalf("tool id must never be rendered: %q", got[0])
+	}
+	if strings.Contains(got[0], "]0;x") {
+		t.Fatalf("injected escape sequence survived: %q", got[0])
 	}
 	for _, tool := range []agent.ToolEvent{
 		{ID: "sh-1", Kind: "execute", Status: "in_progress\nextra", Title: "Shell\nmore"},
@@ -943,7 +958,7 @@ func TestSetConfigFailAfterModel(t *testing.T) {
 	if strings.Contains(view, "grok  high") {
 		t.Fatalf("effort should not become high:\n%s", view)
 	}
-	if len(texts(m, "error")) == 0 {
+	if len(texts(m, entryError)) == 0 {
 		t.Fatal("expected error toast")
 	}
 }
@@ -976,7 +991,7 @@ func TestSetModelFailNoEffortOverlay(t *testing.T) {
 	if !strings.Contains(view, "grok  medium  agent  yolo") {
 		t.Fatalf("footer should be unchanged:\n%s", view)
 	}
-	if len(texts(m, "error")) == 0 {
+	if len(texts(m, entryError)) == 0 {
 		t.Fatal("expected error toast")
 	}
 }
@@ -1011,7 +1026,7 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	if m.snap.CurrentMode != "agent" {
 		t.Fatalf("mode should revert, got %q", m.snap.CurrentMode)
 	}
-	if len(texts(m, "error")) == 0 {
+	if len(texts(m, entryError)) == 0 {
 		t.Fatal("expected error toast")
 	}
 }
@@ -1090,22 +1105,18 @@ func TestInPlaceToolLineSameID(t *testing.T) {
 		ID: "call-1", Kind: "execute", Status: "completed", Title: "Shell", RawInput: "echo hi",
 	}}})
 	m = tm.(Model)
-	got := texts(m, "tool")
+	got := toolRows(m)
 	if len(got) != 1 {
 		t.Fatalf("tool lines %q", got)
 	}
-	if !strings.Contains(got[0], "completed") {
+	if !strings.HasPrefix(got[0], "✓ bash") {
 		t.Fatalf("final status missing: %q", got[0])
 	}
-	if strings.Contains(got[0], "pending") {
-		t.Fatalf("stale pending status: %q", got[0])
+	if !strings.Contains(got[0], "echo hi") {
+		t.Fatalf("command missing: %q", got[0])
 	}
-	view := m.View()
-	if strings.Contains(view, "tool tool") {
-		t.Fatalf("renderer prefixed tool twice:\n%s", view)
-	}
-	if !strings.Contains(view, "tool ") {
-		t.Fatalf("missing tool prefix:\n%s", view)
+	if !strings.Contains(m.View(), "✓ bash  echo hi") {
+		t.Fatalf("row missing from the view:\n%s", m.View())
 	}
 }
 
@@ -1291,27 +1302,30 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 		ID: "old-1", Kind: "execute", Status: "pending", Title: "Shell",
 	}}})
 	m = tm.(Model)
-	if len(texts(m, "tool")) != 1 {
-		t.Fatalf("setup lines %q", texts(m, "tool"))
+	if len(toolRows(m)) != 1 {
+		t.Fatalf("setup lines %q", toolRows(m))
 	}
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.lines) != 0 {
-		t.Fatalf("clear left lines %+v", m.lines)
+	if len(m.entries) != 0 {
+		t.Fatalf("clear left entries %+v", m.entries)
 	}
 	if len(m.toolLine) != 0 {
 		t.Fatalf("clear left toolLine %+v", m.toolLine)
+	}
+	if len(m.pathDirs) != 0 || m.trimmed {
+		t.Fatalf("clear left the path cache %+v (trimmed=%v)", m.pathDirs, m.trimmed)
 	}
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID: "old-1", Kind: "execute", Status: "completed", Title: "Shell",
 	}}})
 	m = tm.(Model)
-	got := texts(m, "tool")
+	got := toolRows(m)
 	if len(got) != 1 {
 		t.Fatalf("expected one new tool row, got %q", got)
 	}
-	if !strings.Contains(got[0], "completed") {
+	if !strings.HasPrefix(got[0], "✓ bash") {
 		t.Fatalf("new row %q", got[0])
 	}
 }

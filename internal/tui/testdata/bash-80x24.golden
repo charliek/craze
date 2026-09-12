@@ -1,10 +1,10 @@
-❯ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    
-  alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima     
-echo:                                                                           
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx        
-alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima       
+❯ go                                                                            
+✓ bash  go vet ./...  exit 127                                                  
+  Command 'go' not found, but can be installed with:                            
+done bash                                                                       
+                                                                                
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +21,4 @@ alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-grok  medium  agent  yolo  ws  idle                                             
+default  medium  agent  yolo  ws  idle                                          

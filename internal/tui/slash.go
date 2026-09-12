@@ -132,10 +132,8 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		m.input.SetValue("")
 		return m.requestQuit()
 	case "clear":
-		m.lines = nil
-		m.toolLine = nil
 		m.input.SetValue("")
-		m.refreshViewport()
+		m.clearTranscript()
 		return m, nil
 	case "model", "models":
 		if args == "" {
@@ -156,7 +154,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		id, err := agent.MatchModel(m.snap, modelArg)
 		if err != nil {
 			m.input.SetValue("")
-			m.addLine("error", err.Error())
+			m.addError(err.Error())
 			return m, nil
 		}
 		return m.applyModelEffort(id, effortArg)
@@ -164,7 +162,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		m.input.SetValue("")
 		id, ok := agent.ResolveMode(name, modeIDs(m.snap.Modes))
 		if !ok {
-			m.addLine("error", "mode "+name+" is not advertised")
+			m.addError("mode " + name + " is not advertised")
 			return m, nil
 		}
 		return m.applyMode(id)
@@ -186,6 +184,7 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	m.snap.CurrentMode = id
+	m.addNote("mode → " + id)
 	sess := m.sess
 	return m, func() tea.Msg {
 		if err := sess.SetMode(context.Background(), id); err != nil {

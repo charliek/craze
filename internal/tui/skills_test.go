@@ -113,7 +113,7 @@ description: Disk demo skill
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("/demo should send a prompt")
 	}
-	got := strings.Join(texts(m, "user"), "")
+	got := strings.Join(texts(m, entryUser), "")
 	if got != "/demo" {
 		t.Fatalf("user %q", got)
 	}
@@ -128,7 +128,7 @@ description: Disk demo skill
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("/demo args should send a prompt")
 	}
-	if got := strings.Join(texts(m, "user"), ""); got != "/demo args" {
+	if got := strings.Join(texts(m, entryUser), ""); got != "/demo args" {
 		t.Fatalf("user %q", got)
 	}
 }
@@ -162,7 +162,7 @@ description: disk research skill
 	if m.status != statusWorking || cmd == nil {
 		t.Fatal("/research should send a prompt")
 	}
-	if got := strings.Join(texts(m, "user"), ""); got != "/research" {
+	if got := strings.Join(texts(m, entryUser), ""); got != "/research" {
 		t.Fatalf("user %q", got)
 	}
 }
