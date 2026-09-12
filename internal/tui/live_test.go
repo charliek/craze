@@ -15,6 +15,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -51,8 +53,8 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	m = drainEvents(t, m, sess)
 	tm, _ = m.Update(doneMsg)
 	m = tm.(Model)
-	if !strings.Contains(m.View(), "first reply") {
-		t.Fatalf("missing first stream chunk:\n%s", m.View())
+	if !strings.Contains(plainView(m), "first reply") {
+		t.Fatalf("missing first stream chunk:\n%s", plainView(m))
 	}
 
 	m.input.SetValue("two")
@@ -62,8 +64,8 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	m = drainEvents(t, m, sess)
 	tm, _ = m.Update(doneMsg)
 	m = tm.(Model)
-	if !strings.Contains(m.View(), "second reply") {
-		t.Fatalf("missing follow-up:\n%s", m.View())
+	if !strings.Contains(plainView(m), "second reply") {
+		t.Fatalf("missing follow-up:\n%s", plainView(m))
 	}
 
 	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
@@ -166,9 +168,13 @@ func drainEvents(t *testing.T, m Model, sess agent.Session) Model {
 }
 
 // TestMain records the environment before any test rewrites HOME, so the one
-// fake-agent build below keeps the developer's warm build cache.
+// fake-agent build below keeps the developer's warm build cache. It also forces
+// a true-colour profile: `go test` has no TTY, so lipgloss would otherwise
+// render every theme as no colour at all and the raw-ANSI assertions in
+// theme_test.go would pass against an empty palette.
 func TestMain(m *testing.M) {
 	pristineEnv = os.Environ()
+	lipgloss.SetColorProfile(termenv.TrueColor)
 	code := m.Run()
 	if fakeAgentDir != "" {
 		_ = os.RemoveAll(fakeAgentDir)

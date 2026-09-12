@@ -32,6 +32,7 @@ func builtinSlash() []slashItem {
 		{Name: "models", Desc: "Switch model", Builtin: true},
 		{Name: "clear", Desc: "Clear transcript", Builtin: true},
 		{Name: "tasks", Desc: "Tasks panel: compact, expanded, hidden", Builtin: true},
+		{Name: "theme", Desc: "Theme picker, or /theme <name>", Builtin: true},
 		{Name: "plan", Desc: "Set plan mode", Builtin: true},
 		{Name: "ask", Desc: "Set ask mode", Builtin: true},
 		{Name: "agent", Desc: "Set agent mode", Builtin: true},
@@ -139,6 +140,12 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "tasks":
 		m.input.SetValue("")
 		return m.cycleTasks()
+	case "theme":
+		m.input.SetValue("")
+		if args == "" {
+			return m.openThemePicker(), nil
+		}
+		return m.setThemeNamed(args), nil
 	case "model", "models":
 		if args == "" {
 			m.picking = true

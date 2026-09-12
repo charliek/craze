@@ -64,7 +64,7 @@ func TestTasksPanelAppearsOnFirstTodoEvent(t *testing.T) {
 		t.Fatal("no panel before the first todo event")
 	}
 	m = sendTodos(t, m, stub, openTodos())
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "TASKS 0/3") {
 		t.Fatalf("missing the compact header:\n%s", view)
 	}
@@ -90,7 +90,7 @@ func TestTasksCompactCapsRowsAndFoldsClosed(t *testing.T) {
 	if got := m.lay.TasksRows; got != tasksCompactRows {
 		t.Fatalf("compact body is %d rows, want %d", got, tasksCompactRows)
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "TASKS 1/7") {
 		t.Fatalf("closed items fold into the count:\n%s", view)
 	}
@@ -112,7 +112,7 @@ func TestTasksCycleCompactExpandedHidden(t *testing.T) {
 	if m.tasksState != tasksExpanded {
 		t.Fatalf("ctrl+t once: %v", m.tasksState)
 	}
-	if view := m.View(); !strings.Contains(view, "Write it up") {
+	if view := plainView(m); !strings.Contains(view, "Write it up") {
 		t.Fatalf("expanded lists completed items:\n%s", view)
 	}
 
@@ -121,7 +121,7 @@ func TestTasksCycleCompactExpandedHidden(t *testing.T) {
 	if m.tasksState != tasksHidden || m.tasksPanelVisible() {
 		t.Fatalf("ctrl+t twice: %v", m.tasksState)
 	}
-	if view := m.View(); strings.Contains(view, "TASKS") {
+	if view := plainView(m); strings.Contains(view, "TASKS") {
 		t.Fatalf("hidden panel still drawn:\n%s", view)
 	}
 
@@ -159,7 +159,7 @@ func TestTasksHiddenPersistsThroughNewLists(t *testing.T) {
 	if len(m.snap.Todos) != 2 || m.snap.Todos[0].Content != "A whole new plan" {
 		t.Fatalf("hidden panel should still take the data: %+v", m.snap.Todos)
 	}
-	if view := m.View(); strings.Contains(view, "A whole new plan") {
+	if view := plainView(m); strings.Contains(view, "A whole new plan") {
 		t.Fatalf("hidden panel drew a row:\n%s", view)
 	}
 }
@@ -169,7 +169,7 @@ func TestTasksLingerHidesAfterTenSeconds(t *testing.T) {
 	m = sendTodos(t, m, stub, openTodos())
 	m = sendTodos(t, m, stub, closedTodos())
 
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "TASKS 3/3 ✓") {
 		t.Fatalf("a finished list shows the tick:\n%s", view)
 	}
@@ -191,7 +191,7 @@ func TestTasksLingerHidesAfterTenSeconds(t *testing.T) {
 	if m.tasksPanelVisible() {
 		t.Fatal("the panel should be gone once the linger expired")
 	}
-	if view := m.View(); strings.Contains(view, "TASKS") {
+	if view := plainView(m); strings.Contains(view, "TASKS") {
 		t.Fatalf("expired panel still drawn:\n%s", view)
 	}
 	if m.tasksLingering() {
@@ -224,6 +224,6 @@ func TestTasksReopenCancelsTheLinger(t *testing.T) {
 	*now = now.Add(2 * tasksLinger)
 	m = beat(t, m)
 	if !m.tasksPanelVisible() {
-		t.Fatalf("the panel should stay while work is open:\n%s", m.View())
+		t.Fatalf("the panel should stay while work is open:\n%s", plainView(m))
 	}
 }

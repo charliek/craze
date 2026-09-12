@@ -157,6 +157,24 @@ func runStubFrame(t *testing.T, cols, rows int, script string) string {
 	return plain
 }
 
+// runThemeFrame is runStubFrame with the theme named explicitly and the raw
+// frame kept, so a test can assert on the palette and not only on the text.
+func runThemeFrame(t *testing.T, cols, rows int, theme, script string) (string, string) {
+	t.Helper()
+	isolateSkillsHome(t)
+	plainOut, raw, err := RunFrameScript(Config{
+		Session:   NewStub(),
+		Theme:     theme,
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second, ANSI: true})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
+	return plainOut, raw
+}
+
 func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	t.Helper()
 	for _, ln := range strings.Split(got, "\n") {
@@ -556,5 +574,37 @@ func TestFrameGoldenStatus60x24(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestFrameGoldenThemePicker100x30 runs the picker through the real program:
+// the names-only list, and the palette changing under the cursor before Enter
+// has been pressed.
+func TestFrameGoldenThemePicker100x30(t *testing.T) {
+	got, raw := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g>")
+	assertGolden(t, "theme-picker-100x30", 100, 30, got)
+	for _, want := range ThemeNames() {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the picker should list %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(raw, ansiFG("#e8a33d")) {
+		t.Fatal("the craze-dark accent is missing from the raw frame")
+	}
+
+	// Six moves down the frozen list reach gruvbox; the screen is re-themed on
+	// the way, with nothing written to disk yet.
+	_, moved := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g><down><down><down><down><down><down>")
+	if !strings.Contains(moved, ansiFG("#fabd2f")) {
+		t.Fatal("moving the cursor did not repaint the frame in gruvbox")
+	}
+	if strings.Contains(moved, ansiFG("#e8a33d")) {
+		t.Fatal("the craze-dark accent survived the live preview")
+	}
+
+	// Esc puts the palette back.
+	_, reverted := runThemeFrame(t, 100, 30, "craze-dark", "<wait:idle><ctrl-g><down><esc>")
+	if !strings.Contains(reverted, ansiFG("#e8a33d")) {
+		t.Fatal("esc did not restore the craze-dark accent")
 	}
 }

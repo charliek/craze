@@ -47,7 +47,7 @@ description: %s
 	m.input.SetValue("/help")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	view := m.View()
+	view := plainView(m)
 	if h := lipgloss.Height(view); h > 24 {
 		t.Fatalf("help view is %d rows with disk skills:\n%s", h, view)
 	}
@@ -84,7 +84,7 @@ body must not be injected
 	if !m.help {
 		t.Fatal("expected help overlay")
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "/demo") {
 		t.Fatalf("help missing /demo:\n%s", view)
 	}

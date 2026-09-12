@@ -80,13 +80,13 @@ func (m Model) spinnerView() string {
 	glyph := m.spinnerGlyph() + " "
 	if m.cardOpen() {
 		return renderSegs(m.width,
-			seg{glyph, styleFG(m.theme.Title)},
+			seg{glyph, styleFG(m.theme.Accent)},
 			seg{"Waiting for your answer", styleFG(m.theme.Warn)},
 		)
 	}
 	text := m.spinnerActivity() + " · " + m.turnElapsed() + " · esc to interrupt"
 	return renderSegs(m.width,
-		seg{glyph, styleFG(m.theme.Title)},
+		seg{glyph, styleFG(m.theme.Accent)},
 		seg{sanitizeLine(text), styleFG(m.theme.Dim)},
 	)
 }

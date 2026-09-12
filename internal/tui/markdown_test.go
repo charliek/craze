@@ -10,10 +10,11 @@ import (
 func mdLines(t *testing.T, text string, width int) []string {
 	t.Helper()
 	out := renderMarkdown(text, width, Preset("tokyo-night"))
-	for _, ln := range out {
+	for i, ln := range out {
 		if w := lipgloss.Width(ln); w > width {
 			t.Fatalf("line is %d wide, limit is %d: %q", w, width, ln)
 		}
+		out[i] = plain(ln)
 	}
 	return out
 }

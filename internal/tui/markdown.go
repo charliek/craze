@@ -109,7 +109,7 @@ func (r *mdRenderer) flush() {
 
 func (r *mdRenderer) heading(ln string) {
 	mt := headingRe.FindStringSubmatch(ln)
-	st := lipgloss.NewStyle().Foreground(r.th.Title).Bold(true)
+	st := lipgloss.NewStyle().Foreground(r.th.Accent).Bold(true)
 	r.push("", inlineMarkdown(strings.TrimSpace(mt[2]), r.th), st)
 }
 
@@ -196,7 +196,7 @@ func isRule(s string) bool {
 // inlineMarkdown styles `code`, **bold** and *italic* / _italic_ spans. A
 // marker without its partner on the same line is left as typed.
 func inlineMarkdown(s string, th Theme) string {
-	code := styleFG(th.Tool)
+	code := styleFG(th.ToolKind)
 	bold := lipgloss.NewStyle().Bold(true)
 	italic := lipgloss.NewStyle().Italic(true)
 	boldItalic := lipgloss.NewStyle().Bold(true).Italic(true)

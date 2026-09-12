@@ -103,6 +103,15 @@ type Model struct {
 	effortStep bool
 	modelSel   int
 	effortSel  int
+
+	// Theme picker: the list is frozen when it opens because the live preview
+	// changes the current theme on every move, and themePrev is the theme Esc
+	// (or an arriving card) puts back.
+	themePicking bool
+	themeSel     int
+	themeNames   []string
+	themePrev    Theme
+
 	slashSel   int
 	slashHide  bool
 	skills     []slashItem
@@ -367,6 +376,12 @@ func (m Model) handleClick(y int) (tea.Model, tea.Cmd) {
 		if i := lay.Region(regionOverlay).Row(y) - pickerHeaderRows; i >= 0 {
 			return m.applyPickerIndex(i)
 		}
+	case m.themePicking && lay.Region(regionOverlay).Contains(y):
+		if i := lay.Region(regionOverlay).Row(y) - pickerHeaderRows; i >= 0 && i < len(m.themeNames) {
+			m.themeSel = i
+			m.applyTheme(Preset(m.themeNames[i]))
+			return m.keepTheme(), nil
+		}
 	case lay.Region(regionTasks).Contains(y):
 		if lay.Region(regionTasks).Row(y) == 0 {
 			return m.cycleTasks()
@@ -394,6 +409,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePermissionKey(msg)
 	}
 
+	if m.themePicking {
+		return m.handleThemePickerKey(msg)
+	}
 	if m.picking {
 		return m.handleModelPickerKey(msg)
 	}
@@ -406,6 +424,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.Type == tea.KeyCtrlT {
 		return m.cycleTasks()
+	}
+	if msg.Type == tea.KeyCtrlG {
+		return m.openThemePicker(), nil
 	}
 	if msg.Type == tea.KeyShiftTab {
 		return m.cycleMode()
@@ -722,6 +743,9 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.help = false
 		m.picking = false
 		m.effortStep = false
+		// A card owns the screen, so the lower overlays close — and the theme
+		// picker takes its live preview back out with it.
+		*m = m.closeThemePicker(true)
 	case agent.EventDone:
 		m.breakStream()
 		// The turn is over, so this is the one moment the branch can have
@@ -801,6 +825,8 @@ func (m Model) overlayView() string {
 	switch {
 	case m.help:
 		return m.helpView()
+	case m.themePicking:
+		return m.themePickerView()
 	case m.picking:
 		return m.modelPickerView()
 	case m.slashMenuOpen():
@@ -830,7 +856,7 @@ func (m Model) slashMenuView() string {
 		line := fmt.Sprintf("/%s  %s", it.Name, it.labeledDesc())
 		st := lipgloss.NewStyle().Foreground(m.theme.Dim)
 		if i == m.slashSel {
-			st = lipgloss.NewStyle().Foreground(m.theme.Title)
+			st = lipgloss.NewStyle().Foreground(m.theme.Accent)
 		}
 		b.WriteString(st.Render(line))
 		b.WriteByte('\n')
@@ -842,7 +868,7 @@ func (m Model) helpView() string {
 	lines := []string{
 		"enter send   shift/alt+enter or ctrl+j newline   shift+tab cycle mode",
 		"esc cancel   ctrl+c cancel then quit   ctrl+d quit   pgup/pgdn scroll",
-		"ctrl+t tasks panel   ctrl+o expand detail",
+		"ctrl+t tasks panel   ctrl+g theme   ctrl+o expand detail",
 		"commands:",
 	}
 	for _, it := range m.slashCatalog() {
@@ -850,7 +876,7 @@ func (m Model) helpView() string {
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Title).
+		BorderForeground(m.theme.Accent).
 		Width(max(1, m.width-2)).
 		Render(strings.Join(lines, "\n"))
 }
@@ -881,7 +907,7 @@ func (m Model) modelPickerView() string {
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Title).
+		BorderForeground(m.theme.Accent).
 		Width(max(1, m.width-2)).
 		Render(strings.TrimRight(b.String(), "\n"))
 }

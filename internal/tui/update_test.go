@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -16,6 +17,13 @@ func isolateSkillsHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 }
+
+// plainView is the frame as text. TestMain forces a true-colour profile so the
+// theme tests can assert on real escape sequences, which means every other
+// assertion has to strip them first.
+func plainView(m Model) string { return plain(m.View()) }
+
+func plain(s string) string { return ansi.Strip(s) }
 
 func sized(t *testing.T) Model {
 	t.Helper()
@@ -60,7 +68,7 @@ func runCmd(cmd tea.Cmd) tea.Msg {
 
 func TestViewStatusRowsAndComposer(t *testing.T) {
 	m := sized(t)
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, chipYolo) {
 		t.Fatalf("missing the permission chip:\n%s", view)
 	}
@@ -81,7 +89,7 @@ func TestStatusStartingBeforeStart(t *testing.T) {
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "starting…") {
 		t.Fatalf("missing starting:\n%s", view)
 	}
@@ -132,8 +140,8 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 	if m.status != statusIdle {
 		t.Fatalf("status %s after done", m.status)
 	}
-	if !strings.Contains(m.View(), "echo: hello") {
-		t.Fatalf("missing assistant text:\n%s", m.View())
+	if !strings.Contains(plainView(m), "echo: hello") {
+		t.Fatalf("missing assistant text:\n%s", plainView(m))
 	}
 
 	m.input.SetValue("again")
@@ -146,8 +154,8 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
 	m = tm.(Model)
-	if !strings.Contains(m.View(), "follow-up: again") {
-		t.Fatalf("missing follow-up:\n%s", m.View())
+	if !strings.Contains(plainView(m), "follow-up: again") {
+		t.Fatalf("missing follow-up:\n%s", plainView(m))
 	}
 }
 
@@ -369,8 +377,8 @@ func TestPermissionOverlayKeys(t *testing.T) {
 	if m.pending == nil {
 		t.Fatal("expected overlay")
 	}
-	if !strings.Contains(m.View(), "permission Shell") {
-		t.Fatalf("missing overlay:\n%s", m.View())
+	if !strings.Contains(plainView(m), "permission Shell") {
+		t.Fatalf("missing overlay:\n%s", plainView(m))
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m = tm.(Model)
@@ -449,18 +457,6 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 	}
 }
 
-func TestPresets(t *testing.T) {
-	if Preset("tokyo-night").Name != "tokyo-night" {
-		t.Fatal("default")
-	}
-	if Preset("dark").Name != "dark" || Preset("light").Name != "light" {
-		t.Fatal("named presets")
-	}
-	if Preset("unknown").Name != "tokyo-night" {
-		t.Fatal("unknown should fall back")
-	}
-}
-
 func texts(m Model, kind entryKind) []string {
 	var out []string
 	for _, e := range m.entries {
@@ -477,7 +473,7 @@ func toolRows(m Model) []string {
 	var out []string
 	for _, e := range m.entries {
 		if e.kind == entryTool {
-			out = append(out, strings.Join(e.rendered, "\n"))
+			out = append(out, plain(strings.Join(e.rendered, "\n")))
 		}
 	}
 	return out
@@ -523,8 +519,8 @@ func TestCoalesceStreamChunks(t *testing.T) {
 	if len(got) != 1 || got[0] != "PONG" {
 		t.Fatalf("coalesce %q", got)
 	}
-	if !strings.Contains(m.View(), "PONG") {
-		t.Fatalf("missing PONG:\n%s", m.View())
+	if !strings.Contains(plainView(m), "PONG") {
+		t.Fatalf("missing PONG:\n%s", plainView(m))
 	}
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
@@ -582,8 +578,8 @@ func TestShiftTabCyclesMode(t *testing.T) {
 	if msg := cmd(); msg != nil {
 		t.Fatalf("stub SetMode returned %T %v", msg, msg)
 	}
-	if !strings.Contains(m.View(), "plan") {
-		t.Fatalf("footer missing plan:\n%s", m.View())
+	if !strings.Contains(plainView(m), "plan") {
+		t.Fatalf("footer missing plan:\n%s", plainView(m))
 	}
 }
 
@@ -610,7 +606,7 @@ func TestSlashHelpExitAndModel(t *testing.T) {
 	if !m.help {
 		t.Fatal("expected help overlay")
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
 		t.Fatalf("help missing keys:\n%s", view)
 	}
@@ -760,7 +756,7 @@ func TestHelpOverlayFitsTerminal(t *testing.T) {
 	if !m.help {
 		t.Fatal("expected help")
 	}
-	view := m.View()
+	view := plainView(m)
 	if h := lipgloss.Height(view); h > 24 {
 		t.Fatalf("help view is %d rows, crops 24-row terminal:\n%s", h, view)
 	}
@@ -851,7 +847,7 @@ func TestModelPickerCurrentFastFirst(t *testing.T) {
 	if !m.picking || m.effortStep {
 		t.Fatal("expected model picker")
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "> 1 fast") {
 		t.Fatalf("current fast should be first:\n%s", view)
 	}
@@ -867,7 +863,7 @@ func TestModelPickerFitsTerminal(t *testing.T) {
 	m.input.SetValue("/model")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	view := m.View()
+	view := plainView(m)
 	if h := lipgloss.Height(view); h > 24 {
 		t.Fatalf("picker view is %d rows:\n%s", h, view)
 	}
@@ -896,7 +892,7 @@ func TestModelPickerThenEffort(t *testing.T) {
 	if !m.picking || !m.effortStep {
 		t.Fatal("expected effort step after model")
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "effort") || !strings.Contains(view, "medium") {
 		t.Fatalf("effort overlay missing:\n%s", view)
 	}
@@ -906,8 +902,8 @@ func TestModelPickerThenEffort(t *testing.T) {
 	if m.picking {
 		t.Fatal("picker should close after effort")
 	}
-	if !strings.Contains(m.View(), "medium") {
-		t.Fatalf("footer missing medium:\n%s", m.View())
+	if !strings.Contains(plainView(m), "medium") {
+		t.Fatalf("footer missing medium:\n%s", plainView(m))
 	}
 }
 
@@ -923,11 +919,11 @@ func TestModelSlashSetsModelAndEffort(t *testing.T) {
 	if m.snap.CurrentModel != "grok" {
 		t.Fatalf("model %q", m.snap.CurrentModel)
 	}
-	if !strings.Contains(m.View(), "high") {
-		t.Fatalf("footer missing high:\n%s", m.View())
+	if !strings.Contains(plainView(m), "high") {
+		t.Fatalf("footer missing high:\n%s", plainView(m))
 	}
-	if !strings.Contains(m.View(), "Grok (high) │ agent") {
-		t.Fatalf("status row 1 tokens:\n%s", m.View())
+	if !strings.Contains(plainView(m), "Grok (high) │ agent") {
+		t.Fatalf("status row 1 tokens:\n%s", plainView(m))
 	}
 }
 
@@ -953,7 +949,7 @@ func TestSetConfigFailAfterModel(t *testing.T) {
 	if m.snap.CurrentModel != "grok" {
 		t.Fatalf("model %q", m.snap.CurrentModel)
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "medium") {
 		t.Fatalf("effort should stay medium:\n%s", view)
 	}
@@ -989,7 +985,7 @@ func TestSetModelFailNoEffortOverlay(t *testing.T) {
 	if m.snap.CurrentModel != "grok" {
 		t.Fatalf("model should revert, got %q", m.snap.CurrentModel)
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "Grok (medium) │ agent") {
 		t.Fatalf("status row 1 should be unchanged:\n%s", view)
 	}
@@ -1142,8 +1138,8 @@ func TestInPlaceToolLineSameID(t *testing.T) {
 	if !strings.Contains(got[0], "echo hi") {
 		t.Fatalf("command missing: %q", got[0])
 	}
-	if !strings.Contains(m.View(), "✓ bash  echo hi") {
-		t.Fatalf("row missing from the view:\n%s", m.View())
+	if !strings.Contains(plainView(m), "✓ bash  echo hi") {
+		t.Fatalf("row missing from the view:\n%s", plainView(m))
 	}
 }
 
@@ -1230,7 +1226,7 @@ func TestHelpOverlayFitsWithInFlightTools(t *testing.T) {
 	if !m.help {
 		t.Fatal("expected help")
 	}
-	view := m.View()
+	view := plainView(m)
 	if h := lipgloss.Height(view); h > 24 {
 		t.Fatalf("help+agents view is %d rows, crops 24-row terminal:\n%s", h, view)
 	}

@@ -64,7 +64,7 @@ func TestAgentRowsSitBelowTheStatusRows(t *testing.T) {
 		{ID: "sh-1", Kind: "execute", Title: "Shell", Status: "in_progress"},
 	})
 
-	view := m.View()
+	view := plainView(m)
 	below, ok := belowStatus(view)
 	if !ok {
 		t.Fatalf("status rows missing:\n%s", view)
@@ -102,7 +102,7 @@ func TestAgentRowsCapWithMoreRow(t *testing.T) {
 	if got := m.lay.Region(regionAgents).Height(); got != agentRowsMax+1 {
 		t.Fatalf("the region is %d rows, want the cap plus the overflow row", got)
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "… +2 more") {
 		t.Fatalf("missing the overflow row:\n%s", view)
 	}
@@ -154,9 +154,9 @@ func poke(t *testing.T, m Model) Model {
 // call and would otherwise answer for it.
 func rowsOf(t *testing.T, m Model) string {
 	t.Helper()
-	below, ok := belowStatus(m.View())
+	below, ok := belowStatus(plainView(m))
 	if !ok {
-		t.Fatalf("status rows missing:\n%s", m.View())
+		t.Fatalf("status rows missing:\n%s", plainView(m))
 	}
 	return below
 }
@@ -179,9 +179,9 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 	if !m.agentPeek {
 		t.Fatal("expected a peek")
 	}
-	below, ok := belowComposer(m.View())
+	below, ok := belowComposer(plainView(m))
 	if !ok {
-		t.Fatalf("composer/status missing:\n%s", m.View())
+		t.Fatalf("composer/status missing:\n%s", plainView(m))
 	}
 	if !strings.Contains(below, "peek prompt for task-1") {
 		t.Fatalf("the peek shows the sub-agent's prompt, between composer and status:\n%s", below)
@@ -198,7 +198,7 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 	if m.status != statusWorking {
 		t.Fatalf("status %s, want working", m.status)
 	}
-	if below, _ := belowComposer(m.View()); strings.Contains(below, "peek prompt") {
+	if below, _ := belowComposer(plainView(m)); strings.Contains(below, "peek prompt") {
 		t.Fatalf("the peek is still drawn:\n%s", below)
 	}
 }
@@ -283,7 +283,7 @@ func TestAgentRowStaysOneCleanRow(t *testing.T) {
 	tool.Task = &agent.TaskInfo{Description: "Count\x1b]0;x\x07 main.go\nlines"}
 	m = applyInFlight(t, m, []agent.ToolEvent{tool})
 
-	row := m.agentRowsView()
+	row := plain(m.agentRowsView())
 	if strings.Count(row, "\n") != 0 {
 		t.Fatalf("one sub-agent is one row: %q", row)
 	}
@@ -345,9 +345,9 @@ func TestAgentSelectionNeverLeavesTheVisibleRows(t *testing.T) {
 	m.input.SetValue("")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	below, ok := belowComposer(m.View())
+	below, ok := belowComposer(plainView(m))
 	if !ok {
-		t.Fatalf("composer/status missing:\n%s", m.View())
+		t.Fatalf("composer/status missing:\n%s", plainView(m))
 	}
 	if !strings.Contains(below, "peek prompt for "+m.agentID) {
 		t.Fatalf("peek is not the highlighted row %q:\n%s", m.agentID, below)
@@ -402,7 +402,7 @@ func TestPeekNeverShowsAHiddenSubAgent(t *testing.T) {
 	m.agentID = hidden.ID
 	m.agentPeek = true
 
-	peek := m.agentPeekView()
+	peek := plain(m.agentPeekView())
 	if strings.Contains(peek, "peek prompt for "+hidden.ID) {
 		t.Fatalf("the peek shows %q, which is behind the overflow row: %q", hidden.ID, peek)
 	}

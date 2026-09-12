@@ -27,7 +27,7 @@ func lastToolRow(t *testing.T, m Model) string {
 	t.Helper()
 	rows := toolRows(m)
 	if len(rows) == 0 {
-		t.Fatalf("no tool rows in:\n%s", m.View())
+		t.Fatalf("no tool rows in:\n%s", plainView(m))
 	}
 	return rows[len(rows)-1]
 }
@@ -51,8 +51,8 @@ func TestStreamChunkRendersExactlyOneEntry(t *testing.T) {
 	if got := m.renders - before; got != 1 {
 		t.Fatalf("a stream chunk rendered %d entries, want 1", got)
 	}
-	if !strings.Contains(m.View(), "chunk more") {
-		t.Fatalf("chunks did not coalesce:\n%s", m.View())
+	if !strings.Contains(plainView(m), "chunk more") {
+		t.Fatalf("chunks did not coalesce:\n%s", plainView(m))
 	}
 }
 
@@ -145,8 +145,8 @@ func TestTodoToolIsNeverAdded(t *testing.T) {
 	if rows := toolRows(m); len(rows) != 0 {
 		t.Fatalf("the todo writer must not reach the transcript: %q", rows)
 	}
-	if strings.Contains(m.View(), "Update TODOs") {
-		t.Fatalf("Update TODOs is visible:\n%s", m.View())
+	if strings.Contains(plainView(m), "Update TODOs") {
+		t.Fatalf("Update TODOs is visible:\n%s", plainView(m))
 	}
 }
 
@@ -180,7 +180,7 @@ func TestThoughtRunCollapsesToOneRow(t *testing.T) {
 		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: chunk}})
 		m = tm.(Model)
 	}
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "+ Thinking…") {
 		t.Fatalf("an open thought run should say Thinking:\n%s", view)
 	}
@@ -189,14 +189,14 @@ func TestThoughtRunCollapsesToOneRow(t *testing.T) {
 	}
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "answer"}})
 	m = tm.(Model)
-	view = m.View()
+	view = plainView(m)
 	if !strings.Contains(view, "+ Thought for ") {
 		t.Fatalf("a closed thought run should say Thought for:\n%s", view)
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	m = tm.(Model)
-	if !strings.Contains(m.View(), "weighing the options") {
-		t.Fatalf("ctrl+o did not expand the thought:\n%s", m.View())
+	if !strings.Contains(plainView(m), "weighing the options") {
+		t.Fatalf("ctrl+o did not expand the thought:\n%s", plainView(m))
 	}
 }
 
@@ -219,7 +219,7 @@ func TestThoughtRunClosesWhenANoteLandsAfterIt(t *testing.T) {
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: base.Add(9 * time.Second)}})
 	m = tm.(Model)
 
-	view := m.View()
+	view := plainView(m)
 	if strings.Contains(view, "+ Thinking…") {
 		t.Fatalf("the run is still open after the turn ended:\n%s", view)
 	}
@@ -273,8 +273,8 @@ func TestEntryCapTrimsWithANote(t *testing.T) {
 		t.Fatalf("surviving tool row index %d, want %d", got, maxEntries-2)
 	}
 	m.vp.GotoTop()
-	if !strings.Contains(m.View(), trimmedNote) {
-		t.Fatalf("missing the trim note:\n%s", m.View())
+	if !strings.Contains(plainView(m), trimmedNote) {
+		t.Fatalf("missing the trim note:\n%s", plainView(m))
 	}
 }
 

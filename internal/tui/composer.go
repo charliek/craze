@@ -46,13 +46,26 @@ func newComposer(th Theme) textarea.Model {
 }
 
 // styleComposer applies the theme colours a live re-theme has to re-apply.
+//
+// bubbles keeps an unexported pointer at whichever of the two style sets is
+// active, and Update copies the whole Model, so that pointer still aims at the
+// styles of an older copy. Writing new colours into this copy's fields would
+// change nothing on screen; Focus/Blur re-seat the pointer, which is the only
+// way in. The blink command they return is dropped: the cursor keeps the phase
+// it is in and the next keystroke restarts the chain (textarea does that
+// itself whenever the cursor moves).
 func styleComposer(ta *textarea.Model, th Theme) {
-	prompt := lipgloss.NewStyle().Foreground(th.Title)
+	prompt := lipgloss.NewStyle().Foreground(th.Accent)
 	placeholder := lipgloss.NewStyle().Foreground(th.Dim)
 	ta.FocusedStyle.Prompt = prompt
 	ta.BlurredStyle.Prompt = prompt
 	ta.FocusedStyle.Placeholder = placeholder
 	ta.BlurredStyle.Placeholder = placeholder
+	if ta.Focused() {
+		_ = ta.Focus()
+	} else {
+		ta.Blur()
+	}
 }
 
 // composerPrompt marks only the first display row, Claude Code style.

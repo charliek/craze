@@ -54,7 +54,7 @@ func (m Model) statusView(lay frameLayout) string {
 // the workspace name.
 func (m Model) statusRow1() string {
 	dim := styleFG(m.theme.Dim)
-	ws := statusPart{text: workspaceName(m.cwd), style: styleFG(m.theme.FG).Bold(true)}
+	ws := statusPart{text: workspaceName(m.cwd), style: styleFG(m.theme.Bright).Bold(true)}
 	if !m.started && m.status != statusError {
 		return fitStatus([]statusPart{
 			ws,
@@ -64,7 +64,7 @@ func (m Model) statusRow1() string {
 	return fitStatus([]statusPart{
 		ws,
 		{text: m.branch, style: dim, drop: 2},
-		{text: statusProvider, style: styleFG(m.theme.User), drop: 4},
+		{text: statusProvider, style: styleFG(m.theme.Provider), drop: 4},
 		{text: m.modelLabel(), style: styleFG(m.theme.FG), drop: 5},
 		{text: sanitizeLine(m.snap.CurrentMode), style: dim, drop: 3},
 		{text: m.sessionElapsed(), style: dim, drop: 1},
@@ -83,13 +83,13 @@ func (m Model) statusRow2(lay frameLayout) string {
 		// left of it, and it is worth more than either neighbour.
 		parts = append(parts, statusPart{
 			text:  m.spinnerGlyph() + " " + m.turnElapsed(),
-			style: styleFG(m.theme.Title),
+			style: styleFG(m.theme.Accent),
 		})
 	}
 	parts = append(parts,
 		statusPart{text: chip, style: chipStyle},
 		statusPart{text: m.inFlightCounts(), style: dim, drop: 2},
-		statusPart{text: m.agentCount(), style: styleFG(m.theme.Title), drop: 1},
+		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 1},
 	)
 	return fitStatus(parts, statusDot, dim, m.width)
 }
@@ -98,9 +98,9 @@ func (m Model) statusRow2(lay frameLayout) string {
 // amber prompting without it.
 func (m Model) permissionChip() (string, lipgloss.Style) {
 	if m.yolo {
-		return "▸▸ bypass permissions on", styleFG(m.theme.Err)
+		return "▸▸ bypass permissions on", styleFG(m.theme.ChipBypass)
 	}
-	return "▸ prompting for permissions", styleFG(m.theme.Warn)
+	return "▸ prompting for permissions", styleFG(m.theme.ChipPrompt)
 }
 
 // modelLabel is the advertised display name of the current model, plus the

@@ -106,7 +106,7 @@ func TestClickOnTheTasksHeaderCycles(t *testing.T) {
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 	if m.lay.Region(regionTasks).Empty() {
-		t.Fatalf("expected a tasks panel:\n%s", m.View())
+		t.Fatalf("expected a tasks panel:\n%s", plainView(m))
 	}
 
 	next := clickAt(t, m, m.lay.Region(regionTasks).Top)

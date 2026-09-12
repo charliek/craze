@@ -144,12 +144,12 @@ func (m Model) tasksView(lay frameLayout) string {
 	if lay.Region(regionTasks).Empty() {
 		return ""
 	}
-	rows := []string{renderSegs(m.width, seg{m.tasksHeader(), styleFG(m.theme.Title)})}
+	rows := []string{renderSegs(m.width, seg{m.tasksHeader(), styleFG(m.theme.Accent)})}
 	items := m.tasksPanelItems()
 	if len(items) > lay.TasksRows {
 		items = items[:max(0, lay.TasksRows)]
 	}
-	rail := seg{"┃ ", styleFG(m.theme.Warn)}
+	rail := seg{"┃ ", styleFG(m.theme.TaskRail)}
 	for _, td := range items {
 		glyph, gst := m.todoGlyph(td.Status)
 		rows = append(rows, renderSegs(m.width,
@@ -164,7 +164,7 @@ func (m Model) tasksView(lay frameLayout) string {
 func (m Model) todoGlyph(status string) (string, lipgloss.Style) {
 	switch status {
 	case "in_progress":
-		return "▸", styleFG(m.theme.Title)
+		return "▸", styleFG(m.theme.Accent)
 	case "completed":
 		return "✓", styleFG(m.theme.OK)
 	case "cancelled":

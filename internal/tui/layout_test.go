@@ -87,7 +87,7 @@ func TestFrameHeightContract(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%dx%d", tc.cols, tc.rows), func(t *testing.T) {
 			m := loadedModel(t, tc.cols, tc.rows)
-			view := m.View()
+			view := plainView(m)
 			if h := lipgloss.Height(view); h != tc.rows {
 				t.Fatalf("frame is %d rows, want %d:\n%s", h, tc.rows, view)
 			}
@@ -132,7 +132,7 @@ func TestShortTerminalDegradesUnconditionally(t *testing.T) {
 	if m.lay.ComposerRows > composerShortRows {
 		t.Fatalf("composer is %d rows, want at most %d", m.lay.ComposerRows, composerShortRows)
 	}
-	view := m.View()
+	view := plainView(m)
 	if strings.Contains(view, "Run go vet") {
 		t.Fatalf("a header-only panel must not list rows:\n%s", view)
 	}
@@ -142,7 +142,7 @@ func TestShortTerminalDegradesUnconditionally(t *testing.T) {
 		t.Fatalf("30 rows fits, but degraded %d steps", tall.lay.Degraded)
 	}
 	if tall.lay.TasksRows == 0 {
-		t.Fatalf("30 rows should list task rows:\n%s", tall.View())
+		t.Fatalf("30 rows should list task rows:\n%s", plainView(tall))
 	}
 	if tall.lay.AgentRows != 4 {
 		t.Fatalf("30 rows should keep 4 agent rows, got %d", tall.lay.AgentRows)
@@ -178,7 +178,7 @@ func TestTooSmallTerminal(t *testing.T) {
 	tm, _ = m.Update(startedMsg{})
 	m = tm.(Model)
 
-	view := m.View()
+	view := plainView(m)
 	if !m.lay.TooSmall {
 		t.Fatal("30x8 should be below the minimum")
 	}
@@ -217,7 +217,7 @@ func TestTooSmallTerminal(t *testing.T) {
 	if m.lay.TooSmall {
 		t.Fatalf("%dx%d is the minimum craze draws in", minFrameCols, minFrameRows)
 	}
-	if h := lipgloss.Height(m.View()); h != minFrameRows {
+	if h := lipgloss.Height(plainView(m)); h != minFrameRows {
 		t.Fatalf("minimum frame is %d rows, want %d", h, minFrameRows)
 	}
 }
@@ -245,7 +245,7 @@ func TestComposerAutogrowsAndClamps(t *testing.T) {
 	if m.input.Height() != m.lay.ComposerRows {
 		t.Fatalf("SetHeight was not called: textarea is %d, layout says %d", m.input.Height(), m.lay.ComposerRows)
 	}
-	if h := lipgloss.Height(m.View()); h != 40 {
+	if h := lipgloss.Height(plainView(m)); h != 40 {
 		t.Fatalf("a grown composer broke the height contract: %d rows", h)
 	}
 
@@ -324,7 +324,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
 
-	view := m.View()
+	view := plainView(m)
 	lines := strings.Split(view, "\n")
 	needles := map[regionID]string{
 		// The transcript's own sub-agent rows read "● agent"; the agent rows
@@ -379,7 +379,7 @@ func TestDegenerateSizeStillFillsTheFrame(t *testing.T) {
 	m := New(Config{Session: NewStub(), Workspace: t.TempDir(), Yolo: true})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 0, Height: 8})
 	m = tm.(Model)
-	view := m.View()
+	view := plainView(m)
 	if h := lipgloss.Height(view); h != 8 {
 		t.Fatalf("a zero-width frame is %d rows, want 8: %q", h, view)
 	}

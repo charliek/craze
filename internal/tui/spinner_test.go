@@ -110,12 +110,12 @@ func TestSpinnerVisibilityAndText(t *testing.T) {
 	if m.spinnerVisible() {
 		t.Fatal("no spinner while idle")
 	}
-	if strings.Contains(m.View(), "esc to interrupt") {
-		t.Fatalf("idle frame has a spinner line:\n%s", m.View())
+	if strings.Contains(plainView(m), "esc to interrupt") {
+		t.Fatalf("idle frame has a spinner line:\n%s", plainView(m))
 	}
 
 	m = hangWorking(t)
-	view := m.View()
+	view := plainView(m)
 	if !m.spinnerVisible() || !strings.Contains(view, "esc to interrupt") {
 		t.Fatalf("missing the spinner while working:\n%s", view)
 	}
@@ -157,7 +157,7 @@ func TestSpinnerWaitsOnACard(t *testing.T) {
 		Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "bash"},
 	}})
 	m = tm.(Model)
-	view := m.View()
+	view := plainView(m)
 	if !strings.Contains(view, "Waiting for your answer") {
 		t.Fatalf("a pending card shows the spinner:\n%s", view)
 	}

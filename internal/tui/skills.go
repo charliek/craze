@@ -24,7 +24,10 @@ var skillRelRoots = []string{
 
 var skillWarnOnce sync.Map
 
-func skillHomeDir() string {
+// homeDir is the home directory craze reads its own files out of: the config
+// file and the user-level skills. HOME wins over the account database so a
+// test (and the frame runner) can isolate both with one variable.
+func homeDir() string {
 	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
 		return home
 	}
@@ -36,7 +39,7 @@ func skillHomeDir() string {
 }
 
 func (m *Model) rescanSkills() {
-	m.skills = scanDiskSkills(m.cwd, skillHomeDir())
+	m.skills = scanDiskSkills(m.cwd, homeDir())
 }
 
 func scanDiskSkills(workspace, home string) []slashItem {

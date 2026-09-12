@@ -64,7 +64,7 @@ func TestStatusRow1DropsFromTheRight(t *testing.T) {
 		{20, "craze"},
 	} {
 		m.width = tc.cols
-		if got := m.statusRow1(); got != tc.want {
+		if got := plain(m.statusRow1()); got != tc.want {
 			t.Fatalf("%d cols:\n got %q\nwant %q", tc.cols, got, tc.want)
 		}
 	}
@@ -76,7 +76,7 @@ func TestStatusRow1PreStart(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
 	m.cwd = "/home/dev/craze"
-	if got, want := m.statusRow1(), "craze │ starting…"; got != want {
+	if got, want := plain(m.statusRow1()), "craze │ starting…"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -87,8 +87,8 @@ func TestStatusChipByForceFlag(t *testing.T) {
 	if text != chipYolo {
 		t.Fatalf("yolo chip %q", text)
 	}
-	if got := style.GetForeground(); got != m.theme.Err {
-		t.Fatalf("bypass chip is %v, want the error colour %v", got, m.theme.Err)
+	if got := style.GetForeground(); got != m.theme.ChipBypass {
+		t.Fatalf("bypass chip is %v, want the chip-bypass colour %v", got, m.theme.ChipBypass)
 	}
 
 	m.yolo = false
@@ -96,8 +96,8 @@ func TestStatusChipByForceFlag(t *testing.T) {
 	if text != chipPrompt {
 		t.Fatalf("prompting chip %q", text)
 	}
-	if got := style.GetForeground(); got != m.theme.Warn {
-		t.Fatalf("prompting chip is %v, want the warn colour %v", got, m.theme.Warn)
+	if got := style.GetForeground(); got != m.theme.ChipPrompt {
+		t.Fatalf("prompting chip is %v, want the chip-prompt colour %v", got, m.theme.ChipPrompt)
 	}
 }
 
@@ -118,7 +118,7 @@ func TestStatusRow2CountsInFlightWorkByKind(t *testing.T) {
 	if got, want := m.agentCount(), "← 1 agent"; got != want {
 		t.Fatalf("agents %q, want %q", got, want)
 	}
-	row := m.statusRow2(m.lay)
+	row := plain(m.statusRow2(m.lay))
 	if !strings.HasPrefix(row, chipYolo) || !strings.Contains(row, "1 shell, 2 reads, 1 edit") ||
 		!strings.HasSuffix(row, "← 1 agent") {
 		t.Fatalf("row 2 %q", row)
@@ -126,15 +126,15 @@ func TestStatusRow2CountsInFlightWorkByKind(t *testing.T) {
 
 	// Narrow: the agent count goes first, then the counts, and the chip stays.
 	m.width = 55
-	if got := m.statusRow2(m.lay); got != chipYolo+statusDot+"1 shell, 2 reads, 1 edit" {
+	if got := plain(m.statusRow2(m.lay)); got != chipYolo+statusDot+"1 shell, 2 reads, 1 edit" {
 		t.Fatalf("55 cols dropped the wrong segment: %q", got)
 	}
 	m.width = 30
-	if got := m.statusRow2(m.lay); got != chipYolo {
+	if got := plain(m.statusRow2(m.lay)); got != chipYolo {
 		t.Fatalf("30 cols should leave the chip alone: %q", got)
 	}
 	m.width = 10
-	if got := m.statusRow2(m.lay); got != "▸▸ bypass…" {
+	if got := plain(m.statusRow2(m.lay)); got != "▸▸ bypass…" {
 		t.Fatalf("the chip truncates rather than disappearing: %q", got)
 	}
 }
@@ -143,11 +143,11 @@ func TestStatusRow2CarriesTheMergedSpinner(t *testing.T) {
 	m := statusFixture(t)
 	m.status = statusWorking
 	m.turnStart = m.now().Add(-14 * time.Second)
-	plain := m.statusRow2(m.lay)
-	if strings.Contains(plain, "14s") {
-		t.Fatalf("an unmerged row 2 has no spinner: %q", plain)
+	unmerged := plain(m.statusRow2(m.lay))
+	if strings.Contains(unmerged, "14s") {
+		t.Fatalf("an unmerged row 2 has no spinner: %q", unmerged)
 	}
-	merged := m.statusRow2(frameLayout{SpinnerMerged: true})
+	merged := plain(m.statusRow2(frameLayout{SpinnerMerged: true}))
 	if !strings.HasPrefix(merged, m.spinnerGlyph()+" 14s"+statusDot) {
 		t.Fatalf("degradation step 6 leaves %q in row 2, got %q", "✳ 14s", merged)
 	}

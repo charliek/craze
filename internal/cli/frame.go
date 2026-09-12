@@ -42,7 +42,7 @@ func newFrameCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.fakeScript, "fake-script", "", "CRAZE_FAKE_SCRIPT for the child agent")
 	cmd.Flags().StringVar(&o.keys, "keys", "", "key script, e.g. \"go<enter><wait:text:TASKS>\"")
 	cmd.Flags().BoolVar(&o.ansi, "ansi", false, "print the raw frame with a forced true-colour profile")
-	cmd.Flags().StringVar(&o.theme, "theme", "tokyo-night", "TUI theme: tokyo-night, dark, or light")
+	cmd.Flags().StringVar(&o.theme, "theme", "", themeFlagUsage)
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 10*time.Second, "per-wait timeout")
 	cmd.Flags().BoolVar(&o.printFrames, "print-frames", false, "stream every frame to stderr")
@@ -66,6 +66,12 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 			return err
 		}
 	}
+	theme := o.theme
+	if theme == "" {
+		// The frame runner is hermetic on purpose: it never reads the config
+		// file, so a golden cannot depend on the developer's saved theme.
+		theme = tui.DefaultTheme
+	}
 	sess := agent.New(agent.Options{
 		Binary:      o.agentBin,
 		Workspace:   ws,
@@ -76,7 +82,7 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 
 	plain, raw, err := tui.RunFrameScript(tui.Config{
 		Session:   sess,
-		Theme:     o.theme,
+		Theme:     theme,
 		Workspace: ws,
 		Yolo:      force,
 	}, o.cols, o.rows, o.keys, tui.FrameOpts{

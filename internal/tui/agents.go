@@ -237,11 +237,11 @@ func (m Model) agentRowsView() string {
 		glyph, gst := m.agentGlyph(t)
 		st := styleFG(m.theme.Dim)
 		if i == sel {
-			st = styleFG(m.theme.Title)
+			st = styleFG(m.theme.Accent)
 		}
 		rows = append(rows, renderSegs(m.width,
 			seg{glyph + " ", gst},
-			seg{"task  ", styleFG(m.theme.Tool)},
+			seg{"task  ", styleFG(m.theme.ToolKind)},
 			seg{agentDesc(t), st},
 			seg{"  " + m.agentSuffix(t), styleFG(m.theme.Dim)},
 		))

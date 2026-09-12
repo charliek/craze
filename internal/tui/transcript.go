@@ -340,11 +340,11 @@ func (m *Model) thoughtRows(e *entry, key renderKey) []string {
 	if e.open {
 		head = "+ Thinking… " + formatElapsed(e.end.Sub(e.at))
 	}
-	rows := []string{renderSegs(key.width, seg{head, styleFG(m.theme.Dim)})}
+	rows := []string{renderSegs(key.width, seg{head, styleFG(m.theme.Thought)})}
 	if !key.expanded {
 		return rows
 	}
-	st := lipgloss.NewStyle().Foreground(m.theme.Dim).Italic(true)
+	st := lipgloss.NewStyle().Foreground(m.theme.Thought).Italic(true)
 	return append(rows, hangingRows(e.text, "  ", "  ", key.width, st)...)
 }
 
@@ -520,7 +520,7 @@ func (m *Model) toolRow(glyph string, gst lipgloss.Style, label, target, suffix 
 			target = clampWidth(target, avail)
 		}
 	}
-	segs := []seg{{glyph + " ", gst}, {label, styleFG(m.theme.Tool)}}
+	segs := []seg{{glyph + " ", gst}, {label, styleFG(m.theme.ToolKind)}}
 	if target != "" {
 		segs = append(segs, seg{"  " + target, styleFG(m.theme.FG)})
 	}
@@ -538,7 +538,7 @@ func (m *Model) toolHead(t *agent.ToolEvent, label, target, suffix string, sufSt
 func (m *Model) statusGlyph(status string) (string, lipgloss.Style) {
 	switch status {
 	case "in_progress":
-		return "⟳", styleFG(m.theme.Title)
+		return "⟳", styleFG(m.theme.Accent)
 	case "completed":
 		return "✓", styleFG(m.theme.OK)
 	case "failed":
@@ -622,13 +622,13 @@ func (m *Model) hunkRows(h textdiff.Hunk, width, limit int) []string {
 		st := styleFG(m.theme.FG)
 		switch ln.Kind {
 		case textdiff.Add:
-			st = styleFG(m.theme.OK)
+			st = styleFG(m.theme.DiffAdd)
 		case textdiff.Del:
 			no = ln.OldNo
-			st = styleFG(m.theme.Err)
+			st = styleFG(m.theme.DiffDel)
 		}
 		out = append(out, renderSegs(width,
-			seg{fmt.Sprintf("%6d ", no), styleFG(m.theme.Dim)},
+			seg{fmt.Sprintf("%6d ", no), styleFG(m.theme.LineNo)},
 			seg{string(ln.Kind) + " " + plainLine(ln.Text), st},
 		))
 	}
@@ -677,7 +677,7 @@ func (m *Model) otherRows(t *agent.ToolEvent, width int) []string {
 func (m *Model) taskRows(t *agent.ToolEvent, width int) []string {
 	desc := taskDesc(t)
 	if t.Status != "completed" && t.Status != "failed" && t.Status != "cancelled" {
-		return []string{m.toolRow("●", styleFG(m.theme.Title), "agent", desc, "running", styleFG(m.theme.Dim), width)}
+		return []string{m.toolRow("●", styleFG(m.theme.Accent), "agent", desc, "running", styleFG(m.theme.Dim), width)}
 	}
 	suffix := ""
 	if t.Task != nil {

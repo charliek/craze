@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -22,7 +23,9 @@ type tuiFlags struct {
 }
 
 func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
-	cmd.Flags().StringVar(&f.theme, "theme", "tokyo-night", "TUI theme: tokyo-night, dark, or light")
+	// The default is empty so Changed("theme") can tell an explicit --theme
+	// from an unset one, which is what the config file loses to.
+	cmd.Flags().StringVar(&f.theme, "theme", "", themeFlagUsage)
 	cmd.Flags().StringVar(&f.workspace, "workspace", "", "existing workspace directory (default: current directory)")
 	cmd.Flags().StringVar(&f.model, "model", "", "ACP model id")
 	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
@@ -33,7 +36,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
 }
 
-func runTUI(f *tuiFlags) error {
+func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	if f.ask && f.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")
 	}
@@ -62,12 +65,29 @@ func runTUI(f *tuiFlags) error {
 	})
 	return tui.Run(tui.Config{
 		Session:   sess,
-		Theme:     f.theme,
+		Theme:     resolveTheme(cmd, f.theme),
 		Workspace: ws,
 		Model:     f.model,
 		Yolo:      f.force,
 		NoMouse:   f.noMouse,
 	})
+}
+
+// themeFlagUsage names the presets once, for both commands that take --theme.
+var themeFlagUsage = "TUI theme: " + strings.Join(tui.ThemeNames(), ", ") +
+	" (default: ~/.craze/config.toml, else " + tui.DefaultTheme + ")"
+
+// resolveTheme is the pinned precedence: an explicitly passed --theme wins,
+// then the config file, then the default preset. "Explicitly passed" is
+// Changed, not a non-empty value, so --theme "" is still a choice.
+func resolveTheme(cmd *cobra.Command, flag string) string {
+	if cmd != nil && cmd.Flags().Changed("theme") {
+		return flag
+	}
+	if name := tui.ConfigTheme(); name != "" {
+		return name
+	}
+	return tui.DefaultTheme
 }
 
 func stdoutIsTTY() bool {

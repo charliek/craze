@@ -11,7 +11,7 @@ import (
 )
 
 func NewRootCmd() *cobra.Command {
-	flags := &tuiFlags{force: true, theme: "tokyo-night"}
+	flags := &tuiFlags{force: true}
 	cmd := &cobra.Command{
 		Use:           "craze",
 		Short:         "A Cursor ACP client TUI",
@@ -30,7 +30,7 @@ func NewRootCmd() *cobra.Command {
 			} else if !stdoutIsTTY() {
 				return usagef("craze: refusing to start TUI on a non-tty")
 			}
-			return runTUI(flags)
+			return runTUI(cmd, flags)
 		},
 	}
 	cmd.SetVersionTemplate("{{.Version}}\n")
