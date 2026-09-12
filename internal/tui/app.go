@@ -826,11 +826,17 @@ func (m Model) modelPickerView() string {
 			fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, md.ID, md.Name)
 		}
 	}
-	return lipgloss.NewStyle().
+	st := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Title).
-		Width(max(1, m.width-2)).
-		Render(strings.TrimRight(b.String(), "\n"))
+		Width(max(1, m.width-2))
+	if m.height > 0 {
+		budget := m.height - m.overlayReserve() - 1
+		if budget > 0 {
+			st = st.MaxHeight(budget)
+		}
+	}
+	return st.Render(strings.TrimRight(b.String(), "\n"))
 }
 
 func (m Model) permissionOverlay() string {

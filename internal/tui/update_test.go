@@ -625,6 +625,28 @@ func TestModelPickerCurrentFastFirst(t *testing.T) {
 	}
 }
 
+func TestModelPickerFitsTerminal(t *testing.T) {
+	m := sized(t)
+	for i := 0; i < 30; i++ {
+		m.snap.Models = append(m.snap.Models, agent.ModelInfo{
+			ID: fmt.Sprintf("extra-%02d", i), Name: fmt.Sprintf("Extra %02d", i),
+		})
+	}
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	view := m.View()
+	if h := lipgloss.Height(view); h > 24 {
+		t.Fatalf("picker view is %d rows:\n%s", h, view)
+	}
+	if !strings.Contains(view, "grok") {
+		t.Fatalf("current grok cropped:\n%s", view)
+	}
+	if !strings.Contains(view, "yolo") {
+		t.Fatalf("footer cropped:\n%s", view)
+	}
+}
+
 func TestModelPickerThenEffort(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("/model")
