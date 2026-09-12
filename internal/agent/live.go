@@ -17,6 +17,9 @@ type session struct {
 	events chan Event
 	done   chan struct{}
 
+	closeOnce sync.Once
+	closeDone chan struct{}
+
 	mu         sync.Mutex
 	started    bool
 	closed     bool
@@ -40,12 +43,21 @@ func New(opts Options) Session {
 
 func newSession(opts Options) *session {
 	return &session{
-		opts:    opts,
-		events:  make(chan Event, 256),
-		done:    make(chan struct{}),
-		waiting: make(map[string]pendingPerm),
-		tools:   make(map[string]ToolEvent),
+		opts:      opts,
+		events:    make(chan Event, 256),
+		done:      make(chan struct{}),
+		closeDone: make(chan struct{}),
+		waiting:   make(map[string]pendingPerm),
+		tools:     make(map[string]ToolEvent),
 	}
+}
+
+// clientRef reads the spawned client under the lock; it is nil before Start
+// assigns it and after a concurrent Close.
+func (s *session) clientRef() *acp.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client
 }
 
 func (s *session) Events() <-chan Event {
@@ -97,7 +109,16 @@ func (s *session) Start(ctx context.Context) error {
 		s.unstart()
 		return err
 	}
+	// Close may have run while we were spawning; adopt the child only if the
+	// session is still open, otherwise reap it here so it cannot be orphaned.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = client.Close()
+		return fmt.Errorf("agent: session closed")
+	}
 	s.client = client
+	s.mu.Unlock()
 	client.SetUpdateHandler(s.onUpdate)
 	client.SetPermissionHandler(s.onPermission)
 
@@ -155,7 +176,8 @@ func (s *session) unstart() {
 
 func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	s.mu.Lock()
-	if s.client == nil {
+	client := s.client
+	if client == nil {
 		s.mu.Unlock()
 		return Result{}, fmt.Errorf("agent: session not started")
 	}
@@ -174,7 +196,7 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		s.mu.Unlock()
 	}()
 
-	res, err := s.client.Prompt(ctx, text)
+	res, err := client.Prompt(ctx, text)
 	if err != nil {
 		s.emit(Event{Type: EventError, Err: err})
 		return Result{}, err
@@ -184,10 +206,11 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 }
 
 func (s *session) SetModel(ctx context.Context, modelID string) error {
-	if s.client == nil {
+	client := s.clientRef()
+	if client == nil {
 		return fmt.Errorf("agent: session not started")
 	}
-	if err := s.client.SetModel(ctx, modelID); err != nil {
+	if err := client.SetModel(ctx, modelID); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -197,10 +220,11 @@ func (s *session) SetModel(ctx context.Context, modelID string) error {
 }
 
 func (s *session) SetMode(ctx context.Context, modeID string) error {
-	if s.client == nil {
+	client := s.clientRef()
+	if client == nil {
 		return fmt.Errorf("agent: session not started")
 	}
-	if err := s.client.SetMode(ctx, modeID); err != nil {
+	if err := client.SetMode(ctx, modeID); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -210,10 +234,11 @@ func (s *session) SetMode(ctx context.Context, modeID string) error {
 }
 
 func (s *session) SetConfig(ctx context.Context, id, value string) error {
-	if s.client == nil {
+	client := s.clientRef()
+	if client == nil {
 		return fmt.Errorf("agent: session not started")
 	}
-	if err := s.client.SetConfig(ctx, id, value); err != nil {
+	if err := client.SetConfig(ctx, id, value); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -240,11 +265,12 @@ func (s *session) Snapshot() Snapshot {
 }
 
 func (s *session) Cancel(ctx context.Context) error {
-	if s.client == nil {
+	client := s.clientRef()
+	if client == nil {
 		return nil
 	}
 	s.cancelWaitingPerms()
-	if err := s.client.Cancel(ctx); err != nil {
+	if err := client.Cancel(ctx); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -315,19 +341,21 @@ func (s *session) AnswerPermission(id, optionID string) error {
 	}
 }
 
+// Close reaps the child exactly once; later callers block until that reap has
+// finished rather than returning while the child is still alive.
 func (s *session) Close() error {
-	s.mu.Lock()
-	if s.closed {
+	s.closeOnce.Do(func() {
+		defer close(s.closeDone)
+		s.mu.Lock()
+		s.closed = true
+		close(s.done)
+		client := s.client
 		s.mu.Unlock()
-		return nil
-	}
-	s.closed = true
-	close(s.done)
-	client := s.client
-	s.mu.Unlock()
-	if client != nil {
-		_ = client.Close()
-	}
+		if client != nil {
+			_ = client.Close()
+		}
+	})
+	<-s.closeDone
 	return nil
 }
 

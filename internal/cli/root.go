@@ -37,6 +37,7 @@ func NewRootCmd() *cobra.Command {
 	registerTUIFlags(cmd, flags)
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newPromptCmd())
+	cmd.AddCommand(newFrameCmd())
 	return cmd
 }
 

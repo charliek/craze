@@ -55,6 +55,7 @@ class PTYCraze:
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         env["CRAZE_FAKE_SCRIPT"] = "echo"
+        env["HOME"] = str(workspace)
         env.pop("CRAZE_AGENT_BIN", None)
         try:
             self.proc = subprocess.Popen(
@@ -64,6 +65,8 @@ class PTYCraze:
                     str(fake_agent_bin),
                     "--workspace",
                     str(workspace),
+                    "--theme",
+                    "tokyo-night",
                 ],
                 stdin=slave,
                 stdout=slave,
@@ -168,7 +171,7 @@ def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
         tui.wait_contains("idle")
         tui.write(b"hello\r")
         tui.wait_contains("echo: hello")
-        tui.write(b"q")
+        tui.write(b"\x04")
         code = tui.wait_exit()
         assert code == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
@@ -193,7 +196,7 @@ def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path:
             raise AssertionError(f"help overlay missing: {text[-4000:]}")
         tui.write(b"\x1b")
         time.sleep(0.1)
-        tui.write(b"q")
+        tui.write(b"\x04")
         code = tui.wait_exit()
         assert code == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)

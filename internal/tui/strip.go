@@ -149,14 +149,14 @@ func (m Model) stripView() string {
 }
 
 func formatStripRow(t agent.ToolEvent) string {
-	title := strings.TrimSpace(t.Title)
+	title := sanitizeLine(t.Title)
 	if title == "" {
-		title = t.Kind
+		title = sanitizeLine(t.Kind)
 	}
 	if isSubagentTitle(t.Title) {
 		title = "subagent " + title
 	}
-	status := t.Status
+	status := sanitizeLine(t.Status)
 	if status == "" {
 		status = "pending"
 	}
@@ -185,7 +185,7 @@ func formatStripPeek(t agent.ToolEvent, width int) string {
 	}
 	lines := make([]string, 0, stripPeekLines)
 	for _, ln := range src {
-		ln = strings.TrimSpace(ln)
+		ln = sanitizeLine(ln)
 		if ln == "" {
 			continue
 		}
@@ -225,32 +225,4 @@ func clampWidth(s string, w int) string {
 		used += rw
 	}
 	return b.String() + "…"
-}
-
-func clampWidthTail(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	if w == 1 {
-		return "…"
-	}
-	rs := []rune(s)
-	var kept []rune
-	used := 0
-	limit := w - 1
-	for i := len(rs) - 1; i >= 0; i-- {
-		rw := lipgloss.Width(string(rs[i]))
-		if used+rw > limit {
-			break
-		}
-		kept = append(kept, rs[i])
-		used += rw
-	}
-	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
-		kept[i], kept[j] = kept[j], kept[i]
-	}
-	return "…" + string(kept)
 }

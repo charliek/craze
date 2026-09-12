@@ -11,7 +11,7 @@ import (
 	"github.com/creack/pty"
 )
 
-func TestPTYAltScreenAndQuit(t *testing.T) {
+func TestPTYAltScreenAndCtrlDQuit(t *testing.T) {
 	isolateSkillsHome(t)
 	ptmx, tty, err := pty.Open()
 	if err != nil {
@@ -58,7 +58,7 @@ func TestPTYAltScreenAndQuit(t *testing.T) {
 		t.Fatalf("did not observe alt-screen enter; got %q", buf.Bytes())
 	}
 
-	if _, err := ptmx.Write([]byte("q")); err != nil {
+	if _, err := ptmx.Write([]byte{0x04}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -68,6 +68,6 @@ func TestPTYAltScreenAndQuit(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		p.Kill()
-		t.Fatal("TUI did not quit after q")
+		t.Fatal("TUI did not quit after ctrl+d")
 	}
 }

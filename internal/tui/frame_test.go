@@ -1,0 +1,364 @@
+package tui
+
+import (
+	"errors"
+	"flag"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/charliek/craze/internal/agent"
+)
+
+var updateGoldens = flag.Bool("update", false, "rewrite internal/tui/testdata/*.golden")
+
+func TestParseFrameScriptTokens(t *testing.T) {
+	toks, err := parseFrameScript("ab<enter><ctrl-o><shift-tab><alt-enter><lt><space>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []tea.KeyMsg{
+		runeKey('a'),
+		runeKey('b'),
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyCtrlO},
+		{Type: tea.KeyShiftTab},
+		{Type: tea.KeyEnter, Alt: true},
+		runeKey('<'),
+		runeKey(' '),
+	}
+	if len(toks) != len(want) {
+		t.Fatalf("got %d tokens, want %d", len(toks), len(want))
+	}
+	for i, tok := range toks {
+		if tok.kind != tokKey {
+			t.Fatalf("token %d kind %v", i, tok.kind)
+		}
+		if tok.key.String() != want[i].String() || tok.key.Type != want[i].Type {
+			t.Fatalf("token %d = %q (%v), want %q (%v)", i, tok.key.String(), tok.key.Type, want[i].String(), want[i].Type)
+		}
+	}
+}
+
+func TestParseFrameScriptNonKeyTokens(t *testing.T) {
+	toks, err := parseFrameScript("<wheel-up><wheel-down><click:10,5><resize:120,40><sleep:5ms>" +
+		"<wait:idle><wait:working><wait:card><wait:text:TASKS n/n><wait:gone:Thinking>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 10 {
+		t.Fatalf("got %d tokens", len(toks))
+	}
+	if toks[0].mouse.Button != tea.MouseButtonWheelUp || toks[1].mouse.Button != tea.MouseButtonWheelDown {
+		t.Fatalf("wheel tokens %+v %+v", toks[0].mouse, toks[1].mouse)
+	}
+	if toks[2].mouse.X != 10 || toks[2].mouse.Y != 5 || toks[2].mouse.Button != tea.MouseButtonLeft {
+		t.Fatalf("click %+v", toks[2].mouse)
+	}
+	if toks[3].size.Width != 120 || toks[3].size.Height != 40 {
+		t.Fatalf("resize %+v", toks[3].size)
+	}
+	if toks[4].dur != 5*time.Millisecond {
+		t.Fatalf("sleep %v", toks[4].dur)
+	}
+	wantWaits := []waitSpec{
+		{kind: "idle"},
+		{kind: "working"},
+		{kind: "card"},
+		{kind: "text", needle: "TASKS n/n"},
+		{kind: "gone", needle: "Thinking"},
+	}
+	for i, want := range wantWaits {
+		got := toks[5+i].wait
+		if got != want {
+			t.Fatalf("wait %d = %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+func TestParseFrameScriptRejects(t *testing.T) {
+	for _, script := range []string{
+		"<nope>",
+		"<ctrl-1>",
+		"<ctrl-aa>",
+		"<enter",
+		"<sleep:soon>",
+		"<click:10>",
+		"<resize:0,10>",
+		"<wait:done>",
+		"<wait:text:>",
+	} {
+		if _, err := parseFrameScript(script); err == nil {
+			t.Fatalf("%q parsed, want an error", script)
+		} else {
+			var se *ScriptError
+			if !errors.As(err, &se) {
+				t.Fatalf("%q: got %T, want *ScriptError", script, err)
+			}
+		}
+	}
+}
+
+func TestWaitSpecMatch(t *testing.T) {
+	idle := frameState{started: true, status: statusIdle, plain: "craze idle"}
+	if !(waitSpec{kind: "idle"}).match(idle) {
+		t.Fatal("idle should match a started idle frame")
+	}
+	if (waitSpec{kind: "idle"}).match(frameState{status: statusIdle}) {
+		t.Fatal("idle must not match before Start returns")
+	}
+	if (waitSpec{kind: "idle"}).match(frameState{started: true, status: statusIdle, card: true}) {
+		t.Fatal("idle must not match while a card is up")
+	}
+	if !(waitSpec{kind: "working"}).match(frameState{status: statusWorking}) {
+		t.Fatal("working")
+	}
+	if !(waitSpec{kind: "card"}).match(frameState{card: true}) {
+		t.Fatal("card")
+	}
+	if !(waitSpec{kind: "text", needle: "idle"}).match(idle) {
+		t.Fatal("text")
+	}
+	if !(waitSpec{kind: "gone", needle: "working"}).match(idle) {
+		t.Fatal("gone")
+	}
+}
+
+func frameWorkspace(t *testing.T) string {
+	t.Helper()
+	// A fixed basename keeps the status line (workspace basename) golden-stable.
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return ws
+}
+
+func runStubFrame(t *testing.T, cols, rows int, script string) string {
+	t.Helper()
+	isolateSkillsHome(t)
+	plain, _, err := RunFrameScript(Config{
+		Session:   NewStub(),
+		Theme:     "tokyo-night",
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
+	return plain
+}
+
+func assertGolden(t *testing.T, name string, cols int, got string) {
+	t.Helper()
+	for _, ln := range strings.Split(got, "\n") {
+		if w := lipgloss.Width(ln); w > cols {
+			t.Fatalf("line is %d wide, max is %d: %q", w, cols, ln)
+		}
+	}
+	path := filepath.Join("testdata", name+".golden")
+	if *updateGoldens {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%v (regenerate with: go test ./internal/tui -run TestFrameGolden -update)", err)
+	}
+	if string(want) != got {
+		t.Fatalf("golden %s mismatch\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
+	}
+}
+
+// echoPrompt is 224 characters, so the stub's "echo: " reply is 230, and opens
+// with a 150-character unbroken token that only a hard wrap can break.
+func echoPrompt() string {
+	return strings.Repeat("x", 150) + " alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+}
+
+func TestFrameGoldenEcho80x24(t *testing.T) {
+	prompt := echoPrompt()
+	if len(prompt) != 224 {
+		t.Fatalf("prompt is %d chars, want 224", len(prompt))
+	}
+	got := runStubFrame(t, 80, 24, "<wait:idle>"+prompt+"<enter><wait:text:echo:><wait:idle>")
+	assertGolden(t, "echo-80x24", 80, got)
+
+	broken := 0
+	for _, ln := range strings.Split(got, "\n") {
+		if strings.Contains(ln, strings.Repeat("x", 40)) {
+			broken++
+		}
+	}
+	if broken < 2 {
+		t.Fatalf("the 150-char token was not broken across rows:\n%s", got)
+	}
+	if !strings.Contains(got, "lima") {
+		t.Fatalf("reply tail missing, so the reply is not across 3 rows:\n%s", got)
+	}
+}
+
+func TestFrameGoldenQuickNotQuit(t *testing.T) {
+	got := runStubFrame(t, 80, 24, "<wait:idle>quick question")
+	assertGolden(t, "quick-not-quit", 80, got)
+	if !strings.Contains(got, "quick question") {
+		t.Fatalf("composer lost the typed text:\n%s", got)
+	}
+	if !strings.Contains(got, "idle") {
+		t.Fatalf("craze did not stay up:\n%s", got)
+	}
+}
+
+func TestFrameWaitTimeoutReapsChild(t *testing.T) {
+	isolateSkillsHome(t)
+	bin := buildFakeAgent(t)
+	ws := frameWorkspace(t)
+	sess := agent.New(agent.Options{
+		Binary:    bin,
+		ExtraArgs: []string{"-script=hang"},
+		Workspace: ws,
+		Force:     true,
+		Stderr:    io.Discard,
+	})
+
+	start := time.Now()
+	_, _, err := RunFrameScript(Config{
+		Session:   sess,
+		Theme:     "tokyo-night",
+		Workspace: ws,
+		Yolo:      true,
+	}, 80, 24, "<wait:idle>hang<enter><wait:idle>", FrameOpts{Timeout: 2 * time.Second})
+
+	var te *WaitTimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("got %v, want *WaitTimeoutError", err)
+	}
+	if te.Wait != "<wait:idle>" {
+		t.Fatalf("wait %q", te.Wait)
+	}
+	if !strings.Contains(te.LastFrame, "working") {
+		t.Fatalf("diagnostics should carry the last frame, got:\n%s", te.LastFrame)
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Fatalf("timeout took %s", elapsed)
+	}
+	if runtime.GOOS != "linux" {
+		return
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processRunning(bin) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("fake-agent child still running after the frame timeout")
+}
+
+func TestFrameWaitsForStartBeforeTyping(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	stub.DelayStart(150 * time.Millisecond)
+	plain, _, err := RunFrameScript(Config{
+		Session:   stub,
+		Theme:     "tokyo-night",
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+	}, 80, 24, "hi<enter><wait:text:echo: hi>", FrameOpts{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("a script with no leading wait must still reach the agent: %v", err)
+	}
+	if !strings.Contains(plain, "echo: hi") {
+		t.Fatalf("prompt was dropped before Start returned:\n%s", plain)
+	}
+}
+
+func TestFrameQuitScriptDoesNotTimeOut(t *testing.T) {
+	// The trailing tokens land after bubbletea has exited, where Send is a
+	// no-op: the sync barrier must not wait them out.
+	for _, script := range []string{
+		"<wait:idle><ctrl-d>",
+		"<wait:idle>/quit<enter><sleep:100ms><esc>",
+		"<ctrl-d><sleep:100ms><esc><esc>",
+	} {
+		t.Run(script, func(t *testing.T) {
+			isolateSkillsHome(t)
+			start := time.Now()
+			_, _, err := RunFrameScript(Config{
+				Session:   NewStub(),
+				Theme:     "tokyo-night",
+				Workspace: frameWorkspace(t),
+				Yolo:      true,
+			}, 80, 24, script, FrameOpts{Timeout: 3 * time.Second})
+			if err != nil {
+				t.Fatalf("quit script returned %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("quit script waited %s, so it raced the sync barrier", elapsed)
+			}
+		})
+	}
+}
+
+func TestFrameIsolatesHomeFromTheChild(t *testing.T) {
+	isolateSkillsHome(t)
+	outer := os.Getenv("HOME")
+	dir := t.TempDir()
+	record := filepath.Join(dir, "child-home")
+	bin := filepath.Join(dir, "home-probe")
+	probe := "#!/bin/sh\nprintf '%s' \"$HOME\" > " + record + "\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(probe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := frameWorkspace(t)
+	sess := agent.New(agent.Options{Binary: bin, Workspace: ws, Stderr: io.Discard})
+
+	// An empty script still starts, fails, and cleans up; the child records the
+	// HOME it was spawned with.
+	if _, _, err := RunFrameScript(Config{
+		Session:   sess,
+		Theme:     "tokyo-night",
+		Workspace: ws,
+	}, 80, 24, "", FrameOpts{Timeout: 5 * time.Second}); err != nil {
+		t.Fatalf("empty script: %v", err)
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("child did not run: %v", err)
+	}
+	if string(got) == "" {
+		t.Fatal("child saw an empty HOME")
+	}
+	if string(got) == outer {
+		t.Fatalf("child inherited the caller's HOME %q", outer)
+	}
+	if os.Getenv("HOME") != outer {
+		t.Fatalf("HOME was not restored: %q", os.Getenv("HOME"))
+	}
+}
+
+func TestRunFrameScriptRejectsBadScript(t *testing.T) {
+	isolateSkillsHome(t)
+	_, _, err := RunFrameScript(Config{
+		Session:   NewStub(),
+		Workspace: frameWorkspace(t),
+	}, 80, 24, "<nope>", FrameOpts{Timeout: time.Second})
+	var se *ScriptError
+	if !errors.As(err, &se) {
+		t.Fatalf("got %T (%v), want *ScriptError", err, err)
+	}
+}

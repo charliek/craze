@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -16,6 +17,7 @@ type Stub struct {
 	closed     chan struct{}
 	cancel     chan struct{}
 	hang       bool
+	startDelay time.Duration
 	n          int
 	failMode   bool
 	failModel  bool
@@ -93,7 +95,22 @@ func (s *Stub) FailNextSetConfig() {
 	s.mu.Unlock()
 }
 
-func (s *Stub) Start(context.Context) error { return nil }
+// DelayStart makes Start take d, so tests can prove callers wait for it.
+func (s *Stub) DelayStart(d time.Duration) {
+	s.mu.Lock()
+	s.startDelay = d
+	s.mu.Unlock()
+}
+
+func (s *Stub) Start(context.Context) error {
+	s.mu.Lock()
+	d := s.startDelay
+	s.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	}
+	return nil
+}
 
 func (s *Stub) Events() <-chan agent.Event { return s.events }
 

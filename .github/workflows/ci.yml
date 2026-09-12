@@ -18,8 +18,8 @@ jobs:
         with:
           go-version: '1.24'
       - run: go test -timeout 5m -v ./...
-      - run: go test -timeout 5m -race ./internal/acp ./internal/agent
-        if: hashFiles('internal/acp/*.go', 'internal/agent/*.go') != ''
+      - run: go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/tui
+        if: hashFiles('internal/acp/*.go', 'internal/agent/*.go', 'internal/tui/*.go') != ''
 
   lint:
     runs-on: ubuntu-latest

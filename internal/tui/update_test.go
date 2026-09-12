@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -138,9 +139,9 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 	}
 }
 
-func TestQQuitsWhenComposerEmpty(t *testing.T) {
+func TestCtrlDQuits(t *testing.T) {
 	m := sized(t)
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
 	if !m.quitting {
 		t.Fatal("expected quit")
@@ -148,16 +149,165 @@ func TestQQuitsWhenComposerEmpty(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected quit cmd")
 	}
+	assertQuitCmd(t, cmd)
+
+	m = sized(t)
 	m.input.SetValue("keep")
-	m.quitting = false
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
-	if m.quitting {
-		t.Fatal("q with composer text must type, not quit")
+	if !m.quitting || cmd == nil {
+		t.Fatal("ctrl+d should quit with composer text too")
 	}
-	if m.input.Value() == "keep" {
-		t.Fatal("q should be inserted into composer")
+}
+
+func TestTypingQuickDoesNotQuit(t *testing.T) {
+	m := sized(t)
+	for _, r := range "quick question" {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = tm.(Model)
+		if m.quitting {
+			t.Fatalf("typing %q quit craze", r)
+		}
+		if m.help {
+			t.Fatalf("typing %q opened help", r)
+		}
 	}
+	if m.input.Value() != "quick question" {
+		t.Fatalf("composer %q", m.input.Value())
+	}
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking || cmd == nil {
+		t.Fatal("quick question should send")
+	}
+	if got := strings.Join(texts(m, "user"), ""); got != "quick question" {
+		t.Fatalf("user %q", got)
+	}
+}
+
+func TestCtrlCStateMachine(t *testing.T) {
+	base := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+
+	t.Run("idle quits", func(t *testing.T) {
+		m := sized(t)
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("ctrl+c while idle should quit")
+		}
+		assertQuitCmd(t, cmd)
+	})
+
+	t.Run("error quits", func(t *testing.T) {
+		m := sized(t)
+		m.status = statusError
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("ctrl+c in the error state should quit")
+		}
+	})
+
+	t.Run("working cancels then quits", func(t *testing.T) {
+		now := base
+		m := hangWorking(t)
+		m.clock = func() time.Time { return now }
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if m.quitting {
+			t.Fatal("first ctrl+c while working must cancel, not quit")
+		}
+		if cmd == nil {
+			t.Fatal("expected cancel cmd")
+		}
+		if !m.ctrlCDeadline.Equal(now.Add(time.Second)) {
+			t.Fatalf("deadline %v", m.ctrlCDeadline)
+		}
+		now = base.Add(400 * time.Millisecond)
+		tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("second ctrl+c inside the window should quit")
+		}
+		assertQuitCmd(t, cmd)
+	})
+
+	t.Run("after the window cancels again", func(t *testing.T) {
+		now := base
+		m := hangWorking(t)
+		m.clock = func() time.Time { return now }
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		now = base.Add(2 * time.Second)
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if m.quitting {
+			t.Fatal("ctrl+c after the window should cancel again")
+		}
+		if cmd == nil {
+			t.Fatal("expected a second cancel cmd")
+		}
+		if !m.ctrlCDeadline.Equal(now.Add(time.Second)) {
+			t.Fatalf("deadline should re-arm, got %v", m.ctrlCDeadline)
+		}
+	})
+
+	t.Run("working with a pending permission cancels once", func(t *testing.T) {
+		m := hangWorking(t)
+		m.clock = func() time.Time { return base }
+		tm, _ := m.Update(eventMsg{agent.Event{
+			Type: agent.EventPermission,
+			Permission: &agent.PermissionEvent{
+				ID:      "perm-1",
+				Tool:    "Shell",
+				Options: []agent.PermissionOption{{OptionID: "opt-once", Kind: "allow_once"}},
+			},
+		}})
+		m = tm.(Model)
+		if m.pending == nil || m.status != statusWorking {
+			t.Fatalf("setup: pending=%v status=%s", m.pending != nil, m.status)
+		}
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if m.quitting {
+			t.Fatal("ctrl+c with a pending request should cancel, not quit")
+		}
+		if m.pending != nil {
+			t.Fatal("cancel should clear the pending request")
+		}
+		if cmd == nil {
+			t.Fatal("expected one cancel cmd")
+		}
+		// The answer and the cancel must run in one command, and a request the
+		// agent already withdrew must not paint an error row.
+		if msg := cmd(); msg != nil {
+			t.Fatalf("cancel cmd returned %T %v", msg, msg)
+		}
+		if got := texts(m, "error"); len(got) != 0 {
+			t.Fatalf("cancel painted error rows %q", got)
+		}
+	})
+
+	t.Run("another key clears the window", func(t *testing.T) {
+		now := base
+		m := hangWorking(t)
+		m.clock = func() time.Time { return now }
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+		m = tm.(Model)
+		if !m.ctrlCDeadline.IsZero() {
+			t.Fatalf("deadline should be cleared, got %v", m.ctrlCDeadline)
+		}
+		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		m = tm.(Model)
+		if m.quitting {
+			t.Fatal("ctrl+c after another key should cancel, not quit")
+		}
+		if cmd == nil {
+			t.Fatal("expected cancel cmd")
+		}
+	})
 }
 
 func TestEscCancelsWorkingTurn(t *testing.T) {
@@ -221,14 +371,16 @@ func TestPermissionOverlayKeys(t *testing.T) {
 }
 
 func TestPermissionOverlayPinnedKeys(t *testing.T) {
-	t.Run("q quits", func(t *testing.T) {
+	t.Run("q does not quit", func(t *testing.T) {
 		m := withOverlay(t)
 		tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 		m = tm.(Model)
-		if !m.quitting || cmd == nil {
-			t.Fatal("q should quit during permission overlay")
+		if m.quitting || cmd != nil {
+			t.Fatal("bare q must not quit during a permission overlay")
 		}
-		assertQuitCmd(t, cmd)
+		if m.pending == nil {
+			t.Fatal("overlay should remain")
+		}
 	})
 	t.Run("ctrl+c quits", func(t *testing.T) {
 		m := withOverlay(t)
@@ -505,27 +657,33 @@ func TestUnknownSlashSendsAsPrompt(t *testing.T) {
 	}
 }
 
-func TestQOnHelpClosesNotQuits(t *testing.T) {
+func TestEscOnHelpClosesNotQuits(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m.input.SetValue("/help")
+	tm, _ := m.Update(enter())
 	m = tm.(Model)
 	if !m.help {
 		t.Fatal("expected help")
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	m = tm.(Model)
+	if !m.help {
+		t.Fatal("q must not close help")
+	}
+	if m.quitting || cmd != nil {
+		t.Fatal("q on help must not quit or run a command")
+	}
+	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
 	if m.help {
-		t.Fatal("q should close help")
+		t.Fatal("esc should close help")
 	}
-	if m.quitting {
-		t.Fatal("q on help must not quit")
-	}
-	if cmd != nil {
-		t.Fatal("q on help should not return a quit cmd")
+	if m.quitting || cmd != nil {
+		t.Fatal("esc on help must not quit")
 	}
 }
 
-func TestQOnModelPickerClosesNotQuits(t *testing.T) {
+func TestEscOnModelPickerClosesNotQuits(t *testing.T) {
 	m := sized(t)
 	m.input.SetValue("/model")
 	tm, _ := m.Update(enter())
@@ -535,11 +693,19 @@ func TestQOnModelPickerClosesNotQuits(t *testing.T) {
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	m = tm.(Model)
-	if m.picking {
-		t.Fatal("q should close picker")
+	if !m.picking {
+		t.Fatal("q must not close the picker")
 	}
 	if m.quitting || cmd != nil {
-		t.Fatal("q on picker must not quit")
+		t.Fatal("q on the picker must not quit or run a command")
+	}
+	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.picking {
+		t.Fatal("esc should close picker")
+	}
+	if m.quitting || cmd != nil {
+		t.Fatal("esc on picker must not quit")
 	}
 }
 
@@ -582,6 +748,55 @@ func TestHelpOverlayFitsTerminal(t *testing.T) {
 	}
 	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
 		t.Fatalf("help body missing:\n%s", view)
+	}
+}
+
+func TestWrapProseHardWrapsAtTinyWidths(t *testing.T) {
+	for _, width := range []int{1, 2, 3, 80} {
+		limit := max(1, min(width-2, proseMaxWidth))
+		got := wrapProse(strings.Repeat("x", 40), width)
+		for _, ln := range strings.Split(got, "\n") {
+			if lipgloss.Width(ln) > limit {
+				t.Fatalf("width %d: line %q is wider than %d", width, ln, limit)
+			}
+		}
+		if strings.Count(got, "x") != 40 {
+			t.Fatalf("width %d: wrap lost characters: %q", width, got)
+		}
+	}
+	if got := wrapProse("unchanged", 0); got != "unchanged" {
+		t.Fatalf("wrap before the first resize should pass through, got %q", got)
+	}
+}
+
+func TestToolRowsStayOneRow(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		ID:     "call-abc-0\nfc_123",
+		Kind:   "execute\nextra",
+		Status: "pending\nextra",
+		Title:  "Shell\x1b]0;x\x07 go vet\n./...",
+	}}})
+	m = tm.(Model)
+	got := texts(m, "tool")
+	if len(got) != 1 {
+		t.Fatalf("tool lines %q", got)
+	}
+	if strings.ContainsAny(got[0], "\n\x1b\x07") {
+		t.Fatalf("tool row still has control characters: %q", got[0])
+	}
+	if strings.Contains(got[0], "fc_123") {
+		t.Fatalf("tool id must never be rendered: %q", got[0])
+	}
+	for _, tool := range []agent.ToolEvent{
+		{ID: "sh-1", Kind: "execute", Status: "in_progress\nextra", Title: "Shell\nmore"},
+		{ID: "rd-1", Kind: "read\nextra", Status: "pending", Title: ""},
+		{ID: "rd-2", Kind: "read", Status: "", Title: "Read\x1b]0;x\x07 main.go"},
+	} {
+		row := formatStripRow(tool)
+		if strings.ContainsAny(row, "\n\x1b\x07") {
+			t.Fatalf("strip row still has control characters: %q", row)
+		}
 	}
 }
 

@@ -13,9 +13,17 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 )
+
+// ctrlCWindow is how long a Ctrl+C that cancelled a turn stays armed; a second
+// press inside it quits.
+const ctrlCWindow = time.Second
+
+// proseMaxWidth caps transcript wrapping so wide terminals stay readable.
+const proseMaxWidth = 100
 
 type status int
 
@@ -81,7 +89,22 @@ type Model struct {
 	stripSel  int
 	stripID   string
 	stripPeek bool
+
+	ctrlCDeadline time.Time
+	clock         func() time.Time
 }
+
+// now reads the clock through an indirection so tests can inject one.
+func (m Model) now() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
+}
+
+// cardOpen reports whether a blocking card owns the keyboard. U0 only has the
+// permission line; question and plan cards land later.
+func (m Model) cardOpen() bool { return m.pending != nil }
 
 type transcriptLine struct {
 	kind string
@@ -174,6 +197,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.ready = true
 		m.layout()
+		m.refreshViewport()
 		return m, nil
 
 	case startedMsg:
@@ -234,16 +258,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlD {
+	switch msg.Type {
+	case tea.KeyCtrlD:
 		return m.requestQuit()
+	case tea.KeyCtrlC:
+		return m.handleCtrlC()
 	}
+	m.ctrlCDeadline = time.Time{}
 
 	if m.pending != nil {
 		if msg.Type == tea.KeyEsc {
 			return m.cancelTurn()
-		}
-		if msg.String() == "q" && composerEmpty(m.input) {
-			return m.requestQuit()
 		}
 		return m.handlePermissionKey(msg)
 	}
@@ -289,13 +314,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.completeSlash()
 		return m, nil
 	}
-	if msg.String() == "q" && composerEmpty(m.input) {
-		return m.requestQuit()
-	}
-	if msg.String() == "?" && composerEmpty(m.input) {
-		m.help = true
-		return m, nil
-	}
 	if m.slashMenuOpen() && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
 		items := m.filteredSlash()
 		if len(items) == 0 {
@@ -333,14 +351,27 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "?", "esc":
-		m.help = false
-	}
 	if msg.Type == tea.KeyEsc {
 		m.help = false
 	}
 	return m, nil
+}
+
+// handleCtrlC implements the pinned state machine: working cancels and arms a
+// one-second window, a second press inside the window quits, and idle or an
+// error state quits outright.
+func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
+	if m.status != statusWorking {
+		return m.requestQuit()
+	}
+	now := m.now()
+	if !m.ctrlCDeadline.IsZero() && now.Before(m.ctrlCDeadline) {
+		return m.requestQuit()
+	}
+	tm, cmd := m.cancelTurn()
+	next := tm.(Model)
+	next.ctrlCDeadline = now.Add(ctrlCWindow)
+	return next, cmd
 }
 
 func (m Model) pickerCount() int {
@@ -401,9 +432,6 @@ func (m Model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		sel = (sel - 1 + n) % n
 	default:
 		s := msg.String()
-		if s == "q" {
-			return m.closePicker(), nil
-		}
 		if s == "j" {
 			sel = (sel + 1) % n
 		} else if s == "k" {
@@ -504,27 +532,29 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	}
 }
 
+// cancelTurn answers a pending permission request and only then cancels, in one
+// command: Cancel itself cancels every waiting request, so running the two
+// concurrently makes the answer lose the race and report an unknown id.
 func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	if m.pending != nil {
-		tm, cmd := m.answerPending("")
-		m = tm.(Model)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+	p := m.pending
+	working := m.status == statusWorking
+	if p == nil && !working {
+		return m, nil
 	}
-	if m.status == statusWorking {
-		cmds = append(cmds, m.cancelCmd())
-	}
-	return m, tea.Batch(cmds...)
-}
-
-func (m Model) cancelCmd() tea.Cmd {
+	m.pending = nil
+	m.layout()
 	sess := m.sess
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = sess.Cancel(ctx)
+	return m, func() tea.Msg {
+		if p != nil {
+			// An unknown id here only means the agent already withdrew the
+			// request, so it is not worth an error row.
+			_ = sess.AnswerPermission(p.ID, "")
+		}
+		if working {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = sess.Cancel(ctx)
+		}
 		return nil
 	}
 }
@@ -602,11 +632,13 @@ func (m *Model) addLine(kind, text string) {
 	m.refreshViewport()
 }
 
+// formatToolLine renders one row per tool call. The id is deliberately absent:
+// cursor ids embed a literal newline, so they stay map keys only.
 func formatToolLine(t *agent.ToolEvent) string {
 	if t == nil {
 		return ""
 	}
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 3)
 	if t.Kind != "" {
 		parts = append(parts, t.Kind)
 	}
@@ -616,14 +648,31 @@ func formatToolLine(t *agent.ToolEvent) string {
 	if t.Title != "" {
 		parts = append(parts, t.Title)
 	}
-	if t.ID != "" {
-		parts = append(parts, t.ID)
-	}
 	s := strings.Join(parts, " ")
 	if t.RawInput != "" {
 		s += " (" + t.RawInput + ")"
 	}
-	return s
+	return sanitizeLine(s)
+}
+
+// sanitizeLine folds a string onto one line: control characters become spaces
+// and runs of whitespace collapse. Full ingestion-side sanitising lands later.
+func sanitizeLine(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
 }
 
 func (m *Model) upsertToolLine(t *agent.ToolEvent) {
@@ -693,22 +742,52 @@ func (m *Model) layout() {
 	m.input.SetWidth(max(1, m.width-4))
 }
 
+// wrapProse word-wraps and then hard-wraps, so an unbroken token longer than
+// the terminal is broken instead of being cut by the viewport.
+func wrapProse(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	w := width - 2
+	if w > proseMaxWidth {
+		w = proseMaxWidth
+	}
+	if w < 1 {
+		w = 1
+	}
+	return ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
+}
+
 func (m *Model) refreshViewport() {
 	stick := m.vp.Height == 0 || m.vp.AtBottom()
 	var b strings.Builder
 	for _, ln := range m.lines {
+		var st lipgloss.Style
+		text := ln.text
 		switch ln.kind {
 		case "user":
-			b.WriteString(lipgloss.NewStyle().Foreground(m.theme.User).Render("you: " + ln.text))
+			st = lipgloss.NewStyle().Foreground(m.theme.User)
+			text = "you: " + text
 		case "tool":
-			b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Tool).Render("tool " + ln.text))
+			st = lipgloss.NewStyle().Foreground(m.theme.Tool)
+			text = "tool " + text
 		case "error":
-			b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Err).Render("error: " + ln.text))
+			st = lipgloss.NewStyle().Foreground(m.theme.Err)
+			text = "error: " + text
 		case "thought":
-			b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Dim).Italic(true).Render(ln.text))
+			st = lipgloss.NewStyle().Foreground(m.theme.Dim).Italic(true)
 		default:
-			b.WriteString(lipgloss.NewStyle().Foreground(m.theme.Assistant).Render(ln.text))
+			st = lipgloss.NewStyle().Foreground(m.theme.Assistant)
 		}
+		if ln.kind == "tool" {
+			// One tool call is one row; long titles are clipped, never wrapped.
+			if m.width > 0 {
+				text = clampWidth(text, m.width)
+			}
+		} else {
+			text = wrapProse(text, m.width)
+		}
+		b.WriteString(st.Render(text))
 		b.WriteByte('\n')
 	}
 	m.vp.SetContent(strings.TrimRight(b.String(), "\n"))
@@ -783,7 +862,7 @@ func (m Model) overlayReserve() int {
 func (m Model) helpView() string {
 	lines := []string{
 		"enter send   shift/alt+enter or ctrl+j newline   shift+tab cycle mode",
-		"esc cancel   q empty composer quit   ctrl+c/d quit   pgup/pgdn scroll",
+		"esc cancel   ctrl+c cancel then quit   ctrl+d quit   pgup/pgdn scroll",
 		"commands:",
 	}
 	for _, it := range m.slashCatalog() {
@@ -875,18 +954,27 @@ func (m Model) footer() string {
 	prefix := fmt.Sprintf("%s  %s  %s  %s  ", model, effort, mode, perm)
 	suffix := "  " + st
 	w := max(1, m.width)
-	cwd := m.cwd
 	budget := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
 	if budget < 1 {
 		budget = 1
 	}
-	cwd = clampWidthTail(cwd, budget)
-	line := prefix + cwd + suffix
+	line := prefix + clampWidth(workspaceName(m.cwd), budget) + suffix
 	return lipgloss.NewStyle().
 		Foreground(m.theme.FooterFG).
 		Background(m.theme.FooterBG).
 		Width(w).
 		Render(line)
+}
+
+// workspaceName is the basename of the workspace, falling back to the path
+// itself at a filesystem root.
+func workspaceName(cwd string) string {
+	base := filepath.Base(cwd)
+	switch base {
+	case "", ".", string(filepath.Separator):
+		return cwd
+	}
+	return base
 }
 
 func waitEvent(sess agent.Session) tea.Cmd {

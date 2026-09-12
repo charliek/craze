@@ -63,7 +63,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 		t.Fatalf("missing follow-up:\n%s", m.View())
 	}
 
-	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
 	if !m.quitting || qcmd == nil {
 		t.Fatal("expected quit")
@@ -115,7 +115,7 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 		_ = promptCmd()
 	}()
 
-	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
 	if !m.quitting || qcmd == nil {
 		t.Fatal("expected quit")
