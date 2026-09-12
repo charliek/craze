@@ -50,7 +50,7 @@ func (m *Model) handleTick(msg tickMsg) {
 }
 
 func (m Model) wantFastTick() bool {
-	return m.status == statusWorking || m.cardOpen() || m.tasksLingering()
+	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() || m.agentLingering()
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a
@@ -67,11 +67,17 @@ func (m Model) spinnerVisible() bool {
 	return m.status == statusWorking || m.cardOpen()
 }
 
+// spinnerGlyph is the current frame of the cycle, shared with the merged form
+// degradation step 6 leaves in status row 2.
+func (m Model) spinnerGlyph() string {
+	return spinnerGlyphs[m.spinFrame%len(spinnerGlyphs)]
+}
+
 func (m Model) spinnerView() string {
 	if !m.spinnerVisible() {
 		return ""
 	}
-	glyph := spinnerGlyphs[m.spinFrame%len(spinnerGlyphs)] + " "
+	glyph := m.spinnerGlyph() + " "
 	if m.cardOpen() {
 		return renderSegs(m.width,
 			seg{glyph, styleFG(m.theme.Title)},

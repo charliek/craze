@@ -141,7 +141,7 @@ func (m Model) tasksHeader() string {
 // tasksView draws the panel into the rows the layout gave it; TasksRows is 0
 // when degradation left only the header.
 func (m Model) tasksView(lay frameLayout) string {
-	if lay.Tasks.Empty() {
+	if lay.Region(regionTasks).Empty() {
 		return ""
 	}
 	rows := []string{renderSegs(m.width, seg{m.tasksHeader(), styleFG(m.theme.Title)})}

@@ -71,11 +71,11 @@ func TestTasksPanelAppearsOnFirstTodoEvent(t *testing.T) {
 	if !strings.Contains(view, "▸ Read main.go") || !strings.Contains(view, "○ Run go vet") {
 		t.Fatalf("in-progress first, then pending:\n%s", view)
 	}
-	if m.lay.Tasks.Height() != 4 {
-		t.Fatalf("panel is %d rows, want header + 3", m.lay.Tasks.Height())
+	if m.lay.Region(regionTasks).Height() != 4 {
+		t.Fatalf("panel is %d rows, want header + 3", m.lay.Region(regionTasks).Height())
 	}
 	// The panel sits directly above the composer.
-	if m.lay.Tasks.Bottom != m.lay.Spinner.Top || m.lay.Spinner.Bottom != m.lay.Composer.Top {
+	if m.lay.Region(regionTasks).Bottom != m.lay.Region(regionSpinner).Top || m.lay.Region(regionSpinner).Bottom != m.lay.Region(regionComposer).Top {
 		t.Fatalf("panel is not pinned above the composer: %+v", m.lay)
 	}
 }

@@ -67,8 +67,12 @@ description: Disk demo skill
 body must not be injected
 `)
 	m := startSized(t, ws)
+	// The help box is cropped, not scrolled, and the two status rows leave one
+	// row less of it at 24; a taller terminal keeps the whole catalog visible.
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = tm.(Model)
 	m.input.SetValue("/demo")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = tm.(Model)
 	if m.input.Value() != "/demo" {
 		t.Fatalf("complete %q", m.input.Value())

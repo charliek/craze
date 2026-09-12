@@ -17,8 +17,8 @@ done bash
                                                                                 
                                                                                 
                                                                                 
-                                                                                
 ────────────────────────────────────────────────────────────────────────────────
 ❯ message  / for commands                                                       
 ────────────────────────────────────────────────────────────────────────────────
-default  medium  agent  yolo  ws  idle                                          
+ws │ cursor │ Default (medium) │ agent │ 0m                                     
+▸▸ bypass permissions on                                                        

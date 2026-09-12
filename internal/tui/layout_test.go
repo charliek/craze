@@ -96,10 +96,10 @@ func TestFrameHeightContract(t *testing.T) {
 					t.Fatalf("line is %d wide, want %d: %q", w, tc.cols, ln)
 				}
 			}
-			if got := m.lay.Transcript.Height(); got < minTranscriptRows {
+			if got := m.lay.Region(regionTranscript).Height(); got < minTranscriptRows {
 				t.Fatalf("transcript kept %d rows, want at least %d", got, minTranscriptRows)
 			}
-			if got, want := m.chromeHeight(), tc.rows-m.lay.Transcript.Height(); got != want {
+			if got, want := m.chromeHeight(), tc.rows-m.lay.Region(regionTranscript).Height(); got != want {
 				t.Fatalf("chromeHeight %d, want %d", got, want)
 			}
 			if !strings.Contains(view, "TASKS") {
@@ -123,8 +123,8 @@ func TestShortTerminalDegradesUnconditionally(t *testing.T) {
 	if m.lay.Degraded < forcedDegrade {
 		t.Fatalf("degraded %d steps, want at least %d", m.lay.Degraded, forcedDegrade)
 	}
-	if m.lay.TasksRows != 0 || m.lay.Tasks.Height() != 1 {
-		t.Fatalf("tasks panel should be header-only, got %d rows in %v", m.lay.TasksRows, m.lay.Tasks)
+	if m.lay.TasksRows != 0 || m.lay.Region(regionTasks).Height() != 1 {
+		t.Fatalf("tasks panel should be header-only, got %d rows in %v", m.lay.TasksRows, m.lay.Region(regionTasks))
 	}
 	if m.lay.AgentRows > agentRowsShort {
 		t.Fatalf("agent rows capped at %d, got %d", agentRowsShort, m.lay.AgentRows)
@@ -152,8 +152,8 @@ func TestShortTerminalDegradesUnconditionally(t *testing.T) {
 func TestLayoutRegionsTileTheScreen(t *testing.T) {
 	m := loadedModel(t, 100, 30)
 	regions := []yRange{
-		m.lay.Transcript, m.lay.Overlay, m.lay.Tasks, m.lay.Spinner,
-		m.lay.Composer, m.lay.Agents, m.lay.Peek, m.lay.Modal, m.lay.Status,
+		m.lay.Region(regionTranscript), m.lay.Region(regionOverlay), m.lay.Region(regionTasks), m.lay.Region(regionSpinner),
+		m.lay.Region(regionComposer), m.lay.Region(regionPeek), m.lay.Region(regionModal), m.lay.Region(regionStatus), m.lay.Region(regionAgents),
 	}
 	y := 0
 	for i, r := range regions {
@@ -165,7 +165,7 @@ func TestLayoutRegionsTileTheScreen(t *testing.T) {
 	if y != m.lay.Height {
 		t.Fatalf("regions cover %d rows, want %d", y, m.lay.Height)
 	}
-	if m.lay.Status.Row(m.lay.Status.Top) != 0 || m.lay.Status.Row(m.lay.Status.Top-1) != -1 {
+	if m.lay.Region(regionStatus).Row(m.lay.Region(regionStatus).Top) != 0 || m.lay.Region(regionStatus).Row(m.lay.Region(regionStatus).Top-1) != -1 {
 		t.Fatal("Row should be region-relative and -1 outside")
 	}
 }
@@ -192,6 +192,14 @@ func TestTooSmallTerminal(t *testing.T) {
 	}
 	if !strings.Contains(view, "terminal too small") {
 		t.Fatalf("missing the minimum-size message:\n%s", view)
+	}
+	// The size is the one thing this screen is for, so it wraps rather than
+	// truncating away at 30 columns.
+	if !strings.Contains(view, fmt.Sprintf("need %d×%d", minFrameCols, minFrameRows)) {
+		t.Fatalf("the required size was truncated away:\n%s", view)
+	}
+	if strings.Contains(view, "…") {
+		t.Fatalf("the message should wrap, not truncate:\n%s", view)
 	}
 
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
@@ -284,5 +292,105 @@ func TestCtrlTIsNotTranspose(t *testing.T) {
 	}
 	if m.tasksState != tasksExpanded {
 		t.Fatalf("ctrl+t should cycle the panel, state %v", m.tasksState)
+	}
+}
+
+func TestFrameRegionsAreOneOrderedList(t *testing.T) {
+	// Every regionID needs an entry: a missing one is a nil func at render.
+	for id := regionID(0); id < regionCount; id++ {
+		if frameRegions[id].rows == nil || frameRegions[id].view == nil {
+			t.Fatalf("region %d has no descriptor; frameRegions must cover every regionID", id)
+		}
+	}
+	if got := len(frameRegions); got != int(regionCount) {
+		t.Fatalf("frameRegions holds %d entries, want %d", got, regionCount)
+	}
+	// Region is total: an id off either end is an empty range, never a panic
+	// and never someone else's rows.
+	m := loadedModel(t, 100, 30)
+	if !m.lay.Region(-1).Empty() || !m.lay.Region(regionCount).Empty() {
+		t.Fatal("Region should be empty outside the enum")
+	}
+}
+
+// TestEveryDrawnRegionOwnsItsRows walks the frame region by region and checks
+// each nonempty band renders its own content at its own coordinates. This is
+// what stops computeLayout's ordering and View's ordering from drifting.
+func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
+	m := loadedModel(t, 100, 30)
+	// Open every band the fixture leaves closed, so none is untested.
+	m.help = true
+	m.agentPeek = true
+	tm, _ := m.Update(refreshSnapMsg{})
+	m = tm.(Model)
+
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	needles := map[regionID]string{
+		// The transcript's own sub-agent rows read "● agent"; the agent rows
+		// under the status rows read "○ task", so the two cannot be confused.
+		regionTranscript: "● agent  count lines",
+		regionOverlay:    "ctrl+o expand detail",
+		regionTasks:      "TASKS",
+		regionSpinner:    "Waiting for your answer",
+		regionComposer:   "───",
+		regionPeek:       "count the lines in file",
+		regionModal:      "permission bash",
+		regionStatus:     chipYolo,
+		regionAgents:     "○ task  count lines",
+	}
+	for id := regionID(0); id < regionCount; id++ {
+		r := m.lay.Region(id)
+		if r.Empty() {
+			t.Fatalf("region %d is not drawn, so this test does not cover it: %+v", id, m.lay)
+		}
+		found := false
+		for y := r.Top; y < r.Bottom && y < len(lines); y++ {
+			if strings.Contains(lines[y], needles[id]) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("region %d claims rows [%d,%d) but none of them contains %q:\n%s",
+				id, r.Top, r.Bottom, needles[id], view)
+		}
+	}
+}
+
+func TestLayoutIsComputedOncePerUpdate(t *testing.T) {
+	m := loadedModel(t, 100, 30)
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}},
+		refreshSnapMsg{},
+	} {
+		before := m.layouts
+		tm, _ := m.Update(msg)
+		m = tm.(Model)
+		if got := m.layouts - before; got != 1 {
+			t.Fatalf("%T computed the layout %d times, want 1", msg, got)
+		}
+	}
+}
+
+func TestDegenerateSizeStillFillsTheFrame(t *testing.T) {
+	isolateSkillsHome(t)
+	m := New(Config{Session: NewStub(), Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 0, Height: 8})
+	m = tm.(Model)
+	view := m.View()
+	if h := lipgloss.Height(view); h != 8 {
+		t.Fatalf("a zero-width frame is %d rows, want 8: %q", h, view)
+	}
+	for _, ln := range strings.Split(view, "\n") {
+		if ln != "" {
+			t.Fatalf("a zero-width row should be empty, got %q", ln)
+		}
+	}
+	// And a frame with no rows at all is nothing, not a stray placeholder.
+	tm, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 0})
+	if got := tm.(Model).View(); got != "" {
+		t.Fatalf("a zero-height frame is %q", got)
 	}
 }

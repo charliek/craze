@@ -16,6 +16,7 @@ type tuiFlags struct {
 	agentBin  string
 	force     bool
 	noForce   bool
+	noMouse   bool
 	ask       bool
 	plan      bool
 }
@@ -27,6 +28,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
 	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
+	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
 }
@@ -64,6 +66,7 @@ func runTUI(f *tuiFlags) error {
 		Workspace: ws,
 		Model:     f.model,
 		Yolo:      f.force,
+		NoMouse:   f.noMouse,
 	})
 }
 

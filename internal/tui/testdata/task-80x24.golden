@@ -16,9 +16,9 @@ done task
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
 ────────────────────────────────────────────────────────────────────────────────
 ❯ message  / for commands                                                       
 ────────────────────────────────────────────────────────────────────────────────
-default  medium  agent  yolo  ws  idle                                          
+ws │ cursor │ Default (medium) │ agent │ 0m                                     
+▸▸ bypass permissions on                                                        
+✓ task  Count main.go lines  8.0s · grok-4.6-high-fast                          

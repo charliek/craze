@@ -222,7 +222,9 @@ func TestFrameGoldenQuickNotQuit(t *testing.T) {
 	if !strings.Contains(got, "quick question") {
 		t.Fatalf("composer lost the typed text:\n%s", got)
 	}
-	if !strings.Contains(got, "idle") {
+	// The session line only fills in once Start returned, so it proves craze
+	// stayed up as well as the old "idle" word did.
+	if !strings.Contains(got, "cursor │ Grok") {
 		t.Fatalf("craze did not stay up:\n%s", got)
 	}
 }
@@ -254,7 +256,9 @@ func TestFrameWaitTimeoutReapsChild(t *testing.T) {
 	if te.Wait != "<wait:idle>" {
 		t.Fatalf("wait %q", te.Wait)
 	}
-	if !strings.Contains(te.LastFrame, "working") {
+	// The status rows carry no status word; the spinner line is what a working
+	// frame shows.
+	if !strings.Contains(te.LastFrame, "esc to interrupt") {
 		t.Fatalf("diagnostics should carry the last frame, got:\n%s", te.LastFrame)
 	}
 	if elapsed := time.Since(start); elapsed > 20*time.Second {
@@ -529,5 +533,28 @@ func TestFrameGoldenTooSmall30x8(t *testing.T) {
 	assertGolden(t, "too-small-30x8", 30, 8, got)
 	if !strings.Contains(got, "terminal too small") {
 		t.Fatalf("missing the minimum-size message:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTaskRows100x30(t *testing.T) {
+	got := runFakeFrame(t, "task", 100, 30, "<wait:idle>go<enter><wait:text:done task><wait:idle>")
+	assertGolden(t, "task-rows-100x30", 100, 30, got)
+	// The row lingers under the status rows after the sub-agent finished.
+	if !strings.Contains(got, "✓ task  Count main.go lines  8.0s · grok-4.6-high-fast") {
+		t.Fatalf("missing the lingering sub-agent row:\n%s", got)
+	}
+	rows := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if !strings.Contains(rows[len(rows)-1], "✓ task") {
+		t.Fatalf("the agent rows belong under the status rows:\n%s", got)
+	}
+}
+
+func TestFrameGoldenStatus60x24(t *testing.T) {
+	got := runStubFrame(t, 60, 24, "<wait:idle>")
+	assertGolden(t, "status-60x24", 60, 24, got)
+	for _, want := range []string{"ws │ cursor │ Grok (medium) │ agent │ 0m", "▸▸ bypass permissions on"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
 	}
 }

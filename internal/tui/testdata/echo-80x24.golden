@@ -17,8 +17,8 @@ alphas bravo charlie delta echo foxtrot golf hotel india juliet kilo lima
                                                                                 
                                                                                 
                                                                                 
-                                                                                
 ────────────────────────────────────────────────────────────────────────────────
 ❯ message  / for commands                                                       
 ────────────────────────────────────────────────────────────────────────────────
-grok  medium  agent  yolo  ws  idle                                             
+ws │ cursor │ Grok (medium) │ agent │ 0m                                        
+▸▸ bypass permissions on                                                        

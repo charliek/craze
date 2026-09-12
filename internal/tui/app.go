@@ -21,6 +21,14 @@ import (
 // press inside it quits.
 const ctrlCWindow = time.Second
 
+const (
+	// wheelLines is how far one wheel notch scrolls the transcript.
+	wheelLines = 3
+	// pickerHeaderRows is the box border plus the picker's own title row,
+	// which sit above option 1.
+	pickerHeaderRows = 2
+)
+
 type status int
 
 const (
@@ -46,6 +54,9 @@ type Config struct {
 	Workspace string
 	Model     string
 	Yolo      bool
+	// NoMouse turns mouse reporting off, which gives the terminal its native
+	// drag-select back.
+	NoMouse bool
 }
 
 type Model struct {
@@ -60,6 +71,13 @@ type Model struct {
 	status status
 	err    string
 
+	// git is found once, at start; branch is re-read when a turn ends.
+	git    gitInfo
+	branch string
+	// sessStart is when Start returned, which is what the status row's
+	// elapsed counts from.
+	sessStart time.Time
+
 	entries  []entry
 	expanded bool
 	trimmed  bool
@@ -72,7 +90,10 @@ type Model struct {
 
 	// lay is the one layout computation per Update; View and the mouse
 	// hit-tester both read it rather than measuring anything themselves.
-	lay frameLayout
+	// layouts counts the computations relayout made, so a test can hold
+	// §3.1's "computed once per Update".
+	lay     frameLayout
+	layouts int
 
 	pending *agent.PermissionEvent
 	snap    agent.Snapshot
@@ -92,9 +113,14 @@ type Model struct {
 	pathDirs    map[string]map[string]struct{}
 	todoPlanned int
 	todoDone    bool
-	stripSel    int
-	stripID     string
-	stripPeek   bool
+
+	// Agent rows: the selection is held by tool id because the in-flight list
+	// reorders on every update.
+	agentSel   int
+	agentID    string
+	agentPeek  bool
+	agentStart map[string]time.Time
+	agentDone  map[string]time.Time
 
 	tasksState    tasksPanelState
 	todosSeen     bool
@@ -166,6 +192,8 @@ func New(cfg Config) Model {
 		model: cfg.Model,
 		yolo:  cfg.Yolo,
 	}
+	m.git = discoverGit(cwd)
+	m.branch = m.git.branch()
 	if m.sess == nil {
 		m.sess = NewStub()
 	}
@@ -181,7 +209,13 @@ func New(cfg Config) Model {
 
 func Run(cfg Config) error {
 	m := New(cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if !cfg.NoMouse {
+		// Cell motion, not all motion: craze ignores drags, and the quieter
+		// mode keeps the terminal from streaming a report per cell.
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(m, opts...)
 	_, err := p.Run()
 	if m.sess != nil {
 		_ = m.sess.Close()
@@ -225,11 +259,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Stickiness is decided from where the user was before the resize; the
+		// layout itself is left to the one relayout the Update wrapper runs.
 		stick := !m.ready || m.vp.Height == 0 || m.vp.AtBottom()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
-		m.relayout(stick)
 		m.setViewportContent(stick)
 		return m, nil
 
@@ -240,6 +275,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case startedMsg:
 		m.started = true
 		m.status = statusIdle
+		m.sessStart = m.now()
+		m.branch = m.git.branch()
 		m.refreshSnap()
 		m.rescanSkills()
 		return m, waitEvent(m.sess)
@@ -291,6 +328,52 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+	}
+	return m, nil
+}
+
+// handleMouse is the pinned mouse contract: the wheel scrolls the transcript,
+// a left press hit-tests the regions frameLayout drew. Drag, motion and every
+// other button are ignored.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.vp.ScrollUp(wheelLines)
+	case tea.MouseButtonWheelDown:
+		m.vp.ScrollDown(wheelLines)
+	case tea.MouseButtonLeft:
+		return m.handleClick(msg.Y)
+	}
+	return m, nil
+}
+
+// handleClick reads the same frameLayout View() drew from, so what is on the
+// screen and what is clickable cannot drift apart.
+func (m Model) handleClick(y int) (tea.Model, tea.Cmd) {
+	lay := m.lay
+	if lay.TooSmall || m.cardOpen() {
+		return m, nil
+	}
+	switch {
+	case m.picking && lay.Region(regionOverlay).Contains(y):
+		// The picker is a bordered box: its top border and its header sit
+		// above the first option.
+		if i := lay.Region(regionOverlay).Row(y) - pickerHeaderRows; i >= 0 {
+			return m.applyPickerIndex(i)
+		}
+	case lay.Region(regionTasks).Contains(y):
+		if lay.Region(regionTasks).Row(y) == 0 {
+			return m.cycleTasks()
+		}
+	case lay.Region(regionAgents).Contains(y):
+		// The last row can be "… +n more", which is not a sub-agent.
+		m.selectAgent(lay.Region(regionAgents).Row(y))
 	}
 	return m, nil
 }
@@ -328,8 +411,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleMode()
 	}
 	if msg.Type == tea.KeyEsc {
-		if m.stripPeek {
-			m.stripPeek = false
+		if m.agentPeek {
+			// The peek closes on its own; the turn underneath keeps running.
+			m.agentPeek = false
 			return m, nil
 		}
 		if m.slashMenuOpen() {
@@ -370,12 +454,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if composerEmpty(m.input) && len(m.stripItems()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
+	// Only the arrow keys select a row; ctrl+p / ctrl+n stay with the textarea.
+	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
 		delta := 1
 		if msg.Type == tea.KeyUp {
 			delta = -1
 		}
-		m.moveStrip(delta)
+		m.moveAgent(delta)
 		return m, nil
 	}
 	return m, m.updateComposer(msg)
@@ -503,8 +588,8 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if ok && (name == "exit" || name == "quit") {
 		return m.runBuiltin(name, args)
 	}
-	if composerEmpty(m.input) && len(m.stripItems()) > 0 {
-		m.stripPeek = true
+	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 {
+		m.agentPeek = true
 		return m, nil
 	}
 	if m.pending != nil || m.status == statusWorking || !m.started {
@@ -623,9 +708,9 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.refreshSnap()
 		if ev.Tool != nil {
 			m.noteToolUpdate(ev.Tool.ID)
+			m.noteAgentTiming(ev.Tool)
 			m.upsertTool(ev.Tool)
 		}
-		m.syncStrip()
 	case agent.EventTodos:
 		m.refreshSnap()
 		todos := m.todosOf(ev)
@@ -639,6 +724,9 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.effortStep = false
 	case agent.EventDone:
 		m.breakStream()
+		// The turn is over, so this is the one moment the branch can have
+		// changed under craze. No polling, no resize hook.
+		m.branch = m.git.branch()
 		if ev.StopReason == "cancelled" {
 			m.status = statusIdle
 		}
@@ -684,28 +772,26 @@ func (m *Model) refreshSnap() {
 // row count, so the frame is always exactly as tall as the terminal.
 func (m Model) View() string {
 	if !m.ready || m.width <= 0 || m.height <= 0 {
-		return "craze"
+		// A degenerate size still owes the terminal exactly its own rows.
+		return blankFrame(m.width, m.height)
 	}
 	lay := m.lay
 	if lay.Width != m.width || lay.Height != m.height {
+		// Only reachable when something resized the model without an Update;
+		// m is a copy here, so this does not count against "once per Update".
 		lay = m.computeLayout()
 	}
 	if lay.TooSmall {
 		return tooSmallView(m.width, m.height)
 	}
 	rows := make([]string, 0, m.height)
-	add := func(block string, r yRange) {
-		rows = append(rows, fitRows(block, r.Height(), m.width)...)
+	for i := range frameRegions {
+		r := lay.regions[i]
+		if r.Empty() {
+			continue
+		}
+		rows = append(rows, fitRows(frameRegions[i].view(m, lay), r.Height(), m.width)...)
 	}
-	add(m.vp.View(), lay.Transcript)
-	add(m.overlayView(), lay.Overlay)
-	add(m.tasksView(lay), lay.Tasks)
-	add(m.spinnerView(), lay.Spinner)
-	add(m.composerView(), lay.Composer)
-	add(m.stripRowsView(lay.AgentRows), lay.Agents)
-	add(m.stripPeekView(), lay.Peek)
-	add(m.permissionOverlay(), lay.Modal)
-	add(m.footer(), lay.Status)
 	return strings.Join(rows, "\n")
 }
 
@@ -808,44 +894,6 @@ func (m Model) permissionOverlay() string {
 	return lipgloss.NewStyle().Foreground(m.theme.Warn).Render(
 		fmt.Sprintf("permission %s  [a]llow-once  [n] reject-once", tool),
 	)
-}
-
-func (m Model) footer() string {
-	perm := "yolo"
-	if !m.yolo {
-		perm = "prompt"
-	}
-	st := m.status.String()
-	if !m.started && m.status != statusError {
-		st = "starting"
-	} else if m.status == statusError {
-		st = "error"
-	}
-	model := m.model
-	if m.snap.CurrentModel != "" {
-		model = m.snap.CurrentModel
-	}
-	mode := m.snap.CurrentMode
-	if mode == "" {
-		mode = "-"
-	}
-	effort := "-"
-	if opt := agent.EffortOption(m.snap); opt != nil && opt.Current != "" {
-		effort = opt.Current
-	}
-	prefix := fmt.Sprintf("%s  %s  %s  %s  ", model, effort, mode, perm)
-	suffix := "  " + st
-	w := max(1, m.width)
-	budget := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
-	if budget < 1 {
-		budget = 1
-	}
-	line := prefix + clampWidth(workspaceName(m.cwd), budget) + suffix
-	return lipgloss.NewStyle().
-		Foreground(m.theme.FooterFG).
-		Background(m.theme.FooterBG).
-		Width(w).
-		Render(line)
 }
 
 // workspaceName is the basename of the workspace, falling back to the path

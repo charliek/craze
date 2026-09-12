@@ -58,30 +58,21 @@ func runCmd(cmd tea.Cmd) tea.Msg {
 	return batch[0]()
 }
 
-func TestViewFooterAndComposer(t *testing.T) {
+func TestViewStatusRowsAndComposer(t *testing.T) {
 	m := sized(t)
 	view := m.View()
-	if !strings.Contains(view, "idle") {
-		t.Fatalf("missing idle in view:\n%s", view)
+	if !strings.Contains(view, chipYolo) {
+		t.Fatalf("missing the permission chip:\n%s", view)
 	}
-	if !strings.Contains(view, "yolo") {
-		t.Fatalf("missing yolo:\n%s", view)
-	}
-	if !strings.Contains(view, "grok") {
-		t.Fatalf("missing model:\n%s", view)
-	}
-	if !strings.Contains(view, "agent") {
-		t.Fatalf("missing mode:\n%s", view)
-	}
-	if !strings.Contains(view, "grok  medium  agent  yolo") {
-		t.Fatalf("footer should be model effort mode yolo:\n%s", view)
+	if !strings.Contains(view, "cursor │ Grok (medium) │ agent │ 0m") {
+		t.Fatalf("row 1 should be provider, model (effort), mode, elapsed:\n%s", view)
 	}
 	if !strings.Contains(view, "message") {
-		t.Fatalf("missing boxed composer placeholder:\n%s", view)
+		t.Fatalf("missing the composer placeholder:\n%s", view)
 	}
 }
 
-func TestFooterStartingBeforeStart(t *testing.T) {
+func TestStatusStartingBeforeStart(t *testing.T) {
 	m := New(Config{
 		Session:   NewStub(),
 		Theme:     "tokyo-night",
@@ -91,11 +82,14 @@ func TestFooterStartingBeforeStart(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
 	view := m.View()
-	if !strings.Contains(view, "starting") {
+	if !strings.Contains(view, "starting…") {
 		t.Fatalf("missing starting:\n%s", view)
 	}
-	if strings.Contains(view, "idle") {
-		t.Fatalf("idle before Start:\n%s", view)
+	if strings.Contains(view, "cursor") {
+		t.Fatalf("the session line fills in only after Start:\n%s", view)
+	}
+	if !strings.Contains(view, chipYolo) {
+		t.Fatalf("the chip is up before Start too:\n%s", view)
 	}
 }
 
@@ -770,8 +764,8 @@ func TestHelpOverlayFitsTerminal(t *testing.T) {
 	if h := lipgloss.Height(view); h > 24 {
 		t.Fatalf("help view is %d rows, crops 24-row terminal:\n%s", h, view)
 	}
-	if !strings.Contains(view, "yolo") {
-		t.Fatalf("footer cropped:\n%s", view)
+	if !strings.Contains(view, chipYolo) {
+		t.Fatalf("status rows cropped:\n%s", view)
 	}
 	if !strings.Contains(view, "message") {
 		t.Fatalf("composer cropped:\n%s", view)
@@ -820,16 +814,6 @@ func TestToolRowsStayOneRow(t *testing.T) {
 	}
 	if strings.Contains(got[0], "]0;x") {
 		t.Fatalf("injected escape sequence survived: %q", got[0])
-	}
-	for _, tool := range []agent.ToolEvent{
-		{ID: "sh-1", Kind: "execute", Status: "in_progress\nextra", Title: "Shell\nmore"},
-		{ID: "rd-1", Kind: "read\nextra", Status: "pending", Title: ""},
-		{ID: "rd-2", Kind: "read", Status: "", Title: "Read\x1b]0;x\x07 main.go"},
-	} {
-		row := formatStripRow(tool)
-		if strings.ContainsAny(row, "\n\x1b\x07") {
-			t.Fatalf("strip row still has control characters: %q", row)
-		}
 	}
 }
 
@@ -890,8 +874,8 @@ func TestModelPickerFitsTerminal(t *testing.T) {
 	if !strings.Contains(view, "grok") {
 		t.Fatalf("current grok cropped:\n%s", view)
 	}
-	if !strings.Contains(view, "yolo") {
-		t.Fatalf("footer cropped:\n%s", view)
+	if !strings.Contains(view, chipYolo) {
+		t.Fatalf("status rows cropped:\n%s", view)
 	}
 }
 
@@ -942,8 +926,8 @@ func TestModelSlashSetsModelAndEffort(t *testing.T) {
 	if !strings.Contains(m.View(), "high") {
 		t.Fatalf("footer missing high:\n%s", m.View())
 	}
-	if !strings.Contains(m.View(), "grok  high  agent  yolo") {
-		t.Fatalf("footer tokens:\n%s", m.View())
+	if !strings.Contains(m.View(), "Grok (high) │ agent") {
+		t.Fatalf("status row 1 tokens:\n%s", m.View())
 	}
 }
 
@@ -1006,8 +990,8 @@ func TestSetModelFailNoEffortOverlay(t *testing.T) {
 		t.Fatalf("model should revert, got %q", m.snap.CurrentModel)
 	}
 	view := m.View()
-	if !strings.Contains(view, "grok  medium  agent  yolo") {
-		t.Fatalf("footer should be unchanged:\n%s", view)
+	if !strings.Contains(view, "Grok (medium) │ agent") {
+		t.Fatalf("status row 1 should be unchanged:\n%s", view)
 	}
 	if len(texts(m, entryError)) == 0 {
 		t.Fatal("expected error toast")
@@ -1049,13 +1033,38 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	}
 }
 
+// belowComposer is the band between the composer and the status rows: the
+// sub-agent peek and the permission line live there. The chip is the anchor
+// because status row 2 always draws it.
 func belowComposer(view string) (string, bool) {
 	i := strings.Index(view, "message")
-	j := strings.Index(view, "yolo")
+	j := strings.Index(view, chipYolo)
+	if j < 0 {
+		j = strings.Index(view, chipPrompt)
+	}
 	if i < 0 || j < 0 || j <= i {
 		return "", false
 	}
 	return view[i:j], true
+}
+
+// belowStatus is everything under the status rows, which since U3b is where
+// the sub-agent rows are drawn.
+func belowStatus(view string) (string, bool) {
+	j := strings.Index(view, chipYolo)
+	if j < 0 {
+		j = strings.Index(view, chipPrompt)
+	}
+	if j < 0 {
+		return "", false
+	}
+	rest := view[j:]
+	k := strings.Index(rest, "\n")
+	if k < 0 {
+		// The chip is the last line, so nothing is drawn under it.
+		return "", true
+	}
+	return rest[k+1:], true
 }
 
 func inFlightTools() []agent.ToolEvent {
@@ -1135,141 +1144,6 @@ func TestInPlaceToolLineSameID(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "✓ bash  echo hi") {
 		t.Fatalf("row missing from the view:\n%s", m.View())
-	}
-}
-
-func TestWorkStripPlacementAndSubagentLabel(t *testing.T) {
-	m := applyInFlight(t, sized(t), inFlightTools())
-	view := m.View()
-	below, ok := belowComposer(view)
-	if !ok {
-		t.Fatalf("composer/footer missing:\n%s", view)
-	}
-	if !strings.Contains(below, "Shell") {
-		t.Fatalf("Shell missing below composer:\n%s", below)
-	}
-	if !strings.Contains(below, "Subagent research") {
-		t.Fatalf("Subagent research missing below composer:\n%s", below)
-	}
-	if strings.Contains(below, "subagent Shell") {
-		t.Fatalf("Shell must not be labeled subagent:\n%s", below)
-	}
-	if !strings.Contains(below, "subagent") {
-		t.Fatalf("Subagent research should be labeled subagent:\n%s", below)
-	}
-
-	done := inFlightTools()
-	for i := range done {
-		done[i].Status = "completed"
-	}
-	m = applyInFlight(t, m, done)
-	view = m.View()
-	below, ok = belowComposer(view)
-	if !ok {
-		t.Fatalf("composer/footer missing after complete:\n%s", view)
-	}
-	if strings.Contains(below, "Shell") || strings.Contains(below, "Subagent research") {
-		t.Fatalf("strip should be gone after completed:\n%s", below)
-	}
-}
-
-func TestStripPeekEnterEsc(t *testing.T) {
-	m := applyInFlight(t, sized(t), inFlightTools())
-	m.status = statusWorking
-	m.input.SetValue("")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = tm.(Model)
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	if cmd != nil {
-		t.Fatal("peek enter must not send")
-	}
-	if !m.stripPeek {
-		t.Fatal("expected peek")
-	}
-	view := m.View()
-	below, ok := belowComposer(view)
-	if !ok {
-		t.Fatalf("composer/footer missing:\n%s", view)
-	}
-	if !strings.Contains(below, "PEEK-TASK-RAW") && !strings.Contains(below, "PEEK-SHELL-RAW") {
-		t.Fatalf("peek missing content snippet:\n%s", below)
-	}
-	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if m.stripPeek {
-		t.Fatal("esc should collapse peek")
-	}
-	if m.status != statusWorking {
-		t.Fatalf("status %s, want working", m.status)
-	}
-	if m.quitting {
-		t.Fatal("esc on peek must not quit")
-	}
-	if cmd != nil {
-		t.Fatal("esc on peek must not cancelTurn")
-	}
-	below, _ = belowComposer(m.View())
-	if strings.Contains(below, "PEEK-TASK-RAW") || strings.Contains(below, "PEEK-SHELL-RAW") {
-		t.Fatalf("peek snippet still visible:\n%s", below)
-	}
-}
-
-func TestStripNavUpDownAndJTypes(t *testing.T) {
-	m := applyInFlight(t, sized(t), inFlightTools())
-	if m.stripID != "task-1" {
-		t.Fatalf("sel %q idx=%d", m.stripID, m.stripSel)
-	}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = tm.(Model)
-	if m.stripID != "sh-1" {
-		t.Fatalf("down sel %q", m.stripID)
-	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m = tm.(Model)
-	if m.stripID != "task-1" {
-		t.Fatalf("up sel %q", m.stripID)
-	}
-
-	m.input.SetValue("hey")
-	sel := m.stripID
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	m = tm.(Model)
-	if !strings.Contains(m.input.Value(), "j") {
-		t.Fatalf("j should type, got %q", m.input.Value())
-	}
-	if m.stripID != sel {
-		t.Fatal("j must not move strip selection")
-	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = tm.(Model)
-	if m.stripID != sel {
-		t.Fatal("down with composer text must not move strip")
-	}
-}
-
-func TestStripKeepsSelectionByID(t *testing.T) {
-	m := applyInFlight(t, sized(t), inFlightTools())
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = tm.(Model)
-	if m.stripID != "sh-1" {
-		t.Fatalf("want sh-1 selected, got %q sel=%d", m.stripID, m.stripSel)
-	}
-	stub := m.sess.(*Stub)
-	tools := inFlightTools()
-	tools[0].ContentText = "still scanning"
-	stub.SetTools(tools)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tools[0]}})
-	m = tm.(Model)
-	if m.stripID != "sh-1" {
-		t.Fatalf("selection jumped to %q sel=%d", m.stripID, m.stripSel)
-	}
-	items := m.stripItems()
-	if len(items) < 2 || items[0].ID != "task-1" {
-		t.Fatalf("expected task-1 first after update, got %+v", items)
-	}
-	if items[m.stripSel].ID != "sh-1" {
-		t.Fatalf("peek target %+v sel=%d", items, m.stripSel)
 	}
 }
 
@@ -1358,9 +1232,9 @@ func TestHelpOverlayFitsWithInFlightTools(t *testing.T) {
 	}
 	view := m.View()
 	if h := lipgloss.Height(view); h > 24 {
-		t.Fatalf("help+strip view is %d rows, crops 24-row terminal:\n%s", h, view)
+		t.Fatalf("help+agents view is %d rows, crops 24-row terminal:\n%s", h, view)
 	}
-	if !strings.Contains(view, "yolo") {
+	if !strings.Contains(view, chipYolo) {
 		t.Fatalf("footer cropped:\n%s", view)
 	}
 	if !strings.Contains(view, "message") {

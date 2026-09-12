@@ -168,7 +168,7 @@ def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:
 
 def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
-        tui.wait_contains("idle")
+        tui.wait_contains("cursor")
         tui.write(b"hello\r")
         tui.wait_contains("echo: hello")
         tui.write(b"\x04")
@@ -179,7 +179,7 @@ def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 
 def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
-        tui.wait_contains("idle")
+        tui.wait_contains("cursor")
         tui.write(b"/help\r")
         deadline = time.monotonic() + 10
         text = ""
