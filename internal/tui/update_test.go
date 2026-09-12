@@ -1539,13 +1539,6 @@ func TestPlanOfferCleared(t *testing.T) {
 		name string
 		do   func(*testing.T, Model) Model
 	}{
-		{"a card arrives", func(t *testing.T, m Model) Model {
-			return feed(t, m, agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
-				ID:      "perm-1",
-				Tool:    "Shell",
-				Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
-			}})
-		}},
 		{"/clear", func(t *testing.T, m Model) Model {
 			m.input.SetValue("/clear")
 			tm, _ := m.Update(enter())
@@ -1881,7 +1874,7 @@ func TestPlanOfferIgnoresEmptyAssistantChunks(t *testing.T) {
 // TestPlanOfferRetiredByACardInEitherOrder: an action between the turn's two
 // endings kills the offer whichever ending it landed between, so the two
 // orderings stay indistinguishable.
-func TestPlanOfferRetiredByACardInEitherOrder(t *testing.T) {
+func TestPlanOfferSurvivesAnAnsweredCardInEitherOrder(t *testing.T) {
 	done := eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}}
 	settled := promptDoneMsg{res: agent.Result{StopReason: "end_turn"}}
 	card := eventMsg{agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
@@ -1903,8 +1896,22 @@ func TestPlanOfferRetiredByACardInEitherOrder(t *testing.T) {
 				tm, _ := m.Update(msg)
 				m = tm.(Model)
 			}
-			if m.planArmed() || m.planOffering() {
-				t.Fatal("the card retired the offer, and no ending may bring it back")
+			// The card owns Enter, so nothing is offered while it is up.
+			if !m.cardOpen() {
+				t.Fatal("this case needs the card still open")
+			}
+			if m.planOffering() {
+				t.Fatal("the card is up and owns Enter; the offer must not compete for it")
+			}
+			// Answering it must leave the offer standing, in either order: a
+			// live plan-mode turn always produces a cursor/create_plan card
+			// before the ending that arms the offer.
+			m, _ = press(m, runeKey('a'))
+			if m.cardOpen() {
+				t.Fatal("'a' should have answered the permission card")
+			}
+			if !m.planOffering() {
+				t.Fatal("the card was answered and the turn still earns the offer, so it must show")
 			}
 		})
 	}
@@ -1936,5 +1943,45 @@ func TestPlanOfferEscWhileWorkingRetiresIt(t *testing.T) {
 	}
 	if strings.Contains(plainView(m), planOfferPlaceholder) {
 		t.Fatalf("the placeholder survived the cancel:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferSurvivesACreatePlanCard is the live scenario, reduced. cursor
+// answers a plan-mode turn with a cursor/create_plan card *and* assistant text,
+// in that order, so a card arrival that retired the offer meant the offer could
+// never appear in a real session — which is exactly what the live run at 120x40
+// found. The card suppresses while it is up; answering it leaves the offer.
+func TestPlanOfferSurvivesACreatePlanCard(t *testing.T) {
+	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
+	// The order cursor really sends: some text, the plan card, more text, done.
+	m = feed(t, m, agent.Event{Type: agent.EventText, Text: "I'll look at main.go first."})
+	m = feed(t, m, agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{
+		ID:       "plan-1",
+		Name:     "Print current time",
+		Overview: "Change main.go so it prints the current time.",
+		Plan:     "In main.go, replace the hi print with the current time.",
+	}})
+	if !m.cardOpen() {
+		t.Fatal("the create_plan card should be up")
+	}
+	m = feed(t, m, agent.Event{Type: agent.EventText, Text: "That is the whole plan."})
+	if m.planOffering() {
+		t.Fatal("the card is still up and owns Enter")
+	}
+	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+	m = tm.(Model)
+	if m.planOffering() {
+		t.Fatal("still unanswered, so still no offer")
+	}
+	m, _ = press(m, runeKey('a'))
+	if m.cardOpen() {
+		t.Fatal("'a' should have accepted the plan card")
+	}
+	if !m.planOffering() {
+		t.Fatal("the plan was accepted and the turn earned the offer, so it must show")
+	}
+	if !strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the offer placeholder is not on screen:\n%s", plainView(m))
 	}
 }

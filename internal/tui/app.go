@@ -1042,8 +1042,11 @@ func (m *Model) retirePlanOffer() {
 // planOffering is the offer once it can be acted on. EventDone arms it and the
 // turn's two endings settle the status, in either order, so everything the user
 // can see or press waits for both — which is what makes the orderings
-// indistinguishable.
-func (m Model) planOffering() bool { return m.planArmed() && m.status == statusIdle }
+// indistinguishable. A card outranks it: cards own Enter, so the offer hides
+// until the card is answered rather than competing for the key.
+func (m Model) planOffering() bool {
+	return m.planArmed() && m.status == statusIdle && !m.cardOpen()
+}
 
 // implementModeID is the advertised mode that means "do the work". Without one
 // there is nowhere for the offer to go, so it is never made.

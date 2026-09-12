@@ -112,9 +112,12 @@ func (m *Model) pushCard(c card) {
 	m.cards = append(append([]card(nil), m.cards...), c)
 	m.help = false
 	m.agentPeek = false
-	// A card is a question the user has to answer first, so the plan offer
-	// stands down rather than competing with it for Enter.
-	m.retirePlanOffer()
+	// A card is a question the user has to answer first, so the offer stands
+	// down while it is up — but it is not retired. cursor answers a plan-mode
+	// turn with a cursor/create_plan card *and* assistant text, so the card
+	// always arrives before the ending that arms the offer; killing the offer
+	// here meant it could never appear in a real plan-mode session at all.
+	// planOffering hides it while a card is open instead.
 	// The draft itself is never touched (pinned), only the menu it opened.
 	m.slashHide = true
 	// A card takes the mouse too, so an in-progress drag is dropped rather
