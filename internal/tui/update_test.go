@@ -39,8 +39,29 @@ func TestViewFooterAndComposer(t *testing.T) {
 	if !strings.Contains(view, "grok") {
 		t.Fatalf("missing model:\n%s", view)
 	}
-	if !strings.Contains(view, ">") {
-		t.Fatalf("missing composer:\n%s", view)
+	if !strings.Contains(view, "agent") {
+		t.Fatalf("missing mode:\n%s", view)
+	}
+	if !strings.Contains(view, "message") {
+		t.Fatalf("missing boxed composer placeholder:\n%s", view)
+	}
+}
+
+func TestFooterStartingBeforeStart(t *testing.T) {
+	m := New(Config{
+		Session:   NewStub(),
+		Theme:     "tokyo-night",
+		Workspace: t.TempDir(),
+		Yolo:      true,
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	view := m.View()
+	if !strings.Contains(view, "starting") {
+		t.Fatalf("missing starting:\n%s", view)
+	}
+	if strings.Contains(view, "idle") {
+		t.Fatalf("idle before Start:\n%s", view)
 	}
 }
 
@@ -297,5 +318,241 @@ func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
 	msg := cmd()
 	if _, ok := msg.(tea.QuitMsg); !ok {
 		t.Fatalf("quit cmd returned %T, want tea.QuitMsg", msg)
+	}
+}
+
+func TestCoalesceStreamChunks(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "P"}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "ONG"}})
+	m = tm.(Model)
+	got := texts(m, "assistant")
+	if len(got) != 1 || got[0] != "PONG" {
+		t.Fatalf("coalesce %q", got)
+	}
+	if !strings.Contains(m.View(), "PONG") {
+		t.Fatalf("missing PONG:\n%s", m.View())
+	}
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "next"}})
+	m = tm.(Model)
+	got = texts(m, "assistant")
+	if len(got) != 2 || got[1] != "next" {
+		t.Fatalf("EventDone should break stream, got %q", got)
+	}
+}
+
+func TestThoughtsCoalesceSeparately(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "th"}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "ink"}})
+	m = tm.(Model)
+	got := texts(m, "thought")
+	if len(got) != 1 || got[0] != "think" {
+		t.Fatalf("thoughts %q", got)
+	}
+}
+
+func TestAltEnterInsertsNewline(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("hello")
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m = tm.(Model)
+	if m.status != statusIdle {
+		t.Fatalf("alt+enter sent a prompt, status %s", m.status)
+	}
+	if cmd != nil {
+		if _, ok := cmd().(promptDoneMsg); ok {
+			t.Fatal("alt+enter must not send")
+		}
+	}
+	if !strings.Contains(m.input.Value(), "\n") {
+		t.Fatalf("expected newline in composer, got %q", m.input.Value())
+	}
+}
+
+func TestShiftTabCyclesMode(t *testing.T) {
+	m := sized(t)
+	if m.snap.CurrentMode != "agent" {
+		t.Fatalf("start mode %q", m.snap.CurrentMode)
+	}
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = tm.(Model)
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("optimistic mode %q", m.snap.CurrentMode)
+	}
+	if cmd == nil {
+		t.Fatal("expected SetMode cmd")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("stub SetMode returned %T %v", msg, msg)
+	}
+	if !strings.Contains(m.View(), "plan") {
+		t.Fatalf("footer missing plan:\n%s", m.View())
+	}
+}
+
+func TestShiftTabIgnoredDuringPermission(t *testing.T) {
+	m := withOverlay(t)
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = tm.(Model)
+	if cmd != nil {
+		t.Fatal("shift+tab should be ignored on the permission overlay")
+	}
+	if m.pending == nil {
+		t.Fatal("overlay should remain")
+	}
+	if m.snap.CurrentMode != "agent" {
+		t.Fatalf("mode %q", m.snap.CurrentMode)
+	}
+}
+
+func TestSlashHelpExitAndModel(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/help")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if !m.help {
+		t.Fatal("expected help overlay")
+	}
+	view := m.View()
+	if !strings.Contains(view, "shift+tab") && !strings.Contains(view, "/exit") {
+		t.Fatalf("help missing keys:\n%s", view)
+	}
+	if strings.Contains(view, "/btw") {
+		t.Fatal("help must not hardcode /btw")
+	}
+
+	m.help = false
+	m.input.SetValue("/model fast")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.snap.CurrentModel != "fast" {
+		t.Fatalf("model %q", m.snap.CurrentModel)
+	}
+	if cmd == nil {
+		t.Fatal("expected SetModel cmd")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("stub SetModel returned %v", msg)
+	}
+
+	m.input.SetValue("/exit")
+	tm, cmd = m.Update(enter())
+	m = tm.(Model)
+	if !m.quitting || cmd == nil {
+		t.Fatal("/exit should quit")
+	}
+	assertQuitCmd(t, cmd)
+}
+
+func TestTabCompletesSlash(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/he")
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = tm.(Model)
+	if m.input.Value() != "/help" {
+		t.Fatalf("complete %q", m.input.Value())
+	}
+}
+
+func TestAdvertisedSlashSendsPrompt(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/research")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking || cmd == nil {
+		t.Fatal("/research should send a prompt")
+	}
+	if got := strings.Join(texts(m, "user"), ""); got != "/research" {
+		t.Fatalf("user %q", got)
+	}
+}
+
+func TestUnknownSlashSendsAsPrompt(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/hepl")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking || cmd == nil {
+		t.Fatal("unknown slash should send as prompt")
+	}
+	if got := strings.Join(texts(m, "user"), ""); got != "/hepl" {
+		t.Fatalf("user %q", got)
+	}
+}
+
+func TestQOnHelpClosesNotQuits(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = tm.(Model)
+	if !m.help {
+		t.Fatal("expected help")
+	}
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = tm.(Model)
+	if m.help {
+		t.Fatal("q should close help")
+	}
+	if m.quitting {
+		t.Fatal("q on help must not quit")
+	}
+	if cmd != nil {
+		t.Fatal("q on help should not return a quit cmd")
+	}
+}
+
+func TestQOnModelPickerClosesNotQuits(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if !m.picking {
+		t.Fatal("expected model picker")
+	}
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = tm.(Model)
+	if m.picking {
+		t.Fatal("q should close picker")
+	}
+	if m.quitting || cmd != nil {
+		t.Fatal("q on picker must not quit")
+	}
+}
+
+func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
+	stub := NewStub()
+	stub.FailNextSetMode()
+	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	m.status = statusWorking
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = tm.(Model)
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("optimistic %q", m.snap.CurrentMode)
+	}
+	if m.status != statusWorking {
+		t.Fatal("optimistic SetMode must not change working status")
+	}
+	if cmd == nil {
+		t.Fatal("expected SetMode cmd")
+	}
+	msg := cmd()
+	tm, _ = m.Update(msg)
+	m = tm.(Model)
+	if m.status != statusWorking {
+		t.Fatalf("status %s after failed SetMode", m.status)
+	}
+	if m.snap.CurrentMode != "agent" {
+		t.Fatalf("mode should revert, got %q", m.snap.CurrentMode)
+	}
+	if len(texts(m, "error")) == 0 {
+		t.Fatal("expected error toast")
 	}
 }
