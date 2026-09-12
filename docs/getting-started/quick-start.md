@@ -1,12 +1,22 @@
 # Quick Start
 
-## Requirements
+## Prerequisites
 
-- Linux
-- Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`)
-- A working Cursor login: `agent login`
+1. Linux.
+2. Install the [Cursor CLI](https://cursor.com/cli).
+3. Log in: `cursor-agent login` (the same binary is also installed as
+   `agent`).
 
-## Build
+## Install
+
+```bash
+go install github.com/charliek/craze/cmd/craze@main
+```
+
+Use `@main`, not `@latest`: no tag exists yet, so `@latest` fails. Until the
+first tag, `craze version` reports `dev`.
+
+## Build from source
 
 ```bash
 git clone https://github.com/charliek/craze.git
@@ -17,7 +27,8 @@ make build
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
 is for tests; a live session uses `cursor-agent` on `PATH` (or `--agent-bin` /
-`CRAZE_AGENT_BIN`).
+`CRAZE_AGENT_BIN`). This path needs Go 1.24+ (this repo pins 1.24 via
+`.mise.toml`; `mise install`).
 
 ## First run
 

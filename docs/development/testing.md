@@ -100,5 +100,5 @@ cd tests/cli && CRAZE_TMUX=1 uv run pytest -v tmux_smoke.py
 cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --scripts echo,todos
 ```
 
-Screen captures land in `~/.cursor/plans/craze/004-harness-tui/smoke/`
-(`--out` or `CRAZE_SMOKE_OUT` moves them).
+Screen captures land in `./smoke-captures/` (git-ignored), overridden with
+`--out` or `CRAZE_SMOKE_OUT`.

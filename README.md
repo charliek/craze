@@ -3,19 +3,31 @@
 A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
 `cursor-agent acp` over ACP. You own the chrome; Cursor still runs the agent.
 
-## Requirements
+## Install
 
-- Linux
-- Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`)
-- A working Cursor login: `agent login`
+1. Linux, and the [Cursor CLI](https://cursor.com/cli) installed.
+2. Log in: `cursor-agent login` (the same binary is also installed as
+   `agent`).
+3. Install craze:
 
-## Build
+   ```shell
+   go install github.com/charliek/craze/cmd/craze@main
+   ```
+
+   Use `@main`, not `@latest` — no tag exists yet, so `@latest` fails.
+   `craze version` reports `dev` until the first tag lands.
+
+## Build from source
 
 ```shell
+git clone https://github.com/charliek/craze.git
+cd craze
 make build
 ./bin/craze version
 ./bin/craze prompt --json --agent-bin ./bin/craze-fake-agent "hello"
 ```
+
+Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
 
 ## Running
 
@@ -54,6 +66,7 @@ craze, so quitting out of one is an ordinary exit 0.
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) |
+| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`) |
 | `↑` `↓` | with an empty composer, select a sub-agent row; in a picker or the slash menu, move the cursor |
 | `Enter` on a selected sub-agent | peek at its prompt; `Esc` closes the peek without cancelling the turn |
 | `PgUp` / `PgDn`, wheel | scroll the transcript |
@@ -207,8 +220,8 @@ cd tests/cli && CRAZE_TMUX=1 uv run pytest -v tmux_smoke.py
 cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --scripts echo,todos
 ```
 
-Screen captures land in `~/.cursor/plans/craze/004-harness-tui/smoke/`
-(`--out` or `CRAZE_SMOKE_OUT` moves them).
+Screen captures land in `./smoke-captures/` (git-ignored), overridden with
+`--out` or `CRAZE_SMOKE_OUT`.
 
 ## Documentation
 
@@ -232,4 +245,8 @@ Documentation is automatically published to GitHub Pages on push to main.
 ## Status
 
 POC on Linux: `craze` opens a TUI; `craze prompt --json` is the headless path.
-Shed-lane integration is explicitly later work.
+Multi-project harness integration is later work.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

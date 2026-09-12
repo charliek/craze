@@ -18,7 +18,7 @@ Run it either way, after ``make build``::
     cd tests/cli && CRAZE_TMUX=1 uv run python tmux_smoke.py --scripts echo,todos
 
 Captures land in ``<out>/<script>-<cols>x<rows>-<step>.txt``, with ``<out>``
-defaulting to ``~/.cursor/plans/craze/004-harness-tui/smoke/``
+defaulting to ``./smoke-captures/`` (git-ignored), relative to the repo root
 (``CRAZE_SMOKE_OUT`` or ``--out`` override it).
 """
 
@@ -44,7 +44,7 @@ from test_tui import _wait_fake_gone
 
 SIZES = ((100, 30), (80, 24))
 THEME = "craze-dark"
-DEFAULT_OUT = Path.home() / ".cursor" / "plans" / "craze" / "004-harness-tui" / "smoke"
+DEFAULT_OUT = ROOT / "smoke-captures"
 
 START_TIMEOUT = 20.0
 WAIT_TIMEOUT = 15.0

@@ -14,13 +14,14 @@ A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
 ## Current Scope
 
 POC on Linux. `craze` opens a TUI; `craze prompt --json` is the headless path.
-Shed-lane / roost integration is later work.
+Multi-project harness integration is later work.
 
 craze requires:
 
 - Linux
 - Go 1.24+ (this repo pins 1.24 via `.mise.toml`)
-- A working Cursor login: `agent login`
+- A working Cursor login: `cursor-agent login` (the same binary is also
+  installed as `agent`)
 
 ## Next Steps
 

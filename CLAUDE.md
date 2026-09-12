@@ -5,8 +5,7 @@ Working conventions for agent sessions in this repo.
 ## What this is
 
 craze is a Linux TUI that drives `cursor-agent` over ACP (Agent Client Protocol).
-It is a proof of concept. Shed-lane / roost integration is out of scope for the
-current bootstrap.
+It is a proof of concept. Multi-project harness integration is later work.
 
 ## Per-commit gate
 
@@ -40,5 +39,4 @@ Gotchas:
 
 ## Plans
 
-Panel-reviewed plans live outside this repo at `~/.cursor/plans/craze/`.
-The plan file is not committed here.
+Panel-reviewed plans live outside this repo and are not committed.

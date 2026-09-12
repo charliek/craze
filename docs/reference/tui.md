@@ -17,6 +17,11 @@ Top to bottom:
 5. Two status rows
 6. One row per in-flight sub-agent
 
+The composer never scrolls: it grows to show every line up to a cap (6 rows,
+3 on a short terminal), then windows to keep the cursor visible. A rule above
+it names the session — the title the agent set, truncated to half the screen
+width, or `craze` before one arrives.
+
 ## Keys
 
 | Key | Action |
@@ -50,6 +55,29 @@ just a message.
 !!! note
     `Ctrl+G` is BEL. Some terminals flash or beep when it is pressed. `/theme`
     opens the same picker without the BEL.
+
+## Modes
+
+`Shift+Tab`, `/plan`, `/ask` and `/agent` cycle or set the ACP session mode.
+The mode chip in status row 2 reads `◆ <mode id>`, coloured by what kind of
+mode the agent advertised it as: accent for an implement-like mode, purple for
+plan, teal for a read-only mode like ask. Clicking the chip cycles the mode the
+same way `Shift+Tab` does — see [Mouse](#mouse). Every change writes a
+`mode → <id>` note, followed by the agent's own description of the mode when
+it gave one.
+
+When a turn in a plan-kind mode ends with an assistant reply, the composer's
+placeholder offers to act on it once craze is idle:
+
+```
+enter implements this plan  ·  type to refine  ·  shift+tab leaves plan mode
+```
+
+`Enter` on the still-empty composer switches to an implement-kind mode and
+sends `Implement the plan above.`; typing instead keeps the session in plan
+mode and the offer disappears once the composer is non-empty. `Esc` clears the
+offer without losing focus. Changing mode, `/clear`, the next turn or a card
+arriving all clear it too.
 
 ## Cards
 
@@ -86,6 +114,33 @@ reach the agent as anything other than an accept or a reject.
 Workspace and home `SKILL.md` files are listed on slash without a skills RPC.
 Agent-advertised commands from the ACP session are listed too, after the
 builtins.
+
+## Model dialog
+
+`/model`, `/models`, or a click on the model name in status row 1, open a
+centred box over the transcript: a filter (`❯ `, type to narrow by name or
+id), the model list (current model first, then the agent's own order, a `>`
+cursor, `current` tagged, `▲`/`▼` when it scrolls), and, only when the agent
+advertises them, an `effort` row (`low medium high xhigh`, the picked one
+bracketed) and a `fast` row (`on`/`off`). The footer reads
+`type to filter · ↑↓ · tab effort/fast · enter · esc`.
+
+`Tab`/`Shift+Tab` move focus between the list, effort and fast; `←`/`→` change
+the focused row's value; clicking a row focuses it. `Enter` closes the dialog
+and applies whatever changed — model, then effort, then fast — each as its own
+step; a note is written for every step that succeeds, and a failed step is
+named in an error instead of silently reverting the rest. `Esc`, or a click
+outside the box, closes it and applies nothing. Status row 1 then reads
+`Name (effort · fast)`, with `fast` shown only when it is on.
+
+`/model <id>` and `/model <id> <effort>` still work without opening the
+dialog. There is no full-width picker band and no `Ctrl+M` binding.
+
+`Ctrl+G`/`/theme` opens the same kind of box (title `theme`, no filter);
+`↑`/`↓` preview live, `Enter` keeps it, and `Esc` or a click outside reverts to
+the theme that was active when it opened. A card arriving from the agent
+closes either dialog — the model dialog applies nothing, the theme dialog
+reverts.
 
 ## Mouse
 
