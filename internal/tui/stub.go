@@ -11,15 +11,16 @@ import (
 // Stub is an in-process Session used by TUI chrome tests. It echoes each
 // prompt as assistant text and does not spawn cursor-agent.
 type Stub struct {
-	mu        sync.Mutex
-	events    chan agent.Event
-	closed    chan struct{}
-	cancel    chan struct{}
-	hang      bool
-	n         int
-	failMode  bool
-	failModel bool
-	snap      agent.Snapshot
+	mu         sync.Mutex
+	events     chan agent.Event
+	closed     chan struct{}
+	cancel     chan struct{}
+	hang       bool
+	n          int
+	failMode   bool
+	failModel  bool
+	failConfig bool
+	snap       agent.Snapshot
 }
 
 func NewStub() *Stub {
@@ -41,6 +42,20 @@ func NewStub() *Stub {
 			},
 			Commands: []agent.CommandInfo{
 				{Name: "research", Description: "Agent-advertised command"},
+			},
+			Config: []agent.ConfigOption{
+				{
+					ID:       "effort",
+					Name:     "Effort",
+					Category: "thought_level",
+					Type:     "select",
+					Current:  "medium",
+					SelectValues: []agent.SelectValue{
+						{Value: "low", Name: "Low"},
+						{Value: "medium", Name: "Medium"},
+						{Value: "high", Name: "High"},
+					},
+				},
 			},
 		},
 	}
@@ -69,6 +84,12 @@ func (s *Stub) FailNextSetMode() {
 func (s *Stub) FailNextSetModel() {
 	s.mu.Lock()
 	s.failModel = true
+	s.mu.Unlock()
+}
+
+func (s *Stub) FailNextSetConfig() {
+	s.mu.Lock()
+	s.failConfig = true
 	s.mu.Unlock()
 }
 
@@ -143,13 +164,19 @@ func (s *Stub) SetMode(_ context.Context, id string) error {
 
 func (s *Stub) SetConfig(_ context.Context, id, value string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	fail := s.failConfig
+	s.failConfig = false
+	if fail {
+		s.mu.Unlock()
+		return fmt.Errorf("stub: set config failed")
+	}
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
 			s.snap.Config[i].Current = value
 			break
 		}
 	}
+	s.mu.Unlock()
 	return nil
 }
 

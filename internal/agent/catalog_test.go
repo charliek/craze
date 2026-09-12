@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +82,166 @@ func TestParseConfigOptions(t *testing.T) {
 	}
 	if opts[2].Type != "boolean" || opts[2].Current != "true" {
 		t.Fatalf("boolean %+v", opts[2])
+	}
+}
+
+func modelIDs(ms []ModelInfo) string {
+	ids := make([]string, len(ms))
+	for i, m := range ms {
+		ids[i] = m.ID
+	}
+	return strings.Join(ids, ",")
+}
+
+func TestOrderModels(t *testing.T) {
+	snap := Snapshot{
+		CurrentModel: "fast",
+		Models: []ModelInfo{
+			{ID: "other", Name: "Zed"},
+			{ID: "grok", Name: "Grok"},
+			{ID: "fast", Name: "Fast"},
+		},
+	}
+	got := OrderModels(snap)
+	if modelIDs(got) != "fast,grok,other" {
+		t.Fatalf("current then grok then rest: %s", modelIDs(got))
+	}
+	if snap.Models[0].ID != "other" {
+		t.Fatalf("OrderModels mutated input: %+v", snap.Models)
+	}
+
+	alphaFirst := Snapshot{
+		CurrentModel: "fast",
+		Models: []ModelInfo{
+			{ID: "aaa", Name: "Aaa"},
+			{ID: "grok", Name: "Grok"},
+			{ID: "fast", Name: "Fast"},
+		},
+	}
+	if modelIDs(OrderModels(alphaFirst)) != "fast,grok,aaa" {
+		t.Fatalf("grok before unrelated: %s", modelIDs(OrderModels(alphaFirst)))
+	}
+
+	tied := Snapshot{
+		Models: []ModelInfo{
+			{ID: "b", Name: "Same"},
+			{ID: "a", Name: "Same"},
+		},
+	}
+	if modelIDs(OrderModels(tied)) != "a,b" {
+		t.Fatalf("id tie-break: %s", modelIDs(OrderModels(tied)))
+	}
+
+	fromCfg := Snapshot{
+		CurrentModel: "fast",
+		Config: []ConfigOption{{
+			ID:       "model",
+			Name:     "Model",
+			Category: "model",
+			Type:     "select",
+			SelectValues: []SelectValue{
+				{Value: "other", Name: "Zed"},
+				{Value: "grok", Name: "Grok"},
+				{Value: "fast", Name: "Fast"},
+			},
+		}},
+	}
+	if modelIDs(OrderModels(fromCfg)) != "fast,grok,other" {
+		t.Fatalf("config fallback: %s", modelIDs(OrderModels(fromCfg)))
+	}
+}
+
+func TestEffortOptionPreference(t *testing.T) {
+	vals := []SelectValue{
+		{Value: "low", Name: "Low"},
+		{Value: "medium", Name: "Medium"},
+		{Value: "high", Name: "High"},
+	}
+	sel := func(id, name, cat string) ConfigOption {
+		return ConfigOption{ID: id, Name: name, Category: cat, Type: "select", SelectValues: vals}
+	}
+	first := sel("reasoning_misc", "Reasoning", "")
+	thought := sel("tl", "Reasoning", "thought_level")
+	idEffort := sel("effort", "Effort", "")
+	modelOpt := sel("x", "Effort", "model_option")
+
+	got := EffortOption(Snapshot{Config: []ConfigOption{first, thought, idEffort, modelOpt}})
+	if got == nil || got.ID != "x" {
+		t.Fatalf("prefer model_option, got %+v", got)
+	}
+	got = EffortOption(Snapshot{Config: []ConfigOption{first, thought, idEffort}})
+	if got == nil || got.ID != "effort" {
+		t.Fatalf("prefer id effort, got %+v", got)
+	}
+	got = EffortOption(Snapshot{Config: []ConfigOption{first, thought}})
+	if got == nil || got.ID != "tl" {
+		t.Fatalf("prefer thought_level, got %+v", got)
+	}
+	got = EffortOption(Snapshot{Config: []ConfigOption{first}})
+	if got == nil || got.ID != "reasoning_misc" {
+		t.Fatalf("first match, got %+v", got)
+	}
+	if EffortOption(Snapshot{}) != nil {
+		t.Fatal("empty config should have no effort option")
+	}
+	if EffortOption(Snapshot{Config: []ConfigOption{{
+		ID: "effort", Name: "Effort", Type: "boolean", Current: "true",
+	}}}) != nil {
+		t.Fatal("boolean thinking is not an effort select")
+	}
+
+	stubLike := EffortOption(Snapshot{Config: []ConfigOption{{
+		ID: "effort", Name: "Effort", Category: "thought_level", Type: "select",
+		Current: "medium", SelectValues: vals,
+	}}})
+	if stubLike == nil || stubLike.Current != "medium" || len(stubLike.SelectValues) != 3 {
+		t.Fatalf("stub/fake shape %+v", stubLike)
+	}
+}
+
+func TestSplitModelEffort(t *testing.T) {
+	snap := Snapshot{
+		Models: []ModelInfo{{ID: "grok", Name: "Grok"}, {ID: "fast", Name: "Fast"}},
+		Config: []ConfigOption{{
+			ID: "effort", Name: "Effort", Category: "thought_level", Type: "select",
+			SelectValues: []SelectValue{
+				{Value: "low", Name: "Low"},
+				{Value: "medium", Name: "Medium"},
+				{Value: "high", Name: "High"},
+			},
+		}},
+	}
+	model, effort := SplitModelEffort("grok high", snap)
+	if model != "grok" || effort != "high" {
+		t.Fatalf("grok high → %q %q", model, effort)
+	}
+	model, effort = SplitModelEffort("grok HIGH", snap)
+	if model != "grok" || effort != "high" {
+		t.Fatalf("canonical effort → %q %q", model, effort)
+	}
+	model, effort = SplitModelEffort("Composer 2", snap)
+	if model != "Composer 2" || effort != "" {
+		t.Fatalf("spaced name → %q %q", model, effort)
+	}
+	model, effort = SplitModelEffort("grok", snap)
+	if model != "grok" || effort != "" {
+		t.Fatalf("model only → %q %q", model, effort)
+	}
+	model, effort = SplitModelEffort("high", snap)
+	if model != "high" || effort != "" {
+		t.Fatalf("single token stays model → %q %q", model, effort)
+	}
+	if _, err := MatchModel(snap, "Composer 2"); err == nil {
+		t.Fatal("unknown spaced name should fail MatchModel")
+	}
+	cfgOnly := Snapshot{
+		Config: []ConfigOption{{
+			ID: "model", Category: "model", Type: "select",
+			SelectValues: []SelectValue{{Value: "fast", Name: "Fast"}},
+		}},
+	}
+	id, err := MatchModel(cfgOnly, "Fast")
+	if err != nil || id != "fast" {
+		t.Fatalf("config models MatchModel %q %v", id, err)
 	}
 }

@@ -68,7 +68,9 @@ type Model struct {
 
 	help       bool
 	picking    bool
+	effortStep bool
 	modelSel   int
+	effortSel  int
 	slashSel   int
 	slashHide  bool
 	streamOpen bool
@@ -101,6 +103,7 @@ type revertModelMsg struct {
 	prev string
 	err  error
 }
+type refreshSnapMsg struct{}
 
 func New(cfg Config) Model {
 	cwd := cfg.Workspace
@@ -196,7 +199,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case revertModelMsg:
 		m.snap.CurrentModel = msg.prev
 		m.model = msg.prev
+		m.picking = false
+		m.effortStep = false
 		m.addLine("error", msg.err.Error())
+		return m, nil
+
+	case refreshSnapMsg:
+		m.refreshSnap()
 		return m, nil
 
 	case eventMsg:
@@ -329,44 +338,85 @@ func (m Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	n := len(m.snap.Models)
-	if n == 0 {
-		m.picking = false
+func (m Model) pickerCount() int {
+	if m.effortStep {
+		if opt := agent.EffortOption(m.snap); opt != nil {
+			return len(opt.SelectValues)
+		}
+		return 0
+	}
+	return len(agent.OrderModels(m.snap))
+}
+
+func (m Model) applyPickerIndex(i int) (tea.Model, tea.Cmd) {
+	if m.effortStep {
+		opt := agent.EffortOption(m.snap)
+		if opt == nil || i < 0 || i >= len(opt.SelectValues) {
+			return m, nil
+		}
+		return m.applyEffort(opt.SelectValues[i].Value)
+	}
+	models := agent.OrderModels(m.snap)
+	if i < 0 || i >= len(models) {
 		return m, nil
+	}
+	return m.applyModel(models[i].ID)
+}
+
+func (m Model) closePicker() Model {
+	m.picking = false
+	m.effortStep = false
+	return m
+}
+
+func (m Model) handleModelPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	n := m.pickerCount()
+	if n == 0 {
+		return m.closePicker(), nil
+	}
+	if m.effortStep {
+		if m.effortSel < 0 || m.effortSel >= n {
+			m.effortSel = 0
+		}
+	} else if m.modelSel < 0 || m.modelSel >= n {
+		m.modelSel = 0
+	}
+	sel := m.modelSel
+	if m.effortStep {
+		sel = m.effortSel
 	}
 	switch msg.Type {
 	case tea.KeyEsc:
-		m.picking = false
-		return m, nil
+		return m.closePicker(), nil
 	case tea.KeyEnter:
-		id := m.snap.Models[m.modelSel].ID
-		return m.applyModel(id)
+		return m.applyPickerIndex(sel)
 	case tea.KeyDown:
-		m.modelSel = (m.modelSel + 1) % n
-		return m, nil
+		sel = (sel + 1) % n
 	case tea.KeyUp:
-		m.modelSel = (m.modelSel - 1 + n) % n
-		return m, nil
-	}
-	s := msg.String()
-	if s == "q" {
-		m.picking = false
-		return m, nil
-	}
-	if s == "j" {
-		m.modelSel = (m.modelSel + 1) % n
-		return m, nil
-	}
-	if s == "k" {
-		m.modelSel = (m.modelSel - 1 + n) % n
-		return m, nil
-	}
-	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
-		i := int(s[0] - '1')
-		if i < n {
-			return m.applyModel(m.snap.Models[i].ID)
+		sel = (sel - 1 + n) % n
+	default:
+		s := msg.String()
+		if s == "q" {
+			return m.closePicker(), nil
 		}
+		if s == "j" {
+			sel = (sel + 1) % n
+		} else if s == "k" {
+			sel = (sel - 1 + n) % n
+		} else if len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
+			i := int(s[0] - '1')
+			if i < n {
+				return m.applyPickerIndex(i)
+			}
+			return m, nil
+		} else {
+			return m, nil
+		}
+	}
+	if m.effortStep {
+		m.effortSel = sel
+	} else {
+		m.modelSel = sel
 	}
 	return m, nil
 }
@@ -503,6 +553,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.pending = ev.Permission
 		m.help = false
 		m.picking = false
+		m.effortStep = false
 		m.layout()
 	case agent.EventDone:
 		m.breakStream()
@@ -608,7 +659,7 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	footerH := 1
+	footerH := max(1, lipgloss.Height(m.footer()))
 	composerH := composerBoxHeight()
 	extra := 0
 	if m.pending != nil {
@@ -731,13 +782,27 @@ func (m Model) helpView() string {
 
 func (m Model) modelPickerView() string {
 	var b strings.Builder
-	b.WriteString("model  (enter select, esc close)\n")
-	for i, md := range m.snap.Models {
-		mark := " "
-		if i == m.modelSel {
-			mark = ">"
+	if m.effortStep {
+		b.WriteString("effort  (enter select, esc close)\n")
+		opt := agent.EffortOption(m.snap)
+		if opt != nil {
+			for i, v := range opt.SelectValues {
+				mark := " "
+				if i == m.effortSel {
+					mark = ">"
+				}
+				fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, v.Value, v.Name)
+			}
 		}
-		fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, md.ID, md.Name)
+	} else {
+		b.WriteString("model  (enter select, esc close)\n")
+		for i, md := range agent.OrderModels(m.snap) {
+			mark := " "
+			if i == m.modelSel {
+				mark = ">"
+			}
+			fmt.Fprintf(&b, "%s %d %s  %s\n", mark, i+1, md.ID, md.Name)
+		}
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -775,11 +840,24 @@ func (m Model) footer() string {
 	if mode == "" {
 		mode = "-"
 	}
-	line := fmt.Sprintf("%s  %s  %s  %s  %s", model, mode, perm, m.cwd, st)
+	effort := "-"
+	if opt := agent.EffortOption(m.snap); opt != nil && opt.Current != "" {
+		effort = opt.Current
+	}
+	prefix := fmt.Sprintf("%s  %s  %s  %s  ", model, effort, mode, perm)
+	suffix := "  " + st
+	w := max(1, m.width)
+	cwd := m.cwd
+	budget := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
+	if budget < 1 {
+		budget = 1
+	}
+	cwd = clampWidthTail(cwd, budget)
+	line := prefix + cwd + suffix
 	return lipgloss.NewStyle().
 		Foreground(m.theme.FooterFG).
 		Background(m.theme.FooterBG).
-		Width(max(1, m.width)).
+		Width(w).
 		Render(line)
 }
 

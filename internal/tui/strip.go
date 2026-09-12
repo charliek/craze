@@ -226,3 +226,31 @@ func clampWidth(s string, w int) string {
 	}
 	return b.String() + "…"
 }
+
+func clampWidthTail(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	rs := []rune(s)
+	var kept []rune
+	used := 0
+	limit := w - 1
+	for i := len(rs) - 1; i >= 0; i-- {
+		rw := lipgloss.Width(string(rs[i]))
+		if used+rw > limit {
+			break
+		}
+		kept = append(kept, rs[i])
+		used += rw
+	}
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	return "…" + string(kept)
+}

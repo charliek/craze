@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -225,13 +227,14 @@ func MatchModel(snap Snapshot, raw string) (string, error) {
 	if want == "" {
 		return "", fmt.Errorf("empty model")
 	}
-	for _, m := range snap.Models {
+	models := snapshotModels(snap)
+	for _, m := range models {
 		if normalizeIdent(m.ID) == want {
 			return m.ID, nil
 		}
 	}
 	var hits []string
-	for _, m := range snap.Models {
+	for _, m := range models {
 		if normalizeIdent(m.Name) == want {
 			hits = append(hits, m.ID)
 		}
@@ -259,4 +262,182 @@ func normalizeIdent(s string) string {
 		out = append(out, c)
 	}
 	return string(out)
+}
+
+func snapshotModels(snap Snapshot) []ModelInfo {
+	if len(snap.Models) > 0 {
+		return append([]ModelInfo(nil), snap.Models...)
+	}
+	for _, c := range snap.Config {
+		if c.Category != "model" {
+			continue
+		}
+		out := make([]ModelInfo, 0, len(c.SelectValues))
+		for _, v := range c.SelectValues {
+			if v.Value == "" {
+				continue
+			}
+			name := v.Name
+			if name == "" {
+				name = v.Value
+			}
+			out = append(out, ModelInfo{ID: v.Value, Name: name})
+		}
+		return out
+	}
+	return nil
+}
+
+func modelDisplayName(m ModelInfo) string {
+	if m.Name != "" {
+		return m.Name
+	}
+	return m.ID
+}
+
+func isGrokModel(m ModelInfo) bool {
+	return strings.Contains(strings.ToLower(m.ID), "grok") ||
+		strings.Contains(strings.ToLower(m.Name), "grok")
+}
+
+func sortModelBucket(ms []ModelInfo) {
+	sort.Slice(ms, func(i, j int) bool {
+		ni, nj := modelDisplayName(ms[i]), modelDisplayName(ms[j])
+		if ni != nj {
+			return ni < nj
+		}
+		return ms[i].ID < ms[j].ID
+	})
+}
+
+// OrderModels returns advertised models with the current model first, then
+// any id/name matching grok, then the rest by display name and id.
+func OrderModels(snap Snapshot) []ModelInfo {
+	models := snapshotModels(snap)
+	if len(models) == 0 {
+		return nil
+	}
+	var cur, grok, rest []ModelInfo
+	seenCurrent := false
+	for _, m := range models {
+		if !seenCurrent && snap.CurrentModel != "" && m.ID == snap.CurrentModel {
+			cur = append(cur, m)
+			seenCurrent = true
+			continue
+		}
+		if isGrokModel(m) {
+			grok = append(grok, m)
+			continue
+		}
+		rest = append(rest, m)
+	}
+	sortModelBucket(grok)
+	sortModelBucket(rest)
+	out := make([]ModelInfo, 0, len(models))
+	out = append(out, cur...)
+	out = append(out, grok...)
+	out = append(out, rest...)
+	return out
+}
+
+func isEffortSelect(opt ConfigOption) bool {
+	if opt.Type != "" && opt.Type != "select" {
+		return false
+	}
+	if len(opt.SelectValues) == 0 {
+		return false
+	}
+	id := strings.ToLower(opt.ID)
+	name := strings.ToLower(opt.Name)
+	return strings.Contains(id, "effort") || strings.Contains(id, "reasoning") ||
+		strings.Contains(name, "effort") || strings.Contains(name, "reasoning")
+}
+
+func effortRank(opt ConfigOption) int {
+	if opt.Category == "model_option" {
+		return 0
+	}
+	if strings.EqualFold(opt.ID, "effort") {
+		return 1
+	}
+	if opt.Category == "thought_level" {
+		return 2
+	}
+	return 3
+}
+
+// EffortOption returns the advertised effort/reasoning select, preferring
+// category model_option, then id effort, then thought_level, else the first match.
+func EffortOption(snap Snapshot) *ConfigOption {
+	bestI := -1
+	bestRank := 4
+	for i, opt := range snap.Config {
+		if !isEffortSelect(opt) {
+			continue
+		}
+		r := effortRank(opt)
+		if bestI < 0 || r < bestRank {
+			bestI = i
+			bestRank = r
+		}
+	}
+	if bestI < 0 {
+		return nil
+	}
+	opt := snap.Config[bestI]
+	return &opt
+}
+
+// ModelConfigOption returns the first config option with category "model".
+func ModelConfigOption(snap Snapshot) *ConfigOption {
+	for _, c := range snap.Config {
+		if c.Category == "model" {
+			opt := c
+			return &opt
+		}
+	}
+	return nil
+}
+
+func matchEffortValue(opt *ConfigOption, raw string) (string, bool) {
+	if opt == nil {
+		return "", false
+	}
+	want := strings.TrimSpace(raw)
+	if want == "" {
+		return "", false
+	}
+	for _, v := range opt.SelectValues {
+		if strings.EqualFold(v.Value, want) {
+			return v.Value, true
+		}
+	}
+	return "", false
+}
+
+func splitLastToken(s string) (rest, last string) {
+	s = strings.TrimSpace(s)
+	i := strings.LastIndexAny(s, " \t")
+	if i < 0 {
+		return "", s
+	}
+	return strings.TrimSpace(s[:i]), s[i+1:]
+}
+
+// SplitModelEffort splits `/model` args: if the last token is an advertised
+// effort value, it is effort and the remainder is the model. Otherwise the
+// whole string is the model.
+func SplitModelEffort(args string, snap Snapshot) (model, effort string) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return "", ""
+	}
+	rest, last := splitLastToken(args)
+	if rest == "" {
+		return args, ""
+	}
+	if val, ok := matchEffortValue(EffortOption(snap), last); ok {
+		return rest, val
+	}
+	return args, ""
 }

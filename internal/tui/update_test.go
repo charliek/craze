@@ -43,6 +43,9 @@ func TestViewFooterAndComposer(t *testing.T) {
 	if !strings.Contains(view, "agent") {
 		t.Fatalf("missing mode:\n%s", view)
 	}
+	if !strings.Contains(view, "grok  medium  agent  yolo") {
+		t.Fatalf("footer should be model effort mode yolo:\n%s", view)
+	}
 	if !strings.Contains(view, "message") {
 		t.Fatalf("missing boxed composer placeholder:\n%s", view)
 	}
@@ -440,6 +443,10 @@ func TestSlashHelpExitAndModel(t *testing.T) {
 	if msg := cmd(); msg != nil {
 		t.Fatalf("stub SetModel returned %v", msg)
 	}
+	if m.picking {
+		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = tm.(Model)
+	}
 
 	m.input.SetValue("/exit")
 	tm, cmd = m.Update(enter())
@@ -570,6 +577,157 @@ func TestParseSlashFields(t *testing.T) {
 	name, args, ok := parseSlashLine("/model\tfast")
 	if !ok || name != "model" || args != "fast" {
 		t.Fatalf("got %q %q %v", name, args, ok)
+	}
+}
+
+func flushCmd(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if msg == nil {
+		return m
+	}
+	tm, next := m.Update(msg)
+	m = tm.(Model)
+	if next != nil {
+		return flushCmd(t, m, next)
+	}
+	return m
+}
+
+func TestModelPickerCurrentFastFirst(t *testing.T) {
+	m := sized(t)
+	m.snap.CurrentModel = "fast"
+	m.model = "fast"
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if !m.picking || m.effortStep {
+		t.Fatal("expected model picker")
+	}
+	view := m.View()
+	if !strings.Contains(view, "> 1 fast") {
+		t.Fatalf("current fast should be first:\n%s", view)
+	}
+}
+
+func TestModelPickerThenEffort(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if !m.picking || m.effortStep {
+		t.Fatal("expected model step")
+	}
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	m = flushCmd(t, m, cmd)
+	if m.snap.CurrentModel != "grok" {
+		t.Fatalf("model %q", m.snap.CurrentModel)
+	}
+	if !m.picking || !m.effortStep {
+		t.Fatal("expected effort step after model")
+	}
+	view := m.View()
+	if !strings.Contains(view, "effort") || !strings.Contains(view, "medium") {
+		t.Fatalf("effort overlay missing:\n%s", view)
+	}
+	tm, cmd = m.Update(enter())
+	m = tm.(Model)
+	m = flushCmd(t, m, cmd)
+	if m.picking {
+		t.Fatal("picker should close after effort")
+	}
+	if !strings.Contains(m.View(), "medium") {
+		t.Fatalf("footer missing medium:\n%s", m.View())
+	}
+}
+
+func TestModelSlashSetsModelAndEffort(t *testing.T) {
+	m := sized(t)
+	m.input.SetValue("/model grok high")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	m = flushCmd(t, m, cmd)
+	if m.picking {
+		t.Fatal("picker should stay closed")
+	}
+	if m.snap.CurrentModel != "grok" {
+		t.Fatalf("model %q", m.snap.CurrentModel)
+	}
+	if !strings.Contains(m.View(), "high") {
+		t.Fatalf("footer missing high:\n%s", m.View())
+	}
+	if !strings.Contains(m.View(), "grok  high  agent  yolo") {
+		t.Fatalf("footer tokens:\n%s", m.View())
+	}
+}
+
+func TestSetConfigFailAfterModel(t *testing.T) {
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	m = flushCmd(t, m, cmd)
+	if !m.effortStep {
+		t.Fatal("expected effort step")
+	}
+	stub.FailNextSetConfig()
+	tm, cmd = m.Update(enter())
+	m = tm.(Model)
+	m = flushCmd(t, m, cmd)
+	if m.picking {
+		t.Fatal("picker should close")
+	}
+	if m.snap.CurrentModel != "grok" {
+		t.Fatalf("model %q", m.snap.CurrentModel)
+	}
+	view := m.View()
+	if !strings.Contains(view, "medium") {
+		t.Fatalf("effort should stay medium:\n%s", view)
+	}
+	if strings.Contains(view, "grok  high") {
+		t.Fatalf("effort should not become high:\n%s", view)
+	}
+	if len(texts(m, "error")) == 0 {
+		t.Fatal("expected error toast")
+	}
+}
+
+func TestSetModelFailNoEffortOverlay(t *testing.T) {
+	stub := NewStub()
+	stub.FailNextSetModel()
+	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	m.input.SetValue("/model")
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m = tm.(Model)
+	if m.snap.CurrentModel != "fast" {
+		t.Fatalf("optimistic %q", m.snap.CurrentModel)
+	}
+	m = flushCmd(t, m, cmd)
+	if m.picking || m.effortStep {
+		t.Fatal("SetModel fail must not leave the effort overlay open")
+	}
+	if m.snap.CurrentModel != "grok" {
+		t.Fatalf("model should revert, got %q", m.snap.CurrentModel)
+	}
+	view := m.View()
+	if !strings.Contains(view, "grok  medium  agent  yolo") {
+		t.Fatalf("footer should be unchanged:\n%s", view)
+	}
+	if len(texts(m, "error")) == 0 {
+		t.Fatal("expected error toast")
 	}
 }
 

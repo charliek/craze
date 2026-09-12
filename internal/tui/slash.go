@@ -103,6 +103,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "help":
 		m.help = true
 		m.picking = false
+		m.effortStep = false
 		m.input.SetValue("")
 		return m, nil
 	case "exit", "quit":
@@ -117,10 +118,11 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "model", "models":
 		if args == "" {
 			m.picking = true
+			m.effortStep = false
 			m.help = false
 			m.modelSel = 0
 			m.input.SetValue("")
-			for i, md := range m.snap.Models {
+			for i, md := range agent.OrderModels(m.snap) {
 				if md.ID == m.snap.CurrentModel {
 					m.modelSel = i
 					break
@@ -128,13 +130,14 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		id, err := agent.MatchModel(m.snap, args)
+		modelArg, effortArg := agent.SplitModelEffort(args, m.snap)
+		id, err := agent.MatchModel(m.snap, modelArg)
 		if err != nil {
 			m.input.SetValue("")
 			m.addLine("error", err.Error())
 			return m, nil
 		}
-		return m.applyModel(id)
+		return m.applyModelEffort(id, effortArg)
 	case "plan", "ask", "agent":
 		m.input.SetValue("")
 		id, ok := agent.ResolveMode(name, modeIDs(m.snap.Modes))
@@ -171,17 +174,90 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) applyModel(id string) (tea.Model, tea.Cmd) {
+	return m.applyModelEffort(id, "")
+}
+
+func (m Model) enterEffortStep() Model {
+	opt := agent.EffortOption(m.snap)
+	if opt == nil || len(opt.SelectValues) == 0 {
+		m.picking = false
+		m.effortStep = false
+		return m
+	}
+	m.picking = true
+	m.effortStep = true
+	m.effortSel = 0
+	for i, v := range opt.SelectValues {
+		if v.Value == opt.Current {
+			m.effortSel = i
+			break
+		}
+	}
+	return m
+}
+
+func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	prev := m.snap.CurrentModel
 	m.snap.CurrentModel = id
 	m.model = id
-	m.picking = false
 	m.input.SetValue("")
+	explicit := effort != ""
+	if explicit {
+		m.picking = false
+		m.effortStep = false
+	} else {
+		m = m.enterEffortStep()
+	}
+
 	sess := m.sess
+	modelCfgID := ""
+	if opt := agent.ModelConfigOption(m.snap); opt != nil {
+		modelCfgID = opt.ID
+	}
+	effortID := ""
+	if explicit {
+		if opt := agent.EffortOption(m.snap); opt != nil {
+			effortID = opt.ID
+		}
+	}
+
 	return m, func() tea.Msg {
-		if err := sess.SetModel(context.Background(), id); err != nil {
-			return revertModelMsg{prev: prev, err: err}
+		ctx := context.Background()
+		if err := sess.SetModel(ctx, id); err != nil {
+			if modelCfgID != "" {
+				if err2 := sess.SetConfig(ctx, modelCfgID, id); err2 == nil {
+					err = nil
+				}
+			}
+			if err != nil {
+				return revertModelMsg{prev: prev, err: err}
+			}
+		}
+		if explicit && effortID != "" {
+			if err := sess.SetConfig(ctx, effortID, effort); err != nil {
+				return actionErrMsg{err}
+			}
+			return refreshSnapMsg{}
 		}
 		return nil
+	}
+}
+
+func (m Model) applyEffort(value string) (tea.Model, tea.Cmd) {
+	opt := agent.EffortOption(m.snap)
+	m.picking = false
+	m.effortStep = false
+	m.input.SetValue("")
+	if opt == nil || value == "" {
+		return m, nil
+	}
+	id := opt.ID
+	sess := m.sess
+	return m, func() tea.Msg {
+		if err := sess.SetConfig(context.Background(), id, value); err != nil {
+			return actionErrMsg{err}
+		}
+		return refreshSnapMsg{}
 	}
 }
 
