@@ -36,31 +36,43 @@ func (m *Model) noteToolUpdate(id string) {
 }
 
 func (m *Model) syncStrip() {
-	n := len(m.stripItems())
-	if n == 0 {
+	items := m.stripItems()
+	if len(items) == 0 {
 		m.stripSel = 0
+		m.stripID = ""
 		m.stripPeek = false
 		return
 	}
-	if m.stripSel >= n {
-		m.stripSel = n - 1
+	if m.stripID != "" {
+		for i, t := range items {
+			if t.ID == m.stripID {
+				m.stripSel = i
+				return
+			}
+		}
+	}
+	if m.stripSel >= len(items) {
+		m.stripSel = len(items) - 1
 	}
 	if m.stripSel < 0 {
 		m.stripSel = 0
 	}
+	m.stripID = items[m.stripSel].ID
 }
 
 func (m *Model) moveStrip(delta int) {
-	n := len(m.stripItems())
-	if n == 0 {
+	items := m.stripItems()
+	if len(items) == 0 {
 		m.stripSel = 0
+		m.stripID = ""
 		m.stripPeek = false
 		return
 	}
-	m.stripSel = (m.stripSel + delta) % n
+	m.stripSel = (m.stripSel + delta) % len(items)
 	if m.stripSel < 0 {
-		m.stripSel += n
+		m.stripSel += len(items)
 	}
+	m.stripID = items[m.stripSel].ID
 }
 
 func (m Model) stripItems() []agent.ToolEvent {

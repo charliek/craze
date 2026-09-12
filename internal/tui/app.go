@@ -76,6 +76,7 @@ type Model struct {
 	toolLine  map[string]int
 	toolTouch []string
 	stripSel  int
+	stripID   string
 	stripPeek bool
 }
 

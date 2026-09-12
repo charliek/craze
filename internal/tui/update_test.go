@@ -778,34 +778,59 @@ func TestStripPeekEnterEsc(t *testing.T) {
 
 func TestStripNavUpDownAndJTypes(t *testing.T) {
 	m := applyInFlight(t, sized(t), inFlightTools())
-	if m.stripSel != 0 {
-		t.Fatalf("sel %d", m.stripSel)
+	if m.stripID != "task-1" {
+		t.Fatalf("sel %q idx=%d", m.stripID, m.stripSel)
 	}
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
-	if m.stripSel != 1 {
-		t.Fatalf("down sel %d", m.stripSel)
+	if m.stripID != "sh-1" {
+		t.Fatalf("down sel %q", m.stripID)
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = tm.(Model)
-	if m.stripSel != 0 {
-		t.Fatalf("up sel %d", m.stripSel)
+	if m.stripID != "task-1" {
+		t.Fatalf("up sel %q", m.stripID)
 	}
 
 	m.input.SetValue("hey")
-	sel := m.stripSel
+	sel := m.stripID
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = tm.(Model)
 	if !strings.Contains(m.input.Value(), "j") {
 		t.Fatalf("j should type, got %q", m.input.Value())
 	}
-	if m.stripSel != sel {
+	if m.stripID != sel {
 		t.Fatal("j must not move strip selection")
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
-	if m.stripSel != sel {
+	if m.stripID != sel {
 		t.Fatal("down with composer text must not move strip")
+	}
+}
+
+func TestStripKeepsSelectionByID(t *testing.T) {
+	m := applyInFlight(t, sized(t), inFlightTools())
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if m.stripID != "sh-1" {
+		t.Fatalf("want sh-1 selected, got %q sel=%d", m.stripID, m.stripSel)
+	}
+	stub := m.sess.(*Stub)
+	tools := inFlightTools()
+	tools[0].ContentText = "still scanning"
+	stub.SetTools(tools)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tools[0]}})
+	m = tm.(Model)
+	if m.stripID != "sh-1" {
+		t.Fatalf("selection jumped to %q sel=%d", m.stripID, m.stripSel)
+	}
+	items := m.stripItems()
+	if len(items) < 2 || items[0].ID != "task-1" {
+		t.Fatalf("expected task-1 first after update, got %+v", items)
+	}
+	if items[m.stripSel].ID != "sh-1" {
+		t.Fatalf("peek target %+v sel=%d", items, m.stripSel)
 	}
 }
 
@@ -817,6 +842,16 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		m = tm.(Model)
 		if !m.quitting || cmd == nil {
 			t.Fatal("/exit while working should quit")
+		}
+		assertQuitCmd(t, cmd)
+	})
+	t.Run("quit", func(t *testing.T) {
+		m := hangWorking(t)
+		m.input.SetValue("/quit")
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		if !m.quitting || cmd == nil {
+			t.Fatal("/quit while working should quit")
 		}
 		assertQuitCmd(t, cmd)
 	})
