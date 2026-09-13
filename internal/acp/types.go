@@ -35,6 +35,9 @@ const (
 	MethodGrokPromptComplete         = "x.ai/session/prompt_complete"
 	MethodGrokPromptCompleteWrapped  = "_x.ai/session/prompt_complete"
 
+	MethodGrokSessionNotification        = "x.ai/session_notification"
+	MethodGrokSessionNotificationWrapped = "_x.ai/session_notification"
+
 	UpdateAgentMessage      = "agent_message_chunk"
 	UpdateAgentThought      = "agent_thought_chunk"
 	UpdateToolCall          = "tool_call"
@@ -224,6 +227,14 @@ type ToolContent struct {
 type SessionNotification struct {
 	SessionID string          `json:"sessionId"`
 	Update    json.RawMessage `json:"update"`
+	// Child is the child session id for a routed child update, "" for the
+	// active session. The session routes on Child, never on a session id of
+	// its own, so the NewSession pendingUpdates flush cannot race Start.
+	Child string `json:"-"`
+	// ToolName is the dialect-normalized tool name: grok reads it from
+	// update._meta["x.ai/tool"].name, cursor leaves it "" and the session
+	// keeps reading rawInput._toolName.
+	ToolName string `json:"-"`
 }
 
 type SessionUpdate struct {
@@ -235,6 +246,40 @@ type SessionUpdate struct {
 	Status            string             `json:"status,omitempty"`
 	AvailableCommands []AvailableCommand `json:"availableCommands,omitempty"`
 	CurrentModeID     string             `json:"currentModeId,omitempty"`
+}
+
+// Subagent kinds carried on x.ai/session_notification.
+const (
+	SubagentSpawned  = "subagent_spawned"
+	SubagentProgress = "subagent_progress"
+	SubagentFinished = "subagent_finished"
+)
+
+// SubagentNotification is one parsed subagent lifecycle event. SessionID is
+// the outer session id the notification arrived on; ChildSessionID is the
+// child it is about.
+type SubagentNotification struct {
+	SessionID       string
+	Kind            string
+	SubagentID      string
+	AttemptID       string
+	ChildSessionID  string
+	ParentSessionID string
+	SubagentType    string
+	Description     string
+	Model           string
+	Role            string
+	CapabilityMode  string
+	ResumedFrom     string
+	Status          string
+	Error           string
+	Output          string
+	DurationMs      int
+	ToolCalls       int
+	Turns           int
+	TokensUsed      int
+	ToolsUsed       []string
+	WillWake        bool
 }
 
 type AvailableCommand struct {

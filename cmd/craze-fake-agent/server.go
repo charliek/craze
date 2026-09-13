@@ -320,6 +320,20 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.task(msg.ID, false)
 	case "task-late":
 		s.task(msg.ID, true)
+	case "grok-subagent":
+		s.grokSubagent(msg.ID, grokSubagentSingle)
+	case "grok-subagent-fail":
+		s.grokSubagent(msg.ID, grokSubagentFail)
+	case "grok-subagent-two":
+		s.grokSubagentTwo(msg.ID)
+	case "grok-subagent-nested":
+		s.grokSubagentNested(msg.ID)
+	case "grok-subagent-late":
+		s.grokSubagent(msg.ID, grokSubagentLate)
+	case "grok-subagent-cancel":
+		s.grokSubagentCancel(msg.ID, false)
+	case "grok-subagent-cancel-early":
+		s.grokSubagentCancel(msg.ID, true)
 	case "markdown":
 		s.markdown(msg.ID)
 	case "title":
@@ -658,6 +672,473 @@ func (s *server) update(sessionID string, upd any) {
 	_ = s.conn.Notify(context.Background(), acp.MethodSessionUpdate, acp.SessionNotification{
 		SessionID: sessionID,
 		Update:    raw,
+	})
+}
+
+// subagentNotify sends one x.ai/session_notification lifecycle event in the
+// live snake_case shape, with attempt_id and the child session id.
+func (s *server) subagentNotify(outer string, update map[string]any) {
+	raw, err := json.Marshal(map[string]any{
+		"sessionId": outer,
+		"update":    update,
+	})
+	if err != nil {
+		return
+	}
+	_ = s.conn.Notify(context.Background(), acp.MethodGrokSessionNotificationWrapped, json.RawMessage(raw))
+}
+
+type grokSubagentMode int
+
+const (
+	grokSubagentSingle grokSubagentMode = iota
+	grokSubagentFail
+	grokSubagentLate
+)
+
+// grokSubagent is the one-child script: parent thought, spawn_subagent
+// tool_call with _meta, subagent_spawned, spawn tool completed carrying
+// subagent_id in rawOutput and content, two-chunk child prompt, child
+// thought, list_dir tool_call with _meta, child answer, wait tool,
+// subagent_progress before the golden text, a pause while the child runs,
+// subagent_finished, wait tool completed retitled after finished (as live),
+// parent text, prompt_complete then the RPC reply.
+func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
+	child := "sub-1"
+	desc := "List directory files"
+	s.thought("Spawning an explore subagent.")
+	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
+		"description":   desc,
+		"prompt":        "List the files in the current working directory in one line.",
+		"subagent_type": "explore",
+		"background":    true,
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":     "subagent_spawned",
+		"subagent_id":       child,
+		"attempt_id":        "at1.test",
+		"parent_session_id": fakeSessionID,
+		"parent_prompt_id":  "prompt-1",
+		"child_session_id":  child,
+		"subagent_type":     "explore",
+		"description":       desc,
+		"capability_mode":   "read-only",
+		"role":              "explore",
+		"model":             "grok-4.6",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-spawn-1",
+		"status":        "completed",
+		"content": []map[string]any{{
+			"type":    "content",
+			"content": map[string]any{"type": "text", "text": "Subagent started in background.\nsubagent_id: " + child + "\ntype: explore\ndescription: " + desc},
+		}},
+		"rawOutput": map[string]any{"type": "Text", "text": "Subagent started in background.\nsubagent_id: " + child + "\ntype: explore\ndescription: " + desc},
+		"_meta":     map[string]any{"x.ai/tool": map[string]any{"name": "spawn_subagent", "kind": "task"}},
+	})
+	s.childText(child, "user_message_chunk", "List the files in the")
+	s.childText(child, "user_message_chunk", " current working directory in one line.")
+	s.childText(child, "agent_thought_chunk", "Listing files.")
+	s.toolMeta(child, "call-1", "list_dir", "list_dir", map[string]any{"target_directory": "/tmp/ws"})
+	s.update(child, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-1",
+		"status":        "completed",
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "list_dir", "kind": "list"}},
+	})
+	s.childText(child, "agent_message_chunk", "main.py README.md")
+	s.toolMeta(fakeSessionID, "call-wait-1", "get_command_or_subagent_output", "get_command_or_subagent_output", map[string]any{
+		"task_ids":   []string{child},
+		"timeout_ms": 120000,
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":     "subagent_progress",
+		"subagent_id":       child,
+		"attempt_id":        "at1.test",
+		"parent_session_id": fakeSessionID,
+		"child_session_id":  child,
+		"duration_ms":       2058,
+		"turn_count":        1,
+		"tool_call_count":   1,
+		"tokens_used":       4740,
+		"tools_used":        []string{"list_dir"},
+	})
+	if mode == grokSubagentLate {
+		s.finishPrompt(id, acp.StopEndTurn)
+		time.Sleep(400 * time.Millisecond)
+		s.childText(child, "agent_message_chunk", " late line")
+		s.subagentNotify(fakeSessionID, map[string]any{
+			"sessionUpdate":    "subagent_finished",
+			"subagent_id":      child,
+			"attempt_id":       "at1.test",
+			"child_session_id": child,
+			"status":           "completed",
+			"tool_calls":       1,
+			"turns":            1,
+			"duration_ms":      2873,
+			"tokens_used":      4740,
+			"output":           "main.py README.md",
+		})
+		s.update(fakeSessionID, map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    "call-wait-1",
+			"status":        "completed",
+			"title":         "[subagent:explore] " + desc + " (sub-1)",
+		})
+		return
+	}
+	time.Sleep(taskRunFor)
+	status, errText, parentText := "completed", "", "DONE: main.py README.md"
+	if mode == grokSubagentFail {
+		status, errText, parentText = "failed", "boom", "subagent failed"
+	}
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":    "subagent_finished",
+		"subagent_id":      child,
+		"attempt_id":       "at1.test",
+		"child_session_id": child,
+		"status":           status,
+		"error":            errText,
+		"tool_calls":       1,
+		"turns":            1,
+		"duration_ms":      2873,
+		"tokens_used":      4740,
+		"output":           "main.py README.md",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-wait-1",
+		"status":        "completed",
+		"title":         "[subagent:explore] " + desc + " (sub-1)",
+	})
+	s.say(parentText)
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// grokSubagentTwo runs two children with interleaved streams and colliding
+// child tool call ids. Both spawned land before either spawn tool's rawOutput;
+// a child update for unknown sub-9 and the echo foreign other-session update
+// exercise the drop path; a duplicate spawned for sub-1 is a no-op. sub-2
+// finishes first; multi-wait retitles after both finished, as live.
+func (s *server) grokSubagentTwo(id json.RawMessage) {
+	s.thought("Spawning two explore subagents.")
+	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
+		"description":   "List python files",
+		"prompt":        "List the python files in one line.",
+		"subagent_type": "explore",
+		"background":    true,
+	})
+	s.toolMeta(fakeSessionID, "call-spawn-2", "spawn_subagent", "spawn_subagent", map[string]any{
+		"description":   "Report README first line",
+		"prompt":        "Report the first line of README.md.",
+		"subagent_type": "explore",
+		"background":    true,
+	})
+	s.childText("sub-9", "agent_message_chunk", "must never surface")
+	s.update("other-session", acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "NOPE"},
+	})
+	for _, sp := range []struct{ child, desc string }{{"sub-1", "List python files"}, {"sub-2", "Report README first line"}} {
+		s.subagentNotify(fakeSessionID, map[string]any{
+			"sessionUpdate":     "subagent_spawned",
+			"subagent_id":       sp.child,
+			"attempt_id":        "at1.test",
+			"parent_session_id": fakeSessionID,
+			"parent_prompt_id":  "prompt-1",
+			"child_session_id":  sp.child,
+			"subagent_type":     "explore",
+			"description":       sp.desc,
+			"capability_mode":   "read-only",
+			"role":              "explore",
+			"model":             "grok-4.6",
+		})
+	}
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":     "subagent_spawned",
+		"subagent_id":       "sub-1",
+		"attempt_id":        "at1.test",
+		"parent_session_id": fakeSessionID,
+		"child_session_id":  "sub-1",
+		"subagent_type":     "explore",
+		"description":       "List python files",
+		"model":             "grok-4.6",
+	})
+	for _, sp := range []struct{ child, desc string }{{"sub-1", "List python files"}, {"sub-2", "Report README first line"}} {
+		s.update(fakeSessionID, map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    "call-spawn-" + sp.child[len(sp.child)-1:],
+			"status":        "completed",
+			"rawOutput":     map[string]any{"type": "Text", "text": "Subagent started in background.\nsubagent_id: " + sp.child},
+			"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "spawn_subagent", "kind": "task"}},
+		})
+	}
+	s.childText("sub-1", "user_message_chunk", "List the python files.")
+	s.childText("sub-2", "user_message_chunk", "Report the first line.")
+	s.toolMeta("sub-1", "call-1", "list_dir", "list_dir", map[string]any{"target_directory": "/tmp/ws"})
+	s.toolMeta("sub-2", "call-1", "read_file", "read_file", map[string]any{"path": "/tmp/ws/README.md"})
+	s.update("sub-1", map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-1",
+		"status":        "completed",
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "list_dir", "kind": "list"}},
+	})
+	s.childText("sub-1", "agent_message_chunk", "main.py util.py")
+	s.update("sub-2", map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-1",
+		"status":        "completed",
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "read_file", "kind": "read"}},
+	})
+	s.childText("sub-2", "agent_message_chunk", "# hi")
+	s.toolMeta(fakeSessionID, "call-wait-1", "multi-wait (wait_all)", "get_command_or_subagent_output", map[string]any{
+		"task_ids":   []string{"sub-1", "sub-2"},
+		"timeout_ms": 120000,
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":     "subagent_progress",
+		"subagent_id":       "sub-1",
+		"attempt_id":        "at1.test",
+		"parent_session_id": fakeSessionID,
+		"child_session_id":  "sub-1",
+		"tool_call_count":   1,
+		"tokens_used":       4740,
+		"tools_used":        []string{"list_dir"},
+	})
+	time.Sleep(taskRunFor)
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":    "subagent_finished",
+		"subagent_id":      "sub-2",
+		"attempt_id":       "at1.test",
+		"child_session_id": "sub-2",
+		"status":           "completed",
+		"tool_calls":       1,
+		"turns":            1,
+		"duration_ms":      4096,
+		"tokens_used":      4799,
+		"output":           "# hi",
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":    "subagent_finished",
+		"subagent_id":      "sub-1",
+		"attempt_id":       "at1.test",
+		"child_session_id": "sub-1",
+		"status":           "completed",
+		"tool_calls":       1,
+		"turns":            1,
+		"duration_ms":      3202,
+		"tokens_used":      4934,
+		"output":           "main.py util.py",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-wait-1",
+		"status":        "completed",
+		"title":         "multi-wait (wait_all)",
+	})
+	s.say("DONE: main.py util.py / # hi")
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// grokSubagentNested has sub-1 spawn sub-1a: the spawn tool lives on sub-1's
+// session and the spawned notification's outer id is sub-1, so the grandchild
+// registers flat like any other child.
+func (s *server) grokSubagentNested(id json.RawMessage) {
+	s.thought("Spawning a nested subagent.")
+	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
+		"description":   "Outer task",
+		"prompt":        "Spawn a nested subagent and report.",
+		"subagent_type": "explore",
+		"background":    true,
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":     "subagent_spawned",
+		"subagent_id":       "sub-1",
+		"attempt_id":        "at1.test",
+		"parent_session_id": fakeSessionID,
+		"parent_prompt_id":  "prompt-1",
+		"child_session_id":  "sub-1",
+		"subagent_type":     "explore",
+		"description":       "Outer task",
+		"model":             "grok-4.6",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-spawn-1",
+		"status":        "completed",
+		"rawOutput":     map[string]any{"type": "Text", "text": "Subagent started in background.\nsubagent_id: sub-1"},
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "spawn_subagent", "kind": "task"}},
+	})
+	s.childText("sub-1", "user_message_chunk", "Spawn a nested subagent.")
+	s.toolMeta("sub-1", "call-nested-spawn", "spawn_subagent", "spawn_subagent", map[string]any{
+		"description":   "Inner task",
+		"prompt":        "List files.",
+		"subagent_type": "explore",
+		"background":    true,
+	})
+	s.subagentNotify("sub-1", map[string]any{
+		"sessionUpdate":     "subagent_spawned",
+		"subagent_id":       "sub-1a",
+		"attempt_id":        "at1.test",
+		"parent_session_id": "sub-1",
+		"parent_prompt_id":  "prompt-2",
+		"child_session_id":  "sub-1a",
+		"subagent_type":     "explore",
+		"description":       "Inner task",
+		"model":             "grok-4.6",
+	})
+	s.childText("sub-1a", "user_message_chunk", "List files.")
+	s.toolMeta("sub-1a", "call-1", "list_dir", "list_dir", map[string]any{"target_directory": "/tmp/ws"})
+	s.update("sub-1a", map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-1",
+		"status":        "completed",
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "list_dir", "kind": "list"}},
+	})
+	s.childText("sub-1a", "agent_message_chunk", "main.py")
+	time.Sleep(taskRunFor)
+	s.subagentNotify("sub-1", map[string]any{
+		"sessionUpdate":    "subagent_finished",
+		"subagent_id":      "sub-1a",
+		"attempt_id":       "at1.test",
+		"child_session_id": "sub-1a",
+		"status":           "completed",
+		"tool_calls":       1,
+		"turns":            1,
+		"duration_ms":      1200,
+		"tokens_used":      900,
+		"output":           "main.py",
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":    "subagent_finished",
+		"subagent_id":      "sub-1",
+		"attempt_id":       "at1.test",
+		"child_session_id": "sub-1",
+		"status":           "completed",
+		"tool_calls":       1,
+		"turns":            1,
+		"duration_ms":      2400,
+		"tokens_used":      1800,
+		"output":           "main.py",
+	})
+	s.say("DONE: main.py")
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// grokSubagentCancel runs a general-purpose child whose shell tool stays
+// in_progress while the parent hangs. On session/cancel the parent completes
+// cancelled, then — after 400 ms, so the drain must be state-aware — the
+// child finishes cancelled. early sends finished before prompt_complete,
+// the cancel.out order.
+func (s *server) grokSubagentCancel(id json.RawMessage, early bool) {
+	s.thought("Spawning a general-purpose subagent.")
+	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
+		"description":   "Sleep 45 then finish",
+		"prompt":        "Run sleep 45 and report finished.",
+		"subagent_type": "general-purpose",
+		"background":    true,
+	})
+	s.subagentNotify(fakeSessionID, map[string]any{
+		"sessionUpdate":     "subagent_spawned",
+		"subagent_id":       "sub-1",
+		"attempt_id":        "at1.test",
+		"parent_session_id": fakeSessionID,
+		"parent_prompt_id":  "prompt-1",
+		"child_session_id":  "sub-1",
+		"subagent_type":     "general-purpose",
+		"description":       "Sleep 45 then finish",
+		"capability_mode":   "general",
+		"role":              "general",
+		"model":             "grok-4.6",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-spawn-1",
+		"status":        "completed",
+		"rawOutput":     map[string]any{"type": "Text", "text": "Subagent started in background.\nsubagent_id: sub-1"},
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "spawn_subagent", "kind": "task"}},
+	})
+	s.childText("sub-1", "user_message_chunk", "Run sleep 45 and report finished.")
+	s.toolMeta("sub-1", "call-1", "Execute sleep 45 && echo finished", "run_terminal_command", map[string]any{"command": "sleep 45 && echo finished"})
+	s.update("sub-1", map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    "call-1",
+		"status":        "in_progress",
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "run_terminal_command", "kind": "execute"}},
+	})
+	s.toolMeta(fakeSessionID, "call-wait-1", "get_command_or_subagent_output", "get_command_or_subagent_output", map[string]any{
+		"task_ids":   []string{"sub-1"},
+		"timeout_ms": 120000,
+	})
+	if !s.waitCancelled() {
+		return
+	}
+	finish := func() {
+		s.subagentNotify(fakeSessionID, map[string]any{
+			"sessionUpdate":    "subagent_finished",
+			"subagent_id":      "sub-1",
+			"attempt_id":       "at1.test",
+			"child_session_id": "sub-1",
+			"status":           "cancelled",
+			"error":            "Subagent was cancelled",
+			"tool_calls":       0,
+			"turns":            1,
+			"duration_ms":      6608,
+			"tokens_used":      0,
+		})
+	}
+	if early {
+		finish()
+		s.finishPrompt(id, acp.StopCancelled)
+		return
+	}
+	s.finishPrompt(id, acp.StopCancelled)
+	time.Sleep(400 * time.Millisecond)
+	finish()
+}
+
+// waitCancelled blocks until session/cancel arrives. It reports whether the
+// cancel came; the caller finishes the prompt itself.
+func (s *server) waitCancelled() bool {
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		cancelled := s.cancelled.Load()
+		s.mu.Unlock()
+		if cancelled {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// thought is one agent_thought_chunk on the parent session.
+func (s *server) thought(text string) {
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentThought,
+		Content:       &acp.ContentBlock{Type: "text", Text: text},
+	})
+}
+
+// toolMeta is a tool_call with update._meta["x.ai/tool"].name set, the shape
+// the ACP ToolName normalization reads.
+func (s *server) toolMeta(sessionID, callID, title, toolName string, rawInput map[string]any) {
+	s.update(sessionID, map[string]any{
+		"sessionUpdate": "tool_call",
+		"toolCallId":    callID,
+		"title":         title,
+		"rawInput":      rawInput,
+		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": toolName}},
+	})
+}
+
+// childText is one text chunk on a child session.
+func (s *server) childText(sessionID, kind, text string) {
+	s.update(sessionID, acp.SessionUpdate{
+		SessionUpdate: kind,
+		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
 }
 

@@ -25,6 +25,13 @@ Flags:
           bash        execute tool completing with exitCode 127
           task        sub-agent tool with a cursor/task receipt
           task-late   same, receipt sent before the tool_call
+          grok-subagent one grok explore child with progress and finish
+          grok-subagent-fail same, child finishes failed
+          grok-subagent-two two parallel children, colliding tool ids
+          grok-subagent-nested grandchild spawned on the child's session
+          grok-subagent-late child still running at prompt_complete
+          grok-subagent-cancel cancel with a running child (finish after)
+          grok-subagent-cancel-early cancel after the child finished
           markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
           planmode    session/new in plan mode; replies planned/implementing
@@ -75,7 +82,9 @@ func main() {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "markdown", "title", "planmode", "planmode-card",
-		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped":
+		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
+		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
+		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)
