@@ -952,8 +952,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Only the arrow keys select a row; ctrl+p / ctrl+n stay with the textarea.
-	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
+	// Only the arrow keys select a row, empty composer or not — a user
+	// typing a follow-up still browses sub-agents; ctrl+p / ctrl+n stay with
+	// the textarea.
+	if len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
 		delta := 1
 		if msg.Type == tea.KeyUp {
 			delta = -1

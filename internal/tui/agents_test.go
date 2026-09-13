@@ -234,11 +234,16 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 		t.Fatalf("ctrl+n/ctrl+p moved the selection to %q", m.agentID)
 	}
 
+	// Arrows select rows even while a draft is being typed (user-directed
+	// 2026-09-13), and the draft itself is untouched.
 	m.input.SetValue("hey")
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
-	if m.agentID != sel {
-		t.Fatal("down with composer text must not move the selection")
+	if m.agentID == sel || m.agentID != "task-b" {
+		t.Fatalf("down with composer text selected %q, want task-b", m.agentID)
+	}
+	if m.input.Value() != "hey" {
+		t.Fatalf("selection stole the draft: %q", m.input.Value())
 	}
 }
 
