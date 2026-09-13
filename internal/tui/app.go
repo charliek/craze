@@ -96,23 +96,16 @@ type Model struct {
 	// elapsed counts from.
 	sessStart time.Time
 
-	entries  []entry
+	// main is the session transcript. cur() returns it; U3b will add a viewed
+	// sub-agent without changing that call.
+	main transcript
+
 	expanded bool
-	trimmed  bool
-	renders  int
 	width    int
 	height   int
 	ready    bool
 	quitting bool
 	started  bool
-
-	// transcriptRows is exactly what setViewportContent handed the viewport,
-	// and transcriptPlain is the same rows stripped and right-trimmed. The
-	// selection, the highlight and the copy all read these rather than
-	// vp.View(), so a selection whose anchor has scrolled off the screen still
-	// knows what it holds.
-	transcriptRows  []string
-	transcriptPlain []string
 
 	// mouseEnabled is --no-mouse kept on the model: the flag decides what
 	// bubbletea reports, and this decides what craze does with a mouse message
@@ -170,10 +163,9 @@ type Model struct {
 	themeNames []string
 	themePrev  Theme
 
-	slashSel   int
-	slashHide  bool
-	skills     []slashItem
-	streamOpen bool
+	slashSel  int
+	slashHide bool
+	skills    []slashItem
 
 	pickingProvider bool
 	providerLocked  bool
@@ -184,9 +176,7 @@ type Model struct {
 	providerDefault agent.Provider
 	newSession      func(agent.Provider) agent.Session
 
-	toolLine    map[string]int
 	toolTouch   []string
-	pathDirs    map[string]map[string]struct{}
 	todoPlanned int
 	todoDone    bool
 
@@ -416,9 +406,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return tm, cmd
 	}
+	// Mutation only marks the transcript dirty. Paint the drawn one here so a
+	// background transcript (U3b) never moves m.vp.
+	if next.cur().dirty {
+		next.refreshViewport()
+	}
 	// The handler has already decided where the transcript sits: sticking now
 	// only follows it down when the chrome above it changed shape.
 	next.relayout(next.vp.Height == 0 || next.vp.AtBottom())
+	next.storeViewport(next.cur())
 	// The tick chain is batched last, so a test can run the handler's own
 	// command without waiting out a timer.
 	if tick := next.armTick(); tick != nil {
@@ -716,10 +712,11 @@ func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
 // the gesture's whole answer.
 func (m Model) selectWord(pos cellPos) Model {
 	m.sel = selection{}
-	if pos.line >= len(m.transcriptPlain) {
+	plain := m.cur().transcriptPlain
+	if pos.line >= len(plain) {
 		return m
 	}
-	lo, hi, ok := wordAt(m.transcriptPlain[pos.line], pos.col)
+	lo, hi, ok := wordAt(plain[pos.line], pos.col)
 	if !ok {
 		return m
 	}
@@ -752,8 +749,9 @@ func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
 	if !m.sel.empty() {
 		return m.copySelection()
 	}
-	for i := len(m.entries) - 1; i >= 0; i-- {
-		if e := &m.entries[i]; e.kind == entryAssistant && e.text != "" {
+	entries := m.cur().entries
+	for i := len(entries) - 1; i >= 0; i-- {
+		if e := &entries[i]; e.kind == entryAssistant && e.text != "" {
 			return m, copyText(e.text, "copied last reply")
 		}
 	}

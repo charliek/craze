@@ -271,11 +271,12 @@ func TestThemeChangeRedrawsEveryEntry(t *testing.T) {
 	m.addUser("one")
 	m.addNote("two")
 	m.addError("three")
-	before := m.renders
+	m.refreshViewport()
+	before := m.main.renders
 	if before < 3 {
 		t.Fatalf("setup rendered %d entries", before)
 	}
-	for _, e := range m.entries {
+	for _, e := range m.main.entries {
 		if e.renderedFor.theme != "craze-dark" {
 			t.Fatalf("entry cached against %q", e.renderedFor.theme)
 		}
@@ -286,10 +287,10 @@ func TestThemeChangeRedrawsEveryEntry(t *testing.T) {
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
 
-	if got := m.renders - before; got != len(m.entries) {
-		t.Fatalf("a re-theme re-rendered %d of %d entries", got, len(m.entries))
+	if got := m.main.renders - before; got != len(m.main.entries) {
+		t.Fatalf("a re-theme re-rendered %d of %d entries", got, len(m.main.entries))
 	}
-	for _, e := range m.entries {
+	for _, e := range m.main.entries {
 		if e.renderedFor.theme != "craze-light" {
 			t.Fatalf("entry still cached against %q", e.renderedFor.theme)
 		}

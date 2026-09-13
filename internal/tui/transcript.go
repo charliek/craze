@@ -70,102 +70,135 @@ func (m Model) renderKey() renderKey {
 	return renderKey{width: m.width, theme: m.theme.Name, expanded: m.expanded}
 }
 
+// transcript is one conversation: entries, per-transcript caches, and the
+// viewport offset last painted for it. Mutation sets dirty; Model paints m.vp
+// only when this transcript is the one on screen (m.cur()).
+type transcript struct {
+	entries         []entry
+	toolLine        map[string]int
+	trimmed         bool
+	streamOpen      bool
+	pathDirs        map[string]map[string]struct{}
+	renders         int
+	transcriptRows  []string
+	transcriptPlain []string
+	yOffset         int
+	atBottom        bool
+	dirty           bool
+}
+
+func (m *Model) cur() *transcript { return &m.main }
+
 // appendEntry is the only way an entry reaches the transcript, so it is also
 // where an open run ends: a note or a tool row between two chunks means they
 // are not one run, and a run that is not the last entry can never be closed.
-func (m *Model) appendEntry(e entry) {
+func (t *transcript) appendEntry(e entry, now time.Time) {
 	e.dirty = true
 	if e.at.IsZero() {
-		e.at = m.now()
+		e.at = now
 	}
 	if e.end.IsZero() {
 		e.end = e.at
 	}
-	m.endRun(e.at)
-	m.entries = append(m.entries, e)
-	m.trimEntries()
-	m.refreshViewport()
+	t.endRun(e.at)
+	t.entries = append(t.entries, e)
+	t.trimEntries()
+	t.dirty = true
 }
+
+func (m *Model) appendEntry(e entry) { m.cur().appendEntry(e, m.now()) }
 
 // trimEntries enforces the entry cap. Tool rows are addressed by index, so the
 // map moves with the slice and rows that fell off are forgotten.
-func (m *Model) trimEntries() {
-	if len(m.entries) <= maxEntries {
+func (t *transcript) trimEntries() {
+	if len(t.entries) <= maxEntries {
 		return
 	}
-	drop := len(m.entries) - maxEntries
-	m.entries = append(m.entries[:0], m.entries[drop:]...)
-	m.trimmed = true
-	for id, idx := range m.toolLine {
+	drop := len(t.entries) - maxEntries
+	t.entries = append(t.entries[:0], t.entries[drop:]...)
+	t.trimmed = true
+	for id, idx := range t.toolLine {
 		if idx-drop < 0 {
-			delete(m.toolLine, id)
+			delete(t.toolLine, id)
 			continue
 		}
-		m.toolLine[id] = idx - drop
+		t.toolLine[id] = idx - drop
 	}
 }
 
-func (m *Model) addUser(text string) {
-	m.appendEntry(entry{kind: entryUser, text: text})
+func (t *transcript) addUser(text string, now time.Time) {
+	t.appendEntry(entry{kind: entryUser, text: text}, now)
 }
 
-func (m *Model) addNote(text string) {
+func (m *Model) addUser(text string) { m.cur().addUser(text, m.now()) }
+
+func (t *transcript) addNote(text string, now time.Time) {
 	if text == "" {
 		return
 	}
-	m.appendEntry(entry{kind: entryNote, text: text})
+	t.appendEntry(entry{kind: entryNote, text: text}, now)
 }
+
+func (m *Model) addNote(text string) { m.cur().addNote(text, m.now()) }
 
 // addPlan puts the plan cursor proposed into the transcript as a note block,
 // which is why the card itself only has to carry the three answers.
-func (m *Model) addPlan(p *agent.PlanEvent) {
+func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {
 	if p == nil {
 		return
 	}
 	plan := *p
-	m.appendEntry(entry{kind: entryPlan, plan: &plan})
+	t.appendEntry(entry{kind: entryPlan, plan: &plan}, now)
 }
 
-func (m *Model) addError(text string) {
+func (m *Model) addPlan(p *agent.PlanEvent) { m.cur().addPlan(p, m.now()) }
+
+func (t *transcript) addError(text string, now time.Time) {
 	if text == "" {
 		return
 	}
-	m.appendEntry(entry{kind: entryError, text: text})
+	t.appendEntry(entry{kind: entryError, text: text}, now)
 }
+
+func (m *Model) addError(text string) { m.cur().addError(text, m.now()) }
 
 // appendStream grows the open entry of the same kind, so a reply that arrives
 // in five chunks stays one entry and costs one re-render per chunk.
-func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
+func (t *transcript) appendStream(kind entryKind, text string, at, now time.Time) {
 	if text == "" {
 		return
 	}
 	if at.IsZero() {
-		at = m.now()
+		at = now
 	}
-	if m.streamOpen && len(m.entries) > 0 {
-		last := &m.entries[len(m.entries)-1]
+	if t.streamOpen && len(t.entries) > 0 {
+		last := &t.entries[len(t.entries)-1]
 		if last.kind == kind {
 			last.text += text
 			last.end = at
 			last.dirty = true
-			m.refreshViewport()
+			t.dirty = true
 			return
 		}
 	}
 	// appendEntry ends the previous run, so the flag is raised after it.
-	m.appendEntry(entry{kind: kind, text: text, at: at, end: at, open: kind == entryThought})
-	m.streamOpen = true
+	t.appendEntry(entry{kind: kind, text: text, at: at, end: at, open: kind == entryThought}, now)
+	t.streamOpen = true
+}
+
+func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
+	m.cur().appendStream(kind, text, at, m.now())
 }
 
 // endRun ends the open run in place, reporting whether anything changed. The
 // open run is always the last entry, which appendEntry keeps true.
-func (m *Model) endRun(at time.Time) bool {
-	m.streamOpen = false
-	n := len(m.entries)
+func (t *transcript) endRun(at time.Time) bool {
+	t.streamOpen = false
+	n := len(t.entries)
 	if n == 0 {
 		return false
 	}
-	e := &m.entries[n-1]
+	e := &t.entries[n-1]
 	if e.kind != entryThought || !e.open {
 		return false
 	}
@@ -179,58 +212,62 @@ func (m *Model) endRun(at time.Time) bool {
 
 // closeStream ends the open run. A thought run freezes its elapsed time at the
 // first event that follows it.
-func (m *Model) closeStream(at time.Time) {
-	if m.endRun(at) {
-		m.refreshViewport()
+func (t *transcript) closeStream(at time.Time) {
+	if t.endRun(at) {
+		t.dirty = true
 	}
 }
 
-func (m *Model) breakStream() { m.closeStream(m.now()) }
+func (t *transcript) breakStream(now time.Time) { t.closeStream(now) }
+
+func (m *Model) breakStream() { m.cur().breakStream(m.now()) }
 
 // upsertTool keeps one row per toolCallId, updated in place. Cursor's todo
 // writer is hidden: the todo stream owns that state.
-func (m *Model) upsertTool(t *agent.ToolEvent) {
-	if t == nil || t.IsTodoTool() {
+func (t *transcript) upsertTool(tool *agent.ToolEvent, now time.Time) {
+	if tool == nil || tool.IsTodoTool() {
 		return
 	}
-	tool := *t
-	m.notePath(tool)
+	ev := *tool
+	t.notePath(ev)
 	// A tool call ends the run above it either way: an update that lands in an
 	// existing row still means the thinking before it is over.
-	m.closeStream(t.At)
-	if t.ID != "" {
-		if idx, ok := m.toolLine[t.ID]; ok && idx >= 0 && idx < len(m.entries) && m.entries[idx].kind == entryTool {
-			e := &m.entries[idx]
-			e.tool = &tool
+	t.closeStream(tool.At)
+	if tool.ID != "" {
+		if idx, ok := t.toolLine[tool.ID]; ok && idx >= 0 && idx < len(t.entries) && t.entries[idx].kind == entryTool {
+			e := &t.entries[idx]
+			e.tool = &ev
 			e.dirty = true
-			m.refreshViewport()
+			t.dirty = true
 			return
 		}
 	}
-	m.appendEntry(entry{kind: entryTool, tool: &tool, at: t.At})
-	if t.ID != "" {
-		if m.toolLine == nil {
-			m.toolLine = make(map[string]int)
+	t.appendEntry(entry{kind: entryTool, tool: &ev, at: tool.At}, now)
+	if tool.ID != "" {
+		if t.toolLine == nil {
+			t.toolLine = make(map[string]int)
 		}
-		m.toolLine[t.ID] = len(m.entries) - 1
+		t.toolLine[tool.ID] = len(t.entries) - 1
 	}
 }
 
+func (m *Model) upsertTool(tool *agent.ToolEvent) { m.cur().upsertTool(tool, m.now()) }
+
 // notePath records which directories a basename has been seen in, so a row can
 // fall back to dir/file once the basename is ambiguous.
-func (m *Model) notePath(t agent.ToolEvent) {
-	p := toolPath(&t)
+func (t *transcript) notePath(tool agent.ToolEvent) {
+	p := toolPath(&tool)
 	if p == "" {
 		return
 	}
 	base, dir := filepath.Base(p), filepath.Dir(p)
-	if m.pathDirs == nil {
-		m.pathDirs = make(map[string]map[string]struct{})
+	if t.pathDirs == nil {
+		t.pathDirs = make(map[string]map[string]struct{})
 	}
-	set := m.pathDirs[base]
+	set := t.pathDirs[base]
 	if set == nil {
 		set = make(map[string]struct{})
-		m.pathDirs[base] = set
+		t.pathDirs[base] = set
 	}
 	if _, ok := set[dir]; ok {
 		return
@@ -238,20 +275,21 @@ func (m *Model) notePath(t agent.ToolEvent) {
 	set[dir] = struct{}{}
 	if len(set) == 2 {
 		// The basename just became ambiguous, so every row showing it redraws.
-		for i := range m.entries {
-			if m.entries[i].kind == entryTool {
-				m.entries[i].dirty = true
+		for i := range t.entries {
+			if t.entries[i].kind == entryTool {
+				t.entries[i].dirty = true
 			}
 		}
+		t.dirty = true
 	}
 }
 
-func (m Model) displayPath(p string) string {
+func (m Model) displayPath(tr *transcript, p string) string {
 	if p == "" {
 		return ""
 	}
 	base := filepath.Base(p)
-	if len(m.pathDirs[base]) < 2 {
+	if len(tr.pathDirs[base]) < 2 {
 		return base
 	}
 	return filepath.Join(filepath.Base(filepath.Dir(p)), base)
@@ -259,16 +297,17 @@ func (m Model) displayPath(p string) string {
 
 // clearTranscript drops the entries and every cache keyed off them.
 func (m *Model) clearTranscript() {
-	m.entries = nil
-	m.toolLine = nil
-	m.pathDirs = nil
-	m.trimmed = false
-	m.streamOpen = false
+	t := m.cur()
+	t.entries = nil
+	t.toolLine = nil
+	t.pathDirs = nil
+	t.trimmed = false
+	t.streamOpen = false
+	t.dirty = true
 	m.todoPlanned = 0
 	m.todoDone = false
 	// "the plan above" is gone, so there is nothing left to offer.
 	m.retirePlanOffer()
-	m.refreshViewport()
 }
 
 // noteTodos turns the todo stream into the two dim transcript notes; the panel
@@ -301,48 +340,58 @@ func (m *Model) refreshViewport() {
 	m.setViewportContent(m.vp.Height == 0 || m.vp.AtBottom())
 }
 
-// setViewportContent re-renders the dirty entries, joins everything and only
-// then scrolls, so "stick to bottom" is decided by where the user was before
-// the change, not after it.
+func (m *Model) storeViewport(tr *transcript) {
+	tr.yOffset = m.vp.YOffset
+	tr.atBottom = m.vp.AtBottom()
+}
+
+// setViewportContent re-renders the dirty entries of the drawn transcript,
+// joins everything and only then scrolls, so "stick to bottom" is decided by
+// where the user was before the change, not after it.
 func (m *Model) setViewportContent(stick bool) {
+	tr := m.cur()
 	// Every rebuild moves the text under the selection — a streaming chunk, a
 	// tool update, /clear, a resize or a theme change — so the highlight goes
 	// with it rather than pointing at rows that are no longer there.
 	m.sel = selection{}
 	if m.width <= 0 {
-		m.transcriptRows, m.transcriptPlain = nil, nil
+		tr.transcriptRows, tr.transcriptPlain = nil, nil
 		m.vp.SetContent("")
+		tr.dirty = false
+		m.storeViewport(tr)
 		return
 	}
 	key := m.renderKey()
-	lines := make([]string, 0, len(m.entries)+1)
-	if m.trimmed {
+	lines := make([]string, 0, len(tr.entries)+1)
+	if tr.trimmed {
 		lines = append(lines, renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)}))
 	}
-	for i := range m.entries {
-		e := &m.entries[i]
+	for i := range tr.entries {
+		e := &tr.entries[i]
 		if e.dirty || e.renderedFor != key {
-			e.rendered = m.renderEntry(e, key)
+			e.rendered = m.renderEntry(tr, e, key)
 			e.renderedFor = key
 			e.dirty = false
-			m.renders++
+			tr.renders++
 		}
 		lines = append(lines, e.rendered...)
 	}
 	// The canonical rows: exactly what the viewport is about to hold, plus the
 	// plain form the selection cuts and copies from.
-	m.transcriptRows = lines
-	m.transcriptPlain = make([]string, len(lines))
+	tr.transcriptRows = lines
+	tr.transcriptPlain = make([]string, len(lines))
 	for i, ln := range lines {
-		m.transcriptPlain[i] = strings.TrimRight(ansi.Strip(ln), " ")
+		tr.transcriptPlain[i] = strings.TrimRight(ansi.Strip(ln), " ")
 	}
 	m.vp.SetContent(strings.Join(lines, "\n"))
 	if stick {
 		m.vp.GotoBottom()
 	}
+	tr.dirty = false
+	m.storeViewport(tr)
 }
 
-func (m *Model) renderEntry(e *entry, key renderKey) []string {
+func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
 	switch e.kind {
 	case entryUser:
 		return hangingRows(e.text, "❯ ", "  ", key.width, styleFG(m.theme.User))
@@ -351,7 +400,7 @@ func (m *Model) renderEntry(e *entry, key renderKey) []string {
 	case entryThought:
 		return m.thoughtRows(e, key)
 	case entryTool:
-		return m.renderTool(e.tool, key)
+		return m.renderTool(tr, e.tool, key)
 	case entryNote:
 		return hangingRows(e.text, "", "", key.width, styleFG(m.theme.Dim))
 	case entryPlan:
@@ -582,22 +631,22 @@ func formatMillis(ms int) string {
 
 // ---------------------------------------------------------------- tool rows
 
-func (m *Model) renderTool(t *agent.ToolEvent, key renderKey) []string {
-	if t == nil {
+func (m *Model) renderTool(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+	if tool == nil {
 		return nil
 	}
-	if t.IsTask() {
-		return m.taskRows(t, key.width)
+	if tool.IsTask() {
+		return m.taskRows(tool, key.width)
 	}
-	switch t.Kind {
+	switch tool.Kind {
 	case "edit":
-		return m.editRows(t, key)
+		return m.editRows(tr, tool, key)
 	case "execute":
-		return m.execRows(t, key)
+		return m.execRows(tool, key)
 	case "read":
-		return m.readRows(t, key)
+		return m.readRows(tr, tool, key)
 	}
-	return m.otherRows(t, key.width)
+	return m.otherRows(tool, key.width)
 }
 
 // toolRow renders "<glyph> <label>  <target>  <suffix>". The target is clamped
@@ -646,30 +695,30 @@ func (m *Model) dimRow(text string, width int) string {
 	return renderSegs(width, seg{text, styleFG(m.theme.Dim)})
 }
 
-func (m *Model) readRows(t *agent.ToolEvent, key renderKey) []string {
-	rows := []string{m.toolHead(t, "read", m.toolTarget(t), "", styleFG(m.theme.Dim), key.width)}
-	if !key.expanded || t.Output == nil {
+func (m *Model) readRows(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+	rows := []string{m.toolHead(tool, "read", m.toolTarget(tr, tool), "", styleFG(m.theme.Dim), key.width)}
+	if !key.expanded || tool.Output == nil {
 		return rows
 	}
-	return append(rows, m.outputRows(t.Output.Content, key.width)...)
+	return append(rows, m.outputRows(tool.Output.Content, key.width)...)
 }
 
-func (m *Model) editRows(t *agent.ToolEvent, key renderKey) []string {
-	added, removed, truncated := diffTotals(t.Diffs)
+func (m *Model) editRows(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+	added, removed, truncated := diffTotals(tool.Diffs)
 	suffix, sufSt := "", styleFG(m.theme.Dim)
 	switch {
 	case truncated:
-		suffix = fmt.Sprintf("diff too large (%d KiB)", diffKiB(t.Diffs))
+		suffix = fmt.Sprintf("diff too large (%d KiB)", diffKiB(tool.Diffs))
 		sufSt = styleFG(m.theme.Warn)
-	case len(t.Diffs) > 0:
+	case len(tool.Diffs) > 0:
 		suffix = fmt.Sprintf("+%d −%d", added, removed)
 		sufSt = styleFG(m.theme.OK)
 	}
-	rows := []string{m.toolHead(t, "edit", m.toolTarget(t), suffix, sufSt, key.width)}
+	rows := []string{m.toolHead(tool, "edit", m.toolTarget(tr, tool), suffix, sufSt, key.width)}
 	if truncated {
 		return rows
 	}
-	return append(rows, m.diffRows(t.Diffs, key)...)
+	return append(rows, m.diffRows(tool.Diffs, key)...)
 }
 
 func (m *Model) diffRows(diffs []agent.ToolDiff, key renderKey) []string {
@@ -800,11 +849,11 @@ func (m *Model) outputRows(text string, width int) []string {
 	return out
 }
 
-func (m *Model) toolTarget(t *agent.ToolEvent) string {
-	if p := m.displayPath(toolPath(t)); p != "" {
+func (m *Model) toolTarget(tr *transcript, tool *agent.ToolEvent) string {
+	if p := m.displayPath(tr, toolPath(tool)); p != "" {
 		return p
 	}
-	return sanitizeLine(t.Title)
+	return sanitizeLine(tool.Title)
 }
 
 // toolPath finds the file a read or edit acted on: the location cursor reports,

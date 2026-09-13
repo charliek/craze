@@ -14,8 +14,8 @@ import (
 // count as a double-click.
 const doubleClickWindow = 400 * time.Millisecond
 
-// cellPos is one cell in transcript-row coordinates: line indexes
-// m.transcriptRows (not the screen), col is a display column from the left
+// cellPos is one cell in transcript-row coordinates: line indexes the drawn
+// transcript's rows (not the screen), col is a display column from the left
 // edge. Absolute rows are the point — a selection whose anchor has scrolled off
 // the top still knows which text it holds.
 type cellPos struct{ line, col int }
@@ -81,12 +81,13 @@ func selSpan(line int, from, to cellPos, width int) (lo, hi int, ok bool) {
 // the line into the content, so a drag that runs past the top or the bottom
 // still has a cell to extend to rather than losing the selection.
 func (m Model) transcriptCell(x, y int) (cellPos, bool) {
+	rows := m.cur().transcriptRows
 	tr := m.lay.Region(regionTranscript)
-	if tr.Empty() || m.width <= 0 || len(m.transcriptRows) == 0 {
+	if tr.Empty() || m.width <= 0 || len(rows) == 0 {
 		return cellPos{}, false
 	}
 	y = clampInt(y, tr.Top, tr.Bottom-1)
-	line := clampInt(m.vp.YOffset+(y-tr.Top), 0, len(m.transcriptRows)-1)
+	line := clampInt(m.vp.YOffset+(y-tr.Top), 0, len(rows)-1)
 	return cellPos{line: line, col: clampInt(x, 0, m.width-1)}, true
 }
 
@@ -98,14 +99,15 @@ func (m Model) selectable(x, y int) bool {
 		return false
 	}
 	tr := m.lay.Region(regionTranscript)
-	if !tr.Contains(y) || len(m.transcriptRows) == 0 {
+	rows := m.cur().transcriptRows
+	if !tr.Contains(y) || len(rows) == 0 {
 		return false
 	}
 	// The band is taller than the content until the transcript fills it, and
 	// the blank cells below the last row hold no text: a press there starts
 	// nothing. transcriptCell clamps onto the last row on purpose — that is for
 	// a drag already under way running off the end, not for a press.
-	if m.vp.YOffset+(y-tr.Top) >= len(m.transcriptRows) {
+	if m.vp.YOffset+(y-tr.Top) >= len(rows) {
 		return false
 	}
 	return x >= 0 && x < m.width
@@ -119,16 +121,17 @@ func (m Model) selectionText() string {
 		return ""
 	}
 	from, to := m.sel.bounds()
+	plainRows := m.cur().transcriptPlain
 	var b strings.Builder
 	for line := from.line; line <= to.line; line++ {
-		if line < 0 || line >= len(m.transcriptPlain) {
+		if line < 0 || line >= len(plainRows) {
 			continue
 		}
 		lo, hi, ok := selSpan(line, from, to, m.width)
 		if !ok {
 			continue
 		}
-		plain := m.transcriptPlain[line]
+		plain := plainRows[line]
 		w := ansi.StringWidth(plain)
 		b.WriteString(cutCells(plain, lo, min(hi+1, w)))
 		// Every row but the last one of the selection is followed by the row
@@ -202,18 +205,19 @@ func wordAt(s string, col int) (lo, hi int, ok bool) {
 }
 
 // transcriptView is the transcript band. Without a selection it is the
-// viewport's own view; with one the rows come from transcriptRows — the exact
-// styled lines the viewport was given — so the highlight is painted over the
-// cached render rather than through it, and selecting re-renders nothing.
+// viewport's own view; with one the rows come from the drawn transcript — the
+// exact styled lines the viewport was given — so the highlight is painted over
+// the cached render rather than through it, and selecting re-renders nothing.
 func (m Model) transcriptView() string {
 	if m.sel.empty() || m.vp.Height <= 0 || m.width <= 0 {
 		return m.vp.View()
 	}
 	from, to := m.sel.bounds()
 	bg := selectionSeq(m.theme.SelectionBG)
+	drawn := m.cur().transcriptRows
 	rows := make([]string, 0, m.vp.Height)
-	for i := m.vp.YOffset; i < m.vp.YOffset+m.vp.Height && i < len(m.transcriptRows); i++ {
-		row := padRow(m.transcriptRows[i], m.width)
+	for i := m.vp.YOffset; i < m.vp.YOffset+m.vp.Height && i < len(drawn); i++ {
+		row := padRow(drawn[i], m.width)
 		if lo, hi, ok := selSpan(i, from, to, m.width); ok {
 			row = highlightSpan(row, lo, hi, bg)
 		}

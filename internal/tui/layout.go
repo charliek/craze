@@ -344,6 +344,7 @@ func (m *Model) relayout(stick bool) {
 	if stick {
 		m.vp.GotoBottom()
 	}
+	m.storeViewport(m.cur())
 }
 
 // fitRows forces a rendered block to exactly n rows, padded to the full width

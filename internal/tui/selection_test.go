@@ -106,7 +106,7 @@ func TestDragCopiesTheSelectedCells(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	rec := captureCopies(t)
 	m := selModel(t, &now, twoRows)
-	if got := m.transcriptPlain[0]; got != "• alpha bravo" {
+	if got := m.main.transcriptPlain[0]; got != "• alpha bravo" {
 		t.Fatalf("transcript row 0 is %q", got)
 	}
 	top := m.lay.Region(regionTranscript).Top
@@ -149,9 +149,9 @@ func TestReverseDragAcrossViewportsCopiesInReadingOrder(t *testing.T) {
 	first := m.vp.YOffset + (last - 2 - tr.Top)
 	// From the head's column to the end of its row, the row between whole, and
 	// the anchor's row up to and including the anchor cell.
-	want := cutCells(m.transcriptPlain[first], 2, 100) + "\n" +
-		m.transcriptPlain[first+1] + "\n" +
-		cutCells(m.transcriptPlain[first+2], 0, 7)
+	want := cutCells(m.main.transcriptPlain[first], 2, 100) + "\n" +
+		m.main.transcriptPlain[first+1] + "\n" +
+		cutCells(m.main.transcriptPlain[first+2], 0, 7)
 	if copies := rec.copies(); len(copies) != 1 || copies[0] != want {
 		t.Fatalf("clipboard got %q, want [%q]", copies, want)
 	}
@@ -393,8 +393,8 @@ func TestCtrlYCopiesTheLastReply(t *testing.T) {
 	rec := captureCopies(t)
 	m := selModel(t, &now, reply)
 	m.mouseEnabled = false
-	if len(m.transcriptPlain) < 3 {
-		t.Fatalf("the fixture should have wrapped: %d rows", len(m.transcriptPlain))
+	if len(m.main.transcriptPlain) < 3 {
+		t.Fatalf("the fixture should have wrapped: %d rows", len(m.main.transcriptPlain))
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
 	m = tm.(Model)
@@ -503,8 +503,9 @@ func TestTranscriptChangeClearsTheSelection(t *testing.T) {
 			return tm.(Model)
 		}},
 		{"clear", func(m Model) Model {
-			m.clearTranscript()
-			return m
+			m.input.SetValue("/clear")
+			tm, _ := m.Update(enter())
+			return tm.(Model)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -529,12 +530,12 @@ func TestSelectingDoesNotReRenderTheTranscript(t *testing.T) {
 	captureCopies(t)
 	m := selModel(t, &now, twoRows)
 	top := m.lay.Region(regionTranscript).Top
-	before := m.renders
+	before := m.main.renders
 	m = mousePress(t, m, 0, top)
 	m = motion(t, m, 6, top+1)
 	_ = m.View()
-	if m.renders != before {
-		t.Fatalf("selecting re-rendered %d entries", m.renders-before)
+	if m.main.renders != before {
+		t.Fatalf("selecting re-rendered %d entries", m.main.renders-before)
 	}
 	// And the highlight really is on the screen.
 	if !strings.Contains(m.View(), selectionSeq(m.theme.SelectionBG)) {
@@ -640,8 +641,8 @@ func TestWordAt(t *testing.T) {
 // to put a row of precisely the terminal's width in the transcript: the
 // renderer wraps before it fills the last cell.
 func fakeRows(m Model, rows ...string) Model {
-	m.transcriptRows = rows
-	m.transcriptPlain = rows
+	m.main.transcriptRows = rows
+	m.main.transcriptPlain = rows
 	m.vp.SetContent(strings.Join(rows, "\n"))
 	m.vp.GotoTop()
 	return m
@@ -688,8 +689,8 @@ func TestPressBelowTheContentStartsNoSelection(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	rec := captureCopies(t)
 	m := selModel(t, &now, "alpha bravo")
-	if len(m.transcriptPlain) != 1 {
-		t.Fatalf("the fixture wants one content row, got %d", len(m.transcriptPlain))
+	if len(m.main.transcriptPlain) != 1 {
+		t.Fatalf("the fixture wants one content row, got %d", len(m.main.transcriptPlain))
 	}
 	tr := m.lay.Region(regionTranscript)
 	if tr.Height() < 5 {

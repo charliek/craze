@@ -457,6 +457,7 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		m.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("line-%02d padding so the transcript is taller than the viewport", i)})
 	}
+	m.refreshViewport()
 	if m.vp.YOffset == 0 {
 		t.Fatal("expected stick-to-bottom to leave a non-zero YOffset")
 	}
@@ -468,6 +469,7 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 	}
 	scrolled := m.vp.YOffset
 	m.appendEntry(entry{kind: entryAssistant, text: "new-line-while-scrolled-up"})
+	m.refreshViewport()
 	if m.vp.YOffset != scrolled {
 		t.Fatalf("new lines jumped the viewport while scrolled up: %d -> %d", scrolled, m.vp.YOffset)
 	}
@@ -475,7 +477,7 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 
 func texts(m Model, kind entryKind) []string {
 	var out []string
-	for _, e := range m.entries {
+	for _, e := range m.main.entries {
 		if e.kind == kind {
 			out = append(out, e.text)
 		}
@@ -487,7 +489,7 @@ func texts(m Model, kind entryKind) []string {
 // per element and its rendered rows joined.
 func toolRows(m Model) []string {
 	var out []string
-	for _, e := range m.entries {
+	for _, e := range m.main.entries {
 		if e.kind == entryTool {
 			out = append(out, plain(strings.Join(e.rendered, "\n")))
 		}
@@ -1351,14 +1353,14 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.entries) != 0 {
-		t.Fatalf("clear left entries %+v", m.entries)
+	if len(m.main.entries) != 0 {
+		t.Fatalf("clear left entries %+v", m.main.entries)
 	}
-	if len(m.toolLine) != 0 {
-		t.Fatalf("clear left toolLine %+v", m.toolLine)
+	if len(m.main.toolLine) != 0 {
+		t.Fatalf("clear left toolLine %+v", m.main.toolLine)
 	}
-	if len(m.pathDirs) != 0 || m.trimmed {
-		t.Fatalf("clear left the path cache %+v (trimmed=%v)", m.pathDirs, m.trimmed)
+	if len(m.main.pathDirs) != 0 || m.main.trimmed {
+		t.Fatalf("clear left the path cache %+v (trimmed=%v)", m.main.pathDirs, m.main.trimmed)
 	}
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID: "old-1", Kind: "execute", Status: "completed", Title: "Shell",
@@ -1649,7 +1651,7 @@ func TestPlanImplementChainsSetModeThenPrompt(t *testing.T) {
 	}
 	// The note is written before the turn it explains.
 	note, user := -1, -1
-	for i, e := range m.entries {
+	for i, e := range m.main.entries {
 		if e.kind == entryNote && strings.HasPrefix(e.text, "mode → agent") {
 			note = i
 		}
@@ -1776,8 +1778,8 @@ func TestPlanImplementFailureDoesNotReviveAClearedPlan(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.entries) != 0 {
-		t.Fatalf("/clear should have emptied the transcript: %d entries", len(m.entries))
+	if len(m.main.entries) != 0 {
+		t.Fatalf("/clear should have emptied the transcript: %d entries", len(m.main.entries))
 	}
 	msg := runCmd(cmd)
 	if _, ok := msg.(planImplementFailedMsg); !ok {
