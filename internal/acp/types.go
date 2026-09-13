@@ -28,6 +28,13 @@ const (
 	MethodCursorUpdateTodos = "cursor/update_todos"
 	MethodCursorTask        = "cursor/task"
 
+	MethodGrokAskUserQuestion        = "x.ai/ask_user_question"
+	MethodGrokAskUserQuestionWrapped = "_x.ai/ask_user_question"
+	MethodGrokExitPlanMode           = "x.ai/exit_plan_mode"
+	MethodGrokExitPlanModeWrapped    = "_x.ai/exit_plan_mode"
+	MethodGrokPromptComplete         = "x.ai/session/prompt_complete"
+	MethodGrokPromptCompleteWrapped  = "_x.ai/session/prompt_complete"
+
 	UpdateAgentMessage      = "agent_message_chunk"
 	UpdateAgentThought      = "agent_thought_chunk"
 	UpdateToolCall          = "tool_call"
@@ -36,6 +43,11 @@ const (
 	UpdateCurrentMode       = "current_mode_update"
 	UpdateConfigOption      = "config_option_update"
 	UpdateSessionInfo       = "session_info_update"
+	UpdatePlan              = "plan"
+
+	// GrokEmptyPlanMarkdown is the plan card body when exit_plan_mode
+	// omitted planContent.
+	GrokEmptyPlanMarkdown = "# No plan written yet\n\n(The agent exited plan mode without writing a plan.)"
 
 	KindAllowOnce    = "allow_once"
 	KindAllowAlways  = "allow_always"
@@ -83,6 +95,23 @@ type InitializeResult struct {
 	AgentInfo         *Implementation `json:"agentInfo,omitempty"`
 	AuthMethods       []AuthMethod    `json:"authMethods,omitempty"`
 	AgentCapabilities json.RawMessage `json:"agentCapabilities,omitempty"`
+	Meta              json.RawMessage `json:"_meta,omitempty"`
+}
+
+// ModelState is initialize._meta.modelState, the fallback when session/new
+// omits models.
+func (r InitializeResult) ModelState() json.RawMessage {
+	raw := bytes.TrimSpace(r.Meta)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var meta struct {
+		ModelState json.RawMessage `json:"modelState"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil
+	}
+	return bytes.TrimSpace(meta.ModelState)
 }
 
 type AuthMethod struct {

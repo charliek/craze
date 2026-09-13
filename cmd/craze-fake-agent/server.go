@@ -96,6 +96,35 @@ func run(script string) error {
 	return nil
 }
 
+func grokScript(script string) bool {
+	return strings.HasPrefix(script, "grok-")
+}
+
+func grokConfigOptions() []map[string]any {
+	return []map[string]any{
+		{
+			"id":           "reasoning_effort",
+			"name":         "Effort",
+			"category":     "model_option",
+			"type":         "select",
+			"currentValue": "high",
+			"options": []map[string]string{
+				{"value": "low", "name": "Low"},
+				{"value": "high", "name": "High"},
+			},
+		},
+	}
+}
+
+func grokModels() map[string]any {
+	return map[string]any{
+		"currentModelId": "grok-4.6",
+		"availableModels": []map[string]string{
+			{"modelId": "grok-4.6", "name": "Grok 4.6"},
+		},
+	}
+}
+
 func (s *server) onRequest(msg *acp.Message) {
 	switch msg.Method {
 	case acp.MethodInitialize:
@@ -103,15 +132,28 @@ func (s *server) onRequest(msg *acp.Message) {
 		if s.script == "noauth" {
 			auth = []map[string]string{}
 		}
-		s.reply(msg.ID, map[string]any{
+		if grokScript(s.script) {
+			auth = []map[string]string{
+				{"id": acp.AuthXAIAPIKey, "name": "API Key"},
+				{"id": acp.AuthCachedToken, "name": "Cached Token"},
+			}
+		}
+		result := map[string]any{
 			"protocolVersion": acp.ProtocolVersion,
 			"agentInfo":       map[string]string{"name": "craze-fake-agent", "version": "test"},
 			"authMethods":     auth,
 			"agentCapabilities": map[string]any{
 				"loadSession": false,
 			},
-		})
+		}
+		if grokScript(s.script) {
+			result["_meta"] = map[string]any{"modelState": grokModels()}
+		}
+		s.reply(msg.ID, result)
 	case acp.MethodAuthenticate:
+		if p := os.Getenv("CRAZE_FAKE_DUMP_AUTH"); p != "" {
+			_ = os.WriteFile(p, msg.Params, 0o644)
+		}
 		if s.script == "noauth" {
 			_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "authenticate must not be called"})
 			return
@@ -125,6 +167,28 @@ func (s *server) onRequest(msg *acp.Message) {
 		s.mu.Lock()
 		cfg := s.config
 		s.mu.Unlock()
+		if grokScript(s.script) {
+			s.reply(msg.ID, map[string]any{
+				"sessionId": fakeSessionID,
+				"modes": map[string]any{
+					"currentModeId": "default",
+					"availableModes": []map[string]string{
+						{"id": "default", "name": "Default"},
+						{"id": "plan", "name": "Plan"},
+						{"id": "ask", "name": "Ask"},
+					},
+				},
+				"models":        grokModels(),
+				"configOptions": grokConfigOptions(),
+			})
+			s.update(fakeSessionID, acp.SessionUpdate{
+				SessionUpdate: acp.UpdateAvailableCommands,
+				AvailableCommands: []acp.AvailableCommand{
+					{Name: "research", Description: "Agent-advertised command"},
+				},
+			})
+			return
+		}
 		// The plan-exit scripts have to start where the offer can be made.
 		currentMode := "agent"
 		if planExitScript(s.script) {
@@ -232,6 +296,12 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.ask(msg.ID)
 	case "plan":
 		s.plan(msg.ID)
+	case "grok-ask":
+		s.grokAsk(msg.ID, false)
+	case "grok-ask-wrapped":
+		s.grokAsk(msg.ID, true)
+	case "grok-plan":
+		s.grokPlan(msg.ID)
 	case "todos":
 		s.todos(msg.ID, true)
 	case "todos-notify":
@@ -289,7 +359,96 @@ func (s *server) echo(id json.RawMessage, text string) {
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
-	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+func (s *server) finishPrompt(id json.RawMessage, stop string) {
+	if grokScript(s.script) {
+		_ = s.conn.Notify(context.Background(), acp.MethodGrokPromptComplete, map[string]any{
+			"sessionId":  fakeSessionID,
+			"stopReason": stop,
+		})
+	}
+	s.reply(id, map[string]any{"stopReason": stop})
+}
+
+func grokAskParams() map[string]any {
+	return map[string]any{
+		"sessionId":  fakeSessionID,
+		"toolCallId": askToolCallID,
+		"mode":       "default",
+		"questions": []map[string]any{
+			{
+				"question": "Pick one",
+				"options": []map[string]string{
+					{"label": "A"},
+					{"label": "B"},
+				},
+			},
+			{
+				"question":    "Pick any",
+				"multiSelect": true,
+				"options": []map[string]string{
+					{"label": "X"},
+					{"label": "Y"},
+					{"label": "Z"},
+				},
+			},
+		},
+	}
+}
+
+func (s *server) grokAsk(id json.RawMessage, wrapped bool) {
+	params := grokAskParams()
+	method := acp.MethodGrokAskUserQuestion
+	body := any(params)
+	if wrapped {
+		method = acp.MethodGrokAskUserQuestionWrapped
+		body = map[string]any{"method": acp.MethodGrokAskUserQuestion, "params": params}
+	}
+	var result struct {
+		Outcome string              `json:"outcome"`
+		Answers map[string][]string `json:"answers"`
+	}
+	err := s.conn.Call(context.Background(), method, body, &result)
+	if err != nil || result.Outcome == "cancelled" {
+		s.finishPrompt(id, acp.StopCancelled)
+		return
+	}
+	if result.Outcome != "accepted" && result.Outcome != "skip_interview" {
+		s.say("asked:bad-envelope")
+		s.finishPrompt(id, acp.StopEndTurn)
+		return
+	}
+	picks := make([]string, 0, 2)
+	for _, q := range []string{"Pick one", "Pick any"} {
+		picks = append(picks, q+"="+strings.Join(result.Answers[q], ","))
+	}
+	s.say("asked:" + result.Outcome + ":" + strings.Join(picks, ";"))
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+func (s *server) grokPlan(id json.RawMessage) {
+	params := map[string]any{
+		"sessionId":   fakeSessionID,
+		"toolCallId":  "call-plan-grok",
+		"planContent": "## Steps\n\n- read main.go\n- edit main.go\n",
+	}
+	var result struct {
+		Outcome string `json:"outcome"`
+	}
+	err := s.conn.Call(context.Background(), acp.MethodGrokExitPlanMode, params, &result)
+	if err != nil || result.Outcome == "cancelled" {
+		s.finishPrompt(id, acp.StopCancelled)
+		return
+	}
+	if result.Outcome != "approved" && result.Outcome != "abandoned" {
+		s.say("planned:bad-envelope")
+		s.finishPrompt(id, acp.StopEndTurn)
+		return
+	}
+	s.say("planned:" + result.Outcome)
+	s.finishPrompt(id, acp.StopEndTurn)
 }
 
 func (s *server) followup(id json.RawMessage, n int) {

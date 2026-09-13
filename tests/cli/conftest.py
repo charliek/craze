@@ -26,3 +26,9 @@ def craze_bin() -> Path:
 @pytest.fixture(scope="session")
 def fake_agent_bin() -> Path:
     return _bin("CRAZE_FAKE_AGENT_BIN", "bin", "craze-fake-agent")
+
+
+@pytest.fixture(autouse=True)
+def isolate_provider_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRAZE_PROVIDER", "")
+    monkeypatch.setenv("CRAZE_CONFIG", str(tmp_path / "craze-config.toml"))

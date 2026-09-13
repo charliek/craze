@@ -19,6 +19,7 @@ type promptOpts struct {
 	workspace string
 	model     string
 	agentBin  string
+	provider  string
 	followUps []string
 	decisions []string
 	force     bool
@@ -30,6 +31,7 @@ type promptOpts struct {
 	stdout    io.Writer
 	stderr    io.Writer
 	stdin     io.Reader
+	cmd       *cobra.Command
 }
 
 func newPromptCmd() *cobra.Command {
@@ -42,6 +44,7 @@ func newPromptCmd() *cobra.Command {
 			o.stdout = cmd.OutOrStdout()
 			o.stderr = cmd.ErrOrStderr()
 			o.stdin = cmd.InOrStdin()
+			o.cmd = cmd
 			if len(args) == 1 {
 				o.text = args[0]
 			}
@@ -58,6 +61,7 @@ func newPromptCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&o.plan, "plan", false, "set session mode to plan after session/new")
 	cmd.Flags().BoolVar(&o.json, "json", false, "write only JSON events to stdout")
+	registerProviderFlag(cmd, &o.provider)
 	return cmd
 }
 
@@ -82,9 +86,15 @@ func (o *promptOpts) run() error {
 		return err
 	}
 
+	resolved, err := resolveProvider(o.cmd, o.provider, o.stderr, false)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	prov := resolved.Provider
 	sess := agent.New(agent.Options{
 		Binary:    o.agentBin,
 		Workspace: ws,
@@ -92,6 +102,7 @@ func (o *promptOpts) run() error {
 		Model:     o.model,
 		Mode:      o.mode(),
 		Stderr:    o.stderr,
+		Provider:  &prov,
 	})
 	defer func() { _ = sess.Close() }()
 
@@ -111,6 +122,7 @@ func (o *promptOpts) run() error {
 		}
 		return err
 	}
+	persistProvider(resolved)
 
 	turns := append([]string{text}, o.followUps...)
 	queue := append([]string{}, o.decisions...)

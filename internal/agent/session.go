@@ -209,8 +209,7 @@ type Options struct {
 	Mode      string
 	Stderr    io.Writer
 	Env       []string
-	// Provider is the agent behind the session; nil is cursor, the only one
-	// implemented. Callers outside this package never build one.
+	// Provider is the agent behind the session; nil is cursor.
 	Provider *Provider
 	// Interactive makes question and plan requests block on the session so a
 	// UI can answer them; headless callers leave it false and craze
@@ -230,5 +229,7 @@ type Session interface {
 	SetMode(ctx context.Context, modeID string) error
 	SetConfig(ctx context.Context, id, value string) error
 	Snapshot() Snapshot
+	// Binary is the resolved agent path Spawn looked up, used for inspect.
+	Binary() string
 	Close() error
 }

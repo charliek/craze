@@ -76,6 +76,82 @@ func TestMergeTodosUpsertKeepsOrderAndAppends(t *testing.T) {
 	}
 }
 
+func TestPlanUpdateReplacesTodos(t *testing.T) {
+	s := newSession(Options{})
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Read", "status": "inProgress"},
+			{"id": "keep", "content": "Edit", "status": "pending"},
+			{"content": "   ", "status": "completed"},
+			{"content": "Vet", "status": "canceled"},
+		},
+	})})
+	ev := <-s.Events()
+	if ev.Type != EventTodos {
+		t.Fatalf("event %+v", ev)
+	}
+	got := s.Snapshot().Todos
+	want := []Todo{
+		{ID: "plan-0", Content: "Read", Status: "in_progress"},
+		{ID: "keep", Content: "Edit", Status: "pending"},
+		{ID: "plan-3", Content: "Vet", Status: "cancelled"},
+	}
+	if todoStates(got) != todoStates(want) {
+		t.Fatalf("first %s", todoStates(got))
+	}
+
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Vet", "status": "completed"},
+			{"content": "Read", "status": "completed"},
+		},
+	})})
+	<-s.Events()
+	got = s.Snapshot().Todos
+	want = []Todo{
+		{ID: "plan-0", Content: "Vet", Status: "completed"},
+		{ID: "plan-1", Content: "Read", Status: "completed"},
+	}
+	if todoStates(got) != todoStates(want) {
+		t.Fatalf("reorder %s", todoStates(got))
+	}
+
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries":       []map[string]string{},
+	})})
+	<-s.Events()
+	if s.Snapshot().Todos != nil {
+		t.Fatalf("empty must clear, got %s", todoStates(s.Snapshot().Todos))
+	}
+
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Again", "status": "pending"},
+		},
+	})})
+	<-s.Events()
+	if got := s.Snapshot().Todos; len(got) != 1 || got[0].ID != "plan-0" {
+		t.Fatalf("repeat %s", todoStates(got))
+	}
+
+	s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries":       "not-an-array",
+	})})
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("malformed plan must not emit, got %+v", ev)
+	default:
+	}
+	if got := s.Snapshot().Todos; len(got) != 1 || got[0].ID != "plan-0" {
+		t.Fatalf("malformed plan must leave todos, got %s", todoStates(got))
+	}
+}
+
 func TestMergeTodosDuplicateIDsLastWins(t *testing.T) {
 	in := []Todo{
 		{ID: "1", Content: "first", Status: "pending"},

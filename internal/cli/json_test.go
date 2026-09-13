@@ -49,8 +49,15 @@ type jsonLineEvent struct {
 // runPromptJSON runs one headless turn against a fake script and returns each
 // NDJSON line with its decoded form, so assertions can use the bytes craze
 // actually wrote.
+func isolateProviderConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("CRAZE_PROVIDER", "")
+	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+}
+
 func runPromptJSON(t *testing.T, script string) []jsonLineEvent {
 	t.Helper()
+	isolateProviderConfig(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", script)
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()
@@ -159,6 +166,59 @@ func TestPromptJSONTask(t *testing.T) {
 func TestPromptJSONTitle(t *testing.T) {
 	evs := runPromptJSON(t, "title")
 	wantLine(t, pick(t, evs, "title", nil), `{"type":"title","title":"Fake Title"}`)
+}
+
+func TestPromptJSONGrokAsk(t *testing.T) {
+	isolateProviderConfig(t)
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-ask")
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetIn(&bytes.Buffer{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"prompt", "--json", "--provider", "grok", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir(), "q"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("prompt: %v\nstderr: %s", err, stderr.String())
+	}
+	var evs []jsonLineEvent
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("line %q: %v", line, err)
+		}
+		evs = append(evs, jsonLineEvent{raw: line, m: m})
+	}
+	q := pick(t, evs, "question", nil)
+	if q.m["auto"] != true {
+		t.Fatalf("question %s", q.raw)
+	}
+	answers, _ := q.m["answers"].(map[string]any)
+	if fmtSlice(answers["Pick one"]) != "A" {
+		t.Fatalf("answers %s", q.raw)
+	}
+	text := ""
+	for _, ev := range evs {
+		if ev.m["type"] == "text" {
+			text += ev.m["text"].(string)
+		}
+	}
+	if text != "asked:accepted:Pick one=A;Pick any=X" {
+		t.Fatalf("text %q", text)
+	}
+}
+
+func fmtSlice(v any) string {
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return ""
+	}
+	s, _ := arr[0].(string)
+	return s
 }
 
 func TestPromptJSONAutoAnswers(t *testing.T) {

@@ -71,11 +71,31 @@ func parseModes(raw json.RawMessage) (current string, modes []ModeInfo) {
 }
 
 func snapshotFromNew(res *acp.NewSessionResult) Snapshot {
+	return snapshotFromNewProvider(res, CursorProvider(), nil)
+}
+
+func snapshotFromNewProvider(res *acp.NewSessionResult, p Provider, init *acp.InitializeResult) Snapshot {
 	if res == nil {
 		return Snapshot{}
 	}
-	curModel, models := parseModels(res.Models)
+	modelsRaw := res.Models
+	if _, models := parseModels(modelsRaw); len(models) == 0 && init != nil {
+		if fallback := init.ModelState(); len(fallback) > 0 {
+			modelsRaw = fallback
+		}
+	}
+	curModel, models := parseModels(modelsRaw)
 	curMode, modes := parseModes(res.Modes)
+	if p.Dialect() == acp.DialectGrok && len(modes) == 0 {
+		modes = []ModeInfo{
+			{ID: "default", Name: "Default"},
+			{ID: "plan", Name: "Plan"},
+			{ID: "ask", Name: "Ask"},
+		}
+		if curMode == "" {
+			curMode = "default"
+		}
+	}
 	return Snapshot{
 		Models:       models,
 		Modes:        modes,

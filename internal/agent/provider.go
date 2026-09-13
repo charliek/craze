@@ -152,9 +152,7 @@ func CursorProvider() Provider {
 	}
 }
 
-// GrokProvider is the data for the grok CLI. Only Lookup data is live this
-// cut: cursor stays the only selectable public id until the dialect and the
-// CLI flag land.
+// GrokProvider is the grok CLI: spawn, auth, dialect and skill inspect.
 func GrokProvider() Provider {
 	return Provider{
 		name:            grokName,

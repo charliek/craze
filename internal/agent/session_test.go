@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -666,5 +667,157 @@ func TestGrokSpawnArgvOrder(t *testing.T) {
 				t.Fatalf("grok argv must not carry --force: %q", got)
 			}
 		})
+	}
+}
+
+func startGrokScript(t *testing.T, script string, force bool) *session {
+	t.Helper()
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	grok := GrokProvider()
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=" + script},
+		Workspace: t.TempDir(),
+		Force:     force,
+		Provider:  &grok,
+		Stderr:    io.Discard,
+	})
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if s.Binary() == "" {
+		t.Fatal("Start must retain the resolved binary")
+	}
+	return s
+}
+
+func TestGrokLoginHint(t *testing.T) {
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	grok := GrokProvider()
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=authfail"},
+		Workspace: t.TempDir(),
+		Force:     true,
+		Provider:  &grok,
+		Stderr:    io.Discard,
+	})
+	err := s.Start(t.Context())
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("expected auth error")
+	}
+	if !strings.Contains(err.Error(), "grok login") {
+		t.Fatalf("login hint: %v", err)
+	}
+}
+
+func TestGrokEnvKeyVsCachedTokenStart(t *testing.T) {
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	for _, tc := range []struct {
+		name   string
+		key    string
+		wantID string
+	}{
+		{"env-key", "test-key", acp.AuthXAIAPIKey},
+		{"cached-token", "", acp.AuthCachedToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XAI_API_KEY", tc.key)
+			dump := filepath.Join(t.TempDir(), "auth")
+			grok := GrokProvider()
+			s := newSession(Options{
+				Binary:    fakeAgentPath(t),
+				ExtraArgs: []string{"-script=grok-echo"},
+				Workspace: t.TempDir(),
+				Force:     true,
+				Provider:  &grok,
+				Env:       append(os.Environ(), "CRAZE_FAKE_DUMP_AUTH="+dump, "XAI_API_KEY="+tc.key),
+				Stderr:    io.Discard,
+			})
+			if err := s.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			raw := readArgv(t, dump)
+			var params acp.AuthenticateParams
+			if err := json.Unmarshal([]byte(raw), &params); err != nil {
+				t.Fatalf("auth dump %q: %v", raw, err)
+			}
+			if params.MethodID != tc.wantID {
+				t.Fatalf("methodId %q want %q", params.MethodID, tc.wantID)
+			}
+			if params.Meta["headless"] != true {
+				t.Fatalf("meta %v", params.Meta)
+			}
+		})
+	}
+}
+
+func TestGrokHeadlessAskAndPlan(t *testing.T) {
+	t.Run("ask", func(t *testing.T) {
+		s := startGrokScript(t, "grok-ask", true)
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "q"); err != nil {
+			t.Fatal(err)
+		}
+		q := log.waitQuestion(t)
+		if !q.Auto || q.Answers["Pick one"][0] != "A" {
+			t.Fatalf("question %+v", q)
+		}
+		log.waitTexts(t, "asked:accepted:Pick one=A;Pick any=X")
+	})
+	t.Run("ask-wrapped", func(t *testing.T) {
+		s := startGrokScript(t, "grok-ask-wrapped", true)
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "q"); err != nil {
+			t.Fatal(err)
+		}
+		log.waitTexts(t, "asked:accepted:Pick one=A;Pick any=X")
+	})
+	t.Run("plan", func(t *testing.T) {
+		s := startGrokScript(t, "grok-plan", true)
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "p"); err != nil {
+			t.Fatal(err)
+		}
+		ev := log.waitType(t, EventPlan)
+		if !ev.Plan.Auto || !ev.Plan.Accepted || !strings.Contains(ev.Plan.Plan, "## Steps") {
+			t.Fatalf("plan %+v", ev.Plan)
+		}
+		log.waitTexts(t, "planned:approved")
+	})
+}
+
+func TestGrokEchoPromptComplete(t *testing.T) {
+	s := startGrokScript(t, "grok-echo", true)
+	log := collect(t, s)
+	res, err := s.Prompt(t.Context(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StopReason != acp.StopEndTurn {
+		t.Fatalf("stop %q", res.StopReason)
+	}
+	log.waitTexts(t, "echo: hello")
+	waitFor(t, "EventDone", func() bool {
+		for _, ev := range log.snapshot() {
+			if ev.Type == EventDone {
+				return true
+			}
+		}
+		return false
+	})
+	nDone := 0
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventDone {
+			nDone++
+		}
+	}
+	if nDone != 1 {
+		t.Fatalf("done events %d", nDone)
 	}
 }

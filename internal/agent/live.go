@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,7 @@ type session struct {
 	// handler goroutine can start long after that (see park).
 	turn          int
 	cancelledTurn int
+	resolvedBin   string
 	snap          Snapshot
 	tools         map[string]ToolEvent
 	toolOrder     []string
@@ -160,6 +162,7 @@ func (s *session) Start(ctx context.Context) error {
 		return fmt.Errorf("agent: session closed")
 	}
 	s.client = client
+	s.resolvedBin = client.Binary()
 	s.mu.Unlock()
 	client.SetUpdateHandler(s.onUpdate)
 	client.SetPermissionHandler(s.onPermission)
@@ -189,7 +192,7 @@ func (s *session) Start(ctx context.Context) error {
 		_ = s.Close()
 		return err
 	}
-	snap := snapshotFromNew(sess)
+	snap := snapshotFromNewProvider(sess, s.provider(), initRes)
 	snap.Provider = s.provider().Info()
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(snap.Modes))
@@ -337,6 +340,12 @@ func (s *session) SetConfig(ctx context.Context, id, value string) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *session) Binary() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resolvedBin
 }
 
 func (s *session) Snapshot() Snapshot {
@@ -740,6 +749,7 @@ type sessionUpdateWire struct {
 	AvailableCommands []acp.AvailableCommand `json:"availableCommands,omitempty"`
 	CurrentModeID     string                 `json:"currentModeId,omitempty"`
 	ConfigOptions     json.RawMessage        `json:"configOptions,omitempty"`
+	Entries           json.RawMessage        `json:"entries,omitempty"`
 }
 
 func (s *session) onUpdate(n acp.SessionNotification) {
@@ -797,7 +807,53 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.snap.Config = cfg
 		s.mu.Unlock()
 		s.emit(Event{Type: EventMeta})
+	case acp.UpdatePlan:
+		todos, ok := planEntriesToTodos(u.Entries)
+		if !ok {
+			return
+		}
+		s.mu.Lock()
+		s.snap.Todos = todos
+		s.snap.TodosUpdatedAt = time.Now()
+		out := append([]Todo(nil), todos...)
+		s.mu.Unlock()
+		s.emit(Event{Type: EventTodos, Todos: out})
 	}
+}
+
+func planEntriesToTodos(raw json.RawMessage) ([]Todo, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil, false
+	}
+	var entries []struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, false
+	}
+	out := make([]Todo, 0, len(entries))
+	for i, e := range entries {
+		content := sanitizeText(e.Content)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		id := sanitizeText(e.ID)
+		if id == "" {
+			id = fmt.Sprintf("plan-%d", i)
+		}
+		out = append(out, Todo{
+			ID:      id,
+			Content: content,
+			Status:  normalizeTodoStatus(e.Status),
+		})
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, true
 }
 
 func toolDeltaFromWire(u sessionUpdateWire) (toolDelta, bool) {

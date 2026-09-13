@@ -74,6 +74,27 @@ func cancelledOutcome() json.RawMessage {
 	return outcome("cancelled")
 }
 
+func grokFlatOutcome(name string, fields ...outcomeField) json.RawMessage {
+	var b bytes.Buffer
+	b.WriteString(`{"outcome":`)
+	writeJSON(&b, name)
+	for _, f := range fields {
+		b.WriteByte(',')
+		writeJSON(&b, f.key)
+		b.WriteByte(':')
+		writeJSON(&b, f.value)
+	}
+	b.WriteByte('}')
+	return b.Bytes()
+}
+
+func cancelledResult(d DialectID, method string) json.RawMessage {
+	if d == DialectGrok && (isGrokAskMethod(method) || isGrokPlanMethod(method)) {
+		return grokFlatOutcome("cancelled")
+	}
+	return cancelledOutcome()
+}
+
 type askAnswer struct {
 	QuestionID        string   `json:"questionId"`
 	SelectedOptionIDs []string `json:"selectedOptionIds"`
@@ -81,7 +102,10 @@ type askAnswer struct {
 
 // askOutcome answers every question of the request in request order, keeping
 // only option ids the request itself offered.
-func askOutcome(req AskQuestionRequest, dec AskDecision) json.RawMessage {
+func askOutcome(d DialectID, req AskQuestionRequest, dec AskDecision) json.RawMessage {
+	if d == DialectGrok {
+		return grokAskOutcome(req, dec)
+	}
 	switch {
 	case dec.Cancelled:
 		return cancelledOutcome()
@@ -96,6 +120,42 @@ func askOutcome(req AskQuestionRequest, dec AskDecision) json.RawMessage {
 		})
 	}
 	return outcome("answered", outcomeField{"answers", answers})
+}
+
+func grokAskOutcome(req AskQuestionRequest, dec AskDecision) json.RawMessage {
+	switch {
+	case dec.Cancelled:
+		return grokFlatOutcome("cancelled")
+	case dec.Skip:
+		return grokFlatOutcome("skip_interview")
+	}
+	var b bytes.Buffer
+	b.WriteString(`{"outcome":"accepted","answers":{`)
+	seen := make(map[string]struct{})
+	first := true
+	for _, q := range req.Questions {
+		key := q.Prompt
+		if key == "" {
+			key = q.ID
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		picked := dec.Answers[q.ID]
+		if len(picked) == 0 {
+			picked = dec.Answers[key]
+		}
+		writeJSON(&b, key)
+		b.WriteByte(':')
+		writeJSON(&b, knownOptionIDs(q, picked))
+	}
+	b.WriteString(`}}`)
+	return b.Bytes()
 }
 
 func knownOptionIDs(q AskQuestion, picked []string) []string {
@@ -125,7 +185,17 @@ func AskAutoAnswers(req AskQuestionRequest) map[string][]string {
 	return answers
 }
 
-func planOutcome(dec PlanDecision) json.RawMessage {
+func planOutcome(d DialectID, dec PlanDecision) json.RawMessage {
+	if d == DialectGrok {
+		switch {
+		case dec.Cancelled:
+			return grokFlatOutcome("cancelled")
+		case dec.Accept:
+			return grokFlatOutcome("approved")
+		default:
+			return grokFlatOutcome("abandoned")
+		}
+	}
 	switch {
 	case dec.Cancelled:
 		return cancelledOutcome()

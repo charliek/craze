@@ -19,6 +19,7 @@ type tuiFlags struct {
 	workspace string
 	model     string
 	agentBin  string
+	provider  string
 	force     bool
 	noForce   bool
 	noMouse   bool
@@ -38,6 +39,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
+	registerProviderFlag(cmd, &f.provider)
 }
 
 func runTUI(cmd *cobra.Command, f *tuiFlags) error {
@@ -64,6 +66,11 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	// stderr and craze's own warnings are held here and printed once the screen
 	// is back.
 	diag := &deferredStderr{}
+	resolved, err := resolveProvider(cmd, f.provider, diag, false)
+	if err != nil {
+		return err
+	}
+	prov := resolved.Provider
 	sess := agent.New(agent.Options{
 		Binary:      f.agentBin,
 		Workspace:   ws,
@@ -72,6 +79,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 		Mode:        mode,
 		Stderr:      diag,
 		Interactive: true,
+		Provider:    &prov,
 	})
 	err = tui.Run(tui.Config{
 		Session:   sess,
