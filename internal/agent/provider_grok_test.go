@@ -173,6 +173,23 @@ func TestGrokAuthMethodSelection(t *testing.T) {
 	}
 }
 
+// TestGrokAuthReadsChildEnv pins that the key has to be in the environment
+// the daemon is spawned with: Options.Env replaces the parent environment,
+// so a parent key the child cannot see must not pick xai.api_key, and a key
+// only the child has must.
+func TestGrokAuthReadsChildEnv(t *testing.T) {
+	grok := GrokProvider()
+	both := &acp.InitializeResult{AuthMethods: []acp.AuthMethod{{ID: acp.AuthXAIAPIKey}, {ID: acp.AuthCachedToken}}}
+	t.Setenv("XAI_API_KEY", "parent-only")
+	if id, _, ok := newSession(Options{Provider: &grok, Env: []string{"PATH=/bin"}}).authMethod(both); !ok || id != acp.AuthCachedToken {
+		t.Fatalf("a key the child cannot see must not be used: %q %v", id, ok)
+	}
+	t.Setenv("XAI_API_KEY", "")
+	if id, _, ok := newSession(Options{Provider: &grok, Env: []string{"XAI_API_KEY=", "GROK_CODE_XAI_API_KEY=child"}}).authMethod(both); !ok || id != acp.AuthXAIAPIKey {
+		t.Fatalf("a key only the child has must be used: %q %v", id, ok)
+	}
+}
+
 func TestSessionCopiesProviderAtNew(t *testing.T) {
 	p := GrokProvider()
 	s := newSession(Options{Provider: &p})

@@ -84,13 +84,13 @@ type authMethod struct {
 }
 
 // usable reports whether the method is both advertised and, when it needs an
-// env key, backed by one.
-func (a authMethod) usable(initRes *acp.InitializeResult) bool {
+// env key, backed by one in the environment the child will see.
+func (a authMethod) usable(initRes *acp.InitializeResult, getenv func(string) string) bool {
 	if !initRes.OffersAuthMethod(a.id) {
 		return false
 	}
 	for _, k := range a.envKeys {
-		if os.Getenv(k) != "" {
+		if getenv(k) != "" {
 			return true
 		}
 	}
@@ -261,13 +261,18 @@ func (p Provider) AuthMethodIDs() []string {
 }
 
 // authFor picks the first usable auth method against what initialize
-// advertised. No advertised methods means no login, for every provider.
-func (p Provider) authFor(initRes *acp.InitializeResult) (id string, meta map[string]any, ok bool) {
+// advertised; getenv is the child's environment, since the key has to be
+// there for the daemon to read. No advertised methods means no login, for
+// every provider.
+func (p Provider) authFor(initRes *acp.InitializeResult, getenv func(string) string) (id string, meta map[string]any, ok bool) {
 	if initRes == nil || len(initRes.AuthMethods) == 0 {
 		return "", nil, false
 	}
+	if getenv == nil {
+		getenv = os.Getenv
+	}
 	for _, a := range p.authMethods {
-		if !a.usable(initRes) {
+		if !a.usable(initRes, getenv) {
 			continue
 		}
 		if a.meta != nil {

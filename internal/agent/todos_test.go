@@ -265,3 +265,22 @@ func TestCancelledTurnClosesInFlightTools(t *testing.T) {
 		}
 	}
 }
+
+// TestSettleOnlyIfInFlightYieldsToTerminalUpdate pins the merge-lock check:
+// a tool that settled between the cancel scan and the merge keeps the
+// agent's own terminal status.
+func TestSettleOnlyIfInFlightYieldsToTerminalUpdate(t *testing.T) {
+	s := newSession(Options{})
+	running, failed, cancelled := "in_progress", "failed", acp.StopCancelled
+	s.mergeTool(toolDelta{id: "t", status: &running})
+	s.mergeTool(toolDelta{id: "t", status: &failed})
+	if _, changed := s.mergeTool(toolDelta{id: "t", status: &cancelled, onlyIfInFlight: true}); changed {
+		t.Fatal("a settled tool must not be re-settled")
+	}
+	if got := s.Snapshot().Tools[0].Status; got != "failed" {
+		t.Fatalf("status %q", got)
+	}
+	if _, changed := s.mergeTool(toolDelta{id: "missing", status: &cancelled, onlyIfInFlight: true}); changed {
+		t.Fatal("an unknown tool must not be created by settlement")
+	}
+}

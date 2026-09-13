@@ -91,16 +91,20 @@ func parseGrokPlan(params json.RawMessage) (CreatePlanRequest, error) {
 	return CreatePlanRequest{Plan: plan}, nil
 }
 
-func parseGrokPromptComplete(params json.RawMessage) (sessionID, stopReason string, ok bool) {
-	var n struct {
-		SessionID  string `json:"sessionId"`
-		StopReason string `json:"stopReason"`
-	}
+// grokPromptComplete is the x.ai/session/prompt_complete payload craze reads.
+type grokPromptComplete struct {
+	SessionID  string `json:"sessionId"`
+	PromptID   string `json:"promptId"`
+	StopReason string `json:"stopReason"`
+}
+
+func parseGrokPromptComplete(params json.RawMessage) (grokPromptComplete, bool) {
+	var n grokPromptComplete
 	if err := json.Unmarshal(unwrapExtParams(params), &n); err != nil {
-		return "", "", false
+		return grokPromptComplete{}, false
 	}
 	if n.SessionID == "" {
-		return "", "", false
+		return grokPromptComplete{}, false
 	}
-	return n.SessionID, n.StopReason, true
+	return n, true
 }

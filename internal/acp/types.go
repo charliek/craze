@@ -163,6 +163,24 @@ type PromptParams struct {
 
 type PromptResult struct {
 	StopReason string `json:"stopReason"`
+	// Meta is the agent's extra; grok stamps promptId on it, which is what
+	// lets a late prompt_complete for this turn be told from the next one's.
+	Meta json.RawMessage `json:"_meta,omitempty"`
+}
+
+// PromptID is _meta.promptId, or empty when the agent sends none.
+func (r PromptResult) PromptID() string {
+	raw := bytes.TrimSpace(r.Meta)
+	if len(raw) == 0 || raw[0] != '{' {
+		return ""
+	}
+	var meta struct {
+		PromptID string `json:"promptId"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return ""
+	}
+	return meta.PromptID
 }
 
 type CancelParams struct {

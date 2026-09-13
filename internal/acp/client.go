@@ -21,6 +21,10 @@ type Client struct {
 	// promptWait is the grok prompt_complete racer. First of the RPC reply
 	// or a matching notify wins; the other is abandoned.
 	promptWait chan promptResult
+	// donePromptID is the grok promptId of the last turn the RPC reply
+	// ended. A prompt_complete carrying it is that turn's late twin and
+	// must not end the turn now running.
+	donePromptID string
 	// turn counts prompts. It is the identity of a turn: a blocking request
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
@@ -244,6 +248,9 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		case n := <-wait:
 			return promptResultOrErr(n)
 		default:
+			if w.err == nil {
+				c.notePromptDone(w.res.PromptID())
+			}
 			return promptResultOrErr(w)
 		}
 	case <-ctx.Done():
@@ -498,11 +505,23 @@ func (c *Client) onNotify(msg *Message) {
 	}
 }
 
+// notePromptDone records the promptId of a turn the RPC reply ended, so
+// the notify for that same turn, arriving late, is recognised as stale.
+func (c *Client) notePromptDone(promptID string) {
+	if promptID == "" {
+		return
+	}
+	c.mu.Lock()
+	c.donePromptID = promptID
+	c.mu.Unlock()
+}
+
 func (c *Client) handlePromptComplete(msg *Message) {
-	sid, stop, ok := parseGrokPromptComplete(msg.Params)
+	n, ok := parseGrokPromptComplete(msg.Params)
 	if !ok {
 		return
 	}
+	stop := n.StopReason
 	if stop == "" {
 		stop = StopEndTurn
 	}
@@ -511,8 +530,9 @@ func (c *Client) handlePromptComplete(msg *Message) {
 	active := c.sessionID
 	in := c.inPrompt
 	d := c.dialect
+	stale := n.PromptID != "" && n.PromptID == c.donePromptID
 	c.mu.Unlock()
-	if d != DialectGrok || !in || sid != active || ch == nil {
+	if d != DialectGrok || !in || n.SessionID != active || ch == nil || stale {
 		return
 	}
 	select {

@@ -229,7 +229,26 @@ func (s *session) Start(ctx context.Context) error {
 // first of its preferred methods that is offered and, when it needs an env
 // key, backed by one. No advertised methods means no login.
 func (s *session) authMethod(initRes *acp.InitializeResult) (string, map[string]any, bool) {
-	return s.provider().authFor(initRes)
+	return s.provider().authFor(initRes, s.childEnv())
+}
+
+// childEnv is the lookup for what the spawned agent will see: Options.Env
+// replaces the parent environment when set, exactly as acp.Spawn applies
+// it, and inherits it otherwise.
+func (s *session) childEnv() func(string) string {
+	if s.opts.Env == nil {
+		return os.Getenv
+	}
+	env := s.opts.Env
+	return func(key string) string {
+		prefix := key + "="
+		for i := len(env) - 1; i >= 0; i-- {
+			if strings.HasPrefix(env[i], prefix) {
+				return env[i][len(prefix):]
+			}
+		}
+		return ""
+	}
 }
 
 func (s *session) unstart() {
@@ -281,16 +300,13 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 // finds nothing there.
 func (s *session) closeInFlightTools(status string) {
 	s.mu.Lock()
-	var open []string
-	for _, id := range s.toolOrder {
-		if t, ok := s.tools[id]; ok && (t.Status == "pending" || t.Status == "in_progress") {
-			open = append(open, id)
-		}
-	}
+	ids := append([]string(nil), s.toolOrder...)
 	s.mu.Unlock()
-	for _, id := range open {
+	for _, id := range ids {
+		// The in-flight check happens under the merge lock: a terminal
+		// update that lands between the scan and the merge wins.
 		st := status
-		if tool, changed := s.mergeTool(toolDelta{id: id, status: &st}); changed {
+		if tool, changed := s.mergeTool(toolDelta{id: id, status: &st, onlyIfInFlight: true}); changed {
 			s.emit(Event{Type: EventTool, Tool: &tool})
 		}
 	}

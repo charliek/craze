@@ -224,9 +224,9 @@ func TestUnwrapExtParamsShapes(t *testing.T) {
 		{"crate-nested", `{"params":` + inner + `}`},
 		{"relay-nested", `{"method":"x.ai/session/prompt_complete","params":` + inner + `}`},
 	} {
-		sid, stop, ok := parseGrokPromptComplete(json.RawMessage(tc.raw))
-		if !ok || sid != "s1" || stop != "end_turn" {
-			t.Fatalf("%s: %q %q %v", tc.name, sid, stop, ok)
+		n, ok := parseGrokPromptComplete(json.RawMessage(tc.raw))
+		if !ok || n.SessionID != "s1" || n.StopReason != "end_turn" {
+			t.Fatalf("%s: %+v %v", tc.name, n, ok)
 		}
 	}
 	// A params key that is not an object is part of the payload, not an envelope.

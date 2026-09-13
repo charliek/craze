@@ -216,3 +216,36 @@ func TestPromptCompleteLateRPCIgnored(t *testing.T) {
 		t.Fatal("late RPC must not leave inPrompt set")
 	}
 }
+
+// TestPromptCompleteStalePromptIDIgnored pins the RPC-wins case: the reply
+// carries _meta.promptId, a follow-up prompt starts, and only then the first
+// turn's prompt_complete lands. It names the finished promptId, so it must
+// not end the second turn.
+func TestPromptCompleteStalePromptIDIgnored(t *testing.T) {
+	p := newRawPipeDialect(t, DialectGrok)
+	p.setSession("s1")
+	done, req := startGrokPrompt(t, p, "first")
+	raw, err := json.Marshal(map[string]any{"stopReason": StopEndTurn, "_meta": map[string]string{"promptId": "p1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: req.ID, Result: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if waitPrompt(t, done).StopReason != StopEndTurn {
+		t.Fatal("first turn")
+	}
+	done2, req2 := startGrokPrompt(t, p, "second")
+	p.send(t, nil, MethodGrokPromptCompleteWrapped, `{"sessionId":"s1","promptId":"p1","stopReason":"end_turn"}`)
+	select {
+	case out := <-done2:
+		t.Fatalf("stale prompt_complete ended the second turn: %+v %v", out.res, out.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// The second turn's own completion still lands.
+	p.send(t, nil, MethodGrokPromptCompleteWrapped, `{"sessionId":"s1","promptId":"p2","stopReason":"max_tokens"}`)
+	if waitPrompt(t, done2).StopReason != "max_tokens" {
+		t.Fatal("second turn")
+	}
+	replyPrompt(t, p, req2.ID, StopEndTurn)
+}
