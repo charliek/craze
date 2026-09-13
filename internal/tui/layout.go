@@ -59,7 +59,6 @@ const (
 	regionTasks                      // pinned tasks panel
 	regionSpinner                    // spinner line
 	regionComposer                   // rule + input rows + rule
-	regionPeek                       // sub-agent prompt peek
 	regionModal                      // the blocking-card band (§3.11)
 	regionStatus                     // the two status rows
 	regionAgents                     // sub-agent rows, under the status rows
@@ -98,10 +97,6 @@ var frameRegions = [regionCount]frameRegion{
 	regionComposer: {
 		rows: frameSizes.composer,
 		view: Model.composerView,
-	},
-	regionPeek: {
-		rows: func(s frameSizes) int { return s.peek },
-		view: func(m Model, _ frameLayout) string { return m.agentPeekView() },
 	},
 	regionModal: {
 		rows: func(s frameSizes) int { return s.modal },
@@ -163,7 +158,6 @@ type frameSizes struct {
 	input      int // composer content rows, without the two rules
 	agentsAll  int // sub-agents with a row to draw
 	agentsCap  int // how many of them degradation still allows
-	peek       int
 	modal      int
 	status     int
 	merged     bool
@@ -187,7 +181,7 @@ func (s frameSizes) agentRows() int { return min(s.agentsAll, s.agentsCap) }
 // chrome is every region except the transcript and the overlay, which take
 // what the others leave.
 func (s frameSizes) chrome() int {
-	return s.tasks() + s.spinner + s.composer() + s.agents() + s.peek + s.modal + s.status
+	return s.tasks() + s.spinner + s.composer() + s.agents() + s.modal + s.status
 }
 
 // degrade applies the first n steps of the pinned degradation order. It is
@@ -204,8 +198,7 @@ func degrade(s frameSizes, n int) frameSizes {
 		s.input = composerShortRows
 	}
 	if n >= 4 {
-		// The peek belongs to an agent row, so it goes with the rows.
-		s.agentsCap, s.peek = 0, 0
+		s.agentsCap = 0
 	}
 	if n >= 5 {
 		s.tasksOpen = false
@@ -225,8 +218,6 @@ func degrade(s frameSizes, n int) frameSizes {
 func fitChrome(s frameSizes, limit int) frameSizes {
 	for s.chrome() > limit {
 		switch {
-		case s.peek > 0:
-			s.peek = 0
 		case s.agentsCap > 0:
 			s.agentsCap = 0
 		case s.tasksBody > 0:
@@ -267,7 +258,6 @@ func (m *Model) computeLayout() frameLayout {
 		input:     min(m.composerRows(), composerMaxRows),
 		agentsAll: len(m.agentItems()),
 		agentsCap: agentRowsMax,
-		peek:      m.peekRows(),
 		modal:     m.modalRows(),
 		status:    statusRows,
 	}
@@ -325,6 +315,7 @@ func (m *Model) relayout(stick bool) {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	m.pruneSubs()
 	m.lay = m.computeLayout()
 	// The selection has to be re-found against the rows this frame will
 	// actually draw, so it is synced here rather than in the event handler,

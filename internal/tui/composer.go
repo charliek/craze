@@ -120,18 +120,6 @@ func (m Model) composerInner() int {
 	return max(1, m.width-composerPromptW)
 }
 
-// composerRows is how many display rows the whole draft occupies. It is
-// uncapped: the textarea is given every one of them so its own cursor
-// bookkeeping never has to scroll, and composerView windows onto the result.
-func (m Model) composerRows() int {
-	inner := m.composerInner()
-	rows := 0
-	for _, ln := range strings.Split(m.input.Value(), "\n") {
-		rows += wrapRows(ln, inner)
-	}
-	return max(rows, 1)
-}
-
 // composerCursorRow is the cursor's row in the same coordinates: the rows the
 // logical lines above it take, plus its offset inside its own line.
 func (m Model) composerCursorRow() int {
@@ -220,6 +208,9 @@ func (m Model) composerTitle() string {
 // of the band is the first row of the draft until the cursor pushes past the
 // bottom, which is what keeps the `❯` on screen.
 func (m Model) composerView(lay frameLayout) string {
+	if m.viewing != "" {
+		return m.subagentComposerView()
+	}
 	if p := m.planPlaceholder(); p != "" {
 		// m is a copy, so this swaps the placeholder for this frame only.
 		m.input.Placeholder = p

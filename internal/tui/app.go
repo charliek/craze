@@ -96,9 +96,12 @@ type Model struct {
 	// elapsed counts from.
 	sessStart time.Time
 
-	// main is the session transcript. cur() returns it; U3b will add a viewed
-	// sub-agent without changing that call.
-	main transcript
+	// main is the session transcript. cur() returns the viewed sub-agent
+	// transcript when viewing != "", otherwise main.
+	main      transcript
+	subs      map[string]*transcript
+	viewing   string
+	tombstone *agent.SubagentInfo
 
 	expanded bool
 	width    int
@@ -176,17 +179,16 @@ type Model struct {
 	providerDefault agent.Provider
 	newSession      func(agent.Provider) agent.Session
 
-	toolTouch   []string
 	todoPlanned int
 	todoDone    bool
 
-	// Agent rows: the selection is held by tool id because the in-flight list
-	// reorders on every update.
+	// Agent rows: the selection is held by sub-agent id because the in-flight
+	// list reorders on every update.
 	agentSel   int
 	agentID    string
-	agentPeek  bool
 	agentStart map[string]time.Time
 	agentDone  map[string]time.Time
+	agentTouch []string
 
 	tasksState    tasksPanelState
 	todosSeen     bool
@@ -514,7 +516,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
 		// keyboard is by the time the text arrives.
-		if msg.text == "" || m.cardOpen() || m.dialogOpen() {
+		if msg.text == "" || m.cardOpen() || m.dialogOpen() || m.viewing != "" {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -789,6 +791,10 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		if lay.Region(regionTasks).Row(y) == 0 {
 			return m.cycleTasks()
 		}
+	case lay.Region(regionComposer).Contains(y):
+		if m.viewing != "" && lay.Region(regionComposer).Row(y) == 1 {
+			m.leaveView()
+		}
 	case lay.Region(regionAgents).Contains(y):
 		// The last row can be "… +n more", which is not a sub-agent.
 		m.selectAgent(lay.Region(regionAgents).Row(y))
@@ -816,6 +822,9 @@ func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
 			return m.openModelDialog(), nil
 		}
 	case 1:
+		if m.viewing != "" {
+			return m, nil
+		}
 		_, spans := m.statusRow2(lay)
 		if spanAt(spans, x) == spanMode {
 			return m.cycleMode()
@@ -875,6 +884,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProviderDialogKey(msg)
 	}
 
+	if m.viewing != "" {
+		return m.handleViewKey(msg)
+	}
+
 	if msg.Type == tea.KeyCtrlY {
 		// A keyboard feature, so it works under --no-mouse as well.
 		return m.copySelectionOrLastReply()
@@ -895,11 +908,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleMode()
 	}
 	if msg.Type == tea.KeyEsc {
-		if m.agentPeek {
-			// The peek closes on its own; the turn underneath keeps running.
-			m.agentPeek = false
-			return m, nil
-		}
 		if m.slashMenuOpen() {
 			m.slashHide = true
 			m.slashSel = 0
@@ -1008,7 +1016,11 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.implementPlan()
 	}
 	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 {
-		m.agentPeek = true
+		if m.agentID != "" {
+			m.enterView(m.agentID)
+		} else {
+			m.selectAgent(m.agentSelection(len(m.visibleAgents())))
+		}
 		return m, nil
 	}
 	if m.cardOpen() || m.status == statusWorking || !m.started {
@@ -1134,6 +1146,9 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 // while the session is still in plan mode, so the prompt is only written once
 // SetMode has come back, and a SetMode that fails sends nothing at all.
 func (m Model) implementPlan() (tea.Model, tea.Cmd) {
+	if m.viewing != "" {
+		return m, nil
+	}
 	id := m.implementModeID()
 	if id == "" {
 		return m, nil
@@ -1195,16 +1210,20 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
-	// Child streams and sub-agent lifecycle are not this turn; U3b will route
-	// them. Dropping them here keeps lastThought/transcript/goldens on the main
-	// session while U2 emits the new events.
-	if ev.Agent != "" || ev.Type == agent.EventSubagent || ev.Type == agent.EventUser {
+	if ev.Type == agent.EventSubagent {
+		m.applySubagentEvent(ev)
+		return
+	}
+	if ev.Agent != "" {
+		m.applyChildEvent(ev)
 		return
 	}
 	// The spinner names what the turn is doing; only a thought chunk leaves it
 	// on "Thinking…".
 	m.lastThought = ev.Type == agent.EventThought
 	switch ev.Type {
+	case agent.EventUser:
+		return
 	case agent.EventText:
 		if ev.Text != "" {
 			// Only a chunk that says something is evidence: appendStream drops
@@ -1218,8 +1237,6 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case agent.EventTool:
 		m.refreshSnap()
 		if ev.Tool != nil {
-			m.noteToolUpdate(ev.Tool.ID)
-			m.noteAgentTiming(ev.Tool)
 			m.upsertTool(ev.Tool)
 		}
 	case agent.EventTodos:
@@ -1364,7 +1381,7 @@ func (m Model) View() string {
 // A card outranks it (§3.11): the menu it did not close is suspended — kept in
 // state, not drawn — until it has been answered.
 func (m Model) overlayView() string {
-	if m.cardOpen() || !m.slashMenuOpen() {
+	if m.cardOpen() || m.viewing != "" || !m.slashMenuOpen() {
 		return ""
 	}
 	return m.slashMenuView()

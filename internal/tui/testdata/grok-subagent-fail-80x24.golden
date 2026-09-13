@@ -1,0 +1,24 @@
+❯ go                                                                            
++ Thought                                                                       
+✗ agent  List directory files  2.9s                                             
+✓ tool  [subagent:explore] List directory files (sub-1)                         
+subagent failed                                                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+──────────────────────────────────────────────────────────────────────── craze ─
+❯ message  / for commands                                                       
+────────────────────────────────────────────────────────────────────────────────
+ws │ grok │ Grok 4.6 (high) │ 0m                                                
+◆ default · shift+tab · ▸▸ bypass permissions on                                
+✗ explore  List directory files  2.9s · grok-4.6                                

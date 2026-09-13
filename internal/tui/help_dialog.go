@@ -65,7 +65,11 @@ func (m Model) helpKeyLines() []helpLine {
 		helpLine{key: "ctrl+o", desc: "expand or collapse transcript detail"},
 	)
 	if m.showSubagents() {
-		out = append(out, helpLine{key: "enter on a row", desc: "peek at a selected sub-agent's prompt"})
+		out = append(out,
+			helpLine{key: "enter on a row", desc: "open a selected sub-agent"},
+			helpLine{key: "esc, ←", desc: "return from a sub-agent"},
+			helpLine{key: "tab, shift+tab", desc: "switch sub-agent while in the view"},
+		)
 	}
 	out = append(out,
 		helpLine{key: "click the model", desc: "model dialog, from status row 1"},

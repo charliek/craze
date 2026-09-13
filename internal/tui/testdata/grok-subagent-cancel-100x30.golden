@@ -1,0 +1,30 @@
+❯ Run sleep 45 and report finished.                                                                 
+– tool  Execute sleep 45 && echo finished                                                           
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+────────────────────────────────────────────────────────────────── (grok-4.6) Sleep 45 then finish ─
+– @general-purpose · cancelled · Subagent was cancelled · esc to return                             
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ws │ grok │ Grok 4.6 (high) │ 0m                                                                    
+◆ default · shift+tab · ▸▸ bypass permissions on                                                    
+● general-purpose  Sleep 45 then finish  6.6s · grok-4.6                                            

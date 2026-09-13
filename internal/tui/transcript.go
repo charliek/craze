@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -17,9 +18,14 @@ import (
 const (
 	// proseMaxWidth caps transcript wrapping so wide terminals stay readable.
 	proseMaxWidth = 100
-	// maxEntries bounds the transcript; older entries are dropped with a note.
-	maxEntries  = 5000
-	trimmedNote = "… earlier transcript trimmed"
+	// maxEntries bounds the main transcript; older entries are dropped with a note.
+	maxEntries = 5000
+	// Sub-agent transcripts are tighter: 1000 entries / 1 MiB raw / 64 KiB
+	// per streamed entry (tail kept).
+	subMaxEntries = 1000
+	subTextBudget = 1 << 20
+	entryTextCap  = 64 << 10
+	trimmedNote   = "… earlier transcript trimmed"
 	// outputPreviewLines is how much of a tool's output an expanded row shows.
 	outputPreviewLines = 20
 	// editCollapsedLines is how much of the first hunk a collapsed edit shows.
@@ -85,9 +91,19 @@ type transcript struct {
 	yOffset         int
 	atBottom        bool
 	dirty           bool
+	// entryCap / textBudget are 0 on main (maxEntries, unlimited text).
+	entryCap   int
+	textBudget int
 }
 
-func (m *Model) cur() *transcript { return &m.main }
+func (m *Model) cur() *transcript {
+	if m.viewing != "" {
+		if t := m.subs[m.viewing]; t != nil {
+			return t
+		}
+	}
+	return &m.main
+}
 
 // appendEntry is the only way an entry reaches the transcript, so it is also
 // where an open run ends: a note or a tool row between two chunks means they
@@ -106,31 +122,54 @@ func (t *transcript) appendEntry(e entry, now time.Time) {
 	t.dirty = true
 }
 
-func (m *Model) appendEntry(e entry) { m.cur().appendEntry(e, m.now()) }
+func (m *Model) appendEntry(e entry) { m.main.appendEntry(e, m.now()) }
 
 // trimEntries enforces the entry cap. Tool rows are addressed by index, so the
 // map moves with the slice and rows that fell off are forgotten.
 func (t *transcript) trimEntries() {
-	if len(t.entries) <= maxEntries {
+	maxE := t.entryCap
+	if maxE <= 0 {
+		maxE = maxEntries
+	}
+	if len(t.entries) > maxE {
+		t.dropFirst(len(t.entries) - maxE)
+	}
+	if t.textBudget > 0 {
+		for t.rawTextLen() > t.textBudget && len(t.entries) > 1 {
+			t.dropFirst(1)
+		}
+	}
+}
+
+func (t *transcript) dropFirst(n int) {
+	if n <= 0 || n > len(t.entries) {
 		return
 	}
-	drop := len(t.entries) - maxEntries
-	t.entries = append(t.entries[:0], t.entries[drop:]...)
+	t.entries = append(t.entries[:0], t.entries[n:]...)
 	t.trimmed = true
+	t.dirty = true
 	for id, idx := range t.toolLine {
-		if idx-drop < 0 {
+		if idx-n < 0 {
 			delete(t.toolLine, id)
 			continue
 		}
-		t.toolLine[id] = idx - drop
+		t.toolLine[id] = idx - n
 	}
+}
+
+func (t *transcript) rawTextLen() int {
+	n := 0
+	for i := range t.entries {
+		n += len(t.entries[i].text)
+	}
+	return n
 }
 
 func (t *transcript) addUser(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryUser, text: text}, now)
 }
 
-func (m *Model) addUser(text string) { m.cur().addUser(text, m.now()) }
+func (m *Model) addUser(text string) { m.main.addUser(text, m.now()) }
 
 func (t *transcript) addNote(text string, now time.Time) {
 	if text == "" {
@@ -139,7 +178,7 @@ func (t *transcript) addNote(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryNote, text: text}, now)
 }
 
-func (m *Model) addNote(text string) { m.cur().addNote(text, m.now()) }
+func (m *Model) addNote(text string) { m.main.addNote(text, m.now()) }
 
 // addPlan puts the plan cursor proposed into the transcript as a note block,
 // which is why the card itself only has to carry the three answers.
@@ -151,7 +190,7 @@ func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {
 	t.appendEntry(entry{kind: entryPlan, plan: &plan}, now)
 }
 
-func (m *Model) addPlan(p *agent.PlanEvent) { m.cur().addPlan(p, m.now()) }
+func (m *Model) addPlan(p *agent.PlanEvent) { m.main.addPlan(p, m.now()) }
 
 func (t *transcript) addError(text string, now time.Time) {
 	if text == "" {
@@ -160,7 +199,7 @@ func (t *transcript) addError(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryError, text: text}, now)
 }
 
-func (m *Model) addError(text string) { m.cur().addError(text, m.now()) }
+func (m *Model) addError(text string) { m.main.addError(text, m.now()) }
 
 // appendStream grows the open entry of the same kind, so a reply that arrives
 // in five chunks stays one entry and costs one re-render per chunk.
@@ -174,7 +213,7 @@ func (t *transcript) appendStream(kind entryKind, text string, at, now time.Time
 	if t.streamOpen && len(t.entries) > 0 {
 		last := &t.entries[len(t.entries)-1]
 		if last.kind == kind {
-			last.text += text
+			last.text = capEntryText(last.text + text)
 			last.end = at
 			last.dirty = true
 			t.dirty = true
@@ -182,12 +221,30 @@ func (t *transcript) appendStream(kind entryKind, text string, at, now time.Time
 		}
 	}
 	// appendEntry ends the previous run, so the flag is raised after it.
-	t.appendEntry(entry{kind: kind, text: text, at: at, end: at, open: kind == entryThought}, now)
+	t.appendEntry(entry{kind: kind, text: capEntryText(text), at: at, end: at, open: kind == entryThought}, now)
 	t.streamOpen = true
 }
 
+func capEntryText(s string) string {
+	if len(s) <= entryTextCap {
+		return s
+	}
+	keep := entryTextCap - len("…")
+	if keep < 0 {
+		keep = 0
+	}
+	start := len(s) - keep
+	if start < 0 {
+		start = 0
+	}
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return "…" + s[start:]
+}
+
 func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
-	m.cur().appendStream(kind, text, at, m.now())
+	m.main.appendStream(kind, text, at, m.now())
 }
 
 // endRun ends the open run in place, reporting whether anything changed. The
@@ -220,7 +277,7 @@ func (t *transcript) closeStream(at time.Time) {
 
 func (t *transcript) breakStream(now time.Time) { t.closeStream(now) }
 
-func (m *Model) breakStream() { m.cur().breakStream(m.now()) }
+func (m *Model) breakStream() { m.main.breakStream(m.now()) }
 
 // upsertTool keeps one row per toolCallId, updated in place. Cursor's todo
 // writer is hidden: the todo stream owns that state.
@@ -251,7 +308,7 @@ func (t *transcript) upsertTool(tool *agent.ToolEvent, now time.Time) {
 	}
 }
 
-func (m *Model) upsertTool(tool *agent.ToolEvent) { m.cur().upsertTool(tool, m.now()) }
+func (m *Model) upsertTool(tool *agent.ToolEvent) { m.main.upsertTool(tool, m.now()) }
 
 // notePath records which directories a basename has been seen in, so a row can
 // fall back to dir/file once the basename is ambiguous.
@@ -297,7 +354,7 @@ func (m Model) displayPath(tr *transcript, p string) string {
 
 // clearTranscript drops the entries and every cache keyed off them.
 func (m *Model) clearTranscript() {
-	t := m.cur()
+	t := &m.main
 	t.entries = nil
 	t.toolLine = nil
 	t.pathDirs = nil
@@ -819,7 +876,11 @@ func (m *Model) otherRows(t *agent.ToolEvent, width int) []string {
 // cursor/task receipt has been joined in.
 func (m *Model) taskRows(t *agent.ToolEvent, width int) []string {
 	desc := taskDesc(t)
-	if t.Status != "completed" && t.Status != "failed" && t.Status != "cancelled" {
+	st := t.Status
+	if t.Task != nil && t.Task.Status != "" {
+		st = string(t.Task.Status)
+	}
+	if st != "completed" && st != "failed" && st != "cancelled" {
 		return []string{m.toolRow("●", styleFG(m.theme.Accent), "agent", desc, "running", styleFG(m.theme.Dim), width)}
 	}
 	suffix := ""
@@ -832,7 +893,8 @@ func (m *Model) taskRows(t *agent.ToolEvent, width int) []string {
 			suffix += shortModelName(t.Task.Model)
 		}
 	}
-	return []string{m.toolHead(t, "agent", desc, suffix, styleFG(m.theme.Dim), width)}
+	glyph, gst := m.statusGlyph(st)
+	return []string{m.toolRow(glyph, gst, "agent", desc, suffix, styleFG(m.theme.Dim), width)}
 }
 
 func (m *Model) outputRows(text string, width int) []string {

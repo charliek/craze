@@ -40,7 +40,7 @@ func taskTool(id, desc, status string) agent.ToolEvent {
 		ToolName: "task",
 		Title:    "Task: " + desc,
 		Status:   status,
-		Task:     &agent.TaskInfo{Description: desc, Prompt: "peek prompt for " + id},
+		Task:     &agent.TaskInfo{Description: desc, Prompt: "prompt for " + id},
 	}
 }
 
@@ -48,7 +48,7 @@ func finishedTaskTool(id, desc string) agent.ToolEvent {
 	t := taskTool(id, desc, "completed")
 	t.Task = &agent.TaskInfo{
 		Description: desc,
-		Prompt:      "peek prompt for " + id,
+		Prompt:      "prompt for " + id,
 		DurationMs:  8010,
 		Model:       "cursor-grok-4.6-high-fast",
 		Receipt:     true,
@@ -167,39 +167,37 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
 	m.input.SetValue("")
-	// Settle the tick chain first, so a returned command means the handler's
-	// own command and not the batched tick.
 	m = poke(t, m)
 
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	if cmd != nil {
-		t.Fatal("enter on an empty composer peeks, it does not send")
+		t.Fatal("enter on an empty composer opens the view, it does not send")
 	}
-	if !m.agentPeek {
-		t.Fatal("expected a peek")
+	if m.viewing != "task-1" {
+		t.Fatalf("viewing %q, want task-1", m.viewing)
 	}
-	below, ok := belowComposer(plainView(m))
-	if !ok {
-		t.Fatalf("composer/status missing:\n%s", plainView(m))
+	if m.status != statusWorking {
+		t.Fatalf("entering must not cancel the turn: %s", m.status)
 	}
-	if !strings.Contains(below, "peek prompt for task-1") {
-		t.Fatalf("the peek shows the sub-agent's prompt, between composer and status:\n%s", below)
+	view := plainView(m)
+	if !strings.Contains(view, "esc to return") {
+		t.Fatalf("missing the banner:\n%s", view)
+	}
+	if !strings.Contains(view, "prompt for task-1") {
+		t.Fatalf("the receipt view shows the prompt:\n%s", view)
 	}
 
 	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
-	if m.agentPeek {
-		t.Fatal("esc should close the peek")
+	if m.viewing != "" {
+		t.Fatal("esc should leave the view")
 	}
 	if cmd != nil {
-		t.Fatal("esc on a peek must not cancel the turn")
+		t.Fatal("esc on the view must not cancel the turn")
 	}
 	if m.status != statusWorking {
 		t.Fatalf("status %s, want working", m.status)
-	}
-	if below, _ := belowComposer(plainView(m)); strings.Contains(below, "peek prompt") {
-		t.Fatalf("the peek is still drawn:\n%s", below)
 	}
 }
 
@@ -258,9 +256,12 @@ func TestAgentKeepsSelectionByIDAcrossAReorder(t *testing.T) {
 
 	// task-a updates, so it moves to the front and the list reorders under the
 	// selection. Selection is by id, so the index has to follow it up a row.
-	stub := m.sess.(*Stub)
-	stub.SetTools(tools)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tools[0]}})
+	info := subagentsFromTools(tools)[0]
+	tm, _ := m.Update(eventMsg{agent.Event{
+		Type:           agent.EventSubagent,
+		Subagent:       &info,
+		SubagentChange: agent.SubagentChangeProgress,
+	}})
 	m = tm.(Model)
 
 	items := m.agentItems()
@@ -341,16 +342,11 @@ func TestAgentSelectionNeverLeavesTheVisibleRows(t *testing.T) {
 		t.Fatalf("the arrows reached %d of %d drawn rows", len(seen), agentRowsMax)
 	}
 
-	// And the peek shows the row the frame highlights.
 	m.input.SetValue("")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	below, ok := belowComposer(plainView(m))
-	if !ok {
-		t.Fatalf("composer/status missing:\n%s", plainView(m))
-	}
-	if !strings.Contains(below, "peek prompt for "+m.agentID) {
-		t.Fatalf("peek is not the highlighted row %q:\n%s", m.agentID, below)
+	if m.viewing == "" || !visible[m.viewing] {
+		t.Fatalf("enter opened %q, which is not on screen (visible %v)", m.viewing, visible)
 	}
 	rows := rowsOf(t, m)
 	if !strings.Contains(rows, "… +2 more") {
@@ -384,10 +380,7 @@ func TestDegradationShrinksTheSelectableRows(t *testing.T) {
 	}
 }
 
-// TestPeekNeverShowsAHiddenSubAgent pins the peek on its own: even handed an
-// out-of-window index it draws a row that is on screen, so the box and the
-// highlight can never name different sub-agents.
-func TestPeekNeverShowsAHiddenSubAgent(t *testing.T) {
+func TestViewedRowPushedPastTheCapStaysVisible(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	tools := make([]agent.ToolEvent, 0, 6)
@@ -398,15 +391,20 @@ func TestPeekNeverShowsAHiddenSubAgent(t *testing.T) {
 
 	all := m.agentItems()
 	hidden := all[len(all)-1]
-	m.agentSel = len(all) - 1
-	m.agentID = hidden.ID
-	m.agentPeek = true
+	m.enterView(hidden.ID)
+	m = poke(t, m)
 
-	peek := plain(m.agentPeekView())
-	if strings.Contains(peek, "peek prompt for "+hidden.ID) {
-		t.Fatalf("the peek shows %q, which is behind the overflow row: %q", hidden.ID, peek)
+	visible := m.visibleAgents()
+	found := false
+	for _, s := range visible {
+		if s.ID == hidden.ID {
+			found = true
+		}
 	}
-	if !strings.Contains(peek, "peek prompt for "+m.visibleAgents()[0].ID) {
-		t.Fatalf("the peek should fall back to the highlighted row: %q", peek)
+	if !found {
+		t.Fatalf("viewed %q is not among the visible rows: %v", hidden.ID, visible)
+	}
+	if m.viewing != hidden.ID {
+		t.Fatalf("viewing %q", m.viewing)
 	}
 }

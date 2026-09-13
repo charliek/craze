@@ -1291,6 +1291,110 @@ func TestFrameGoldenGrokPlan(t *testing.T) {
 	}
 }
 
+func TestFrameGoldenGrokSubagentRows(t *testing.T) {
+	keys := "<wait:idle>go<enter><wait:text:4.7k tok>"
+	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
+		got := runFakeFrameProvider(t, "grok-subagent", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		name := fmt.Sprintf("grok-subagent-rows-%dx%d", size.cols, size.rows)
+		assertGolden(t, name, size.cols, size.rows, got)
+		if !strings.Contains(got, "○ explore  List directory files  0s · 4.7k tok") {
+			t.Fatalf("%s missing the running row:\n%s", name, got)
+		}
+	}
+}
+
+func TestFrameGoldenGrokSubagentView(t *testing.T) {
+	keys := "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><wait:text:✓ tool  list_dir>"
+	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
+		got := runFakeFrameProvider(t, "grok-subagent", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		name := fmt.Sprintf("grok-subagent-view-%dx%d", size.cols, size.rows)
+		assertGolden(t, name, size.cols, size.rows, got)
+		if !strings.Contains(got, "esc to return") {
+			t.Fatalf("%s missing the banner:\n%s", name, got)
+		}
+		if !strings.Contains(got, "(grok-4.6)") {
+			t.Fatalf("%s missing the chip:\n%s", name, got)
+		}
+		if !strings.Contains(got, "✓ tool  list_dir") {
+			t.Fatalf("%s missing the child tool row:\n%s", name, got)
+		}
+	}
+}
+
+func TestFrameGoldenGrokSubagentViewDone100x30(t *testing.T) {
+	got := runFakeFrameProvider(t, "grok-subagent", 100, 30,
+		"<wait:idle>go<enter><wait:text:4.7k tok><down><enter><wait:idle>",
+		agent.GrokProvider(), true)
+	assertGolden(t, "grok-subagent-view-done-100x30", 100, 30, got)
+	if !strings.Contains(got, "esc to return") {
+		t.Fatalf("missing the banner:\n%s", got)
+	}
+	if !strings.Contains(got, "completed") {
+		t.Fatalf("finished while viewed should Warn completed:\n%s", got)
+	}
+}
+
+func TestFrameGoldenGrokSubagentTwoView100x30(t *testing.T) {
+	got := runFakeFrameProvider(t, "grok-subagent-two", 100, 30,
+		"<wait:idle>go<enter><wait:text:4.7k tok><enter><tab><wait:text:✓ tool  read_file>",
+		agent.GrokProvider(), true)
+	assertGolden(t, "grok-subagent-two-view-100x30", 100, 30, got)
+	if !strings.Contains(got, "Report README first line") {
+		t.Fatalf("tab should switch to sub-2:\n%s", got)
+	}
+	if !strings.Contains(got, "esc to return · tab next agent") {
+		t.Fatalf("missing the tab hint after esc to return:\n%s", got)
+	}
+}
+
+func TestFrameGoldenGrokSubagentFail80x24(t *testing.T) {
+	got := runFakeFrameProvider(t, "grok-subagent-fail", 80, 24,
+		"<wait:idle>go<enter><wait:text:✗ explore><wait:idle>",
+		agent.GrokProvider(), true)
+	assertGolden(t, "grok-subagent-fail-80x24", 80, 24, got)
+	if !strings.Contains(got, "✗ explore") {
+		t.Fatalf("missing the failed row:\n%s", got)
+	}
+}
+
+func TestFrameGoldenGrokSubagentCancel100x30(t *testing.T) {
+	got := runFakeFrameProvider(t, "grok-subagent-cancel", 100, 30,
+		"<wait:idle>go<enter><wait:text:○ general-purpose><esc><wait:text:– general-purpose><down><enter><wait:text:Execute sleep>",
+		agent.GrokProvider(), true)
+	assertGolden(t, "grok-subagent-cancel-100x30", 100, 30, got)
+	if !strings.Contains(got, "cancelled") {
+		t.Fatalf("missing the cancelled banner:\n%s", got)
+	}
+	if !strings.Contains(got, "– tool  Execute sleep 45 && echo finished") {
+		t.Fatalf("missing the cancelled child tool row:\n%s", got)
+	}
+}
+
+func TestFrameGoldenGrokSubagentLate80x24(t *testing.T) {
+	got := runFakeFrameProvider(t, "grok-subagent-late", 80, 24,
+		"<wait:idle>go<enter><wait:idle>",
+		agent.GrokProvider(), true)
+	assertGolden(t, "grok-subagent-late-80x24", 80, 24, got)
+	if !strings.Contains(got, "○") {
+		t.Fatalf("parent idle, the child should still be running:\n%s", got)
+	}
+	if !strings.Contains(got, "← 1 agent") {
+		t.Fatalf("missing the agent count:\n%s", got)
+	}
+}
+
+func TestFrameGoldenTaskView100x30(t *testing.T) {
+	got := runFakeFrame(t, "task", 100, 30,
+		"<wait:idle>go<enter><wait:text:done task><wait:idle><down><enter>")
+	assertGolden(t, "task-view-100x30", 100, 30, got)
+	if !strings.Contains(got, "receipt only") {
+		t.Fatalf("cursor view is receipt-only:\n%s", got)
+	}
+	if !strings.Contains(got, "esc to return") {
+		t.Fatalf("missing the banner:\n%s", got)
+	}
+}
+
 func TestFrameGrokModelDialogHasNoFastRow(t *testing.T) {
 	got := runFakeFrameProvider(t, "grok-echo", 100, 30, "<wait:idle>/model<enter>", agent.GrokProvider(), true)
 	if strings.Contains(got, "fast") {

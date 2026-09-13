@@ -1258,12 +1258,68 @@ func applyInFlight(t *testing.T, m Model, tools []agent.ToolEvent) Model {
 		t.Fatalf("sess is %T, want *Stub", m.sess)
 	}
 	stub.SetTools(tools)
+	subs := subagentsFromTools(tools)
+	if len(subs) > 0 {
+		stub.SetSubagents(subs)
+	}
 	for i := range tools {
 		tool := tools[i]
 		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tool}})
 		m = tm.(Model)
 	}
+	for i := range subs {
+		info := subs[i]
+		change := agent.SubagentChangeSpawned
+		if subagentTerminal(info) {
+			change = agent.SubagentChangeFinished
+		}
+		tm, _ := m.Update(eventMsg{agent.Event{
+			Type:           agent.EventSubagent,
+			Subagent:       &info,
+			SubagentChange: change,
+		}})
+		m = tm.(Model)
+	}
 	return m
+}
+
+func subagentsFromTools(tools []agent.ToolEvent) []agent.SubagentInfo {
+	var out []agent.SubagentInfo
+	for _, t := range tools {
+		if !t.IsTask() {
+			continue
+		}
+		info := agent.SubagentInfo{
+			ID:         t.ID,
+			ToolCallID: t.ID,
+			Status:     agent.SubagentRunning,
+		}
+		if t.Task != nil {
+			info.Description = t.Task.Description
+			info.Prompt = t.Task.Prompt
+			info.Model = t.Task.Model
+			info.DurationMs = t.Task.DurationMs
+			info.SubagentType = t.Task.SubagentType
+			if t.Task.Status != "" {
+				info.Status = t.Task.Status
+			}
+		}
+		if info.Description == "" {
+			info.Description = strings.TrimPrefix(t.Title, "Task: ")
+		}
+		if t.Task == nil || t.Task.Status == "" {
+			switch t.Status {
+			case "failed":
+				info.Status = agent.SubagentFailed
+			case "cancelled":
+				info.Status = agent.SubagentCancelled
+			case "completed":
+				info.Status = agent.SubagentCompleted
+			}
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 func hangWorking(t *testing.T) Model {
@@ -1598,7 +1654,7 @@ func TestPlanOfferEscKeepsFocus(t *testing.T) {
 	}
 }
 
-// TestPlanOfferBeatsAgentPeek: Enter on an empty composer peeks at a running
+// TestPlanOfferBeatsAgentPeek: Enter on an empty composer opens a running
 // sub-agent, unless there is a plan on offer.
 func TestPlanOfferBeatsAgentPeek(t *testing.T) {
 	m := intoPlanMode(t, sized(t))
@@ -1612,8 +1668,8 @@ func TestPlanOfferBeatsAgentPeek(t *testing.T) {
 	}
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
-	if m.agentPeek {
-		t.Fatal("the offer outranks the peek")
+	if m.viewing != "" {
+		t.Fatal("the offer outranks the sub-agent view")
 	}
 	if cmd == nil {
 		t.Fatal("expected the SetMode command")

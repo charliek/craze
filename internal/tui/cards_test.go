@@ -623,10 +623,19 @@ func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 // TestCardArrivalClosesTheHelpAndThePeek covers the rest of the stack.
 func TestCardArrivalClosesTheHelpAndThePeek(t *testing.T) {
 	m, stub := sizedCards(t)
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	m.input.SetValue("")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if m.viewing == "" {
+		t.Fatal("setup: expected the sub-agent view")
+	}
 	m = m.openHelp()
-	m.agentPeek = true
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(true)})
-	if m.dialog == dialogHelp || m.agentPeek {
-		t.Fatalf("a card closes help and the peek: dialog=%v peek=%v", m.dialog, m.agentPeek)
+	if m.dialog == dialogHelp {
+		t.Fatalf("a card closes help: dialog=%v", m.dialog)
+	}
+	if m.viewing == "" {
+		t.Fatal("a card must not close the sub-agent view")
 	}
 }

@@ -121,6 +121,13 @@ func (s *Stub) SetTools(tools []agent.ToolEvent) {
 	s.snap.Tools = cloneStubTools(tools)
 }
 
+// SetSubagents replaces Snapshot.Subagents (copy-on-write).
+func (s *Stub) SetSubagents(subs []agent.SubagentInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Subagents = cloneStubSubagents(subs)
+}
+
 // SetTodos replaces Snapshot.Todos. Tests send EventTodos afterwards.
 func (s *Stub) SetTodos(todos []agent.Todo) {
 	s.mu.Lock()
@@ -347,6 +354,21 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Config = cloneStubConfig(s.snap.Config)
 	out.Todos = append([]agent.Todo(nil), s.snap.Todos...)
 	out.Tools = cloneStubTools(s.snap.Tools)
+	out.Subagents = cloneStubSubagents(s.snap.Subagents)
+	return out
+}
+
+func cloneStubSubagents(in []agent.SubagentInfo) []agent.SubagentInfo {
+	if in == nil {
+		return nil
+	}
+	out := make([]agent.SubagentInfo, len(in))
+	for i, s := range in {
+		out[i] = s
+		if s.ToolsUsed != nil {
+			out[i].ToolsUsed = append([]string(nil), s.ToolsUsed...)
+		}
+	}
 	return out
 }
 

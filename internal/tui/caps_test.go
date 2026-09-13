@@ -18,6 +18,9 @@ func TestGrokHidesFastKeepsSubagentRows(t *testing.T) {
 		t.Fatalf("setup: cursor should show fast, got %q", m.modelLabel())
 	}
 	m.snap.Tools = []agent.ToolEvent{taskTool("t1", "count main.go lines", "in_progress")}
+	m.snap.Subagents = []agent.SubagentInfo{{
+		ID: "t1", Status: agent.SubagentRunning, Description: "count main.go lines",
+	}}
 	if len(m.agentItems()) == 0 {
 		t.Fatal("setup: cursor should show a sub-agent row")
 	}

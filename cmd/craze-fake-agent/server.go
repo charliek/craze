@@ -747,6 +747,9 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		"status":        "completed",
 		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "list_dir", "kind": "list"}},
 	})
+	// The view goldens wait on this tool completion; the pause holds the
+	// pre-answer frame open long enough for the capture not to race the text.
+	time.Sleep(taskRunFor)
 	s.childText(child, "agent_message_chunk", "main.py README.md")
 	s.toolMeta(fakeSessionID, "call-wait-1", "get_command_or_subagent_output", "get_command_or_subagent_output", map[string]any{
 		"task_ids":   []string{child},
@@ -891,6 +894,9 @@ func (s *server) grokSubagentTwo(id json.RawMessage) {
 		"status":        "completed",
 		"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "read_file", "kind": "read"}},
 	})
+	// The two-view golden waits on sub-2's tool completion and captures
+	// before its answer; the pause keeps that frame from racing the text.
+	time.Sleep(taskRunFor)
 	s.childText("sub-2", "agent_message_chunk", "# hi")
 	s.toolMeta(fakeSessionID, "call-wait-1", "multi-wait (wait_all)", "get_command_or_subagent_output", map[string]any{
 		"task_ids":   []string{"sub-1", "sub-2"},

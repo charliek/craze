@@ -22,6 +22,10 @@ func (m Model) showSubagents() bool {
 	return m.caps().SubagentRows
 }
 
+func (m Model) showSubagentTranscript() bool {
+	return m.caps().SubagentTranscript
+}
+
 func (m Model) showTodos() bool {
 	return m.caps().Todos
 }

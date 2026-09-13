@@ -1,0 +1,30 @@
+❯ List the files in the current working directory in one line.                                      
++ Thought                                                                                           
+✓ tool  list_dir                                                                                    
+main.py README.md                                                                                   
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+────────────────────────────────────────────────────────────────── (grok-4.6) List directory files ─
+✓ @explore · completed · esc to return                                                              
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ws │ grok │ Grok 4.6 (high) │ 0m                                                                    
+◆ default · shift+tab · ▸▸ bypass permissions on                                                    
+● explore  List directory files  2.9s · grok-4.6                                                    
