@@ -23,6 +23,31 @@ Frame goldens live in `internal/tui/testdata/` and render through the same TUI
 model as a live session. CI also runs `-race` on `internal/acp`,
 `internal/agent`, and `internal/tui`.
 
+### Sub-agent scripts
+
+The `grok-subagent*` fake scripts replay the wire shapes captured from a live
+grok run — snake_case `_x.ai/session_notification` with `attempt_id`,
+`update._meta["x.ai/tool"]`, and child session ids on the same stdio:
+
+| Script | What it proves |
+|--------|----------------|
+| `grok-subagent` | One explore child end to end: spawn-tool join, the child's own user/thought/tool/text stream, progress, finish, wait-tool retitle |
+| `grok-subagent-fail` | The same child finishing `failed` with an error |
+| `grok-subagent-two` | Two interleaved children with colliding child tool call ids; an update for an unknown child is dropped; a duplicate `spawned` is a no-op |
+| `grok-subagent-nested` | A grandchild spawned on the child's session registers flat and joins inside the child's tools |
+| `grok-subagent-late` | The child still running at `prompt_complete`; its finish lands 400 ms later, so `done` is not EOF and the drain must be state-aware |
+| `grok-subagent-cancel` | Cancel with a running child: `prompt_complete{cancelled}` first, `subagent_finished{cancelled}` 400 ms later |
+| `grok-subagent-cancel-early` | The other live cancel order: `finished{completed}` before `prompt_complete{cancelled}` |
+
+Cursor's `task` / `task-late` / `tasks` scripts cover the receipt-only path:
+the session synthesizes the same sub-agent lifecycle from the `cursor/task`
+receipt, and the TUI view shows what the receipt carried.
+
+Sanitized excerpts of the live captures are committed under
+`internal/acp/testdata/grok-subagent/` (`subagent.jsonl`, `two.jsonl`,
+`cancel.jsonl`) and are what the ACP parser tests run against, so the repo
+does not depend on the capture directory.
+
 ## craze frame
 
 `craze frame` is a hidden command that runs the real TUI model with no
@@ -91,10 +116,10 @@ make test-cli
 ## tmux smoke
 
 `tests/cli/tmux_smoke.py` drives the real binary in a real terminal at 100x30
-and 80x24, one run per case: every fake script, plus cases for the model dialog
-and for a real mouse drag. It is opt-in and never runs in CI — pytest
-only collects it when it is named explicitly, and it skips unless `tmux` is on
-`PATH` and `CRAZE_TMUX` is set.
+and 80x24, one run per case: every fake script, plus cases for the model
+dialog, the sub-agent view (both providers), and a real mouse drag. It is
+opt-in and never runs in CI — pytest only collects it when it is named
+explicitly, and it skips unless `tmux` is on `PATH` and `CRAZE_TMUX` is set.
 
 ```bash
 cd tests/cli && CRAZE_TMUX=1 uv run pytest -v tmux_smoke.py

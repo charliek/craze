@@ -51,6 +51,7 @@ class PTYCraze:
         fake_agent_bin: Path,
         workspace: Path,
         script: str = "echo",
+        provider: str = "cursor",
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
@@ -70,7 +71,7 @@ class PTYCraze:
                 [
                     str(craze_bin),
                     "--provider",
-                    "cursor",
+                    provider,
                     "--agent-bin",
                     str(fake_agent_bin),
                     "--workspace",
@@ -116,11 +117,27 @@ class PTYCraze:
     def screen(self) -> str:
         return bytes(self.buf).decode("utf-8", "replace")
 
+    def mark(self) -> int:
+        """Offset into the accumulated output; pairs with wait_contains_since."""
+        return len(self.buf)
+
     def wait_contains(self, needle: str, timeout: float = 10) -> str:
+        return self._wait(needle, 0, timeout)
+
+    def wait_contains_since(self, needle: str, mark: int, timeout: float = 10) -> str:
+        """wait_contains over bytes emitted after mark only.
+
+        The screen is accumulated history, so a plain wait_contains can pass
+        on bytes that painted long before the action under test. Scoping to
+        the mark makes the assertion about output the action caused.
+        """
+        return self._wait(needle, mark, timeout)
+
+    def _wait(self, needle: str, mark: int, timeout: float) -> str:
         deadline = time.monotonic() + timeout
         last = ""
         while time.monotonic() < deadline:
-            last = self.screen()
+            last = bytes(self.buf[mark:]).decode("utf-8", "replace")
             if needle in last:
                 return last
             if self.proc.poll() is not None:
@@ -225,4 +242,31 @@ def test_tui_authfail_exits_nonzero(
         tui.write(b"\x04")
         code = tui.wait_exit()
         assert code != 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_subagent_view_enter_esc(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """Enter opens a sub-agent in the main area; Esc returns; nothing cancels.
+
+    The banner only paints while the view holds the main area. Esc's return
+    is proven by main-transcript bytes re-emitted after a mark taken inside
+    the view: the screen is accumulated history, so only output the return
+    itself caused counts.
+    """
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, script="grok-subagent", provider="grok"
+    ) as tui:
+        tui.wait_contains("grok")
+        tui.write(b"go\r")
+        tui.wait_contains("○ explore")
+        tui.write(b"\x1b[B\r")
+        tui.wait_contains("esc to return")
+        mark = tui.mark()
+        tui.write(b"\x1b")
+        tui.wait_contains_since("DONE: main.py README.md", mark)
+        tui.write(b"\x04")
+        code = tui.wait_exit()
+        assert code == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)

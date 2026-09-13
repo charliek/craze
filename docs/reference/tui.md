@@ -21,12 +21,22 @@ Top to bottom:
 3. Spinner line
 4. Composer
 5. Two status rows
-6. One row per in-flight sub-agent (Cursor only this cut; Grok hides the band)
+6. One row per in-flight sub-agent (both providers)
 
 The composer never scrolls: it grows to show every line up to a cap (6 rows,
 3 on a short terminal), then windows to keep the cursor visible. A rule above
 it names the session — the title the agent set, truncated to half the screen
 width, or `craze` before one arrives.
+
+The sub-agent band under the status rows lists every running sub-agent and,
+for ten seconds after the TUI saw it finish, the finished ones — the one being
+viewed stays as long as it is viewed. A row is `<glyph> <label>
+<description> <suffix>`: `○` while it runs, `✓` when it completed, `✗` when
+it failed, `–` when it was cancelled, and `●` for the one being viewed; the
+label is the sub-agent type (`explore`, `general-purpose`; cursor's rows read
+`task`). While it runs the suffix counts up — `0s · 4.7k tok` — and once it
+finishes it reads the duration and model, `2.9s · grok-4.6`. Status row 2
+counts the band (`← 2 agents`).
 
 ## Keys
 
@@ -34,16 +44,18 @@ width, or `craze` before one arrives.
 |---|---|
 | `Enter` | send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | close a peek, then the slash menu, then a dialog (`/help` included); answer the card on top; otherwise cancel the running turn (the transcript says `cancelled`) |
-| `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error |
+| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
+| `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
-| `Shift+Tab` | cycle the ACP mode (agent / plan / ask) |
+| `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
-| `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) |
-| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`) |
-| `↑` `↓` | with an empty composer, select a sub-agent row; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
-| `Enter` on a selected sub-agent | peek at its prompt; `Esc` closes the peek without cancelling the turn |
+| `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
+| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
+| `↑` `↓` | select a sub-agent row (empty composer or not); inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
+| `Enter` on a selected sub-agent | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
+| `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
+| `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
 | `Tab` | complete the slash command being typed |
 
@@ -61,6 +73,43 @@ bindings, so a message that starts with either is just a message.
 !!! note
     `Ctrl+G` is BEL. Some terminals flash or beep when it is pressed. `/theme`
     opens the same picker without the BEL.
+
+## Sub-agent view
+
+`Enter` on a selected row — or a click on the row — opens that sub-agent in
+the main area, read-only. Grok streams a sub-agent's own session, so its
+transcript is the child's own prompt, thoughts, tool calls and replies,
+rendered by the same machinery as the main one. Cursor streams no sub-agent
+transcript, so the view is what its `cursor/task` receipt carried: a note
+saying so, the prompt, a `model · duration · agent id` line once the receipt
+landed, and the output when there is one. There is no composer here — you
+cannot prompt, message or stop a sub-agent from craze.
+
+The composer's top rule carries the chip `(model) description` —
+`(grok-4.6) List directory files` — and the input line is replaced by the
+banner:
+
+- running: `○ @explore · read-only · esc to return`, with `· tab next agent`
+  when more than one row is visible
+- finished: `✓ @explore · completed · esc to return`, in the warning colour
+  so the end is unmistakable (`✗ failed` / `– cancelled`, with the error when
+  there is one; the `esc to return` half never truncates away)
+- cursor: `@task · receipt only · esc to return`
+
+Entering or leaving cancels nothing. The main turn keeps running underneath —
+while the viewed sub-agent runs, the spinner line is its own
+`<spinner> <activity> · <elapsed> · <tokens>`, not the turn's — and the draft
+and the main transcript's scroll position come back on return. A sub-agent
+that finishes while viewed stays in the view until `Esc`, even past the
+ten-second linger an unviewed row gets.
+
+Keys inside the view: `Esc` and `←` return; `↑`/`↓` scroll it a line,
+`PgUp`/`PgDn` page, the wheel scrolls three lines as everywhere else;
+`Tab`/`Shift+Tab` switch to the next/previous sub-agent (the mode cycle is
+unreachable here); `Ctrl+O` toggles detail and `Ctrl+Y` copies from it, both
+as outside; `Ctrl+C` still cancels the main turn and the view stays open.
+Typing, pasting and the slash menu are inert inside the view, and a card
+still lands on top and owns the keyboard until it is answered.
 
 ## Modes
 
@@ -178,6 +227,11 @@ what is off screen. It shrinks the same way the other two do — content rows
 first, then the footer — down to a title-only box. `Esc`, a click outside, or a
 card arriving closes it; nothing else is bound while it is up.
 
+On a provider that shows the band, `panels and views` gains the sub-agent view
+keys — `enter on a row` to open one, `esc, ←` to return, and
+`tab, shift+tab` to switch while inside — and the `↑ ↓` row reads
+`sub-agent rows, or a list inside a dialog`.
+
 ## Mouse
 
 Mouse reporting is on by default; `--no-mouse` turns it off.
@@ -189,14 +243,17 @@ clickable cannot drift apart:
 | Target | Effect |
 |---|---|
 | Tasks panel header | Cycles the panel (same as `Ctrl+T`) |
-| Sub-agent row under the status rows | Selects that sub-agent and opens its peek |
+| Sub-agent row under the status rows | Selects that sub-agent and opens it in the main area (same as `Enter` on it) |
+| The banner line inside the sub-agent view | Returns to the main transcript (same as `Esc`) |
 | Model name in status row 1 | Opens the model dialog (same as `/model`) |
 | `◆ agent` mode chip in status row 2 | Cycles the mode (same as `Shift+Tab`) |
 | A row inside an open dialog | Picks that row; a `/help` row is inert |
 | Anywhere outside an open dialog | Closes it, applying nothing |
 | The transcript | Starts a selection |
 
-Task rows, the `… +n more` row, the separators between status segments and a
+Dragging and double-clicking inside the sub-agent view select and copy from
+its transcript the same way. The mode chip is inert inside the view. Task
+rows, the `… +n more` row, the separators between status segments and a
 segment the row truncated away are all inert.
 
 ### Selection and copy

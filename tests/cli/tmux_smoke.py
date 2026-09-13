@@ -64,8 +64,9 @@ KEY_GAP = 0.15
 
 # 005 §3.2 put the mode chip at the start of status row 2, which is the bottom
 # of the frame. Every script that gets a session shows one of these; `authfail`
-# never gets one, so its row 2 starts with the permission chip instead.
-MODE_CHIPS = ("\u25c6 agent", "\u25c6 plan", "\u25c6 ask")
+# never gets one, so its row 2 starts with the permission chip instead. Grok
+# names its default mode `default`, so that chip is here too.
+MODE_CHIPS = ("\u25c6 agent", "\u25c6 plan", "\u25c6 ask", "\u25c6 default")
 PERMISSION_CHIPS = ("\u25b8\u25b8 ", "\u25b8 ")
 
 TMUX = shutil.which("tmux")
@@ -162,8 +163,11 @@ ENTER = "Enter"
 ESC = "Escape"
 TAB = "Tab"
 RIGHT = "Right"
+LEFT = "Left"
+UP = "Up"
+DOWN = "Down"
 QUIT = "C-d"
-NAMED_KEYS = frozenset({ENTER, ESC, TAB, RIGHT, QUIT})
+NAMED_KEYS = frozenset({ENTER, ESC, TAB, RIGHT, LEFT, UP, DOWN, QUIT})
 
 # SGR mouse button codes. A drag is press, one motion with the button-held bit
 # set, then the release; the release repeats the button code and ends in a
@@ -193,6 +197,10 @@ class Case:
     # clipboard is what the copy must have handed the platform clipboard tool,
     # checked against the stub run.sh puts on PATH.
     clipboard: str | None = None
+    # provider is which craze provider to start. The grok sub-agent scripts
+    # need grok: the cursor dialect drops every _x.ai/session_notification,
+    # so under cursor there is no row to watch.
+    provider: str = "cursor"
 
 
 # The per-case expectations are §3.15's (004) and §5 V6's (005), verbatim.
@@ -407,6 +415,111 @@ CASES: dict[str, Case] = {
             "that went down"
         ),
     ),
+    # ------------------------------------------------------------ 007 §3.9
+    # The grok sub-agent scripts, watched on the band and driven into the
+    # read-only view. They run under --provider grok (the cursor dialect drops
+    # the notifications, so under cursor there is no row to watch) and grok's
+    # default mode chip leads status row 2.
+    "grok-subagent": Case(
+        provider="grok",
+        chip="\u25c6 default",
+        steps=(
+            Watch("\u25cb explore", "agent-running", "\u2713 explore", "agent-done"),
+            Wait("2.9s", "agent-duration"),
+            Send(DOWN, ENTER),
+            Wait("esc to return", "view"),
+            Send(UP),
+            Wait("(grok-4.6)", "chip"),
+            Send(LEFT),
+            Gone("esc to return", "view-closed"),
+        ),
+        note=(
+            "the running row needs the fake's taskRunFor pauses to survive a "
+            "render frame, like `task`; the chip wait after \u2191 is on the live "
+            "pane, so it is also the proof that scrolling inside the view did not "
+            "leave it"
+        ),
+    ),
+    "grok-subagent-two": Case(
+        provider="grok",
+        chip="\u25c6 default",
+        steps=(
+            Wait("List python files", "row-1"),
+            Wait("Report README first line", "row-2"),
+            Wait("4.7k tok", "progress"),
+            Send(ENTER),
+            Wait("List the python files.", "view-1"),
+            Send(TAB),
+            Wait("Report the first line.", "view-2"),
+            Send(ESC),
+            Gone("esc to return", "view-closed"),
+        ),
+        note=(
+            "the selection is held by id and the most recently updated row leads "
+            "the band, so once sub-1's progress has landed Enter opens sub-1 and "
+            "Tab moves to sub-2; the two prompts are the only text that tells the "
+            "views apart"
+        ),
+    ),
+    "grok-subagent-fail": Case(
+        provider="grok",
+        chip="\u25c6 default",
+        steps=(
+            Watch("\u25cb explore", "agent-running", "\u2717 explore", "agent-failed"),
+            Wait("subagent failed", "reply"),
+        ),
+    ),
+    "grok-subagent-cancel": Case(
+        provider="grok",
+        chip="\u25c6 default",
+        steps=(
+            Wait("\u25cb general-purpose", "agent-running"),
+            Send(ESC),
+            Wait("\u2013 general-purpose", "agent-cancelled"),
+            Send(DOWN, ENTER),
+            Wait("@general-purpose \u00b7 cancelled", "view"),
+            Send(ESC),
+            Gone("esc to return", "view-closed"),
+        ),
+        note=(
+            "the fake holds the parent until session/cancel and finishes the "
+            "child cancelled 400 ms later, so the row flip is the wire order, "
+            "not craze inventing an end"
+        ),
+    ),
+    "grok-subagent-late": Case(
+        provider="grok",
+        chip="\u25c6 default",
+        steps=(
+            Wait("\u25cb explore", "agent-running"),
+            Gone("esc to interrupt", "parent-idle"),
+            Wait("\u2713 explore", "agent-done"),
+        ),
+        note=(
+            "the parent ends the turn while the child still runs, and the finish "
+            "that lands 400 ms later is what flips the row \u2014 done is not EOF "
+            "here either"
+        ),
+    ),
+    # The cursor view rides on the task script the way the model dialog rides
+    # on echo: cursor streams no sub-agent transcript, so the view is what the
+    # cursor/task receipt carried, in the same chrome grok's view uses.
+    "task-view": Case(
+        script="task",
+        steps=(
+            Watch("\u25cf agent", "agent-running", "\u2713 agent", "agent-done"),
+            Wait("8.0s", "agent-duration"),
+            Send(DOWN, ENTER),
+            Wait("@task \u00b7 receipt only", "view"),
+            Wait("esc to return", "banner"),
+            Send(ESC),
+            Gone("esc to return", "view-closed"),
+        ),
+        note=(
+            "the band row lingers ten seconds after the TUI saw it finish, which "
+            "is the window the down/enter pair has to land in"
+        ),
+    ),
 }
 
 CASE_IDS = tuple(CASES)
@@ -458,6 +571,7 @@ class TmuxPane:
         out_dir: Path,
         no_force: bool,
         chip: str | None,
+        provider: str = "cursor",
     ) -> None:
         self.name = name
         self.script = script
@@ -488,7 +602,7 @@ class TmuxPane:
         argv = [
             str(craze),
             "--provider",
-            "cursor",
+            provider,
             "--agent-bin",
             str(fake_agent),
             "--workspace",
@@ -790,10 +904,11 @@ def _run_case(
         out_dir=out_dir,
         no_force=case.no_force,
         chip=case.chip,
+        provider=case.provider,
     ) as pane:
-        # The status rows carry no status word; `cursor` is the provider
-        # segment of row 1, which only exists once the frame is drawn.
-        pane.wait_for("cursor", "start", timeout=START_TIMEOUT)
+        # The status rows carry no status word; the provider segment of row 1
+        # is what says a frame was drawn, and it only exists once it was.
+        pane.wait_for(case.provider, "start", timeout=START_TIMEOUT)
         if case.prompt is not None:
             pane.send(case.prompt, ENTER)
         for step in case.steps:

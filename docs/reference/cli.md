@@ -68,7 +68,50 @@ echo "hello" | ./bin/craze prompt --json
 | `--plan` | Set session mode to plan after `session/new` |
 | `--json` | Write only JSON events to stdout |
 
-Without `--json`, only assistant text is written to stdout.
+Without `--json`, only the **main session's** assistant text is written to
+stdout — a sub-agent's text is never printed, so a piped reply stays the
+agent's own answer.
+
+### JSON events
+
+`--json` writes one JSON object per line:
+
+| `type` | Carries |
+|--------|---------|
+| `text` | Assistant reply chunk; `agent` names the sub-agent when the chunk belongs to one |
+| `thought` | Reasoning chunk; `agent` as on `text` |
+| `user` | A chunk of a sub-agent's prompt; only ever emitted with `agent` |
+| `tool` | Tool call create/update, merged by id; `agent` as on `text`; a sub-agent tool also carries `task` |
+| `todos` | Todo list replace or merge |
+| `permission` / `question` / `plan` | Blocking request, answered headless by `--permission-decision`; a permission with no decision left is rejected |
+| `subagent` | Sub-agent lifecycle |
+| `title` | The title the session took |
+| `done` / `error` | Turn finished / turn failed |
+
+`agent` is the sub-agent's own session id (grok) and appears only on lines
+that belong to one; main-session lines have no `agent` field. Grok streams a
+sub-agent's session on the same connection, so its prompt, thoughts, tool
+calls and replies arrive as tagged `user`, `thought`, `tool` and `text` lines.
+
+`subagent` is the lifecycle,
+`{"type":"subagent","event":"spawned|progress|finished","id":…}`, with
+`attemptId`, `parentId`, `status`, `description`, `subagentType`, `model`,
+`toolCallId`, `durationMs`, `toolCalls`, `turns`, `tokens`, `output` and
+`error` alongside, each omitted when empty, plus `transcript` (whether the
+provider streams one), which is always present — `true` or `false`. Grok's
+lines come from its own lifecycle notifications; cursor
+sends none, so craze synthesizes the same lines from the `cursor/task`
+receipt. `tool.task` carries `description`, `model`, `agentId`, `durationMs`
+and `status` (`running`, `completed`, `failed`, `cancelled`).
+
+`done` is **not** EOF: it says the *turn* ended, not the sub-agents.
+Lifecycle lines for a still-running sub-agent may follow the turn's `done` —
+grok sends `subagent_finished` after `prompt_complete` when a turn is
+cancelled — and a sub-agent spawned in one turn may report during the next.
+Before every exit, `craze prompt` drains the stream: when no sub-agent was
+ever spawned nothing is added; otherwise events keep being read and written
+until every sub-agent is terminal, then 250 ms pass with no event, or 1.5 s
+elapse — whichever comes first.
 
 ## craze version
 

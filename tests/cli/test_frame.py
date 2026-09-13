@@ -624,3 +624,138 @@ def test_frame_grok_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) 
     assert "echo: go" in text, text
     assert "fast" not in text, text
     assert "◆ default" in text, text
+
+
+# --------------------------------------------------------------- 007 §3.9
+#
+# The grok sub-agent scripts need --provider grok the same way
+# test_frame_grok_echo does: the cursor dialect drops every
+# _x.ai/session_notification, so without the flag there is no row to wait on.
+# The keys mirror internal/tui/frame_test.go's goldens, which own the exact
+# cells; these own the trip through the command. The rows case waits on the
+# progress suffix (`4.7k tok`) rather than on the row itself because the
+# suffix is what proves the progress notification landed, the way the Go
+# golden's <wait:text:4.7k tok> does.
+
+# case id, script, cols, rows, keys, substrings that must be on the frame
+GROK_SUBAGENT_CASES = [
+    (
+        "grok-subagent-rows",
+        "grok-subagent",
+        80,
+        24,
+        "<wait:idle>go<enter><wait:text:4.7k tok>",
+        ["○ explore  List directory files  0s · 4.7k tok", "← 1 agent"],
+    ),
+    (
+        "grok-subagent-view",
+        "grok-subagent",
+        80,
+        24,
+        "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><wait:text:esc to return>",
+        [
+            "(grok-4.6) List directory files",
+            "read-only · esc to return",
+            "✓ tool  list_dir",
+            "● explore",
+            "list_dir · 0s · 4.7k tok",
+        ],
+    ),
+    (
+        "grok-subagent-two",
+        "grok-subagent-two",
+        100,
+        30,
+        "<wait:idle>go<enter><wait:text:4.7k tok><enter><tab><wait:text:✓ tool  read_file>",
+        ["Report README first line", "esc to return · tab next agent", "← 2 agents"],
+    ),
+    (
+        "grok-subagent-fail",
+        "grok-subagent-fail",
+        80,
+        24,
+        "<wait:idle>go<enter><wait:text:✗ explore><wait:idle>",
+        ["✗ explore  List directory files  2.9s · grok-4.6"],
+    ),
+    (
+        "grok-subagent-cancel",
+        "grok-subagent-cancel",
+        100,
+        30,
+        "<wait:idle>go<enter><wait:text:○ general-purpose><esc>"
+        "<wait:text:– general-purpose><down><enter><wait:text:Execute sleep>",
+        ["– tool  Execute sleep 45 && echo finished", "cancelled"],
+    ),
+    (
+        "grok-subagent-late",
+        "grok-subagent-late",
+        80,
+        24,
+        "<wait:idle>go<enter><wait:idle>",
+        ["○ explore", "← 1 agent"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case,script,cols,rows,keys,wants",
+    GROK_SUBAGENT_CASES,
+    ids=[c[0] for c in GROK_SUBAGENT_CASES],
+)
+def test_frame_grok_subagent_scripts(
+    craze_bin: Path,
+    fake_agent_bin: Path,
+    tmp_path: Path,
+    case: str,
+    script: str,
+    cols: int,
+    rows: int,
+    keys: str,
+    wants: list[str],
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script=script,
+        cols=cols,
+        rows=rows,
+        keys=keys,
+        provider="grok",
+    )
+    text = "\n".join(frame_lines(proc, cols, rows))
+    for want in wants:
+        assert want in text, f"missing {want!r}:\n{text}"
+    # The grok status row names the provider and the default mode chip, the
+    # same two probes test_frame_grok_echo pins.
+    assert f"{WORKDIR} │ grok" in text, text
+    assert "◆ default" in text, text
+
+
+def test_frame_task_view_receipt(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The cursor sub-agent view: same chrome, receipt-only content.
+
+    `task` runs under the default cursor provider. The row lingers after the
+    turn ends, so `<down><enter>` still opens it once `done task` has been
+    waited on — the view is the receipt (note, prompt, model line), never a
+    transcript cursor never streamed.
+    """
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="task",
+        cols=100,
+        rows=30,
+        keys="<wait:idle>go<enter><wait:text:done task><wait:idle><down><enter>",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    for want in (
+        "@task · receipt only · esc to return",
+        "(grok-4.6-high-fast) Count main.go lines",
+        "streams no sub-agent transcript",
+        "● task  Count main.go lines",
+    ):
+        assert want in text, f"missing {want!r}:\n{text}"
