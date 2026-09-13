@@ -137,23 +137,39 @@ func TestPromptCompleteFollowUpAfterNotifyFirst(t *testing.T) {
 	}
 }
 
-func TestPromptCompleteCancelCleansWaiters(t *testing.T) {
+// TestPromptCompleteCancelWaitsForAgent pins that Cancel sends session/cancel
+// and leaves the prompt in flight until the agent ends the turn itself. Live
+// grok answers a cancel with prompt_complete{cancelled} and then the RPC
+// reply; ending the prompt early would let a follow-up prompt be ended by
+// that late notification instead of its own.
+func TestPromptCompleteCancelWaitsForAgent(t *testing.T) {
 	p := newRawPipeDialect(t, DialectGrok)
 	p.setSession("s1")
-	done, _ := startGrokPrompt(t, p, "hi")
+	done, req := startGrokPrompt(t, p, "hi")
 	cancelDone := make(chan error, 1)
 	go func() { cancelDone <- p.client.Cancel(context.Background()) }()
 	msg := p.readWithin(t, 3*time.Second, "session/cancel")
 	if msg.Method != MethodSessionCancel {
 		t.Fatalf("method %q", msg.Method)
 	}
+	if err := <-cancelDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case out := <-done:
+		t.Fatalf("cancel must not end the prompt by itself: %+v %v", out.res, out.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if !p.client.PromptInFlight() {
+		t.Fatal("prompt must stay in flight until the agent ends the turn")
+	}
+	p.send(t, nil, MethodGrokPromptCompleteWrapped, `{"sessionId":"s1","stopReason":"cancelled"}`)
 	res := waitPrompt(t, done)
 	if res.StopReason != StopCancelled {
 		t.Fatalf("stop %q", res.StopReason)
 	}
-	if err := <-cancelDone; err != nil {
-		t.Fatal(err)
-	}
+	// The RPC reply for the cancelled turn lands late and is ignored.
+	replyPrompt(t, p, req.ID, StopCancelled)
 	done2, req2 := startGrokPrompt(t, p, "next")
 	replyPrompt(t, p, req2.ID, StopEndTurn)
 	if waitPrompt(t, done2).StopReason != StopEndTurn {

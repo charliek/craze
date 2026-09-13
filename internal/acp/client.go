@@ -88,14 +88,6 @@ func DialWithDialect(in io.Reader, out io.Writer, dialect DialectID) *Client {
 
 func (c *Client) Conn() *Conn { return c.conn }
 
-// Binary is the resolved child path Spawn looked up, or empty for a Dial.
-func (c *Client) Binary() string {
-	if c == nil || c.child == nil || c.child.cmd == nil {
-		return ""
-	}
-	return c.child.cmd.Path
-}
-
 func (c *Client) SessionID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -303,9 +295,15 @@ func (c *Client) SetConfig(ctx context.Context, configID, value string) error {
 	}, nil)
 }
 
+// Cancel answers every blocking request cancelled and tells the agent to stop
+// the turn. It does not end the prompt itself: the turn is over when the
+// agent says so (the RPC reply, or grok's prompt_complete), the same as
+// cursor. Ending it here would let a follow-up prompt start while the agent
+// is still winding the old turn down, and grok's late prompt_complete for
+// that old turn would then end the new one. Close is the only path that
+// fails a waiter outright.
 func (c *Client) Cancel(ctx context.Context) error {
 	c.completeIncomingCancelled()
-	c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
 	sid := c.SessionID()
 	if sid == "" {
 		return nil

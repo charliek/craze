@@ -14,22 +14,25 @@ func isGrokPlanMethod(method string) bool {
 	return method == MethodGrokExitPlanMode || method == MethodGrokExitPlanModeWrapped
 }
 
-// unwrapExtParams peels a gateway-wrapped {_x.ai/..., params:{method,params}}
-// envelope down to the inner params object. Direct payloads pass through.
+// unwrapExtParams peels an ext-method envelope down to the inner params
+// object. Live grok 1.0.30 sends `_x.ai/...` params flat; the
+// agent-client-protocol crate's own encoding nests them as
+// {"params":{...}}, and relays may add the inner {"method":..., "params":...}
+// pair. Any of those shapes ends at the same object; a flat payload passes
+// through untouched.
 func unwrapExtParams(raw json.RawMessage) json.RawMessage {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || raw[0] != '{' {
 		return raw
 	}
 	var w struct {
-		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return raw
 	}
 	nested := bytes.TrimSpace(w.Params)
-	if w.Method == "" || len(nested) == 0 {
+	if len(nested) == 0 || nested[0] != '{' {
 		return raw
 	}
 	return nested

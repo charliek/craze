@@ -9,8 +9,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/charliek/craze/internal/agent"
 )
 
 func writeSkillMD(t *testing.T, path, body string) {
@@ -320,50 +318,4 @@ func catalogItems(items []slashItem, name string) (slashItem, bool) {
 		}
 	}
 	return slashItem{}, false
-}
-
-func TestInspectFailureAddsDiagnostic(t *testing.T) {
-	m := sized(t)
-	m.skillsGen = 3
-	tm, _ := m.Update(skillsMsg{
-		gen:        3,
-		inspectErr: fmt.Errorf("inspect timed out"),
-		skills:     []slashItem{{Name: "disk", Desc: "fallback", Skill: true}},
-	})
-	m = tm.(Model)
-	if _, ok := catalogByName(m, "disk"); !ok {
-		t.Fatal("fallback skills missing")
-	}
-	if !strings.Contains(strings.Join(texts(m, entryError), "\n"), "skill inspect failed") {
-		t.Fatalf("diagnostic missing:\n%s", plainView(m))
-	}
-}
-
-func TestInspectResultIgnoresStaleGeneration(t *testing.T) {
-	m := sized(t)
-	m.skillsGen = 2
-	m.skills = []slashItem{{Name: "kept", Skill: true}}
-	tm, _ := m.Update(skillsMsg{gen: 1, skills: []slashItem{{Name: "stale", Skill: true}}})
-	m = tm.(Model)
-	if _, ok := catalogByName(m, "kept"); !ok {
-		t.Fatal("stale inspect overwrote the cache")
-	}
-	if _, ok := catalogByName(m, "stale"); ok {
-		t.Fatal("stale inspect landed")
-	}
-}
-
-func TestGrokSlashKeepsInspectCache(t *testing.T) {
-	m := sized(t)
-	m.snap.Provider = agent.GrokProvider().Info()
-	m.skills = []slashItem{{Name: "cached", Desc: "from inspect", Skill: true}}
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m = tm.(Model)
-	if m.input.Value() != "/" {
-		t.Fatalf("composer %q", m.input.Value())
-	}
-	it, ok := catalogByName(m, "cached")
-	if !ok || !it.Skill {
-		t.Fatalf("slash must keep the inspect cache %#v ok=%v", it, ok)
-	}
 }

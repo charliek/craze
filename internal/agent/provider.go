@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -30,8 +31,6 @@ const (
 	cursorImplementPrompt = "Implement the plan above."
 	// fastCategory is the config category cursor puts its fast toggle in.
 	fastCategory = "model_config"
-	// inspectCommand is the subcommand grok runs for skill discovery.
-	grokInspectCommand = "inspect"
 )
 
 // Provider is everything craze knows about the agent behind a session that is
@@ -59,14 +58,48 @@ type Provider struct {
 	forceArgs []string
 	// extraGlobalArgs go before the subcommand (grok: --no-auto-update).
 	extraGlobalArgs []string
-	// authMethodIDs is the preference order intersected with initialize's
+	// authMethods is the preference order intersected with initialize's
 	// advertised methods.
-	authMethodIDs []string
-	loginHint     string
-	capabilities  Capabilities
-	dialect       acp.DialectID
-	skillScan     SkillScan
+	authMethods  []authMethod
+	loginHint    string
+	capabilities Capabilities
+	dialect      acp.DialectID
+	skillScan    SkillScan
+	// fallbackModes are injected when session/new advertises no modes
+	// (grok omits availableModes but accepts set_mode for these ids).
+	fallbackModes []ModeInfo
+	// planUpdatesAreTodos maps ACP `plan` session updates onto the todo
+	// stream; cursor drives todos through cursor/update_todos instead.
+	planUpdatesAreTodos bool
 }
+
+// authMethod is one way a provider can authenticate, in preference order.
+// envKeys, when set, make the method usable only while one of them is
+// non-empty in the environment (grok's xai.api_key needs a key to send).
+// meta rides on the authenticate request as _meta.
+type authMethod struct {
+	id      string
+	envKeys []string
+	meta    map[string]any
+}
+
+// usable reports whether the method is both advertised and, when it needs an
+// env key, backed by one.
+func (a authMethod) usable(initRes *acp.InitializeResult) bool {
+	if !initRes.OffersAuthMethod(a.id) {
+		return false
+	}
+	for _, k := range a.envKeys {
+		if os.Getenv(k) != "" {
+			return true
+		}
+	}
+	return len(a.envKeys) == 0
+}
+
+// grokHeadlessMeta is what grok's authenticate carries so the daemon never
+// opens a browser on craze's behalf.
+func grokHeadlessMeta() map[string]any { return map[string]any{"headless": true} }
 
 // Capabilities is what the TUI reads to hide surfaces a backend cannot back.
 type Capabilities struct {
@@ -80,13 +113,13 @@ type Capabilities struct {
 	ParameterizedPicker bool
 }
 
-// SkillScan is where a provider's skills come from. InspectArgs, when set,
-// name a subcommand of the resolved provider binary whose JSON output
-// replaces the filesystem walk.
+// SkillScan is where a provider's on-disk skills come from: SKILL.md trees
+// under RelRoots in the workspace and home. Skills the agent advertises over
+// ACP (grok lists every bundled and plugin skill in
+// available_commands_update) need no scan at all.
 type SkillScan struct {
 	RelRoots          []string
 	SkipCursorPlugins bool
-	InspectArgs       []string
 }
 
 // Args builds the child argv from the provider pieces. ExtraArgs stay first
@@ -127,7 +160,7 @@ func CursorProvider() Provider {
 		defaultBins:     []string{"cursor-agent", "agent"},
 		spawnArgs:       []string{"--trust", "acp"},
 		forceArgs:       []string{"--force"},
-		authMethodIDs:   []string{acp.AuthCursorLogin},
+		authMethods:     []authMethod{{id: acp.AuthCursorLogin}},
 		loginHint:       "agent login",
 		capabilities: Capabilities{
 			FastToggle:          true,
@@ -152,7 +185,7 @@ func CursorProvider() Provider {
 	}
 }
 
-// GrokProvider is the grok CLI: spawn, auth, dialect and skill inspect.
+// GrokProvider is the grok CLI: spawn, auth, dialect and skill roots.
 func GrokProvider() Provider {
 	return Provider{
 		name:            grokName,
@@ -163,8 +196,14 @@ func GrokProvider() Provider {
 		forceAfter:      1,
 		forceArgs:       []string{"--always-approve"},
 		extraGlobalArgs: []string{"--no-auto-update"},
-		authMethodIDs:   []string{acp.AuthXAIAPIKey, acp.AuthCachedToken},
-		loginHint:       "grok login",
+		// The env key beats the daemon's own default (cached_token), as in
+		// t3code; grok.com / oidc are interactive browser logins and are
+		// never listed here.
+		authMethods: []authMethod{
+			{id: acp.AuthXAIAPIKey, envKeys: []string{"XAI_API_KEY", "GROK_CODE_XAI_API_KEY"}, meta: grokHeadlessMeta()},
+			{id: acp.AuthCachedToken, meta: grokHeadlessMeta()},
+		},
+		loginHint: "grok login",
 		capabilities: Capabilities{
 			FastToggle:          false,
 			Effort:              true,
@@ -176,10 +215,17 @@ func GrokProvider() Provider {
 			ParameterizedPicker: true,
 		},
 		dialect: acp.DialectGrok,
+		// Grok advertises its whole catalog, plugin skills included, over
+		// ACP; the walk only adds SKILL.md trees the daemon has not loaded.
 		skillScan: SkillScan{
-			RelRoots:    []string{filepath.Join(".grok", "skills")},
-			InspectArgs: []string{grokInspectCommand, "--json"},
+			RelRoots: []string{filepath.Join(".grok", "skills")},
 		},
+		fallbackModes: []ModeInfo{
+			{ID: "default", Name: "Default"},
+			{ID: "plan", Name: "Plan"},
+			{ID: "ask", Name: "Ask"},
+		},
+		planUpdatesAreTodos: true,
 	}
 }
 
@@ -206,7 +252,37 @@ func (p Provider) Dialect() acp.DialectID { return p.dialect }
 
 // AuthMethodIDs is the preference order for authenticate, intersected with
 // what initialize advertises.
-func (p Provider) AuthMethodIDs() []string { return append([]string(nil), p.authMethodIDs...) }
+func (p Provider) AuthMethodIDs() []string {
+	out := make([]string, 0, len(p.authMethods))
+	for _, a := range p.authMethods {
+		out = append(out, a.id)
+	}
+	return out
+}
+
+// authFor picks the first usable auth method against what initialize
+// advertised. No advertised methods means no login, for every provider.
+func (p Provider) authFor(initRes *acp.InitializeResult) (id string, meta map[string]any, ok bool) {
+	if initRes == nil || len(initRes.AuthMethods) == 0 {
+		return "", nil, false
+	}
+	for _, a := range p.authMethods {
+		if !a.usable(initRes) {
+			continue
+		}
+		if a.meta != nil {
+			meta = make(map[string]any, len(a.meta))
+			for k, v := range a.meta {
+				meta[k] = v
+			}
+		}
+		return a.id, meta, true
+	}
+	return "", nil, false
+}
+
+// FallbackModes are the modes craze assumes when session/new advertises none.
+func (p Provider) FallbackModes() []ModeInfo { return append([]ModeInfo(nil), p.fallbackModes...) }
 
 // LoginHint is the command the auth error tells the user to run.
 func (p Provider) LoginHint() string { return p.loginHint }
@@ -219,7 +295,6 @@ func (p Provider) SkillScan() SkillScan {
 	return SkillScan{
 		RelRoots:          append([]string(nil), p.skillScan.RelRoots...),
 		SkipCursorPlugins: p.skillScan.SkipCursorPlugins,
-		InspectArgs:       append([]string(nil), p.skillScan.InspectArgs...),
 	}
 }
 

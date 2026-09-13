@@ -37,7 +37,6 @@ type session struct {
 	// handler goroutine can start long after that (see park).
 	turn          int
 	cancelledTurn int
-	resolvedBin   string
 	snap          Snapshot
 	tools         map[string]ToolEvent
 	toolOrder     []string
@@ -166,7 +165,6 @@ func (s *session) Start(ctx context.Context) error {
 		return fmt.Errorf("agent: session closed")
 	}
 	s.client = client
-	s.resolvedBin = client.Binary()
 	s.mu.Unlock()
 	client.SetUpdateHandler(s.onUpdate)
 	client.SetPermissionHandler(s.onPermission)
@@ -185,7 +183,7 @@ func (s *session) Start(ctx context.Context) error {
 			_ = s.Close()
 			return fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
 		}
-	} else if len(initRes.AuthMethods) > 0 && s.provider().Dialect() == acp.DialectGrok {
+	} else if len(initRes.AuthMethods) > 0 && len(s.provider().AuthMethodIDs()) > 0 {
 		// The daemon offered only methods craze will not start (interactive
 		// browser login); say how to fix it instead of hanging later.
 		_ = s.Close()
@@ -227,37 +225,11 @@ func (s *session) Start(ctx context.Context) error {
 	return nil
 }
 
-// authMethod intersects what initialize advertised with the provider's
-// preference order. No advertised methods means no login, for either
-// provider. Otherwise cursor logs in only when cursor_login is offered, and
-// grok prefers the env key over the daemon's default. Grok methods craze
-// will not start (interactive browser login) are never picked.
+// authMethod is the provider's pick against what initialize advertised: the
+// first of its preferred methods that is offered and, when it needs an env
+// key, backed by one. No advertised methods means no login.
 func (s *session) authMethod(initRes *acp.InitializeResult) (string, map[string]any, bool) {
-	p := s.provider()
-	if len(initRes.AuthMethods) == 0 {
-		return "", nil, false
-	}
-	if p.Dialect() == acp.DialectGrok {
-		if hasAPIKeyEnv() && initRes.OffersAuthMethod(acp.AuthXAIAPIKey) {
-			return acp.AuthXAIAPIKey, map[string]any{"headless": true}, true
-		}
-		if initRes.OffersAuthMethod(acp.AuthCachedToken) {
-			return acp.AuthCachedToken, map[string]any{"headless": true}, true
-		}
-		return "", nil, false
-	}
-	for _, id := range p.AuthMethodIDs() {
-		if initRes.OffersAuthMethod(id) {
-			return id, nil, true
-		}
-	}
-	return "", nil, false
-}
-
-// hasAPIKeyEnv reports whether a grok API key is set. Grok honours the
-// legacy GROK_CODE_XAI_API_KEY alongside XAI_API_KEY.
-func hasAPIKeyEnv() bool {
-	return os.Getenv("XAI_API_KEY") != "" || os.Getenv("GROK_CODE_XAI_API_KEY") != ""
+	return s.provider().authFor(initRes)
 }
 
 func (s *session) unstart() {
@@ -295,8 +267,33 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		s.emit(Event{Type: EventError, Err: err})
 		return Result{}, err
 	}
+	if res.StopReason == acp.StopCancelled {
+		s.closeInFlightTools(acp.StopCancelled)
+	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// closeInFlightTools settles every tool the turn left running. Grok answers
+// a cancel with the turn's end and nothing more: the interrupted tool never
+// gets a terminal tool_call_update, so without this its row spins forever and
+// the status row keeps counting it. Cursor closes its own tools, so this
+// finds nothing there.
+func (s *session) closeInFlightTools(status string) {
+	s.mu.Lock()
+	var open []string
+	for _, id := range s.toolOrder {
+		if t, ok := s.tools[id]; ok && (t.Status == "pending" || t.Status == "in_progress") {
+			open = append(open, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, id := range open {
+		st := status
+		if tool, changed := s.mergeTool(toolDelta{id: id, status: &st}); changed {
+			s.emit(Event{Type: EventTool, Tool: &tool})
+		}
+	}
 }
 
 func (s *session) SetModel(ctx context.Context, modelID string) error {
@@ -344,12 +341,6 @@ func (s *session) SetConfig(ctx context.Context, id, value string) error {
 	}
 	s.mu.Unlock()
 	return nil
-}
-
-func (s *session) Binary() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.resolvedBin
 }
 
 func (s *session) Snapshot() Snapshot {
@@ -812,7 +803,7 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.mu.Unlock()
 		s.emit(Event{Type: EventMeta})
 	case acp.UpdatePlan:
-		if s.provider().Dialect() != acp.DialectGrok {
+		if !s.provider().planUpdatesAreTodos {
 			return
 		}
 		todos, ok := planEntriesToTodos(u.Entries)

@@ -94,7 +94,6 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 		Model:           f.model,
 		Yolo:            f.force,
 		NoMouse:         f.noMouse,
-		Diag:            diag,
 		Provider:        resolved.Provider,
 		ProviderLocked:  resolved.Locked,
 		PersistProvider: true,

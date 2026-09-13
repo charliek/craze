@@ -331,8 +331,6 @@ func (s *Stub) SetConfig(_ context.Context, id, value string) error {
 	return nil
 }
 
-func (s *Stub) Binary() string { return "" }
-
 func (s *Stub) SetProvider(p agent.Provider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

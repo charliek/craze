@@ -687,9 +687,6 @@ func startGrokScript(t *testing.T, script string, force bool) *session {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if s.Binary() == "" {
-		t.Fatal("Start must retain the resolved binary")
-	}
 	return s
 }
 

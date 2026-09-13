@@ -184,3 +184,53 @@ func TestGrokCompleteIncomingCancelledIsFlat(t *testing.T) {
 	}
 	close(gate)
 }
+
+// TestPickKindPrefersSpelledID pins the grok permission shape: the daemon
+// prepends "enable-always-approve" (kind allow_once) to every request, so a
+// plain allow-once must land on the option that spells allow-once and not on
+// the first allow_once by position.
+func TestPickKindPrefersSpelledID(t *testing.T) {
+	opts := []PermissionOption{
+		{OptionID: "enable-always-approve", Name: "Always approve", Kind: KindAllowOnce},
+		{OptionID: "allow-once", Name: "Allow once", Kind: KindAllowOnce},
+		{OptionID: "reject-once", Name: "Reject", Kind: KindRejectOnce},
+	}
+	if id, ok := PickKind(opts, KindAllowOnce); !ok || id != "allow-once" {
+		t.Fatalf("allow_once picked %q %v", id, ok)
+	}
+	if id, ok := PickKind(opts, KindRejectOnce); !ok || id != "reject-once" {
+		t.Fatalf("reject_once picked %q %v", id, ok)
+	}
+	// Without a spelled id the first of the kind still wins, as before.
+	if id, ok := PickYoloAllow(opts); !ok || id != "allow-once" {
+		t.Fatalf("yolo picked %q %v", id, ok)
+	}
+	cursor := []PermissionOption{{OptionID: "opt-1", Kind: KindAllowAlways}, {OptionID: "opt-2", Kind: KindAllowOnce}}
+	if id, ok := PickYoloAllow(cursor); !ok || id != "opt-1" {
+		t.Fatalf("cursor yolo picked %q %v", id, ok)
+	}
+	if _, ok := PickKind(cursor, KindRejectAlways); ok {
+		t.Fatal("a kind the request did not offer is not picked")
+	}
+}
+
+// TestUnwrapExtParamsShapes pins the three envelopes an x.ai ext method can
+// arrive in: flat (live grok 1.0.30), the protocol crate's {"params":{...}},
+// and a relay's {"method":..., "params":{...}}.
+func TestUnwrapExtParamsShapes(t *testing.T) {
+	inner := `{"sessionId":"s1","stopReason":"end_turn"}`
+	for _, tc := range []struct{ name, raw string }{
+		{"flat", inner},
+		{"crate-nested", `{"params":` + inner + `}`},
+		{"relay-nested", `{"method":"x.ai/session/prompt_complete","params":` + inner + `}`},
+	} {
+		sid, stop, ok := parseGrokPromptComplete(json.RawMessage(tc.raw))
+		if !ok || sid != "s1" || stop != "end_turn" {
+			t.Fatalf("%s: %q %q %v", tc.name, sid, stop, ok)
+		}
+	}
+	// A params key that is not an object is part of the payload, not an envelope.
+	if got := string(unwrapExtParams(json.RawMessage(`{"params":"x","sessionId":"s1"}`))); got != `{"params":"x","sessionId":"s1"}` {
+		t.Fatalf("scalar params must pass through, got %s", got)
+	}
+}

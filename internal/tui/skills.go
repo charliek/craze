@@ -4,8 +4,6 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/charliek/craze/internal/agent"
 )
 
@@ -35,36 +33,15 @@ func (m *Model) applySkills(skills []agent.Skill) {
 	m.skills = skillsToSlash(skills)
 }
 
-// rescanSkills walks the provider's filesystem roots. Inspect is a tea.Cmd
-// after Start; grok's `/` retrigger must not spawn it, so this is a no-op
-// when the provider advertises inspect.
+// rescanSkills walks the provider's filesystem roots. It runs at Start and
+// on a bare `/`; skills the agent advertises over ACP arrive as
+// available_commands_update and are merged by slashCatalog.
 func (m *Model) rescanSkills() {
-	p := m.providerValue()
-	if len(p.SkillScan().InspectArgs) > 0 {
-		return
-	}
-	m.applySkills(agent.DiscoverSkills(p, m.cwd, homeDir(), m.sessionBinary()))
-}
-
-func (m Model) discoverSkillsCmd() tea.Cmd {
-	p := m.providerValue()
-	if len(p.SkillScan().InspectArgs) == 0 {
-		return nil
-	}
-	bin := m.sessionBinary()
-	if bin == "" {
-		return nil
-	}
-	gen := m.skillsGen
-	cwd, home := m.cwd, homeDir()
-	return func() tea.Msg {
-		d := agent.DiscoverSkillsReport(p, cwd, home, bin)
-		return skillsMsg{gen: gen, skills: skillsToSlash(d.Skills), inspectErr: d.InspectErr}
-	}
+	m.applySkills(agent.DiscoverSkills(m.providerValue(), m.cwd, homeDir()))
 }
 
 // scanDiskSkills is the cursor filesystem walk, kept for tests that pin
 // project-beats-home and the plugin skip without constructing a Model.
 func scanDiskSkills(workspace, home string) []slashItem {
-	return skillsToSlash(agent.DiscoverSkills(agent.CursorProvider(), workspace, home, ""))
+	return skillsToSlash(agent.DiscoverSkills(agent.CursorProvider(), workspace, home))
 }

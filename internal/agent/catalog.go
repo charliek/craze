@@ -86,14 +86,9 @@ func snapshotFromNewProvider(res *acp.NewSessionResult, p Provider, init *acp.In
 	}
 	curModel, models := parseModels(modelsRaw)
 	curMode, modes := parseModes(res.Modes)
-	if p.Dialect() == acp.DialectGrok && len(modes) == 0 {
-		modes = []ModeInfo{
-			{ID: "default", Name: "Default"},
-			{ID: "plan", Name: "Plan"},
-			{ID: "ask", Name: "Ask"},
-		}
-		if curMode == "" {
-			curMode = "default"
+	if len(modes) == 0 {
+		if modes = p.FallbackModes(); len(modes) > 0 && curMode == "" {
+			curMode = modes[0].ID
 		}
 	}
 	return Snapshot{

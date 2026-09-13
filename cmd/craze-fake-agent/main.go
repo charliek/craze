@@ -44,8 +44,6 @@ Flags:
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in
 for cursor-agent acp or grok agent stdio.
-
-inspect --json prints a skill catalog fixture and exits (no ACP).
 `
 
 func main() {
@@ -73,11 +71,6 @@ func main() {
 			script = strings.TrimPrefix(a, "--script=")
 		}
 	}
-	if isInspectJSON(args) {
-		dumpArgv()
-		fmt.Print(inspectJSONFixture)
-		os.Exit(0)
-	}
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
@@ -93,30 +86,6 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-func isInspectJSON(args []string) bool {
-	hasInspect, hasJSON := false, false
-	for _, a := range args {
-		switch a {
-		case "inspect":
-			hasInspect = true
-		case "--json", "-json":
-			hasJSON = true
-		}
-	}
-	return hasInspect && hasJSON
-}
-
-const inspectJSONFixture = `{
-  "skills": [
-    {"name":"bundled-one","description":"A bundled skill","source":{"type":"bundled","path":"/opt/grok/skills/bundled-one/SKILL.md"},"userInvocable":true},
-    {"name":"plugin-one","description":"A plugin skill","source":{"type":"plugin","path":"/home/u/.grok/installed-plugins/foo/skills/plugin-one/SKILL.md"}},
-    {"name":"hidden","description":"not invocable","source":{"type":"user","path":"/x"},"userInvocable":false},
-    {"name":"no-path","description":"missing path","source":{"type":"user"}},
-    {"name":"PLUGIN-ONE","description":"duplicate case"}
-  ]
-}
-`
 
 func dumpArgv() {
 	p := os.Getenv("CRAZE_FAKE_DUMP_ARGV")

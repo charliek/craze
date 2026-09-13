@@ -3,15 +3,38 @@ package acp
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
+// PickKind returns the id of the option that answers kind. An option whose
+// id spells the kind itself (grok's "allow-once" for allow_once) wins over
+// the first option of that kind: grok prepends "enable-always-approve", also
+// kind allow_once, to every request, and picking it by position would turn
+// on always-approve for the rest of the session when the user asked to allow
+// one call.
 func PickKind(opts []PermissionOption, kind string) (string, bool) {
+	first := ""
 	for _, o := range opts {
-		if o.Kind == kind && o.OptionID != "" {
+		if o.Kind != kind || o.OptionID == "" {
+			continue
+		}
+		if KindSpelledBy(o.OptionID, kind) {
 			return o.OptionID, true
 		}
+		if first == "" {
+			first = o.OptionID
+		}
 	}
-	return "", false
+	return first, first != ""
+}
+
+// KindSpelledBy reports whether an option id is the kind under another
+// spelling: case and the dash/underscore choice are ignored.
+func KindSpelledBy(id, kind string) bool {
+	norm := func(s string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), "-", "_"))
+	}
+	return norm(id) == norm(kind)
 }
 
 // PickYoloAllow selects allow_always, then allow_once, using the option's own id.

@@ -155,6 +155,18 @@ type PermissionOption struct {
 	Kind     string
 }
 
+// OptionIDForKind picks the option that answers a permission kind, the way
+// yolo does on the wire: an option whose id spells the kind wins over the
+// first of that kind, so grok's prepended "enable-always-approve" (kind
+// allow_once) is never chosen for a plain allow-once.
+func OptionIDForKind(opts []PermissionOption, kind string) (string, bool) {
+	wire := make([]acp.PermissionOption, 0, len(opts))
+	for _, o := range opts {
+		wire = append(wire, acp.PermissionOption{OptionID: o.OptionID, Kind: o.Kind})
+	}
+	return acp.PickKind(wire, kind)
+}
+
 type PermissionEvent struct {
 	ID      string
 	Tool    string
@@ -229,7 +241,5 @@ type Session interface {
 	SetMode(ctx context.Context, modeID string) error
 	SetConfig(ctx context.Context, id, value string) error
 	Snapshot() Snapshot
-	// Binary is the resolved agent path Spawn looked up, used for inspect.
-	Binary() string
 	Close() error
 }

@@ -1,25 +1,17 @@
 package agent
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 const (
-	maxSkillDepth   = 10
-	maxSkillFiles   = 256
-	maxSkillBytes   = 1 << 20
-	maxInspectBytes = 1 << 20
-	inspectTimeout  = 4 * time.Second
+	maxSkillDepth = 10
+	maxSkillFiles = 256
+	maxSkillBytes = 1 << 20
 )
 
 // Skill is a provider skill the slash picker can offer.
@@ -28,133 +20,12 @@ type Skill struct {
 	Description string
 }
 
-type inspectRunner func(bin string, args []string, dir string, timeout time.Duration) ([]byte, error)
-
-func execInspect(bin string, args []string, dir string, timeout time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Stderr = io.Discard
-	cmd.WaitDelay = time.Second
-	var buf cappedBuffer
-	buf.max = maxInspectBytes
-	cmd.Stdout = &buf
-	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("agent: inspect timed out")
-	}
-	if buf.hit {
-		return nil, fmt.Errorf("agent: inspect output too large")
-	}
-	return buf.buf.Bytes(), err
-}
-
-// cappedBuffer stops buffering once max bytes have been written so inspect
-// cannot grow without bound.
-type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
-	hit bool
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if c.hit {
-		return len(p), nil
-	}
-	if c.buf.Len()+len(p) > c.max {
-		c.hit = true
-		return len(p), nil
-	}
-	return c.buf.Write(p)
-}
-
-// SkillDiscovery is one catalog lookup. InspectErr is set when inspect was
-// attempted and failed (timeout, spawn, or decode); Skills is then the
-// filesystem fallback rather than an empty catalog treated as success.
-type SkillDiscovery struct {
-	Skills     []Skill
-	InspectErr error
-}
-
-// DiscoverSkills is the provider-owned catalog: inspect when advertised,
-// otherwise a filesystem walk of SkillScan.RelRoots. Inspect failure falls
-// back to the walk rather than caching an empty catalog.
-func DiscoverSkills(p Provider, cwd, home, bin string) []Skill {
-	return DiscoverSkillsReport(p, cwd, home, bin).Skills
-}
-
-// DiscoverSkillsReport is DiscoverSkills plus whether inspect failed, so the
-// TUI can surface a diagnostic without treating a valid empty catalog as an
-// error.
-func DiscoverSkillsReport(p Provider, cwd, home, bin string) SkillDiscovery {
-	return discoverSkillsReport(p, cwd, home, bin, execInspect)
-}
-
-func discoverSkills(p Provider, cwd, home, bin string, run inspectRunner) []Skill {
-	return discoverSkillsReport(p, cwd, home, bin, run).Skills
-}
-
-func discoverSkillsReport(p Provider, cwd, home, bin string, run inspectRunner) SkillDiscovery {
-	scan := p.SkillScan()
-	if len(scan.InspectArgs) > 0 && bin != "" && run != nil {
-		out, err := run(bin, scan.InspectArgs, cwd, inspectTimeout)
-		if err != nil {
-			return SkillDiscovery{Skills: walkProviderSkills(scan, cwd, home), InspectErr: err}
-		}
-		skills, ok := parseInspectSkills(out)
-		if !ok {
-			return SkillDiscovery{
-				Skills:     walkProviderSkills(scan, cwd, home),
-				InspectErr: fmt.Errorf("agent: inspect: invalid json"),
-			}
-		}
-		return SkillDiscovery{Skills: skills}
-	}
-	return SkillDiscovery{Skills: walkProviderSkills(scan, cwd, home)}
-}
-
-func parseInspectSkills(raw []byte) ([]Skill, bool) {
-	var parsed struct {
-		Skills []struct {
-			Name          string `json:"name"`
-			Description   string `json:"description"`
-			UserInvocable *bool  `json:"userInvocable"`
-			Source        struct {
-				Type string `json:"type"`
-				Path string `json:"path"`
-			} `json:"source"`
-		} `json:"skills"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, false
-	}
-	if parsed.Skills == nil {
-		return nil, false
-	}
-	out := make([]Skill, 0, len(parsed.Skills))
-	seen := make(map[string]struct{})
-	for _, e := range parsed.Skills {
-		if e.UserInvocable != nil && !*e.UserInvocable {
-			continue
-		}
-		name := strings.TrimSpace(e.Name)
-		if name == "" {
-			continue
-		}
-		key := strings.ToLower(name)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, Skill{Name: name, Description: strings.TrimSpace(e.Description)})
-		if len(out) >= maxSkillFiles {
-			break
-		}
-	}
-	return out, true
+// DiscoverSkills is the provider-owned catalog: a filesystem walk of the
+// provider's SkillScan roots under the workspace and home. Skills the agent
+// itself advertises arrive over ACP as available_commands_update and are
+// merged by the slash catalog, not here.
+func DiscoverSkills(p Provider, cwd, home string) []Skill {
+	return walkProviderSkills(p.SkillScan(), cwd, home)
 }
 
 func walkProviderSkills(scan SkillScan, workspace, home string) []Skill {

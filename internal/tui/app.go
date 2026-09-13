@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,11 +57,6 @@ type Config struct {
 	// NoMouse turns mouse reporting off, which gives the terminal its native
 	// drag-select back.
 	NoMouse bool
-	// Diag is where craze's own diagnostics go for the duration of Run. While
-	// the alt screen is up a write to the terminal lands on top of a frame, so
-	// the caller passes a buffer it flushes afterwards. nil leaves them on
-	// stderr, which is right for anything that does not own the screen.
-	Diag io.Writer
 	// Provider is the resolved default the startup picker preselects.
 	Provider agent.Provider
 	// ProviderLocked skips the picker: an explicit --provider, or the frame
@@ -176,12 +170,9 @@ type Model struct {
 	themeNames []string
 	themePrev  Theme
 
-	slashSel  int
-	slashHide bool
-	skills    []slashItem
-	// skillsGen is the Start that launched the current inspect; a late result
-	// from an earlier provider is dropped.
-	skillsGen  int
+	slashSel   int
+	slashHide  bool
+	skills     []slashItem
 	streamOpen bool
 
 	pickingProvider bool
@@ -256,11 +247,6 @@ func (m Model) now() time.Time {
 
 type eventMsg struct{ ev agent.Event }
 type startedMsg struct{}
-type skillsMsg struct {
-	gen        int
-	skills     []slashItem
-	inspectErr error
-}
 type promptDoneMsg struct {
 	res agent.Result
 	err error
@@ -371,13 +357,6 @@ func Run(cfg Config) error {
 	out := newSyncWriter(os.Stdout)
 	prevOut := setClipboardOut(out)
 	defer setClipboardOut(prevOut)
-	// Nothing craze owns may write to the terminal behind the renderer's back
-	// while the alt screen is up: the agent's stderr and craze's own warnings
-	// are buffered by the caller and flushed once the screen is back.
-	if cfg.Diag != nil {
-		prevDiag := setDiag(cfg.Diag)
-		defer setDiag(prevDiag)
-	}
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithOutput(out)}
 	if !cfg.NoMouse {
 		// Cell motion, not all motion: the quieter mode reports a drag once per
@@ -479,25 +458,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.addError(err.Error())
 			}
 		}
-		m.skillsGen++
 		m.rescanSkills()
-		cmd := waitEvent(m.sess)
-		if inspect := m.discoverSkillsCmd(); inspect != nil {
-			return m, tea.Batch(cmd, inspect)
-		}
-		return m, cmd
-
-	case skillsMsg:
-		if msg.gen != m.skillsGen {
-			return m, nil
-		}
-		m.skills = msg.skills
-		if msg.inspectErr != nil {
-			text := "skill inspect failed: " + msg.inspectErr.Error()
-			m.addError(text)
-			diagf("craze: %s\n", text)
-		}
-		return m, nil
+		return m, waitEvent(m.sess)
 
 	case errMsg:
 		// errMsg is only ever startCmd's: the session never came up. The TUI
@@ -1012,8 +974,6 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	if m.input.Value() != prev {
 		m.slashHide = false
 		if name, _, ok := parseSlashLine(m.input.Value()); ok && name == "" {
-			// Cursor filesystem skills still rescan here; grok inspect is
-			// cached after Start and must not run again on `/`.
 			m.rescanSkills()
 		}
 	}

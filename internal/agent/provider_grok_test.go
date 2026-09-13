@@ -44,9 +44,6 @@ func TestGrokProviderData(t *testing.T) {
 	if !reflect.DeepEqual(scan.RelRoots, []string{filepath.Join(".grok", "skills")}) {
 		t.Fatalf("rel roots %q", scan.RelRoots)
 	}
-	if !reflect.DeepEqual(scan.InspectArgs, []string{"inspect", "--json"}) {
-		t.Fatalf("inspect args %q", scan.InspectArgs)
-	}
 	if p.ImplementPrompt() != "Implement the plan above." {
 		t.Fatalf("implement prompt %q", p.ImplementPrompt())
 	}
@@ -70,9 +67,6 @@ func TestCursorProviderData(t *testing.T) {
 	caps := p.Capabilities()
 	if !caps.FastToggle || !caps.SubagentRows || !caps.ParameterizedPicker {
 		t.Fatalf("capabilities %+v", caps)
-	}
-	if len(p.SkillScan().InspectArgs) != 0 {
-		t.Fatalf("cursor has no inspect command: %q", p.SkillScan().InspectArgs)
 	}
 	if !p.SkillScan().SkipCursorPlugins {
 		t.Fatal("cursor still skips .cursor/plugins this cut")
@@ -136,9 +130,6 @@ func TestProviderInfoRoundTrip(t *testing.T) {
 	if grok.Dialect() != acp.DialectGrok {
 		t.Fatalf("dialect %q", grok.Dialect())
 	}
-	if !reflect.DeepEqual(grok.SkillScan().InspectArgs, []string{"inspect", "--json"}) {
-		t.Fatalf("inspect args %q", grok.SkillScan().InspectArgs)
-	}
 	cursor := CursorProvider().Info()
 	if !cursor.Capabilities().SubagentRows || cursor.Dialect() != acp.DialectCursor {
 		t.Fatalf("cursor snapshot %+v %q", cursor.Capabilities(), cursor.Dialect())
@@ -195,9 +186,8 @@ func TestSkillScanReturnsCopies(t *testing.T) {
 	p := GrokProvider()
 	scan := p.SkillScan()
 	scan.RelRoots[0] = "mutated"
-	scan.InspectArgs[0] = "mutated"
 	got := p.SkillScan()
-	if got.RelRoots[0] == "mutated" || got.InspectArgs[0] == "mutated" {
+	if got.RelRoots[0] == "mutated" {
 		t.Fatal("SkillScan shared backing storage")
 	}
 }

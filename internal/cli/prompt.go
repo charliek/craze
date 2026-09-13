@@ -258,12 +258,7 @@ func pickPermission(opts []agent.PermissionOption, queue []string) (optionID str
 }
 
 func optionIDForKind(opts []agent.PermissionOption, kind string) (string, bool) {
-	for _, o := range opts {
-		if o.Kind == kind && o.OptionID != "" {
-			return o.OptionID, true
-		}
-	}
-	return "", false
+	return agent.OptionIDForKind(opts, kind)
 }
 
 func decisionKind(raw string) (string, error) {

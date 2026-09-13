@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -228,5 +229,39 @@ func TestTodosEventEmitted(t *testing.T) {
 	}
 	if ev.At.IsZero() {
 		t.Fatal("Event.At not stamped")
+	}
+}
+
+// TestCancelledTurnClosesInFlightTools pins what grok leaves behind after a
+// cancel: the interrupted tool never gets a terminal update from the agent,
+// so the session settles it itself when the turn ends cancelled.
+func TestCancelledTurnClosesInFlightTools(t *testing.T) {
+	p := GrokProvider()
+	s := newSession(Options{Provider: &p})
+	running, done := "in_progress", "completed"
+	s.mergeTool(toolDelta{id: "t-run", status: &running})
+	s.mergeTool(toolDelta{id: "t-done", status: &done})
+	s.mergeTool(toolDelta{id: "t-new"})
+	go s.closeInFlightTools(acp.StopCancelled)
+	select {
+	case ev := <-s.Events():
+		if ev.Type != EventTool || ev.Tool == nil || ev.Tool.ID != "t-run" || ev.Tool.Status != "cancelled" {
+			t.Fatalf("unexpected event %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("running tool was not settled")
+	}
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("only the running tool is settled: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+	for _, tool := range s.Snapshot().Tools {
+		if tool.ID == "t-done" && tool.Status != "completed" {
+			t.Fatalf("completed tool touched: %+v", tool)
+		}
+		if tool.ID == "t-new" && tool.Status != "" {
+			t.Fatalf("a tool that never reported in flight is left alone: %+v", tool)
+		}
 	}
 }

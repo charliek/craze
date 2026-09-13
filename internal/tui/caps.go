@@ -41,10 +41,3 @@ func (m Model) providerValue() agent.Provider {
 	}
 	return p
 }
-
-func (m Model) sessionBinary() string {
-	if m.sess == nil {
-		return ""
-	}
-	return m.sess.Binary()
-}

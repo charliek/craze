@@ -119,11 +119,11 @@ reach the agent as anything other than an accept or a reject.
 
 Skills come from the **provider**, not a global scan. Cursor walks
 `.cursor/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills` under
-the workspace and `$HOME`, and still skips `.cursor/plugins`. Grok runs
-`grok inspect --json` once after Start (plugin skills included) and falls
-back to `.grok/skills` if inspect fails; `/` uses the cache and does not
-run inspect again. Agent-advertised commands from the ACP session are listed
-too, after the builtins.
+the workspace and `$HOME`, and still skips `.cursor/plugins`. Grok walks
+`.grok/skills`; its bundled and plugin skills need no walk because the grok
+session advertises all of them (under their real slash names, such as
+`coderabbit:code-review`) as ACP commands. Agent-advertised commands from
+the ACP session are listed after the builtins.
 
 ## Model dialog
 
