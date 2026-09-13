@@ -181,3 +181,23 @@ func TestGrokAuthMethodSelection(t *testing.T) {
 		t.Fatalf("cursor passes cursor_login with nil meta: %q %v %v", id, meta, ok)
 	}
 }
+
+func TestSessionCopiesProviderAtNew(t *testing.T) {
+	p := GrokProvider()
+	s := newSession(Options{Provider: &p})
+	p = CursorProvider()
+	if s.provider().Name() != "grok" {
+		t.Fatalf("mutating the caller's provider changed the session: %q", s.provider().Name())
+	}
+}
+
+func TestSkillScanReturnsCopies(t *testing.T) {
+	p := GrokProvider()
+	scan := p.SkillScan()
+	scan.RelRoots[0] = "mutated"
+	scan.InspectArgs[0] = "mutated"
+	got := p.SkillScan()
+	if got.RelRoots[0] == "mutated" || got.InspectArgs[0] == "mutated" {
+		t.Fatal("SkillScan shared backing storage")
+	}
+}

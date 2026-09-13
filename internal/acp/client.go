@@ -241,12 +241,19 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		rpcCh <- promptResult{res: result, err: err}
 	}()
 	select {
-	case w := <-rpcCh:
-		return promptResultOrErr(w)
 	case w := <-wait:
 		rpcCancel()
 		go func() { <-rpcCh }()
 		return promptResultOrErr(w)
+	case w := <-rpcCh:
+		// Both channels can be ready at once; Go's select would pick
+		// either. If the notify already landed it was first, so it wins.
+		select {
+		case n := <-wait:
+			return promptResultOrErr(n)
+		default:
+			return promptResultOrErr(w)
+		}
 	case <-ctx.Done():
 		rpcCancel()
 		go func() { <-rpcCh }()

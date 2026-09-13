@@ -84,6 +84,10 @@ func newSession(opts Options) *session {
 
 		taskReceipts: make(map[string]TaskInfo),
 	}
+	if opts.Provider != nil {
+		p := *opts.Provider
+		s.opts.Provider = &p
+	}
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
@@ -808,6 +812,9 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.mu.Unlock()
 		s.emit(Event{Type: EventMeta})
 	case acp.UpdatePlan:
+		if s.provider().Dialect() != acp.DialectGrok {
+			return
+		}
 		todos, ok := planEntriesToTodos(u.Entries)
 		if !ok {
 			return

@@ -215,7 +215,13 @@ func (p Provider) LoginHint() string { return p.loginHint }
 func (p Provider) Capabilities() Capabilities { return p.capabilities }
 
 // SkillScan is where the provider's skills come from.
-func (p Provider) SkillScan() SkillScan { return p.skillScan }
+func (p Provider) SkillScan() SkillScan {
+	return SkillScan{
+		RelRoots:          append([]string(nil), p.skillScan.RelRoots...),
+		SkipCursorPlugins: p.skillScan.SkipCursorPlugins,
+		InspectArgs:       append([]string(nil), p.skillScan.InspectArgs...),
+	}
+}
 
 // ModeKind is what this provider's mode id means; an id it does not know is
 // ModeUnknown.

@@ -76,8 +76,27 @@ func TestMergeTodosUpsertKeepsOrderAndAppends(t *testing.T) {
 	}
 }
 
-func TestPlanUpdateReplacesTodos(t *testing.T) {
+func TestCursorIgnoresPlanUpdates(t *testing.T) {
 	s := newSession(Options{})
+	s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Read", "status": "pending"},
+		},
+	})})
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("cursor must ignore plan updates, got %+v", ev)
+	default:
+	}
+	if s.Snapshot().Todos != nil {
+		t.Fatalf("cursor todos %s", todoStates(s.Snapshot().Todos))
+	}
+}
+
+func TestPlanUpdateReplacesTodos(t *testing.T) {
+	p := GrokProvider()
+	s := newSession(Options{Provider: &p})
 	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
 		"sessionUpdate": acp.UpdatePlan,
 		"entries": []map[string]string{
