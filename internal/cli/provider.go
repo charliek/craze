@@ -68,9 +68,9 @@ func warnUnknownProvider(w io.Writer, id string) {
 	fmt.Fprintf(w, "craze: unknown provider %q, using cursor\n", id)
 }
 
-func persistProvider(r resolvedProvider) {
+func persistProvider(r resolvedProvider) error {
 	if r.Fallback {
-		return
+		return nil
 	}
-	_ = tui.SaveProvider(r.Provider.Name())
+	return tui.SaveProvider(r.Provider.Name())
 }

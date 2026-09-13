@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -129,6 +130,35 @@ description: skip
 	got := DiscoverSkills(CursorProvider(), cwd, "", "")
 	if len(got) != 1 || got[0].Name != "ok" {
 		t.Fatalf("cursor skills %v", got)
+	}
+}
+
+func TestExecInspectCapsOutput(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "inspect")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ndd if=/dev/zero bs=1024 count=2048 2>/dev/null\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := execInspect(bin, nil, dir, 2*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestDiscoverSkillsSkipsNonRegular(t *testing.T) {
+	cwd := t.TempDir()
+	path := filepath.Join(cwd, ".cursor", "skills", "fifo", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	got := DiscoverSkills(CursorProvider(), cwd, "", "")
+	for _, sk := range got {
+		if sk.Name == "fifo" {
+			t.Fatal("fifo SKILL.md must be skipped")
+		}
 	}
 }
 

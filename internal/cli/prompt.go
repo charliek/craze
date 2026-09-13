@@ -122,7 +122,9 @@ func (o *promptOpts) run() error {
 		}
 		return err
 	}
-	persistProvider(resolved)
+	if err := persistProvider(resolved); err != nil {
+		fmt.Fprintf(o.stderr, "craze: not saving the provider: %v\n", err)
+	}
 
 	turns := append([]string{text}, o.followUps...)
 	queue := append([]string{}, o.decisions...)

@@ -88,7 +88,11 @@ func defaultConfigOptions() []map[string]any {
 
 func run(script string) error {
 	conn := acp.NewConn(os.Stdin, os.Stdout)
-	s := &server{conn: conn, script: script, config: defaultConfigOptions()}
+	cfg := defaultConfigOptions()
+	if grokScript(script) {
+		cfg = grokConfigOptions()
+	}
+	s := &server{conn: conn, script: script, config: cfg}
 	conn.SetRequestHandler(s.onRequest)
 	conn.SetNotifyHandler(s.onNotify)
 	conn.Start()

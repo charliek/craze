@@ -62,7 +62,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--provider` | ACP provider: `cursor` or `grok` |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
-| `--force` | Spawn the agent with `--force` (yolo). Default: on |
+| `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |

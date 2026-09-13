@@ -33,8 +33,8 @@ def run_prompt(
     env["CRAZE_FAKE_SCRIPT"] = script
     env.pop("CRAZE_PROVIDER", None)
     env["CRAZE_CONFIG"] = str(workspace / "missing-craze-config.toml")
-    env.setdefault("XAI_API_KEY", "")
-    env.setdefault("GROK_CODE_XAI_API_KEY", "")
+    env["XAI_API_KEY"] = ""
+    env["GROK_CODE_XAI_API_KEY"] = ""
     cmd = [
         str(craze_bin),
         "prompt",

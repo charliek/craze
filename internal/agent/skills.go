@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,10 +15,11 @@ import (
 )
 
 const (
-	maxSkillDepth  = 10
-	maxSkillFiles  = 256
-	maxSkillBytes  = 1 << 20
-	inspectTimeout = 4 * time.Second
+	maxSkillDepth   = 10
+	maxSkillFiles   = 256
+	maxSkillBytes   = 1 << 20
+	maxInspectBytes = 1 << 20
+	inspectTimeout  = 4 * time.Second
 )
 
 // Skill is a provider skill the slash picker can offer.
@@ -37,11 +39,36 @@ func execInspect(bin string, args []string, dir string, timeout time.Duration) (
 	}
 	cmd.Stderr = io.Discard
 	cmd.WaitDelay = time.Second
-	out, err := cmd.Output()
+	var buf cappedBuffer
+	buf.max = maxInspectBytes
+	cmd.Stdout = &buf
+	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("agent: inspect timed out")
 	}
-	return out, err
+	if buf.hit {
+		return nil, fmt.Errorf("agent: inspect output too large")
+	}
+	return buf.buf.Bytes(), err
+}
+
+// cappedBuffer stops buffering once max bytes have been written so inspect
+// cannot grow without bound.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	max int
+	hit bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.hit {
+		return len(p), nil
+	}
+	if c.buf.Len()+len(p) > c.max {
+		c.hit = true
+		return len(p), nil
+	}
+	return c.buf.Write(p)
 }
 
 // SkillDiscovery is one catalog lookup. InspectErr is set when inspect was
@@ -203,7 +230,7 @@ func walkSkillRoot(root string, skipPlugins bool, nFiles *int, seen map[string]s
 		}
 		*nFiles++
 		fi, infoErr := d.Info()
-		if infoErr != nil || fi.Size() > maxSkillBytes {
+		if infoErr != nil || !fi.Mode().IsRegular() || fi.Size() > maxSkillBytes {
 			return nil
 		}
 		data, readErr := os.ReadFile(path)
