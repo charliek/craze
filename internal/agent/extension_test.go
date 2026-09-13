@@ -135,10 +135,11 @@ func TestDuplicateTaskReceiptOverwrites(t *testing.T) {
 	s := newSession(Options{})
 	title := "Task: work"
 	s.mergeTool(toolDelta{id: "t1", title: &title})
+	drainEvents(s)
 	go s.onTaskReceipt(acpTask("t1", "model-a", "agent-a", 1))
-	<-s.Events()
+	waitEventType(t, s, EventTool)
 	go s.onTaskReceipt(acpTask("t1", "model-b", "agent-b", 2))
-	<-s.Events()
+	waitEventType(t, s, EventTool)
 	task := s.Snapshot().Tools[0].Task
 	if task.Model != "model-b" || task.AgentID != "agent-b" || task.DurationMs != 2 {
 		t.Fatalf("task %+v", task)

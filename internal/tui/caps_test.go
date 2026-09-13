@@ -7,7 +7,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
-func TestGrokHidesFastAndSubagentRows(t *testing.T) {
+func TestGrokHidesFastKeepsSubagentRows(t *testing.T) {
 	m := sized(t)
 	for i, c := range m.snap.Config {
 		if c.ID == "fast" {
@@ -28,15 +28,15 @@ func TestGrokHidesFastAndSubagentRows(t *testing.T) {
 	if !strings.Contains(m.modelLabel(), "medium") {
 		t.Fatalf("grok should still show effort, got %q", m.modelLabel())
 	}
-	if len(m.agentItems()) != 0 {
-		t.Fatalf("grok must hide sub-agent rows, got %d", len(m.agentItems()))
+	if len(m.agentItems()) == 0 {
+		t.Fatal("grok now shows sub-agent rows")
 	}
-	if m.agentCount() != "" {
-		t.Fatalf("grok agent count %q", m.agentCount())
+	if m.agentCount() == "" {
+		t.Fatal("grok agent count should be set")
 	}
 }
 
-func TestGrokHelpOmitsFastAndSubagentKeys(t *testing.T) {
+func TestGrokHelpKeepsSubagentKeys(t *testing.T) {
 	m := sized(t)
 	m.snap.Provider = agent.GrokProvider().Info()
 	keys := m.helpKeyLines()
@@ -47,8 +47,8 @@ func TestGrokHelpOmitsFastAndSubagentKeys(t *testing.T) {
 	if !strings.Contains(joined, "shift+tab") {
 		t.Fatal("grok still has modes; help must keep shift+tab")
 	}
-	if strings.Contains(joined, "sub-agent") {
-		t.Fatalf("grok help still mentions sub-agents:\n%s", joined)
+	if !strings.Contains(joined, "sub-agent") {
+		t.Fatalf("grok help should mention sub-agents:\n%s", joined)
 	}
 }
 

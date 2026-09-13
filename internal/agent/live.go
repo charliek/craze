@@ -38,6 +38,7 @@ type session struct {
 	turn          int
 	cancelledTurn int
 	snap          Snapshot
+	sessionID     string
 	tools         map[string]ToolEvent
 	toolOrder     []string
 	// taskReceipts holds cursor/task receipts whose tool_call has not landed
@@ -45,6 +46,8 @@ type session struct {
 	// never leak or attach itself to a later tool with a reused id.
 	taskReceipts     map[string]TaskInfo
 	taskReceiptOrder []string
+	subagents        map[string]*subagentRec
+	subagentOrder    []string
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
@@ -82,6 +85,7 @@ func newSession(opts Options) *session {
 		tools:     make(map[string]ToolEvent),
 
 		taskReceipts: make(map[string]TaskInfo),
+		subagents:    make(map[string]*subagentRec),
 	}
 	if opts.Provider != nil {
 		p := *opts.Provider
@@ -167,6 +171,7 @@ func (s *session) Start(ctx context.Context) error {
 	s.client = client
 	s.mu.Unlock()
 	client.SetUpdateHandler(s.onUpdate)
+	client.SetSubagentHandler(s.onSubagent)
 	client.SetPermissionHandler(s.onPermission)
 	client.SetAskHandler(s.onAskQuestion)
 	client.SetPlanHandler(s.onCreatePlan)
@@ -196,6 +201,9 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	snap := snapshotFromNewProvider(sess, s.provider(), initRes)
 	snap.Provider = s.provider().Info()
+	s.mu.Lock()
+	s.sessionID = sess.SessionID
+	s.mu.Unlock()
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(snap.Modes))
 		if !ok {
@@ -306,9 +314,11 @@ func (s *session) closeInFlightTools(status string) {
 		// The in-flight check happens under the merge lock: a terminal
 		// update that lands between the scan and the merge wins.
 		st := status
-		if tool, changed := s.mergeTool(toolDelta{id: id, status: &st, onlyIfInFlight: true}); changed {
+		tool, changed, extras := s.applyToolDelta("", toolDelta{id: id, status: &st, onlyIfInFlight: true})
+		if changed {
 			s.emit(Event{Type: EventTool, Tool: &tool})
 		}
+		s.emitAll(extras)
 	}
 }
 
@@ -369,6 +379,7 @@ func (s *session) Snapshot() Snapshot {
 	out.Config = cloneConfig(s.snap.Config)
 	out.Todos = append([]Todo(nil), s.snap.Todos...)
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
+	out.Subagents = snapshotSubagents(s.subagentOrder, s.subagents)
 	return out
 }
 
@@ -742,9 +753,11 @@ func (s *session) onTaskReceipt(req acp.TaskRequest) {
 	}
 	tool.Task = mergeTaskInfo(tool.Task, info)
 	s.tools[req.ToolCallID] = tool
-	out := cloneTool(tool)
+	extras := s.syncCursorLocked(tool)
+	out := cloneTool(s.tools[req.ToolCallID])
 	s.mu.Unlock()
 	s.emit(Event{Type: EventTool, Tool: &out})
+	s.emitAll(extras)
 }
 
 type sessionUpdateWire struct {
@@ -768,6 +781,10 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 	if err := json.Unmarshal(n.Update, &u); err != nil {
 		return
 	}
+	if n.Child != "" {
+		s.onChildUpdate(n.Child, n.ToolName, u)
+		return
+	}
 	switch u.SessionUpdate {
 	case acp.UpdateAgentMessage:
 		s.emit(Event{Type: EventText, Text: messageText(u.Content)})
@@ -778,10 +795,12 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		if !ok {
 			return
 		}
-		tool, emit := s.mergeTool(delta)
+		delta.wireName = n.ToolName
+		tool, emit, extras := s.applyToolDelta("", delta)
 		if emit {
 			s.emit(Event{Type: EventTool, Tool: &tool})
 		}
+		s.emitAll(extras)
 	case acp.UpdateAvailableCommands:
 		s.mu.Lock()
 		s.snap.Commands = commandsFromUpdate(u.AvailableCommands)

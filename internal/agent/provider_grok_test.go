@@ -33,7 +33,7 @@ func TestGrokProviderData(t *testing.T) {
 		t.Fatalf("login hint %q", p.LoginHint())
 	}
 	wantCaps := Capabilities{
-		FastToggle: false, SubagentRows: false,
+		FastToggle: false, SubagentRows: true, SubagentTranscript: true,
 		Effort: true, Modes: true, Todos: true,
 		AskCards: true, PlanCards: true, ParameterizedPicker: true,
 	}
@@ -65,7 +65,7 @@ func TestCursorProviderData(t *testing.T) {
 		t.Fatalf("login hint %q", p.LoginHint())
 	}
 	caps := p.Capabilities()
-	if !caps.FastToggle || !caps.SubagentRows || !caps.ParameterizedPicker {
+	if !caps.FastToggle || !caps.SubagentRows || caps.SubagentTranscript || !caps.ParameterizedPicker {
 		t.Fatalf("capabilities %+v", caps)
 	}
 	if !p.SkillScan().SkipCursorPlugins {
@@ -121,8 +121,11 @@ func TestProviderInfoRoundTrip(t *testing.T) {
 	if got := grok.provider(); got.Name() != "grok" {
 		t.Fatalf("rebuilt %+v", got)
 	}
-	if grok.Capabilities().SubagentRows {
-		t.Fatal("a grok snapshot must report SubagentRows false")
+	if !grok.Capabilities().SubagentRows {
+		t.Fatal("a grok snapshot must report SubagentRows true")
+	}
+	if !grok.Capabilities().SubagentTranscript {
+		t.Fatal("a grok snapshot must report SubagentTranscript true")
 	}
 	if grok.Capabilities().FastToggle {
 		t.Fatal("a grok snapshot must report FastToggle false")

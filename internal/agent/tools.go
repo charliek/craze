@@ -28,27 +28,10 @@ const (
 // without a _toolName still register as sub-agents.
 var subagentTitleRe = regexp.MustCompile(`(?i)\bsubagent\b|\btask\b`)
 
-// IsTask reports whether the tool call is a sub-agent.
-//
-// The order matters. A todo tool is never a sub-agent: cursor rewrites its
-// title to "Update TODOs: <the user's todo text>", so a live turn asked to
-// "spawn a subagent to count lines" made the title fallback below classify the
-// todo writer as a sub-agent and put a bogus row under the status rows.
-//
-// After that, a tool that declares a _toolName is classified by that name
-// alone. The title heuristics are the 003 fallback for tools that declare
-// nothing (cursor's own sub-agent calls, and the `tasks` fake), and they are
-// the only part that can be fooled by text the user wrote, so they only run
-// when there is nothing better to go on.
+// IsTask reports whether the tool call is a sub-agent. Classification stamps
+// Task at merge; this is the compatibility query the TUI still reads.
 func (t ToolEvent) IsTask() bool {
-	if t.IsTodoTool() {
-		return false
-	}
-	if t.ToolName != "" {
-		return t.ToolName == "task"
-	}
-	return strings.HasPrefix(t.Title, "Task:") ||
-		(t.Title != "" && subagentTitleRe.MatchString(t.Title))
+	return t.Task != nil
 }
 
 // IsTodoTool reports whether the tool call is cursor's todo writer, which the
@@ -73,22 +56,44 @@ type toolDelta struct {
 	hasRawOutput   bool
 	locations      json.RawMessage
 	hasLocations   bool
+	// wireName is SessionNotification.ToolName (grok _meta); rawInput._toolName wins.
+	wireName string
 }
 
 func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
+	tool, changed, extras := s.applyToolDelta("", d)
+	s.emitAll(extras)
+	return tool, changed
+}
+
+func (s *session) applyToolDelta(owner string, d toolDelta) (ToolEvent, bool, []Event) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.tools == nil {
-		s.tools = make(map[string]ToolEvent)
+	tool, changed, extras := s.mergeToolLocked(owner, d)
+	s.mu.Unlock()
+	return tool, changed, extras
+}
+
+func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, []Event) {
+	tools, order, evicted, capN := s.toolStoreLocked(owner)
+	if tools == nil {
+		return ToolEvent{}, false, nil
 	}
-	prev, exists := s.tools[d.id]
+	if evicted != nil {
+		if _, gone := evicted[d.id]; gone {
+			return ToolEvent{}, false, nil
+		}
+	}
+	prev, exists := tools[d.id]
 	if d.onlyIfInFlight && (!exists || !toolStatusInFlight(prev.Status)) {
-		return cloneTool(prev), false
+		return cloneTool(prev), false, nil
 	}
 	out := prev
 	if !exists {
+		if capN > 0 && len(*order) >= capN {
+			s.evictChildToolLocked(tools, order, evicted)
+		}
 		out.ID = d.id
-		s.toolOrder = append(s.toolOrder, d.id)
+		*order = append(*order, d.id)
 	}
 	if d.title != nil {
 		title := sanitizeText(*d.title)
@@ -106,8 +111,24 @@ func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
 		if name := toolNameOf(d.rawInput); name != "" {
 			out.ToolName = name
 		}
-		if task := taskFromRawInput(d.rawInput); task != nil {
+		if task := taskFromRawInput(d.rawInput, out.ToolName); task != nil {
 			out.Task = mergeTaskInfo(out.Task, *task)
+		}
+	}
+	if out.ToolName == "" && d.wireName != "" {
+		out.ToolName = sanitizeText(d.wireName)
+		if d.hasRawInput {
+			if task := taskFromRawInput(d.rawInput, out.ToolName); task != nil {
+				out.Task = mergeTaskInfo(out.Task, *task)
+			}
+		}
+	}
+	if s.classifyTask(out) {
+		if out.Task == nil {
+			out.Task = &TaskInfo{}
+		}
+		if out.Task.Description == "" {
+			out.Task.Description = strings.TrimPrefix(out.Title, "Task: ")
 		}
 	}
 	if d.hasContent {
@@ -125,11 +146,36 @@ func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
 	if d.hasLocations {
 		out.Locations = locationPaths(d.locations)
 	}
+	out.At = time.Now()
+	tools[d.id] = out
+	if owner != "" && out.Title != "" {
+		if rec := s.subagents[owner]; rec != nil {
+			rec.info.Activity = truncateUTF8(out.Title, subagentActivityCap)
+		}
+	}
+
+	var extras []Event
+	extras = append(extras, s.syncCursorLocked(out)...)
+	if t, ok := tools[d.id]; ok {
+		out = t
+	}
 	if r, ok := s.taskReceipts[d.id]; ok {
 		out.Task = mergeTaskInfo(out.Task, r)
 		s.dropTaskReceiptLocked(d.id)
+		tools[d.id] = out
+		extras = append(extras, s.syncCursorLocked(out)...)
+		if t, ok := tools[d.id]; ok {
+			out = t
+		}
 	}
-	out.At = time.Now()
+	if d.hasRawOutput || d.hasContent {
+		join := s.joinFromOutputLocked(owner, out, d.rawOutput, d.content)
+		extras = append(extras, join...)
+		if t, ok := tools[d.id]; ok {
+			out = t
+		}
+	}
+
 	changed := !exists ||
 		out.Status != prev.Status ||
 		out.Title != prev.Title ||
@@ -139,8 +185,8 @@ func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
 		!sameOutput(prev.Output, out.Output) ||
 		!sameDiffs(prev.Diffs, out.Diffs) ||
 		!sameTask(prev.Task, out.Task)
-	s.tools[d.id] = out
-	return cloneTool(out), changed
+	tools[d.id] = out
+	return cloneTool(out), changed, extras
 }
 
 // toolStatusInFlight is the status set the TUI counts as running.
@@ -181,8 +227,15 @@ func sameDiffs(a, b []ToolDiff) bool {
 }
 
 func sameTask(a, b *TaskInfo) bool {
-	if a == nil || b == nil {
-		return a == b
+	if a == nil && b == nil {
+		return true
+	}
+	empty := TaskInfo{}
+	if a == nil {
+		return *b == empty
+	}
+	if b == nil {
+		return *a == empty
 	}
 	return *a == *b
 }
@@ -214,6 +267,12 @@ func mergeTaskInfo(prev *TaskInfo, in TaskInfo) *TaskInfo {
 	}
 	if in.Receipt {
 		out.Receipt = true
+	}
+	if in.Status != "" {
+		out.Status = in.Status
+	}
+	if in.Background {
+		out.Background = true
 	}
 	return &out
 }
@@ -396,13 +455,33 @@ type taskRawInput struct {
 	SubagentType json.RawMessage `json:"subagentType"`
 }
 
-// taskFromRawInput reads the sub-agent fields off a task tool's rawInput.
-func taskFromRawInput(raw json.RawMessage) *TaskInfo {
+type grokSpawnRawInput struct {
+	Description  string `json:"description"`
+	Prompt       string `json:"prompt"`
+	SubagentType string `json:"subagent_type"`
+	Background   bool   `json:"background"`
+}
+
+// taskFromRawInput reads the sub-agent fields off a spawn tool's rawInput.
+// toolName is already resolved (_toolName else wire _meta).
+func taskFromRawInput(raw json.RawMessage, toolName string) *TaskInfo {
+	if toolName == "spawn_subagent" {
+		var in grokSpawnRawInput
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil
+		}
+		return &TaskInfo{
+			Description:  sanitizeText(in.Description),
+			Prompt:       truncateUTF8(sanitizeText(in.Prompt), taskPromptCap),
+			SubagentType: sanitizeText(in.SubagentType),
+			Background:   in.Background,
+		}
+	}
 	var in taskRawInput
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil
 	}
-	if in.ToolName != "task" {
+	if toolName != "task" && in.ToolName != "task" {
 		return nil
 	}
 	return &TaskInfo{

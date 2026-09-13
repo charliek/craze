@@ -118,40 +118,72 @@ func TestLocationPathsCap(t *testing.T) {
 // made the title fallback classify the todo writer as a sub-agent and put a
 // bogus row under the status rows.
 func TestTaskClassification(t *testing.T) {
+	cursor := CursorProvider()
+	grok := GrokProvider()
 	for _, tc := range []struct {
 		name           string
-		tool           ToolEvent
+		prov           *Provider
+		delta          toolDelta
 		task, todoTool bool
 	}{
-		{"cursor sub-agent", ToolEvent{ToolName: "task", Title: "Task: Count main.go lines"}, true, false},
-		{"todo writer", ToolEvent{ToolName: "updateTodos", Title: "Update TODOs"}, false, true},
+		{"cursor sub-agent", &cursor, namedDelta("t", "task", "Task: Count main.go lines"), true, false},
+		{"todo writer", &cursor, namedDelta("t", "updateTodos", "Update TODOs"), false, true},
 		{
 			"todo writer quoting the user's todo text",
-			ToolEvent{ToolName: "updateTodos", Title: "Update TODOs: Spawn a subagent to count lines in main.go"},
+			&cursor,
+			namedDelta("t", "updateTodos", "Update TODOs: Spawn a subagent to count lines in main.go"),
 			false, true,
 		},
 		{
 			"todo writer with only the title to go on",
-			ToolEvent{Title: "Update TODOs: Spawn a subagent to count lines"},
+			&cursor,
+			titleDelta("t", "Update TODOs: Spawn a subagent to count lines"),
 			false, true,
 		},
 		{
 			"a declared tool is not reclassified by user text in its title",
-			ToolEvent{ToolName: "read", Title: "Read the subagent task notes"},
+			&cursor,
+			namedDelta("t", "read", "Read the subagent task notes"),
 			false, false,
 		},
-		{"003 fallback: title only", ToolEvent{Title: "Subagent research"}, true, false},
-		{"003 fallback: Task: prefix", ToolEvent{Title: "Task: something"}, true, false},
-		{"plain shell", ToolEvent{ToolName: "shell", Title: "`go vet ./...`"}, false, false},
-		{"empty", ToolEvent{}, false, false},
+		{"003 fallback: title only", &cursor, titleDelta("t", "Subagent research"), true, false},
+		{"003 fallback: Task: prefix", &cursor, titleDelta("t", "Task: something"), true, false},
+		{"plain shell", &cursor, namedDelta("t", "shell", "`go vet ./...`"), false, false},
+		{"empty", &cursor, toolDelta{id: "t"}, false, false},
+		{"grok spawn_subagent", &grok, wireDelta("t", "spawn_subagent", "spawn_subagent"), true, false},
+		{"grok wait tool titled like a subagent", &grok, wireDelta("t", "get_command_or_subagent_output", "[subagent:explore] List directory files (sub-1)"), false, false},
+		{"grok title fallback is off", &grok, titleDelta("t", "Task: something"), false, false},
+		{"cursor Update TODOs: spawn a subagent", &cursor, titleDelta("t", "Update TODOs: spawn a subagent"), false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.tool.IsTask(); got != tc.task {
-				t.Fatalf("IsTask() = %v, want %v", got, tc.task)
+			s := newSession(Options{Provider: tc.prov})
+			tool, _ := s.mergeTool(tc.delta)
+			if got := tool.IsTask(); got != tc.task {
+				t.Fatalf("IsTask() = %v, want %v (tool %+v)", got, tc.task, tool)
 			}
-			if got := tc.tool.IsTodoTool(); got != tc.todoTool {
+			if got := tool.IsTodoTool(); got != tc.todoTool {
 				t.Fatalf("IsTodoTool() = %v, want %v", got, tc.todoTool)
 			}
 		})
 	}
+}
+
+func namedDelta(id, toolName, title string) toolDelta {
+	t := title
+	return toolDelta{
+		id:          id,
+		title:       &t,
+		rawInput:    mustJSON(map[string]any{"_toolName": toolName}),
+		hasRawInput: true,
+	}
+}
+
+func wireDelta(id, wireName, title string) toolDelta {
+	t := title
+	return toolDelta{id: id, title: &t, wireName: wireName}
+}
+
+func titleDelta(id, title string) toolDelta {
+	t := title
+	return toolDelta{id: id, title: &t}
 }

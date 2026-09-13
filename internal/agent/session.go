@@ -23,6 +23,23 @@ const (
 	EventDone       EventType = "done"
 	EventError      EventType = "error"
 	EventMeta       EventType = "meta"
+	EventUser       EventType = "user"
+	EventSubagent   EventType = "subagent"
+)
+
+const (
+	SubagentChangeSpawned  = "spawned"
+	SubagentChangeProgress = "progress"
+	SubagentChangeFinished = "finished"
+)
+
+type SubagentStatus string
+
+const (
+	SubagentRunning   SubagentStatus = "running"
+	SubagentCompleted SubagentStatus = "completed"
+	SubagentFailed    SubagentStatus = "failed"
+	SubagentCancelled SubagentStatus = "cancelled"
 )
 
 type ModelInfo struct {
@@ -47,6 +64,7 @@ type Snapshot struct {
 	Commands       []CommandInfo
 	Config         []ConfigOption
 	Tools          []ToolEvent
+	Subagents      []SubagentInfo
 	Todos          []Todo
 	TodosUpdatedAt time.Time
 	Title          string
@@ -55,6 +73,32 @@ type Snapshot struct {
 	// Provider is a value copy of the session's provider, so the UI can read
 	// what a mode id means and what the agent is called without a session.
 	Provider ProviderInfo
+}
+
+// SubagentInfo is one grok child or cursor task, in spawn order on Snapshot.
+// The per-child tool map stays private; consumers see tools only as EventTool.
+type SubagentInfo struct {
+	ID           string
+	AttemptID    string
+	ParentID     string
+	ToolCallID   string
+	Description  string
+	SubagentType string
+	Model        string
+	Status       SubagentStatus
+	Error        string
+	Prompt       string
+	Output       string
+	Activity     string
+	StartedAt    time.Time
+	EndedAt      time.Time
+	DurationMs   int
+	ToolCalls    int
+	Turns        int
+	TokensUsed   int
+	ToolsUsed    []string
+	Transcript   bool
+	Background   bool
 }
 
 // Todo is one entry of the cursor todo list. Status is normalised to
@@ -86,15 +130,20 @@ type Event struct {
 	// update. The snapshot alone cannot say a mode changed — one that went
 	// plan → ask → plan leaves it exactly as it was — so the event has to
 	// carry the fact that it changed at all.
-	Mode       string
-	Tool       *ToolEvent
-	Todos      []Todo
-	Permission *PermissionEvent
-	Question   *QuestionEvent
-	Plan       *PlanEvent
-	Err        error
-	StopReason string
-	At         time.Time
+	Mode string
+	// Agent is the child session id for EventText/Thought/Tool/User that
+	// belong to a sub-agent. "" is the main session.
+	Agent          string
+	Tool           *ToolEvent
+	Todos          []Todo
+	Permission     *PermissionEvent
+	Question       *QuestionEvent
+	Plan           *PlanEvent
+	Subagent       *SubagentInfo
+	SubagentChange string
+	Err            error
+	StopReason     string
+	At             time.Time
 }
 
 type ToolEvent struct {
@@ -138,7 +187,8 @@ type ToolDiff struct {
 }
 
 // TaskInfo describes a sub-agent tool call. Receipt is set once the matching
-// cursor/task receipt has been joined in.
+// cursor/task receipt has been joined in. Status is the joined child's
+// lifecycle, so the spawn tool's transcript row can follow the child.
 type TaskInfo struct {
 	Description  string
 	Prompt       string
@@ -147,6 +197,8 @@ type TaskInfo struct {
 	SubagentType string
 	DurationMs   int
 	Receipt      bool
+	Status       SubagentStatus
+	Background   bool
 }
 
 type PermissionOption struct {

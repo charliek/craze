@@ -71,6 +71,11 @@ type Provider struct {
 	// planUpdatesAreTodos maps ACP `plan` session updates onto the todo
 	// stream; cursor drives todos through cursor/update_todos instead.
 	planUpdatesAreTodos bool
+	// subagentToolName is the wire tool name that is a sub-agent spawn:
+	// grok spawn_subagent, cursor task. Title-regex fallback only runs
+	// when this is unknown and titleTaskFallback is set (cursor).
+	subagentToolName  string
+	titleTaskFallback bool
 }
 
 // authMethod is one way a provider can authenticate, in preference order.
@@ -107,6 +112,7 @@ type Capabilities struct {
 	Effort              bool
 	Modes               bool
 	SubagentRows        bool
+	SubagentTranscript  bool
 	Todos               bool
 	AskCards            bool
 	PlanCards           bool
@@ -167,12 +173,15 @@ func CursorProvider() Provider {
 			Effort:              true,
 			Modes:               true,
 			SubagentRows:        true,
+			SubagentTranscript:  false,
 			Todos:               true,
 			AskCards:            true,
 			PlanCards:           true,
 			ParameterizedPicker: true,
 		},
-		dialect: acp.DialectCursor,
+		dialect:           acp.DialectCursor,
+		subagentToolName:  "task",
+		titleTaskFallback: true,
 		skillScan: SkillScan{
 			RelRoots: []string{
 				filepath.Join(".cursor", "skills"),
@@ -208,13 +217,15 @@ func GrokProvider() Provider {
 			FastToggle:          false,
 			Effort:              true,
 			Modes:               true,
-			SubagentRows:        false,
+			SubagentRows:        true,
+			SubagentTranscript:  true,
 			Todos:               true,
 			AskCards:            true,
 			PlanCards:           true,
 			ParameterizedPicker: true,
 		},
-		dialect: acp.DialectGrok,
+		dialect:          acp.DialectGrok,
+		subagentToolName: "spawn_subagent",
 		// Grok advertises its whole catalog, plugin skills included, over
 		// ACP; the walk only adds SKILL.md trees the daemon has not loaded.
 		skillScan: SkillScan{

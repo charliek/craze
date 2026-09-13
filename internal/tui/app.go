@@ -1197,6 +1197,12 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
+	// Child streams and sub-agent lifecycle are not this turn; U3b will route
+	// them. Dropping them here keeps lastThought/transcript/goldens on the main
+	// session while U2 emits the new events.
+	if ev.Agent != "" || ev.Type == agent.EventSubagent || ev.Type == agent.EventUser {
+		return
+	}
 	// The spinner names what the turn is doing; only a thought chunk leaves it
 	// on "Thinking…".
 	m.lastThought = ev.Type == agent.EventThought

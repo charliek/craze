@@ -2,13 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var (
@@ -57,19 +60,33 @@ func isolateProviderConfig(t *testing.T) {
 
 func runPromptJSON(t *testing.T, script string) []jsonLineEvent {
 	t.Helper()
+	return runPromptJSONArgs(t, script, nil, "go")
+}
+
+func runPromptJSONArgs(t *testing.T, script string, extra []string, text string) []jsonLineEvent {
+	t.Helper()
 	isolateProviderConfig(t)
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", script)
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()
 	cmd.SetIn(&bytes.Buffer{})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"prompt", "--json", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir(), "go"})
+	args := append([]string{"prompt", "--json", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir()}, extra...)
+	args = append(args, text)
+	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("prompt: %v\nstderr: %s", err, stderr.String())
 	}
+	return parseJSONLines(t, stdout.String())
+}
+
+func parseJSONLines(t *testing.T, stdout string) []jsonLineEvent {
+	t.Helper()
 	var out []jsonLineEvent
-	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
 		if line == "" {
 			continue
 		}
@@ -160,7 +177,38 @@ func TestPromptJSONTask(t *testing.T) {
 	evs := runPromptJSON(t, "task")
 	tool := pick(t, evs, "tool", func(ev map[string]any) bool { return ev["task"] != nil && ev["status"] == "completed" })
 	wantContains(t, tool, `"task":{"description":"Count main.go lines",`+
-		`"model":"cursor-grok-4.6-high-fast","agentId":"agent-1234","durationMs":8010}`)
+		`"model":"cursor-grok-4.6-high-fast","agentId":"agent-1234","durationMs":8010,"status":"completed"}`)
+	assertSubagentLifecycle(t, evs, "")
+}
+
+func TestPromptJSONTaskLate(t *testing.T) {
+	evs := runPromptJSON(t, "task-late")
+	assertSubagentLifecycle(t, evs, "")
+}
+
+func assertSubagentLifecycle(t *testing.T, evs []jsonLineEvent, id string) {
+	t.Helper()
+	var events []string
+	for _, ev := range evs {
+		if ev.m["type"] != "subagent" {
+			continue
+		}
+		if id != "" && ev.m["id"] != id {
+			continue
+		}
+		e, _ := ev.m["event"].(string)
+		events = append(events, e)
+	}
+	i := 0
+	want := []string{"spawned", "progress", "finished"}
+	for _, e := range events {
+		if i < len(want) && e == want[i] {
+			i++
+		}
+	}
+	if i != len(want) {
+		t.Fatalf("subagent lifecycle %v", events)
+	}
 }
 
 func TestPromptJSONTitle(t *testing.T) {
@@ -232,4 +280,104 @@ func TestPromptJSONAutoAnswers(t *testing.T) {
 		wantLine(t, pick(t, evs, "plan", nil),
 			`{"type":"plan","name":"Fake Plan","id":"plan-1","auto":true,"accepted":true}`)
 	})
+}
+
+func TestPromptJSONGrokSubagent(t *testing.T) {
+	evs := runPromptJSONArgs(t, "grok-subagent", []string{"--provider", "grok"}, "go")
+	assertSubagentLifecycle(t, evs, "sub-1")
+	user := pick(t, evs, "user", func(m map[string]any) bool { return m["agent"] == "sub-1" })
+	if user.m["text"] == "" {
+		t.Fatalf("user %s", user.raw)
+	}
+	childText := pick(t, evs, "text", func(m map[string]any) bool { return m["agent"] == "sub-1" })
+	if childText.m["text"] == "" {
+		t.Fatalf("child text %s", childText.raw)
+	}
+	for _, ev := range evs {
+		if ev.m["type"] == "text" && ev.m["agent"] == nil && strings.Contains(fmtString(ev.m["text"]), "DONE") {
+			return
+		}
+	}
+	t.Fatal("missing parent DONE text")
+}
+
+func TestPromptJSONGrokSubagentLate(t *testing.T) {
+	evs := runPromptJSONArgs(t, "grok-subagent-late", []string{"--provider", "grok"}, "go")
+	if pick(t, evs, "done", nil).m["stopReason"] != "end_turn" {
+		t.Fatal("missing done")
+	}
+	fin := pick(t, evs, "subagent", func(m map[string]any) bool { return m["event"] == "finished" })
+	if fin.m["id"] != "sub-1" {
+		t.Fatalf("finished %s", fin.raw)
+	}
+}
+
+func TestPromptJSONGrokSubagentFollowUp(t *testing.T) {
+	evs := runPromptJSONArgs(t, "grok-subagent-late", []string{"--provider", "grok", "--follow-up", "two"}, "one")
+	var dones int
+	for _, ev := range evs {
+		if ev.m["type"] == "done" {
+			dones++
+		}
+	}
+	if dones != 2 {
+		t.Fatalf("want two done, got %d", dones)
+	}
+	pick(t, evs, "subagent", func(m map[string]any) bool { return m["event"] == "finished" && m["id"] == "sub-1" })
+}
+
+func TestPromptJSONGrokSubagentCancel(t *testing.T) {
+	isolateProviderConfig(t)
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-subagent-cancel")
+	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetIn(&bytes.Buffer{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"prompt", "--json", "--provider", "grok", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir(), "go"})
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+	}()
+	err := cmd.ExecuteContext(ctx)
+	var ee *exitError
+	if err == nil || !errors.As(err, &ee) || ee.code != 1 {
+		t.Fatalf("want exit 1, got %v", err)
+	}
+	evs := parseJSONLines(t, stdout.String())
+	fin := pick(t, evs, "subagent", func(m map[string]any) bool { return m["event"] == "finished" })
+	if fin.m["status"] != "cancelled" {
+		t.Fatalf("finished %s", fin.raw)
+	}
+}
+
+func TestPromptPlainExcludesChildText(t *testing.T) {
+	isolateProviderConfig(t)
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-subagent")
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetIn(&bytes.Buffer{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"prompt", "--provider", "grok", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir(), "go"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("prompt: %v\nstderr: %s", err, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "DONE: main.py README.md") {
+		t.Fatalf("missing parent text %q", got)
+	}
+	if strings.Contains(got, "Listing files.") {
+		t.Fatalf("child thought leaked: %q", got)
+	}
+}
+
+func fmtString(v any) string {
+	s, _ := v.(string)
+	return s
 }

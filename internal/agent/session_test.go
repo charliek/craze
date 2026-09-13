@@ -129,6 +129,32 @@ func (e *eventLog) waitTexts(t *testing.T, want string) string {
 	return ""
 }
 
+func drainEvents(s *session) {
+	for {
+		select {
+		case <-s.Events():
+		default:
+			return
+		}
+	}
+}
+
+func waitEventType(t *testing.T, s *session, typ EventType) Event {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			if ev.Type == typ {
+				return ev
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", typ)
+			return Event{}
+		}
+	}
+}
+
 func texts(evs []Event) string {
 	var b strings.Builder
 	for _, ev := range evs {

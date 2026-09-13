@@ -14,6 +14,7 @@ const jsonStreamCap = 2048
 type jsonEvent struct {
 	Type       string              `json:"type"`
 	Text       string              `json:"text,omitempty"`
+	Agent      string              `json:"agent,omitempty"`
 	Name       string              `json:"name,omitempty"`
 	Status     string              `json:"status,omitempty"`
 	ID         string              `json:"id,omitempty"`
@@ -30,6 +31,26 @@ type jsonEvent struct {
 	Accepted   bool                `json:"accepted,omitempty"`
 	StopReason string              `json:"stopReason,omitempty"`
 	Message    string              `json:"message,omitempty"`
+}
+
+type jsonSubagent struct {
+	Type         string `json:"type"`
+	Event        string `json:"event"`
+	ID           string `json:"id"`
+	AttemptID    string `json:"attemptId,omitempty"`
+	ParentID     string `json:"parentId,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Description  string `json:"description,omitempty"`
+	SubagentType string `json:"subagentType,omitempty"`
+	Model        string `json:"model,omitempty"`
+	ToolCallID   string `json:"toolCallId,omitempty"`
+	DurationMs   int    `json:"durationMs,omitempty"`
+	ToolCalls    int    `json:"toolCalls,omitempty"`
+	Turns        int    `json:"turns,omitempty"`
+	Tokens       int    `json:"tokens,omitempty"`
+	Output       string `json:"output,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Transcript   bool   `json:"transcript"`
 }
 
 type jsonToolOutput struct {
@@ -51,6 +72,7 @@ type jsonTask struct {
 	Model       string `json:"model,omitempty"`
 	AgentID     string `json:"agentId,omitempty"`
 	DurationMs  int    `json:"durationMs,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 type jsonTodo struct {
@@ -72,12 +94,16 @@ func encodeEvent(w io.Writer, ev agent.Event) error {
 	return err
 }
 
-func eventJSON(ev agent.Event) (jsonEvent, bool) {
+func eventJSON(ev agent.Event) (any, bool) {
 	switch ev.Type {
 	case agent.EventText:
-		return jsonEvent{Type: "text", Text: ev.Text}, true
+		return jsonEvent{Type: "text", Text: ev.Text, Agent: ev.Agent}, true
 	case agent.EventThought:
-		return jsonEvent{Type: "thought", Text: ev.Text}, true
+		return jsonEvent{Type: "thought", Text: ev.Text, Agent: ev.Agent}, true
+	case agent.EventUser:
+		return jsonEvent{Type: "user", Text: ev.Text, Agent: ev.Agent}, true
+	case agent.EventSubagent:
+		return subagentJSON(ev), ev.Subagent != nil
 	case agent.EventTool:
 		return toolJSON(ev), true
 	case agent.EventTodos:
@@ -135,8 +161,32 @@ func eventJSON(ev agent.Event) (jsonEvent, bool) {
 	}
 }
 
+func subagentJSON(ev agent.Event) jsonSubagent {
+	j := jsonSubagent{Type: "subagent", Event: ev.SubagentChange}
+	if ev.Subagent == nil {
+		return j
+	}
+	a := ev.Subagent
+	j.ID = a.ID
+	j.AttemptID = a.AttemptID
+	j.ParentID = a.ParentID
+	j.Status = string(a.Status)
+	j.Description = a.Description
+	j.SubagentType = a.SubagentType
+	j.Model = a.Model
+	j.ToolCallID = a.ToolCallID
+	j.DurationMs = a.DurationMs
+	j.ToolCalls = a.ToolCalls
+	j.Turns = a.Turns
+	j.Tokens = a.TokensUsed
+	j.Output = a.Output
+	j.Error = a.Error
+	j.Transcript = a.Transcript
+	return j
+}
+
 func toolJSON(ev agent.Event) jsonEvent {
-	j := jsonEvent{Type: "tool"}
+	j := jsonEvent{Type: "tool", Agent: ev.Agent}
 	t := ev.Tool
 	if t == nil {
 		return j
@@ -168,6 +218,7 @@ func toolJSON(ev agent.Event) jsonEvent {
 			Model:       t.Task.Model,
 			AgentID:     t.Task.AgentID,
 			DurationMs:  t.Task.DurationMs,
+			Status:      string(t.Task.Status),
 		}
 	}
 	return j
