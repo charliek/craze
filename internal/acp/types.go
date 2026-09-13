@@ -10,6 +10,8 @@ import (
 const (
 	ProtocolVersion = 1
 	AuthCursorLogin = "cursor_login"
+	AuthXAIAPIKey   = "xai.api_key"
+	AuthCachedToken = "cached_token"
 
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
@@ -42,6 +44,16 @@ const (
 
 	StopEndTurn   = "end_turn"
 	StopCancelled = "cancelled"
+)
+
+// DialectID selects the provider-shaped branch of the ACP client. The client
+// stays one NDJSON JSON-RPC connection; only method names and reply envelopes
+// differ per dialect.
+type DialectID string
+
+const (
+	DialectCursor DialectID = "cursor"
+	DialectGrok   DialectID = "grok"
 )
 
 type Implementation struct {
@@ -79,8 +91,13 @@ type AuthMethod struct {
 }
 
 func (r InitializeResult) OffersCursorLogin() bool {
+	return r.OffersAuthMethod(AuthCursorLogin)
+}
+
+// OffersAuthMethod reports whether initialize advertised an auth method id.
+func (r InitializeResult) OffersAuthMethod(id string) bool {
 	for _, m := range r.AuthMethods {
-		if m.ID == AuthCursorLogin {
+		if m.ID == id {
 			return true
 		}
 	}
@@ -89,6 +106,8 @@ func (r InitializeResult) OffersCursorLogin() bool {
 
 type AuthenticateParams struct {
 	MethodID string `json:"methodId"`
+	// Meta carries provider extras; grok authenticates with headless true.
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 type NewSessionParams struct {

@@ -601,3 +601,70 @@ func matchTail(got string, want []string) bool {
 	}
 	return true
 }
+
+// TestCursorSpawnArgvRegression pins the current spawn line, ExtraArgs first,
+// so the provider seam cannot silently reorder it.
+func TestCursorSpawnArgvRegression(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "argv")
+	cursor := CursorProvider()
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=echo"},
+		Workspace: t.TempDir(),
+		Force:     true,
+		Provider:  &cursor,
+		Env:       append(os.Environ(), "CRAZE_FAKE_DUMP_ARGV="+dump),
+		Stderr:    io.Discard,
+	})
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got := readArgv(t, dump)
+	if !matchTail(got, []string{"-script=echo", "--force", "--trust", "acp"}) {
+		t.Fatalf("argv %q", got)
+	}
+	if strings.Contains(got, "--always-approve") || strings.Contains(got, "--no-auto-update") {
+		t.Fatalf("cursor argv carries grok flags: %q", got)
+	}
+}
+
+// TestGrokSpawnArgvOrder pins the grok spawn line: ExtraArgs first, then the
+// global flag, the agent subcommand, the force flag, and stdio. --trust acp
+// must never appear on the grok line.
+func TestGrokSpawnArgvOrder(t *testing.T) {
+	for _, force := range []bool{true, false} {
+		t.Run(map[bool]string{true: "yolo", false: "no-force"}[force], func(t *testing.T) {
+			dump := filepath.Join(t.TempDir(), "argv")
+			grok := GrokProvider()
+			s := newSession(Options{
+				Binary:    fakeAgentPath(t),
+				ExtraArgs: []string{"-script=echo"},
+				Workspace: t.TempDir(),
+				Force:     force,
+				Provider:  &grok,
+				Env:       append(os.Environ(), "CRAZE_FAKE_DUMP_ARGV="+dump),
+				Stderr:    io.Discard,
+			})
+			// The fake only advertises cursor auth, so grok without an API
+			// key and without a cached token fails auth by design; the
+			// argv dump it writes on startup is still what this asserts.
+			_ = s.Start(t.Context())
+			t.Cleanup(func() { _ = s.Close() })
+			got := readArgv(t, dump)
+			want := []string{"-script=echo", "--no-auto-update", "agent", "stdio"}
+			if force {
+				want = []string{"-script=echo", "--no-auto-update", "agent", "--always-approve", "stdio"}
+			}
+			if !matchTail(got, want) {
+				t.Fatalf("argv %q", got)
+			}
+			if strings.Contains(got, "--trust") {
+				t.Fatalf("grok argv must not carry --trust: %q", got)
+			}
+			if strings.Contains(got, "--force") {
+				t.Fatalf("grok argv must not carry --force: %q", got)
+			}
+		})
+	}
+}

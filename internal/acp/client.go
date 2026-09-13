@@ -17,6 +17,7 @@ type Client struct {
 	mu        sync.Mutex
 	sessionID string
 	inPrompt  bool
+	dialect   DialectID
 	// turn counts prompts. It is the identity of a turn: a blocking request
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
@@ -49,6 +50,7 @@ func newClient(conn *Conn, child *Child) *Client {
 	c := &Client{
 		conn:     conn,
 		child:    child,
+		dialect:  DialectCursor,
 		incoming: make(map[string]*pendingReq),
 	}
 	conn.SetRequestHandler(c.onRequest)
@@ -56,9 +58,22 @@ func newClient(conn *Conn, child *Child) *Client {
 	return c
 }
 
+// Dialect is the provider dialect the client speaks.
+func (c *Client) Dialect() DialectID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dialect
+}
+
 func Dial(in io.Reader, out io.Writer) *Client {
+	return DialWithDialect(in, out, DialectCursor)
+}
+
+// DialWithDialect is Dial for a provider dialect. Tests default to cursor.
+func DialWithDialect(in io.Reader, out io.Writer, dialect DialectID) *Client {
 	conn := NewConn(in, out)
 	c := newClient(conn, nil)
+	c.dialect = dialect
 	conn.Start()
 	return c
 }
@@ -137,8 +152,8 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	return &result, nil
 }
 
-func (c *Client) Authenticate(ctx context.Context) error {
-	return c.conn.Call(ctx, MethodAuthenticate, AuthenticateParams{MethodID: AuthCursorLogin}, nil)
+func (c *Client) Authenticate(ctx context.Context, methodID string, meta map[string]any) error {
+	return c.conn.Call(ctx, MethodAuthenticate, AuthenticateParams{MethodID: methodID, Meta: meta}, nil)
 }
 
 func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult, error) {

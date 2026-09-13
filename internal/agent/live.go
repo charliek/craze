@@ -121,11 +121,7 @@ func (s *session) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	args := append([]string{}, s.opts.ExtraArgs...)
-	if s.opts.Force {
-		args = append(args, "--force")
-	}
-	args = append(args, "--trust", "acp")
+	args := s.provider().Args(s.opts.ExtraArgs, s.opts.Force)
 
 	cwd := s.opts.Workspace
 	if cwd == "" {
@@ -143,11 +139,13 @@ func (s *session) Start(ctx context.Context) error {
 	}
 
 	client, err := acp.Spawn(acp.SpawnOptions{
-		Binary: s.opts.Binary,
-		Args:   args,
-		Dir:    cwd,
-		Env:    s.opts.Env,
-		Stderr: s.opts.Stderr,
+		Binary:     s.opts.Binary,
+		Candidates: s.provider().Bins(),
+		Args:       args,
+		Dir:        cwd,
+		Env:        s.opts.Env,
+		Stderr:     s.opts.Stderr,
+		Dialect:    s.provider().Dialect(),
 	})
 	if err != nil {
 		s.unstart()
@@ -175,11 +173,16 @@ func (s *session) Start(ctx context.Context) error {
 		_ = s.Close()
 		return err
 	}
-	if initRes.OffersCursorLogin() {
-		if err := client.Authenticate(ctx); err != nil {
+	if methodID, meta, ok := s.authMethod(initRes); ok {
+		if err := client.Authenticate(ctx, methodID, meta); err != nil {
 			_ = s.Close()
-			return fmt.Errorf("%w (run `agent login`)", err)
+			return fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
 		}
+	} else if len(initRes.AuthMethods) > 0 && s.provider().Dialect() == acp.DialectGrok {
+		// The daemon offered only methods craze will not start (interactive
+		// browser login); say how to fix it instead of hanging later.
+		_ = s.Close()
+		return fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
 	}
 	sess, err := client.NewSession(ctx, cwd)
 	if err != nil {
@@ -215,6 +218,39 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// authMethod intersects what initialize advertised with the provider's
+// preference order. No advertised methods means no login, for either
+// provider. Otherwise cursor logs in only when cursor_login is offered, and
+// grok prefers the env key over the daemon's default. Grok methods craze
+// will not start (interactive browser login) are never picked.
+func (s *session) authMethod(initRes *acp.InitializeResult) (string, map[string]any, bool) {
+	p := s.provider()
+	if len(initRes.AuthMethods) == 0 {
+		return "", nil, false
+	}
+	if p.Dialect() == acp.DialectGrok {
+		if hasAPIKeyEnv() && initRes.OffersAuthMethod(acp.AuthXAIAPIKey) {
+			return acp.AuthXAIAPIKey, map[string]any{"headless": true}, true
+		}
+		if initRes.OffersAuthMethod(acp.AuthCachedToken) {
+			return acp.AuthCachedToken, map[string]any{"headless": true}, true
+		}
+		return "", nil, false
+	}
+	for _, id := range p.AuthMethodIDs() {
+		if initRes.OffersAuthMethod(id) {
+			return id, nil, true
+		}
+	}
+	return "", nil, false
+}
+
+// hasAPIKeyEnv reports whether a grok API key is set. Grok honours the
+// legacy GROK_CODE_XAI_API_KEY alongside XAI_API_KEY.
+func hasAPIKeyEnv() bool {
+	return os.Getenv("XAI_API_KEY") != "" || os.Getenv("GROK_CODE_XAI_API_KEY") != ""
 }
 
 func (s *session) unstart() {

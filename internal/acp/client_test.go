@@ -84,7 +84,7 @@ func handshake(t *testing.T, c *Client) {
 	if _, err := c.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Authenticate(ctx); err != nil {
+	if err := c.Authenticate(ctx, AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
 	cwd := t.TempDir()
@@ -207,7 +207,7 @@ func TestAuthFail(t *testing.T) {
 	if _, err := c.Initialize(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	err := c.Authenticate(t.Context())
+	err := c.Authenticate(t.Context(), AuthCursorLogin, nil)
 	if err == nil {
 		t.Fatal("expected authenticate error")
 	}
@@ -483,7 +483,7 @@ func TestPermissionRepliesUseRequestOptionID(t *testing.T) {
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Authenticate(ctx); err != nil {
+	if err := client.Authenticate(ctx, AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.NewSession(ctx, t.TempDir()); err != nil {
@@ -615,7 +615,7 @@ func TestSetConfigJSONShape(t *testing.T) {
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Authenticate(ctx); err != nil {
+	if err := client.Authenticate(ctx, AuthCursorLogin, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.NewSession(ctx, t.TempDir()); err != nil {

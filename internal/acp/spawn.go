@@ -14,23 +14,35 @@ const shutdownGrace = 2 * time.Second
 
 type SpawnOptions struct {
 	Binary string
-	Args   []string
-	Dir    string
-	Env    []string
-	Stderr io.Writer
+	// Candidates is the provider's PATH lookup order when Binary and
+	// CRAZE_AGENT_BIN are both unset. An explicit Binary still wins.
+	Candidates []string
+	Args       []string
+	Dir        string
+	Env        []string
+	Stderr     io.Writer
+	Dialect    DialectID
 }
 
 func ResolveBinary(explicit string) (string, error) {
-	var candidates []string
+	return ResolveBinaryCandidates(explicit, []string{"cursor-agent", "agent"})
+}
+
+// ResolveBinaryCandidates resolves explicit, then CRAZE_AGENT_BIN, then the
+// candidate list. An explicit binary is returned as-is after the PATH and
+// absolute-path checks; candidates are PATH lookups only, so a grok lookup
+// can never fall back to a stray "agent" on PATH.
+func ResolveBinaryCandidates(explicit string, candidates []string) (string, error) {
+	var names []string
 	if explicit != "" {
-		candidates = append(candidates, explicit)
+		names = append(names, explicit)
 	} else if env := os.Getenv("CRAZE_AGENT_BIN"); env != "" {
-		candidates = append(candidates, env)
+		names = append(names, env)
 	} else {
-		candidates = append(candidates, "cursor-agent", "agent")
+		names = append(names, candidates...)
 	}
 	var last error
-	for _, name := range candidates {
+	for _, name := range names {
 		path, err := exec.LookPath(name)
 		if err == nil {
 			return path, nil
@@ -95,7 +107,7 @@ func signalGroup(pgid int, proc *os.Process, sig syscall.Signal) error {
 }
 
 func Spawn(opts SpawnOptions) (*Client, error) {
-	bin, err := ResolveBinary(opts.Binary)
+	bin, err := ResolveBinaryCandidates(opts.Binary, opts.Candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +158,9 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 
 	conn := NewConn(stdout, stdin)
 	client := newClient(conn, child)
+	if opts.Dialect != "" {
+		client.dialect = opts.Dialect
+	}
 	conn.Start()
 	go func() {
 		<-child.waitCh
