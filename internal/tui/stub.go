@@ -333,6 +333,12 @@ func (s *Stub) SetConfig(_ context.Context, id, value string) error {
 
 func (s *Stub) Binary() string { return "" }
 
+func (s *Stub) SetProvider(p agent.Provider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Provider = p.Info()
+}
+
 func (s *Stub) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()

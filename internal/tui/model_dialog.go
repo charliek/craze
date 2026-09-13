@@ -15,9 +15,12 @@ import (
 const (
 	// modelDialogTitle / themeDialogTitle name the two dialogs; the frame is
 	// shared and the title is how the user tells them apart.
-	modelDialogTitle = "model"
-	themeDialogTitle = "theme"
-	modelDialogHint  = "type to filter · ↑↓ · tab effort/fast · enter · esc"
+	modelDialogTitle      = "model"
+	themeDialogTitle      = "theme"
+	modelDialogHint       = "type to filter · ↑↓ · tab effort/fast · enter · esc"
+	modelDialogHintEffort = "type to filter · ↑↓ · tab effort · enter · esc"
+	modelDialogHintFast   = "type to filter · ↑↓ · tab fast · enter · esc"
+	modelDialogHintPlain  = "type to filter · ↑↓ · enter · esc"
 	// modelValueHint is the footer once focus is on a toggle row: ←/→ is the
 	// key that now does something, and the filter still takes what is typed, so
 	// the hint says both rather than dropping one of them.
@@ -93,11 +96,15 @@ func (m Model) openModelDialog() Model {
 	ti.Cursor.SetMode(cursor.CursorStatic)
 	ti.Focus()
 	d := modelDialog{filter: ti}
-	if opt := agent.EffortOption(m.snap); opt != nil {
-		d.effort = currentOrFirst(opt)
+	if m.showEffort() {
+		if opt := agent.EffortOption(m.snap); opt != nil {
+			d.effort = currentOrFirst(opt)
+		}
 	}
-	if opt := agent.FastOption(m.snap); opt != nil {
-		d.fast = currentOrFirst(opt)
+	if m.showFast() {
+		if opt := agent.FastOption(m.snap); opt != nil {
+			d.fast = currentOrFirst(opt)
+		}
 	}
 	m.mdlg = d
 	m.dialog = dialogModel
@@ -136,6 +143,10 @@ func (m Model) closeDialog(revert bool) Model {
 	case dialogHelp:
 		m.dialog = dialogNone
 		m.helpTop = 0
+	case dialogProvider:
+		// The picker is not dismissed without starting: Esc and a click
+		// outside go through confirmProvider instead.
+		m.dialog = dialogNone
 	}
 	return m
 }
@@ -161,10 +172,10 @@ func (m Model) dialogModelList() []agent.ModelInfo {
 // toggle rows the session actually advertises.
 func (m Model) modelDialogFocuses() []dialogFocus {
 	out := []dialogFocus{focusList}
-	if agent.EffortOption(m.snap) != nil {
+	if m.showEffort() {
 		out = append(out, focusEffort)
 	}
-	if agent.FastOption(m.snap) != nil {
+	if m.showFast() {
 		out = append(out, focusFast)
 	}
 	return out
@@ -266,17 +277,21 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		m.snap.CurrentModel = id
 		m.model = id
 	}
-	if opt := agent.EffortOption(m.snap); opt != nil && d.effort != "" && d.effort != opt.Current {
-		steps = append(steps, applyStep{
-			cfgID: opt.ID, value: d.effort, note: "effort → " + d.effort, label: "effort",
-		})
-		m = m.setConfigCurrent(opt.ID, d.effort)
+	if m.showEffort() {
+		if opt := agent.EffortOption(m.snap); opt != nil && d.effort != "" && d.effort != opt.Current {
+			steps = append(steps, applyStep{
+				cfgID: opt.ID, value: d.effort, note: "effort → " + d.effort, label: "effort",
+			})
+			m = m.setConfigCurrent(opt.ID, d.effort)
+		}
 	}
-	if opt := agent.FastOption(m.snap); opt != nil && d.fast != "" && d.fast != opt.Current {
-		steps = append(steps, applyStep{
-			cfgID: opt.ID, value: d.fast, note: "fast → " + fastWord(opt, d.fast), label: "fast",
-		})
-		m = m.setConfigCurrent(opt.ID, d.fast)
+	if m.showFast() {
+		if opt := agent.FastOption(m.snap); opt != nil && d.fast != "" && d.fast != opt.Current {
+			steps = append(steps, applyStep{
+				cfgID: opt.ID, value: d.fast, note: "fast → " + fastWord(opt, d.fast), label: "fast",
+			})
+			m = m.setConfigCurrent(opt.ID, d.fast)
+		}
 	}
 	if len(steps) == 0 {
 		return m, nil
@@ -416,10 +431,29 @@ type modelDialogPlan struct {
 
 func (m Model) modelDialogPlan(budget int) modelDialogPlan {
 	list := m.dialogModelList()
-	effort, fast := agent.EffortOption(m.snap), agent.FastOption(m.snap)
+	var effort, fast *agent.ConfigOption
+	if m.showEffort() {
+		effort = agent.EffortOption(m.snap)
+	}
+	if m.showFast() {
+		fast = agent.FastOption(m.snap)
+	}
 	rows := fitModelDialog(budget, min(len(list), dialogListMax), effort != nil, fast != nil)
 	top, shown := dialogListWindow(len(list), m.mdlg.sel, rows.list)
 	return modelDialogPlan{rows: rows, list: list, top: top, shown: shown, effort: effort, fast: fast}
+}
+
+func (m Model) modelDialogHintText() string {
+	switch {
+	case m.showEffort() && m.showFast():
+		return modelDialogHint
+	case m.showEffort():
+		return modelDialogHintEffort
+	case m.showFast():
+		return modelDialogHintFast
+	default:
+		return modelDialogHintPlain
+	}
 }
 
 func (m Model) modelDialogBody(inner, budget int) []string {
@@ -447,7 +481,7 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		rows = append(rows, m.dialogValueRow("fast", p.fast, m.mdlg.fast, m.mdlg.focus == focusFast, inner, fastLabel(p.fast)))
 	}
 	if p.rows.footer {
-		hint := modelDialogHint
+		hint := m.modelDialogHintText()
 		if m.mdlg.focus != focusList {
 			hint = modelValueHint
 		}

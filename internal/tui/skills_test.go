@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 func writeSkillMD(t *testing.T, path, body string) {
@@ -304,7 +304,7 @@ description: real
 
 func TestScanSkillsSkipsOversize(t *testing.T) {
 	ws := t.TempDir()
-	big := strings.Repeat("a", maxSkillBytes+1)
+	big := strings.Repeat("a", (1<<20)+1)
 	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "huge", "SKILL.md"), "---\nname: huge\ndescription: too big\n---\n"+big)
 	items := scanDiskSkills(ws, "")
 	if _, ok := catalogItems(items, "huge"); ok {
@@ -322,39 +322,48 @@ func catalogItems(items []slashItem, name string) (slashItem, bool) {
 	return slashItem{}, false
 }
 
-// TestSkillWarningsGoToTheDiagSeam: the scan runs on the Update goroutine while
-// the TUI owns the alt screen, so a warning written to the real stderr is
-// painted over the frame with none of the renderer's locks taken. It goes to the
-// writer Run installed instead, which the caller flushes afterwards.
-func TestSkillWarningsGoToTheDiagSeam(t *testing.T) {
-	ws := t.TempDir()
-	// No closing fence: the parse fails and the skill is named as skipped.
-	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "broken", "SKILL.md"), "---\nname: broken\n")
+func TestInspectFailureAddsDiagnostic(t *testing.T) {
+	m := sized(t)
+	m.skillsGen = 3
+	tm, _ := m.Update(skillsMsg{
+		gen:        3,
+		inspectErr: fmt.Errorf("inspect timed out"),
+		skills:     []slashItem{{Name: "disk", Desc: "fallback", Skill: true}},
+	})
+	m = tm.(Model)
+	if _, ok := catalogByName(m, "disk"); !ok {
+		t.Fatal("fallback skills missing")
+	}
+	if !strings.Contains(strings.Join(texts(m, entryError), "\n"), "skill inspect failed") {
+		t.Fatalf("diagnostic missing:\n%s", plainView(m))
+	}
+}
 
-	var buf bytes.Buffer
-	prev := setDiag(&buf)
-	t.Cleanup(func() { setDiag(prev) })
-	// os.Stderr is the terminal under the alt screen. Nothing may reach it.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+func TestInspectResultIgnoresStaleGeneration(t *testing.T) {
+	m := sized(t)
+	m.skillsGen = 2
+	m.skills = []slashItem{{Name: "kept", Skill: true}}
+	tm, _ := m.Update(skillsMsg{gen: 1, skills: []slashItem{{Name: "stale", Skill: true}}})
+	m = tm.(Model)
+	if _, ok := catalogByName(m, "kept"); !ok {
+		t.Fatal("stale inspect overwrote the cache")
 	}
-	prevErr := os.Stderr
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = prevErr; _ = r.Close() })
+	if _, ok := catalogByName(m, "stale"); ok {
+		t.Fatal("stale inspect landed")
+	}
+}
 
-	if items := scanDiskSkills(ws, t.TempDir()); len(items) != 0 {
-		t.Fatalf("a skill that does not parse must not appear: %#v", items)
+func TestGrokSlashKeepsInspectCache(t *testing.T) {
+	m := sized(t)
+	m.snap.Provider = agent.GrokProvider().Info()
+	m.skills = []slashItem{{Name: "cached", Desc: "from inspect", Skill: true}}
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = tm.(Model)
+	if m.input.Value() != "/" {
+		t.Fatalf("composer %q", m.input.Value())
 	}
-	if got := buf.String(); !strings.Contains(got, "skip skill") || !strings.Contains(got, "broken") {
-		t.Fatalf("the warning did not reach the seam: %q", got)
-	}
-	_ = w.Close()
-	leaked, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(leaked) != 0 {
-		t.Fatalf("%q reached the terminal", leaked)
+	it, ok := catalogByName(m, "cached")
+	if !ok || !it.Skill {
+		t.Fatalf("slash must keep the inspect cache %#v ok=%v", it, ok)
 	}
 }

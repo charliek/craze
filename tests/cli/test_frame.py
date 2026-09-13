@@ -560,3 +560,45 @@ def test_frame_wait_timeout_exits_3_with_the_last_frame(
     assert "<wait:idle>" in proc.stderr, proc.stderr
     assert "last frame:" in proc.stderr, proc.stderr
     assert "esc to interrupt" in proc.stderr, proc.stderr
+
+
+def test_frame_ignores_craze_provider_env(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The frame runner is hermetic: $CRAZE_PROVIDER must not change goldens."""
+    work = tmp_path / WORKDIR
+    work.mkdir(exist_ok=True)
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    env["CRAZE_PROVIDER"] = "grok"
+    env.pop("CRAZE_AGENT_BIN", None)
+    env.pop("CRAZE_FAKE_SCRIPT", None)
+    env.pop("CRAZE_CONFIG", None)
+    proc = subprocess.run(
+        [
+            str(craze_bin),
+            "frame",
+            "--cols",
+            "80",
+            "--rows",
+            "24",
+            "--agent-bin",
+            str(fake_agent_bin),
+            "--fake-script",
+            "echo",
+            "--keys",
+            "<wait:idle>",
+            "--theme",
+            "craze-dark",
+            "--timeout",
+            "15s",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(work),
+        env=env,
+        timeout=120,
+    )
+    text = "\n".join(frame_lines(proc, 80, 24))
+    assert f"{WORKDIR} │ cursor" in text, text
+    assert "starting…" not in text, text

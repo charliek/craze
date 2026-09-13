@@ -47,9 +47,12 @@ description: must not appear in grok fallback
 	run := func(string, []string, string, time.Duration) ([]byte, error) {
 		return nil, fmt.Errorf("inspect failed")
 	}
-	got := discoverSkills(GrokProvider(), cwd, home, "/bin/grok", run)
-	if len(got) != 1 || got[0].Name != "disk-skill" {
-		t.Fatalf("fallback %v", got)
+	got := discoverSkillsReport(GrokProvider(), cwd, home, "/bin/grok", run)
+	if len(got.Skills) != 1 || got.Skills[0].Name != "disk-skill" {
+		t.Fatalf("fallback %v", got.Skills)
+	}
+	if got.InspectErr == nil || !strings.Contains(got.InspectErr.Error(), "inspect failed") {
+		t.Fatalf("InspectErr %v", got.InspectErr)
 	}
 }
 
@@ -63,9 +66,12 @@ description: fallback
 	run := func(string, []string, string, time.Duration) ([]byte, error) {
 		return []byte("not json"), nil
 	}
-	got := discoverSkills(GrokProvider(), cwd, "", "/bin/grok", run)
-	if len(got) != 1 || got[0].Name != "fb" {
-		t.Fatalf("decode fallback %v", got)
+	got := discoverSkillsReport(GrokProvider(), cwd, "", "/bin/grok", run)
+	if len(got.Skills) != 1 || got.Skills[0].Name != "fb" {
+		t.Fatalf("decode fallback %v", got.Skills)
+	}
+	if got.InspectErr == nil {
+		t.Fatal("decode failure must set InspectErr")
 	}
 }
 
@@ -79,12 +85,12 @@ description: should not appear
 	run := func(string, []string, string, time.Duration) ([]byte, error) {
 		return []byte(`{"skills":[]}`), nil
 	}
-	got := discoverSkills(GrokProvider(), cwd, "", "/bin/grok", run)
-	if got == nil {
-		got = []Skill{}
+	got := discoverSkillsReport(GrokProvider(), cwd, "", "/bin/grok", run)
+	if len(got.Skills) != 0 {
+		t.Fatalf("empty inspect must not fall back, got %v", got.Skills)
 	}
-	if len(got) != 0 {
-		t.Fatalf("empty inspect must not fall back, got %v", got)
+	if got.InspectErr != nil {
+		t.Fatalf("empty catalog is success, InspectErr %v", got.InspectErr)
 	}
 }
 

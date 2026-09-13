@@ -70,26 +70,41 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	if err != nil {
 		return err
 	}
-	prov := resolved.Provider
-	sess := agent.New(agent.Options{
-		Binary:      f.agentBin,
-		Workspace:   ws,
-		Force:       f.force,
-		Model:       f.model,
-		Mode:        mode,
-		Stderr:      diag,
-		Interactive: true,
-		Provider:    &prov,
-	})
-	err = tui.Run(tui.Config{
-		Session:   sess,
-		Theme:     resolveTheme(cmd, f.theme),
-		Workspace: ws,
-		Model:     f.model,
-		Yolo:      f.force,
-		NoMouse:   f.noMouse,
-		Diag:      diag,
-	})
+	if cmd == nil {
+		// Direct callers (tests) have no cobra flag set, so lock the resolved
+		// id and skip the picker — the same as an explicit --provider.
+		resolved.Locked = true
+	}
+	newSession := func(p agent.Provider) agent.Session {
+		prov := p
+		return agent.New(agent.Options{
+			Binary:      f.agentBin,
+			Workspace:   ws,
+			Force:       f.force,
+			Model:       f.model,
+			Mode:        mode,
+			Stderr:      diag,
+			Interactive: true,
+			Provider:    &prov,
+		})
+	}
+	cfg := tui.Config{
+		Theme:           resolveTheme(cmd, f.theme),
+		Workspace:       ws,
+		Model:           f.model,
+		Yolo:            f.force,
+		NoMouse:         f.noMouse,
+		Diag:            diag,
+		Provider:        resolved.Provider,
+		ProviderLocked:  resolved.Locked,
+		PersistProvider: true,
+		FallbackDefault: resolved.Fallback,
+		NewSession:      newSession,
+	}
+	if resolved.Locked {
+		cfg.Session = newSession(resolved.Provider)
+	}
+	err = tui.Run(cfg)
 	diag.flush(os.Stderr)
 	return err
 }

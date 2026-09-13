@@ -44,24 +44,49 @@ func execInspect(bin string, args []string, dir string, timeout time.Duration) (
 	return out, err
 }
 
+// SkillDiscovery is one catalog lookup. InspectErr is set when inspect was
+// attempted and failed (timeout, spawn, or decode); Skills is then the
+// filesystem fallback rather than an empty catalog treated as success.
+type SkillDiscovery struct {
+	Skills     []Skill
+	InspectErr error
+}
+
 // DiscoverSkills is the provider-owned catalog: inspect when advertised,
 // otherwise a filesystem walk of SkillScan.RelRoots. Inspect failure falls
 // back to the walk rather than caching an empty catalog.
 func DiscoverSkills(p Provider, cwd, home, bin string) []Skill {
-	return discoverSkills(p, cwd, home, bin, execInspect)
+	return DiscoverSkillsReport(p, cwd, home, bin).Skills
+}
+
+// DiscoverSkillsReport is DiscoverSkills plus whether inspect failed, so the
+// TUI can surface a diagnostic without treating a valid empty catalog as an
+// error.
+func DiscoverSkillsReport(p Provider, cwd, home, bin string) SkillDiscovery {
+	return discoverSkillsReport(p, cwd, home, bin, execInspect)
 }
 
 func discoverSkills(p Provider, cwd, home, bin string, run inspectRunner) []Skill {
+	return discoverSkillsReport(p, cwd, home, bin, run).Skills
+}
+
+func discoverSkillsReport(p Provider, cwd, home, bin string, run inspectRunner) SkillDiscovery {
 	scan := p.SkillScan()
 	if len(scan.InspectArgs) > 0 && bin != "" && run != nil {
 		out, err := run(bin, scan.InspectArgs, cwd, inspectTimeout)
-		if err == nil {
-			if skills, ok := parseInspectSkills(out); ok {
-				return skills
+		if err != nil {
+			return SkillDiscovery{Skills: walkProviderSkills(scan, cwd, home), InspectErr: err}
+		}
+		skills, ok := parseInspectSkills(out)
+		if !ok {
+			return SkillDiscovery{
+				Skills:     walkProviderSkills(scan, cwd, home),
+				InspectErr: fmt.Errorf("agent: inspect: invalid json"),
 			}
 		}
+		return SkillDiscovery{Skills: skills}
 	}
-	return walkProviderSkills(scan, cwd, home)
+	return SkillDiscovery{Skills: walkProviderSkills(scan, cwd, home)}
 }
 
 func parseInspectSkills(raw []byte) ([]Skill, bool) {

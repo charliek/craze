@@ -89,10 +89,12 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 	})
 
 	plain, raw, err := tui.RunFrameScript(tui.Config{
-		Session:   sess,
-		Theme:     theme,
-		Workspace: ws,
-		Yolo:      force,
+		Session:        sess,
+		Theme:          theme,
+		Workspace:      ws,
+		Yolo:           force,
+		Provider:       prov,
+		ProviderLocked: true,
 	}, o.cols, o.rows, o.keys, tui.FrameOpts{
 		Timeout:     o.timeout,
 		ANSI:        o.ansi,

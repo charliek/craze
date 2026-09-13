@@ -63,6 +63,21 @@ type Config struct {
 	// the caller passes a buffer it flushes afterwards. nil leaves them on
 	// stderr, which is right for anything that does not own the screen.
 	Diag io.Writer
+	// Provider is the resolved default the startup picker preselects.
+	Provider agent.Provider
+	// ProviderLocked skips the picker: an explicit --provider, or the frame
+	// runner. The session is constructed immediately.
+	ProviderLocked bool
+	// PersistProvider writes the provider id after a successful Start.
+	PersistProvider bool
+	// FallbackDefault is an unknown env/config id that resolved to cursor.
+	// Esc on the picker must not persist that automatic fallback; Enter on a
+	// row is a real choice and is saved.
+	FallbackDefault bool
+	// NewSession constructs a session for the chosen provider. The TUI calls
+	// it after the picker (or immediately when locked). Tests that pass
+	// Session and leave this nil never show the picker.
+	NewSession func(agent.Provider) agent.Session
 }
 
 type Model struct {
@@ -161,10 +176,22 @@ type Model struct {
 	themeNames []string
 	themePrev  Theme
 
-	slashSel   int
-	slashHide  bool
-	skills     []slashItem
+	slashSel  int
+	slashHide bool
+	skills    []slashItem
+	// skillsGen is the Start that launched the current inspect; a late result
+	// from an earlier provider is dropped.
+	skillsGen  int
 	streamOpen bool
+
+	pickingProvider bool
+	providerLocked  bool
+	persistProvider bool
+	fallbackDefault bool
+	pickedExplicit  bool
+	providerCursor  int
+	providerDefault agent.Provider
+	newSession      func(agent.Provider) agent.Session
 
 	toolLine    map[string]int
 	toolTouch   []string
@@ -229,6 +256,11 @@ func (m Model) now() time.Time {
 
 type eventMsg struct{ ev agent.Event }
 type startedMsg struct{}
+type skillsMsg struct {
+	gen        int
+	skills     []slashItem
+	inspectErr error
+}
 type promptDoneMsg struct {
 	res agent.Result
 	err error
@@ -283,15 +315,24 @@ func New(cfg Config) Model {
 	}
 
 	th := Preset(cfg.Theme)
+	prov := cfg.Provider
+	if prov.Name() == "" {
+		prov = agent.CursorProvider()
+	}
 	m := Model{
-		theme:        th,
-		vp:           vp,
-		input:        newComposer(th),
-		sess:         cfg.Session,
-		cwd:          cwd,
-		model:        cfg.Model,
-		yolo:         cfg.Yolo,
-		mouseEnabled: !cfg.NoMouse,
+		theme:           th,
+		vp:              vp,
+		input:           newComposer(th),
+		sess:            cfg.Session,
+		cwd:             cwd,
+		model:           cfg.Model,
+		yolo:            cfg.Yolo,
+		mouseEnabled:    !cfg.NoMouse,
+		providerLocked:  cfg.ProviderLocked,
+		persistProvider: cfg.PersistProvider,
+		fallbackDefault: cfg.FallbackDefault,
+		providerDefault: prov,
+		newSession:      cfg.NewSession,
 		// Turn 1 is the session before the first prompt, and it is over before
 		// it starts: nothing is in flight, so both of its endings have landed.
 		turnSeq:      1,
@@ -300,8 +341,17 @@ func New(cfg Config) Model {
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
-	if m.sess == nil {
-		m.sess = NewStub()
+	if m.newSession != nil && !m.providerLocked {
+		m.pickingProvider = true
+		m.dialog = dialogProvider
+		m.providerCursor = providerIndex(prov)
+	} else {
+		if m.sess == nil && m.newSession != nil {
+			m.sess = m.newSession(prov)
+		}
+		if m.sess == nil {
+			m.sess = NewStub()
+		}
 	}
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {
@@ -336,8 +386,17 @@ func Run(cfg Config) error {
 	}
 	p := tea.NewProgram(m, opts...)
 	final, err := p.Run()
-	if m.sess != nil {
-		_ = m.sess.Close()
+	var sess agent.Session
+	var startErr error
+	if fm, ok := final.(Model); ok {
+		sess = fm.sess
+		startErr = fm.startErr
+	}
+	if sess == nil {
+		sess = m.sess
+	}
+	if sess != nil {
+		_ = sess.Close()
 	}
 	if err != nil {
 		return err
@@ -345,18 +404,23 @@ func Run(cfg Config) error {
 	// A quit is clean unless the session never started. Only startCmd's
 	// failure counts: an error mid-session leaves a usable craze, and quitting
 	// out of one is a normal exit.
-	if fm, ok := final.(Model); ok {
-		return fm.startErr
-	}
-	return nil
+	return startErr
 }
 
 func (m Model) Init() tea.Cmd {
+	if m.pickingProvider {
+		return nil
+	}
 	return m.startCmd()
 }
 
 func (m Model) startCmd() tea.Cmd {
 	sess := m.sess
+	if sess == nil {
+		return func() tea.Msg {
+			return errMsg{fmt.Errorf("craze: no session")}
+		}
+	}
 	return func() tea.Msg {
 		if err := sess.Start(context.Background()); err != nil {
 			return errMsg{err}
@@ -406,8 +470,34 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessStart = m.now()
 		m.branch = m.git.branch()
 		m.refreshSnap()
+		if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
+			name := m.snap.Provider.Name
+			if name == "" {
+				name = agent.CursorProvider().Name()
+			}
+			if err := SaveProvider(name); err != nil {
+				m.addError(err.Error())
+			}
+		}
+		m.skillsGen++
 		m.rescanSkills()
-		return m, waitEvent(m.sess)
+		cmd := waitEvent(m.sess)
+		if inspect := m.discoverSkillsCmd(); inspect != nil {
+			return m, tea.Batch(cmd, inspect)
+		}
+		return m, cmd
+
+	case skillsMsg:
+		if msg.gen != m.skillsGen {
+			return m, nil
+		}
+		m.skills = msg.skills
+		if msg.inspectErr != nil {
+			text := "skill inspect failed: " + msg.inspectErr.Error()
+			m.addError(text)
+			diagf("craze: %s\n", text)
+		}
+		return m, nil
 
 	case errMsg:
 		// errMsg is only ever startCmd's: the session never came up. The TUI
@@ -729,6 +819,9 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		if r.Contains(x, y) {
 			return m.dialogClick(y - r.Y)
 		}
+		if m.pickingProvider {
+			return m.confirmProvider(m.providerDefault, false)
+		}
 		return m.closeDialog(true), nil
 	}
 	switch {
@@ -784,6 +877,8 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 		return m.modelDialogClick(i)
 	case dialogTheme:
 		return m.themeDialogClick(i)
+	case dialogProvider:
+		return m.providerDialogClick(i)
 	}
 	return m, nil
 }
@@ -816,6 +911,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleModelDialogKey(msg)
 	case dialogHelp:
 		return m.handleHelpDialogKey(msg)
+	case dialogProvider:
+		return m.handleProviderDialogKey(msg)
 	}
 
 	if msg.Type == tea.KeyCtrlY {
@@ -915,6 +1012,8 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	if m.input.Value() != prev {
 		m.slashHide = false
 		if name, _, ok := parseSlashLine(m.input.Value()); ok && name == "" {
+			// Cursor filesystem skills still rescan here; grok inspect is
+			// cached after Start and must not run again on `/`.
 			m.rescanSkills()
 		}
 	}
@@ -964,7 +1063,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) cycleMode() (tea.Model, tea.Cmd) {
-	if m.cardOpen() || len(m.snap.Modes) == 0 {
+	if m.cardOpen() || !m.showModes() {
 		return m, nil
 	}
 	id := agent.NextModeID(m.snap)
@@ -1053,7 +1152,7 @@ func (m Model) implementModeID() string {
 // planEarnsOffer is what a finished turn has to have been for the composer to
 // offer the plan it left behind.
 func (m Model) planEarnsOffer(stopReason string) bool {
-	if stopReason == stopCancelled || m.status == statusError {
+	if !m.showModes() || stopReason == stopCancelled || m.status == statusError {
 		return false
 	}
 	// An action retired this turn's offer, so the ending that would have armed
@@ -1130,7 +1229,9 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	sess := m.sess
 	return m, func() tea.Msg {
-		_ = sess.Close()
+		if sess != nil {
+			_ = sess.Close()
+		}
 		return tea.Quit()
 	}
 }
@@ -1170,14 +1271,22 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// An auto-answered request (headless) is already decided; only an
 		// interactive one is a card.
 		if ev.Question != nil && !ev.Question.Auto {
-			m.pushCard(card{kind: cardQuestion, ask: ev.Question})
+			if m.showAsk() {
+				m.pushCard(card{kind: cardQuestion, ask: ev.Question})
+			} else if m.sess != nil {
+				_ = m.sess.AnswerQuestion(ev.Question.ID, nil, true)
+			}
 		}
 	case agent.EventPlan:
 		if ev.Plan != nil && !ev.Plan.Auto {
 			// The plan itself is transcript material; the card is only the
 			// three answers it needs.
 			m.addPlan(ev.Plan)
-			m.pushCard(card{kind: cardPlan, plan: ev.Plan})
+			if m.showPlan() {
+				m.pushCard(card{kind: cardPlan, plan: ev.Plan})
+			} else if m.sess != nil {
+				_ = m.sess.AnswerPlan(ev.Plan.ID, false)
+			}
 		}
 	case agent.EventDone:
 		m.breakStream()

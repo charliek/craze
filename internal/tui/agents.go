@@ -65,6 +65,9 @@ func (m *Model) noteAgentTiming(t *agent.ToolEvent) {
 // that closed inside the linger window, most recently updated first. There is
 // no row for craze's own turn — the pinned "no main row".
 func (m Model) agentItems() []agent.ToolEvent {
+	if !m.showSubagents() {
+		return nil
+	}
 	byID := make(map[string]agent.ToolEvent, len(m.snap.Tools))
 	live := make([]agent.ToolEvent, 0, len(m.snap.Tools))
 	for _, t := range m.snap.Tools {
@@ -135,6 +138,9 @@ func (m Model) agentVisible(t agent.ToolEvent) bool {
 // agentLingering reports whether a finished row is still counting down, so the
 // tick chain keeps redrawing until it disappears.
 func (m Model) agentLingering() bool {
+	if !m.showSubagents() {
+		return false
+	}
 	for _, t := range m.snap.Tools {
 		if !t.IsTask() || toolInFlight(t.Status) {
 			continue

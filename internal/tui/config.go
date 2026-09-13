@@ -120,8 +120,8 @@ func ConfigProvider() string {
 }
 
 // SaveProvider persists the provider id with the same lock and atomic write
-// as the theme. Only the CLI writes it, after a successful Start; the session
-// itself never persists.
+// as the theme. The TUI writes it on startedMsg and craze prompt writes it
+// after Start; the session itself never persists.
 func SaveProvider(name string) error {
 	path := configPath()
 	if path == "" {

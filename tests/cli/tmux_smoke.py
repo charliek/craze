@@ -487,6 +487,8 @@ class TmuxPane:
 
         argv = [
             str(craze),
+            "--provider",
+            "cursor",
             "--agent-bin",
             str(fake_agent),
             "--workspace",
@@ -508,6 +510,8 @@ class TmuxPane:
             "export TERM=xterm-256color\n"
             f"export CRAZE_FAKE_SCRIPT={shlex.quote(script)}\n"
             "unset CRAZE_AGENT_BIN\n"
+            "unset CRAZE_PROVIDER\n"
+            "unset CRAZE_CONFIG\n"
             f"{' '.join(shlex.quote(a) for a in argv)} 2>{shlex.quote(str(self.stderr_file))}\n"
             f"printf '%s\\n' \"$?\" > {shlex.quote(str(self.exit_file))}\n"
         )
