@@ -1114,7 +1114,6 @@ func (s *server) waitCancelled() bool {
 	return false
 }
 
-// thought is one agent_thought_chunk on the parent session.
 func (s *server) thought(text string) {
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentThought,
@@ -1134,7 +1133,6 @@ func (s *server) toolMeta(sessionID, callID, title, toolName string, rawInput ma
 	})
 }
 
-// childText is one text chunk on a child session.
 func (s *server) childText(sessionID, kind, text string) {
 	s.update(sessionID, acp.SessionUpdate{
 		SessionUpdate: kind,

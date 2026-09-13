@@ -634,7 +634,9 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 	h := c.onUpdate
 	c.mu.Unlock()
 	if !routed {
-		c.countDropped()
+		c.mu.Lock()
+		c.dropped++
+		c.mu.Unlock()
 		return
 	}
 	if n.SessionID != active {
@@ -654,7 +656,9 @@ func (c *Client) handleSubagentNotification(msg *Message) {
 	n, ok, drop := parseSubagentNotification(msg.Params)
 	if !ok {
 		if drop {
-			c.countDropped()
+			c.mu.Lock()
+			c.dropped++
+			c.mu.Unlock()
 		}
 		return
 	}
@@ -700,12 +704,6 @@ func (c *Client) handleSubagentNotification(msg *Message) {
 	if h != nil {
 		h(n)
 	}
-}
-
-func (c *Client) countDropped() {
-	c.mu.Lock()
-	c.dropped++
-	c.mu.Unlock()
 }
 
 // handleUpdateTodos is shared by both envelopes: id is nil for a notification.
