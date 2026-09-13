@@ -18,8 +18,9 @@ flags; see [craze prompt](#craze-prompt).
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | ACP model id |
-| `--agent-bin` | Path to `cursor-agent` / fake agent (or `CRAZE_AGENT_BIN`) |
-| `--force` | Spawn the agent with `--force` (yolo). Default: on |
+| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
+| `--provider` | ACP provider: `cursor` or `grok`. Empty is unset. Unknown id exits 2 |
+| `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
@@ -28,8 +29,15 @@ flags; see [craze prompt](#craze-prompt).
 
 `--ask` and `--plan` are mutually exclusive.
 
+`--provider` on the TUI skips the startup picker. Without it, `$CRAZE_PROVIDER`
+then `provider` in the config file then `cursor` is the default, and the picker
+lets you change it before Start. `craze prompt` has no picker; it uses the same
+precedence. `craze frame` ignores env and config and defaults to cursor unless
+`--provider` is passed.
+
 ```bash
 ./bin/craze
+./bin/craze --provider grok
 ./bin/craze --workspace ../proj
 ./bin/craze --no-force
 ./bin/craze --theme gruvbox --no-mouse
@@ -41,7 +49,7 @@ Run a headless ACP turn (and optional follow-ups). Text comes from the
 argument, or from stdin when it is not a tty.
 
 ```bash
-./bin/craze prompt --json --agent-bin ./bin/craze-fake-agent "hello"
+./bin/craze prompt --json --provider grok --agent-bin ./bin/craze-fake-agent "hello"
 echo "hello" | ./bin/craze prompt --json
 ./bin/craze prompt --json --follow-up "and then this" "start here"
 ```
@@ -50,7 +58,8 @@ echo "hello" | ./bin/craze prompt --json
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | ACP model id (`session/set_model` after `session/new`) |
-| `--agent-bin` | Path to `cursor-agent` / fake agent (or `CRAZE_AGENT_BIN`) |
+| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
+| `--provider` | ACP provider: `cursor` or `grok` |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with `--force` (yolo). Default: on |

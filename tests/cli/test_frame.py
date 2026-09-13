@@ -37,6 +37,7 @@ def frame(
     no_force: bool = False,
     ansi: bool = False,
     timeout: str = "15s",
+    provider: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     work = tmp_path / WORKDIR
     work.mkdir(exist_ok=True)
@@ -62,6 +63,8 @@ def frame(
         argv.append("--no-force")
     if ansi:
         argv.append("--ansi")
+    if provider:
+        argv.extend(["--provider", provider])
     # RunFrameScript isolates HOME itself; this keeps the child agent and the
     # skills scan out of the developer's home too, the same way the PTY suite
     # does, and drops the env vars that would override the flags under test.
@@ -70,6 +73,7 @@ def frame(
     env.pop("CRAZE_AGENT_BIN", None)
     env.pop("CRAZE_FAKE_SCRIPT", None)
     env.pop("CRAZE_CONFIG", None)
+    env.pop("CRAZE_PROVIDER", None)
     return subprocess.run(
         argv, capture_output=True, text=True, cwd=str(work), env=env, timeout=120
     )
@@ -602,3 +606,21 @@ def test_frame_ignores_craze_provider_env(
     text = "\n".join(frame_lines(proc, 80, 24))
     assert f"{WORKDIR} │ cursor" in text, text
     assert "starting…" not in text, text
+
+
+def test_frame_grok_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="grok-echo",
+        cols=80,
+        rows=24,
+        keys="<wait:idle>go<enter><wait:text:echo: go><wait:idle>",
+        provider="grok",
+    )
+    text = "\n".join(frame_lines(proc, 80, 24))
+    assert f"{WORKDIR} │ grok" in text, text
+    assert "echo: go" in text, text
+    assert "fast" not in text, text
+    assert "◆ default" in text, text

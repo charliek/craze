@@ -626,9 +626,15 @@ func runFakeFrame(t *testing.T, script string, cols, rows int, keys string) stri
 // permission line is ever drawn.
 func runFakeFrameForce(t *testing.T, script string, cols, rows int, keys string, force bool) string {
 	t.Helper()
+	return runFakeFrameProvider(t, script, cols, rows, keys, agent.CursorProvider(), force)
+}
+
+func runFakeFrameProvider(t *testing.T, script string, cols, rows int, keys string, p agent.Provider, force bool) string {
+	t.Helper()
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
 	ws := frameWorkspace(t)
+	prov := p
 	sess := agent.New(agent.Options{
 		Binary:      bin,
 		ExtraArgs:   []string{"-script=" + script},
@@ -636,12 +642,15 @@ func runFakeFrameForce(t *testing.T, script string, cols, rows int, keys string,
 		Force:       force,
 		Interactive: true,
 		Stderr:      io.Discard,
+		Provider:    &prov,
 	})
 	plain, _, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      force,
+		Session:        sess,
+		Theme:          "tokyo-night",
+		Workspace:      ws,
+		Yolo:           force,
+		Provider:       p,
+		ProviderLocked: true,
 	}, cols, rows, keys, FrameOpts{Timeout: 15 * time.Second})
 	if err != nil {
 		t.Fatalf("run %s frame: %v", script, err)
@@ -1230,5 +1239,64 @@ func assertSelected(t *testing.T, raw string, on, off [][2]int) {
 				t.Fatalf("cell %d,%d selected=%v, want %v\nrow: %q", row, col, got, want[1], rows[row])
 			}
 		}
+	}
+}
+
+func TestFrameGoldenGrokEcho(t *testing.T) {
+	keys := "<wait:idle>go<enter><wait:text:echo: go><wait:idle>"
+	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
+		got := runFakeFrameProvider(t, "grok-echo", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		name := fmt.Sprintf("grok-echo-%dx%d", size.cols, size.rows)
+		assertGolden(t, name, size.cols, size.rows, got)
+		if !strings.Contains(got, " │ grok │ ") {
+			t.Fatalf("%s missing grok provider:\n%s", name, got)
+		}
+		if strings.Contains(got, " │ cursor │ ") {
+			t.Fatalf("%s still shows cursor:\n%s", name, got)
+		}
+		if strings.Contains(got, "fast") {
+			t.Fatalf("%s must not show fast:\n%s", name, got)
+		}
+		if !strings.Contains(got, "◆ default") {
+			t.Fatalf("%s missing mode chip:\n%s", name, got)
+		}
+	}
+}
+
+func TestFrameGoldenGrokAsk(t *testing.T) {
+	keys := "<wait:idle>go<enter><wait:card>"
+	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
+		got := runFakeFrameProvider(t, "grok-ask", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		name := fmt.Sprintf("grok-ask-%dx%d", size.cols, size.rows)
+		assertGolden(t, name, size.cols, size.rows, got)
+		for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s missing %q:\n%s", name, want, got)
+			}
+		}
+	}
+}
+
+func TestFrameGoldenGrokPlan(t *testing.T) {
+	keys := "<wait:idle>go<enter><wait:card>"
+	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
+		got := runFakeFrameProvider(t, "grok-plan", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		name := fmt.Sprintf("grok-plan-%dx%d", size.cols, size.rows)
+		assertGolden(t, name, size.cols, size.rows, got)
+		for _, want := range []string{"[a]ccept", "[r]eject", "esc cancel"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s missing %q:\n%s", name, want, got)
+			}
+		}
+	}
+}
+
+func TestFrameGrokModelDialogHasNoFastRow(t *testing.T) {
+	got := runFakeFrameProvider(t, "grok-echo", 100, 30, "<wait:idle>/model<enter>", agent.GrokProvider(), true)
+	if strings.Contains(got, "fast") {
+		t.Fatalf("grok model dialog must not draw fast:\n%s", got)
+	}
+	if !strings.Contains(got, "effort") {
+		t.Fatalf("grok model dialog should still draw effort:\n%s", got)
 	}
 }

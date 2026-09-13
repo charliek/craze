@@ -1,14 +1,16 @@
 # Architecture
 
-craze is an ACP client. It owns the chrome; `cursor-agent` (or
+craze is an ACP client. It owns the chrome; `cursor-agent` or `grok` (or
 `craze-fake-agent` in tests) is the agent process.
 
 ```mermaid
 flowchart LR
   tui["TUI / prompt"] --> session["agent.Session"]
   session --> client["acp.Client"]
-  client --> child["cursor-agent acp"]
-  child -->|"session/update, permission, ask, plan"| client
+  client --> cursor["cursor-agent acp"]
+  client --> grok["grok agent stdio"]
+  cursor -->|"session/update, permission, ask, plan"| client
+  grok -->|"session/update, x.ai ask/plan, prompt_complete"| client
   client --> session
   session --> tui
 ```
@@ -43,7 +45,8 @@ rows, and cards. `craze prompt --json` writes the same events as JSON lines.
 
 ## Fake agent
 
-`craze-fake-agent` stands in for `cursor-agent acp`. Unknown arguments
-(including `acp` and `--force`) are ignored so the binary can be pointed at
-with `--agent-bin`. Scripts are selected with `-script` or
-`CRAZE_FAKE_SCRIPT`. See [Testing](testing.md).
+`craze-fake-agent` stands in for `cursor-agent acp` or `grok agent stdio`.
+Unknown arguments (including `acp`, `--force`, `agent`, `stdio`, and
+`--always-approve`) are ignored so the binary can be pointed at with
+`--agent-bin`. Scripts are selected with `-script` or `CRAZE_FAKE_SCRIPT`.
+Grok scripts are prefixed `grok-`. See [Testing](testing.md).
