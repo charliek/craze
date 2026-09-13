@@ -31,6 +31,10 @@ def run_prompt(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = script
+    env.pop("CRAZE_PROVIDER", None)
+    env["CRAZE_CONFIG"] = str(workspace / "missing-craze-config.toml")
+    env["XAI_API_KEY"] = ""
+    env["GROK_CODE_XAI_API_KEY"] = ""
     cmd = [
         str(craze_bin),
         "prompt",
@@ -50,6 +54,18 @@ def run_prompt(
         env=env,
         timeout=timeout,
     )
+
+
+def test_grok_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin, fake_agent_bin, tmp_path, "--provider", "grok", "hello", script="grok-echo"
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
+    assert texts == "echo: hello"
+    terminals = [e for e in events if e.get("type") in ("done", "error")]
+    assert terminals == [{"type": "done", "stopReason": "end_turn"}]
 
 
 def test_first_turn_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
@@ -188,6 +204,41 @@ def test_stdin_prompt(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> 
     events = parse_events(proc.stdout)
     texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
     assert texts == "echo: from stdin"
+
+
+def test_grok_ask_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--provider",
+        "grok",
+        "q",
+        script="grok-ask",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    questions = [e for e in events if e.get("type") == "question"]
+    assert questions, events
+    assert questions[0].get("auto") is True
+    assert questions[0]["answers"]["Pick one"] == ["A"]
+    assert questions[0]["answers"]["Pick any"] == ["X"]
+    texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
+    assert texts == "asked:accepted:Pick one=A;Pick any=X"
+    assert events[-1] == {"type": "done", "stopReason": "end_turn"}
+
+
+def test_unknown_provider_exits_2(craze_bin: Path, tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [str(craze_bin), "prompt", "--provider", "codex", "--workspace", str(tmp_path), "hi"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert proc.returncode == 2
+    assert "unknown provider" in proc.stderr
+    assert proc.stdout == ""
 
 
 def test_usage_exit_2(craze_bin: Path, tmp_path: Path) -> None:

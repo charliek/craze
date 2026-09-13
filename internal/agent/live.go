@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -82,6 +83,10 @@ func newSession(opts Options) *session {
 
 		taskReceipts: make(map[string]TaskInfo),
 	}
+	if opts.Provider != nil {
+		p := *opts.Provider
+		s.opts.Provider = &p
+	}
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
@@ -121,11 +126,7 @@ func (s *session) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	args := append([]string{}, s.opts.ExtraArgs...)
-	if s.opts.Force {
-		args = append(args, "--force")
-	}
-	args = append(args, "--trust", "acp")
+	args := s.provider().Args(s.opts.ExtraArgs, s.opts.Force)
 
 	cwd := s.opts.Workspace
 	if cwd == "" {
@@ -143,11 +144,13 @@ func (s *session) Start(ctx context.Context) error {
 	}
 
 	client, err := acp.Spawn(acp.SpawnOptions{
-		Binary: s.opts.Binary,
-		Args:   args,
-		Dir:    cwd,
-		Env:    s.opts.Env,
-		Stderr: s.opts.Stderr,
+		Binary:     s.opts.Binary,
+		Candidates: s.provider().Bins(),
+		Args:       args,
+		Dir:        cwd,
+		Env:        s.opts.Env,
+		Stderr:     s.opts.Stderr,
+		Dialect:    s.provider().Dialect(),
 	})
 	if err != nil {
 		s.unstart()
@@ -175,18 +178,23 @@ func (s *session) Start(ctx context.Context) error {
 		_ = s.Close()
 		return err
 	}
-	if initRes.OffersCursorLogin() {
-		if err := client.Authenticate(ctx); err != nil {
+	if methodID, meta, ok := s.authMethod(initRes); ok {
+		if err := client.Authenticate(ctx, methodID, meta); err != nil {
 			_ = s.Close()
-			return fmt.Errorf("%w (run `agent login`)", err)
+			return fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
 		}
+	} else if len(initRes.AuthMethods) > 0 && len(s.provider().AuthMethodIDs()) > 0 {
+		// The daemon offered only methods craze will not start (interactive
+		// browser login); say how to fix it instead of hanging later.
+		_ = s.Close()
+		return fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
 	}
 	sess, err := client.NewSession(ctx, cwd)
 	if err != nil {
 		_ = s.Close()
 		return err
 	}
-	snap := snapshotFromNew(sess)
+	snap := snapshotFromNewProvider(sess, s.provider(), initRes)
 	snap.Provider = s.provider().Info()
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(snap.Modes))
@@ -215,6 +223,32 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// authMethod is the provider's pick against what initialize advertised: the
+// first of its preferred methods that is offered and, when it needs an env
+// key, backed by one. No advertised methods means no login.
+func (s *session) authMethod(initRes *acp.InitializeResult) (string, map[string]any, bool) {
+	return s.provider().authFor(initRes, s.childEnv())
+}
+
+// childEnv is the lookup for what the spawned agent will see: Options.Env
+// replaces the parent environment when set, exactly as acp.Spawn applies
+// it, and inherits it otherwise.
+func (s *session) childEnv() func(string) string {
+	if s.opts.Env == nil {
+		return os.Getenv
+	}
+	env := s.opts.Env
+	return func(key string) string {
+		prefix := key + "="
+		for i := len(env) - 1; i >= 0; i-- {
+			if strings.HasPrefix(env[i], prefix) {
+				return env[i][len(prefix):]
+			}
+		}
+		return ""
+	}
 }
 
 func (s *session) unstart() {
@@ -252,8 +286,30 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		s.emit(Event{Type: EventError, Err: err})
 		return Result{}, err
 	}
+	if res.StopReason == acp.StopCancelled {
+		s.closeInFlightTools(acp.StopCancelled)
+	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// closeInFlightTools settles every tool the turn left running. Grok answers
+// a cancel with the turn's end and nothing more: the interrupted tool never
+// gets a terminal tool_call_update, so without this its row spins forever and
+// the status row keeps counting it. Cursor closes its own tools, so this
+// finds nothing there.
+func (s *session) closeInFlightTools(status string) {
+	s.mu.Lock()
+	ids := append([]string(nil), s.toolOrder...)
+	s.mu.Unlock()
+	for _, id := range ids {
+		// The in-flight check happens under the merge lock: a terminal
+		// update that lands between the scan and the merge wins.
+		st := status
+		if tool, changed := s.mergeTool(toolDelta{id: id, status: &st, onlyIfInFlight: true}); changed {
+			s.emit(Event{Type: EventTool, Tool: &tool})
+		}
+	}
 }
 
 func (s *session) SetModel(ctx context.Context, modelID string) error {
@@ -704,6 +760,7 @@ type sessionUpdateWire struct {
 	AvailableCommands []acp.AvailableCommand `json:"availableCommands,omitempty"`
 	CurrentModeID     string                 `json:"currentModeId,omitempty"`
 	ConfigOptions     json.RawMessage        `json:"configOptions,omitempty"`
+	Entries           json.RawMessage        `json:"entries,omitempty"`
 }
 
 func (s *session) onUpdate(n acp.SessionNotification) {
@@ -761,7 +818,56 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.snap.Config = cfg
 		s.mu.Unlock()
 		s.emit(Event{Type: EventMeta})
+	case acp.UpdatePlan:
+		if !s.provider().planUpdatesAreTodos {
+			return
+		}
+		todos, ok := planEntriesToTodos(u.Entries)
+		if !ok {
+			return
+		}
+		s.mu.Lock()
+		s.snap.Todos = todos
+		s.snap.TodosUpdatedAt = time.Now()
+		out := append([]Todo(nil), todos...)
+		s.mu.Unlock()
+		s.emit(Event{Type: EventTodos, Todos: out})
 	}
+}
+
+func planEntriesToTodos(raw json.RawMessage) ([]Todo, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil, false
+	}
+	var entries []struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, false
+	}
+	out := make([]Todo, 0, len(entries))
+	for i, e := range entries {
+		content := sanitizeText(e.Content)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		id := sanitizeText(e.ID)
+		if id == "" {
+			id = fmt.Sprintf("plan-%d", i)
+		}
+		out = append(out, Todo{
+			ID:      id,
+			Content: content,
+			Status:  normalizeTodoStatus(e.Status),
+		})
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, true
 }
 
 func toolDeltaFromWire(u sessionUpdateWire) (toolDelta, bool) {

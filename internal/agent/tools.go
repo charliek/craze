@@ -58,18 +58,21 @@ func (t ToolEvent) IsTodoTool() bool {
 }
 
 type toolDelta struct {
-	id           string
-	title        *string
-	kind         *string
-	status       *string
-	rawInput     json.RawMessage
-	hasRawInput  bool
-	content      json.RawMessage
-	hasContent   bool
-	rawOutput    json.RawMessage
-	hasRawOutput bool
-	locations    json.RawMessage
-	hasLocations bool
+	id string
+	// onlyIfInFlight drops the delta when the tool has already settled, so a
+	// terminal update that raced in is not overwritten (closeInFlightTools).
+	onlyIfInFlight bool
+	title          *string
+	kind           *string
+	status         *string
+	rawInput       json.RawMessage
+	hasRawInput    bool
+	content        json.RawMessage
+	hasContent     bool
+	rawOutput      json.RawMessage
+	hasRawOutput   bool
+	locations      json.RawMessage
+	hasLocations   bool
 }
 
 func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
@@ -79,6 +82,9 @@ func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
 		s.tools = make(map[string]ToolEvent)
 	}
 	prev, exists := s.tools[d.id]
+	if d.onlyIfInFlight && (!exists || !toolStatusInFlight(prev.Status)) {
+		return cloneTool(prev), false
+	}
 	out := prev
 	if !exists {
 		out.ID = d.id
@@ -135,6 +141,11 @@ func (s *session) mergeTool(d toolDelta) (ToolEvent, bool) {
 		!sameTask(prev.Task, out.Task)
 	s.tools[d.id] = out
 	return cloneTool(out), changed
+}
+
+// toolStatusInFlight is the status set the TUI counts as running.
+func toolStatusInFlight(status string) bool {
+	return status == "pending" || status == "in_progress"
 }
 
 // sameOutput compares by value; ToolOutput holds a *int so == on the struct

@@ -14,8 +14,8 @@ func NewRootCmd() *cobra.Command {
 	flags := &tuiFlags{force: true}
 	cmd := &cobra.Command{
 		Use:           "craze",
-		Short:         "A Cursor ACP client TUI",
-		Long:          "craze is a terminal UI that drives cursor-agent over ACP.",
+		Short:         "An ACP client TUI for Cursor and Grok",
+		Long:          "craze is a terminal UI that drives cursor-agent or grok over ACP.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version.Version,

@@ -41,6 +41,9 @@ func (s tasksPanelState) next() tasksPanelState {
 // cycleTasks is Ctrl+T and /tasks. Hidden persists: a later list updates the
 // data without bringing the panel back.
 func (m Model) cycleTasks() (tea.Model, tea.Cmd) {
+	if !m.showTodos() {
+		return m, nil
+	}
 	m.tasksState = m.tasksState.next()
 	return m, nil
 }
@@ -85,7 +88,7 @@ func (m Model) tasksLingering() bool {
 }
 
 func (m Model) tasksPanelVisible() bool {
-	if !m.todosSeen || m.tasksState == tasksHidden || len(m.snap.Todos) == 0 {
+	if !m.showTodos() || !m.todosSeen || m.tasksState == tasksHidden || len(m.snap.Todos) == 0 {
 		return false
 	}
 	if !m.todosClosedAt.IsZero() && m.now().Sub(m.todosClosedAt) >= tasksLinger {

@@ -10,6 +10,8 @@ import (
 const (
 	ProtocolVersion = 1
 	AuthCursorLogin = "cursor_login"
+	AuthXAIAPIKey   = "xai.api_key"
+	AuthCachedToken = "cached_token"
 
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
@@ -26,6 +28,13 @@ const (
 	MethodCursorUpdateTodos = "cursor/update_todos"
 	MethodCursorTask        = "cursor/task"
 
+	MethodGrokAskUserQuestion        = "x.ai/ask_user_question"
+	MethodGrokAskUserQuestionWrapped = "_x.ai/ask_user_question"
+	MethodGrokExitPlanMode           = "x.ai/exit_plan_mode"
+	MethodGrokExitPlanModeWrapped    = "_x.ai/exit_plan_mode"
+	MethodGrokPromptComplete         = "x.ai/session/prompt_complete"
+	MethodGrokPromptCompleteWrapped  = "_x.ai/session/prompt_complete"
+
 	UpdateAgentMessage      = "agent_message_chunk"
 	UpdateAgentThought      = "agent_thought_chunk"
 	UpdateToolCall          = "tool_call"
@@ -34,6 +43,11 @@ const (
 	UpdateCurrentMode       = "current_mode_update"
 	UpdateConfigOption      = "config_option_update"
 	UpdateSessionInfo       = "session_info_update"
+	UpdatePlan              = "plan"
+
+	// GrokEmptyPlanMarkdown is the plan card body when exit_plan_mode
+	// omitted planContent.
+	GrokEmptyPlanMarkdown = "# No plan written yet\n\n(The agent exited plan mode without writing a plan.)"
 
 	KindAllowOnce    = "allow_once"
 	KindAllowAlways  = "allow_always"
@@ -42,6 +56,16 @@ const (
 
 	StopEndTurn   = "end_turn"
 	StopCancelled = "cancelled"
+)
+
+// DialectID selects the provider-shaped branch of the ACP client. The client
+// stays one NDJSON JSON-RPC connection; only method names and reply envelopes
+// differ per dialect.
+type DialectID string
+
+const (
+	DialectCursor DialectID = "cursor"
+	DialectGrok   DialectID = "grok"
 )
 
 type Implementation struct {
@@ -71,6 +95,23 @@ type InitializeResult struct {
 	AgentInfo         *Implementation `json:"agentInfo,omitempty"`
 	AuthMethods       []AuthMethod    `json:"authMethods,omitempty"`
 	AgentCapabilities json.RawMessage `json:"agentCapabilities,omitempty"`
+	Meta              json.RawMessage `json:"_meta,omitempty"`
+}
+
+// ModelState is initialize._meta.modelState, the fallback when session/new
+// omits models.
+func (r InitializeResult) ModelState() json.RawMessage {
+	raw := bytes.TrimSpace(r.Meta)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var meta struct {
+		ModelState json.RawMessage `json:"modelState"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil
+	}
+	return bytes.TrimSpace(meta.ModelState)
 }
 
 type AuthMethod struct {
@@ -79,8 +120,13 @@ type AuthMethod struct {
 }
 
 func (r InitializeResult) OffersCursorLogin() bool {
+	return r.OffersAuthMethod(AuthCursorLogin)
+}
+
+// OffersAuthMethod reports whether initialize advertised an auth method id.
+func (r InitializeResult) OffersAuthMethod(id string) bool {
 	for _, m := range r.AuthMethods {
-		if m.ID == AuthCursorLogin {
+		if m.ID == id {
 			return true
 		}
 	}
@@ -89,6 +135,8 @@ func (r InitializeResult) OffersCursorLogin() bool {
 
 type AuthenticateParams struct {
 	MethodID string `json:"methodId"`
+	// Meta carries provider extras; grok authenticates with headless true.
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 type NewSessionParams struct {
@@ -115,6 +163,24 @@ type PromptParams struct {
 
 type PromptResult struct {
 	StopReason string `json:"stopReason"`
+	// Meta is the agent's extra; grok stamps promptId on it, which is what
+	// lets a late prompt_complete for this turn be told from the next one's.
+	Meta json.RawMessage `json:"_meta,omitempty"`
+}
+
+// PromptID is _meta.promptId, or empty when the agent sends none.
+func (r PromptResult) PromptID() string {
+	raw := bytes.TrimSpace(r.Meta)
+	if len(raw) == 0 || raw[0] != '{' {
+		return ""
+	}
+	var meta struct {
+		PromptID string `json:"promptId"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return ""
+	}
+	return meta.PromptID
 }
 
 type CancelParams struct {

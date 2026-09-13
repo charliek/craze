@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -600,4 +601,220 @@ func matchTail(got string, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestCursorSpawnArgvRegression pins the current spawn line, ExtraArgs first,
+// so the provider seam cannot silently reorder it.
+func TestCursorSpawnArgvRegression(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "argv")
+	cursor := CursorProvider()
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=echo"},
+		Workspace: t.TempDir(),
+		Force:     true,
+		Provider:  &cursor,
+		Env:       append(os.Environ(), "CRAZE_FAKE_DUMP_ARGV="+dump),
+		Stderr:    io.Discard,
+	})
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got := readArgv(t, dump)
+	if !matchTail(got, []string{"-script=echo", "--force", "--trust", "acp"}) {
+		t.Fatalf("argv %q", got)
+	}
+	if strings.Contains(got, "--always-approve") || strings.Contains(got, "--no-auto-update") {
+		t.Fatalf("cursor argv carries grok flags: %q", got)
+	}
+}
+
+// TestGrokSpawnArgvOrder pins the grok spawn line: ExtraArgs first, then the
+// global flag, the agent subcommand, the force flag, and stdio. --trust acp
+// must never appear on the grok line.
+func TestGrokSpawnArgvOrder(t *testing.T) {
+	for _, force := range []bool{true, false} {
+		t.Run(map[bool]string{true: "yolo", false: "no-force"}[force], func(t *testing.T) {
+			dump := filepath.Join(t.TempDir(), "argv")
+			grok := GrokProvider()
+			s := newSession(Options{
+				Binary:    fakeAgentPath(t),
+				ExtraArgs: []string{"-script=echo"},
+				Workspace: t.TempDir(),
+				Force:     force,
+				Provider:  &grok,
+				Env:       append(os.Environ(), "CRAZE_FAKE_DUMP_ARGV="+dump),
+				Stderr:    io.Discard,
+			})
+			// The fake only advertises cursor auth, so grok without an API
+			// key and without a cached token fails auth by design; the
+			// argv dump it writes on startup is still what this asserts.
+			_ = s.Start(t.Context())
+			t.Cleanup(func() { _ = s.Close() })
+			got := readArgv(t, dump)
+			want := []string{"-script=echo", "--no-auto-update", "agent", "stdio"}
+			if force {
+				want = []string{"-script=echo", "--no-auto-update", "agent", "--always-approve", "stdio"}
+			}
+			if !matchTail(got, want) {
+				t.Fatalf("argv %q", got)
+			}
+			if strings.Contains(got, "--trust") {
+				t.Fatalf("grok argv must not carry --trust: %q", got)
+			}
+			if strings.Contains(got, "--force") {
+				t.Fatalf("grok argv must not carry --force: %q", got)
+			}
+		})
+	}
+}
+
+func startGrokScript(t *testing.T, script string, force bool) *session {
+	t.Helper()
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	grok := GrokProvider()
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=" + script},
+		Workspace: t.TempDir(),
+		Force:     force,
+		Provider:  &grok,
+		Stderr:    io.Discard,
+	})
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestGrokLoginHint(t *testing.T) {
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	grok := GrokProvider()
+	s := newSession(Options{
+		Binary:    fakeAgentPath(t),
+		ExtraArgs: []string{"-script=authfail"},
+		Workspace: t.TempDir(),
+		Force:     true,
+		Provider:  &grok,
+		Stderr:    io.Discard,
+	})
+	err := s.Start(t.Context())
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("expected auth error")
+	}
+	if !strings.Contains(err.Error(), "grok login") {
+		t.Fatalf("login hint: %v", err)
+	}
+}
+
+func TestGrokEnvKeyVsCachedTokenStart(t *testing.T) {
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	for _, tc := range []struct {
+		name   string
+		key    string
+		wantID string
+	}{
+		{"env-key", "test-key", acp.AuthXAIAPIKey},
+		{"cached-token", "", acp.AuthCachedToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XAI_API_KEY", tc.key)
+			dump := filepath.Join(t.TempDir(), "auth")
+			grok := GrokProvider()
+			s := newSession(Options{
+				Binary:    fakeAgentPath(t),
+				ExtraArgs: []string{"-script=grok-echo"},
+				Workspace: t.TempDir(),
+				Force:     true,
+				Provider:  &grok,
+				Env:       append(os.Environ(), "CRAZE_FAKE_DUMP_AUTH="+dump, "XAI_API_KEY="+tc.key),
+				Stderr:    io.Discard,
+			})
+			if err := s.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			raw := readArgv(t, dump)
+			var params acp.AuthenticateParams
+			if err := json.Unmarshal([]byte(raw), &params); err != nil {
+				t.Fatalf("auth dump %q: %v", raw, err)
+			}
+			if params.MethodID != tc.wantID {
+				t.Fatalf("methodId %q want %q", params.MethodID, tc.wantID)
+			}
+			if params.Meta["headless"] != true {
+				t.Fatalf("meta %v", params.Meta)
+			}
+		})
+	}
+}
+
+func TestGrokHeadlessAskAndPlan(t *testing.T) {
+	t.Run("ask", func(t *testing.T) {
+		s := startGrokScript(t, "grok-ask", true)
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "q"); err != nil {
+			t.Fatal(err)
+		}
+		q := log.waitQuestion(t)
+		if !q.Auto || q.Answers["Pick one"][0] != "A" {
+			t.Fatalf("question %+v", q)
+		}
+		log.waitTexts(t, "asked:accepted:Pick one=A;Pick any=X")
+	})
+	t.Run("ask-wrapped", func(t *testing.T) {
+		s := startGrokScript(t, "grok-ask-wrapped", true)
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "q"); err != nil {
+			t.Fatal(err)
+		}
+		log.waitTexts(t, "asked:accepted:Pick one=A;Pick any=X")
+	})
+	t.Run("plan", func(t *testing.T) {
+		s := startGrokScript(t, "grok-plan", true)
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "p"); err != nil {
+			t.Fatal(err)
+		}
+		ev := log.waitType(t, EventPlan)
+		if !ev.Plan.Auto || !ev.Plan.Accepted || !strings.Contains(ev.Plan.Plan, "## Steps") {
+			t.Fatalf("plan %+v", ev.Plan)
+		}
+		log.waitTexts(t, "planned:approved")
+	})
+}
+
+func TestGrokEchoPromptComplete(t *testing.T) {
+	s := startGrokScript(t, "grok-echo", true)
+	log := collect(t, s)
+	res, err := s.Prompt(t.Context(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StopReason != acp.StopEndTurn {
+		t.Fatalf("stop %q", res.StopReason)
+	}
+	log.waitTexts(t, "echo: hello")
+	waitFor(t, "EventDone", func() bool {
+		for _, ev := range log.snapshot() {
+			if ev.Type == EventDone {
+				return true
+			}
+		}
+		return false
+	})
+	nDone := 0
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventDone {
+			nDone++
+		}
+	}
+	if nDone != 1 {
+		t.Fatalf("done events %d", nDone)
+	}
 }

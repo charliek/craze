@@ -17,6 +17,14 @@ type Client struct {
 	mu        sync.Mutex
 	sessionID string
 	inPrompt  bool
+	dialect   DialectID
+	// promptWait is the grok prompt_complete racer. First of the RPC reply
+	// or a matching notify wins; the other is abandoned.
+	promptWait chan promptResult
+	// donePromptID is the grok promptId of the last turn the RPC reply
+	// ended. A prompt_complete carrying it is that turn's late twin and
+	// must not end the turn now running.
+	donePromptID string
 	// turn counts prompts. It is the identity of a turn: a blocking request
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
@@ -45,10 +53,16 @@ type pendingReq struct {
 	replied bool
 }
 
+type promptResult struct {
+	res PromptResult
+	err error
+}
+
 func newClient(conn *Conn, child *Child) *Client {
 	c := &Client{
 		conn:     conn,
 		child:    child,
+		dialect:  DialectCursor,
 		incoming: make(map[string]*pendingReq),
 	}
 	conn.SetRequestHandler(c.onRequest)
@@ -56,9 +70,22 @@ func newClient(conn *Conn, child *Child) *Client {
 	return c
 }
 
+// Dialect is the provider dialect the client speaks.
+func (c *Client) Dialect() DialectID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dialect
+}
+
 func Dial(in io.Reader, out io.Writer) *Client {
+	return DialWithDialect(in, out, DialectCursor)
+}
+
+// DialWithDialect is Dial for a provider dialect. Tests default to cursor.
+func DialWithDialect(in io.Reader, out io.Writer, dialect DialectID) *Client {
 	conn := NewConn(in, out)
 	c := newClient(conn, nil)
+	c.dialect = dialect
 	conn.Start()
 	return c
 }
@@ -137,8 +164,8 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	return &result, nil
 }
 
-func (c *Client) Authenticate(ctx context.Context) error {
-	return c.conn.Call(ctx, MethodAuthenticate, AuthenticateParams{MethodID: AuthCursorLogin}, nil)
+func (c *Client) Authenticate(ctx context.Context, methodID string, meta map[string]any) error {
+	return c.conn.Call(ctx, MethodAuthenticate, AuthenticateParams{MethodID: methodID, Meta: meta}, nil)
 }
 
 func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult, error) {
@@ -178,10 +205,14 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 	// and every request of the turn before it is now stale.
 	c.turn++
 	sid := c.sessionID
+	dialect := c.dialect
+	wait := make(chan promptResult, 1)
+	c.promptWait = wait
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
 		c.inPrompt = false
+		c.promptWait = nil
 		c.mu.Unlock()
 	}()
 
@@ -189,11 +220,64 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		SessionID: sid,
 		Prompt:    []ContentBlock{{Type: "text", Text: text}},
 	}
-	var result PromptResult
-	if err := c.conn.Call(ctx, MethodSessionPrompt, params, &result); err != nil {
-		return nil, err
+	if dialect != DialectGrok {
+		var result PromptResult
+		if err := c.conn.Call(ctx, MethodSessionPrompt, params, &result); err != nil {
+			return nil, err
+		}
+		return &result, nil
 	}
-	return &result, nil
+
+	rpcCtx, rpcCancel := context.WithCancel(ctx)
+	defer rpcCancel()
+	rpcCh := make(chan promptResult, 1)
+	go func() {
+		var result PromptResult
+		err := c.conn.Call(rpcCtx, MethodSessionPrompt, params, &result)
+		rpcCh <- promptResult{res: result, err: err}
+	}()
+	select {
+	case w := <-wait:
+		rpcCancel()
+		go func() { <-rpcCh }()
+		return promptResultOrErr(w)
+	case w := <-rpcCh:
+		// Both channels can be ready at once; Go's select would pick
+		// either. If the notify already landed it was first, so it wins.
+		select {
+		case n := <-wait:
+			return promptResultOrErr(n)
+		default:
+			if w.err == nil {
+				c.notePromptDone(w.res.PromptID())
+			}
+			return promptResultOrErr(w)
+		}
+	case <-ctx.Done():
+		rpcCancel()
+		go func() { <-rpcCh }()
+		return nil, ctx.Err()
+	}
+}
+
+func promptResultOrErr(w promptResult) (*PromptResult, error) {
+	if w.err != nil {
+		return nil, w.err
+	}
+	return &w.res, nil
+}
+
+func (c *Client) failPromptWaiters(res PromptResult, err error) {
+	c.mu.Lock()
+	ch := c.promptWait
+	c.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- promptResult{res: res, err: err}:
+	default:
+	}
 }
 
 func (c *Client) SetModel(ctx context.Context, modelID string) error {
@@ -218,6 +302,13 @@ func (c *Client) SetConfig(ctx context.Context, configID, value string) error {
 	}, nil)
 }
 
+// Cancel answers every blocking request cancelled and tells the agent to stop
+// the turn. It does not end the prompt itself: the turn is over when the
+// agent says so (the RPC reply, or grok's prompt_complete), the same as
+// cursor. Ending it here would let a follow-up prompt start while the agent
+// is still winding the old turn down, and grok's late prompt_complete for
+// that old turn would then end the new one. Close is the only path that
+// fails a waiter outright.
 func (c *Client) Cancel(ctx context.Context) error {
 	c.completeIncomingCancelled()
 	sid := c.SessionID()
@@ -242,6 +333,7 @@ func (c *Client) AnswerPermission(id string, dec PermissionDecision) {
 
 func (c *Client) Close() error {
 	c.completeIncomingCancelled()
+	c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
 	c.mu.Lock()
 	inFlight := c.inPrompt
 	sid := c.sessionID
@@ -267,6 +359,7 @@ func (c *Client) Close() error {
 // loop, before their handler goroutine starts: a cancel landing in between
 // must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
+	d := c.Dialect()
 	switch msg.Method {
 	case MethodRequestPermission:
 		var req PermissionRequest
@@ -276,6 +369,10 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, func(in *pendingReq) { c.handlePermission(in, req) })
 	case MethodCursorAskQuestion:
+		if d == DialectGrok {
+			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+			return
+		}
 		var req AskQuestionRequest
 		if err := decodeObject(msg.Params, &req); err != nil {
 			c.replyInvalidParams(msg.ID, "invalid cursor/ask_question params")
@@ -283,15 +380,49 @@ func (c *Client) onRequest(msg *Message) {
 		}
 		c.dispatch(msg, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodCursorCreatePlan:
+		if d == DialectGrok {
+			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+			return
+		}
 		var req CreatePlanRequest
 		if err := decodeObject(msg.Params, &req); err != nil {
 			c.replyInvalidParams(msg.ID, "invalid cursor/create_plan params")
 			return
 		}
 		c.dispatch(msg, func(in *pendingReq) { c.handleCreatePlan(in, req) })
+	case MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
+		if d != DialectGrok {
+			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+			return
+		}
+		req, err := parseGrokAsk(msg.Params)
+		if err != nil {
+			c.replyInvalidParams(msg.ID, "invalid x.ai/ask_user_question params")
+			return
+		}
+		c.dispatch(msg, func(in *pendingReq) { c.handleAskQuestion(in, req) })
+	case MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
+		if d != DialectGrok {
+			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+			return
+		}
+		req, err := parseGrokPlan(msg.Params)
+		if err != nil {
+			c.replyInvalidParams(msg.ID, "invalid x.ai/exit_plan_mode params")
+			return
+		}
+		c.dispatch(msg, func(in *pendingReq) { c.handleCreatePlan(in, req) })
 	case MethodCursorUpdateTodos:
+		if d == DialectGrok {
+			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+			return
+		}
 		c.handleUpdateTodos(msg.ID, msg.Params)
 	case MethodCursorTask:
+		if d == DialectGrok {
+			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+			return
+		}
 		c.handleTask(msg.ID, msg.Params)
 	default:
 		_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -330,7 +461,7 @@ func (c *Client) register(msg *Message) *pendingReq {
 func (c *Client) runIncoming(in *pendingReq, run func(*pendingReq)) {
 	defer c.dropIncoming(idKey(in.id))
 	if !c.liveIncoming(in) {
-		c.replyIncoming(in, cancelledOutcome())
+		c.replyIncoming(in, cancelledResult(c.Dialect(), in.method))
 		return
 	}
 	run(in)
@@ -362,9 +493,51 @@ func (c *Client) onNotify(msg *Message) {
 	case MethodSessionUpdate:
 		c.handleSessionUpdate(msg)
 	case MethodCursorUpdateTodos:
-		c.handleUpdateTodos(nil, msg.Params)
+		if c.Dialect() != DialectGrok {
+			c.handleUpdateTodos(nil, msg.Params)
+		}
 	case MethodCursorTask:
-		c.handleTask(nil, msg.Params)
+		if c.Dialect() != DialectGrok {
+			c.handleTask(nil, msg.Params)
+		}
+	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped:
+		c.handlePromptComplete(msg)
+	}
+}
+
+// notePromptDone records the promptId of a turn the RPC reply ended, so
+// the notify for that same turn, arriving late, is recognised as stale.
+func (c *Client) notePromptDone(promptID string) {
+	if promptID == "" {
+		return
+	}
+	c.mu.Lock()
+	c.donePromptID = promptID
+	c.mu.Unlock()
+}
+
+func (c *Client) handlePromptComplete(msg *Message) {
+	n, ok := parseGrokPromptComplete(msg.Params)
+	if !ok {
+		return
+	}
+	stop := n.StopReason
+	if stop == "" {
+		stop = StopEndTurn
+	}
+	c.mu.Lock()
+	ch := c.promptWait
+	active := c.sessionID
+	in := c.inPrompt
+	d := c.dialect
+	stale := n.PromptID != "" && n.PromptID == c.donePromptID
+	c.mu.Unlock()
+	if d != DialectGrok || !in || n.SessionID != active || ch == nil || stale {
+		return
+	}
+	select {
+	case ch <- promptResult{res: PromptResult{StopReason: stop}}:
+	default:
 	}
 }
 
@@ -474,32 +647,34 @@ func (c *Client) finishPermission(in *pendingReq, req PermissionRequest, dec Per
 func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
 	c.mu.Lock()
 	h := c.askHandler
+	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		c.replyIncoming(in, askOutcome(req, h(in.turn, req)))
+		c.replyIncoming(in, askOutcome(d, req, h(in.turn, req)))
 		return
 	}
 	select {
 	case <-c.conn.Done():
-		c.replyIncoming(in, cancelledOutcome())
+		c.replyIncoming(in, cancelledResult(d, in.method))
 	default:
-		c.replyIncoming(in, askOutcome(req, AskDecision{Answers: AskAutoAnswers(req)}))
+		c.replyIncoming(in, askOutcome(d, req, AskDecision{Answers: AskAutoAnswers(req)}))
 	}
 }
 
 func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
 	c.mu.Lock()
 	h := c.planHandler
+	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		c.replyIncoming(in, planOutcome(h(in.turn, req)))
+		c.replyIncoming(in, planOutcome(d, h(in.turn, req)))
 		return
 	}
 	select {
 	case <-c.conn.Done():
-		c.replyIncoming(in, cancelledOutcome())
+		c.replyIncoming(in, cancelledResult(d, in.method))
 	default:
-		c.replyIncoming(in, planOutcome(PlanDecision{Accept: true}))
+		c.replyIncoming(in, planOutcome(d, PlanDecision{Accept: true}))
 	}
 }
 
@@ -529,6 +704,7 @@ func (c *Client) completeIncomingCancelled() {
 		pending = append(pending, in)
 	}
 	c.incomingMu.Unlock()
+	d := c.Dialect()
 	for _, in := range pending {
 		if in.decide != nil {
 			select {
@@ -536,15 +712,15 @@ func (c *Client) completeIncomingCancelled() {
 			default:
 			}
 		}
-		c.replyIncoming(in, cancelledOutcome())
+		c.replyIncoming(in, cancelledResult(d, in.method))
 	}
 }
 
 func cancelDecision(method string) any {
 	switch method {
-	case MethodCursorAskQuestion:
+	case MethodCursorAskQuestion, MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
 		return AskDecision{Cancelled: true}
-	case MethodCursorCreatePlan:
+	case MethodCursorCreatePlan, MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
 		return PlanDecision{Cancelled: true}
 	default:
 		return PermissionDecision{Cancelled: true}

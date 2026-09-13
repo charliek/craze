@@ -4,7 +4,36 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/charliek/craze/internal/acp"
 )
+
+func TestGrokEmptyModesInjected(t *testing.T) {
+	snap := snapshotFromNewProvider(&acp.NewSessionResult{
+		Models: json.RawMessage(`{"currentModelId":"grok-4.6","availableModels":[{"modelId":"grok-4.6","name":"Grok 4.6"}]}`),
+	}, GrokProvider(), nil)
+	if len(snap.Modes) != 3 || snap.Modes[0].ID != "default" || snap.Modes[1].ID != "plan" || snap.Modes[2].ID != "ask" {
+		t.Fatalf("modes %+v", snap.Modes)
+	}
+	if snap.CurrentMode != "default" {
+		t.Fatalf("current %q", snap.CurrentMode)
+	}
+	if id, ok := ResolveMode("agent", modeIDs(snap.Modes)); !ok || id != "default" {
+		t.Fatalf("agent alias %q %v", id, ok)
+	}
+	cursor := snapshotFromNew(&acp.NewSessionResult{})
+	if len(cursor.Modes) != 0 {
+		t.Fatalf("cursor must not inject modes: %+v", cursor.Modes)
+	}
+}
+
+func TestInitializeModelStateFallback(t *testing.T) {
+	init := &acp.InitializeResult{Meta: json.RawMessage(`{"modelState":{"currentModelId":"grok-4.6","availableModels":[{"modelId":"grok-4.6","name":"Grok 4.6"}]}}`)}
+	snap := snapshotFromNewProvider(&acp.NewSessionResult{}, GrokProvider(), init)
+	if snap.CurrentModel != "grok-4.6" || len(snap.Models) != 1 || snap.Models[0].ID != "grok-4.6" {
+		t.Fatalf("fallback %+v / %q", snap.Models, snap.CurrentModel)
+	}
+}
 
 func TestParseModelsAndModes(t *testing.T) {
 	modelsRaw := json.RawMessage(`{"currentModelId":"default","availableModels":[{"modelId":"default","name":"Default"},{"modelId":"composer","name":"Composer"}]}`)

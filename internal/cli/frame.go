@@ -20,6 +20,7 @@ type frameOpts struct {
 	keys        string
 	ansi        bool
 	theme       string
+	provider    string
 	noForce     bool
 	timeout     time.Duration
 	printFrames bool
@@ -46,6 +47,7 @@ func newFrameCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 10*time.Second, "per-wait timeout")
 	cmd.Flags().BoolVar(&o.printFrames, "print-frames", false, "stream every frame to stderr")
+	registerProviderFlag(cmd, &o.provider)
 	return cmd
 }
 
@@ -72,19 +74,27 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		// file, so a golden cannot depend on the developer's saved theme.
 		theme = tui.DefaultTheme
 	}
+	resolved, err := resolveProvider(cmd, o.provider, cmd.ErrOrStderr(), true)
+	if err != nil {
+		return err
+	}
+	prov := resolved.Provider
 	sess := agent.New(agent.Options{
 		Binary:      o.agentBin,
 		Workspace:   ws,
 		Force:       force,
 		Stderr:      cmd.ErrOrStderr(),
 		Interactive: true,
+		Provider:    &prov,
 	})
 
 	plain, raw, err := tui.RunFrameScript(tui.Config{
-		Session:   sess,
-		Theme:     theme,
-		Workspace: ws,
-		Yolo:      force,
+		Session:        sess,
+		Theme:          theme,
+		Workspace:      ws,
+		Yolo:           force,
+		Provider:       prov,
+		ProviderLocked: true,
 	}, o.cols, o.rows, o.keys, tui.FrameOpts{
 		Timeout:     o.timeout,
 		ANSI:        o.ansi,

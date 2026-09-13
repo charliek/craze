@@ -155,6 +155,18 @@ type PermissionOption struct {
 	Kind     string
 }
 
+// OptionIDForKind picks the option that answers a permission kind, the way
+// yolo does on the wire: an option whose id spells the kind wins over the
+// first of that kind, so grok's prepended "enable-always-approve" (kind
+// allow_once) is never chosen for a plain allow-once.
+func OptionIDForKind(opts []PermissionOption, kind string) (string, bool) {
+	wire := make([]acp.PermissionOption, 0, len(opts))
+	for _, o := range opts {
+		wire = append(wire, acp.PermissionOption{OptionID: o.OptionID, Kind: o.Kind})
+	}
+	return acp.PickKind(wire, kind)
+}
+
 type PermissionEvent struct {
 	ID      string
 	Tool    string
@@ -209,8 +221,7 @@ type Options struct {
 	Mode      string
 	Stderr    io.Writer
 	Env       []string
-	// Provider is the agent behind the session; nil is cursor, the only one
-	// implemented. Callers outside this package never build one.
+	// Provider is the agent behind the session; nil is cursor.
 	Provider *Provider
 	// Interactive makes question and plan requests block on the session so a
 	// UI can answer them; headless callers leave it false and craze

@@ -36,9 +36,14 @@ Flags:
           hang        do not finish the prompt until session/cancel
           authfail    initialize ok, authenticate error
           noauth      initialize with empty authMethods; reject authenticate
+          grok-echo   grok initialize/auth; echo; x.ai/session/prompt_complete
+          grok-ask    x.ai/ask_user_question then complete
+          grok-plan   x.ai/exit_plan_mode then complete
+          grok-ask-wrapped wrapped _x.ai/ask_user_question then complete
 
-Unknown arguments (including acp and --force) are ignored so this binary can
-stand in for cursor-agent acp.
+Unknown arguments (including acp, --force, agent, stdio, --always-approve,
+--yolo, --no-auto-update, --trust) are ignored so this binary can stand in
+for cursor-agent acp or grok agent stdio.
 `
 
 func main() {
@@ -69,7 +74,8 @@ func main() {
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
-		"bash", "task", "task-late", "markdown", "title", "planmode", "planmode-card":
+		"bash", "task", "task-late", "markdown", "title", "planmode", "planmode-card",
+		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

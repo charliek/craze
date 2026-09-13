@@ -65,7 +65,20 @@ func parseSlashLine(s string) (name, args string, ok bool) {
 }
 
 func (m Model) slashCatalog() []slashItem {
-	items := builtinSlash()
+	var items []slashItem
+	for _, it := range builtinSlash() {
+		switch it.Name {
+		case "plan", "ask", "agent":
+			if !m.showModes() {
+				continue
+			}
+		case "tasks":
+			if !m.showTodos() {
+				continue
+			}
+		}
+		items = append(items, it)
+	}
 	seen := make(map[string]struct{}, len(items))
 	for _, it := range items {
 		seen[it.Name] = struct{}{}
@@ -156,6 +169,10 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		return m.applyModelEffort(id, effortArg)
 	case "plan", "ask", "agent":
 		m.input.SetValue("")
+		if !m.showModes() {
+			m.addError("mode " + name + " is not advertised")
+			return m, nil
+		}
 		id, ok := agent.ResolveMode(name, modeIDs(m.snap.Modes))
 		if !ok {
 			m.addError("mode " + name + " is not advertised")

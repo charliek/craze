@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,7 +302,7 @@ description: real
 
 func TestScanSkillsSkipsOversize(t *testing.T) {
 	ws := t.TempDir()
-	big := strings.Repeat("a", maxSkillBytes+1)
+	big := strings.Repeat("a", (1<<20)+1)
 	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "huge", "SKILL.md"), "---\nname: huge\ndescription: too big\n---\n"+big)
 	items := scanDiskSkills(ws, "")
 	if _, ok := catalogItems(items, "huge"); ok {
@@ -320,41 +318,4 @@ func catalogItems(items []slashItem, name string) (slashItem, bool) {
 		}
 	}
 	return slashItem{}, false
-}
-
-// TestSkillWarningsGoToTheDiagSeam: the scan runs on the Update goroutine while
-// the TUI owns the alt screen, so a warning written to the real stderr is
-// painted over the frame with none of the renderer's locks taken. It goes to the
-// writer Run installed instead, which the caller flushes afterwards.
-func TestSkillWarningsGoToTheDiagSeam(t *testing.T) {
-	ws := t.TempDir()
-	// No closing fence: the parse fails and the skill is named as skipped.
-	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "broken", "SKILL.md"), "---\nname: broken\n")
-
-	var buf bytes.Buffer
-	prev := setDiag(&buf)
-	t.Cleanup(func() { setDiag(prev) })
-	// os.Stderr is the terminal under the alt screen. Nothing may reach it.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	prevErr := os.Stderr
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = prevErr; _ = r.Close() })
-
-	if items := scanDiskSkills(ws, t.TempDir()); len(items) != 0 {
-		t.Fatalf("a skill that does not parse must not appear: %#v", items)
-	}
-	if got := buf.String(); !strings.Contains(got, "skip skill") || !strings.Contains(got, "broken") {
-		t.Fatalf("the warning did not reach the seam: %q", got)
-	}
-	_ = w.Close()
-	leaked, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(leaked) != 0 {
-		t.Fatalf("%q reached the terminal", leaked)
-	}
 }

@@ -29,8 +29,8 @@ func (l helpLine) heading() bool { return l.key == "" }
 
 // helpKeyLines is the keyboard and mouse half of the box, grouped so the eye
 // can find a key by what it is for instead of reading four keys to a line.
-func helpKeyLines() []helpLine {
-	return []helpLine{
+func (m Model) helpKeyLines() []helpLine {
+	out := []helpLine{
 		{desc: "sending and editing"},
 		{"enter", "send the draft"},
 		{"alt+enter, ctrl+j", "newline (shift+enter where the terminal sends it)"},
@@ -38,24 +38,43 @@ func helpKeyLines() []helpLine {
 		{"esc", "cancel the turn, or close what is open"},
 		{"ctrl+c", "cancel the turn, then quit"},
 		{"ctrl+d", "quit"},
-		{desc: "mode"},
-		{"shift+tab", "cycle the mode: agent, plan, ask"},
-		{"click ◆ chip", "cycle the mode from status row 2"},
-		{desc: "moving and scrolling"},
-		{"↑ ↓", "sub-agent rows, or a list inside a dialog"},
-		{"pgup pgdn, wheel", "scroll the transcript"},
-		{"tab", "complete the slash command being typed"},
-		{desc: "panels and views"},
-		{"ctrl+t", "tasks panel: compact, expanded, hidden"},
-		{"ctrl+g", "theme dialog"},
-		{"ctrl+o", "expand or collapse transcript detail"},
-		{"enter on a row", "peek at a selected sub-agent's prompt"},
-		{"click the model", "model dialog, from status row 1"},
-		{desc: "selection and clipboard"},
-		{"drag", "select transcript rows and copy them"},
-		{"double-click", "select the word under the pointer"},
-		{"ctrl+y", "copy the selection, or the last reply"},
 	}
+	if m.showModes() {
+		out = append(out,
+			helpLine{desc: "mode"},
+			helpLine{key: "shift+tab", desc: "cycle the mode: agent, plan, ask"},
+			helpLine{key: "click ◆ chip", desc: "cycle the mode from status row 2"},
+		)
+	}
+	arrows := "a list inside a dialog"
+	if m.showSubagents() {
+		arrows = "sub-agent rows, or a list inside a dialog"
+	}
+	out = append(out,
+		helpLine{desc: "moving and scrolling"},
+		helpLine{key: "↑ ↓", desc: arrows},
+		helpLine{key: "pgup pgdn, wheel", desc: "scroll the transcript"},
+		helpLine{key: "tab", desc: "complete the slash command being typed"},
+		helpLine{desc: "panels and views"},
+	)
+	if m.showTodos() {
+		out = append(out, helpLine{key: "ctrl+t", desc: "tasks panel: compact, expanded, hidden"})
+	}
+	out = append(out,
+		helpLine{key: "ctrl+g", desc: "theme dialog"},
+		helpLine{key: "ctrl+o", desc: "expand or collapse transcript detail"},
+	)
+	if m.showSubagents() {
+		out = append(out, helpLine{key: "enter on a row", desc: "peek at a selected sub-agent's prompt"})
+	}
+	out = append(out,
+		helpLine{key: "click the model", desc: "model dialog, from status row 1"},
+		helpLine{desc: "selection and clipboard"},
+		helpLine{key: "drag", desc: "select transcript rows and copy them"},
+		helpLine{key: "double-click", desc: "select the word under the pointer"},
+		helpLine{key: "ctrl+y", desc: "copy the selection, or the last reply"},
+	)
+	return out
 }
 
 // helpCommandLines is the slash catalog: craze's own builtins first, then
@@ -80,7 +99,7 @@ func (m Model) helpCommandLines() []helpLine {
 }
 
 func (m Model) helpLines() []helpLine {
-	return append(helpKeyLines(), m.helpCommandLines()...)
+	return append(m.helpKeyLines(), m.helpCommandLines()...)
 }
 
 func (m Model) openHelp() Model {

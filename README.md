@@ -1,13 +1,15 @@
 # craze
 
-A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
-`cursor-agent acp` over ACP. You own the chrome; Cursor still runs the agent.
+A Linux terminal UI that talks ACP to **Cursor** (`cursor-agent acp`) or
+**Grok** (`grok agent stdio`). You own the chrome; the provider still runs
+the agent.
 
 ## Install
 
-1. Linux, and the [Cursor CLI](https://cursor.com/cli) installed.
-2. Log in: `cursor-agent login` (the same binary is also installed as
-   `agent`).
+1. Linux, and either the [Cursor CLI](https://cursor.com/cli) or the
+   [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`) installed.
+2. Log in: `cursor-agent login` (also installed as `agent`), or `grok login`
+   / set `XAI_API_KEY`.
 3. Install craze:
 
    ```shell
@@ -42,26 +44,34 @@ Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
 `PATH`, so drop the `./bin/`.
 
 ```shell
-./bin/craze                      # the TUI, in the current directory
+./bin/craze                      # picker, then the TUI in the current directory
+./bin/craze --provider cursor    # skip the picker
+./bin/craze --provider grok
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse
 ```
 
+Without `--provider`, the TUI shows a two-row picker (`cursor` / `grok`)
+preselected to `$CRAZE_PROVIDER`, then `provider` in `~/.craze/config.toml`,
+then cursor. `Enter` starts that row; `Esc` starts the preselected default.
+`--provider` skips the picker. The last **successful** Start is saved and
+used next time.
+
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
 `--model` picks an ACP model id, `--ask` / `--plan` set the session mode, and
-`--agent-bin` (or `CRAZE_AGENT_BIN`) points at `cursor-agent` or, for tests,
-`./bin/craze-fake-agent`.
+`--agent-bin` (or `CRAZE_AGENT_BIN`) overrides the binary. Cursor looks up
+`cursor-agent` then `agent`; Grok looks up `grok` only.
 
 The screen is, top to bottom: the transcript, the pinned tasks panel, the
 spinner line, the composer, two status rows, and one row per in-flight
 sub-agent.
 
-craze exits **nonzero when the session never started** — no Cursor login, or a
-`cursor-agent` that would not come up. It still draws the TUI and puts the
-error in the transcript, because that is where you can read it, but the process
-tells a script that nothing ran. An error *during* a session leaves a usable
-craze, so quitting out of one is an ordinary exit 0.
+craze exits **nonzero when the session never started** — no login (`agent login`
+or `grok login`), or an agent that would not come up. It still draws the TUI
+and puts the error in the transcript, because that is where you can read it,
+but the process tells a script that nothing ran. An error *during* a session
+leaves a usable craze, so quitting out of one is an ordinary exit 0.
 
 ## Keys
 

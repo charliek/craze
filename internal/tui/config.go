@@ -108,6 +108,42 @@ func SaveTheme(name string) error {
 	return writeConfig(path, cfg)
 }
 
+// ConfigProvider is the persisted provider id, or "" when there is none. An
+// unreadable config reads as empty, like the theme.
+func ConfigProvider() string {
+	cfg, err := readConfig()
+	if err != nil {
+		return ""
+	}
+	name, _ := cfg["provider"].(string)
+	return strings.TrimSpace(name)
+}
+
+// SaveProvider persists the provider id with the same lock and atomic write
+// as the theme. The TUI writes it on startedMsg and craze prompt writes it
+// after Start; the session itself never persists.
+func SaveProvider(name string) error {
+	path := configPath()
+	if path == "" {
+		return errors.New("craze: no home directory to save the provider in")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := lockConfig(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	cfg, err := readConfigAt(path)
+	if err != nil {
+		return fmt.Errorf("craze: not saving the provider: %w", err)
+	}
+	cfg["provider"] = name
+	return writeConfig(path, cfg)
+}
+
 // lockConfig takes the exclusive lock that covers one read-modify-write. Linux
 // only, per the repo's pin. A lock craze cannot take (a read-only directory,
 // say) is not a reason to refuse to save: the write itself still reports that.

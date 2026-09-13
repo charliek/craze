@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -76,6 +77,101 @@ func TestMergeTodosUpsertKeepsOrderAndAppends(t *testing.T) {
 	}
 }
 
+func TestCursorIgnoresPlanUpdates(t *testing.T) {
+	s := newSession(Options{})
+	s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Read", "status": "pending"},
+		},
+	})})
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("cursor must ignore plan updates, got %+v", ev)
+	default:
+	}
+	if s.Snapshot().Todos != nil {
+		t.Fatalf("cursor todos %s", todoStates(s.Snapshot().Todos))
+	}
+}
+
+func TestPlanUpdateReplacesTodos(t *testing.T) {
+	p := GrokProvider()
+	s := newSession(Options{Provider: &p})
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Read", "status": "inProgress"},
+			{"id": "keep", "content": "Edit", "status": "pending"},
+			{"content": "   ", "status": "completed"},
+			{"content": "Vet", "status": "canceled"},
+		},
+	})})
+	ev := <-s.Events()
+	if ev.Type != EventTodos {
+		t.Fatalf("event %+v", ev)
+	}
+	got := s.Snapshot().Todos
+	want := []Todo{
+		{ID: "plan-0", Content: "Read", Status: "in_progress"},
+		{ID: "keep", Content: "Edit", Status: "pending"},
+		{ID: "plan-3", Content: "Vet", Status: "cancelled"},
+	}
+	if todoStates(got) != todoStates(want) {
+		t.Fatalf("first %s", todoStates(got))
+	}
+
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Vet", "status": "completed"},
+			{"content": "Read", "status": "completed"},
+		},
+	})})
+	<-s.Events()
+	got = s.Snapshot().Todos
+	want = []Todo{
+		{ID: "plan-0", Content: "Vet", Status: "completed"},
+		{ID: "plan-1", Content: "Read", Status: "completed"},
+	}
+	if todoStates(got) != todoStates(want) {
+		t.Fatalf("reorder %s", todoStates(got))
+	}
+
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries":       []map[string]string{},
+	})})
+	<-s.Events()
+	if s.Snapshot().Todos != nil {
+		t.Fatalf("empty must clear, got %s", todoStates(s.Snapshot().Todos))
+	}
+
+	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries": []map[string]string{
+			{"content": "Again", "status": "pending"},
+		},
+	})})
+	<-s.Events()
+	if got := s.Snapshot().Todos; len(got) != 1 || got[0].ID != "plan-0" {
+		t.Fatalf("repeat %s", todoStates(got))
+	}
+
+	s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
+		"sessionUpdate": acp.UpdatePlan,
+		"entries":       "not-an-array",
+	})})
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("malformed plan must not emit, got %+v", ev)
+	default:
+	}
+	if got := s.Snapshot().Todos; len(got) != 1 || got[0].ID != "plan-0" {
+		t.Fatalf("malformed plan must leave todos, got %s", todoStates(got))
+	}
+}
+
 func TestMergeTodosDuplicateIDsLastWins(t *testing.T) {
 	in := []Todo{
 		{ID: "1", Content: "first", Status: "pending"},
@@ -133,5 +229,58 @@ func TestTodosEventEmitted(t *testing.T) {
 	}
 	if ev.At.IsZero() {
 		t.Fatal("Event.At not stamped")
+	}
+}
+
+// TestCancelledTurnClosesInFlightTools pins what grok leaves behind after a
+// cancel: the interrupted tool never gets a terminal update from the agent,
+// so the session settles it itself when the turn ends cancelled.
+func TestCancelledTurnClosesInFlightTools(t *testing.T) {
+	p := GrokProvider()
+	s := newSession(Options{Provider: &p})
+	running, done := "in_progress", "completed"
+	s.mergeTool(toolDelta{id: "t-run", status: &running})
+	s.mergeTool(toolDelta{id: "t-done", status: &done})
+	s.mergeTool(toolDelta{id: "t-new"})
+	go s.closeInFlightTools(acp.StopCancelled)
+	select {
+	case ev := <-s.Events():
+		if ev.Type != EventTool || ev.Tool == nil || ev.Tool.ID != "t-run" || ev.Tool.Status != "cancelled" {
+			t.Fatalf("unexpected event %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("running tool was not settled")
+	}
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("only the running tool is settled: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+	for _, tool := range s.Snapshot().Tools {
+		if tool.ID == "t-done" && tool.Status != "completed" {
+			t.Fatalf("completed tool touched: %+v", tool)
+		}
+		if tool.ID == "t-new" && tool.Status != "" {
+			t.Fatalf("a tool that never reported in flight is left alone: %+v", tool)
+		}
+	}
+}
+
+// TestSettleOnlyIfInFlightYieldsToTerminalUpdate pins the merge-lock check:
+// a tool that settled between the cancel scan and the merge keeps the
+// agent's own terminal status.
+func TestSettleOnlyIfInFlightYieldsToTerminalUpdate(t *testing.T) {
+	s := newSession(Options{})
+	running, failed, cancelled := "in_progress", "failed", acp.StopCancelled
+	s.mergeTool(toolDelta{id: "t", status: &running})
+	s.mergeTool(toolDelta{id: "t", status: &failed})
+	if _, changed := s.mergeTool(toolDelta{id: "t", status: &cancelled, onlyIfInFlight: true}); changed {
+		t.Fatal("a settled tool must not be re-settled")
+	}
+	if got := s.Snapshot().Tools[0].Status; got != "failed" {
+		t.Fatalf("status %q", got)
+	}
+	if _, changed := s.mergeTool(toolDelta{id: "missing", status: &cancelled, onlyIfInFlight: true}); changed {
+		t.Fatal("an unknown tool must not be created by settlement")
 	}
 }

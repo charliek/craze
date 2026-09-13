@@ -40,6 +40,7 @@ const (
 	dialogModel
 	dialogTheme
 	dialogHelp
+	dialogProvider
 )
 
 // rect is the modal layer's box in screen cells: the outer rectangle, borders
@@ -108,6 +109,8 @@ func (m Model) dialogBody(inner, budget int) []string {
 		return m.themeDialogBody(inner, budget)
 	case dialogHelp:
 		return m.helpDialogBody(inner, budget)
+	case dialogProvider:
+		return m.providerDialogBody(inner, budget)
 	}
 	return nil
 }

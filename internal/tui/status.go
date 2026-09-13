@@ -90,6 +90,9 @@ func (m Model) statusView(lay frameLayout) string {
 func (m Model) statusRow1() (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	ws := statusPart{text: workspaceName(m.cwd), style: styleFG(m.theme.Bright).Bold(true)}
+	if m.pickingProvider {
+		return fitStatus([]statusPart{ws}, statusSep, dim, m.width)
+	}
 	if !m.started && m.status != statusError {
 		return fitStatus([]statusPart{
 			ws,
@@ -146,6 +149,9 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 // rather than by its id, so an agent that calls plan mode "architect" still
 // gets the plan colour. Clicking it cycles the mode, as shift+tab does.
 func (m Model) modeChip() (string, lipgloss.Style) {
+	if !m.showModes() {
+		return "", lipgloss.NewStyle()
+	}
 	id := sanitizeLine(m.snap.CurrentMode)
 	if id == "" {
 		return "", lipgloss.NewStyle()
@@ -203,10 +209,12 @@ func (m Model) modelLabel() string {
 	}
 	name = sanitizeLine(name)
 	var bits []string
-	if opt := agent.EffortOption(m.snap); opt != nil && opt.Current != "" {
-		bits = append(bits, sanitizeLine(opt.Current))
+	if m.showEffort() {
+		if opt := agent.EffortOption(m.snap); opt != nil && opt.Current != "" {
+			bits = append(bits, sanitizeLine(opt.Current))
+		}
 	}
-	if agent.FastOn(m.snap) {
+	if m.showFast() && agent.FastOn(m.snap) {
 		bits = append(bits, "fast")
 	}
 	if len(bits) > 0 {
@@ -239,6 +247,9 @@ func (m Model) inFlightCounts() string {
 
 // agentCount is the `← n agents` marker pointing at the rows below.
 func (m Model) agentCount() string {
+	if !m.showSubagents() {
+		return ""
+	}
 	n := 0
 	for i := range m.snap.Tools {
 		if t := &m.snap.Tools[i]; toolInFlight(t.Status) && t.IsTask() {

@@ -215,13 +215,7 @@ func (m Model) answerPermission(kind string) (tea.Model, tea.Cmd) {
 	if !ok || c.perm == nil {
 		return m, nil
 	}
-	id := ""
-	for _, o := range c.perm.Options {
-		if o.Kind == kind {
-			id = o.OptionID
-			break
-		}
-	}
+	id, _ := agent.OptionIDForKind(c.perm.Options, kind)
 	m.answerCard(func() error { return m.sess.AnswerPermission(c.perm.ID, id) })
 	return m, nil
 }

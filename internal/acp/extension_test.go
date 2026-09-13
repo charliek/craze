@@ -18,6 +18,11 @@ type rawPipe struct {
 
 func newRawPipe(t *testing.T) *rawPipe {
 	t.Helper()
+	return newRawPipeDialect(t, DialectCursor)
+}
+
+func newRawPipeDialect(t *testing.T, d DialectID) *rawPipe {
+	t.Helper()
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	t.Cleanup(func() {
@@ -26,9 +31,15 @@ func newRawPipe(t *testing.T) *rawPipe {
 		_ = serverR.Close()
 		_ = serverW.Close()
 	})
-	c := Dial(clientR, clientW)
+	c := DialWithDialect(clientR, clientW, d)
 	t.Cleanup(func() { _ = c.Close() })
 	return &rawPipe{client: c, enc: NewEncoder(serverW), dec: NewDecoder(serverR)}
+}
+
+func (p *rawPipe) setSession(sid string) {
+	p.client.mu.Lock()
+	p.client.sessionID = sid
+	p.client.mu.Unlock()
 }
 
 func (p *rawPipe) send(t *testing.T, id any, method string, params string) {
@@ -489,7 +500,7 @@ func TestHandlerRunsForTheRunningTurn(t *testing.T) {
 	ran := make(chan struct{})
 	go p.client.runIncoming(in, func(*pendingReq) {
 		close(ran)
-		p.client.replyIncoming(in, planOutcome(PlanDecision{Accept: true}))
+		p.client.replyIncoming(in, planOutcome(DialectCursor, PlanDecision{Accept: true}))
 	})
 	msg := p.readWithin(t, 3*time.Second, "the handler's reply")
 	if string(msg.Result) != `{"outcome":{"outcome":"accepted"}}` {

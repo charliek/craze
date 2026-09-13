@@ -2,9 +2,15 @@
 
 ```bash
 ./bin/craze
+./bin/craze --provider grok
 ```
 
 The TUI is the default command. It refuses to start on a non-tty.
+
+Without `--provider`, a centred **provider** dialog lists `cursor` and `grok`
+before the session is constructed. The preselected row is the resolved default
+(see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
+that row, `Esc` starts the default. After Start the provider cannot change.
 
 ## Layout
 
@@ -15,7 +21,7 @@ Top to bottom:
 3. Spinner line
 4. Composer
 5. Two status rows
-6. One row per in-flight sub-agent
+6. One row per in-flight sub-agent (Cursor only this cut; Grok hides the band)
 
 The composer never scrolls: it grows to show every line up to a cap (6 rows,
 3 on a short terminal), then windows to keep the cursor visible. A rule above
@@ -111,9 +117,13 @@ reach the agent as anything other than an accept or a reject.
 | `/agent` | Set agent mode |
 | `/exit` | Quit craze |
 
-Workspace and home `SKILL.md` files are listed on slash without a skills RPC.
-Agent-advertised commands from the ACP session are listed too, after the
-builtins.
+Skills come from the **provider**, not a global scan. Cursor walks
+`.cursor/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills` under
+the workspace and `$HOME`, and still skips `.cursor/plugins`. Grok walks
+`.grok/skills`; its bundled and plugin skills need no walk because the grok
+session advertises all of them (under their real slash names, such as
+`coderabbit:code-review`) as ACP commands. Agent-advertised commands from
+the ACP session are listed after the builtins.
 
 ## Model dialog
 
@@ -122,7 +132,8 @@ over the transcript: a filter (`❯ `, type to narrow by name or id), the model
 list (current model first, then the agent's own order, `current` tagged,
 `▲`/`▼` when it scrolls), and, only when the agent advertises them, an `effort`
 row (`low medium high xhigh`, the picked one bracketed) and a `fast` row
-(`on`/`off`).
+(`on`/`off`). Grok advertises effort but not fast, so the fast row stays
+hidden.
 
 The list, `effort` and `fast` are three focus targets, and the one the keys are
 on carries a `> ` gutter and the selection background — so exactly one row looks

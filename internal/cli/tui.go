@@ -19,6 +19,7 @@ type tuiFlags struct {
 	workspace string
 	model     string
 	agentBin  string
+	provider  string
 	force     bool
 	noForce   bool
 	noMouse   bool
@@ -38,6 +39,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
+	registerProviderFlag(cmd, &f.provider)
 }
 
 func runTUI(cmd *cobra.Command, f *tuiFlags) error {
@@ -64,24 +66,44 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	// stderr and craze's own warnings are held here and printed once the screen
 	// is back.
 	diag := &deferredStderr{}
-	sess := agent.New(agent.Options{
-		Binary:      f.agentBin,
-		Workspace:   ws,
-		Force:       f.force,
-		Model:       f.model,
-		Mode:        mode,
-		Stderr:      diag,
-		Interactive: true,
-	})
-	err = tui.Run(tui.Config{
-		Session:   sess,
-		Theme:     resolveTheme(cmd, f.theme),
-		Workspace: ws,
-		Model:     f.model,
-		Yolo:      f.force,
-		NoMouse:   f.noMouse,
-		Diag:      diag,
-	})
+	resolved, err := resolveProvider(cmd, f.provider, diag, false)
+	if err != nil {
+		return err
+	}
+	if cmd == nil {
+		// Direct callers (tests) have no cobra flag set, so lock the resolved
+		// id and skip the picker — the same as an explicit --provider.
+		resolved.Locked = true
+	}
+	newSession := func(p agent.Provider) agent.Session {
+		prov := p
+		return agent.New(agent.Options{
+			Binary:      f.agentBin,
+			Workspace:   ws,
+			Force:       f.force,
+			Model:       f.model,
+			Mode:        mode,
+			Stderr:      diag,
+			Interactive: true,
+			Provider:    &prov,
+		})
+	}
+	cfg := tui.Config{
+		Theme:           resolveTheme(cmd, f.theme),
+		Workspace:       ws,
+		Model:           f.model,
+		Yolo:            f.force,
+		NoMouse:         f.noMouse,
+		Provider:        resolved.Provider,
+		ProviderLocked:  resolved.Locked,
+		PersistProvider: true,
+		FallbackDefault: resolved.Fallback,
+		NewSession:      newSession,
+	}
+	if resolved.Locked {
+		cfg.Session = newSession(resolved.Provider)
+	}
+	err = tui.Run(cfg)
 	diag.flush(os.Stderr)
 	return err
 }

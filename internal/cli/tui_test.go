@@ -46,6 +46,8 @@ func TestTUIKeepsTheAgentStderrOffTheTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAZE_PROVIDER", "")
+	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
 
 	tail := newPTYTail(ptmx)
 	prevIn, prevOut, prevErr := os.Stdin, os.Stdout, os.Stderr

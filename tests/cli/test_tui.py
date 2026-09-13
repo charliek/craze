@@ -63,10 +63,14 @@ class PTYCraze:
         env["CRAZE_FAKE_SCRIPT"] = script
         env["HOME"] = str(workspace)
         env.pop("CRAZE_AGENT_BIN", None)
+        env.pop("CRAZE_PROVIDER", None)
+        env.pop("CRAZE_CONFIG", None)
         try:
             self.proc = subprocess.Popen(
                 [
                     str(craze_bin),
+                    "--provider",
+                    "cursor",
                     "--agent-bin",
                     str(fake_agent_bin),
                     "--workspace",
