@@ -421,7 +421,7 @@ func (m Model) subagentSpinnerView() string {
 
 func (m Model) subElapsed(info agent.SubagentInfo) string {
 	start, ok := m.agentStart[info.ID]
-	if !ok {
+	if !ok || m.frozen {
 		return formatElapsed(0)
 	}
 	return formatElapsed(m.now().Sub(start))

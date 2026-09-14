@@ -635,7 +635,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// would leave the turn unfinishable. Any other failure was emitted
 			// as EventError before Prompt returned, so that ending is on its
 			// way.
-			if errors.Is(msg.err, agent.ErrPromptInFlight) {
+			if errors.Is(msg.err, agent.ErrPromptInFlight) || errors.Is(msg.err, agent.ErrForeignTurn) {
 				m.streamEndSeq = m.turnSeq
 			}
 			m.status = statusError
@@ -841,6 +841,11 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	if lay.TooSmall {
 		return m, nil
 	}
+	// A click is "anything else" to the confirm line: it declines, so the
+	// click never opens something over an armed question.
+	if m.confirm != nil {
+		m.declineStrongSend()
+	}
 	if r := lay.Dialog; !r.Empty() {
 		if r.Contains(x, y) {
 			return m.dialogClick(y - r.Y)
@@ -951,12 +956,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProviderDialogKey(msg)
 	}
 
-	if m.viewing != "" {
-		return m.handleViewKey(msg)
-	}
-
 	// The confirm line is a question with two answers: Enter confirms, Esc
-	// and anything else decline and give the draft back.
+	// and anything else decline and give the draft back. It outranks the
+	// sub-agent view: a view opened over it would leave it armed and
+	// unanswerable.
 	if m.confirm != nil {
 		switch msg.Type {
 		case tea.KeyEnter:
@@ -965,6 +968,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.declineStrongSend()
 			return m, nil
 		}
+	}
+
+	if m.viewing != "" {
+		return m.handleViewKey(msg)
 	}
 
 	if msg.Type == tea.KeyCtrlL {
@@ -1100,6 +1107,7 @@ func (m *Model) focusRows() {
 // focusComposer hands the keyboard back to the composer.
 func (m *Model) focusComposer() {
 	m.agentFocus = false
+	m.queueFocus = false
 	_ = m.input.Focus()
 }
 
@@ -1239,7 +1247,10 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		return m.runBuiltin(name, args)
 	}
-	if m.status == statusWorking {
+	// A running turn queues; so does a turn the agent is running on its own
+	// (grok's interject fallback): a prompt sent into it would be refused,
+	// and the queue drains the moment it ends.
+	if m.status == statusWorking || m.snap.ForeignTurn {
 		text := strings.TrimSpace(m.input.Value())
 		if text == "" {
 			return m, nil
@@ -1335,6 +1346,11 @@ func (m Model) drainSettledTurn() (Model, tea.Cmd) {
 	if m.status != statusIdle || !m.turnSettled() || m.sess == nil {
 		return m, nil
 	}
+	if m.snap.ForeignTurn {
+		// The agent is talking on its own; nothing can be sent into that,
+		// the armed send-now included. Everything re-runs when it stops.
+		return m, nil
+	}
 	if p := m.strong; p != nil {
 		m.strong = nil
 		if p.seq != 0 && p.seq != m.turnSeq {
@@ -1350,10 +1366,6 @@ func (m Model) drainSettledTurn() (Model, tea.Cmd) {
 			// The row it named was already gone; fall through to the drain.
 			m = next
 		}
-	}
-	if m.snap.ForeignTurn {
-		// The agent is talking on its own; the drain re-runs when it stops.
-		return m, nil
 	}
 	next, ok := m.sess.PopQueue()
 	if !ok {

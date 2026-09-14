@@ -1046,7 +1046,7 @@ func TestEditedRowSentUnderTheEditor(t *testing.T) {
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
 		t.Fatalf("the row is sent as it was queued: %q", got)
 	}
-	if !strings.Contains(plainView(m), "was sent") {
+	if !strings.Contains(plainView(m), "is gone") {
 		t.Fatalf("the note is missing:\n%s", plainView(m))
 	}
 }

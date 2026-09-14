@@ -195,7 +195,8 @@ func (m Model) composerHint() string {
 	if p := m.planPlaceholder(); p != "" {
 		return p
 	}
-	if m.status != statusWorking || m.input.Value() != "" {
+	// A card owns the keyboard, so neither verb is available under one.
+	if m.status != statusWorking || m.cardOpen() || m.input.Value() != "" {
 		return ""
 	}
 	hint := queueSendNowHint

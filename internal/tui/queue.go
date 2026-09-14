@@ -106,7 +106,7 @@ func (m *Model) syncQueue() {
 	// The edit ends rather than saving into a row that is gone.
 	if m.queueEdit != "" && !m.queueHasID(m.queueEdit) {
 		m.cancelQueueEdit()
-		m.note("the message you were editing was sent")
+		m.note("the message you were editing is gone")
 	}
 	items := m.visibleQueue()
 	if len(items) == 0 {
@@ -333,7 +333,8 @@ func (m Model) fireStrongSend(p strongSend) (tea.Model, tea.Cmd) {
 		}
 		text = taken.Text
 		m.refreshSnap()
-	} else if m.input.Value() == p.text {
+	} else if strings.TrimSpace(m.input.Value()) == p.text {
+		// The armed text was trimmed; the draft may not have been.
 		m.input.SetValue("")
 		m.slashSel = 0
 	}
@@ -395,7 +396,16 @@ func (m Model) queueEditChip() string {
 	if m.queueEdit == "" {
 		return ""
 	}
-	return fmt.Sprintf("editing #%d · enter saves · esc cancels", m.queueEditPos+1)
+	// The row's number is read now, not at edit time: a drain that sends #1
+	// while #2 is being edited makes that row #1.
+	pos := m.queueEditPos
+	for i, p := range m.snap.Queue {
+		if p.ID == m.queueEdit {
+			pos = i
+			break
+		}
+	}
+	return fmt.Sprintf("editing #%d · enter saves · esc cancels", pos+1)
 }
 
 // ------------------------------------------------------------------ the band
@@ -515,6 +525,22 @@ func queueActionAt(x, width int) queueAction {
 // row's send now, and on the composer it is the strong send — interject where
 // the provider can, send now (with the confirm) where it cannot.
 func (m Model) handleStrongSend() (tea.Model, tea.Cmd) {
+	if id := m.queueEdit; id != "" {
+		// The composer holds a queued row, not a draft: Ctrl+L saves the
+		// edit and sends that row now, so the text cannot go out twice
+		// (once as a draft and again from the queue).
+		tm, _ := m.saveQueueEdit()
+		m = tm.(Model)
+		if m.queueEdit != "" {
+			return m, nil // the save was refused and said why
+		}
+		for _, p := range m.snap.Queue {
+			if p.ID == id {
+				return m.sendQueuedNow(p)
+			}
+		}
+		return m, nil // an emptied edit cancelled the row
+	}
 	if p, ok := m.queueSelected(); ok {
 		return m.sendQueuedNow(p)
 	}
