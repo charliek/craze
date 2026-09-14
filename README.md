@@ -94,7 +94,9 @@ leaves a usable craze, so quitting out of one is an ordinary exit 0.
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
-| `Tab` | complete the slash command being typed |
+| `Tab` / `Enter` on the slash menu | accept the highlighted row, replacing just the `/token` under the cursor; `Enter` on a name already typed in full runs or sends it instead |
+| `PgUp` / `PgDn`, wheel, click on the slash menu | page it, move the selection one row a notch, or accept the row clicked |
+| `Esc` on the slash menu | hide it for that token only; a second `Esc` cancels a running turn as usual |
 
 `/help` opens a centred, scrollable box listing the same keys — grouped, one
 per row — plus every slash command. `/exit` quits; there are no bare `q` or `?`

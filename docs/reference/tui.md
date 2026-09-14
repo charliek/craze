@@ -51,10 +51,10 @@ visible row, taking the last one when it would otherwise fall behind the cap.
 
 | Key | Action |
 |---|---|
-| `Enter` | send; **queue** the draft while a turn is running (see [Queued messages](#queued-messages)) |
+| `Enter` | with the slash menu open on a token that is not already typed out in full, accept the highlighted row; otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
+| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; hide the slash menu for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`) |
 | `Ctrl+C` | cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
@@ -62,15 +62,15 @@ visible row, taking the last one when it would otherwise fall behind the cap.
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
-| `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
+| `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
-| `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
-| `Tab` | complete the slash command being typed |
+| `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
+| `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); elsewhere a no-op |
 
 `/help` lists the same keys plus every slash command — see
 [Help dialog](#help-dialog). `/exit` quits; there are no bare `q` or `?`
@@ -251,6 +251,21 @@ reach the agent as anything other than an accept or a reject.
 
 ## Slash commands
 
+The menu opens on the `/` token under the cursor, not only on a whole-line
+`/name`: a `/` at offset 0 of the draft or right after any whitespace starts a
+token, so typing `see /gau` mid-sentence opens the menu on `/gau` the way
+Cursor's and Grok's own TUIs already let you invoke a skill there. `foo/bar`
+and `https://x` never trigger — the `/` has to sit at the start of the draft
+or follow whitespace, not mid-word. A bare `/`, anywhere in the draft, opens
+on an empty token and lists the whole catalog; that is how you browse it.
+
+craze's own commands are only ever offered where `Enter` would actually run
+them: the draft's first non-whitespace run, with no newline anywhere in the
+draft. Typed after the first word, on a second line, or with anything else
+ahead of it, they drop out of the menu — offering `/help` where `Enter` could
+only send the text as a prompt would be a lie. Agent-advertised commands and
+skills carry no such restriction; they complete anywhere in the draft.
+
 | Command | Action |
 |---------|--------|
 | `/help` | Keybindings and commands |
@@ -263,13 +278,46 @@ reach the agent as anything other than an accept or a reject.
 | `/agent` | Set agent mode |
 | `/exit` | Quit craze |
 
-Skills come from the **provider**, not a global scan. Cursor walks
-`.cursor/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills` under
-the workspace and `$HOME`, and still skips `.cursor/plugins`. Grok walks
-`.grok/skills`; its bundled and plugin skills need no walk because the grok
-session advertises all of them (under their real slash names, such as
-`coderabbit:code-review`) as ACP commands. Agent-advertised commands from
-the ACP session are listed after the builtins.
+Matches are prefix hits first, then substring hits, each group kept in the
+catalog's own order, case-insensitive — no fuzzy matching. The band shows up
+to 8 rows and scrolls to keep the selection in view rather than capping the
+list, so the whole catalog stays reachable by scrolling. `Tab` or `Enter`
+accepts the highlighted row, replacing just the token with `/name ` (absorbing
+one space that already followed it) and closing the menu; `Enter` on a token
+that already spells the highlighted name falls through and runs or sends
+instead, and `Enter` on a bare `/` accepts the first row rather than sending
+`/` itself as a prompt. `↑`/`↓` move the selection with wrap; `PgUp`/`PgDn`
+page it, ahead of paging the transcript, while the menu is open. A click on a
+row accepts it and the wheel over the band moves the selection — see
+[Mouse](#mouse).
+
+When the list is longer than the band, the first row carries `k/n` — `k` is
+the selection's position, `n` the match count — followed by `▲` once the
+window has scrolled past the top; the last row carries `▼` when there is more
+below. A band cropped to a single row shows `k/n` alone: it is both the first
+and the last row, and the count already says what the arrows would.
+
+Skills come from the agent's own ACP catalog first: both Cursor and Grok
+advertise the skills they have enabled for the session — plugin skills
+included — so craze takes plugin skills from that catalog and never walks a
+plugin cache of its own; what the menu offers is exactly what the agent will
+honour. The on-disk scan is a supplement, for project skills the session's
+own catalog does not carry (Grok in particular does not advertise its own
+project skills over ACP, so the walk is their only path to the menu): Cursor
+walks `.cursor/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills`
+under the workspace and `$HOME`, still skipping `.cursor/plugins`; Grok walks
+`.grok/skills` and `.agents/skills`. The two providers disagree on how a
+skill on disk gets its name — **Cursor names it after the skill's directory**,
+whatever its frontmatter says; **Grok names it after the frontmatter `name`**,
+falling back to the directory only when there is none — and on both,
+`user-invocable: false` in the frontmatter hides the skill from the menu the
+same way it hides it from the agent's own catalog. Agent-advertised commands
+from the ACP session are listed after the builtins, disk skills after those.
+
+Cursor's ACP catalog lands a few seconds after the session starts
+(`session/new` itself carries none of it), so a `/` typed right away shows
+only craze's builtins and whatever the disk scan already found; the rest
+appears once the agent advertises it.
 
 ## Model dialog
 
@@ -333,12 +381,16 @@ keys — `enter on a row` to open one, `esc, ←` to return, and
 
 Mouse reporting is on by default; `--no-mouse` turns it off.
 
-The wheel scrolls the transcript three lines per notch. A left click hit-tests
-the same layout the frame was drawn from, so what is on screen and what is
+The wheel scrolls the transcript three lines per notch — except over the
+slash menu, where it moves the selection one row per notch instead, clamped
+rather than wrapped: the menu is a selection, not a viewport, so three rows a
+notch would jump past rows never seen highlighted. A left click hit-tests the
+same layout the frame was drawn from, so what is on screen and what is
 clickable cannot drift apart:
 
 | Target | Effect |
 |---|---|
+| A row in the slash menu | Accepts it (same as `Tab`); a click after scrolling lands on the row actually drawn there |
 | Tasks panel header | Cycles the panel (same as `Ctrl+T`) |
 | Sub-agent row under the status rows | Selects that sub-agent and opens it in the main area (same as `Enter` on it) |
 | A queued message's text | Selects that row |
