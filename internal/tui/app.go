@@ -841,10 +841,12 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	if lay.TooSmall {
 		return m, nil
 	}
-	// A click is "anything else" to the confirm line: it declines, so the
-	// click never opens something over an armed question.
+	// A click is "anything else" to the confirm line: it declines, and that
+	// is all it does — carrying on would let the same click act on a row or
+	// arm a new question over the one just answered.
 	if m.confirm != nil {
 		m.declineStrongSend()
+		return m, nil
 	}
 	if r := lay.Dialog; !r.Empty() {
 		if r.Contains(x, y) {
@@ -1242,7 +1244,10 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// and holding it until the turn ends would be surprising. The ones that
 	// do need the agent keep today's refusal.
 	if ok && name != "" && builtinNamed(name) {
-		if m.status == statusWorking && !runsWhileWorking(name) {
+		// A turn the agent runs on its own is a running turn for this
+		// purpose too: /model or /plan into it would land on a session
+		// that is busy.
+		if (m.status == statusWorking || m.snap.ForeignTurn) && !runsWhileWorking(name) {
 			return m, nil
 		}
 		return m.runBuiltin(name, args)

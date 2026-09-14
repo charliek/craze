@@ -196,6 +196,53 @@ func TestConfirmOutranksTheSubagentView(t *testing.T) {
 	if got.input.Value() != "PINEAPPLE" {
 		t.Fatalf("declining keeps the draft: %q", got.input.Value())
 	}
+	// Declining is all the click does: it opens nothing and acts on no row.
+	if got.viewing != "" {
+		t.Fatalf("the declining click opened a view: %q", got.viewing)
+	}
+	// The same for a row: select it (its action strip is drawn), arm its
+	// send now, then click where [cancel] sits — the click declines and
+	// does not remove the row.
+	m = typeEnter(t, got, "MANGO")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(Model)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = tm.(Model)
+	if m.confirm == nil {
+		t.Fatal("setup: expected the row's confirm")
+	}
+	y := m.lay.Region(regionQueue).Top
+	got = clickXY(t, m, m.width-3, y)
+	if got.confirm != nil || len(got.snap.Queue) != 1 || got.queueEdit != "" {
+		t.Fatalf("a declining click on a row must not act on it: confirm=%v queue=%d edit=%q", got.confirm != nil, len(got.snap.Queue), got.queueEdit)
+	}
+}
+
+// TestBuiltinsRefusedDuringAForeignTurn: the agent is busy on its own, so
+// the builtins that need an idle session are refused as they are mid-turn.
+func TestBuiltinsRefusedDuringAForeignTurn(t *testing.T) {
+	m, stub := queueWorking(t)
+	stub.SetProvider(agent.GrokProvider())
+	foreign := agent.ForeignTurnInfo{ID: "interject-fallback-1", Text: "note", Running: true}
+	stub.SetForeignTurn(foreign)
+	m = feed(t, m, agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &foreign})
+	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+	m = tm.(Model)
+	if m.status != statusIdle || !m.snap.ForeignTurn {
+		t.Fatalf("setup: idle under a foreign turn, got %s foreign=%v", m.status, m.snap.ForeignTurn)
+	}
+	m = typeEnter(t, m, "/model")
+	if m.dialog == dialogModel {
+		t.Fatal("/model must be refused while the agent runs a turn of its own")
+	}
+	if len(m.snap.Queue) != 0 {
+		t.Fatalf("a refused builtin is never queued: %+v", m.snap.Queue)
+	}
+	m = typeEnter(t, m, "/help")
+	if m.dialog != dialogHelp {
+		t.Fatal("/help still runs")
+	}
 }
 
 // TestEditChipFollowsTheRow: the chip numbers the row as it is now, not as it
