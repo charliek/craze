@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -37,6 +38,34 @@ const (
 
 	MethodGrokSessionNotification        = "x.ai/session_notification"
 	MethodGrokSessionNotificationWrapped = "_x.ai/session_notification"
+
+	// Interject is the only grok extension craze writes. Live grok 1.0.30
+	// answers the wrapped name and 404s the bare one, so the wrapped name is
+	// what goes out; both are accepted inbound.
+	MethodGrokInterject        = "x.ai/interject"
+	MethodGrokInterjectWrapped = "_x.ai/interject"
+	// Interjection is the broadcast every client renders the user block from.
+	// There is no user_message_chunk for an interjection.
+	MethodGrokInterjection        = "x.ai/session/interjection"
+	MethodGrokInterjectionWrapped = "_x.ai/session/interjection"
+	// QueueChanged is grok's server-side queue broadcast. craze does not use
+	// that queue; it reads this only to learn turn identity (§3.2).
+	MethodGrokQueueChanged        = "x.ai/queue/changed"
+	MethodGrokQueueChangedWrapped = "_x.ai/queue/changed"
+
+	// UpdateTurnCompleted rides x.ai/session_notification and is the one
+	// terminator grok sends for every turn, its own interject fallback
+	// included — which sends no prompt_complete at all (captured live,
+	// 2026-09-14). It is what ends a foreign turn.
+	UpdateTurnCompleted = "turn_completed"
+
+	// InterjectFallbackPrefix names the prompt grok mints when an
+	// interjection cannot be merged into a running turn. Such a completion
+	// never ends a craze turn.
+	InterjectFallbackPrefix = "interject-fallback-"
+
+	// InterjectStatusQueued is the only ack status craze accepts.
+	InterjectStatusQueued = "queued"
 
 	UpdateAgentMessage      = "agent_message_chunk"
 	UpdateAgentThought      = "agent_thought_chunk"
@@ -410,6 +439,76 @@ type TaskRequest struct {
 // refuses to act on: JSON-RPC null and non-objects decode without error into a
 // zero value, which would silently mutate state.
 var ErrBadParams = errors.New("acp: params must be a JSON object")
+
+// ErrUnsupported is what a dialect that has no such method returns before
+// anything is written to the wire.
+var ErrUnsupported = errors.New("acp: not supported by this agent")
+
+// ErrForeignTurn refuses a prompt while the agent is running a turn craze did
+// not start (grok's interject fallback). One prompt at a time is a session
+// rule, not a client rule, so the guard belongs here as well.
+var ErrForeignTurn = errors.New("acp: agent is running a turn of its own")
+
+// ErrNoSession is a session-scoped call made before session/new.
+var ErrNoSession = errors.New("acp: no session")
+
+// InterjectParams is x.ai/interject. content is not sent: no images this cut.
+type InterjectParams struct {
+	SessionID      string `json:"sessionId"`
+	Text           string `json:"text"`
+	InterjectionID string `json:"interjectionId,omitempty"`
+}
+
+// interjectAck is the ack, nested one level under the JSON-RPC result:
+// {"result":{"result":{"status":"queued"}}} on the wire.
+type interjectAck struct {
+	Result struct {
+		Status string `json:"status"`
+	} `json:"result"`
+}
+
+// InterjectionNotification is x.ai/session/interjection, the broadcast the
+// user block is rendered from. InterjectionID is echoed back when the client
+// sent one, and is empty otherwise.
+type InterjectionNotification struct {
+	SessionID      string `json:"sessionId"`
+	Text           string `json:"text"`
+	InterjectionID string `json:"interjectionId"`
+}
+
+// QueueEntry is one row of grok's own queue. craze never puts anything in it;
+// the entries are read only to learn which promptId its prompt was given.
+type QueueEntry struct {
+	ID       string `json:"id"`
+	Version  int    `json:"version"`
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+	Position int    `json:"position"`
+}
+
+// QueueChanged is x.ai/queue/changed. It is broadcast on every queue change
+// and at turn start, where RunningPromptID names the turn now running.
+type QueueChanged struct {
+	SessionID       string       `json:"sessionId"`
+	Entries         []QueueEntry `json:"entries"`
+	RunningPromptID string       `json:"runningPromptId"`
+	RunningText     string       `json:"runningText"`
+	RunningKind     string       `json:"runningKind"`
+}
+
+// ForeignTurn is a turn the agent started on craze's session without a craze
+// prompt. Running is true on the start sighting and false at its end.
+type ForeignTurn struct {
+	ID      string
+	Text    string
+	Running bool
+}
+
+// IsInterjectFallback reports whether a promptId is one grok minted for a
+// stranded interjection.
+func IsInterjectFallback(promptID string) bool {
+	return strings.HasPrefix(promptID, InterjectFallbackPrefix)
+}
 
 func decodeObject(raw json.RawMessage, v any) error {
 	raw = bytes.TrimSpace(raw)

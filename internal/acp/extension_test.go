@@ -583,3 +583,16 @@ func TestEmptyTodosListAccepted(t *testing.T) {
 		t.Fatalf("handler saw %+v", req.Todos)
 	}
 }
+
+// writeLine puts one captured JSONL line back on the wire verbatim, so the
+// client sees it through its own framing and dispatch.
+func (p *rawPipe) writeLine(t *testing.T, line string) {
+	t.Helper()
+	var msg Message
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		t.Fatalf("%s: %v", line, err)
+	}
+	if err := p.enc.WriteMessage(&msg); err != nil {
+		t.Fatal(err)
+	}
+}

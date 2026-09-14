@@ -208,3 +208,64 @@ func grokToolName(update json.RawMessage) string {
 	}
 	return tool.Name
 }
+
+// parseInterjection reads x.ai/session/interjection. A broadcast without text
+// is dropped: the whole point of the notification is the user block it makes.
+func parseInterjection(params json.RawMessage) (InterjectionNotification, bool) {
+	var n InterjectionNotification
+	if err := decodeObject(unwrapExtParams(params), &n); err != nil {
+		return InterjectionNotification{}, false
+	}
+	if n.SessionID == "" || n.Text == "" {
+		return InterjectionNotification{}, false
+	}
+	return n, true
+}
+
+// parseQueueChanged reads x.ai/queue/changed. Entries may legitimately be
+// empty — that is what a drained queue looks like — so only the session id is
+// required.
+func parseQueueChanged(params json.RawMessage) (QueueChanged, bool) {
+	var n QueueChanged
+	if err := decodeObject(unwrapExtParams(params), &n); err != nil {
+		return QueueChanged{}, false
+	}
+	if n.SessionID == "" {
+		return QueueChanged{}, false
+	}
+	return n, true
+}
+
+// grokTurnCompleted is the turn_completed update carried on
+// x.ai/session_notification. Live grok sends one for every turn — craze's own
+// and the interject fallback's — and it is the only ending the fallback has.
+type grokTurnCompleted struct {
+	SessionID  string
+	PromptID   string
+	StopReason string
+}
+
+// parseGrokTurnCompleted returns the event only for a turn_completed update
+// that names its prompt. Any other update kind is not one, and says nothing
+// about malformed params: handleSubagentNotification still gets its turn.
+func parseGrokTurnCompleted(params json.RawMessage) (grokTurnCompleted, bool) {
+	var w struct {
+		SessionID string `json:"sessionId"`
+		Update    struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			PromptID      string `json:"prompt_id"`
+			StopReason    string `json:"stop_reason"`
+		} `json:"update"`
+	}
+	if err := decodeObject(unwrapExtParams(params), &w); err != nil {
+		return grokTurnCompleted{}, false
+	}
+	if w.Update.SessionUpdate != UpdateTurnCompleted || w.SessionID == "" || w.Update.PromptID == "" {
+		return grokTurnCompleted{}, false
+	}
+	return grokTurnCompleted{
+		SessionID:  w.SessionID,
+		PromptID:   w.Update.PromptID,
+		StopReason: w.Update.StopReason,
+	}, true
+}
