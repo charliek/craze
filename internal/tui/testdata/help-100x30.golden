@@ -20,7 +20,7 @@
               │moving and scrolling                                                  │              
               │  ↑ ↓               queued messages, sub-agent rows, or a list inside…│              
               │  pgup pgdn, wheel  scroll the transcript                             │              
-              │  tab               complete the slash command being typed           ▼│              
+              │  tab, enter        on the slash menu, accept the highlighted row    ▼│              
               │↑↓ · pgup/pgdn · esc closes                                           │              
               ╰──────────────────────────────────────────────────────────────────────╯              
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─

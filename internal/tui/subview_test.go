@@ -294,8 +294,8 @@ func TestKeysPasteAndSlashInertInsideTheView(t *testing.T) {
 	m.input.SetValue("/")
 	tm, _ = m.Update(refreshSnapMsg{})
 	m = tm.(Model)
-	if m.overlayView() != "" {
-		t.Fatalf("slash overlay drew inside the view: %q", m.overlayView())
+	if m.overlayView(m.lay) != "" {
+		t.Fatalf("slash overlay drew inside the view: %q", m.overlayView(m.lay))
 	}
 }
 

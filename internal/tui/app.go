@@ -13,7 +13,6 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -169,9 +168,16 @@ type Model struct {
 	themeNames []string
 	themePrev  Theme
 
-	slashSel  int
-	slashHide bool
-	skills    []slashItem
+	// The slash menu. slashSel is the highlighted row and slashTop the first
+	// one drawn, both indices into filteredSlash(); slashKey is the token they
+	// belong to, so the selection restarts when the token changes; and
+	// slashHideKey is the token Esc hid, so the menu comes back as soon as the
+	// token under the cursor is another one. A flag could not tell those apart.
+	slashSel     int
+	slashTop     int
+	slashKey     string
+	slashHideKey string
+	skills       []slashItem
 
 	pickingProvider bool
 	providerLocked  bool
@@ -566,7 +572,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
 		// keyboard is by the time the text arrives.
-		if msg.text == "" || m.cardOpen() || m.dialogOpen() || m.viewing != "" {
+		if msg.text == "" || m.composerCovered() {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -673,10 +679,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseActionPress:
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
+			if m.slashActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
+				return m.slashWheel(-1), nil
+			}
 			// The selection is in transcript rows, not screen rows, so it
 			// scrolls with the text it holds and survives the wheel.
 			m.vp.ScrollUp(wheelLines)
 		case tea.MouseButtonWheelDown:
+			if m.slashActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
+				return m.slashWheel(1), nil
+			}
 			m.vp.ScrollDown(wheelLines)
 		case tea.MouseButtonLeft:
 			return m.handlePress(msg.X, msg.Y)
@@ -701,6 +713,20 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// slashWheel is the wheel over the band: one row of selection per notch,
+// clamped rather than wrapped. §3.5 deliberately does not reuse wheelLines —
+// the menu is a selection, not a viewport, so "scrolling" it three at a time
+// would jump past rows the user never saw highlighted. relayout's syncSlash
+// carries slashTop along afterwards, the same as it does for a key move.
+func (m Model) slashWheel(delta int) Model {
+	items := m.filteredSlash()
+	if len(items) == 0 {
+		return m
+	}
+	m.slashSel = min(max(m.slashSel+delta, 0), len(items)-1)
+	return m
 }
 
 // handlePress is the left button going down: over the transcript it anchors a
@@ -858,6 +884,13 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		return m.closeDialog(true), nil
 	}
 	switch {
+	case lay.Region(regionOverlay).Contains(y):
+		// slashTop is the top syncSlash settled for the frame just drawn, so
+		// a click after scrolling lands on the row that was actually on
+		// screen, not row 0 of the whole catalog. acceptSlash no-ops past
+		// the last item — the catalog can shrink between the draw and the
+		// click.
+		return m.acceptSlash(m.slashTop + lay.Region(regionOverlay).Row(y)), nil
 	case lay.Region(regionTasks).Contains(y):
 		if lay.Region(regionTasks).Row(y) == 0 {
 			return m.cycleTasks()
@@ -1018,9 +1051,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cancelQueueEdit()
 			return m, nil
 		}
-		if m.slashMenuOpen() {
-			m.slashHide = true
-			m.slashSel = 0
+		if m.slashActive() {
+			// Esc hides this token's menu and nothing else; the draft is
+			// untouched (pinned). Recording the token rather than setting a
+			// flag is what reopens the menu as soon as the token changes or
+			// the cursor moves into another one. The consequence under a
+			// running turn is accepted: Esc on any /word hides the menu and
+			// the second Esc cancels the turn.
+			if start, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset()); ok {
+				m.slashHideKey = slashTokenKey(start, name)
+			}
+			m.slashSel, m.slashTop = 0, 0
 			return m, nil
 		}
 		if m.strong != nil {
@@ -1044,6 +1085,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		return m, nil
 	}
+	// While the band is up it is what the keyboard is on, so it takes these
+	// keys before the transcript pages or the arrows leave the composer. The
+	// key type is tested first because slashRows() costs a catalog build.
+	// Esc is deliberately not here: its precedence is per-key (a queue edit
+	// outranks it), not per-band, so it stays in the ladder above.
+	switch msg.Type {
+	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
+		if rows := m.slashRows(); rows > 0 {
+			return m.handleSlashKey(msg.Type, rows), nil
+		}
+	}
 	if msg.Type == tea.KeyPgUp || msg.Type == tea.KeyPgDown {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
@@ -1054,22 +1106,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.Type == tea.KeyEnter {
 		return m.handleEnter()
-	}
-	if msg.Type == tea.KeyTab && m.slashMenuOpen() {
-		m = m.completeSlash()
-		return m, nil
-	}
-	if m.slashMenuOpen() && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
-		items := m.filteredSlash()
-		if len(items) == 0 {
-			return m, nil
-		}
-		if msg.Type == tea.KeyDown {
-			m.slashSel = (m.slashSel + 1) % len(items)
-		} else {
-			m.slashSel = (m.slashSel - 1 + len(items)) % len(items)
-		}
-		return m, nil
 	}
 	// Only the arrow keys move the keyboard out of the composer, empty
 	// composer or not — a user typing a follow-up still browses what is
@@ -1174,8 +1210,11 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	if m.input.Value() != prev {
-		m.slashHide = false
-		if name, _, ok := parseSlashLine(m.input.Value()); ok && name == "" {
+		// A bare "/" coming under the cursor rescans the disk skills, so a
+		// skill saved since the session started is in the catalog the menu is
+		// about to draw. It is gated on the value changing — a keystroke, not
+		// cursor motion — so the bounded walk runs once per such key.
+		if _, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset()); ok && name == "" {
 			m.rescanSkills()
 		}
 	}
@@ -1222,6 +1261,14 @@ func (m *Model) clearPending() {
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.confirm != nil {
 		return m.confirmStrongSend()
+	}
+	// The menu owns Enter while it is up, and it owns it before the queue edit
+	// saves: a row accepted inside an edit completes the text being edited, and
+	// the next Enter saves it. A token that already spells the highlighted row
+	// falls through, so a fully typed /help still runs on the first press and a
+	// fully typed /gauntlet still sends.
+	if m.slashActive() && !m.slashExactlyTyped() {
+		return m.acceptSlash(m.slashSel), nil
 	}
 	if m.queueEdit != "" {
 		return m.saveQueueEdit()
@@ -1290,7 +1337,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input.SetValue("")
-	m.slashSel = 0
+	m.resetSlash()
 	return m.sendText(text)
 }
 
@@ -1716,49 +1763,6 @@ func (m Model) View() string {
 		base = overlay(base, m.dialogView(r), r)
 	}
 	return base
-}
-
-// overlayView is the slash menu, the one overlay that still draws as a band
-// under the transcript; the layout crops it rather than letting it squeeze the
-// transcript away. The pickers left it in V3 and help left it here: a dialog is
-// a layer over the transcript, not a band under it.
-//
-// A card outranks it (§3.11): the menu it did not close is suspended — kept in
-// state, not drawn — until it has been answered.
-func (m Model) overlayView() string {
-	if m.cardOpen() || m.viewing != "" || !m.slashMenuOpen() {
-		return ""
-	}
-	return m.slashMenuView()
-}
-
-func (m Model) overlayRows() int {
-	v := m.overlayView()
-	if v == "" {
-		return 0
-	}
-	return lipgloss.Height(v)
-}
-
-func (m Model) slashMenuView() string {
-	items := m.filteredSlash()
-	if len(items) == 0 {
-		return ""
-	}
-	if m.slashSel >= len(items) {
-		m.slashSel = 0
-	}
-	var b strings.Builder
-	for i, it := range items {
-		line := fmt.Sprintf("/%s  %s", it.Name, it.labeledDesc())
-		st := lipgloss.NewStyle().Foreground(m.theme.Dim)
-		if i == m.slashSel {
-			st = lipgloss.NewStyle().Foreground(m.theme.Accent)
-		}
-		b.WriteString(st.Render(line))
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // workspaceName is the basename of the workspace, falling back to the path

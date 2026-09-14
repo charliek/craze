@@ -32,3 +32,6 @@ site-build/
 # Claude Code local/user-specific files
 .claude/settings.local.json
 .claude/projects/
+
+# Agent worktrees (a second checkout; never stage it)
+.claude/worktrees/

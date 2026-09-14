@@ -115,9 +115,11 @@ func (m *Model) pushCard(c card) {
 	// turn with a cursor/create_plan card *and* assistant text, so the card
 	// always arrives before the ending that arms the offer; killing the offer
 	// here meant it could never appear in a real plan-mode session at all.
-	// planOffering hides it while a card is open instead.
-	// The draft itself is never touched (pinned), only the menu it opened.
-	m.slashHide = true
+	// planOffering hides it while a card is open instead. The slash menu needs
+	// nothing here at all: slashMenuOpen gates on composerCovered(), so the
+	// menu is suspended rather than closed and the draft it was completing is
+	// never touched (pinned).
+	//
 	// A card takes the mouse too, so an in-progress drag is dropped rather
 	// than left waiting for a release that will never be handled.
 	m.sel = selection{}

@@ -122,6 +122,59 @@ func grokScript(script string) bool {
 	return strings.HasPrefix(script, "grok-")
 }
 
+// advertiseCommands is the available_commands_update both session/new branches
+// send, in one place so the wire shape has one definition. Every script but one
+// keeps the single `research` entry the older goldens were written against;
+// `commands` swaps in a catalog big enough to overflow the slash menu's window,
+// so the band's columns, its scroll marks and its one-row-per-entry rule all
+// have a golden to stand on.
+func (s *server) advertiseCommands() {
+	cmds := []acp.AvailableCommand{{Name: "research", Description: "Agent-advertised command"}}
+	if s.script == "commands" {
+		cmds = commandsCatalog()
+	}
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate:     acp.UpdateAvailableCommands,
+		AvailableCommands: cmds,
+	})
+}
+
+// commandsCatalog is 24 entries: enough that eight rows window onto it, with
+// descriptions long enough to be clamped at 80 columns. Three names are load
+// bearing and the goldens that use them say so — `zulu-tool` is the sentinel a
+// frame script waits for to know the catalog has landed (the update arrives
+// after session/new replies), `gauntlet-like` is the only entry matching the
+// query `gau`, and `multiline-note` is the entry whose advertised description
+// carries a newline, which the menu owes one physical row regardless.
+func commandsCatalog() []acp.AvailableCommand {
+	return []acp.AvailableCommand{
+		{Name: "alpha-review", Description: "Review the working tree and report the findings worth acting on before the next commit"},
+		{Name: "bravo-search", Description: "Search the whole repository for a symbol and summarise every call site it turns up"},
+		{Name: "charlie-build", Description: "Build every binary in the module and report the first compile error in full"},
+		{Name: "delta-deploy", Description: "Deploy the current branch to the staging environment and tail the rollout log"},
+		{Name: "echo-lint", Description: "Run every configured linter and group the complaints by the file they belong to"},
+		{Name: "foxtrot-format", Description: "Format the tree in place and list the files the formatter actually rewrote"},
+		{Name: "golf-refactor", Description: "Extract the selected code into a helper and update every caller in the package"},
+		{Name: "hotel-migrate", Description: "Generate the next schema migration and dry-run it against a scratch database"},
+		{Name: "india-inspect", Description: "Inspect a running process and dump its goroutines, heap profile and open files"},
+		{Name: "juliet-bench", Description: "Run the benchmark suite twice and report the deltas that clear the noise floor"},
+		{Name: "kilo-profile", Description: "Collect a CPU profile for thirty seconds and render the hottest twenty frames"},
+		{Name: "lima-trace", Description: "Capture an execution trace of one request and annotate every blocking wait in it"},
+		{Name: "mike-audit", Description: "Audit the dependency tree for advisories and propose the smallest safe upgrade"},
+		{Name: "november-scan", Description: "Scan the repository for secrets, tokens and private keys that were committed"},
+		{Name: "oscar-package", Description: "Package the release artefacts for every supported platform and checksum them"},
+		{Name: "papa-publish", Description: "Publish the built artefacts to the registry once every required check is green"},
+		{Name: "quebec-query", Description: "Run a read-only query against the analytics warehouse and tabulate the result"},
+		{Name: "romeo-report", Description: "Write the weekly engineering report from the merged pull requests of the week"},
+		{Name: "sierra-sync", Description: "Sync the local checkout with upstream and rebase every unpushed local commit"},
+		{Name: "tango-test", Description: "Run the full test suite with the race detector and repeat the flaky tests ten times"},
+		{Name: "uniform-upgrade", Description: "Upgrade the toolchain pinned in the manifest and re-run the per-commit gate"},
+		{Name: "gauntlet-like", Description: "Discover, plan, implement and verify a change end to end, one gated commit at a time"},
+		{Name: "multiline-note", Description: "Draws on one line.\nThe newline in this description must not split the row."},
+		{Name: "zulu-tool", Description: "The last entry in the catalog, and the sentinel a frame script waits for"},
+	}
+}
+
 func grokConfigOptions() []map[string]any {
 	return []map[string]any{
 		{
@@ -203,12 +256,7 @@ func (s *server) onRequest(msg *acp.Message) {
 				"models":        grokModels(),
 				"configOptions": grokConfigOptions(),
 			})
-			s.update(fakeSessionID, acp.SessionUpdate{
-				SessionUpdate: acp.UpdateAvailableCommands,
-				AvailableCommands: []acp.AvailableCommand{
-					{Name: "research", Description: "Agent-advertised command"},
-				},
-			})
+			s.advertiseCommands()
 			return
 		}
 		// The plan-exit scripts have to start where the offer can be made.
@@ -235,12 +283,7 @@ func (s *server) onRequest(msg *acp.Message) {
 			},
 			"configOptions": cfg,
 		})
-		s.update(fakeSessionID, acp.SessionUpdate{
-			SessionUpdate: acp.UpdateAvailableCommands,
-			AvailableCommands: []acp.AvailableCommand{
-				{Name: "research", Description: "Agent-advertised command"},
-			},
-		})
+		s.advertiseCommands()
 	case acp.MethodSessionPrompt:
 		s.noteOrder(orderPrompt, "")
 		if queueScript(s.script) {

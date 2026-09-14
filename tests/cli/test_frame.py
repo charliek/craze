@@ -169,6 +169,17 @@ CASES = [
         "<wait:idle>go<enter><wait:text:done todos><wait:idle>",
         ["TASKS 1/3"],
     ),
+    # 009 §3.4: the slash band through the command. The catalog lands after
+    # session/new replies, so the script waits on the entry only `/zulu`
+    # matches and then backs out to the bare token the nine builtins and the
+    # fake's 24 commands both answer.
+    (
+        "commands",
+        100,
+        30,
+        "<wait:idle>/zulu<wait:text:zulu-tool><backspace><backspace><backspace><backspace>",
+        ["❯ /help", "/model            Switch model", "1/33", "▼"],
+    ),
 ]
 
 

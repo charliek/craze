@@ -65,7 +65,8 @@ func (m Model) helpKeyLines() []helpLine {
 		helpLine{desc: "moving and scrolling"},
 		helpLine{key: "↑ ↓", desc: arrows},
 		helpLine{key: "pgup pgdn, wheel", desc: "scroll the transcript"},
-		helpLine{key: "tab", desc: "complete the slash command being typed"},
+		helpLine{key: "tab, enter", desc: "on the slash menu, accept the highlighted row"},
+		helpLine{key: "pgup pgdn", desc: "on the slash menu, page it — ahead of scrolling the transcript"},
 		helpLine{desc: "panels and views"},
 	)
 	if m.showTodos() {

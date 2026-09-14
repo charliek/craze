@@ -380,6 +380,78 @@ func TestFrameGoldenComposer(t *testing.T) {
 	}
 }
 
+// slashCatalogLanded types a query only the catalog's last entry matches,
+// waits for it, then backs out of the query again. The commands update lands
+// after session/new has replied — cursor takes seconds over it — so a golden
+// that only typed "/" would race the catalog and show the builtins alone.
+// Waiting on an entry is waiting on the update that carried it, and the four
+// backspaces leave exactly the token the golden is about.
+const slashCatalogLanded = "/zulu<wait:text:zulu-tool><backspace><backspace><backspace><backspace>"
+
+// TestFrameGoldenSlashMenu is §3.4's band through the real program and the
+// real wire: the name column, the clamped descriptions, the gutter mark, the
+// k/n ▲ ▼ marks at three granted heights, the accept, and the one-physical-row
+// rule for a description the agent advertised with a newline in it.
+//
+// The fake's `commands` script advertises 24 entries, so the cursor fixture's
+// nine builtins make 33 at message start and 24 with the token mid-message —
+// the counts the marks have to agree with.
+func TestFrameGoldenSlashMenu(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cols, rows int
+		keys       string
+		want       []string
+		absent     []string
+	}{
+		// Eight of 33 from the top: the count, no ▲ at the top of the list,
+		// and a ▼ because the other 25 are below.
+		{"slash-open-100x30", 100, 30, slashCatalogLanded,
+			[]string{"❯ /help", "1/33", "▼", "/model            Switch model"}, []string{"▲"}},
+		// Ten rows down the window has moved three: the count follows the
+		// selection, not the window, and both arrows are up.
+		{"slash-scroll-100x30", 100, 30, slashCatalogLanded + strings.Repeat("<down>", 10),
+			[]string{"❯ /bravo-search", "11/33 ▲", "▼", "/tasks"}, []string{"/help"}},
+		// §3.5's click, on the same scrolled window slash-scroll-100x30 draws:
+		// row 17 on screen is /tasks, items[3] because slashTop is 3 there, not
+		// items[0] — a click that used the bare band row instead of
+		// slashTop+row would have accepted /help.
+		{"slash-click-100x30", 100, 30, slashCatalogLanded + strings.Repeat("<down>", 10) + "<click:5,17>",
+			[]string{"❯ /tasks "}, []string{"❯ /help ", "❯ /bravo-search", "▲", "▼", "11/33"}},
+		// Mid-message the builtins are not offered, so the same catalog is 24.
+		{"slash-mid-80x24", 80, 24, "see " + slashCatalogLanded,
+			[]string{"❯ /alpha-review", "1/24", "▼"}, []string{"/help", "/exit", "▲"}},
+		// Twelve rows is the smallest frame craze draws; the band gets four of
+		// them and the selection is still on screen five rows down.
+		{"slash-crop-80x12", 80, 12, slashCatalogLanded + strings.Repeat("<down>", 5),
+			[]string{"❯ /plan", "6/33 ▲", "▼"}, []string{"/help"}},
+		// One match, so Tab needs no scrolling: the token becomes "/name " and
+		// the trailing space closes the band by the rule, not by a flag.
+		{"slash-accept-100x30", 100, 30, "/gau<wait:text:gauntlet-like><tab>",
+			[]string{"❯ /gauntlet-like "}, []string{"1/1", "▼", "Discover, plan"}},
+		// The advertised description carries a \n; sanitizeLine folded it at
+		// catalog time, so the row is one line with both halves on it.
+		{"slash-multiline-desc-100x30", 100, 30, "/multiline<wait:text:multiline-note>",
+			[]string{"❯ /multiline-note  Draws on one line. The newline in this description must not split the row."},
+			[]string{"1/1", "▲", "▼"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runFakeFrame(t, "commands", tc.cols, tc.rows, "<wait:idle>"+tc.keys)
+			assertGolden(t, tc.name, tc.cols, tc.rows, got)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("frame is missing %q:\n%s", want, got)
+				}
+			}
+			for _, no := range tc.absent {
+				if strings.Contains(got, no) {
+					t.Fatalf("frame should not contain %q:\n%s", no, got)
+				}
+			}
+		})
+	}
+}
+
 // TestFrameGoldenTitleRule is the other half of §3.1: the session title cursor
 // sends lands at the right end of the top rule.
 func TestFrameGoldenTitleRule(t *testing.T) {

@@ -42,8 +42,12 @@ func TestGrokProviderData(t *testing.T) {
 		t.Fatalf("capabilities %+v", p.Capabilities())
 	}
 	scan := p.SkillScan()
-	if !reflect.DeepEqual(scan.RelRoots, []string{filepath.Join(".grok", "skills")}) {
+	wantRoots := []string{filepath.Join(".grok", "skills"), filepath.Join(".agents", "skills")}
+	if !reflect.DeepEqual(scan.RelRoots, wantRoots) {
 		t.Fatalf("rel roots %q", scan.RelRoots)
+	}
+	if scan.NameFromDir {
+		t.Fatal("grok keeps the frontmatter name, not the directory")
 	}
 	if p.ImplementPrompt() != "Implement the plan above." {
 		t.Fatalf("implement prompt %q", p.ImplementPrompt())
@@ -71,6 +75,9 @@ func TestCursorProviderData(t *testing.T) {
 	}
 	if !p.SkillScan().SkipCursorPlugins {
 		t.Fatal("cursor still skips .cursor/plugins this cut")
+	}
+	if !p.SkillScan().NameFromDir {
+		t.Fatal("cursor names a skill by its directory")
 	}
 }
 

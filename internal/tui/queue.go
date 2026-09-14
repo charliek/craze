@@ -205,7 +205,7 @@ func (m Model) queueDraft(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input.SetValue("")
-	m.slashSel = 0
+	m.resetSlash()
 	m.refreshSnap()
 	return m, nil
 }
@@ -249,7 +249,7 @@ func (m Model) interject(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input.SetValue("")
-	m.slashSel = 0
+	m.resetSlash()
 	return m, nil
 }
 
@@ -336,7 +336,7 @@ func (m Model) fireStrongSend(p strongSend) (tea.Model, tea.Cmd) {
 	} else if strings.TrimSpace(m.input.Value()) == p.text {
 		// The armed text was trimmed; the draft may not have been.
 		m.input.SetValue("")
-		m.slashSel = 0
+		m.resetSlash()
 	}
 	if strings.TrimSpace(text) == "" {
 		return m, nil
@@ -357,6 +357,7 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 	m.queueEdit = p.ID
 	m.queueEditPos = m.queueSel
 	m.input.SetValue(p.Text)
+	m.resetSlash()
 	m.focusComposer()
 	m.queueFocus = false
 }
@@ -386,6 +387,7 @@ func (m *Model) finishQueueEdit() {
 	m.queueEdit = ""
 	m.input.SetValue(m.editDraft)
 	m.editDraft = ""
+	m.resetSlash()
 }
 
 // cancelQueueEdit is Esc in edit mode: the row is untouched.

@@ -39,14 +39,22 @@ func sized(t *testing.T) Model {
 
 func startSized(t *testing.T, ws string) Model {
 	t.Helper()
+	return startStub(t, NewStub(), ws, 80, 24)
+}
+
+// startStub is where every test model is built: the standard config around the
+// caller's stub, sized, and started. Isolating the skills home stays with the
+// caller, because a test that wants real skills on disk sets one up first.
+func startStub(t *testing.T, stub *Stub, ws string, cols, rows int) Model {
+	t.Helper()
 	m := New(Config{
-		Session:   NewStub(),
+		Session:   stub,
 		Theme:     "tokyo-night",
 		Workspace: ws,
 		Model:     "grok",
 		Yolo:      true,
 	})
-	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: cols, Height: rows})
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
 	return tm.(Model)
@@ -659,7 +667,8 @@ func TestTabCompletesSlash(t *testing.T) {
 	m.input.SetValue("/he")
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = tm.(Model)
-	if m.input.Value() != "/help" {
+	// Accepting ends the token with a space, which is what closes the menu.
+	if m.input.Value() != "/help " {
 		t.Fatalf("complete %q", m.input.Value())
 	}
 }
