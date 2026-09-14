@@ -9,45 +9,71 @@ import (
 // The queue's transactions are ordered by s.queueOp: a mutation and the
 // events it produced go out together, so a consumer rebuilding the queue from
 // the event stream never sees them interleaved with another transaction's.
-// The lock order is queueOp → s.mu → the queue's own lock, and Snapshot takes
-// the last two in that order as well.
+// The lock order is queueOp → emitMu → s.mu → the queue's own lock, and
+// Snapshot takes the last two in that order as well.
+
+// queueTx runs one queue transaction. fn mutates the queue under queueOp and
+// returns the events it produced; those are emitted after queueOp is released,
+// because emit blocks while the event channel is full and a consumer that is
+// waiting on something else holding queueOp — Prompt's error path clearing the
+// queue, say — would wedge the session. emitMu is taken inside queueOp and
+// held across the sends, so the transactions still reach the stream whole and
+// in the order they happened. Lock order: queueOp → emitMu, never the reverse.
+func (s *session) queueTx(fn func() []QueueEvent) {
+	s.queueOp.Lock()
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	evs := func() []QueueEvent {
+		// The mutation is the transaction; the emits are not, which is why
+		// queueOp goes back before them.
+		defer s.queueOp.Unlock()
+		return fn()
+	}()
+	for _, ev := range evs {
+		s.emit(ev.Event())
+	}
+}
 
 // Queue appends a message to craze's own queue. The queue is craze-side on
 // both providers: Client.Prompt keeps its one-in-flight rule and the drain is
 // the only thing that ever starts a queued turn.
-func (s *session) Queue(text string) (QueuedPrompt, error) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	p, ev, err := s.queue.Add(text, time.Now())
-	if err != nil {
-		return QueuedPrompt{}, err
-	}
-	s.emit(ev.Event())
-	return p, nil
+func (s *session) Queue(text string) (p QueuedPrompt, err error) {
+	s.queueTx(func() []QueueEvent {
+		var ev QueueEvent
+		p, ev, err = s.queue.Add(text, time.Now())
+		if err != nil {
+			return nil
+		}
+		return []QueueEvent{ev}
+	})
+	return p, err
 }
 
 // EditQueued rewrites a row in place. The id and the position are the row's
 // identity: an edit is not a cancel plus a re-queue.
-func (s *session) EditQueued(id, text string) error {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	ev, err := s.queue.Edit(id, text)
-	if err != nil {
-		return err
-	}
-	s.emit(ev.Event())
-	return nil
+func (s *session) EditQueued(id, text string) (err error) {
+	s.queueTx(func() []QueueEvent {
+		var ev QueueEvent
+		ev, err = s.queue.Edit(id, text)
+		if err != nil {
+			return nil
+		}
+		return []QueueEvent{ev}
+	})
+	return err
 }
 
-func (s *session) Unqueue(id string) (QueuedPrompt, bool) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	ev, ok := s.queue.Remove(id)
-	if !ok {
-		return QueuedPrompt{}, false
-	}
-	s.emit(ev.Event())
-	return ev.Prompt, true
+func (s *session) Unqueue(id string) (p QueuedPrompt, ok bool) {
+	s.queueTx(func() []QueueEvent {
+		var ev QueueEvent
+		ev, ok = s.queue.Remove(id)
+		if !ok {
+			return nil
+		}
+		p = ev.Prompt
+		return []QueueEvent{ev}
+	})
+	return p, ok
 }
 
 // TakeQueued hands a row to the caller to prompt. It is a guard, not a
@@ -57,55 +83,51 @@ func (s *session) Unqueue(id string) (QueuedPrompt, bool) {
 // a row that left the queue and could not then be prompted would simply be
 // gone. Callers take only after Prompt has returned: EventDone alone is too
 // early, because inPrompt clears after it is emitted.
-func (s *session) TakeQueued(id string) (QueuedPrompt, bool) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	s.mu.Lock()
-	if s.inPrompt || s.foreign {
-		s.mu.Unlock()
-		return QueuedPrompt{}, false
-	}
-	ev, ok := s.queue.Take(id)
-	s.mu.Unlock()
-	if !ok {
-		return QueuedPrompt{}, false
-	}
-	s.emit(ev.Event())
-	return ev.Prompt, true
+func (s *session) TakeQueued(id string) (p QueuedPrompt, ok bool) {
+	s.queueTx(func() []QueueEvent {
+		ev, taken := s.takeGuarded(func() (QueueEvent, bool) { return s.queue.Take(id) })
+		if !taken {
+			return nil
+		}
+		p, ok = ev.Prompt, true
+		return []QueueEvent{ev}
+	})
+	return p, ok
 }
 
 // PopQueue is TakeQueued of the head, under the same guard.
-func (s *session) PopQueue() (QueuedPrompt, bool) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
+func (s *session) PopQueue() (p QueuedPrompt, ok bool) {
+	s.queueTx(func() []QueueEvent {
+		ev, taken := s.takeGuarded(s.queue.Pop)
+		if !taken {
+			return nil
+		}
+		p, ok = ev.Prompt, true
+		return []QueueEvent{ev}
+	})
+	return p, ok
+}
+
+// takeGuarded is the guard and the removal as one critical section: a row that
+// left the queue and could not then be prompted would simply be gone. The
+// caller holds queueOp.
+func (s *session) takeGuarded(take func() (QueueEvent, bool)) (QueueEvent, bool) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.inPrompt || s.foreign {
-		s.mu.Unlock()
-		return QueuedPrompt{}, false
+		return QueueEvent{}, false
 	}
-	ev, ok := s.queue.Pop()
-	s.mu.Unlock()
-	if !ok {
-		return QueuedPrompt{}, false
-	}
-	s.emit(ev.Event())
-	return ev.Prompt, true
+	return take()
 }
 
 func (s *session) ClearQueue() int {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	return s.clearQueueLocked()
-}
-
-// clearQueueLocked empties the queue and emits one removed event per row. The
-// caller holds queueOp.
-func (s *session) clearQueueLocked() int {
-	evs := s.queue.Clear()
-	for _, ev := range evs {
-		s.emit(ev.Event())
-	}
-	return len(evs)
+	n := 0
+	s.queueTx(func() []QueueEvent {
+		evs := s.queue.Clear()
+		n = len(evs)
+		return evs
+	})
+	return n
 }
 
 // Interject merges text into the running turn. It is refused in exactly the
@@ -126,8 +148,13 @@ func (s *session) Interject(ctx context.Context, text string) error {
 	s.mu.Lock()
 	client := s.client
 	live := s.inPrompt && !s.doneEmitted && !s.cancelling
-	s.interjectSeq++
-	id := fmt.Sprintf("craze-%d", s.interjectSeq)
+	id := ""
+	if client != nil && live {
+		// The id correlates the ack and the broadcast with this request; a
+		// refusal writes nothing, so it does not spend one.
+		s.interjectSeq++
+		id = fmt.Sprintf("craze-%d", s.interjectSeq)
+	}
 	s.mu.Unlock()
 	if client == nil {
 		return fmt.Errorf("agent: session not started")
@@ -164,7 +191,5 @@ func (s *session) onForeignTurn(info ForeignTurnInfo) {
 // long after they had stopped expecting it; an explicit clear with a note is
 // the honest end.
 func (s *session) clearQueueOnError() {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	s.clearQueueLocked()
+	s.ClearQueue()
 }

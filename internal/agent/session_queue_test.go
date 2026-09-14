@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -255,22 +256,36 @@ func TestErroredTurnClearsTheQueue(t *testing.T) {
 		t.Fatal("the prompt must fail")
 	}
 	waitUntil(t, "the queue to clear", func() bool { return len(s.Snapshot().Queue) == 0 })
-	waitUntil(t, "the error event", func() bool {
-		for _, ev := range log.snapshot() {
-			if ev.Type == EventError {
-				return true
+	waitUntil(t, "both removed events", func() bool {
+		n := 0
+		for _, ev := range queueEvents(log.snapshot()) {
+			if ev.QueueChange == QueueRemoved {
+				n++
 			}
 		}
-		return false
+		return n == 2
 	})
-	var removed int
-	for _, ev := range queueEvents(log.snapshot()) {
-		if ev.QueueChange == QueueRemoved {
-			removed++
+	// The error goes out before the removals, so a consumer is already in its
+	// error state when they arrive and can say why the queue emptied. Both
+	// being in the log says nothing about that; the order is the contract.
+	evs := log.snapshot()
+	errAt, removedAt := -1, -1
+	for i, ev := range evs {
+		if ev.Type == EventError && errAt < 0 {
+			errAt = i
+		}
+		if ev.Type == EventQueue && ev.QueueChange == QueueRemoved && removedAt < 0 {
+			removedAt = i
 		}
 	}
-	if removed != 2 {
-		t.Fatalf("%d removed events for a two-row queue", removed)
+	if errAt < 0 {
+		t.Fatal("no error event for a failed turn")
+	}
+	if removedAt < 0 {
+		t.Fatal("no removed event for the queue the error cleared")
+	}
+	if errAt > removedAt {
+		t.Fatalf("the error event (%d) came after the first removal (%d)", errAt, removedAt)
 	}
 }
 
@@ -298,16 +313,21 @@ func TestPopQueueGuardIsAtomicWithTheRemoval(t *testing.T) {
 	}()
 	deadline := time.Now().Add(20 * time.Second)
 	for taken < 20 && time.Now().Before(deadline) {
+		head := s.Snapshot().Queue
 		if _, ok := s.PopQueue(); ok {
-			s.mu.Lock()
-			in := s.inPrompt
-			s.mu.Unlock()
-			if in {
-				// The take happened; if a prompt is in flight now it began
-				// after the take, which is exactly what the lock allows.
-				_ = in
-			}
+			// The take happened; if a prompt is in flight now it began after
+			// the take, which is exactly what the lock allows.
 			taken++
+			continue
+		}
+		// A refused take must leave its row where it was: nothing else drains
+		// here, so the head can only have moved if the guard let a row out it
+		// then refused to hand over.
+		if len(head) == 0 {
+			continue
+		}
+		if got := s.Snapshot().Queue; len(got) != len(head) || got[0].ID != head[0].ID {
+			t.Fatalf("a refused take moved the queue: head %q of %d became %+v", head[0].ID, len(head), got)
 		}
 	}
 	<-done
@@ -316,6 +336,37 @@ func TestPopQueueGuardIsAtomicWithTheRemoval(t *testing.T) {
 	}
 	if got := len(s.Snapshot().Queue); got != 20-taken {
 		t.Fatalf("%d taken but %d left of 20", taken, got)
+	}
+
+	// The same guard, without the race: a row cannot leave the queue while a
+	// prompt is in flight, and the refusal leaves it listed for the drain to
+	// come back to. inPrompt is set by hand because a real turn would have to
+	// be raced to be observed in it.
+	row, err := s.Queue("guarded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.inPrompt = true
+	s.mu.Unlock()
+	if _, ok := s.TakeQueued(row.ID); ok {
+		t.Fatal("a row left the queue while a prompt was in flight")
+	}
+	if _, ok := s.PopQueue(); ok {
+		t.Fatal("the head left the queue while a prompt was in flight")
+	}
+	listed := false
+	for _, p := range s.Snapshot().Queue {
+		listed = listed || p.ID == row.ID
+	}
+	if !listed {
+		t.Fatalf("the refused row is gone: %+v", s.Snapshot().Queue)
+	}
+	s.mu.Lock()
+	s.inPrompt = false
+	s.mu.Unlock()
+	if _, ok := s.TakeQueued(row.ID); !ok {
+		t.Fatal("the row must be takeable once the turn has returned")
 	}
 }
 
@@ -333,4 +384,207 @@ func TestInterjectRefusedAfterAFailedTurn(t *testing.T) {
 	if err := s.Interject(context.Background(), "BANANA"); !errors.Is(err, ErrNotInTurn) {
 		t.Fatalf("err %v", err)
 	}
+}
+
+// TestTakeQueuedSendsANonHeadRowAndKeepsTheRest: the TUI's "send this one now"
+// takes a row out of the middle. The event carries the position the row held,
+// which is a fact about the change and not about the queue afterwards, and
+// every other row stays queued in its own order.
+func TestTakeQueuedSendsANonHeadRowAndKeepsTheRest(t *testing.T) {
+	s := startScript(t, "echo", true)
+	log := collect(t, s)
+	var rows []QueuedPrompt
+	for _, text := range []string{"one", "two", "three"} {
+		p, err := s.Queue(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, p)
+	}
+	got, ok := s.TakeQueued(rows[1].ID)
+	if !ok {
+		t.Fatal("an idle session must hand over any row")
+	}
+	if got.ID != rows[1].ID || got.Text != "two" {
+		t.Fatalf("took %+v", got)
+	}
+	waitUntil(t, "the sent event", func() bool {
+		for _, ev := range queueEvents(log.snapshot()) {
+			if ev.QueueChange == QueueSent {
+				return true
+			}
+		}
+		return false
+	})
+	var sent []Event
+	for _, ev := range queueEvents(log.snapshot()) {
+		if ev.QueueChange == QueueSent {
+			sent = append(sent, ev)
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("%d sent events for one take", len(sent))
+	}
+	if sent[0].QueuePos != 1 || sent[0].Queue.ID != rows[1].ID {
+		t.Fatalf("sent event %+v pos %d", sent[0].Queue, sent[0].QueuePos)
+	}
+	left := s.Snapshot().Queue
+	if len(left) != 2 || left[0].ID != rows[0].ID || left[1].ID != rows[2].ID {
+		t.Fatalf("the other rows did not stay queued in order: %+v", left)
+	}
+}
+
+// TestClearQueueRemovesHeadFirstAndCountsTheRows: a clear is one removal per
+// row, head first, so a consumer replaying the stream empties its queue the
+// same way — and the count is what tells the caller anything was there.
+func TestClearQueueRemovesHeadFirstAndCountsTheRows(t *testing.T) {
+	s := startScript(t, "echo", true)
+	log := collect(t, s)
+	want := []string{"one", "two", "three"}
+	for _, text := range want {
+		if _, err := s.Queue(text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := s.ClearQueue(); n != len(want) {
+		t.Fatalf("ClearQueue returned %d for %d rows", n, len(want))
+	}
+	if got := s.Snapshot().Queue; len(got) != 0 {
+		t.Fatalf("the queue survived the clear: %+v", got)
+	}
+	waitUntil(t, "every removed event", func() bool {
+		n := 0
+		for _, ev := range queueEvents(log.snapshot()) {
+			if ev.QueueChange == QueueRemoved {
+				n++
+			}
+		}
+		return n == len(want)
+	})
+	var texts []string
+	for _, ev := range queueEvents(log.snapshot()) {
+		if ev.QueueChange != QueueRemoved {
+			continue
+		}
+		if ev.QueuePos != 0 {
+			// Each row was the head when it was dropped.
+			t.Fatalf("removed %q at position %d", ev.Queue.Text, ev.QueuePos)
+		}
+		texts = append(texts, ev.Queue.Text)
+	}
+	if strings.Join(texts, ",") != strings.Join(want, ",") {
+		t.Fatalf("removed %v, want head first: %v", texts, want)
+	}
+	if n := s.ClearQueue(); n != 0 {
+		t.Fatalf("clearing an empty queue reported %d rows", n)
+	}
+}
+
+// TestErrorPathClearSurvivesAFullEventChannel: the error and the removals it
+// drags behind it are emitted while the only consumer is still waiting for
+// Prompt to return, so the buffer can be full when the clear runs. A
+// transaction that held the queue lock across that blocked send would wedge
+// every other queue caller behind it — Close included, which is what would
+// have unblocked it.
+func TestErrorPathClearSurvivesAFullEventChannel(t *testing.T) {
+	s := newSession(Options{})
+	t.Cleanup(func() { _ = s.Close() })
+	for i := 0; i < 4; i++ {
+		if _, err := s.Queue(fmt.Sprintf("row-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Nothing has read the stream, so filling the rest of the buffer leaves
+	// the clear's own removals nowhere to go.
+	for len(s.events) < cap(s.events) {
+		s.emit(Event{Type: EventText, Text: "filler"})
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.clearQueueOnError()
+	}()
+	waitUntil(t, "the queue to empty", func() bool { return len(s.Snapshot().Queue) == 0 })
+	select {
+	case <-done:
+		t.Fatal("the clear cannot have finished: nothing has read the full event channel")
+	default:
+	}
+	waitUntil(t, "the transaction lock to be free while the emit blocks", func() bool {
+		if !s.queueOp.TryLock() {
+			return false
+		}
+		s.queueOp.Unlock()
+		return true
+	})
+	// Reading the stream is all it takes for the transaction to finish.
+	var removed []string
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		for ev := range s.Events() {
+			if ev.Type == EventQueue && ev.QueueChange == QueueRemoved {
+				removed = append(removed, ev.Queue.Text)
+			}
+			if len(removed) == 4 {
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the error path's clear deadlocked on a full event channel")
+	}
+	<-read
+	if strings.Join(removed, ",") != "row-0,row-1,row-2,row-3" {
+		t.Fatalf("removals %v", removed)
+	}
+}
+
+// TestForeignTurnRefusalIsNotATurnThatFailed: the prompt never left craze, so
+// nothing about it belongs in the stream. Emitting an error for it would put an
+// error line in front of a caller that is about to retry and succeed, and
+// clearing the queue would lose messages nothing had even tried to send.
+func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
+	s := startGrokScript(t, "grok-long-turn-fallback", true)
+	log := collect(t, s)
+	if _, err := s.Queue("PINEAPPLE"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := s.Prompt(context.Background(), "do the steps"); err != nil {
+			t.Errorf("prompt: %v", err)
+		}
+	}()
+	waitUntil(t, "the turn to start", s.promptInFlight)
+	if err := s.Interject(t.Context(), "BANANA"); err != nil {
+		t.Fatalf("interject: %v", err)
+	}
+	<-done
+	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
+
+	s.mu.Lock()
+	turnBefore := s.turn
+	s.mu.Unlock()
+	if _, err := s.Prompt(context.Background(), "next"); !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("prompt during a foreign turn: %v", err)
+	}
+	s.mu.Lock()
+	turnAfter := s.turn
+	s.mu.Unlock()
+	if turnAfter != turnBefore {
+		t.Fatalf("a refused prompt spent turn %d (was %d)", turnAfter, turnBefore)
+	}
+	if got := s.Snapshot().Queue; len(got) != 1 || got[0].Text != "PINEAPPLE" {
+		t.Fatalf("a refusal must leave the queue alone: %+v", got)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventError {
+			t.Fatalf("a refusal must not reach the stream: %v", ev.Err)
+		}
+	}
+	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 }

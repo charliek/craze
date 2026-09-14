@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ func providerFor(t *testing.T, hermetic bool, args ...string) (resolvedProvider,
 	}
 	registerProviderFlag(cmd, &flag)
 	cmd.SetArgs(args)
-	cmd.SetOut(os.NewFile(0, os.DevNull))
+	cmd.SetOut(io.Discard)
 	cmd.SetErr(&stderr)
 	err := cmd.Execute()
 	return got, stderr.String(), err

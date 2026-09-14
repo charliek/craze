@@ -54,9 +54,13 @@ type session struct {
 	subagentFinishSeq uint64
 	// queue is craze's own message queue (§3.1). queueOp orders whole
 	// transactions — the mutation and the events it produced — so the event
-	// stream can be replayed into the same queue. Lock order:
-	// queueOp → s.mu → the queue's own lock.
+	// stream can be replayed into the same queue. emitMu is taken inside
+	// queueOp and held across the transaction's emits, which happen after
+	// queueOp is released: emit blocks on a full event channel, and a reader
+	// that is waiting on something holding queueOp would wedge the session.
+	// Lock order: queueOp → emitMu → s.mu → the queue's own lock.
 	queueOp sync.Mutex
+	emitMu  sync.Mutex
 	queue   PromptQueue
 	// doneEmitted marks that the turn is over — Prompt has returned, either
 	// way. inPrompt is still true until Prompt's defer runs, so it alone
@@ -302,6 +306,9 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		s.mu.Unlock()
 		return Result{}, acp.ErrPromptInFlight
 	}
+	// The turn bookkeeping is rolled back below if the client refuses the
+	// prompt before the wire: nothing was attempted, so nothing happened.
+	prevTurn, prevDone := s.turn, s.doneEmitted
 	s.inPrompt = true
 	s.turn++
 	// A new turn: it has not ended and no cancel has been asked for it, so
@@ -321,6 +328,22 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	}()
 
 	res, err := client.Prompt(ctx, text)
+	if refusedBeforeWire(err) {
+		// The prompt never left craze: no turn ran, so this turn number was
+		// never spent and there is nothing for the stream to report. Telling
+		// the caller is the whole of it — an error event here would show up on
+		// a run that goes on to succeed.
+		s.mu.Lock()
+		if s.cancelledTurn != s.turn {
+			// A cancel that landed on this number has already spent it: giving
+			// it back would leave the marker pointing at the turn after this
+			// one, which nobody cancelled.
+			s.turn = prevTurn
+		}
+		s.doneEmitted = prevDone
+		s.mu.Unlock()
+		return Result{}, err
+	}
 	// The turn is over the moment Prompt returns, whichever way it went.
 	// Marking it here and not beside the EventDone below is what closes the
 	// window an interjection could otherwise slip through on the error path,
@@ -334,13 +357,8 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		// state when the removals arrive and can say why the queue emptied.
 		s.emit(Event{Type: EventError, Err: err})
 		// Nothing drains from an error state, and a queue that outlived one
-		// would run behind whatever the user sends next. A refusal is not
-		// such an ending: ErrForeignTurn means nothing was attempted, and
-		// dropping the user's queue over a prompt that never left craze
-		// would lose messages the caller can simply send later.
-		if !errors.Is(err, acp.ErrForeignTurn) {
-			s.clearQueueOnError()
-		}
+		// would run behind whatever the user sends next.
+		s.clearQueueOnError()
 		return Result{}, err
 	}
 	if res.StopReason == acp.StopCancelled {
@@ -348,6 +366,15 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// refusedBeforeWire reports an error that means the prompt never reached the
+// agent: a turn craze did not start is running, or one of craze's own still
+// is. Nothing was attempted and no queued message was lost, so the refusal is
+// the caller's to retry — it is not a turn that failed, and the queue it would
+// have drained stays exactly as it was.
+func refusedBeforeWire(err error) bool {
+	return errors.Is(err, acp.ErrForeignTurn) || errors.Is(err, acp.ErrPromptInFlight)
 }
 
 // closeInFlightTools settles every tool the turn left running. Grok answers

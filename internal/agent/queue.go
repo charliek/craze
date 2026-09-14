@@ -179,15 +179,6 @@ func (q *PromptQueue) Len() int {
 	return len(q.items)
 }
 
-// QueueEvents turns queue transactions into session events.
-func QueueEvents(evs []QueueEvent) []Event {
-	out := make([]Event, 0, len(evs))
-	for _, e := range evs {
-		out = append(out, e.Event())
-	}
-	return out
-}
-
 // Event is the session event for one queue change.
 func (e QueueEvent) Event() Event {
 	p := e.Prompt
