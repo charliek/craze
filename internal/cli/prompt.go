@@ -71,7 +71,7 @@ func newPromptCmd() *cobra.Command {
 	return cmd
 }
 
-func (o *promptOpts) run() error {
+func (o *promptOpts) run() (retErr error) {
 	if o.ask && o.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")
 	}
@@ -132,7 +132,13 @@ func (o *promptOpts) run() error {
 		}
 		return err
 	}
-	defer o.drainSubagents(sess)
+	defer func() {
+		// A drain write that fails means the JSON on stdout is incomplete;
+		// that is an error even when everything else succeeded.
+		if err := o.drainSubagents(sess); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 	if err := persistProvider(resolved); err != nil {
 		fmt.Fprintf(o.stderr, "craze: not saving the provider: %v\n", err)
 	}
@@ -241,8 +247,8 @@ func (o *promptOpts) writeEvent(ev agent.Event) error {
 	return nil
 }
 
-func (o *promptOpts) drainSubagents(sess agent.Session) {
-	_ = drainSubagentEvents(sess.Events(), sess.Snapshot, o.writeEvent)
+func (o *promptOpts) drainSubagents(sess agent.Session) error {
+	return drainSubagentEvents(sess.Events(), sess.Snapshot, o.writeEvent)
 }
 
 func drainSubagentEvents(events <-chan agent.Event, snapFn func() agent.Snapshot, write func(agent.Event) error) error {

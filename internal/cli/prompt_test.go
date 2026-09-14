@@ -221,6 +221,23 @@ func TestDrainWritesLateFinished(t *testing.T) {
 	}
 }
 
+// TestDrainPropagatesWriteErrors pins the contract run()'s deferred drain
+// relies on: a write that fails during the drain is an error, so a headless
+// run can never exit 0 with incomplete JSON.
+func TestDrainPropagatesWriteErrors(t *testing.T) {
+	evs := make(chan agent.Event, 1)
+	snap := agent.Snapshot{Subagents: []agent.SubagentInfo{{ID: "sub-1", Status: agent.SubagentCompleted}}}
+	evs <- agent.Event{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeFinished, Subagent: &snap.Subagents[0]}
+	close(evs)
+	want := errors.New("pipe broke")
+	err := drainSubagentEvents(evs, func() agent.Snapshot { return snap }, func(agent.Event) error {
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("drain error %v, want %v", err, want)
+	}
+}
+
 func TestPickPermissionKeepsUnusedDecisions(t *testing.T) {
 	opts := []agent.PermissionOption{
 		{OptionID: "opt-reject", Kind: "reject_once"},
