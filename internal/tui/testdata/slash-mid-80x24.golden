@@ -1,0 +1,24 @@
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+❯ /alpha-review     Review the working tree and report the findings worth … 1/24
+  /bravo-search     Search the whole repository for a symbol and summarise ever…
+  /charlie-build    Build every binary in the module and report the first compi…
+  /delta-deploy     Deploy the current branch to the staging environment and ta…
+  /echo-lint        Run every configured linter and group the complaints by the…
+  /foxtrot-format   Format the tree in place and list the files the formatter a…
+  /golf-refactor    Extract the selected code into a helper and update every ca…
+  /hotel-migrate    Generate the next schema migration and dry-run it against… ▼
+──────────────────────────────────────────────────────────────────────── craze ─
+❯ see /                                                                         
+────────────────────────────────────────────────────────────────────────────────
+ws │ cursor │ Default (medium) │ 0m                                             
+◆ agent · shift+tab · ▸▸ bypass permissions on                                  

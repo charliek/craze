@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -223,7 +225,9 @@ func TestSlashCatalogRejectsUntypableNames(t *testing.T) {
 		// SetValue shorter than acceptSlash measured its new cursor against.
 		{Name: "bad\ufffdrune", Description: "the replacement rune"},
 		{Name: "bad\xffbyte", Description: "invalid UTF-8, which range reads as U+FFFD"},
-		{Name: "good", Description: "first line\nsecond line"},
+		// U+009B is a single-code-point CSI: a terminal reading C1 in UTF-8
+		// would take an advertised description as an escape sequence.
+		{Name: "good", Description: "first line\nsecond\u009b2J line"},
 	}
 	names := make([]string, 0, 3)
 	desc := ""
@@ -237,8 +241,8 @@ func TestSlashCatalogRejectsUntypableNames(t *testing.T) {
 	if strings.Join(names, ",") != "good" {
 		t.Fatalf("catalog kept an untypable name: %v", names)
 	}
-	if desc != "first line second line" {
-		t.Fatalf("the description was not folded onto one line: %q", desc)
+	if desc != "first line second2J line" {
+		t.Fatalf("the description was not folded onto one safe line: %q", desc)
 	}
 }
 
@@ -662,5 +666,92 @@ func TestDialogSuppressesTheSlashBand(t *testing.T) {
 	}
 	if !m.slashMenuOpen() || m.lay.Region(regionOverlay).Empty() {
 		t.Fatal("closing the dialog brings the band back")
+	}
+}
+
+// TestSlashNameColumnCapsAndClamps is §3.4's name column: it is measured over
+// every match rather than the window, so the descriptions do not shuffle
+// sideways on each ↓, and slashNameCap stops one pathological name from taking
+// the whole row — past the cap that one name is clamped and the column stops.
+func TestSlashNameColumnCapsAndClamps(t *testing.T) {
+	long := "zz-" + strings.Repeat("l", 40)
+	m, _ := slashModel(t, 100, 30, "zz-short", long)
+	m = draft(m, "see /zz")
+	items := m.filteredSlash()
+	if len(items) != 2 {
+		t.Fatalf("fixture: matches %v", slashNames(m))
+	}
+	if w := slashNameWidth(items); w != slashNameCap {
+		t.Fatalf("name column is %d cells, want the cap %d", w, slashNameCap)
+	}
+	rows := strings.Split(plain(m.slashMenuView(m.lay)), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("the band drew %d rows:\n%s", len(rows), strings.Join(rows, "\n"))
+	}
+	// Both descriptions start in the same column: the gutter, the capped name
+	// column, and the two spaces between them.
+	const descAt = len(agentGutterBlank) + slashNameCap + 2
+	for i, r := range rows {
+		cells := []rune(r)
+		if len(cells) < descAt+10 {
+			t.Fatalf("row %d is only %d cells: %q", i, len(cells), r)
+		}
+		if got := string(cells[descAt : descAt+10]); got != "advertised" {
+			t.Fatalf("row %d starts its description at %q, want %q", i, got, "advertised")
+		}
+	}
+	// The name the column cannot hold is clamped into it, not past it.
+	name := string([]rune(rows[1])[len(agentGutterBlank) : len(agentGutterBlank)+slashNameCap])
+	if !strings.HasPrefix(name, "/zz-l") || !strings.HasSuffix(name, "…") {
+		t.Fatalf("the long name was not clamped into the column: %q", name)
+	}
+}
+
+// TestSlashMarks is §3.4's scroll marks: the count rides the first row with an
+// ▲ once the window has moved, the ▼ rides the last while there is more below,
+// a list that fits carries neither, and a band of one row is both ends at once
+// — where the count already says what the arrows would.
+// TestSlashMarkSurvivesTheNarrowestBand: the count is the one thing on the row
+// the user cannot re-derive, so at the 40-column minimum the name column yields
+// to it rather than letting dialogTagSeg drop it for want of a separating cell.
+// codex review found a 28-cell name column and a four-digit count leaving the
+// mark nowhere to go, and the row drawn with no mark at all.
+func TestSlashMarkSurvivesTheNarrowestBand(t *testing.T) {
+	names := make([]string, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		names = append(names, fmt.Sprintf("a-very-long-command-name-%04d", i))
+	}
+	m, _ := slashModel(t, minFrameCols, 30, names...)
+	m = caret(m, "see /a-very", len("see /a-very"))
+	m.slashSel, m.slashTop = 998, 991
+	m.relayout(false)
+	row := plain(strings.Split(m.slashMenuView(m.lay), "\n")[0])
+	if !strings.Contains(row, "999/1000") || !strings.Contains(row, "▲") {
+		t.Fatalf("the narrowest band dropped its mark: %q", row)
+	}
+	if lipgloss.Width(row) > minFrameCols {
+		t.Fatalf("row is %d cells wide, over the frame's %d: %q", lipgloss.Width(row), minFrameCols, row)
+	}
+}
+
+func TestSlashMarks(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		i, top, granted, n, sel int
+		want                    string
+	}{
+		{"a list that fits is unmarked", 0, 0, 8, 8, 0, ""},
+		{"the first row counts", 0, 0, 8, 33, 0, "1/33"},
+		{"the count follows the selection, not the window", 3, 3, 8, 33, 10, "11/33 ▲"},
+		{"the rows between are bare", 5, 3, 8, 33, 10, ""},
+		{"the last row points down", 10, 3, 8, 33, 10, "▼"},
+		{"the end of the list points nowhere", 32, 25, 8, 33, 30, ""},
+		{"one row carries the count alone", 4, 4, 1, 33, 4, "5/33"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slashMark(tc.i, tc.top, tc.granted, tc.n, tc.sel); got != tc.want {
+				t.Fatalf("slashMark = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

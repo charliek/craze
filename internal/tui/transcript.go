@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -679,7 +680,10 @@ func dropControls(s string) string {
 		switch {
 		case r == '\n' || r == '\r' || r == '\t':
 			b.WriteByte(' ')
-		case r < 0x20 || r == 0x7f:
+		// unicode.IsControl is the whole Cc category, not just C0 and DEL:
+		// U+009B is a single-code-point CSI, and a terminal that reads C1 in
+		// UTF-8 would take an agent's description as an escape sequence.
+		case unicode.IsControl(r):
 		default:
 			b.WriteRune(r)
 		}

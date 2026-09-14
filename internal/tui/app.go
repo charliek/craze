@@ -1738,61 +1738,6 @@ func (m Model) View() string {
 	return base
 }
 
-// overlayView is the slash menu, the one overlay that still draws as a band
-// under the transcript; the layout crops it rather than letting it squeeze the
-// transcript away. The pickers left it in V3 and help left it here: a dialog is
-// a layer over the transcript, not a band under it.
-//
-// A card outranks it (§3.11): the menu it did not close is suspended — kept in
-// state, not drawn — until it has been answered. So does a dialog, which is a
-// layer over the transcript and used to leave this band drawn under it. Both
-// live in slashMenuOpen, so the band and the keys agree on when it is up.
-func (m Model) overlayView(lay frameLayout) string {
-	if !m.slashMenuOpen() {
-		return ""
-	}
-	return m.slashMenuView(lay)
-}
-
-// overlayRows is the band's natural height, computed rather than rendered:
-// the layout asks for it before the view exists, and measuring a string to
-// learn a number the list already knows is one more place for the two to
-// disagree.
-func (m Model) overlayRows() int { return m.overlayRowsFor(m.filteredSlash()) }
-
-// overlayRowsFor is overlayRows for a caller that already holds the matches.
-func (m Model) overlayRowsFor(items []slashItem) int {
-	if !m.slashMenuOpen() {
-		return 0
-	}
-	return min(slashMaxRows, len(items))
-}
-
-// slashMenuView draws the window, not the list: only [slashTop, slashTop+n) of
-// the matches, where n is what the layout granted. The selection is not
-// clamped here — syncSlash settled it against these same rows in relayout — so
-// what is drawn and what a key or a click selects cannot drift apart. The
-// window is, because View recomputes lay on a bare resize and that layout is
-// not the one syncSlash saw.
-func (m Model) slashMenuView(lay frameLayout) string {
-	items := m.filteredSlash()
-	granted := min(lay.Region(regionOverlay).Height(), len(items))
-	if granted <= 0 {
-		return ""
-	}
-	top := min(max(m.slashTop, 0), len(items)-granted)
-	var b strings.Builder
-	for i := top; i < top+granted; i++ {
-		fg := m.theme.Dim
-		if i == m.slashSel {
-			fg = m.theme.Accent
-		}
-		b.WriteString(styleFG(fg).Render(fmt.Sprintf("/%s  %s", items[i].Name, items[i].labeledDesc())))
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
 // workspaceName is the basename of the workspace, falling back to the path
 // itself at a filesystem root.
 func workspaceName(cwd string) string {

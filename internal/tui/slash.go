@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -16,6 +18,13 @@ import (
 // most rows the band ever asks the layout for. The list itself is uncapped:
 // the band windows onto it, so the whole catalog stays reachable.
 const slashMaxRows = 8
+
+// slashNameCap is the widest the name column ever grows, in cells. Names this
+// long are pathological — cursor's and grok's run to about twenty — and without
+// a ceiling one of them would push every description off the row it shares the
+// band with. Past the cap the name is clamped with an ellipsis, so the cost
+// stays on the row that earned it.
+const slashNameCap = 28
 
 type slashItem struct {
 	Name, Desc string
@@ -527,4 +536,152 @@ func (m *Model) syncSlash() {
 	if m.slashSel >= m.slashTop+granted {
 		m.slashTop = m.slashSel - granted + 1
 	}
+}
+
+// ------------------------------------------------------------------ the band
+
+// overlayView is the slash menu, the one overlay that still draws as a band
+// under the transcript; the layout crops it rather than letting it squeeze the
+// transcript away. The pickers left it in V3 and help left it here: a dialog is
+// a layer over the transcript, not a band under it.
+//
+// A card outranks it (§3.11): the menu it did not close is suspended — kept in
+// state, not drawn — until it has been answered. So does a dialog, which is a
+// layer over the transcript and used to leave this band drawn under it. Both
+// live in slashMenuOpen, so the band and the keys agree on when it is up.
+func (m Model) overlayView(lay frameLayout) string {
+	if !m.slashMenuOpen() {
+		return ""
+	}
+	return m.slashMenuView(lay)
+}
+
+// overlayRows is the band's natural height, computed rather than rendered:
+// the layout asks for it before the view exists, and measuring a string to
+// learn a number the list already knows is one more place for the two to
+// disagree.
+func (m Model) overlayRows() int { return m.overlayRowsFor(m.filteredSlash()) }
+
+// overlayRowsFor is overlayRows for a caller that already holds the matches.
+func (m Model) overlayRowsFor(items []slashItem) int {
+	if !m.slashMenuOpen() {
+		return 0
+	}
+	return min(slashMaxRows, len(items))
+}
+
+// slashMenuView draws the window, not the list: only [slashTop, slashTop+n) of
+// the matches, where n is what the layout granted. The selection is not
+// clamped here — syncSlash settled it against these same rows in relayout — so
+// what is drawn and what a key or a click selects cannot drift apart. The
+// window is, because View recomputes lay on a bare resize and that layout is
+// not the one syncSlash saw.
+//
+// The window arithmetic stays here, as it does in queueRowsView and
+// agentRowsView: the row is handed the decisions it draws — which item, whether
+// it is selected, its scroll mark — and never the window they came from.
+func (m Model) slashMenuView(lay frameLayout) string {
+	items := m.filteredSlash()
+	granted := min(lay.Region(regionOverlay).Height(), len(items))
+	if granted <= 0 {
+		return ""
+	}
+	top := min(max(m.slashTop, 0), len(items)-granted)
+	// The first row's mark is the widest this frame has: it is the only one
+	// carrying the count. The column yields to it rather than the other way
+	// round — at the 40-column minimum a 28-cell name would otherwise leave
+	// dialogTagSeg no room for the separating space and the mark would vanish
+	// silently, which is the one thing on the row the user cannot re-derive.
+	markW := lipgloss.Width(slashMark(top, top, granted, len(items), m.slashSel))
+	nameW := slashNameWidth(items)
+	if markW > 0 {
+		nameW = min(nameW, max(1, m.width-len(agentGutterBlank)-markW-1))
+	}
+	rows := make([]string, 0, granted)
+	for i := top; i < top+granted; i++ {
+		mark := slashMark(i, top, granted, len(items), m.slashSel)
+		rows = append(rows, m.slashRow(items[i], mark, i == m.slashSel, nameW))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// slashNameWidth is the name column, measured over every match rather than the
+// eight on screen: a column that re-measured itself per window would shuffle
+// the descriptions sideways on each ↓, which is exactly the jitter pin 4 exists
+// to prevent. slashNameCap keeps one pathological name from eating the row —
+// past it the name is clamped and only that row loses its tail.
+func slashNameWidth(items []slashItem) int {
+	w := 0
+	for _, it := range items {
+		w = max(w, lipgloss.Width("/"+it.Name))
+	}
+	return min(w, slashNameCap)
+}
+
+// slashRow is one menu row, built like the queue's and the sub-agent rows it
+// sits beside: the house gutter mark naming the selected row, the name in its
+// fixed column, two spaces, and the description clamped to whatever is left.
+// The scroll mark's cells are reserved before the description is clamped, the
+// way queueRow reserves its action strip, so the two can never overlap; the
+// mark itself is right-aligned by dialogTagSeg, the same right edge helpRow and
+// the dialog lists ride.
+//
+// The name is clamped and then padded, which is not one step too many:
+// clampWidth can land a cell short of the column when a wide rune cannot be
+// split beside the ellipsis, and padRow returns an over-wide string unpadded,
+// so only the pair guarantees exactly nameW cells — which is the whole point of
+// a column measured over every match.
+//
+// labeledDesc was sanitised at catalog time, so an advertised description with
+// a newline in it is already one line by the time it gets here — the row owes
+// the band exactly one physical line and nothing downstream re-splits it.
+func (m Model) slashRow(it slashItem, mark string, selected bool, nameW int) string {
+	gutter := seg{agentGutterBlank, styleFG(m.theme.Dim)}
+	fg := m.theme.Dim
+	if selected {
+		gutter = seg{agentGutterMark, styleFG(m.theme.Accent)}
+		fg = m.theme.Accent
+	}
+	markW := 0
+	if mark != "" {
+		// One cell of separation, so a count never abuts the description.
+		// dialogTagSeg folds that cell into its own padding.
+		markW = lipgloss.Width(mark) + 1
+	}
+	used := len(agentGutterBlank) + nameW
+	desc := ""
+	if avail := m.width - used - 2 - markW; avail >= 1 {
+		desc = clampWidth(it.labeledDesc(), avail)
+	}
+	segs := []seg{gutter, {padRow(clampWidth("/"+it.Name, nameW), nameW), styleFG(fg)}}
+	if desc != "" {
+		segs = append(segs, seg{"  " + desc, styleFG(fg)})
+		used += 2 + lipgloss.Width(desc)
+	}
+	return renderSegs(m.width, append(segs, m.dialogTagSeg(used, mark, m.width))...)
+}
+
+// slashMark is the row's scroll mark: the position count on the first row, an
+// ▲ after it when the window has scrolled off the top, and a ▼ on the last row
+// when there is more below. The arrows are dialogScrollTag's — the house rule
+// for a windowed list, in window-relative coordinates, which is why i loses its
+// top here. A list that fits gets none of it: there is nothing to say, and the
+// marks would only cost the descriptions cells.
+//
+// A band granted a single row is both first and last, and there k/n already
+// says whether anything is above it or below it, so it carries the count alone
+// (§3.4).
+func slashMark(i, top, granted, n, sel int) string {
+	if n <= granted {
+		return ""
+	}
+	tag := dialogScrollTag(i-top, top, granted, n)
+	if i != top {
+		return tag
+	}
+	count := fmt.Sprintf("%d/%d", sel+1, n)
+	if granted > 1 && tag != "" {
+		count += " " + tag
+	}
+	return count
 }

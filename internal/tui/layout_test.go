@@ -372,7 +372,11 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			name:  "lower overlays",
 			slash: true,
 			needles: map[regionID]string{
-				regionOverlay: "/help  Keybindings and commands",
+				// The needle names the region, not the row's shape: the name
+				// column is measured from whatever the fixture advertises, and
+				// this test is about which rows a band owns. The row itself is
+				// owned by the slash goldens.
+				regionOverlay: "Keybindings and commands",
 			},
 		},
 		{

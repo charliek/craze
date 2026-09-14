@@ -32,6 +32,8 @@ Flags:
           grok-subagent-late child still running at prompt_complete
           grok-subagent-cancel cancel with a running child (finish after)
           grok-subagent-cancel-early cancel after the child finished
+          commands    echo, but session/new advertises 24 commands with long
+                      descriptions (one of them multi-line) for the slash menu
           markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
           planmode    session/new in plan mode; replies planned/implementing
@@ -89,7 +91,7 @@ func main() {
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
-		"bash", "task", "task-late", "markdown", "title", "planmode", "planmode-card",
+		"bash", "task", "task-late", "commands", "markdown", "title", "planmode", "planmode-card",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",

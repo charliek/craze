@@ -1,0 +1,30 @@
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+❯ /help             Keybindings and commands                                                    1/33
+  /model            Switch model                                                                    
+  /clear            Clear transcript                                                                
+  /tasks            Tasks panel: compact, expanded, hidden                                          
+  /theme            Theme picker, or /theme <name>                                                  
+  /plan             Set plan mode                                                                   
+  /ask              Set ask mode                                                                    
+  /agent            Set agent mode                                                                 ▼
+──────────────────────────────────────────────────────────────────────────────────────────── craze ─
+❯ /                                                                                                 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ws │ cursor │ Default (medium) │ 0m                                                                 
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
