@@ -405,7 +405,6 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			// Open every band this frame is allowed to draw.
 			if tc.slash {
 				m.input.SetValue("/")
-				m.slashHide = false
 			}
 			if tc.dialog {
 				m = m.openModelDialog()

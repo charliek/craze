@@ -2,12 +2,20 @@ package tui
 
 import (
 	"context"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
 )
+
+// slashMaxRows is the menu's natural height — grok-build's window, and the
+// most rows the band ever asks the layout for. The list itself is uncapped:
+// the band windows onto it, so the whole catalog stays reachable.
+const slashMaxRows = 8
 
 type slashItem struct {
 	Name, Desc string
@@ -65,15 +73,19 @@ func parseSlashLine(s string) (name, args string, ok bool) {
 }
 
 func (m Model) slashCatalog() []slashItem {
-	var items []slashItem
-	for _, it := range builtinSlash() {
+	// The two capability reads are hoisted: each one rebuilds the whole
+	// Provider to answer a bool, and the loop would ask four times.
+	modes, todos := m.showModes(), m.showTodos()
+	builtins := builtinSlash()
+	items := make([]slashItem, 0, len(builtins)+len(m.snap.Commands)+len(m.skills))
+	for _, it := range builtins {
 		switch it.Name {
 		case "plan", "ask", "agent":
-			if !m.showModes() {
+			if !modes {
 				continue
 			}
 		case "tasks":
-			if !m.showTodos() {
+			if !todos {
 				continue
 			}
 		}
@@ -85,55 +97,222 @@ func (m Model) slashCatalog() []slashItem {
 	}
 	for _, c := range m.snap.Commands {
 		n := strings.ToLower(c.Name)
-		if n == "" {
+		if !slashNameOK(c.Name) {
 			continue
 		}
 		if _, ok := seen[n]; ok {
 			continue
 		}
 		seen[n] = struct{}{}
-		items = append(items, slashItem{Name: c.Name, Desc: c.Description, Builtin: false})
+		items = append(items, slashItem{Name: c.Name, Desc: sanitizeLine(c.Description), Builtin: false})
 	}
 	for _, sk := range m.skills {
 		n := strings.ToLower(sk.Name)
-		if n == "" {
+		if !slashNameOK(sk.Name) {
 			continue
 		}
 		if _, ok := seen[n]; ok {
 			continue
 		}
 		seen[n] = struct{}{}
-		items = append(items, slashItem{Name: sk.Name, Desc: sk.Desc, Skill: true})
+		items = append(items, slashItem{Name: sk.Name, Desc: sanitizeLine(sk.Desc), Skill: true})
 	}
 	return items
 }
 
-func (m Model) slashMenuOpen() bool {
-	if m.slashHide {
+// slashNameOK keeps the catalog to names a token could hold. A directory name
+// or an advertised command with whitespace in it could never be typed as one
+// token, so it would sit in the menu unreachable; a control character would
+// break the row it draws on. Rejecting them here means every later stage — the
+// filter, the accept, the row — can assume one clean token.
+//
+// utf8.RuneError goes with them, and for a sharper reason than looks: bubbles'
+// rune sanitizer *drops* it (runeutil.go:67), so a name carrying one — or the
+// invalid UTF-8 that range yields it for — would come out of SetValue shorter
+// than the string acceptSlash measured the new cursor offset against, and the
+// cursor would land that many bytes into the rest of the draft.
+func slashNameOK(name string) bool {
+	if name == "" {
 		return false
 	}
-	_, args, ok := parseSlashLine(m.input.Value())
-	return ok && args == ""
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError {
+			return false
+		}
+	}
+	return true
 }
 
+// slashToken is the slash token under the cursor: [start,end) are byte offsets
+// into value on rune boundaries, name is the token without its "/", and ok
+// says the cursor sits inside a token that is one.
+//
+// The token is the maximal run of non-whitespace runes containing the cursor,
+// where containing means start <= cursor <= end. The inclusive end is what
+// keeps the menu up with the cursor right after the last rune typed, and the
+// space that follows closes it. Because the run is maximal, a token beginning
+// with "/" has that "/" at offset 0 or after whitespace by construction, which
+// is what keeps `foo/bar` and `https://x` out of the menu without a second
+// test. A bare "/" is a token with an empty name and opens the whole catalog —
+// browsing is the point.
+//
+// Whitespace is unicode.IsSpace on both sides, so a newline ends a token (a
+// slash on the second line of a draft completes like any other) and a
+// non-breaking space before the "/" does not silence the menu. grok-build
+// rejects a bare mid-text "/" and tests ASCII whitespace only; both are
+// deliberate deviations.
+func slashToken(value string, cursor int) (start, end int, name string, ok bool) {
+	cursor = min(max(cursor, 0), len(value))
+	start = cursor
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(value[:start])
+		if unicode.IsSpace(r) {
+			break
+		}
+		start -= size
+	}
+	end = cursor
+	for end < len(value) {
+		r, size := utf8.DecodeRuneInString(value[end:])
+		if unicode.IsSpace(r) {
+			break
+		}
+		end += size
+	}
+	if end <= start || value[start] != '/' {
+		return 0, 0, "", false
+	}
+	return start, end, value[start+1 : end], true
+}
+
+// slashTokenKey identifies the token being completed: where it starts and what
+// has been typed into it. Esc records it and relayout compares it, so the menu
+// hides for exactly one token and comes back the moment the token under the
+// cursor is another one — typed into, deleted from, or left behind by an arrow
+// key. A real token's key is never empty, so an empty slashHideKey hides
+// nothing.
+func slashTokenKey(start int, name string) string {
+	return strconv.Itoa(start) + ":" + name
+}
+
+// slashMenuOpen is the band's whole gate: a token under the cursor that Esc
+// has not hidden, and nothing covering the composer. A card suspends the menu
+// rather than closing it (§3.11) and a dialog now suppresses it too, and both
+// fall out of composerCovered — so no flag of its own, and the band and the
+// keys cannot disagree about when it is up.
+func (m Model) slashMenuOpen() bool {
+	if m.composerCovered() {
+		return false
+	}
+	start, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset())
+	return ok && m.slashHideKey != slashTokenKey(start, name)
+}
+
+// slashRows is how many rows the menu has this frame: its natural height
+// capped by the room the layout leaves the overlay.
+//
+// It reads OverlayCap rather than the drawn region because a key is handled
+// before the frame it belongs to is laid out: the keystroke that opened the
+// menu left the previous layout with a zero-row overlay. The cap — what the
+// transcript can spare above its minimum — does not move when the menu opens,
+// so it already says what the next frame will grant. OverlayCap is already
+// floored at zero where it is recorded (layout.go), so nothing re-clamps it.
+func (m Model) slashRows() int { return m.slashRowsFor(m.filteredSlash()) }
+
+// slashRowsFor is slashRows for a caller that already holds the matches, so
+// one Update does not build the catalog a second time only to count it.
+func (m Model) slashRowsFor(items []slashItem) int {
+	return min(m.overlayRowsFor(items), m.lay.OverlayCap)
+}
+
+// slashActive is the menu the keyboard can reach. Zero matches and a band the
+// layout granted zero rows are the same thing to a key: nothing is on screen,
+// so Tab, Enter, Esc, PgUp/PgDn and the arrows mean what they mean with no
+// menu at all.
+func (m Model) slashActive() bool { return m.slashRows() > 0 }
+
+// handleSlashKey is the band's keyboard, called only with the band up and the
+// rows it was granted. Tab accepts the highlighted row; the arrows move the
+// selection with wrap; PgUp/PgDn page by the rows the user can see, clamped
+// rather than wrapped, because a page that jumped to the far end of the
+// catalog is not a page. Enter is not here: §3.3 pins its position inside
+// handleEnter, between the confirm and the queue edit's save.
+func (m Model) handleSlashKey(k tea.KeyType, rows int) Model {
+	if k == tea.KeyTab {
+		return m.acceptSlash(m.slashSel)
+	}
+	items := m.filteredSlash()
+	switch k {
+	case tea.KeyDown:
+		m.slashSel = (m.slashSel + 1) % len(items)
+	case tea.KeyUp:
+		m.slashSel = (m.slashSel - 1 + len(items)) % len(items)
+	case tea.KeyPgDown:
+		m.slashSel = min(m.slashSel+rows, len(items)-1)
+	case tea.KeyPgUp:
+		m.slashSel = max(m.slashSel-rows, 0)
+	}
+	return m
+}
+
+// slashBuiltinsEligible is pin 5, defined by what Enter can actually run:
+// parseSlashLine trims the draft and refuses a newline, so a builtin is only
+// ever dispatched when the token is the draft's first non-whitespace run and
+// the draft is one line. Offering /help where Enter could only send the text
+// would be a lie, so the builtins are dropped before the filter runs.
+func slashBuiltinsEligible(value string, start int) bool {
+	return !strings.ContainsRune(value, '\n') && strings.TrimSpace(value[:start]) == ""
+}
+
+// filteredSlash is the menu's rows: the eligible catalog, prefix hits first
+// and substring hits after (pin 3), each group in catalog order, case
+// insensitive. No fuzzy matcher and no cap — the band windows onto this list,
+// so the whole catalog stays reachable by scrolling.
 func (m Model) filteredSlash() []slashItem {
-	name, _, ok := parseSlashLine(m.input.Value())
+	value := m.input.Value()
+	start, _, name, ok := slashToken(value, m.composerCursorOffset())
 	if !ok {
 		return nil
 	}
-	var out []slashItem
+	builtins := slashBuiltinsEligible(value, start)
+	q := strings.ToLower(name)
+	var prefix, sub []slashItem
 	for _, it := range m.slashCatalog() {
-		if name == "" || strings.HasPrefix(strings.ToLower(it.Name), name) {
-			out = append(out, it)
+		if it.Builtin && !builtins {
+			continue
+		}
+		n := strings.ToLower(it.Name)
+		switch {
+		case strings.HasPrefix(n, q):
+			prefix = append(prefix, it)
+		case q != "" && strings.Contains(n, q):
+			sub = append(sub, it)
 		}
 	}
-	if len(out) > 6 {
-		out = out[:6]
+	// append to a nil prefix with nothing to add still yields nil, which is
+	// the "no matches" the callers test with len().
+	return append(prefix, sub...)
+}
+
+// slashExactlyTyped is grok-build's Enter rule: a token that already spells the
+// highlighted row is not completed again, it is run or sent. A bare "/" spells
+// nothing, so Enter there accepts the first row instead of sending "/".
+func (m Model) slashExactlyTyped() bool {
+	_, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset())
+	if !ok || name == "" {
+		return false
 	}
-	return out
+	items := m.filteredSlash()
+	if m.slashSel < 0 || m.slashSel >= len(items) {
+		return false
+	}
+	return strings.EqualFold(name, items[m.slashSel].Name)
 }
 
 func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
+	// Every branch consumes the draft — clearing it, replacing it, or sending
+	// it — so the menu that draft opened goes with it.
+	m.resetSlash()
 	switch name {
 	case "help":
 		m.input.SetValue("")
@@ -271,15 +450,81 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) completeSlash() Model {
+// acceptSlash puts row i into the draft: only the token under the cursor is
+// replaced, with "/name " — and the trailing space is what ends the token, so
+// the menu closes by the rule in slashToken rather than by a flag.
+//
+// A space already following the token is absorbed rather than doubled, so
+// accepting inside "/gau  more" yields "/gauntlet  more"; only a space, because
+// a tab or the newline that ends a line is structure the draft meant to have.
+// An out-of-range i is a no-op: the list can shrink under an open menu between
+// the frame that drew it and the key that accepts.
+func (m Model) acceptSlash(i int) Model {
 	items := m.filteredSlash()
-	if len(items) == 0 {
+	if i < 0 || i >= len(items) {
 		return m
 	}
-	idx := m.slashSel
-	if idx < 0 || idx >= len(items) {
-		idx = 0
+	value := m.input.Value()
+	start, end, _, ok := slashToken(value, m.composerCursorOffset())
+	if !ok {
+		return m
 	}
-	m.input.SetValue("/" + items[idx].Name)
+	if end < len(value) && value[end] == ' ' {
+		end++
+	}
+	ins := "/" + items[i].Name + " "
+	next := value[:start] + ins + value[end:]
+	m.input.SetValue(next)
+	m.setComposerCursor(next, start+len(ins))
+	m.slashSel, m.slashTop = 0, 0
 	return m
+}
+
+// resetSlash forgets the menu's state along with the draft it belonged to: the
+// selection, the window, and the token Esc hid. A draft that has been sent,
+// queued, interjected, run as a builtin or swapped out for a queued row is
+// gone, and nothing about the menu it opened should outlive it — least of all
+// a hide that would silence the same token typed into the next draft.
+func (m *Model) resetSlash() {
+	m.slashSel, m.slashTop = 0, 0
+	m.slashKey, m.slashHideKey = "", ""
+}
+
+// syncSlash re-finds the menu's selection and window against the rows this
+// frame will draw, for the same reason syncQueue and syncAgents do: the row
+// count is only settled in relayout, and the catalog can be replaced under an
+// open menu by an available_commands_update or a capability change.
+//
+// The selection moves in the key handler; the window follows here. That is
+// what keeps a resize after scrolling, and the keystroke that opened the menu
+// on a frame that had granted it nothing, from leaving the selection off
+// screen — and a click can only ever land on a row that was drawn.
+func (m *Model) syncSlash() {
+	key := ""
+	if start, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset()); ok {
+		key = slashTokenKey(start, name)
+	}
+	if key != m.slashKey {
+		// A new token is a new list: typing, pasting and cursor motion all
+		// land here, so there is one place the selection restarts from.
+		m.slashKey = key
+		m.slashSel, m.slashTop = 0, 0
+	}
+	items := m.filteredSlash()
+	granted := m.slashRowsFor(items)
+	if granted <= 0 {
+		// Nothing is drawn, so there is no window to hold. An empty list can
+		// only grant zero rows, so this is also the no-matches case, and the
+		// selection is settled again the next time the band has rows.
+		m.slashTop = 0
+		return
+	}
+	m.slashSel = min(max(m.slashSel, 0), len(items)-1)
+	m.slashTop = min(max(m.slashTop, 0), max(0, len(items)-granted))
+	if m.slashSel < m.slashTop {
+		m.slashTop = m.slashSel
+	}
+	if m.slashSel >= m.slashTop+granted {
+		m.slashTop = m.slashSel - granted + 1
+	}
 }

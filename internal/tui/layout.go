@@ -85,7 +85,7 @@ var frameRegions = [regionCount]frameRegion{
 	},
 	regionOverlay: {
 		rows: func(s frameSizes) int { return s.overlay },
-		view: func(m Model, _ frameLayout) string { return m.overlayView() },
+		view: func(m Model, lay frameLayout) string { return m.overlayView(lay) },
 	},
 	regionTasks: {
 		rows: frameSizes.tasks,
@@ -135,6 +135,11 @@ type frameLayout struct {
 	// no dialog is open. It is not a region: it is drawn over the transcript
 	// after the band loop, and hit-tested before any of them.
 	Dialog rect
+
+	// OverlayCap is the most rows the overlay band could have taken this
+	// frame, whether or not it is open: what the transcript can spare above
+	// its minimum. The granted rows are min(OverlayCap, natural height).
+	OverlayCap int
 
 	// What degradation left of the regions that can shrink.
 	TasksRows     int  // task rows under the header; 0 means header-only
@@ -299,12 +304,15 @@ func (m *Model) computeLayout() frameLayout {
 	s = fitChrome(s, m.height-1)
 
 	// The overlay takes what is left over the transcript minimum; it is capped
-	// rather than degraded, so a long help box crops instead of squeezing the
+	// rather than degraded, so a long menu crops instead of squeezing the
 	// transcript away.
 	rest := m.height - s.chrome()
-	if nat := m.overlayRows(); nat > 0 && rest > minTranscriptRows {
-		s.overlay = min(nat, rest-minTranscriptRows)
-	}
+	// OverlayCap is that ceiling on its own, recorded whether or not the band
+	// is open: the chrome above and below it does not change when the menu
+	// opens, so a key handled before the next layout can still tell a band
+	// that will be drawn from one the screen has no room for.
+	lay.OverlayCap = max(0, rest-minTranscriptRows)
+	s.overlay = min(m.overlayRows(), lay.OverlayCap)
 	s.transcript = rest - s.overlay
 
 	y := 0
@@ -347,6 +355,10 @@ func (m *Model) relayout(stick bool) {
 	// actually draw, so it is synced here rather than in the event handler,
 	// where the row cap is still the previous frame's.
 	m.syncAgents()
+	// Same for the slash menu, which additionally restarts its selection when
+	// the token under the cursor changes — typing, pasting and cursor motion
+	// alike, which is why it cannot live in the composer's key handler.
+	m.syncSlash()
 	if m.lay.TooSmall {
 		return
 	}

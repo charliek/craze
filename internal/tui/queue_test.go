@@ -21,19 +21,9 @@ func queueWorking(t *testing.T) (Model, *Stub) {
 	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.HangNext()
-	m := New(Config{
-		Session:   stub,
-		Theme:     "tokyo-night",
-		Workspace: t.TempDir(),
-		Model:     "grok",
-		Yolo:      true,
-	})
-	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m := startStub(t, stub, t.TempDir(), 80, 24)
 	m.input.SetValue("go")
-	tm, _ = m.Update(enter())
+	tm, _ := m.Update(enter())
 	m = tm.(Model)
 	if m.status != statusWorking {
 		t.Fatal("want working")
@@ -50,17 +40,7 @@ func queueWorkingLive(t *testing.T) (Model, *Stub) {
 	isolateSkillsHome(t)
 	stub := NewStub()
 	stub.HangNext()
-	m := New(Config{
-		Session:   stub,
-		Theme:     "tokyo-night",
-		Workspace: t.TempDir(),
-		Model:     "grok",
-		Yolo:      true,
-	})
-	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m := startStub(t, stub, t.TempDir(), 80, 24)
 	m.input.SetValue("go")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)

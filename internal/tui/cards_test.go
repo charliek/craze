@@ -17,17 +17,7 @@ func sizedCards(t *testing.T) (Model, *Stub) {
 	t.Helper()
 	isolateSkillsHome(t)
 	stub := NewStub()
-	m := New(Config{
-		Session:   stub,
-		Theme:     "tokyo-night",
-		Workspace: t.TempDir(),
-		Model:     "grok",
-		Yolo:      true,
-	})
-	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	return tm.(Model), stub
+	return startStub(t, stub, t.TempDir(), 80, 24), stub
 }
 
 // cardEvent announces a blocking request to the stub and then delivers it to
@@ -593,16 +583,20 @@ func TestCardsOwnTheKeyboard(t *testing.T) {
 // preview reverted, and the slash menu the draft opened is not drawn.
 func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 	m, stub := sizedCards(t)
+	m.input.SetValue("/")
+	if !m.slashMenuOpen() {
+		t.Fatal("fixture: the slash menu should be open")
+	}
 	m = m.openThemePicker()
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
 	preview := m.theme.Name
 	if preview == "tokyo-night" {
 		t.Fatal("the picker should have previewed another theme")
 	}
-	m.input.SetValue("/")
-	m.slashHide = false
-	if !m.slashMenuOpen() {
-		t.Fatal("fixture: the slash menu should be open")
+	// A dialog is a layer over the transcript, so it suppresses the band too
+	// (§3.4); the draft that opened it is still there underneath.
+	if m.slashMenuOpen() || !m.lay.Region(regionOverlay).Empty() {
+		t.Fatal("a dialog should suppress the slash band")
 	}
 
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
@@ -612,7 +606,7 @@ func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 	if m.theme.Name != "tokyo-night" {
 		t.Fatalf("the live preview survived the card: theme is %q", m.theme.Name)
 	}
-	if !m.lay.Region(regionOverlay).Empty() || m.overlayView() != "" {
+	if !m.lay.Region(regionOverlay).Empty() || m.overlayView(m.lay) != "" {
 		t.Fatalf("the overlay band should be suspended while a card is up: %+v", m.lay)
 	}
 	if m.input.Value() != "/" {

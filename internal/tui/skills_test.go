@@ -79,7 +79,7 @@ body must not be injected
 	m.input.SetValue("/demo")
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = tm.(Model)
-	if m.input.Value() != "/demo" {
+	if m.input.Value() != "/demo " {
 		t.Fatalf("complete %q", m.input.Value())
 	}
 
@@ -209,7 +209,7 @@ description: named by directory
 	m.input.SetValue("/fromdir")
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = tm.(Model)
-	if m.input.Value() != "/fromdir" {
+	if m.input.Value() != "/fromdir " {
 		t.Fatalf("complete %q", m.input.Value())
 	}
 }

@@ -150,6 +150,14 @@ func (s *Stub) SetTodos(todos []agent.Todo) {
 	s.snap.TodosUpdatedAt = s.now()
 }
 
+// SetCommands replaces Snapshot.Commands, as an available_commands_update
+// would. Tests poke the model afterwards so refreshSnap picks the set up.
+func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Commands = append([]agent.CommandInfo(nil), cmds...)
+}
+
 // SetTitle replaces Snapshot.Title.
 func (s *Stub) SetTitle(title string) {
 	s.mu.Lock()

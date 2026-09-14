@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -115,6 +116,69 @@ func isNewlineKey(msg tea.KeyMsg) bool {
 // SetWidth leaves the textarea after the prompt (textarea.go:892).
 func (m Model) composerInner() int {
 	return max(1, m.width-composerPromptW)
+}
+
+// composerCovered reports that a layer stands between the user and the draft:
+// a card, a dialog, or the sub-agent view. Each takes the keyboard away from
+// the composer (handleKey returns above it for all three), so what belongs to
+// the draft — the slash band, an asynchronous paste — goes with it. The
+// confirm line is deliberately not here: it swallows keys too, but it is one
+// armed question rather than a layer, and it is answered in place.
+func (m Model) composerCovered() bool {
+	return m.cardOpen() || m.dialogOpen() || m.viewing != ""
+}
+
+// composerCursorOffset is the cursor's byte offset into the draft, which is
+// what slashToken works in.
+//
+// bubbles reports the cursor in runes and in two pieces: Line() is the logical
+// row, and LineInfo().StartColumn + ColumnOffset the rune column inside that
+// row. Both are rune indices into the row despite the "column" names, and at
+// the exact end of a wrapped row bubbles reports StartColumn = col with
+// ColumnOffset = 0, which sums to the same thing — so the sum is the column
+// whatever the width wraps at. CharOffset is cells, not runes, and would count
+// a double-width rune twice; it is never what this wants.
+func (m Model) composerCursorOffset() int {
+	value := m.input.Value()
+	lines := strings.Split(value, "\n")
+	row := min(max(m.input.Line(), 0), len(lines)-1)
+	off := 0
+	for i := 0; i < row; i++ {
+		// +1 for the "\n" the split took out.
+		off += len(lines[i]) + 1
+	}
+	info := m.input.LineInfo()
+	col := max(info.StartColumn+info.ColumnOffset, 0)
+	rs := []rune(lines[row])
+	col = min(col, len(rs))
+	return off + len(string(rs[:col]))
+}
+
+// setComposerCursor puts the cursor at a byte offset in a value the textarea
+// already holds. SetValue leaves it at the very end of the buffer, so an edit
+// that inserted in the middle has to walk back: CursorUp steps one display row
+// (a wrapped one or a logical one) and always makes progress, and SetCursor
+// then takes the rune column inside the logical line — the same coordinates
+// LineInfo reports back. The loop is bounded by the draft's display rows as a
+// guard only.
+func (m *Model) setComposerCursor(value string, off int) {
+	row, col := runeRowCol(value, off)
+	for guard := m.composerRows(); m.input.Line() > row && guard > 0; guard-- {
+		m.input.CursorUp()
+	}
+	m.input.SetCursor(col)
+}
+
+// runeRowCol splits a byte offset into the logical row it falls on and the
+// rune column inside that row, which is the pair bubbles works in.
+func runeRowCol(value string, off int) (row, col int) {
+	off = min(max(off, 0), len(value))
+	head := value[:off]
+	row = strings.Count(head, "\n")
+	if i := strings.LastIndexByte(head, '\n'); i >= 0 {
+		head = head[i+1:]
+	}
+	return row, utf8.RuneCountInString(head)
 }
 
 // composerCursorRow is the cursor's row in the same coordinates: the rows the
