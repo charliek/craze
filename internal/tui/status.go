@@ -140,6 +140,7 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 		statusPart{text: m.copyChip(), style: styleFG(m.theme.Accent)},
 		statusPart{text: chip, style: chipStyle},
 		statusPart{text: m.inFlightCounts(), style: dim, drop: 3},
+		statusPart{text: m.queueCount(), style: styleFG(m.theme.Accent), drop: 2},
 		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 2},
 	)
 	return fitStatus(parts, statusDot, dim, m.width)
@@ -180,6 +181,17 @@ func (m Model) copyChip() string {
 		return ""
 	}
 	return sanitizeLine(m.copyNote)
+}
+
+// queueCount is what Esc is about to let run: the consequence of cancelling a
+// turn with messages behind it, visible before the key is pressed. It stays
+// when the band itself is degraded away.
+func (m Model) queueCount() string {
+	n := len(m.queueItems())
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("⧗ %d queued", n)
 }
 
 // permissionChip is the pinned permission state: red bypass under --force,

@@ -39,6 +39,22 @@ grok run — snake_case `_x.ai/session_notification` with `attempt_id`,
 | `grok-subagent-cancel` | Cancel with a running child: `prompt_complete{cancelled}` first, `subagent_finished{cancelled}` 400 ms later |
 | `grok-subagent-cancel-early` | The other live cancel order: `finished{completed}` before `prompt_complete{cancelled}` |
 
+### Queue scripts
+
+The 008 scripts are the long turns the message queue needs: a turn has to
+outlive several frames before anything can be typed into it.
+
+| Script | What it proves |
+|--------|----------------|
+| `long-turn` | Cursor: two execute tools, then `DONE step1 step2`. A second `session/prompt` during a turn answers the first `cancelled` and runs instead — the live cursor wire craze's queue exists to avoid, reachable only through a raw `acp.Conn` |
+| `grok-long-turn` | The same over the grok dialect, with `x.ai/queue/changed` at turn start (which is where craze learns its own `promptId`) and `x.ai/interject` merged at the next tool result: the reply reads `DONE step1 <interjection> step2` |
+| `grok-long-turn-fallback` | Interjections are never merged: each becomes grok's own `interject-fallback-…` turn once the session is idle, announced by `queue/changed` and ended by `turn_completed` **alone** — no `prompt_complete`, no trailing `queue/changed`, exactly as the live capture shows. A prompt whose text contains `STRAND-INTERJECTION` makes the fake strand one of its own as the turn ends, which is how the headless drain's wait is driven without craze interjecting |
+
+Sanitized excerpts of those live captures are committed under
+`internal/acp/testdata/grok-queue/` (`fallback.jsonl` is the whole
+interject-fallback turn, `interject.jsonl` a merged one, `queue-changed.jsonl`
+the queue broadcast) and are replayed through a real client.
+
 Cursor's `task` / `task-late` / `tasks` scripts cover the receipt-only path:
 the session synthesizes the same sub-agent lifecycle from the `cursor/task`
 receipt, and the TUI view shows what the receipt carried.
@@ -92,9 +108,25 @@ brackets is a token:
 <pgup> <pgdn> <shift-tab> <alt-enter> <ctrl-a>..<ctrl-z> <lt>
 <wheel-up> <wheel-down> <click:X,Y> <resize:COLS,ROWS> <sleep:250ms>
 <press:X,Y> <motion:X,Y> <release:X,Y> <drag:X1,Y1,X2,Y2> <dblclick:X,Y>
+<hover:X,Y>
 <paste:one\ntwo>
 <wait:idle> <wait:working> <wait:card> <wait:copied> <wait:text:foo> <wait:gone:foo>
 ```
+
+`<motion:X,Y>` stamps the left button, so it models a drag. `<hover:X,Y>` is
+motion with nothing held, which is one of the two things a queued message's
+`[send now] [edit] [cancel]` strip appears on — the other is the row the
+keyboard has selected.
+
+`--freeze` stops the clock and the spinner cycle for the whole run. A frame of
+a turn in progress is otherwise a race against wall time: the elapsed counter
+and the spinner glyph both move on their own, so the same script captures a
+different frame on a slower build. Every golden of a running turn uses it.
+
+`CRAZE_FAKE_STEP` sets how long each of the fake's `long-turn` tool steps
+takes. It is a comma-separated list, one entry per turn with the last
+repeating: `2s,1ms` is a first turn slow enough to type into and later ones
+that finish at once, which is what a frame of a *drained* queue needs.
 
 | Exit | Meaning |
 |------|---------|
@@ -119,7 +151,8 @@ make test-cli
 
 `tests/cli/tmux_smoke.py` drives the real binary in a real terminal at 100x30
 and 80x24, one run per case: every fake script, plus cases for the model
-dialog, the sub-agent view (both providers), and a real mouse drag. It is
+dialog, the sub-agent view (both providers), a real mouse drag, the queue band
+(`queue`) and a grok interjection (`grok-interject`). It is
 opt-in and never runs in CI — pytest only collects it when it is named
 explicitly, and it skips unless `tmux` is on `PATH` and `CRAZE_TMUX` is set.
 

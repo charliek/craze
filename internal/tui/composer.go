@@ -32,6 +32,11 @@ const (
 	// planOfferPlaceholder is the composer's half of the plan-mode exit: the
 	// three things Enter, typing and Shift+Tab do while a plan is on offer.
 	planOfferPlaceholder = "enter implements this plan  ·  type to refine  ·  shift+tab leaves plan mode"
+	// The two mid-turn hints. Ctrl+L is the strong send, and what strong
+	// means depends on what the agent can do: grok merges the text into the
+	// running turn, cursor can only cancel it and start again.
+	queueInterjectHint = "enter queues  ·  ctrl+l interjects"
+	queueSendNowHint   = "enter queues  ·  ctrl+l sends now"
 )
 
 func newComposer(th Theme) textarea.Model {
@@ -183,6 +188,24 @@ func (m Model) planPlaceholder() string {
 	return clampWidth(planOfferPlaceholder, m.composerInner())
 }
 
+// composerHint is the placeholder for this frame. The plan offer keeps
+// priority; under a running turn the hint says what Enter and Ctrl+L do,
+// which differs by provider because only grok can interject.
+func (m Model) composerHint() string {
+	if p := m.planPlaceholder(); p != "" {
+		return p
+	}
+	// A card owns the keyboard, so neither verb is available under one.
+	if m.status != statusWorking || m.cardOpen() || m.input.Value() != "" {
+		return ""
+	}
+	hint := queueSendNowHint
+	if m.caps().Interject {
+		hint = queueInterjectHint
+	}
+	return clampWidth(hint, m.composerInner())
+}
+
 // composerTitle is the right end of the top rule: the session title cursor
 // sent, or the program's name until one arrives.
 func (m Model) composerTitle() string {
@@ -203,7 +226,12 @@ func (m Model) composerView(lay frameLayout) string {
 	if m.viewing != "" {
 		return m.subagentComposerView()
 	}
-	if p := m.planPlaceholder(); p != "" {
+	if m.confirm != nil {
+		return m.composerRule(true) + "\n" +
+			renderSegs(m.width, seg{clampWidth(confirmLine, m.width), styleFG(m.theme.Accent)}) + "\n" +
+			m.composerRule(false)
+	}
+	if p := m.composerHint(); p != "" {
 		// m is a copy, so this swaps the placeholder for this frame only.
 		m.input.Placeholder = p
 	}
@@ -233,6 +261,13 @@ func (m Model) composerRule(top bool) string {
 	width := max(1, m.width)
 	style := styleFG(m.theme.Rule)
 	title := m.composerTitle()
+	if chip := m.queueEditChip(); top && chip != "" {
+		// The rule drops a title it cannot fit beside its margins, and at
+		// the 40-column minimum the whole chip is wider than the rule. A
+		// truncated "editing #1 · enter saves…" still says the composer is
+		// not the composer right now; nothing at all does not.
+		title = clampWidth(chip, max(0, width-4))
+	}
 	// "─"*n + " " + title + " ─": the two spaces and the closing dash are the
 	// three cells the title needs beside itself.
 	lead := width - lipgloss.Width(title) - 3

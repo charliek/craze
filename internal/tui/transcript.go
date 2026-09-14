@@ -65,6 +65,10 @@ type entry struct {
 	end time.Time
 	// open marks a thought run that is still streaming.
 	open bool
+	// interject marks a user entry that came from a grok interjection rather
+	// than from a prompt craze sent: it went into a turn already running, so
+	// it is drawn with a different mark.
+	interject bool
 
 	rendered    []string
 	renderedFor renderKey
@@ -170,6 +174,19 @@ func (t *transcript) addUser(text string, now time.Time) {
 }
 
 func (m *Model) addUser(text string) { m.main.addUser(text, m.now()) }
+
+// addInterjection is the user block for text merged into the running turn.
+// It is written from the agent's broadcast, not from the send: the ack only
+// says the text was accepted, and grok broadcasts one for an interjection it
+// could not merge as well.
+func (t *transcript) addInterjection(text string, now time.Time) {
+	if text == "" {
+		return
+	}
+	t.appendEntry(entry{kind: entryUser, text: text, interject: true}, now)
+}
+
+func (m *Model) addInterjection(text string) { m.main.addInterjection(text, m.now()) }
 
 func (t *transcript) addNote(text string, now time.Time) {
 	if text == "" {
@@ -451,6 +468,11 @@ func (m *Model) setViewportContent(stick bool) {
 func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
 	switch e.kind {
 	case entryUser:
+		if e.interject {
+			// It joined a turn that was already running, so it does not get
+			// the prompt mark a turn of its own does.
+			return hangingRows(e.text, "↳ ", "  ", key.width, styleFG(m.theme.User))
+		}
 		return hangingRows(e.text, "❯ ", "  ", key.width, styleFG(m.theme.User))
 	case entryAssistant:
 		return renderMarkdown(e.text, key.width, m.theme)

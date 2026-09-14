@@ -25,6 +25,28 @@ type Client struct {
 	// ended. A prompt_complete carrying it is that turn's late twin and
 	// must not end the turn now running.
 	donePromptID string
+	// promptID is the grok promptId of the prompt in flight, learned from
+	// the queue/changed broadcast that names it (§3.2). promptText is what
+	// was sent, which is how the broadcast is recognised. Both are reset by
+	// every Prompt.
+	promptID   string
+	promptText string
+	// foreignSeen records that some other running promptId was broadcast
+	// since the prompt was sent. Until promptID is known it is the only
+	// reason to distrust an unmatched prompt_complete.
+	foreignSeen bool
+	// foreignID is the turn the agent is running without a craze prompt —
+	// grok's interject fallback is the only known producer. While it is set,
+	// Prompt is refused.
+	foreignID   string
+	foreignText string
+
+	interjectHandler func(InterjectionNotification)
+	foreignHandler   func(ForeignTurn)
+	// interjectSeen dedups the interjection broadcast by id, bounded in
+	// arrival order. A broadcast with no id is never deduped.
+	interjectSeen  map[string]struct{}
+	interjectOrder []string
 	// turn counts prompts. It is the identity of a turn: a blocking request
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
@@ -248,9 +270,15 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	pending := c.pendingUpdates
 	c.pendingUpdates = nil
 	// A new session does not inherit the previous session's child
-	// allowlist: those ids belong to a session that is gone.
+	// allowlist: those ids belong to a session that is gone. Neither the
+	// foreign turn nor the interjection ids survive it.
 	c.children = nil
 	c.childOrder = nil
+	c.foreignID = ""
+	c.foreignText = ""
+	c.foreignSeen = false
+	c.interjectSeen = nil
+	c.interjectOrder = nil
 	h := c.onUpdate
 	c.mu.Unlock()
 	if dropped := flushSessionUpdates(result.SessionID, pending, h); dropped > 0 {
@@ -273,10 +301,22 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		c.mu.Unlock()
 		return nil, ErrPromptInFlight
 	}
+	if c.foreignID != "" {
+		// The agent is running a turn of its own; a prompt now would be
+		// queued server-side and its completion would be told apart from
+		// that turn's only by ids craze has not learned yet.
+		c.mu.Unlock()
+		return nil, ErrForeignTurn
+	}
 	c.inPrompt = true
 	// A new turn: every blocking request registered from here on belongs to it,
 	// and every request of the turn before it is now stale.
 	c.turn++
+	// The new turn's identity is not known yet: queue/changed teaches it, and
+	// until then nothing the last turn learned may speak for this one.
+	c.promptID = ""
+	c.promptText = text
+	c.foreignSeen = false
 	sid := c.sessionID
 	dialect := c.dialect
 	wait := make(chan promptResult, 1)
@@ -286,6 +326,8 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		c.mu.Lock()
 		c.inPrompt = false
 		c.promptWait = nil
+		c.promptID = ""
+		c.promptText = ""
 		c.mu.Unlock()
 	}()
 
@@ -576,8 +618,24 @@ func (c *Client) onNotify(msg *Message) {
 	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped:
 		c.handlePromptComplete(msg)
 	case MethodGrokSessionNotification, MethodGrokSessionNotificationWrapped:
+		if c.Dialect() != DialectGrok {
+			return
+		}
+		// turn_completed rides the same notification as the sub-agent
+		// lifecycle and is not one: it ends the foreign turn it names and is
+		// not a lifecycle event, so it never reaches the subagent router.
+		if n, ok := parseGrokTurnCompleted(msg.Params); ok {
+			c.handleTurnCompleted(n)
+			return
+		}
+		c.handleSubagentNotification(msg)
+	case MethodGrokInterjection, MethodGrokInterjectionWrapped:
 		if c.Dialect() == DialectGrok {
-			c.handleSubagentNotification(msg)
+			c.handleInterjection(msg)
+		}
+	case MethodGrokQueueChanged, MethodGrokQueueChangedWrapped:
+		if c.Dialect() == DialectGrok {
+			c.handleQueueChanged(msg)
 		}
 	}
 }
@@ -603,19 +661,48 @@ func (c *Client) handlePromptComplete(msg *Message) {
 		stop = StopEndTurn
 	}
 	c.mu.Lock()
+	if c.dialect != DialectGrok || n.SessionID != c.sessionID {
+		c.mu.Unlock()
+		return
+	}
+	// A completion for a turn craze did not start ends that turn, so the
+	// drain waiting on it can go ahead. The fallback is not observed to send
+	// one — turn_completed is its only ending — but a future grok might.
+	end := c.endForeignLocked(n.PromptID)
+	h := c.foreignHandler
 	ch := c.promptWait
-	active := c.sessionID
 	in := c.inPrompt
-	d := c.dialect
 	stale := n.PromptID != "" && n.PromptID == c.donePromptID
+	settles := c.settlesLocked(n.PromptID)
+	if in && !stale && !settles {
+		// A completion that could have ended this turn and does not belong
+		// to it is the one worth counting.
+		c.dropped++
+	}
 	c.mu.Unlock()
-	if d != DialectGrok || !in || n.SessionID != active || ch == nil || stale {
+	fireForeign(h, nil, end)
+	if !in || ch == nil || stale || !settles {
 		return
 	}
 	select {
 	case ch <- promptResult{res: PromptResult{StopReason: stop}}:
 	default:
 	}
+}
+
+// settlesLocked decides whether a prompt_complete may end the turn in flight.
+// Once the turn's own promptId is known only that id settles it. Until then a
+// completion settles the turn unless it names an interject fallback or some
+// other running turn has been broadcast since the prompt went out — the two
+// ways a completion craze did not ask for can reach it.
+func (c *Client) settlesLocked(promptID string) bool {
+	if c.promptID != "" {
+		return promptID == c.promptID
+	}
+	if IsInterjectFallback(promptID) {
+		return false
+	}
+	return !c.foreignSeen
 }
 
 func (c *Client) handleSessionUpdate(msg *Message) {

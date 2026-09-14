@@ -10,6 +10,13 @@ import (
 
 var ErrPromptInFlight = acp.ErrPromptInFlight
 
+// ErrUnsupported is a feature this provider does not have; nothing was
+// written to the wire.
+var ErrUnsupported = acp.ErrUnsupported
+
+// ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
+var ErrForeignTurn = acp.ErrForeignTurn
+
 type EventType string
 
 const (
@@ -25,6 +32,11 @@ const (
 	EventMeta       EventType = "meta"
 	EventUser       EventType = "user"
 	EventSubagent   EventType = "subagent"
+	// EventQueue is one change to craze's own message queue.
+	EventQueue EventType = "queue"
+	// EventForeignTurn brackets a turn the agent started without a craze
+	// prompt — grok's interject fallback. Nothing drains while one runs.
+	EventForeignTurn EventType = "foreign_turn"
 )
 
 const (
@@ -73,6 +85,11 @@ type Snapshot struct {
 	// Provider is a value copy of the session's provider, so the UI can read
 	// what a mode id means and what the agent is called without a session.
 	Provider ProviderInfo
+	// Queue is craze's own message queue in send order, cloned.
+	Queue []QueuedPrompt
+	// ForeignTurn reports that the agent is running a turn of its own. The
+	// drain waits it out: a prompt sent now would be queued behind it.
+	ForeignTurn bool
 }
 
 // SubagentInfo is one grok child or cursor task, in spawn order on Snapshot.
@@ -141,9 +158,27 @@ type Event struct {
 	Plan           *PlanEvent
 	Subagent       *SubagentInfo
 	SubagentChange string
-	Err            error
-	StopReason     string
-	At             time.Time
+	// Queue, QueueChange and QueuePos describe one EventQueue: the row, what
+	// happened to it, and the position it held when it happened.
+	Queue       *QueuedPrompt
+	QueueChange QueueChange
+	QueuePos    int
+	// Interjection marks an EventUser that came from a grok interjection
+	// broadcast rather than from a prompt craze sent.
+	Interjection bool
+	// ForeignTurn is set on EventForeignTurn.
+	ForeignTurn *ForeignTurnInfo
+	Err         error
+	StopReason  string
+	At          time.Time
+}
+
+// ForeignTurnInfo is a turn the agent is running on craze's session without a
+// craze prompt. Running is true when it starts and false when it ends.
+type ForeignTurnInfo struct {
+	ID      string
+	Text    string
+	Running bool
 }
 
 type ToolEvent struct {
@@ -286,6 +321,25 @@ type Session interface {
 	Prompt(ctx context.Context, text string) (Result, error)
 	Events() <-chan Event
 	Cancel(ctx context.Context) error
+	// Queue appends a message to craze's own queue. It refuses a full queue
+	// or an oversized message without mutating anything, so the caller keeps
+	// the draft it tried to queue.
+	Queue(text string) (QueuedPrompt, error)
+	// EditQueued rewrites a row in place, keeping its id and position.
+	EditQueued(id, text string) error
+	// Unqueue drops a row the user cancelled.
+	Unqueue(id string) (QueuedPrompt, bool)
+	// TakeQueued removes any row so the caller can prompt it. It is a guard,
+	// not a driver: it returns false while a prompt is in flight or the agent
+	// is running a turn of its own, and it never prompts anything itself.
+	TakeQueued(id string) (QueuedPrompt, bool)
+	// PopQueue is TakeQueued of the head — the drain.
+	PopQueue() (QueuedPrompt, bool)
+	// ClearQueue empties the queue and returns how many rows went.
+	ClearQueue() int
+	// Interject merges text into the running turn without cancelling it.
+	// Only grok can: everything else returns ErrUnsupported before the wire.
+	Interject(ctx context.Context, text string) error
 	AnswerPermission(id, optionID string) error
 	AnswerQuestion(id string, answers map[string][]string, skip bool) error
 	AnswerPlan(id string, accept bool) error

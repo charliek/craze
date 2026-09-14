@@ -31,6 +31,50 @@ type jsonEvent struct {
 	Accepted   bool                `json:"accepted,omitempty"`
 	StopReason string              `json:"stopReason,omitempty"`
 	Message    string              `json:"message,omitempty"`
+	// Interjection marks a user block that came from a grok interjection
+	// rather than from a prompt craze sent.
+	Interjection bool `json:"interjection,omitempty"`
+}
+
+// jsonQueue is one change to craze's own message queue. Position is the row's
+// index when the change happened, which is not the same as where it sits now.
+type jsonQueue struct {
+	Type     string `json:"type"`
+	Event    string `json:"event"`
+	ID       string `json:"id"`
+	Position int    `json:"position"`
+	Version  int    `json:"version"`
+	Text     string `json:"text,omitempty"`
+}
+
+// jsonForeignTurn brackets a turn the agent ran without a craze prompt.
+type jsonForeignTurn struct {
+	Type  string `json:"type"`
+	Event string `json:"event"`
+	ID    string `json:"id,omitempty"`
+	Text  string `json:"text,omitempty"`
+}
+
+func queueJSON(ev agent.Event) jsonQueue {
+	j := jsonQueue{Type: "queue", Event: string(ev.QueueChange), Position: ev.QueuePos}
+	if ev.Queue != nil {
+		j.ID = ev.Queue.ID
+		j.Version = ev.Queue.Version
+		j.Text = ev.Queue.Text
+	}
+	return j
+}
+
+func foreignTurnJSON(ev agent.Event) jsonForeignTurn {
+	j := jsonForeignTurn{Type: "foreign_turn", Event: "ended"}
+	if ev.ForeignTurn != nil {
+		if ev.ForeignTurn.Running {
+			j.Event = "started"
+		}
+		j.ID = ev.ForeignTurn.ID
+		j.Text = ev.ForeignTurn.Text
+	}
+	return j
 }
 
 type jsonSubagent struct {
@@ -101,7 +145,11 @@ func eventJSON(ev agent.Event) (any, bool) {
 	case agent.EventThought:
 		return jsonEvent{Type: "thought", Text: ev.Text, Agent: ev.Agent}, true
 	case agent.EventUser:
-		return jsonEvent{Type: "user", Text: ev.Text, Agent: ev.Agent}, true
+		return jsonEvent{Type: "user", Text: ev.Text, Agent: ev.Agent, Interjection: ev.Interjection}, true
+	case agent.EventQueue:
+		return queueJSON(ev), ev.Queue != nil
+	case agent.EventForeignTurn:
+		return foreignTurnJSON(ev), ev.ForeignTurn != nil
 	case agent.EventSubagent:
 		return subagentJSON(ev), ev.Subagent != nil
 	case agent.EventTool:

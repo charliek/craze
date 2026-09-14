@@ -415,7 +415,10 @@ func (m Model) agentSuffix(s agent.SubagentInfo) string {
 		if !ok {
 			return ""
 		}
-		out := formatElapsed(m.now().Sub(start))
+		out := formatElapsed(0)
+		if !m.frozen {
+			out = formatElapsed(m.now().Sub(start))
+		}
 		if tok := formatTokens(s.TokensUsed); tok != "" {
 			out += " · " + tok
 		}

@@ -38,6 +38,8 @@ def frame(
     ansi: bool = False,
     timeout: str = "15s",
     provider: str | None = None,
+    freeze: bool = False,
+    step: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     work = tmp_path / WORKDIR
     work.mkdir(exist_ok=True)
@@ -65,6 +67,8 @@ def frame(
         argv.append("--ansi")
     if provider:
         argv.extend(["--provider", provider])
+    if freeze:
+        argv.append("--freeze")
     # RunFrameScript isolates HOME itself; this keeps the child agent and the
     # skills scan out of the developer's home too, the same way the PTY suite
     # does, and drops the env vars that would override the flags under test.
@@ -74,6 +78,11 @@ def frame(
     env.pop("CRAZE_FAKE_SCRIPT", None)
     env.pop("CRAZE_CONFIG", None)
     env.pop("CRAZE_PROVIDER", None)
+    # Never inherited: a developer with CRAZE_FAKE_STEP exported would
+    # otherwise change the timing of every case that did not ask for it.
+    env.pop("CRAZE_FAKE_STEP", None)
+    if step:
+        env["CRAZE_FAKE_STEP"] = step
     return subprocess.run(
         argv, capture_output=True, text=True, cwd=str(work), env=env, timeout=120
     )
@@ -759,3 +768,159 @@ def test_frame_task_view_receipt(
         "● task  Count main.go lines",
     ):
         assert want in text, f"missing {want!r}:\n{text}"
+
+
+# ---------------------------------------------------------------- queued messages
+
+# The long turn runs two tool steps; a step long enough to type into is what
+# makes these frames the same on any machine, and --freeze stops the clock so
+# the elapsed counter and the spinner glyph do not move either.
+QUEUE_TWO = (
+    "<wait:idle>go the long way<enter><wait:working>"
+    "Reply with PINEAPPLE<enter>Reply with MANGO<enter>"
+)
+
+
+def test_frame_queue_band(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        cols=100,
+        rows=30,
+        keys=QUEUE_TWO + "<wait:text:#2 Reply with MANGO>",
+        freeze=True,
+        step="30s",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "#1 Reply with PINEAPPLE" in text, text
+    assert "#2 Reply with MANGO" in text, text
+    assert "⧗ 2 queued" in text, text
+    assert "enter queues  ·  ctrl+l sends now" in text, text
+    # A queued message is not in the transcript until it is sent.
+    assert "❯ Reply with PINEAPPLE" not in text, text
+
+
+def test_frame_queue_hover_shows_the_actions(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        cols=100,
+        rows=30,
+        keys=QUEUE_TWO + "<wait:text:#2 Reply with MANGO><hover:10,22>",
+        freeze=True,
+        step="30s",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "[send now] [edit] [cancel]" in text, text
+
+
+def test_frame_queue_up_selects_and_enter_edits(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        cols=100,
+        rows=30,
+        keys=QUEUE_TWO + "<wait:text:#2 Reply with MANGO><up><enter>",
+        freeze=True,
+        step="30s",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "editing #2" in text, text
+    assert "❯ Reply with MANGO" in text, text
+    assert "#2 Reply with MANGO" in text, text
+
+
+def test_frame_queue_backspace_cancels_a_row(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        cols=100,
+        rows=30,
+        keys=QUEUE_TWO + "<wait:text:#2 Reply with MANGO><up><backspace><wait:gone:MANGO>",
+        freeze=True,
+        step="30s",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "#1 Reply with PINEAPPLE" in text, text
+    assert "MANGO" not in text, text
+    assert "⧗ 1 queued" in text, text
+
+
+def test_frame_send_now_asks_first_on_cursor(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        cols=100,
+        rows=30,
+        keys="<wait:idle>go the long way<enter><wait:working>Reply with PINEAPPLE<ctrl-l>",
+        freeze=True,
+        step="30s",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "cancel the running turn and send? enter · esc" in text, text
+
+
+def test_frame_grok_interject_joins_the_turn(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="grok-long-turn",
+        cols=100,
+        rows=30,
+        keys=(
+            "<wait:idle>go the long way<enter><wait:working>Also say BANANA<ctrl-l>"
+            "<wait:text:DONE step1 Also say BANANA step2><wait:idle>"
+        ),
+        provider="grok",
+        freeze=True,
+        step="2s,1ms",
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "↳ Also say BANANA" in text, text
+    assert "DONE step1 Also say BANANA step2" in text, text
+    # An interjection never cancels the turn it joined.
+    assert "cancelled" not in text, text
+
+
+def test_frame_queue_drains_in_order(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        cols=80,
+        rows=24,
+        keys=(
+            QUEUE_TWO
+            + "<wait:text:#2 Reply with MANGO><wait:text:❯ Reply with MANGO><wait:idle>"
+        ),
+        freeze=True,
+        step="2s,1ms",
+    )
+    text = "\n".join(frame_lines(proc, 80, 24))
+    assert text.index("❯ Reply with PINEAPPLE") < text.index("❯ Reply with MANGO"), text
+    assert "#1 Reply" not in text, text
+    assert "⧗ " not in text, text

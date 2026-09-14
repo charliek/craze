@@ -122,6 +122,15 @@ func (m *Model) pushCard(c card) {
 	// than left waiting for a release that will never be handled.
 	m.sel = selection{}
 	m.pressed = tea.MouseButtonNone
+	m.queueHov = noHover()
+	// A card owns the keyboard, so a confirm waiting for Enter cannot stay on
+	// screen behind it. It is discarded rather than remembered: the answer
+	// the user was about to give was about a turn this card is now part of.
+	// The draft was never touched, so there is nothing to restore.
+	if m.confirm != nil {
+		m.confirm = nil
+		m.note("send now dropped")
+	}
 	// Either dialog goes with the rest: the model dialog applies nothing on
 	// the way out, and the theme dialog takes its live preview with it.
 	*m = m.closeDialog(true)

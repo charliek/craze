@@ -347,6 +347,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 		card    bool
 		dialog  bool
 		slash   bool
+		queue   bool
 		needles map[regionID]string
 	}{
 		{
@@ -375,6 +376,15 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			},
 		},
 		{
+			// The queue band only exists while something is queued, so it
+			// needs a frame of its own.
+			name:  "queue band",
+			queue: true,
+			needles: map[regionID]string{
+				regionQueue: "#1 PINEAPPLE",
+			},
+		},
+		{
 			// The modal layer is drawn over the transcript and nowhere else, so
 			// every band under it still owns the rows the layout gave it.
 			name:   "dialog layer",
@@ -399,6 +409,11 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			}
 			if tc.dialog {
 				m = m.openModelDialog()
+			}
+			if tc.queue {
+				if _, err := m.sess.Queue("PINEAPPLE"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)

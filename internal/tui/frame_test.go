@@ -50,11 +50,11 @@ func TestParseFrameScriptTokens(t *testing.T) {
 
 func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 	toks, err := parseFrameScript("<wheel-up><wheel-down><click:10,5><resize:120,40><sleep:5ms>" +
-		"<wait:idle><wait:working><wait:card><wait:text:TASKS n/n><wait:gone:Thinking>")
+		"<wait:idle><wait:working><wait:card><wait:text:TASKS n/n><wait:gone:Thinking><hover:3,4>")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(toks) != 10 {
+	if len(toks) != 11 {
 		t.Fatalf("got %d tokens", len(toks))
 	}
 	if mouseOf(t, toks[0]).Button != tea.MouseButtonWheelUp || mouseOf(t, toks[1]).Button != tea.MouseButtonWheelDown {
@@ -81,6 +81,11 @@ func TestParseFrameScriptNonKeyTokens(t *testing.T) {
 		if got != want {
 			t.Fatalf("wait %d = %+v, want %+v", i, got, want)
 		}
+	}
+	// A hover is a motion with no button held, which is what all-motion
+	// reporting sends and what <motion:> (a drag) is not.
+	if mm := mouseOf(t, toks[10]); mm.X != 3 || mm.Y != 4 || mm.Button != tea.MouseButtonNone || mm.Action != tea.MouseActionMotion {
+		t.Fatalf("hover token %+v", toks[10].msgs)
 	}
 }
 
@@ -157,6 +162,7 @@ func TestParseFrameScriptPaste(t *testing.T) {
 func TestParseFrameScriptRejects(t *testing.T) {
 	for _, script := range []string{
 		"<nope>",
+		"<hover:x>",
 		"<paste:>",
 		"<ctrl-1>",
 		"<ctrl-aa>",
@@ -1403,4 +1409,36 @@ func TestFrameGrokModelDialogHasNoFastRow(t *testing.T) {
 	if !strings.Contains(got, "effort") {
 		t.Fatalf("grok model dialog should still draw effort:\n%s", got)
 	}
+}
+
+// runFakeFrameFrozen is runFakeFrameProvider with the clock and the spinner
+// stopped, so a golden of a turn in progress does not depend on how fast the
+// build is.
+func runFakeFrameFrozen(t *testing.T, script string, cols, rows int, keys string, p agent.Provider) string {
+	t.Helper()
+	bin := buildFakeAgent(t)
+	isolateSkillsHome(t)
+	ws := frameWorkspace(t)
+	prov := p
+	sess := agent.New(agent.Options{
+		Binary:      bin,
+		ExtraArgs:   []string{"-script=" + script},
+		Workspace:   ws,
+		Force:       true,
+		Interactive: true,
+		Stderr:      io.Discard,
+		Provider:    &prov,
+	})
+	plain, _, err := RunFrameScript(Config{
+		Session:        sess,
+		Theme:          "tokyo-night",
+		Workspace:      ws,
+		Yolo:           true,
+		Provider:       p,
+		ProviderLocked: true,
+	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second, Freeze: true})
+	if err != nil {
+		t.Fatalf("run %s frame: %v", script, err)
+	}
+	return plain
 }

@@ -51,6 +51,16 @@ type FrameOpts struct {
 	ANSI        bool
 	PrintFrames bool
 	Out         io.Writer
+	// Freeze stops the two things a frame of a turn in progress shows that
+	// move on their own: the elapsed counters and the spinner's glyph. A
+	// golden is otherwise a race against wall time — a slower build (-race,
+	// a loaded machine) captures a different frame from the same script.
+	//
+	// It freezes those two renderings and nothing else. The model's clock is
+	// left alone on purpose: it is also what decides a double-click, the
+	// Ctrl+C window and every linger, and a frozen one would quietly change
+	// what the script under test is exercising.
+	Freeze bool
 }
 
 type frameTokenKind int
@@ -174,6 +184,18 @@ func parseFrameToken(body string) (frameToken, error) {
 		strings.HasPrefix(name, "motion:"), strings.HasPrefix(name, "release:"),
 		strings.HasPrefix(name, "dblclick:"):
 		return parseMouseToken(raw, name)
+
+	case strings.HasPrefix(name, "hover:"):
+		// <motion:> stamps the left button, so it models a drag. A hover is
+		// motion with nothing held, which is the only thing the queue's
+		// action strip appears on.
+		x, y, err := parseFramePair(strings.TrimPrefix(name, "hover:"))
+		if err != nil {
+			return frameToken{}, &ScriptError{Token: raw, Reason: "want <hover:X,Y>"}
+		}
+		return frameToken{kind: tokMouse, text: raw, msgs: []tea.Msg{
+			tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionMotion},
+		}}, nil
 
 	case strings.HasPrefix(name, "drag:"):
 		// One gesture, three reports: a drag is exactly what the terminal
@@ -521,6 +543,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	bus := newFrameBus(print)
 
 	m := New(cfg)
+	m.frozen = opts.Freeze
 	sess := m.sess
 	p := tea.NewProgram(frameModel{inner: m, bus: bus}, tea.WithoutRenderer(), tea.WithInput(nil))
 	done := make(chan error, 1)

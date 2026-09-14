@@ -142,6 +142,11 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		m.input.SetValue("")
 		return m.requestQuit()
 	case "clear":
+		// Nothing pending survives a clear: a queued message sent minutes
+		// later, into a transcript that no longer shows why it was queued, is
+		// worse than losing it. The pending state goes first, because ending
+		// an edit puts the displaced draft back into the composer.
+		m.clearPending()
 		m.input.SetValue("")
 		m.clearTranscript()
 		return m, nil

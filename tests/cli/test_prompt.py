@@ -356,3 +356,122 @@ def test_plain_prompt_excludes_child_text(
     assert proc.returncode == 0, proc.stderr
     assert "DONE: main.py README.md" in proc.stdout
     assert "Listing files." not in proc.stdout
+
+
+def test_follow_up_queue_lines(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """--follow-up is the headless queue: a queued line each, then a sent line
+    before each turn, in order."""
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "one",
+        "--follow-up",
+        "Reply PINEAPPLE",
+        "--follow-up",
+        "Reply MANGO",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    dones = [e for e in events if e.get("type") == "done"]
+    assert len(dones) == 3, events
+
+    queued = [e for e in events if e.get("type") == "queue" and e["event"] == "queued"]
+    sent = [e for e in events if e.get("type") == "queue" and e["event"] == "sent"]
+    assert [e["text"] for e in queued] == ["Reply PINEAPPLE", "Reply MANGO"]
+    assert [e["position"] for e in queued] == [0, 1]
+    assert [e["id"] for e in sent] == [e["id"] for e in queued]
+    assert all(e["position"] == 0 for e in sent)
+
+    texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
+    assert texts.index("PINEAPPLE") < texts.index("MANGO")
+
+
+def test_follow_up_queue_silent_in_plain_mode(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "one",
+        "--follow-up",
+        "two",
+        json_mode=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "queue" not in proc.stdout
+    assert "echo: one" in proc.stdout
+    assert "two" in proc.stdout
+
+
+def test_grok_interject_fallback_is_waited_out(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """A turn grok starts on its own is bracketed in the JSON, and the queued
+    follow-up runs after it rather than into it."""
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--provider",
+        "grok",
+        "do the steps STRAND-INTERJECTION",
+        "--follow-up",
+        "Reply PINEAPPLE",
+        script="grok-long-turn-fallback",
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    assert len([e for e in events if e.get("type") == "done"]) == 2, events
+    foreign = [e for e in events if e.get("type") == "foreign_turn"]
+    assert [e["event"] for e in foreign] == ["started", "ended"], foreign
+    assert foreign[0]["id"].startswith("interject-fallback-"), foreign
+
+    order = [
+        e["event"] if e.get("type") == "foreign_turn" else "sent"
+        for e in events
+        if e.get("type") == "foreign_turn"
+        or (e.get("type") == "queue" and e["event"] == "sent")
+    ]
+    assert order == ["started", "ended", "sent"], order
+    assert [e.get("type") for e in events].count("done") == 2, events
+
+    users = [e for e in events if e.get("type") == "user" and e.get("interjection")]
+    assert users, events
+
+
+def test_signal_clears_the_queue(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """SIGINT stops everything pending, not just the running turn."""
+    env = os.environ.copy()
+    env["CRAZE_FAKE_SCRIPT"] = "hang"
+    env.pop("CRAZE_PROVIDER", None)
+    env["CRAZE_CONFIG"] = str(tmp_path / "missing-craze-config.toml")
+    proc = subprocess.Popen(
+        [
+            str(craze_bin),
+            "prompt",
+            "--json",
+            "--agent-bin",
+            str(fake_agent_bin),
+            "--workspace",
+            str(tmp_path),
+            "--follow-up",
+            "never runs",
+            "go",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    time.sleep(1.0)
+    proc.send_signal(signal.SIGINT)
+    stdout, stderr = proc.communicate(timeout=10)
+    assert proc.returncode == 1, stderr
+    events = parse_events(stdout)
+    removed = [e for e in events if e.get("type") == "queue" and e["event"] == "removed"]
+    assert len(removed) == 1, events
+    assert not [e for e in events if e.get("type") == "queue" and e["event"] == "sent"]
+    assert len([e for e in events if e.get("type") == "done"]) == 1, events

@@ -47,6 +47,14 @@ Flags:
           grok-ask    x.ai/ask_user_question then complete
           grok-plan   x.ai/exit_plan_mode then complete
           grok-ask-wrapped wrapped _x.ai/ask_user_question then complete
+          long-turn   cursor: two 600 ms execute tools then DONE step1 step2;
+                      a second prompt cancels the first and runs instead
+          grok-long-turn same over the grok dialect, with x.ai/queue/changed at
+                      turn start and x.ai/interject merged at the next tool
+                      result (DONE step1 <interjection> step2)
+          grok-long-turn-fallback interjections are never merged: each becomes
+                      grok's own interject-fallback turn once the session is
+                      idle, ended by turn_completed alone
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in
@@ -84,7 +92,8 @@ func main() {
 		"bash", "task", "task-late", "markdown", "title", "planmode", "planmode-card",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
-		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early":
+		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",
+		"long-turn", "grok-long-turn", "grok-long-turn-fallback":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,7 +27,7 @@ func themeFor(t *testing.T, args ...string) string {
 	}
 	registerTUIFlags(cmd, f)
 	cmd.SetArgs(args)
-	cmd.SetOut(os.NewFile(0, os.DevNull))
+	cmd.SetOut(io.Discard)
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}

@@ -56,6 +56,10 @@ DEFAULT_OUT = ROOT / "smoke-captures"
 
 START_TIMEOUT = 20.0
 WAIT_TIMEOUT = 15.0
+# TMUX_TIMEOUT bounds one tmux command. It is not how long a case may take —
+# it is how long a single `capture-pane` or `send-keys` may hang before the
+# suite calls it a failure instead of waiting for ever.
+TMUX_TIMEOUT = 20.0
 EXIT_TIMEOUT = 10.0
 # One keystroke per send-keys call, spaced out: bubbletea v1 coalesces
 # consecutive printable bytes from one read into a single KeyRunes message, so
@@ -167,7 +171,11 @@ LEFT = "Left"
 UP = "Up"
 DOWN = "Down"
 QUIT = "C-d"
-NAMED_KEYS = frozenset({ENTER, ESC, TAB, RIGHT, LEFT, UP, DOWN, QUIT})
+STRONG = "C-l"
+BSPACE = "BSpace"
+NAMED_KEYS = frozenset(
+    {ENTER, ESC, TAB, RIGHT, LEFT, UP, DOWN, QUIT, STRONG, BSPACE}
+)
 
 # SGR mouse button codes. A drag is press, one motion with the button-held bit
 # set, then the release; the release repeats the button code and ends in a
@@ -201,6 +209,9 @@ class Case:
     # need grok: the cursor dialect drops every _x.ai/session_notification,
     # so under cursor there is no row to watch.
     provider: str = "cursor"
+    # env is extra environment for the pane. The queue cases set
+    # CRAZE_FAKE_STEP so the first turn is slow enough to type into.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 # The per-case expectations are §3.15's (004) and §5 V6's (005), verbatim.
@@ -519,6 +530,50 @@ CASES: dict[str, Case] = {
             "is the window the down/enter pair has to land in"
         ),
     ),
+    # 008: the queue band in a real terminal. The first turn is slow enough to
+    # type into and the ones behind it finish at once, so the drain is
+    # observable without waiting on a clock.
+    "queue": Case(
+        script="long-turn",
+        prompt="go the long way",
+        env=(("CRAZE_FAKE_STEP", "6s,1ms"),),
+        steps=(
+            Wait("esc to interrupt", "working"),
+            Send("Reply with PINEAPPLE", ENTER),
+            Wait("#1 Reply with PINEAPPLE", "queued-one"),
+            Send("Reply with MANGO", ENTER),
+            Wait("#2 Reply with MANGO", "queued-two"),
+            Wait("⧗ 2 queued", "queue-count"),
+            Send(UP),
+            Wait("❯ #2 Reply with MANGO", "selected"),
+            Wait("[send now] [edit] [cancel]", "actions"),
+            Send(BSPACE),
+            Gone("MANGO", "cancelled-row"),
+            Wait("⧗ 1 queued", "one-left"),
+            Wait("❯ Reply with PINEAPPLE", "drained"),
+        ),
+        note=(
+            "Enter queues while a turn runs, ↑ selects, BSpace cancels a row, "
+            "and the head is sent when the turn settles"
+        ),
+    ),
+    "grok-interject": Case(
+        script="grok-long-turn",
+        provider="grok",
+        chip="◆ default",
+        prompt="go the long way",
+        env=(("CRAZE_FAKE_STEP", "6s,1ms"),),
+        steps=(
+            Wait("esc to interrupt", "working"),
+            Send("Also say BANANA", STRONG),
+            Wait("↳ Also say BANANA", "interjection"),
+            Wait("DONE step1 Also say BANANA step2", "merged-reply"),
+        ),
+        note=(
+            "ctrl+l on grok merges the draft into the running turn: the ↳ entry "
+            "comes from the agent's broadcast and the reply carries the word"
+        ),
+    ),
 }
 
 CASE_IDS = tuple(CASES)
@@ -571,6 +626,7 @@ class TmuxPane:
         no_force: bool,
         chip: str | None,
         provider: str = "cursor",
+        env: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.name = name
         self.script = script
@@ -622,7 +678,10 @@ class TmuxPane:
             f"export CRAZE_SMOKE_CLIPBOARD={shlex.quote(str(self.clipboard_file))}\n"
             "export TERM=xterm-256color\n"
             f"export CRAZE_FAKE_SCRIPT={shlex.quote(script)}\n"
-            "unset CRAZE_AGENT_BIN\n"
+            + "".join(
+                f"export {k}={shlex.quote(v)}\n" for k, v in env
+            )
+            + "unset CRAZE_AGENT_BIN\n"
             "unset CRAZE_PROVIDER\n"
             "unset CRAZE_CONFIG\n"
             f"{' '.join(shlex.quote(a) for a in argv)} 2>{shlex.quote(str(self.stderr_file))}\n"
@@ -641,11 +700,20 @@ class TmuxPane:
         # catch it — the assertion would pass while the developer's clipboard
         # changed. tmux only reads the file when it starts the server, so
         # passing the flag on every command is harmless.
-        proc = subprocess.run(
-            [TMUX, "-f", "/dev/null", "-L", self.socket, *args],
-            capture_output=True,
-            text=True,
-        )
+        # Every tmux call is bounded: without a timeout a wedged tmux blocks
+        # the polling loop for ever and WAIT_TIMEOUT never gets a chance to
+        # fire, so a stuck case hangs the suite instead of failing it.
+        try:
+            proc = subprocess.run(
+                [TMUX, "-f", "/dev/null", "-L", self.socket, *args],
+                capture_output=True,
+                text=True,
+                timeout=TMUX_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as err:
+            raise SmokeFailure(
+                f"tmux {' '.join(args)} did not return within {TMUX_TIMEOUT}s"
+            ) from err
         if check and proc.returncode != 0:
             raise SmokeFailure(
                 f"tmux {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}"
@@ -679,7 +747,13 @@ class TmuxPane:
         self._tmux("kill-server", check=False)
 
     def __enter__(self) -> TmuxPane:
-        self.start()
+        # A failure inside start() — the size assertion, a tmux option — must
+        # not leak the server it may already have started.
+        try:
+            self.start()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -904,6 +978,7 @@ def _run_case(
         no_force=case.no_force,
         chip=case.chip,
         provider=case.provider,
+        env=case.env,
     ) as pane:
         # The status rows carry no status word; the provider segment of row 1
         # is what says a frame was drawn, and it only exists once it was.

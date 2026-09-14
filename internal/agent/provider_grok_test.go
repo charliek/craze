@@ -36,6 +36,7 @@ func TestGrokProviderData(t *testing.T) {
 		FastToggle: false, SubagentRows: true, SubagentTranscript: true,
 		Effort: true, Modes: true, Todos: true,
 		AskCards: true, PlanCards: true, ParameterizedPicker: true,
+		Interject: true,
 	}
 	if p.Capabilities() != wantCaps {
 		t.Fatalf("capabilities %+v", p.Capabilities())

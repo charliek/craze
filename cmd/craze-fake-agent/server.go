@@ -36,6 +36,24 @@ type server struct {
 	// but the read loop would record the order the handler goroutines happened
 	// to wake in.
 	order []orderEntry
+
+	// The queue scripts' per-prompt state (queue.go): every prompt still held
+	// with its own cancel channel and its own reply, the turn runner's state,
+	// and the interjections waiting for a safe point.
+	promptSeq int
+	queued    []*promptReq
+	running   *promptReq
+	draining  bool
+	// bmu orders the queue broadcasts: each one snapshots the queue and
+	// writes it inside this lock, so no broadcast can publish state older
+	// than one already on the wire.
+	bmu                  sync.Mutex
+	pendingInterjections []string
+	merged               []string
+	fallbackSeq          int
+	fallbackOn           bool
+	fallbackID           string
+	fallbackText         string
 }
 
 // orderEntry is one recorded call. mode is the mode a set_mode asked for and is
@@ -225,12 +243,29 @@ func (s *server) onRequest(msg *acp.Message) {
 		})
 	case acp.MethodSessionPrompt:
 		s.noteOrder(orderPrompt, "")
+		if queueScript(s.script) {
+			// The queue scripts hold one record per prompt instead of the
+			// single flag, so a second prompt cancelling the first cannot
+			// cancel itself. Registration is on the read loop: the cancel is
+			// decided by the order the prompts arrived in.
+			s.beginPrompt(msg)
+			s.kickQueue()
+			return
+		}
 		// A cancel belongs to the turn it interrupts. Clearing the flag here,
 		// on the read loop, means a cancel read after this prompt can never be
 		// lost and one read before it can never cancel this turn — without
 		// which a second prompt to a cancel script cancels itself instantly.
 		s.cancelled.Store(false)
 		go s.handlePrompt(msg)
+	case acp.MethodGrokInterject, acp.MethodGrokInterjectWrapped:
+		// Only grok answers it. The cursor scripts fall through to the
+		// -32601 every other unknown method gets, which is the live wire.
+		if !grokScript(s.script) || !queueScript(s.script) {
+			_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
+			return
+		}
+		go s.handleInterject(msg)
 	case acp.MethodSessionSetModel:
 		s.reply(msg.ID, map[string]any{})
 	case acp.MethodSessionSetMode:
@@ -281,6 +316,11 @@ func (s *server) onNotify(msg *acp.Message) {
 		s.hangWait = nil
 	}
 	s.mu.Unlock()
+	if queueScript(s.script) {
+		// session/cancel is scoped to the session: every prompt the fake is
+		// still holding is cancelled, and each is answered exactly once.
+		s.cancelAll()
+	}
 }
 
 func (s *server) handlePrompt(msg *acp.Message) {

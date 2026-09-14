@@ -1,8 +1,8 @@
   ╭──────────────────────────────────╮  
   │help                              │  
   │sending and editing               │  
-  │  enter             send the draft│  
-  │  alt+enter, ctrl+j newline (sh… ▼│  
+  │  enter             send the draf…│  
+  │  ctrl+l            send now, c… ▼│  
   │↑↓ · pgup/pgdn · esc closes       │  
   ╰──────────────────────────────────╯  
 ──────────────────────────────── craze ─
