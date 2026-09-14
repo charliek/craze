@@ -164,7 +164,7 @@ func TestLayoutRegionsTileTheScreen(t *testing.T) {
 	m := loadedModel(t, 100, 30)
 	regions := []yRange{
 		m.lay.Region(regionTranscript), m.lay.Region(regionOverlay), m.lay.Region(regionTasks), m.lay.Region(regionSpinner),
-		m.lay.Region(regionComposer), m.lay.Region(regionPeek), m.lay.Region(regionModal), m.lay.Region(regionStatus), m.lay.Region(regionAgents),
+		m.lay.Region(regionComposer), m.lay.Region(regionModal), m.lay.Region(regionStatus), m.lay.Region(regionAgents),
 	}
 	y := 0
 	for i, r := range regions {
@@ -337,9 +337,9 @@ func TestFrameRegionsAreOneOrderedList(t *testing.T) {
 // what stops computeLayout's ordering and View's ordering from drifting.
 //
 // It takes two frames rather than one, because §3.11 forbids a frame with
-// everything on: a card suspends the lower overlays, so the overlay and the
-// peek can only be drawn while no card is up. Between the two every regionID
-// is covered, which the tail of the test holds.
+// everything on: a card suspends the lower overlays, so the overlay can only
+// be drawn while no card is up. Between the two every regionID is covered,
+// which the tail of the test holds.
 func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 	covered := make(map[regionID]bool, regionCount)
 	for _, tc := range []struct {
@@ -372,7 +372,6 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			slash: true,
 			needles: map[regionID]string{
 				regionOverlay: "/help  Keybindings and commands",
-				regionPeek:    "count the lines in file",
 			},
 		},
 		{
@@ -398,7 +397,6 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 				m.input.SetValue("/")
 				m.slashHide = false
 			}
-			m.agentPeek = !tc.card && !tc.dialog
 			if tc.dialog {
 				m = m.openModelDialog()
 			}

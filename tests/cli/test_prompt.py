@@ -28,6 +28,7 @@ def run_prompt(
     script: str = "echo",
     input_text: str | None = None,
     timeout: float = 10,
+    json_mode: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = script
@@ -35,10 +36,10 @@ def run_prompt(
     env["CRAZE_CONFIG"] = str(workspace / "missing-craze-config.toml")
     env["XAI_API_KEY"] = ""
     env["GROK_CODE_XAI_API_KEY"] = ""
-    cmd = [
-        str(craze_bin),
-        "prompt",
-        "--json",
+    cmd = [str(craze_bin), "prompt"]
+    if json_mode:
+        cmd.append("--json")
+    cmd += [
         "--agent-bin",
         str(fake_agent_bin),
         "--workspace",
@@ -253,3 +254,105 @@ def test_usage_exit_2(craze_bin: Path, tmp_path: Path) -> None:
     assert proc.returncode == 2
     assert "prompt text required" in proc.stderr
     assert proc.stdout == ""
+
+
+def _lifecycle(events: list[dict], agent_id: str | None = None) -> list[str]:
+    out = []
+    for e in events:
+        if e.get("type") != "subagent":
+            continue
+        if agent_id is not None and e.get("id") != agent_id:
+            continue
+        out.append(e.get("event"))
+    return out
+
+
+def test_grok_subagent_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin, fake_agent_bin, tmp_path, "--provider", "grok", "go", script="grok-subagent"
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    life = _lifecycle(events, "sub-1")
+    assert "spawned" in life and "progress" in life and "finished" in life
+    assert life.index("spawned") < life.index("progress") < life.index("finished")
+    users = [e for e in events if e.get("type") == "user" and e.get("agent") == "sub-1"]
+    assert users
+    child_text = [e for e in events if e.get("type") == "text" and e.get("agent") == "sub-1"]
+    assert child_text
+    assert any(e.get("type") == "done" for e in events)
+    assert any(e.get("type") == "subagent" and e.get("event") == "finished" for e in events)
+
+
+def test_grok_subagent_late_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin, fake_agent_bin, tmp_path, "--provider", "grok", "go", script="grok-subagent-late"
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    assert any(e.get("type") == "done" for e in events)
+    assert any(e.get("type") == "subagent" and e.get("event") == "finished" for e in events)
+
+
+def test_grok_subagent_cancel_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["CRAZE_FAKE_SCRIPT"] = "grok-subagent-cancel"
+    env.pop("CRAZE_PROVIDER", None)
+    env["CRAZE_CONFIG"] = str(tmp_path / "missing-craze-config.toml")
+    env["XAI_API_KEY"] = ""
+    env["GROK_CODE_XAI_API_KEY"] = ""
+    proc = subprocess.Popen(
+        [
+            str(craze_bin),
+            "prompt",
+            "--json",
+            "--provider",
+            "grok",
+            "--agent-bin",
+            str(fake_agent_bin),
+            "--workspace",
+            str(tmp_path),
+            "go",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    time.sleep(0.5)
+    proc.send_signal(signal.SIGINT)
+    stdout, stderr = proc.communicate(timeout=10)
+    assert proc.returncode != 0, stdout + stderr
+    events = parse_events(stdout)
+    finished = [e for e in events if e.get("type") == "subagent" and e.get("event") == "finished"]
+    assert finished, events
+    assert finished[-1].get("status") == "cancelled"
+
+
+def test_prompt_json_task_subagent(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(craze_bin, fake_agent_bin, tmp_path, "go", script="task")
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    life = _lifecycle(events)
+    assert life.index("spawned") < life.index("progress") < life.index("finished"), life
+    tools = [e for e in events if e.get("type") == "tool" and e.get("task")]
+    assert tools
+    assert tools[-1]["task"].get("status") == "completed"
+
+
+def test_plain_prompt_excludes_child_text(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--provider",
+        "grok",
+        "go",
+        script="grok-subagent",
+        json_mode=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "DONE: main.py README.md" in proc.stdout
+    assert "Listing files." not in proc.stdout

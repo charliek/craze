@@ -40,7 +40,7 @@ func taskTool(id, desc, status string) agent.ToolEvent {
 		ToolName: "task",
 		Title:    "Task: " + desc,
 		Status:   status,
-		Task:     &agent.TaskInfo{Description: desc, Prompt: "peek prompt for " + id},
+		Task:     &agent.TaskInfo{Description: desc, Prompt: "prompt for " + id},
 	}
 }
 
@@ -48,7 +48,7 @@ func finishedTaskTool(id, desc string) agent.ToolEvent {
 	t := taskTool(id, desc, "completed")
 	t.Task = &agent.TaskInfo{
 		Description: desc,
-		Prompt:      "peek prompt for " + id,
+		Prompt:      "prompt for " + id,
 		DurationMs:  8010,
 		Model:       "cursor-grok-4.6-high-fast",
 		Receipt:     true,
@@ -167,39 +167,61 @@ func TestAgentPeekEnterEsc(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
 	m.input.SetValue("")
-	// Settle the tick chain first, so a returned command means the handler's
-	// own command and not the batched tick.
 	m = poke(t, m)
 
+	// Enter with the keyboard in the composer is the composer's: an empty
+	// draft sends nothing and opens nothing.
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
+	if cmd != nil || m.viewing != "" {
+		t.Fatalf("enter in the composer opened %q (cmd %v)", m.viewing, cmd != nil)
+	}
+	// ↓ moves the keyboard to the rows; the composer loses its cursor.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if !m.agentFocus || m.input.Focused() {
+		t.Fatalf("down: rows focused %v, composer focused %v", m.agentFocus, m.input.Focused())
+	}
+	tm, cmd = m.Update(enter())
+	m = tm.(Model)
 	if cmd != nil {
-		t.Fatal("enter on an empty composer peeks, it does not send")
+		t.Fatal("enter on a focused row opens the view, it does not send")
 	}
-	if !m.agentPeek {
-		t.Fatal("expected a peek")
+	if m.viewing != "task-1" {
+		t.Fatalf("viewing %q, want task-1", m.viewing)
 	}
-	below, ok := belowComposer(plainView(m))
-	if !ok {
-		t.Fatalf("composer/status missing:\n%s", plainView(m))
+	if m.status != statusWorking {
+		t.Fatalf("entering must not cancel the turn: %s", m.status)
 	}
-	if !strings.Contains(below, "peek prompt for task-1") {
-		t.Fatalf("the peek shows the sub-agent's prompt, between composer and status:\n%s", below)
+	view := plainView(m)
+	if !strings.Contains(view, "esc to return") {
+		t.Fatalf("missing the banner:\n%s", view)
+	}
+	if !strings.Contains(view, "prompt for task-1") {
+		t.Fatalf("the receipt view shows the prompt:\n%s", view)
 	}
 
 	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
-	if m.agentPeek {
-		t.Fatal("esc should close the peek")
+	if m.viewing != "" {
+		t.Fatal("esc should leave the view")
 	}
 	if cmd != nil {
-		t.Fatal("esc on a peek must not cancel the turn")
+		t.Fatal("esc on the view must not cancel the turn")
 	}
 	if m.status != statusWorking {
 		t.Fatalf("status %s, want working", m.status)
 	}
-	if below, _ := belowComposer(plainView(m)); strings.Contains(below, "peek prompt") {
-		t.Fatalf("the peek is still drawn:\n%s", below)
+	// Back from the view the keyboard is still on the rows, marking the row
+	// the view came from; Esc there returns it to the composer without
+	// cancelling anything.
+	if !m.agentFocus || m.input.Focused() {
+		t.Fatal("leaving the view should keep the keyboard on the rows")
+	}
+	tm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.agentFocus || !m.input.Focused() || cmd != nil || m.status != statusWorking {
+		t.Fatalf("esc on the rows: focus %v composer %v cmd %v status %s", m.agentFocus, m.input.Focused(), cmd != nil, m.status)
 	}
 }
 
@@ -210,20 +232,48 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 		taskTool("task-a", "job a", "in_progress"),
 		taskTool("task-b", "job b", "in_progress"),
 	})
-	// The most recently updated sub-agent leads the list, and the selection
-	// stays on the first row craze ever saw: task-a, now the second row.
-	if m.agentID != "task-a" || m.agentSel != 1 {
+	// Rows sit in spawn order and the selection starts on the first one.
+	if m.agentID != "task-a" || m.agentSel != 0 {
 		t.Fatalf("selection starts at %q (row %d)", m.agentID, m.agentSel)
 	}
+	if m.agentFocus || !m.input.Focused() {
+		t.Fatal("the keyboard starts in the composer")
+	}
+	// The first ↓ only moves the keyboard to the rows (the mark appears on
+	// the row the selection already sits on); the next one moves the mark.
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if !m.agentFocus || m.agentID != "task-a" {
+		t.Fatalf("first down: focus %v, selected %q", m.agentFocus, m.agentID)
+	}
+	if !strings.Contains(plainView(m), "❯ ○ task  job a") {
+		t.Fatalf("the focused row carries the gutter mark:\n%s", plainView(m))
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
 	if m.agentID != "task-b" {
 		t.Fatalf("down selected %q", m.agentID)
+	}
+	// ↓ on the last row stays put: the rows do not wrap.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if m.agentID != "task-b" {
+		t.Fatalf("down on the last row moved to %q", m.agentID)
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = tm.(Model)
 	if m.agentID != "task-a" {
 		t.Fatalf("up selected %q", m.agentID)
+	}
+	// ↑ past the first row hands the keyboard back to the composer and the
+	// mark goes away.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(Model)
+	if m.agentFocus || !m.input.Focused() {
+		t.Fatal("up past the top should return to the composer")
+	}
+	if strings.Contains(plainView(m), "❯ ○") {
+		t.Fatalf("the mark should be gone with the composer focused:\n%s", plainView(m))
 	}
 
 	// ctrl+p / ctrl+n belong to the textarea, not the rows.
@@ -236,42 +286,93 @@ func TestAgentNavArrowsOnlyAndTypingUnaffected(t *testing.T) {
 		t.Fatalf("ctrl+n/ctrl+p moved the selection to %q", m.agentID)
 	}
 
+	// Arrows select rows even while a draft is being typed (user-directed
+	// 2026-09-13), and the draft itself is untouched.
 	m.input.SetValue("hey")
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
-	if m.agentID != sel {
-		t.Fatal("down with composer text must not move the selection")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if m.agentID == sel || m.agentID != "task-b" {
+		t.Fatalf("down with composer text selected %q, want task-b", m.agentID)
+	}
+	if m.input.Value() != "hey" {
+		t.Fatalf("selection stole the draft: %q", m.input.Value())
+	}
+	// Typing hands the keyboard back to the composer and the key lands.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!")})
+	m = tm.(Model)
+	if m.agentFocus || m.input.Value() != "hey!" {
+		t.Fatalf("typing on the rows: focus %v, draft %q", m.agentFocus, m.input.Value())
 	}
 }
 
-func TestAgentKeepsSelectionByIDAcrossAReorder(t *testing.T) {
+func TestAgentOrderIsSpawnOrderAndStable(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	tools := []agent.ToolEvent{
 		taskTool("task-a", "job a", "in_progress"),
 		taskTool("task-b", "job b", "in_progress"),
+		taskTool("task-c", "job c", "in_progress"),
 	}
 	m = applyInFlight(t, m, tools)
-	if m.agentID != "task-a" || m.agentSel != 1 {
-		t.Fatalf("start: %q at row %d", m.agentID, m.agentSel)
+	ids := func() string {
+		var out []string
+		for _, s := range m.agentItems() {
+			out = append(out, s.ID)
+		}
+		return strings.Join(out, ",")
 	}
-
-	// task-a updates, so it moves to the front and the list reorders under the
-	// selection. Selection is by id, so the index has to follow it up a row.
-	stub := m.sess.(*Stub)
-	stub.SetTools(tools)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tools[0]}})
+	if got := ids(); got != "task-a,task-b,task-c" {
+		t.Fatalf("start order %s", got)
+	}
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if m.agentID != "task-b" || m.agentSel != 1 {
+		t.Fatalf("down: %q at row %d", m.agentID, m.agentSel)
+	}
 
-	items := m.agentItems()
-	if len(items) != 2 || items[0].ID != "task-a" {
-		t.Fatalf("expected task-a first after its update, got %+v", items)
+	// Activity on other rows (progress, a child tool, text) must not shuffle
+	// the list under the selection: the user is aiming ↑/↓ at a moving target
+	// otherwise.
+	subs := subagentsFromTools(tools)
+	for _, ev := range []agent.Event{
+		{Type: agent.EventSubagent, Subagent: &subs[2], SubagentChange: agent.SubagentChangeProgress},
+		{Type: agent.EventTool, Agent: "task-c", Tool: &agent.ToolEvent{ID: "c-1", Title: "read", Status: "in_progress"}},
+		{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeProgress},
+		{Type: agent.EventText, Agent: "task-a", Text: "hi"},
+	} {
+		tm, _ = m.Update(eventMsg{ev})
+		m = tm.(Model)
 	}
-	if m.agentID != "task-a" {
-		t.Fatalf("selection jumped to %q", m.agentID)
+	if got := ids(); got != "task-a,task-b,task-c" {
+		t.Fatalf("activity reordered the rows: %s", got)
 	}
-	if m.agentSel != 0 || items[m.agentSel].ID != "task-a" {
-		t.Fatalf("index %d points at %q", m.agentSel, items[m.agentSel].ID)
+	if m.agentID != "task-b" || m.agentSel != 1 {
+		t.Fatalf("selection moved: %q at row %d", m.agentID, m.agentSel)
+	}
+
+	// A finished row keeps its slot while it lingers, then the rows below
+	// close up and the selection follows its id, not its index.
+	done := subs[0]
+	done.Status = agent.SubagentCompleted
+	stub := m.sess.(*Stub)
+	stub.SetSubagents([]agent.SubagentInfo{done, subs[1], subs[2]})
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
+	m = tm.(Model)
+	if got := ids(); got != "task-a,task-b,task-c" {
+		t.Fatalf("finish reordered the rows: %s", got)
+	}
+	now = now.Add(agentLinger + time.Second)
+	tm, _ = m.Update(tickMsg{})
+	m = tm.(Model)
+	if got := ids(); got != "task-b,task-c" {
+		t.Fatalf("after the linger: %s", got)
+	}
+	if m.agentID != "task-b" || m.agentSel != 0 {
+		t.Fatalf("selection after the linger: %q at row %d", m.agentID, m.agentSel)
 	}
 }
 
@@ -341,16 +442,11 @@ func TestAgentSelectionNeverLeavesTheVisibleRows(t *testing.T) {
 		t.Fatalf("the arrows reached %d of %d drawn rows", len(seen), agentRowsMax)
 	}
 
-	// And the peek shows the row the frame highlights.
 	m.input.SetValue("")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	below, ok := belowComposer(plainView(m))
-	if !ok {
-		t.Fatalf("composer/status missing:\n%s", plainView(m))
-	}
-	if !strings.Contains(below, "peek prompt for "+m.agentID) {
-		t.Fatalf("peek is not the highlighted row %q:\n%s", m.agentID, below)
+	if m.viewing == "" || !visible[m.viewing] {
+		t.Fatalf("enter opened %q, which is not on screen (visible %v)", m.viewing, visible)
 	}
 	rows := rowsOf(t, m)
 	if !strings.Contains(rows, "… +2 more") {
@@ -384,10 +480,7 @@ func TestDegradationShrinksTheSelectableRows(t *testing.T) {
 	}
 }
 
-// TestPeekNeverShowsAHiddenSubAgent pins the peek on its own: even handed an
-// out-of-window index it draws a row that is on screen, so the box and the
-// highlight can never name different sub-agents.
-func TestPeekNeverShowsAHiddenSubAgent(t *testing.T) {
+func TestViewedRowPushedPastTheCapStaysVisible(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	tools := make([]agent.ToolEvent, 0, 6)
@@ -398,15 +491,79 @@ func TestPeekNeverShowsAHiddenSubAgent(t *testing.T) {
 
 	all := m.agentItems()
 	hidden := all[len(all)-1]
-	m.agentSel = len(all) - 1
-	m.agentID = hidden.ID
-	m.agentPeek = true
+	m.enterView(hidden.ID)
+	m = poke(t, m)
 
-	peek := plain(m.agentPeekView())
-	if strings.Contains(peek, "peek prompt for "+hidden.ID) {
-		t.Fatalf("the peek shows %q, which is behind the overflow row: %q", hidden.ID, peek)
+	visible := m.visibleAgents()
+	found := false
+	for _, s := range visible {
+		if s.ID == hidden.ID {
+			found = true
+		}
 	}
-	if !strings.Contains(peek, "peek prompt for "+m.visibleAgents()[0].ID) {
-		t.Fatalf("the peek should fall back to the highlighted row: %q", peek)
+	if !found {
+		t.Fatalf("viewed %q is not among the visible rows: %v", hidden.ID, visible)
+	}
+	if m.viewing != hidden.ID {
+		t.Fatalf("viewing %q", m.viewing)
+	}
+}
+
+func TestShortModelNameDropsRoutingPrefixes(t *testing.T) {
+	for in, want := range map[string]string{
+		"grok-4.6":                    "grok-4.6",
+		"cursor-grok-4.6-high-fast":   "grok-4.6-high-fast",
+		"openrouter/gemini-3.8-flash": "gemini-3.8-flash",
+		"":                            "",
+	} {
+		if got := shortModelName(in); got != want {
+			t.Errorf("shortModelName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFinishSeenInASnapshotBeforeItsEventKeepsTheRow(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	tools := []agent.ToolEvent{
+		taskTool("task-a", "job a", "in_progress"),
+		taskTool("task-b", "job b", "in_progress"),
+	}
+	m = applyInFlight(t, m, tools)
+	if m.agentID != "task-a" || m.agentSel != 0 {
+		t.Fatalf("start: %q at row %d", m.agentID, m.agentSel)
+	}
+
+	// The session settles task-a and re-emits its spawn tool; the snapshot
+	// already says completed when that tool event lands, one Update before
+	// the finished event does.
+	subs := subagentsFromTools(tools)
+	done := subs[0]
+	done.Status = agent.SubagentCompleted
+	stub := m.sess.(*Stub)
+	stub.SetSubagents([]agent.SubagentInfo{done, subs[1]})
+	settled := finishedTaskTool("task-a", "job a")
+	stub.SetTools([]agent.ToolEvent{settled, tools[1]})
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &settled}})
+	m = tm.(Model)
+	items := m.agentItems()
+	if len(items) != 2 || items[0].ID != "task-a" {
+		t.Fatalf("the finished row left the band before its event: %+v", items)
+	}
+	if m.agentID != "task-a" || m.agentSel != 0 {
+		t.Fatalf("selection moved: %q at row %d", m.agentID, m.agentSel)
+	}
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
+	m = tm.(Model)
+	if m.agentID != "task-a" || m.agentSel != 0 {
+		t.Fatalf("selection after finished: %q at row %d", m.agentID, m.agentSel)
+	}
+	// Enter opens the row the mark is on.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = tm.(Model)
+	if m.viewing != "task-a" {
+		t.Fatalf("enter opened %q", m.viewing)
 	}
 }

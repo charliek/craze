@@ -96,23 +96,19 @@ type Model struct {
 	// elapsed counts from.
 	sessStart time.Time
 
-	entries  []entry
+	// main is the session transcript. cur() returns the viewed sub-agent
+	// transcript when viewing != "", otherwise main.
+	main      transcript
+	subs      map[string]*transcript
+	viewing   string
+	tombstone *agent.SubagentInfo
+
 	expanded bool
-	trimmed  bool
-	renders  int
 	width    int
 	height   int
 	ready    bool
 	quitting bool
 	started  bool
-
-	// transcriptRows is exactly what setViewportContent handed the viewport,
-	// and transcriptPlain is the same rows stripped and right-trimmed. The
-	// selection, the highlight and the copy all read these rather than
-	// vp.View(), so a selection whose anchor has scrolled off the screen still
-	// knows what it holds.
-	transcriptRows  []string
-	transcriptPlain []string
 
 	// mouseEnabled is --no-mouse kept on the model: the flag decides what
 	// bubbletea reports, and this decides what craze does with a mouse message
@@ -170,10 +166,9 @@ type Model struct {
 	themeNames []string
 	themePrev  Theme
 
-	slashSel   int
-	slashHide  bool
-	skills     []slashItem
-	streamOpen bool
+	slashSel  int
+	slashHide bool
+	skills    []slashItem
 
 	pickingProvider bool
 	providerLocked  bool
@@ -184,19 +179,19 @@ type Model struct {
 	providerDefault agent.Provider
 	newSession      func(agent.Provider) agent.Session
 
-	toolLine    map[string]int
-	toolTouch   []string
-	pathDirs    map[string]map[string]struct{}
 	todoPlanned int
 	todoDone    bool
 
-	// Agent rows: the selection is held by tool id because the in-flight list
-	// reorders on every update.
+	// Agent rows: the selection is held by sub-agent id so it survives a row
+	// leaving the band (finish, linger, eviction) above or below it.
 	agentSel   int
 	agentID    string
-	agentPeek  bool
 	agentStart map[string]time.Time
 	agentDone  map[string]time.Time
+	// agentFocus is true while ↑/↓ have moved the keyboard from the composer
+	// to the rows: the selected row carries the gutter mark and Enter opens
+	// it. Any other key hands the keyboard back to the composer.
+	agentFocus bool
 
 	tasksState    tasksPanelState
 	todosSeen     bool
@@ -416,9 +411,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return tm, cmd
 	}
+	// Mutation only marks the transcript dirty. Paint the drawn one here so a
+	// background transcript (U3b) never moves m.vp.
+	if next.cur().dirty {
+		next.refreshViewport()
+	}
 	// The handler has already decided where the transcript sits: sticking now
 	// only follows it down when the chrome above it changed shape.
 	next.relayout(next.vp.Height == 0 || next.vp.AtBottom())
+	next.storeViewport(next.cur())
 	// The tick chain is batched last, so a test can run the handler's own
 	// command without waiting out a timer.
 	if tick := next.armTick(); tick != nil {
@@ -518,7 +519,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
 		// keyboard is by the time the text arrives.
-		if msg.text == "" || m.cardOpen() || m.dialogOpen() {
+		if msg.text == "" || m.cardOpen() || m.dialogOpen() || m.viewing != "" {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -716,10 +717,11 @@ func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
 // the gesture's whole answer.
 func (m Model) selectWord(pos cellPos) Model {
 	m.sel = selection{}
-	if pos.line >= len(m.transcriptPlain) {
+	plain := m.cur().transcriptPlain
+	if pos.line >= len(plain) {
 		return m
 	}
-	lo, hi, ok := wordAt(m.transcriptPlain[pos.line], pos.col)
+	lo, hi, ok := wordAt(plain[pos.line], pos.col)
 	if !ok {
 		return m
 	}
@@ -752,8 +754,9 @@ func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
 	if !m.sel.empty() {
 		return m.copySelection()
 	}
-	for i := len(m.entries) - 1; i >= 0; i-- {
-		if e := &m.entries[i]; e.kind == entryAssistant && e.text != "" {
+	entries := m.cur().entries
+	for i := len(entries) - 1; i >= 0; i-- {
+		if e := &entries[i]; e.kind == entryAssistant && e.text != "" {
 			return m, copyText(e.text, "copied last reply")
 		}
 	}
@@ -791,6 +794,10 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		if lay.Region(regionTasks).Row(y) == 0 {
 			return m.cycleTasks()
 		}
+	case lay.Region(regionComposer).Contains(y):
+		if m.viewing != "" && lay.Region(regionComposer).Row(y) == 1 {
+			m.leaveView()
+		}
 	case lay.Region(regionAgents).Contains(y):
 		// The last row can be "… +n more", which is not a sub-agent.
 		m.selectAgent(lay.Region(regionAgents).Row(y))
@@ -818,6 +825,9 @@ func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
 			return m.openModelDialog(), nil
 		}
 	case 1:
+		if m.viewing != "" {
+			return m, nil
+		}
 		_, spans := m.statusRow2(lay)
 		if spanAt(spans, x) == spanMode {
 			return m.cycleMode()
@@ -877,6 +887,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProviderDialogKey(msg)
 	}
 
+	if m.viewing != "" {
+		return m.handleViewKey(msg)
+	}
+
 	if msg.Type == tea.KeyCtrlY {
 		// A keyboard feature, so it works under --no-mouse as well.
 		return m.copySelectionOrLastReply()
@@ -896,12 +910,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyShiftTab {
 		return m.cycleMode()
 	}
-	if msg.Type == tea.KeyEsc {
-		if m.agentPeek {
-			// The peek closes on its own; the turn underneath keeps running.
-			m.agentPeek = false
+	if m.agentFocus {
+		handled, next := m.handleRowsKey(msg)
+		m = next
+		if handled {
 			return m, nil
 		}
+	}
+	if msg.Type == tea.KeyEsc {
 		if m.slashMenuOpen() {
 			m.slashHide = true
 			m.slashSel = 0
@@ -946,19 +962,75 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Only the arrow keys select a row; ctrl+p / ctrl+n stay with the textarea.
-	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
-		delta := 1
-		if msg.Type == tea.KeyUp {
-			delta = -1
-		}
-		m.moveAgent(delta)
+	// Only the arrow keys move the keyboard to the rows, empty composer or
+	// not — a user typing a follow-up still browses sub-agents; ctrl+p /
+	// ctrl+n stay with the textarea.
+	if len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
+		m.focusRows()
 		return m, nil
 	}
 	return m, m.updateComposer(msg)
 }
 
+// focusRows moves the keyboard from the composer to the sub-agent rows: the
+// composer loses its cursor and the selected row gains the gutter mark. The
+// selection itself does not move, so ↓ from the composer lands where the
+// user last was (the first row to begin with).
+func (m *Model) focusRows() {
+	m.agentFocus = true
+	m.input.Blur()
+}
+
+// focusComposer hands the keyboard back to the composer.
+func (m *Model) focusComposer() {
+	m.agentFocus = false
+	_ = m.input.Focus()
+}
+
+// handleRowsKey is the keyboard while the rows have it. ↑ past the first row,
+// Esc and any key that is not a row key return to the composer; that key is
+// then handled as usual (handled == false), so typing never needs a second
+// press.
+func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
+	items := m.visibleAgents()
+	if len(items) == 0 {
+		m.focusComposer()
+		return false, m
+	}
+	switch msg.Type {
+	case tea.KeyUp:
+		if m.agentSel <= 0 {
+			m.focusComposer()
+		} else {
+			m.moveAgent(-1)
+		}
+		return true, m
+	case tea.KeyDown:
+		if m.agentSel < len(items)-1 {
+			m.moveAgent(1)
+		}
+		return true, m
+	case tea.KeyEnter:
+		if m.agentID != "" {
+			m.enterView(m.agentID)
+		} else {
+			m.selectAgent(m.agentSelection(len(items)))
+		}
+		return true, m
+	case tea.KeyEsc:
+		m.focusComposer()
+		return true, m
+	}
+	m.focusComposer()
+	return false, m
+}
+
 func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
+	// A blurred textarea drops every key, so whatever took the cursor away
+	// (Esc on an idle turn, the rows) gives it back before the key lands.
+	if !m.input.Focused() {
+		_ = m.input.Focus()
+	}
 	prev := m.input.Value()
 	// bubbles repositions its own viewport inside Update (textarea.go:1087),
 	// against the height in force *before* the key, and never rewinds slack
@@ -1002,16 +1074,12 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if ok && name == "exit" {
 		return m.runBuiltin(name, args)
 	}
-	// The offer outranks the peek: an empty composer under a live offer means
-	// "build it", and the peek is still there for an empty composer without
-	// one. The test is Value()=="" and not composerEmpty, so Enter agrees with
-	// the placeholder the user is looking at.
+	// The offer outranks the sub-agent rows: an empty composer under a live
+	// offer means "build it", and the rows stay reachable for an empty
+	// composer without one. The test is Value()=="" and not composerEmpty,
+	// so Enter agrees with the placeholder the user is looking at.
 	if m.planOffering() && m.input.Value() == "" {
 		return m.implementPlan()
-	}
-	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 {
-		m.agentPeek = true
-		return m, nil
 	}
 	if m.cardOpen() || m.status == statusWorking || !m.started {
 		return m, nil
@@ -1136,6 +1204,9 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 // while the session is still in plan mode, so the prompt is only written once
 // SetMode has come back, and a SetMode that fails sends nothing at all.
 func (m Model) implementPlan() (tea.Model, tea.Cmd) {
+	if m.viewing != "" {
+		return m, nil
+	}
 	id := m.implementModeID()
 	if id == "" {
 		return m, nil
@@ -1197,10 +1268,20 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
+	if ev.Type == agent.EventSubagent {
+		m.applySubagentEvent(ev)
+		return
+	}
+	if ev.Agent != "" {
+		m.applyChildEvent(ev)
+		return
+	}
 	// The spinner names what the turn is doing; only a thought chunk leaves it
 	// on "Thinking…".
 	m.lastThought = ev.Type == agent.EventThought
 	switch ev.Type {
+	case agent.EventUser:
+		return
 	case agent.EventText:
 		if ev.Text != "" {
 			// Only a chunk that says something is evidence: appendStream drops
@@ -1214,8 +1295,6 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case agent.EventTool:
 		m.refreshSnap()
 		if ev.Tool != nil {
-			m.noteToolUpdate(ev.Tool.ID)
-			m.noteAgentTiming(ev.Tool)
 			m.upsertTool(ev.Tool)
 		}
 	case agent.EventTodos:
@@ -1316,6 +1395,18 @@ func (m *Model) refreshSnap() {
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}
+	// Stamp the rows on first sight in a snapshot, not only on the lifecycle
+	// event: a tool re-emit can carry a finished status one Update ahead of
+	// the `finished` event, and a finished row without its stamp would drop
+	// out of the band for that frame and move the selection under the user.
+	for i := range m.snap.Subagents {
+		s := &m.snap.Subagents[i]
+		if subagentTerminal(*s) {
+			m.noteAgentDone(s.ID)
+		} else {
+			m.noteAgentStart(s.ID)
+		}
+	}
 }
 
 // View places the regions the layout decided, each forced to exactly its own
@@ -1360,7 +1451,7 @@ func (m Model) View() string {
 // A card outranks it (§3.11): the menu it did not close is suspended — kept in
 // state, not drawn — until it has been answered.
 func (m Model) overlayView() string {
-	if m.cardOpen() || !m.slashMenuOpen() {
+	if m.cardOpen() || m.viewing != "" || !m.slashMenuOpen() {
 		return ""
 	}
 	return m.slashMenuView()

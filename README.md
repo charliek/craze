@@ -79,16 +79,18 @@ leaves a usable craze, so quitting out of one is an ordinary exit 0.
 |---|---|
 | `Enter` | send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | close a peek, then the slash menu, then a dialog (`/help` included); answer the card on top; otherwise cancel the running turn (the transcript says `cancelled`) |
-| `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error |
+| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
+| `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
-| `Shift+Tab` | cycle the ACP mode (agent / plan / ask) |
+| `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
-| `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) |
-| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`) |
-| `↑` `↓` | with an empty composer, select a sub-agent row; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
-| `Enter` on a selected sub-agent | peek at its prompt; `Esc` closes the peek without cancelling the turn |
+| `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
+| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
+| `↑` `↓` | move the keyboard from the composer to the sub-agent rows (draft or not) and then between them: the selected row carries a `❯` gutter mark and the composer loses its cursor; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
+| `Enter` while the rows have the keyboard | open it in the main area, read-only: its own transcript on Grok, what the task receipt carried on Cursor |
+| `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
+| `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
 | `Tab` | complete the slash command being typed |
 
@@ -144,8 +146,8 @@ transcript. An explicit `--theme` beats the config file, which beats
 Mouse reporting is on by default. The wheel scrolls the transcript three lines
 per notch. A left click picks a row in the model or theme dialog, cycles the
 tasks panel from its header, cycles the mode from the `◆ agent` chip in status
-row 2, opens the model dialog from the model name in status row 1, or selects a
-sub-agent row.
+row 2, opens the model dialog from the model name in status row 1, or opens a
+sub-agent row; inside the sub-agent view, a click on the banner returns.
 
 Dragging over the transcript draws a selection and copies it on release; a
 double-click selects the word under the pointer. The status row says `copied 2
@@ -232,9 +234,10 @@ PTY). Everything uses `craze-fake-agent`, so no Cursor credentials are needed.
 
 `tests/cli/tmux_smoke.py` is the tmux smoke layer: it drives the real binary in
 a real terminal at 100x30 and 80x24, one run per case: every fake script, plus
-cases for the model dialog and for a real mouse drag. It is opt-in and
-never runs in CI — pytest only collects it when it is named explicitly, and it
-skips unless `tmux` is on PATH and `CRAZE_TMUX` is set.
+cases for the model dialog, the sub-agent view (both providers), and a real
+mouse drag. It is opt-in and never runs in CI — pytest only collects it when it
+is named explicitly, and it skips unless `tmux` is on PATH and `CRAZE_TMUX` is
+set.
 
 ```shell
 cd tests/cli && CRAZE_TMUX=1 uv run pytest -v tmux_smoke.py

@@ -136,7 +136,7 @@ func TestSpinnerVisibilityAndText(t *testing.T) {
 		t.Fatalf("activity %q", got)
 	}
 
-	task := agent.ToolEvent{ID: "task-1", Kind: "other", ToolName: "task", Title: "Task: count", Status: "in_progress"}
+	task := agent.ToolEvent{ID: "task-1", Kind: "other", ToolName: "task", Title: "Task: count", Status: "in_progress", Task: &agent.TaskInfo{Description: "count"}}
 	m = applyInFlight(t, m, []agent.ToolEvent{tool, task})
 	if got := m.spinnerActivity(); got != "Waiting for 1 sub-agent" {
 		t.Fatalf("a sub-agent wins: %q", got)

@@ -27,4 +27,4 @@ done task
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ cursor │ Default (medium) │ 0m                                                                 
 ◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
-✓ task  Count main.go lines  8.0s · grok-4.6-high-fast                                              
+  ✓ task  Count main.go lines  8.0s · grok-4.6-high-fast                                            

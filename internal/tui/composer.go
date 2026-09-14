@@ -101,14 +101,6 @@ func composerPrompt(line int) string {
 	return "  "
 }
 
-// composerEmpty is "nothing worth sending". It is deliberately not the rule
-// the textarea draws its own placeholder by — that is Value()=="" with the
-// cursor at 0,0 (textarea.go:1094) — so anything that has to agree with what
-// is on screen has to test Value() and not this.
-func composerEmpty(ta textarea.Model) bool {
-	return strings.TrimSpace(ta.Value()) == ""
-}
-
 func isNewlineKey(msg tea.KeyMsg) bool {
 	s := msg.String()
 	return s == "shift+enter" || s == "alt+enter" || msg.Type == tea.KeyCtrlJ
@@ -118,18 +110,6 @@ func isNewlineKey(msg tea.KeyMsg) bool {
 // SetWidth leaves the textarea after the prompt (textarea.go:892).
 func (m Model) composerInner() int {
 	return max(1, m.width-composerPromptW)
-}
-
-// composerRows is how many display rows the whole draft occupies. It is
-// uncapped: the textarea is given every one of them so its own cursor
-// bookkeeping never has to scroll, and composerView windows onto the result.
-func (m Model) composerRows() int {
-	inner := m.composerInner()
-	rows := 0
-	for _, ln := range strings.Split(m.input.Value(), "\n") {
-		rows += wrapRows(ln, inner)
-	}
-	return max(rows, 1)
 }
 
 // composerCursorRow is the cursor's row in the same coordinates: the rows the
@@ -220,6 +200,9 @@ func (m Model) composerTitle() string {
 // of the band is the first row of the draft until the cursor pushes past the
 // bottom, which is what keeps the `❯` on screen.
 func (m Model) composerView(lay frameLayout) string {
+	if m.viewing != "" {
+		return m.subagentComposerView()
+	}
 	if p := m.planPlaceholder(); p != "" {
 		// m is a copy, so this swaps the placeholder for this frame only.
 		m.input.Placeholder = p

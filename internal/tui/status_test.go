@@ -117,8 +117,11 @@ func TestStatusRow2CountsInFlightWorkByKind(t *testing.T) {
 		{ID: "ed-1", Kind: "edit", Status: "pending"},
 		{ID: "sh-2", Kind: "execute", Status: "completed"},
 		{ID: "td-1", Kind: "other", ToolName: "updateTodos", Title: "Update TODOs", Status: "in_progress"},
-		{ID: "tk-1", Kind: "other", ToolName: "task", Title: "Task: research", Status: "in_progress"},
+		{ID: "tk-1", Kind: "other", ToolName: "task", Title: "Task: research", Status: "in_progress", Task: &agent.TaskInfo{Description: "research"}},
 	}
+	m.snap.Subagents = []agent.SubagentInfo{{
+		ID: "tk-1", Status: agent.SubagentRunning, Description: "research",
+	}}
 	if got, want := m.inFlightCounts(), "1 shell, 2 reads, 1 edit"; got != want {
 		t.Fatalf("counts %q, want %q", got, want)
 	}
@@ -138,8 +141,11 @@ func TestStatusRow2DropOrder(t *testing.T) {
 	m := statusFixture(t)
 	m.snap.Tools = []agent.ToolEvent{
 		{ID: "sh-1", Kind: "execute", Status: "in_progress"},
-		{ID: "tk-1", Kind: "other", ToolName: "task", Title: "Task: research", Status: "in_progress"},
+		{ID: "tk-1", Kind: "other", ToolName: "task", Title: "Task: research", Status: "in_progress", Task: &agent.TaskInfo{Description: "research"}},
 	}
+	m.snap.Subagents = []agent.SubagentInfo{{
+		ID: "tk-1", Status: agent.SubagentRunning, Description: "research",
+	}}
 	chip := modeChipAgent + statusDot + chipYolo
 	for _, tc := range []struct {
 		cols int

@@ -28,14 +28,22 @@ type Client struct {
 	// turn counts prompts. It is the identity of a turn: a blocking request
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
-	turn           int
-	permHandler    func(turn int, req PermissionRequest) PermissionDecision
-	askHandler     func(turn int, req AskQuestionRequest) AskDecision
-	planHandler    func(turn int, req CreatePlanRequest) PlanDecision
-	todosHandler   func(UpdateTodosRequest) []TodoItem
-	taskHandler    func(TaskRequest)
-	onUpdate       func(SessionNotification)
-	pendingUpdates []SessionNotification
+	turn            int
+	permHandler     func(turn int, req PermissionRequest) PermissionDecision
+	askHandler      func(turn int, req AskQuestionRequest) AskDecision
+	planHandler     func(turn int, req CreatePlanRequest) PlanDecision
+	todosHandler    func(UpdateTodosRequest) []TodoItem
+	taskHandler     func(TaskRequest)
+	onUpdate        func(SessionNotification)
+	subagentHandler func(SubagentNotification)
+	pendingUpdates  []SessionNotification
+	// children is the routed-child allowlist, in registration order. A
+	// subagent_spawned registers its child_session_id; subagent_finished
+	// deregisters after the handler ran. The 65th concurrent registration
+	// is refused, never evicting a registered child.
+	children   map[string]struct{}
+	childOrder []string
+	dropped    int64
 
 	incomingMu sync.Mutex
 	incoming   map[string]*pendingReq
@@ -137,6 +145,63 @@ func (c *Client) SetTodosHandler(h func(UpdateTodosRequest) []TodoItem) {
 	c.mu.Unlock()
 }
 
+// childRouteCap bounds concurrently routed children. A 65th registration is
+// refused (dropped and counted); no registered child is ever evicted.
+const childRouteCap = 64
+
+// SetSubagentHandler installs the subagent lifecycle handler. It runs on the
+// read goroutine in wire order; it must not go async.
+func (c *Client) SetSubagentHandler(h func(SubagentNotification)) {
+	c.mu.Lock()
+	c.subagentHandler = h
+	c.mu.Unlock()
+}
+
+// DroppedUpdates counts updates dropped by the child router: unknown or
+// unregistered session ids, refused registrations, and malformed lifecycle
+// notifications.
+func (c *Client) DroppedUpdates() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dropped
+}
+
+// registerChild records a routed child. Re-registering a known id keeps its
+// original order slot. A new id past the cap is refused.
+func (c *Client) registerChild(id string) bool {
+	if _, ok := c.children[id]; ok {
+		return true
+	}
+	if len(c.childOrder) >= childRouteCap {
+		c.dropped++
+		return false
+	}
+	if c.children == nil {
+		c.children = make(map[string]struct{})
+	}
+	c.children[id] = struct{}{}
+	c.childOrder = append(c.childOrder, id)
+	return true
+}
+
+func (c *Client) deregisterChild(id string) {
+	if _, ok := c.children[id]; !ok {
+		return
+	}
+	delete(c.children, id)
+	for i, v := range c.childOrder {
+		if v == id {
+			c.childOrder = append(c.childOrder[:i], c.childOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+func (c *Client) isChildLocked(id string) bool {
+	_, ok := c.children[id]
+	return ok
+}
+
 // SetTaskHandler installs a cursor/task receipt handler.
 func (c *Client) SetTaskHandler(h func(TaskRequest)) {
 	c.mu.Lock()
@@ -182,9 +247,17 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	c.sessionID = result.SessionID
 	pending := c.pendingUpdates
 	c.pendingUpdates = nil
+	// A new session does not inherit the previous session's child
+	// allowlist: those ids belong to a session that is gone.
+	c.children = nil
+	c.childOrder = nil
 	h := c.onUpdate
 	c.mu.Unlock()
-	flushSessionUpdates(result.SessionID, pending, h)
+	if dropped := flushSessionUpdates(result.SessionID, pending, h); dropped > 0 {
+		c.mu.Lock()
+		c.dropped += dropped
+		c.mu.Unlock()
+	}
 	return &result, nil
 }
 
@@ -502,6 +575,10 @@ func (c *Client) onNotify(msg *Message) {
 		}
 	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped:
 		c.handlePromptComplete(msg)
+	case MethodGrokSessionNotification, MethodGrokSessionNotificationWrapped:
+		if c.Dialect() == DialectGrok {
+			c.handleSubagentNotification(msg)
+		}
 	}
 }
 
@@ -546,18 +623,97 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 	if err := json.Unmarshal(msg.Params, &n); err != nil {
 		return
 	}
+	// dialect is written once, before the read loop starts, so the dialect
+	// check and grokToolName's own json.Unmarshal stay off c.mu.
+	if c.dialect == DialectGrok {
+		n.ToolName = grokToolName(n.Update)
+	}
 	c.mu.Lock()
 	if c.sessionID == "" {
+		// Pre-session/new: keep today's active-session filter at flush time.
 		c.pendingUpdates = append(c.pendingUpdates, n)
 		c.mu.Unlock()
 		return
 	}
 	active := c.sessionID
+	routed := n.SessionID == active || c.isChildLocked(n.SessionID)
 	h := c.onUpdate
 	c.mu.Unlock()
-	if n.SessionID != active {
+	if !routed {
+		c.mu.Lock()
+		c.dropped++
+		c.mu.Unlock()
 		return
 	}
+	if n.SessionID != active {
+		n.Child = n.SessionID
+	}
+	if h != nil {
+		h(n)
+	}
+}
+
+// handleSubagentNotification routes one x.ai/session_notification. Spawned
+// registers the child when the outer id is the active session or a
+// registered child; finished deregisters after the handler ran. The handler
+// always runs for a well-formed lifecycle event, even when registration is
+// refused, so a row can still show.
+func (c *Client) handleSubagentNotification(msg *Message) {
+	n, ok, drop := parseSubagentNotification(msg.Params)
+	if !ok {
+		if drop {
+			c.mu.Lock()
+			c.dropped++
+			c.mu.Unlock()
+		}
+		return
+	}
+	c.mu.Lock()
+	active := c.sessionID
+	// Only the active session or a registered child may introduce a new
+	// child, so a spawn is gated on the outer id alone. progress and
+	// finished also route when the child they are about is registered: a
+	// grandchild outlives its own parent child, whose finished already
+	// deregistered the outer id this notification arrives on.
+	outerRouted := active != "" && (n.SessionID == active || c.isChildLocked(n.SessionID))
+	childRouted := active != "" && c.isChildLocked(n.ChildSessionID)
+	parentRouted := outerRouted || childRouted
+	var h func(SubagentNotification)
+	switch n.Kind {
+	case SubagentSpawned:
+		if !outerRouted {
+			c.dropped++
+			c.mu.Unlock()
+			return
+		}
+		// Cap-refuse still delivers the notification so a row can show;
+		// registerChild counts the refusal. The child's stream is not routed.
+		c.registerChild(n.ChildSessionID)
+		h = c.subagentHandler
+	case SubagentFinished:
+		if !parentRouted {
+			c.dropped++
+			c.mu.Unlock()
+			return
+		}
+		h = c.subagentHandler
+		c.mu.Unlock()
+		if h != nil {
+			h(n)
+		}
+		c.mu.Lock()
+		c.deregisterChild(n.ChildSessionID)
+		c.mu.Unlock()
+		return
+	default:
+		if !parentRouted {
+			c.dropped++
+			c.mu.Unlock()
+			return
+		}
+		h = c.subagentHandler
+	}
+	c.mu.Unlock()
 	if h != nil {
 		h(n)
 	}
@@ -608,15 +764,24 @@ func (c *Client) replyInvalidParams(id json.RawMessage, msg string) {
 	_ = c.conn.ReplyErr(id, &RPCError{Code: CodeInvalidParams, Message: msg})
 }
 
-func flushSessionUpdates(sid string, pending []SessionNotification, h func(SessionNotification)) {
-	if h == nil {
-		return
-	}
+// flushSessionUpdates forwards the updates buffered before session/new that
+// belong to the session that came back, and returns how many the
+// active-session filter discarded so the caller can count them as dropped.
+func flushSessionUpdates(sid string, pending []SessionNotification, h func(SessionNotification)) int64 {
+	var dropped int64
 	for _, n := range pending {
-		if n.SessionID == sid {
-			h(n)
+		// Today's active-session filter: only the active session flushes.
+		if n.SessionID != sid {
+			dropped++
+			continue
 		}
+		if h == nil {
+			continue
+		}
+		n.Child = ""
+		h(n)
 	}
+	return dropped
 }
 
 func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {

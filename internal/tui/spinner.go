@@ -51,7 +51,7 @@ func (m *Model) handleTick(msg tickMsg) {
 
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
-		m.agentLingering() || m.copyLingering()
+		m.agentLingering() || m.copyLingering() || m.anySubagentRunning()
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a
@@ -65,7 +65,10 @@ func untilNextMinute(now time.Time) time.Duration {
 }
 
 func (m Model) spinnerVisible() bool {
-	return m.status == statusWorking || m.cardOpen()
+	if m.viewing != "" {
+		return m.viewedRunning() || m.cardOpen()
+	}
+	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning()
 }
 
 // spinnerGlyph is the current frame of the cycle, shared with the merged form
@@ -85,7 +88,13 @@ func (m Model) spinnerView() string {
 			seg{"Waiting for your answer", styleFG(m.theme.Warn)},
 		)
 	}
-	text := m.spinnerActivity() + " · " + m.turnElapsed() + " · esc to interrupt"
+	if m.viewing != "" {
+		return m.subagentSpinnerView()
+	}
+	text := m.spinnerActivity() + " · " + m.spinnerElapsed()
+	if m.status == statusWorking {
+		text += " · esc to interrupt"
+	}
 	return renderSegs(m.width,
 		seg{glyph, styleFG(m.theme.Accent)},
 		seg{sanitizeLine(text), styleFG(m.theme.Dim)},
@@ -129,15 +138,26 @@ func (m Model) spinnerActivity() string {
 			}
 		}
 	}
+	// After end_turn the tools are settled but the children may not be; the
+	// rows are what is still running then.
+	if m.status != statusWorking {
+		running := 0
+		for i := range m.snap.Subagents {
+			if subagentRunning(m.snap.Subagents[i]) {
+				running++
+			}
+		}
+		tasks = max(tasks, running)
+	}
 	switch {
 	case tasks > 0:
 		return fmt.Sprintf("Waiting for %d sub-agent%s", tasks, plural(tasks))
 	case exec > 0:
 		return strings.TrimSpace("Running " + firstNonEmpty(execCmd))
 	case edit > 0:
-		return strings.TrimSpace("Editing " + m.displayPath(editPath))
+		return strings.TrimSpace("Editing " + m.displayPath(&m.main, editPath))
 	case read > 0:
-		return strings.TrimSpace("Reading " + m.displayPath(readPath))
+		return strings.TrimSpace("Reading " + m.displayPath(&m.main, readPath))
 	case m.lastThought:
 		return "Thinking…"
 	}

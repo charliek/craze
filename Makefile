@@ -13,6 +13,8 @@ build:
 
 lint:
 	golangci-lint run
+	@n=$$(go list -f '{{join .Imports "\n"}}' ./internal/tui ./internal/cli | grep -c internal/acp || true); \
+	echo "$$n"; test "$$n" = "0"
 
 test:
 	go test -timeout 5m -v ./...

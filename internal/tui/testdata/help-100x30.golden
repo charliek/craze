@@ -18,9 +18,9 @@
               │  ctrl+t            tasks panel: compact, expanded, hidden            │              
               │  ctrl+g            theme dialog                                      │              
               │  ctrl+o            expand or collapse transcript detail              │              
-              │  enter on a row    peek at a selected sub-agent's prompt             │              
-              │  click the model   model dialog, from status row 1                   │              
-              │selection and clipboard                                              ▼│              
+              │  enter on a row    open a selected sub-agent                         │              
+              │  esc, ←            return from a sub-agent                           │              
+              │  ↑ ↓ pgup pgdn     scroll inside a sub-agent                        ▼│              
               │↑↓ · pgup/pgdn · esc closes                                           │              
               ╰──────────────────────────────────────────────────────────────────────╯              
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─

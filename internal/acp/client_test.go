@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,11 +67,15 @@ func (e *buildError) Unwrap() error { return e.err }
 
 func spawnScript(t *testing.T, script string) *Client {
 	t.Helper()
-	c, err := Spawn(SpawnOptions{
+	opts := SpawnOptions{
 		Binary: fakeAgentPath(t),
 		Args:   []string{"-script=" + script, "--force", "acp"},
 		Stderr: io.Discard,
-	})
+	}
+	if strings.HasPrefix(script, "grok-") {
+		opts.Dialect = DialectGrok
+	}
+	c, err := Spawn(opts)
 	if err != nil {
 		t.Fatal(err)
 	}

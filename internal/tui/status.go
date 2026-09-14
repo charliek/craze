@@ -128,7 +128,7 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 		// Degradation step 6 took the spinner line away; this is all that is
 		// left of it, and it is worth more than any of its neighbours.
 		parts = append(parts, statusPart{
-			text:  m.spinnerGlyph() + " " + m.turnElapsed(),
+			text:  m.mergedSpinnerText(),
 			style: styleFG(m.theme.Accent),
 		})
 	}
@@ -251,8 +251,8 @@ func (m Model) agentCount() string {
 		return ""
 	}
 	n := 0
-	for i := range m.snap.Tools {
-		if t := &m.snap.Tools[i]; toolInFlight(t.Status) && t.IsTask() {
+	for i := range m.snap.Subagents {
+		if subagentRunning(m.snap.Subagents[i]) {
 			n++
 		}
 	}

@@ -16,6 +16,7 @@ func fill(m *Model, n int) {
 	for i := 0; i < n; i++ {
 		m.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("entry %02d padding so the transcript outgrows the viewport", i)})
 	}
+	m.refreshViewport()
 }
 
 func toolEvent(m Model, t *agent.ToolEvent) Model {
@@ -37,18 +38,18 @@ func lastToolRow(t *testing.T, m Model) string {
 func TestStreamChunkRendersExactlyOneEntry(t *testing.T) {
 	m := sized(t)
 	fill(&m, 20)
-	before := m.renders
+	before := m.main.renders
 
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "chunk"}})
 	m = tm.(Model)
-	if got := m.renders - before; got != 1 {
+	if got := m.main.renders - before; got != 1 {
 		t.Fatalf("a new stream entry rendered %d entries, want 1", got)
 	}
 
-	before = m.renders
+	before = m.main.renders
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: " more"}})
 	m = tm.(Model)
-	if got := m.renders - before; got != 1 {
+	if got := m.main.renders - before; got != 1 {
 		t.Fatalf("a stream chunk rendered %d entries, want 1", got)
 	}
 	if !strings.Contains(plainView(m), "chunk more") {
@@ -59,19 +60,19 @@ func TestStreamChunkRendersExactlyOneEntry(t *testing.T) {
 func TestResizeAndCtrlOInvalidateEveryEntry(t *testing.T) {
 	m := sized(t)
 	fill(&m, 5)
-	before := m.renders
+	before := m.main.renders
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
 	m = tm.(Model)
-	if got := m.renders - before; got != 5 {
+	if got := m.main.renders - before; got != 5 {
 		t.Fatalf("resize rendered %d entries, want 5", got)
 	}
-	before = m.renders
+	before = m.main.renders
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	m = tm.(Model)
 	if !m.expanded {
 		t.Fatal("ctrl+o did not toggle")
 	}
-	if got := m.renders - before; got != 5 {
+	if got := m.main.renders - before; got != 5 {
 		t.Fatalf("ctrl+o rendered %d entries, want 5", got)
 	}
 }
@@ -250,7 +251,7 @@ func TestThoughtRunClosesWhenANoteLandsAfterIt(t *testing.T) {
 	if !strings.Contains(view, "+ Thought for 5s") {
 		t.Fatalf("elapsed should freeze where the note landed:\n%s", view)
 	}
-	if m.entries[0].open || m.streamOpen {
+	if m.main.entries[0].open || m.main.streamOpen {
 		t.Fatal("the run should be closed in the model too")
 	}
 }
@@ -277,25 +278,26 @@ func TestToolRowEndsTheThoughtRunAboveIt(t *testing.T) {
 
 func TestEntryCapTrimsWithANote(t *testing.T) {
 	m := sized(t)
-	m.entries = make([]entry, maxEntries)
-	for i := range m.entries {
-		m.entries[i] = entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
+	m.main.entries = make([]entry, maxEntries)
+	for i := range m.main.entries {
+		m.main.entries[i] = entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
 	}
-	m.toolLine = map[string]int{"first": 0, "last": maxEntries - 1}
+	m.main.toolLine = map[string]int{"first": 0, "last": maxEntries - 1}
 	m.appendEntry(entry{kind: entryNote, text: "newest"})
 
-	if len(m.entries) != maxEntries {
-		t.Fatalf("cap not enforced: %d entries", len(m.entries))
+	if len(m.main.entries) != maxEntries {
+		t.Fatalf("cap not enforced: %d entries", len(m.main.entries))
 	}
-	if !m.trimmed {
+	if !m.main.trimmed {
 		t.Fatal("trimming should be recorded")
 	}
-	if _, ok := m.toolLine["first"]; ok {
+	if _, ok := m.main.toolLine["first"]; ok {
 		t.Fatal("a trimmed tool row must be forgotten")
 	}
-	if got := m.toolLine["last"]; got != maxEntries-2 {
+	if got := m.main.toolLine["last"]; got != maxEntries-2 {
 		t.Fatalf("surviving tool row index %d, want %d", got, maxEntries-2)
 	}
+	m.refreshViewport()
 	m.vp.GotoTop()
 	if !strings.Contains(plainView(m), trimmedNote) {
 		t.Fatalf("missing the trim note:\n%s", plainView(m))

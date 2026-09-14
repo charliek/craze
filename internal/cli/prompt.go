@@ -9,10 +9,20 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+)
+
+const (
+	subagentDrainMax = 1500 * time.Millisecond
+	subagentQuiet    = 250 * time.Millisecond
+	// subagentSweepMax bounds the final sweep so a producer that keeps
+	// writing cannot hold the deadline open for ever; it is the session's
+	// event buffer, so one pass empties a full channel.
+	subagentSweepMax = 256
 )
 
 type promptOpts struct {
@@ -65,7 +75,7 @@ func newPromptCmd() *cobra.Command {
 	return cmd
 }
 
-func (o *promptOpts) run() error {
+func (o *promptOpts) run() (retErr error) {
 	if o.ask && o.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")
 	}
@@ -91,7 +101,11 @@ func (o *promptOpts) run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	parent := context.Background()
+	if o.cmd != nil {
+		parent = o.cmd.Context()
+	}
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	prov := resolved.Provider
@@ -122,6 +136,13 @@ func (o *promptOpts) run() error {
 		}
 		return err
 	}
+	defer func() {
+		// A drain write that fails means the JSON on stdout is incomplete;
+		// that is an error even when everything else succeeded.
+		if err := o.drainSubagents(sess); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 	if err := persistProvider(resolved); err != nil {
 		fmt.Fprintf(o.stderr, "craze: not saving the provider: %v\n", err)
 	}
@@ -192,14 +213,8 @@ func (o *promptOpts) runTurn(sess agent.Session, text string, queue *[]string) (
 		if !ok {
 			break
 		}
-		if o.json {
-			if err := encodeEvent(o.stdout, ev); err != nil {
-				return agent.Result{}, rejected, err
-			}
-		} else if ev.Type == agent.EventText {
-			if _, err := io.WriteString(o.stdout, ev.Text); err != nil {
-				return agent.Result{}, rejected, err
-			}
+		if err := o.writeEvent(ev); err != nil {
+			return agent.Result{}, rejected, err
 		}
 		if ev.Type == agent.EventPermission && ev.Permission != nil {
 			r, err := o.answerPermission(sess, ev.Permission, queue)
@@ -223,6 +238,112 @@ func (o *promptOpts) runTurn(sess agent.Session, text string, queue *[]string) (
 	}
 	out := <-ch
 	return out.res, rejected, out.err
+}
+
+func (o *promptOpts) writeEvent(ev agent.Event) error {
+	if o.json {
+		return encodeEvent(o.stdout, ev)
+	}
+	if ev.Type == agent.EventText && ev.Agent == "" {
+		_, err := io.WriteString(o.stdout, ev.Text)
+		return err
+	}
+	return nil
+}
+
+func (o *promptOpts) drainSubagents(sess agent.Session) error {
+	return drainSubagentEvents(sess.Events(), sess.Snapshot, o.writeEvent)
+}
+
+func drainSubagentEvents(events <-chan agent.Event, snapFn func() agent.Snapshot, write func(agent.Event) error) error {
+	if !hasSpawnedSubagent(snapFn()) {
+		return nil
+	}
+	maxTimer := time.NewTimer(subagentDrainMax)
+	defer maxTimer.Stop()
+	var quiet *time.Timer
+	stopQuiet := func() {
+		if quiet == nil {
+			return
+		}
+		if !quiet.Stop() {
+			select {
+			case <-quiet.C:
+			default:
+			}
+		}
+		quiet = nil
+	}
+	defer stopQuiet()
+
+	for {
+		running := hasRunningSubagent(snapFn())
+		var quietC <-chan time.Time
+		if running {
+			stopQuiet()
+		} else {
+			if quiet == nil {
+				quiet = time.NewTimer(subagentQuiet)
+			}
+			quietC = quiet.C
+		}
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return nil
+			}
+			if quiet != nil {
+				if !quiet.Stop() {
+					select {
+					case <-quiet.C:
+					default:
+					}
+				}
+				quiet.Reset(subagentQuiet)
+			}
+			if err := write(ev); err != nil {
+				return err
+			}
+		case <-quietC:
+			return sweepEvents(events, write)
+		case <-maxTimer.C:
+			return sweepEvents(events, write)
+		}
+	}
+}
+
+// sweepEvents writes what is already buffered, without blocking. A deadline
+// and a ready event can both be ready when select runs, and select picks
+// between them at random: without this, a timer could return while the
+// session had already produced lines that stdout never got.
+func sweepEvents(events <-chan agent.Event, write func(agent.Event) error) error {
+	for i := 0; i < subagentSweepMax; i++ {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return nil
+			}
+			if err := write(ev); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+func hasSpawnedSubagent(snap agent.Snapshot) bool {
+	return len(snap.Subagents) > 0
+}
+
+func hasRunningSubagent(snap agent.Snapshot) bool {
+	for _, a := range snap.Subagents {
+		if a.Status == agent.SubagentRunning || a.Status == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *promptOpts) answerPermission(sess agent.Session, perm *agent.PermissionEvent, queue *[]string) (bool, error) {
