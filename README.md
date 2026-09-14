@@ -77,18 +77,20 @@ leaves a usable craze, so quitting out of one is an ordinary exit 0.
 
 | Key | Action |
 |---|---|
-| `Enter` | send |
+| `Enter` | send; queue the draft while a turn is running |
+| `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first) |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
-| `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Ctrl+C` | cancel the running turn and everything queued behind it; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
-| `↑` `↓` | move the keyboard from the composer to the sub-agent rows (draft or not) and then between them: the selected row carries a `❯` gutter mark and the composer loses its cursor; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
-| `Enter` while the rows have the keyboard | open it in the main area, read-only: its own transcript on Grok, what the task receipt carried on Cursor |
+| `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: `↑` reaches the queued messages first and the sub-agent rows when nothing is queued, `↓` the other way round; the selected row carries a `❯` gutter mark; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor |
+| `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only: its own transcript on Grok, what the task receipt carried on Cursor |
+| `Enter` / `Backspace` / `Ctrl+L` on a queued message | edit it in place / cancel it / send it now |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
@@ -101,7 +103,15 @@ bindings, so a message that starts with either is just a message.
 **Shift+Enter is unreliable under bubbletea v1.** Most terminals send a bare
 `Enter` for it, and craze cannot tell the two apart, so it sends the message.
 `Alt+Enter` and `Ctrl+J` are the newline keys that always work; `Shift+Enter`
-is bound as well, for the terminals that do report it distinctly.
+is bound as well, for the terminals that do report it distinctly. `Ctrl+Enter`
+is the same story, which is why the strong send is `Ctrl+L`.
+
+**Queued messages.** While a turn runs, `Enter` queues instead of refusing.
+The queued messages show above the spinner as `#1`, `#2`, … with
+`[send now] [edit] [cancel]` on the row under the pointer, and one is sent per
+settled turn. `Esc` cancels the turn and lets the queue continue; `Ctrl+C`
+stops everything. See [docs/reference/tui.md](docs/reference/tui.md) for the
+whole thing.
 
 **`Ctrl+G` is BEL.** Some terminals flash or beep when it is pressed. `/theme`
 opens the same picker without the BEL.

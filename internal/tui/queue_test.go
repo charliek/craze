@@ -1245,3 +1245,27 @@ func TestEditSurvivesTheBandBeingDegradedAway(t *testing.T) {
 		t.Fatalf("the edit saved into its row: %q", texts)
 	}
 }
+
+// TestErroredTurnSaysTheQueueWasCleared: the session clears the queue after
+// it has reported the error, so the status is already error when the
+// removals land and the note can say why the band emptied.
+func TestErroredTurnSaysTheQueueWasCleared(t *testing.T) {
+	m, stub := queueWorking(t)
+	m = typeEnter(t, m, "PINEAPPLE")
+	m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
+	if m.status != statusError {
+		t.Fatalf("status %s", m.status)
+	}
+	n := stub.ClearQueue()
+	m = feed(t, m, agent.Event{
+		Type:        agent.EventQueue,
+		Queue:       &agent.QueuedPrompt{ID: "q-1", Text: "PINEAPPLE"},
+		QueueChange: agent.QueueRemoved,
+	})
+	if n != 1 {
+		t.Fatalf("the session cleared %d rows", n)
+	}
+	if !strings.Contains(plainView(m), "queue cleared") {
+		t.Fatalf("the note is missing:\n%s", plainView(m))
+	}
+}

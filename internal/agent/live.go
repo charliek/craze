@@ -322,6 +322,9 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 
 	res, err := client.Prompt(ctx, text)
 	if err != nil {
+		// The error goes out first, so a consumer is already in its error
+		// state when the removals arrive and can say why the queue emptied.
+		s.emit(Event{Type: EventError, Err: err})
 		// Nothing drains from an error state, and a queue that outlived one
 		// would run behind whatever the user sends next. A refusal is not
 		// such an ending: ErrForeignTurn means nothing was attempted, and
@@ -330,7 +333,6 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		if !errors.Is(err, acp.ErrForeignTurn) {
 			s.clearQueueOnError()
 		}
-		s.emit(Event{Type: EventError, Err: err})
 		return Result{}, err
 	}
 	if res.StopReason == acp.StopCancelled {

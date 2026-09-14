@@ -53,6 +53,8 @@ class PTYCraze:
         workspace: Path,
         script: str = "echo",
         provider: str = "cursor",
+        no_mouse: bool = False,
+        step: str | None = None,
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
@@ -67,19 +69,24 @@ class PTYCraze:
         env.pop("CRAZE_AGENT_BIN", None)
         env.pop("CRAZE_PROVIDER", None)
         env.pop("CRAZE_CONFIG", None)
+        if step:
+            env["CRAZE_FAKE_STEP"] = step
+        argv = [
+            str(craze_bin),
+            "--provider",
+            provider,
+            "--agent-bin",
+            str(fake_agent_bin),
+            "--workspace",
+            str(workspace),
+            "--theme",
+            "tokyo-night",
+        ]
+        if no_mouse:
+            argv.append("--no-mouse")
         try:
             self.proc = subprocess.Popen(
-                [
-                    str(craze_bin),
-                    "--provider",
-                    provider,
-                    "--agent-bin",
-                    str(fake_agent_bin),
-                    "--workspace",
-                    str(workspace),
-                    "--theme",
-                    "tokyo-night",
-                ],
+                argv,
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -279,4 +286,140 @@ def test_tui_subagent_view_enter_esc(
         tui.write(b"\x04")
         code = tui.wait_exit()
         assert code == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+
+def _raw_since(tui: PTYCraze, mark: int) -> str:
+    return bytes(tui.buf[mark:]).decode("utf-8", "replace")
+
+
+def _assert_mode_switch(raw: str, enable: str) -> None:
+    """Both disables, then the enable, in that order.
+
+    bubbletea's DisableMouse writes 1002l then 1003l; neither escape disables
+    the other, so a switch that skipped one would leave the previous mode on
+    and the assertion has to be about the order, not about presence.
+    """
+    cell_off = raw.find("\x1b[?1002l")
+    all_off = raw.find("\x1b[?1003l")
+    on = raw.find(enable)
+    assert cell_off >= 0, f"no 1002l before {enable!r}: {raw[-400:]!r}"
+    assert all_off >= 0, f"no 1003l before {enable!r}: {raw[-400:]!r}"
+    assert on >= 0, f"no {enable!r}: {raw[-400:]!r}"
+    assert cell_off < on and all_off < on, (
+        f"the disables must precede {enable!r}: "
+        f"1002l@{cell_off} 1003l@{all_off} enable@{on}"
+    )
+
+
+def _wait_raw(tui: PTYCraze, needle: str, mark: int, timeout: float = 10) -> str:
+    """wait for a literal escape sequence, without stripping escapes."""
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        last = _raw_since(tui, mark)
+        if needle in last:
+            return last
+        if tui.proc.poll() is not None:
+            raise AssertionError(f"craze exited {tui.proc.returncode}: {last[-2000:]}")
+        time.sleep(0.05)
+    raise AssertionError(f"timeout waiting for {needle!r}: {last[-2000:]!r}")
+
+
+def test_tui_queue_then_drain(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """Enter during a running turn queues; the queue drains one per turn.
+
+    The first turn is slow enough to type into and the ones behind it finish
+    at once, so the drain is observable without the test waiting on a clock.
+    """
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, script="long-turn", step="2s,1ms"
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"go the long way\r")
+        tui.wait_contains("Working")
+        tui.write(b"Reply with PINEAPPLE\r")
+        tui.wait_contains("#1 Reply with PINEAPPLE")
+        tui.write(b"Reply with MANGO\r")
+        tui.wait_contains("#2 Reply with MANGO")
+        tui.wait_contains("⧗ 2 queued")
+        # Both are sent, one per settled turn, and the session comes back to
+        # idle with the band empty.
+        #
+        # The *order* is not this test's to hold: both turns finish inside a
+        # few milliseconds here, so a mark-scoped wait cannot separate them.
+        # internal/tui's queue-drain golden and the `--json` follow-up test
+        # own the ordering; this one owns "it works in a real terminal".
+        mark = tui.mark()
+        tui.wait_contains_since("❯ Reply with PINEAPPLE", mark, timeout=30)
+        tui.wait_contains_since("❯ Reply with MANGO", mark, timeout=30)
+        tui.wait_contains_since("message  / for commands", mark, timeout=30)
+        screen = _ANSI.sub("", tui.screen())
+        assert "⧗ " not in screen.split("❯ Reply with MANGO")[-1], screen[-1500:]
+        tui.write(b"\x04")
+        assert tui.wait_exit() == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_queue_switches_the_terminal_to_all_motion(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """Hover needs motion reports with no button down.
+
+    1002 (cell motion) does not send them and 1003 (all motion) does, and
+    neither escape disables the other — so every transition goes through
+    1000l/1002l/1003l first. The terminal is where that is visible.
+    """
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, script="long-turn", step="30s"
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"go the long way\r")
+        tui.wait_contains("Working")
+        mark = tui.mark()
+        tui.write(b"Reply with PINEAPPLE\r")
+        tui.wait_contains_since("#1 Reply with PINEAPPLE", mark)
+        got = _wait_raw(tui, "\x1b[?1003h", mark)
+        _assert_mode_switch(got, "\x1b[?1003h")
+
+        # The last row leaving puts cell motion back, the same way round.
+        mark = tui.mark()
+        tui.write(b"\x1b[A")  # ↑ selects the row
+        tui.wait_contains_since("❯ #1 Reply with PINEAPPLE", mark)
+        mark = tui.mark()
+        tui.write(b"\x7f")  # backspace cancels it
+        got = _wait_raw(tui, "\x1b[?1002h", mark)
+        _assert_mode_switch(got, "\x1b[?1002h")
+        tui.write(b"\x03\x03")
+        tui.wait_exit()
+    _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_no_mouse_never_changes_the_motion_mode(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """--no-mouse asked the terminal for no reporting at all.
+
+    The queue must not turn any of it on behind the flag's back.
+    """
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        step="30s",
+        no_mouse=True,
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"go the long way\r")
+        tui.wait_contains("Working")
+        mark = tui.mark()
+        tui.write(b"Reply with PINEAPPLE\r")
+        tui.wait_contains_since("#1 Reply with PINEAPPLE", mark)
+        time.sleep(0.3)
+        raw = _raw_since(tui, mark)
+        for seq in ("\x1b[?1003h", "\x1b[?1002h", "\x1b[?1003l"):
+            assert seq not in raw, repr(raw[-400:])
+        tui.write(b"\x03\x03")
+        tui.wait_exit()
     _wait_fake_gone(fake_agent_bin)

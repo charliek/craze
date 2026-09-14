@@ -24,6 +24,7 @@ type frameOpts struct {
 	noForce     bool
 	timeout     time.Duration
 	printFrames bool
+	freeze      bool
 }
 
 func newFrameCmd() *cobra.Command {
@@ -47,6 +48,7 @@ func newFrameCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 10*time.Second, "per-wait timeout")
 	cmd.Flags().BoolVar(&o.printFrames, "print-frames", false, "stream every frame to stderr")
+	cmd.Flags().BoolVar(&o.freeze, "freeze", false, "stop the clock and the spinner cycle, so a frame of a turn in progress does not depend on wall time")
 	registerProviderFlag(cmd, &o.provider)
 	return cmd
 }
@@ -100,6 +102,7 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		ANSI:        o.ansi,
 		PrintFrames: o.printFrames,
 		Out:         cmd.ErrOrStderr(),
+		Freeze:      o.freeze,
 	})
 	if err != nil {
 		return frameExitError(cmd, err)

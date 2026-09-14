@@ -51,17 +51,17 @@ type FrameOpts struct {
 	ANSI        bool
 	PrintFrames bool
 	Out         io.Writer
-	// Freeze stops the clock and the spinner cycle for the whole run. A
-	// golden of a turn in progress is otherwise a race against wall time:
-	// the elapsed counter and the spinner glyph both move on their own, and
-	// a slower build (‑race, a loaded machine) captures a different frame
-	// from the same script. It changes nothing about what the model does.
+	// Freeze stops the two things a frame of a turn in progress shows that
+	// move on their own: the elapsed counters and the spinner's glyph. A
+	// golden is otherwise a race against wall time — a slower build (-race,
+	// a loaded machine) captures a different frame from the same script.
+	//
+	// It freezes those two renderings and nothing else. The model's clock is
+	// left alone on purpose: it is also what decides a double-click, the
+	// Ctrl+C window and every linger, and a frozen one would quietly change
+	// what the script under test is exercising.
 	Freeze bool
 }
-
-// frameEpoch is the fixed clock a frozen run reads. The value is arbitrary;
-// what matters is that it does not move.
-var frameEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 type frameTokenKind int
 
@@ -543,10 +543,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	bus := newFrameBus(print)
 
 	m := New(cfg)
-	if opts.Freeze {
-		m.clock = func() time.Time { return frameEpoch }
-		m.frozen = true
-	}
+	m.frozen = opts.Freeze
 	sess := m.sess
 	p := tea.NewProgram(frameModel{inner: m, bus: bus}, tea.WithoutRenderer(), tea.WithInput(nil))
 	done := make(chan error, 1)

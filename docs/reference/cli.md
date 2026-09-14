@@ -60,7 +60,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--model` | ACP model id (`session/set_model` after `session/new`) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
 | `--provider` | ACP provider: `cursor` or `grok` |
-| `--follow-up` | Additional prompt on the same ACP session (repeatable) |
+| `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
@@ -72,6 +72,23 @@ Without `--json`, only the **main session's** assistant text is written to
 stdout — a sub-agent's text is never printed, so a piped reply stays the
 agent's own answer.
 
+### `--follow-up` is the queue
+
+Every `--follow-up` is queued before the first turn and sent one per settled
+turn, in order — the same queue the TUI's `Enter` fills. It holds 32 messages
+of up to 32 KiB each; past either bound the run stops with an error rather
+than sending a truncated message.
+
+The chain still ends the way it always did: a stop reason that is not
+`end_turn`, or an error, stops it with exit 1 and no further turn. `SIGINT`
+and `SIGTERM` clear the queue first and then cancel, so nothing starts behind
+the signal; the run exits 1.
+
+When the agent starts a turn craze did not prompt for — Grok's interject
+fallback (see [Queued messages](tui.md#queued-messages)) — the next queued
+message waits for it, up to a minute, and the run exits 1 with a note on
+stderr if it is still going after that.
+
 ### JSON events
 
 `--json` writes one JSON object per line:
@@ -80,7 +97,9 @@ agent's own answer.
 |--------|---------|
 | `text` | Assistant reply chunk; `agent` names the sub-agent when the chunk belongs to one |
 | `thought` | Reasoning chunk; `agent` as on `text` |
-| `user` | A chunk of a sub-agent's prompt; only ever emitted with `agent` |
+| `user` | A chunk of a sub-agent's prompt (with `agent`), or a Grok interjection on the main session (with `"interjection":true`) |
+| `queue` | One change to craze's own message queue |
+| `foreign_turn` | A turn the agent started without a craze prompt, bracketed |
 | `tool` | Tool call create/update, merged by id; `agent` as on `text`; a sub-agent tool also carries `task` |
 | `todos` | Todo list replace or merge |
 | `permission` / `question` / `plan` | Blocking request, answered headless by `--permission-decision`; a permission with no decision left is rejected |
@@ -103,6 +122,19 @@ lines come from its own lifecycle notifications; cursor
 sends none, so craze synthesizes the same lines from the `cursor/task`
 receipt. `tool.task` carries `description`, `model`, `agentId`, `durationMs`
 and `status` (`running`, `completed`, `failed`, `cancelled`).
+
+`queue` is `{"type":"queue","event":"queued|edited|removed|sent","id":"q-1",
+"position":0,"version":0,"text":"…"}`. `position` is the row's index **when
+the change happened**, not where it sits now — so a `sent` line from the drain
+carries 0 (the head was position 0 when it went), every line of a clear
+carries 0 for the same reason, and a `sent` line for the TUI's send now
+carries whatever row the user picked. `--follow-up` produces a `queued` line
+per follow-up before the first turn and a `sent` line before each turn after
+it. Plain (non-`--json`) mode prints none of this.
+
+`foreign_turn` is `{"type":"foreign_turn","event":"started|ended","id":"…",
+"text":"…"}`; the id is Grok's `interject-fallback-…` prompt id. Nothing
+drains between the two lines.
 
 `done` is **not** EOF: it says the *turn* ended, not the sub-agents.
 Lifecycle lines for a still-running sub-agent may follow the turn's `done` —

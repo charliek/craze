@@ -255,9 +255,11 @@ type Model struct {
 
 	ctrlCDeadline time.Time
 	clock         func() time.Time
-	// frozen is the frame runner's --freeze: the clock does not move and the
-	// spinner does not cycle, so a golden of a turn in progress is not a race
-	// against wall time.
+	// frozen is the frame runner's --freeze: the elapsed counters read zero
+	// and the spinner does not cycle, so a golden of a turn in progress is
+	// not a race against wall time. Nothing else about the model changes —
+	// the clock still moves, so double-clicks, the Ctrl+C window and the
+	// lingers behave exactly as they do in a live session.
 	frozen bool
 }
 

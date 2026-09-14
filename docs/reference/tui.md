@@ -51,18 +51,22 @@ visible row, taking the last one when it would otherwise fall behind the cap.
 
 | Key | Action |
 |---|---|
-| `Enter` | send |
+| `Enter` | send; **queue** the draft while a turn is running (see [Queued messages](#queued-messages)) |
+| `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
-| `Ctrl+C` | cancel the running turn; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Ctrl+C` | cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
-| `↑` `↓` | move the keyboard from the composer to the sub-agent rows (draft or not) and then between them: the selected row carries a `❯` gutter mark and the composer loses its cursor; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
-| `Enter` while the rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
+| `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
+| `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
+| `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
+| `Backspace` / `Delete` on a queued row | cancel it |
+| `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
@@ -78,6 +82,87 @@ bindings, so a message that starts with either is just a message.
     message. `Alt+Enter` and `Ctrl+J` are the newline keys that always work;
     `Shift+Enter` is bound as well, for the terminals that do report it
     distinctly.
+
+!!! note "Why `Ctrl+L` and not `Ctrl+Enter`"
+    The same limitation: bubbletea v1 has no `Ctrl+Enter` and does not parse
+    the kitty keyboard protocol, so `Ctrl+Enter` arrives as a bare `\r` —
+    indistinguishable from `Enter`, which is the key that queues. Grok's own
+    TUI falls back to `Ctrl+L` for the same reason, so craze does too.
+
+## Queued messages
+
+While a turn runs, `Enter` queues the draft instead of refusing it. The queued
+messages appear in a band above the spinner, newest last:
+
+```text
+  #1 Reply with PINEAPPLE
+  #2 Reply with MANGO          [send now] [edit] [cancel]
+✳ Working · 12s · esc to interrupt
+```
+
+One is sent per settled turn, in order, and it only becomes a transcript entry
+when it is actually sent. Status row 2 carries `⧗ n queued` so the number is
+visible even when the band has been degraded away on a short terminal.
+
+The three actions are drawn on the row under the pointer and on the row the
+keyboard is on. Each is also a key: `Ctrl+L` sends that message now,
+`Enter` edits it in place (the row keeps its number and its place in the
+queue), and `Backspace` cancels it.
+
+### The three verbs
+
+| Verb | Cursor | Grok | Cancels the turn? | Asks first? |
+|---|---|---|---|---|
+| queue (`Enter` on a draft during a turn) | craze's queue | craze's queue | no | no |
+| send now (`Ctrl+L` on a queued row; on a draft under Cursor) | cancels the turn, then sends | same | **yes** | **yes** |
+| interject (`Ctrl+L` on a draft under Grok) | not offered — `Ctrl+L` is send now | merged into the running turn | no | no |
+
+Grok is the only agent with a mid-turn path: `x.ai/interject` hands it text
+that it folds into the turn at its next safe point (after a tool result), and
+the transcript shows it as a `↳` entry when the agent broadcasts it back.
+Cursor has none — a second prompt there silently cancels the first — so craze
+never sends one and offers send now instead, always with
+
+```text
+cancel the running turn and send? enter · esc
+```
+
+in place of the composer's input rows. `Esc`, or any other key, declines and
+loses nothing: nothing leaves the composer or the queue until the message
+actually goes.
+
+### What clears the queue and what does not
+
+| | Queue |
+|---|---|
+| `Esc` (cancel the turn) | kept — the next queued message starts once the cancelled turn settles |
+| `Ctrl+C` (first press) | cleared, along with a confirm and a pending send-now |
+| `/clear` | cleared |
+| A turn that ends in an error | cleared, with a note — nothing drains from an error state |
+| Quitting | gone with the session; there is no persistence across restarts |
+
+Slash builtins never queue. `/exit`, `/help`, `/theme`, `/tasks` and `/clear`
+run immediately even mid-turn; the ones that need the agent (`/model`,
+`/plan`, …) keep today's refusal. A slash line the agent advertises is
+ordinary text and queues like any other message.
+
+The queue holds 32 messages of up to 32 KiB each. Past either bound the
+message is **refused**, never truncated, and the draft stays in the composer
+so you can shorten it: status row 2 says `queue full` or `message too long`.
+
+### When the agent talks on its own
+
+Grok turns an interjection it could not merge — one that arrives when no turn
+is running, or too late in the one that is — into a turn of its own, called an
+*interject fallback*. craze shows its reply under
+
+```text
+agent continued on its own (interjection fallback)
+```
+
+and holds the queue until it ends: a message sent into that turn would be
+queued behind it on the agent's side, where craze can no longer tell its
+ending from the fallback's.
 
 !!! note
     `Ctrl+G` is BEL. Some terminals flash or beep when it is pressed. `/theme`
@@ -256,6 +341,10 @@ clickable cannot drift apart:
 |---|---|
 | Tasks panel header | Cycles the panel (same as `Ctrl+T`) |
 | Sub-agent row under the status rows | Selects that sub-agent and opens it in the main area (same as `Enter` on it) |
+| A queued message's text | Selects that row |
+| `[send now]` on a queued row | Sends it instead of the running turn (asks first) |
+| `[edit]` on a queued row | Loads it into the composer for an in-place edit |
+| `[cancel]` on a queued row | Removes it from the queue |
 | The banner line inside the sub-agent view | Returns to the main transcript (same as `Esc`) |
 | Model name in status row 1 | Opens the model dialog (same as `/model`) |
 | `◆ agent` mode chip in status row 2 | Cycles the mode (same as `Shift+Tab`) |
@@ -267,6 +356,14 @@ Dragging and double-clicking inside the sub-agent view select and copy from
 its transcript the same way. The mode chip is inert inside the view. Task
 rows, the `… +n more` row, the separators between status segments and a
 segment the row truncated away are all inert.
+
+The queue's actions appear on hover, which needs motion reports the default
+mouse mode does not send. craze switches the terminal to all-motion reporting
+while at least one message is queued and back to cell motion when the last one
+leaves — and never at all under `--no-mouse`. A button is only clickable on
+the row it was drawn on, which is the row under the pointer and the row the
+keyboard has selected; a click anywhere else in the band selects that row
+rather than acting on it.
 
 ### Selection and copy
 

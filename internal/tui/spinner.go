@@ -102,7 +102,7 @@ func (m Model) spinnerView() string {
 }
 
 func (m Model) turnElapsed() string {
-	if m.turnStart.IsZero() {
+	if m.turnStart.IsZero() || m.frozen {
 		return formatElapsed(0)
 	}
 	return formatElapsed(m.now().Sub(m.turnStart))
