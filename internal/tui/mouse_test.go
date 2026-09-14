@@ -328,3 +328,113 @@ func TestChipClickBlockedByOverlays(t *testing.T) {
 		})
 	}
 }
+
+// ------------------------------------------------------------------ §3.5
+
+// TestClickOnASlashRowAcceptsTheScrolledRow is the bug the test exists to
+// catch: the row under the pointer is slashTop+row, not row. Row 2 of a band
+// that has scrolled off the top is a different command from items[2], and a
+// click that forgot slashTop would accept the wrong one silently.
+func TestClickOnASlashRowAcceptsTheScrolledRow(t *testing.T) {
+	m, _ := slashScrolled(t, 10)
+	if m.slashTop == 0 {
+		t.Fatal("fixture: the window should have scrolled off the top")
+	}
+	items := m.filteredSlash()
+	if items[2].Name == items[m.slashTop+2].Name {
+		t.Fatal("fixture: row 2 and slashTop+2 must name different commands")
+	}
+	want := items[m.slashTop+2].Name
+	top := m.lay.Region(regionOverlay).Top
+	m = clickAt(t, m, top+2)
+	if got := m.input.Value(); got != "see /"+want+" " {
+		t.Fatalf("click on row 2 accepted %q, want /%s (items[2] would be /%s)",
+			got, want, items[2].Name)
+	}
+}
+
+// TestClickPastTheLastSlashRowIsANoOp: the band's own region never draws more
+// rows than the layout granted, so a click below it — where a row "past the
+// last item" would land — never reaches acceptSlash at all.
+func TestClickPastTheLastSlashRowIsANoOp(t *testing.T) {
+	m, _ := slashScrolled(t, 10)
+	before, sel, top := m.input.Value(), m.slashSel, m.slashTop
+	bottom := m.lay.Region(regionOverlay).Bottom
+	m = clickAt(t, m, bottom)
+	if m.input.Value() != before || m.slashSel != sel || m.slashTop != top {
+		t.Fatalf("a click past the band's last row changed something: draft %q sel %d top %d",
+			m.input.Value(), m.slashSel, m.slashTop)
+	}
+}
+
+// TestWheelOverTheBandMovesTheSlashSelection is §3.5's other gesture: one row
+// per notch, clamped rather than wrapped like ↑/↓ — the menu is a selection,
+// not a viewport, so wheelLines' three-at-a-time would jump past rows nobody
+// saw highlighted, and a wrap would fling the highlight across the whole
+// catalog on one notch too many.
+func TestWheelOverTheBandMovesTheSlashSelection(t *testing.T) {
+	m, _ := slashScrolled(t, 3)
+	if m.slashSel != 3 {
+		t.Fatalf("fixture: selection %d, want 3", m.slashSel)
+	}
+	y := m.lay.Region(regionOverlay).Top
+	down := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, Y: y}
+	up := tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, Y: y}
+
+	tm, _ := m.Update(down)
+	m = tm.(Model)
+	if m.slashSel != 4 {
+		t.Fatalf("one notch down moved to %d, want 4", m.slashSel)
+	}
+	tm, _ = m.Update(up)
+	m = tm.(Model)
+	if m.slashSel != 3 {
+		t.Fatalf("one notch up moved to %d, want 3", m.slashSel)
+	}
+	// Clamped, not wrapped: enough notches to run off either end stop at the
+	// edge instead of wrapping the way ↑/↓ does.
+	for i := 0; i < 10; i++ {
+		tm, _ = m.Update(up)
+		m = tm.(Model)
+	}
+	if m.slashSel != 0 {
+		t.Fatalf("wheel up clamped at %d, want 0", m.slashSel)
+	}
+	items := m.filteredSlash()
+	for i := 0; i < len(items)+5; i++ {
+		tm, _ = m.Update(down)
+		m = tm.(Model)
+	}
+	if m.slashSel != len(items)-1 {
+		t.Fatalf("wheel down clamped at %d, want %d", m.slashSel, len(items)-1)
+	}
+}
+
+// TestWheelOverTheTranscriptStillScrollsWithTheSlashMenuOpen: away from the
+// band, the wheel is unchanged — the new branch in handleMouse must not steal
+// the gesture just because a menu happens to be open somewhere else on screen.
+func TestWheelOverTheTranscriptStillScrollsWithTheSlashMenuOpen(t *testing.T) {
+	m := scrollable(t)
+	m.snap.Commands = []agent.CommandInfo{{Name: "research", Description: "d"}}
+	m = draft(m, "see /res")
+	if !m.slashActive() {
+		t.Fatal("fixture: the menu should be open")
+	}
+	if !m.vp.AtBottom() {
+		t.Fatal("fixture: a fresh transcript sticks to the bottom")
+	}
+	bottom := m.vp.YOffset
+	if bottom < wheelLines {
+		t.Fatalf("not enough scrollback to test with: offset %d", bottom)
+	}
+	if !m.lay.Region(regionTranscript).Contains(1) {
+		t.Fatal("fixture: y=1 should be inside the transcript, not the band")
+	}
+	m = wheel(t, m, tea.MouseButtonWheelUp)
+	if got, want := m.vp.YOffset, bottom-wheelLines; got != want {
+		t.Fatalf("wheel up over the transcript moved to %d, want %d (%d lines per notch)", got, want, wheelLines)
+	}
+	if m.slashSel != 0 {
+		t.Fatalf("the wheel over the transcript must not touch the slash selection: %d", m.slashSel)
+	}
+}

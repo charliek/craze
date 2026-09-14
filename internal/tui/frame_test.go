@@ -412,6 +412,12 @@ func TestFrameGoldenSlashMenu(t *testing.T) {
 		// selection, not the window, and both arrows are up.
 		{"slash-scroll-100x30", 100, 30, slashCatalogLanded + strings.Repeat("<down>", 10),
 			[]string{"❯ /bravo-search", "11/33 ▲", "▼", "/tasks"}, []string{"/help"}},
+		// §3.5's click, on the same scrolled window slash-scroll-100x30 draws:
+		// row 17 on screen is /tasks, items[3] because slashTop is 3 there, not
+		// items[0] — a click that used the bare band row instead of
+		// slashTop+row would have accepted /help.
+		{"slash-click-100x30", 100, 30, slashCatalogLanded + strings.Repeat("<down>", 10) + "<click:5,17>",
+			[]string{"❯ /tasks "}, []string{"❯ /help ", "❯ /bravo-search", "▲", "▼", "11/33"}},
 		// Mid-message the builtins are not offered, so the same catalog is 24.
 		{"slash-mid-80x24", 80, 24, "see " + slashCatalogLanded,
 			[]string{"❯ /alpha-review", "1/24", "▼"}, []string{"/help", "/exit", "▲"}},

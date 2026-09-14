@@ -679,10 +679,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseActionPress:
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
+			if m.slashActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
+				return m.slashWheel(-1), nil
+			}
 			// The selection is in transcript rows, not screen rows, so it
 			// scrolls with the text it holds and survives the wheel.
 			m.vp.ScrollUp(wheelLines)
 		case tea.MouseButtonWheelDown:
+			if m.slashActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
+				return m.slashWheel(1), nil
+			}
 			m.vp.ScrollDown(wheelLines)
 		case tea.MouseButtonLeft:
 			return m.handlePress(msg.X, msg.Y)
@@ -707,6 +713,20 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// slashWheel is the wheel over the band: one row of selection per notch,
+// clamped rather than wrapped. §3.5 deliberately does not reuse wheelLines —
+// the menu is a selection, not a viewport, so "scrolling" it three at a time
+// would jump past rows the user never saw highlighted. relayout's syncSlash
+// carries slashTop along afterwards, the same as it does for a key move.
+func (m Model) slashWheel(delta int) Model {
+	items := m.filteredSlash()
+	if len(items) == 0 {
+		return m
+	}
+	m.slashSel = min(max(m.slashSel+delta, 0), len(items)-1)
+	return m
 }
 
 // handlePress is the left button going down: over the transcript it anchors a
@@ -864,6 +884,13 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		return m.closeDialog(true), nil
 	}
 	switch {
+	case lay.Region(regionOverlay).Contains(y):
+		// slashTop is the top syncSlash settled for the frame just drawn, so
+		// a click after scrolling lands on the row that was actually on
+		// screen, not row 0 of the whole catalog. acceptSlash no-ops past
+		// the last item — the catalog can shrink between the draw and the
+		// click.
+		return m.acceptSlash(m.slashTop + lay.Region(regionOverlay).Row(y)), nil
 	case lay.Region(regionTasks).Contains(y):
 		if lay.Region(regionTasks).Row(y) == 0 {
 			return m.cycleTasks()
