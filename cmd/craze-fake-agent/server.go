@@ -225,6 +225,11 @@ func (s *server) onRequest(msg *acp.Message) {
 		})
 	case acp.MethodSessionPrompt:
 		s.noteOrder(orderPrompt, "")
+		// A cancel belongs to the turn it interrupts. Clearing the flag here,
+		// on the read loop, means a cancel read after this prompt can never be
+		// lost and one read before it can never cancel this turn — without
+		// which a second prompt to a cancel script cancels itself instantly.
+		s.cancelled.Store(false)
 		go s.handlePrompt(msg)
 	case acp.MethodSessionSetModel:
 		s.reply(msg.ID, map[string]any{})
@@ -706,13 +711,15 @@ const (
 func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 	child := "sub-1"
 	desc := "List directory files"
+	prompt := "List the files in the current working directory in one line."
 	s.thought("Spawning an explore subagent.")
 	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
 		"description":   desc,
-		"prompt":        "List the files in the current working directory in one line.",
+		"prompt":        prompt,
 		"subagent_type": "explore",
 		"background":    true,
 	})
+	s.spawnTitle(fakeSessionID, "call-spawn-1", desc, prompt, "explore")
 	s.subagentNotify(fakeSessionID, map[string]any{
 		"sessionUpdate":     "subagent_spawned",
 		"subagent_id":       child,
@@ -792,9 +799,11 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		return
 	}
 	time.Sleep(taskRunFor)
-	status, errText, parentText := "completed", "", "DONE: main.py README.md"
+	// A failed child reports the error, not an output it never produced.
+	status, errText, output := "completed", "", "main.py README.md"
+	parentText := "DONE: main.py README.md"
 	if mode == grokSubagentFail {
-		status, errText, parentText = "failed", "boom", "subagent failed"
+		status, errText, output, parentText = "failed", "boom", "", "subagent failed"
 	}
 	s.subagentNotify(fakeSessionID, map[string]any{
 		"sessionUpdate":    "subagent_finished",
@@ -807,7 +816,7 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		"turns":            1,
 		"duration_ms":      2873,
 		"tokens_used":      4740,
-		"output":           "main.py README.md",
+		"output":           output,
 	})
 	s.update(fakeSessionID, map[string]any{
 		"sessionUpdate": "tool_call_update",
@@ -832,12 +841,14 @@ func (s *server) grokSubagentTwo(id json.RawMessage) {
 		"subagent_type": "explore",
 		"background":    true,
 	})
+	s.spawnTitle(fakeSessionID, "call-spawn-1", "List python files", "List the python files in one line.", "explore")
 	s.toolMeta(fakeSessionID, "call-spawn-2", "spawn_subagent", "spawn_subagent", map[string]any{
 		"description":   "Report README first line",
 		"prompt":        "Report the first line of README.md.",
 		"subagent_type": "explore",
 		"background":    true,
 	})
+	s.spawnTitle(fakeSessionID, "call-spawn-2", "Report README first line", "Report the first line of README.md.", "explore")
 	s.childText("sub-9", "agent_message_chunk", "must never surface")
 	s.update("other-session", acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
@@ -958,6 +969,7 @@ func (s *server) grokSubagentNested(id json.RawMessage) {
 		"subagent_type": "explore",
 		"background":    true,
 	})
+	s.spawnTitle(fakeSessionID, "call-spawn-1", "Outer task", "Spawn a nested subagent and report.", "explore")
 	s.subagentNotify(fakeSessionID, map[string]any{
 		"sessionUpdate":     "subagent_spawned",
 		"subagent_id":       "sub-1",
@@ -983,6 +995,7 @@ func (s *server) grokSubagentNested(id json.RawMessage) {
 		"subagent_type": "explore",
 		"background":    true,
 	})
+	s.spawnTitle("sub-1", "call-nested-spawn", "Inner task", "List files.", "explore")
 	s.subagentNotify("sub-1", map[string]any{
 		"sessionUpdate":     "subagent_spawned",
 		"subagent_id":       "sub-1a",
@@ -1035,8 +1048,9 @@ func (s *server) grokSubagentNested(id json.RawMessage) {
 // grokSubagentCancel runs a general-purpose child whose shell tool stays
 // in_progress while the parent hangs. On session/cancel the parent completes
 // cancelled, then — after 400 ms, so the drain must be state-aware — the
-// child finishes cancelled. early sends finished before prompt_complete,
-// the cancel.out order.
+// child finishes cancelled (cancel2.out). early is the cancel.out order
+// instead: the child's own turn ends first, its finish says completed with no
+// error, and only then does the parent turn end cancelled.
 func (s *server) grokSubagentCancel(id json.RawMessage, early bool) {
 	s.thought("Spawning a general-purpose subagent.")
 	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
@@ -1045,6 +1059,7 @@ func (s *server) grokSubagentCancel(id json.RawMessage, early bool) {
 		"subagent_type": "general-purpose",
 		"background":    true,
 	})
+	s.spawnTitle(fakeSessionID, "call-spawn-1", "Sleep 45 then finish", "Run sleep 45 and report finished.", "general-purpose")
 	s.subagentNotify(fakeSessionID, map[string]any{
 		"sessionUpdate":     "subagent_spawned",
 		"subagent_id":       "sub-1",
@@ -1077,17 +1092,17 @@ func (s *server) grokSubagentCancel(id json.RawMessage, early bool) {
 		"task_ids":   []string{"sub-1"},
 		"timeout_ms": 120000,
 	})
-	if !s.waitCancelled() {
+	if !s.waitCancelled(id) {
 		return
 	}
-	finish := func() {
+	finish := func(status, errText string) {
 		s.subagentNotify(fakeSessionID, map[string]any{
 			"sessionUpdate":    "subagent_finished",
 			"subagent_id":      "sub-1",
 			"attempt_id":       "at1.test",
 			"child_session_id": "sub-1",
-			"status":           "cancelled",
-			"error":            "Subagent was cancelled",
+			"status":           status,
+			"error":            errText,
 			"tool_calls":       0,
 			"turns":            1,
 			"duration_ms":      6608,
@@ -1095,28 +1110,47 @@ func (s *server) grokSubagentCancel(id json.RawMessage, early bool) {
 		})
 	}
 	if early {
-		finish()
+		// cancel.out:63,65,70,71 — the child had already ended its own turn
+		// end_turn and reported completed before the cancel reached it.
+		s.turnCompleted("sub-1", acp.StopEndTurn)
+		finish("completed", "")
+		s.turnCompleted(fakeSessionID, acp.StopCancelled)
 		s.finishPrompt(id, acp.StopCancelled)
 		return
 	}
+	// cancel2.out:70-77 — parent turn_completed, then the child's on the
+	// child session id, then prompt_complete and the reply; the child's
+	// finish trails by 400 ms.
+	s.turnCompleted(fakeSessionID, acp.StopCancelled)
+	s.turnCompleted("sub-1", acp.StopCancelled)
 	s.finishPrompt(id, acp.StopCancelled)
 	time.Sleep(400 * time.Millisecond)
-	finish()
+	finish("cancelled", "Subagent was cancelled")
 }
 
-// waitCancelled blocks until session/cancel arrives. It reports whether the
-// cancel came; the caller finishes the prompt itself.
-func (s *server) waitCancelled() bool {
+// turnCompleted is the x.ai turn_completed a session sends as its turn ends.
+// Live grok sends one per session — parent and child both — ahead of the
+// parent's prompt_complete; craze ignores the kind, and that is the point.
+func (s *server) turnCompleted(sessionID, stop string) {
+	s.subagentNotify(sessionID, map[string]any{
+		"sessionUpdate": "turn_completed",
+		"prompt_id":     "prompt-1",
+		"stop_reason":   stop,
+	})
+}
+
+// waitCancelled blocks until session/cancel arrives. On its 30 s deadline it
+// ends the prompt itself rather than leaking the pending request, and reports
+// false so the script stops.
+func (s *server) waitCancelled(id json.RawMessage) bool {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		s.mu.Lock()
-		cancelled := s.cancelled.Load()
-		s.mu.Unlock()
-		if cancelled {
+		if s.cancelled.Load() {
 			return true
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	s.finishPrompt(id, acp.StopEndTurn)
 	return false
 }
 
@@ -1124,6 +1158,36 @@ func (s *server) thought(text string) {
 	s.update(fakeSessionID, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentThought,
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
+	})
+}
+
+// spawnTitle is the tool_call_update grok sends between a spawn_subagent
+// tool_call and its subagent_spawned (two.out:45): the row is retitled to the
+// description and rawInput is rewritten into the Task variant. Skipping it
+// left the fakes showing a row title no live wire ever produces.
+func (s *server) spawnTitle(sessionID, callID, desc, prompt, subagentType string) {
+	s.update(sessionID, map[string]any{
+		"sessionUpdate": "tool_call_update",
+		"toolCallId":    callID,
+		"kind":          "other",
+		"title":         desc,
+		"locations":     []any{},
+		"rawInput": map[string]any{
+			"variant":           "Task",
+			"prompt":            prompt,
+			"description":       desc,
+			"subagent_type":     subagentType,
+			"run_in_background": true,
+			"task_id":           nil,
+		},
+		"_meta": map[string]any{"x.ai/tool": map[string]any{
+			"version":   1,
+			"name":      "spawn_subagent",
+			"kind":      "task",
+			"namespace": "grok_build",
+			"label":     "Subagent",
+			"read_only": false,
+		}},
 	})
 }
 

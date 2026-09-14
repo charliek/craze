@@ -19,6 +19,10 @@ import (
 const (
 	subagentDrainMax = 1500 * time.Millisecond
 	subagentQuiet    = 250 * time.Millisecond
+	// subagentSweepMax bounds the final sweep so a producer that keeps
+	// writing cannot hold the deadline open for ever; it is the session's
+	// event buffer, so one pass empties a full channel.
+	subagentSweepMax = 256
 )
 
 type promptOpts struct {
@@ -301,11 +305,32 @@ func drainSubagentEvents(events <-chan agent.Event, snapFn func() agent.Snapshot
 				return err
 			}
 		case <-quietC:
-			return nil
+			return sweepEvents(events, write)
 		case <-maxTimer.C:
+			return sweepEvents(events, write)
+		}
+	}
+}
+
+// sweepEvents writes what is already buffered, without blocking. A deadline
+// and a ready event can both be ready when select runs, and select picks
+// between them at random: without this, a timer could return while the
+// session had already produced lines that stdout never got.
+func sweepEvents(events <-chan agent.Event, write func(agent.Event) error) error {
+	for i := 0; i < subagentSweepMax; i++ {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return nil
+			}
+			if err := write(ev); err != nil {
+				return err
+			}
+		default:
 			return nil
 		}
 	}
+	return nil
 }
 
 func hasSpawnedSubagent(snap agent.Snapshot) bool {

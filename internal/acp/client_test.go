@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,7 +72,7 @@ func spawnScript(t *testing.T, script string) *Client {
 		Args:   []string{"-script=" + script, "--force", "acp"},
 		Stderr: io.Discard,
 	}
-	if len(script) >= 5 && script[:5] == "grok-" {
+	if strings.HasPrefix(script, "grok-") {
 		opts.Dialect = DialectGrok
 	}
 	c, err := Spawn(opts)

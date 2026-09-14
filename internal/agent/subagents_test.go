@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -153,7 +154,13 @@ func TestGrokSubagentLateAfterDone(t *testing.T) {
 }
 
 func TestGrokSubagentCancelOrders(t *testing.T) {
-	for _, script := range []string{"grok-subagent-cancel", "grok-subagent-cancel-early"} {
+	// The late order (cancel2.out) cancels a child mid-tool; the early order
+	// (cancel.out) cancels the parent after the child already completed, so
+	// the child's finish is `completed` and its tool settles the same way.
+	for script, want := range map[string]SubagentStatus{
+		"grok-subagent-cancel":       SubagentCancelled,
+		"grok-subagent-cancel-early": SubagentCompleted,
+	} {
 		t.Run(script, func(t *testing.T) {
 			s := startGrokScript(t, script, true)
 			log := collect(t, s)
@@ -175,11 +182,11 @@ func TestGrokSubagentCancelOrders(t *testing.T) {
 			for _, ev := range log.snapshot() {
 				if ev.Type == EventSubagent && ev.SubagentChange == SubagentChangeFinished {
 					n++
-					if ev.Subagent == nil || ev.Subagent.Status != SubagentCancelled {
-						t.Fatalf("status %+v", ev.Subagent)
+					if ev.Subagent == nil || ev.Subagent.Status != want {
+						t.Fatalf("status %+v, want %s", ev.Subagent, want)
 					}
 				}
-				if ev.Type == EventTool && ev.Agent == "sub-1" && ev.Tool != nil && ev.Tool.ID == "call-1" && ev.Tool.Status == "cancelled" {
+				if ev.Type == EventTool && ev.Agent == "sub-1" && ev.Tool != nil && ev.Tool.ID == "call-1" && ev.Tool.Status == string(want) {
 					settled = true
 				}
 			}
@@ -187,7 +194,7 @@ func TestGrokSubagentCancelOrders(t *testing.T) {
 				t.Fatalf("exactly one finished, got %d", n)
 			}
 			if !settled {
-				t.Fatal("child tool must be settled cancelled with EventTool{Agent}")
+				t.Fatalf("child tool must be settled %s with EventTool{Agent}", want)
 			}
 		})
 	}
@@ -324,9 +331,10 @@ func TestDivergentIDsKeyByChildSession(t *testing.T) {
 	}
 }
 
-// TestRunningRecordCapDrops65th pins the session-side bound: ACP still
-// delivers a refused spawned, but the session never tracks more than
-// subagentRunCap running records, and never evicts one to make room.
+// TestRunningRecordCapDrops65th pins both session-side bounds. §3.2/§9 say a
+// 65th concurrent child still gets a row, so past the routing cap the record
+// is created with no transcript and no tool map; past subagentUnroutedCap of
+// those the spawned is dropped, and a freed routing slot is reusable.
 func TestRunningRecordCapDrops65th(t *testing.T) {
 	grok := GrokProvider()
 	s := newSession(Options{Provider: &grok})
@@ -334,23 +342,366 @@ func TestRunningRecordCapDrops65th(t *testing.T) {
 	for i := 0; i < subagentRunCap; i++ {
 		s.onSubagent(spawnNotif(fmt.Sprintf("sub-%d", i), "d"))
 	}
+	drainEvents(s)
 	if got := len(s.Snapshot().Subagents); got != subagentRunCap {
 		t.Fatalf("records %d, want %d", got, subagentRunCap)
 	}
 	s.onSubagent(spawnNotif("sub-65", "d"))
-	if got := len(s.Snapshot().Subagents); got != subagentRunCap {
-		t.Fatalf("65th running record tracked: %d", got)
+	rec, ok := s.subagents["sub-65"]
+	if !ok {
+		t.Fatal("the 65th concurrent child must still get a row")
 	}
-	if _, ok := s.subagents["sub-65"]; ok {
-		t.Fatal("the capped spawned must leave no record")
+	if rec.info.Transcript || rec.tools != nil || !rec.unrouted {
+		t.Fatalf("the 65th gets a row but no transcript: %+v", rec.info)
+	}
+	st, title := "completed", "list"
+	if _, changed, _ := s.applyToolDelta("sub-65", toolDelta{id: "c1", status: &st, title: &title}); changed {
+		t.Fatal("an unrouted child owns no tool store")
+	}
+	for i := 0; i < subagentUnroutedCap+4; i++ {
+		s.onSubagent(spawnNotif(fmt.Sprintf("over-%d", i), "d"))
+	}
+	drainEvents(s)
+	if got := len(s.Snapshot().Subagents); got != subagentRunCap+subagentUnroutedCap {
+		t.Fatalf("rows %d, want the hard cap %d", got, subagentRunCap+subagentUnroutedCap)
+	}
+	s.onSubagent(finishNotif("sub-0", "completed"))
+	s.onSubagent(spawnNotif("sub-fresh", "d"))
+	fresh, ok := s.subagents["sub-fresh"]
+	if !ok || fresh.unrouted || !fresh.info.Transcript {
+		t.Fatalf("a finished slot must free a routed spawn: ok=%v %+v", ok, fresh)
+	}
+}
+
+// TestFinishedEvictionDropsOldestFinish pins that eviction is by finish time,
+// not spawn order: a long-runner spawned first, and finishing after 32 newer
+// children came and went, must survive its own finished event.
+func TestFinishedEvictionDropsOldestFinish(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(spawnNotif("long", "the long runner"))
+	for i := 0; i < subagentFinishedCap; i++ {
+		id := fmt.Sprintf("fin-%d", i)
+		s.onSubagent(spawnNotif(id, id))
+		s.onSubagent(finishNotif(id, "completed"))
+		drainEvents(s)
+	}
+	s.onSubagent(finishNotif("long", "completed"))
+
+	var fin *SubagentInfo
+	for _, ev := range pendingEvents(s) {
+		if ev.Type == EventSubagent && ev.SubagentChange == SubagentChangeFinished && ev.Subagent != nil {
+			fin = ev.Subagent
+		}
+	}
+	if fin == nil || fin.ID != "long" {
+		t.Fatalf("finished event %+v", fin)
+	}
+	ids := map[string]bool{}
+	for _, a := range s.Snapshot().Subagents {
+		ids[a.ID] = true
+	}
+	if !ids["long"] {
+		t.Fatal("a finished event must be about a record the snapshot still holds")
+	}
+	if ids["fin-0"] {
+		t.Fatal("the oldest finish is the one to evict")
+	}
+	if !ids["fin-31"] || len(ids) != subagentFinishedCap {
+		t.Fatalf("records %d %v", len(ids), ids)
+	}
+}
+
+// TestJoinByLongDescriptionMatchesCapped pins that the description join caps
+// both sides: the record's went through capSubagent, so an uncapped compare
+// could never match a description over subagentDescCap.
+func TestJoinByLongDescriptionMatchesCapped(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	desc := strings.Repeat("d", 400)
+	title := "spawn_subagent"
+	s.mergeTool(toolDelta{
+		id: "call-a", title: &title, wireName: "spawn_subagent",
+		rawInput:    mustJSON(map[string]any{"description": desc, "prompt": "p", "subagent_type": "explore"}),
+		hasRawInput: true,
+	})
+	drainEvents(s)
+	s.onSubagent(spawnNotif("sub-1", desc))
+	got := s.Snapshot().Subagents[0]
+	if got.ToolCallID != "call-a" {
+		t.Fatalf("a %d-byte description must still join, got %q", len(desc), got.ToolCallID)
+	}
+}
+
+// TestRawOutputJoinEmitsSubagentProgress pins that a join reaches --json: the
+// record gains a ToolCallID, so it has to be re-emitted rather than waiting
+// for the child to finish.
+func TestRawOutputJoinEmitsSubagentProgress(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	title := "spawn_subagent"
+	s.mergeTool(toolDelta{
+		id: "call-a", title: &title, wireName: "spawn_subagent",
+		rawInput:    mustJSON(map[string]any{"description": "Tool side", "prompt": "p", "subagent_type": "explore"}),
+		hasRawInput: true,
+	})
+	s.onSubagent(spawnNotif("sub-1", "Notification side"))
+	if got := s.Snapshot().Subagents[0].ToolCallID; got != "" {
+		t.Fatalf("the descriptions differ, nothing should have joined yet: %q", got)
+	}
+	drainEvents(s)
+	_, _, extras := s.applyToolDelta("", toolDelta{
+		id: "call-a", rawOutput: grokSpawnOutput("sub-1"), hasRawOutput: true, wireName: "spawn_subagent",
+	})
+	s.emitAll(extras)
+
+	var progress *SubagentInfo
+	for _, ev := range pendingEvents(s) {
+		if ev.Type == EventSubagent && ev.SubagentChange == SubagentChangeProgress && ev.Subagent != nil {
+			progress = ev.Subagent
+		}
+	}
+	if progress == nil || progress.ToolCallID != "call-a" || progress.ID != "sub-1" {
+		t.Fatalf("the rawOutput join must emit a progress carrying toolCallId, got %+v", progress)
+	}
+}
+
+// TestDetachRestoresToolsOwnTask pins that detaching a child takes back
+// everything the join stamped — status, model, type — and leaves the spawn
+// tool with what it parsed out of its own rawInput.
+func TestDetachRestoresToolsOwnTask(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	title := "spawn_subagent"
+	s.mergeTool(toolDelta{
+		id: "call-a", title: &title, wireName: "spawn_subagent",
+		rawInput:    mustJSON(map[string]any{"description": "Own", "prompt": "own prompt", "subagent_type": "explore"}),
+		hasRawInput: true,
+	})
+	s.mergeTool(toolDelta{
+		id: "call-b", title: &title, wireName: "spawn_subagent",
+		rawInput:    mustJSON(map[string]any{"description": "Own", "prompt": "own prompt", "subagent_type": "explore"}),
+		hasRawInput: true,
+	})
+	s.onSubagent(spawnNotif("sub-1", "Own"))
+	s.onSubagent(finishNotif("sub-1", "failed"))
+	// The rawOutput is authoritative and moves sub-1 from call-b to call-a.
+	s.applyToolDelta("", toolDelta{
+		id: "call-a", rawOutput: grokSpawnOutput("sub-1"), hasRawOutput: true, wireName: "spawn_subagent",
+	})
+	drainEvents(s)
+
+	s.mu.Lock()
+	detached := s.tools["call-b"]
+	s.mu.Unlock()
+	if detached.Task == nil {
+		t.Fatal("a detached spawn tool is still a spawn tool")
+	}
+	if detached.Task.AgentID != "" || detached.Task.Status != "" || detached.Task.Model != "" {
+		t.Fatalf("the child's stamped fields must go with it: %+v", detached.Task)
+	}
+	if detached.Task.Description != "Own" || detached.Task.Prompt != "own prompt" {
+		t.Fatalf("the tool's own rawInput must survive: %+v", detached.Task)
+	}
+}
+
+// TestEvictedChildToolIDsStayBounded pins that the tombstones of evicted
+// child tool ids are bounded; they used to grow one entry per evicted tool
+// for the whole session.
+func TestEvictedChildToolIDsStayBounded(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(spawnNotif("sub-1", "d"))
+	completed, title := "completed", "t"
+	const want = 2000
+	for i := 0; i < want+childToolCap; i++ {
+		s.applyToolDelta("sub-1", toolDelta{
+			id: fmt.Sprintf("t-%d", i), status: &completed, title: &title, wireName: "list_dir",
+		})
+		s.mu.Lock()
+		n := len(s.subagents["sub-1"].evicted)
+		s.mu.Unlock()
+		if n > childEvictedCap {
+			t.Fatalf("tombstones grew to %d, cap %d", n, childEvictedCap)
+		}
+	}
+	s.mu.Lock()
+	rec := s.subagents["sub-1"]
+	n, order := len(rec.evicted), len(rec.evictedOrder)
+	newest := rec.isEvicted(fmt.Sprintf("t-%d", want-1))
+	s.mu.Unlock()
+	if n != order {
+		t.Fatalf("set and order disagree: %d vs %d", n, order)
+	}
+	if !newest {
+		t.Fatal("the trim must keep the newest tombstones")
+	}
+}
+
+// TestCursorTaskRecordsCapped pins the cursor side of the running bound: task
+// tools synthesise records, so a runaway turn must not grow the map without
+// end. Cursor has no transcript, so a record past the cap is simply dropped.
+func TestCursorTaskRecordsCapped(t *testing.T) {
+	s := newSession(Options{})
+	inProgress := "in_progress"
+	for i := 0; i < subagentRunCap+4; i++ {
+		id := fmt.Sprintf("task-%d", i)
+		title := "Task: " + id
+		s.mergeTool(toolDelta{
+			id: id, title: &title, status: &inProgress,
+			rawInput:    mustJSON(map[string]any{"_toolName": "task", "description": id}),
+			hasRawInput: true,
+		})
+		drainEvents(s)
+	}
+	if got := len(s.Snapshot().Subagents); got != subagentRunCap {
+		t.Fatalf("cursor records %d, want %d", got, subagentRunCap)
+	}
+	if _, ok := s.subagents[fmt.Sprintf("task-%d", subagentRunCap)]; ok {
+		t.Fatal("a task past the running cap must leave no record")
+	}
+}
+
+// TestSubagentStringCaps pins the §3.1 caps. Output keeps its tail — the
+// child's answer is at the end of what it wrote, not the start.
+func TestSubagentStringCaps(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(acp.SubagentNotification{
+		Kind: acp.SubagentSpawned, SubagentID: "sub-1", ChildSessionID: "sub-1", AttemptID: "a1",
+		ParentSessionID: "main",
+		Description:     strings.Repeat("d", 4000),
+		SubagentType:    strings.Repeat("t", 400),
+		Model:           strings.Repeat("m", 900),
+	})
+	for i := 0; i < 100; i++ {
+		s.onChildUpdate("sub-1", "", sessionUpdateWire{
+			SessionUpdate: updateUserMessage,
+			Content:       mustJSON(map[string]any{"type": "text", "text": strings.Repeat("p", 64)}),
+		})
+		drainEvents(s)
+	}
+	longTitle, done := strings.Repeat("T", 900), "completed"
+	s.applyToolDelta("sub-1", toolDelta{id: "c1", status: &done, title: &longTitle, wireName: "list_dir"})
+	var used []string
+	for i := 0; i < 20; i++ {
+		used = append(used, fmt.Sprintf("tool-%d", i))
 	}
 	s.onSubagent(acp.SubagentNotification{
-		Kind: acp.SubagentFinished, SubagentID: "sub-0", ChildSessionID: "sub-0",
-		AttemptID: "at1", Status: "completed",
+		Kind: acp.SubagentProgress, SubagentID: "sub-1", ChildSessionID: "sub-1", ToolsUsed: used,
 	})
-	s.onSubagent(spawnNotif("sub-65", "d"))
-	if _, ok := s.subagents["sub-65"]; !ok {
-		t.Fatal("a finished slot must free room for a new spawned")
+	s.onSubagent(acp.SubagentNotification{
+		Kind: acp.SubagentFinished, SubagentID: "sub-1", ChildSessionID: "sub-1", Status: "failed",
+		Error:  strings.Repeat("e", 4000),
+		Output: strings.Repeat("o", 9000) + "THE-TAIL",
+	})
+	drainEvents(s)
+
+	got := s.Snapshot().Subagents[0]
+	for _, c := range []struct {
+		name string
+		s    string
+		max  int
+	}{
+		{"Description", got.Description, subagentDescCap},
+		{"SubagentType", got.SubagentType, subagentTypeCap},
+		{"Model", got.Model, subagentModelCap},
+		{"Error", got.Error, subagentErrorCap},
+		{"Prompt", got.Prompt, taskPromptCap},
+		{"Output", got.Output, subagentOutputCap},
+		{"Activity", got.Activity, subagentActivityCap},
+	} {
+		if len(c.s) > c.max {
+			t.Fatalf("%s is %d bytes, cap %d", c.name, len(c.s), c.max)
+		}
+		if !utf8.ValidString(c.s) {
+			t.Fatalf("%s is not valid utf-8", c.name)
+		}
+	}
+	if len(got.Prompt) != taskPromptCap {
+		t.Fatalf("chunks must accumulate up to the cap, got %d bytes", len(got.Prompt))
+	}
+	if !strings.HasPrefix(got.Output, ellipsis) || !strings.HasSuffix(got.Output, "THE-TAIL") {
+		t.Fatalf("Output must keep the tail, got %d bytes ending %q", len(got.Output), got.Output[len(got.Output)-16:])
+	}
+	if len(got.ToolsUsed) != subagentToolsUsedCap || got.ToolsUsed[0] != "tool-12" {
+		t.Fatalf("ToolsUsed %v", got.ToolsUsed)
+	}
+}
+
+// TestLastFinishedWins pins §3.3: a second finished with a different status is
+// applied and re-emitted. A child tool that already settled on the first
+// finish keeps that first terminal status — craze never re-opens a settled
+// tool.
+func TestLastFinishedWins(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(spawnNotif("sub-1", "d"))
+	inflight, title := "in_progress", "list"
+	s.applyToolDelta("sub-1", toolDelta{id: "c1", status: &inflight, title: &title, wireName: "list_dir"})
+	s.onSubagent(finishNotif("sub-1", "completed"))
+	drainEvents(s)
+	s.onSubagent(finishNotif("sub-1", "cancelled"))
+
+	var last *SubagentInfo
+	for _, ev := range pendingEvents(s) {
+		if ev.Type == EventSubagent && ev.Subagent != nil {
+			last = ev.Subagent
+		}
+	}
+	if last == nil || last.Status != SubagentCancelled {
+		t.Fatalf("the second finished must be re-emitted, got %+v", last)
+	}
+	if got := s.Snapshot().Subagents[0].Status; got != SubagentCancelled {
+		t.Fatalf("record status %q", got)
+	}
+	s.mu.Lock()
+	tool := s.subagents["sub-1"].tools["c1"]
+	s.mu.Unlock()
+	if tool.Status != "completed" {
+		t.Fatalf("a settled child tool keeps its first terminal status, got %q", tool.Status)
+	}
+}
+
+// TestUnknownSubagentNotificationsDropped pins §3.3: progress and finished for
+// an id no spawned introduced never make a half-initialized row.
+func TestUnknownSubagentNotificationsDropped(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(acp.SubagentNotification{
+		Kind: acp.SubagentProgress, SubagentID: "ghost", ChildSessionID: "ghost", TokensUsed: 9,
+	})
+	s.onSubagent(finishNotif("ghost", "completed"))
+	if evs := pendingEvents(s); len(evs) != 0 {
+		t.Fatalf("no event may escape for an unknown id: %v", typesOf(evs))
+	}
+	if got := s.Snapshot().Subagents; len(got) != 0 {
+		t.Fatalf("records %+v", got)
+	}
+}
+
+// TestActivityIsMostRecentChildTool pins §3.1's Activity.
+func TestActivityIsMostRecentChildTool(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(spawnNotif("sub-1", "d"))
+	for i, title := range []string{"Read main.go", "List directory files", "Grep for TODO"} {
+		name, done := title, "completed"
+		s.applyToolDelta("sub-1", toolDelta{
+			id: fmt.Sprintf("c-%d", i), status: &done, title: &name, wireName: "list_dir",
+		})
+	}
+	if got := s.Snapshot().Subagents[0].Activity; got != "Grep for TODO" {
+		t.Fatalf("Activity should be the newest child tool title, got %q", got)
 	}
 }
 
@@ -594,6 +945,29 @@ func spawnNotif(id, desc string) acp.SubagentNotification {
 		Description:     desc,
 		SubagentType:    "explore",
 		Model:           "grok-4.6",
+	}
+}
+
+func finishNotif(id string, status string) acp.SubagentNotification {
+	return acp.SubagentNotification{
+		Kind:           acp.SubagentFinished,
+		SubagentID:     id,
+		ChildSessionID: id,
+		AttemptID:      "at1",
+		Status:         status,
+	}
+}
+
+// pendingEvents takes everything already queued without blocking.
+func pendingEvents(s *session) []Event {
+	var out []Event
+	for {
+		select {
+		case ev := <-s.Events():
+			out = append(out, ev)
+		default:
+			return out
+		}
 	}
 }
 

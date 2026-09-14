@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,12 @@ const (
 	subagentToolsUsedCap = 8
 	subagentFinishedCap  = 32
 	childToolCap         = 256
+	// childEvictedCap bounds the tombstones of evicted child tool ids, kept so
+	// a late delta for a dropped id is ignored rather than resurrecting it.
+	// Past the cap only childEvictedKeep of the newest survive: a delta for an
+	// id evicted that many tools ago is not coming.
+	childEvictedCap  = 512
+	childEvictedKeep = 256
 )
 
 type subagentRec struct {
@@ -28,6 +35,51 @@ type subagentRec struct {
 	tools      map[string]ToolEvent
 	toolOrder  []string
 	evicted    map[string]struct{}
+	// evictedOrder is the insertion order of evicted, so the set can be
+	// trimmed to its newest entries instead of growing for the whole session.
+	evictedOrder []string
+	// unrouted marks a child past the routing cap (§3.2/§9): it gets a row but
+	// no transcript, so it never owns a tool map.
+	unrouted bool
+	// finishSeq orders terminal records by when they finished, which spawn
+	// order does not: a long-runner spawned first can finish last.
+	finishSeq uint64
+	// preStamp is the joined tool's Task as it was before the child's fields
+	// were stamped onto it, and preStampTool the tool it belongs to, so a
+	// detach restores the tool's own parsed rawInput exactly.
+	preStamp     *TaskInfo
+	preStampTool string
+}
+
+// isEvicted reports whether a child tool id was dropped by the tool cap.
+func (r *subagentRec) isEvicted(id string) bool {
+	if r == nil || r.evicted == nil {
+		return false
+	}
+	_, ok := r.evicted[id]
+	return ok
+}
+
+// noteEvicted remembers a dropped child tool id, bounded by childEvictedCap.
+func (r *subagentRec) noteEvicted(id string) {
+	if r == nil {
+		return
+	}
+	if r.evicted == nil {
+		r.evicted = make(map[string]struct{})
+	}
+	if _, dup := r.evicted[id]; dup {
+		return
+	}
+	r.evicted[id] = struct{}{}
+	r.evictedOrder = append(r.evictedOrder, id)
+	if len(r.evictedOrder) <= childEvictedCap {
+		return
+	}
+	for _, old := range r.evictedOrder[:len(r.evictedOrder)-childEvictedKeep] {
+		delete(r.evicted, old)
+	}
+	r.evictedOrder = append([]string(nil), r.evictedOrder[len(r.evictedOrder)-childEvictedKeep:]...)
 }
 
 func (s *session) emitAll(evs []Event) {
@@ -45,7 +97,7 @@ func (s *session) classifyTask(t ToolEvent) bool {
 		return true
 	}
 	if t.ToolName == "" && p.titleTaskFallback && t.Title != "" {
-		return strings.HasPrefix(t.Title, "Task:") || subagentTitleRe.MatchString(t.Title)
+		return subagentTitleRe.MatchString(t.Title)
 	}
 	return false
 }
@@ -162,20 +214,37 @@ func (s *session) handleSpawnedLocked(n acp.SubagentNotification) []Event {
 		rec.info.TokensUsed = 0
 		rec.info.ToolsUsed = nil
 		rec.info.EndedAt = time.Time{}
-		s.applySpawnFieldsLocked(&rec.info, n)
+		// The record is running again, so it no longer holds a finish slot.
+		rec.finishSeq = 0
+		s.applySpawnFieldsLocked(rec, n)
 		join := s.joinByDescriptionLocked(id)
 		info := cloneSubagent(rec.info)
-		return append([]Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}, join...)
+		return append([]Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}, dropSpawnEcho(join, info)...)
 	}
 	if rec := s.newSubagentLocked(n); rec == nil {
 		return nil
 	}
 	join := s.joinByDescriptionLocked(id)
 	info := cloneSubagent(s.subagents[id].info)
-	return append([]Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}, join...)
+	return append([]Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}, dropSpawnEcho(join, info)...)
 }
 
-func (s *session) applySpawnFieldsLocked(info *SubagentInfo, n acp.SubagentNotification) {
+// dropSpawnEcho removes the progress event a join emits when it carries
+// exactly the state the spawned event already reports: §3.1 pins that
+// identical state is never re-emitted.
+func dropSpawnEcho(evs []Event, spawned SubagentInfo) []Event {
+	out := evs[:0]
+	for _, ev := range evs {
+		if ev.Type == EventSubagent && ev.Subagent != nil && sameSubagentFull(*ev.Subagent, spawned) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func (s *session) applySpawnFieldsLocked(rec *subagentRec, n acp.SubagentNotification) {
+	info := &rec.info
 	parent := n.ParentSessionID
 	if parent == s.sessionID {
 		parent = ""
@@ -190,28 +259,44 @@ func (s *session) applySpawnFieldsLocked(info *SubagentInfo, n acp.SubagentNotif
 	if n.Model != "" {
 		info.Model = n.Model
 	}
-	info.Transcript = s.provider().Capabilities().SubagentTranscript
+	// An unrouted child never gets a stream, so a resume must not claim one.
+	info.Transcript = !rec.unrouted && s.provider().Capabilities().SubagentTranscript
 	capSubagent(info)
 }
 
-// subagentRunCap bounds concurrent running records. The ACP router refuses
-// to route past 64 active children but still delivers refused spawns so a
-// row could show; the session enforces the plan's own bound instead — a
-// spawned past the cap is dropped here, never evicting a running child.
-const subagentRunCap = 64
+// subagentRunCap bounds the running records the ACP router will route a
+// stream for: it refuses to route past 64 active children.
+//
+// subagentUnroutedCap bounds the rows kept past that. §3.2/§9 pin that a 65th
+// concurrent child still gets a *row*, just no transcript, so the record is
+// created with Transcript false and no tool map; past this many unrouted
+// running children the spawned is dropped, capping running records at 96.
+const (
+	subagentRunCap      = 64
+	subagentUnroutedCap = 32
+)
 
-func (s *session) runningSubagentsLocked() int {
-	n := 0
+// runningSubagentsLocked counts records still running, and how many of those
+// are unrouted rows.
+func (s *session) runningSubagentsLocked() (total, unrouted int) {
 	for _, rec := range s.subagents {
-		if rec.info.Status == SubagentRunning || rec.info.Status == "" {
-			n++
+		if rec.info.Status != SubagentRunning && rec.info.Status != "" {
+			continue
+		}
+		total++
+		if rec.unrouted {
+			unrouted++
 		}
 	}
-	return n
+	return total, unrouted
 }
 
 func (s *session) newSubagentLocked(n acp.SubagentNotification) *subagentRec {
-	if s.runningSubagentsLocked() >= subagentRunCap {
+	running, unrouted := s.runningSubagentsLocked()
+	// The router's 64 slots are the routed children only, so a routed slot
+	// freed by a finish is usable again even while unrouted rows are held.
+	routed := running-unrouted < subagentRunCap
+	if !routed && unrouted >= subagentUnroutedCap {
 		return nil
 	}
 	parent := n.ParentSessionID
@@ -232,10 +317,13 @@ func (s *session) newSubagentLocked(n acp.SubagentNotification) *subagentRec {
 			Model:        n.Model,
 			Status:       SubagentRunning,
 			StartedAt:    time.Now(),
-			Transcript:   s.provider().Capabilities().SubagentTranscript,
+			Transcript:   routed && s.provider().Capabilities().SubagentTranscript,
 		},
-		tools:   make(map[string]ToolEvent),
-		evicted: make(map[string]struct{}),
+		unrouted: !routed,
+	}
+	if routed {
+		rec.tools = make(map[string]ToolEvent)
+		rec.evicted = make(map[string]struct{})
 	}
 	capSubagent(&rec.info)
 	s.subagents[id] = rec
@@ -298,6 +386,8 @@ func (s *session) handleFinishedLocked(n acp.SubagentNotification) []Event {
 	if n.Turns > 0 {
 		rec.info.Turns = n.Turns
 	}
+	// A zeroed counter on finished (seen live on cancel: tokens_used:0 after
+	// progress had reported 1186) keeps the last progress value on purpose.
 	if n.TokensUsed > 0 {
 		rec.info.TokensUsed = n.TokensUsed
 	}
@@ -316,7 +406,8 @@ func (s *session) handleFinishedLocked(n acp.SubagentNotification) []Event {
 
 	evs := s.settleChildToolsLocked(rec)
 	evs = append(evs, s.remergeJoinedTaskLocked(rec)...)
-	s.evictFinishedLocked()
+	s.stampFinishLocked(rec)
+	s.evictFinishedLocked(rec.info.ID)
 	info := cloneSubagent(rec.info)
 	evs = append(evs, Event{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeFinished})
 	return evs
@@ -388,19 +479,56 @@ func (s *session) remergeJoinedTaskLocked(rec *subagentRec) []Event {
 	return []Event{{Type: EventTool, Agent: owner, Tool: &ct}}
 }
 
-func (s *session) evictFinishedLocked() {
+// stampFinishLocked gives a record its place in finish order. It is claimed
+// once per run: a "last finished wins" restatement of an already-terminal
+// record must not make it the newest finish.
+func (s *session) stampFinishLocked(rec *subagentRec) {
+	if rec.finishSeq != 0 {
+		return
+	}
+	s.subagentFinishSeq++
+	rec.finishSeq = s.subagentFinishSeq
+}
+
+// evictFinishedLocked drops finished records past subagentFinishedCap, oldest
+// *finish* first — not oldest spawn. A long-runner spawned first can finish
+// after 32 newer children have come and gone; evicting it by spawn order
+// would delete the record its own finished event is about, so the event would
+// describe a row no snapshot ever held. keep is the record that just
+// finished; it is never the one evicted.
+func (s *session) evictFinishedLocked(keep string) {
 	var finished []string
 	for _, id := range s.subagentOrder {
 		rec := s.subagents[id]
-		if rec != nil && rec.info.Status != SubagentRunning {
+		if rec != nil && rec.info.Status != SubagentRunning && rec.info.Status != "" {
 			finished = append(finished, id)
 		}
 	}
+	if len(finished) <= subagentFinishedCap {
+		return
+	}
+	sort.SliceStable(finished, func(i, j int) bool {
+		a, b := s.subagents[finished[i]], s.subagents[finished[j]]
+		if !a.info.EndedAt.Equal(b.info.EndedAt) {
+			return a.info.EndedAt.Before(b.info.EndedAt)
+		}
+		return a.finishSeq < b.finishSeq
+	})
 	for len(finished) > subagentFinishedCap {
-		drop := finished[0]
-		finished = finished[1:]
-		delete(s.subagents, drop)
-		s.removeSubagentOrderLocked(drop)
+		drop := -1
+		for i, id := range finished {
+			if id != keep {
+				drop = i
+				break
+			}
+		}
+		if drop < 0 {
+			return
+		}
+		id := finished[drop]
+		finished = append(finished[:drop], finished[drop+1:]...)
+		delete(s.subagents, id)
+		s.removeSubagentOrderLocked(id)
 	}
 }
 
@@ -466,7 +594,11 @@ func (s *session) knownSubagent(id string) bool {
 	return ok
 }
 
-func (s *session) toolStoreLocked(owner string) (map[string]ToolEvent, *[]string, map[string]struct{}, int) {
+// toolStoreLocked returns the tool map of a session: the main one for "", a
+// child's private one otherwise. The third result is the owning record (nil
+// for the main session) so the caller can read and extend its evicted set.
+// An unrouted child (§3.2) has no store at all — nothing is ever routed to it.
+func (s *session) toolStoreLocked(owner string) (map[string]ToolEvent, *[]string, *subagentRec, int) {
 	if owner == "" {
 		if s.tools == nil {
 			s.tools = make(map[string]ToolEvent)
@@ -474,19 +606,16 @@ func (s *session) toolStoreLocked(owner string) (map[string]ToolEvent, *[]string
 		return s.tools, &s.toolOrder, nil, 0
 	}
 	rec := s.subagents[owner]
-	if rec == nil {
+	if rec == nil || rec.unrouted {
 		return nil, nil, nil, 0
 	}
 	if rec.tools == nil {
 		rec.tools = make(map[string]ToolEvent)
 	}
-	if rec.evicted == nil {
-		rec.evicted = make(map[string]struct{})
-	}
-	return rec.tools, &rec.toolOrder, rec.evicted, childToolCap
+	return rec.tools, &rec.toolOrder, rec, childToolCap
 }
 
-func (s *session) evictChildToolLocked(tools map[string]ToolEvent, order *[]string, evicted map[string]struct{}) {
+func (s *session) evictChildToolLocked(tools map[string]ToolEvent, order *[]string, rec *subagentRec) {
 	pick := func(terminal bool) string {
 		for _, id := range *order {
 			t := tools[id]
@@ -504,9 +633,7 @@ func (s *session) evictChildToolLocked(tools map[string]ToolEvent, order *[]stri
 		return
 	}
 	delete(tools, id)
-	if evicted != nil {
-		evicted[id] = struct{}{}
-	}
+	rec.noteEvicted(id)
 	for i, x := range *order {
 		if x == id {
 			*order = append((*order)[:i], (*order)[i+1:]...)
@@ -538,7 +665,10 @@ func (s *session) joinByDescriptionLocked(id string) []Event {
 		}
 		tdesc := ""
 		if t.Task != nil {
-			tdesc = t.Task.Description
+			// The record's description went through capSubagent, so the tool's
+			// raw one has to be capped the same way or anything over
+			// subagentDescCap could never match.
+			tdesc = truncateUTF8(sanitizeText(t.Task.Description), subagentDescCap)
 		}
 		if tdesc == rec.info.Description {
 			found = tid
@@ -589,6 +719,15 @@ func (s *session) attachSubagentLocked(subID, toolID, owner string) []Event {
 		}
 		changed = append(changed, touched{tid, own})
 	}
+	// A join rewrites the record too (ToolCallID, and the prompt/background it
+	// learns off the tool). Without an EventSubagent for that, a --json
+	// consumer would not see toolCallId until the child finished. Kept in a
+	// slice, not a map, so the emitted order is deterministic.
+	type before struct {
+		id   string
+		info SubagentInfo
+	}
+	prevInfos := []before{{subID, cloneSubagent(rec.info)}}
 
 	if rec.info.ToolCallID != "" && rec.info.ToolCallID != toolID {
 		oldOwner := rec.info.ParentID
@@ -606,6 +745,7 @@ func (s *session) attachSubagentLocked(subID, toolID, owner string) []Event {
 	for oid, orec := range s.subagents {
 		if oid != subID && orec.info.ToolCallID == toolID && orec.info.ParentID == owner {
 			old := orec.info.ToolCallID
+			prevInfos = append(prevInfos, before{oid, cloneSubagent(orec.info)})
 			orec.info.ToolCallID = ""
 			s.clearToolJoinLocked(old, oid, orec.info.ParentID)
 			note(old, orec.info.ParentID)
@@ -639,6 +779,14 @@ func (s *session) attachSubagentLocked(subID, toolID, owner string) []Event {
 		ct := cloneTool(t)
 		evs = append(evs, Event{Type: EventTool, Agent: c.owner, Tool: &ct})
 	}
+	for _, b := range prevInfos {
+		r := s.subagents[b.id]
+		if r == nil || sameSubagentFull(b.info, r.info) {
+			continue
+		}
+		info := cloneSubagent(r.info)
+		evs = append(evs, Event{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeProgress})
+	}
 	return evs
 }
 
@@ -650,8 +798,7 @@ func (s *session) clearToolJoinLocked(toolID, subID, owner string) {
 			if !ok || t.Task == nil || t.Task.AgentID != subID {
 				return
 			}
-			t.Task.AgentID = ""
-			m[toolID] = t
+			m[toolID] = s.unstampToolLocked(t, toolID, subID)
 		})
 		return
 	}
@@ -660,9 +807,32 @@ func (s *session) clearToolJoinLocked(toolID, subID, owner string) {
 		return
 	}
 	if t.Task.AgentID == subID || t.Task.AgentID == "" {
-		t.Task.AgentID = ""
-		tools[toolID] = t
+		tools[toolID] = s.unstampToolLocked(t, toolID, subID)
 	}
+}
+
+// unstampToolLocked undoes stampJoinedToolLocked. Detaching a child has to
+// take back everything the join wrote — the child's status, model, type and
+// prompt, not just its id — or the tool's row keeps describing a child that
+// is no longer its own. The pre-join Task is restored verbatim, so whatever
+// the tool parsed out of its own rawInput survives; without that snapshot
+// only the fields that can only have come from the child are cleared.
+func (s *session) unstampToolLocked(t ToolEvent, toolID, subID string) ToolEvent {
+	if rec := s.subagents[subID]; rec != nil && rec.preStampTool == toolID {
+		task := TaskInfo{}
+		if rec.preStamp != nil {
+			task = *rec.preStamp
+		}
+		rec.preStamp, rec.preStampTool = nil, ""
+		t.Task = &task
+		return t
+	}
+	task := *t.Task
+	task.AgentID = ""
+	task.Status = ""
+	task.Model = ""
+	t.Task = &task
+	return t
 }
 
 func (s *session) stampJoinedToolLocked(toolID, owner string, rec *subagentRec) {
@@ -679,6 +849,11 @@ func (s *session) stampJoinedToolLocked(toolID, owner string, rec *subagentRec) 
 	}
 	if rec.info.Prompt == "" && t.Task != nil && t.Task.Prompt != "" {
 		rec.info.Prompt = t.Task.Prompt
+	}
+	rec.preStamp, rec.preStampTool = nil, toolID
+	if t.Task != nil {
+		task := *t.Task
+		rec.preStamp = &task
 	}
 	t.Task = mergeTaskInfo(t.Task, TaskInfo{
 		AgentID:      rec.info.ID,
@@ -709,6 +884,12 @@ func (s *session) syncCursorLocked(tool ToolEvent) []Event {
 	}
 	rec, ok := s.subagents[tool.ID]
 	if !ok {
+		// Cursor synthesises a record per task tool, so the same running bound
+		// grok's spawns get applies here. There is no transcript to lose, so a
+		// record past the cap is simply dropped.
+		if running, _ := s.runningSubagentsLocked(); running >= subagentRunCap {
+			return nil
+		}
 		rec = &subagentRec{
 			info: SubagentInfo{
 				ID:         tool.ID,
@@ -809,7 +990,8 @@ func (s *session) applyCursorTerminalLocked(rec *subagentRec, tool ToolEvent) {
 	}
 	capSubagent(&rec.info)
 	s.writeCursorTaskLocked(tool.ID, rec)
-	s.evictFinishedLocked()
+	s.stampFinishLocked(rec)
+	s.evictFinishedLocked(rec.info.ID)
 }
 
 func terminalToolStatus(status string) bool {

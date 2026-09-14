@@ -253,7 +253,11 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	c.childOrder = nil
 	h := c.onUpdate
 	c.mu.Unlock()
-	flushSessionUpdates(result.SessionID, pending, h)
+	if dropped := flushSessionUpdates(result.SessionID, pending, h); dropped > 0 {
+		c.mu.Lock()
+		c.dropped += dropped
+		c.mu.Unlock()
+	}
 	return &result, nil
 }
 
@@ -619,10 +623,12 @@ func (c *Client) handleSessionUpdate(msg *Message) {
 	if err := json.Unmarshal(msg.Params, &n); err != nil {
 		return
 	}
-	c.mu.Lock()
+	// dialect is written once, before the read loop starts, so the dialect
+	// check and grokToolName's own json.Unmarshal stay off c.mu.
 	if c.dialect == DialectGrok {
 		n.ToolName = grokToolName(n.Update)
 	}
+	c.mu.Lock()
 	if c.sessionID == "" {
 		// Pre-session/new: keep today's active-session filter at flush time.
 		c.pendingUpdates = append(c.pendingUpdates, n)
@@ -664,11 +670,18 @@ func (c *Client) handleSubagentNotification(msg *Message) {
 	}
 	c.mu.Lock()
 	active := c.sessionID
-	parentRouted := active != "" && (n.SessionID == active || c.isChildLocked(n.SessionID))
+	// Only the active session or a registered child may introduce a new
+	// child, so a spawn is gated on the outer id alone. progress and
+	// finished also route when the child they are about is registered: a
+	// grandchild outlives its own parent child, whose finished already
+	// deregistered the outer id this notification arrives on.
+	outerRouted := active != "" && (n.SessionID == active || c.isChildLocked(n.SessionID))
+	childRouted := active != "" && c.isChildLocked(n.ChildSessionID)
+	parentRouted := outerRouted || childRouted
 	var h func(SubagentNotification)
 	switch n.Kind {
 	case SubagentSpawned:
-		if !parentRouted {
+		if !outerRouted {
 			c.dropped++
 			c.mu.Unlock()
 			return
@@ -751,17 +764,24 @@ func (c *Client) replyInvalidParams(id json.RawMessage, msg string) {
 	_ = c.conn.ReplyErr(id, &RPCError{Code: CodeInvalidParams, Message: msg})
 }
 
-func flushSessionUpdates(sid string, pending []SessionNotification, h func(SessionNotification)) {
-	if h == nil {
-		return
-	}
+// flushSessionUpdates forwards the updates buffered before session/new that
+// belong to the session that came back, and returns how many the
+// active-session filter discarded so the caller can count them as dropped.
+func flushSessionUpdates(sid string, pending []SessionNotification, h func(SessionNotification)) int64 {
+	var dropped int64
 	for _, n := range pending {
 		// Today's active-session filter: only the active session flushes.
-		if n.SessionID == sid {
-			n.Child = ""
-			h(n)
+		if n.SessionID != sid {
+			dropped++
+			continue
 		}
+		if h == nil {
+			continue
+		}
+		n.Child = ""
+		h(n)
 	}
+	return dropped
 }
 
 func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {

@@ -48,6 +48,9 @@ type session struct {
 	taskReceiptOrder []string
 	subagents        map[string]*subagentRec
 	subagentOrder    []string
+	// subagentFinishSeq stamps records in the order they finished, which is
+	// not spawn order; the finished-record cap evicts by it.
+	subagentFinishSeq uint64
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.

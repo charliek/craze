@@ -74,14 +74,12 @@ func (s *session) applyToolDelta(owner string, d toolDelta) (ToolEvent, bool, []
 }
 
 func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, []Event) {
-	tools, order, evicted, capN := s.toolStoreLocked(owner)
+	tools, order, rec, capN := s.toolStoreLocked(owner)
 	if tools == nil {
 		return ToolEvent{}, false, nil
 	}
-	if evicted != nil {
-		if _, gone := evicted[d.id]; gone {
-			return ToolEvent{}, false, nil
-		}
+	if rec.isEvicted(d.id) {
+		return ToolEvent{}, false, nil
 	}
 	prev, exists := tools[d.id]
 	if d.onlyIfInFlight && (!exists || !toolStatusInFlight(prev.Status)) {
@@ -90,7 +88,7 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	out := prev
 	if !exists {
 		if capN > 0 && len(*order) >= capN {
-			s.evictChildToolLocked(tools, order, evicted)
+			s.evictChildToolLocked(tools, order, rec)
 		}
 		out.ID = d.id
 		*order = append(*order, d.id)
@@ -148,10 +146,10 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	}
 	out.At = time.Now()
 	tools[d.id] = out
-	if owner != "" && out.Title != "" {
-		if rec := s.subagents[owner]; rec != nil {
-			rec.info.Activity = truncateUTF8(out.Title, subagentActivityCap)
-		}
+	// rec is the owning child (nil for the main session): §3.1's Activity is
+	// the title of its most recent tool call.
+	if rec != nil && out.Title != "" {
+		rec.info.Activity = truncateUTF8(out.Title, subagentActivityCap)
 	}
 
 	var extras []Event

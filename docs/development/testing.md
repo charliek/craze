@@ -45,7 +45,9 @@ receipt, and the TUI view shows what the receipt carried.
 
 Sanitized excerpts of the live captures are committed under
 `internal/acp/testdata/grok-subagent/` (`subagent.jsonl`, `two.jsonl`,
-`cancel.jsonl`) and are what the ACP parser tests run against, so the repo
+`cancel-late.jsonl` for a cancel while the child still runs, `cancel-early.jsonl`
+for a cancel after the child completed) and are what the ACP parser tests and
+a replay through the client run against, so the repo
 does not depend on the capture directory.
 
 ## craze frame

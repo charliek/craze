@@ -238,6 +238,63 @@ func TestDrainPropagatesWriteErrors(t *testing.T) {
 	}
 }
 
+// TestSweepEventsTakesBufferedWithoutBlocking pins the helper the drain's
+// deadline branches use: everything already buffered is written, and an empty
+// channel returns at once rather than waiting for the next event.
+func TestSweepEventsTakesBufferedWithoutBlocking(t *testing.T) {
+	evs := make(chan agent.Event, 4)
+	for i := 0; i < 3; i++ {
+		evs <- agent.Event{Type: agent.EventText, Text: "x"}
+	}
+	var got int
+	start := time.Now()
+	if err := sweepEvents(evs, func(agent.Event) error {
+		got++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got != 3 {
+		t.Fatalf("wrote %d of 3 buffered events", got)
+	}
+	if time.Since(start) > 50*time.Millisecond {
+		t.Fatalf("sweep blocked for %s", time.Since(start))
+	}
+	want := errors.New("pipe broke")
+	evs <- agent.Event{Type: agent.EventText, Text: "x"}
+	if err := sweepEvents(evs, func(agent.Event) error { return want }); !errors.Is(err, want) {
+		t.Fatalf("sweep error %v, want %v", err, want)
+	}
+}
+
+// TestDrainKeepsBufferedEventsWhenTheTimerFires pins the race the sweep
+// closes: when a deadline and a buffered event are both ready, select picks
+// between them at random, so returning on the timer alone would drop JSON the
+// session had already produced. The first write outlasts the quiet window, so
+// by the next iteration both are ready.
+func TestDrainKeepsBufferedEventsWhenTheTimerFires(t *testing.T) {
+	const n = 8
+	evs := make(chan agent.Event, n)
+	for i := 0; i < n; i++ {
+		evs <- agent.Event{Type: agent.EventText, Text: "x"}
+	}
+	snap := agent.Snapshot{Subagents: []agent.SubagentInfo{{ID: "sub-1", Status: agent.SubagentCompleted}}}
+	var got int
+	err := drainSubagentEvents(evs, func() agent.Snapshot { return snap }, func(agent.Event) error {
+		if got == 0 {
+			time.Sleep(subagentQuiet + 50*time.Millisecond)
+		}
+		got++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != n {
+		t.Fatalf("the drain wrote %d of %d buffered events", got, n)
+	}
+}
+
 func TestPickPermissionKeepsUnusedDecisions(t *testing.T) {
 	opts := []agent.PermissionOption{
 		{OptionID: "opt-reject", Kind: "reject_once"},

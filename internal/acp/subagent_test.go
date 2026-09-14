@@ -36,22 +36,42 @@ func childUpdateParams(child, kind, text string) string {
 	return fmt.Sprintf(`{"sessionId":%q,"update":{"sessionUpdate":%q,"content":{"type":"text","text":%q}}}`, child, kind, text)
 }
 
+// handlerEvent is one handler call. Both handlers append to the same ordered
+// slice, so a test can assert the order *between* them — the §3.2 claim that
+// the read loop delivers spawned before the first routed child update.
+type handlerEvent struct {
+	// kind is the lifecycle kind, or eventUpdate for a session update.
+	kind  string
+	child string
+}
+
+const eventUpdate = "update"
+
 type notifyCapture struct {
 	mu       sync.Mutex
 	updates  []SessionNotification
 	subagent []SubagentNotification
+	events   []handlerEvent
 }
 
 func (c *notifyCapture) addUpdate(n SessionNotification) {
 	c.mu.Lock()
 	c.updates = append(c.updates, n)
+	c.events = append(c.events, handlerEvent{kind: eventUpdate, child: n.Child})
 	c.mu.Unlock()
 }
 
 func (c *notifyCapture) addSubagent(n SubagentNotification) {
 	c.mu.Lock()
 	c.subagent = append(c.subagent, n)
+	c.events = append(c.events, handlerEvent{kind: n.Kind, child: n.ChildSessionID})
 	c.mu.Unlock()
+}
+
+func (c *notifyCapture) order() []handlerEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]handlerEvent(nil), c.events...)
 }
 
 func (c *notifyCapture) snapshot() ([]SessionNotification, []SubagentNotification) {
@@ -201,24 +221,57 @@ func TestSpawnedRegistersAndChildForwarded(t *testing.T) {
 	}
 }
 
+// TestPendingUpdatesFlushAfterSessionNew drives the real session/new RPC: an
+// update buffered before it belongs to the session that comes back and is
+// forwarded untagged, and one for any other id is dropped and counted.
 func TestPendingUpdatesFlushAfterSessionNew(t *testing.T) {
 	p := newRawPipeDialect(t, DialectGrok)
 	cap := &notifyCapture{}
 	p.client.SetUpdateHandler(cap.addUpdate)
-	// No session yet: updates buffer.
+	// No session yet: both updates buffer instead of routing.
 	p.send(t, nil, MethodSessionUpdate, childUpdateParams("s-new", UpdateAgentMessage, "early"))
-	time.Sleep(50 * time.Millisecond)
-	p.client.mu.Lock()
-	p.client.sessionID = "s-new"
-	pending := p.client.pendingUpdates
-	p.client.pendingUpdates = nil
-	h := p.client.onUpdate
-	p.client.mu.Unlock()
-	flushSessionUpdates("s-new", pending, h)
-	cap.waitFor(t, 1, 0)
+	p.send(t, nil, MethodSessionUpdate, childUpdateParams("other-session", UpdateAgentMessage, "NOPE"))
+	waitUntil(t, func() bool {
+		p.client.mu.Lock()
+		defer p.client.mu.Unlock()
+		return len(p.client.pendingUpdates) == 2
+	})
+	if updates, _ := cap.snapshot(); len(updates) != 0 {
+		t.Fatalf("nothing may forward before session/new, got %v", updates)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.client.NewSession(t.Context(), t.TempDir())
+		done <- err
+	}()
+	req := p.readWithin(t, 3*time.Second, "session/new")
+	if req.Method != MethodSessionNew {
+		t.Fatalf("method %q", req.Method)
+	}
+	raw, err := json.Marshal(map[string]string{"sessionId": "s-new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: req.ID, Result: raw}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("NewSession hung")
+	}
 	updates, _ := cap.snapshot()
-	if updates[0].Child != "" {
-		t.Fatalf("flushed main update must have Child == \"\", got %q", updates[0].Child)
+	if len(updates) != 1 {
+		t.Fatalf("exactly the new session's buffered update flushes, got %v", updates)
+	}
+	if updates[0].Child != "" || updates[0].SessionID != "s-new" {
+		t.Fatalf("flushed main update must have Child == \"\", got %+v", updates[0])
+	}
+	if got := p.client.DroppedUpdates(); got != 1 {
+		t.Fatalf("dropped %d, want 1 (the discarded foreign buffered update)", got)
 	}
 }
 
@@ -420,19 +473,81 @@ func TestForeignSessionDropped(t *testing.T) {
 	}
 }
 
+// TestSubagentHandlerOrder pins the §3.2 ordering claim across both handlers:
+// one read loop delivers them in wire order, so spawned is seen before the
+// first update tagged with that child.
 func TestSubagentHandlerOrder(t *testing.T) {
 	p, cap := grokPipe(t)
+	// A main-session update first: it must not be mistaken for a child one.
+	p.send(t, nil, MethodSessionUpdate, childUpdateParams(subTestParent, UpdateAgentMessage, "main"))
 	p.send(t, nil, MethodGrokSessionNotificationWrapped, spawnedParams(subTestParent, subTestChild, "at1"))
 	p.send(t, nil, MethodSessionUpdate, childUpdateParams(subTestChild, UpdateAgentMessage, "one"))
 	p.send(t, nil, MethodGrokSessionNotificationWrapped, progressParams(subTestParent, subTestChild))
+	p.send(t, nil, MethodSessionUpdate, childUpdateParams(subTestChild, UpdateAgentMessage, "two"))
 	p.send(t, nil, MethodGrokSessionNotificationWrapped, finishedParams(subTestParent, subTestChild, "completed"))
-	cap.waitFor(t, 1, 3)
+	cap.waitFor(t, 3, 3)
 	_, subs := cap.snapshot()
 	want := []string{SubagentSpawned, SubagentProgress, SubagentFinished}
 	for i, k := range want {
 		if subs[i].Kind != k {
 			t.Fatalf("order %v, want %v", subs, want)
 		}
+	}
+	events := cap.order()
+	spawnedAt, firstChildAt := -1, -1
+	for i, e := range events {
+		if e.kind == SubagentSpawned && e.child == subTestChild && spawnedAt < 0 {
+			spawnedAt = i
+		}
+		if e.kind == eventUpdate && e.child != "" && firstChildAt < 0 {
+			firstChildAt = i
+		}
+	}
+	if spawnedAt < 0 || firstChildAt < 0 {
+		t.Fatalf("events %+v", events)
+	}
+	if spawnedAt > firstChildAt {
+		t.Fatalf("spawned at %d must precede the first child update at %d: %+v", spawnedAt, firstChildAt, events)
+	}
+	if events[0].kind != eventUpdate || events[0].child != "" {
+		t.Fatalf("the main update must come first: %+v", events)
+	}
+}
+
+// TestGrandchildTailAfterParentChildFinished is the deregistration hole: once
+// sub-1's finished deregistered it, sub-1a's own progress/finished still
+// arrive with sub-1 as the outer id. They route on the child id instead.
+func TestGrandchildTailAfterParentChildFinished(t *testing.T) {
+	const grandchild = "sub-1a"
+	p, cap := grokPipe(t)
+	p.send(t, nil, MethodGrokSessionNotificationWrapped, spawnedParams(subTestParent, subTestChild, "at1"))
+	p.send(t, nil, MethodGrokSessionNotificationWrapped, spawnedParams(subTestChild, grandchild, "at1"))
+	p.send(t, nil, MethodGrokSessionNotificationWrapped, finishedParams(subTestParent, subTestChild, "completed"))
+	p.send(t, nil, MethodGrokSessionNotificationWrapped, progressParams(subTestChild, grandchild))
+	p.send(t, nil, MethodGrokSessionNotificationWrapped, finishedParams(subTestChild, grandchild, "completed"))
+	cap.waitFor(t, 0, 5)
+	_, subs := cap.snapshot()
+	want := []struct{ kind, child string }{
+		{SubagentSpawned, subTestChild},
+		{SubagentSpawned, grandchild},
+		{SubagentFinished, subTestChild},
+		{SubagentProgress, grandchild},
+		{SubagentFinished, grandchild},
+	}
+	for i, w := range want {
+		if subs[i].Kind != w.kind || subs[i].ChildSessionID != w.child {
+			t.Fatalf("event %d is %s/%s, want %s/%s", i, subs[i].Kind, subs[i].ChildSessionID, w.kind, w.child)
+		}
+	}
+	if got := p.client.DroppedUpdates(); got != 0 {
+		t.Fatalf("dropped %d, want 0", got)
+	}
+	// The grandchild's finished deregistered it: its stream stops routing.
+	p.send(t, nil, MethodSessionUpdate, childUpdateParams(grandchild, UpdateAgentMessage, "late"))
+	waitUntil(t, func() bool { return p.client.DroppedUpdates() == 1 })
+	updates, _ := cap.snapshot()
+	if len(updates) != 0 {
+		t.Fatalf("nothing may route after the grandchild finished, got %v", updates)
 	}
 }
 
@@ -508,22 +623,40 @@ func TestNoChildEventsWithoutAllowlist(t *testing.T) {
 	}
 }
 
+// subagentFixtures are the sanitized live captures. There is no comment
+// mechanism in JSONL, so the two cancel orders are told apart by name:
+// cancel-late is cancel2.out (finished 400 ms after prompt_complete) and
+// cancel-early is cancel.out (the child finished completed before it).
+var subagentFixtures = []string{"subagent.jsonl", "two.jsonl", "cancel-late.jsonl", "cancel-early.jsonl"}
+
+// fixtureParent and fixtureChild are the sanitized session ids the fixtures
+// use in place of the live uuids.
+const (
+	fixtureParent = "PARENT"
+	fixtureChild  = "CHILD"
+)
+
+func fixtureLines(t *testing.T, name string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "grok-subagent", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, l := range strings.Split(string(raw), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 {
+		t.Fatalf("%s: empty", name)
+	}
+	return lines
+}
+
 func TestSubagentFixturesParse(t *testing.T) {
-	for _, name := range []string{"subagent.jsonl", "two.jsonl", "cancel.jsonl"} {
-		raw, err := os.ReadFile(filepath.Join("testdata", "grok-subagent", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var lines []string
-		for _, l := range strings.Split(string(raw), "\n") {
-			if l != "" {
-				lines = append(lines, l)
-			}
-		}
-		if len(lines) == 0 {
-			t.Fatalf("%s: empty", name)
-		}
-		for _, l := range lines {
+	for _, name := range subagentFixtures {
+		for _, l := range fixtureLines(t, name) {
 			var m struct {
 				Method string          `json:"method"`
 				Params json.RawMessage `json:"params"`
@@ -539,8 +672,9 @@ func TestSubagentFixturesParse(t *testing.T) {
 				}
 			case MethodGrokSessionNotificationWrapped, MethodGrokSessionNotification:
 				if _, ok, _ := parseSubagentNotification(m.Params); !ok {
-					// cancel.jsonl carries the cancel tail (turn_completed,
-					// prompt_complete, RPC reply): only lifecycle lines parse.
+					// The cancel fixtures carry the cancel tail
+					// (turn_completed, prompt_complete, RPC reply): only
+					// lifecycle lines parse.
 					var w struct {
 						Update struct {
 							SessionUpdate string `json:"sessionUpdate"`
@@ -556,13 +690,154 @@ func TestSubagentFixturesParse(t *testing.T) {
 				}
 			case MethodGrokPromptCompleteWrapped, MethodGrokPromptComplete:
 			default:
-				// The RPC reply line in cancel.jsonl has no method.
+				// The RPC reply line in the cancel fixtures has no method.
 				var v map[string]any
 				if err := json.Unmarshal([]byte(l), &v); err != nil {
 					t.Fatalf("%s: bad line %s", name, l)
 				}
 			}
 		}
+	}
+}
+
+// replayFixture writes every fixture line back onto the wire verbatim, so the
+// client sees them through its own read loop — framing, dispatch, allowlist
+// and tool-name normalization included, not just the parser.
+func replayFixture(t *testing.T, p *rawPipe, name string) {
+	t.Helper()
+	for _, l := range fixtureLines(t, name) {
+		var msg Message
+		if err := json.Unmarshal([]byte(l), &msg); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := p.enc.WriteMessage(&msg); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+// TestGrokSubagentFixtureReplay routes the sanitized live captures through a
+// real grok client: the lifecycle ids and descriptions the wire carries, the
+// child stream tagged with its child id, and the grok tool name lifted out of
+// update._meta["x.ai/tool"].
+func TestGrokSubagentFixtureReplay(t *testing.T) {
+	type wantEvent struct{ kind, child, desc, status string }
+	for _, tc := range []struct {
+		name    string
+		want    []wantEvent
+		updates int
+	}{
+		{
+			name: "subagent.jsonl",
+			want: []wantEvent{
+				{SubagentSpawned, fixtureChild, "List directory files", ""},
+				{SubagentProgress, fixtureChild, "", ""},
+				{SubagentFinished, fixtureChild, "", "completed"},
+			},
+			updates: 3,
+		},
+		{
+			name: "two.jsonl",
+			want: []wantEvent{
+				{SubagentSpawned, "CHILD1", "List python files one line", ""},
+				{SubagentSpawned, "CHILD2", "Report README first line", ""},
+				{SubagentProgress, "CHILD2", "", ""},
+				{SubagentProgress, "CHILD1", "", ""},
+				{SubagentFinished, "CHILD1", "", "completed"},
+				{SubagentProgress, "CHILD2", "", ""},
+				{SubagentFinished, "CHILD2", "", "completed"},
+			},
+		},
+		{
+			// cancel2.out: the child is still running at prompt_complete and
+			// finishes cancelled afterwards.
+			name: "cancel-late.jsonl",
+			want: []wantEvent{
+				{SubagentProgress, fixtureChild, "", ""},
+				{SubagentFinished, fixtureChild, "", "cancelled"},
+			},
+		},
+		{
+			// cancel.out: the child's own turn ended first, so its finish is
+			// completed with no error even though the parent was cancelled.
+			name: "cancel-early.jsonl",
+			want: []wantEvent{
+				{SubagentSpawned, fixtureChild, "Sleep 45 then finish", ""},
+				{SubagentProgress, fixtureChild, "", ""},
+				{SubagentFinished, fixtureChild, "", "completed"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectGrok)
+			p.setSession(fixtureParent)
+			cap := &notifyCapture{}
+			p.client.SetUpdateHandler(cap.addUpdate)
+			p.client.SetSubagentHandler(cap.addSubagent)
+			replayFixture(t, p, tc.name)
+			cap.waitFor(t, tc.updates, len(tc.want))
+			updates, subs := cap.snapshot()
+			if len(subs) != len(tc.want) {
+				t.Fatalf("lifecycle %+v, want %d events", subs, len(tc.want))
+			}
+			for i, w := range tc.want {
+				got := subs[i]
+				if got.Kind != w.kind || got.ChildSessionID != w.child {
+					t.Fatalf("event %d is %s/%s, want %s/%s", i, got.Kind, got.ChildSessionID, w.kind, w.child)
+				}
+				if got.Description != w.desc || got.Status != w.status {
+					t.Fatalf("event %d desc %q status %q, want %q/%q", i, got.Description, got.Status, w.desc, w.status)
+				}
+				if got.AttemptID == "" {
+					t.Fatalf("event %d lost attempt_id: %+v", i, got)
+				}
+			}
+			if len(updates) != tc.updates {
+				t.Fatalf("updates %+v, want %d", updates, tc.updates)
+			}
+			if got := p.client.DroppedUpdates(); got != 0 {
+				t.Fatalf("dropped %d, want 0", got)
+			}
+			if tc.name != "subagent.jsonl" {
+				return
+			}
+			// The child's list_dir tool_call routes tagged and normalized.
+			var child *SessionNotification
+			for i, u := range updates {
+				if u.Child != "" {
+					child = &updates[i]
+					break
+				}
+			}
+			if child == nil {
+				t.Fatalf("no routed child update in %+v", updates)
+			}
+			if child.Child != fixtureChild || child.SessionID != fixtureChild {
+				t.Fatalf("child update tagged %q on session %q", child.Child, child.SessionID)
+			}
+			if child.ToolName != "list_dir" {
+				t.Fatalf("ToolName %q, want list_dir (from _meta[\"x.ai/tool\"])", child.ToolName)
+			}
+			for _, u := range updates {
+				if u.Child == "" && u.SessionID != fixtureParent {
+					t.Fatalf("untagged update from %q", u.SessionID)
+				}
+			}
+			// Wire order: spawned first, then the child's stream.
+			events := cap.order()
+			spawnedAt, firstChildAt := -1, -1
+			for i, e := range events {
+				if e.kind == SubagentSpawned && spawnedAt < 0 {
+					spawnedAt = i
+				}
+				if e.kind == eventUpdate && e.child != "" && firstChildAt < 0 {
+					firstChildAt = i
+				}
+			}
+			if spawnedAt < 0 || firstChildAt < 0 || spawnedAt > firstChildAt {
+				t.Fatalf("spawned must precede the child stream: %+v", events)
+			}
+		})
 	}
 }
 

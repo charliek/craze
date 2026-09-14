@@ -123,7 +123,6 @@ func parseSubagentNotification(params json.RawMessage) (n SubagentNotification, 
 			AttemptID       string   `json:"attempt_id"`
 			ChildSessionID  string   `json:"child_session_id"`
 			ParentSessionID string   `json:"parent_session_id"`
-			ParentPromptID  string   `json:"parent_prompt_id"`
 			SubagentType    string   `json:"subagent_type"`
 			Description     string   `json:"description"`
 			Model           string   `json:"model"`
