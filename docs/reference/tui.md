@@ -69,7 +69,8 @@ visible row, taking the last one when it would otherwise fall behind the cap.
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
-| `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
+| `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
+| wheel | scroll the transcript three lines a notch; over an open slash menu, move its selection one row a notch instead — it selects, it does not page (see [Mouse](#mouse)) |
 | `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); elsewhere a no-op |
 
 `/help` lists the same keys plus every slash command — see
