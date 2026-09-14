@@ -1051,3 +1051,77 @@ func countStatus(s *session, st SubagentStatus) int {
 	}
 	return n
 }
+
+func attemptNotif(n acp.SubagentNotification, attempt string) acp.SubagentNotification {
+	n.AttemptID = attempt
+	return n
+}
+
+// TestRestartRecomputesRouting pins that a new attempt of a retained record
+// re-decides routing against the 64 routed slots, both ways.
+func TestRestartRecomputesRouting(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	// A routed child finishes; 64 others then fill the routed slots; its
+	// restart cannot be routed any more.
+	s.onSubagent(spawnNotif("sub-a", "d"))
+	s.onSubagent(finishNotif("sub-a", "completed"))
+	for i := 0; i < subagentRunCap; i++ {
+		s.onSubagent(spawnNotif(fmt.Sprintf("fill-%d", i), "d"))
+	}
+	s.onSubagent(attemptNotif(spawnNotif("sub-a", "d"), "at2"))
+	drainEvents(s)
+	rec := s.subagents["sub-a"]
+	if !rec.unrouted || rec.info.Transcript || rec.tools != nil || rec.info.Status != SubagentRunning {
+		t.Fatalf("restart with the routed slots full must be unrouted: %+v tools=%v", rec.info, rec.tools != nil)
+	}
+	// Slots free up, it finishes and restarts again: routed this time.
+	for i := 0; i < subagentRunCap; i++ {
+		s.onSubagent(finishNotif(fmt.Sprintf("fill-%d", i), "completed"))
+	}
+	s.onSubagent(attemptNotif(finishNotif("sub-a", "completed"), "at2"))
+	s.onSubagent(attemptNotif(spawnNotif("sub-a", "d"), "at3"))
+	drainEvents(s)
+	rec = s.subagents["sub-a"]
+	if rec.unrouted || !rec.info.Transcript || rec.tools == nil {
+		t.Fatalf("restart with a free slot must be routed: %+v tools=%v", rec.info, rec.tools != nil)
+	}
+	st, title := "completed", "list"
+	if _, changed, _ := s.applyToolDelta("sub-a", toolDelta{id: "c1", status: &st, title: &title}); !changed {
+		t.Fatal("a re-routed child owns a tool store again")
+	}
+}
+
+// TestStaleAttemptLifecycleIgnored pins that a late progress or finished
+// from a previous attempt never touches the current one.
+func TestStaleAttemptLifecycleIgnored(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(spawnNotif("sub-a", "d"))
+	s.onSubagent(attemptNotif(spawnNotif("sub-a", "d"), "at2"))
+	drainEvents(s)
+	st, title := "in_progress", "list"
+	s.applyToolDelta("sub-a", toolDelta{id: "c1", status: &st, title: &title})
+	drainEvents(s)
+
+	prog := acp.SubagentNotification{Kind: acp.SubagentProgress, SubagentID: "sub-a", ChildSessionID: "sub-a", AttemptID: "at1", TokensUsed: 999}
+	s.onSubagent(prog)
+	s.onSubagent(finishNotif("sub-a", "failed"))
+	if evs := pendingEvents(s); len(evs) != 0 {
+		t.Fatalf("stale attempt emitted %d events: %+v", len(evs), evs)
+	}
+	rec := s.subagents["sub-a"]
+	if rec.info.Status != SubagentRunning || rec.info.AttemptID != "at2" || rec.info.TokensUsed != 0 {
+		t.Fatalf("stale attempt changed the record: %+v", rec.info)
+	}
+	if rec.tools["c1"].Status != "in_progress" {
+		t.Fatalf("stale finish settled the current attempt's tool: %+v", rec.tools["c1"])
+	}
+	// The current attempt's own finish still lands.
+	s.onSubagent(attemptNotif(finishNotif("sub-a", "completed"), "at2"))
+	if rec.info.Status != SubagentCompleted {
+		t.Fatalf("the current attempt's finish must land: %+v", rec.info)
+	}
+}

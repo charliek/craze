@@ -216,6 +216,7 @@ func (s *session) handleSpawnedLocked(n acp.SubagentNotification) []Event {
 		rec.info.EndedAt = time.Time{}
 		// The record is running again, so it no longer holds a finish slot.
 		rec.finishSeq = 0
+		s.rerouteLocked(rec)
 		s.applySpawnFieldsLocked(rec, n)
 		join := s.joinByDescriptionLocked(id)
 		info := cloneSubagent(rec.info)
@@ -331,9 +332,40 @@ func (s *session) newSubagentLocked(n acp.SubagentNotification) *subagentRec {
 	return rec
 }
 
+// rerouteLocked re-decides a retained record's routing when a new attempt
+// starts: the ACP allowlist registers it afresh against the 64 routed slots,
+// so the previous attempt's decision may no longer hold in either direction.
+// rec already counts as running here.
+func (s *session) rerouteLocked(rec *subagentRec) {
+	running, unrouted := s.runningSubagentsLocked()
+	routedRunning := running - unrouted
+	if !rec.unrouted {
+		routedRunning--
+	}
+	routed := routedRunning < subagentRunCap
+	switch {
+	case routed && rec.unrouted:
+		rec.unrouted = false
+		rec.tools = make(map[string]ToolEvent)
+		rec.evicted = make(map[string]struct{})
+	case !routed && !rec.unrouted:
+		rec.unrouted = true
+		rec.tools = nil
+		rec.toolOrder = nil
+		rec.evicted = nil
+		rec.evictedOrder = nil
+	}
+}
+
+// staleAttempt reports a lifecycle notification for an attempt the record
+// has moved past: a late `finished` from at1 must not end at2.
+func staleAttempt(rec *subagentRec, n acp.SubagentNotification) bool {
+	return n.AttemptID != "" && rec.info.AttemptID != "" && n.AttemptID != rec.info.AttemptID
+}
+
 func (s *session) handleProgressLocked(n acp.SubagentNotification) []Event {
 	rec := subagentRecOf(s.subagents, n)
-	if rec == nil {
+	if rec == nil || staleAttempt(rec, n) {
 		return nil
 	}
 	prev := cloneSubagent(rec.info)
@@ -366,7 +398,7 @@ func (s *session) applyProgressFieldsLocked(info *SubagentInfo, n acp.SubagentNo
 
 func (s *session) handleFinishedLocked(n acp.SubagentNotification) []Event {
 	rec := subagentRecOf(s.subagents, n)
-	if rec == nil {
+	if rec == nil || staleAttempt(rec, n) {
 		return nil
 	}
 	prev := cloneSubagent(rec.info)
