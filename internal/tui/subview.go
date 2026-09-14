@@ -36,6 +36,7 @@ func (m *Model) enterView(id string) {
 	}
 	m.viewing = id
 	m.agentID = id
+	m.agentFocus = false
 	m.input.Blur()
 	tr := m.ensureSub(id)
 	first := tr.transcriptRows == nil
@@ -50,9 +51,12 @@ func (m *Model) enterView(id string) {
 		m.setViewportContent(true)
 		return
 	}
-	m.setViewportContent(tr.atBottom)
-	if !tr.atBottom {
-		m.vp.SetYOffset(tr.yOffset)
+	// setViewportContent stores the viewport back into tr, so the saved
+	// position has to be read before the call, not after it.
+	stick, off := tr.atBottom, tr.yOffset
+	m.setViewportContent(stick)
+	if !stick {
+		m.vp.SetYOffset(off)
 		m.storeViewport(tr)
 	}
 }
@@ -70,7 +74,10 @@ func (m *Model) leaveView() {
 		m.agentDone[id] = m.now()
 	}
 	m.viewing = ""
-	_ = m.input.Focus()
+	// The keyboard stays on the rows, marking the row the view came from;
+	// typing hands it back to the composer.
+	m.agentFocus = true
+	m.input.Blur()
 	released := m.tombstone != nil && m.tombstone.ID == id
 	m.tombstone = nil
 	if released {
@@ -80,9 +87,10 @@ func (m *Model) leaveView() {
 			delete(m.agentDone, id)
 		}
 	}
-	m.setViewportContent(m.main.atBottom)
-	if !m.main.atBottom {
-		m.vp.SetYOffset(m.main.yOffset)
+	stick, off := m.main.atBottom, m.main.yOffset
+	m.setViewportContent(stick)
+	if !stick {
+		m.vp.SetYOffset(off)
 		m.storeViewport(&m.main)
 	}
 }
@@ -148,7 +156,6 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 	info := *ev.Subagent
 	id := info.ID
 	m.refreshSnap()
-	m.noteAgentTouch(id)
 	m.ensureSub(id)
 	if m.viewing == id {
 		cp := info
@@ -195,7 +202,6 @@ func (m *Model) applyChildEvent(ev agent.Event) {
 		tr.appendStream(entryUser, ev.Text, ev.At, m.now())
 	case agent.EventTool:
 		m.refreshSnap()
-		m.noteAgentTouch(id)
 		m.noteAgentStart(id)
 		if ev.Tool != nil {
 			tr.upsertTool(ev.Tool, m.now())
@@ -338,14 +344,18 @@ func (m Model) subagentBanner() string {
 	esc := "esc to return"
 	st := styleFG(m.theme.Dim)
 	var head, tail string
-	if !m.showSubagentTranscript() {
-		head = "@" + typ + " · receipt only"
-	} else if subagentRunning(info) {
-		head = "○ @" + typ + " · read-only"
+	if subagentRunning(info) {
+		if m.showSubagentTranscript() {
+			head = "○ @" + typ + " · read-only"
+		} else {
+			head = "○ @" + typ + " · receipt only"
+		}
 		if len(m.visibleAgents()) > 1 {
 			tail = " · tab next agent"
 		}
 	} else {
+		// A finished sub-agent gets the Warn banner on both providers; the
+		// receipt note stays so the cursor view still says what it holds.
 		st = styleFG(m.theme.Warn)
 		glyph := "✓"
 		status := "completed"
@@ -356,6 +366,9 @@ func (m Model) subagentBanner() string {
 			glyph, status = "–", "cancelled"
 		}
 		head = glyph + " @" + typ + " · " + status
+		if !m.showSubagentTranscript() {
+			head += " · receipt only"
+		}
 		if err := sanitizeLine(info.Error); err != "" {
 			head += " · " + err
 		}
@@ -413,11 +426,26 @@ func (m Model) mergedSpinnerText() string {
 	if m.viewing != "" {
 		if info, ok := m.viewedInfo(); ok {
 			glyph, _ := m.agentGlyph(info)
-			if subagentRunning(info) {
+			if subagentRunning(info) || info.DurationMs <= 0 {
 				return glyph + " " + m.subElapsed(info)
 			}
 			return glyph + " " + formatMillis(info.DurationMs)
 		}
 	}
-	return m.spinnerGlyph() + " " + m.turnElapsed()
+	return m.spinnerGlyph() + " " + m.spinnerElapsed()
+}
+
+// spinnerElapsed is the clock the main spinner shows: the turn's while it
+// runs, else the longest-running sub-agent's — after end_turn the turn's
+// clock would keep growing for a turn that is over.
+func (m Model) spinnerElapsed() string {
+	if m.status == statusWorking {
+		return m.turnElapsed()
+	}
+	for i := range m.snap.Subagents {
+		if subagentRunning(m.snap.Subagents[i]) {
+			return m.subElapsed(m.snap.Subagents[i])
+		}
+	}
+	return m.turnElapsed()
 }

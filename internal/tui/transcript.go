@@ -991,8 +991,15 @@ func taskDesc(t *agent.ToolEvent) string {
 }
 
 // shortModelName drops cursor's provider prefix: the row has no space for it.
+// shortModelName is the model id as a row can afford it: cursor's `cursor-`
+// prefix and a routing prefix such as `openrouter/` carry no information the
+// provider column does not already show.
 func shortModelName(s string) string {
-	return sanitizeLine(strings.TrimPrefix(s, "cursor-"))
+	s = strings.TrimPrefix(s, "cursor-")
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return sanitizeLine(s)
 }
 
 func diffTotals(diffs []agent.ToolDiff) (added, removed int, truncated bool) {

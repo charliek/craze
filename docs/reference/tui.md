@@ -30,13 +30,22 @@ width, or `craze` before one arrives.
 
 The sub-agent band under the status rows lists every running sub-agent and,
 for ten seconds after the TUI saw it finish, the finished ones — the one being
-viewed stays as long as it is viewed. A row is `<glyph> <label>
-<description> <suffix>`: `○` while it runs, `✓` when it completed, `✗` when
+viewed stays as long as it is viewed. A row is `<gutter> <glyph> <label>
+<description> <suffix>`: the gutter is `❯` on the selected row (its
+description is accent-coloured too) and blank on the others; `○` while it runs, `✓` when it completed, `✗` when
 it failed, `–` when it was cancelled, and `●` for the one being viewed; the
 label is the sub-agent type (`explore`, `general-purpose`; cursor's rows read
 `task`). While it runs the suffix counts up — `0s · 4.7k tok` — and once it
 finishes it reads the duration and model, `2.9s · grok-4.6`. Status row 2
-counts the band (`← 2 agents`).
+counts the running ones (`← 2 agents`); a lingering finished row is not counted.
+The keyboard starts in the composer; `↓` moves it to the rows, where the
+selected row carries the `❯` mark, and `↑` past the first row, `Esc` or any
+typed key move it back. Returning from the sub-agent view leaves it on the
+rows, marking the row the view came from. Rows sit in spawn order and never reshuffle
+while a sub-agent streams, so `↑`/`↓` aim at a fixed target; a finished row
+keeps its slot until it leaves the band, and the rows below close up. Past
+the cap the band ends in `… +n more`; the viewed sub-agent always keeps a
+visible row, taking the last one when it would otherwise fall behind the cap.
 
 ## Keys
 
@@ -52,8 +61,8 @@ counts the band (`← 2 agents`).
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
-| `↑` `↓` | select a sub-agent row (empty composer or not); inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
-| `Enter` on a selected sub-agent | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
+| `↑` `↓` | move the keyboard from the composer to the sub-agent rows (draft or not) and then between them: the selected row carries a `❯` gutter mark and the composer loses its cursor; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
+| `Enter` while the rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |
@@ -76,8 +85,9 @@ bindings, so a message that starts with either is just a message.
 
 ## Sub-agent view
 
-`Enter` on a selected row — or a click on the row — opens that sub-agent in
-the main area, read-only. Grok streams a sub-agent's own session, so its
+`Enter` while the rows have the keyboard (`↓` from the composer, then `↑`/`↓`
+to the row) — or a click on the row — opens that sub-agent in the main area,
+read-only. Grok streams a sub-agent's own session, so its
 transcript is the child's own prompt, thoughts, tool calls and replies,
 rendered by the same machinery as the main one. Cursor streams no sub-agent
 transcript, so the view is what its `cursor/task` receipt carried: a note
@@ -94,7 +104,9 @@ banner:
 - finished: `✓ @explore · completed · esc to return`, in the warning colour
   so the end is unmistakable (`✗ failed` / `– cancelled`, with the error when
   there is one; the `esc to return` half never truncates away)
-- cursor: `@task · receipt only · esc to return`
+- cursor: `○ @task · receipt only · esc to return` while it runs, then the
+  same warning-coloured finish line with `· receipt only` kept:
+  `✓ @task · completed · receipt only · esc to return`
 
 Entering or leaving cancels nothing. The main turn keeps running underneath —
 while the viewed sub-agent runs, the spinner line is its own

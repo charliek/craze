@@ -23,8 +23,8 @@ grok-4.6-high-fast · 8.0s · agent-1234
                                                                                                     
                                                                                                     
 ───────────────────────────────────────────────────────── (grok-4.6-high-fast) Count main.go lines ─
-@task · receipt only · esc to return                                                                
+✓ @task · completed · receipt only · esc to return                                                  
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ cursor │ Default (medium) │ 0m                                                                 
 ◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
-● task  Count main.go lines  8.0s · grok-4.6-high-fast                                              
+❯ ● task  Count main.go lines  8.0s · grok-4.6-high-fast                                            

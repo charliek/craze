@@ -4,6 +4,7 @@ import errno
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -134,11 +135,17 @@ class PTYCraze:
         return self._wait(needle, mark, timeout)
 
     def _wait(self, needle: str, mark: int, timeout: float) -> str:
+        """Match against the output with terminal escapes stripped.
+
+        Adjacent spans carry their own SGR sequences, so a needle that
+        crosses a style boundary (`○ explore`: glyph then label) never
+        appears contiguously in the raw bytes.
+        """
         deadline = time.monotonic() + timeout
         last = ""
         while time.monotonic() < deadline:
             last = bytes(self.buf[mark:]).decode("utf-8", "replace")
-            if needle in last:
+            if needle in _ANSI.sub("", last):
                 return last
             if self.proc.poll() is not None:
                 raise AssertionError(
@@ -181,6 +188,9 @@ class PTYCraze:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:

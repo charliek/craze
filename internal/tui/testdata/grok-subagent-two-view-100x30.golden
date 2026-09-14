@@ -26,5 +26,5 @@ hi
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ grok │ Grok 4.6 (high) │ 0m                                                                    
 ◆ default · shift+tab · ▸▸ bypass permissions on · ← 2 agents                                       
-○ explore  List python files  0s · 4.7k tok                                                         
-● explore  Report README first line  0s                                                             
+  ○ explore  List python files  0s · 4.7k tok                                                       
+❯ ● explore  Report README first line  0s                                                           

@@ -68,6 +68,7 @@ func (m Model) helpKeyLines() []helpLine {
 		out = append(out,
 			helpLine{key: "enter on a row", desc: "open a selected sub-agent"},
 			helpLine{key: "esc, ←", desc: "return from a sub-agent"},
+			helpLine{key: "↑ ↓ pgup pgdn", desc: "scroll inside a sub-agent"},
 			helpLine{key: "tab, shift+tab", desc: "switch sub-agent while in the view"},
 		)
 	}

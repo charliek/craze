@@ -15,7 +15,9 @@ import (
 func openView(t *testing.T, m Model) Model {
 	t.Helper()
 	m.input.SetValue("")
-	tm, _ := m.Update(enter())
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	tm, _ = m.Update(enter())
 	m = tm.(Model)
 	if m.viewing == "" {
 		t.Fatal("expected the sub-agent view")
@@ -44,22 +46,47 @@ func TestEnterOpensSubagentView(t *testing.T) {
 	}
 }
 
+// tallChild gives task-1 n one-row entries so its transcript is taller than
+// the viewport (a single streamed reply collapses to a few rows).
+func tallChild(t *testing.T, m Model, n int) Model {
+	t.Helper()
+	// Grok: a receipt-only provider would rebuild the view from the receipt.
+	m.sess.(*Stub).SetProvider(agent.GrokProvider())
+	m.refreshSnap()
+	tr := m.ensureSub("task-1")
+	for i := 0; i < n; i++ {
+		tr.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("childline%d", i)}, m.now())
+	}
+	return m
+}
+
 func TestEscAndLeftReturnAndRestoreOffset(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
-	for i := 0; i < 40; i++ {
-		m.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("line-%02d padding so the transcript is taller than the viewport", i)})
+	// Two pages up on a 200-line main, so the offset is neither 0 nor the
+	// bottom (a one-page scroll on a short transcript clamps to 0 and the
+	// restore assertion is vacuous).
+	for i := 0; i < 200; i++ {
+		m.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("line-%03d padding so the transcript is taller than the viewport", i)})
 	}
 	m.refreshViewport()
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
-	m = tm.(Model)
-	if m.vp.AtBottom() {
-		t.Fatal("setup: page up should leave the main transcript scrolled")
+	for i := 0; i < 2; i++ {
+		tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		m = tm.(Model)
+	}
+	if m.vp.AtBottom() || m.vp.YOffset == 0 {
+		t.Fatalf("setup: page up should leave the main transcript mid-way, offset %d", m.vp.YOffset)
 	}
 	offset := m.vp.YOffset
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
+	// The child is taller than the main, so a stale "stick to bottom" would
+	// land somewhere else entirely.
+	m = tallChild(t, m, 300)
 	m = openView(t, m)
+	if m.vp.YOffset == offset {
+		t.Fatal("setup: the child should open at its own bottom")
+	}
 
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
@@ -84,6 +111,68 @@ func TestEscAndLeftReturnAndRestoreOffset(t *testing.T) {
 	}
 	if m.status != statusWorking {
 		t.Fatal("leaving must not cancel the turn")
+	}
+
+	// The child keeps its own position too: scrolled up inside, left, and
+	// re-entered, it is where it was.
+	m = openView(t, m)
+	for i := 0; i < 2; i++ {
+		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		m = tm.(Model)
+	}
+	childOff := m.vp.YOffset
+	if childOff == 0 || m.vp.AtBottom() {
+		t.Fatalf("setup: the child should be scrolled mid-way, offset %d", childOff)
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	m = openView(t, m)
+	if m.vp.YOffset != childOff {
+		t.Fatalf("re-entering restored child offset %d, want %d", m.vp.YOffset, childOff)
+	}
+}
+
+func TestMouseAndPagingInsideTheView(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	m.status = statusWorking
+	m = tallChild(t, m, 300)
+	m = openView(t, m)
+	bottom := m.vp.YOffset
+	if bottom < 3*wheelLines {
+		t.Fatalf("setup: not enough child scrollback, offset %d", bottom)
+	}
+	m = wheel(t, m, tea.MouseButtonWheelUp)
+	if got := m.vp.YOffset; got != bottom-wheelLines {
+		t.Fatalf("wheel up inside the view moved to %d, want %d", got, bottom-wheelLines)
+	}
+	m = wheel(t, m, tea.MouseButtonWheelDown)
+	if got := m.vp.YOffset; got != bottom {
+		t.Fatalf("wheel down inside the view moved to %d, want %d", got, bottom)
+	}
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = tm.(Model)
+	if got := m.vp.YOffset; got >= bottom {
+		t.Fatalf("pgup inside the view did not page: %d", got)
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = tm.(Model)
+	if got := m.vp.YOffset; got != bottom {
+		t.Fatalf("pgdn inside the view moved to %d, want %d", got, bottom)
+	}
+	if m.viewing != "task-1" {
+		t.Fatal("scrolling must not leave the view")
+	}
+	// A double-click selects from the child's transcript, not the main one.
+	y := m.lay.Region(regionTranscript).Top
+	m = clickXY(t, m, 1, y)
+	m = clickXY(t, m, 1, y)
+	if !m.sel.on {
+		t.Fatal("double-click inside the view should start a selection")
+	}
+	if text := m.selectionText(); !strings.Contains(text, "childline") {
+		t.Fatalf("selection came from the wrong transcript: %q", text)
 	}
 }
 
@@ -271,8 +360,15 @@ func TestChildEventsWhileViewingMainDoNotTouchMainState(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.lastThought = false
 	m.sawAssistantSeq = 0
-	touch := append([]string(nil), m.agentTouch...)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Agent: "task-1", Text: "thinking"}})
+	offer, dead := m.planOfferSeq, m.planDeadSeq
+	// A child read with a path is the only event that could write pathDirs.
+	read := agent.ToolEvent{ID: "c-read", Kind: "read", Title: "read", Status: "completed", Locations: []string{"/ws/pkg/main.go"}}
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Agent: "task-1", Tool: &read}})
+	m = tm.(Model)
+	if m.planOfferSeq != offer || m.planDeadSeq != dead {
+		t.Fatal("child events must not touch the plan offer")
+	}
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Agent: "task-1", Text: "thinking"}})
 	m = tm.(Model)
 	if m.lastThought {
 		t.Fatal("child thought must not set lastThought")
@@ -281,9 +377,6 @@ func TestChildEventsWhileViewingMainDoNotTouchMainState(t *testing.T) {
 	m = tm.(Model)
 	if m.sawAssistantSeq != 0 {
 		t.Fatal("child text must not set sawAssistantSeq")
-	}
-	if got := strings.Join(m.agentTouch, ","); got != strings.Join(touch, ",") {
-		t.Fatalf("child text touched agentTouch: %s -> %s", touch, m.agentTouch)
 	}
 	if len(m.main.pathDirs) != 0 {
 		t.Fatalf("child events must not write main pathDirs: %v", m.main.pathDirs)
@@ -430,6 +523,32 @@ func TestSubagentByteBudgets(t *testing.T) {
 	}
 	if !tr.trimmed {
 		t.Fatal("2000 chunks should trim")
+	}
+
+	// The raw-text budget: 60 × 40 KiB entries (alternating kinds so they do
+	// not merge) is 2.4 MiB, so the transcript has to have trimmed down to
+	// the 1 MiB budget.
+	m = agentModel(t, &now)
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	chunk := strings.Repeat("b", 40*1024)
+	for i := 0; i < 60; i++ {
+		kind := agent.EventText
+		if i%2 == 1 {
+			kind = agent.EventThought
+		}
+		tm, _ = m.Update(eventMsg{agent.Event{Type: kind, Agent: "task-1", Text: chunk}})
+		m = tm.(Model)
+	}
+	tr = m.subs["task-1"]
+	total := 0
+	for _, e := range tr.entries {
+		total += len(e.text)
+	}
+	if total > subTextBudget {
+		t.Fatalf("sub transcript holds %d bytes, budget %d", total, subTextBudget)
+	}
+	if !tr.trimmed || len(tr.entries) >= 60 {
+		t.Fatalf("the text budget should have trimmed: trimmed=%v entries=%d", tr.trimmed, len(tr.entries))
 	}
 }
 
@@ -594,5 +713,64 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	}
 	if got := m.agentStart["task-1"]; !got.Equal(now) {
 		t.Fatalf("elapsed must restart at the new sighting, got %v", got)
+	}
+}
+
+func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	ghost := agent.SubagentInfo{ID: "ghost", Status: agent.SubagentCompleted, Description: "never spawned here"}
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &ghost, SubagentChange: agent.SubagentChangeFinished}})
+	m = tm.(Model)
+	if _, ok := m.agentDone["ghost"]; ok {
+		t.Fatal("a record the snapshot never held must not keep a done stamp")
+	}
+}
+
+func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	m.sess.(*Stub).SetProvider(agent.CursorProvider())
+	m.refreshSnap()
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	m.status = statusWorking
+	m = openView(t, m)
+	if v := plainView(m); !strings.Contains(v, "○ @task · receipt only · esc to return") {
+		t.Fatalf("running receipt banner:\n%s", v)
+	}
+	subs := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})
+	subs[0].Status = agent.SubagentCompleted
+	m.sess.(*Stub).SetSubagents(subs)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeFinished}})
+	m = tm.(Model)
+	if m.viewing != "task-1" {
+		t.Fatal("finishing must not close the view")
+	}
+	if v := plainView(m); !strings.Contains(v, "✓ @task · completed · receipt only · esc to return") {
+		t.Fatalf("finished receipt banner:\n%s", v)
+	}
+}
+
+func TestSpinnerClockAfterEndTurnIsTheSubagents(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	m.status = statusWorking
+	m.turnStart = now.Add(-5 * time.Minute)
+	m.agentStart["task-1"] = now.Add(-45 * time.Second)
+	if v := m.spinnerView(); !strings.Contains(v, "5m") || !strings.Contains(v, "esc to interrupt") {
+		t.Fatalf("while working the spinner shows the turn's clock:\n%s", v)
+	}
+	m.status = statusIdle
+	v := m.spinnerView()
+	if v == "" {
+		t.Fatal("a running sub-agent keeps the spinner up after end_turn")
+	}
+	if strings.Contains(v, "5m") || strings.Contains(v, "esc to interrupt") {
+		t.Fatalf("after end_turn the turn's clock must not keep growing:\n%s", v)
+	}
+	if !strings.Contains(v, "45s") {
+		t.Fatalf("after end_turn the spinner shows the sub-agent's elapsed:\n%s", v)
 	}
 }

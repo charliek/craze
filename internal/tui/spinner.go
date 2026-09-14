@@ -91,7 +91,7 @@ func (m Model) spinnerView() string {
 	if m.viewing != "" {
 		return m.subagentSpinnerView()
 	}
-	text := m.spinnerActivity() + " · " + m.turnElapsed()
+	text := m.spinnerActivity() + " · " + m.spinnerElapsed()
 	if m.status == statusWorking {
 		text += " · esc to interrupt"
 	}
@@ -138,15 +138,26 @@ func (m Model) spinnerActivity() string {
 			}
 		}
 	}
+	// After end_turn the tools are settled but the children may not be; the
+	// rows are what is still running then.
+	if m.status != statusWorking {
+		running := 0
+		for i := range m.snap.Subagents {
+			if subagentRunning(m.snap.Subagents[i]) {
+				running++
+			}
+		}
+		tasks = max(tasks, running)
+	}
 	switch {
 	case tasks > 0:
 		return fmt.Sprintf("Waiting for %d sub-agent%s", tasks, plural(tasks))
 	case exec > 0:
 		return strings.TrimSpace("Running " + firstNonEmpty(execCmd))
 	case edit > 0:
-		return strings.TrimSpace("Editing " + m.displayPath(m.cur(), editPath))
+		return strings.TrimSpace("Editing " + m.displayPath(&m.main, editPath))
 	case read > 0:
-		return strings.TrimSpace("Reading " + m.displayPath(m.cur(), readPath))
+		return strings.TrimSpace("Reading " + m.displayPath(&m.main, readPath))
 	case m.lastThought:
 		return "Thinking…"
 	}

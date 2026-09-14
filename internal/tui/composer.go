@@ -101,14 +101,6 @@ func composerPrompt(line int) string {
 	return "  "
 }
 
-// composerEmpty is "nothing worth sending". It is deliberately not the rule
-// the textarea draws its own placeholder by — that is Value()=="" with the
-// cursor at 0,0 (textarea.go:1094) — so anything that has to agree with what
-// is on screen has to test Value() and not this.
-func composerEmpty(ta textarea.Model) bool {
-	return strings.TrimSpace(ta.Value()) == ""
-}
-
 func isNewlineKey(msg tea.KeyMsg) bool {
 	s := msg.String()
 	return s == "shift+enter" || s == "alt+enter" || msg.Type == tea.KeyCtrlJ

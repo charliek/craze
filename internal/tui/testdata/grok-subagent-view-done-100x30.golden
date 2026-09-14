@@ -27,4 +27,4 @@ main.py README.md
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ grok │ Grok 4.6 (high) │ 0m                                                                    
 ◆ default · shift+tab · ▸▸ bypass permissions on                                                    
-● explore  List directory files  2.9s · grok-4.6                                                    
+❯ ● explore  List directory files  2.9s · grok-4.6                                                  

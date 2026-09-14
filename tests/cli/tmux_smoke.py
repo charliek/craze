@@ -447,7 +447,7 @@ CASES: dict[str, Case] = {
             Wait("List python files", "row-1"),
             Wait("Report README first line", "row-2"),
             Wait("4.7k tok", "progress"),
-            Send(ENTER),
+            Send(DOWN, ENTER),
             Wait("List the python files.", "view-1"),
             Send(TAB),
             Wait("Report the first line.", "view-2"),
@@ -455,10 +455,9 @@ CASES: dict[str, Case] = {
             Gone("esc to return", "view-closed"),
         ),
         note=(
-            "the selection is held by id and the most recently updated row leads "
-            "the band, so once sub-1's progress has landed Enter opens sub-1 and "
-            "Tab moves to sub-2; the two prompts are the only text that tells the "
-            "views apart"
+            "rows sit in spawn order and the selection starts on the first, so "
+            "Enter opens sub-1 and Tab moves to sub-2; the two prompts are the "
+            "only text that tells the views apart"
         ),
     ),
     "grok-subagent-fail": Case(
@@ -510,7 +509,7 @@ CASES: dict[str, Case] = {
             Watch("\u25cf agent", "agent-running", "\u2713 agent", "agent-done"),
             Wait("8.0s", "agent-duration"),
             Send(DOWN, ENTER),
-            Wait("@task \u00b7 receipt only", "view"),
+            Wait("\u2713 @task \u00b7 completed \u00b7 receipt only", "view"),
             Wait("esc to return", "banner"),
             Send(ESC),
             Gone("esc to return", "view-closed"),

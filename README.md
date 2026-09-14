@@ -87,8 +87,8 @@ leaves a usable craze, so quitting out of one is an ordinary exit 0.
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
-| `↑` `↓` | select a sub-agent row (empty composer or not); inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
-| `Enter` on a selected sub-agent | open it in the main area, read-only: its own transcript on Grok, what the task receipt carried on Cursor |
+| `↑` `↓` | move the keyboard from the composer to the sub-agent rows (draft or not) and then between them: the selected row carries a `❯` gutter mark and the composer loses its cursor; `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; in a dialog or the slash menu, move the cursor (in `/help`, scroll the box) |
+| `Enter` while the rows have the keyboard | open it in the main area, read-only: its own transcript on Grok, what the task receipt carried on Cursor |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn`, wheel | scroll the transcript, or page the `/help` box |

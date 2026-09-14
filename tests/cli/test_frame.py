@@ -666,7 +666,7 @@ GROK_SUBAGENT_CASES = [
         "grok-subagent-two",
         100,
         30,
-        "<wait:idle>go<enter><wait:text:4.7k tok><enter><tab><wait:text:✓ tool  read_file>",
+        "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><tab><wait:text:✓ tool  read_file>",
         ["Report README first line", "esc to return · tab next agent", "← 2 agents"],
     ),
     (
@@ -753,7 +753,7 @@ def test_frame_task_view_receipt(
     )
     text = "\n".join(frame_lines(proc, 100, 30))
     for want in (
-        "@task · receipt only · esc to return",
+        "✓ @task · completed · receipt only · esc to return",
         "(grok-4.6-high-fast) Count main.go lines",
         "streams no sub-agent transcript",
         "● task  Count main.go lines",

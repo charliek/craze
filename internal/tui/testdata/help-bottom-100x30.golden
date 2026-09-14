@@ -1,8 +1,8 @@
               ╭──────────────────────────────────────────────────────────────────────╮              
               │help                                                                  │              
-              │  ctrl+o            expand or collapse transcript detail             ▲│              
-              │  enter on a row    open a selected sub-agent                         │              
+              │  enter on a row    open a selected sub-agent                        ▲│              
               │  esc, ←            return from a sub-agent                           │              
+              │  ↑ ↓ pgup pgdn     scroll inside a sub-agent                         │              
               │  tab, shift+tab    switch sub-agent while in the view                │              
               │  click the model   model dialog, from status row 1                   │              
               │selection and clipboard                                               │              

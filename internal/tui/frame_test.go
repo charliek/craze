@@ -1336,7 +1336,7 @@ func TestFrameGoldenGrokSubagentViewDone100x30(t *testing.T) {
 
 func TestFrameGoldenGrokSubagentTwoView100x30(t *testing.T) {
 	got := runFakeFrameProvider(t, "grok-subagent-two", 100, 30,
-		"<wait:idle>go<enter><wait:text:4.7k tok><enter><tab><wait:text:✓ tool  read_file>",
+		"<wait:idle>go<enter><wait:text:4.7k tok><down><enter><tab><wait:text:✓ tool  read_file>",
 		agent.GrokProvider(), true)
 	assertGolden(t, "grok-subagent-two-view-100x30", 100, 30, got)
 	if !strings.Contains(got, "Report README first line") {

@@ -624,12 +624,7 @@ func TestCardSuspendsTheLowerOverlays(t *testing.T) {
 func TestCardArrivalClosesTheHelpAndThePeek(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
-	m.input.SetValue("")
-	tm, _ := m.Update(enter())
-	m = tm.(Model)
-	if m.viewing == "" {
-		t.Fatal("setup: expected the sub-agent view")
-	}
+	m = openView(t, m)
 	m = m.openHelp()
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(true)})
 	if m.dialog == dialogHelp {

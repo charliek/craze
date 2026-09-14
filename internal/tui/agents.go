@@ -29,20 +29,6 @@ func subagentTerminal(s agent.SubagentInfo) bool {
 	return s.Status == agent.SubagentCompleted || s.Status == agent.SubagentFailed || s.Status == agent.SubagentCancelled
 }
 
-func (m *Model) noteAgentTouch(id string) {
-	if id == "" {
-		return
-	}
-	next := make([]string, 0, len(m.agentTouch)+1)
-	next = append(next, id)
-	for _, x := range m.agentTouch {
-		if x != id {
-			next = append(next, x)
-		}
-	}
-	m.agentTouch = next
-}
-
 func (m *Model) noteAgentStart(id string) {
 	if id == "" {
 		return
@@ -121,50 +107,32 @@ func agentLabel(s agent.SubagentInfo) string {
 	return "task"
 }
 
+// agentItems lists the rows in spawn order (the snapshot's order), which
+// never changes while a sub-agent is alive, so ↑/↓ selection and the reserved
+// viewed slot stay put while children stream. The viewed sub-agent is appended
+// only when its record has already left the snapshot (tombstone).
 func (m Model) agentItems() []agent.SubagentInfo {
 	if !m.showSubagents() {
 		return nil
 	}
-	byID := make(map[string]agent.SubagentInfo, len(m.snap.Subagents)+1)
-	live := make([]agent.SubagentInfo, 0, len(m.snap.Subagents)+1)
-	seen := make(map[string]struct{}, len(m.snap.Subagents)+1)
+	out := make([]agent.SubagentInfo, 0, len(m.snap.Subagents)+1)
+	seen := false
 	for _, s := range m.snap.Subagents {
 		if !m.agentVisible(s) {
 			continue
 		}
-		live = append(live, s)
-		if s.ID != "" {
-			byID[s.ID] = s
-			seen[s.ID] = struct{}{}
-		}
-	}
-	if m.viewing != "" {
-		if _, ok := seen[m.viewing]; !ok {
-			if info, ok := m.subagentByID(m.viewing); ok {
-				live = append(live, info)
-				byID[info.ID] = info
-				seen[info.ID] = struct{}{}
-			}
-		}
-	}
-	if len(live) == 0 {
-		return nil
-	}
-	out := make([]agent.SubagentInfo, 0, len(live))
-	picked := make(map[string]struct{}, len(live))
-	for _, id := range m.agentTouch {
-		if s, ok := byID[id]; ok {
-			out = append(out, s)
-			picked[id] = struct{}{}
-		}
-	}
-	for _, s := range live {
-		if s.ID != "" {
-			if _, ok := picked[s.ID]; ok {
-				continue
-			}
-		}
 		out = append(out, s)
+		if s.ID != "" && s.ID == m.viewing {
+			seen = true
+		}
+	}
+	if m.viewing != "" && !seen {
+		if info, ok := m.subagentByID(m.viewing); ok {
+			out = append(out, info)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -260,14 +228,17 @@ func (m *Model) pruneSubs() {
 		delete(m.agentStart, id)
 		delete(m.agentDone, id)
 	}
-	if len(m.agentTouch) > 0 {
-		next := m.agentTouch[:0]
-		for _, id := range m.agentTouch {
-			if _, ok := live[id]; ok || (m.viewing != "" && id == m.viewing) {
-				next = append(next, id)
-			}
+	// A record whose only sighting was its finish has a done stamp and no
+	// start stamp; it has to leave too, or a later record with the same id
+	// would measure its linger from this stale clock.
+	for id := range m.agentDone {
+		if _, ok := live[id]; ok {
+			continue
 		}
-		m.agentTouch = next
+		if m.viewing != "" && id == m.viewing {
+			continue
+		}
+		delete(m.agentDone, id)
 	}
 }
 
@@ -289,6 +260,9 @@ func (m *Model) syncAgents() {
 		m.agentSel = 0
 		if m.viewing == "" {
 			m.agentID = ""
+			if m.agentFocus {
+				m.focusComposer()
+			}
 		}
 		return
 	}
@@ -318,11 +292,15 @@ func (m *Model) moveAgent(delta int) {
 		}
 		return
 	}
-	m.agentSel = (m.agentSel + delta) % len(items)
-	if m.agentSel < 0 {
-		m.agentSel += len(items)
-	}
+	m.agentSel = min(max(m.agentSel+delta, 0), len(items)-1)
 	m.agentID = items[m.agentSel].ID
+}
+
+// rowsFocused says whether a row carries the selection mark: while the
+// keyboard is on the rows, or while a sub-agent is being viewed (its row is
+// the one the view came from).
+func (m Model) rowsFocused() bool {
+	return m.agentFocus || m.viewing != ""
 }
 
 func (m *Model) selectAgent(i int) {
@@ -359,7 +337,10 @@ func (m Model) agentRowsView() string {
 		return ""
 	}
 	more := len(m.agentItems()) - len(items)
-	sel := m.agentSelection(len(items))
+	sel := -1
+	if m.rowsFocused() {
+		sel = m.agentSelection(len(items))
+	}
 	rows := make([]string, 0, len(items)+1)
 	for i, s := range items {
 		glyph, gst := m.agentGlyph(s)
@@ -369,17 +350,24 @@ func (m Model) agentRowsView() string {
 		}
 		label := agentLabel(s)
 		suffix := m.agentSuffix(s)
-		rows = append(rows, m.agentRow(glyph, gst, label, sanitizeLine(s.Description), suffix, st))
+		rows = append(rows, m.agentRow(i == sel, glyph, gst, label, sanitizeLine(s.Description), suffix, st))
 	}
 	if more > 0 {
 		rows = append(rows, renderSegs(m.width,
-			seg{fmt.Sprintf("… +%d more", more), styleFG(m.theme.Dim)}))
+			seg{agentGutterBlank + fmt.Sprintf("… +%d more", more), styleFG(m.theme.Dim)}))
 	}
 	return strings.Join(rows, "\n")
 }
 
-func (m Model) agentRow(glyph string, gst lipgloss.Style, label, desc, suffix string, descSt lipgloss.Style) string {
-	fixed := 2 + lipgloss.Width(label)
+// The gutter marks the selected row the way the composer marks its prompt,
+// so ↑/↓ have a target that reads even where the accent colour is faint.
+const (
+	agentGutterMark  = "❯ "
+	agentGutterBlank = "  "
+)
+
+func (m Model) agentRow(selected bool, glyph string, gst lipgloss.Style, label, desc, suffix string, descSt lipgloss.Style) string {
+	fixed := len(agentGutterBlank) + 2 + lipgloss.Width(label)
 	if suffix != "" {
 		fixed += 2 + lipgloss.Width(suffix)
 	}
@@ -390,7 +378,11 @@ func (m Model) agentRow(glyph string, gst lipgloss.Style, label, desc, suffix st
 			desc = ""
 		}
 	}
-	segs := []seg{{glyph + " ", gst}, {label, styleFG(m.theme.ToolKind)}}
+	gutter := seg{agentGutterBlank, styleFG(m.theme.Dim)}
+	if selected {
+		gutter = seg{agentGutterMark, styleFG(m.theme.Accent)}
+	}
+	segs := []seg{gutter, {glyph + " ", gst}, {label, styleFG(m.theme.ToolKind)}}
 	if desc != "" {
 		segs = append(segs, seg{"  " + desc, descSt})
 	}

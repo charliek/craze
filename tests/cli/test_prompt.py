@@ -334,9 +334,7 @@ def test_prompt_json_task_subagent(craze_bin: Path, fake_agent_bin: Path, tmp_pa
     assert proc.returncode == 0, proc.stderr
     events = parse_events(proc.stdout)
     life = _lifecycle(events)
-    assert life[:3] == ["spawned", "progress", "finished"] or (
-        "spawned" in life and "progress" in life and "finished" in life
-    )
+    assert life.index("spawned") < life.index("progress") < life.index("finished"), life
     tools = [e for e in events if e.get("type") == "tool" and e.get("task")]
     assert tools
     assert tools[-1]["task"].get("status") == "completed"

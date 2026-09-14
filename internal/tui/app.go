@@ -182,13 +182,16 @@ type Model struct {
 	todoPlanned int
 	todoDone    bool
 
-	// Agent rows: the selection is held by sub-agent id because the in-flight
-	// list reorders on every update.
+	// Agent rows: the selection is held by sub-agent id so it survives a row
+	// leaving the band (finish, linger, eviction) above or below it.
 	agentSel   int
 	agentID    string
 	agentStart map[string]time.Time
 	agentDone  map[string]time.Time
-	agentTouch []string
+	// agentFocus is true while ↑/↓ have moved the keyboard from the composer
+	// to the rows: the selected row carries the gutter mark and Enter opens
+	// it. Any other key hands the keyboard back to the composer.
+	agentFocus bool
 
 	tasksState    tasksPanelState
 	todosSeen     bool
@@ -907,6 +910,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyShiftTab {
 		return m.cycleMode()
 	}
+	if m.agentFocus {
+		handled, next := m.handleRowsKey(msg)
+		m = next
+		if handled {
+			return m, nil
+		}
+	}
 	if msg.Type == tea.KeyEsc {
 		if m.slashMenuOpen() {
 			m.slashHide = true
@@ -952,21 +962,75 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Only the arrow keys select a row, empty composer or not — a user
-	// typing a follow-up still browses sub-agents; ctrl+p / ctrl+n stay with
-	// the textarea.
+	// Only the arrow keys move the keyboard to the rows, empty composer or
+	// not — a user typing a follow-up still browses sub-agents; ctrl+p /
+	// ctrl+n stay with the textarea.
 	if len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
-		delta := 1
-		if msg.Type == tea.KeyUp {
-			delta = -1
-		}
-		m.moveAgent(delta)
+		m.focusRows()
 		return m, nil
 	}
 	return m, m.updateComposer(msg)
 }
 
+// focusRows moves the keyboard from the composer to the sub-agent rows: the
+// composer loses its cursor and the selected row gains the gutter mark. The
+// selection itself does not move, so ↓ from the composer lands where the
+// user last was (the first row to begin with).
+func (m *Model) focusRows() {
+	m.agentFocus = true
+	m.input.Blur()
+}
+
+// focusComposer hands the keyboard back to the composer.
+func (m *Model) focusComposer() {
+	m.agentFocus = false
+	_ = m.input.Focus()
+}
+
+// handleRowsKey is the keyboard while the rows have it. ↑ past the first row,
+// Esc and any key that is not a row key return to the composer; that key is
+// then handled as usual (handled == false), so typing never needs a second
+// press.
+func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
+	items := m.visibleAgents()
+	if len(items) == 0 {
+		m.focusComposer()
+		return false, m
+	}
+	switch msg.Type {
+	case tea.KeyUp:
+		if m.agentSel <= 0 {
+			m.focusComposer()
+		} else {
+			m.moveAgent(-1)
+		}
+		return true, m
+	case tea.KeyDown:
+		if m.agentSel < len(items)-1 {
+			m.moveAgent(1)
+		}
+		return true, m
+	case tea.KeyEnter:
+		if m.agentID != "" {
+			m.enterView(m.agentID)
+		} else {
+			m.selectAgent(m.agentSelection(len(items)))
+		}
+		return true, m
+	case tea.KeyEsc:
+		m.focusComposer()
+		return true, m
+	}
+	m.focusComposer()
+	return false, m
+}
+
 func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
+	// A blurred textarea drops every key, so whatever took the cursor away
+	// (Esc on an idle turn, the rows) gives it back before the key lands.
+	if !m.input.Focused() {
+		_ = m.input.Focus()
+	}
 	prev := m.input.Value()
 	// bubbles repositions its own viewport inside Update (textarea.go:1087),
 	// against the height in force *before* the key, and never rewinds slack
@@ -1016,14 +1080,6 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// so Enter agrees with the placeholder the user is looking at.
 	if m.planOffering() && m.input.Value() == "" {
 		return m.implementPlan()
-	}
-	if composerEmpty(m.input) && len(m.visibleAgents()) > 0 {
-		if m.agentID != "" {
-			m.enterView(m.agentID)
-		} else {
-			m.selectAgent(m.agentSelection(len(m.visibleAgents())))
-		}
-		return m, nil
 	}
 	if m.cardOpen() || m.status == statusWorking || !m.started {
 		return m, nil
@@ -1338,6 +1394,18 @@ func (m *Model) refreshSnap() {
 	m.snap = m.sess.Snapshot()
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
+	}
+	// Stamp the rows on first sight in a snapshot, not only on the lifecycle
+	// event: a tool re-emit can carry a finished status one Update ahead of
+	// the `finished` event, and a finished row without its stamp would drop
+	// out of the band for that frame and move the selection under the user.
+	for i := range m.snap.Subagents {
+		s := &m.snap.Subagents[i]
+		if subagentTerminal(*s) {
+			m.noteAgentDone(s.ID)
+		} else {
+			m.noteAgentStart(s.ID)
+		}
 	}
 }
 

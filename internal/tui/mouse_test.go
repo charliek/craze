@@ -148,9 +148,9 @@ func TestClickHitTestsAgentRowsAfterAResize(t *testing.T) {
 		taskTool("task-a", "job a", "in_progress"),
 		taskTool("task-b", "job b", "in_progress"),
 	})
-	// The most recent update leads, so row 0 is task-b and row 1 is task-a.
+	// Rows sit in spawn order: row 0 is task-a and row 1 is task-b.
 	rowsTop := m.lay.Region(regionAgents).Top
-	if got := clickAt(t, m, rowsTop+1); got.agentID != "task-a" || got.viewing != "task-a" {
+	if got := clickAt(t, m, rowsTop+1); got.agentID != "task-b" || got.viewing != "task-b" {
 		t.Fatalf("click on row 1 selected %q (view %q)", got.agentID, got.viewing)
 	}
 
@@ -163,7 +163,7 @@ func TestClickHitTestsAgentRowsAfterAResize(t *testing.T) {
 	if got := clickAt(t, m, rowsTop); got.viewing != "" {
 		t.Fatalf("a stale row coordinate selected %q", got.agentID)
 	}
-	if got := clickAt(t, m, m.lay.Region(regionAgents).Top+1); got.agentID != "task-a" || got.viewing != "task-a" {
+	if got := clickAt(t, m, m.lay.Region(regionAgents).Top+1); got.agentID != "task-b" || got.viewing != "task-b" {
 		t.Fatalf("after the resize row 1 selected %q (view %q)", got.agentID, got.viewing)
 	}
 	// The overflow row is not a sub-agent and selects nothing.
