@@ -1010,10 +1010,10 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if ok && name == "exit" {
 		return m.runBuiltin(name, args)
 	}
-	// The offer outranks the peek: an empty composer under a live offer means
-	// "build it", and the peek is still there for an empty composer without
-	// one. The test is Value()=="" and not composerEmpty, so Enter agrees with
-	// the placeholder the user is looking at.
+	// The offer outranks the sub-agent rows: an empty composer under a live
+	// offer means "build it", and the rows stay reachable for an empty
+	// composer without one. The test is Value()=="" and not composerEmpty,
+	// so Enter agrees with the placeholder the user is looking at.
 	if m.planOffering() && m.input.Value() == "" {
 		return m.implementPlan()
 	}

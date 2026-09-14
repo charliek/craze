@@ -294,6 +294,66 @@ func TestJoinOwnerScopedCollidingToolIDs(t *testing.T) {
 	}
 }
 
+// TestDivergentIDsKeyByChildSession pins the routing seam: records key by
+// child_session_id (what routed updates are tagged with), so a provider that
+// ever sends subagent_id != child_session_id still streams into its record.
+func TestDivergentIDsKeyByChildSession(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	s.onSubagent(acp.SubagentNotification{
+		Kind: acp.SubagentSpawned, SubagentID: "logical-7", ChildSessionID: "session-abc",
+		AttemptID: "at1", Description: "d", Model: "m",
+	})
+	if got := s.Snapshot().Subagents; len(got) != 1 || got[0].ID != "session-abc" {
+		t.Fatalf("records %+v", got)
+	}
+	s.onChildUpdate("session-abc", "", sessionUpdateWire{
+		SessionUpdate: updateUserMessage,
+		Content:       mustJSON(map[string]any{"type": "text", "text": "prompt"}),
+	})
+	if got := s.Snapshot().Subagents[0]; got.Prompt != "prompt" {
+		t.Fatalf("child update missed its record: %+v", got)
+	}
+	s.onSubagent(acp.SubagentNotification{
+		Kind: acp.SubagentFinished, SubagentID: "logical-7", ChildSessionID: "session-abc",
+		AttemptID: "at1", Status: "completed",
+	})
+	if got := s.Snapshot().Subagents[0]; got.Status != SubagentCompleted {
+		t.Fatalf("finish missed its record: %+v", got)
+	}
+}
+
+// TestRunningRecordCapDrops65th pins the session-side bound: ACP still
+// delivers a refused spawned, but the session never tracks more than
+// subagentRunCap running records, and never evicts one to make room.
+func TestRunningRecordCapDrops65th(t *testing.T) {
+	grok := GrokProvider()
+	s := newSession(Options{Provider: &grok})
+	s.sessionID = "main"
+	for i := 0; i < subagentRunCap; i++ {
+		s.onSubagent(spawnNotif(fmt.Sprintf("sub-%d", i), "d"))
+	}
+	if got := len(s.Snapshot().Subagents); got != subagentRunCap {
+		t.Fatalf("records %d, want %d", got, subagentRunCap)
+	}
+	s.onSubagent(spawnNotif("sub-65", "d"))
+	if got := len(s.Snapshot().Subagents); got != subagentRunCap {
+		t.Fatalf("65th running record tracked: %d", got)
+	}
+	if _, ok := s.subagents["sub-65"]; ok {
+		t.Fatal("the capped spawned must leave no record")
+	}
+	s.onSubagent(acp.SubagentNotification{
+		Kind: acp.SubagentFinished, SubagentID: "sub-0", ChildSessionID: "sub-0",
+		AttemptID: "at1", Status: "completed",
+	})
+	s.onSubagent(spawnNotif("sub-65", "d"))
+	if _, ok := s.subagents["sub-65"]; !ok {
+		t.Fatal("a finished slot must free room for a new spawned")
+	}
+}
+
 func TestResumedSameIDNewAttemptResets(t *testing.T) {
 	grok := GrokProvider()
 	s := newSession(Options{Provider: &grok})

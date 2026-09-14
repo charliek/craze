@@ -131,8 +131,20 @@ func (s *session) onSubagent(n acp.SubagentNotification) {
 	s.emitAll(evs)
 }
 
+// subagentRecOf finds a record by ChildSessionID first (the routing key) and
+// falls back to SubagentID for shapes that only carry it.
+func subagentRecOf(recs map[string]*subagentRec, n acp.SubagentNotification) *subagentRec {
+	if rec := recs[n.ChildSessionID]; rec != nil {
+		return rec
+	}
+	return recs[n.SubagentID]
+}
+
 func (s *session) handleSpawnedLocked(n acp.SubagentNotification) []Event {
-	id := n.SubagentID
+	id := n.ChildSessionID
+	if id == "" {
+		id = n.SubagentID
+	}
 	if id == "" {
 		return nil
 	}
@@ -155,7 +167,9 @@ func (s *session) handleSpawnedLocked(n acp.SubagentNotification) []Event {
 		info := cloneSubagent(rec.info)
 		return append([]Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}, join...)
 	}
-	s.newSubagentLocked(n)
+	if rec := s.newSubagentLocked(n); rec == nil {
+		return nil
+	}
 	join := s.joinByDescriptionLocked(id)
 	info := cloneSubagent(s.subagents[id].info)
 	return append([]Event{{Type: EventSubagent, Subagent: &info, SubagentChange: SubagentChangeSpawned}}, join...)
@@ -180,14 +194,37 @@ func (s *session) applySpawnFieldsLocked(info *SubagentInfo, n acp.SubagentNotif
 	capSubagent(info)
 }
 
+// subagentRunCap bounds concurrent running records. The ACP router refuses
+// to route past 64 active children but still delivers refused spawns so a
+// row could show; the session enforces the plan's own bound instead — a
+// spawned past the cap is dropped here, never evicting a running child.
+const subagentRunCap = 64
+
+func (s *session) runningSubagentsLocked() int {
+	n := 0
+	for _, rec := range s.subagents {
+		if rec.info.Status == SubagentRunning || rec.info.Status == "" {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *session) newSubagentLocked(n acp.SubagentNotification) *subagentRec {
+	if s.runningSubagentsLocked() >= subagentRunCap {
+		return nil
+	}
 	parent := n.ParentSessionID
 	if parent == s.sessionID {
 		parent = ""
 	}
+	id := n.ChildSessionID
+	if id == "" {
+		id = n.SubagentID
+	}
 	rec := &subagentRec{
 		info: SubagentInfo{
-			ID:           n.SubagentID,
+			ID:           id,
 			AttemptID:    n.AttemptID,
 			ParentID:     parent,
 			Description:  n.Description,
@@ -201,13 +238,13 @@ func (s *session) newSubagentLocked(n acp.SubagentNotification) *subagentRec {
 		evicted: make(map[string]struct{}),
 	}
 	capSubagent(&rec.info)
-	s.subagents[n.SubagentID] = rec
-	s.subagentOrder = append(s.subagentOrder, n.SubagentID)
+	s.subagents[id] = rec
+	s.subagentOrder = append(s.subagentOrder, id)
 	return rec
 }
 
 func (s *session) handleProgressLocked(n acp.SubagentNotification) []Event {
-	rec := s.subagents[n.SubagentID]
+	rec := subagentRecOf(s.subagents, n)
 	if rec == nil {
 		return nil
 	}
@@ -240,7 +277,7 @@ func (s *session) applyProgressFieldsLocked(info *SubagentInfo, n acp.SubagentNo
 }
 
 func (s *session) handleFinishedLocked(n acp.SubagentNotification) []Event {
-	rec := s.subagents[n.SubagentID]
+	rec := subagentRecOf(s.subagents, n)
 	if rec == nil {
 		return nil
 	}
