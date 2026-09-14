@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,22 @@ type session struct {
 	// subagentFinishSeq stamps records in the order they finished, which is
 	// not spawn order; the finished-record cap evicts by it.
 	subagentFinishSeq uint64
+	// queue is craze's own message queue (§3.1). queueOp orders whole
+	// transactions — the mutation and the events it produced — so the event
+	// stream can be replayed into the same queue. Lock order:
+	// queueOp → s.mu → the queue's own lock.
+	queueOp sync.Mutex
+	queue   PromptQueue
+	// doneEmitted marks that this turn's EventDone has gone out. inPrompt is
+	// still true until Prompt's defer runs, so it alone cannot say whether
+	// there is still a turn to interject into.
+	doneEmitted bool
+	// cancelling holds from Cancel until the turn ends. An interjection sent
+	// in that window is exactly what grok strands.
+	cancelling bool
+	// foreign mirrors the client's foreign-turn state for Snapshot.
+	foreign      bool
+	interjectSeq int
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
@@ -180,6 +197,12 @@ func (s *session) Start(ctx context.Context) error {
 	client.SetPlanHandler(s.onCreatePlan)
 	client.SetTodosHandler(s.onUpdateTodos)
 	client.SetTaskHandler(s.onTaskReceipt)
+	client.SetInterjectionHandler(func(n acp.InterjectionNotification) {
+		s.onInterjection(interjectionText{Text: n.Text})
+	})
+	client.SetForeignTurnHandler(func(f acp.ForeignTurn) {
+		s.onForeignTurn(ForeignTurnInfo{ID: f.ID, Text: f.Text, Running: f.Running})
+	})
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
@@ -281,12 +304,17 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	}
 	s.inPrompt = true
 	s.turn++
+	// A new turn: it has not ended and no cancel has been asked for it, so
+	// an interjection is live again.
+	s.doneEmitted = false
+	s.cancelling = false
 	done := make(chan struct{})
 	s.promptDone = done
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.inPrompt = false
+		s.cancelling = false
 		s.clearTaskReceiptsLocked()
 		close(done)
 		s.mu.Unlock()
@@ -294,12 +322,23 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 
 	res, err := client.Prompt(ctx, text)
 	if err != nil {
+		// Nothing drains from an error state, and a queue that outlived one
+		// would run behind whatever the user sends next. A refusal is not
+		// such an ending: ErrForeignTurn means nothing was attempted, and
+		// dropping the user's queue over a prompt that never left craze
+		// would lose messages the caller can simply send later.
+		if !errors.Is(err, acp.ErrForeignTurn) {
+			s.clearQueueOnError()
+		}
 		s.emit(Event{Type: EventError, Err: err})
 		return Result{}, err
 	}
 	if res.StopReason == acp.StopCancelled {
 		s.closeInFlightTools(acp.StopCancelled)
 	}
+	s.mu.Lock()
+	s.doneEmitted = true
+	s.mu.Unlock()
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
 }
@@ -376,6 +415,9 @@ func (s *session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
+	// s.mu → the queue's lock is the order every queue transaction takes;
+	// reading them the other way round here would close the cycle.
+	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
@@ -383,6 +425,7 @@ func (s *session) Snapshot() Snapshot {
 	out.Todos = append([]Todo(nil), s.snap.Todos...)
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
 	out.Subagents = snapshotSubagents(s.subagentOrder, s.subagents)
+	out.ForeignTurn = s.foreign
 	return out
 }
 
@@ -391,6 +434,11 @@ func (s *session) Cancel(ctx context.Context) error {
 	if client == nil {
 		return nil
 	}
+	// From here until the turn ends an interjection would be stranded, which
+	// is what makes grok mint a turn of its own.
+	s.mu.Lock()
+	s.cancelling = true
+	s.mu.Unlock()
 	s.cancelWaiting()
 	if err := client.Cancel(ctx); err != nil {
 		return err

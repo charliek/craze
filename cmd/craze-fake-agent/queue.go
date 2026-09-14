@@ -195,8 +195,35 @@ func (s *server) runTurn(r *promptReq) {
 		s.mergeInterjections()
 	}
 	s.say("DONE " + strings.Join(s.takeMerged(), " "))
+	s.strandSelfInterjection(r)
 	s.endTurn(r, acp.StopEndTurn)
 }
+
+// strandInterjectionMarker in a prompt makes the fallback script strand an
+// interjection of its own as the turn ends. craze never interjects headlessly,
+// but grok can mint a fallback for an interjection craze did not send, and the
+// drain has to wait that turn out either way.
+const strandInterjectionMarker = "STRAND-INTERJECTION"
+
+func (s *server) strandSelfInterjection(r *promptReq) {
+	if s.script != "grok-long-turn-fallback" || !strings.Contains(r.text, strandInterjectionMarker) {
+		return
+	}
+	_ = s.conn.Notify(context.Background(), acp.MethodGrokInterjectionWrapped, map[string]any{
+		"sessionId": fakeSessionID,
+		"text":      "someone else's note",
+	})
+	// The fallback is announced while this turn is still finishing and
+	// outlives its ending, which is the ordering a client's drain has to
+	// survive: the turn it was waiting on is over and the session is still
+	// not its own. Live grok mints the fallback a moment later instead; the
+	// client cannot tell the two apart, and this one is testable.
+	s.startFallback("someone else's note", strandFallbackFor)
+}
+
+// strandFallbackFor is how long the stranded fallback holds the session — long
+// enough to outlive the turn that stranded it.
+const strandFallbackFor = 400 * time.Millisecond
 
 // endTurn writes one turn's ending: the turn stops being the running one, the
 // queue broadcast says so, and turn_completed, prompt_complete and the RPC
@@ -250,17 +277,7 @@ func (s *server) broadcastQueue() {
 	s.bmu.Lock()
 	defer s.bmu.Unlock()
 	s.mu.Lock()
-	rows := make([]map[string]any, 0, len(s.queued))
-	for i, e := range s.queued {
-		rows = append(rows, map[string]any{
-			"id":       e.promptID,
-			"version":  0,
-			"kind":     "prompt",
-			"text":     e.text,
-			"position": i,
-		})
-	}
-	params := map[string]any{"sessionId": fakeSessionID, "entries": rows}
+	params := map[string]any{"sessionId": fakeSessionID, "entries": queueRows(s.queued)}
 	switch {
 	case s.running != nil:
 		params["runningPromptId"] = s.running.promptID
@@ -273,6 +290,35 @@ func (s *server) broadcastQueue() {
 	}
 	s.mu.Unlock()
 	_ = s.conn.Notify(context.Background(), acp.MethodGrokQueueChangedWrapped, params)
+}
+
+// broadcastQueueAs is broadcastQueue for a turn with no request record of its
+// own: the interject fallback, which may hold the session while the turn that
+// stranded it is still writing its ending.
+func (s *server) broadcastQueueAs(runningID, runningText string) {
+	s.bmu.Lock()
+	defer s.bmu.Unlock()
+	s.mu.Lock()
+	params := map[string]any{"sessionId": fakeSessionID, "entries": queueRows(s.queued)}
+	s.mu.Unlock()
+	params["runningPromptId"] = runningID
+	params["runningText"] = runningText
+	params["runningKind"] = "prompt"
+	_ = s.conn.Notify(context.Background(), acp.MethodGrokQueueChangedWrapped, params)
+}
+
+func queueRows(entries []*promptReq) []map[string]any {
+	rows := make([]map[string]any, 0, len(entries))
+	for i, e := range entries {
+		rows = append(rows, map[string]any{
+			"id":       e.promptID,
+			"version":  0,
+			"kind":     "prompt",
+			"text":     e.text,
+			"position": i,
+		})
+	}
+	return rows
 }
 
 // turnCompletedID is turnCompleted for a script that mints real prompt ids.
@@ -347,27 +393,39 @@ func (s *server) runFallbackIfStranded() {
 	}
 	text := strings.Join(s.pendingInterjections, " ")
 	s.pendingInterjections = nil
-	s.fallbackSeq++
-	s.fallbackID = fmt.Sprintf("interject-fallback-%d", s.fallbackSeq)
-	s.fallbackText = text
-	s.fallbackOn = true
 	s.mu.Unlock()
-	go s.runFallback(text)
+	s.startFallback(text, 50*time.Millisecond)
 }
 
-func (s *server) runFallback(text string) {
-	defer func() {
-		s.mu.Lock()
-		id := s.fallbackID
-		s.fallbackOn = false
-		s.fallbackID, s.fallbackText = "", ""
+// startFallback mints the interject-fallback turn and runs it in the
+// background. It does not check whether a turn is running: a fallback can be
+// announced while the turn that stranded it is still finishing.
+func (s *server) startFallback(text string, runFor time.Duration) {
+	s.mu.Lock()
+	if s.fallbackOn {
 		s.mu.Unlock()
-		// Live grok sends no queue/changed and no prompt_complete for a
-		// fallback: turn_completed is the whole ending.
-		s.turnCompletedID(fakeSessionID, id, acp.StopEndTurn)
-		s.kickQueue()
-	}()
-	s.broadcastQueue()
+		return
+	}
+	s.fallbackSeq++
+	id := fmt.Sprintf("interject-fallback-%d", s.fallbackSeq)
+	s.fallbackID, s.fallbackText = id, text
+	s.fallbackOn = true
+	s.mu.Unlock()
+	// The announcement goes out before this returns, so a turn ending right
+	// behind it cannot be mistaken for the session going idle.
+	s.broadcastQueueAs(id, text)
+	go s.runFallback(id, text, runFor)
+}
+
+func (s *server) runFallback(id, text string, runFor time.Duration) {
 	s.say("noted: " + text)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(runFor)
+	s.mu.Lock()
+	s.fallbackOn = false
+	s.fallbackID, s.fallbackText = "", ""
+	s.mu.Unlock()
+	// Live grok sends no queue/changed and no prompt_complete for a
+	// fallback: turn_completed is the whole ending.
+	s.turnCompletedID(fakeSessionID, id, acp.StopEndTurn)
+	s.kickQueue()
 }

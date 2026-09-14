@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,10 @@ import (
 )
 
 const (
+	// foreignTurnMax bounds the wait for a turn the agent started on its own
+	// (grok's interject fallback). Past it craze stops rather than sending a
+	// prompt that would be queued behind a turn nobody asked for.
+	foreignTurnMax   = 60 * time.Second
 	subagentDrainMax = 1500 * time.Millisecond
 	subagentQuiet    = 250 * time.Millisecond
 	// subagentSweepMax bounds the final sweep so a producer that keeps
@@ -126,9 +131,17 @@ func (o *promptOpts) run() (retErr error) {
 	go func() {
 		<-ctx.Done()
 		if inRun.Load() {
+			// A signal stops everything pending, not just the running turn:
+			// the queue goes first so nothing starts behind the cancel.
+			sess.ClearQueue()
 			_ = sess.Cancel(context.Background())
 		}
 	}()
+
+	// decisions is the headless permission queue, consumed by whichever
+	// reader of the event stream sees the request — a turn's own loop, the
+	// drain between turns, or a turn the agent started on its own.
+	decisions := append([]string{}, o.decisions...)
 
 	if err := sess.Start(ctx); err != nil {
 		if o.json {
@@ -138,7 +151,11 @@ func (o *promptOpts) run() (retErr error) {
 	}
 	defer func() {
 		// A drain write that fails means the JSON on stdout is incomplete;
-		// that is an error even when everything else succeeded.
+		// that is an error even when everything else succeeded. The queue's
+		// own last events — a signal's removed lines — are flushed first.
+		if err := o.flushEvents(sess, &decisions); err != nil && retErr == nil {
+			retErr = err
+		}
 		if err := o.drainSubagents(sess); err != nil && retErr == nil {
 			retErr = err
 		}
@@ -147,23 +164,158 @@ func (o *promptOpts) run() (retErr error) {
 		fmt.Fprintf(o.stderr, "craze: not saving the provider: %v\n", err)
 	}
 
-	turns := append([]string{text}, o.followUps...)
-	queue := append([]string{}, o.decisions...)
+	// --follow-up is the headless queue: every follow-up is queued before the
+	// first turn, and the drain below sends them one per settled turn, in
+	// order, exactly as the TUI does.
+	for _, f := range o.followUps {
+		if _, err := sess.Queue(f); err != nil {
+			return fmt.Errorf("craze: %w", err)
+		}
+	}
 	forcedReject := false
-	for _, turn := range turns {
-		res, rejected, err := o.runTurn(sess, turn, &queue)
+	turn := text
+	for {
+		// A turn the agent started on its own can begin between the check
+		// below and the prompt going out, and the session refuses a prompt
+		// while one runs. The refusal reaches nothing: no turn was attempted
+		// and no queued message was lost, so it is waited out and retried
+		// once rather than reported.
+		res, rejected, err := o.runTurn(sess, turn, &decisions)
+		if errors.Is(err, agent.ErrForeignTurn) {
+			if werr := o.waitForeignTurn(sess, &decisions); werr != nil {
+				return werr
+			}
+			res, rejected, err = o.runTurn(sess, turn, &decisions)
+		}
 		if rejected {
 			forcedReject = true
 		}
 		if err != nil {
 			return err
 		}
+		if err := o.flushEvents(sess, &decisions); err != nil {
+			return err
+		}
+		// The stop reason still ends the chain exactly as it did before the
+		// queue existed: anything but end_turn is exit 1 and no more turns.
 		if res.StopReason != "end_turn" {
 			return &exitError{code: 1, msg: ""}
 		}
+		next, ok, err := o.nextQueued(ctx, sess, &decisions)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		turn = next.Text
+	}
+	// A signal that landed while the queue was draining still ends the run,
+	// even if every turn that did run ended end_turn.
+	if ctx.Err() != nil {
+		return &exitError{code: 1, msg: ""}
 	}
 	if forcedReject {
 		return &exitError{code: 1, msg: ""}
+	}
+	return nil
+}
+
+// nextQueued is the headless drain: wait out any turn the agent is running on
+// its own, then take the head. A blocked take is not an empty queue — the two
+// are told apart by the snapshot, so follow-ups are never abandoned with an
+// exit status that says everything ran.
+func (o *promptOpts) nextQueued(ctx context.Context, sess agent.Session, queue *[]string) (agent.QueuedPrompt, bool, error) {
+	deadline := time.Now().Add(foreignTurnMax)
+	for {
+		if err := o.waitForeignTurn(sess, queue); err != nil {
+			return agent.QueuedPrompt{}, false, err
+		}
+		// A signal clears the queue and ends the run; taking a row now would
+		// start a turn nothing is left to cancel.
+		if ctx.Err() != nil {
+			return agent.QueuedPrompt{}, false, nil
+		}
+		next, ok := sess.PopQueue()
+		if ok {
+			if err := o.flushEvents(sess, queue); err != nil {
+				return agent.QueuedPrompt{}, false, err
+			}
+			return next, true, nil
+		}
+		if len(sess.Snapshot().Queue) == 0 {
+			return agent.QueuedPrompt{}, false, nil
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(o.stderr, "craze: the queue is still blocked after %s\n", foreignTurnMax)
+			return agent.QueuedPrompt{}, false, &exitError{code: 1, msg: ""}
+		}
+		// Something still holds the drain. Let its events through and look
+		// again rather than spinning on the snapshot.
+		if err := o.flushEvents(sess, queue); err != nil {
+			return agent.QueuedPrompt{}, false, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// flushEvents writes whatever the session has already emitted without waiting
+// for more. Queue changes happen between turns, where runTurn's own loop is
+// not reading, so this is what puts them on stdout in the order they happened.
+func (o *promptOpts) flushEvents(sess agent.Session, queue *[]string) error {
+	for {
+		select {
+		case ev, ok := <-sess.Events():
+			if !ok {
+				return nil
+			}
+			if _, err := o.consume(sess, ev, queue); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+// consume is what every reader of the event stream does with one event: write
+// it, and answer it if it is a permission request. A request that arrives
+// outside a turn craze prompted — during a foreign turn, or between turns —
+// is still the agent waiting on an answer, so every reader goes through here.
+func (o *promptOpts) consume(sess agent.Session, ev agent.Event, queue *[]string) (bool, error) {
+	if err := o.writeEvent(ev); err != nil {
+		return false, err
+	}
+	if ev.Type != agent.EventPermission || ev.Permission == nil {
+		return false, nil
+	}
+	return o.answerPermission(sess, ev.Permission, queue)
+}
+
+// waitForeignTurn waits out a turn the agent started on its own before the
+// next queued message goes. Sending into one would put craze's prompt in the
+// agent's queue, where its completion is no longer craze's to recognise.
+func (o *promptOpts) waitForeignTurn(sess agent.Session, queue *[]string) error {
+	if !sess.Snapshot().ForeignTurn {
+		return nil
+	}
+	deadline := time.NewTimer(foreignTurnMax)
+	defer deadline.Stop()
+	for sess.Snapshot().ForeignTurn {
+		select {
+		case ev, ok := <-sess.Events():
+			if !ok {
+				return nil
+			}
+			// A foreign turn runs tools of its own, so it can ask for
+			// permission; nothing else is reading the stream here.
+			if _, err := o.consume(sess, ev, queue); err != nil {
+				return err
+			}
+		case <-deadline.C:
+			fmt.Fprintf(o.stderr, "craze: the agent is still running a turn of its own after %s\n", foreignTurnMax)
+			return &exitError{code: 1, msg: ""}
+		}
 	}
 	return nil
 }
@@ -213,17 +365,12 @@ func (o *promptOpts) runTurn(sess agent.Session, text string, queue *[]string) (
 		if !ok {
 			break
 		}
-		if err := o.writeEvent(ev); err != nil {
-			return agent.Result{}, rejected, err
+		r, err := o.consume(sess, ev, queue)
+		if err != nil {
+			return agent.Result{}, rejected || ev.Type == agent.EventPermission, err
 		}
-		if ev.Type == agent.EventPermission && ev.Permission != nil {
-			r, err := o.answerPermission(sess, ev.Permission, queue)
-			if err != nil {
-				return agent.Result{}, true, err
-			}
-			if r {
-				rejected = true
-			}
+		if r {
+			rejected = true
 		}
 		if ev.Type == agent.EventDone || ev.Type == agent.EventError {
 			out := <-ch

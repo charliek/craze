@@ -117,6 +117,10 @@ type Capabilities struct {
 	AskCards            bool
 	PlanCards           bool
 	ParameterizedPicker bool
+	// Interject is the mid-turn merge: text folded into the running turn
+	// without cancelling it. Grok has it; cursor's only mid-turn path is a
+	// second prompt, which cancels.
+	Interject bool
 }
 
 // SkillScan is where a provider's on-disk skills come from: SKILL.md trees
@@ -223,6 +227,7 @@ func GrokProvider() Provider {
 			AskCards:            true,
 			PlanCards:           true,
 			ParameterizedPicker: true,
+			Interject:           true,
 		},
 		dialect:          acp.DialectGrok,
 		subagentToolName: "spawn_subagent",

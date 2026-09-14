@@ -36,6 +36,20 @@ type Stub struct {
 	// Clock stamps Event.At; tests inject one to drive lingers and elapsed
 	// times without sleeping.
 	Clock func() time.Time
+
+	// queue is craze's own message queue — the real one, so the chrome tests
+	// run against the same transactions a live session does. queueOp orders
+	// whole transactions as the live session's does; the lock order is
+	// queueOp → mu → the queue's own lock.
+	queueOp sync.Mutex
+	queue   agent.PromptQueue
+	// inPrompt, doneEmitted and cancelling mirror the live session's turn
+	// state, which is what the queue guards and Interject are decided from.
+	inPrompt     bool
+	doneEmitted  bool
+	cancelling   bool
+	foreign      bool
+	interjectErr error
 }
 
 type stubOpen struct{ id, method string }
@@ -193,7 +207,16 @@ func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 	s.hang = false
 	s.n++
 	n := s.n
+	s.inPrompt = true
+	s.doneEmitted = false
+	s.cancelling = false
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inPrompt = false
+		s.cancelling = false
+		s.mu.Unlock()
+	}()
 
 	if hang {
 		select {
@@ -201,6 +224,7 @@ func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 		case <-s.closed:
 		case <-ctx.Done():
 		}
+		s.markDone()
 		s.emit(agent.Event{Type: agent.EventDone, StopReason: "cancelled"})
 		return agent.Result{StopReason: "cancelled"}, nil
 	}
@@ -210,11 +234,23 @@ func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 		reply = "follow-up: " + text
 	}
 	s.emit(agent.Event{Type: agent.EventText, Text: reply})
+	s.markDone()
 	s.emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
 	return agent.Result{StopReason: "end_turn"}, nil
 }
 
+// markDone records that this turn's EventDone has gone out: inPrompt is still
+// true until the deferred clear, so it alone cannot say a turn is still open.
+func (s *Stub) markDone() {
+	s.mu.Lock()
+	s.doneEmitted = true
+	s.mu.Unlock()
+}
+
 func (s *Stub) Cancel(context.Context) error {
+	s.mu.Lock()
+	s.cancelling = true
+	s.mu.Unlock()
 	s.cancelOpen()
 	select {
 	case s.cancel <- struct{}{}:
@@ -355,6 +391,9 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Todos = append([]agent.Todo(nil), s.snap.Todos...)
 	out.Tools = cloneStubTools(s.snap.Tools)
 	out.Subagents = cloneStubSubagents(s.snap.Subagents)
+	out.ForeignTurn = s.foreign
+	// mu → the queue's lock is the order every transaction takes.
+	out.Queue = s.queue.List()
 	return out
 }
 
