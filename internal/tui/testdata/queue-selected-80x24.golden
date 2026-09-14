@@ -1,4 +1,6 @@
-❯ go                                                                            
+❯ go the long way                                                               
++ Thought                                                                       
+⟳ tool  Execute sleep && echo step1                                             
                                                                                 
                                                                                 
                                                                                 
@@ -10,15 +12,13 @@
                                                                                 
                                                                                 
                                                                                 
-✳ Waiting for your answer                                                       
+                                                                                
+                                                                                
+  #1 Reply with PINEAPPLE                                                       
+❯ #2 Reply with MANGO                                 [send now] [edit] [cancel]
+✳ Working · 0s · esc to interrupt                                               
 ──────────────────────────────────────────────────────────────────────── craze ─
-❯ enter queues  ·  ctrl+l interjects                                            
+❯ enter queues  ·  ctrl+l sends now                                             
 ────────────────────────────────────────────────────────────────────────────────
-╭──────────────────────────────────────────────────────────────────────────────╮
-│question 1/2  Pick one                                                        │
-│> 1 A                                                                         │
-│  2 B                                                                         │
-│1-9 pick · ↑↓ move · enter select · esc skip                                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-ws │ grok │ Grok 4.6 (high) │ 0m                                                
-◆ default · shift+tab · ▸▸ bypass permissions on                                
+ws │ cursor │ Default (medium) │ 0m                                             
+◆ agent · shift+tab · ▸▸ bypass permissions on · ⧗ 2 queued                     

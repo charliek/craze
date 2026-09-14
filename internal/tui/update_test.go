@@ -1378,21 +1378,40 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		assertQuitCmd(t, cmd)
 	})
 	t.Run("help", func(t *testing.T) {
+		// A builtin never queues, and /help needs nothing from the agent, so
+		// it is answered mid-turn rather than held or refused.
 		m := hangWorking(t)
 		m.input.SetValue("/help")
-		tm, cmd := m.Update(enter())
+		tm, _ := m.Update(enter())
 		m = tm.(Model)
-		if m.dialog == dialogHelp {
-			t.Fatal("/help while working should be ignored")
+		if m.dialog != dialogHelp {
+			t.Fatal("/help while working opens the help box")
 		}
 		if m.quitting {
 			t.Fatal("/help while working must not quit")
 		}
-		if cmd != nil {
-			t.Fatal("/help while working should not run a command")
-		}
 		if m.status != statusWorking {
 			t.Fatalf("status %s", m.status)
+		}
+		if len(m.snap.Queue) != 0 {
+			t.Fatalf("a builtin must never queue: %+v", m.snap.Queue)
+		}
+	})
+	t.Run("model", func(t *testing.T) {
+		// The builtins that do need the agent keep today's refusal, and
+		// still never queue.
+		m := hangWorking(t)
+		m.input.SetValue("/model")
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		if m.dialog == dialogModel {
+			t.Fatal("/model while working is refused")
+		}
+		if cmd != nil {
+			t.Fatal("/model while working should not run a command")
+		}
+		if len(m.snap.Queue) != 0 {
+			t.Fatalf("a builtin must never queue: %+v", m.snap.Queue)
 		}
 	})
 }
@@ -1872,19 +1891,29 @@ func TestPlanOfferIgnoresAnAbandonedTurnsLateEvents(t *testing.T) {
 	if got := texts(m, entryUser); len(got) != 1 {
 		t.Fatalf("no turn may start while the last one is still draining: %q", got)
 	}
+	if len(m.snap.Queue) != 1 {
+		t.Fatalf("the draft is queued instead: %+v", m.snap.Queue)
+	}
 	// The cancelled turn's own events land now, against the turn that made them.
 	m = feed(t, m,
 		agent.Event{Type: agent.EventText, Text: "here is the plan"},
 		agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
-	if m.status != statusIdle {
-		t.Fatalf("both endings have landed: status %s", m.status)
-	}
 	if m.planArmed() {
 		t.Fatal("a cancelled turn offers nothing")
 	}
-	// The next turn starts clean: the chunk that arrived late was not its own,
-	// so its ending has no evidence to arm an offer with.
-	m = startTurn(t, m, "and now this")
+	// Both of that turn's endings have landed, so the queued message is what
+	// starts next — and it is a turn of its own, with its own user entry.
+	if m.status != statusWorking {
+		t.Fatalf("the queue drains once the turn settles: status %s", m.status)
+	}
+	if got := texts(m, entryUser); len(got) != 2 {
+		t.Fatalf("the queued message is sent as a turn: %q", got)
+	}
+	if len(m.snap.Queue) != 0 {
+		t.Fatalf("the row left the queue: %+v", m.snap.Queue)
+	}
+	// The drained turn starts clean: the chunk that arrived late was not its
+	// own, so its ending has no evidence to arm an offer with.
 	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
 	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
 	m = tm.(Model)

@@ -44,7 +44,7 @@ func (m *Model) handleTick(msg tickMsg) {
 		return
 	}
 	m.tickLive = false
-	if m.tickFast {
+	if m.tickFast && !m.frozen {
 		m.spinFrame++
 	}
 }

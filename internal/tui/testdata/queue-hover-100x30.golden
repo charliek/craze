@@ -1,12 +1,6 @@
-❯ go                                                                                                
-PLAN Fake Plan                                                                                      
-Two steps, then stop.                                                                               
-Steps                                                                                               
-                                                                                                    
-• read main.go                                                                                      
-• edit main.go                                                                                      
-  ○ Read main.go                                                                                    
-  ○ Edit main.go                                                                                    
+❯ go the long way                                                                                   
++ Thought                                                                                           
+⟳ tool  Execute sleep && echo step1                                                                 
                                                                                                     
                                                                                                     
                                                                                                     
@@ -20,11 +14,17 @@ Steps
                                                                                                     
                                                                                                     
                                                                                                     
-✳ Waiting for your answer                                                                           
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  #1 Reply with PINEAPPLE                                                 [send now] [edit] [cancel]
+  #2 Reply with MANGO                                                                               
+✳ Working · 0s · esc to interrupt                                                                   
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
 ❯ enter queues  ·  ctrl+l sends now                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-plan Fake Plan                                                                                      
-[a]ccept  [r]eject  esc cancel                                                                      
 ws │ cursor │ Default (medium) │ 0m                                                                 
-◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
+◆ agent · shift+tab · ▸▸ bypass permissions on · ⧗ 2 queued                                         

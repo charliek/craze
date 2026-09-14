@@ -1,20 +1,20 @@
     ╭──────────────────────────────────────────────────────────────────────╮    
     │help                                                                  │    
     │sending and editing                                                   │    
-    │  enter             send the draft                                    │    
+    │  enter             send the draft, or queue it while a turn runs     │    
+    │  ctrl+l            send now, cancelling the running turn (asks first)│    
     │  alt+enter, ctrl+j newline (shift+enter where the terminal sends it) │    
     │  ctrl+v            paste                                             │    
     │  esc               cancel the turn, or close what is open            │    
-    │  ctrl+c            cancel the turn, then quit                        │    
+    │  ctrl+c            cancel the turn and everything queued, then quit  │    
     │  ctrl+d            quit                                              │    
-    │mode                                                                  │    
-    │  shift+tab         cycle the mode: agent, plan, ask                  │    
-    │  click ◆ chip      cycle the mode from status row 2                  │    
-    │moving and scrolling                                                  │    
-    │  ↑ ↓               sub-agent rows, or a list inside a dialog         │    
-    │  pgup pgdn, wheel  scroll the transcript                             │    
-    │  tab               complete the slash command being typed            │    
-    │panels and views                                                     ▼│    
+    │queued messages                                                       │    
+    │  ↑                 select a queued message                           │    
+    │  enter on a row    edit it in place                                  │    
+    │  backspace         cancel it                                         │    
+    │  ctrl+l on a row   send it now instead of the running turn           │    
+    │  hover a row       [send now] [edit] [cancel]                        │    
+    │mode                                                                 ▼│    
     │↑↓ · pgup/pgdn · esc closes                                           │    
     ╰──────────────────────────────────────────────────────────────────────╯    
 ──────────────────────────────────────────────────────────────────────── craze ─

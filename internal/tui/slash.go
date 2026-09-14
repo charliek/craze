@@ -144,6 +144,10 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "clear":
 		m.input.SetValue("")
 		m.clearTranscript()
+		// Nothing pending survives a clear: a queued message sent minutes
+		// later, into a transcript that no longer shows why it was queued, is
+		// worse than losing it.
+		m.clearPending()
 		return m, nil
 	case "tasks":
 		m.input.SetValue("")

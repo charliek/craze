@@ -1,12 +1,9 @@
-❯ go                                                                                                
-PLAN Fake Plan                                                                                      
-Two steps, then stop.                                                                               
-Steps                                                                                               
-                                                                                                    
-• read main.go                                                                                      
-• edit main.go                                                                                      
-  ○ Read main.go                                                                                    
-  ○ Edit main.go                                                                                    
+❯ go the long way                                                                                   
++ Thought                                                                                           
+✓ tool  Execute sleep && echo step1                                                                 
+↳ Also say BANANA                                                                                   
+✓ tool  Execute sleep && echo step2                                                                 
+DONE step1 Also say BANANA step2                                                                    
                                                                                                     
                                                                                                     
                                                                                                     
@@ -20,11 +17,14 @@ Steps
                                                                                                     
                                                                                                     
                                                                                                     
-✳ Waiting for your answer                                                                           
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
-❯ enter queues  ·  ctrl+l sends now                                                                 
+❯ message  / for commands                                                                           
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-plan Fake Plan                                                                                      
-[a]ccept  [r]eject  esc cancel                                                                      
-ws │ cursor │ Default (medium) │ 0m                                                                 
-◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
+ws │ grok │ Grok 4.6 (high) │ 0m                                                                    
+◆ default · shift+tab · ▸▸ bypass permissions on                                                    

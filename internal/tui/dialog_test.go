@@ -675,8 +675,9 @@ func TestHelpDialogGroupsAndNamesItsSections(t *testing.T) {
 		}
 	}
 	want := []string{
-		"sending and editing", "mode", "moving and scrolling", "panels and views",
-		"selection and clipboard", "commands", "this session's commands",
+		"sending and editing", "queued messages", "mode", "moving and scrolling",
+		"panels and views", "selection and clipboard", "commands",
+		"this session's commands",
 	}
 	if !reflect.DeepEqual(headings, want) {
 		t.Fatalf("headings %q, want %q", headings, want)

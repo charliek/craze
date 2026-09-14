@@ -30,14 +30,25 @@ func (l helpLine) heading() bool { return l.key == "" }
 // helpKeyLines is the keyboard and mouse half of the box, grouped so the eye
 // can find a key by what it is for instead of reading four keys to a line.
 func (m Model) helpKeyLines() []helpLine {
+	strong := "send now, cancelling the running turn (asks first)"
+	if m.caps().Interject {
+		strong = "add to the running turn without cancelling it"
+	}
 	out := []helpLine{
 		{desc: "sending and editing"},
-		{"enter", "send the draft"},
+		{"enter", "send the draft, or queue it while a turn runs"},
+		{"ctrl+l", strong},
 		{"alt+enter, ctrl+j", "newline (shift+enter where the terminal sends it)"},
 		{"ctrl+v", "paste"},
 		{"esc", "cancel the turn, or close what is open"},
-		{"ctrl+c", "cancel the turn, then quit"},
+		{"ctrl+c", "cancel the turn and everything queued, then quit"},
 		{"ctrl+d", "quit"},
+		{desc: "queued messages"},
+		{"↑", "select a queued message"},
+		{"enter on a row", "edit it in place"},
+		{"backspace", "cancel it"},
+		{"ctrl+l on a row", "send it now instead of the running turn"},
+		{"hover a row", "[send now] [edit] [cancel]"},
 	}
 	if m.showModes() {
 		out = append(out,
@@ -46,9 +57,9 @@ func (m Model) helpKeyLines() []helpLine {
 			helpLine{key: "click ◆ chip", desc: "cycle the mode from status row 2"},
 		)
 	}
-	arrows := "a list inside a dialog"
+	arrows := "queued messages, or a list inside a dialog"
 	if m.showSubagents() {
-		arrows = "sub-agent rows, or a list inside a dialog"
+		arrows = "queued messages, sub-agent rows, or a list inside a dialog"
 	}
 	out = append(out,
 		helpLine{desc: "moving and scrolling"},

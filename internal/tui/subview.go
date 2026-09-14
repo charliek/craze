@@ -280,6 +280,11 @@ func (m Model) composerRows() int {
 	if m.viewing != "" {
 		return 1
 	}
+	if m.confirm != nil {
+		// The confirm replaces the input rows with its one line; the draft
+		// and its cursor are still underneath and come back on decline.
+		return 1
+	}
 	inner := m.composerInner()
 	rows := 0
 	for _, ln := range strings.Split(m.input.Value(), "\n") {

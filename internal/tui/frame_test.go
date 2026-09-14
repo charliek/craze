@@ -1404,3 +1404,35 @@ func TestFrameGrokModelDialogHasNoFastRow(t *testing.T) {
 		t.Fatalf("grok model dialog should still draw effort:\n%s", got)
 	}
 }
+
+// runFakeFrameFrozen is runFakeFrameProvider with the clock and the spinner
+// stopped, so a golden of a turn in progress does not depend on how fast the
+// build is.
+func runFakeFrameFrozen(t *testing.T, script string, cols, rows int, keys string, p agent.Provider) string {
+	t.Helper()
+	bin := buildFakeAgent(t)
+	isolateSkillsHome(t)
+	ws := frameWorkspace(t)
+	prov := p
+	sess := agent.New(agent.Options{
+		Binary:      bin,
+		ExtraArgs:   []string{"-script=" + script},
+		Workspace:   ws,
+		Force:       true,
+		Interactive: true,
+		Stderr:      io.Discard,
+		Provider:    &prov,
+	})
+	plain, _, err := RunFrameScript(Config{
+		Session:        sess,
+		Theme:          "tokyo-night",
+		Workspace:      ws,
+		Yolo:           true,
+		Provider:       p,
+		ProviderLocked: true,
+	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second, Freeze: true})
+	if err != nil {
+		t.Fatalf("run %s frame: %v", script, err)
+	}
+	return plain
+}

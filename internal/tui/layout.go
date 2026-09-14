@@ -19,7 +19,7 @@ const (
 	// minTranscriptRows is the floor degradation works towards.
 	minTranscriptRows = 3
 	forcedDegrade     = 3
-	maxDegrade        = 7
+	maxDegrade        = 8
 	// agentRowsShort is the agent-row cap of degradation step 1.
 	agentRowsShort = 2
 	// statusRows is the pinned pair: the session line and the chip line.
@@ -57,6 +57,7 @@ const (
 	regionTranscript regionID = iota // scrollback viewport
 	regionOverlay                    // help or the slash menu
 	regionTasks                      // pinned tasks panel
+	regionQueue                      // queued messages, above the spinner
 	regionSpinner                    // spinner line
 	regionComposer                   // rule + input rows + rule
 	regionModal                      // the blocking-card band (§3.11)
@@ -89,6 +90,10 @@ var frameRegions = [regionCount]frameRegion{
 	regionTasks: {
 		rows: frameSizes.tasks,
 		view: Model.tasksView,
+	},
+	regionQueue: {
+		rows: frameSizes.queue,
+		view: func(m Model, _ frameLayout) string { return m.queueRowsView() },
 	},
 	regionSpinner: {
 		rows: func(s frameSizes) int { return s.spinner },
@@ -135,6 +140,7 @@ type frameLayout struct {
 	TasksRows     int  // task rows under the header; 0 means header-only
 	ComposerRows  int  // input rows between the two rules
 	AgentRows     int  // agent rows drawn, without the "… +n more" row
+	QueueRows     int  // queue rows drawn, without the "… +n more" row
 	SpinnerMerged bool // the spinner folded into status row 2
 	Degraded      int  // how many degradation steps were applied
 }
@@ -158,6 +164,8 @@ type frameSizes struct {
 	input      int // composer content rows, without the two rules
 	agentsAll  int // sub-agents with a row to draw
 	agentsCap  int // how many of them degradation still allows
+	queueAll   int // queued messages with a row to draw
+	queueCap   int // how many of them degradation still allows
 	modal      int
 	status     int
 	merged     bool
@@ -175,13 +183,20 @@ func (s frameSizes) composer() int { return s.input + 2 }
 // agents is the whole region: the rows that fit plus the overflow row.
 func (s frameSizes) agents() int { return agentRegionRows(s.agentsAll, s.agentsCap) }
 
+// queue is the band: the rows that fit plus the overflow row, counted the
+// same way the sub-agent rows are.
+func (s frameSizes) queue() int { return agentRegionRows(s.queueAll, s.queueCap) }
+
+// queueRows is how many queued messages are actually listed.
+func (s frameSizes) queueRows() int { return min(s.queueAll, s.queueCap) }
+
 // agentRows is how many sub-agents are actually listed.
 func (s frameSizes) agentRows() int { return min(s.agentsAll, s.agentsCap) }
 
 // chrome is every region except the transcript and the overlay, which take
 // what the others leave.
 func (s frameSizes) chrome() int {
-	return s.tasks() + s.spinner + s.composer() + s.agents() + s.modal + s.status
+	return s.tasks() + s.queue() + s.spinner + s.composer() + s.agents() + s.modal + s.status
 }
 
 // degrade applies the first n steps of the pinned degradation order. It is
@@ -201,12 +216,15 @@ func degrade(s frameSizes, n int) frameSizes {
 		s.agentsCap = 0
 	}
 	if n >= 5 {
+		s.queueCap = 0
+	}
+	if n >= 6 {
 		s.tasksOpen = false
 	}
-	if n >= 6 && s.spinner > 0 {
+	if n >= 7 && s.spinner > 0 {
 		s.spinner, s.merged = 0, true
 	}
-	if n >= 7 && s.modal > 1 {
+	if n >= 8 && s.modal > 1 {
 		s.modal = 1
 	}
 	return s
@@ -220,6 +238,8 @@ func fitChrome(s frameSizes, limit int) frameSizes {
 		switch {
 		case s.agentsCap > 0:
 			s.agentsCap = 0
+		case s.queueCap > 0:
+			s.queueCap = 0
 		case s.tasksBody > 0:
 			s.tasksBody = 0
 		case s.tasksOpen:
@@ -258,6 +278,8 @@ func (m *Model) computeLayout() frameLayout {
 		input:     min(m.composerRows(), composerMaxRows),
 		agentsAll: len(m.agentItems()),
 		agentsCap: agentRowsMax,
+		queueAll:  len(m.queueItems()),
+		queueCap:  queueRowsMax,
 		modal:     m.modalRows(),
 		status:    statusRows,
 	}
@@ -295,6 +317,7 @@ func (m *Model) computeLayout() frameLayout {
 	lay.TasksRows = s.tasksBody
 	lay.ComposerRows = s.input
 	lay.AgentRows = s.agentRows()
+	lay.QueueRows = s.queueRows()
 	lay.SpinnerMerged = s.merged
 	lay.Degraded = steps
 	// The layer is measured last, from the transcript range the bands just
@@ -317,6 +340,9 @@ func (m *Model) relayout(stick bool) {
 	}
 	m.pruneSubs()
 	m.lay = m.computeLayout()
+	// The queue selection is re-found against the rows this frame will draw,
+	// for the same reason the sub-agent one is: the cap is only settled here.
+	m.syncQueue()
 	// The selection has to be re-found against the rows this frame will
 	// actually draw, so it is synced here rather than in the event handler,
 	// where the row cap is still the previous frame's.

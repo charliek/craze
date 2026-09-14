@@ -600,7 +600,7 @@ func TestCancelledTurnDoesNotHandItsInterjectionToTheNext(t *testing.T) {
 	// The merge happens at the first tool result; cancelling before it would
 	// strand the interjection into a fallback turn instead, which is a
 	// different case (TestGrokLongTurnFallbackKeepsTheTurnCount).
-	waitFor(t, func() bool { return log.toolDone("call-step-1") }, "step 1's tool result")
+	waitFor(t, func() bool { return log.toolDonePrefix("call-t1-step-1") }, "step 1's tool result")
 	if err := c.Cancel(t.Context()); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}

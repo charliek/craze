@@ -26,6 +26,9 @@ const ctrlCWindow = time.Second
 // imports internal/acp, so the string is spelled here.
 const stopCancelled = "cancelled"
 
+// foreignTurnNote heads the stream of a turn the agent started on its own.
+const foreignTurnNote = "agent continued on its own (interjection fallback)"
+
 // wheelLines is how far one wheel notch scrolls the transcript.
 const wheelLines = 3
 
@@ -193,6 +196,28 @@ type Model struct {
 	// it. Any other key hands the keyboard back to the composer.
 	agentFocus bool
 
+	// The queue band. The selection is held by id as the agent rows' is, so
+	// it survives a row leaving the band above it; queueHov is the pointer's
+	// row and the button under it, and exists only while the queue does.
+	queueSel   int
+	queueID    string
+	queueFocus bool
+	queueHov   queueHover
+	// queueEdit is the row being edited in place, "" when none.
+	// queueEditPos is its position, for the chip; editDraft is the composer
+	// the edit displaced and Esc puts back.
+	queueEdit    string
+	queueEditPos int
+	editDraft    string
+	// confirm is the send-now waiting for an answer; strong is the one that
+	// was confirmed and is waiting for the cancelled turn to settle. There is
+	// at most one of each, and never two at once.
+	confirm *strongSend
+	strong  *strongSend
+	// mouseAll records which motion mode the terminal is in, so the queue
+	// going 0 → 1 rows and back issues exactly one transition each way.
+	mouseAll bool
+
 	tasksState    tasksPanelState
 	todosSeen     bool
 	todosClosedAt time.Time
@@ -230,6 +255,10 @@ type Model struct {
 
 	ctrlCDeadline time.Time
 	clock         func() time.Time
+	// frozen is the frame runner's --freeze: the clock does not move and the
+	// spinner does not cycle, so a golden of a turn in progress is not a race
+	// against wall time.
+	frozen bool
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -302,6 +331,7 @@ func New(cfg Config) Model {
 	}
 	m := Model{
 		theme:           th,
+		queueHov:        noHover(),
 		vp:              vp,
 		input:           newComposer(th),
 		sess:            cfg.Session,
@@ -420,6 +450,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// only follows it down when the chrome above it changed shape.
 	next.relayout(next.vp.Height == 0 || next.vp.AtBottom())
 	next.storeViewport(next.cur())
+	// The queue going 0 → 1 rows and back is the only thing that changes the
+	// terminal's motion mode, and it is decided from the state the handler
+	// left behind, once per Update.
+	if mouse := next.queueMouseCmd(); mouse != nil {
+		cmd = tea.Batch(cmd, mouse)
+	}
 	// The tick chain is batched last, so a test can run the handler's own
 	// command without waiting out a timer.
 	if tick := next.armTick(); tick != nil {
@@ -511,6 +547,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshSnap()
 		return m, nil
 
+	case cancelFailedMsg:
+		// The turn it belonged to may already be over; only the armed send
+		// that was waiting on this cancel is affected.
+		if msg.seq == m.turnSeq {
+			m.dropStrongSend("cancel failed")
+		}
+		m.addError(msg.err.Error())
+		return m, nil
+
 	case clipboardDoneMsg:
 		m.copyNote = msg.note
 		m.copyUntil = m.now().Add(copyNoteLinger)
@@ -569,7 +614,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case eventMsg:
 		m.applyEvent(msg.ev)
-		return m, waitEvent(m.sess)
+		// One transition settles the turn and starts whatever it left to do.
+		// A foreign turn ending is the other moment the drain can run: the
+		// turn it was blocked on is over and craze's own already settled.
+		next, cmd := m.finishTurn()
+		if ev := msg.ev; ev.Type == agent.EventForeignTurn && ev.ForeignTurn != nil && !ev.ForeignTurn.Running {
+			next, cmd = next.drainSettledTurn()
+		}
+		return next, tea.Batch(cmd, waitEvent(next.sess))
 
 	case promptDoneMsg:
 		// The stream is closed by EventDone, which shares the event channel with
@@ -587,10 +639,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = statusError
 			m.err = msg.err.Error()
 			m.addError(m.err)
+			m.dropStrongSend("")
+			m.confirm = nil
 			return m, nil
 		}
-		m.settleStatus()
-		return m, nil
+		return m.finishTurn()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -627,8 +680,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.handlePress(msg.X, msg.Y)
 		}
 	case tea.MouseActionMotion:
-		// Only a drag extends. A double-click's word is already the selection
-		// it meant, and the pointer wobbling over it must not eat into it.
+		// Motion with no button down is a hover, which is what the queue's
+		// action strip appears on. Only a drag extends a selection: a
+		// double-click's word is already the selection it meant, and the
+		// pointer wobbling over it must not eat into it.
+		if msg.Button == tea.MouseButtonNone {
+			m.queueHov = m.queueHoverAt(msg.X, msg.Y)
+			return m, nil
+		}
 		if m.pressed == tea.MouseButtonLeft && m.sel.drag {
 			return m.handleDrag(msg.X, msg.Y), nil
 		}
@@ -798,6 +857,9 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		if m.viewing != "" && lay.Region(regionComposer).Row(y) == 1 {
 			m.leaveView()
 		}
+	case lay.Region(regionQueue).Contains(y):
+		// The last row can be "… +n more", which is not a queued message.
+		return m.queueClick(x, lay.Region(regionQueue).Row(y))
 	case lay.Region(regionAgents).Contains(y):
 		// The last row can be "… +n more", which is not a sub-agent.
 		m.selectAgent(lay.Region(regionAgents).Row(y))
@@ -891,6 +953,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleViewKey(msg)
 	}
 
+	// The confirm line is a question with two answers: Enter confirms, Esc
+	// and anything else decline and give the draft back.
+	if m.confirm != nil {
+		switch msg.Type {
+		case tea.KeyEnter:
+			return m.confirmStrongSend()
+		default:
+			m.declineStrongSend()
+			return m, nil
+		}
+	}
+
+	if msg.Type == tea.KeyCtrlL {
+		return m.handleStrongSend()
+	}
+
 	if msg.Type == tea.KeyCtrlY {
 		// A keyboard feature, so it works under --no-mouse as well.
 		return m.copySelectionOrLastReply()
@@ -910,6 +988,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyShiftTab {
 		return m.cycleMode()
 	}
+	if m.queueFocus {
+		handled, next := m.handleQueueKey(msg)
+		m = next
+		if handled {
+			return m, nil
+		}
+	}
 	if m.agentFocus {
 		handled, next := m.handleRowsKey(msg)
 		m = next
@@ -918,12 +1003,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.Type == tea.KeyEsc {
+		if m.queueEdit != "" {
+			m.cancelQueueEdit()
+			return m, nil
+		}
 		if m.slashMenuOpen() {
 			m.slashHide = true
 			m.slashSel = 0
 			return m, nil
 		}
+		if m.strong != nil {
+			// The cancel is still in flight; dropping the send-now here is
+			// what takes the text back before it turns into a turn.
+			m.dropStrongSend("send now dropped")
+			return m, nil
+		}
 		if m.status == statusWorking {
+			// The queue survives Esc on purpose: cancelling this turn is not
+			// cancelling what was meant to follow it, and the drain sends the
+			// head once the cancelled turn settles.
 			return m.cancelTurn()
 		}
 		if m.planArmed() {
@@ -962,12 +1060,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Only the arrow keys move the keyboard to the rows, empty composer or
-	// not — a user typing a follow-up still browses sub-agents; ctrl+p /
-	// ctrl+n stay with the textarea.
-	if len(m.visibleAgents()) > 0 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) {
-		m.focusRows()
-		return m, nil
+	// Only the arrow keys move the keyboard out of the composer, empty
+	// composer or not — a user typing a follow-up still browses what is
+	// above; ctrl+p / ctrl+n stay with the textarea.
+	//
+	// ↑ reaches the queue band first (Claude Code's "press up to edit queued
+	// messages") and the sub-agent rows otherwise; ↓ reaches the sub-agent
+	// rows first, because they are the band below the composer, and the queue
+	// only when there are none.
+	if msg.Type == tea.KeyUp || msg.Type == tea.KeyDown {
+		queued := len(m.visibleQueue())
+		agents := len(m.visibleAgents())
+		switch {
+		case msg.Type == tea.KeyUp && queued > 0:
+			m.focusQueue(queued - 1)
+			return m, nil
+		case agents > 0:
+			m.focusRows()
+			return m, nil
+		case queued > 0:
+			m.focusQueue(0)
+			return m, nil
+		}
 	}
 	return m, m.updateComposer(msg)
 }
@@ -999,10 +1113,14 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
 	}
 	switch msg.Type {
 	case tea.KeyUp:
-		if m.agentSel <= 0 {
-			m.focusComposer()
-		} else {
+		switch {
+		case m.agentSel > 0:
 			m.moveAgent(-1)
+		case len(m.visibleQueue()) > 0:
+			// The band above the composer is the next thing up.
+			m.focusQueue(len(m.visibleQueue()) - 1)
+		default:
+			m.focusComposer()
 		}
 		return true, m
 	case tea.KeyDown:
@@ -1063,13 +1181,39 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if !m.ctrlCDeadline.IsZero() && now.Before(m.ctrlCDeadline) {
 		return m.requestQuit()
 	}
+	// One key stops everything pending, not just the turn: the queue, the
+	// confirm, the send-now that was waiting for the cancel, and the edit.
+	m.clearPending()
 	tm, cmd := m.cancelTurn()
 	next := tm.(Model)
 	next.ctrlCDeadline = now.Add(ctrlCWindow)
 	return next, cmd
 }
 
+// clearPending empties everything the queue band is holding. The strong send's
+// text does not come back here: Ctrl+C means stop, and a draft reappearing
+// under the cursor would be one more thing to undo.
+func (m *Model) clearPending() {
+	m.confirm = nil
+	m.strong = nil
+	if m.queueEdit != "" {
+		m.cancelQueueEdit()
+	}
+	if m.sess != nil {
+		m.sess.ClearQueue()
+	}
+	m.queueFocus = false
+	m.queueHov = noHover()
+	m.refreshSnap()
+}
+
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
+	if m.confirm != nil {
+		return m.confirmStrongSend()
+	}
+	if m.queueEdit != "" {
+		return m.saveQueueEdit()
+	}
 	name, args, ok := parseSlashLine(m.input.Value())
 	if ok && name == "exit" {
 		return m.runBuiltin(name, args)
@@ -1081,13 +1225,37 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.planOffering() && m.input.Value() == "" {
 		return m.implementPlan()
 	}
-	if m.cardOpen() || m.status == statusWorking || !m.started {
+	if m.cardOpen() || !m.started {
 		return m, nil
 	}
+	// A builtin never queues: it is craze's own, it does not need the agent,
+	// and holding it until the turn ends would be surprising. The ones that
+	// do need the agent keep today's refusal.
 	if ok && name != "" && builtinNamed(name) {
+		if m.status == statusWorking && !runsWhileWorking(name) {
+			return m, nil
+		}
 		return m.runBuiltin(name, args)
 	}
+	if m.status == statusWorking {
+		text := strings.TrimSpace(m.input.Value())
+		if text == "" {
+			return m, nil
+		}
+		return m.queueDraft(text)
+	}
 	return m.send()
+}
+
+// runsWhileWorking names the builtins that do not need the agent and are
+// therefore answered mid-turn rather than refused. The rest keep today's
+// silent refusal.
+func runsWhileWorking(name string) bool {
+	switch name {
+	case "exit", "help", "theme", "tasks", "clear":
+		return true
+	}
+	return false
 }
 
 func (m Model) cycleMode() (tea.Model, tea.Cmd) {
@@ -1136,13 +1304,62 @@ func (m Model) turnSettled() bool {
 	return m.promptEndSeq == m.turnSeq && m.streamEndSeq == m.turnSeq
 }
 
-// settleStatus puts the status back to idle once the running turn is over. An
-// error state stands: the turn that failed said so, and only the next send
-// clears it.
-func (m *Model) settleStatus() {
-	if m.status != statusError && m.turnSettled() {
-		m.status = statusIdle
+// finishTurn is the one place a turn's ending is acted on. It fires on the
+// unsettled → settled transition only — both endings in for the same turn,
+// and the status still working — and then, in order: a confirmed send-now
+// starts, or the drain waits out a turn the agent is running of its own, or
+// one queued message goes. An error state stands: the turn that failed said
+// so, the session has already cleared the queue, and only the next send
+// clears the status.
+func (m Model) finishTurn() (Model, tea.Cmd) {
+	if m.status != statusWorking || !m.turnSettled() {
+		return m, nil
 	}
+	m.status = statusIdle
+	if m.confirm != nil {
+		// The question was "cancel the running turn and send?" and the turn
+		// answered it first. Nothing was taken from anywhere, so the draft
+		// and the row are both still where they were.
+		m.confirm = nil
+		m.note("the turn ended first")
+	}
+	return m.drainSettledTurn()
+}
+
+// drainSettledTurn starts what a settled turn left behind. It is separate from
+// finishTurn because a foreign turn ending re-opens the same decision long
+// after the status went idle.
+func (m Model) drainSettledTurn() (Model, tea.Cmd) {
+	if m.status != statusIdle || !m.turnSettled() || m.sess == nil {
+		return m, nil
+	}
+	if p := m.strong; p != nil {
+		m.strong = nil
+		if p.seq != 0 && p.seq != m.turnSeq {
+			// It was armed against a turn that is no longer the one that
+			// just ended, so it is not this turn's business.
+			m.note("send now dropped")
+		} else {
+			tm, cmd := m.fireStrongSend(*p)
+			next := tm.(Model)
+			if next.status == statusWorking {
+				return next, cmd
+			}
+			// The row it named was already gone; fall through to the drain.
+			m = next
+		}
+	}
+	if m.snap.ForeignTurn {
+		// The agent is talking on its own; the drain re-runs when it stops.
+		return m, nil
+	}
+	next, ok := m.sess.PopQueue()
+	if !ok {
+		return m, nil
+	}
+	m.refreshSnap()
+	tm, cmd := m.sendText(next.Text)
+	return tm.(Model), cmd
 }
 
 // planArmed is the offer as state: it belongs to the turn that earned it, so a
@@ -1245,12 +1462,23 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	// its way cannot arm what Esc just declined.
 	m.retirePlanOffer()
 	sess := m.sess
+	seq := m.turnSeq
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = sess.Cancel(ctx)
+		if err := sess.Cancel(ctx); err != nil {
+			return cancelFailedMsg{seq: seq, err: err}
+		}
 		return nil
 	}
+}
+
+// cancelFailedMsg says the cancel never reached the agent. A send-now armed
+// behind it would wait for a turn that is not ending, so the text goes back
+// to the composer instead.
+type cancelFailedMsg struct {
+	seq int
+	err error
 }
 
 // requestQuit closes the session, which answers every card still queued with
@@ -1281,6 +1509,31 @@ func (m *Model) applyEvent(ev agent.Event) {
 	m.lastThought = ev.Type == agent.EventThought
 	switch ev.Type {
 	case agent.EventUser:
+		if ev.Interjection {
+			// The turn is still running: the text joined it rather than
+			// starting one, so it is the only user block craze does not
+			// write from its own send.
+			m.addInterjection(ev.Text)
+		}
+		return
+	case agent.EventQueue:
+		// The band draws from the snapshot; nothing else has to happen.
+		m.refreshSnap()
+		if ev.QueueChange == agent.QueueRemoved && m.status == statusError {
+			m.note("queue cleared")
+		}
+		return
+	case agent.EventForeignTurn:
+		m.refreshSnap()
+		if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
+			// What follows is the agent talking without a prompt of craze's.
+			// The note is what stops the reply reading as an answer to the
+			// last thing the user said.
+			m.breakStream()
+			m.addNote(foreignTurnNote)
+		} else {
+			m.breakStream()
+		}
 		return
 	case agent.EventText:
 		if ev.Text != "" {
@@ -1345,12 +1598,15 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if m.planEarnsOffer(ev.StopReason) {
 			m.planOfferSeq = m.turnSeq
 		}
-		m.settleStatus()
 	case agent.EventError:
 		// The error is the prompt's other ending: Prompt emits it and returns,
 		// so no EventDone follows it.
 		m.streamEndSeq = m.turnSeq
 		m.status = statusError
+		// Nothing drains from an error state, so an armed send would sit
+		// there and fire behind whatever the user sends next.
+		m.dropStrongSend("")
+		m.confirm = nil
 		if ev.Err != nil {
 			m.err = ev.Err.Error()
 			m.addError(m.err)

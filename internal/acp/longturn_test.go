@@ -255,8 +255,9 @@ func (u *updateLog) text() string {
 	return b.String()
 }
 
-// toolDone reports whether a tool call has reached a terminal status.
-func (u *updateLog) toolDone(id string) bool {
+// toolDonePrefix reports whether a tool call has reached a terminal status.
+// The fake stamps the turn into the id, so the caller names the turn too.
+func (u *updateLog) toolDonePrefix(id string) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	for _, upd := range u.list {

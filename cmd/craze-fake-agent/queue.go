@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -11,9 +12,36 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
-// longTurnStep is how long each of the two execute tools stays in_progress.
-// A turn has to outlive several frames for anything to be queued during it.
-const longTurnStep = 600 * time.Millisecond
+// longTurnStepDefault is how long each of the two execute tools stays
+// in_progress. A turn has to outlive several frames for anything to be queued
+// during it. CRAZE_FAKE_STEP overrides it: a golden of a turn in progress
+// wants a step long enough that no build is slow enough to leave it, and a
+// golden of a drained queue wants one short enough to get there.
+const longTurnStepDefault = 600 * time.Millisecond
+
+// longTurnStep is the step duration for turn n (1-based). CRAZE_FAKE_STEP is
+// a comma-separated list, one entry per turn, the last repeating: "2s,1ms" is
+// a first turn slow enough to queue into and later ones that finish at once,
+// which is what a golden of a drained queue needs.
+func longTurnStep(turn int) time.Duration {
+	v := os.Getenv("CRAZE_FAKE_STEP")
+	if v == "" {
+		return longTurnStepDefault
+	}
+	parts := strings.Split(v, ",")
+	i := turn - 1
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(parts) {
+		i = len(parts) - 1
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(parts[i]))
+	if err != nil || d < 0 {
+		return longTurnStepDefault
+	}
+	return d
+}
 
 // queueScript reports whether a script uses the per-prompt request records and
 // the serialized turn runner below. The older scripts keep the single
@@ -36,8 +64,11 @@ type promptReq struct {
 	id       json.RawMessage
 	promptID string
 	text     string
-	cancel   chan struct{}
-	replied  sync.Once
+	// turn is this prompt's 1-based arrival number, which is what picks its
+	// step duration out of CRAZE_FAKE_STEP.
+	turn    int
+	cancel  chan struct{}
+	replied sync.Once
 }
 
 func (r *promptReq) cancelled() bool {
@@ -74,6 +105,7 @@ func (s *server) beginPrompt(msg *acp.Message) *promptReq {
 		id:       msg.ID,
 		promptID: fmt.Sprintf("prompt-%d", s.promptSeq),
 		text:     text,
+		turn:     s.promptSeq,
 		cancel:   make(chan struct{}),
 	}
 	// Everything already accepted, running or not: on cursor all of it is
@@ -171,11 +203,15 @@ func (s *server) runTurn(r *promptReq) {
 	if grokScript(s.script) {
 		s.broadcastQueue()
 	}
+	step := longTurnStep(r.turn)
 	s.thought("Working through the steps.")
-	for i, step := range []string{"step1", "step2"} {
-		call := fmt.Sprintf("call-step-%d", i+1)
-		s.executeTool(call, step)
-		if !r.waitStep(longTurnStep) {
+	for i, name := range []string{"step1", "step2"} {
+		// The id carries the turn: a real agent never reuses a toolCallId
+		// across turns, and a client that merges by id would fold the second
+		// turn's row into the first turn's finished one.
+		call := fmt.Sprintf("call-t%d-step-%d", r.turn, i+1)
+		s.executeTool(call, name)
+		if !r.waitStep(step) {
 			s.update(fakeSessionID, map[string]any{
 				"sessionUpdate": "tool_call_update",
 				"toolCallId":    call,
@@ -188,7 +224,7 @@ func (s *server) runTurn(r *promptReq) {
 			"sessionUpdate": "tool_call_update",
 			"toolCallId":    call,
 			"status":        "completed",
-			"rawOutput":     map[string]any{"type": "Text", "text": step},
+			"rawOutput":     map[string]any{"type": "Text", "text": name},
 		})
 		// Safe point: an interjection waiting here is merged into this turn,
 		// exactly as grok drains at a tool result.
