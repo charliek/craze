@@ -9,6 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 func writeSkillMD(t *testing.T, path, body string) {
@@ -318,4 +320,95 @@ func catalogItems(items []slashItem, name string) (slashItem, bool) {
 		}
 	}
 	return slashItem{}, false
+}
+
+// TestSlashCatalogCursorNamesByDirectory pins cursor's verified rule through
+// the slash catalog: a skill directory's basename is offered, never the
+// frontmatter name (plan 009 §3.6, C3).
+func TestSlashCatalogCursorNamesByDirectory(t *testing.T) {
+	isolateSkillsHome(t)
+	ws := t.TempDir()
+	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "dir-alpha", "SKILL.md"), `---
+name: fm-alpha
+description: alpha
+---
+`)
+	m := startSized(t, ws)
+	if _, ok := catalogByName(m, "fm-alpha"); ok {
+		t.Fatal("cursor must not offer the frontmatter name")
+	}
+	it, ok := catalogByName(m, "dir-alpha")
+	if !ok || !it.Skill {
+		t.Fatalf("cursor should offer the directory name: %#v ok=%v", it, ok)
+	}
+}
+
+// TestSlashCatalogGrokKeepsFrontmatterName is the opposite rule for grok,
+// exercised through the same catalog path.
+func TestSlashCatalogGrokKeepsFrontmatterName(t *testing.T) {
+	isolateSkillsHome(t)
+	ws := t.TempDir()
+	writeSkillMD(t, filepath.Join(ws, ".grok", "skills", "dir-alpha", "SKILL.md"), `---
+name: fm-alpha
+description: alpha
+---
+`)
+	m := startSized(t, ws)
+	m.snap.Provider = agent.GrokProvider().Info()
+	m.rescanSkills()
+	if _, ok := catalogByName(m, "dir-alpha"); ok {
+		t.Fatal("grok must not offer the directory name when frontmatter has one")
+	}
+	it, ok := catalogByName(m, "fm-alpha")
+	if !ok || !it.Skill {
+		t.Fatalf("grok should keep the frontmatter name: %#v ok=%v", it, ok)
+	}
+}
+
+// TestSlashCatalogHiddenSkillExcluded checks user-invocable: false (cursor's
+// spelling) and user_invocable: no (grok's) both hide the skill from the
+// catalog the picker reads.
+func TestSlashCatalogHiddenSkillExcluded(t *testing.T) {
+	isolateSkillsHome(t)
+	ws := t.TempDir()
+	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "hidden", "SKILL.md"), `---
+name: hidden
+description: hidden skill
+user-invocable: false
+---
+`)
+	writeSkillMD(t, filepath.Join(ws, ".grok", "skills", "hidden", "SKILL.md"), `---
+name: hidden
+description: hidden skill
+user_invocable: no
+---
+`)
+	m := startSized(t, ws)
+	if _, ok := catalogByName(m, "hidden"); ok {
+		t.Fatal("cursor must hide a user-invocable: false skill")
+	}
+	m.snap.Provider = agent.GrokProvider().Info()
+	m.rescanSkills()
+	if _, ok := catalogByName(m, "hidden"); ok {
+		t.Fatal("grok must hide a user_invocable: no skill")
+	}
+}
+
+// TestSlashCatalogGrokWalksAgentsSkills pins grok's second root reaching the
+// picker: .agents/skills, not only .grok/skills.
+func TestSlashCatalogGrokWalksAgentsSkills(t *testing.T) {
+	isolateSkillsHome(t)
+	ws := t.TempDir()
+	writeSkillMD(t, filepath.Join(ws, ".agents", "skills", "agentskill", "SKILL.md"), `---
+name: agentskill
+description: from .agents
+---
+`)
+	m := startSized(t, ws)
+	m.snap.Provider = agent.GrokProvider().Info()
+	m.rescanSkills()
+	it, ok := catalogByName(m, "agentskill")
+	if !ok || !it.Skill {
+		t.Fatalf("grok should walk .agents/skills: %#v ok=%v", it, ok)
+	}
 }

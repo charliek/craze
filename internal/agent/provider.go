@@ -130,6 +130,10 @@ type Capabilities struct {
 type SkillScan struct {
 	RelRoots          []string
 	SkipCursorPlugins bool
+	// NameFromDir names a skill by its directory and ignores the frontmatter
+	// name (cursor-agent's rule, verified). Off, the frontmatter name wins
+	// and the directory is the fallback (grok-build's rule).
+	NameFromDir bool
 }
 
 // Args builds the child argv from the provider pieces. ExtraArgs stay first
@@ -194,6 +198,7 @@ func CursorProvider() Provider {
 				filepath.Join(".claude", "skills"),
 			},
 			SkipCursorPlugins: true,
+			NameFromDir:       true,
 		},
 	}
 }
@@ -233,8 +238,13 @@ func GrokProvider() Provider {
 		subagentToolName: "spawn_subagent",
 		// Grok advertises its whole catalog, plugin skills included, over
 		// ACP; the walk only adds SKILL.md trees the daemon has not loaded.
+		// grok-build always scans both .grok and .agents (.claude/.cursor sit
+		// behind compat flags craze does not read), project before home.
 		skillScan: SkillScan{
-			RelRoots: []string{filepath.Join(".grok", "skills")},
+			RelRoots: []string{
+				filepath.Join(".grok", "skills"),
+				filepath.Join(".agents", "skills"),
+			},
 		},
 		fallbackModes: []ModeInfo{
 			{ID: "default", Name: "Default"},
@@ -316,6 +326,7 @@ func (p Provider) SkillScan() SkillScan {
 	return SkillScan{
 		RelRoots:          append([]string(nil), p.skillScan.RelRoots...),
 		SkipCursorPlugins: p.skillScan.SkipCursorPlugins,
+		NameFromDir:       p.skillScan.NameFromDir,
 	}
 }
 
