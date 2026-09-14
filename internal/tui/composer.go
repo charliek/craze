@@ -261,7 +261,11 @@ func (m Model) composerRule(top bool) string {
 	style := styleFG(m.theme.Rule)
 	title := m.composerTitle()
 	if chip := m.queueEditChip(); top && chip != "" {
-		title = chip
+		// The rule drops a title it cannot fit beside its margins, and at
+		// the 40-column minimum the whole chip is wider than the rule. A
+		// truncated "editing #1 · enter saves…" still says the composer is
+		// not the composer right now; nothing at all does not.
+		title = clampWidth(chip, max(0, width-4))
 	}
 	// "─"*n + " " + title + " ─": the two spaces and the closing dash are the
 	// three cells the title needs beside itself.

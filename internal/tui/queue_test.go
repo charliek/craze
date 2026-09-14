@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -1267,5 +1268,41 @@ func TestErroredTurnSaysTheQueueWasCleared(t *testing.T) {
 	}
 	if !strings.Contains(plainView(m), "queue cleared") {
 		t.Fatalf("the note is missing:\n%s", plainView(m))
+	}
+}
+
+// TestQueueEditChipSurvivesTheNarrowestRule: the rule drops a title it cannot
+// fit, so at 40 columns the whole chip would vanish and nothing would say the
+// composer is holding a row rather than a draft.
+func TestQueueEditChipSurvivesTheNarrowestRule(t *testing.T) {
+	m, _ := queueWorking(t)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: minFrameCols, Height: 24})
+	m = tm.(Model)
+	m = typeEnter(t, m, "PINEAPPLE")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(Model)
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	if m.queueEdit == "" {
+		t.Fatal("edit mode is on")
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "editing") {
+		t.Fatalf("the chip is gone at %d columns:\n%s", minFrameCols, view)
+	}
+	for _, ln := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(ln); w > minFrameCols {
+			t.Fatalf("line is %d wide: %q", w, ln)
+		}
+	}
+}
+
+// TestStubRefusesAConcurrentPrompt keeps the double honest: the live session
+// refuses one, and a stub that did not would let a test pass against turn
+// state craze can never reach.
+func TestStubRefusesAConcurrentPrompt(t *testing.T) {
+	_, stub := queueWorkingLive(t)
+	if _, err := stub.Prompt(context.Background(), "second"); !errors.Is(err, agent.ErrPromptInFlight) {
+		t.Fatalf("err %v", err)
 	}
 }

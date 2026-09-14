@@ -203,6 +203,13 @@ func (s *Stub) Events() <-chan agent.Event { return s.events }
 
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 	s.mu.Lock()
+	// One prompt at a time, as the live session has it: without the guard a
+	// second prompt's deferred clear would report the first one's turn over
+	// while it is still running, and the queue would drain into it.
+	if s.inPrompt {
+		s.mu.Unlock()
+		return agent.Result{}, agent.ErrPromptInFlight
+	}
 	hang := s.hang
 	s.hang = false
 	s.n++

@@ -253,3 +253,28 @@ func TestPromptAnswersPermissionDuringAForeignTurn(t *testing.T) {
 		t.Fatalf("the follow-up must run after the foreign turn:\n%s", stdout.String())
 	}
 }
+
+// TestPermissionRejectedBetweenTurnsStillFailsTheRun: the queue gave the
+// event stream three readers, and a permission refused by any of them is
+// still a refusal. A run that said no and then exited 0 would tell a script
+// the opposite of what happened.
+func TestPermissionRejectedBetweenTurnsStillFailsTheRun(t *testing.T) {
+	isolateProviderConfig(t)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "permission")
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetIn(&bytes.Buffer{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"prompt", "--json", "--no-force", "--agent-bin", fakeAgentPath(t),
+		"--workspace", t.TempDir(),
+		"--permission-decision", "reject-once",
+		"--follow-up", "second", "go",
+	})
+	err := cmd.Execute()
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.code != 1 {
+		t.Fatalf("a rejected permission must fail the run: %v", err)
+	}
+}

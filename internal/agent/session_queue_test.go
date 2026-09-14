@@ -318,3 +318,19 @@ func TestPopQueueGuardIsAtomicWithTheRemoval(t *testing.T) {
 		t.Fatalf("%d taken but %d left of 20", taken, got)
 	}
 }
+
+// TestInterjectRefusedAfterAFailedTurn is the window an error leaves open if
+// the turn is only marked over beside EventDone: the error path emits no
+// EventDone at all, so an interjection sent while its events drain would
+// reach grok after the turn and mint one of grok's own.
+func TestInterjectRefusedAfterAFailedTurn(t *testing.T) {
+	s := startGrokScript(t, "grok-long-turn", true)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Prompt(ctx, "do the steps"); err == nil {
+		t.Fatal("the prompt must fail")
+	}
+	if err := s.Interject(context.Background(), "BANANA"); !errors.Is(err, ErrNotInTurn) {
+		t.Fatalf("err %v", err)
+	}
+}

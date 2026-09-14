@@ -78,6 +78,9 @@ def frame(
     env.pop("CRAZE_FAKE_SCRIPT", None)
     env.pop("CRAZE_CONFIG", None)
     env.pop("CRAZE_PROVIDER", None)
+    # Never inherited: a developer with CRAZE_FAKE_STEP exported would
+    # otherwise change the timing of every case that did not ask for it.
+    env.pop("CRAZE_FAKE_STEP", None)
     if step:
         env["CRAZE_FAKE_STEP"] = step
     return subprocess.run(

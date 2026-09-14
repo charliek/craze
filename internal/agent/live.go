@@ -58,9 +58,9 @@ type session struct {
 	// queueOp → s.mu → the queue's own lock.
 	queueOp sync.Mutex
 	queue   PromptQueue
-	// doneEmitted marks that this turn's EventDone has gone out. inPrompt is
-	// still true until Prompt's defer runs, so it alone cannot say whether
-	// there is still a turn to interject into.
+	// doneEmitted marks that the turn is over — Prompt has returned, either
+	// way. inPrompt is still true until Prompt's defer runs, so it alone
+	// cannot say whether there is still a turn to interject into.
 	doneEmitted bool
 	// cancelling holds from Cancel until the turn ends. An interjection sent
 	// in that window is exactly what grok strands.
@@ -321,6 +321,14 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	}()
 
 	res, err := client.Prompt(ctx, text)
+	// The turn is over the moment Prompt returns, whichever way it went.
+	// Marking it here and not beside the EventDone below is what closes the
+	// window an interjection could otherwise slip through on the error path,
+	// where there is no EventDone at all — and an interjection that lands
+	// after a turn is exactly what makes grok mint one of its own.
+	s.mu.Lock()
+	s.doneEmitted = true
+	s.mu.Unlock()
 	if err != nil {
 		// The error goes out first, so a consumer is already in its error
 		// state when the removals arrive and can say why the queue emptied.
@@ -338,9 +346,6 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	if res.StopReason == acp.StopCancelled {
 		s.closeInFlightTools(acp.StopCancelled)
 	}
-	s.mu.Lock()
-	s.doneEmitted = true
-	s.mu.Unlock()
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
 }
