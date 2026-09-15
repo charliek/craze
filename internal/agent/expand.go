@@ -93,10 +93,50 @@ func pluginRefs(text string, lookup map[string]pluginTarget) []pluginRef {
 	}
 	var out []pluginRef
 	used := make(map[string]bool, maxPluginBlocks)
+	eachPluginName(text, func(name string, end int) bool {
+		target, ok := lookup[strings.ToLower(name)]
+		if !ok {
+			return true
+		}
+		key := strings.ToLower(target.cmd.Qualified)
+		if used[key] {
+			return true
+		}
+		used[key] = true
+		out = append(out, pluginRef{target: target, typed: name, args: scanPluginArgs(text, end)})
+		return len(out) < maxPluginBlocks
+	})
+	return out
+}
+
+// hasUnresolvedSlash reports whether the draft names something the lookup
+// cannot answer. It is the question the catalog wait asks (§3.3): while the
+// rows are still provisional every one of them is qualified, so a bare
+// /probe-echo resolves to nothing — and waiting is only worth the delay when
+// the draft holds a name the rename could rescue. An unknown slash such as
+// /nope answers true too: craze cannot tell one the catalog will never explain
+// from one it is about to, and the wait is bounded either way.
+func hasUnresolvedSlash(text string, lookup map[string]pluginTarget) bool {
+	unresolved := false
+	eachPluginName(text, func(name string, _ int) bool {
+		if _, ok := lookup[strings.ToLower(name)]; ok {
+			return true
+		}
+		unresolved = true
+		return false
+	})
+	return unresolved
+}
+
+// eachPluginName walks the /name tokens of a draft in order and hands each to
+// fn with the offset that ends it; fn stops the walk by returning false. One
+// scanner and not two, because the wait that precedes an expansion and the
+// expansion itself have to agree, byte for byte, on what a token is.
+func eachPluginName(text string, fn func(name string, end int) bool) {
 	// Offset 0 counts as "after whitespace": a draft that is nothing but
 	// /name is the common case.
 	afterSpace := true
-	for i := 0; i < len(text) && len(out) < maxPluginBlocks; {
+	for i := 0; i < len(text); {
 		r, size := utf8.DecodeRuneInString(text[i:])
 		if r != '/' || !afterSpace {
 			afterSpace = unicode.IsSpace(r)
@@ -104,27 +144,18 @@ func pluginRefs(text string, lookup map[string]pluginTarget) []pluginRef {
 			continue
 		}
 		name, end := scanPluginName(text, i+1)
+		afterSpace = false
 		if name == "" {
-			afterSpace = false
 			i += size
 			continue
 		}
 		// Whatever the name was, the scan resumes past it; a slash inside it
 		// was never the start of another one.
 		i = end
-		afterSpace = false
-		target, ok := lookup[strings.ToLower(name)]
-		if !ok {
-			continue
+		if !fn(name, end) {
+			return
 		}
-		key := strings.ToLower(target.cmd.Qualified)
-		if used[key] {
-			continue
-		}
-		used[key] = true
-		out = append(out, pluginRef{target: target, typed: name, args: scanPluginArgs(text, end)})
 	}
-	return out
 }
 
 // scanPluginName reads the name at i (just past the slash) and returns it with

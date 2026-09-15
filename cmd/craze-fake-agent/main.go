@@ -36,6 +36,9 @@ Flags:
                       descriptions (one of them multi-line) for the slash menu
           nocommands  echo, but session/new advertises no commands at all, so
                       craze's own plugin rows stay provisionally qualified
+          callorder   nocommands, and every reply ends with a receipt naming
+                      each session/prompt and session/cancel read so far, in
+                      arrival order
           markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
           planmode    session/new in plan mode; replies planned/implementing
@@ -93,7 +96,7 @@ func main() {
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
-		"bash", "task", "task-late", "commands", "nocommands", "markdown", "title", "planmode", "planmode-card",
+		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",

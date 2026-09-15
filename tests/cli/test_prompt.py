@@ -491,21 +491,27 @@ def joined_text(events: list[dict]) -> str:
 
 
 def test_plugin_command_expands(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
-    # The bare spelling only exists once the agent's first
-    # available_commands_update has landed -- until then every plugin row is
-    # qualified, so that a bare name accepted early cannot change meaning when
-    # the catalog arrives. A turn in front of this one is what makes the
-    # window deterministic; the qualified spelling needs no such thing
-    # (test_plugin_qualified_name sends it on the first turn).
+    # A bare name on the very first turn, which is the whole of a one-shot
+    # headless run. The bare spelling only exists once the agent's first
+    # available_commands_update has been applied -- until then every plugin row
+    # is qualified, so that a name accepted early cannot change meaning when the
+    # catalog arrives.
+    #
+    # What this proves is first-turn expansion end to end, against a fake whose
+    # catalog lands before the prompt does: the `commands` script advertises one
+    # from session/new. It does not prove the wait of plan 010 section 3.3, and
+    # is not meant to -- the wait itself, what ends it and what a cancel does to
+    # it are pinned by the Go tests in internal/agent/expand_test.go, which can
+    # drive the session's state directly. Against `nocommands` the same draft
+    # would sit out the window and then go out verbatim.
     proc = run_prompt(
         craze_bin,
         fake_agent_bin,
         tmp_path,
         "--plugin-dir",
         str(PROBE_PLUGIN),
-        "--follow-up",
         "/probe-echo banana",
-        "warm up",
+        script="commands",
     )
     assert proc.returncode == 0, proc.stderr
     events = parse_events(proc.stdout)
@@ -521,8 +527,7 @@ def test_plugin_command_expands(craze_bin: Path, fake_agent_bin: Path, tmp_path:
     # The draft goes first and the block after it, which the fake's newline
     # between text blocks is what makes visible.
     text = joined_text(events)
-    assert text.startswith("echo: warm up"), text
-    assert "echo: /probe-echo banana\nThe user invoked " in text, text
+    assert text.startswith("echo: /probe-echo banana\nThe user invoked "), text
     assert "PROBE-COMMAND-EXPANDED args=[banana]" in text
 
 

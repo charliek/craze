@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/charliek/craze/internal/acp"
 )
 
 // entryOf is one discovered plugin entry, as short as a test needs it: the
@@ -630,5 +633,493 @@ func TestGrokPromptUnchanged(t *testing.T) {
 	log.waitTexts(t, "echo: /probe-plugin:probe-echo banana")
 	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
 		t.Fatalf("grok reported %+v", cmds[0].Command)
+	}
+}
+
+// TestHasUnresolvedSlash is the question the catalog wait asks, on its own.
+// The lookup is the resolved one, so a name that is only reachable qualified
+// counts as unresolved bare — which is exactly the state a provisional
+// session is in for every row it has.
+func TestHasUnresolvedSlash(t *testing.T) {
+	entries := []PluginEntry{
+		entryOf("git-commands", "watch-pr", PluginKindCommand, "body"),
+		entryOf("forge", "simplify", PluginKindCommand, "body"),
+	}
+	lookup := lookupOf(entries, "simplify")
+
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"a name that resolves", "/watch-pr 12", false},
+		{"a qualified name that resolves", "/git-commands:watch-pr 12", false},
+		{"a name the agent took over", "/simplify this", true},
+		{"a name nobody claims", "/nope banana", true},
+		{"no slash at all", "watch-pr now", false},
+		{"a slash inside a word", "see https://x/nope now", false},
+		{"an empty draft", "", false},
+		{"one resolved name and one that is not", "/watch-pr 12\n/nope", true},
+		{"the resolved one does not hide the other", "/nope\n/watch-pr 12", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasUnresolvedSlash(tc.text, lookup); got != tc.want {
+				t.Fatalf("hasUnresolvedSlash(%q) = %v", tc.text, got)
+			}
+		})
+	}
+	// A session with no plugins resolves nothing, which is not the same
+	// question: the wait asks this one only once it knows there are plugins.
+	if !hasUnresolvedSlash("/watch-pr 12", nil) {
+		t.Fatal("an empty lookup answers nothing")
+	}
+}
+
+// shortCatalogWait cuts the §3.3 window down to something a test can afford to
+// sit out, and puts it back afterwards. Nothing in this package runs in
+// parallel, so the one variable is safe to swap.
+func shortCatalogWait(t *testing.T, d time.Duration) time.Duration {
+	t.Helper()
+	prev := catalogWait
+	catalogWait = d
+	t.Cleanup(func() { catalogWait = prev })
+	return d
+}
+
+// longCatalogWait is the window a test sets when the point is that something
+// other than the timeout ended the wait, and catalogWaitMargin is what a wait
+// that must not happen at all is allowed to take anyway. They are five times
+// apart, so neither bound is a close call on a loaded box under -race.
+const (
+	longCatalogWait   = 10 * time.Second
+	catalogWaitMargin = 2 * time.Second
+)
+
+// waitingSession is the one state §3.3 asks about, built by hand: plugins
+// discovered, no catalog applied, no agent behind it. The wait is decided
+// entirely from the session's own fields, so timing it needs no wire — and
+// timing it through a Prompt would time the fake's round trip instead.
+func waitingSession(t *testing.T) *session {
+	t.Helper()
+	s := newTestSession(t, Options{PluginDirs: []string{probeFixtureDir(t)}, Stderr: io.Discard})
+	s.plugins = s.discoverPlugins(t.TempDir())
+	if len(s.plugins) != 2 {
+		t.Fatalf("the fixture discovered %+v", s.plugins)
+	}
+	s.mu.Lock()
+	s.snap.Plugins = s.resolvePluginsLocked()
+	s.mu.Unlock()
+	return s
+}
+
+// awaitOnce runs the wait exactly as Prompt runs it — awaitCatalog, then the
+// locked hand-back that says whether Cancel got there first — and reports how
+// long the wait itself took, whether one was registered at all, and whether it
+// was aborted.
+func awaitOnce(ctx context.Context, s *session, text string) (elapsed time.Duration, waited, aborted bool) {
+	start := time.Now()
+	abort := s.awaitCatalog(ctx, text)
+	elapsed = time.Since(start)
+	s.mu.Lock()
+	aborted = s.clearCatalogWaitLocked(abort)
+	s.mu.Unlock()
+	return elapsed, abort != nil, aborted
+}
+
+// awaitOutcome is one run of awaitOnce, carried back from the goroutine that
+// parked in the wait.
+type awaitOutcome struct {
+	elapsed time.Duration
+	waited  bool
+	aborted bool
+}
+
+// awaitInBackground parks a wait on its own goroutine, so the test goroutine
+// is free to be the thing that ends it — and stays the only one allowed to
+// call t.
+func awaitInBackground(s *session, text string) <-chan awaitOutcome {
+	out := make(chan awaitOutcome, 1)
+	go func() {
+		elapsed, waited, aborted := awaitOnce(context.Background(), s, text)
+		out <- awaitOutcome{elapsed, waited, aborted}
+	}()
+	return out
+}
+
+// waitForCatalogWait blocks until a prompt is provably parked in the wait, so
+// that what the test does next — apply a catalog, cancel — lands inside the
+// window rather than racing the goroutine into it.
+func waitForCatalogWait(t *testing.T, s *session) {
+	t.Helper()
+	waitFor(t, "a prompt to park in the catalog wait", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.catalogAbort != nil
+	})
+}
+
+// promptOn runs one Prompt on its own goroutine, so the test can drive the
+// session while that prompt is parked in the wait. The context is Background
+// because both real callers pass that: Esc and a headless signal both arrive
+// through Session.Cancel, never through the prompt's context.
+func promptOn(s *session, text string) <-chan error {
+	out := make(chan error, 1)
+	go func() {
+		_, err := s.Prompt(context.Background(), text)
+		out <- err
+	}()
+	return out
+}
+
+// promptReturn is what that prompt returned. The deadline is a deadlock guard,
+// not a measurement: it is far shorter than the window these tests set, so a
+// wait that ended on the timeout instead of on what the test did fails here
+// rather than passing slowly.
+func promptReturn(t *testing.T, out <-chan error, why string) error {
+	t.Helper()
+	select {
+	case err := <-out:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the prompt never returned: %s", why)
+		return nil
+	}
+}
+
+// twoBlockEcho is what the fake echoes back for a resolved bare /probe-echo:
+// the draft, then the expansion, with the fake's newline between the blocks.
+func twoBlockEcho(dir string) string {
+	return "echo: /probe-echo banana\n" +
+		`The user invoked /probe-echo banana (the "probe-echo" command from the "probe-plugin" plugin, ` +
+		filepath.Join(dir, "commands", "probe-echo.md") + "). Follow its instructions:\n" +
+		`<command name="probe-echo" plugin="probe-plugin" args="banana">` + "\n" +
+		"Reply with exactly this line:\nPROBE-COMMAND-EXPANDED args=[banana]\n" +
+		"</command>"
+}
+
+// TestCatalogWaitTiming is the clock, and the only place there is one: what
+// waits, what does not, and what ends a wait early. It runs against the wait
+// itself rather than a prompt, because a prompt measures a round trip to the
+// fake as well and -race makes that no kind of clock at all.
+func TestCatalogWaitTiming(t *testing.T) {
+	t.Run("an unresolved name sits out the window", func(t *testing.T) {
+		window := shortCatalogWait(t, 200*time.Millisecond)
+		s := waitingSession(t)
+		elapsed, waited, aborted := awaitOnce(t.Context(), s, "/probe-echo banana")
+		if !waited || aborted {
+			t.Fatalf("waited=%v aborted=%v", waited, aborted)
+		}
+		// A lower bound: the window is the whole of what is being claimed, and
+		// nothing can make it shorter.
+		if elapsed < window {
+			t.Fatalf("the wait ended after %s, short of the %s window", elapsed, window)
+		}
+	})
+
+	// Every case below sets a window it must not reach, so an elapsed under
+	// the margin means the gate refused to wait rather than merely waited
+	// quickly.
+	skips := []struct {
+		name  string
+		text  string
+		setup func(*session)
+	}{
+		{"a qualified spelling already resolves", "/probe-plugin:probe-echo banana", nil},
+		{"a draft with no slash token", "hello", nil},
+		{"a session with no plugins", "/probe-echo banana", func(s *session) { s.plugins = nil }},
+		{"the catalog has already been applied", "/probe-echo banana", func(s *session) {
+			s.onUpdate(commandsUpdate("research"))
+		}},
+	}
+	for _, tc := range skips {
+		t.Run(tc.name, func(t *testing.T) {
+			window := shortCatalogWait(t, longCatalogWait)
+			s := waitingSession(t)
+			if tc.setup != nil {
+				tc.setup(s)
+			}
+			elapsed, waited, _ := awaitOnce(t.Context(), s, tc.text)
+			if waited {
+				t.Fatal("a wait was registered for something waiting cannot change")
+			}
+			if elapsed >= catalogWaitMargin {
+				t.Fatalf("took %s of the %s window", elapsed, window)
+			}
+		})
+	}
+
+	t.Run("the catalog ends the wait", func(t *testing.T) {
+		shortCatalogWait(t, longCatalogWait)
+		s := waitingSession(t)
+		res := awaitInBackground(s, "/probe-echo banana")
+		waitForCatalogWait(t, s)
+		s.onUpdate(commandsUpdate("research"))
+		got := <-res
+		if !got.waited || got.aborted {
+			t.Fatalf("waited=%v aborted=%v", got.waited, got.aborted)
+		}
+		if got.elapsed >= catalogWaitMargin {
+			t.Fatalf("the update took %s to end the wait", got.elapsed)
+		}
+	})
+
+	t.Run("a cancel ends the wait", func(t *testing.T) {
+		shortCatalogWait(t, longCatalogWait)
+		s := waitingSession(t)
+		res := awaitInBackground(s, "/probe-echo banana")
+		waitForCatalogWait(t, s)
+		if !s.abortCatalogWait() {
+			t.Fatal("the abort found no wait to end")
+		}
+		// A second one has nothing left to close, which is what lets Cancel
+		// answer "this Esc was the wait's" from the return value alone.
+		if s.abortCatalogWait() {
+			t.Fatal("a second abort claimed the same wait")
+		}
+		got := <-res
+		if !got.aborted {
+			t.Fatal("the wait ended without reporting the cancel")
+		}
+		if got.elapsed >= catalogWaitMargin {
+			t.Fatalf("the cancel took %s to end the wait", got.elapsed)
+		}
+	})
+
+	t.Run("a cancelled context ends the wait", func(t *testing.T) {
+		shortCatalogWait(t, longCatalogWait)
+		s := waitingSession(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		// Not a cancel: the caller went away, which is not the user saying the
+		// prompt must not be sent, and the send below fails on its own.
+		elapsed, waited, aborted := awaitOnce(ctx, s, "/probe-echo banana")
+		if !waited || aborted {
+			t.Fatalf("waited=%v aborted=%v", waited, aborted)
+		}
+		if elapsed >= catalogWaitMargin {
+			t.Fatalf("a dead context took %s to end the wait", elapsed)
+		}
+	})
+}
+
+// TestCancelDuringTheCatalogWait is Esc while the first prompt is still parked
+// in the wait, through the very Session.Cancel the TUI's Esc calls. The turn
+// the prompt would have opened does not exist yet, so the cancel has nothing
+// but the wait to find — and what it must leave behind is a prompt that never
+// opened a turn and never reached the agent.
+func TestCancelDuringTheCatalogWait(t *testing.T) {
+	shortCatalogWait(t, longCatalogWait)
+	s := startScriptOpts(t, "nocommands", Options{PluginDirs: []string{probeFixtureDir(t)}})
+	log := collect(t, s)
+	s.mu.Lock()
+	turnBefore := s.turn
+	s.mu.Unlock()
+
+	out := promptOn(s, "/probe-echo banana")
+	waitForCatalogWait(t, s)
+	if err := s.Cancel(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := promptReturn(t, out, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
+		t.Fatalf("the cancelled prompt returned %v", err)
+	}
+	// No turn: not one still running, and not one whose number was spent.
+	// Snapshot carries no in-flight flag, so the question is asked where the
+	// answer is kept.
+	s.mu.Lock()
+	in, turn := s.inPrompt, s.turn
+	s.mu.Unlock()
+	if in || turn != turnBefore {
+		t.Fatalf("inPrompt=%v turn=%d (was %d) after a cancelled wait", in, turn, turnBefore)
+	}
+	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+		t.Fatalf("a cancelled prompt reported %+v", cmds[0].Command)
+	}
+	// The fake echoes every prompt it is handed, in order, so what it echoes
+	// next is the whole of what ever reached it: the cancelled draft did not.
+	if _, err := s.Prompt(t.Context(), "still here"); err != nil {
+		t.Fatal(err)
+	}
+	log.waitTexts(t, "echo: still here")
+}
+
+// TestCancelDuringTheWaitLeavesTheNextPromptAlone is the race the test above
+// cannot reach, because waiting for Cancel to return before sending anything
+// else serializes it away. Live, nothing does: the aborted prompt returns
+// ErrPromptCancelled, the TUI settles the turn and drains its queue, and the
+// next prompt goes out while Cancel is still walking the rest of its path. That
+// tail is written for a turn on the wire — mark it cancelled, answer its
+// blocked requests, send session/cancel, wait on its promptDone — so every step
+// of it would land on the prompt that just started. Esc for the one the user
+// stopped would stop the one they did not.
+//
+// What makes the failure deterministic is not the timing but the wire: an Esc
+// that ran the tail always sends a session/cancel, whenever it lands, and an
+// Esc that returns at the abort never sends one at all. The `callorder` script
+// reports what it read, so the last turn's receipt names every notification
+// craze wrote before it — and a cancel anywhere in that record fails this.
+func TestCancelDuringTheWaitLeavesTheNextPromptAlone(t *testing.T) {
+	shortCatalogWait(t, longCatalogWait)
+	s := startScriptOpts(t, "callorder", Options{PluginDirs: []string{probeFixtureDir(t)}})
+	log := collect(t, s)
+
+	// A parks in the wait.
+	outA := promptOn(s, "/probe-echo banana")
+	waitForCatalogWait(t, s)
+
+	// Esc, on a goroutine of its own and deliberately not waited on: the whole
+	// finding is in what Cancel does after the abort, and waiting here is what
+	// hid it.
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- s.Cancel(t.Context()) }()
+
+	if err := promptReturn(t, outA, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
+		t.Fatalf("the cancelled prompt returned %v", err)
+	}
+	// B, the moment A is out of the way — the TUI's promptDoneMsg → finishTurn
+	// → queue drain, with nothing in between.
+	res, err := s.Prompt(t.Context(), "still here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StopReason != acp.StopEndTurn {
+		t.Fatalf("the prompt after the cancel ended %q", res.StopReason)
+	}
+	// The old Esc has to be finished before the record can be read: the cancel
+	// it would have written is on the wire by then, ahead of anything sent
+	// after this.
+	select {
+	case err := <-cancelled:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancel never returned")
+	}
+	if _, err := s.Prompt(t.Context(), "settled"); err != nil {
+		t.Fatal(err)
+	}
+	// Two prompts and no cancel: A never reached the agent, and neither did the
+	// Esc that stopped it.
+	log.waitTexts(t, "echo: still here\ncalls: prompt\necho: settled\ncalls: prompt,prompt\n")
+	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+		t.Fatalf("a cancelled prompt reported %+v", cmds[0].Command)
+	}
+}
+
+// TestCatalogWaitFallsThroughToVerbatim is the fallthrough: an agent that
+// never advertises a catalog leaves every row provisional forever, so the bare
+// name cannot resolve however long craze waits. The window is sat out once and
+// the draft then goes as the user typed it — one block, no expansion — which
+// is what craze did before the wait existed.
+func TestCatalogWaitFallsThroughToVerbatim(t *testing.T) {
+	shortCatalogWait(t, 200*time.Millisecond)
+	s := startScriptOpts(t, "nocommands", Options{PluginDirs: []string{probeFixtureDir(t)}})
+	log := collect(t, s)
+
+	if _, err := s.Prompt(t.Context(), "/probe-echo banana"); err != nil {
+		t.Fatal(err)
+	}
+	// The fake joins text blocks with a newline, so a second block could not
+	// hide in this.
+	log.waitTexts(t, "echo: /probe-echo banana")
+	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+		t.Fatalf("a provisional row answered a bare name: %+v", cmds[0].Command)
+	}
+}
+
+// TestBareNameResolvesOnTheFirstPrompt is the live miss this wait was added
+// for (§9): a one-shot run whose only prompt carries a bare plugin name. The
+// catalog lands, the row renames, and the draft goes out with its expansion
+// behind it. The production window stands here — what the wait costs is timed
+// in TestCatalogWaitTiming; what it buys is this.
+func TestBareNameResolvesOnTheFirstPrompt(t *testing.T) {
+	dir := probeFixtureDir(t)
+	s := startScriptOpts(t, "commands", Options{PluginDirs: []string{dir}})
+	log := collect(t, s)
+
+	if _, err := s.Prompt(t.Context(), "/probe-echo banana"); err != nil {
+		t.Fatal(err)
+	}
+	// Two blocks, the draft first: the whole point of having waited.
+	log.waitTexts(t, twoBlockEcho(dir))
+	ev := log.waitType(t, EventCommand)
+	if ev.Command == nil || ev.Command.Display != "probe-echo" {
+		t.Fatalf("the row did not rename: %+v", ev.Command)
+	}
+}
+
+// TestCatalogWaitWakesOnTheUpdate pins what the wait blocks on, deterministically:
+// the agent advertises nothing of its own, so no catalog can land on its own,
+// and the only one there is goes through the real update handler once the
+// prompt is provably parked. The window is far longer than promptReturn's
+// deadline, so the timeout cannot be what let this prompt through.
+func TestCatalogWaitWakesOnTheUpdate(t *testing.T) {
+	shortCatalogWait(t, longCatalogWait)
+	dir := probeFixtureDir(t)
+	s := startScriptOpts(t, "nocommands", Options{PluginDirs: []string{dir}})
+	log := collect(t, s)
+
+	out := promptOn(s, "/probe-echo banana")
+	waitForCatalogWait(t, s)
+	s.onUpdate(commandsUpdate("research"))
+	if err := promptReturn(t, out, "the update did not wake the wait"); err != nil {
+		t.Fatal(err)
+	}
+	log.waitTexts(t, twoBlockEcho(dir))
+	ev := log.waitType(t, EventCommand)
+	if ev.Command == nil || ev.Command.Display != "probe-echo" {
+		t.Fatalf("the row did not rename: %+v", ev.Command)
+	}
+}
+
+// TestGrokNeverWaitsForACatalog: grok reads its own plugin skills off the
+// wire, so --plugin-dir discovers nothing for it and no rename could rescue a
+// name. A session with nothing to expand registers no wait at all, which is
+// the gate rather than the clock.
+func TestGrokNeverWaitsForACatalog(t *testing.T) {
+	shortCatalogWait(t, longCatalogWait)
+	grok := GrokProvider()
+	s := newTestSession(t, Options{
+		Provider:   &grok,
+		PluginDirs: []string{probeFixtureDir(t)},
+		Stderr:     io.Discard,
+	})
+	s.plugins = s.discoverPlugins(t.TempDir())
+	if len(s.plugins) != 0 {
+		t.Fatalf("grok discovered %+v", s.plugins)
+	}
+	if _, waited, _ := awaitOnce(t.Context(), s, "/probe-echo banana"); waited {
+		t.Fatal("a session with no plugins registered a wait")
+	}
+}
+
+// TestCancelledContextEndsTheCatalogWait: the caller has gone, so the wait
+// ends with it. What happens next is what an already-cancelled context has
+// always meant here — the prompt fails on the wire and the session reports it,
+// which is not the cancelled-before-the-wire ending Cancel produces — and no
+// expansion is reported, because none was resolved.
+func TestCancelledContextEndsTheCatalogWait(t *testing.T) {
+	shortCatalogWait(t, longCatalogWait)
+	s := startScriptOpts(t, "nocommands", Options{PluginDirs: []string{probeFixtureDir(t)}})
+	log := collect(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out := make(chan error, 1)
+	go func() {
+		_, err := s.Prompt(ctx, "/probe-echo banana")
+		out <- err
+	}()
+	err := promptReturn(t, out, "a dead context did not end the wait")
+	if err == nil {
+		t.Fatal("the prompt must fail")
+	}
+	if errors.Is(err, ErrPromptCancelled) {
+		t.Fatalf("a dead context is not a cancel: %v", err)
+	}
+	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+		t.Fatalf("a cancelled prompt reported %+v", cmds[0].Command)
 	}
 }

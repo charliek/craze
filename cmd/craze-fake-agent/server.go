@@ -57,10 +57,10 @@ type server struct {
 }
 
 // orderEntry is one recorded call. mode is the mode a set_mode asked for and is
-// empty for a prompt. Method names alone cannot answer the question the goldens
-// rest on — a prompt whose own mode change arrived first, and to which mode —
-// because a set_mode belongs to the prompt that follows it and only the mode it
-// asked for says whether that prompt is an implement turn.
+// empty for a prompt and for a cancel. Method names alone cannot answer the
+// question the goldens rest on — a prompt whose own mode change arrived first,
+// and to which mode — because a set_mode belongs to the prompt that follows it
+// and only the mode it asked for says whether that prompt is an implement turn.
 type orderEntry struct {
 	method string
 	mode   string
@@ -69,6 +69,7 @@ type orderEntry struct {
 const (
 	orderSetMode = "set_mode"
 	orderPrompt  = "prompt"
+	orderCancel  = "cancel"
 	// implementModeID is the mode craze switches to on its way out of plan mode,
 	// so a prompt preceded by a set_mode to it is the implement turn.
 	implementModeID = "agent"
@@ -129,7 +130,7 @@ func grokScript(script string) bool {
 // window, so the band's columns, its scroll marks and its one-row-per-entry
 // rule all have a golden to stand on, and `nocommands` sends nothing at all.
 func (s *server) advertiseCommands() {
-	if s.script == "nocommands" {
+	if silentCatalogScript(s.script) {
 		// An agent that never advertises a catalog. Plugin rows stay
 		// provisional for the whole session then (plan 010 §3.2), which is the
 		// one state a golden cannot otherwise reach: the update lands the
@@ -145,6 +146,13 @@ func (s *server) advertiseCommands() {
 		SessionUpdate:     acp.UpdateAvailableCommands,
 		AvailableCommands: cmds,
 	})
+}
+
+// silentCatalogScript names the scripts whose session/new advertises no
+// commands at all, so craze's own plugin rows stay provisionally qualified for
+// the whole session — the state the catalog wait of plan 010 §3.3 exists for.
+func silentCatalogScript(script string) bool {
+	return script == "nocommands" || script == "callorder"
 }
 
 // commandsCatalog is 24 entries: enough that eight rows window onto it, with
@@ -360,6 +368,10 @@ func (s *server) onNotify(msg *acp.Message) {
 	if msg.Method != acp.MethodSessionCancel {
 		return
 	}
+	// Still on the read loop, alongside session/prompt, so the record is the
+	// order craze put the two on the wire and not the order two handler
+	// goroutines happened to wake in.
+	s.noteOrder(orderCancel, "")
 	s.mu.Lock()
 	s.cancelled.Store(true)
 	if s.hangWait != nil {
@@ -438,6 +450,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.planmode(msg.ID, text, n)
 	case "planmode-card":
 		s.planmodeCard(msg.ID, text, n)
+	case "callorder":
+		s.callOrder(msg.ID, text)
 	default:
 		s.echo(msg.ID, text)
 	}
@@ -474,6 +488,40 @@ func (s *server) echo(id json.RawMessage, text string) {
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
 	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// callOrder is echo with a receipt: a second text block naming every
+// session/prompt and session/cancel the fake has read so far, in arrival order.
+// The fake reports everything it knows by what it sends back, and this is no
+// different — it is the only way a test in another process can ask what craze
+// put on the wire, and in which order, rather than inferring it from a turn's
+// stop reason. The receipt is read on the read loop's own record, so a prompt
+// answered here names every cancel written before it and none written after.
+func (s *server) callOrder(id json.RawMessage, text string) {
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "echo: " + text},
+	})
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "\ncalls: " + s.callsSeen() + "\n"},
+	})
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// callsSeen is the recorded order as one comma-joined line, set_mode entries
+// left out: the scripts that care about those have promptMode, and the ones
+// that read this line care only about prompts against cancels.
+func (s *server) callsSeen() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, e := range s.order {
+		if e.method == orderPrompt || e.method == orderCancel {
+			out = append(out, e.method)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 func (s *server) finishPrompt(id json.RawMessage, stop string) {
@@ -1627,6 +1675,11 @@ func (s *server) promptMode(n int) (mode string, overtaken bool) {
 	prompts := 0
 	last := "" // the newest set_mode since the previous prompt
 	for _, e := range s.order {
+		if e.method == orderCancel {
+			// A cancel belongs to no prompt and changes no mode; only the two
+			// methods below answer this question.
+			continue
+		}
 		if e.method == orderSetMode {
 			if prompts == n {
 				overtaken = overtaken || (mode == "" && e.mode == implementModeID)

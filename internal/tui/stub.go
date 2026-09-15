@@ -12,11 +12,15 @@ import (
 // Stub is an in-process Session used by TUI chrome tests. It echoes each
 // prompt as assistant text and does not spawn cursor-agent.
 type Stub struct {
-	mu         sync.Mutex
-	events     chan agent.Event
-	closed     chan struct{}
-	cancel     chan struct{}
-	hang       bool
+	mu     sync.Mutex
+	events chan agent.Event
+	closed chan struct{}
+	cancel chan struct{}
+	hang   bool
+	// park is the live session's catalog wait (§3.3): a prompt held back
+	// before any of the turn's bookkeeping, which a Cancel ends by handing it
+	// agent.ErrPromptCancelled.
+	park       bool
 	startDelay time.Duration
 	n          int
 	failMode   bool
@@ -127,6 +131,17 @@ func (s *Stub) HangNext() {
 	s.mu.Unlock()
 }
 
+// ParkNext makes the next prompt behave as one the live session holds back for
+// the agent's first command catalog: it opens no turn, emits no event of any
+// kind, and a Cancel while it is parked hands it agent.ErrPromptCancelled.
+// HangNext cannot stand in for it — a hung prompt is a turn on the wire, and
+// what a cancelled wait leaves the UI is an error and nothing else.
+func (s *Stub) ParkNext() {
+	s.mu.Lock()
+	s.park = true
+	s.mu.Unlock()
+}
+
 // SetTools replaces Snapshot.Tools (copy-on-write). Tests send EventTool
 // afterwards so the TUI refreshSnap() picks the in-flight set up.
 func (s *Stub) SetTools(tools []agent.ToolEvent) {
@@ -220,6 +235,21 @@ func (s *Stub) Start(context.Context) error {
 func (s *Stub) Events() <-chan agent.Event { return s.events }
 
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
+	s.mu.Lock()
+	park := s.park
+	s.park = false
+	s.mu.Unlock()
+	if park {
+		// Before the bookkeeping, where the live session's wait also sits:
+		// nothing has been claimed, so the cancelled ending is the whole of
+		// what this prompt leaves behind.
+		select {
+		case <-s.cancel:
+		case <-s.closed:
+		case <-ctx.Done():
+		}
+		return agent.Result{}, agent.ErrPromptCancelled
+	}
 	s.mu.Lock()
 	// One prompt at a time, as the live session has it: without the guard a
 	// second prompt's deferred clear would report the first one's turn over

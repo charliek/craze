@@ -77,9 +77,17 @@ type session struct {
 	// the agent's first available_commands_update has been applied, which is
 	// what takes the resolved names out of their provisional all-qualified
 	// spelling. Both are read under s.mu, because a Prompt can run against
-	// them while an update is rewriting the resolution.
-	plugins      []PluginEntry
-	commandsSeen bool
+	// them while an update is rewriting the resolution. commandsApplied is
+	// commandsSeen as something to block on: it closes in the same locked
+	// section that sets the flag, so a prompt that read the flag as false is
+	// guaranteed to see the close.
+	plugins         []PluginEntry
+	commandsSeen    bool
+	commandsApplied chan struct{}
+	// catalogAbort is the abort channel of the one prompt parked in that wait,
+	// nil when none is. It lives on the session because the prompt holding it
+	// has opened no turn yet, so Cancel has nothing else to find it by.
+	catalogAbort chan struct{}
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
@@ -116,8 +124,9 @@ func newSession(opts Options) *session {
 		seq:       make(map[string]int),
 		tools:     make(map[string]ToolEvent),
 
-		taskReceipts: make(map[string]TaskInfo),
-		subagents:    make(map[string]*subagentRec),
+		commandsApplied: make(chan struct{}),
+		taskReceipts:    make(map[string]TaskInfo),
+		subagents:       make(map[string]*subagentRec),
 	}
 	if opts.Provider != nil {
 		p := *opts.Provider
@@ -357,8 +366,115 @@ func (s *session) unstart() {
 	s.mu.Unlock()
 }
 
-func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
+// catalogWait bounds the one wait of §3.3. Five seconds is longer than any
+// catalog observed live and short enough that a prompt which will never be
+// expanded is not held hostage to one. It is a var only so the tests can
+// shorten it; nothing in craze writes it.
+var catalogWait = 5 * time.Second
+
+// awaitCatalog holds a prompt back, once and briefly, for the agent's first
+// available_commands_update. Until that update is applied every plugin row
+// shows its qualified spelling (§3.2), so a bare /probe-echo resolves to
+// nothing — and a one-shot `craze prompt` sends before the update lands, which
+// is how a live run put the draft on the wire verbatim and left the model to
+// guess what /probe-echo meant.
+//
+// It waits only where waiting can change the answer: the first update has not
+// been applied, the session has plugins at all, and the draft names something
+// the lookup cannot answer yet. So a qualified spelling never waits, a draft
+// with no slash in it never waits, grok — which has no plugins — never waits,
+// and nothing waits again once the catalog has landed. Falling through the
+// timeout is exactly the behaviour without this: resolve against whatever is
+// known and send, which is safe, because an unexpanded /name reaches the agent
+// as the text the user typed.
+//
+// The alternative — resolving bare names against the provisional catalog — is
+// precisely the wrong-meaning window §3.2 exists to close, and is not done.
+//
+// A waiting prompt is cancellable: it registers an abort channel that Cancel
+// closes, because the turn it would open does not exist yet and s.inPrompt —
+// the only thing Cancel used to look at — is still false. The channel it
+// registered comes back to Prompt, which clears it under the lock that opens
+// the turn; nil means nothing waited.
+//
+// Not handled: a second Prompt sent while one waits would reach the
+// bookkeeping first and hand the waiter ErrPromptInFlight — accepted, because
+// nothing in craze sends two prompts at once (the TUI queues them, the
+// headless run is sequential).
+func (s *session) awaitCatalog(ctx context.Context, text string) chan struct{} {
 	s.mu.Lock()
+	applied := s.commandsApplied
+	var abort chan struct{}
+	if !s.commandsSeen && len(s.plugins) > 0 && hasUnresolvedSlash(text, s.pluginLookupLocked()) {
+		abort = make(chan struct{})
+		s.catalogAbort = abort
+	}
+	s.mu.Unlock()
+	if abort == nil {
+		return nil
+	}
+	timer := time.NewTimer(catalogWait)
+	defer timer.Stop()
+	select {
+	case <-applied:
+	case <-timer.C:
+	case <-ctx.Done():
+	case <-s.done:
+	case <-abort:
+	}
+	return abort
+}
+
+// clearCatalogWaitLocked takes the wait's registration back and reports whether
+// Cancel closed it. It runs in the same locked section that marks the turn
+// started, so an Esc can never land between the end of the wait and the
+// bookkeeping: a Cancel either finds the registration — and this returns true,
+// before anything has been claimed — or finds the turn and cancels that.
+func (s *session) clearCatalogWaitLocked(abort chan struct{}) bool {
+	if abort == nil {
+		return false
+	}
+	if s.catalogAbort == abort {
+		s.catalogAbort = nil
+	}
+	select {
+	case <-abort:
+		return true
+	default:
+		return false
+	}
+}
+
+// abortCatalogWait ends a pending catalog wait, at most once, and reports
+// whether it ended one: the registration is dropped under the same lock that
+// closes it, so a second Cancel finds nothing to close and answers false. A
+// prompt already on the wire is not this — that turn is the agent's to cancel —
+// which is why a registration is only honoured while there is no turn in
+// flight.
+func (s *session) abortCatalogWait() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inPrompt || s.catalogAbort == nil {
+		return false
+	}
+	close(s.catalogAbort)
+	s.catalogAbort = nil
+	return true
+}
+
+func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
+	// Before any of the turn's bookkeeping: this waits, and a turn that has
+	// been opened must not be left open across a wait — nothing has been
+	// claimed yet, so a caller that gives up here gives up on nothing.
+	abort := s.awaitCatalog(ctx, text)
+	s.mu.Lock()
+	if s.clearCatalogWaitLocked(abort) {
+		// Cancelled while waiting. Nothing was opened, nothing was sent and
+		// nothing will be emitted, so saying so to the caller is the whole of
+		// it — the turn it drew is its own to settle.
+		s.mu.Unlock()
+		return Result{}, ErrPromptCancelled
+	}
 	client := s.client
 	if client == nil {
 		s.mu.Unlock()
@@ -554,6 +670,29 @@ func (s *session) Snapshot() Snapshot {
 func (s *session) Cancel(ctx context.Context) error {
 	client := s.clientRef()
 	if client == nil {
+		return nil
+	}
+	// A prompt still waiting for the catalog has opened no turn, so nothing
+	// below would reach it: without this, Esc would return having cancelled
+	// nothing and the wait would go on to send the very prompt it was pressed
+	// to stop.
+	//
+	// Aborting one is the whole of this cancel, and everything below is
+	// skipped. The abort happened under s.mu with !s.inPrompt, so there was no
+	// turn of craze's own to cancel; the rest of the path — marking the turn
+	// cancelling, answering blocked requests against s.turn, session/cancel,
+	// waiting on s.promptDone — is written for a turn that is on the wire, and
+	// from here it can only land on one that starts later. The aborted prompt
+	// returns ErrPromptCancelled, its consumer settles the turn and drains
+	// whatever it had queued, and the tail running on would cancel that next
+	// prompt instead: Esc for the one the user stopped would stop the one they
+	// did not.
+	//
+	// So an Esc that lands here does not answer a foreign turn's blocked
+	// request. Nothing is lost by that: no wait is registered any more, so a
+	// second Esc falls straight through to the normal path and answers it
+	// exactly as it always did.
+	if s.abortCatalogWait() {
 		return nil
 	}
 	// From here until the turn ends an interjection would be stranded, which
@@ -980,8 +1119,15 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// The first update of the session ends the provisional spelling, and
 		// every update re-resolves: a name the agent has taken over must stop
 		// being offered bare the moment it does.
+		first := !s.commandsSeen
 		s.commandsSeen = true
 		s.snap.Plugins = s.resolvePluginsLocked()
+		if first {
+			// Closed after the rows are resolved and before s.mu is released,
+			// so a prompt waiting on it cannot wake into the old resolution:
+			// it has to take this very lock to read one.
+			close(s.commandsApplied)
+		}
 		s.mu.Unlock()
 		s.emit(Event{Type: EventMeta})
 	case acp.UpdateCurrentMode:

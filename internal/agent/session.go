@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -33,6 +34,12 @@ var ErrUnsupported = acp.ErrUnsupported
 
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
+
+// ErrPromptCancelled is a prompt Cancel stopped while it was still waiting for
+// the agent's first command catalog: no turn was opened and nothing reached the
+// wire. Like the two refusals above it has no ending of its own — no EventDone,
+// no EventError — so a consumer that draws a turn has to settle it on this.
+var ErrPromptCancelled = errors.New("agent: prompt cancelled before it was sent")
 
 type EventType string
 

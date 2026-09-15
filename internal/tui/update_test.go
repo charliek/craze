@@ -382,6 +382,72 @@ func TestEscCancelsWorkingTurn(t *testing.T) {
 	}
 }
 
+// TestEscDuringTheCatalogWaitSettlesTheTurn is Esc while the first prompt is
+// still held back for the agent's command catalog. That prompt opened no turn,
+// so the session emits nothing at all for it and its error is the whole of the
+// ending — and what it has to leave on screen is what every other cancel
+// leaves: the draft where the user typed it, the note under it, no error.
+//
+// Both commands run for real — the one Enter returned, which parks, and the one
+// Esc returned, which frees it — so the promptDoneMsg fed back below is the
+// session's own and not one written here. What this does not test is the race
+// that follows: the session-level TestCancelDuringTheWaitLeavesTheNextPromptAlone
+// owns what Cancel may still do once the freed prompt has returned.
+func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	stub.ParkNext()
+	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	m.input.SetValue("/probe-echo banana")
+	tm, send := m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking {
+		t.Fatal("want working")
+	}
+	// The send runs where the tea runtime runs it, on its own goroutine, so
+	// the Esc below lands while it is still parked.
+	done := make(chan tea.Msg, 1)
+	go func() { done <- runCmd(send) }()
+
+	tm, esc := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if esc == nil {
+		t.Fatal("expected cancel cmd")
+	}
+	if msg := runCmd(esc); msg != nil {
+		t.Fatalf("the cancel failed: %+v", msg)
+	}
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Esc never freed the parked prompt")
+	}
+	got, ok := msg.(promptDoneMsg)
+	if !ok || !errors.Is(got.err, agent.ErrPromptCancelled) {
+		t.Fatalf("the parked prompt returned %#v", msg)
+	}
+	tm, _ = m.Update(got)
+	m = tm.(Model)
+	if m.status != statusIdle {
+		t.Fatalf("status %s", m.status)
+	}
+	if m.err != "" {
+		t.Fatalf("a cancel is not an error: %q", m.err)
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "/probe-echo banana") {
+		t.Fatalf("the draft left the transcript:\n%s", view)
+	}
+	if !strings.Contains(view, stopCancelled) {
+		t.Fatalf("the cancel left no note:\n%s", view)
+	}
+}
+
 func TestPermissionOverlayKeys(t *testing.T) {
 	m := sized(t)
 	m.yolo = false
