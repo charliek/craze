@@ -2,11 +2,29 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
+
+// HomeDir is the home directory craze reads its own files out of: the config
+// file, the user-level skills and the plugin caches. HOME wins over the account
+// database so a test (and the frame runner) can isolate all of them with one
+// variable.
+func HomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home)
+}
 
 var ErrPromptInFlight = acp.ErrPromptInFlight
 
@@ -16,6 +34,12 @@ var ErrUnsupported = acp.ErrUnsupported
 
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
+
+// ErrPromptCancelled is a prompt Cancel stopped while it was still waiting for
+// the agent's first command catalog: no turn was opened and nothing reached the
+// wire. Like the two refusals above it has no ending of its own — no EventDone,
+// no EventError — so a consumer that draws a turn has to settle it on this.
+var ErrPromptCancelled = errors.New("agent: prompt cancelled before it was sent")
 
 type EventType string
 
@@ -34,6 +58,11 @@ const (
 	EventSubagent   EventType = "subagent"
 	// EventQueue is one change to craze's own message queue.
 	EventQueue EventType = "queue"
+	// EventCommand is one plugin command or skill craze expanded into the
+	// prompt it is about to send. It is emitted before the request reaches the
+	// wire, so it always precedes the turn's first agent event, and never at
+	// all for a prompt the client refused.
+	EventCommand EventType = "command"
 	// EventForeignTurn brackets a turn the agent started without a craze
 	// prompt — grok's interject fallback. Nothing drains while one runs.
 	EventForeignTurn EventType = "foreign_turn"
@@ -90,6 +119,10 @@ type Snapshot struct {
 	// ForeignTurn reports that the agent is running a turn of its own. The
 	// drain waits it out: a prompt sent now would be queued behind it.
 	ForeignTurn bool
+	// Plugins are the plugin commands and skills craze found on disk for this
+	// provider, already resolved to the names the menu and the wire both use,
+	// in discovery order. Cloned by Snapshot.
+	Plugins []PluginCommand
 }
 
 // SubagentInfo is one grok child or cursor task, in spawn order on Snapshot.
@@ -163,6 +196,8 @@ type Event struct {
 	Queue       *QueuedPrompt
 	QueueChange QueueChange
 	QueuePos    int
+	// Command is the expansion an EventCommand reports.
+	Command *ExpandedCommand
 	// Interjection marks an EventUser that came from a grok interjection
 	// broadcast rather than from a prompt craze sent.
 	Interjection bool
@@ -171,6 +206,18 @@ type Event struct {
 	Err         error
 	StopReason  string
 	At          time.Time
+}
+
+// ExpandedCommand is one plugin entry craze expanded into a prompt: the row the
+// menu offered it as, embedded rather than transcribed so a name the resolver
+// learns to spell differently reaches the event without a second edit, plus
+// where the content came from and Text — the whole block as it went on the
+// wire, so a headless caller can read exactly what the agent was given. The
+// transcript shows only the provenance, never the body.
+type ExpandedCommand struct {
+	PluginCommand
+	Path string
+	Text string
 }
 
 // ForeignTurnInfo is a turn the agent is running on craze's session without a
@@ -308,6 +355,10 @@ type Options struct {
 	Mode      string
 	Stderr    io.Writer
 	Env       []string
+	// PluginDirs are extra plugin roots to read, cursor-agent's --plugin-dir
+	// by another route. A relative path is the workspace's. Providers whose
+	// PluginScan does not want them ignore them.
+	PluginDirs []string
 	// Provider is the agent behind the session; nil is cursor.
 	Provider *Provider
 	// Interactive makes question and plan requests block on the session so a

@@ -198,6 +198,36 @@ func (t *transcript) addNote(text string, now time.Time) {
 
 func (m *Model) addNote(text string) { m.main.addNote(text, m.now()) }
 
+// commandLineMark leads the provenance line under a user entry craze expanded
+// a plugin command or skill into. It points down and to the right, at the entry
+// above it rather than at anything the agent said.
+const commandLineMark = "⤷ "
+
+// addCommandLine records that craze expanded something into the prompt above:
+// which entry, by the plugin:name spelling that always resolves, and whether it
+// was a command or a skill. It is a note, so it draws dim under the user block
+// like every other thing craze says about a turn rather than in it.
+//
+// The block itself is deliberately not shown. It is the plugin's whole body,
+// often pages of it, and the transcript is the conversation the user is having;
+// a headless caller that wants the text reads the command JSON line.
+func (t *transcript) addCommandLine(cmd *agent.ExpandedCommand, now time.Time) {
+	if cmd == nil {
+		return
+	}
+	name := sanitizeLine(cmd.Qualified)
+	if name == "" {
+		return
+	}
+	line := commandLineMark + name
+	if kind := sanitizeLine(cmd.Kind); kind != "" {
+		line += " (" + kind + ")"
+	}
+	t.addNote(line, now)
+}
+
+func (m *Model) addCommandLine(cmd *agent.ExpandedCommand) { m.main.addCommandLine(cmd, m.now()) }
+
 // addPlan puts the plan cursor proposed into the transcript as a note block,
 // which is why the card itself only has to carry the three answers.
 func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {

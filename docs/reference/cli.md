@@ -26,6 +26,7 @@ flags; see [craze prompt](#craze-prompt).
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic on stderr, not an error; ignored (with a diagnostic) on Grok |
 
 `--ask` and `--plan` are mutually exclusive.
 
@@ -66,6 +67,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--no-force` | Disable yolo and handle permission requests |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic on stderr, not an error; ignored (with a diagnostic) on Grok |
 | `--json` | Write only JSON events to stdout |
 
 Without `--json`, only the **main session's** assistant text is written to
@@ -98,6 +100,7 @@ stderr if it is still going after that.
 | `text` | Assistant reply chunk; `agent` names the sub-agent when the chunk belongs to one |
 | `thought` | Reasoning chunk; `agent` as on `text` |
 | `user` | A chunk of a sub-agent's prompt (with `agent`), or a Grok interjection on the main session (with `"interjection":true`) |
+| `command` | A plugin command or skill craze expanded into the prompt |
 | `queue` | One change to craze's own message queue |
 | `foreign_turn` | A turn the agent started without a craze prompt, bracketed |
 | `tool` | Tool call create/update, merged by id; `agent` as on `text`; a sub-agent tool also carries `task` |
@@ -122,6 +125,16 @@ lines come from its own lifecycle notifications; cursor
 sends none, so craze synthesizes the same lines from the `cursor/task`
 receipt. `tool.task` carries `description`, `model`, `agentId`, `durationMs`
 and `status` (`running`, `completed`, `failed`, `cancelled`).
+
+`command` is one plugin command or skill craze found on disk and expanded
+into the prompt (see [Slash commands](tui.md#slash-commands)):
+`{"type":"command","name":"watch-pr","qualified":"git-commands:watch-pr",
+"plugin":"git-commands","kind":"command","path":"/home/…/watch-pr.md",
+"text":"…"}`. `name` is the entry's own name and `qualified` its
+`plugin:name` spelling — the same row under two names when the bare one was
+free; `text` is the block exactly as it went out on the wire, the only way a
+headless caller can see what the agent was actually given. Plain mode
+prints none of this.
 
 `queue` is `{"type":"queue","event":"queued|edited|removed|sent","id":"q-1",
 "position":0,"version":0,"text":"…"}`. `position` is the row's index **when

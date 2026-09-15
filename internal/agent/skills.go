@@ -155,20 +155,14 @@ func isCursorPlugins(path string) bool {
 // malformed.
 func parseSkillMarkdown(path string, data []byte, nameFromDir bool) (name, desc string, invocable bool, err error) {
 	text := strings.TrimPrefix(string(data), "\ufeff")
+	fm, _, hasFrontmatter, err := splitFrontmatter(text)
+	if err != nil {
+		return "", "", false, err
+	}
 	invocable = true
 	var fmName string
-	hasFrontmatter := false
-	if strings.HasPrefix(text, "---") {
-		first, rest, found := strings.Cut(text, "\n")
-		first = strings.TrimSuffix(first, "\r")
-		if first == "---" && found {
-			fm, ok := cutFrontmatter(rest)
-			if !ok {
-				return "", "", false, fmt.Errorf("unclosed frontmatter")
-			}
-			hasFrontmatter = true
-			fmName, desc, invocable = parseFrontmatterLines(fm)
-		}
+	if hasFrontmatter {
+		fmName, desc, invocable = parseFrontmatterLines(fm)
 	}
 	// The directory basename wins outright when nameFromDir is set, and by
 	// default whenever the frontmatter gave no name at all.
@@ -232,6 +226,29 @@ func trimLine(s string) string {
 	return strings.TrimSpace(strings.TrimSuffix(s, "\r"))
 }
 
+// splitFrontmatter cuts a markdown file into its frontmatter block and the body
+// after it. hadFrontmatter is false when the file does not open with a "---"
+// line of its own; an opened but unclosed block is an error. Every reader of a
+// SKILL.md or a plugin command shares this rule, so the delimiter is decided
+// here once rather than per parser.
+func splitFrontmatter(text string) (fm, body string, hadFrontmatter bool, err error) {
+	if !strings.HasPrefix(text, "---") {
+		return "", text, false, nil
+	}
+	first, rest, found := strings.Cut(text, "\n")
+	if !found || strings.TrimSuffix(first, "\r") != "---" {
+		return "", text, false, nil
+	}
+	fm, ok := cutFrontmatter(rest)
+	if !ok {
+		return "", "", false, fmt.Errorf("unclosed frontmatter")
+	}
+	// rest[len(fm):] starts at the closing "---" line; the body is what
+	// follows it.
+	_, body, _ = strings.Cut(rest[len(fm):], "\n")
+	return fm, body, true, nil
+}
+
 func cutFrontmatter(rest string) (string, bool) {
 	offset := 0
 	remaining := rest
@@ -261,9 +278,10 @@ func cutFrontmatter(rest string) (string, bool) {
 // they show.
 func parseFrontmatterLines(fm string) (name, desc string, invocable bool) {
 	invocable = true
-	for _, raw := range strings.Split(fm, "\n") {
-		raw = strings.TrimSuffix(raw, "\r")
-		if raw != strings.TrimLeft(raw, " \t") {
+	lines := strings.Split(fm, "\n")
+	for i := 0; i < len(lines); i++ {
+		raw := strings.TrimSuffix(lines[i], "\r")
+		if !topLevel(raw) {
 			continue
 		}
 		line := trimLine(raw)
@@ -275,17 +293,72 @@ func parseFrontmatterLines(fm string) (name, desc string, invocable bool) {
 			continue
 		}
 		key = strings.ToLower(unquoteScalar(strings.TrimSpace(key)))
-		val = unquoteScalar(strings.TrimSpace(val))
+		// The block markers are read off the value before its quotes come
+		// off: `description: ">"` is a one-character description, and taking
+		// it for a folded scalar would swallow the lines under it.
+		marker := strings.TrimSpace(val)
+		val = unquoteScalar(marker)
 		switch key {
 		case "name":
 			name = strings.TrimSpace(val)
 		case "description":
+			if block, used, ok := blockScalar(marker, lines[i+1:]); ok {
+				desc = block
+				i += used
+				continue
+			}
 			desc = val
 		case "user-invocable", "user_invocable":
 			invocable = !isFalsyScalar(val)
 		}
 	}
 	return name, desc, invocable
+}
+
+// blockScalar is YAML's folded and literal scalars, read for the one key that
+// needs them. Six of the plugin entries cached on a real machine write
+// `description: >-` with the text indented underneath, and without this those
+// rows would show the two characters ">-" as their whole description.
+//
+// It is deliberately narrow: only the four markers below, only for a value that
+// is nothing else, and only up to the first line back at the key's own
+// indentation. ">" forms join with a single space and "|" forms with newlines,
+// which is what the two markers mean; the chomping indicators are read but have
+// nothing to chomp, since the blank lines are dropped either way. used is how
+// many following lines the block consumed.
+func blockScalar(val string, rest []string) (block string, used int, ok bool) {
+	var sep string
+	switch val {
+	case ">", ">-":
+		sep = " "
+	case "|", "|-":
+		sep = "\n"
+	default:
+		return "", 0, false
+	}
+	var parts []string
+	for _, raw := range rest {
+		raw = strings.TrimSuffix(raw, "\r")
+		trimmed := strings.TrimSpace(raw)
+		// A line at the key's indentation (top level here) ends the block; a
+		// blank one belongs to it and contributes nothing.
+		if trimmed != "" && topLevel(raw) {
+			break
+		}
+		used++
+		if trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, sep), used, true
+}
+
+// topLevel reports that a frontmatter line carries no indentation, which is
+// what makes it the document's own key rather than part of a nested block.
+// Both halves of the reader — the key loop and the block scalar that has to
+// know where its block ends — turn on this one predicate.
+func topLevel(raw string) bool {
+	return raw == strings.TrimLeft(raw, " \t")
 }
 
 // isFalsyScalar is user-invocable's own value grammar: false or no,

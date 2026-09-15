@@ -49,15 +49,28 @@ type jsonLineEvent struct {
 	m   map[string]any
 }
 
-// runPromptJSON runs one headless turn against a fake script and returns each
-// NDJSON line with its decoded form, so assertions can use the bytes craze
-// actually wrote.
-func isolateProviderConfig(t *testing.T) {
+// isolateHome points HOME at an empty directory. The plugin scan walks the
+// caches under it at session start, so a run that skipped this would find
+// whatever the developer happens to have installed. It is separate from
+// isolateRunEnv because a test that wants its own provider or config still
+// wants this.
+func isolateHome(t *testing.T) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+}
+
+// isolateRunEnv is everything a headless run reads out of the environment
+// before it reaches the agent: HOME, the provider override and the config file.
+func isolateRunEnv(t *testing.T) {
+	t.Helper()
+	isolateHome(t)
 	t.Setenv("CRAZE_PROVIDER", "")
 	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
 }
 
+// runPromptJSON runs one headless turn against a fake script and returns each
+// NDJSON line with its decoded form, so assertions can use the bytes craze
+// actually wrote.
 func runPromptJSON(t *testing.T, script string) []jsonLineEvent {
 	t.Helper()
 	return runPromptJSONArgs(t, script, nil, "go")
@@ -65,7 +78,14 @@ func runPromptJSON(t *testing.T, script string) []jsonLineEvent {
 
 func runPromptJSONArgs(t *testing.T, script string, extra []string, text string) []jsonLineEvent {
 	t.Helper()
-	isolateProviderConfig(t)
+	return parseJSONLines(t, runPromptStdout(t, script, append([]string{"--json"}, extra...), text))
+}
+
+// runPromptStdout is one headless turn's stdout, whatever mode it ran in. The
+// plain-mode tests take it raw; the JSON ones parse it.
+func runPromptStdout(t *testing.T, script string, extra []string, text string) string {
+	t.Helper()
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", script)
@@ -74,13 +94,13 @@ func runPromptJSONArgs(t *testing.T, script string, extra []string, text string)
 	cmd.SetIn(&bytes.Buffer{})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	args := append([]string{"prompt", "--json", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir()}, extra...)
+	args := append([]string{"prompt", "--agent-bin", fakeAgentPath(t), "--workspace", t.TempDir()}, extra...)
 	args = append(args, text)
 	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("prompt: %v\nstderr: %s", err, stderr.String())
 	}
-	return parseJSONLines(t, stdout.String())
+	return stdout.String()
 }
 
 func parseJSONLines(t *testing.T, stdout string) []jsonLineEvent {
@@ -217,7 +237,7 @@ func TestPromptJSONTitle(t *testing.T) {
 }
 
 func TestPromptJSONGrokAsk(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-ask")
@@ -327,7 +347,7 @@ func TestPromptJSONGrokSubagentFollowUp(t *testing.T) {
 }
 
 func TestPromptJSONGrokSubagentCancel(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-subagent-cancel")
@@ -355,7 +375,7 @@ func TestPromptJSONGrokSubagentCancel(t *testing.T) {
 }
 
 func TestPromptPlainExcludesChildText(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-subagent")
@@ -380,4 +400,95 @@ func TestPromptPlainExcludesChildText(t *testing.T) {
 func fmtString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// pluginFixture lays out a plugin under a temp directory and returns its root,
+// so a headless run can be given a --plugin-dir that holds exactly what the
+// test is about.
+func pluginFixture(t *testing.T, plugin string, files map[string]string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), plugin)
+	for rel, body := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestPromptJSONPluginCommand is the command line a headless caller reads: the
+// bare name and the qualified one side by side — two plugins ship gauntlet
+// here, so the row is only reachable qualified — and the block as it was sent.
+func TestPromptJSONPluginCommand(t *testing.T) {
+	forge := pluginFixture(t, "forge", map[string]string{
+		"commands/gauntlet.md": "---\ndescription: the forge one\n---\nRun the gauntlet on $ARGUMENTS.\n",
+	})
+	flows := pluginFixture(t, "flows", map[string]string{
+		"commands/gauntlet.md": "---\ndescription: the flows one\n---\nSomething else.\n",
+	})
+	evs := runPromptJSONArgs(t, "echo", []string{"--plugin-dir", forge, "--plugin-dir", flows}, "/forge:gauntlet craze")
+	got := pick(t, evs, "command", nil)
+	prefix := `{"type":"command","name":"gauntlet","qualified":"forge:gauntlet","plugin":"forge","kind":"command","path":"` +
+		filepath.Join(forge, "commands", "gauntlet.md") + `","text":"The user invoked /forge:gauntlet craze `
+	if !strings.HasPrefix(got.raw, prefix) {
+		t.Fatalf("line\n got %s\nwant it to start %s", got.raw, prefix)
+	}
+	wantContains(t, got, `Run the gauntlet on craze.`)
+	// The flows entry was never invoked, so it has no line.
+	for _, ev := range evs {
+		if ev.m["type"] == "command" && ev.m["plugin"] != "forge" {
+			t.Fatalf("unexpected command line %s", ev.raw)
+		}
+	}
+	// The echo is the draft, then a newline, then the block that went with it.
+	var text strings.Builder
+	for _, ev := range evs {
+		if ev.m["type"] == "text" {
+			text.WriteString(fmtString(ev.m["text"]))
+		}
+	}
+	if !strings.HasPrefix(text.String(), "echo: /forge:gauntlet craze\nThe user invoked ") {
+		t.Fatalf("echo %q", text.String())
+	}
+}
+
+// TestPromptJSONUnknownSlashHasNoCommandLine: a name craze did not resolve is
+// the agent's own, and nothing about it is craze's to report.
+func TestPromptJSONUnknownSlashHasNoCommandLine(t *testing.T) {
+	dir := pluginFixture(t, "probe-plugin", map[string]string{
+		"commands/probe-echo.md": "---\ndescription: probe\n---\nSay PROBE.\n",
+	})
+	evs := runPromptJSONArgs(t, "echo", []string{"--plugin-dir", dir}, "/nope banana")
+	for _, ev := range evs {
+		if ev.m["type"] == "command" {
+			t.Fatalf("unknown name reported %s", ev.raw)
+		}
+	}
+	got := pick(t, evs, "text", func(m map[string]any) bool { return strings.Contains(fmtString(m["text"]), "nope") })
+	if fmtString(got.m["text"]) != "/nope banana" {
+		t.Fatalf("echo %s", got.raw)
+	}
+}
+
+// TestPromptPlainSaysNothingAboutCommands: plain mode is the agent's text and
+// nothing else, expansion included.
+func TestPromptPlainSaysNothingAboutCommands(t *testing.T) {
+	dir := pluginFixture(t, "probe-plugin", map[string]string{
+		"commands/probe-echo.md": "---\ndescription: probe\n---\nSay PROBE-COMMAND-EXPANDED args=[$ARGUMENTS].\n",
+	})
+	got := runPromptStdout(t, "echo", []string{"--plugin-dir", dir}, "/probe-plugin:probe-echo banana")
+	if strings.Contains(got, `"type":"command"`) {
+		t.Fatalf("plain mode wrote an event line: %q", got)
+	}
+	// The expansion still happened; it is only craze's own line that is absent.
+	if !strings.HasPrefix(got, "echo: /probe-plugin:probe-echo banana\nThe user invoked ") {
+		t.Fatalf("plain output %q", got)
+	}
+	if !strings.Contains(got, "PROBE-COMMAND-EXPANDED args=[banana]") {
+		t.Fatalf("plain output %q", got)
+	}
 }

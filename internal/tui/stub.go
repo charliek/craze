@@ -12,11 +12,18 @@ import (
 // Stub is an in-process Session used by TUI chrome tests. It echoes each
 // prompt as assistant text and does not spawn cursor-agent.
 type Stub struct {
-	mu         sync.Mutex
-	events     chan agent.Event
-	closed     chan struct{}
-	cancel     chan struct{}
-	hang       bool
+	mu     sync.Mutex
+	events chan agent.Event
+	closed chan struct{}
+	cancel chan struct{}
+	hang   bool
+	// park is the live session's catalog wait (§3.3): a prompt held back
+	// before any of the turn's bookkeeping, which a Cancel ends by handing it
+	// agent.ErrPromptCancelled. parked is the barrier that prompt closes on
+	// its way into the wait, so a test can be sure the Cancel it sends next
+	// lands on a parked prompt and not ahead of one.
+	park       bool
+	parked     chan struct{}
 	startDelay time.Duration
 	n          int
 	failMode   bool
@@ -127,6 +134,25 @@ func (s *Stub) HangNext() {
 	s.mu.Unlock()
 }
 
+// ParkNext makes the next prompt behave as one the live session holds back for
+// the agent's first command catalog: it opens no turn, emits no event of any
+// kind, and a Cancel while it is parked hands it agent.ErrPromptCancelled.
+// HangNext cannot stand in for it — a hung prompt is a turn on the wire, and
+// what a cancelled wait leaves the UI is an error and nothing else.
+//
+// The channel it returns closes as that prompt goes into the wait. A test that
+// cancels without receiving from it is not testing a cancelled wait at all: the
+// Cancel would buffer its token and the prompt would take it on arrival, which
+// is a queued cancellation and passes whether or not Cancel can reach a prompt
+// that is already parked.
+func (s *Stub) ParkNext() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.park = true
+	s.parked = make(chan struct{})
+	return s.parked
+}
+
 // SetTools replaces Snapshot.Tools (copy-on-write). Tests send EventTool
 // afterwards so the TUI refreshSnap() picks the in-flight set up.
 func (s *Stub) SetTools(tools []agent.ToolEvent) {
@@ -156,6 +182,16 @@ func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.Commands = append([]agent.CommandInfo(nil), cmds...)
+}
+
+// SetPlugins replaces Snapshot.Plugins with an already-resolved list, as the
+// live session does at Start and again on every available_commands_update.
+// Tests build it through agent.ResolvePluginNames so the naming rule under test
+// is the one the session applies.
+func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Plugins = append([]agent.PluginCommand(nil), plugins...)
 }
 
 // SetTitle replaces Snapshot.Title.
@@ -210,6 +246,29 @@ func (s *Stub) Start(context.Context) error {
 func (s *Stub) Events() <-chan agent.Event { return s.events }
 
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
+	s.mu.Lock()
+	park, parked := s.park, s.parked
+	s.park, s.parked = false, nil
+	s.mu.Unlock()
+	if park {
+		// Before the bookkeeping, where the live session's wait also sits:
+		// nothing has been claimed, so the cancelled ending is the whole of
+		// what this prompt leaves behind.
+		if parked != nil {
+			// The barrier goes down one statement short of the select, which
+			// is as close as Go gets. The gap is not observable: s.cancel is
+			// buffered, so a Cancel that lands in it is taken by this select
+			// the moment it runs — and it is this prompt that takes it, which
+			// is the whole of what the barrier promises.
+			close(parked)
+		}
+		select {
+		case <-s.cancel:
+		case <-s.closed:
+		case <-ctx.Done():
+		}
+		return agent.Result{}, agent.ErrPromptCancelled
+	}
 	s.mu.Lock()
 	// One prompt at a time, as the live session has it: without the guard a
 	// second prompt's deferred clear would report the first one's turn over
@@ -402,6 +461,7 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Models = append([]agent.ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
+	out.Plugins = append([]agent.PluginCommand(nil), s.snap.Plugins...)
 	out.Config = cloneStubConfig(s.snap.Config)
 	out.Todos = append([]agent.Todo(nil), s.snap.Todos...)
 	out.Tools = cloneStubTools(s.snap.Tools)

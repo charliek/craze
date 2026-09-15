@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -641,5 +643,210 @@ func TestSetConfigJSONShape(t *testing.T) {
 	}
 	if m["configId"] != "effort" || m["sessionId"] != "s1" {
 		t.Fatalf("wire %s", params)
+	}
+}
+
+// startPromptBlocks sends a multi-block prompt on its own goroutine and hands
+// back the request the client wrote, so a test can read the exact bytes.
+func startPromptBlocks(t *testing.T, p *rawPipe, blocks []ContentBlock, accepted func()) (<-chan struct {
+	res *PromptResult
+	err error
+}, *Message) {
+	t.Helper()
+	done := make(chan struct {
+		res *PromptResult
+		err error
+	}, 1)
+	go func() {
+		res, err := p.client.PromptBlocks(context.Background(), blocks, accepted)
+		done <- struct {
+			res *PromptResult
+			err error
+		}{res, err}
+	}()
+	req := p.readWithin(t, 3*time.Second, "session/prompt")
+	if req.Method != MethodSessionPrompt {
+		t.Fatalf("method %q", req.Method)
+	}
+	return done, req
+}
+
+// TestPromptBlocksSendsEveryBlockInOrder is the wire shape the whole plugin
+// expansion rests on: the draft first and craze's own blocks after it, in one
+// session/prompt.
+func TestPromptBlocksSendsEveryBlockInOrder(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	blocks := []ContentBlock{
+		{Type: "text", Text: "/watch-pr 12"},
+		{Type: "text", Text: "block one"},
+		{Type: "text", Text: "block two"},
+	}
+	done, req := startPromptBlocks(t, p, blocks, nil)
+	want := `{"sessionId":"s1","prompt":[` +
+		`{"type":"text","text":"/watch-pr 12"},` +
+		`{"type":"text","text":"block one"},` +
+		`{"type":"text","text":"block two"}]}`
+	if string(req.Params) != want {
+		t.Fatalf("params\n got %s\nwant %s", req.Params, want)
+	}
+	// The correlation text grok reads is block 1 and nothing else.
+	p.client.mu.Lock()
+	got := p.client.promptText
+	p.client.mu.Unlock()
+	if got != "/watch-pr 12" {
+		t.Fatalf("promptText %q", got)
+	}
+	replyPrompt(t, p, req.ID, StopEndTurn)
+	if out := <-done; out.err != nil {
+		t.Fatal(out.err)
+	}
+}
+
+// TestPromptSendsOneBlock pins that the one-argument wrapper is exactly what it
+// always was: one text block, nothing else on the wire.
+func TestPromptSendsOneBlock(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.client.Prompt(context.Background(), "hello")
+		done <- err
+	}()
+	req := p.readWithin(t, 3*time.Second, "session/prompt")
+	if want := `{"sessionId":"s1","prompt":[{"type":"text","text":"hello"}]}`; string(req.Params) != want {
+		t.Fatalf("params\n got %s\nwant %s", req.Params, want)
+	}
+	replyPrompt(t, p, req.ID, StopEndTurn)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPromptBlocksHookRunsBeforeTheRequest pins the ordering the command events
+// depend on: the hook has already run when the request reaches the agent, so
+// nothing the turn produces can precede what the hook emitted. The two are
+// stamped from one counter rather than merely both observed, so an
+// implementation that wrote the request first would fail here even if the
+// transport happened to hold the bytes.
+func TestPromptBlocksHookRunsBeforeTheRequest(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	var order atomic.Int32
+	hookAt, reqAt := make(chan int32, 1), make(chan int32, 1)
+	reqCh := make(chan *Message, 1)
+	go func() {
+		msg, err := p.dec.ReadMessage()
+		if err != nil {
+			return
+		}
+		reqAt <- order.Add(1)
+		reqCh <- msg
+	}()
+	done := make(chan error, 1)
+	go func() {
+		blocks := []ContentBlock{{Type: "text", Text: "draft"}, {Type: "text", Text: "block"}}
+		_, err := p.client.PromptBlocks(context.Background(), blocks, func() { hookAt <- order.Add(1) })
+		done <- err
+	}()
+	var hook, req int32
+	select {
+	case hook = <-hookAt:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook never ran")
+	}
+	select {
+	case req = <-reqAt:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the request never reached the agent")
+	}
+	if hook >= req {
+		t.Fatalf("hook ran %d, request %d: the hook must come first", hook, req)
+	}
+	replyPrompt(t, p, (<-reqCh).ID, StopEndTurn)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPromptBlocksCopiesTheCallersBlocks: the hook hands control back to the
+// caller for a moment, and a caller that rewrote its slice there must not
+// change what goes out — or make promptText disagree with block 1.
+func TestPromptBlocksCopiesTheCallersBlocks(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	blocks := []ContentBlock{{Type: "text", Text: "draft"}, {Type: "text", Text: "block"}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.client.PromptBlocks(context.Background(), blocks, func() {
+			blocks[0] = ContentBlock{Type: "text", Text: "rewritten"}
+			blocks[1] = ContentBlock{Type: "text", Text: "rewritten too"}
+		})
+		done <- err
+	}()
+	req := p.readWithin(t, 3*time.Second, "session/prompt")
+	var params PromptParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if len(params.Prompt) != 2 || params.Prompt[0].Text != "draft" || params.Prompt[1].Text != "block" {
+		t.Fatalf("sent %+v, want the blocks as they were passed", params.Prompt)
+	}
+	replyPrompt(t, p, req.ID, StopEndTurn)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPromptBlocksRefusesAnEmptyPrompt: nothing to say is not a turn, and
+// opening one would fire the hook and leave the session in flight over a
+// request carrying "prompt": null.
+func TestPromptBlocksRefusesAnEmptyPrompt(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	ran := false
+	if _, err := p.client.PromptBlocks(context.Background(), nil, func() { ran = true }); err == nil {
+		t.Fatal("an empty prompt was accepted")
+	}
+	if ran {
+		t.Fatal("the hook ran on an empty prompt")
+	}
+	p.client.mu.Lock()
+	inFlight := p.client.inPrompt
+	p.client.mu.Unlock()
+	if inFlight {
+		t.Fatal("an empty prompt opened a turn")
+	}
+}
+
+// TestPromptBlocksHookSkippedOnRefusal: a prompt the client refuses never
+// reached the wire, so nothing happened and nothing may be reported.
+func TestPromptBlocksHookSkippedOnRefusal(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	ran := false
+	hook := func() { ran = true }
+
+	done, req := startPromptBlocks(t, p, []ContentBlock{{Type: "text", Text: "first"}}, nil)
+	if _, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "second"}}, hook); !errors.Is(err, ErrPromptInFlight) {
+		t.Fatalf("second prompt: %v", err)
+	}
+	if ran {
+		t.Fatal("the hook ran on ErrPromptInFlight")
+	}
+	replyPrompt(t, p, req.ID, StopEndTurn)
+	if out := <-done; out.err != nil {
+		t.Fatal(out.err)
+	}
+
+	// A turn the agent started for itself refuses the same way.
+	p.client.mu.Lock()
+	p.client.foreignID = "interject-fallback-1"
+	p.client.mu.Unlock()
+	if _, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "third"}}, hook); !errors.Is(err, ErrForeignTurn) {
+		t.Fatalf("prompt during a foreign turn: %v", err)
+	}
+	if ran {
+		t.Fatal("the hook ran on ErrForeignTurn")
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -654,6 +655,41 @@ func TestConsecutiveUserChunksMerge(t *testing.T) {
 	}
 	if len(users) != 1 || users[0] != "List the files in the current directory." {
 		t.Fatalf("user entries %q", users)
+	}
+}
+
+// TestChildCommandLineLandsInTheChildTranscript: nothing emits an expansion
+// against a child today — craze expands its own prompts, and those are the main
+// session's — but one that arrived would belong to the child's transcript for
+// the same reason its user block does, and dropping it silently is the one
+// thing a sub-agent view must not do with an event it was handed.
+func TestChildCommandLineLandsInTheChildTranscript(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventCommand, Agent: "task-1", Command: &agent.ExpandedCommand{
+		PluginCommand: agent.PluginCommand{
+			Plugin: "probe-plugin", Bare: "probe-echo",
+			Display: "probe-echo", Qualified: "probe-plugin:probe-echo",
+			Kind: agent.PluginKindCommand,
+		},
+		Text: "the block, which the transcript never shows",
+	}}})
+	m = tm.(Model)
+	var notes []string
+	for _, e := range m.subs["task-1"].entries {
+		if e.kind == entryNote {
+			notes = append(notes, e.text)
+		}
+	}
+	if !slices.Contains(notes, "⤷ probe-plugin:probe-echo (command)") {
+		t.Fatalf("child notes %q", notes)
+	}
+	// The main transcript is not where a child's event goes.
+	for _, e := range m.main.entries {
+		if strings.Contains(e.text, "probe-plugin") {
+			t.Fatalf("the child's line reached the main transcript: %q", e.text)
+		}
 	}
 }
 

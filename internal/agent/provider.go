@@ -65,6 +65,10 @@ type Provider struct {
 	capabilities Capabilities
 	dialect      acp.DialectID
 	skillScan    SkillScan
+	// pluginScan is the plugin content the provider's own loader would find.
+	// Zero means the provider needs none: grok advertises its plugin skills
+	// over ACP and expands them itself.
+	pluginScan PluginScan
 	// fallbackModes are injected when session/new advertises no modes
 	// (grok omits availableModes but accepts set_mode for these ids).
 	fallbackModes []ModeInfo
@@ -200,6 +204,10 @@ func CursorProvider() Provider {
 			SkipCursorPlugins: true,
 			NameFromDir:       true,
 		},
+		// cursor-agent's ACP server builds its catalog without a plugins
+		// service and never expands a plugin command, so everything a plugin
+		// ships has to be found — and later expanded — by craze itself.
+		pluginScan: PluginScan{Dirs: true, CursorCache: true, ClaudePlugins: true},
 	}
 }
 
@@ -329,6 +337,10 @@ func (p Provider) SkillScan() SkillScan {
 		NameFromDir:       p.skillScan.NameFromDir,
 	}
 }
+
+// PluginScan is where the provider's plugin commands and skills come from. The
+// value holds no slices, so returning it is the whole of the clone.
+func (p Provider) PluginScan() PluginScan { return p.pluginScan }
 
 // ModeKind is what this provider's mode id means; an id it does not know is
 // ModeUnknown.

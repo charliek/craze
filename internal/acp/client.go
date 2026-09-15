@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"sync"
@@ -295,7 +296,30 @@ func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
 	c.mu.Unlock()
 }
 
+// Prompt sends one text block: the draft, exactly as the user typed it.
 func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error) {
+	return c.PromptBlocks(ctx, []ContentBlock{{Type: "text", Text: text}}, nil)
+}
+
+// PromptBlocks sends one session/prompt carrying every block, in order, and
+// blocks on the RPC for the whole turn while agent updates stream on the
+// reader goroutine. Block 1 is the draft; the blocks after it are craze's own
+// plugin expansions, which cursor reads in order like any other block.
+//
+// accepted runs once the prompt is craze's to send — after the in-flight and
+// foreign-turn checks have passed and the turn has been opened — and before
+// the request is written, so whatever it emits precedes the turn's first agent
+// update. It never runs on a refusal: nothing reached the wire, so nothing
+// happened.
+func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accepted func()) (*PromptResult, error) {
+	if len(blocks) == 0 {
+		return nil, errors.New("acp: prompt has no content")
+	}
+	// The caller's slice is its own from here: accepted hands control back to
+	// it for a moment, and a prompt whose blocks changed between the text
+	// correlation below and the marshal would send one thing and remember
+	// another.
+	blocks = append([]ContentBlock(nil), blocks...)
 	c.mu.Lock()
 	if c.inPrompt {
 		c.mu.Unlock()
@@ -315,7 +339,9 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 	// The new turn's identity is not known yet: queue/changed teaches it, and
 	// until then nothing the last turn learned may speak for this one.
 	c.promptID = ""
-	c.promptText = text
+	// Block 1 and nothing else: grok's queue correlation compares this against
+	// the text the user typed, which is all block 1 ever holds.
+	c.promptText = firstBlockText(blocks)
 	c.foreignSeen = false
 	sid := c.sessionID
 	dialect := c.dialect
@@ -331,9 +357,15 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		c.mu.Unlock()
 	}()
 
+	// The turn is open and nothing can refuse it any more: the hook runs here,
+	// one step before the bytes go out.
+	if accepted != nil {
+		accepted()
+	}
+
 	params := PromptParams{
 		SessionID: sid,
-		Prompt:    []ContentBlock{{Type: "text", Text: text}},
+		Prompt:    blocks,
 	}
 	if dialect != DialectGrok {
 		var result PromptResult
@@ -373,6 +405,15 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 		go func() { <-rpcCh }()
 		return nil, ctx.Err()
 	}
+}
+
+// firstBlockText is the draft out of a prompt's blocks: block 1 when it is
+// text, and "" for the empty prompt nobody sends.
+func firstBlockText(blocks []ContentBlock) string {
+	if len(blocks) == 0 || blocks[0].Type != "text" {
+		return ""
+	}
+	return blocks[0].Text
 }
 
 func promptResultOrErr(w promptResult) (*PromptResult, error) {

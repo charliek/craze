@@ -169,6 +169,7 @@ func TestPromptPersistsProviderAfterStart(t *testing.T) {
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_PROVIDER", "")
+	isolateHome(t)
 	cfg := filepath.Join(t.TempDir(), "config.toml")
 	t.Setenv("CRAZE_CONFIG", cfg)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-echo")
@@ -188,6 +189,7 @@ func TestPromptPersistsProviderAfterStart(t *testing.T) {
 
 func TestPromptDoesNotPersistFallback(t *testing.T) {
 	t.Setenv("CRAZE_PROVIDER", "codex")
+	isolateHome(t)
 	cfg := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(cfg, []byte("theme = \"gruvbox\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -213,6 +215,7 @@ func TestPromptDoesNotPersistFallback(t *testing.T) {
 
 func TestPromptDoesNotPersistFailedStart(t *testing.T) {
 	t.Setenv("CRAZE_PROVIDER", "")
+	isolateHome(t)
 	cfg := filepath.Join(t.TempDir(), "config.toml")
 	t.Setenv("CRAZE_CONFIG", cfg)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "authfail")

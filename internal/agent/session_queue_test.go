@@ -21,6 +21,34 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// foreignTurnCounts is how many foreign turns the log says started and ended.
+// Both are read from the same snapshot, so a turn cannot be counted as having
+// ended in a pass that never saw it start.
+func foreignTurnCounts(evs []Event) (started, ended int) {
+	for _, ev := range evs {
+		if ev.Type != EventForeignTurn || ev.ForeignTurn == nil {
+			continue
+		}
+		if ev.ForeignTurn.Running {
+			started++
+		} else {
+			ended++
+		}
+	}
+	return started, ended
+}
+
+// countType is how many events of one type the log holds.
+func countType(evs []Event, typ EventType) int {
+	n := 0
+	for _, ev := range evs {
+		if ev.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
 func queueEvents(evs []Event) []Event {
 	out := make([]Event, 0, len(evs))
 	for _, ev := range evs {
@@ -122,27 +150,24 @@ func TestPopQueueRefusesDuringAForeignTurn(t *testing.T) {
 	}
 	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 
-	var started, ended int
-	for _, ev := range log.snapshot() {
-		if ev.Type != EventForeignTurn || ev.ForeignTurn == nil {
-			continue
-		}
-		if ev.ForeignTurn.Running {
-			started++
-		} else {
-			ended++
-		}
-	}
+	// The snapshot flag is not the sync point for anything read out of the
+	// log. onForeignTurn flips s.foreign under the lock and emits only after
+	// unlocking, and emit merely buffers — the collector appends later still.
+	// So the wait above returns in a window where the end event has not been
+	// emitted at all, and counting there reads one event short. The log is
+	// what the assertions are about, so the log is what they wait on.
+	waitUntil(t, "the foreign turn's end event", func() bool {
+		_, ended := foreignTurnCounts(log.snapshot())
+		return ended > 0
+	})
+	started, ended := foreignTurnCounts(log.snapshot())
 	if started != 1 || ended != 1 {
 		t.Fatalf("foreign turn events: %d started, %d ended", started, ended)
 	}
-	var dones int
-	for _, ev := range log.snapshot() {
-		if ev.Type == EventDone {
-			dones++
-		}
-	}
-	if dones != 1 {
+	// Same shape: <-done says Prompt returned, which says EventDone was
+	// emitted — not that the collector has appended it.
+	waitUntil(t, "the turn's done event", func() bool { return countType(log.snapshot(), EventDone) > 0 })
+	if dones := countType(log.snapshot(), EventDone); dones != 1 {
 		t.Fatalf("%d EventDone for one craze prompt", dones)
 	}
 	// The queued prompt runs after the fallback, on a session it has let go.
@@ -564,7 +589,15 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 		t.Fatalf("interject: %v", err)
 	}
 	<-done
-	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
+	// The start event, not the snapshot flag: the flag flips before the event
+	// is emitted, so waiting on it would leave the "no error reached the
+	// stream" check below reading a log the collector has not caught up with —
+	// which is a refusal passing for want of evidence rather than on it. The
+	// event is emitted after the flag, so this waits for both.
+	waitUntil(t, "the foreign turn's start event", func() bool {
+		started, _ := foreignTurnCounts(log.snapshot())
+		return started > 0
+	})
 
 	s.mu.Lock()
 	turnBefore := s.turn

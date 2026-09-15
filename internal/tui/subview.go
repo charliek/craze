@@ -200,6 +200,12 @@ func (m *Model) applyChildEvent(ev agent.Event) {
 		tr.appendStream(entryThought, ev.Text, ev.At, m.now())
 	case agent.EventUser:
 		tr.appendStream(entryUser, ev.Text, ev.At, m.now())
+	case agent.EventCommand:
+		// Nothing emits one against a child today — craze expands on its own
+		// prompts and those are the main session's — but a child's expansion
+		// belongs to the child's transcript for the same reason its user
+		// block does, and the alternative is dropping it silently.
+		tr.addCommandLine(ev.Command, m.now())
 	case agent.EventTool:
 		m.refreshSnap()
 		m.noteAgentStart(id)

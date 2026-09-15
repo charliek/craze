@@ -635,6 +635,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The stream is closed by EventDone, which shares the event channel with
 		// the chunks; this message races them and would split a run in two.
 		m.promptEndSeq = m.turnSeq
+		if errors.Is(msg.err, agent.ErrPromptCancelled) {
+			// Esc landed while the prompt was still waiting for the catalog.
+			// Nothing ran and nothing failed, so this is not an error state:
+			// it is the ending a cancelled turn has, and the transcript owes
+			// the row it already drew the same note — Esc leaves nothing else
+			// behind. No event of any kind is coming, so the stream ends here.
+			m.streamEndSeq = m.turnSeq
+			m.addNote(stopCancelled)
+			return m.finishTurn()
+		}
 		if msg.err != nil {
 			// A prompt the session never accepted emits no events at all, so
 			// its stream is over too: waiting for an ending that cannot come
@@ -1581,6 +1591,12 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// write from its own send.
 			m.addInterjection(ev.Text)
 		}
+		return
+	case agent.EventCommand:
+		// It arrives before the request reaches the wire, so the line lands
+		// under the user block craze has already written and above anything
+		// the agent goes on to say.
+		m.addCommandLine(ev.Command)
 		return
 	case agent.EventQueue:
 		// The band draws from the snapshot; nothing else has to happen.

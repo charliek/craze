@@ -22,6 +22,7 @@ import (
 )
 
 func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
+	isolateSkillsHome(t)
 	bin := buildFakeAgent(t)
 	ws := t.TempDir()
 	sess := agent.New(agent.Options{
@@ -91,6 +92,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 }
 
 func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
+	isolateSkillsHome(t)
 	bin := buildFakeAgent(t)
 	ws := t.TempDir()
 	sess := agent.New(agent.Options{
