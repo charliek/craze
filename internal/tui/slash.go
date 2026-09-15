@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -30,16 +31,46 @@ type slashItem struct {
 	Name, Desc string
 	Builtin    bool
 	Skill      bool
+	// Plugin is the plugin id a row craze owns came from, and Qualified its
+	// plugin:name spelling. Plugin != "" is the whole marker: only those rows
+	// answer to a second spelling in the filter and the accept, so an agent
+	// command whose advertised name happens to hold a colon — grok's
+	// codex:review — stays the single name it has always been.
+	Plugin, Qualified string
 }
 
+// labeledDesc is the description as the row draws it, with what the entry is
+// named after it. A plugin row says which plugin it came from, because the four
+// /rescue commands on a real machine are told apart by nothing else; a disk
+// skill keeps the (skill) it has had since 009. An entry that described itself
+// with nothing still gets the label, which is more than the bare name says.
 func (it slashItem) labeledDesc() string {
-	if !it.Skill {
+	label := ""
+	switch {
+	case it.Plugin != "":
+		label = "(" + it.Plugin + ")"
+	case it.Skill:
+		label = "(skill)"
+	default:
 		return it.Desc
 	}
 	if strings.TrimSpace(it.Desc) == "" {
-		return "(skill)"
+		return label
 	}
-	return it.Desc + " (skill)"
+	return it.Desc + " " + label
+}
+
+// qualifiedAlias is the second spelling a row answers to, or "" when it has
+// none. Only a plugin row has one, and only while its displayed name is the
+// bare one: a row already showing plugin:name is matched by the name buckets,
+// and putting it in the qualified ones too would move it behind every other
+// prefix hit. This is the one place the "answers to two names" rule is spelled
+// out — the filter, the Enter rule and the accept all ask it here.
+func (it slashItem) qualifiedAlias() string {
+	if it.Plugin == "" || it.Qualified == "" || strings.EqualFold(it.Qualified, it.Name) {
+		return ""
+	}
+	return it.Qualified
 }
 
 func builtinSlash() []slashItem {
@@ -86,7 +117,11 @@ func (m Model) slashCatalog() []slashItem {
 	// Provider to answer a bool, and the loop would ask four times.
 	modes, todos := m.showModes(), m.showTodos()
 	builtins := builtinSlash()
-	items := make([]slashItem, 0, len(builtins)+len(m.snap.Commands)+len(m.skills))
+	// An upper bound on the whole catalog: every loop below can only drop
+	// rows. It sizes the row slice and the dedupe map, which holds one key per
+	// row that survives and so grows to the same shape.
+	size := len(builtins) + len(m.snap.Commands) + len(m.snap.Plugins) + len(m.skills)
+	items := make([]slashItem, 0, size)
 	for _, it := range builtins {
 		switch it.Name {
 		case "plan", "ask", "agent":
@@ -100,31 +135,47 @@ func (m Model) slashCatalog() []slashItem {
 		}
 		items = append(items, it)
 	}
-	seen := make(map[string]struct{}, len(items))
+	seen := make(map[string]struct{}, size)
 	for _, it := range items {
 		seen[it.Name] = struct{}{}
 	}
-	for _, c := range m.snap.Commands {
-		n := strings.ToLower(c.Name)
-		if !slashNameOK(c.Name) {
-			continue
+	// add is the one gate every non-builtin source passes: an untypable name
+	// never reaches the menu, and the first source to claim a name keeps it,
+	// case insensitively. Source order is therefore the whole precedence rule.
+	add := func(it slashItem) {
+		if !slashNameOK(it.Name) {
+			return
 		}
+		n := strings.ToLower(it.Name)
 		if _, ok := seen[n]; ok {
-			continue
+			return
 		}
 		seen[n] = struct{}{}
-		items = append(items, slashItem{Name: c.Name, Desc: sanitizeLine(c.Description), Builtin: false})
+		items = append(items, it)
+	}
+	for _, c := range m.snap.Commands {
+		add(slashItem{Name: c.Name, Desc: sanitizeLine(c.Description)})
+	}
+	// Plugin rows sit between what the agent advertised and what the disk
+	// scan found. The agent's own names win because craze expands nothing it
+	// advertised — the resolver has already qualified anything that would
+	// have collided — and a plugin row beats a disk skill of the same name
+	// because only the plugin row says which plugin it came from.
+	for _, p := range m.snap.Plugins {
+		// Both spellings have to be typable, not just the displayed one: the
+		// filter and the accept offer the qualified name too.
+		if !slashNameOK(p.Qualified) || !slashNameOK(p.Plugin) {
+			continue
+		}
+		add(slashItem{
+			Name:      p.Display,
+			Desc:      sanitizeLine(p.Description),
+			Plugin:    sanitizeLine(p.Plugin),
+			Qualified: sanitizeLine(p.Qualified),
+		})
 	}
 	for _, sk := range m.skills {
-		n := strings.ToLower(sk.Name)
-		if !slashNameOK(sk.Name) {
-			continue
-		}
-		if _, ok := seen[n]; ok {
-			continue
-		}
-		seen[n] = struct{}{}
-		items = append(items, slashItem{Name: sk.Name, Desc: sanitizeLine(sk.Desc), Skill: true})
+		add(slashItem{Name: sk.Name, Desc: sanitizeLine(sk.Desc), Skill: true})
 	}
 	return items
 }
@@ -273,10 +324,15 @@ func slashBuiltinsEligible(value string, start int) bool {
 	return !strings.ContainsRune(value, '\n') && strings.TrimSpace(value[:start]) == ""
 }
 
-// filteredSlash is the menu's rows: the eligible catalog, prefix hits first
-// and substring hits after (pin 3), each group in catalog order, case
-// insensitive. No fuzzy matcher and no cap — the band windows onto this list,
-// so the whole catalog stays reachable by scrolling.
+// filteredSlash is the menu's rows: the eligible catalog in four buckets —
+// displayed-name prefix, qualified-only prefix, displayed-name substring,
+// qualified-only substring — each in catalog order, each row in its first
+// bucket only, case insensitive. A row craze does not own has no second
+// spelling, so it can only land in buckets 1 and 3, which is 009's pin 3
+// unchanged. The qualified buckets are what make /git-commands: a query at
+// all: cursor's own name class has no colon, so the spelling exists only
+// because craze resolves it. No fuzzy matcher and no cap — the band windows
+// onto this list, so the whole catalog stays reachable by scrolling.
 func (m Model) filteredSlash() []slashItem {
 	value := m.input.Value()
 	start, _, name, ok := slashToken(value, m.composerCursorOffset())
@@ -285,22 +341,27 @@ func (m Model) filteredSlash() []slashItem {
 	}
 	builtins := slashBuiltinsEligible(value, start)
 	q := strings.ToLower(name)
-	var prefix, sub []slashItem
+	var prefix, qualPrefix, sub, qualSub []slashItem
 	for _, it := range m.slashCatalog() {
 		if it.Builtin && !builtins {
 			continue
 		}
 		n := strings.ToLower(it.Name)
+		qual := strings.ToLower(it.qualifiedAlias())
 		switch {
 		case strings.HasPrefix(n, q):
 			prefix = append(prefix, it)
+		case qual != "" && strings.HasPrefix(qual, q):
+			qualPrefix = append(qualPrefix, it)
 		case q != "" && strings.Contains(n, q):
 			sub = append(sub, it)
+		case q != "" && qual != "" && strings.Contains(qual, q):
+			qualSub = append(qualSub, it)
 		}
 	}
-	// append to a nil prefix with nothing to add still yields nil, which is
-	// the "no matches" the callers test with len().
-	return append(prefix, sub...)
+	// Concat of four empty buckets is nil, which is the "no matches" the
+	// callers test with len().
+	return slices.Concat(prefix, qualPrefix, sub, qualSub)
 }
 
 // slashExactlyTyped is grok-build's Enter rule: a token that already spells the
@@ -315,7 +376,12 @@ func (m Model) slashExactlyTyped() bool {
 	if m.slashSel < 0 || m.slashSel >= len(items) {
 		return false
 	}
-	return strings.EqualFold(name, items[m.slashSel].Name)
+	it := items[m.slashSel]
+	// Either spelling of a plugin row is the row fully typed: both resolve to
+	// the same entry on the wire, so completing one into the other would be
+	// the menu rewriting a name that already works. name is non-empty here, so
+	// a row with no alias cannot match the "" qualifiedAlias returns.
+	return strings.EqualFold(name, it.Name) || strings.EqualFold(name, it.qualifiedAlias())
 }
 
 func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
@@ -474,19 +540,32 @@ func (m Model) acceptSlash(i int) Model {
 		return m
 	}
 	value := m.input.Value()
-	start, end, _, ok := slashToken(value, m.composerCursorOffset())
+	start, end, typed, ok := slashToken(value, m.composerCursorOffset())
 	if !ok {
 		return m
 	}
 	if end < len(value) && value[end] == ' ' {
 		end++
 	}
-	ins := "/" + items[i].Name + " "
+	ins := "/" + slashAcceptName(items[i], typed) + " "
 	next := value[:start] + ins + value[end:]
 	m.input.SetValue(next)
 	m.setComposerCursor(next, start+len(ins))
 	m.slashSel, m.slashTop = 0, 0
 	return m
+}
+
+// slashAcceptName is the spelling an accept writes: the row's displayed name,
+// unless the row is one craze owns and the token already carries a colon. The
+// colon is the user saying "I want the plugin path", and it is the only signal
+// there is — the row means the same entry either way. A row craze does not own
+// always inserts its name, colon or not, so grok's advertised codex:review
+// completes from /codex: exactly as it did before plugins existed.
+func slashAcceptName(it slashItem, typed string) string {
+	if alias := it.qualifiedAlias(); alias != "" && strings.ContainsRune(typed, ':') {
+		return alias
+	}
+	return it.Name
 }
 
 // resetSlash forgets the menu's state along with the draft it belonged to: the

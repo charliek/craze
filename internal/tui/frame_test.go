@@ -306,6 +306,27 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	}
 }
 
+// assertFrameGolden is assertGolden plus the substrings a case names, so a
+// golden diff says the frame changed and the assertions say what about it
+// mattered. An empty name skips the golden, for a frame whose text is
+// machine-specific and can only be asserted on in fragments.
+func assertFrameGolden(t *testing.T, name string, cols, rows int, got string, want, absent []string) {
+	t.Helper()
+	if name != "" {
+		assertGolden(t, name, cols, rows, got)
+	}
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Fatalf("frame is missing %q:\n%s", w, got)
+		}
+	}
+	for _, no := range absent {
+		if strings.Contains(got, no) {
+			t.Fatalf("frame should not contain %q:\n%s", no, got)
+		}
+	}
+}
+
 // echoPrompt is 224 characters, so the stub's "echo: " reply is 230, and opens
 // with a 150-character unbroken token that only a hard wrap can break.
 func echoPrompt() string {
@@ -709,27 +730,66 @@ func runFakeFrameForce(t *testing.T, script string, cols, rows int, keys string,
 
 func runFakeFrameProvider(t *testing.T, script string, cols, rows int, keys string, p agent.Provider, force bool) string {
 	t.Helper()
+	return runFakeFrameOpts(t, script, cols, rows, keys, fakeFrameOpts{provider: p, force: force})
+}
+
+// runFakeFramePlugins is runFakeFrame with --plugin-dir's Options half threaded
+// through. The frame runner builds its session in process, so the CLI flag
+// never runs here: a golden that wants a plugin fixture has to hand the
+// directories to agent.Options itself.
+func runFakeFramePlugins(t *testing.T, script string, cols, rows int, keys string, dirs ...string) string {
+	t.Helper()
+	return runFakeFrameOpts(t, script, cols, rows, keys, fakeFrameOpts{force: true, pluginDirs: dirs})
+}
+
+// fakeFrameOpts is what a golden varies about its session beyond the script and
+// the frame size. It is a struct rather than four more parameters because every
+// wrapper above would otherwise have to grow each one — and so that a case
+// needing a combination no wrapper spells can state it here instead of earning
+// a wrapper of its own.
+type fakeFrameOpts struct {
+	// provider is the ACP dialect; the zero value takes cursor's, which is
+	// what every golden but grok's wants.
+	provider   agent.Provider
+	force      bool
+	freeze     bool
+	pluginDirs []string
+	// timeout is the per-wait timeout; zero takes the 15s the goldens have
+	// always used.
+	timeout time.Duration
+}
+
+func runFakeFrameOpts(t *testing.T, script string, cols, rows int, keys string, o fakeFrameOpts) string {
+	t.Helper()
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
 	ws := frameWorkspace(t)
-	prov := p
+	if o.provider.Name() == "" {
+		o.provider = agent.CursorProvider()
+	}
+	prov := o.provider
 	sess := agent.New(agent.Options{
 		Binary:      bin,
 		ExtraArgs:   []string{"-script=" + script},
 		Workspace:   ws,
-		Force:       force,
+		Force:       o.force,
+		PluginDirs:  o.pluginDirs,
 		Interactive: true,
 		Stderr:      io.Discard,
 		Provider:    &prov,
 	})
+	timeout := o.timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
 	plain, _, err := RunFrameScript(Config{
 		Session:        sess,
 		Theme:          "tokyo-night",
 		Workspace:      ws,
-		Yolo:           force,
-		Provider:       p,
+		Yolo:           o.force,
+		Provider:       prov,
 		ProviderLocked: true,
-	}, cols, rows, keys, FrameOpts{Timeout: 15 * time.Second})
+	}, cols, rows, keys, FrameOpts{Timeout: timeout, Freeze: o.freeze})
 	if err != nil {
 		t.Fatalf("run %s frame: %v", script, err)
 	}
@@ -1488,29 +1548,10 @@ func TestFrameGrokModelDialogHasNoFastRow(t *testing.T) {
 // build is.
 func runFakeFrameFrozen(t *testing.T, script string, cols, rows int, keys string, p agent.Provider) string {
 	t.Helper()
-	bin := buildFakeAgent(t)
-	isolateSkillsHome(t)
-	ws := frameWorkspace(t)
-	prov := p
-	sess := agent.New(agent.Options{
-		Binary:      bin,
-		ExtraArgs:   []string{"-script=" + script},
-		Workspace:   ws,
-		Force:       true,
-		Interactive: true,
-		Stderr:      io.Discard,
-		Provider:    &prov,
+	return runFakeFrameOpts(t, script, cols, rows, keys, fakeFrameOpts{
+		provider: p,
+		force:    true,
+		freeze:   true,
+		timeout:  20 * time.Second,
 	})
-	plain, _, err := RunFrameScript(Config{
-		Session:        sess,
-		Theme:          "tokyo-night",
-		Workspace:      ws,
-		Yolo:           true,
-		Provider:       p,
-		ProviderLocked: true,
-	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second, Freeze: true})
-	if err != nil {
-		t.Fatalf("run %s frame: %v", script, err)
-	}
-	return plain
 }

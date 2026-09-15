@@ -1582,6 +1582,12 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.addInterjection(ev.Text)
 		}
 		return
+	case agent.EventCommand:
+		// It arrives before the request reaches the wire, so the line lands
+		// under the user block craze has already written and above anything
+		// the agent goes on to say.
+		m.addCommandLine(ev.Command)
+		return
 	case agent.EventQueue:
 		// The band draws from the snapshot; nothing else has to happen.
 		m.refreshSnap()

@@ -123,12 +123,20 @@ func grokScript(script string) bool {
 }
 
 // advertiseCommands is the available_commands_update both session/new branches
-// send, in one place so the wire shape has one definition. Every script but one
-// keeps the single `research` entry the older goldens were written against;
-// `commands` swaps in a catalog big enough to overflow the slash menu's window,
-// so the band's columns, its scroll marks and its one-row-per-entry rule all
-// have a golden to stand on.
+// send, in one place so the wire shape has one definition. Most scripts keep
+// the single `research` entry the older goldens were written against; two do
+// not. `commands` swaps in a catalog big enough to overflow the slash menu's
+// window, so the band's columns, its scroll marks and its one-row-per-entry
+// rule all have a golden to stand on, and `nocommands` sends nothing at all.
 func (s *server) advertiseCommands() {
+	if s.script == "nocommands" {
+		// An agent that never advertises a catalog. Plugin rows stay
+		// provisional for the whole session then (plan 010 §3.2), which is the
+		// one state a golden cannot otherwise reach: the update lands the
+		// instant session/new is answered, so "before the catalog" is a race
+		// against the reader goroutine rather than a frame anyone can capture.
+		return
+	}
 	cmds := []acp.AvailableCommand{{Name: "research", Description: "Agent-advertised command"}}
 	if s.script == "commands" {
 		cmds = commandsCatalog()

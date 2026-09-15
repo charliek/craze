@@ -13,6 +13,7 @@ right things in it, and exited the way it says it does".
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -40,6 +41,7 @@ def frame(
     provider: str | None = None,
     freeze: bool = False,
     step: str | None = None,
+    plugin_dirs: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     work = tmp_path / WORKDIR
     work.mkdir(exist_ok=True)
@@ -67,6 +69,8 @@ def frame(
         argv.append("--ansi")
     if provider:
         argv.extend(["--provider", provider])
+    for d in plugin_dirs or []:
+        argv.extend(["--plugin-dir", d])
     if freeze:
         argv.append("--freeze")
     # RunFrameScript isolates HOME itself; this keeps the child agent and the
@@ -935,3 +939,44 @@ def test_frame_queue_drains_in_order(
     assert text.index("❯ Reply with PINEAPPLE") < text.index("❯ Reply with MANGO"), text
     assert "#1 Reply" not in text, text
     assert "⧗ " not in text, text
+
+
+# The probe plugin the Go goldens use, copied into the frame's working
+# directory so the flag under test can name it relatively: `craze frame` has no
+# --workspace, so a relative --plugin-dir resolves against the cwd it runs in.
+PROBE_PLUGIN = Path(__file__).resolve().parent / "fixtures" / "probe-plugin"
+
+
+def test_frame_plugin_dir_expands_a_command(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    work = tmp_path / WORKDIR
+    work.mkdir(exist_ok=True)
+    shutil.copytree(PROBE_PLUGIN, work / "probe-plugin")
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="commands",
+        cols=100,
+        rows=30,
+        # The catalog lands after session/new replies, and a bare plugin name
+        # only resolves once it has: waiting for the entry only `/zulu`
+        # matches is waiting for that update.
+        keys=(
+            "<wait:idle>/zulu<wait:text:zulu-tool>"
+            "<backspace><backspace><backspace><backspace><backspace>"
+            "/probe-echo banana<enter>"
+            "<wait:text:PROBE-COMMAND-EXPANDED args=[banana]><wait:idle>"
+        ),
+        plugin_dirs=["probe-plugin"],
+    )
+    text = "\n".join(frame_lines(proc, 100, 30))
+    assert "❯ /probe-echo banana" in text, text
+    # The provenance line craze writes under the user block, by the qualified
+    # spelling and the kind.
+    assert "⤷ probe-plugin:probe-echo (command)" in text, text
+    # The fake echoes every text block of the prompt, so the reply is proof
+    # that the expansion craze appended went out with the draft.
+    assert "echo: /probe-echo banana" in text, text
+    assert "PROBE-COMMAND-EXPANDED args=[banana]" in text, text

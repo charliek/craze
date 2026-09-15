@@ -13,14 +13,18 @@ import (
 )
 
 type frameOpts struct {
-	cols        int
-	rows        int
-	agentBin    string
-	fakeScript  string
-	keys        string
-	ansi        bool
-	theme       string
-	provider    string
+	cols       int
+	rows       int
+	agentBin   string
+	fakeScript string
+	keys       string
+	ansi       bool
+	theme      string
+	provider   string
+	// pluginDirs are extra plugin roots, as on the root command. There is no
+	// --workspace here, so a relative one is resolved against the cwd the
+	// frame runs in — the same directory the session takes as its workspace.
+	pluginDirs  []string
 	noForce     bool
 	timeout     time.Duration
 	printFrames bool
@@ -45,6 +49,7 @@ func newFrameCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.keys, "keys", "", "key script, e.g. \"go<enter><wait:text:TASKS>\"")
 	cmd.Flags().BoolVar(&o.ansi, "ansi", false, "print the raw frame with a forced true-colour profile")
 	cmd.Flags().StringVar(&o.theme, "theme", "", themeFlagUsage)
+	registerPluginDirFlag(cmd, &o.pluginDirs)
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 10*time.Second, "per-wait timeout")
 	cmd.Flags().BoolVar(&o.printFrames, "print-frames", false, "stream every frame to stderr")
@@ -86,6 +91,7 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		Workspace:   ws,
 		Force:       force,
 		Stderr:      cmd.ErrOrStderr(),
+		PluginDirs:  o.pluginDirs,
 		Interactive: true,
 		Provider:    &prov,
 	})

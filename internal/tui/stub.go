@@ -158,6 +158,16 @@ func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 	s.snap.Commands = append([]agent.CommandInfo(nil), cmds...)
 }
 
+// SetPlugins replaces Snapshot.Plugins with an already-resolved list, as the
+// live session does at Start and again on every available_commands_update.
+// Tests build it through agent.ResolvePluginNames so the naming rule under test
+// is the one the session applies.
+func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Plugins = append([]agent.PluginCommand(nil), plugins...)
+}
+
 // SetTitle replaces Snapshot.Title.
 func (s *Stub) SetTitle(title string) {
 	s.mu.Lock()
@@ -402,6 +412,7 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Models = append([]agent.ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]agent.ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]agent.CommandInfo(nil), s.snap.Commands...)
+	out.Plugins = append([]agent.PluginCommand(nil), s.snap.Plugins...)
 	out.Config = cloneStubConfig(s.snap.Config)
 	out.Todos = append([]agent.Todo(nil), s.snap.Todos...)
 	out.Tools = cloneStubTools(s.snap.Tools)

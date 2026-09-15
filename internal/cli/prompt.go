@@ -86,7 +86,7 @@ func newPromptCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")
-	cmd.Flags().StringArrayVar(&o.pluginDirs, "plugin-dir", nil, "extra plugin directory whose commands and skills craze expands (repeatable)")
+	registerPluginDirFlag(cmd, &o.pluginDirs)
 	cmd.Flags().BoolVar(&o.force, "force", true, "spawn the agent with --force (yolo)")
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().BoolVar(&o.ask, "ask", false, "set session mode to ask after session/new")

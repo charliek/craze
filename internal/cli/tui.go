@@ -20,11 +20,14 @@ type tuiFlags struct {
 	model     string
 	agentBin  string
 	provider  string
-	force     bool
-	noForce   bool
-	noMouse   bool
-	ask       bool
-	plan      bool
+	// pluginDirs are extra plugin roots, cursor-agent's --plugin-dir spelled
+	// the same way. They are craze's own: the child agent is never told.
+	pluginDirs []string
+	force      bool
+	noForce    bool
+	noMouse    bool
+	ask        bool
+	plan       bool
 }
 
 func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
@@ -34,6 +37,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().StringVar(&f.workspace, "workspace", "", "existing workspace directory (default: current directory)")
 	cmd.Flags().StringVar(&f.model, "model", "", "ACP model id")
 	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
+	registerPluginDirFlag(cmd, &f.pluginDirs)
 	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
@@ -84,6 +88,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 			Model:       f.model,
 			Mode:        mode,
 			Stderr:      diag,
+			PluginDirs:  f.pluginDirs,
 			Interactive: true,
 			Provider:    &prov,
 		})
@@ -154,6 +159,14 @@ func (d *deferredStderr) flush(w io.Writer) {
 // themeFlagUsage names the presets once, for both commands that take --theme.
 var themeFlagUsage = "TUI theme: " + strings.Join(tui.ThemeNames(), ", ") +
 	" (default: ~/.craze/config.toml, else " + tui.DefaultTheme + ")"
+
+// registerPluginDirFlag declares --plugin-dir once, for all three commands that
+// start a session. It is a stringArray, not a stringSlice: a plugin path may
+// hold a comma, and repeating the flag is how cursor-agent spells it.
+func registerPluginDirFlag(cmd *cobra.Command, dst *[]string) {
+	cmd.Flags().StringArrayVar(dst, "plugin-dir", nil,
+		"extra plugin directory whose commands and skills craze expands (repeatable)")
+}
 
 // resolveTheme is the pinned precedence: an explicitly passed --theme wins,
 // then the config file, then the default preset. "Explicitly passed" is

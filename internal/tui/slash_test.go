@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -746,6 +747,270 @@ func TestSlashMarkSurvivesTheNarrowestBand(t *testing.T) {
 	}
 	if lipgloss.Width(row) > minFrameCols {
 		t.Fatalf("row is %d cells wide, over the frame's %d: %q", lipgloss.Width(row), minFrameCols, row)
+	}
+}
+
+// ------------------------------------------------------------------ §3.5
+
+// pluginEntry is one discovered entry as the resolver sees it. The menu never
+// reads a body or a path, so this fixture carries neither.
+func pluginEntry(plugin, name, desc string) agent.PluginEntry {
+	return agent.PluginEntry{
+		Plugin:      plugin,
+		Name:        name,
+		Description: desc,
+		Kind:        agent.PluginKindCommand,
+	}
+}
+
+// slashPluginModel is slashModel with plugin rows on the snapshot, named by the
+// same resolver the live session runs so the menu under test is never handed a
+// spelling the session would not have produced.
+func slashPluginModel(t *testing.T, entries []agent.PluginEntry, advertised ...string) Model {
+	t.Helper()
+	m, stub := slashModel(t, 100, 30, advertised...)
+	stub.SetPlugins(agent.ResolvePluginNames(entries, advertised, false))
+	m.refreshSnap()
+	return m
+}
+
+// TestSlashCatalogOrderACPThenPluginThenDisk is §3.5's source order: what the
+// agent advertised wins, because craze expands none of it; craze's own plugin
+// rows come next; the disk skill walk is last.
+func TestSlashCatalogOrderACPThenPluginThenDisk(t *testing.T) {
+	isolateSkillsHome(t)
+	ws := t.TempDir()
+	writeSkillMD(t, filepath.Join(ws, ".cursor", "skills", "on-disk", "SKILL.md"), `---
+name: on-disk
+description: found by the walk
+---
+`)
+	stub := NewStub()
+	setStubCommands(stub, "advertised")
+	stub.SetPlugins(agent.ResolvePluginNames([]agent.PluginEntry{
+		pluginEntry("probe-plugin", "probe-echo", "the plugin one"),
+	}, []string{"advertised"}, false))
+	m := startStub(t, stub, ws, 100, 30)
+
+	var got []string
+	for _, it := range m.slashCatalog() {
+		if it.Builtin {
+			continue
+		}
+		got = append(got, it.Name)
+	}
+	if want := "advertised,probe-echo,on-disk"; strings.Join(got, ",") != want {
+		t.Fatalf("catalog order %v, want %v", got, want)
+	}
+	it, ok := catalogByName(m, "probe-echo")
+	if !ok {
+		t.Fatal("the plugin row is missing from the catalog")
+	}
+	if it.Plugin != "probe-plugin" || it.Qualified != "probe-plugin:probe-echo" || it.Skill {
+		t.Fatalf("plugin row %+v", it)
+	}
+}
+
+// TestSlashCatalogSanitisesPluginRows: a row craze owns goes through the same
+// two gates every advertised row does — an untypable name never reaches the
+// menu, and a description is folded onto the one line the band has for it.
+func TestSlashCatalogSanitisesPluginRows(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	setStubCommands(stub)
+	stub.SetPlugins([]agent.PluginCommand{
+		{Plugin: "ok", Bare: "good", Display: "good", Qualified: "ok:good", Description: "first line\nsecond line"},
+		{Plugin: "two words", Bare: "spaced", Display: "spaced", Qualified: "two words:spaced"},
+		{Plugin: "ok", Bare: "bell", Display: "be\x07ll", Qualified: "ok:be\x07ll"},
+	})
+	m := startStub(t, stub, t.TempDir(), 100, 30)
+	var got []string
+	for _, it := range m.slashCatalog() {
+		if it.Builtin {
+			continue
+		}
+		got = append(got, it.Name)
+	}
+	if strings.Join(got, ",") != "good" {
+		t.Fatalf("catalog kept an untypable plugin row: %v", got)
+	}
+	it, _ := catalogByName(m, "good")
+	if it.labeledDesc() != "first line second line (ok)" {
+		t.Fatalf("labelled description %q", it.labeledDesc())
+	}
+}
+
+// TestSlashLabeledDesc is the row's label: which plugin a row craze owns came
+// from — the only thing telling four /rescue commands apart — and the (skill)
+// the disk walk has carried since 009. Both kinds of plugin entry are labelled
+// the same way; a row with nothing to describe it still says where it is from.
+func TestSlashLabeledDesc(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		it   slashItem
+		want string
+	}{
+		{"an advertised row is its description alone", slashItem{Name: "a", Desc: "advertised"}, "advertised"},
+		{"a disk skill is labelled", slashItem{Name: "a", Desc: "on disk", Skill: true}, "on disk (skill)"},
+		{"a disk skill with no description is the label", slashItem{Name: "a", Skill: true}, "(skill)"},
+		{"a plugin command names its plugin", slashItem{Name: "watch-pr", Desc: "watch it", Plugin: "git-commands"},
+			"watch it (git-commands)"},
+		{"a plugin skill names its plugin too", slashItem{Name: "gauntlet", Desc: "run it", Plugin: "forge"},
+			"run it (forge)"},
+		{"a plugin row with no description is the plugin", slashItem{Name: "watch-pr", Plugin: "git-commands"},
+			"(git-commands)"},
+		{"a description of spaces is no description", slashItem{Name: "a", Desc: "   ", Plugin: "p"}, "(p)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.it.labeledDesc(); got != tc.want {
+				t.Fatalf("labeledDesc = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilteredSlashFourBuckets is §3.5's filter, and the whole of it in one
+// fixture: every row here is in a different bucket, and the catalog order they
+// arrive in is the reverse of the order they come out in, so nothing about the
+// result could be an accident of how they were listed.
+//
+// The two qualified buckets are plugin-only. my-zeta-cmd is an advertised row
+// whose own name holds the query, so it lands in the name-substring bucket
+// ahead of the plugin row that only matches through its plugin id.
+func TestFilteredSlashFourBuckets(t *testing.T) {
+	m := slashPluginModel(t, []agent.PluginEntry{
+		// Bucket 4: only "my-zeta:tool" holds the query, and not at the front.
+		pluginEntry("my-zeta", "tool", "the fourth bucket"),
+		// Bucket 2: the bare name is unique, so the query only reaches it
+		// through the qualified spelling craze resolved for it.
+		pluginEntry("zeta", "runner", "the second bucket"),
+		// Bucket 1: a plugin row matched by its displayed name is in the same
+		// bucket as any other row, and in it exactly once.
+		pluginEntry("zeta", "zeta-run", "the first bucket, from a plugin"),
+	}, "my-zeta-cmd", "zeta-first")
+	m = draft(m, "see /zeta")
+	want := []string{"zeta-first", "zeta-run", "runner", "my-zeta-cmd", "tool"}
+	if got := slashNames(m); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("filter order %v, want %v", got, want)
+	}
+}
+
+// TestFilteredSlashQualifiedIsPluginOnly: an advertised name with a colon in it
+// is one name, not two spellings. grok advertises codex:review, and the menu
+// has completed it since 009 — putting it in the qualified buckets would move
+// it behind every prefix hit for no reason at all.
+func TestFilteredSlashQualifiedIsPluginOnly(t *testing.T) {
+	m := slashPluginModel(t, []agent.PluginEntry{
+		pluginEntry("codex", "rescue", "the plugin one"),
+	}, "codex:review")
+	m = draft(m, "see /codex:")
+	// The advertised row is a bucket-1 hit, because "codex:review" is its
+	// name. Nothing else here claims "rescue", so the plugin row is displayed
+	// bare and only reaches the query through bucket 2 — which is exactly the
+	// bucket the advertised row must not be treated as belonging to.
+	want := []string{"codex:review", "rescue"}
+	if got := slashNames(m); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("filter order %v, want %v", got, want)
+	}
+}
+
+// TestAcceptSlashPluginSpelling is the accept rule: the displayed name, unless
+// the token already carries a colon — which is the user asking for the plugin
+// path and the only signal there is.
+func TestAcceptSlashPluginSpelling(t *testing.T) {
+	entries := []agent.PluginEntry{pluginEntry("probe-plugin", "probe-echo", "probe")}
+	for _, tc := range []struct{ name, typed, want string }{
+		{"a bare token accepts the bare name", "/pro", "/probe-echo "},
+		{"a colon in the token accepts the qualified one", "/probe-plugin:pro", "/probe-plugin:probe-echo "},
+		{"the whole plugin id and nothing else", "/probe-plugin:", "/probe-plugin:probe-echo "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := slashPluginModel(t, entries)
+			m = draft(m, tc.typed)
+			if len(m.filteredSlash()) != 1 {
+				t.Fatalf("fixture: matches %v", slashNames(m))
+			}
+			m = pressKey(t, m, tea.KeyTab)
+			if m.input.Value() != tc.want {
+				t.Fatalf("draft %q, want %q", m.input.Value(), tc.want)
+			}
+		})
+	}
+}
+
+// TestAcceptSlashQualifiedRowIgnoresTheColonRule: a row already displayed
+// qualified has one spelling, so the colon changes nothing about it.
+func TestAcceptSlashQualifiedRowIgnoresTheColonRule(t *testing.T) {
+	m := slashPluginModel(t, []agent.PluginEntry{
+		pluginEntry("alpha", "rescue", "one"),
+		pluginEntry("beta", "rescue", "the other"),
+	})
+	m = draft(m, "/alpha:")
+	m = pressKey(t, m, tea.KeyTab)
+	if m.input.Value() != "/alpha:rescue " {
+		t.Fatalf("draft %q", m.input.Value())
+	}
+}
+
+// TestAcceptACPNameWithColon is §3.5's limit on the colon rule: it belongs to
+// rows craze owns. grok advertises codex:review under exactly that name, and a
+// /codex: query has to keep completing it the way it did before plugins.
+func TestAcceptACPNameWithColon(t *testing.T) {
+	m, _ := slashModel(t, 100, 30, "codex:review")
+	m = draft(m, "/codex:")
+	if names := slashNames(m); len(names) != 1 || names[0] != "codex:review" {
+		t.Fatalf("fixture: matches %v", names)
+	}
+	m = pressKey(t, m, tea.KeyTab)
+	if m.input.Value() != "/codex:review " {
+		t.Fatalf("draft %q, want %q", m.input.Value(), "/codex:review ")
+	}
+}
+
+// TestEnterOnEitherPluginSpellingSends: both spellings resolve to the same
+// entry on the wire, so both are the row fully typed and neither is completed
+// into the other.
+func TestEnterOnEitherPluginSpellingSends(t *testing.T) {
+	entries := []agent.PluginEntry{pluginEntry("probe-plugin", "probe-echo", "probe")}
+	for _, typed := range []string{"/probe-echo", "/probe-plugin:probe-echo"} {
+		t.Run(typed, func(t *testing.T) {
+			m := slashPluginModel(t, entries)
+			m = draft(m, typed)
+			if !m.slashActive() {
+				t.Fatal("fixture: the menu should be up on the typed name")
+			}
+			if !m.slashExactlyTyped() {
+				t.Fatalf("%q is the row fully typed", typed)
+			}
+			m, cmd := press(m, enter())
+			if m.status != statusWorking || cmd == nil {
+				t.Fatalf("the exactly typed row sends: status %v", m.status)
+			}
+			assertSent(t, m, typed)
+		})
+	}
+}
+
+// TestPluginNamedLikeABuiltinShowsQualified: the builtins are in the taken set
+// the resolver names against, so a plugin shipping "help" is offered as
+// helper:help and the one bare /help in the menu is still craze's own.
+func TestPluginNamedLikeABuiltinShowsQualified(t *testing.T) {
+	m := slashPluginModel(t, []agent.PluginEntry{
+		pluginEntry("helper", "help", "the plugin one"),
+	})
+	m = draft(m, "/help")
+	want := []string{"help", "helper:help"}
+	if got := slashNames(m); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("matches %v, want %v", got, want)
+	}
+	it, ok := catalogByName(m, "help")
+	if !ok || !it.Builtin {
+		t.Fatalf("the bare /help row is craze's own: %+v", it)
+	}
+	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, tea.KeyTab)
+	if m.input.Value() != "/helper:help " {
+		t.Fatalf("draft %q", m.input.Value())
 	}
 }
 
