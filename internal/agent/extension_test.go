@@ -16,7 +16,7 @@ func startScriptOpts(t *testing.T, script string, opts Options) *session {
 	opts.ExtraArgs = append(opts.ExtraArgs, "-script="+script)
 	opts.Workspace = t.TempDir()
 	opts.Stderr = io.Discard
-	s := newSession(opts)
+	s := newTestSession(t, opts)
 	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}

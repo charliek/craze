@@ -45,9 +45,21 @@ func fakeAgentPath(t *testing.T) string {
 	return fakeBin
 }
 
+// newTestSession is how every test in this package builds a session, so that
+// pointing HOME at an empty directory is a property of the constructor rather
+// than something each test has to remember. Everything that starts a session
+// reads HOME — the plugin caches live under it — so a test that skipped it
+// would pass or fail on what the developer running it happens to have
+// installed.
+func newTestSession(t *testing.T, opts Options) *session {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	return newSession(opts)
+}
+
 func startScript(t *testing.T, script string, force bool) *session {
 	t.Helper()
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=" + script},
 		Workspace: t.TempDir(),
@@ -327,7 +339,7 @@ func TestSerializedPrompt(t *testing.T) {
 }
 
 func TestAuthFailStart(t *testing.T) {
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=authfail"},
 		Workspace: t.TempDir(),
@@ -503,7 +515,7 @@ func TestCancelPendingPermission(t *testing.T) {
 func TestSpawnArgvForceAndTrust(t *testing.T) {
 	t.Run("yolo", func(t *testing.T) {
 		dump := filepath.Join(t.TempDir(), "argv")
-		s := newSession(Options{
+		s := newTestSession(t, Options{
 			Binary:    fakeAgentPath(t),
 			ExtraArgs: []string{"-script=echo"},
 			Workspace: t.TempDir(),
@@ -523,7 +535,7 @@ func TestSpawnArgvForceAndTrust(t *testing.T) {
 	})
 	t.Run("no-force", func(t *testing.T) {
 		dump := filepath.Join(t.TempDir(), "argv")
-		s := newSession(Options{
+		s := newTestSession(t, Options{
 			Binary:    fakeAgentPath(t),
 			ExtraArgs: []string{"-script=echo"},
 			Workspace: t.TempDir(),
@@ -546,7 +558,7 @@ func TestSpawnArgvForceAndTrust(t *testing.T) {
 }
 
 func TestUnknownModeRejected(t *testing.T) {
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=echo"},
 		Workspace: t.TempDir(),
@@ -565,7 +577,7 @@ func TestUnknownModeRejected(t *testing.T) {
 }
 
 func TestSetModeOnStart(t *testing.T) {
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=echo"},
 		Workspace: t.TempDir(),
@@ -586,7 +598,7 @@ func TestSetModeOnStart(t *testing.T) {
 }
 
 func TestChildCrashStart(t *testing.T) {
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    "/bin/false",
 		Workspace: t.TempDir(),
 		Force:     true,
@@ -634,7 +646,7 @@ func matchTail(got string, want []string) bool {
 func TestCursorSpawnArgvRegression(t *testing.T) {
 	dump := filepath.Join(t.TempDir(), "argv")
 	cursor := CursorProvider()
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=echo"},
 		Workspace: t.TempDir(),
@@ -664,7 +676,7 @@ func TestGrokSpawnArgvOrder(t *testing.T) {
 		t.Run(map[bool]string{true: "yolo", false: "no-force"}[force], func(t *testing.T) {
 			dump := filepath.Join(t.TempDir(), "argv")
 			grok := GrokProvider()
-			s := newSession(Options{
+			s := newTestSession(t, Options{
 				Binary:    fakeAgentPath(t),
 				ExtraArgs: []string{"-script=echo"},
 				Workspace: t.TempDir(),
@@ -701,7 +713,7 @@ func startGrokScript(t *testing.T, script string, force bool) *session {
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	grok := GrokProvider()
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=" + script},
 		Workspace: t.TempDir(),
@@ -720,7 +732,7 @@ func TestGrokLoginHint(t *testing.T) {
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	grok := GrokProvider()
-	s := newSession(Options{
+	s := newTestSession(t, Options{
 		Binary:    fakeAgentPath(t),
 		ExtraArgs: []string{"-script=authfail"},
 		Workspace: t.TempDir(),
@@ -752,7 +764,7 @@ func TestGrokEnvKeyVsCachedTokenStart(t *testing.T) {
 			t.Setenv("XAI_API_KEY", tc.key)
 			dump := filepath.Join(t.TempDir(), "auth")
 			grok := GrokProvider()
-			s := newSession(Options{
+			s := newTestSession(t, Options{
 				Binary:    fakeAgentPath(t),
 				ExtraArgs: []string{"-script=grok-echo"},
 				Workspace: t.TempDir(),

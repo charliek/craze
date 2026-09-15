@@ -3,10 +3,27 @@ package agent
 import (
 	"context"
 	"io"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
 )
+
+// HomeDir is the home directory craze reads its own files out of: the config
+// file, the user-level skills and the plugin caches. HOME wins over the account
+// database so a test (and the frame runner) can isolate all of them with one
+// variable.
+func HomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home)
+}
 
 var ErrPromptInFlight = acp.ErrPromptInFlight
 
@@ -90,6 +107,10 @@ type Snapshot struct {
 	// ForeignTurn reports that the agent is running a turn of its own. The
 	// drain waits it out: a prompt sent now would be queued behind it.
 	ForeignTurn bool
+	// Plugins are the plugin commands and skills craze found on disk for this
+	// provider, already resolved to the names the menu and the wire both use,
+	// in discovery order. Cloned by Snapshot.
+	Plugins []PluginCommand
 }
 
 // SubagentInfo is one grok child or cursor task, in spawn order on Snapshot.
@@ -308,6 +329,10 @@ type Options struct {
 	Mode      string
 	Stderr    io.Writer
 	Env       []string
+	// PluginDirs are extra plugin roots to read, cursor-agent's --plugin-dir
+	// by another route. A relative path is the workspace's. Providers whose
+	// PluginScan does not want them ignore them.
+	PluginDirs []string
 	// Provider is the agent behind the session; nil is cursor.
 	Provider *Provider
 	// Interactive makes question and plan requests block on the session so a

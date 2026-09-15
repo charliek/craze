@@ -76,7 +76,7 @@ func TestPromptFollowUpsAreTheQueue(t *testing.T) {
 
 // TestPromptPlainModeWritesNoQueueLines: the queue is JSON-only chrome.
 func TestPromptPlainModeWritesNoQueueLines(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()
@@ -102,7 +102,7 @@ func TestPromptPlainModeWritesNoQueueLines(t *testing.T) {
 // TestPromptCancelledFirstTurnStopsTheChain: the stop reason still ends the
 // run with exit 1 and no queued turn behind it.
 func TestPromptCancelledFirstTurnStopsTheChain(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "hang")
 	ctx, cancel := context.WithCancel(context.Background())
 	var stdout, stderr bytes.Buffer
@@ -199,7 +199,7 @@ func TestPromptForeignTurnIsWaitedOut(t *testing.T) {
 // TestQueueFullRefusesTheFollowUp: the bound is the session's, and the CLI
 // reports it rather than silently dropping a message.
 func TestQueueFullRefusesTheFollowUp(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()
@@ -223,7 +223,7 @@ func TestQueueFullRefusesTheFollowUp(t *testing.T) {
 // turn the agent started on its own — is still the agent waiting for an
 // answer, so every reader of the stream answers it.
 func TestPromptAnswersPermissionDuringAForeignTurn(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-long-turn-fallback")
@@ -263,7 +263,7 @@ func TestPromptAnswersPermissionDuringAForeignTurn(t *testing.T) {
 // still a refusal. A run that said no and then exited 0 would tell a script
 // the opposite of what happened.
 func TestPermissionRejectedBetweenTurnsStillFailsTheRun(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "permission")
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()

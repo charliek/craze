@@ -49,15 +49,28 @@ type jsonLineEvent struct {
 	m   map[string]any
 }
 
-// runPromptJSON runs one headless turn against a fake script and returns each
-// NDJSON line with its decoded form, so assertions can use the bytes craze
-// actually wrote.
-func isolateProviderConfig(t *testing.T) {
+// isolateHome points HOME at an empty directory. The plugin scan walks the
+// caches under it at session start, so a run that skipped this would find
+// whatever the developer happens to have installed. It is separate from
+// isolateRunEnv because a test that wants its own provider or config still
+// wants this.
+func isolateHome(t *testing.T) {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+}
+
+// isolateRunEnv is everything a headless run reads out of the environment
+// before it reaches the agent: HOME, the provider override and the config file.
+func isolateRunEnv(t *testing.T) {
+	t.Helper()
+	isolateHome(t)
 	t.Setenv("CRAZE_PROVIDER", "")
 	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
 }
 
+// runPromptJSON runs one headless turn against a fake script and returns each
+// NDJSON line with its decoded form, so assertions can use the bytes craze
+// actually wrote.
 func runPromptJSON(t *testing.T, script string) []jsonLineEvent {
 	t.Helper()
 	return runPromptJSONArgs(t, script, nil, "go")
@@ -65,7 +78,7 @@ func runPromptJSON(t *testing.T, script string) []jsonLineEvent {
 
 func runPromptJSONArgs(t *testing.T, script string, extra []string, text string) []jsonLineEvent {
 	t.Helper()
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", script)
@@ -217,7 +230,7 @@ func TestPromptJSONTitle(t *testing.T) {
 }
 
 func TestPromptJSONGrokAsk(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-ask")
@@ -327,7 +340,7 @@ func TestPromptJSONGrokSubagentFollowUp(t *testing.T) {
 }
 
 func TestPromptJSONGrokSubagentCancel(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-subagent-cancel")
@@ -355,7 +368,7 @@ func TestPromptJSONGrokSubagentCancel(t *testing.T) {
 }
 
 func TestPromptPlainExcludesChildText(t *testing.T) {
-	isolateProviderConfig(t)
+	isolateRunEnv(t)
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-subagent")

@@ -85,6 +85,21 @@ func lettered(prefix string, n int) []string {
 	return out
 }
 
+// TestBuiltinNamesMatchTheAgentList pins the two halves of the builtin list to
+// each other: the menu's table here, with its descriptions, and
+// agent.BuiltinSlashNames, which the session folds into the names a plugin row
+// may not take. They have to name the same commands, or a plugin shipping one
+// of them would be offered bare by one half and shadowed by the other.
+func TestBuiltinNamesMatchTheAgentList(t *testing.T) {
+	var menu []string
+	for _, it := range builtinSlash() {
+		menu = append(menu, it.Name)
+	}
+	if strings.Join(menu, ",") != strings.Join(agent.BuiltinSlashNames(), ",") {
+		t.Fatalf("menu builtins %v, agent builtins %v", menu, agent.BuiltinSlashNames())
+	}
+}
+
 // ------------------------------------------------------------------ §3.1
 
 func TestSlashTokenRules(t *testing.T) {

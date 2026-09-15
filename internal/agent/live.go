@@ -72,6 +72,14 @@ type session struct {
 	// foreign mirrors the client's foreign-turn state for Snapshot.
 	foreign      bool
 	interjectSeq int
+	// plugins are the on-disk plugin entries discovered once, in Start,
+	// before session/new; they never change again. commandsSeen records that
+	// the agent's first available_commands_update has been applied, which is
+	// what takes the resolved names out of their provisional all-qualified
+	// spelling. Both are read under s.mu, because a Prompt can run against
+	// them while an update is rewriting the resolution.
+	plugins      []PluginEntry
+	commandsSeen bool
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
@@ -115,6 +123,7 @@ func newSession(opts Options) *session {
 		p := *opts.Provider
 		s.opts.Provider = &p
 	}
+	s.opts.PluginDirs = append([]string(nil), opts.PluginDirs...)
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
@@ -224,6 +233,13 @@ func (s *session) Start(ctx context.Context) error {
 		_ = s.Close()
 		return fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
 	}
+	// The disk scan runs before session/new so the first snapshot the session
+	// ever publishes already carries its plugins; a catalog update that beats
+	// session/new home then has entries to resolve against.
+	plugins := s.discoverPlugins(cwd)
+	s.mu.Lock()
+	s.plugins = plugins
+	s.mu.Unlock()
 	sess, err := client.NewSession(ctx, cwd)
 	if err != nil {
 		_ = s.Close()
@@ -259,8 +275,46 @@ func (s *session) Start(ctx context.Context) error {
 	if len(s.snap.Commands) == 0 {
 		s.snap.Commands = commands
 	}
+	// Same locked section as the carry-over on purpose: the names resolve
+	// against whatever commands survived it, so an update that arrived early
+	// is honoured and one that arrives next redoes the work.
+	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
 	return nil
+}
+
+// discoverPlugins runs the provider's plugin scan for this workspace. It never
+// fails: a --plugin-dir that is not there, and one handed to a provider that
+// reads its plugins off the wire instead, are each one line on the session's
+// stderr. Plugins are an extra, and a session that refused to start over one
+// would be strictly worse than a session without them.
+func (s *session) discoverPlugins(workspace string) []PluginEntry {
+	scan := s.provider().PluginScan()
+	warn := func(msg string) {
+		if s.opts.Stderr == nil {
+			return
+		}
+		fmt.Fprintln(s.opts.Stderr, msg)
+	}
+	if !scan.Dirs && len(s.opts.PluginDirs) > 0 {
+		warn("plugin dirs ignored for " + s.provider().Name())
+	}
+	return discoverPlugins(scan, workspace, HomeDir(), s.opts.PluginDirs, warn)
+}
+
+// resolvePluginsLocked names the discovered entries against what the agent has
+// advertised so far. s.mu must be held: the snapshot's plugin list and the
+// commands it was resolved against have to change together, or a prompt reading
+// one and the menu drawing the other would disagree about what a name means.
+func (s *session) resolvePluginsLocked() []PluginCommand {
+	if len(s.plugins) == 0 {
+		return nil
+	}
+	taken := make([]string, 0, len(s.snap.Commands))
+	for _, c := range s.snap.Commands {
+		taken = append(taken, c.Name)
+	}
+	return ResolvePluginNames(s.plugins, taken, !s.commandsSeen)
 }
 
 // authMethod is the provider's pick against what initialize advertised: the
@@ -455,6 +509,7 @@ func (s *session) Snapshot() Snapshot {
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
+	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
 	out.Config = cloneConfig(s.snap.Config)
 	out.Todos = append([]Todo(nil), s.snap.Todos...)
 	out.Tools = snapshotTools(s.toolOrder, s.tools)
@@ -889,6 +944,11 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 	case acp.UpdateAvailableCommands:
 		s.mu.Lock()
 		s.snap.Commands = commandsFromUpdate(u.AvailableCommands)
+		// The first update of the session ends the provisional spelling, and
+		// every update re-resolves: a name the agent has taken over must stop
+		// being offered bare the moment it does.
+		s.commandsSeen = true
+		s.snap.Plugins = s.resolvePluginsLocked()
 		s.mu.Unlock()
 		s.emit(Event{Type: EventMeta})
 	case acp.UpdateCurrentMode:
