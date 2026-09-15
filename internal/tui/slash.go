@@ -456,17 +456,26 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	m.snap.CurrentMode = id
+	// The generation is what the answer is matched on, not the mode id: see
+	// Model.modeGen. It is captured for the closure here, because m.modeGen
+	// belongs to a copy the next change is free to bump.
+	m.modeGen++
 	m.modeInFlight = id
+	gen := m.modeGen
 	// Leaving the mode the plan was made in retires the offer with it, and the
 	// kill is recorded against the turn so a late ending cannot bring it back.
 	m.retirePlanOffer()
 	m.addNote(modeNote(m.snap.Modes, id))
 	sess := m.sess
 	return m, func() tea.Msg {
-		if err := sess.SetMode(context.Background(), id); err != nil {
-			return revertModeMsg{prev: prev, err: err}
+		// Bounded, so an agent that never answers produces a revert instead of
+		// pinning the chip for ever. See modeCallTimeout.
+		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
+		defer cancel()
+		if err := sess.SetMode(ctx, id); err != nil {
+			return revertModeMsg{gen: gen, prev: prev, err: err}
 		}
-		return modeAppliedMsg{id: id}
+		return modeAppliedMsg{gen: gen, id: id}
 	}
 }
 

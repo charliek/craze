@@ -675,7 +675,7 @@ func TestShiftTabCyclesMode(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected SetMode cmd")
 	}
-	if msg := cmd(); msg != (modeAppliedMsg{id: "plan"}) {
+	if msg := cmd(); msg != (modeAppliedMsg{gen: m.modeGen, id: "plan"}) {
 		t.Fatalf("stub SetMode returned %T %v", msg, msg)
 	}
 	if !strings.Contains(plainView(m), "plan") {
@@ -1280,6 +1280,372 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	}
 }
 
+// --- mode round trips ----------------------------------------------------
+//
+// A mode change is a round trip. The chip flips the moment the user asks for
+// it, and the session's own snapshot only catches up when the agent answers —
+// so for the length of that trip refreshSnap draws the requested mode instead
+// of the session's. That mask is what stops an unrelated update flickering the
+// chip back, and it is also what makes a wrong answer expensive: a mask that is
+// never taken down, or taken down by the wrong answer, leaves the chip lying
+// for the life of the process rather than for a frame. Model.modeGen is what
+// tells the answers apart. These are the interleavings it has to survive.
+
+// askMode is `/plan`, `/ask` or `/agent` typed into the composer. The command
+// it produced comes back unrun, so a test can decide separately when the RPC
+// happens and when its answer reaches Update — which is the whole subject
+// here.
+func askMode(t *testing.T, m Model, id string) (Model, tea.Cmd) {
+	t.Helper()
+	m.input.SetValue("/" + id)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatalf("/%s produced no SetMode command", id)
+	}
+	if m.snap.CurrentMode != id {
+		t.Fatalf("/%s left the chip on %q: the flip is optimistic", id, m.snap.CurrentMode)
+	}
+	return m, cmd
+}
+
+// deliver hands a message the model's own command produced back to Update, the
+// way the program loop does.
+func deliver(t *testing.T, m Model, msg tea.Msg) Model {
+	t.Helper()
+	if msg == nil {
+		t.Fatal("nothing to deliver")
+	}
+	tm, _ := m.Update(msg)
+	return tm.(Model)
+}
+
+// sessionMode is the mode the stub session is really in: the truth the chip has
+// to agree with once nothing of craze's own is in flight.
+func sessionMode(s *Stub) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snap.CurrentMode
+}
+
+// agentSetsMode is the agent changing the mode by itself — the session records
+// it, and announces it with an EventMeta the test feeds where it wants it.
+func agentSetsMode(s *Stub, id string) {
+	s.mu.Lock()
+	s.snap.CurrentMode = id
+	s.mu.Unlock()
+}
+
+// unrelatedUpdate is the shape the mask exists for: an available_commands_update
+// arrives as a mode-less EventMeta, refreshSnap re-reads the whole snapshot, and
+// the session's answer for the mode is still the one the user just left.
+func unrelatedUpdate(t *testing.T, m Model) Model {
+	t.Helper()
+	return feed(t, m, agent.Event{Type: agent.EventMeta})
+}
+
+// TestModeAnswersSettleInAnyOrder drives two mode changes that are on the wire
+// at once. The commands run independently and their answers can reach Update in
+// any order, including one that contradicts the order the session applied them
+// in. Only one thing has to hold at the end of every interleaving: nothing is
+// left in flight, and the chip says what the session says.
+func TestModeAnswersSettleInAnyOrder(t *testing.T) {
+	// req 0 is `/plan`, req 1 is `/ask`; run puts that request's RPC on the
+	// session, and an op that is neither run nor refresh delivers the answer it
+	// gave. fail arms the stub to refuse the run it is on.
+	type op struct {
+		req     int
+		run     bool
+		fail    bool
+		refresh bool
+	}
+	for _, tc := range []struct {
+		name string
+		ops  []op
+		want string
+		errs int
+	}{
+		{
+			name: "answered in the order they were asked",
+			ops:  []op{{req: 0, run: true}, {req: 0}, {refresh: true}, {req: 1, run: true}, {req: 1}},
+			want: "ask",
+		},
+		{
+			// The second request reaches the session first, so the first one's
+			// RPC is what the session ends up holding. Matching the chip to the
+			// newest *request* would leave it on `ask` for ever.
+			name: "the second is answered first",
+			ops:  []op{{req: 1, run: true}, {req: 1}, {req: 0, run: true}, {req: 0}},
+			want: "plan",
+		},
+		{
+			// The refusal settles the chip, an unrelated update then reads the
+			// session — and the acceptance that lands afterwards has to be what
+			// puts the mode it made real back on the chip.
+			name: "the second is refused, and answered first",
+			ops:  []op{{req: 1, run: true, fail: true}, {req: 1}, {refresh: true}, {req: 0, run: true}, {req: 0}},
+			want: "plan",
+			errs: 1,
+		},
+		{
+			// A refusal for a request the chip has moved on from may not roll
+			// the chip back to where that request started.
+			name: "the first is refused, and answered last",
+			ops:  []op{{req: 1, run: true}, {req: 1}, {req: 0, run: true, fail: true}, {req: 0}},
+			want: "ask",
+			errs: 1,
+		},
+		{
+			// Same, with the stale refusal arriving while the newer request is
+			// still out: it may not take the newer one's protection down with
+			// it either.
+			name: "the first is refused, and answered first",
+			ops:  []op{{req: 0, run: true, fail: true}, {req: 0}, {req: 1, run: true}, {req: 1}},
+			want: "ask",
+			errs: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t)
+			stub := m.sess.(*Stub)
+			var cmds [2]tea.Cmd
+			var answers [2]tea.Msg
+			m, cmds[0] = askMode(t, m, "plan")
+			m, cmds[1] = askMode(t, m, "ask")
+			for i, o := range tc.ops {
+				switch {
+				case o.refresh:
+					m = unrelatedUpdate(t, m)
+				case o.run:
+					if o.fail {
+						stub.FailNextSetMode()
+					}
+					answers[o.req] = runCmd(cmds[o.req])
+					if answers[o.req] == nil {
+						t.Fatalf("op %d: request %d answered with nothing", i, o.req)
+					}
+				default:
+					m = deliver(t, m, answers[o.req])
+				}
+			}
+			if m.modeInFlight != "" {
+				t.Fatalf("every answer is in: %q is still masking the chip", m.modeInFlight)
+			}
+			if got := sessionMode(stub); got != tc.want {
+				t.Fatalf("the session ended at %q, the case is written for %q", got, tc.want)
+			}
+			if m.snap.CurrentMode != tc.want {
+				t.Fatalf("the chip says %q, the session says %q", m.snap.CurrentMode, tc.want)
+			}
+			if got := len(texts(m, entryError)); got != tc.errs {
+				t.Fatalf("%d errors on screen, want %d: %q", got, tc.errs, texts(m, entryError))
+			}
+		})
+	}
+}
+
+// TestStaleModeRefusalLeavesTheNewerRequestAlone is the refusal case on its
+// own, asserted mid-flight: the chip has moved two changes on from the request
+// being refused, so the refusal may neither roll it back nor take down the
+// protection the newer change is relying on — while still saying out loud that
+// the agent refused something the user asked for.
+func TestStaleModeRefusalLeavesTheNewerRequestAlone(t *testing.T) {
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	m, planCmd := askMode(t, m, "plan")
+	m, askCmd := askMode(t, m, "ask")
+
+	stub.FailNextSetMode()
+	refusal := runCmd(planCmd)
+	if _, ok := refusal.(revertModeMsg); !ok {
+		t.Fatalf("a refused SetMode returned %T", refusal)
+	}
+	m = deliver(t, m, refusal)
+	if m.snap.CurrentMode != "ask" {
+		t.Fatalf("chip %q: a stale refusal put a mode two changes old back", m.snap.CurrentMode)
+	}
+	if m.modeInFlight != "ask" {
+		t.Fatalf("modeInFlight %q: `ask` is still on the wire and still needs its mask", m.modeInFlight)
+	}
+	if got := texts(m, entryError); len(got) != 1 {
+		t.Fatalf("the refusal is still the user's to see: %q", got)
+	}
+	// The mask is still doing its job, so the older mode cannot flicker back.
+	m = unrelatedUpdate(t, m)
+	if m.snap.CurrentMode != "ask" {
+		t.Fatalf("chip %q after an unrelated update", m.snap.CurrentMode)
+	}
+
+	m = deliver(t, m, runCmd(askCmd))
+	if m.modeInFlight != "" || m.snap.CurrentMode != "ask" || sessionMode(stub) != "ask" {
+		t.Fatalf("settled with chip %q, session %q, in flight %q",
+			m.snap.CurrentMode, sessionMode(stub), m.modeInFlight)
+	}
+}
+
+// TestModeAnswerForARepeatedModeIsNotTheNewerRequests: mode ids repeat, so
+// `plan` → `ask` → `plan` puts the same id on the wire twice. The first
+// request's answer names `plan` and so does the third request's mask — matching
+// on the id hands the late answer the newer request's protection, and the next
+// unrelated update then flicks the chip to a mode the user has already left.
+func TestModeAnswerForARepeatedModeIsNotTheNewerRequests(t *testing.T) {
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	m, first := askMode(t, m, "plan")
+	m, second := askMode(t, m, "ask")
+	m, third := askMode(t, m, "plan")
+
+	// The first two reach the session; the third is still on the wire.
+	firstMsg, secondMsg := runCmd(first), runCmd(second)
+	if got := sessionMode(stub); got != "ask" {
+		t.Fatalf("session %q, want the second request's mode", got)
+	}
+	m = deliver(t, m, firstMsg)
+	if m.modeInFlight != "plan" {
+		t.Fatalf("modeInFlight %q: the third request is unanswered, so its mask stands", m.modeInFlight)
+	}
+	m = unrelatedUpdate(t, m)
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("chip %q: an unrelated update flicked it to the session's older mode", m.snap.CurrentMode)
+	}
+	m = deliver(t, m, secondMsg)
+	if m.modeInFlight != "plan" || m.snap.CurrentMode != "plan" {
+		t.Fatalf("chip %q, in flight %q, after the second answer", m.snap.CurrentMode, m.modeInFlight)
+	}
+
+	m = deliver(t, m, runCmd(third))
+	if m.modeInFlight != "" || m.snap.CurrentMode != "plan" || sessionMode(stub) != "plan" {
+		t.Fatalf("settled with chip %q, session %q, in flight %q",
+			m.snap.CurrentMode, sessionMode(stub), m.modeInFlight)
+	}
+}
+
+// TestAgentModeArrivingBeforeTheAnswerIsNotMasked: the RPC succeeding and its
+// answer being handled are two different moments, and the agent can change the
+// mode by itself in between. The mask hides that change for as long as the
+// answer is outstanding, so the answer has to read the session back — otherwise
+// the chip keeps the mode craze asked for while the session is in another one,
+// and no later event is owed to correct it.
+func TestAgentModeArrivingBeforeTheAnswerIsNotMasked(t *testing.T) {
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	m, cmd := askMode(t, m, "plan")
+	applied := runCmd(cmd)
+	if got := sessionMode(stub); got != "plan" {
+		t.Fatalf("session %q: the RPC was accepted", got)
+	}
+	// The agent moves the mode again, of its own accord, and its update is
+	// handled before craze's own answer is.
+	agentSetsMode(stub, "ask")
+	m = feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "ask"})
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("chip %q: the mask is what stops the round trip flickering", m.snap.CurrentMode)
+	}
+
+	m = deliver(t, m, applied)
+	if m.modeInFlight != "" {
+		t.Fatalf("modeInFlight %q: the answer for this request is in", m.modeInFlight)
+	}
+	if m.snap.CurrentMode != "ask" {
+		t.Fatalf("chip %q, session %q: taking the mask down has to read the session back",
+			m.snap.CurrentMode, sessionMode(stub))
+	}
+}
+
+// TestStalePlanImplementAnswerLeavesTheNewerRequestAlone is the same ABA on the
+// plan-offer path, which asks for a mode of its own: accepting the offer asks
+// for `agent`, and Shift+Tab can cycle all the way back round to `agent` before
+// the offer's answer lands.
+func TestStalePlanImplementAnswerLeavesTheNewerRequestAlone(t *testing.T) {
+	m := planOfferModel(t)
+	tm, implement := m.Update(enter())
+	m = tm.(Model)
+	if implement == nil {
+		t.Fatal("expected the SetMode command")
+	}
+	// The user's own turn makes the offer's answer too late to send anything,
+	// so this test is about the mask and nothing else.
+	m = startTurn(t, m, "something else entirely")
+	// agent → plan → ask → agent: the third cycle asks for the same mode the
+	// offer did.
+	var cycle tea.Cmd
+	for range 3 {
+		tm, cycle = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = tm.(Model)
+	}
+	if m.snap.CurrentMode != "agent" || m.modeInFlight != "agent" {
+		t.Fatalf("chip %q, in flight %q: the cycle should be back on agent",
+			m.snap.CurrentMode, m.modeInFlight)
+	}
+
+	answer := runCmd(implement)
+	if _, ok := answer.(planImplementMsg); !ok {
+		t.Fatalf("the offer's SetMode returned %T", answer)
+	}
+	m = deliver(t, m, answer)
+	if m.modeInFlight != "agent" {
+		t.Fatalf("modeInFlight %q: the cycle's own request is still unanswered", m.modeInFlight)
+	}
+	m = deliver(t, m, runCmd(cycle))
+	if m.modeInFlight != "" || m.snap.CurrentMode != "agent" {
+		t.Fatalf("settled with chip %q, in flight %q", m.snap.CurrentMode, m.modeInFlight)
+	}
+}
+
+// wedgedMode is a session that is alive but never answers session/set_mode. It
+// is the case that used to pin the chip for the life of the process: Conn.Call
+// blocks until its context says otherwise, and nothing else ever produces the
+// message that takes the mask down.
+type wedgedMode struct{ *Stub }
+
+func (wedgedMode) SetMode(ctx context.Context, _ string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(2 * time.Second):
+		// Nothing bounded this call, so in the program it would never have
+		// come back at all. Say so rather than hang the suite out to the
+		// package timeout.
+		return errors.New("set_mode was never bounded")
+	}
+}
+
+// TestModeChangeTimesOutInsteadOfPinningTheChip: an agent that does not answer
+// has to produce the ordinary revert, because the revert is what takes the mask
+// down. Without a deadline there is no answer at all and the chip keeps a mode
+// the session was never in.
+func TestModeChangeTimesOutInsteadOfPinningTheChip(t *testing.T) {
+	defer func(d time.Duration) { modeCallTimeout = d }(modeCallTimeout)
+	modeCallTimeout = 20 * time.Millisecond
+
+	isolateSkillsHome(t)
+	m := New(Config{Session: wedgedMode{NewStub()}, Workspace: t.TempDir(), Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+
+	m, cmd := askMode(t, m, "plan")
+	answer := runCmd(cmd)
+	revert, ok := answer.(revertModeMsg)
+	if !ok {
+		t.Fatalf("a wedged agent answered with %T, want the ordinary revert", answer)
+	}
+	if !errors.Is(revert.err, context.DeadlineExceeded) {
+		t.Fatalf("revert error %v, want the call's own deadline", revert.err)
+	}
+	m = deliver(t, m, revert)
+	if m.modeInFlight != "" {
+		t.Fatalf("modeInFlight %q: a timeout clears the mask like any other refusal", m.modeInFlight)
+	}
+	if m.snap.CurrentMode != "agent" {
+		t.Fatalf("chip %q, want it back where it started", m.snap.CurrentMode)
+	}
+	if got := texts(m, entryError); len(got) != 1 {
+		t.Fatalf("the timeout is the user's to see: %q", got)
+	}
+}
+
 // belowComposer is the band between the composer and the status rows: the
 // sub-agent peek and the permission line live there. The chip is the anchor
 // because status row 2 always draws it.
@@ -1545,7 +1911,9 @@ func intoPlanMode(t *testing.T, m Model) Model {
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = tm.(Model)
 	msg := runCmd(cmd)
-	if msg != (modeAppliedMsg{id: "plan"}) {
+	// The generation is whatever this model is up to, so the assertion is on
+	// the answer's shape and its mode, not on the counter.
+	if applied, ok := msg.(modeAppliedMsg); !ok || applied.id != "plan" {
 		t.Fatalf("SetMode returned %+v", msg)
 	}
 	tm, _ = m.Update(msg)
