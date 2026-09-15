@@ -9,6 +9,7 @@ import select
 import signal
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -31,6 +32,17 @@ def _set_winsize(fd: int, rows: int = 24, cols: int = 80) -> None:
 
 def _cmdline_has(needle: str) -> bool:
     encoded = needle.encode()
+    if sys.platform != "linux":
+        # Only Linux has /proc; everywhere else ps is the one portable view of
+        # another process's argv. check=True on purpose: every caller reads a
+        # False as proof the child is gone, so a ps that failed must raise
+        # rather than quietly turn a leak check green.
+        out = subprocess.run(
+            ["ps", "-axww", "-o", "args="],
+            capture_output=True,
+            check=True,
+        ).stdout
+        return encoded in out
     try:
         entries = Path("/proc").glob("[0-9]*/cmdline")
     except OSError:

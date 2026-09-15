@@ -61,6 +61,7 @@ func TestPTYAltScreenAndCtrlDQuit(t *testing.T) {
 	if !sawAlt {
 		t.Fatalf("did not observe alt-screen enter; got %q", buf.Bytes())
 	}
+	drainPTY(ptmx)
 
 	if _, err := ptmx.Write([]byte{0x04}); err != nil {
 		t.Fatal(err)
@@ -109,6 +110,7 @@ func TestPTYWheelScrollsTranscript(t *testing.T) {
 		done <- err
 	}()
 	defer func() {
+		drainPTY(ptmx)
 		p.Quit()
 		select {
 		case <-done:
@@ -187,6 +189,7 @@ func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
 				done <- err
 			}()
 			defer func() {
+				drainPTY(ptmx)
 				p.Quit()
 				select {
 				case <-done:
@@ -215,6 +218,19 @@ func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// drainPTY keeps emptying the master once a test has finished asserting on it.
+// A test that stops reading stalls whatever is writing to the slave, and the
+// last thing bubbletea does on the way out of Program.Run is flush the final
+// frame from inside renderer.stop() — so an unread master turns "quit" into a
+// deadlock rather than a slow exit. Linux happens to buffer a whole 24x80
+// styled frame; darwin's tty output queue is a few KiB and does not. Call it
+// after the last waitPTY, never alongside one: two readers on one descriptor
+// would split the stream between them.
+func drainPTY(ptmx *os.File) {
+	_ = ptmx.SetReadDeadline(time.Time{})
+	go func() { _, _ = io.Copy(io.Discard, ptmx) }()
 }
 
 // waitPTY reads until needle shows up in the stream or the deadline passes.
@@ -270,6 +286,7 @@ func TestPTYSyncWriterKeepsTheWindowSize(t *testing.T) {
 		done <- err
 	}()
 	defer func() {
+		drainPTY(ptmx)
 		p.Quit()
 		select {
 		case <-done:

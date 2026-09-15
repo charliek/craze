@@ -149,6 +149,24 @@ type Model struct {
 	cards          []card
 	cardsCancelled bool
 	snap           agent.Snapshot
+	// modeInFlight is a mode change of craze's own that the agent has not
+	// answered yet. The chip flips when the user asks for it and reverts only
+	// if the agent refuses, but the session's snapshot still says the old mode
+	// for the length of that round trip — so refreshSnap keeps this one on the
+	// chip instead, or any unrelated update landing inside the window flickers
+	// it back to the mode the user just left.
+	//
+	// modeGen is which request it belongs to. The mode id cannot stand in for
+	// that: changes are not serialised, two of them can be answered out of
+	// order, and ids repeat — agent → plan → agent → plan hands the third
+	// request's protection to the first request's answer. Every writer bumps
+	// the generation and every answer carries it back, so an answer that is
+	// not the current generation is stale and may neither clear the flag nor
+	// speak for the chip. The flag *overrides* the session's snapshot, so a
+	// stuck or wrongly-cleared one makes the chip lie for the life of the
+	// process, where the bug it was introduced for only made it flicker.
+	modeInFlight string
+	modeGen      int
 
 	// dialog is the modal layer: at most one is up, drawn over the transcript
 	// region and hit-tested before any band. mdlg is the model dialog's own
@@ -285,10 +303,24 @@ type promptDoneMsg struct {
 }
 type errMsg struct{ err error }
 type actionErrMsg struct{ err error }
+
+// revertModeMsg is SetMode coming back refused, or never coming back inside
+// modeCallTimeout. gen is the request it answers for; prev is what the chip
+// showed before that request asked.
 type revertModeMsg struct {
+	gen  int
 	prev string
 	err  error
 }
+
+// modeAppliedMsg is SetMode coming back accepted: the session's snapshot
+// carries this mode now, so the chip can go back to reading it. gen is the
+// request it answers for.
+type modeAppliedMsg struct {
+	gen int
+	id  string
+}
+
 type revertModelMsg struct {
 	prev string
 	err  error
@@ -307,12 +339,18 @@ type dblClickMsg struct{ X, Y int }
 // user has already started a turn of their own is answering for a turn that no
 // longer exists: writing its note and its user entry then would put a prompt in
 // the transcript that the session rejects as already in flight.
+//
+// Both carry the mode generation as well, for the same reason revertModeMsg
+// and modeAppliedMsg do: the turn says whether the prompt is still wanted, the
+// generation says whether this is still the mode request the chip is showing.
 type planImplementMsg struct {
 	seq  int
+	gen  int
 	mode string
 }
 type planImplementFailedMsg struct {
 	seq  int
+	gen  int
 	prev string
 	err  error
 }
@@ -521,9 +559,30 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case revertModeMsg:
+		if msg.gen != m.modeGen {
+			// Stale: a newer request of the user's own is what the chip is
+			// showing, so this refusal may neither roll the chip back to a
+			// mode two changes ago nor drop the newer request's protection.
+			// The error is still theirs to see — the agent refused something
+			// they asked for, and swallowing that would be a bug of its own.
+			m.addError(msg.err.Error())
+			return m, nil
+		}
+		// The revert is the last word on this request, so nothing may put the
+		// refused mode back on the chip afterwards. prev is what the chip
+		// showed before it asked; the session is the real authority, and with
+		// the flag down nothing masks it any more, so it is read straight back
+		// — an agent-initiated mode that landed while this was on the wire is
+		// on the chip rather than lost behind prev. refreshSnap is a no-op
+		// before a session exists, which is what leaves prev in place then.
+		m.modeInFlight = ""
 		m.snap.CurrentMode = msg.prev
+		m.refreshSnap()
 		m.addError(msg.err.Error())
 		return m, nil
+
+	case modeAppliedMsg:
+		return m.modeSettled(msg.gen), nil
 
 	case revertModelMsg:
 		m.snap.CurrentModel = msg.prev
@@ -596,7 +655,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case planImplementMsg:
 		// The session is in the implement mode now, so the note is honest
-		// whatever else has happened meanwhile.
+		// whatever else has happened meanwhile — and so is its snapshot.
+		m = m.modeSettled(msg.gen)
 		m.addNote(modeNote(m.snap.Modes, msg.mode))
 		if msg.seq != m.turnSeq {
 			// A turn of the user's own started while SetMode was in flight, so
@@ -613,7 +673,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and the plan is still the last thing on screen, so it is still on
 		// offer — unless something retired it while SetMode was in flight, in
 		// which case there is no plan above to implement any more.
-		tm, cmd := m.update(revertModeMsg{prev: msg.prev, err: msg.err})
+		tm, cmd := m.update(revertModeMsg{gen: msg.gen, prev: msg.prev, err: msg.err})
 		next := tm.(Model)
 		if msg.seq == next.turnSeq && next.planDeadSeq != next.turnSeq {
 			next.planOfferSeq = next.turnSeq
@@ -1506,20 +1566,40 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	// Optimistic, the way applyMode is: the chip flips now and reverts if the
-	// agent refuses.
+	// agent refuses, and the snapshot may not put the old mode back meanwhile.
 	m.snap.CurrentMode = id
+	m.modeGen++
+	m.modeInFlight = id
+	gen := m.modeGen
 	// The offer is spent, not retired: a SetMode that fails leaves the plan on
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
 	seq := m.turnSeq
 	sess := m.sess
 	return m, func() tea.Msg {
-		if err := sess.SetMode(context.Background(), id); err != nil {
-			return planImplementFailedMsg{seq: seq, prev: prev, err: err}
+		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
+		defer cancel()
+		if err := sess.SetMode(ctx, id); err != nil {
+			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err}
 		}
-		return planImplementMsg{seq: seq, mode: id}
+		return planImplementMsg{seq: seq, gen: gen, mode: id}
 	}
 }
+
+// modeCallTimeout bounds session/set_mode. Without one an agent that is alive
+// but not answering leaves Conn.Call blocked for ever, no answer is ever
+// produced, and the flag that overrides the chip is never taken down: the chip
+// then lies for the life of the process. A cancel's 2 s is too tight for this
+// one — a cancel interrupts an agent that is by definition mid-turn and
+// listening, while set_mode can queue behind whatever the agent is doing — so
+// this is long enough that a busy agent answering between tool calls still
+// makes it, and short enough that a wedged one corrects itself while the user
+// is still looking at the same screen. Timing out is an ordinary refusal: it
+// returns the revert, which puts the chip back and clears the flag.
+//
+// A var rather than a const only so a test can shorten it: nothing in the
+// program writes it.
+var modeCallTimeout = 15 * time.Second
 
 // cancelTurn drops the whole card queue and cancels. Cancel answers every
 // request the session is still holding — permission, question and plan alike —
@@ -1721,6 +1801,25 @@ func (m Model) todosOf(ev agent.Event) []agent.Todo {
 	return m.snap.Todos
 }
 
+// modeSettled is SetMode coming back accepted, for gen. The snapshot is always
+// re-read: the session is the authority on the mode, and refreshSnap puts a
+// newer request of craze's own back over it, so reading it can never contradict
+// one. What only the current generation may do is take the mask down — an older
+// answer arriving late says nothing about the request the chip is showing.
+//
+// The re-read is the point, not bookkeeping: the RPC succeeding and this
+// message being handled are two different moments, and an agent-initiated mode
+// can land in between. refreshSnap masked it at the time, and clearing the flag
+// without reading it back would leave the chip on the mode craze asked for
+// while the session is in another one, with nothing to correct it afterwards.
+func (m Model) modeSettled(gen int) Model {
+	if gen == m.modeGen {
+		m.modeInFlight = ""
+	}
+	m.refreshSnap()
+	return m
+}
+
 // refreshSnap re-reads the session's snapshot. It draws no conclusions from
 // what changed: a mode change is reported by the event that carries it, because
 // applyMode has already written the user's own change into the snapshot and an
@@ -1730,6 +1829,13 @@ func (m *Model) refreshSnap() {
 		return
 	}
 	m.snap = m.sess.Snapshot()
+	if m.modeInFlight != "" {
+		// A SetMode of craze's own is still on the wire. The snapshot answers
+		// with the mode the session is still in, which is the one the user
+		// just left: taking it would flicker the chip back for as long as the
+		// round trip lasts.
+		m.snap.CurrentMode = m.modeInFlight
+	}
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}

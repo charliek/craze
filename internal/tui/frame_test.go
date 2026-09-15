@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -606,12 +605,9 @@ func TestFrameWaitTimeoutReapsChild(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 20*time.Second {
 		t.Fatalf("timeout took %s", elapsed)
 	}
-	if runtime.GOOS != "linux" {
-		return
-	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if !processRunning(bin) {
+		if !processRunning(t, bin) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

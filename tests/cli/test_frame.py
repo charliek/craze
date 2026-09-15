@@ -428,7 +428,10 @@ def test_frame_mode_chip_click_cycles(
     """The chip is clickable, not just drawn: a press on it cycles the mode.
 
     Status row 2 is the last row of the frame, so its y is rows-1, and the chip
-    is the first thing on it — x 1 is inside `◆ agent`.
+    is the first thing on it — x 1 is inside `◆ agent`. The wait is on the chip
+    rather than on the note, because the chip is what this asserts: waiting on
+    the transcript would let the two disagree about which frame is the one
+    under test.
     """
     proc = frame(
         craze_bin,
@@ -437,7 +440,7 @@ def test_frame_mode_chip_click_cycles(
         script="echo",
         cols=80,
         rows=24,
-        keys="<wait:idle><click:1,23><wait:text:mode →>",
+        keys="<wait:idle><click:1,23><wait:text:◆ plan>",
     )
     text = "\n".join(frame_lines(proc, 80, 24))
     assert "mode → plan" in text, text
@@ -510,14 +513,26 @@ def test_frame_permission_line_needs_no_force(
 def test_frame_cancel_says_so(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 ) -> None:
+    """Esc cancels a turn the agent is running, and the transcript says so.
+
+    Esc waits for the agent's own tool row rather than for `<wait:working>`:
+    the status flips while craze is still writing the user line, one goroutine
+    hop before the prompt reaches the wire, and an Esc sent inside that window
+    puts session/cancel on the wire *ahead* of session/prompt — which cancels
+    nothing, because a cancel belongs to the turn it interrupts. The tool row
+    is the agent answering this very prompt, so it is proof there is a turn to
+    cancel. The long turn's step is 30s so the turn cannot end on its own
+    first, whatever the machine is doing.
+    """
     proc = frame(
         craze_bin,
         fake_agent_bin,
         tmp_path,
-        script="hang",
+        script="long-turn",
         cols=80,
         rows=24,
-        keys="<wait:idle>hang<enter><wait:working><esc><wait:text:cancelled>",
+        keys="<wait:idle>go the long way<enter><wait:text:⟳ tool><esc><wait:text:cancelled>",
+        step="30s",
     )
     text = "\n".join(frame_lines(proc, 80, 24))
     assert "cancelled" in text, text

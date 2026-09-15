@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+# One group for every tag, not one per tag. Two releases running at once would
+# both push Formula/craze.rb to the tap, and whichever finished last would win
+# regardless of version order — an older tag could quietly regress the formula.
+# Serializing all of them also keeps the same-tag re-run case covered, and
+# cancel-in-progress stays false because aborting mid-upload is worse than
+# waiting.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # version-check: assert the tag matches internal/version/version.go.
+  # Catches the case where a tag was pushed against a commit that never ran
+  # scripts/release/update-version.sh (e.g. a developer bypassed the skill).
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Assert tag matches internal/version/version.go
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_ver="${tag#v}"
+          base_ver="${tag_ver%%-*}"   # strip any -rc1/-beta suffix
+          manifest_ver="$(sed -nE 's/^var Version = "([^"]+)"$/\1/p' internal/version/version.go)"
+          echo "tag=${tag} (full ${tag_ver}, base ${base_ver})  manifest version=${manifest_ver}"
+          # Either spelling is accepted, because both can legitimately occur.
+          # The release skill hands update-version.sh the tag's version
+          # verbatim, so tagging v1.2.3-rc.1 writes "1.2.3-rc.1" into the
+          # manifest — the full form. The upstream convention's template
+          # compares only the base, which assumes prerelease suffixes live in
+          # the tag alone. Accepting both means a prerelease does not fail
+          # here, while a genuine mismatch (v0.0.2 against a 0.0.1 manifest)
+          # still does: neither form of 0.0.2 equals 0.0.1.
+          if [ "${manifest_ver}" != "${tag_ver}" ] && [ "${manifest_ver}" != "${base_ver}" ]; then
+            echo "::error::tag ${tag} does not match internal/version/version.go version ${manifest_ver} (expected ${tag_ver} or ${base_ver}). The release skill should bump the manifest before tagging — re-run /release-workflows:release if this looks wrong."
+            exit 1
+          fi
+
+  # ci-gate: refuse to publish a release whose code didn't pass CI. The
+  # tagged commit's own ci.yml run is in flight in parallel with this
+  # workflow; poll until its ci-success check completes and require green.
+  ci-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Require ci-success green on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 45 minutes. Releases aren't time-sensitive; better to wait than
+          # to fail on a slow runner.
+          deadline=$(( SECONDS + 2700 ))
+          while :; do
+            latest="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=ci-success" \
+              --jq '.check_runs | sort_by(.started_at) | last')"
+            status="$(echo "${latest}" | jq -r '.status // "missing"')"
+            conclusion="$(echo "${latest}" | jq -r '.conclusion // ""')"
+            echo "ci-success @ ${GITHUB_SHA}: status=${status} conclusion=${conclusion}"
+            if [ "${status}" = "completed" ]; then
+              [ "${conclusion}" = "success" ] && { echo "CI green — releasing."; exit 0; }
+              echo "::error::ci-success concluded '${conclusion}' for ${GITHUB_SHA} — not releasing."
+              exit 1
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for ci-success on ${GITHUB_SHA} (status=${status}). Push the commit to main and let CI finish before tagging."
+              exit 1
+            fi
+            sleep 20
+          done
+
+  release:
+    needs: [version-check, ci-gate]
+    runs-on: ubuntu-latest
+    # Deliberately generous: this job runs GoReleaser's full build+upload
+    # phase. A release killed mid-upload is a painful partial-failure to
+    # recover from (see RELEASING.md), so this is a runaway backstop
+    # against GitHub's 6-hour default, not a performance budget.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # GoReleaser talks to the GitHub API with GITHUB_TOKEN; it never
+          # pushes over git, so there's no reason for the job token to sit
+          # on disk.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build release-notes args
+        id: notes
+        run: |
+          set -euo pipefail
+          notes_file="$(mktemp)"
+          scripts/release/changelog-section.sh "${GITHUB_REF_NAME}" > "${notes_file}"
+          # grep, not `[ -s ]`: a heading whose section is empty still yields a
+          # file of one blank line, which is non-zero size but would hand
+          # GoReleaser blank release notes instead of letting it generate its own.
+          if grep -q '[^[:space:]]' "${notes_file}"; then
+            echo "args=release --clean --release-notes ${notes_file}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No CHANGELOG.md section found for ${GITHUB_REF_NAME} — GoReleaser will auto-generate notes."
+            echo "args=release --clean" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Mint a release-bot App token scoped to charliek/homebrew-tap for
+      # GoReleaser's `brews:` step (formula push). The App must be
+      # installed on homebrew-tap (verify via sanity-check-app.yml).
+      - name: Mint a homebrew-tap App token
+        id: tap
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_KEY }}
+          owner: charliek
+          repositories: homebrew-tap
+          # Defense-in-depth: explicit permission floor on the minted
+          # token so a future widening of the App's installation perms
+          # doesn't silently broaden what this token can do. GoReleaser
+          # only needs contents:write on the tap repo (to push the
+          # formula).
+          permission-contents: write
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          # Pinned to the same version .mise.toml and ci.yml's
+          # release-snapshot job use — no floating `~> v2`, so a real
+          # release can't drift from what CI (and a contributor's own
+          # machine) already proved builds cleanly.
+          version: v2.15.3
+          args: ${{ steps.notes.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GoReleaser reads HOMEBREW_TAP_TOKEN from this env var (see
+          # .goreleaser.yaml: brews[].repository.token).
+          HOMEBREW_TAP_TOKEN: ${{ steps.tap.outputs.token }}
+
+      # Mint a release-bot App token scoped to charliek/apt-charliek for
+      # the publish dispatch. The App must be installed on apt-charliek
+      # (verify via sanity-check-app.yml). Skipped on prerelease tags —
+      # the apt channel only tracks stable releases.
+      - name: Mint an apt-charliek App token
+        if: success() && !contains(github.ref_name, '-')
+        id: apt
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_KEY }}
+          owner: charliek
+          repositories: apt-charliek
+          # POST /repos/.../dispatches requires contents:write.
+          permission-contents: write
+
+      - name: Trigger apt-charliek publish
+        if: success() && !contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ steps.apt.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Retry the dispatch a few times — a transient network/API blip
+          # shouldn't fail the release after GoReleaser already succeeded.
+          # apt-charliek's publish workflow is idempotent so a missed
+          # dispatch self-heals on the next release, but persistent
+          # failures are still worth flagging.
+          for attempt in 1 2 3; do
+            # Capture stderr so a real install-state failure (App not
+            # installed on apt-charliek, scoped-perms mismatch, etc.) is
+            # diagnosable from the workflow log without re-running.
+            if gh api repos/charliek/apt-charliek/dispatches \
+              --method POST \
+              -f event_type=publish \
+              -F "client_payload[package]=craze" \
+              -F "client_payload[tag]=${{ github.ref_name }}" 2>&1; then
+              echo "::notice::Watch apt publish at https://github.com/charliek/apt-charliek/actions"
+              exit 0
+            fi
+            echo "::warning::dispatch attempt $attempt failed; sleeping $((attempt * 5))s"
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::apt-charliek dispatch failed after 3 attempts — check the stderr above for the API error"
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done

@@ -35,7 +35,7 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	if err := sess.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "linux" && !processRunning(bin) {
+	if !processRunning(t, bin) {
 		t.Fatal("expected fake-agent child after Start")
 	}
 
@@ -79,16 +79,14 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 		t.Fatalf("quit cmd returned %T, want tea.QuitMsg", msg)
 	}
 
-	if runtime.GOOS == "linux" {
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			if !processRunning(bin) {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processRunning(t, bin) {
+			return
 		}
-		t.Fatal("fake-agent child still running after quit/close")
+		time.Sleep(20 * time.Millisecond)
 	}
+	t.Fatal("fake-agent child still running after quit/close")
 }
 
 func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
@@ -145,7 +143,7 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 		t.Fatal("prompt did not return after quit")
 	}
 
-	if runtime.GOOS == "linux" && processRunning(bin) {
+	if processRunning(t, bin) {
 		t.Fatal("fake-agent child still running after quit while working")
 	}
 }
@@ -228,10 +226,27 @@ func buildFakeAgent(t *testing.T) string {
 	return fakeAgentBin
 }
 
-func processRunning(bin string) bool {
+// processRunning asks whether anything in the process table still has bin in
+// its argv, which is how the leak checks above see a child craze failed to
+// reap. Only Linux has /proc; everywhere else ps is the one portable view of
+// another process's argv.
+//
+// It takes t so that failing to read the process table is a test failure and
+// not a quiet "nothing is running": every caller reads a false as proof the
+// child is gone, so an errored ps would turn each of these assertions green
+// without having looked at anything.
+func processRunning(t *testing.T, bin string) bool {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		out, err := exec.Command("ps", "-axww", "-o", "args=").Output()
+		if err != nil {
+			t.Fatalf("ps: %v", err)
+		}
+		return bytes.Contains(out, []byte(bin))
+	}
 	entries, err := filepath.Glob("/proc/[0-9]*/cmdline")
 	if err != nil {
-		return false
+		t.Fatalf("glob /proc: %v", err)
 	}
 	for _, p := range entries {
 		b, err := os.ReadFile(p)

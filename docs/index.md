@@ -1,7 +1,9 @@
 # craze
 
-A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
-`cursor-agent acp` over ACP. You own the chrome; Cursor still runs the agent.
+A Linux and macOS terminal UI for [Cursor CLI](https://cursor.com/cli) and
+[Grok CLI](https://docs.x.ai/build/cli/headless-scripting), talking to
+`cursor-agent acp` or `grok` over ACP. You own the chrome; the provider still
+runs the agent.
 
 ```bash
 ./bin/craze                      # the TUI, in the current directory
@@ -13,15 +15,17 @@ A Linux terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
 
 ## Current Scope
 
-POC on Linux. `craze` opens a TUI; `craze prompt --json` is the headless path.
-Multi-project harness integration is later work.
+POC on Linux and macOS. `craze` opens a TUI; `craze prompt --json` is the
+headless path. Multi-project harness integration is later work.
 
 craze requires:
 
-- Linux
+- Linux or macOS
 - Go 1.24+ (this repo pins 1.24 via `.mise.toml`)
-- A working Cursor login: `cursor-agent login` (the same binary is also
-  installed as `agent`)
+- Either the [Cursor CLI](https://cursor.com/cli), with a working login
+  (`cursor-agent login`, the same binary is also installed as `agent`), or
+  the [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`),
+  with `grok login` or `XAI_API_KEY` set
 
 ## Next Steps
 
