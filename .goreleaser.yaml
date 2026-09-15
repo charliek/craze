@@ -1,0 +1,98 @@
+version: 2
+
+project_name: craze
+
+# No `before.hooks: go mod tidy` (prox has one): CI's lint job already fails
+# the build on go.mod/go.sum drift, so re-running tidy here would only mask
+# the same problem later than it should be caught.
+builds:
+  - id: craze
+    binary: craze
+    main: ./cmd/craze
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/charliek/craze/internal/version.Version={{.Version}}
+
+# cmd/craze-fake-agent is a test double for the ACP client, not a shipped
+# binary, so it has no build entry here.
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
+
+nfpms:
+  - id: craze-deb
+    package_name: craze
+    file_name_template: "craze_{{ .Version }}_{{ .Arch }}"
+    vendor: charliek
+    homepage: "https://github.com/charliek/craze"
+    maintainer: "Charlie Knudsen <charlie.knudsen@gmail.com>"
+    description: "Terminal UI for Cursor and Grok coding agents over ACP"
+    license: MIT
+    formats:
+      - deb
+    bindir: /usr/local/bin
+    ids:
+      - craze
+
+# `brews` is deprecated in favour of `homebrew_casks`, and GoReleaser will
+# warn about that on every run. That warning is expected: casks are
+# macOS-only, and this tap's formulae need to install on Linux too, so we
+# stay on `brews` on purpose.
+brews:
+  - name: craze
+    ids:
+      - default
+    # A prerelease tag (rc, beta, ...) must never overwrite the stable
+    # formula in the tap; prox doesn't need this because it has no
+    # prereleases yet.
+    skip_upload: auto
+    repository:
+      owner: charliek
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/charliek/craze"
+    description: "Terminal UI for Cursor and Grok coding agents over ACP"
+    license: "MIT"
+    install: |
+      bin.install "craze"
+    test: |
+      system bin/"craze", "version"
+    caveats: |
+      craze drives a coding agent that you install separately: the Cursor
+      CLI (`cursor-agent login`) or the Grok CLI (`grok login`).
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+release:
+  github:
+    owner: charliek
+    name: craze
+  draft: false
+  prerelease: auto
+  mode: replace
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"

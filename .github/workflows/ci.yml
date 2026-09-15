@@ -96,3 +96,76 @@ jobs:
       # CRAZE_TMUX=1, and is run by hand.
       - run: make build
       - run: make test-cli
+
+  release-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # See the test job for why persist-credentials is false. fetch-depth: 0
+      # is new here: GoReleaser walks tag history to compute a version, and
+      # the default shallow clone would leave it with none.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Pinned to the same version .mise.toml installs locally (and that
+      # release.yml uses for the real release), so a snapshot build here
+      # can't disagree with what a contributor sees on their own machine.
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.15.3
+          args: release --snapshot --clean
+      # --snapshot never publishes, so everything below only proves the
+      # config still produces the artifacts a real release depends on:
+      # both binaries, both platforms, both archive and deb packaging.
+      - name: artifact counts
+        run: |
+          set -euo pipefail
+          archives=$(jq '[.[] | select(.type == "Archive")] | length' dist/artifacts.json)
+          packages=$(jq '[.[] | select(.type == "Linux Package")] | length' dist/artifacts.json)
+          checksums=$(jq '[.[] | select(.type == "Checksum")] | length' dist/artifacts.json)
+          echo "archives=$archives packages=$packages checksums=$checksums"
+          test "$archives" = "4"
+          test "$packages" = "2"
+          test "$checksums" = "1"
+      - name: deb contents and metadata
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            deb=$(jq -r --arg arch "$arch" \
+              '.[] | select(.type == "Linux Package" and .goarch == $arch) | .path' \
+              dist/artifacts.json)
+            dpkg-deb --info "$deb" | grep -q 'Package: craze'
+            dpkg-deb --info "$deb" | grep -q "Architecture: $arch"
+            dpkg-deb --contents "$deb" | grep -q './usr/local/bin/craze$'
+          done
+      - name: archive contents
+        run: |
+          set -euo pipefail
+          mapfile -t archives < <(
+            jq -r '.[] | select(.type == "Archive") | .path' dist/artifacts.json
+          )
+          # A `while read` over an empty query would loop zero times and exit
+          # 0, so the step has to say out loud how many archives it expected
+          # to open rather than trusting the count step above to have run.
+          test "${#archives[@]}" = "4"
+          for archive in "${archives[@]}"; do
+            count=$(tar -tzf "$archive" | wc -l)
+            test "$count" = "1"
+            tar -tzf "$archive" | grep -qx 'craze'
+          done
+      - name: extracted binary reports a snapshot version
+        run: |
+          set -euo pipefail
+          archive=$(jq -r \
+            '.[] | select(.type == "Archive" and .goos == "linux" and .goarch == "amd64") | .path' \
+            dist/artifacts.json)
+          tmp=$(mktemp -d)
+          tar -xzf "$archive" -C "$tmp"
+          out=$("$tmp/craze" version)
+          echo "version=$out"
+          [[ "$out" == *SNAPSHOT* ]]
+          [[ "$out" != "dev" ]]
