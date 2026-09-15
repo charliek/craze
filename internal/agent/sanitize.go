@@ -60,6 +60,18 @@ func sanitizeText(s string) string {
 	return b.String()
 }
 
+// sanitizeLine is sanitizeText folded onto one line: every run of whitespace,
+// newlines and tabs included, collapses to a single space and the ends are
+// trimmed. It is what a value has to survive before it can go inside a tag
+// craze writes — an argument or a path carrying a newline would otherwise put
+// the rest of that tag on a line of its own.
+func sanitizeLine(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(sanitizeText(s)), " ")
+}
+
 // clean reports whether s needs no scrubbing at all, so the common case does
 // not allocate.
 //

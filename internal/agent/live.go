@@ -317,6 +317,14 @@ func (s *session) resolvePluginsLocked() []PluginCommand {
 	return ResolvePluginNames(s.plugins, taken, !s.commandsSeen)
 }
 
+// pluginLookupLocked is every spelling the resolved rows can be typed by. It is
+// derived rather than kept, so there is no third thing to rewrite in step with
+// the other two: the menu's rows and the wire's lookup are the same list read
+// twice under the same lock.
+func (s *session) pluginLookupLocked() map[string]pluginTarget {
+	return buildPluginLookup(s.plugins, s.snap.Plugins)
+}
+
 // authMethod is the provider's pick against what initialize advertised: the
 // first of its preferred methods that is offered and, when it needs an env
 // key, backed by one. No advertised methods means no login.
@@ -371,6 +379,11 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	s.cancelling = false
 	done := make(chan struct{})
 	s.promptDone = done
+	// The references are read in the same locked section as everything else
+	// the turn depends on: an available_commands_update landing now either
+	// renamed the entries before this prompt resolved them or after, never
+	// halfway through.
+	refs := pluginRefs(text, s.pluginLookupLocked())
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -381,7 +394,27 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		s.mu.Unlock()
 	}()
 
-	res, err := client.Prompt(ctx, text)
+	// Block 1 is the draft; what craze expanded follows it. The events go out
+	// from the hook, which runs only once the client has accepted the prompt:
+	// a refused one expanded nothing, because nothing was sent.
+	blocks, expanded := promptBlocks(text, refs)
+	var accepted func()
+	if len(expanded) > 0 {
+		accepted = func() {
+			for _, cmd := range expanded {
+				// Its own copy, not a pointer into the shared slice: the event
+				// outlives this loop. And emitted under the prompt's own
+				// context, because this hook runs before the request is
+				// written: a consumer that has stopped draining would
+				// otherwise hold the prompt back from the wire entirely,
+				// where every other event of a turn only holds back the turn.
+				if !s.emitCtx(ctx, Event{Type: EventCommand, Command: &cmd}) {
+					return
+				}
+			}
+		}
+	}
+	res, err := client.PromptBlocks(ctx, blocks, accepted)
 	if refusedBeforeWire(err) {
 		// The prompt never left craze: no turn ran, so this turn number was
 		// never spent and there is nothing for the stream to report. Telling
@@ -1075,19 +1108,27 @@ func messageText(raw json.RawMessage) string {
 	return sanitizeText(b.Text)
 }
 
-func (s *session) emit(ev Event) {
+func (s *session) emit(ev Event) { s.emitCtx(context.Background(), ev) }
+
+// emitCtx is emit with a caller's cancellation as a third way out, and reports
+// whether the event was delivered. A session that is closing drops it either
+// way; ctx is for a caller that must not be held by a consumer's backlog.
+func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
 	}
 	select {
 	case <-s.done:
-		return
+		return false
 	default:
 	}
 	select {
 	case s.events <- ev:
+		return true
 	case <-s.done:
+	case <-ctx.Done():
 	}
+	return false
 }
 
 func (s *session) promptInFlight() bool {

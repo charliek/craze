@@ -475,3 +475,165 @@ def test_signal_clears_the_queue(craze_bin: Path, fake_agent_bin: Path, tmp_path
     assert len(removed) == 1, events
     assert not [e for e in events if e.get("type") == "queue" and e["event"] == "sent"]
     assert len([e for e in events if e.get("type") == "done"]) == 1, events
+
+
+# The probe plugin this plan was built against: one command that spends its
+# arguments and one skill that does not.
+PROBE_PLUGIN = Path(__file__).resolve().parent / "fixtures" / "probe-plugin"
+
+
+def command_events(events: list[dict]) -> list[dict]:
+    return [e for e in events if e.get("type") == "command"]
+
+
+def joined_text(events: list[dict]) -> str:
+    return "".join(e.get("text", "") for e in events if e.get("type") == "text")
+
+
+def test_plugin_command_expands(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    # The bare spelling only exists once the agent's first
+    # available_commands_update has landed -- until then every plugin row is
+    # qualified, so that a bare name accepted early cannot change meaning when
+    # the catalog arrives. A turn in front of this one is what makes the
+    # window deterministic; the qualified spelling needs no such thing
+    # (test_plugin_qualified_name sends it on the first turn).
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "--follow-up",
+        "/probe-echo banana",
+        "warm up",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    cmds = command_events(events)
+    assert len(cmds) == 1, events
+    cmd = cmds[0]
+    assert cmd["name"] == "probe-echo"
+    assert cmd["qualified"] == "probe-plugin:probe-echo"
+    assert cmd["plugin"] == "probe-plugin"
+    assert cmd["kind"] == "command"
+    assert cmd["path"].endswith("commands/probe-echo.md")
+    assert "PROBE-COMMAND-EXPANDED args=[banana]" in cmd["text"]
+    # The draft goes first and the block after it, which the fake's newline
+    # between text blocks is what makes visible.
+    text = joined_text(events)
+    assert text.startswith("echo: warm up"), text
+    assert "echo: /probe-echo banana\nThe user invoked " in text, text
+    assert "PROBE-COMMAND-EXPANDED args=[banana]" in text
+
+
+def test_plugin_qualified_name(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "/probe-plugin:probe-echo banana",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    cmds = command_events(events)
+    assert len(cmds) == 1, events
+    assert cmds[0]["qualified"] == "probe-plugin:probe-echo"
+    assert "PROBE-COMMAND-EXPANDED args=[banana]" in cmds[0]["text"]
+    text = joined_text(events)
+    assert text.startswith("echo: /probe-plugin:probe-echo banana\nThe user invoked "), text
+
+
+def test_plugin_skill_expands(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "/probe-plugin:probe-skill kiwi",
+    )
+    assert proc.returncode == 0, proc.stderr
+    cmds = command_events(parse_events(proc.stdout))
+    assert len(cmds) == 1, proc.stdout
+    cmd = cmds[0]
+    assert cmd["kind"] == "skill"
+    assert cmd["path"].endswith("skills/probe-skill/SKILL.md")
+    # A skill is attached whole and unsubstituted: frontmatter included, the
+    # arguments only in the tag.
+    assert '<skill name="probe-skill" plugin="probe-plugin" args="kiwi">' in cmd["text"]
+    assert "---\nname: probe-skill\n" in cmd["text"]
+    assert "PROBE-SKILL-EXPANDED" in cmd["text"]
+
+
+def test_unknown_slash_is_verbatim(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "/nope banana",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    assert command_events(events) == []
+    assert joined_text(events) == "echo: /nope banana"
+
+
+def test_follow_up_expands(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "--follow-up",
+        "/probe-plugin:probe-skill two",
+        "/probe-plugin:probe-echo one",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    cmds = command_events(events)
+    assert [c["kind"] for c in cmds] == ["command", "skill"], events
+    assert "PROBE-COMMAND-EXPANDED args=[one]" in cmds[0]["text"]
+    assert "PROBE-SKILL-EXPANDED" in cmds[1]["text"]
+
+
+def test_plain_mode_silent(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "/probe-plugin:probe-echo banana",
+        json_mode=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert '"type":"command"' not in proc.stdout
+    # The expansion still happened; only craze's own line is absent.
+    assert proc.stdout.startswith("echo: /probe-plugin:probe-echo banana\nThe user invoked ")
+    assert "PROBE-COMMAND-EXPANDED args=[banana]" in proc.stdout
+
+
+def test_grok_ignores_plugin_dir(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    proc = run_prompt(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        "--provider",
+        "grok",
+        "--plugin-dir",
+        str(PROBE_PLUGIN),
+        "/probe-echo banana",
+        script="grok-echo",
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    assert command_events(events) == []
+    # grok advertises its own plugin skills and expands them itself, so the
+    # draft goes out as one block, exactly as it did before this existed.
+    assert joined_text(events) == "echo: /probe-echo banana"
+    assert "plugin dirs ignored for grok" in proc.stderr

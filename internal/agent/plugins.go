@@ -636,15 +636,26 @@ func pluginNameOK(name string) bool {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '_' || c == '-':
-		default:
+		if !isPluginNameByte(name[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// isPluginNameByte is that class one byte at a time, which is how the prompt
+// scanner reads it (scanNameRun). It lives here rather than beside the scanner
+// so the rule the discovery side admits a name by and the rule the wire side
+// matches one by cannot drift: a name only one of them accepts is a menu row
+// whose Enter sends plain text.
+func isPluginNameByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '_' || c == '-':
+		return true
+	}
+	return false
 }
 
 // pluginIDOK is the same class for a plugin id. A plugin whose id fails it is

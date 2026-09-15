@@ -37,16 +37,19 @@ type promptOpts struct {
 	provider  string
 	followUps []string
 	decisions []string
-	force     bool
-	noForce   bool
-	ask       bool
-	plan      bool
-	json      bool
-	text      string
-	stdout    io.Writer
-	stderr    io.Writer
-	stdin     io.Reader
-	cmd       *cobra.Command
+	// pluginDirs are extra plugin roots, cursor-agent's --plugin-dir spelled
+	// the same way. They are craze's own: the child agent is never told.
+	pluginDirs []string
+	force      bool
+	noForce    bool
+	ask        bool
+	plan       bool
+	json       bool
+	text       string
+	stdout     io.Writer
+	stderr     io.Writer
+	stdin      io.Reader
+	cmd        *cobra.Command
 	// foreignMax overrides foreignTurnMax. Zero is the real bound; the tests
 	// that drive the give-up path set a short one, because a minute of waiting
 	// is not a test anyone runs.
@@ -83,6 +86,7 @@ func newPromptCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")
+	cmd.Flags().StringArrayVar(&o.pluginDirs, "plugin-dir", nil, "extra plugin directory whose commands and skills craze expands (repeatable)")
 	cmd.Flags().BoolVar(&o.force, "force", true, "spawn the agent with --force (yolo)")
 	cmd.Flags().BoolVar(&o.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().BoolVar(&o.ask, "ask", false, "set session mode to ask after session/new")
@@ -127,13 +131,14 @@ func (o *promptOpts) run() (retErr error) {
 
 	prov := resolved.Provider
 	sess := agent.New(agent.Options{
-		Binary:    o.agentBin,
-		Workspace: ws,
-		Force:     o.force,
-		Model:     o.model,
-		Mode:      o.mode(),
-		Stderr:    o.stderr,
-		Provider:  &prov,
+		Binary:     o.agentBin,
+		Workspace:  ws,
+		Force:      o.force,
+		Model:      o.model,
+		Mode:       o.mode(),
+		Stderr:     o.stderr,
+		PluginDirs: o.pluginDirs,
+		Provider:   &prov,
 	})
 	defer func() { _ = sess.Close() }()
 

@@ -1302,13 +1302,16 @@ func promptText(params json.RawMessage) string {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return ""
 	}
-	var out string
+	var parts []string
 	for _, b := range p.Prompt {
 		if b.Type == "text" {
-			out += b.Text
+			parts = append(parts, b.Text)
 		}
 	}
-	return out
+	// A newline between blocks, not nothing: craze sends the draft and then one
+	// block per plugin expansion, and an echo that ran them together would hide
+	// exactly the boundary a golden is there to show.
+	return strings.Join(parts, "\n")
 }
 
 // Real cursor toolCallIds carry a literal newline; the new scripts keep that

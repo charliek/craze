@@ -47,6 +47,21 @@ type jsonQueue struct {
 	Text     string `json:"text,omitempty"`
 }
 
+// jsonCommand is one plugin command or skill craze expanded into the prompt.
+// Name is the entry's own name and Qualified the plugin:name spelling, which
+// are the same row under two names when the bare one was free. Text is the
+// block as it went on the wire: what the agent was actually told, which is the
+// only way a headless caller can see it.
+type jsonCommand struct {
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	Qualified string `json:"qualified"`
+	Plugin    string `json:"plugin"`
+	Kind      string `json:"kind"`
+	Path      string `json:"path"`
+	Text      string `json:"text,omitempty"`
+}
+
 // jsonForeignTurn brackets a turn the agent ran without a craze prompt.
 type jsonForeignTurn struct {
 	Type  string `json:"type"`
@@ -61,6 +76,19 @@ func queueJSON(ev agent.Event) jsonQueue {
 		j.ID = ev.Queue.ID
 		j.Version = ev.Queue.Version
 		j.Text = ev.Queue.Text
+	}
+	return j
+}
+
+func commandJSON(ev agent.Event) jsonCommand {
+	j := jsonCommand{Type: "command"}
+	if ev.Command != nil {
+		j.Name = ev.Command.Bare
+		j.Qualified = ev.Command.Qualified
+		j.Plugin = ev.Command.Plugin
+		j.Kind = ev.Command.Kind
+		j.Path = ev.Command.Path
+		j.Text = ev.Command.Text
 	}
 	return j
 }
@@ -146,6 +174,8 @@ func eventJSON(ev agent.Event) (any, bool) {
 		return jsonEvent{Type: "thought", Text: ev.Text, Agent: ev.Agent}, true
 	case agent.EventUser:
 		return jsonEvent{Type: "user", Text: ev.Text, Agent: ev.Agent, Interjection: ev.Interjection}, true
+	case agent.EventCommand:
+		return commandJSON(ev), ev.Command != nil
 	case agent.EventQueue:
 		return queueJSON(ev), ev.Queue != nil
 	case agent.EventForeignTurn:
