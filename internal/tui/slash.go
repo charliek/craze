@@ -456,6 +456,7 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	m.snap.CurrentMode = id
+	m.modeInFlight = id
 	// Leaving the mode the plan was made in retires the offer with it, and the
 	// kill is recorded against the turn so a late ending cannot bring it back.
 	m.retirePlanOffer()
@@ -465,7 +466,7 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 		if err := sess.SetMode(context.Background(), id); err != nil {
 			return revertModeMsg{prev: prev, err: err}
 		}
-		return nil
+		return modeAppliedMsg{id: id}
 	}
 }
 

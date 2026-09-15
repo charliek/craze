@@ -149,6 +149,13 @@ type Model struct {
 	cards          []card
 	cardsCancelled bool
 	snap           agent.Snapshot
+	// modeInFlight is a mode change of craze's own that the agent has not
+	// answered yet. The chip flips when the user asks for it and reverts only
+	// if the agent refuses, but the session's snapshot still says the old mode
+	// for the length of that round trip — so refreshSnap keeps this one on the
+	// chip instead, or any unrelated update landing inside the window flickers
+	// it back to the mode the user just left.
+	modeInFlight string
 
 	// dialog is the modal layer: at most one is up, drawn over the transcript
 	// region and hit-tested before any band. mdlg is the model dialog's own
@@ -289,6 +296,11 @@ type revertModeMsg struct {
 	prev string
 	err  error
 }
+
+// modeAppliedMsg is SetMode coming back accepted: the session's snapshot
+// carries this mode now, so the chip can go back to reading it.
+type modeAppliedMsg struct{ id string }
+
 type revertModelMsg struct {
 	prev string
 	err  error
@@ -522,7 +534,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case revertModeMsg:
 		m.snap.CurrentMode = msg.prev
+		// The revert is the last word on the mode, so nothing may put the
+		// refused one back on the chip afterwards.
+		m.modeInFlight = ""
 		m.addError(msg.err.Error())
+		return m, nil
+
+	case modeAppliedMsg:
+		// A newer change of the user's own is left alone: that one is the one
+		// still in flight, and the snapshot does not carry it yet.
+		if m.modeInFlight == msg.id {
+			m.modeInFlight = ""
+		}
 		return m, nil
 
 	case revertModelMsg:
@@ -596,7 +619,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case planImplementMsg:
 		// The session is in the implement mode now, so the note is honest
-		// whatever else has happened meanwhile.
+		// whatever else has happened meanwhile — and so is its snapshot.
+		if m.modeInFlight == msg.mode {
+			m.modeInFlight = ""
+		}
 		m.addNote(modeNote(m.snap.Modes, msg.mode))
 		if msg.seq != m.turnSeq {
 			// A turn of the user's own started while SetMode was in flight, so
@@ -1506,8 +1532,9 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	}
 	prev := m.snap.CurrentMode
 	// Optimistic, the way applyMode is: the chip flips now and reverts if the
-	// agent refuses.
+	// agent refuses, and the snapshot may not put the old mode back meanwhile.
 	m.snap.CurrentMode = id
+	m.modeInFlight = id
 	// The offer is spent, not retired: a SetMode that fails leaves the plan on
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
@@ -1730,6 +1757,13 @@ func (m *Model) refreshSnap() {
 		return
 	}
 	m.snap = m.sess.Snapshot()
+	if m.modeInFlight != "" {
+		// A SetMode of craze's own is still on the wire. The snapshot answers
+		// with the mode the session is still in, which is the one the user
+		// just left: taking it would flicker the chip back for as long as the
+		// round trip lasts.
+		m.snap.CurrentMode = m.modeInFlight
+	}
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}

@@ -675,7 +675,7 @@ func TestShiftTabCyclesMode(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected SetMode cmd")
 	}
-	if msg := cmd(); msg != nil {
+	if msg := cmd(); msg != (modeAppliedMsg{id: "plan"}) {
 		t.Fatalf("stub SetMode returned %T %v", msg, msg)
 	}
 	if !strings.Contains(plainView(m), "plan") {
@@ -1537,15 +1537,19 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 // --- §3.3 plan-mode exit -------------------------------------------------
 
 // intoPlanMode cycles the session into plan mode the way Shift+Tab does and
-// runs the SetMode through, so the stub's own snapshot agrees with the model's
-// and a refreshSnap cannot put the mode back.
+// runs the SetMode through — answer included, the way the program loop would —
+// so the stub's own snapshot agrees with the model's and the mode is no longer
+// in flight.
 func intoPlanMode(t *testing.T, m Model) Model {
 	t.Helper()
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = tm.(Model)
-	if msg := runCmd(cmd); msg != nil {
+	msg := runCmd(cmd)
+	if msg != (modeAppliedMsg{id: "plan"}) {
 		t.Fatalf("SetMode returned %+v", msg)
 	}
+	tm, _ = m.Update(msg)
+	m = tm.(Model)
 	if m.snap.CurrentMode != "plan" {
 		t.Fatalf("mode %q, want plan", m.snap.CurrentMode)
 	}
