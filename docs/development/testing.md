@@ -66,6 +66,58 @@ for a cancel after the child completed) and are what the ACP parser tests and
 a replay through the client run against, so the repo
 does not depend on the capture directory.
 
+### Plugin scripts
+
+The fake's `commands` script advertises a full catalog from `session/new`
+(the same 24-entry catalog the slash-menu goldens use), so a plugin row
+resolves on turn one; `nocommands` never sends `available_commands_update`
+at all, so a session against it stays in the provisional window — every
+plugin row qualified — for its whole life, which is the one state a real
+Cursor session only holds for a few seconds and no golden could otherwise
+capture. `callorder` is `echo` with a receipt: a second text block naming
+every `session/prompt` and `session/cancel` the fake has read so far, in
+arrival order, which is how `internal/agent/expand_test.go`'s catalog-wait
+tests prove `Cancel` aborts the wait rather than racing the next queued
+prompt.
+
+Fixture plugins live in two places: `tests/cli/fixtures/probe-plugin/` (one
+command, `probe-echo`, that spends its arguments, and one skill,
+`probe-skill`, that does not) is what the Python suite and the manual JSON
+checks drive; `internal/tui/testdata/plugins/` carries the same probe
+plugin for the Go goldens plus `alpha` and `beta`, which each ship a
+`rescue` command so a name collision — and the qualified spelling it
+forces — has a fixture of its own.
+
+Every test that starts a session or runs a binary isolates `HOME`: craze
+walks the plugin caches under `HOME` at session start, so a test that
+didn't would see whatever a developer happens to have installed. In Go
+that's `t.Setenv("HOME", t.TempDir())` in the test's own setup
+(`internal/agent/session_test.go`, `internal/cli/json_test.go`,
+`internal/cli/frame_test.go`, `internal/cli/tui_test.go`, …); in the Python
+suite it's the autouse `isolate_run_env` fixture in `tests/cli/conftest.py`.
+
+To drive a plugin command through the JSON interface:
+
+```bash
+CRAZE_FAKE_SCRIPT=commands ./bin/craze prompt --json \
+  --agent-bin ./bin/craze-fake-agent \
+  --plugin-dir tests/cli/fixtures/probe-plugin \
+  "/probe-echo banana"
+```
+
+and through `craze frame`:
+
+```bash
+./bin/craze frame --cols 100 --rows 30 \
+  --agent-bin ./bin/craze-fake-agent --fake-script commands \
+  --plugin-dir tests/cli/fixtures/probe-plugin \
+  --keys "/probe-echo banana<enter><wait:text:PROBE-COMMAND-EXPANDED>"
+```
+
+Both isolate `HOME` themselves in the test suites above; run by hand like
+this, they read whatever plugins your own `HOME` happens to have cached in
+addition to the fixture.
+
 ## craze frame
 
 `craze frame` is a hidden command that runs the real TUI model with no
@@ -90,6 +142,7 @@ what the goldens render against.
 | `--no-force` | Disable yolo and handle permission requests |
 | `--timeout` | Per-wait timeout (default 10s) |
 | `--print-frames` | Stream every frame to stderr |
+| `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable); resolved against the current directory, since `craze frame` has no `--workspace` |
 
 There is no `--workspace`: `craze frame` runs in the current directory. It
 never reads `~/.craze/config.toml`, so a saved theme cannot reach a golden.

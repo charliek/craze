@@ -298,27 +298,104 @@ window has scrolled past the top; the last row carries `▼` when there is more
 below. A band cropped to a single row shows `k/n` alone: it is both the first
 and the last row, and the count already says what the arrows would.
 
-Skills come from the agent's own ACP catalog first: both Cursor and Grok
-advertise the skills they have enabled for the session — plugin skills
-included — so craze takes plugin skills from that catalog and never walks a
-plugin cache of its own; what the menu offers is exactly what the agent will
-honour. The on-disk scan is a supplement, for project skills the session's
-own catalog does not carry (Grok in particular does not advertise its own
-project skills over ACP, so the walk is their only path to the menu): Cursor
-walks `.cursor/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills`
-under the workspace and `$HOME`, still skipping `.cursor/plugins`; Grok walks
-`.grok/skills` and `.agents/skills`. The two providers disagree on how a
-skill on disk gets its name — **Cursor names it after the skill's directory**,
-whatever its frontmatter says; **Grok names it after the frontmatter `name`**,
-falling back to the directory only when there is none — and on both,
-`user-invocable: false` in the frontmatter hides the skill from the menu the
-same way it hides it from the agent's own catalog. Agent-advertised commands
-from the ACP session are listed after the builtins, disk skills after those.
+Skills come from the agent's own ACP catalog first: Grok's ACP server loads a
+plugins service, so its catalog already carries every plugin skill it has
+enabled, named and expanded by Grok itself — craze changes nothing there.
+Cursor's ACP server never constructs a plugins service, so its catalog never
+carries anything a plugin ships, command or skill, and never expands one
+either: sent as prompt text, `/watch-pr` reaches the model as the two words
+`/watch-pr`, and the model is left to guess what they meant. Everything
+Cursor's catalog *does* carry — project and user skills, `.cursor/commands`,
+`.claude/commands`, and workspace and global commands — is still expanded by
+cursor itself exactly as before. The on-disk scan is a supplement, for
+project skills the session's own catalog does not carry (Grok in particular
+does not advertise its own project skills over ACP, so the walk is their
+only path to the menu): Cursor walks `.cursor/skills`, `.agents/skills`,
+`.codex/skills`, `.claude/skills` under the workspace and `$HOME`, still
+skipping `.cursor/plugins`; Grok walks `.grok/skills` and `.agents/skills`.
+The two providers disagree on how a skill on disk gets its name — **Cursor
+names it after the skill's directory**, whatever its frontmatter says;
+**Grok names it after the frontmatter `name`**, falling back to the
+directory only when there is none — and on both, `user-invocable: false` in
+the frontmatter hides the skill from the menu the same way it hides it from
+the agent's own catalog.
+
+For Cursor, craze makes up the difference itself: it finds a plugin's
+commands and skills on disk and expands them into the prompt the way
+cursor's own TUI does, so `/watch-pr` and the rest of a plugin's commands
+reach the menu and work when sent even though Cursor's ACP server never
+sees them. It looks in three places, first source wins on a `plugin:name`
+collision: `--plugin-dir` directories, in the order given; then the cursor
+plugin cache (`~/.cursor/plugins/cache/<marketplace>/<plugin>/<version>/`,
+the version with the newest modification time among those carrying that
+plugin's `.cache-complete` sentinel — a plugin with no finished install
+contributes nothing); then Claude Code's enabled plugins
+(`~/.claude/plugins/installed_plugins.json`, filtered by the workspace's and
+the user's `.claude/settings.json` the way cursor's own loader filters
+them). An entry is offered under its own bare name when nothing else —
+Cursor, a builtin, another plugin — claims that name, and under
+`plugin:name` on a collision or when Cursor or a builtin already owns the
+bare spelling. The menu's order stays builtins, then whatever Cursor
+advertised, then these plugin rows, then disk skills, the same
+case-insensitive first-name-wins dedupe as everywhere else.
+
+Typing `:` is how you ask for a plugin's qualified spelling: `/git-c` finds
+`watch-pr` and `merge-pr` through the plugin's own name even when neither
+collides with anything else, `Tab` on `/git-commands:w` inserts
+`/git-commands:watch-pr `, `Tab` on `/wat` inserts the bare `/watch-pr `, and
+`Enter` sends on either fully-typed spelling. A name several plugins share
+(four installs on this machine each ship a `/rescue`) is never offered
+bare, so a bare `/rescue` typed by hand is not a plugin reference at all —
+it goes to the agent as ordinary text, the same as any other name nothing
+advertises.
+
+Under the user's transcript entry, a plugin reference leaves a dim
+`⤷ plugin:name (kind)` line — the qualified spelling and whether it was a
+command or a skill, never the body itself. A command's body substitutes
+`$ARGUMENTS` and `$1`..`$99` from the typed arguments, cursor's own rule for
+plugin commands; a skill's body is sent whole and unsubstituted, because
+that is what cursor itself does with a skill's content — the arguments show
+up only in the block's lead sentence and its `args` attribute. Both substitute `${CLAUDE_PLUGIN_ROOT}`
+and `${CURSOR_PLUGIN_ROOT}` with the plugin's own install path. Up to 8
+references expand per prompt, first occurrence of each name only; a
+headless `craze prompt --json` run can read the whole block in the
+`command` event's `text` field (see [CLI reference](cli.md#json-events)).
+Grok changes on none of this: it already advertises and expands every
+plugin skill itself, so craze's menu and wire are exactly what they were
+before, and `/plugin:name` typed by hand for a skill Grok advertises bare is
+honoured by Grok's own resolver.
 
 Cursor's ACP catalog lands a few seconds after the session starts
 (`session/new` itself carries none of it), so a `/` typed right away shows
-only craze's builtins and whatever the disk scan already found; the rest
-appears once the agent advertises it.
+only craze's builtins, whatever plugin rows resolved from disk — qualified,
+see below — and whatever the disk scan already found; the rest appears once
+the agent advertises it. Plugin rows stay qualified for exactly that window:
+a row shown as `plugin:name` before Cursor's first catalog update goes bare
+the moment that update confirms nothing else owns the name, so the menu
+renames itself once per session; a draft already typed with the qualified
+spelling keeps resolving no matter which way the row is drawn, so nothing
+sent during that window is ever wrong. If Cursor ever stopped sending the
+catalog altogether, plugin rows would simply stay qualified for the whole
+session — safe, just less tidy.
+
+`craze prompt`'s one-shot turn does not get to wait out that window by
+watching the menu, so when the very first prompt of a session carries a
+slash token that does not yet resolve, craze holds it for up to 5 seconds so
+a bare name is not sent before the catalog can say whether it is really
+unclaimed. `Esc` cancels the wait like any other turn — the prompt never
+reaches the wire. A draft with no slash token, an already-qualified name, or
+any prompt after the first never waits, and falling through the 5 seconds
+unresolved is exactly the old behaviour: the draft goes out verbatim.
+
+Two things worth knowing about where plugin rows come from. The cursor
+plugin cache is read as *installed*, not as currently enabled, so a plugin
+the account has since turned off keeps its cache until cursor prunes it and
+craze can still offer it — because craze expands the command itself rather
+than counting on the agent to recognise it, that is optimistic about what
+the account still has on, not a lie about what will happen. And because the
+token scan reads the whole prompt line the way cursor's own regex does, a
+stray `/watch-pr` in the middle of a sentence ("see /watch-pr for context")
+expands exactly as if it had been typed at the start.
 
 ## Model dialog
 
