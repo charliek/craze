@@ -6,18 +6,40 @@ on:
   pull_request:
     branches: [main, 'feature/*']
 
-# Linux only, on purpose: craze drives cursor-agent over a pty and is not
-# supported on macOS (see CLAUDE.md), so a darwin leg would test a platform
-# nobody runs.
+# test and cli run both a Linux and a macOS leg: craze ships for both via the
+# tap's Homebrew formula (linux and darwin archives, see .goreleaser.yaml)
+# and the apt package (linux-only debs, amd64 and arm64), so both are
+# platforms real users run on. Agent spawn itself is plain pipes plus
+# Setpgid (internal/acp/spawn.go) — no pty — so there was never a technical
+# reason this couldn't build and pass on darwin; ptys only show up in this
+# repo's own tests. lint and build stay ubuntu-only, but not because
+# compiling is platform-independent — it isn't, and this repo does reach for
+# syscall.SysProcAttr and syscall.Flock. They stay ubuntu-only because the
+# macOS legs below already compile everything: `go test ./...` builds every
+# package there, and the cli job runs `make build` on both legs. A separate
+# darwin build job would recompile what those legs just compiled. The same
+# goes for lint: there is no GOOS-suffixed or //go:build-gated source in the
+# tree, so there is no file golangci-lint would only see with GOOS=darwin.
+# Add either of those and this reasoning needs revisiting.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      # fail-fast: false so a failure on one OS doesn't cancel the other leg
+      # mid-run — losing that leg's result would hide whether the bug is
+      # platform-specific or universal, which is the one thing worth knowing
+      # first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     # Hard backstop. Without this a job inherits GitHub's 6-hour default, so a
     # deadlocked test — or a hung fake agent holding the job's stdout pipe open,
     # which Go's own -timeout cannot interrupt — burns runner minutes until
     # someone notices. The suite takes ~30s locally; hosted runners are slower
-    # and have fewer cores, so this is generous but bounded.
-    timeout-minutes: 15
+    # and have fewer cores, and macos-latest (arm64) is the slower of the two,
+    # so 15 minutes started clipping it — 20 keeps the same generous-but-bounded
+    # intent for the new ceiling.
+    timeout-minutes: 20
     steps:
       # persist-credentials: false — actions/checkout otherwise leaves the job
       # token in .git/config, and the very next step runs `go test ./...`, i.e.
@@ -79,7 +101,13 @@ jobs:
       - run: ./bin/craze --version
 
   cli:
-    runs-on: ubuntu-latest
+    strategy:
+      # Same reasoning as the test job's matrix: don't let one OS's failure
+      # cancel the other leg before it reports.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -169,3 +197,44 @@ jobs:
           echo "version=$out"
           [[ "$out" == *SNAPSHOT* ]]
           [[ "$out" != "dev" ]]
+
+  # The job id below must stay exactly `ci-success`, with no `name:`
+  # override: that id is the check-run name the repo's main-protection
+  # ruleset requires, the name the release workflow's ci-gate job polls for,
+  # and the name the release skill matches on. A `name:` here changes what
+  # shows up as the check without changing the job id other workflows key
+  # off of, which would silently break all three.
+  ci-success:
+    needs: [test, lint, build, cli, release-snapshot]
+    # GitHub's default `if` is `success()`, which SKIPS a job the moment any
+    # dependency fails. A skipped required check is "no result" to branch
+    # protection, not "failing" — so a red CI would merge clean instead of
+    # being blocked. always() makes this job run — and fail loudly — exactly
+    # when it should.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Reading `needs` back as JSON, instead of hand-writing
+      # `needs.test.result == 'success' && needs.lint.result == ... `, means
+      # a job later added to the `needs:` list above is automatically
+      # covered here — there is no second list to remember to keep in sync,
+      # so forgetting one can't quietly leave the gate passing. Matrix jobs
+      # (test, cli) already collapse to a single result each in this
+      # context — GitHub reports the job as failed here if any one leg
+      # failed — so one red macOS run fails the whole gate too.
+      #
+      # One hole, and it is GitHub's rather than ours: if two matrix legs
+      # fail and you rerun only ONE of them, and it passes, the aggregator's
+      # rerun can see the matrix job as successful while the other leg is
+      # still red from the first attempt
+      # (github.com/orgs/community/discussions/26822). Rerun all jobs, not a
+      # single leg, when a matrix job is red.
+      - name: require every dependency to have succeeded
+        # Through env rather than interpolated straight into the run: line —
+        # the expansion happens before the shell parses anything, so a job
+        # that later grows an output containing a quote would otherwise
+        # rewrite this command rather than be checked by it.
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e 'all(.result == "success")'
