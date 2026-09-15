@@ -4,8 +4,9 @@ Working conventions for agent sessions in this repo.
 
 ## What this is
 
-craze is a Linux TUI that drives `cursor-agent` over ACP (Agent Client Protocol).
-It is a proof of concept. Multi-project harness integration is later work.
+craze is a Linux and macOS TUI that drives `cursor-agent` or `grok` over ACP
+(Agent Client Protocol). It is a proof of concept. Multi-project harness
+integration is later work.
 
 ## Per-commit gate
 
@@ -18,7 +19,13 @@ make lint && make test && make build
 Once `tests/cli/pyproject.toml` exists, also run `make test-cli` (and CI will).
 Do not pipe gate commands through `| tail`.
 
-Linux only. No macOS CI. Toolchain is [mise](https://mise.jdx.dev/) (`.mise.toml`); the Makefile prepends `~/.local/share/mise/shims` so `make` works without an activated shell.
+CI runs `test` and `cli` on both `ubuntu-latest` and `macos-latest`; `lint`,
+`build`, and `release-snapshot` stay ubuntu-only (see the comment atop
+`.github/workflows/ci.yml` for why that split is safe). The mac-mini is the
+live-smoke box for macOS: real `cursor-agent`/`grok` sessions driven in tmux,
+outside CI. Toolchain is [mise](https://mise.jdx.dev/) (`.mise.toml`); the
+Makefile prepends `~/.local/share/mise/shims` so `make` works without an
+activated shell.
 
 ## Docs
 

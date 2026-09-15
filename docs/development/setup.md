@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Linux
+- Linux or macOS
 - Go 1.24 or later
 - [mise](https://mise.jdx.dev/) (optional; this repo pins Go and golangci-lint in `.mise.toml`)
 - [uv](https://docs.astral.sh/uv/) (docs site and `make test-cli`)

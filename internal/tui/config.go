@@ -144,9 +144,11 @@ func SaveProvider(name string) error {
 	return writeConfig(path, cfg)
 }
 
-// lockConfig takes the exclusive lock that covers one read-modify-write. Linux
-// only, per the repo's pin. A lock craze cannot take (a read-only directory,
-// say) is not a reason to refuse to save: the write itself still reports that.
+// lockConfig takes the exclusive lock that covers one read-modify-write.
+// syscall.Flock exists on both Linux and Darwin (the two platforms this repo
+// pins), so this works unchanged on both. A lock craze cannot take (a
+// read-only directory, say) is not a reason to refuse to save: the write
+// itself still reports that.
 func lockConfig(path string) (func(), error) {
 	f, err := os.OpenFile(path+configLockSuffix, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

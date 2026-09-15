@@ -1,30 +1,75 @@
 # craze
 
-A Linux terminal UI that talks ACP to **Cursor** (`cursor-agent acp`) or
-**Grok** (`grok agent stdio`). You own the chrome; the provider still runs
+A Linux and macOS terminal UI that talks ACP to **Cursor** (`cursor-agent acp`)
+or **Grok** (`grok agent stdio`). You own the chrome; the provider still runs
 the agent.
 
 ## Install
 
-1. Linux, and either the [Cursor CLI](https://cursor.com/cli) or the
-   [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`) installed.
-2. Log in: `cursor-agent login` (also installed as `agent`), or `grok login`
-   / set `XAI_API_KEY`.
-3. Install craze:
+Either way, you also need the [Cursor CLI](https://cursor.com/cli) or the
+[Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`) installed
+and logged in: `cursor-agent login` (also installed as `agent`), or
+`grok login` / set `XAI_API_KEY`.
 
-   ```shell
-   go install github.com/charliek/craze/cmd/craze@main
-   ```
+### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — available from v0.0.1
 
-   `@main` pins the branch explicitly. `go install` writes the binary to
-   `$GOBIN`, or `$GOPATH/bin` when that is unset — `$HOME/go/bin` by default —
-   so with that directory on your `PATH` the command is `craze`:
+```shell
+brew install charliek/tap/craze
+```
 
-   ```shell
-   craze version
-   ```
+Intel macOS (`darwin/amd64`) is cross-compiled and shipped but not tested at
+runtime; treat it as best-effort. Apple Silicon and Linux (amd64/arm64) are
+tested.
 
-   It reports `dev` until the first tag lands.
+### apt (Debian/Ubuntu, amd64/arm64) — available from v0.0.1
+
+Add the repo once:
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://apt.stridelabs.ai/pubkey.gpg | \
+  sudo tee /etc/apt/keyrings/apt-charliek.gpg > /dev/null
+echo 'deb [signed-by=/etc/apt/keyrings/apt-charliek.gpg] https://apt.stridelabs.ai noble main' | \
+  sudo tee /etc/apt/sources.list.d/apt-charliek.list
+sudo apt update
+```
+
+Then:
+
+```shell
+sudo apt install craze
+```
+
+### Direct `.deb` — available from v0.0.1
+
+Download the asset for your architecture from the
+[GitHub Release](https://github.com/charliek/craze/releases) — named
+`craze_<version>_<arch>.deb` (no `linux` segment in the name) — then:
+
+```shell
+sudo apt install ./craze_<version>_<arch>.deb
+```
+
+### From source
+
+```shell
+go install github.com/charliek/craze/cmd/craze@latest
+```
+
+`go install` writes the binary to `$GOBIN`, or `$GOPATH/bin` when that is
+unset — `$HOME/go/bin` by default — so with that directory on your `PATH`
+the command is `craze`.
+
+### `craze version`
+
+Homebrew, the `.deb`, and the release archives all report the release tag.
+`go install .../craze@v0.0.1` (and `@latest`) also reports `0.0.1`, because
+the source default in `internal/version/version.go` is bumped as part of
+cutting that release. `go install .../craze@main`, though, reports the
+**last released version**, not `dev` — it reads that same bumped source
+default, so it lags behind whatever landed on `main` since. Prefer `@latest`
+over `@main` for that reason. `make build` (building from a checkout) always
+reports `dev`.
 
 ## Build from source
 
@@ -280,7 +325,7 @@ Documentation is automatically published to GitHub Pages on push to main.
 
 ## Status
 
-POC on Linux: `craze` opens a TUI; `craze prompt --json` is the headless path.
+POC on Linux and macOS: `craze` opens a TUI; `craze prompt --json` is the headless path.
 Multi-project harness integration is later work.
 
 ## License
