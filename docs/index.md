@@ -1,7 +1,9 @@
 # craze
 
-A Linux and macOS terminal UI for [Cursor CLI](https://cursor.com/cli), talking to
-`cursor-agent acp` over ACP. You own the chrome; Cursor still runs the agent.
+A Linux and macOS terminal UI for [Cursor CLI](https://cursor.com/cli) and
+[Grok CLI](https://docs.x.ai/build/cli/headless-scripting), talking to
+`cursor-agent acp` or `grok` over ACP. You own the chrome; the provider still
+runs the agent.
 
 ```bash
 ./bin/craze                      # the TUI, in the current directory

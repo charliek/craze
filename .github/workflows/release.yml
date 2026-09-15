@@ -8,10 +8,14 @@ on:
 permissions:
   contents: write
 
-# Serialize re-runs against the same tag — better to wait than to abort
-# half-uploaded artifacts.
+# One group for every tag, not one per tag. Two releases running at once would
+# both push Formula/craze.rb to the tap, and whichever finished last would win
+# regardless of version order — an older tag could quietly regress the formula.
+# Serializing all of them also keeps the same-tag re-run case covered, and
+# cancel-in-progress stays false because aborting mid-upload is worse than
+# waiting.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:

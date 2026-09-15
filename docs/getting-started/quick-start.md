@@ -20,7 +20,7 @@ Intel macOS (`darwin/amd64`) is cross-compiled and shipped but not tested at
 runtime; treat it as best-effort. Apple Silicon and Linux (amd64/arm64) are
 tested.
 
-### apt (Debian/Ubuntu, amd64/arm64) — available from v0.0.1
+### apt (Ubuntu 24.04+ and derivatives, amd64/arm64) — available from v0.0.1
 
 Add the repo once:
 
@@ -80,8 +80,8 @@ make build
 ```
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
-is for tests; a live session uses `cursor-agent` on `PATH` (or `--agent-bin` /
-`CRAZE_AGENT_BIN`). This path needs Go 1.24+ (this repo pins 1.24 via
+is for tests; a live session uses `cursor-agent` or `grok` on `PATH` (or
+`--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.24+ (this repo pins 1.24 via
 `.mise.toml`; `mise install`).
 
 ## First run
@@ -108,8 +108,8 @@ craze refuses to start the TUI on a non-tty. For a scripted turn, use
 
 ## Exit codes
 
-craze exits **nonzero when the session never started** — no Cursor login, or a
-`cursor-agent` that would not come up. It still draws the TUI and puts the
+craze exits **nonzero when the session never started** — not logged in to the
+provider, or an agent binary (`cursor-agent`, `grok`) that would not come up. It still draws the TUI and puts the
 error in the transcript, because that is where you can read it, but the process
 tells a script that nothing ran. An error *during* a session leaves a usable
 craze, so quitting out of one is an ordinary exit 0.

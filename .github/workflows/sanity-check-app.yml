@@ -45,6 +45,10 @@ jobs:
         with:
           client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_APP_KEY }}
+          # Without a permission-* input the minted token carries every
+          # permission the installation has. This check only reads repo and
+          # installation metadata, so that is all it should be able to do.
+          permission-metadata: read
 
       - name: Token sees craze + bot identity
         env:

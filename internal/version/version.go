@@ -7,8 +7,9 @@ package version
 //
 // Two things override the default at build time:
 //
-//   - `make build` always sets it to "dev" via ldflags
-//     (-X github.com/charliek/craze/internal/version.Version=dev).
+//   - `make build` defaults it to "dev" via ldflags
+//     (-X github.com/charliek/craze/internal/version.Version=$(VERSION), and
+//     the Makefile's VERSION ?= dev is overridable: VERSION=1.2.3 make build).
 //   - GoReleaser sets it to the tag being released.
 //
 // The value below stays "dev" until the first release bumps it to

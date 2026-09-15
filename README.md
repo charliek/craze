@@ -21,7 +21,7 @@ Intel macOS (`darwin/amd64`) is cross-compiled and shipped but not tested at
 runtime; treat it as best-effort. Apple Silicon and Linux (amd64/arm64) are
 tested.
 
-### apt (Debian/Ubuntu, amd64/arm64) — available from v0.0.1
+### apt (Ubuntu 24.04+ and derivatives, amd64/arm64) — available from v0.0.1
 
 Add the repo once:
 

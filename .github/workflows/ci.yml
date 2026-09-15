@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, 'feature/*']
 
+# Nothing in this file writes to the repo: the jobs build, test and produce a
+# throwaway GoReleaser snapshot. Declaring the floor at the workflow level
+# rather than per-job means a job added later inherits read-only instead of
+# whatever the repository default happens to be by then.
+permissions:
+  contents: read
+
 # test and cli run both a Linux and a macOS leg: craze ships for both via the
 # tap's Homebrew formula (linux and darwin archives, see .goreleaser.yaml)
 # and the apt package (linux-only debs, amd64 and arm64), so both are
