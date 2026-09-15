@@ -19,8 +19,11 @@ type Stub struct {
 	hang   bool
 	// park is the live session's catalog wait (§3.3): a prompt held back
 	// before any of the turn's bookkeeping, which a Cancel ends by handing it
-	// agent.ErrPromptCancelled.
+	// agent.ErrPromptCancelled. parked is the barrier that prompt closes on
+	// its way into the wait, so a test can be sure the Cancel it sends next
+	// lands on a parked prompt and not ahead of one.
 	park       bool
+	parked     chan struct{}
 	startDelay time.Duration
 	n          int
 	failMode   bool
@@ -136,10 +139,18 @@ func (s *Stub) HangNext() {
 // kind, and a Cancel while it is parked hands it agent.ErrPromptCancelled.
 // HangNext cannot stand in for it — a hung prompt is a turn on the wire, and
 // what a cancelled wait leaves the UI is an error and nothing else.
-func (s *Stub) ParkNext() {
+//
+// The channel it returns closes as that prompt goes into the wait. A test that
+// cancels without receiving from it is not testing a cancelled wait at all: the
+// Cancel would buffer its token and the prompt would take it on arrival, which
+// is a queued cancellation and passes whether or not Cancel can reach a prompt
+// that is already parked.
+func (s *Stub) ParkNext() <-chan struct{} {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.park = true
-	s.mu.Unlock()
+	s.parked = make(chan struct{})
+	return s.parked
 }
 
 // SetTools replaces Snapshot.Tools (copy-on-write). Tests send EventTool
@@ -236,13 +247,21 @@ func (s *Stub) Events() <-chan agent.Event { return s.events }
 
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 	s.mu.Lock()
-	park := s.park
-	s.park = false
+	park, parked := s.park, s.parked
+	s.park, s.parked = false, nil
 	s.mu.Unlock()
 	if park {
 		// Before the bookkeeping, where the live session's wait also sits:
 		// nothing has been claimed, so the cancelled ending is the whole of
 		// what this prompt leaves behind.
+		if parked != nil {
+			// The barrier goes down one statement short of the select, which
+			// is as close as Go gets. The gap is not observable: s.cancel is
+			// buffered, so a Cancel that lands in it is taken by this select
+			// the moment it runs — and it is this prompt that takes it, which
+			// is the whole of what the barrier promises.
+			close(parked)
+		}
 		select {
 		case <-s.cancel:
 		case <-s.closed:

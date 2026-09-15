@@ -589,7 +589,14 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 		t.Fatalf("interject: %v", err)
 	}
 	<-done
-	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
+	// The start event rather than the snapshot flag, for the reason spelled
+	// out in TestPopQueueRefusesDuringAForeignTurn: the flag flips first, so
+	// waiting on it would let the check below read a log the collector has not
+	// caught up with.
+	waitUntil(t, "the foreign turn's start event", func() bool {
+		started, _ := foreignTurnCounts(log.snapshot())
+		return started > 0
+	})
 
 	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("prompt during a foreign turn: %v", err)
@@ -715,16 +722,18 @@ func waitingSession(t *testing.T) *session {
 
 // awaitOnce runs the wait exactly as Prompt runs it — awaitCatalog, then the
 // locked hand-back that says whether Cancel got there first — and reports how
-// long the wait itself took, whether one was registered at all, and whether it
-// was aborted.
-func awaitOnce(ctx context.Context, s *session, text string) (elapsed time.Duration, waited, aborted bool) {
+// long the wait itself took, whether one was registered at all, whether it was
+// aborted, and what the wait refused the caller with. Every caller here is the
+// only prompt of its session, so the error is the timing tests' proof that the
+// slot reservation did not fire on a session that has no other prompt in it.
+func awaitOnce(ctx context.Context, s *session, text string) (elapsed time.Duration, waited, aborted bool, err error) {
 	start := time.Now()
-	abort := s.awaitCatalog(ctx, text)
+	abort, err := s.awaitCatalog(ctx, text)
 	elapsed = time.Since(start)
 	s.mu.Lock()
 	aborted = s.clearCatalogWaitLocked(abort)
 	s.mu.Unlock()
-	return elapsed, abort != nil, aborted
+	return elapsed, abort != nil, aborted, err
 }
 
 // awaitOutcome is one run of awaitOnce, carried back from the goroutine that
@@ -733,6 +742,7 @@ type awaitOutcome struct {
 	elapsed time.Duration
 	waited  bool
 	aborted bool
+	err     error
 }
 
 // awaitInBackground parks a wait on its own goroutine, so the test goroutine
@@ -741,8 +751,8 @@ type awaitOutcome struct {
 func awaitInBackground(s *session, text string) <-chan awaitOutcome {
 	out := make(chan awaitOutcome, 1)
 	go func() {
-		elapsed, waited, aborted := awaitOnce(context.Background(), s, text)
-		out <- awaitOutcome{elapsed, waited, aborted}
+		elapsed, waited, aborted, err := awaitOnce(context.Background(), s, text)
+		out <- awaitOutcome{elapsed, waited, aborted, err}
 	}()
 	return out
 }
@@ -806,9 +816,9 @@ func TestCatalogWaitTiming(t *testing.T) {
 	t.Run("an unresolved name sits out the window", func(t *testing.T) {
 		window := shortCatalogWait(t, 200*time.Millisecond)
 		s := waitingSession(t)
-		elapsed, waited, aborted := awaitOnce(t.Context(), s, "/probe-echo banana")
-		if !waited || aborted {
-			t.Fatalf("waited=%v aborted=%v", waited, aborted)
+		elapsed, waited, aborted, err := awaitOnce(t.Context(), s, "/probe-echo banana")
+		if err != nil || !waited || aborted {
+			t.Fatalf("waited=%v aborted=%v err=%v", waited, aborted, err)
 		}
 		// A lower bound: the window is the whole of what is being claimed, and
 		// nothing can make it shorter.
@@ -839,7 +849,10 @@ func TestCatalogWaitTiming(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(s)
 			}
-			elapsed, waited, _ := awaitOnce(t.Context(), s, tc.text)
+			elapsed, waited, _, err := awaitOnce(t.Context(), s, tc.text)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if waited {
 				t.Fatal("a wait was registered for something waiting cannot change")
 			}
@@ -856,8 +869,8 @@ func TestCatalogWaitTiming(t *testing.T) {
 		waitForCatalogWait(t, s)
 		s.onUpdate(commandsUpdate("research"))
 		got := <-res
-		if !got.waited || got.aborted {
-			t.Fatalf("waited=%v aborted=%v", got.waited, got.aborted)
+		if got.err != nil || !got.waited || got.aborted {
+			t.Fatalf("waited=%v aborted=%v err=%v", got.waited, got.aborted, got.err)
 		}
 		if got.elapsed >= catalogWaitMargin {
 			t.Fatalf("the update took %s to end the wait", got.elapsed)
@@ -878,6 +891,9 @@ func TestCatalogWaitTiming(t *testing.T) {
 			t.Fatal("a second abort claimed the same wait")
 		}
 		got := <-res
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
 		if !got.aborted {
 			t.Fatal("the wait ended without reporting the cancel")
 		}
@@ -893,9 +909,9 @@ func TestCatalogWaitTiming(t *testing.T) {
 		cancel()
 		// Not a cancel: the caller went away, which is not the user saying the
 		// prompt must not be sent, and the send below fails on its own.
-		elapsed, waited, aborted := awaitOnce(ctx, s, "/probe-echo banana")
-		if !waited || aborted {
-			t.Fatalf("waited=%v aborted=%v", waited, aborted)
+		elapsed, waited, aborted, err := awaitOnce(ctx, s, "/probe-echo banana")
+		if err != nil || !waited || aborted {
+			t.Fatalf("waited=%v aborted=%v err=%v", waited, aborted, err)
 		}
 		if elapsed >= catalogWaitMargin {
 			t.Fatalf("a dead context took %s to end the wait", elapsed)
@@ -1008,6 +1024,81 @@ func TestCancelDuringTheWaitLeavesTheNextPromptAlone(t *testing.T) {
 	}
 }
 
+// TestASecondPromptDuringTheWaitIsRefused is the other half of that race: not
+// what Cancel does after the abort, but what a prompt sent while one is still
+// parked may do. The wait holds the prompt slot without holding s.inPrompt, so
+// the refusal has to come from the registration itself — otherwise the second
+// caller either overwrites the registration (a bare name, which would park too,
+// leaving Cancel with only the later channel to close while the first waiter
+// timed out and sent) or opens a turn straight over the parked one (plain text,
+// which never waits). Both are one prompt slot claimed twice.
+//
+// B goes on a goroutine so a lost guard shows up as the deadline rather than as
+// a test that sits out the whole window; the pointer comparison is what says
+// the registration A parked on is still the one Cancel finds.
+func TestASecondPromptDuringTheWaitIsRefused(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"one that would park behind it", "/probe-echo cherry"},
+		{"one that would not have waited at all", "plain words"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shortCatalogWait(t, longCatalogWait)
+			s := startScriptOpts(t, "nocommands", Options{PluginDirs: []string{probeFixtureDir(t)}})
+			log := collect(t, s)
+
+			// A parks in the wait, and the channel it parked on is what B must
+			// not disturb.
+			outA := promptOn(s, "/probe-echo banana")
+			waitForCatalogWait(t, s)
+			s.mu.Lock()
+			parked := s.catalogAbort
+			turnBefore := s.turn
+			s.mu.Unlock()
+
+			outB := promptOn(s, tc.text)
+			if err := promptReturn(t, outB, "the second prompt was not refused"); !errors.Is(err, ErrPromptInFlight) {
+				t.Fatalf("the second prompt returned %v", err)
+			}
+			s.mu.Lock()
+			still, in, turn := s.catalogAbort, s.inPrompt, s.turn
+			s.mu.Unlock()
+			if still != parked {
+				t.Fatal("the refused prompt took the wait's registration")
+			}
+			if in {
+				t.Fatal("the refused prompt opened a turn")
+			}
+			// A refusal before the bookkeeping spends nothing, so there is no
+			// rollback to get wrong: the number is simply untouched.
+			if turn != turnBefore {
+				t.Fatalf("turn=%d (was %d) after a refusal", turn, turnBefore)
+			}
+
+			// A is still the cancellable one, and Esc still ends it.
+			if err := s.Cancel(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := promptReturn(t, outA, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
+				t.Fatalf("the cancelled prompt returned %v", err)
+			}
+			// The fake echoes every prompt it is handed, in order, so what it
+			// echoes next is the whole of what ever reached it: neither A nor
+			// the refused B did.
+			if _, err := s.Prompt(t.Context(), "still here"); err != nil {
+				t.Fatal(err)
+			}
+			log.waitTexts(t, "echo: still here")
+			if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+				t.Fatalf("a prompt that never ran reported %+v", cmds[0].Command)
+			}
+		})
+	}
+}
+
 // TestCatalogWaitFallsThroughToVerbatim is the fallthrough: an agent that
 // never advertises a catalog leaves every row provisional forever, so the bare
 // name cannot resolve however long craze waits. The window is sat out once and
@@ -1090,7 +1181,11 @@ func TestGrokNeverWaitsForACatalog(t *testing.T) {
 	if len(s.plugins) != 0 {
 		t.Fatalf("grok discovered %+v", s.plugins)
 	}
-	if _, waited, _ := awaitOnce(t.Context(), s, "/probe-echo banana"); waited {
+	_, waited, _, err := awaitOnce(t.Context(), s, "/probe-echo banana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waited {
 		t.Fatal("a session with no plugins registered a wait")
 	}
 }

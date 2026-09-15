@@ -396,7 +396,7 @@ func TestEscCancelsWorkingTurn(t *testing.T) {
 func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
-	stub.ParkNext()
+	parked := stub.ParkNext()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
@@ -409,9 +409,18 @@ func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 		t.Fatal("want working")
 	}
 	// The send runs where the tea runtime runs it, on its own goroutine, so
-	// the Esc below lands while it is still parked.
+	// the Esc below lands while it is still parked. Starting that goroutine
+	// does not order it against the Esc, though: without the barrier the Esc
+	// can run first, and the prompt then takes the buffered cancellation on
+	// arrival — a queued cancel, not a cancel of a prompt already in the wait,
+	// which is the only thing this test is about.
 	done := make(chan tea.Msg, 1)
 	go func() { done <- runCmd(send) }()
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the prompt never parked")
+	}
 
 	tm, esc := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)

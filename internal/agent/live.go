@@ -397,12 +397,23 @@ var catalogWait = 5 * time.Second
 // registered comes back to Prompt, which clears it under the lock that opens
 // the turn; nil means nothing waited.
 //
-// Not handled: a second Prompt sent while one waits would reach the
-// bookkeeping first and hand the waiter ErrPromptInFlight — accepted, because
-// nothing in craze sends two prompts at once (the TUI queues them, the
-// headless run is sequential).
-func (s *session) awaitCatalog(ctx context.Context, text string) chan struct{} {
+// A registered wait reserves the prompt slot: a second Prompt arriving while
+// one is parked is refused here with ErrPromptInFlight, the same answer
+// s.inPrompt would give it a step later. The registration is a prompt that has
+// not opened its turn yet, so without the reservation the second caller would
+// overwrite s.catalogAbort — leaving Cancel able to close only the later
+// channel while the first waiter woke on the timeout and went on to open a turn
+// and reach the wire, which is the prompt Esc was pressed to stop. A second
+// caller that would not have waited at all (a qualified name, plain text) is
+// refused for the same reason: starting its turn while a waiter is parked
+// leaves two prompts racing for one slot. Nothing has been spent at this point,
+// so the refusal costs the refused caller nothing to roll back.
+func (s *session) awaitCatalog(ctx context.Context, text string) (chan struct{}, error) {
 	s.mu.Lock()
+	if s.catalogAbort != nil {
+		s.mu.Unlock()
+		return nil, acp.ErrPromptInFlight
+	}
 	applied := s.commandsApplied
 	var abort chan struct{}
 	if !s.commandsSeen && len(s.plugins) > 0 && hasUnresolvedSlash(text, s.pluginLookupLocked()) {
@@ -411,7 +422,7 @@ func (s *session) awaitCatalog(ctx context.Context, text string) chan struct{} {
 	}
 	s.mu.Unlock()
 	if abort == nil {
-		return nil
+		return nil, nil
 	}
 	timer := time.NewTimer(catalogWait)
 	defer timer.Stop()
@@ -422,7 +433,7 @@ func (s *session) awaitCatalog(ctx context.Context, text string) chan struct{} {
 	case <-s.done:
 	case <-abort:
 	}
-	return abort
+	return abort, nil
 }
 
 // clearCatalogWaitLocked takes the wait's registration back and reports whether
@@ -465,8 +476,13 @@ func (s *session) abortCatalogWait() bool {
 func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	// Before any of the turn's bookkeeping: this waits, and a turn that has
 	// been opened must not be left open across a wait — nothing has been
-	// claimed yet, so a caller that gives up here gives up on nothing.
-	abort := s.awaitCatalog(ctx, text)
+	// claimed yet, so a caller that gives up here gives up on nothing. Its
+	// refusal comes back the same way: the slot was already another prompt's,
+	// and returning here spends no turn number and rolls nothing back.
+	abort, err := s.awaitCatalog(ctx, text)
+	if err != nil {
+		return Result{}, err
+	}
 	s.mu.Lock()
 	if s.clearCatalogWaitLocked(abort) {
 		// Cancelled while waiting. Nothing was opened, nothing was sent and
