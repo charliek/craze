@@ -255,7 +255,15 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 	release := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(3)
-	block := func() { defer wg.Done(); <-release }
+	var enteredMu sync.Mutex
+	entered := 0
+	block := func() {
+		defer wg.Done()
+		enteredMu.Lock()
+		entered++
+		enteredMu.Unlock()
+		<-release
+	}
 	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
 		block()
 		return PermissionDecision{OptionID: "yes"}
@@ -277,6 +285,19 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 		p.client.incomingMu.Lock()
 		defer p.client.incomingMu.Unlock()
 		return len(p.client.incoming) == 3
+	})
+	// Registered is not the same as running: register happens on the read
+	// loop, but each handler runs on its own goroutine, and runIncoming
+	// deliberately skips a handler whose request a cancel already answered.
+	// Cancelling as soon as all three are registered therefore races the
+	// scheduler -- a handler that had not started yet never runs, never
+	// reaches its deferred wg.Done, and wg.Wait below blocks until the test
+	// binary's own timeout kills the package. Wait for all three to be parked
+	// inside their handler, which is the premise this test is about anyway.
+	waitUntil(t, func() bool {
+		enteredMu.Lock()
+		defer enteredMu.Unlock()
+		return entered == 3
 	})
 
 	// Cancel writes its replies inline and the pipe is unbuffered, so the
