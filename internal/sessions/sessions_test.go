@@ -378,7 +378,7 @@ func TestUnknownFieldsRoundTrip(t *testing.T) {
 	}
 	line := `{"sessionId":"s1","provider":"cursor","cwd":"/ws","title":"t","pinned":false,` +
 		`"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z","futureField":"kept",` +
-		`"futureNum":42}` + "\n"
+		`"futureNum":42,"futureBig":9007199254740993}` + "\n"
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +396,11 @@ func TestUnknownFieldsRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"futureNum":42`) {
 		t.Fatalf("unknown numeric field lost: %s", b)
+	}
+	// 2^53+1 is the smallest integer a float64 cannot hold, so decoding the
+	// line into float64s would silently rewrite it as 9007199254740992.
+	if !strings.Contains(string(b), `"futureBig":9007199254740993`) {
+		t.Fatalf("unknown large integer lost precision: %s", b)
 	}
 }
 
@@ -417,6 +422,8 @@ func TestReadValidation(t *testing.T) {
 		body string
 	}{
 		{"not a JSON object", `"just a string"` + "\n"},
+		{"JSON null", `null` + "\n"},
+		{"trailing data after the object", `{"sessionId":"s1","provider":"cursor","cwd":"/ws","updatedAt":"2024-01-01T00:00:00Z"} {"extra":1}` + "\n"},
 		{"missing sessionId", `{"provider":"cursor","cwd":"/ws","updatedAt":"2024-01-01T00:00:00Z"}` + "\n"},
 		{"empty sessionId", `{"sessionId":"","provider":"cursor","cwd":"/ws","updatedAt":"2024-01-01T00:00:00Z"}` + "\n"},
 		{"missing provider", `{"sessionId":"s1","cwd":"/ws","updatedAt":"2024-01-01T00:00:00Z"}` + "\n"},

@@ -290,6 +290,68 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (*NewSessionResult,
 	return &result, nil
 }
 
+// LoadSession reloads an existing agent session by id. The agent answers by
+// replaying the whole transcript as session/update notifications and only then
+// returning the result, so replay end *is* the RPC result.
+//
+// The session id is installed *before* the call, unlike NewSession, which
+// learns it from the reply. Replay notifications therefore route through
+// handleSessionUpdate's live path instead of the pre-session pendingUpdates
+// buffer, which is unbounded and whose flush would otherwise hand a whole
+// session to the update handler in one burst from this goroutine. Any
+// pendingUpdates already held are discarded: nothing before a load can belong
+// to the session being loaded. The rest of the reset is NewSession's, for the
+// same reason — the child allowlist, the foreign turn and the interjection
+// ids all belong to a session that is gone.
+//
+// INVARIANT this depends on: Conn.readLoop dispatches each notification
+// synchronously through onNotify *before* it delivers an RPC result (conn.go,
+// readLoop). So every replay notification has reached the session's update
+// handler by the time LoadSession returns, with no idle-gap race to guess at
+// and nothing left in flight to bracket. Cursor's synthetic replay tool ids
+// (replay-N-M) are ordinary tool ids on this path and flow through the tool
+// merge unchanged.
+//
+// On an RPC error or a timeout the id is cleared back to "", so anything the
+// agent is still streaming lands in pendingUpdates again. That is only safe
+// because Start closes the client immediately on this error — the buffer, and
+// any child a replayed subagent_spawned registered, go with it.
+func (c *Client) LoadSession(ctx context.Context, id, cwd string) (*NewSessionResult, error) {
+	if id == "" {
+		return nil, errors.New("acp: load session has no id")
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.sessionID = id
+	c.pendingUpdates = nil
+	c.children = nil
+	c.childOrder = nil
+	c.foreignID = ""
+	c.foreignText = ""
+	c.foreignSeen = false
+	c.interjectSeen = nil
+	c.interjectOrder = nil
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, loadSessionDeadline())
+	defer cancel()
+	params := LoadSessionParams{SessionID: id, CWD: abs, MCPServers: []any{}}
+	var result NewSessionResult
+	if err := c.conn.Call(ctx, MethodSessionLoad, params, &result); err != nil {
+		c.mu.Lock()
+		c.sessionID = ""
+		c.mu.Unlock()
+		return nil, err
+	}
+	// The wire does not echo the id (grok returns models alone); the caller
+	// asked for this one and got it.
+	result.SessionID = id
+	return &result, nil
+}
+
 func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
 	c.mu.Lock()
 	c.onUpdate = h

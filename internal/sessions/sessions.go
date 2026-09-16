@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -357,9 +358,22 @@ func dedupeLastWins(records []record) []record {
 // decodeLine decodes one non-blank line into a record, validating the
 // fields §3.2 requires and preserving every field it does not recognise.
 func decodeLine(line string) (record, error) {
+	// UseNumber keeps an unknown numeric field as its literal text rather
+	// than a float64, so a large integer another build wrote round-trips
+	// through this older one without losing precision.
+	dec := json.NewDecoder(strings.NewReader(line))
+	dec.UseNumber()
 	var raw map[string]any
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		return record{}, fmt.Errorf("not a JSON object: %w", err)
+	}
+	if raw == nil {
+		return record{}, errors.New("not a JSON object: null")
+	}
+	// json.Unmarshal rejects trailing data; a Decoder does not, so say so
+	// explicitly rather than silently accepting two objects on one line.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return record{}, errors.New("not a JSON object: trailing data after the object")
 	}
 
 	sessionID, _ := raw["sessionId"].(string)

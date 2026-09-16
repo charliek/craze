@@ -850,3 +850,457 @@ func TestPromptBlocksHookSkippedOnRefusal(t *testing.T) {
 		t.Fatal("the hook ran on ErrForeignTurn")
 	}
 }
+
+// --- session/load -------------------------------------------------------
+
+func TestInitializeLoadSessionCapability(t *testing.T) {
+	cases := []struct {
+		name string
+		caps string
+		want bool
+	}{
+		{"true", `{"loadSession":true}`, true},
+		{"false", `{"loadSession":false}`, false},
+		{"absent", `{"promptCapabilities":{"image":true}}`, false},
+		{"empty object", `{}`, false},
+		{"no capabilities at all", ``, false},
+		{"null", `null`, false},
+		{"not an object", `["loadSession"]`, false},
+		{"malformed", `{"loadSession":`, false},
+		{"wrong type", `{"loadSession":"yes"}`, false},
+		{"whitespace", "  \n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := InitializeResult{AgentCapabilities: json.RawMessage(tc.caps)}
+			if got := res.LoadSession(); got != tc.want {
+				t.Fatalf("LoadSession() = %v for %q, want %v", got, tc.caps, tc.want)
+			}
+		})
+	}
+}
+
+// loadServer is a pipe-backed agent whose session/load is the test's own
+// function and whose every other method is -32601. It returns the client and
+// the agent side of the connection, so a test can write notifications itself.
+func loadServer(t *testing.T, onLoad func(srv *Conn, msg *Message)) (*Client, *Conn) {
+	t.Helper()
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	t.Cleanup(func() {
+		_ = clientR.Close()
+		_ = clientW.Close()
+		_ = serverR.Close()
+		_ = serverW.Close()
+	})
+	client := Dial(clientR, clientW)
+	t.Cleanup(func() { _ = client.Close() })
+
+	srv := NewConn(serverR, serverW)
+	srv.SetRequestHandler(func(msg *Message) {
+		if msg.Method == MethodSessionLoad {
+			onLoad(srv, msg)
+			return
+		}
+		_ = srv.ReplyErr(msg.ID, MethodNotFound(msg.Method))
+	})
+	srv.Start()
+	t.Cleanup(func() { _ = srv.Close() })
+	return client, srv
+}
+
+func notifyChunk(srv *Conn, sid, text string) {
+	_ = srv.Notify(context.Background(), MethodSessionUpdate, SessionNotification{
+		SessionID: sid,
+		Update:    json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + text + `"}}`),
+	})
+}
+
+// recorder collects the text of every update the client routed live.
+type recorder struct {
+	mu   sync.Mutex
+	text []string
+}
+
+func (r *recorder) add(n SessionNotification) {
+	var upd SessionUpdate
+	_ = json.Unmarshal(n.Update, &upd)
+	r.mu.Lock()
+	if upd.Content != nil {
+		r.text = append(r.text, upd.Content.Text)
+	}
+	r.mu.Unlock()
+}
+
+func (r *recorder) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.text...)
+}
+
+// TestLoadSessionRoutesReplayLive is the §3.3 invariant: the id is installed
+// before the call, so a replay notification routes through the live path, and
+// the read loop dispatches notifications synchronously before it delivers an
+// RPC result, so the notification has reached the update handler by the time
+// LoadSession returns. No sleeping, no idle gap.
+func TestLoadSessionRoutesReplayLive(t *testing.T) {
+	var client *Client
+	idDuringCall := make(chan string, 1)
+	client, _ = loadServer(t, func(srv *Conn, msg *Message) {
+		client.mu.Lock()
+		idDuringCall <- client.sessionID
+		client.mu.Unlock()
+		notifyChunk(srv, "s-load", "replayed")
+		_ = srv.Reply(msg.ID, map[string]any{"models": map[string]any{"currentModelId": "m1"}})
+	})
+	rec := &recorder{}
+	client.SetUpdateHandler(rec.add)
+
+	res, err := client.LoadSession(t.Context(), "s-load", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := <-idDuringCall; got != "s-load" {
+		t.Fatalf("sessionID during session/load = %q, want it set to s-load before the call", got)
+	}
+	if res.SessionID != "s-load" {
+		t.Fatalf("result sessionId %q, want the id the client asked for", res.SessionID)
+	}
+	if got := rec.seen(); len(got) != 1 || got[0] != "replayed" {
+		t.Fatalf("replay must reach the update handler before LoadSession returns, handler saw %v", got)
+	}
+	client.mu.Lock()
+	pending := len(client.pendingUpdates)
+	client.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("replay must route live, not buffer: %d pendingUpdates", pending)
+	}
+}
+
+// TestLoadSessionResetsSessionState: a load resets exactly what NewSession
+// resets and discards the pre-session buffer, which can only hold noise from
+// before the session existed.
+func TestLoadSessionResetsSessionState(t *testing.T) {
+	var client *Client
+	client, _ = loadServer(t, func(srv *Conn, msg *Message) {
+		notifyChunk(srv, "s-load", "replayed")
+		_ = srv.Reply(msg.ID, map[string]any{})
+	})
+	rec := &recorder{}
+	client.SetUpdateHandler(rec.add)
+
+	client.mu.Lock()
+	client.sessionID = "s-old"
+	client.children = map[string]struct{}{"child-1": {}}
+	client.childOrder = []string{"child-1"}
+	client.foreignID = "prompt-9"
+	client.foreignText = "a turn of the agent's own"
+	client.foreignSeen = true
+	client.interjectSeen = map[string]struct{}{"i-1": {}}
+	client.interjectOrder = []string{"i-1"}
+	client.pendingUpdates = []SessionNotification{{
+		SessionID: "s-load",
+		Update:    json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"pre-session noise"}}`),
+	}}
+	client.mu.Unlock()
+
+	if _, err := client.LoadSession(t.Context(), "s-load", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.sessionID != "s-load" {
+		t.Fatalf("sessionID %q", client.sessionID)
+	}
+	if len(client.children) != 0 || len(client.childOrder) != 0 {
+		t.Fatalf("child allowlist survived the load: %v %v", client.children, client.childOrder)
+	}
+	if client.foreignID != "" || client.foreignText != "" || client.foreignSeen {
+		t.Fatalf("foreign-turn state survived the load: %q %q %v", client.foreignID, client.foreignText, client.foreignSeen)
+	}
+	if len(client.interjectSeen) != 0 || len(client.interjectOrder) != 0 {
+		t.Fatalf("interjection state survived the load: %v %v", client.interjectSeen, client.interjectOrder)
+	}
+	if len(client.pendingUpdates) != 0 {
+		t.Fatalf("pendingUpdates survived the load: %v", client.pendingUpdates)
+	}
+	if got := rec.seen(); len(got) != 1 || got[0] != "replayed" {
+		t.Fatalf("handler saw %v, want the replay alone — the pre-session buffer is discarded, not flushed", got)
+	}
+}
+
+// TestLoadSessionErrorClearsSessionID: a refused load leaves no active
+// session, so anything still streaming goes back to the pre-session buffer.
+// That is only safe because Start closes the client on this error.
+func TestLoadSessionErrorClearsSessionID(t *testing.T) {
+	var client *Client
+	client, srv := loadServer(t, func(srv *Conn, msg *Message) {
+		_ = srv.ReplyErr(msg.ID, &RPCError{Code: CodeInvalidParams, Message: "Session not found"})
+	})
+	rec := &recorder{}
+	client.SetUpdateHandler(rec.add)
+
+	_, err := client.LoadSession(t.Context(), "s-load", t.TempDir())
+	if err == nil {
+		t.Fatal("expected the agent's error")
+	}
+	var rpc *RPCError
+	if !errors.As(err, &rpc) || rpc.Code != CodeInvalidParams || rpc.Message != "Session not found" {
+		t.Fatalf("error %v, want the agent's -32602", err)
+	}
+	client.mu.Lock()
+	sid := client.sessionID
+	client.mu.Unlock()
+	if sid != "" {
+		t.Fatalf("a failed load must clear the session id, got %q", sid)
+	}
+
+	// An update arriving after the failure buffers again. The unanswerable
+	// request that follows it is the barrier: the read loop is sequential, so
+	// a reply to it proves the notification before it was dispatched.
+	notifyChunk(srv, "s-load", "still streaming")
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := srv.Call(ctx, "probe/unknown", map[string]any{}, nil); err == nil {
+		t.Fatal("the barrier request should have been refused")
+	}
+	client.mu.Lock()
+	pending := len(client.pendingUpdates)
+	client.mu.Unlock()
+	if pending != 1 {
+		t.Fatalf("after a failed load an update must buffer again, got %d pendingUpdates", pending)
+	}
+	if got := rec.seen(); len(got) != 0 {
+		t.Fatalf("handler saw %v after a failed load, want nothing routed", got)
+	}
+}
+
+// TestLoadSessionTimesOut drives the script that never answers session/load.
+func TestLoadSessionTimesOut(t *testing.T) {
+	t.Cleanup(SetLoadSessionTimeout(150 * time.Millisecond))
+	c := spawnScript(t, "load-hang")
+	res, err := c.Initialize(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.LoadSession() {
+		t.Fatal("load-hang must advertise loadSession")
+	}
+	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := c.LoadSession(t.Context(), "s-load", t.TempDir()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("load error %v, want the deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("load took %s, the deadline did not apply", elapsed)
+	}
+	c.mu.Lock()
+	sid := c.sessionID
+	c.mu.Unlock()
+	if sid != "" {
+		t.Fatalf("a timed-out load must clear the session id, got %q", sid)
+	}
+}
+
+func TestLoadSessionTimeoutHookRestores(t *testing.T) {
+	restore := SetLoadSessionTimeout(5 * time.Millisecond)
+	if got := loadSessionDeadline(); got != 5*time.Millisecond {
+		t.Fatalf("deadline %s", got)
+	}
+	restore()
+	if got := loadSessionDeadline(); got != loadSessionTimeout {
+		t.Fatalf("deadline %s after restore, want %s", got, loadSessionTimeout)
+	}
+}
+
+func TestLoadSessionCursorScript(t *testing.T) {
+	c := spawnScript(t, "load")
+	up := attachUpdates(c)
+	init, err := c.Initialize(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !init.LoadSession() {
+		t.Fatal("the load script must advertise loadSession")
+	}
+	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.LoadSession(t.Context(), "s-restored", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Modes) == 0 || len(res.Models) == 0 {
+		t.Fatalf("cursor's load result is {modes, models}, got %+v", res)
+	}
+	if len(res.ConfigOptions) != 0 {
+		t.Fatalf("cursor's load result carries no configOptions, got %s", res.ConfigOptions)
+	}
+
+	var kinds []string
+	var toolIDs []string
+	for _, u := range up.snapshot() {
+		kinds = append(kinds, u.SessionUpdate)
+		if u.ToolCallID != "" {
+			toolIDs = append(toolIDs, u.ToolCallID+":"+u.Status)
+		}
+	}
+	want := []string{
+		"user_message_chunk", "user_message_chunk", UpdateAgentThought,
+		UpdateToolCall, UpdateToolCallUpd, UpdateAgentMessage,
+	}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("replay kinds %v, want %v", kinds, want)
+	}
+	// Cursor's synthetic replay ids are ordinary tool ids on this path.
+	if strings.Join(toolIDs, ",") != "replay-0-1:pending,replay-0-1:completed" {
+		t.Fatalf("replay tool ids %v", toolIDs)
+	}
+
+	// A prompt after the load is answered on the loaded session.
+	if _, err := c.Prompt(t.Context(), "again"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(textFrom(up.snapshot()), "echo: again") {
+		t.Fatalf("prompt after a load: %q", textFrom(up.snapshot()))
+	}
+}
+
+func TestLoadSessionGrokScript(t *testing.T) {
+	c := spawnScript(t, "grok-load")
+	up := attachUpdates(c)
+	var submu sync.Mutex
+	var subs []string
+	c.SetSubagentHandler(func(n SubagentNotification) {
+		submu.Lock()
+		subs = append(subs, n.Kind)
+		submu.Unlock()
+	})
+	init, err := c.Initialize(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !init.LoadSession() {
+		t.Fatal("grok-load must advertise loadSession")
+	}
+	if err := c.Authenticate(t.Context(), AuthXAIAPIKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.LoadSession(t.Context(), "s-restored", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// grok's load result: models alone.
+	if len(res.Models) == 0 {
+		t.Fatal("grok's load result carries models")
+	}
+	if len(res.Modes) != 0 || len(res.ConfigOptions) != 0 {
+		t.Fatalf("grok's load result has no modes and no configOptions, got %s / %s", res.Modes, res.ConfigOptions)
+	}
+	completedTool := false
+	for _, u := range up.snapshot() {
+		if u.SessionUpdate == UpdateToolCall && u.Status == "completed" {
+			completedTool = true
+		}
+	}
+	if !completedTool {
+		t.Fatal("grok replays a tool_call already completed")
+	}
+	submu.Lock()
+	got := strings.Join(subs, ",")
+	submu.Unlock()
+	if got != SubagentSpawned+","+SubagentFinished {
+		t.Fatalf("replayed sub-agent lifecycle %q", got)
+	}
+}
+
+func TestLoadSessionLongReplay(t *testing.T) {
+	c := spawnScript(t, "load-long")
+	up := attachUpdates(c)
+	if _, err := c.Initialize(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.LoadSession(t.Context(), "s-restored", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(up.snapshot()); n != 600 {
+		t.Fatalf("replayed %d updates, want 600 before the result", n)
+	}
+}
+
+// TestLoadScriptsRefuseSessionNew: every load script errors on session/new, so
+// a later test can prove no client fell back to it.
+func TestLoadScriptsRefuseSessionNew(t *testing.T) {
+	for _, script := range []string{"load", "grok-load", "load-missing", "load-hang", "load-long"} {
+		t.Run(script, func(t *testing.T) {
+			c := spawnScript(t, script)
+			if _, err := c.Initialize(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			method := AuthCursorLogin
+			if strings.HasPrefix(script, "grok-") {
+				method = AuthXAIAPIKey
+			}
+			if err := c.Authenticate(t.Context(), method, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, err := c.NewSession(t.Context(), t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), "session/new must not be called") {
+				t.Fatalf("session/new error %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadSessionMissingScript(t *testing.T) {
+	c := spawnScript(t, "load-missing")
+	if _, err := c.Initialize(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.LoadSession(t.Context(), "s-gone", t.TempDir())
+	var rpc *RPCError
+	if !errors.As(err, &rpc) || rpc.Code != CodeInvalidParams || rpc.Message != "Session not found" {
+		t.Fatalf("load error %v, want -32602 Session not found", err)
+	}
+}
+
+// TestSessionLoadRefusedWithoutCapability: every other script is an agent
+// without the capability and answers -32601, which is the live wire.
+func TestSessionLoadRefusedWithoutCapability(t *testing.T) {
+	c := spawnScript(t, "echo")
+	res, err := c.Initialize(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LoadSession() {
+		t.Fatal("echo must keep loadSession false")
+	}
+	if err := c.Authenticate(t.Context(), AuthCursorLogin, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.LoadSession(t.Context(), "s-load", t.TempDir())
+	var rpc *RPCError
+	if !errors.As(err, &rpc) || rpc.Code != CodeMethodNotFound {
+		t.Fatalf("load error %v, want -32601", err)
+	}
+}
+
+func TestLoadSessionRejectsEmptyID(t *testing.T) {
+	var client *Client
+	client, _ = loadServer(t, func(srv *Conn, msg *Message) {
+		t.Error("session/load must not reach the wire without an id")
+		_ = srv.Reply(msg.ID, map[string]any{})
+	})
+	if _, err := client.LoadSession(t.Context(), "", t.TempDir()); err == nil {
+		t.Fatal("expected an error for an empty session id")
+	}
+}

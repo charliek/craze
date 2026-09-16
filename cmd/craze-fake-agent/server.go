@@ -30,6 +30,10 @@ type server struct {
 	cancelled atomic.Bool
 	hangWait  chan struct{}
 	config    []map[string]any
+	// loadedID is the session id a session/load asked for. The load scripts
+	// replay on it and every later stream uses it, so a craze that loads some
+	// other id than fakeSessionID still sees its own session.
+	loadedID string
 	// order is every session/set_mode and session/prompt in arrival order, with
 	// the mode each set_mode asked for. It is what lets the planmode scripts
 	// prove craze chained the two rather than racing them; recording it anywhere
@@ -234,7 +238,7 @@ func (s *server) onRequest(msg *acp.Message) {
 			"agentInfo":       map[string]string{"name": "craze-fake-agent", "version": "test"},
 			"authMethods":     auth,
 			"agentCapabilities": map[string]any{
-				"loadSession": false,
+				"loadSession": loadScript(s.script),
 			},
 		}
 		if grokScript(s.script) {
@@ -255,6 +259,13 @@ func (s *server) onRequest(msg *acp.Message) {
 		}
 		s.reply(msg.ID, map[string]any{})
 	case acp.MethodSessionNew:
+		if loadScript(s.script) {
+			// A load script has exactly one session and craze must reach it
+			// with session/load. Refusing here is what lets a test prove no
+			// fallback to session/new happened.
+			_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "session/new must not be called"})
+			return
+		}
 		s.mu.Lock()
 		cfg := s.config
 		s.mu.Unlock()
@@ -300,6 +311,16 @@ func (s *server) onRequest(msg *acp.Message) {
 			"configOptions": cfg,
 		})
 		s.advertiseCommands()
+	case acp.MethodSessionLoad:
+		if !loadScript(s.script) {
+			// Every other script is an agent without the capability, and the
+			// live wire for one of those is -32601.
+			_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
+			return
+		}
+		// Off the read loop, like a prompt: a replay that blocks on a full
+		// pipe must not stop the fake from reading session/cancel.
+		go s.handleLoad(msg)
 	case acp.MethodSessionPrompt:
 		s.noteOrder(orderPrompt, "")
 		if queueScript(s.script) {
@@ -475,15 +496,18 @@ func (s *server) hang(id json.RawMessage) {
 }
 
 func (s *server) echo(id json.RawMessage, text string) {
+	// mainID, not fakeSessionID: a prompt sent after a session/load streams on
+	// the session that was loaded. Without a load the two are the same id.
+	sid := s.mainID()
 	s.update("other-session", acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: "NOPE"},
 	})
-	s.update(fakeSessionID, acp.SessionUpdate{
+	s.update(sid, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: "echo: "},
 	})
-	s.update(fakeSessionID, acp.SessionUpdate{
+	s.update(sid, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
@@ -527,7 +551,7 @@ func (s *server) callsSeen() string {
 func (s *server) finishPrompt(id json.RawMessage, stop string) {
 	if grokScript(s.script) {
 		_ = s.conn.Notify(context.Background(), acp.MethodGrokPromptComplete, map[string]any{
-			"sessionId":  fakeSessionID,
+			"sessionId":  s.mainID(),
 			"stopReason": stop,
 		})
 	}
@@ -822,10 +846,20 @@ func (s *server) update(sessionID string, upd any) {
 // subagentNotify sends one x.ai/session_notification lifecycle event in the
 // live snake_case shape, with attempt_id and the child session id.
 func (s *server) subagentNotify(outer string, update map[string]any) {
-	raw, err := json.Marshal(map[string]any{
+	s.subagentNotifyMeta(outer, update, false)
+}
+
+// subagentNotifyMeta is subagentNotify with grok's replay tag: a replayed
+// lifecycle event carries _meta.isReplay on the notification params.
+func (s *server) subagentNotifyMeta(outer string, update map[string]any, replay bool) {
+	params := map[string]any{
 		"sessionId": outer,
 		"update":    update,
-	})
+	}
+	if replay {
+		params["_meta"] = map[string]any{"isReplay": true}
+	}
+	raw, err := json.Marshal(params)
 	if err != nil {
 		return
 	}
