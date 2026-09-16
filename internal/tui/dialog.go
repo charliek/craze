@@ -41,6 +41,7 @@ const (
 	dialogTheme
 	dialogHelp
 	dialogProvider
+	dialogResume
 )
 
 // rect is the modal layer's box in screen cells: the outer rectangle, borders
@@ -55,6 +56,11 @@ func (r rect) Contains(x, y int) bool {
 }
 
 func (m Model) dialogOpen() bool { return m.dialog != dialogNone }
+
+// picking is a pre-start dialog: the provider picker or the resume picker.
+// Neither has a session yet, so neither may start the event reader, and the
+// status row has nothing to say about a session that does not exist.
+func (m Model) picking() bool { return m.pickingProvider || m.pickingResume }
 
 // dialogRect centres the box inside the transcript region and nowhere else:
 // the base bands stay the one ordered list, and a dialog is a layer over the
@@ -111,6 +117,8 @@ func (m Model) dialogBody(inner, budget int) []string {
 		return m.helpDialogBody(inner, budget)
 	case dialogProvider:
 		return m.providerDialogBody(inner, budget)
+	case dialogResume:
+		return m.resumeDialogBody(inner, budget)
 	}
 	return nil
 }

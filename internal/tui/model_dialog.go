@@ -147,6 +147,12 @@ func (m Model) closeDialog(revert bool) Model {
 		// The picker is not dismissed without starting: Esc and a click
 		// outside go through confirmProvider instead.
 		m.dialog = dialogNone
+	case dialogResume:
+		// Nor is this one, and it has no default to fall back on: Esc quits
+		// the program and a click outside is swallowed by handleClick (§3.7),
+		// so nothing reaches this before a session exists — a card, which is
+		// the one other caller, is a request a live turn makes.
+		m.dialog = dialogNone
 	}
 	return m
 }

@@ -85,6 +85,18 @@ type Config struct {
 	// it after the picker (or immediately when locked). Tests that pass
 	// Session and leave this nil never show the picker.
 	NewSession func(agent.Provider) agent.Session
+	// Resume is --resume's rows, newest first: when it is non-empty New opens
+	// the resume picker instead of the provider picker (and instead of
+	// starting anything), and Init returns nil until a row is chosen. The
+	// caller has already filtered them to this workspace and, when --provider
+	// was explicit, to that provider (§3.1).
+	Resume []sessions.Row
+	// LoadSession constructs a session that loads the chosen row — the same
+	// closure as NewSession with agent.Options.LoadSessionID, Title and
+	// TitlePinned filled in from the row. It is only ever called from the
+	// resume picker; --continue resolves its row in internal/cli and passes
+	// the session in Session with Loading set.
+	LoadSession func(agent.Provider, sessions.Row) agent.Session
 	// Loading says Session was built to resume an existing agent session
 	// (agent.Options.LoadSessionID), so Start replays its transcript before
 	// it returns. tea.Batch gives no ordering between startCmd and the first
@@ -248,6 +260,14 @@ type Model struct {
 	skills       []slashItem
 
 	pickingProvider bool
+	// pickingResume is the resume picker, the other pre-start dialog. It is
+	// its own flag rather than a mode of pickingProvider because the two
+	// answer a click outside the box differently: the provider picker starts
+	// its default, and there is no default session to start (§3.7).
+	pickingResume   bool
+	resumeCursor    int
+	resume          []sessions.Row
+	loadSession     func(agent.Provider, sessions.Row) agent.Session
 	providerLocked  bool
 	persistProvider bool
 	fallbackDefault bool
@@ -446,6 +466,8 @@ func New(cfg Config) Model {
 		providerDefault: prov,
 		providers:       pickerRows(cfg.Providers, prov),
 		newSession:      cfg.NewSession,
+		loadSession:     cfg.LoadSession,
+		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
@@ -458,11 +480,19 @@ func New(cfg Config) Model {
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
-	if m.newSession != nil && !m.providerLocked {
+	switch {
+	case len(m.resume) > 0:
+		// --resume outranks the provider picker: every row carries its own
+		// provider and choosing one locks it, so asking which provider to
+		// start before asking which session to load would be asking a
+		// question the answer overrides (§3.1).
+		m.pickingResume = true
+		m.dialog = dialogResume
+	case m.newSession != nil && !m.providerLocked:
 		m.pickingProvider = true
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
-	} else {
+	default:
 		if m.sess == nil && m.newSession != nil {
 			m.sess = m.newSession(prov)
 		}
@@ -530,7 +560,7 @@ func Run(cfg Config) error {
 // events — permission, question and plan — are requests an agent makes of a
 // live turn and never appear in a replay (§2.1).
 func (m Model) Init() tea.Cmd {
-	if m.pickingProvider {
+	if m.picking() {
 		return nil
 	}
 	return tea.Batch(m.startCmd(), waitEvent(m.sess))
@@ -1023,6 +1053,14 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		if r.Contains(x, y) {
 			return m.dialogClick(y - r.Y)
 		}
+		if m.pickingResume {
+			// Swallowed, and nothing else: a click outside a pre-start
+			// picker that closed it would leave the model with no session
+			// and no start command — a craze that draws a frame and can
+			// never do anything (§3.7). The provider picker has a default to
+			// start; there is no default session.
+			return m, nil
+		}
 		if m.pickingProvider {
 			return m.confirmProvider(m.providerDefault, false)
 		}
@@ -1100,6 +1138,8 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 		return m.themeDialogClick(i)
 	case dialogProvider:
 		return m.providerDialogClick(i)
+	case dialogResume:
+		return m.resumeDialogClick(i)
 	}
 	return m, nil
 }
@@ -1134,6 +1174,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHelpDialogKey(msg)
 	case dialogProvider:
 		return m.handleProviderDialogKey(msg)
+	case dialogResume:
+		return m.handleResumeDialogKey(msg)
 	}
 
 	// The confirm line is a question with two answers: Enter confirms, Esc

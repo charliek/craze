@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import json
 import os
 import pty
 import re
@@ -13,6 +14,7 @@ import sys
 import termios
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -67,6 +69,7 @@ class PTYCraze:
         provider: str = "cursor",
         no_mouse: bool = False,
         step: str | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
@@ -86,10 +89,14 @@ class PTYCraze:
         env.pop("CRAZE_FAKE_STEP", None)
         if step:
             env["CRAZE_FAKE_STEP"] = step
-        argv = [
-            str(craze_bin),
-            "--provider",
-            provider,
+        argv = [str(craze_bin)]
+        if provider:
+            # An empty provider leaves the flag off entirely, which is the
+            # only way to exercise what an *implicit* provider does: an
+            # explicit --provider filters the session index and is still
+            # allowed to write the persisted default.
+            argv += ["--provider", provider]
+        argv += [
             "--agent-bin",
             str(fake_agent_bin),
             "--workspace",
@@ -99,6 +106,7 @@ class PTYCraze:
         ]
         if no_mouse:
             argv.append("--no-mouse")
+        argv += extra_args or []
         try:
             self.proc = subprocess.Popen(
                 argv,
@@ -438,3 +446,94 @@ def test_tui_no_mouse_never_changes_the_motion_mode(
         tui.write(b"\x03\x03")
         tui.wait_exit()
     _wait_fake_gone(fake_agent_bin)
+
+
+def _seed_index(home: Path, workspace: Path, session_id: str, provider: str, title: str) -> Path:
+    """Write one session-index row, the way a previous craze run would have.
+
+    The index is the config file's sibling, so HOME is what decides where it
+    lands — the same HOME the TUI under test runs with.
+    """
+    stamp = (
+        datetime.now(timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat(timespec="microseconds")
+        + "Z"
+    )
+    row = {
+        "sessionId": session_id,
+        "provider": provider,
+        "cwd": str(workspace),
+        "title": title,
+        "pinned": False,
+        "createdAt": stamp,
+        "updatedAt": stamp,
+    }
+    craze_dir = home / ".craze"
+    craze_dir.mkdir(parents=True, exist_ok=True)
+    index = craze_dir / "sessions.jsonl"
+    index.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return index
+
+
+def test_tui_continue_with_no_index_exits_1(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """Nothing to continue is exit 1 and a message, not an empty craze.
+
+    It runs on a pty because the non-tty refusal (exit 2) comes first, so this
+    is the only way to see the code the flag itself returns.
+    """
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, extra_args=["--continue"]
+    ) as tui:
+        code = tui.wait_exit(timeout=10)
+        assert code == 1, tui.screen()[-3000:]
+        assert "no session to continue in" in _ANSI.sub("", tui.screen())
+
+
+def test_tui_continue_and_resume_exit_2(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """Asking for both is a usage error, and usage errors are exit 2."""
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, extra_args=["--continue", "--resume"]
+    ) as tui:
+        code = tui.wait_exit(timeout=10)
+        assert code == 2, tui.screen()[-3000:]
+        assert "mutually exclusive" in _ANSI.sub("", tui.screen())
+
+
+def test_tui_continue_replays_and_leaves_the_config_alone(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """--continue restores the transcript and never rewrites the default provider.
+
+    The config file says grok and the row says cursor: the row wins (the index
+    decides which agent can load a session), the provider in config.toml is
+    not filtered against and not overwritten, and the transcript comes back
+    with the `restored` note that closes a replay.
+    """
+    config = tmp_path / ".craze" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    before = 'provider = "grok"\ntheme = "tokyo-night"\n'
+    config.write_text(before, encoding="utf-8")
+    _seed_index(tmp_path, tmp_path, "sess-load-1", "cursor", "yesterday's thread")
+
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="load",
+        provider="",
+        extra_args=["--continue"],
+    ) as tui:
+        tui.wait_contains("the workspace holds main.py and README.md")
+        tui.wait_contains("restored")
+        # The stored title is on the composer rule, seeded before Start.
+        tui.wait_contains("yesterday's thread")
+        tui.write(b"\x04")
+        assert tui.wait_exit() == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+    assert config.read_text(encoding="utf-8") == before

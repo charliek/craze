@@ -90,7 +90,7 @@ func (m Model) statusView(lay frameLayout) string {
 func (m Model) statusRow1() (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	ws := statusPart{text: workspaceName(m.cwd), style: styleFG(m.theme.Bright).Bold(true)}
-	if m.pickingProvider {
+	if m.picking() {
 		return fitStatus([]statusPart{ws}, statusSep, dim, m.width)
 	}
 	if !m.sessionReady() && m.status != statusError {
