@@ -665,6 +665,26 @@ def test_frame_grok_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) 
     assert "◆ default" in text, text
 
 
+def test_frame_gx_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    # gx is grok on the wire (plan 012): the fake agent's grok-shaped script
+    # keys off --fake-script, never --provider, so grok-echo applies unchanged.
+    proc = frame(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="grok-echo",
+        cols=80,
+        rows=24,
+        keys="<wait:idle>go<enter><wait:text:echo: go><wait:idle>",
+        provider="gx",
+    )
+    text = "\n".join(frame_lines(proc, 80, 24))
+    assert f"{WORKDIR} │ gx" in text, text
+    assert "echo: go" in text, text
+    assert "fast" not in text, text
+    assert "◆ default" in text, text
+
+
 # --------------------------------------------------------------- 007 §3.9
 #
 # The grok sub-agent scripts need --provider grok the same way
