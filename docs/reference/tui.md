@@ -7,9 +7,12 @@
 
 The TUI is the default command. It refuses to start on a non-tty.
 
-Without `--provider`, a centred **provider** dialog lists `cursor` and `grok`
-before the session is constructed. The preselected row is the resolved default
-(see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
+Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
+and `gx` — the last shown only when a binary for it resolves, since gx is a
+third-party fork nobody can assume is installed (see
+[Configuration](configuration.md#provider-precedence)) — before the session
+is constructed. The preselected row is the resolved default (see
+[Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
 
 ## Layout
@@ -21,7 +24,7 @@ Top to bottom:
 3. Spinner line
 4. Composer
 5. Two status rows
-6. One row per in-flight sub-agent (both providers)
+6. One row per in-flight sub-agent (all providers)
 
 The composer never scrolls: it grows to show every line up to a cap (6 rows,
 3 on a short terminal), then windows to keep the cursor visible. A rule above
@@ -313,7 +316,7 @@ does not advertise its own project skills over ACP, so the walk is their
 only path to the menu): Cursor walks `.cursor/skills`, `.agents/skills`,
 `.codex/skills`, `.claude/skills` under the workspace and `$HOME`, still
 skipping `.cursor/plugins`; Grok walks `.grok/skills` and `.agents/skills`.
-The two providers disagree on how a skill on disk gets its name — **Cursor
+Cursor and Grok disagree on how a skill on disk gets its name — **Cursor
 names it after the skill's directory**, whatever its frontmatter says;
 **Grok names it after the frontmatter `name`**, falling back to the
 directory only when there is none — and on both, `user-invocable: false` in

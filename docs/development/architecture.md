@@ -1,7 +1,11 @@
 # Architecture
 
-craze is an ACP client. It owns the chrome; `cursor-agent` or `grok` (or
-`craze-fake-agent` in tests) is the agent process.
+craze is an ACP client. It owns the chrome; `cursor-agent`, `grok`, or `gx`
+(or `craze-fake-agent` in tests) is the agent process. `gx` is a third-party
+fork of the Grok CLI that speaks the same ACP dialect as `grok` — see
+[Configuration](../reference/configuration.md#provider-precedence) — so on
+the wire a gx session *is* a grok session and the diagram below has no
+separate node for it.
 
 ```mermaid
 flowchart LR

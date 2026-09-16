@@ -4,9 +4,9 @@ Working conventions for agent sessions in this repo.
 
 ## What this is
 
-craze is a Linux and macOS TUI that drives `cursor-agent` or `grok` over ACP
-(Agent Client Protocol). It is a proof of concept. Multi-project harness
-integration is later work.
+craze is a Linux and macOS TUI that drives `cursor-agent`, `grok`, or `gx` (a
+third-party fork of the Grok CLI) over ACP (Agent Client Protocol). It is a
+proof of concept. Multi-project harness integration is later work.
 
 ## Per-commit gate
 

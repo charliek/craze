@@ -2,7 +2,9 @@
 
 A Linux and macOS terminal UI for [Cursor CLI](https://cursor.com/cli) and
 [Grok CLI](https://docs.x.ai/build/cli/headless-scripting), talking to
-`cursor-agent acp` or `grok` over ACP. You own the chrome; the provider still
+`cursor-agent acp` or `grok` over ACP — or to `gx`
+([`charliek/grok-build`](https://github.com/charliek/grok-build)), a
+third-party fork of the Grok CLI. You own the chrome; the provider still
 runs the agent.
 
 ```bash
@@ -22,10 +24,15 @@ craze requires:
 
 - Linux or macOS
 - Go 1.24+ (this repo pins 1.24 via `.mise.toml`)
-- Either the [Cursor CLI](https://cursor.com/cli), with a working login
-  (`cursor-agent login`, the same binary is also installed as `agent`), or
-  the [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`),
-  with `grok login` or `XAI_API_KEY` set
+- One of: the [Cursor CLI](https://cursor.com/cli), with a working login
+  (`cursor-agent login`, the same binary is also installed as `agent`); the
+  [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), with
+  `grok login` or `XAI_API_KEY` set; or
+  [`gx`](https://github.com/charliek/grok-build), a third-party fork of the
+  Grok CLI that speaks the same ACP dialect as `grok`, so everything these
+  docs say about Grok's behaviour applies to it too — it currently shares
+  grok's `~/.grok` home (config, auth, sessions, skills), which is the
+  fork's current behaviour, not a craze guarantee
 
 ## Next Steps
 
