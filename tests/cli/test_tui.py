@@ -88,6 +88,13 @@ class PTYCraze:
         # Never inherited: a developer with CRAZE_FAKE_STEP exported would
         # otherwise change the timing of every case that did not ask for it.
         env.pop("CRAZE_FAKE_STEP", None)
+        # Nor CI. termenv reports "not a terminal" whenever CI is set
+        # (termenv.go isTTY), which drops the colour profile to Ascii, and
+        # craze paints no colour -- and sets no terminal colours -- when it
+        # cannot paint at all. This harness exists to drive craze the way a
+        # real terminal does, and a real terminal has no CI in its environment,
+        # so popping it is what makes a CI run behave like a developer's.
+        env.pop("CI", None)
         if step:
             env["CRAZE_FAKE_STEP"] = step
         env.update(env_extra or {})
