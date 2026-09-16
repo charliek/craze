@@ -3,10 +3,15 @@
 ## Prerequisites
 
 1. Linux or macOS.
-2. Install either the [Cursor CLI](https://cursor.com/cli) or the
-   [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`).
+2. Install the [Cursor CLI](https://cursor.com/cli), the
+   [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
+   [`gx`](https://github.com/charliek/grok-build) — a third-party fork of
+   the Grok CLI that speaks the same ACP dialect as `grok`, so everything
+   here about Grok applies to it too.
 3. Log in: `cursor-agent login` (the same binary is also installed as
-   `agent`), or `grok login` / set `XAI_API_KEY`.
+   `agent`), or `grok login` / set `XAI_API_KEY`. `gx` currently shares
+   grok's `~/.grok` home, so the same login covers it — that is the fork's
+   current behaviour, not a craze guarantee.
 
 ## Install
 
@@ -80,7 +85,7 @@ make build
 ```
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
-is for tests; a live session uses `cursor-agent` or `grok` on `PATH` (or
+is for tests; a live session uses `cursor-agent`, `grok`, or `gx` on `PATH` (or
 `--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.24+ (this repo pins 1.24 via
 `.mise.toml`; `mise install`).
 
@@ -109,7 +114,7 @@ craze refuses to start the TUI on a non-tty. For a scripted turn, use
 ## Exit codes
 
 craze exits **nonzero when the session never started** — not logged in to the
-provider, or an agent binary (`cursor-agent`, `grok`) that would not come up. It still draws the TUI and puts the
+provider, or an agent binary (`cursor-agent`, `grok`, `gx`) that would not come up. It still draws the TUI and puts the
 error in the transcript, because that is where you can read it, but the process
 tells a script that nothing ran. An error *during* a session leaves a usable
 craze, so quitting out of one is an ordinary exit 0.

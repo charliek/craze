@@ -1,15 +1,20 @@
 # craze
 
-A Linux and macOS terminal UI that talks ACP to **Cursor** (`cursor-agent acp`)
-or **Grok** (`grok agent stdio`). You own the chrome; the provider still runs
-the agent.
+A Linux and macOS terminal UI that talks ACP to **Cursor** (`cursor-agent acp`),
+**Grok** (`grok agent stdio`), or **gx** — a third-party fork of the Grok
+CLI. You own the chrome; the provider still runs the agent.
 
 ## Install
 
-Either way, you also need the [Cursor CLI](https://cursor.com/cli) or the
-[Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`) installed
-and logged in: `cursor-agent login` (also installed as `agent`), or
-`grok login` / set `XAI_API_KEY`.
+Either way, you also need the [Cursor CLI](https://cursor.com/cli), the
+[Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
+[`gx`](https://github.com/charliek/grok-build) installed and logged in:
+`cursor-agent login` (also installed as `agent`), or `grok login` / set
+`XAI_API_KEY`. `gx` is a third-party fork of `grok-build` that speaks the
+same ACP dialect as `grok`, so everything here about Grok's behaviour
+applies to it too; it currently shares grok's `~/.grok` home (config, auth,
+sessions, skills) — that is the fork's current behaviour, not a craze
+guarantee.
 
 ### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — available from v0.0.1
 
@@ -92,21 +97,25 @@ Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
 ./bin/craze                      # picker, then the TUI in the current directory
 ./bin/craze --provider cursor    # skip the picker
 ./bin/craze --provider grok
+./bin/craze --provider gx
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse
 ```
 
-Without `--provider`, the TUI shows a two-row picker (`cursor` / `grok`)
-preselected to `$CRAZE_PROVIDER`, then `provider` in `~/.craze/config.toml`,
-then cursor. `Enter` starts that row; `Esc` starts the preselected default.
-`--provider` skips the picker. The last **successful** Start is saved and
-used next time.
+Without `--provider`, the TUI shows a picker listing `cursor`, `grok`, and
+`gx` — gx only when a binary for it resolves — preselected to
+`$CRAZE_PROVIDER`, then `provider` in `~/.craze/config.toml`, then cursor.
+`Enter` starts that row; `Esc` starts the preselected default. `--provider`
+skips the picker; `--provider gx` works regardless of whether a binary
+resolves, and fails at spawn if it's missing. The last **successful** Start
+is saved and used next time.
 
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
 `--model` picks an ACP model id, `--ask` / `--plan` set the session mode, and
 `--agent-bin` (or `CRAZE_AGENT_BIN`) overrides the binary. Cursor looks up
-`cursor-agent` then `agent`; Grok looks up `grok` only.
+`cursor-agent` then `agent`; Grok looks up `grok` only; gx looks up `gx`
+only.
 
 The screen is, top to bottom: the transcript, the pinned tasks panel, the
 spinner line, the composer, two status rows, and one row per in-flight

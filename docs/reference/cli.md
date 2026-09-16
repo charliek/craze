@@ -19,7 +19,7 @@ flags; see [craze prompt](#craze-prompt).
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | ACP model id |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
-| `--provider` | ACP provider: `cursor` or `grok`. Empty is unset. Unknown id exits 2 |
+| `--provider` | ACP provider: `cursor`, `grok`, or `gx`. Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
@@ -60,7 +60,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | ACP model id (`session/set_model` after `session/new`) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
-| `--provider` | ACP provider: `cursor` or `grok` |
+| `--provider` | ACP provider: `cursor`, `grok`, or `gx` |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |

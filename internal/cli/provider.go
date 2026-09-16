@@ -12,10 +12,28 @@ import (
 	"github.com/charliek/craze/internal/tui"
 )
 
-const (
-	envProvider = "CRAZE_PROVIDER"
-	providerIDs = "cursor or grok"
-)
+const envProvider = "CRAZE_PROVIDER"
+
+// providerIDs names every registered provider for the flag usage and the
+// unknown-provider error. Computed so a new provider cannot be announced in
+// one message and forgotten in the other.
+var providerIDs = joinOr(agent.ProviderNames())
+
+// joinOr joins names as a choice rather than a list: "" for none, the bare
+// name for one, "a or b" (no comma) for two, and an Oxford "a, b, or c" for
+// three or more.
+func joinOr(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " or " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
+	}
+}
 
 type resolvedProvider struct {
 	Provider agent.Provider

@@ -69,6 +69,20 @@ def test_grok_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> Non
     assert terminals == [{"type": "done", "stopReason": "end_turn"}]
 
 
+def test_gx_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    # gx is grok on the wire (plan 012), so the fake agent's grok-shaped
+    # script applies unchanged: it keys off --script, never --provider.
+    proc = run_prompt(
+        craze_bin, fake_agent_bin, tmp_path, "--provider", "gx", "hello", script="grok-echo"
+    )
+    assert proc.returncode == 0, proc.stderr
+    events = parse_events(proc.stdout)
+    texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
+    assert texts == "echo: hello"
+    terminals = [e for e in events if e.get("type") in ("done", "error")]
+    assert terminals == [{"type": "done", "stopReason": "end_turn"}]
+
+
 def test_first_turn_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     proc = run_prompt(craze_bin, fake_agent_bin, tmp_path, "hello")
     assert proc.returncode == 0, proc.stderr

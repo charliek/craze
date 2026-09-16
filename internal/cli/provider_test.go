@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -34,6 +36,39 @@ func providerFor(t *testing.T, hermetic bool, args ...string) (resolvedProvider,
 	cmd.SetErr(&stderr)
 	err := cmd.Execute()
 	return got, stderr.String(), err
+}
+
+func TestJoinOr(t *testing.T) {
+	cases := []struct {
+		names []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{"cursor"}, "cursor"},
+		{[]string{"cursor", "grok"}, "cursor or grok"},
+		{[]string{"cursor", "grok", "gx"}, "cursor, grok, or gx"},
+	}
+	for _, c := range cases {
+		if got := joinOr(c.names); got != c.want {
+			t.Fatalf("joinOr(%v) = %q, want %q", c.names, got, c.want)
+		}
+	}
+}
+
+func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
+	cmd := NewRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"prompt", "--provider", "codex", "hi"})
+	err := cmd.Execute()
+	var ee *exitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("%v", err)
+	}
+	const want = `craze: unknown provider "codex" (want cursor, grok, or gx)`
+	if ee.msg != want {
+		t.Fatalf("msg %q, want %q", ee.msg, want)
+	}
 }
 
 func TestUnknownProviderFlagExits2(t *testing.T) {
@@ -228,5 +263,148 @@ func TestPromptDoesNotPersistFailedStart(t *testing.T) {
 	}
 	if got := tui.ConfigProvider(); got != "" {
 		t.Fatalf("failed start persisted %q", got)
+	}
+}
+
+// writeExecutable writes an executable stub at dir/name. Mode 0o755 matters: a
+// 0o644 file makes exec.LookPath fail for the wrong reason, so a negative case
+// would pass by accident.
+func writeExecutable(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func providerNames(list []agent.Provider) []string {
+	out := make([]string, 0, len(list))
+	for _, p := range list {
+		out = append(out, p.Name())
+	}
+	return out
+}
+
+// TestPickerProviders pins the picker's availability filter: cursor and grok
+// are unconditional, so the picker is never empty, and gx appears only when a
+// binary for it resolves. Resolution is the same question spawn asks, so
+// --agent-bin reveals gx and an unresolvable --agent-bin hides it even with gx
+// on PATH (§3.3, AC 4 and AC 9).
+//
+// CRAZE_AGENT_BIN is cleared once for every case and each builds its own PATH
+// in a temp directory, so none of them can read what the host happens to have
+// installed.
+func TestPickerProviders(t *testing.T) {
+	t.Setenv("CRAZE_AGENT_BIN", "")
+	t.Run("gx absent", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok"}) {
+			t.Fatalf("rows %q, want [cursor grok]", got)
+		}
+	})
+	t.Run("gx on PATH", func(t *testing.T) {
+		dir := t.TempDir()
+		writeExecutable(t, dir, "gx")
+		t.Setenv("PATH", dir)
+		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
+			t.Fatalf("rows %q, want [cursor grok gx]", got)
+		}
+	})
+	t.Run("agent-bin reveals gx", func(t *testing.T) {
+		bin := writeExecutable(t, t.TempDir(), "some-agent")
+		t.Setenv("PATH", t.TempDir())
+		if got := providerNames(pickerProviders(bin)); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
+			t.Fatalf("rows %q, want [cursor grok gx]", got)
+		}
+	})
+	t.Run("invalid agent-bin hides gx", func(t *testing.T) {
+		dir := t.TempDir()
+		writeExecutable(t, dir, "gx")
+		t.Setenv("PATH", dir)
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		if got := providerNames(pickerProviders(missing)); !reflect.DeepEqual(got, []string{"cursor", "grok"}) {
+			t.Fatalf("rows %q, want [cursor grok] — the override is exclusive", got)
+		}
+	})
+}
+
+// TestGxResolvesThroughEveryEntryPoint pins §3.2: gx is a provider id like any
+// other at all three precedence levels, and resolution never consults PATH — a
+// missing binary is a spawn error, not an unknown provider (AC 5).
+func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
+	// No binary override and an empty PATH for every case: whichever entry
+	// point names gx, resolution must succeed without one.
+	t.Setenv("CRAZE_AGENT_BIN", "")
+	t.Setenv("PATH", t.TempDir())
+	t.Run("flag", func(t *testing.T) {
+		t.Setenv("CRAZE_PROVIDER", "")
+		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+		got, _, err := providerFor(t, false, "--provider", "gx")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Provider.Name() != "gx" || !got.Locked || got.Fallback {
+			t.Fatalf("%+v", got)
+		}
+	})
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("CRAZE_PROVIDER", "gx")
+		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+		got, stderr, err := providerFor(t, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Provider.Name() != "gx" || got.Fallback {
+			t.Fatalf("%+v stderr %q", got, stderr)
+		}
+	})
+	t.Run("config", func(t *testing.T) {
+		t.Setenv("CRAZE_PROVIDER", "")
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("provider = \"gx\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CRAZE_CONFIG", path)
+		got, stderr, err := providerFor(t, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Provider.Name() != "gx" || got.Fallback {
+			t.Fatalf("%+v stderr %q", got, stderr)
+		}
+	})
+}
+
+// TestPromptPersistsGxProviderKeepingOtherKeys is AC 5's automatable half:
+// choosing gx writes provider = "gx" and leaves the rest of the config file
+// alone. The run goes through --agent-bin, so it proves the id flows all the
+// way through CLI resolution without gx being installed.
+func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
+	bin := fakeAgentPath(t)
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	t.Setenv("CRAZE_PROVIDER", "")
+	isolateHome(t)
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfg, []byte("theme = \"gruvbox\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_CONFIG", cfg)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-echo")
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetIn(&bytes.Buffer{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"prompt", "--json", "--provider", "gx", "--agent-bin", bin, "--workspace", t.TempDir(), "hi"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("prompt: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := tui.ConfigProvider(); got != "gx" {
+		t.Fatalf("persisted %q", got)
+	}
+	if got := tui.ConfigTheme(); got != "gruvbox" {
+		t.Fatalf("saving the provider disturbed theme: %q", got)
 	}
 }
