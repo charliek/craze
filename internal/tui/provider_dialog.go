@@ -113,20 +113,37 @@ func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) providerDialogPlan(budget int) (shown int, footer bool) {
-	n := len(m.providers)
+// providerDialogPlan is the window onto the row list and whether the footer
+// survived: title + rows + footer, with the list giving its rows up one at a
+// time and the footer going only once even one row no longer fits. The
+// renderer and the hit-tester both take it, so the two cannot disagree about
+// which rows the frame is showing.
+//
+// The window follows providerCursor instead of always starting at row 0. A box
+// that truncated from the bottom would draw the top of the list while the keys
+// — and the Enter that starts a session — were on a row nobody could see, and
+// would bound clicks to rows that are not the ones on screen. Three rows and a
+// default at the last index is what makes that reachable, but the arithmetic is
+// the same one row or ten.
+func (m Model) providerDialogPlan(budget int) (top, shown int, footer bool) {
 	footer = budget >= 3
 	rows := budget - 1
 	if footer {
 		rows--
 	}
-	return min(max(rows, 0), n), footer
+	// dialogListWindow scrolls only as far as the cursor forces, so a list that
+	// fits still starts at row 0 and the goldens are unmoved.
+	top, shown = dialogListWindow(len(m.providers), m.providerCursor, max(rows, 0))
+	return top, shown, footer
 }
 
+// providerDialogBody draws the window the plan settled. There is no ▲/▼ marker
+// the way the theme list has one: the tag column is the "default" tag, and a
+// row cannot carry both.
 func (m Model) providerDialogBody(inner, budget int) []string {
-	shown, footer := m.providerDialogPlan(budget)
+	top, shown, footer := m.providerDialogPlan(budget)
 	rows := []string{m.dialogTitle(providerDialogTitle, inner)}
-	for i := 0; i < shown; i++ {
+	for i := top; i < top+shown; i++ {
 		p := m.providers[i]
 		tag := ""
 		if p.Name() == m.providerDefault.Name() {
@@ -141,11 +158,11 @@ func (m Model) providerDialogBody(inner, budget int) []string {
 }
 
 func (m Model) providerDialogClick(i int) (tea.Model, tea.Cmd) {
-	shown, _ := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
-	row := i - 1
+	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
+	row := i - 1 // the title row
 	if row < 0 || row >= shown {
 		return m, nil
 	}
-	m.providerCursor = row
+	m.providerCursor = top + row
 	return m, nil
 }

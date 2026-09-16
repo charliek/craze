@@ -340,16 +340,16 @@ func TestStartedMsgDoesNotPersistWhenDisabled(t *testing.T) {
 
 // goldenPicker is the model the picker's frame goldens render. One Config
 // serves all of them, so a golden differs from its neighbours only by the row
-// list and the terminal size, and a change to the frame cannot land in one of
-// them and miss the others.
-func goldenPicker(t *testing.T, list []agent.Provider, cols, rows int) Model {
+// list, the default and the terminal size, and a change to the frame cannot
+// land in one of them and miss the others.
+func goldenPicker(t *testing.T, def agent.Provider, list []agent.Provider, cols, rows int) Model {
 	t.Helper()
 	m := New(Config{
 		Theme:      "tokyo-night",
 		Workspace:  frameWorkspace(t),
 		Model:      "grok",
 		Yolo:       true,
-		Provider:   agent.CursorProvider(),
+		Provider:   def,
 		Providers:  list,
 		NewSession: pickerFactory(t),
 	})
@@ -360,7 +360,7 @@ func goldenPicker(t *testing.T, list []agent.Provider, cols, rows int) Model {
 func TestFrameGoldenProviderPicker(t *testing.T) {
 	isolateSkillsHome(t)
 	for _, size := range []struct{ cols, rows int }{{100, 30}, {80, 24}} {
-		m := goldenPicker(t, nil, size.cols, size.rows)
+		m := goldenPicker(t, agent.CursorProvider(), nil, size.cols, size.rows)
 		name := "provider-picker-100x30"
 		if size.cols == 80 {
 			name = "provider-picker-80x24"
@@ -508,6 +508,151 @@ func TestProviderPickerClickMovesHighlight(t *testing.T) {
 
 func TestFrameGoldenProviderPickerThreeRows(t *testing.T) {
 	isolateSkillsHome(t)
-	m := goldenPicker(t, agent.Providers(), 100, 30)
+	m := goldenPicker(t, agent.CursorProvider(), agent.Providers(), 100, 30)
 	assertGolden(t, "provider-picker-3rows-100x30", 100, 30, plainView(m))
+}
+
+// markedPickerRow is the one row of a rendered body that carries the focus
+// gutter, as plain text. Reading it back out of the body is what makes the
+// window assertions about what the box draws rather than about the numbers the
+// plan returned, and finding two of them would be its own bug.
+func markedPickerRow(t *testing.T, body []string, shown int) string {
+	t.Helper()
+	got := ""
+	for _, row := range body[1 : 1+shown] {
+		if text := plain(row); strings.HasPrefix(text, dialogCursorMark) {
+			if got != "" {
+				t.Fatalf("two rows carry the focus gutter:\n%s", strings.Join(body, "\n"))
+			}
+			got = text
+		}
+	}
+	return got
+}
+
+// TestProviderPickerShortBudgetKeepsTheSelectedRow is §3.10: a box too short
+// for every row draws the window the cursor is in, not the top of the list.
+// Truncating from the bottom hid the selected row — the one Enter starts — and,
+// because the click path shares the plan, made it unclickable too. Three rows
+// with gx able to be the default at index 2 is what made it reachable, but a
+// two-row picker had it at any budget of two.
+//
+// The budgets go to the body directly: craze's 40x12 floor still fits three
+// rows (TestFrameGoldenProviderPickerFloor pins that), so a fourth provider or
+// a band that takes a transcript row is what would reach this through a real
+// WindowSizeMsg.
+func TestProviderPickerShortBudgetKeepsTheSelectedRow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cursor int
+	}{
+		{"last", 2},
+		{"middle", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newPickerRows(t, agent.CursorProvider(), agent.Providers())
+			m.providerCursor = tc.cursor
+			want := m.providers[tc.cursor].Name()
+			// 2 is the smallest budget that keeps a row at all, 4 the largest
+			// that still drops one: a squeeze with and without the footer, and
+			// a window of one row and of two.
+			for budget := 2; budget <= 4; budget++ {
+				top, shown, footer := m.providerDialogPlan(budget)
+				if shown <= 0 || shown >= len(m.providers) {
+					t.Fatalf("fixture: budget %d is not a squeeze (top %d, shown %d)", budget, top, shown)
+				}
+				if tc.cursor < top || tc.cursor >= top+shown {
+					t.Fatalf("budget %d drew rows [%d,%d), which does not hold the cursor at %d", budget, top, top+shown, tc.cursor)
+				}
+				body := m.providerDialogBody(dialogMaxWidth-dialogBorder, budget)
+				wantRows := shown + 1 // the title
+				if footer {
+					wantRows++
+				}
+				if got := len(body); got != wantRows {
+					t.Fatalf("budget %d drew %d rows for a %d-row window, want %d", budget, got, shown, wantRows)
+				}
+				row := markedPickerRow(t, body, shown)
+				if !strings.HasPrefix(row, dialogCursorMark+want) {
+					t.Fatalf("budget %d: the row under the cursor is %q, want %q", budget, row, want)
+				}
+			}
+		})
+	}
+}
+
+// TestProviderPickerShortBoxClickSelectsTheVisibleRow is the click half of
+// §3.10: the hit test maps a press back through the same offset the renderer
+// used. The box here draws rows 1 and 2, so a press on its first row is grok —
+// the bug this replaces answered cursor, the row that is not on screen.
+//
+// The shortened box is set on m.lay.Dialog because View, providerDialogBody
+// and providerDialogClick all read that one rect, so the frame the test clicks
+// on is the frame the model draws.
+func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
+	m := newPickerRows(t, agent.GxProvider(), agent.Providers())
+	if m.providerCursor != 2 {
+		t.Fatalf("fixture: gx default preselects %d, want 2", m.providerCursor)
+	}
+	// Two borders, the title, two rows and the footer.
+	m.lay.Dialog.H = dialogBorder + 4
+	top, shown, _ := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
+	if top != 1 || shown != 2 {
+		t.Fatalf("fixture: the squeezed box draws rows [%d,%d), want [1,3)", top, top+shown)
+	}
+	if row := pickerRowLine(t, m, "grok"); !strings.HasPrefix(row, dialogNoMark+"grok") {
+		t.Fatalf("grok is not the box's first row: %q", row)
+	}
+	r := m.lay.Dialog
+	// Row 0 is the top border and row 1 the title, so row 2 is the window's
+	// first provider.
+	for i, want := range []struct {
+		name  string
+		index int
+	}{{"grok", 1}, {"gx", 2}} {
+		out := clickXY(t, m, r.X+2, r.Y+2+i)
+		if out.providerCursor != want.index {
+			t.Fatalf("click on %q moved the cursor to %d, want %d", want.name, out.providerCursor, want.index)
+		}
+		if !out.pickingProvider || out.dialog != dialogProvider {
+			t.Fatalf("click on %q closed the picker", want.name)
+		}
+		if out.sess != nil {
+			t.Fatalf("click on %q started a session", want.name)
+		}
+	}
+	// A press on the footer is still not a row, and the rows the window scrolled
+	// past are not reachable by clicking below it either.
+	if out := clickXY(t, m, r.X+2, r.Y+4); out.providerCursor != 2 {
+		t.Fatalf("a click on the footer moved the cursor to %d", out.providerCursor)
+	}
+}
+
+// TestProviderPickerWindowDoesNotScrollWhenEverythingFits is the other half of
+// §3.10: the offset answers a squeeze, it is not a scroller. A window that
+// tracked the cursor unconditionally would put the default's row at the top of
+// a full-size box and move every picker golden with it.
+func TestProviderPickerWindowDoesNotScrollWhenEverythingFits(t *testing.T) {
+	for _, def := range []agent.Provider{agent.CursorProvider(), agent.GxProvider()} {
+		m := newPickerRows(t, def, agent.Providers())
+		top, shown, footer := m.providerDialogPlan(m.lay.Dialog.H - dialogBorder)
+		if top != 0 || shown != len(m.providers) || !footer {
+			t.Fatalf("%s default: top %d, shown %d, footer %v — want the whole list from row 0", def.Name(), top, shown, footer)
+		}
+		body := m.providerDialogBody(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
+		first := strings.TrimPrefix(plain(body[1]), dialogCursorMark)
+		if got := strings.Fields(first); len(got) == 0 || got[0] != "cursor" {
+			t.Fatalf("%s default: the box opens on %q, want cursor", def.Name(), plain(body[1]))
+		}
+	}
+}
+
+// TestFrameGoldenProviderPickerFloor is the three-row picker at 40x12, the
+// smallest frame craze draws, with the default on the last row. Every row still
+// fits there, so the golden is what says the window did not scroll at the size
+// where the box is closest to giving a row up.
+func TestFrameGoldenProviderPickerFloor(t *testing.T) {
+	isolateSkillsHome(t)
+	m := goldenPicker(t, agent.GxProvider(), agent.Providers(), 40, 12)
+	assertGolden(t, "provider-picker-3rows-40x12", 40, 12, plainView(m))
 }
