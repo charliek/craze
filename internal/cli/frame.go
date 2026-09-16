@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -29,6 +32,12 @@ type frameOpts struct {
 	timeout     time.Duration
 	printFrames bool
 	freeze      bool
+	// cont and resume are the root command's --continue/--resume, so a golden
+	// can be rendered of what they do; seedSessions writes the index rows
+	// they resolve against, inside the runner's isolated HOME (§3.7).
+	cont         bool
+	resume       bool
+	seedSessions []string
 }
 
 func newFrameCmd() *cobra.Command {
@@ -54,6 +63,10 @@ func newFrameCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 10*time.Second, "per-wait timeout")
 	cmd.Flags().BoolVar(&o.printFrames, "print-frames", false, "stream every frame to stderr")
 	cmd.Flags().BoolVar(&o.freeze, "freeze", false, "stop the clock and the spinner cycle, so a frame of a turn in progress does not depend on wall time")
+	cmd.Flags().BoolVar(&o.cont, "continue", false, "load the newest seeded session instead of starting a new one")
+	cmd.Flags().BoolVar(&o.resume, "resume", false, "open the resume picker over the seeded sessions")
+	cmd.Flags().StringArrayVar(&o.seedSessions, "seed-session", nil,
+		"seed one index row as provider:id:title (repeatable; the last one is the newest)")
 	registerProviderFlag(cmd, &o.provider)
 	return cmd
 }
@@ -61,6 +74,9 @@ func newFrameCmd() *cobra.Command {
 func (o *frameOpts) run(cmd *cobra.Command) error {
 	if o.cols <= 0 || o.rows <= 0 {
 		return usagef("craze frame: --cols and --rows must be positive")
+	}
+	if o.cont && o.resume {
+		return usagef("craze frame: --continue and --resume are mutually exclusive")
 	}
 	ws, err := resolveWorkspace("")
 	if err != nil {
@@ -96,19 +112,33 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		Provider:    &prov,
 	})
 
-	plain, raw, err := tui.RunFrameScript(tui.Config{
+	base := tui.Config{
 		Session:        sess,
 		Theme:          theme,
 		Workspace:      ws,
 		Yolo:           force,
 		Provider:       prov,
 		ProviderLocked: true,
-	}, o.cols, o.rows, o.keys, tui.FrameOpts{
+		// TerminalTitle is deliberately left false: the frame runner builds
+		// its program with tea.WithoutRenderer(), so tea.SetWindowTitle is a
+		// no-op here regardless, and a golden must never depend on it (§3.10).
+	}
+	var setup func() (tui.Config, error)
+	if o.cont || o.resume || len(o.seedSessions) > 0 {
+		// The index lives under HOME, and the runner only isolates HOME after
+		// this function has handed it a Config — so the seeding and the row
+		// lookup have to happen in a callback it runs inside the isolation,
+		// or a golden would read (and write) the developer's own index (§3.7).
+		setup = func() (tui.Config, error) { return o.seedAndResolve(cmd, base, ws, force) }
+	}
+
+	plain, raw, err := tui.RunFrameScript(base, o.cols, o.rows, o.keys, tui.FrameOpts{
 		Timeout:     o.timeout,
 		ANSI:        o.ansi,
 		PrintFrames: o.printFrames,
 		Out:         cmd.ErrOrStderr(),
 		Freeze:      o.freeze,
+		Setup:       setup,
 	})
 	if err != nil {
 		return frameExitError(cmd, err)
@@ -119,6 +149,94 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 	}
 	_, err = fmt.Fprintln(cmd.OutOrStdout(), out)
 	return err
+}
+
+// seedAndResolve writes the --seed-session rows and answers --continue /
+// --resume out of them. It runs inside the frame runner's isolated HOME, so
+// the store it builds is the isolated one and the rows are gone with the
+// directory when the run ends.
+func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws string, force bool) (tui.Config, error) {
+	cwd := ws
+	if abs, err := filepath.Abs(ws); err == nil {
+		cwd = abs
+	}
+	index := &sessions.Store{KnownProvider: knownProvider}
+	for _, spec := range o.seedSessions {
+		row, err := parseSeedSession(spec, cwd)
+		if err != nil {
+			return base, err
+		}
+		if err := index.Upsert(row); err != nil {
+			return base, err
+		}
+	}
+	cfg := base
+	cfg.SessionIndex = index
+	build := func(p agent.Provider, row sessions.Row) agent.Session {
+		prov := p
+		return agent.New(agent.Options{
+			Binary:        o.agentBin,
+			Workspace:     ws,
+			Force:         force,
+			Stderr:        cmd.ErrOrStderr(),
+			PluginDirs:    o.pluginDirs,
+			Interactive:   true,
+			Provider:      &prov,
+			LoadSessionID: row.SessionID,
+			Title:         row.Title,
+			TitlePinned:   row.Pinned,
+		})
+	}
+	switch {
+	case o.cont:
+		row, ok, err := index.Latest(cwd, "")
+		if err != nil {
+			return cfg, err
+		}
+		if !ok {
+			return cfg, usagef("%s", noSessionMsg(cwd, ""))
+		}
+		p, err := agent.ProviderByName(row.Provider)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Provider = p
+		cfg.Session = build(p, row)
+		cfg.Loading = true
+	case o.resume:
+		rows, err := index.Recent(cwd, "", resumeRowLimit)
+		if err != nil {
+			return cfg, err
+		}
+		if len(rows) == 0 {
+			return cfg, usagef("%s", noSessionMsg(cwd, ""))
+		}
+		// The picker builds the session itself, once a row is chosen; the one
+		// assembled before the runner started is not the one to start.
+		cfg.Session = nil
+		cfg.Resume = rows
+		cfg.LoadSession = build
+	}
+	return cfg, nil
+}
+
+// parseSeedSession reads provider:id:title. SplitN with a limit of 3 so a
+// title may hold a colon — which real ones do, and a session called
+// "fix: the flaky test" is exactly the row a picker golden wants.
+func parseSeedSession(spec, cwd string) (sessions.Row, error) {
+	parts := strings.SplitN(spec, ":", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" {
+		return sessions.Row{}, usagef("craze frame: --seed-session wants provider:id:title, got %q", spec)
+	}
+	return sessions.Row{
+		SessionID: parts[1],
+		Provider:  parts[0],
+		CWD:       cwd,
+		Title:     parts[2],
+		// An agent title: it fills the row without pinning it, which is what
+		// a seeded session looks like before anyone renames it.
+		TitleKind: sessions.TitleKindAgent,
+	}, nil
 }
 
 // frameExitError maps a script failure onto craze's exit codes: 2 for a bad

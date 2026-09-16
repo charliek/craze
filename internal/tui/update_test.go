@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -2508,5 +2510,143 @@ func TestPlanOfferSurvivesACreatePlanCard(t *testing.T) {
 	}
 	if !strings.Contains(plainView(m), planOfferPlaceholder) {
 		t.Fatalf("the offer placeholder is not on screen:\n%s", plainView(m))
+	}
+}
+
+// windowTitleMsgs walks a batched Cmd for every tea.SetWindowTitle it carries,
+// rendered with fmt.Sprint. bubbletea's setWindowTitleMsg is an unexported
+// string type, so identifying it by its reflected type name and reading its
+// value through fmt.Sprint is the only way in from outside the package
+// (§3.10).
+//
+// The tick chain rides in the same batch (Update arms it last) and a real
+// tea.Tick command sleeps for its own duration before returning — up to a
+// minute, when the model is idle — so it is skipped by function name via
+// runtime.FuncForPC rather than called: this walk must stay instant however
+// far from a minute boundary the wall clock happens to be when it runs.
+func windowTitleMsgs(cmd tea.Cmd) []string {
+	var out []string
+	var walk func(tea.Cmd)
+	walk = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		if name := runtime.FuncForPC(reflect.ValueOf(c).Pointer()).Name(); strings.Contains(name, "bubbletea.Tick") {
+			return
+		}
+		msg := c()
+		if msg == nil {
+			return
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, sub := range batch {
+				walk(sub)
+			}
+			return
+		}
+		if strings.Contains(fmt.Sprintf("%T", msg), "WindowTitleMsg") {
+			out = append(out, fmt.Sprint(msg))
+		}
+	}
+	walk(cmd)
+	return out
+}
+
+// titledStub is startStub with the tab title switched on (every other test
+// model leaves Config.TerminalTitle false, the tested default), sized but not
+// yet started, so the caller can watch the very first title alongside every
+// later transition.
+func titledStub(t *testing.T, stub *Stub, ws string) Model {
+	t.Helper()
+	isolateSkillsHome(t)
+	m := New(Config{
+		Session:       stub,
+		Theme:         "tokyo-night",
+		Workspace:     ws,
+		Model:         "grok",
+		Yolo:          true,
+		TerminalTitle: true,
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	return tm.(Model)
+}
+
+// TestWindowTitleCmdOnSizing is the pre-start moment: New alone sets no
+// title (windowTitle is pure and the wrapper never ran), but the very first
+// Update — sizing the frame, exactly as Run's first WindowSizeMsg does —
+// already carries the pre-title "✦ craze", because no handler sets the title
+// itself and this is the one comparison every transition passes through.
+func TestWindowTitleCmdOnSizing(t *testing.T) {
+	isolateSkillsHome(t)
+	m := New(Config{
+		Session:       NewStub(),
+		Theme:         "tokyo-night",
+		Workspace:     t.TempDir(),
+		Yolo:          true,
+		TerminalTitle: true,
+	})
+	tm, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	if got := windowTitleMsgs(cmd); len(got) != 1 || got[0] != "✦ craze" {
+		t.Fatalf("first sizing = %v, want one %q", got, "✦ craze")
+	}
+	if m.lastTitle != "✦ craze" {
+		t.Fatalf("lastTitle = %q, want %q", m.lastTitle, "✦ craze")
+	}
+}
+
+// TestWindowTitleCmdFiresOnceOnChangeOnly is the write-only-on-change
+// contract: a status change re-fires exactly once, and a message that leaves
+// every input to windowTitle() untouched fires it not at all, however many
+// times Update runs.
+func TestWindowTitleCmdFiresOnceOnChangeOnly(t *testing.T) {
+	m := titledStub(t, NewStub(), t.TempDir())
+
+	tm, cmd := m.Update(startedMsg{})
+	m = tm.(Model)
+	if got := windowTitleMsgs(cmd); len(got) != 0 {
+		t.Fatalf("startedMsg while still idle should not re-fire the title: %v", got)
+	}
+
+	m.input.SetValue("go")
+	tm, cmd = m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking {
+		t.Fatalf("the send should have started a turn: status %v", m.status)
+	}
+	if got := windowTitleMsgs(cmd); len(got) != 1 || got[0] != "❖ craze" {
+		t.Fatalf("status -> working = %v, want one %q", got, "❖ craze")
+	}
+
+	// Unrelated to the title: still working, no card, same text. Run it twice
+	// so a bug that fires on every Update rather than on change shows up
+	// however many times the assertion below is repeated.
+	for i := 0; i < 2; i++ {
+		tm, cmd = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+		m = tm.(Model)
+		if got := windowTitleMsgs(cmd); len(got) != 0 {
+			t.Fatalf("an unrelated resize should not re-fire the title: %v", got)
+		}
+	}
+}
+
+// TestWindowTitleOffSwitchEmitsNothing is Config.TerminalTitle's false path:
+// every existing test model leaves it off, and this pins that the reason is a
+// gate the Update wrapper actually honours, not an accident of the zero
+// value never being exercised.
+func TestWindowTitleOffSwitchEmitsNothing(t *testing.T) {
+	isolateSkillsHome(t)
+	m := startStub(t, NewStub(), t.TempDir(), 80, 24)
+	if m.terminalTitle {
+		t.Fatal("startStub's Config never sets TerminalTitle, so this must be false")
+	}
+	m.input.SetValue("go")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if got := windowTitleMsgs(cmd); len(got) != 0 {
+		t.Fatalf("terminal_title off should never emit a title: %v", got)
+	}
+	if m.lastTitle != "" {
+		t.Fatalf("lastTitle should stay empty with the title off, got %q", m.lastTitle)
 	}
 }

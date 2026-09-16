@@ -1,10 +1,10 @@
                                                                                 
                                                                                 
                                                                                 
-  /clear            Clear transcript                                      6/33 ▲
+  /clear            Clear transcript                                      6/34 ▲
   /tasks            Tasks panel: compact, expanded, hidden                      
   /theme            Theme picker, or /theme <name>                              
-❯ /plan             Set plan mode                                              ▼
+❯ /rename           Rename this session, /rename <title>                       ▼
 ──────────────────────────────────────────────────────────────────────── craze ─
 ❯ /                                                                             
 ────────────────────────────────────────────────────────────────────────────────

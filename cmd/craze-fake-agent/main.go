@@ -62,6 +62,20 @@ Flags:
           grok-long-turn-fallback interjections are never merged: each becomes
                       grok's own interject-fallback turn once the session is
                       idle, ended by turn_completed alone
+          load        advertises loadSession; session/load replays a two-chunk
+                      user message, a thought, a pending tool_call completed by
+                      an update, and a reply, then answers {modes, models}
+          grok-load   the same replay tagged _meta.isReplay, with the tool_call
+                      already completed, a subagent_spawned/finished pair and a
+                      turn_completed on _x.ai/session_notification; answers
+                      {models} alone
+          load-missing session/load fails -32602 "Session not found"
+          load-hang   session/load is never answered
+          load-long   session/load replays 600 message chunks then answers
+
+The five load scripts refuse session/new with an error, so a test can prove no
+client fell back to it. Every other script advertises loadSession false and
+answers session/load with -32601.
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in
@@ -100,7 +114,8 @@ func main() {
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",
-		"long-turn", "grok-long-turn", "grok-long-turn-fallback":
+		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
+		"load", "grok-load", "load-missing", "load-hang", "load-long":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

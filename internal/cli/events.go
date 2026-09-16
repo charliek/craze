@@ -62,6 +62,26 @@ type jsonCommand struct {
 	Text      string `json:"text,omitempty"`
 }
 
+// jsonReplay brackets a session/load replay: phase start before the first
+// replayed event, phase end once the restored session is ready.
+//
+// `craze prompt` never sets agent.Options.LoadSessionID, so no headless run
+// can emit this line in v1 (plan 013 §3.4). The mapping is here anyway: an
+// event type eventJSON does not know is dropped silently, and a later
+// `prompt --continue` would lose the bracket without a word.
+type jsonReplay struct {
+	Type  string `json:"type"`
+	Phase string `json:"phase"`
+}
+
+func replayJSON(ev agent.Event) jsonReplay {
+	j := jsonReplay{Type: "replay"}
+	if ev.Replay != nil {
+		j.Phase = ev.Replay.Phase
+	}
+	return j
+}
+
 // jsonForeignTurn brackets a turn the agent ran without a craze prompt.
 type jsonForeignTurn struct {
 	Type  string `json:"type"`
@@ -180,6 +200,8 @@ func eventJSON(ev agent.Event) (any, bool) {
 		return queueJSON(ev), ev.Queue != nil
 	case agent.EventForeignTurn:
 		return foreignTurnJSON(ev), ev.ForeignTurn != nil
+	case agent.EventReplay:
+		return replayJSON(ev), ev.Replay != nil
 	case agent.EventSubagent:
 		return subagentJSON(ev), ev.Subagent != nil
 	case agent.EventTool:

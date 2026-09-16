@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 const (
@@ -17,6 +19,7 @@ const (
 	MethodInitialize        = "initialize"
 	MethodAuthenticate      = "authenticate"
 	MethodSessionNew        = "session/new"
+	MethodSessionLoad       = "session/load"
 	MethodSessionPrompt     = "session/prompt"
 	MethodSessionCancel     = "session/cancel"
 	MethodSessionSetModel   = "session/set_model"
@@ -146,6 +149,23 @@ func (r InitializeResult) ModelState() json.RawMessage {
 	return bytes.TrimSpace(meta.ModelState)
 }
 
+// LoadSession is agentCapabilities.loadSession: whether the agent can reload a
+// session by id and replay its transcript. Absent or malformed capabilities
+// are a no — craze refuses the load rather than guessing.
+func (r InitializeResult) LoadSession() bool {
+	raw := bytes.TrimSpace(r.AgentCapabilities)
+	if len(raw) == 0 || raw[0] != '{' {
+		return false
+	}
+	var caps struct {
+		LoadSession bool `json:"loadSession"`
+	}
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		return false
+	}
+	return caps.LoadSession
+}
+
 type AuthMethod struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -181,6 +201,44 @@ type NewSessionResult struct {
 	Models        json.RawMessage `json:"models,omitempty"`
 	Modes         json.RawMessage `json:"modes,omitempty"`
 	ConfigOptions json.RawMessage `json:"configOptions,omitempty"`
+}
+
+// LoadSessionParams is session/load: NewSessionParams plus the id, which is
+// the shape all three agents were probed against. The result comes back in the
+// NewSessionResult shape (models/modes/configOptions, each optional — cursor
+// answers {modes, models}, grok and gx answer with models alone), with
+// sessionId filled in by the client because the wire does not echo it.
+type LoadSessionParams struct {
+	SessionID  string `json:"sessionId"`
+	CWD        string `json:"cwd"`
+	MCPServers []any  `json:"mcpServers"`
+}
+
+// loadSessionTimeout is the session/load deadline. All three probed agents
+// answer after the replay — under a second for a 172-event session — so this
+// is only a backstop against an agent that leaves the RPC pending. 90 s is
+// t3code's default, kept because the probes give no reason to shorten it.
+const loadSessionTimeout = 90 * time.Second
+
+// loadTimeoutOverride is the test hook for that deadline, in nanoseconds; zero
+// means loadSessionTimeout. An atomic rather than a plain var because the
+// tests that shorten it live in other packages (internal/agent) and run under
+// -race beside a live read loop.
+var loadTimeoutOverride atomic.Int64
+
+// SetLoadSessionTimeout shortens the session/load deadline and returns the
+// function that restores the previous value. It exists for tests; no
+// production path calls it.
+func SetLoadSessionTimeout(d time.Duration) func() {
+	prev := loadTimeoutOverride.Swap(int64(d))
+	return func() { loadTimeoutOverride.Store(prev) }
+}
+
+func loadSessionDeadline() time.Duration {
+	if d := loadTimeoutOverride.Load(); d > 0 {
+		return time.Duration(d)
+	}
+	return loadSessionTimeout
 }
 
 type ContentBlock struct {

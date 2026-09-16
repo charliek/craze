@@ -190,3 +190,34 @@ func TestConfigPathFollowsHomeAndOverride(t *testing.T) {
 		t.Fatalf("CRAZE_CONFIG ignored: %q", got)
 	}
 }
+
+// TestConfigTerminalTitleDefaultsTrue is the off switch's default: a config
+// file that never mentions terminal_title at all still shows the tab title.
+func TestConfigTerminalTitleDefaultsTrue(t *testing.T) {
+	writeConfigFile(t, "theme = \"dark\"\n")
+	if !ConfigTerminalTitle() {
+		t.Fatal("terminal_title should default to true")
+	}
+}
+
+// TestConfigTerminalTitleOff is the explicit off switch itself.
+func TestConfigTerminalTitleOff(t *testing.T) {
+	writeConfigFile(t, "terminal_title = false\n")
+	if ConfigTerminalTitle() {
+		t.Fatal("terminal_title = false should read false")
+	}
+	writeConfigFile(t, "terminal_title = true\n")
+	if !ConfigTerminalTitle() {
+		t.Fatal("terminal_title = true should read true")
+	}
+}
+
+// TestConfigTerminalTitleMalformedDefaultsTrue matches ConfigTheme's own
+// unreadable-config rule: a config craze cannot parse is not a reason to also
+// lose the tab title, so it reads as the default rather than as off.
+func TestConfigTerminalTitleMalformedDefaultsTrue(t *testing.T) {
+	writeConfigFile(t, "this is not toml [[[\n")
+	if !ConfigTerminalTitle() {
+		t.Fatal("an unreadable config should default terminal_title to true")
+	}
+}

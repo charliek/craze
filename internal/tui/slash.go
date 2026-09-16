@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // slashMaxRows is the menu's natural height — grok-build's window, and the
@@ -80,6 +81,7 @@ func builtinSlash() []slashItem {
 		{Name: "clear", Desc: "Clear transcript", Builtin: true},
 		{Name: "tasks", Desc: "Tasks panel: compact, expanded, hidden", Builtin: true},
 		{Name: "theme", Desc: "Theme picker, or /theme <name>", Builtin: true},
+		{Name: "rename", Desc: "Rename this session, /rename <title>", Builtin: true},
 		{Name: "plan", Desc: "Set plan mode", Builtin: true},
 		{Name: "ask", Desc: "Set ask mode", Builtin: true},
 		{Name: "agent", Desc: "Set agent mode", Builtin: true},
@@ -413,6 +415,31 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			return m.openThemePicker(), nil
 		}
 		return m.setThemeNamed(args), nil
+	case "rename":
+		// The draft is consumed whichever way this goes: the command has been
+		// read, and leaving it in the composer would invite a second run of it.
+		m.input.SetValue("")
+		title := capRunes(sanitizeLine(strings.TrimSpace(args)), titleRuneCap)
+		if title == "" {
+			m.addError("usage: /rename <title>")
+			return m, nil
+		}
+		if !m.sessionReady() {
+			// There is no snapshot to rename yet, and no session id to write
+			// the index row against.
+			m.addError("session is still starting")
+			return m, nil
+		}
+		if m.sess != nil {
+			m.sess.SetTitle(title)
+		}
+		m.refreshSnap()
+		// A user title always wins and pins the row, so no agent title the
+		// session produces afterwards — this session's or a later
+		// --continue's — can take the name back.
+		m.writeIndex(title, sessions.TitleKindUser)
+		m.addNote("renamed to " + title)
+		return m, nil
 	case "model":
 		if args == "" {
 			m.input.SetValue("")

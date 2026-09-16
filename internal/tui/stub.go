@@ -44,6 +44,16 @@ type Stub struct {
 	// times without sleeping.
 	Clock func() time.Time
 
+	// Replay is the transcript Start hands back before the session is up, as
+	// a loaded session's replay does. Start emits agent.EventReplay{start},
+	// then each of these with Replayed set, then agent.EventReplay{end} —
+	// the same bracket the live session's session/load path emits, so a test
+	// can drive replay rendering without an agent.
+	Replay []agent.Event
+	// titlePinned is /rename's pin, as on the live session: once set, a
+	// title the agent produces no longer replaces the user's.
+	titlePinned bool
+
 	// queue is craze's own message queue — the real one, so the chrome tests
 	// run against the same transactions a live session does. queueOp orders
 	// whole transactions as the live session's does; the lock order is
@@ -80,6 +90,10 @@ func NewStub() *Stub {
 		closed:       make(chan struct{}),
 		cancel:       make(chan struct{}, 1),
 		snap: agent.Snapshot{
+			// A session id, as a started live session has: the index writes
+			// are guarded by one, so a stub without it could never exercise
+			// them.
+			SessionID:    "stub-session-1",
 			CurrentModel: "grok",
 			CurrentMode:  "agent",
 			Models: []agent.ModelInfo{
@@ -194,10 +208,24 @@ func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
 	s.snap.Plugins = append([]agent.PluginCommand(nil), plugins...)
 }
 
-// SetTitle replaces Snapshot.Title.
+// SetTitle is /rename, with the live session's semantics: it replaces
+// Snapshot.Title, emits nothing, and pins the title against a later agent one.
 func (s *Stub) SetTitle(title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.snap.Title = title
+	s.titlePinned = true
+}
+
+// AgentTitle is a session_info_update: the agent's own title, which a pin from
+// SetTitle refuses. It is how a test reaches the live session's rule without
+// an agent.
+func (s *Stub) AgentTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.titlePinned {
+		return
+	}
 	s.snap.Title = title
 }
 
@@ -236,10 +264,29 @@ func (s *Stub) DelayStart(d time.Duration) {
 func (s *Stub) Start(context.Context) error {
 	s.mu.Lock()
 	d := s.startDelay
+	// nil Replay is "this is a new session"; a non-nil Replay is "this is a
+	// load", empty or not. append flattens both to nil, so the distinction has
+	// to be taken before it: the live session brackets a session/load whose
+	// transcript turned out to be empty just the same, and a model built with
+	// Config.Loading would otherwise sit in the restoring state forever.
+	loaded := s.Replay != nil
+	replay := append([]agent.Event(nil), s.Replay...)
 	s.mu.Unlock()
 	if d > 0 {
 		time.Sleep(d)
 	}
+	if !loaded {
+		return nil
+	}
+	// Bracketed exactly as the live session brackets a session/load: the end
+	// phase goes out only once everything the replay carried has, so a
+	// consumer that treats it as "the restored session is ready" is right.
+	s.emit(agent.Event{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayStart}})
+	for _, ev := range replay {
+		ev.Replayed = true
+		s.emit(ev)
+	}
+	s.emit(agent.Event{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayEnd}})
 	return nil
 }
 

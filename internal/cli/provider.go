@@ -79,6 +79,23 @@ func resolveProvider(cmd *cobra.Command, flag string, stderr io.Writer, hermetic
 	return resolvedProvider{Provider: agent.CursorProvider(), Locked: locked}, nil
 }
 
+// knownProvider is the session index's view of the registry: a row whose
+// provider id this build does not know is kept in the file but never offered
+// (§3.2), because craze has no way to start it.
+func knownProvider(id string) bool {
+	_, err := agent.ProviderByName(id)
+	return err == nil
+}
+
+// providerFlagExplicit is "--provider was passed, and named something". It is
+// what filters the session index and what lets a load still write the
+// persisted default — both are about a choice the user made on this command
+// line, which is why an id out of the environment or the config file does not
+// count (§3.1).
+func providerFlagExplicit(cmd *cobra.Command, flag string) bool {
+	return cmd != nil && cmd.Flags().Changed("provider") && strings.TrimSpace(flag) != ""
+}
+
 func warnUnknownProvider(w io.Writer, id string) {
 	if w == nil {
 		return

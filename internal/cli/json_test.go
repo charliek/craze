@@ -492,3 +492,34 @@ func TestPromptPlainSaysNothingAboutCommands(t *testing.T) {
 		t.Fatalf("plain output %q", got)
 	}
 }
+
+// TestPromptJSONHasNoMainUserOrReplayLines is the blast radius of plan 013's
+// replay work on the headless stream. grok and gx echo the user's own prompt
+// back as a main-session user_message_chunk; craze still drops it, so a `user`
+// line without an agent — a doubled user block in the TUI, and a line
+// `prompt --json` never wrote — cannot appear. And `craze prompt` never sets a
+// load id, so the `replay` bracket events.go now knows how to encode is never
+// emitted by a headless run.
+func TestPromptJSONHasNoMainUserOrReplayLines(t *testing.T) {
+	for _, script := range []string{"grok-echo", "grok-subagent"} {
+		t.Run(script, func(t *testing.T) {
+			evs := runPromptJSONArgs(t, script, []string{"--provider", "grok"}, "go")
+			if len(evs) == 0 {
+				t.Fatal("no output")
+			}
+			for _, ev := range evs {
+				if ev.m["type"] == "replay" {
+					t.Fatalf("prompt emitted a replay line: %s", ev.raw)
+				}
+				if ev.m["type"] != "user" {
+					continue
+				}
+				// A child's prompt is a user line by design; the main
+				// session's own echo is not.
+				if agent, _ := ev.m["agent"].(string); agent == "" {
+					t.Fatalf("main-session user line: %s", ev.raw)
+				}
+			}
+		})
+	}
+}

@@ -27,8 +27,11 @@ flags; see [craze prompt](#craze-prompt).
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |
 | `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable). Relative to the workspace; a missing directory is a diagnostic on stderr, not an error; ignored (with a diagnostic) on Grok |
+| `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one. No matching session exits 1 |
+| `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
 
-`--ask` and `--plan` are mutually exclusive.
+`--ask` and `--plan` are mutually exclusive. So are `--continue` and
+`--resume` (exit 2).
 
 `--provider` on the TUI skips the startup picker. Without it, `$CRAZE_PROVIDER`
 then `provider` in the config file then `cursor` is the default, and the picker
@@ -42,7 +45,47 @@ precedence. `craze frame` ignores env and config and defaults to cursor unless
 ./bin/craze --workspace ../proj
 ./bin/craze --no-force
 ./bin/craze --theme gruvbox --no-mouse
+./bin/craze --continue
+./bin/craze --resume
+./bin/craze --provider grok --continue
 ```
+
+### `--continue` and `--resume`
+
+Both load a session out of the session index
+(`~/.craze/sessions.jsonl` — see
+[Configuration](configuration.md#session-index)), filtered to the current
+workspace. An **explicit** `--provider` filters the search further; a
+provider that only came from `$CRAZE_PROVIDER` or `config.toml` does not, so
+a plain `--continue` finds the newest session for this workspace across
+every provider, and picker rows show each row's own provider. Whichever row
+is loaded, its own provider starts the agent — it overrides whatever
+`--provider` would otherwise have resolved to, and it is never written back
+as the persisted default (see
+[Configuration](configuration.md#session-index)).
+
+No matching row:
+
+```text
+craze: no session to continue in /abs/workspace
+craze: no session to continue in /abs/workspace for provider grok
+```
+
+exit 1, and no TUI is drawn. A session index that exists but craze cannot
+parse fails the same way, exit 1, naming the file; the index is never
+rewritten by a failed read. `--continue` and `--resume` together is a usage
+error, exit 2, and `--resume` on a non-tty gets the ordinary non-tty
+refusal — checked before either flag is considered, so it fires even for a
+workspace with no sessions at all.
+
+A load the agent itself refuses (no `session/load` support, an unknown
+session id, a working directory Grok or gx reject) is shown as an on-screen
+error exactly like a failed `session/new`; the row stays in the index, craze
+never falls back to starting a new session, and the exit code on quit is 1.
+
+See [`/rename`](tui.md#slash-commands) and
+[Resuming a session](tui.md#resuming-a-session) for what a restored session
+looks like in the TUI.
 
 ## craze prompt
 
@@ -170,9 +213,9 @@ Print the craze version and exit.
 
 | Code | When |
 |------|------|
-| 0 | Session started; quitting after a usable session, including an error *during* the session |
-| 1 | Session never started (no login, agent would not come up), or a runtime failure |
-| 2 | Usage error (bad flags, missing prompt text, non-tty TUI) |
+| 0 | Session started; quitting after a usable session, including an error *during* the session; also `Esc` on the `--resume` picker (no session was ever started) |
+| 1 | Session never started (no login, agent would not come up, or a load the agent refused), a runtime failure, or nothing to `--continue`/`--resume` — no matching session, or a session index craze could not read |
+| 2 | Usage error (bad flags, missing prompt text, non-tty TUI, or `--continue` with `--resume`). The non-tty refusal is checked before `--continue`/`--resume` are considered |
 
 `craze frame` uses 2 for a bad key script and 3 for a wait timeout; that
 command is hidden. See [Testing](../development/testing.md#craze-frame).

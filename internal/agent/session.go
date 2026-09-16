@@ -66,6 +66,22 @@ const (
 	// EventForeignTurn brackets a turn the agent started without a craze
 	// prompt — grok's interject fallback. Nothing drains while one runs.
 	EventForeignTurn EventType = "foreign_turn"
+	// EventReplay brackets a session/load replay: Phase start before the
+	// first replayed event, Phase end once the restored snapshot is
+	// installed. Every event between the two carries Event.Replayed; the
+	// brackets themselves do not.
+	EventReplay EventType = "replay"
+)
+
+// ReplayInfo is one end of the session/load replay bracket.
+type ReplayInfo struct{ Phase string }
+
+// The two phases of a replay. Which phase an event fell between is what marks
+// it replayed: cursor's replay carries no _meta at all (plan 013 §2.1), so a
+// wire tag cannot be the answer for every provider.
+const (
+	ReplayStart = "start"
+	ReplayEnd   = "end"
 )
 
 const (
@@ -109,8 +125,11 @@ type Snapshot struct {
 	Todos          []Todo
 	TodosUpdatedAt time.Time
 	Title          string
-	CurrentModel   string
-	CurrentMode    string
+	// SessionID is the agent's own id for this session, learned from
+	// session/new or session/load. "" until Start has one.
+	SessionID    string
+	CurrentModel string
+	CurrentMode  string
 	// Provider is a value copy of the session's provider, so the UI can read
 	// what a mode id means and what the agent is called without a session.
 	Provider ProviderInfo
@@ -203,9 +222,16 @@ type Event struct {
 	Interjection bool
 	// ForeignTurn is set on EventForeignTurn.
 	ForeignTurn *ForeignTurnInfo
-	Err         error
-	StopReason  string
-	At          time.Time
+	// Replay is set on EventReplay and names which end of the bracket this
+	// is.
+	Replay *ReplayInfo
+	// Replayed marks an event the agent replayed out of its own history
+	// rather than produced now. It is stamped on every event emitted between
+	// the two EventReplay phases.
+	Replayed   bool
+	Err        error
+	StopReason string
+	At         time.Time
 }
 
 // ExpandedCommand is one plugin entry craze expanded into a prompt: the row the
@@ -365,6 +391,17 @@ type Options struct {
 	// UI can answer them; headless callers leave it false and craze
 	// auto-answers.
 	Interactive bool
+	// LoadSessionID resumes an existing agent session by id — session/load
+	// instead of session/new. The agent replays the whole transcript before
+	// the call returns, bracketed by EventReplay; a load that fails fails
+	// Start, and craze never falls back to session/new.
+	LoadSessionID string
+	// Title and TitlePinned seed the session's title and its /rename pin
+	// before the replay. No agent replays a title (plan 013 §2.1), so the
+	// index row craze loaded the id from is the only place a resumed
+	// session's title can come from.
+	Title       string
+	TitlePinned bool
 }
 
 type Session interface {
@@ -397,6 +434,12 @@ type Session interface {
 	SetModel(ctx context.Context, modelID string) error
 	SetMode(ctx context.Context, modeID string) error
 	SetConfig(ctx context.Context, id, value string) error
+	// SetTitle renames the session in craze alone: ACP v1 has no rename verb.
+	// It emits nothing — it is called from the UI's own update goroutine, and
+	// an emit onto a full event channel there would block the UI on a
+	// consumer the UI itself schedules. It pins the title, so a later agent
+	// session_info_update no longer replaces it.
+	SetTitle(title string)
 	Snapshot() Snapshot
 	Close() error
 }

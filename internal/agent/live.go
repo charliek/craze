@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
@@ -88,6 +89,21 @@ type session struct {
 	// nil when none is. It lives on the session because the prompt holding it
 	// has opened no turn yet, so Cancel has nothing else to find it by.
 	catalogAbort chan struct{}
+	// titlePinned is /rename's pin: once set, an agent session_info_update no
+	// longer replaces the title. Options.TitlePinned seeds it on a load, so
+	// the pin survives any number of --continues. Guarded by s.mu.
+	titlePinned bool
+	// replayUser coalesces a replayed main-session user_message_chunk. The
+	// agents split a prompt over several chunks and craze has to draw exactly
+	// one user block, so the chunks accumulate here and go out as one
+	// EventUser at the next non-user update or at replay end. Guarded by
+	// s.mu.
+	replayUser strings.Builder
+	// replaying is true between the two EventReplay phases. It is written on
+	// Start's goroutine and read on the client's read loop, and emitCtx —
+	// which stamps Event.Replayed from it — is deliberately lock-free, so it
+	// is an atomic rather than a field under s.mu.
+	replaying atomic.Bool
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
@@ -249,18 +265,39 @@ func (s *session) Start(ctx context.Context) error {
 	s.mu.Lock()
 	s.plugins = plugins
 	s.mu.Unlock()
-	sess, err := client.NewSession(ctx, cwd)
-	if err != nil {
-		_ = s.Close()
-		return err
+	// A load replaces session/new entirely: there is no fallback, because a
+	// silent new session is the one outcome a user who typed --continue must
+	// never get (plan 013 §3.8).
+	loading := s.opts.LoadSessionID != ""
+	var snap Snapshot
+	if loading {
+		if err := s.loadSession(ctx, client, initRes, cwd); err != nil {
+			_ = s.Close()
+			return err
+		}
+	} else {
+		sess, err := client.NewSession(ctx, cwd)
+		if err != nil {
+			_ = s.Close()
+			return err
+		}
+		snap = snapshotFromNewProvider(sess, s.provider(), initRes)
+		snap.Provider = s.provider().Info()
+		snap.SessionID = sess.SessionID
+		s.mu.Lock()
+		s.sessionID = sess.SessionID
+		s.mu.Unlock()
 	}
-	snap := snapshotFromNewProvider(sess, s.provider(), initRes)
-	snap.Provider = s.provider().Info()
-	s.mu.Lock()
-	s.sessionID = sess.SessionID
-	s.mu.Unlock()
+	// The --ask/--plan/--model tail, unchanged: it runs after session setup
+	// either way. On a load that means after the restored snapshot has been
+	// installed and the replay bracket closed, so it writes through s.mu
+	// instead of into a snapshot that has not been published yet.
+	modes := snap.Modes
+	if loading {
+		modes = s.Snapshot().Modes
+	}
 	if s.opts.Mode != "" {
-		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(snap.Modes))
+		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(modes))
 		if !ok {
 			_ = s.Close()
 			return fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
@@ -269,14 +306,29 @@ func (s *session) Start(ctx context.Context) error {
 			_ = s.Close()
 			return err
 		}
-		snap.CurrentMode = modeID
+		if loading {
+			s.mu.Lock()
+			s.snap.CurrentMode = modeID
+			s.mu.Unlock()
+		} else {
+			snap.CurrentMode = modeID
+		}
 	}
 	if s.opts.Model != "" {
 		if err := client.SetModel(ctx, s.opts.Model); err != nil {
 			_ = s.Close()
 			return err
 		}
-		snap.CurrentModel = s.opts.Model
+		if loading {
+			s.mu.Lock()
+			s.snap.CurrentModel = s.opts.Model
+			s.mu.Unlock()
+		} else {
+			snap.CurrentModel = s.opts.Model
+		}
+	}
+	if loading {
+		return nil
 	}
 	s.mu.Lock()
 	commands := s.snap.Commands
@@ -290,6 +342,84 @@ func (s *session) Start(ctx context.Context) error {
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
 	return nil
+}
+
+// loadSession is Start's session/load path: the replay, bracketed.
+//
+// The bracket is a phase, not a wire tag — cursor replays with no _meta at all
+// (plan 013 §2.1) — and it closes only once the restored snapshot is in place,
+// so EventReplay{end} means "the session is ready to read", not merely "the
+// wire went quiet". Everything the replay accumulated on the way through — tool
+// rows, sub-agent rows, todos, commands, the seeded title — is kept: the load
+// result is merged into the snapshot rather than assigned over it, which is the
+// whole difference from the session/new path above.
+func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd string) error {
+	if !initRes.LoadSession() {
+		// Nothing has reached the wire: an agent without the capability is
+		// told so before the RPC rather than by its own error.
+		return fmt.Errorf("agent: %s does not support session/load", s.provider().Name())
+	}
+	// The stored title and its pin are seeded *before* the replay. No agent
+	// replays a session_info_update (plan 013 §2.1), so the index row craze
+	// resolved the id from is the only place a resumed title can come from,
+	// and the composer rule reads it from the first frame on.
+	s.mu.Lock()
+	if title := sanitizeText(s.opts.Title); title != "" {
+		s.snap.Title = title
+	}
+	if s.opts.TitlePinned {
+		s.titlePinned = true
+	}
+	s.mu.Unlock()
+
+	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
+	s.replaying.Store(true)
+	res, err := client.LoadSession(ctx, s.opts.LoadSessionID, cwd)
+	if err != nil {
+		// No end bracket: the load failed, so Start returns and closes the
+		// client. Clearing the flag keeps a late notification from being
+		// stamped replayed on its way into a channel nobody will read.
+		s.replaying.Store(false)
+		return err
+	}
+	// The last chunks of a replayed prompt have no update behind them to push
+	// them out, so replay end is their flush.
+	s.flushReplayUser()
+	restored := snapshotFromNewProvider(res, s.provider(), initRes)
+	s.mu.Lock()
+	s.sessionID = res.SessionID
+	// The merge. Models come from the result (else initialize's modelState),
+	// modes from the result else the provider's fallback — grok and gx return
+	// neither modes nor configOptions on a load — so the config chips are
+	// simply absent after a resume, which plan 013 §4 documents. Tools,
+	// Subagents, Todos, Commands, Plugins and Title keep whatever the replay
+	// left behind.
+	s.snap.Models = restored.Models
+	s.snap.Modes = restored.Modes
+	s.snap.Config = restored.Config
+	s.snap.CurrentModel = restored.CurrentModel
+	s.snap.CurrentMode = restored.CurrentMode
+	s.snap.SessionID = res.SessionID
+	s.snap.Provider = s.provider().Info()
+	s.snap.Plugins = s.resolvePluginsLocked()
+	s.mu.Unlock()
+	s.replaying.Store(false)
+	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
+	return nil
+}
+
+// flushReplayUser emits the coalesced replayed prompt as exactly one EventUser.
+// The builder is drained under the lock, so the read loop and Start racing to
+// flush it cannot emit the same text twice.
+func (s *session) flushReplayUser() {
+	s.mu.Lock()
+	text := s.replayUser.String()
+	s.replayUser.Reset()
+	s.mu.Unlock()
+	if text == "" {
+		return
+	}
+	s.emit(Event{Type: EventUser, Text: text})
 }
 
 // discoverPlugins runs the provider's plugin scan for this workspace. It never
@@ -662,6 +792,18 @@ func (s *session) SetConfig(ctx context.Context, id, value string) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// SetTitle is /rename: craze's own name for this session, since ACP v1 has no
+// rename verb. It emits nothing — it is called from the UI's update goroutine,
+// and an emit onto a full event channel there would block the UI on a consumer
+// the UI itself schedules; the caller re-reads the snapshot instead. It pins
+// the title, so a session_info_update the agent sends later is ignored.
+func (s *session) SetTitle(title string) {
+	s.mu.Lock()
+	s.snap.Title = sanitizeText(title)
+	s.titlePinned = true
+	s.mu.Unlock()
 }
 
 func (s *session) Snapshot() Snapshot {
@@ -1113,6 +1255,22 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.onChildUpdate(n.Child, n.ToolName, u)
 		return
 	}
+	if s.replaying.Load() {
+		// A replayed prompt arrives in chunks and has to draw one user block,
+		// so the chunks are coalesced and pushed out by the next update of
+		// any other kind (or by replay end). Outside a replay the case is
+		// deliberately absent: grok and gx echo the user's own prompt live,
+		// and emitting that would double every user block in the TUI and add
+		// user lines to `craze prompt --json`.
+		if u.SessionUpdate == updateUserMessage {
+			text := messageText(u.Content)
+			s.mu.Lock()
+			s.replayUser.WriteString(text)
+			s.mu.Unlock()
+			return
+		}
+		s.flushReplayUser()
+	}
 	switch u.SessionUpdate {
 	case acp.UpdateAgentMessage:
 		s.emit(Event{Type: EventText, Text: messageText(u.Content)})
@@ -1166,6 +1324,13 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			return
 		}
 		s.mu.Lock()
+		if s.titlePinned {
+			// /rename won: the user's name for the session outlives every
+			// title the agent invents, including one produced by a live turn
+			// after a --continue.
+			s.mu.Unlock()
+			return
+		}
 		s.snap.Title = title
 		s.mu.Unlock()
 		// EventMeta carries the new title so `prompt --json` can emit a
@@ -1278,6 +1443,9 @@ func (s *session) emit(ev Event) { s.emitCtx(context.Background(), ev) }
 func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
+	}
+	if s.replaying.Load() {
+		ev.Replayed = true
 	}
 	select {
 	case <-s.done:

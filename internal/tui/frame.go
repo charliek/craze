@@ -61,6 +61,14 @@ type FrameOpts struct {
 	// Ctrl+C window and every linger, and a frozen one would quietly change
 	// what the script under test is exercising.
 	Freeze bool
+	// Setup builds the Config the runner drives, and is called after HOME has
+	// been isolated and before New. Everything a frame reads out of the home
+	// directory — the config file, the session index --continue and --resume
+	// resolve against — therefore comes from the isolated one, which the
+	// Config passed to RunFrameScript cannot: it is built by the caller,
+	// outside. Its result replaces that Config entirely (§3.7). nil leaves
+	// the passed Config alone.
+	Setup func() (Config, error)
 }
 
 type frameTokenKind int
@@ -321,7 +329,10 @@ func parseFrameQuad(s string) (int, int, int, int, error) {
 func (w waitSpec) match(s frameState) bool {
 	switch w.kind {
 	case "idle":
-		return s.started && s.status == statusIdle && !s.card
+		// A loaded session is not idle while its replay is still arriving:
+		// the status is the zero value until the gate opens (§3.5), so
+		// without the replay test <wait:idle> would match mid-restore.
+		return s.started && !s.replaying && s.status == statusIdle && !s.card
 	case "working":
 		return s.status == statusWorking
 	case "card":
@@ -342,9 +353,14 @@ type frameState struct {
 	plain   string
 	status  status
 	started bool
-	card    bool
-	copied  bool
-	sync    int
+	// picking is a pre-start dialog: the model is waiting for the user to
+	// choose, so Start has not been called and never will be until a key
+	// says so. <start> takes it as "as started as this frame gets".
+	picking   bool
+	replaying bool
+	card      bool
+	copied    bool
+	sync      int
 }
 
 // frameBus carries frames from the bubbletea goroutine to the script runner.
@@ -472,13 +488,15 @@ func (f frameModel) View() string { return f.inner.View() }
 func (f frameModel) publish() {
 	view := f.inner.View()
 	f.bus.publish(frameState{
-		view:    view,
-		plain:   ansi.Strip(view),
-		status:  f.inner.status,
-		started: f.inner.started,
-		card:    f.inner.cardOpen(),
-		copied:  f.inner.copyLingering(),
-		sync:    f.sync,
+		view:      view,
+		plain:     ansi.Strip(view),
+		status:    f.inner.status,
+		started:   f.inner.started,
+		picking:   f.inner.picking(),
+		replaying: f.inner.replaying,
+		card:      f.inner.cardOpen(),
+		copied:    f.inner.copyLingering(),
+		sync:      f.sync,
 	})
 }
 
@@ -520,6 +538,17 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	}
 	defer restoreHome()
 
+	// Inside the isolated HOME, and before New: a --continue seeded by the
+	// caller writes its rows into the isolated index and resolves them there,
+	// so nothing a frame does can be read out of — or written into — the
+	// developer's own ~/.craze (§3.7).
+	if opts.Setup != nil {
+		cfg, err = opts.Setup()
+		if err != nil {
+			return "", "", err
+		}
+	}
+
 	// The runner prints its final frame to stdout, so an OSC 52 sequence in
 	// that stream would corrupt it — and nothing under `make test` may reach for
 	// the developer's own clipboard. Both writes are recorded instead. The
@@ -548,8 +577,14 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	p := tea.NewProgram(frameModel{inner: m, bus: bus}, tea.WithoutRenderer(), tea.WithInput(nil))
 	done := make(chan error, 1)
 	finished := make(chan struct{})
+	// The last model the program held, for the session it ended with: a
+	// pre-start picker has none at New, and the one the picker built is the
+	// one that owns a child process. Written before done is sent and read
+	// after it is received, so the channel orders the two.
+	var last tea.Model
 	go func() {
-		_, runErr := p.Run()
+		final, runErr := p.Run()
+		last = final
 		done <- runErr
 		close(finished)
 	}()
@@ -566,6 +601,9 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	case <-time.After(timeout):
 		p.Kill()
 		<-done
+	}
+	if fm, ok := last.(frameModel); ok && fm.inner.sess != nil {
+		sess = fm.inner.sess
 	}
 	// Close blocks until the child is reaped, and is safe even if Start is
 	// still in flight: it will not adopt a child into a closed session.
@@ -616,9 +654,11 @@ func (r *frameRunner) run(toks []frameToken, cols, rows int) error {
 }
 
 // startedSpec matches once Start has returned, either way: a failed Start
-// leaves the model in the error state rather than started.
+// leaves the model in the error state rather than started. A pre-start picker
+// counts too — nothing is starting until the script chooses a row, and the
+// script is what the runner is holding.
 func startedSpec(s frameState) bool {
-	return s.started || s.status == statusError
+	return s.started || s.status == statusError || s.picking
 }
 
 func (r *frameRunner) await(pred func(frameState) bool, what string) error {

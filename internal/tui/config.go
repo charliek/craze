@@ -8,14 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/charliek/craze/internal/atomicfile"
+	"github.com/charliek/craze/internal/paths"
 )
 
 const (
-	// configDir / configName make up ~/.craze/config.toml; CRAZE_CONFIG
-	// replaces the whole path.
+	// configDir / configName make up ~/.craze/config.toml; kept here (in
+	// addition to internal/paths, the actual source of truth for configPath)
+	// because theme_test.go asserts against the literal path.
 	configDir  = ".craze"
 	configName = "config.toml"
 	// configLockSuffix names the sibling file SaveTheme flocks. It is never
@@ -28,16 +30,10 @@ const (
 var ErrConfigMalformed = errors.New("malformed config")
 
 // configPath is where the persisted settings live, or "" when there is no home
-// directory to put them in.
+// directory to put them in. It defers to internal/paths, which config.go and
+// internal/sessions both call so neither package depends on the other.
 func configPath() string {
-	if p := strings.TrimSpace(os.Getenv("CRAZE_CONFIG")); p != "" {
-		return p
-	}
-	home := homeDir()
-	if home == "" {
-		return ""
-	}
-	return filepath.Join(home, configDir, configName)
+	return paths.ConfigPath()
 }
 
 // readConfig decodes the file into a plain map so keys craze knows nothing
@@ -108,6 +104,22 @@ func SaveTheme(name string) error {
 	return writeConfig(path, cfg)
 }
 
+// ConfigTerminalTitle is whether craze may set the terminal tab title
+// (§3.10), defaulting to true: only an explicit `terminal_title = false`
+// turns it off. A config craze cannot read defaults true rather than false —
+// a broken config file is not a reason to also lose the tab title.
+func ConfigTerminalTitle() bool {
+	cfg, err := readConfig()
+	if err != nil {
+		return true
+	}
+	on, ok := cfg["terminal_title"].(bool)
+	if !ok {
+		return true
+	}
+	return on
+}
+
 // ConfigProvider is the persisted provider id, or "" when there is none. An
 // unreadable config reads as empty, like the theme.
 func ConfigProvider() string {
@@ -144,52 +156,23 @@ func SaveProvider(name string) error {
 	return writeConfig(path, cfg)
 }
 
-// lockConfig takes the exclusive lock that covers one read-modify-write.
-// syscall.Flock exists on both Linux and Darwin (the two platforms this repo
-// pins), so this works unchanged on both. A lock craze cannot take (a
-// read-only directory, say) is not a reason to refuse to save: the write
-// itself still reports that.
+// lockConfig takes the exclusive lock that covers one read-modify-write. A
+// lock craze cannot take (a read-only directory, say) is not a reason to
+// refuse to save: the write itself still reports that, so the open/flock
+// error atomicfile.Lock now returns is swallowed here, exactly as it always
+// was before Lock moved into its own package.
 func lockConfig(path string) (func(), error) {
-	f, err := os.OpenFile(path+configLockSuffix, os.O_CREATE|os.O_RDWR, 0o600)
+	unlock, err := atomicfile.Lock(path + configLockSuffix)
 	if err != nil {
-		return func() {}, nil //nolint:nilerr // the write below reports the real problem
+		return unlock, nil //nolint:nilerr // never block a save on the lock; the write below reports the real problem
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return func() {}, nil //nolint:nilerr // as above: never block a save on the lock
-	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return unlock, nil
 }
 
 func writeConfig(path string, cfg map[string]any) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".craze-config-*.toml")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	// Removing the temp file is a no-op once the rename succeeded, and the one
-	// thing that matters when anything below fails.
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, buf.Bytes(), 0o600)
 }

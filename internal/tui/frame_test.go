@@ -414,7 +414,7 @@ const slashCatalogLanded = "/zulu<wait:text:zulu-tool><backspace><backspace><bac
 // rule for a description the agent advertised with a newline in it.
 //
 // The fake's `commands` script advertises 24 entries, so the cursor fixture's
-// nine builtins make 33 at message start and 24 with the token mid-message —
+// ten builtins make 34 at message start and 24 with the token mid-message —
 // the counts the marks have to agree with.
 func TestFrameGoldenSlashMenu(t *testing.T) {
 	for _, tc := range []struct {
@@ -424,27 +424,27 @@ func TestFrameGoldenSlashMenu(t *testing.T) {
 		want       []string
 		absent     []string
 	}{
-		// Eight of 33 from the top: the count, no ▲ at the top of the list,
-		// and a ▼ because the other 25 are below.
+		// Eight of 34 from the top: the count, no ▲ at the top of the list,
+		// and a ▼ because the other 26 are below.
 		{"slash-open-100x30", 100, 30, slashCatalogLanded,
-			[]string{"❯ /help", "1/33", "▼", "/model            Switch model"}, []string{"▲"}},
+			[]string{"❯ /help", "1/34", "▼", "/model            Switch model"}, []string{"▲"}},
 		// Ten rows down the window has moved three: the count follows the
 		// selection, not the window, and both arrows are up.
 		{"slash-scroll-100x30", 100, 30, slashCatalogLanded + strings.Repeat("<down>", 10),
-			[]string{"❯ /bravo-search", "11/33 ▲", "▼", "/tasks"}, []string{"/help"}},
+			[]string{"❯ /alpha-review", "11/34 ▲", "▼", "/tasks"}, []string{"/help"}},
 		// §3.5's click, on the same scrolled window slash-scroll-100x30 draws:
 		// row 17 on screen is /tasks, items[3] because slashTop is 3 there, not
 		// items[0] — a click that used the bare band row instead of
 		// slashTop+row would have accepted /help.
 		{"slash-click-100x30", 100, 30, slashCatalogLanded + strings.Repeat("<down>", 10) + "<click:5,17>",
-			[]string{"❯ /tasks "}, []string{"❯ /help ", "❯ /bravo-search", "▲", "▼", "11/33"}},
+			[]string{"❯ /tasks "}, []string{"❯ /help ", "❯ /alpha-review", "▲", "▼", "11/34"}},
 		// Mid-message the builtins are not offered, so the same catalog is 24.
 		{"slash-mid-80x24", 80, 24, "see " + slashCatalogLanded,
 			[]string{"❯ /alpha-review", "1/24", "▼"}, []string{"/help", "/exit", "▲"}},
 		// Twelve rows is the smallest frame craze draws; the band gets four of
 		// them and the selection is still on screen five rows down.
 		{"slash-crop-80x12", 80, 12, slashCatalogLanded + strings.Repeat("<down>", 5),
-			[]string{"❯ /plan", "6/33 ▲", "▼"}, []string{"/help"}},
+			[]string{"❯ /rename", "6/34 ▲", "▼"}, []string{"/help"}},
 		// One match, so Tab needs no scrolling: the token becomes "/name " and
 		// the trailing space closes the band by the rule, not by a flag.
 		{"slash-accept-100x30", 100, 30, "/gau<wait:text:gauntlet-like><tab>",

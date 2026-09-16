@@ -15,14 +15,14 @@
                                                                                                     
                                                                                                     
                                                                                                     
-❯ /help             Keybindings and commands                                                    1/33
+❯ /help             Keybindings and commands                                                    1/34
   /model            Switch model                                                                    
   /clear            Clear transcript                                                                
   /tasks            Tasks panel: compact, expanded, hidden                                          
   /theme            Theme picker, or /theme <name>                                                  
+  /rename           Rename this session, /rename <title>                                            
   /plan             Set plan mode                                                                   
-  /ask              Set ask mode                                                                    
-  /agent            Set agent mode                                                                 ▼
+  /ask              Set ask mode                                                                   ▼
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
 ❯ /                                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────

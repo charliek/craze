@@ -143,9 +143,17 @@ what the goldens render against.
 | `--timeout` | Per-wait timeout (default 10s) |
 | `--print-frames` | Stream every frame to stderr |
 | `--plugin-dir` | Extra plugin directory whose commands and skills craze expands (repeatable); resolved against the current directory, since `craze frame` has no `--workspace` |
+| `--seed-session` | Write one session-index row before the model is built, as `provider:id:title` (repeatable; the title may contain `:`) |
+| `--continue` | Load the newest seeded row, the way `craze --continue` does |
+| `--resume` | Open the resume picker over the seeded rows |
 
 There is no `--workspace`: `craze frame` runs in the current directory. It
 never reads `~/.craze/config.toml`, so a saved theme cannot reach a golden.
+
+`--seed-session` rows are written **inside** the isolated `HOME`, and
+`--continue` / `--resume` resolve against that isolated index, so a replay or
+picker golden can never see — or touch — a developer's real
+`~/.craze/sessions.jsonl`.
 
 `craze frame` cannot drive the real `cursor-agent`. It points `HOME` at an
 empty directory for the duration of the run — that is what keeps a developer's
