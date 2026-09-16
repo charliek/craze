@@ -36,6 +36,39 @@ func providerFor(t *testing.T, hermetic bool, args ...string) (resolvedProvider,
 	return got, stderr.String(), err
 }
 
+func TestJoinOr(t *testing.T) {
+	cases := []struct {
+		names []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{"cursor"}, "cursor"},
+		{[]string{"cursor", "grok"}, "cursor or grok"},
+		{[]string{"cursor", "grok", "gx"}, "cursor, grok, or gx"},
+	}
+	for _, c := range cases {
+		if got := joinOr(c.names); got != c.want {
+			t.Fatalf("joinOr(%v) = %q, want %q", c.names, got, c.want)
+		}
+	}
+}
+
+func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
+	cmd := NewRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"prompt", "--provider", "codex", "hi"})
+	err := cmd.Execute()
+	var ee *exitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("%v", err)
+	}
+	const want = `craze: unknown provider "codex" (want cursor, grok, or gx)`
+	if ee.msg != want {
+		t.Fatalf("msg %q, want %q", ee.msg, want)
+	}
+}
+
 func TestUnknownProviderFlagExits2(t *testing.T) {
 	for _, args := range [][]string{
 		{"prompt", "--provider", "codex", "hi"},
