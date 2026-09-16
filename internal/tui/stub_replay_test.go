@@ -82,3 +82,32 @@ func TestStubSetTitlePins(t *testing.T) {
 	default:
 	}
 }
+
+// TestStubEmptyReplayStillBrackets: a session/load whose transcript turned out
+// to be empty is still a load, and the live session brackets it. If the stub
+// stayed silent, a model built with Config.Loading would never leave the
+// restoring state and every wait on it would time out instead of failing with
+// something a reader can act on.
+func TestStubEmptyReplayStillBrackets(t *testing.T) {
+	s := NewStub()
+	t.Cleanup(func() { _ = s.Close() })
+	s.Replay = []agent.Event{}
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{agent.ReplayStart, agent.ReplayEnd} {
+		select {
+		case ev := <-s.Events():
+			if ev.Type != agent.EventReplay || ev.Replay == nil || ev.Replay.Phase != want {
+				t.Fatalf("event %+v, want the %s bracket", ev, want)
+			}
+		default:
+			t.Fatalf("an empty replay skipped the %s bracket", want)
+		}
+	}
+	select {
+	case ev := <-s.Events():
+		t.Fatalf("an empty replay emitted more than its brackets: %+v", ev)
+	default:
+	}
+}

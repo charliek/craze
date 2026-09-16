@@ -264,12 +264,18 @@ func (s *Stub) DelayStart(d time.Duration) {
 func (s *Stub) Start(context.Context) error {
 	s.mu.Lock()
 	d := s.startDelay
+	// nil Replay is "this is a new session"; a non-nil Replay is "this is a
+	// load", empty or not. append flattens both to nil, so the distinction has
+	// to be taken before it: the live session brackets a session/load whose
+	// transcript turned out to be empty just the same, and a model built with
+	// Config.Loading would otherwise sit in the restoring state forever.
+	loaded := s.Replay != nil
 	replay := append([]agent.Event(nil), s.Replay...)
 	s.mu.Unlock()
 	if d > 0 {
 		time.Sleep(d)
 	}
-	if len(replay) == 0 {
+	if !loaded {
 		return nil
 	}
 	// Bracketed exactly as the live session brackets a session/load: the end
