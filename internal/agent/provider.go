@@ -25,6 +25,7 @@ const (
 const (
 	cursorName = "cursor"
 	grokName   = "grok"
+	gxName     = "gx"
 	// cursorImplementPrompt is what leaving plan mode sends as the user's
 	// turn; it is provider-shaped because the wording is the agent's, not
 	// craze's. Grok uses the same wording this cut.
@@ -80,6 +81,10 @@ type Provider struct {
 	// when this is unknown and titleTaskFallback is set (cursor).
 	subagentToolName  string
 	titleTaskFallback bool
+	// optional keeps a provider out of the startup picker unless a binary for
+	// it resolves. gx is a personal fork; cursor and grok are always offered,
+	// so an empty picker is impossible.
+	optional bool
 }
 
 // authMethod is one way a provider can authenticate, in preference order.
@@ -263,20 +268,81 @@ func GrokProvider() Provider {
 	}
 }
 
-// ProviderByName looks up a provider by id. An empty name is unset, not
-// unknown: it reads as cursor.
-func ProviderByName(name string) (Provider, error) {
-	switch name {
-	case "", cursorName:
-		return CursorProvider(), nil
-	case grokName:
-		return GrokProvider(), nil
-	default:
-		return Provider{}, fmt.Errorf("agent: unknown provider %q", name)
+// GxProvider is charliek/grok-build's `gx` fork. It is grok on the wire —
+// same dialect, same auth, same ~/.grok home, same skills and plugins — so it
+// is spelled as the difference rather than a second copy of the table: a
+// different binary, a different login hint, and the one field that keeps it
+// out of the picker on machines that do not have it.
+func GxProvider() Provider {
+	p := GrokProvider()
+	p.name = gxName
+	p.defaultBins = []string{gxName}
+	p.loginHint = "gx login"
+	p.optional = true
+	return p
+}
+
+// Providers is every provider craze knows, in picker order. It is the single
+// registry: ProviderByName and ProviderNames both read it, so a new provider
+// is a constructor and one line here. It builds the slice per call rather
+// than handing back a package-level one, for the same reason Bins and
+// SkillScan copy: nothing a caller does to the result can reach the registry.
+func Providers() []Provider {
+	return []Provider{CursorProvider(), GrokProvider(), GxProvider()}
+}
+
+// ProviderNames is every registered provider's id, in Providers order.
+func ProviderNames() []string {
+	providers := Providers()
+	names := make([]string, 0, len(providers))
+	for _, p := range providers {
+		names = append(names, p.name)
 	}
+	return names
+}
+
+// DefaultProviders is the non-optional subset of Providers: what the picker
+// falls back to when the caller supplies no availability-filtered list.
+func DefaultProviders() []Provider {
+	providers := Providers()
+	out := make([]Provider, 0, len(providers))
+	for _, p := range providers {
+		if !p.optional {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ProviderByName looks up a provider by id. An empty name is unset, not
+// unknown: it reads as cursor. Ids are lowercase-exact.
+func ProviderByName(name string) (Provider, error) {
+	if name == "" {
+		return CursorProvider(), nil
+	}
+	for _, p := range Providers() {
+		if p.name == name {
+			return p, nil
+		}
+	}
+	return Provider{}, fmt.Errorf("agent: unknown provider %q", name)
 }
 
 func (p Provider) Name() string { return p.name }
+
+// Optional reports whether p is left out of the startup picker on a machine
+// that has no binary for it.
+func (p Provider) Optional() bool { return p.optional }
+
+// BinaryResolves reports whether binary lookup for p succeeds — the same
+// question acp.Spawn asks, with the same precedence: --agent-bin (explicit),
+// then $CRAZE_AGENT_BIN, then p's own PATH candidates. It mirrors lookup and
+// nothing more: an absolute override is accepted on os.Stat alone, so a true
+// result is not a promise that the process will start.
+func (p Provider) BinaryResolves(explicit string) bool {
+	_, err := acp.ResolveBinaryCandidates(explicit, p.Bins())
+	return err == nil
+}
 
 // Bins is the provider's PATH lookup order for its agent binary.
 func (p Provider) Bins() []string { return append([]string(nil), p.defaultBins...) }

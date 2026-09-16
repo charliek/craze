@@ -117,7 +117,7 @@ func TestNestedUserInvocableIsNotTheDocumentsOwn(t *testing.T) {
 	body := "---\nname: nested\ndescription: still visible\nmetadata:\n  user-invocable: false\n---\n"
 	writeSkill(t, filepath.Join(cwd, ".cursor", "skills", "nested", "SKILL.md"), body)
 	writeSkill(t, filepath.Join(cwd, ".grok", "skills", "nested", "SKILL.md"), body)
-	for _, p := range []Provider{CursorProvider(), GrokProvider()} {
+	for _, p := range []Provider{CursorProvider(), GrokProvider(), GxProvider()} {
 		got := DiscoverSkills(p, cwd, "")
 		if len(got) != 1 || got[0].Name != "nested" {
 			t.Fatalf("%s: a nested user-invocable must not hide the skill: %v", p.Name(), got)
