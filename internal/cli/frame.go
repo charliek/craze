@@ -119,6 +119,9 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		Yolo:           force,
 		Provider:       prov,
 		ProviderLocked: true,
+		// TerminalTitle is deliberately left false: the frame runner builds
+		// its program with tea.WithoutRenderer(), so tea.SetWindowTitle is a
+		// no-op here regardless, and a golden must never depend on it (§3.10).
 	}
 	var setup func() (tui.Config, error)
 	if o.cont || o.resume || len(o.seedSessions) > 0 {

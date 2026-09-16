@@ -132,6 +132,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 		NewSession:      newSession,
 		LoadSession:     build,
 		SessionIndex:    &sessions.Store{KnownProvider: knownProvider},
+		TerminalTitle:   tui.ConfigTerminalTitle(),
 	}
 	if err := resolveLoad(cmd, f, indexCWD, &cfg, build); err != nil {
 		return err

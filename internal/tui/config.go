@@ -104,6 +104,22 @@ func SaveTheme(name string) error {
 	return writeConfig(path, cfg)
 }
 
+// ConfigTerminalTitle is whether craze may set the terminal tab title
+// (§3.10), defaulting to true: only an explicit `terminal_title = false`
+// turns it off. A config craze cannot read defaults true rather than false —
+// a broken config file is not a reason to also lose the tab title.
+func ConfigTerminalTitle() bool {
+	cfg, err := readConfig()
+	if err != nil {
+		return true
+	}
+	on, ok := cfg["terminal_title"].(bool)
+	if !ok {
+		return true
+	}
+	return on
+}
+
 // ConfigProvider is the persisted provider id, or "" when there is none. An
 // unreadable config reads as empty, like the theme.
 func ConfigProvider() string {

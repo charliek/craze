@@ -135,6 +135,23 @@ class Ends:
 
 
 @dataclass(frozen=True)
+class WaitTitle:
+    """Poll the pane's own title — tmux's ``#{pane_title}`` — until it is
+    exactly ``text``.
+
+    This is plan 013 §3.10's tab title, not the composer's rule that ``Ends``
+    checks: craze writes it with ``tea.SetWindowTitle``, which the running
+    Program turns into OSC 2, and tmux tracks OSC 0/2 into ``#{pane_title}`` the
+    same way Ghostty and roost apply it to a real tab. Exact match, not a
+    substring, because the whole point is the mark prefix (``✦``/``❖``/
+    ``⚠``/``✕``) and a substring match would let the wrong one through.
+    """
+
+    text: str
+    step: str
+
+
+@dataclass(frozen=True)
 class Drag:
     """One left-button drag over the pane, from cell to cell, 0-based."""
 
@@ -159,7 +176,7 @@ class Watch:
     until_step: str
 
 
-Step = Send | Wait | Gone | Absent | Ends | Watch | Drag
+Step = Send | Wait | Gone | Absent | Ends | Watch | Drag | WaitTitle
 
 # Named tmux keys, to keep the tables readable. Everything else is sent with
 # `send-keys -l`, so a bare "a" is the letter and never a key name.
@@ -255,14 +272,29 @@ CASES: dict[str, Case] = {
     # 005 §3.1 put the session title at the right end of the composer's top
     # rule, so the screen is where it is checked now; the reply is waited on
     # first because the title update rides ahead of it.
+    # /rename overrides whatever the agent set (`title-rule` above already
+    # proved the agent's own "Fake Title" landed), and plan 013 §3.10 pins that
+    # a renamed session's tab title is idle's mark plus the new title verbatim
+    # — the one live proof that the tab title tracks a user rename and not just
+    # whatever session_info_update last said.
     "title": Case(
-        steps=(Wait("echo: go", "reply"), Ends(" Fake Title \u2500", "title-rule")),
+        steps=(
+            Wait("echo: go", "reply"),
+            Ends(" Fake Title \u2500", "title-rule"),
+            Send("/rename fix the flaky pty test"),
+            Send(ENTER),
+            Wait("renamed to fix the flaky pty test", "renamed"),
+            WaitTitle("\u2726 fix the flaky pty test", "title-renamed"),
+        ),
         note="the session title is the right end of the composer's top rule",
     ),
     "permission": Case(
         no_force=True,
         steps=(
             Wait("[a]llow", "permission-line"),
+            # A permission card is exactly "needs you" (§3.10): the warning
+            # mark, over whatever the working turn underneath it would show.
+            WaitTitle("\u26a0 craze", "title-needs-you"),
             Send("A"),
             Wait("decision:opt-always", "allowed-always"),
         ),
@@ -286,6 +318,8 @@ CASES: dict[str, Case] = {
         prompt="hang",
         steps=(
             Wait("esc to interrupt", "working"),
+            # Working, no card, no error: the diamond mark (§3.10).
+            WaitTitle("❖ craze", "title-working"),
             Send(ESC),
             # The spinner going away is "Esc cancels"; the word is the second half.
             Gone("esc to interrupt", "cancelled-idle"),
@@ -400,6 +434,11 @@ CASES: dict[str, Case] = {
         script="echo",
         prompt=None,
         steps=(
+            # Before anything is sent: idle, untitled, plan 013 §3.10's
+            # pre-title default. This is the one case that never sends a
+            # first prompt, so the pane is still exactly what Run's first
+            # frame put on screen.
+            WaitTitle("✦ craze", "title-idle"),
             Send("/help"),
             Send(ENTER),
             Wait("sending and editing", "help-open"),
@@ -769,6 +808,16 @@ class TmuxPane:
     def screen(self) -> str:
         return "\n".join(self.lines())
 
+    def pane_title(self) -> str:
+        """tmux's own idea of the pane's title, tracking OSC 0/2 exactly as a
+        real terminal's tab would — this is the one place the suite reads what
+        ``tea.SetWindowTitle`` actually produced, rather than what craze drew
+        inside its own frame.
+        """
+        return self._tmux(
+            "display-message", "-p", "-t", self.session, "-F", "#{pane_title}"
+        ).strip()
+
     def send(self, *keys: str) -> None:
         for key in keys:
             if key in NAMED_KEYS:
@@ -895,6 +944,23 @@ class TmuxPane:
             f"timed out waiting for a line ending in {text!r}:\n" + "\n".join(lines)
         )
 
+    def wait_title(self, text: str, step: str, timeout: float = WAIT_TIMEOUT) -> str:
+        deadline = time.monotonic() + timeout
+        got = ""
+        while time.monotonic() < deadline:
+            got = self.pane_title()
+            if got == text:
+                self.capture(step)
+                return got
+            if not self.alive():
+                raise SmokeFailure(
+                    f"craze exited before the pane title became {text!r}, last saw {got!r}"
+                )
+            time.sleep(0.05)
+        raise SmokeFailure(
+            f"timed out waiting for the pane title to become {text!r}, last saw {got!r}"
+        )
+
     def watch(self, spec: Watch, timeout: float = WAIT_TIMEOUT) -> None:
         """Poll flat out for a state the screen only passes through."""
         deadline = time.monotonic() + timeout
@@ -998,6 +1064,8 @@ def _run_case(
                 pane.wait_ends(step.text, step.step)
             elif isinstance(step, Drag):
                 pane.drag(step)
+            elif isinstance(step, WaitTitle):
+                pane.wait_title(step.text, step.step)
             else:
                 pane.watch(step)
         check_clipboard(pane, case)

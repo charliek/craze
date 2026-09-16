@@ -109,6 +109,12 @@ type Config struct {
 	// unit test and every golden uses: the TUI never reaches for the store
 	// itself, so nothing here can write a developer's real index (§3.2).
 	SessionIndex SessionIndex
+	// TerminalTitle turns on the tab title the Update wrapper maintains
+	// (§3.10). It defaults false, which is what every test Config and the
+	// frame runner leave it — the frame runner's tea.WithoutRenderer() makes
+	// the message a no-op anyway, so nothing depends on it there. runTUI is
+	// the one caller that reads ConfigTerminalTitle() into this.
+	TerminalTitle bool
 }
 
 // SessionIndex is the write half of internal/sessions.Store, as the TUI needs
@@ -360,6 +366,17 @@ type Model struct {
 	// the clock still moves, so double-clicks, the Ctrl+C window and the
 	// lingers behave exactly as they do in a live session.
 	frozen bool
+
+	// terminalTitle is Config.TerminalTitle: the off switch. false means the
+	// Update wrapper never computes or emits a title at all, which is what
+	// craze frame relies on (its Config never sets this) and what
+	// terminal_title = false gives a real run.
+	terminalTitle bool
+	// lastTitle is the last string windowTitle() emitted a tea.SetWindowTitle
+	// for, so the Update wrapper can write on change alone (§3.10) instead of
+	// on every tick. It also doubles as "a title was ever set": Run's exit
+	// clear checks it on the final model rather than carrying a second flag.
+	lastTitle string
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -469,6 +486,7 @@ func New(cfg Config) Model {
 		loadSession:     cfg.LoadSession,
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
+		terminalTitle:   cfg.TerminalTitle,
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
@@ -531,6 +549,10 @@ func Run(cfg Config) error {
 	if fm, ok := final.(Model); ok {
 		sess = fm.sess
 		startErr = fm.startErr
+		// Every exit path lands here: clearWindowTitle no-ops when titles
+		// were off or a title was never set, and otherwise writes OSC 2
+		// through the same writer bubbletea rendered into (§3.10).
+		clearWindowTitle(out, fm)
 	}
 	if sess == nil {
 		sess = m.sess
@@ -608,6 +630,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// command without waiting out a timer.
 	if tick := next.armTick(); tick != nil {
 		cmd = tea.Batch(cmd, tick)
+	}
+	// The one place every transition passes through on its way to the frame:
+	// no handler sets the title itself, so no transition can miss it, and
+	// nothing is written on a tick because this only fires on change (§3.10).
+	if next.terminalTitle {
+		if title := next.windowTitle(); title != next.lastTitle {
+			next.lastTitle = title
+			cmd = tea.Batch(cmd, tea.SetWindowTitle(title))
+		}
 	}
 	return next, cmd
 }
