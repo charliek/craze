@@ -101,6 +101,8 @@ Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
 ./bin/craze --workspace ../proj  # somewhere else
 ./bin/craze --no-force           # ask before each tool call
 ./bin/craze --theme gruvbox --no-mouse
+./bin/craze --continue           # reload the newest session in this workspace
+./bin/craze --resume             # pick one of the last 10 sessions here
 ```
 
 Without `--provider`, the TUI shows a picker listing `cursor`, `grok`, and

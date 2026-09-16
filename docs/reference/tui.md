@@ -15,6 +15,10 @@ is constructed. The preselected row is the resolved default (see
 [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
 
+`--resume` shows a **resume** picker instead of that dialog, and `--continue`
+skips both and loads a session directly — see [Resuming a
+session](#resuming-a-session) and [CLI reference](cli.md#-continue-and-resume).
+
 ## Layout
 
 Top to bottom:
@@ -49,6 +53,69 @@ while a sub-agent streams, so `↑`/`↓` aim at a fixed target; a finished row
 keeps its slot until it leaves the band, and the rows below close up. Past
 the cap the band ends in `… +n more`; the viewed sub-agent always keeps a
 visible row, taking the last one when it would otherwise fall behind the cap.
+
+## Resuming a session
+
+`--resume` opens a **resume** picker in place of the provider dialog: rows
+of `<title> · <provider> · <age>` (age as `3m`, `2h`, or `5d` since the
+session was last touched), newest first, up to 10 rows. `↑`/`↓`/`Tab`/`Shift+Tab`
+move and wrap, `Enter` loads the selected row, and a click loads the row
+clicked; `Esc` quits craze outright (exit 0 — no session was ever started,
+so there is no "default" the way the provider dialog has one) and a click
+outside the box does nothing, unlike every other dialog. `--continue` skips
+the picker and loads the newest row for the workspace directly. See [CLI
+reference](cli.md#-continue-and-resume) for the flags, the filtering
+rules, and the exit codes when nothing matches.
+
+Loading a row is a **replay**, not a fresh start. Status row 1 reads
+`restoring…` in place of `starting…`, and sending a message or running
+`/rename` is refused until the whole transcript is back — even after the
+agent has otherwise answered the initial handshake. The replay renders as
+ordinary transcript entries (the user's prompt, thoughts, tool rows,
+replies) and ends with a `restored` note marking the seam between the old
+session's history and the live one. Once restored, the rule above the
+composer shows the row's stored title (see [`/rename`](#slash-commands))
+instead of `craze`.
+
+A restored session does not reconstruct everything:
+
+- **Timestamps** on replayed entries are when craze loaded the session, not
+  when the agent originally sent them — the agents themselves do not replay
+  their own timestamps.
+- **Sub-agent transcripts** are not reconstructed. A finished sub-agent's
+  row comes back from the replayed spawn/finish lifecycle, but there is no
+  transcript behind it to open.
+- **Grok and gx** show no `effort` or `fast` row in the [model
+  dialog](#model-dialog) right after a resume — their `session/load` result
+  carries neither, unlike a fresh `session/new`. A later live turn may
+  supply them again.
+- A rename is craze's own and is never sent to the agent: `agent ls` and
+  `grok --resume` still show whatever title the agent itself gave the
+  session.
+
+## Tab title
+
+craze sets the terminal tab title (Ghostty, roost, and anything else that
+honours OSC 0/2) to `<mark> <text>`: `<text>` is `craze` until the session
+has a title, then the stored title (agent, first-prompt fallback, or a
+`/rename`) truncated to 40 cells. The mark is one glyph, highest priority
+first:
+
+| State | Mark | When |
+|---|---|---|
+| needs you | `⚠` | a permission, question, or plan card is open |
+| error | `✕` | a start failure or a turn error (cleared by the next send) |
+| working | `❖` | a turn is running, a session is replaying, or a foreign turn is in progress |
+| idle | `✦` | everything else, including the pre-start picker |
+
+The strong-send confirm line does not raise the needs-you mark: it is the
+user's own keystroke, not the agent asking for something. The title updates
+the instant the state changes and is cleared on every exit, so the tab falls
+back to the terminal's own derived name rather than a stale `✦ craze`.
+
+`terminal_title = false` in `~/.craze/config.toml` turns every write off
+(default: on) — see [Configuration](configuration.md#terminal-tab-title).
+`craze prompt` and `craze frame` never set a tab title.
 
 ## Keys
 
@@ -277,6 +344,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/clear` | Clear transcript |
 | `/tasks` | Tasks panel: compact, expanded, hidden |
 | `/theme` | Theme picker, or `/theme <name>` |
+| `/rename <title>` | Rename this session — craze's own; never sent to the agent |
 | `/plan` | Set plan mode |
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |

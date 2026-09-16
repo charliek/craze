@@ -1,8 +1,11 @@
 # Configuration
 
-craze persists the theme and the last successfully started **provider**.
-Session flags (`--workspace`, `--model`, `--force`, `--ask` / `--plan`,
-`--agent-bin`) are per-invocation.
+craze persists the theme and the last successfully started **provider** in
+`~/.craze/config.toml`, and, once a session has a prompt or a title, a row
+about it in the session index (`~/.craze/sessions.jsonl`) that
+`--continue`, `--resume` and `/rename` use — see [Session
+index](#session-index). Session flags (`--workspace`, `--model`, `--force`,
+`--ask` / `--plan`, `--agent-bin`) are per-invocation.
 
 ## Theme precedence
 
@@ -55,6 +58,53 @@ the default.
 `craze frame` never reads this file, and never reads `$CRAZE_PROVIDER`. See
 [Testing](../development/testing.md#craze-frame).
 
+## Session index
+
+`~/.craze/sessions.jsonl` is the on-disk index behind `--continue`,
+`--resume` and `/rename` (see [CLI](cli.md#-continue-and-resume) and
+[TUI](tui.md#resuming-a-session)). It is **always the sibling of the config
+file** — the same directory, `sessions.jsonl` next to `config.toml` — so a
+`CRAZE_CONFIG` pointing somewhere else carries the index along with it, and
+`craze frame`'s isolated `HOME` isolates it too. There is no separate
+environment variable for it.
+
+One JSON object per line:
+
+```json
+{"sessionId":"…","provider":"grok","cwd":"/abs/workspace","title":"fix flaky pty test","pinned":false,"createdAt":"2026-09-15T22:04:11.5Z","updatedAt":"2026-09-16T00:12:03.2Z"}
+```
+
+- `cwd` is matched by exact string against the workspace's absolute path —
+  no symlink resolution — so a session started from one path is not offered
+  under another that resolves to the same directory, cursor included even
+  though its own `session/load` is permissive across directories.
+- `title` is the session's stored name: the agent's own title, the first
+  line of the first prompt as a fallback, or a `/rename`. `pinned` marks a
+  `/rename`, which always wins over a later agent title.
+- A row exists only once there is something to show it for: craze creates
+  it on the session's first prompt or its first agent-supplied title,
+  whichever comes first — never merely on start — so a session started and
+  quit without a prompt leaves nothing behind.
+- The index is capped at 500 rows; a write past the cap drops the oldest
+  rows by `updatedAt`.
+- An unknown provider id already in the file (written by a newer craze) is
+  kept on disk but never offered by `--continue` or `--resume`.
+- `craze prompt` never writes to the index — headless sessions are not
+  resumable.
+
+**A `--continue` or `--resume` never changes the persisted default
+provider.** Loading yesterday's grok thread is not a decision about
+tomorrow's default: `provider` in `config.toml` is only touched when
+`--provider` was passed explicitly alongside `--continue`/`--resume`, the
+same as an ordinary run.
+
+## Terminal tab title
+
+`terminal_title = false` in `config.toml` turns off every terminal tab-title
+write (see [Tab title](tui.md#tab-title)); the default — including when the
+key is absent or the file cannot be parsed — is `true`. `craze prompt` never
+sets a tab title, and `craze frame` has no terminal to write one to.
+
 ## Provider precedence
 
 Ids are `cursor`, `grok`, and `gx`. An empty string (`--provider ""`,
@@ -99,7 +149,7 @@ the dialect.
 
 | Variable | Purpose |
 |----------|---------|
-| `CRAZE_CONFIG` | Replace the config path (`~/.craze/config.toml`) |
+| `CRAZE_CONFIG` | Replace the config path (`~/.craze/config.toml`); the [session index](#session-index) always follows it, as its sibling |
 | `CRAZE_AGENT_BIN` | Agent binary when `--agent-bin` is unset |
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `gx`) |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
