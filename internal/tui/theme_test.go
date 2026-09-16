@@ -476,6 +476,31 @@ func TestCardClosesThePickerAndRevertsThePreview(t *testing.T) {
 	}
 }
 
+// TestComposerTextCarriesTheThemeForeground: bubbles leaves FocusedStyle.Text
+// an empty style and makes the blurred one an AdaptiveColor, so typed text
+// would have no foreground of its own — and a light theme on a dark terminal
+// would then paint the terminal's light default text on the theme's light
+// background. styleComposer names the colour, which makes OSC 10 a
+// synchronisation rather than a necessity (§3.3).
+func TestComposerTextCarriesTheThemeForeground(t *testing.T) {
+	for _, name := range []string{"craze-dark", "craze-light"} {
+		th := Preset(name)
+		ta := newComposer(th)
+		if got := ta.FocusedStyle.Text.GetForeground(); got != th.FG {
+			t.Fatalf("%s: focused composer text is %v, want FG %v", name, got, th.FG)
+		}
+		if got := ta.BlurredStyle.Text.GetForeground(); got != th.FG {
+			t.Fatalf("%s: blurred composer text is %v, want FG %v", name, got, th.FG)
+		}
+		// And a live re-theme moves it, since that is all styleComposer is for.
+		other := Preset("gruvbox")
+		styleComposer(&ta, other)
+		if got := ta.FocusedStyle.Text.GetForeground(); got != other.FG {
+			t.Fatalf("%s: a re-theme left the composer text at %v", name, got)
+		}
+	}
+}
+
 // TestThemePickerIgnoredWhileACardIsUp keeps the card owning the keyboard.
 func TestThemePickerIgnoredWhileACardIsUp(t *testing.T) {
 	m := withOverlay(t)

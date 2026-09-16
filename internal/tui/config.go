@@ -120,6 +120,23 @@ func ConfigTerminalTitle() bool {
 	return on
 }
 
+// ConfigBackground is whether craze may set the terminal's own default
+// background and text colours from the theme (§3.3), defaulting to true: only
+// an explicit `background = false` turns it off. A config craze cannot read
+// defaults true rather than false, exactly as the tab title does — a broken
+// config file is not a reason to also lose the themed background.
+func ConfigBackground() bool {
+	cfg, err := readConfig()
+	if err != nil {
+		return true
+	}
+	on, ok := cfg["background"].(bool)
+	if !ok {
+		return true
+	}
+	return on
+}
+
 // ConfigProvider is the persisted provider id, or "" when there is none. An
 // unreadable config reads as empty, like the theme.
 func ConfigProvider() string {

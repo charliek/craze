@@ -58,8 +58,13 @@ var themeAliases = map[string]string{
 // block is the preset table verbatim; the rest is derived, so a renderer names
 // what it is drawing rather than picking a colour.
 //
-// There is no full-screen background fill: craze draws on the terminal's own
-// background and BG only exists to derive the tinted backgrounds below.
+// craze paints no full-screen background of its own. Instead, when the
+// `background` setting is on, it sets the terminal's *own* default colours
+// from BG and FG with OSC 11/10 while it runs and resets them on exit
+// (internal/tui/terminal.go, §3.3); with `background = false` or
+// --no-background it leaves the terminal alone and draws on whatever
+// background the terminal already has. BG also derives the tinted backgrounds
+// below either way.
 type Theme struct {
 	Name string
 
@@ -211,6 +216,9 @@ func (m *Model) applyTheme(th Theme) {
 	stick := m.vp.Height == 0 || m.vp.AtBottom()
 	m.theme = th
 	styleComposer(&m.input, th)
+	// The terminal's own default colours are part of the theme, so the live
+	// preview has to move them too. A no-op unless Run attached a terminal.
+	m.term.apply(th)
 	m.setViewportContent(stick)
 }
 

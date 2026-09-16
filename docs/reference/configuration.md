@@ -19,8 +19,10 @@ An explicit `--theme` beats the config file, which beats `craze-dark`.
 
 ## Presets
 
-Seven presets. craze never paints a full-screen background, so your
-terminal's own background shows through.
+Seven presets. While craze runs it sets your terminal's own default
+background and text colours to the theme's and restores them when it exits;
+`background = false` or `--no-background` leaves them alone — see [Terminal
+colours](#terminal-colours).
 
 | Name | Notes |
 |------|-------|
@@ -104,6 +106,25 @@ same as an ordinary run.
 write (see [Tab title](tui.md#tab-title)); the default — including when the
 key is absent or the file cannot be parsed — is `true`. `craze prompt` never
 sets a tab title, and `craze frame` has no terminal to write one to.
+
+## Terminal colours
+
+The theme is more than craze's own cells: while craze runs it sets the
+terminal's default background and text colours to the preset's (`OSC 11` and
+`OSC 10`) and hands them back on exit (`OSC 111` and `OSC 110`), so the
+picker's live preview moves the background too. The terminal's *configured*
+defaults come back, not whatever colours happened to be set before craze
+started.
+
+`background = false` in `config.toml`, or `--no-background` on the command
+line, turns that off: craze then draws on your terminal's own background and
+writes none of those four sequences. The default — including when the key is
+absent or the file cannot be parsed — is `true`, and only a literal `false`
+disables it; there is no flag to force it back on. It is also off
+automatically whenever craze is painting no colour at all (`NO_COLOR`,
+`TERM=dumb`). A terminal that ignores `OSC 11` simply keeps its own
+background; a hard kill (`SIGKILL`) leaves the theme's colours set until the
+terminal is reset, the same as the tab title.
 
 ## Provider precedence
 

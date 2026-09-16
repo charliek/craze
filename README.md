@@ -195,8 +195,10 @@ reach the agent as anything other than an accept or a reject.
 ## Themes
 
 Seven presets: `craze-dark` (the default), `craze-light`, `tokyo-night`,
-`dark`, `light`, `catppuccin`, `gruvbox`. craze never paints a full-screen
-background, so your terminal's own background shows through.
+`dark`, `light`, `catppuccin`, `gruvbox`. While craze runs it sets your
+terminal's own default background and text colours to the theme's and
+restores them when it exits; `background = false` in `~/.craze/config.toml`,
+or `--no-background`, leaves your terminal's colours alone.
 
 `Ctrl+G` or `/theme` opens a names-only picker that repaints the live screen as
 the cursor moves; `Enter` keeps the theme and saves it, `Esc` puts back the one

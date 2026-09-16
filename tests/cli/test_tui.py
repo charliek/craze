@@ -70,6 +70,7 @@ class PTYCraze:
         no_mouse: bool = False,
         step: str | None = None,
         extra_args: list[str] | None = None,
+        env_extra: dict[str, str] | None = None,
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
@@ -89,6 +90,7 @@ class PTYCraze:
         env.pop("CRAZE_FAKE_STEP", None)
         if step:
             env["CRAZE_FAKE_STEP"] = step
+        env.update(env_extra or {})
         argv = [str(craze_bin)]
         if provider:
             # An empty provider leaves the flag off entirely, which is the
@@ -220,7 +222,10 @@ class PTYCraze:
         self.close()
 
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# CSI, plus OSC: craze sets the terminal's own colours (OSC 11/10) and tab
+# title (OSC 2), and an OSC string left in the text would otherwise survive
+# into what wait_contains matches.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:
@@ -502,6 +507,88 @@ def test_tui_continue_and_resume_exit_2(
         code = tui.wait_exit(timeout=10)
         assert code == 2, tui.screen()[-3000:]
         assert "mutually exclusive" in _ANSI.sub("", tui.screen())
+
+
+_OSC_SET_TOKYO = "\x1b]11;rgb:1a/1b/26\x07\x1b]10;rgb:a9/b1/d6\x07"
+_OSC_RESET = "\x1b]111\x07\x1b]110\x07"
+
+
+def _wait_raw_endswith(tui: PTYCraze, suffix: str, timeout: float = 5) -> str:
+    """wait for the raw output to *end* with a sequence.
+
+    Deliberately not _wait_raw: that one takes a mark and matches anywhere,
+    and it treats an exited process as a failure. The reset pair is written on
+    the way out, after bubbletea closes the alt screen, so the process having
+    exited is the normal case here -- and it has to be the *last* bytes on the
+    wire, which is the ordering this asserts.
+    """
+    deadline = time.monotonic() + timeout
+    raw = ""
+    while time.monotonic() < deadline:
+        raw = tui.screen()
+        if raw.endswith(suffix):
+            return raw
+        time.sleep(0.05)
+    raise AssertionError(f"output does not end with {suffix!r}: {raw[-400:]!r}")
+
+
+def test_tui_themes_the_terminal_colours_and_resets_them(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The themed background is a property of the terminal, not of a frame.
+
+    craze sets the terminal's own default background and foreground (OSC 11
+    and 10) from the theme before the first frame and hands them back (OSC 111
+    and 110) after bubbletea has restored everything else, so a pty is the
+    only place the whole lifecycle is visible. Every off switch — the flag,
+    `background = false`, and a profile with no colour at all — has to leave
+    all four of those sequences unwritten, not merely balance them.
+    """
+    workspace = tmp_path / "on"
+    workspace.mkdir()
+    with PTYCraze(craze_bin, fake_agent_bin, workspace) as tui:
+        tui.wait_contains("cursor")
+        raw = tui.screen()
+        assert _OSC_SET_TOKYO in raw, repr(raw[:400])
+        # Before the first frame: the pair precedes the alt screen bubbletea
+        # opens as its very first act.
+        assert "\x1b[?1049h" in raw, repr(raw[:400])
+        assert raw.index(_OSC_SET_TOKYO) < raw.index("\x1b[?1049h"), repr(raw[:400])
+
+        os.killpg(tui.proc.pid, signal.SIGTERM)
+        tui.wait_exit()
+        # Last thing out, after bubbletea's own restore and the title clear.
+        _wait_raw_endswith(tui, _OSC_RESET)
+    _wait_fake_gone(fake_agent_bin)
+
+    for name, extra_args, config, env_extra in (
+        ("off-flag", ["--no-background"], None, None),
+        ("off-config", None, "background = false\n", None),
+        # NO_COLOR drops the profile to Ascii: craze paints no SGR colour, so
+        # it must not repaint the terminal either.
+        ("off-no-color", None, None, {"NO_COLOR": "1"}),
+    ):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        if config is not None:
+            path = workspace / ".craze" / "config.toml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(config, encoding="utf-8")
+        with PTYCraze(
+            craze_bin,
+            fake_agent_bin,
+            workspace,
+            extra_args=extra_args,
+            env_extra=env_extra,
+        ) as tui:
+            tui.wait_contains("cursor")
+            os.killpg(tui.proc.pid, signal.SIGTERM)
+            tui.wait_exit()
+            time.sleep(0.2)
+            raw = tui.screen()
+            # None of OSC 10, 11, 110 or 111 — they all start "\x1b]1".
+            assert "\x1b]1" not in raw, f"{name}: {raw[:400]!r} … {raw[-400:]!r}"
+        _wait_fake_gone(fake_agent_bin)
 
 
 def test_tui_continue_replays_and_leaves_the_config_alone(

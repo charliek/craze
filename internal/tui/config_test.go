@@ -221,3 +221,36 @@ func TestConfigTerminalTitleMalformedDefaultsTrue(t *testing.T) {
 		t.Fatal("an unreadable config should default terminal_title to true")
 	}
 }
+
+// TestConfigBackgroundTable is the whole of the setting's parsing rule (§3.4):
+// only a literal `background = false` turns the themed terminal background
+// off. A missing file, a file craze cannot parse, a missing key and a value
+// that is not a bool all read as on — losing the theme's background is a
+// worse answer to a broken config than ignoring the key it could not read.
+func TestConfigBackgroundTable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"missing key", "theme = \"dark\"\n", true},
+		{"malformed file", "this is not toml [[[\n", true},
+		{"true", "background = true\n", true},
+		{"false", "background = false\n", false},
+		{"non-bool", "background = \"no\"\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if got := ConfigBackground(); got != tc.want {
+				t.Fatalf("ConfigBackground() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "nothing", "config.toml"))
+		if !ConfigBackground() {
+			t.Fatal("no config file at all should still theme the background")
+		}
+	})
+}

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
@@ -28,8 +30,11 @@ type tuiFlags struct {
 	force      bool
 	noForce    bool
 	noMouse    bool
-	ask        bool
-	plan       bool
+	// noBackground keeps the terminal's own background and text colours: the
+	// only override, since there is no --background to force it back on.
+	noBackground bool
+	ask          bool
+	plan         bool
 	// cont and resume are --continue/-c and --resume/-r: load the newest
 	// session in this workspace, or pick one of the last ten (§3.1). They
 	// are mutually exclusive; neither ever falls back to session/new.
@@ -53,6 +58,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
+	cmd.Flags().BoolVar(&f.noBackground, "no-background", false, "keep the terminal's own background and text colours")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
 	cmd.Flags().BoolVarP(&f.cont, "continue", "c", false, "load the newest session in this workspace instead of starting a new one")
@@ -133,6 +139,12 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 		LoadSession:     build,
 		SessionIndex:    &sessions.Store{KnownProvider: knownProvider},
 		TerminalTitle:   tui.ConfigTerminalTitle(),
+		// Resolved once, here: config, then the flag, then the colour
+		// profile. NO_COLOR and TERM=dumb land on the Ascii profile, and a
+		// craze that paints no SGR colour must not repaint the terminal
+		// either.
+		Background: tui.ConfigBackground() && !f.noBackground &&
+			lipgloss.ColorProfile() != termenv.Ascii,
 	}
 	if err := resolveLoad(cmd, f, indexCWD, &cfg, build); err != nil {
 		return err
