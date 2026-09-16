@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // ctrlCWindow is how long a Ctrl+C that cancelled a turn stays armed; a second
@@ -27,6 +28,10 @@ const stopCancelled = "cancelled"
 
 // foreignTurnNote heads the stream of a turn the agent started on its own.
 const foreignTurnNote = "agent continued on its own (interjection fallback)"
+
+// restoredNote closes a session/load replay in the transcript: everything
+// above it is history the agent handed back, everything below is this session.
+const restoredNote = "restored"
 
 // wheelLines is how far one wheel notch scrolls the transcript.
 const wheelLines = 3
@@ -80,6 +85,25 @@ type Config struct {
 	// it after the picker (or immediately when locked). Tests that pass
 	// Session and leave this nil never show the picker.
 	NewSession func(agent.Provider) agent.Session
+	// Loading says Session was built to resume an existing agent session
+	// (agent.Options.LoadSessionID), so Start replays its transcript before
+	// it returns. tea.Batch gives no ordering between startCmd and the first
+	// waitEvent, so the model cannot learn this from EventReplay{start}: it
+	// is constructed replaying and only EventReplay{end} clears the flag
+	// (§3.5). A new session leaves this false and behaves exactly as today.
+	Loading bool
+	// SessionIndex persists ~/.craze/sessions.jsonl, the catalog --continue
+	// and --resume read. nil means no persistence, which is what every TUI
+	// unit test and every golden uses: the TUI never reaches for the store
+	// itself, so nothing here can write a developer's real index (§3.2).
+	SessionIndex SessionIndex
+}
+
+// SessionIndex is the write half of internal/sessions.Store, as the TUI needs
+// it. It is an interface rather than the concrete store so a test can inject a
+// recorder and so the zero Config persists nothing.
+type SessionIndex interface {
+	Upsert(sessions.Row) error
 }
 
 type Model struct {
@@ -117,6 +141,26 @@ type Model struct {
 	ready    bool
 	quitting bool
 	started  bool
+	// replaying is the second half of the "session is up" gate (§3.5). A
+	// loaded session is constructed with it set — Config.Loading knows what
+	// Start is about to do, and tea.Batch promises no ordering between
+	// startCmd and the first waitEvent — and only EventReplay{end} clears it.
+	// Whichever of startedMsg and that event lands second runs sessionUp.
+	replaying bool
+	// loading remembers what replaying was constructed from, because
+	// replaying is cleared: only a loaded session touches the index when it
+	// comes up, since only a loaded session already has a row there.
+	loading bool
+
+	// sessionIndex is Config.SessionIndex; nil means nothing is persisted.
+	// indexRow says the index has a row for this session, so a touch has
+	// something to touch — a session started and quit without a prompt must
+	// leave nothing behind (§3.2). indexSeeded says the first send has
+	// already written its fallback title, so later sends do not rewrite the
+	// whole file for a title that can no longer change anything.
+	sessionIndex SessionIndex
+	indexRow     bool
+	indexSeeded  bool
 
 	// mouseEnabled is --no-mouse kept on the model: the flag decides what
 	// bubbletea reports, and this decides what craze does with a mouse message
@@ -402,6 +446,10 @@ func New(cfg Config) Model {
 		providerDefault: prov,
 		providers:       pickerRows(cfg.Providers, prov),
 		newSession:      cfg.NewSession,
+		sessionIndex:    cfg.SessionIndex,
+		// A load is replaying before its first event: see Model.replaying.
+		replaying: cfg.Loading,
+		loading:   cfg.Loading,
 		// Turn 1 is the session before the first prompt, and it is over before
 		// it starts: nothing is in flight, so both of its endings have landed.
 		turnSeq:      1,
@@ -469,11 +517,23 @@ func Run(cfg Config) error {
 	return startErr
 }
 
+// Init starts the session and arms the event reader in the same batch. The
+// reader cannot wait for startedMsg: a session/load replays its whole
+// transcript from the client's read loop *during* Start, and a replay longer
+// than the session's 256-slot event channel would block that read loop, so the
+// session/load result would never be read and Start would never return (§2.2).
+//
+// Applying events before started is safe because nothing in applyEvent depends
+// on m.started: finishTurn is a no-op unless the status is working,
+// drainSettledTurn finds an empty queue, cancelTurn is a no-op with no cards
+// and no running turn, refreshSnap is idempotent, and the only card-producing
+// events — permission, question and plan — are requests an agent makes of a
+// live turn and never appear in a replay (§2.1).
 func (m Model) Init() tea.Cmd {
 	if m.pickingProvider {
 		return nil
 	}
-	return m.startCmd()
+	return tea.Batch(m.startCmd(), waitEvent(m.sess))
 }
 
 func (m Model) startCmd() tea.Cmd {
@@ -539,9 +599,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case startedMsg:
+		// Half of the gate: Start has returned. For a new session that is the
+		// whole of it, and sessionUp runs from here exactly as it always has;
+		// for a loaded one the replay may still be draining, in which case
+		// EventReplay{end} runs the tail instead. The event reader is not
+		// re-armed here — Init armed it, and eventMsg re-arms it after that.
 		m.started = true
-		m.status = statusIdle
-		m.sessStart = m.now()
 		m.branch = m.git.branch()
 		m.refreshSnap()
 		if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
@@ -553,8 +616,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.addError(err.Error())
 			}
 		}
-		m.rescanSkills()
-		return m, waitEvent(m.sess)
+		m.sessionUp()
+		return m, nil
 
 	case errMsg:
 		// errMsg is only ever startCmd's: the session never came up. The TUI
@@ -1356,7 +1419,13 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.saveQueueEdit()
 	}
 	name, args, ok := parseSlashLine(m.input.Value())
-	if ok && name == "exit" {
+	if ok && (name == "exit" || name == "rename") {
+		// The two builtins that run before the session is up. Quitting has
+		// always had to; /rename joins it because the gate below refuses
+		// silently, and a rename typed at a session that is still restoring
+		// owes the user the reason rather than nothing at all (§3.6). Neither
+		// touches the wire, and neither is reachable while a card is up —
+		// handleKey hands the keyboard to the card before Enter gets here.
 		return m.runBuiltin(name, args)
 	}
 	// The offer outranks the sub-agent rows: an empty composer under a live
@@ -1366,7 +1435,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.planOffering() && m.input.Value() == "" {
 		return m.implementPlan()
 	}
-	if m.cardOpen() || !m.started {
+	if m.cardOpen() || !m.sessionReady() {
 		return m, nil
 	}
 	// A builtin never queues: it is craze's own, it does not need the agent,
@@ -1399,7 +1468,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 // silent refusal.
 func runsWhileWorking(name string) bool {
 	switch name {
-	case "exit", "help", "theme", "tasks", "clear":
+	case "exit", "help", "theme", "tasks", "clear", "rename":
 		return true
 	}
 	return false
@@ -1427,7 +1496,24 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 // composer's own send and the plan offer have in common: the plan offer never
 // touches the draft, so the two differ only in where the text came from.
 func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
+	if !m.sessionReady() {
+		// The composer refuses Enter before the gate opens, and so does the
+		// queue drain and the plan offer: a prompt into a session that is
+		// still restoring would race the replay it is reading.
+		return m, nil
+	}
 	m.addUser(text)
+	if !m.indexSeeded {
+		// The first prompt is the first thing worth showing in a picker, so
+		// it is what creates the row — and it is what fills the title of a
+		// loaded row that never got one. Later sends change nothing a title
+		// rule would keep, so they do not rewrite the file.
+		// Only a write that landed retires the first-prompt title: a
+		// session that has not learned its id yet, or an index craze could
+		// not write, gets another chance on the next send rather than
+		// leaving the session out of every future picker.
+		m.indexSeeded = m.writeIndex(fallbackTitle(text), sessions.TitleKindFallback)
+	}
 	m.status = statusWorking
 	m.cardsCancelled = false
 	m.turnStart = m.now()
@@ -1682,7 +1768,39 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// starting one, so it is the only user block craze does not
 			// write from its own send.
 			m.addInterjection(ev.Text)
+			return
 		}
+		if m.replaying || ev.Replayed {
+			// A prompt out of the restored transcript, which craze never sent
+			// and therefore never wrote. The session coalesces a multi-chunk
+			// one into a single event, so this is one user block per prompt.
+			m.addUser(ev.Text)
+			return
+		}
+		// A live main-session echo. grok and gx send one for every prompt the
+		// user types, and craze has already written that block from its own
+		// send, so taking this one would double it (§2.2).
+		return
+	case agent.EventReplay:
+		if ev.Replay == nil {
+			return
+		}
+		if ev.Replay.Phase != agent.ReplayEnd {
+			// The start phase is informational: the model was built replaying
+			// because Config.Loading knew a load was coming, and it had to be,
+			// since tea.Batch could deliver startedMsg before this event ever
+			// arrived (§3.5).
+			return
+		}
+		// The restored snapshot is installed, so this is the moment the
+		// session is up as far as the replay is concerned. breakStream first,
+		// or the last replayed thought stays open and the note lands inside
+		// it.
+		m.breakStream()
+		m.addNote(restoredNote)
+		m.replaying = false
+		m.refreshSnap()
+		m.sessionUp()
 		return
 	case agent.EventCommand:
 		// It arrives before the request reaches the wire, so the line lands
@@ -1772,6 +1890,8 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if m.planEarnsOffer(ev.StopReason) {
 			m.planOfferSeq = m.turnSeq
 		}
+		// A turn ended, so this session is the newest thing in the workspace.
+		m.touchIndex()
 	case agent.EventError:
 		// The error is the prompt's other ending: Prompt emits it and returns,
 		// so no EventDone follows it.
@@ -1793,6 +1913,13 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.retirePlanOffer()
 		}
 		m.refreshSnap()
+		if ev.Text != "" {
+			// session_info_update: the agent named the session. It replaces a
+			// first-prompt fallback but loses to a /rename pin, which the
+			// index decides — the session has already refused it if it is
+			// pinned, so this only ever carries a title craze may keep.
+			m.writeIndex(ev.Text, sessions.TitleKindAgent)
+		}
 	}
 }
 
@@ -1830,6 +1957,111 @@ func (m Model) modeSettled(gen int) Model {
 	}
 	m.refreshSnap()
 	return m
+}
+
+// sessionReady is the two-key gate of §3.5: Start has returned *and*, for a
+// loaded session, its replay has ended and the restored snapshot is installed.
+// tea.Batch orders neither of them, so both are latched and whichever lands
+// second opens the gate. Sends and /rename wait for it; a new session never
+// sets replaying, so it means exactly what m.started alone used to.
+func (m Model) sessionReady() bool { return m.started && !m.replaying }
+
+// sessionUp is the tail startedMsg used to run alone: the status goes idle,
+// the elapsed counter starts, the skills are rescanned, and a loaded session
+// touches its index row. It is called from both keys and does nothing until
+// both have landed, so it runs exactly once however they are ordered.
+func (m *Model) sessionUp() {
+	if !m.sessionReady() {
+		return
+	}
+	m.status = statusIdle
+	m.sessStart = m.now()
+	m.rescanSkills()
+	if m.loading {
+		// Only a loaded session: its row is where the id came from, so
+		// touching it is bumping something that exists. A new session gets no
+		// row until it has something to show (§3.2).
+		m.writeIndex("", sessions.TitleKindNone)
+	}
+}
+
+// titleRuneCap is how long a session title may be in the index. Runes, not
+// bytes: the cap exists so a picker row is a row, and a prompt is as likely to
+// open in Japanese as in ASCII.
+const titleRuneCap = 120
+
+// fallbackTitle is the title a session carries until the agent names it or the
+// user renames it: the first line of the first prompt. It is not a pin — an
+// agent title replaces it, and /rename replaces either (§3.6).
+func fallbackTitle(prompt string) string {
+	first, _, _ := strings.Cut(prompt, "\n")
+	return capRunes(sanitizeLine(first), titleRuneCap)
+}
+
+func capRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	i, count := 0, 0
+	for i = range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
+// writeIndex is the one place the TUI persists a session. There is no store
+// here and no path: Config.SessionIndex is an interface and nil means "do not
+// persist", which is what keeps every unit test and every golden off a
+// developer's real ~/.craze/sessions.jsonl (§3.2). A session with no id yet is
+// nothing to record either.
+//
+// The write is synchronous on the bubbletea goroutine, exactly as
+// SaveProvider's is, and a failure is a transcript line rather than a fatal:
+// craze not being able to remember a session is not a reason to stop running
+// it.
+// writeIndex upserts this session's row, reporting whether the index now holds
+// it. A nil index is "nothing to persist", which counts as done; a session that
+// has not learned its id yet, and a write that failed, both count as not done,
+// so a caller that only writes once can retry on its next chance.
+func (m *Model) writeIndex(title string, kind sessions.TitleKind) bool {
+	if m.sessionIndex == nil {
+		return true
+	}
+	if m.snap.SessionID == "" {
+		return false
+	}
+	provider := m.snap.Provider.Name
+	if provider == "" {
+		// Only reachable before a session has answered with its own
+		// provider; the resolved default is the one it was started as.
+		provider = m.providerDefault.Name()
+	}
+	row := sessions.Row{
+		SessionID: m.snap.SessionID,
+		Provider:  provider,
+		CWD:       m.cwd,
+		Title:     capRunes(sanitizeLine(title), titleRuneCap),
+		TitleKind: kind,
+	}
+	if err := m.sessionIndex.Upsert(row); err != nil {
+		m.addError(err.Error())
+		return false
+	}
+	m.indexRow = true
+	return true
+}
+
+// touchIndex bumps the row's updatedAt, so --resume orders by when a session
+// was last used. It is a no-op until a row exists: a turn the agent ran on its
+// own before craze ever sent a prompt must not conjure a titleless row.
+func (m *Model) touchIndex() {
+	if !m.indexRow {
+		return
+	}
+	_ = m.writeIndex("", sessions.TitleKindNone)
 }
 
 // refreshSnap re-reads the session's snapshot. It draws no conclusions from

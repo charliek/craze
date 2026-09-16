@@ -15,7 +15,7 @@
                                                                                                     
                                                                                                     
                                                                                                     
-  /uniform-upgrade  Upgrade the toolchain pinned in the manifest and re-run the per-commit … 37/37 ▲
+  /uniform-upgrade  Upgrade the toolchain pinned in the manifest and re-run the per-commit … 38/38 ▲
   /gauntlet-like    Discover, plan, implement and verify a change end to end, one gated commit at a…
   /multiline-note   Draws on one line. The newline in this description must not split the row.      
   /zulu-tool        The last entry in the catalog, and the sentinel a frame script waits for        

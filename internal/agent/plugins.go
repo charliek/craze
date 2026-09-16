@@ -673,7 +673,7 @@ func pluginIDOK(id string) bool { return pluginNameOK(id) }
 // internal/tui/slash.go's builtinSlash is the other half of this list, with the
 // descriptions the menu draws; the two are pinned to each other by a test.
 func BuiltinSlashNames() []string {
-	return []string{"help", "model", "clear", "tasks", "theme", "plan", "ask", "agent", "exit"}
+	return []string{"help", "model", "clear", "tasks", "theme", "rename", "plan", "ask", "agent", "exit"}
 }
 
 // PluginCommand is a plugin entry as the menu and the JSON stream see it. Bare

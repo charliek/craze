@@ -93,10 +93,17 @@ func (m Model) statusRow1() (string, []segSpan) {
 	if m.pickingProvider {
 		return fitStatus([]statusPart{ws}, statusSep, dim, m.width)
 	}
-	if !m.started && m.status != statusError {
+	if !m.sessionReady() && m.status != statusError {
+		// A loaded session is doing something more specific than starting: it
+		// is reading back a transcript, which is what the row says until the
+		// replay ends (§3.5).
+		what := "starting…"
+		if m.replaying {
+			what = "restoring…"
+		}
 		return fitStatus([]statusPart{
 			ws,
-			{text: "starting…", style: dim, drop: 1},
+			{text: what, style: dim, drop: 1},
 		}, statusSep, dim, m.width)
 	}
 	return fitStatus([]statusPart{

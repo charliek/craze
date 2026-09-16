@@ -1,3 +1,8 @@
+❯ List the files in the current working directory in one line.                                      
++ Thought                                                                                           
+✓ read  List Directory                                                                              
+the workspace holds main.py and README.md                                                           
+restored                                                                                            
                                                                                                     
                                                                                                     
                                                                                                     
@@ -15,16 +20,11 @@
                                                                                                     
                                                                                                     
                                                                                                     
-❯ /help             Keybindings and commands                                                    1/34
-  /model            Switch model                                                                    
-  /clear            Clear transcript                                                                
-  /tasks            Tasks panel: compact, expanded, hidden                                          
-  /theme            Theme picker, or /theme <name>                                                  
-  /rename           Rename this session, /rename <title>                                            
-  /plan             Set plan mode                                                                   
-  /ask              Set ask mode                                                                   ▼
+                                                                                                    
+                                                                                                    
+                                                                                                    
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
-❯ /                                                                                                 
+❯ message  / for commands                                                                           
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-ws │ cursor │ Default (medium) │ 0m                                                                 
+ws │ cursor │ Grok (medium) │ 0m                                                                    
 ◆ agent · shift+tab · ▸▸ bypass permissions on                                                      

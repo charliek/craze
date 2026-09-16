@@ -90,7 +90,10 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	if m.model == "" {
 		m.model = "default"
 	}
-	return m, m.startCmd()
+	// The same batch Init returns, for the same reason: the session this just
+	// built may be a load, and its replay is emitted from the client's read
+	// loop while Start is still running (§3.5).
+	return m, tea.Batch(m.startCmd(), waitEvent(m.sess))
 }
 
 func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

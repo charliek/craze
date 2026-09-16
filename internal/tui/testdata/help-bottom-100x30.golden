@@ -1,7 +1,6 @@
               ╭──────────────────────────────────────────────────────────────────────╮              
               │help                                                                  │              
-              │  enter on a row    open a selected sub-agent                        ▲│              
-              │  esc, ←            return from a sub-agent                           │              
+              │  esc, ←            return from a sub-agent                          ▲│              
               │  ↑ ↓ pgup pgdn     scroll inside a sub-agent                         │              
               │  tab, shift+tab    switch sub-agent while in the view                │              
               │  click the model   model dialog, from status row 1                   │              
@@ -15,6 +14,7 @@
               │  /clear            Clear transcript                                  │              
               │  /tasks            Tasks panel: compact, expanded, hidden            │              
               │  /theme            Theme picker, or /theme <name>                    │              
+              │  /rename           Rename this session, /rename <title>              │              
               │  /plan             Set plan mode                                     │              
               │  /ask              Set ask mode                                      │              
               │  /agent            Set agent mode                                    │              

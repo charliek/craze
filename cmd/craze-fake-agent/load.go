@@ -27,7 +27,11 @@ const (
 	replayThought    = "Recalling the earlier turn."
 	replayToolTitle  = "List Directory"
 	replayToolOutput = "main.py README.md"
-	replayAnswer     = "restored: main.py README.md"
+	// Deliberately free of the word "restored": a replay golden's frame
+	// script waits on <wait:text:restored> for the note that marks the end of
+	// the replay, and an answer carrying that word would satisfy the wait
+	// mid-replay instead.
+	replayAnswer = "the workspace holds main.py and README.md"
 )
 
 // loadScript names the scripts that advertise loadSession, answer session/load,

@@ -321,7 +321,10 @@ func parseFrameQuad(s string) (int, int, int, int, error) {
 func (w waitSpec) match(s frameState) bool {
 	switch w.kind {
 	case "idle":
-		return s.started && s.status == statusIdle && !s.card
+		// A loaded session is not idle while its replay is still arriving:
+		// the status is the zero value until the gate opens (§3.5), so
+		// without the replay test <wait:idle> would match mid-restore.
+		return s.started && !s.replaying && s.status == statusIdle && !s.card
 	case "working":
 		return s.status == statusWorking
 	case "card":
@@ -338,13 +341,14 @@ func (w waitSpec) match(s frameState) bool {
 
 // frameState is one published frame plus the model state the waits look at.
 type frameState struct {
-	view    string
-	plain   string
-	status  status
-	started bool
-	card    bool
-	copied  bool
-	sync    int
+	view      string
+	plain     string
+	status    status
+	started   bool
+	replaying bool
+	card      bool
+	copied    bool
+	sync      int
 }
 
 // frameBus carries frames from the bubbletea goroutine to the script runner.
@@ -472,13 +476,14 @@ func (f frameModel) View() string { return f.inner.View() }
 func (f frameModel) publish() {
 	view := f.inner.View()
 	f.bus.publish(frameState{
-		view:    view,
-		plain:   ansi.Strip(view),
-		status:  f.inner.status,
-		started: f.inner.started,
-		card:    f.inner.cardOpen(),
-		copied:  f.inner.copyLingering(),
-		sync:    f.sync,
+		view:      view,
+		plain:     ansi.Strip(view),
+		status:    f.inner.status,
+		started:   f.inner.started,
+		replaying: f.inner.replaying,
+		card:      f.inner.cardOpen(),
+		copied:    f.inner.copyLingering(),
+		sync:      f.sync,
 	})
 }
 

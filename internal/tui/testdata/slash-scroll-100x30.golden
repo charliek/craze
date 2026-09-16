@@ -15,14 +15,14 @@
                                                                                                     
                                                                                                     
                                                                                                     
-  /tasks            Tasks panel: compact, expanded, hidden                                   11/33 ▲
+  /tasks            Tasks panel: compact, expanded, hidden                                   11/34 ▲
   /theme            Theme picker, or /theme <name>                                                  
+  /rename           Rename this session, /rename <title>                                            
   /plan             Set plan mode                                                                   
   /ask              Set ask mode                                                                    
   /agent            Set agent mode                                                                  
   /exit             Quit craze                                                                      
-  /alpha-review     Review the working tree and report the findings worth acting on before the next…
-❯ /bravo-search     Search the whole repository for a symbol and summarise every call site it tur… ▼
+❯ /alpha-review     Review the working tree and report the findings worth acting on before the ne… ▼
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
 ❯ /                                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
