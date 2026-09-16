@@ -66,10 +66,14 @@ type Theme struct {
 	BG, FG, Dim, Bright, Border         lipgloss.Color
 	Accent, Teal, OK, Warn, Err, Purple lipgloss.Color
 
-	User, Assistant, Thought, ToolKind lipgloss.Color
-	DiffAdd, DiffDel                   lipgloss.Color
-	DiffAddBG, DiffDelBG               lipgloss.Color
-	LineNo, TaskRail, Selection, Rule  lipgloss.Color
+	// UserMark colours the ❯ / ↳ glyph that opens a user row; User is the bold
+	// prompt text beside it. Heading colours a markdown heading (h1-h6 draw
+	// identically), kept apart from Accent so a heading and inline code in
+	// the same reply are not the same colour.
+	User, UserMark, Assistant, Thought, ToolKind, Heading lipgloss.Color
+	DiffAdd, DiffDel                                      lipgloss.Color
+	DiffAddBG, DiffDelBG                                  lipgloss.Color
+	LineNo, TaskRail, Selection, Rule                     lipgloss.Color
 	// SelectionBG is the background the dialog cursor row (and V4's mouse
 	// selection) paints with; Selection stays a foreground slot.
 	SelectionBG                      lipgloss.Color
@@ -95,10 +99,20 @@ func (p paletteSpec) theme() Theme {
 		Err:    lipgloss.Color(p.err),
 		Purple: lipgloss.Color(p.purple),
 	}
-	th.User = th.Bright
+	// User was Bright, which vanished into body text. Teal makes it read as
+	// "you" without competing for the loudest colour on screen. UserMark on
+	// the ❯ derives from Accent, which is what the composer's own prompt
+	// glyph and the row gutter mark paint with, so today one colour means
+	// "you, here" across all three.
+	th.User = th.Teal
+	th.UserMark = th.Accent
 	th.Assistant = th.FG
 	th.Thought = th.Dim
 	th.ToolKind = th.Accent
+	// Heading was Accent, which is also inline code, the spinner and chips,
+	// so a heading and a code word in the same reply were the same amber. OK
+	// is not otherwise used in running prose, so it reads as its own thing.
+	th.Heading = th.OK
 	th.DiffAdd = th.OK
 	th.DiffDel = th.Err
 	th.DiffAddBG = blend(p.bg, p.ok, diffBGMix)

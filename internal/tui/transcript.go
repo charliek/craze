@@ -499,12 +499,16 @@ func (m *Model) setViewportContent(stick bool) {
 func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
 	switch e.kind {
 	case entryUser:
+		// The mark carries the colour; the two-space continuation indent is
+		// blank, so it stays unstyled rather than carrying a pointless SGR.
+		markSt, textSt := styleFG(m.theme.UserMark), styleFG(m.theme.User).Bold(true)
+		contSt := lipgloss.NewStyle()
 		if e.interject {
 			// It joined a turn that was already running, so it does not get
 			// the prompt mark a turn of its own does.
-			return hangingRows(e.text, "↳ ", "  ", key.width, styleFG(m.theme.User))
+			return hangingRowsStyled(e.text, "↳ ", "  ", key.width, markSt, contSt, textSt)
 		}
-		return hangingRows(e.text, "❯ ", "  ", key.width, styleFG(m.theme.User))
+		return hangingRowsStyled(e.text, "❯ ", "  ", key.width, markSt, contSt, textSt)
 	case entryAssistant:
 		return renderMarkdown(e.text, key.width, m.theme)
 	case entryThought:
@@ -568,21 +572,56 @@ func (m *Model) planRows(p *agent.PlanEvent, key renderKey) []string {
 	return rows
 }
 
-// hangingRows wraps prose and indents the continuation rows under the first.
-func hangingRows(text string, first, cont string, width int, st lipgloss.Style) []string {
+// hangingRowsStyled wraps prose and indents the continuation rows under the
+// first, colouring the prefix glyph separately from the body text. Only the
+// first row's prefix paints with firstSt: a continuation row carries no
+// glyph of its own (usually plain indent spaces), so colouring it would only
+// add ANSI noise nothing on screen shows. textSt paints every row's text.
+// hangingRowLines wraps text under a hanging indent and hands each row's
+// prefix and content to fn. hangingRows and hangingRowsStyled share it so the
+// wrap and indent arithmetic lives in exactly one place while each stays free
+// to paint the row its own way.
+func hangingRowLines(text string, first, cont string, width int, fn func(i int, prefix, ln string)) {
 	indent := lipgloss.Width(first)
 	if w := lipgloss.Width(cont); w > indent {
 		indent = w
 	}
 	wrapped := wrapProse(text, width-indent)
-	var out []string
 	for i, ln := range strings.Split(wrapped, "\n") {
 		prefix := cont
 		if i == 0 {
 			prefix = first
 		}
-		out = append(out, renderSegs(width, seg{prefix + ln, st}))
+		fn(i, prefix, ln)
 	}
+}
+
+// hangingRows paints the whole row, prefix and text alike, with one style. It
+// renders each row as a single seg, exactly as it always has: a two-seg split
+// clamps differently when the prefix alone fills width (renderSegSpans stops
+// before the text seg, so it truncates without an ellipsis), and this helper's
+// callers must keep rendering byte-identically.
+func hangingRows(text string, first, cont string, width int, st lipgloss.Style) []string {
+	var out []string
+	hangingRowLines(text, first, cont, width, func(_ int, prefix, ln string) {
+		out = append(out, renderSegs(width, seg{prefix + ln, st}))
+	})
+	return out
+}
+
+// hangingRowsStyled is hangingRows with the prefix painted apart from the
+// text: firstSt for the opening prefix, contSt for the continuation indent,
+// textSt for the text itself. contSt is its own parameter so a blank indent
+// can go unstyled while a visible continuation glyph keeps its colour.
+func hangingRowsStyled(text string, first, cont string, width int, firstSt, contSt, textSt lipgloss.Style) []string {
+	var out []string
+	hangingRowLines(text, first, cont, width, func(i int, prefix, ln string) {
+		pst := contSt
+		if i == 0 {
+			pst = firstSt
+		}
+		out = append(out, renderSegs(width, seg{prefix, pst}, seg{ln, textSt}))
+	})
 	return out
 }
 

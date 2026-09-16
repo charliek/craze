@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func mdLines(t *testing.T, text string, width int) []string {
@@ -178,6 +179,29 @@ func TestMarkdownCapsWidthOnWideTerminals(t *testing.T) {
 	for _, ln := range got {
 		if w := lipgloss.Width(ln); w > proseMaxWidth {
 			t.Fatalf("prose is %d wide, cap is %d", w, proseMaxWidth)
+		}
+	}
+}
+
+// A wrapped blockquote keeps its bar dim on every row. The styled variant of
+// hangingRows takes the continuation prefix style as its own parameter so the
+// user row's blank indent can go unstyled without stripping the colour from a
+// continuation prefix that is a visible glyph, like this one; the blockquote
+// itself still goes through plain hangingRows, which paints the whole row.
+func TestBlockquoteBarStaysDimWhenWrapped(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	th := Preset("tokyo-night")
+	rows := renderMarkdown("> "+strings.Repeat("word ", 20), 40, th)
+	if len(rows) < 2 {
+		t.Fatalf("want a wrapped quote, got %d row(s): %q", len(rows), rows)
+	}
+	dim := ansiFG(string(th.Dim))
+	for i, ln := range rows {
+		if !strings.HasPrefix(ln, dim) {
+			t.Fatalf("quote row %d does not open with the dim colour: %q", i, ln)
+		}
+		if !strings.HasPrefix(plain(ln), "│ ") {
+			t.Fatalf("quote row %d does not start with a bar: %q", i, plain(ln))
 		}
 	}
 }

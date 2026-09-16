@@ -109,7 +109,7 @@ func (r *mdRenderer) flush() {
 
 func (r *mdRenderer) heading(ln string) {
 	mt := headingRe.FindStringSubmatch(ln)
-	st := lipgloss.NewStyle().Foreground(r.th.Accent).Bold(true)
+	st := lipgloss.NewStyle().Foreground(r.th.Heading).Bold(true)
 	r.push("", inlineMarkdown(strings.TrimSpace(mt[2]), r.th), st)
 }
 
