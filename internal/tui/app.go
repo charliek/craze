@@ -61,6 +61,12 @@ type Config struct {
 	NoMouse bool
 	// Provider is the resolved default the startup picker preselects.
 	Provider agent.Provider
+	// Providers is the picker's rows, filtered for availability by the caller.
+	// tui.New inserts Config.Provider if it is missing, so the resolved default is
+	// always offered (§3.4). Empty means the built-in default set —
+	// agent.DefaultProviders(), every provider that is not optional — which keeps
+	// every test that builds a Config by hand hermetic.
+	Providers []agent.Provider
 	// ProviderLocked skips the picker: an explicit --provider, or the frame
 	// runner. The session is constructed immediately.
 	ProviderLocked bool
@@ -204,7 +210,12 @@ type Model struct {
 	pickedExplicit  bool
 	providerCursor  int
 	providerDefault agent.Provider
-	newSession      func(agent.Provider) agent.Session
+	// providers is the picker's rows, settled once in New: the caller's
+	// availability-filtered list unioned with providerDefault (§3.4). Nothing
+	// after the constructor recomputes it, so the rows the user sees are the
+	// rows Esc and Enter act on.
+	providers  []agent.Provider
+	newSession func(agent.Provider) agent.Session
 
 	todoPlanned int
 	todoDone    bool
@@ -389,6 +400,7 @@ func New(cfg Config) Model {
 		persistProvider: cfg.PersistProvider,
 		fallbackDefault: cfg.FallbackDefault,
 		providerDefault: prov,
+		providers:       pickerRows(cfg.Providers, prov),
 		newSession:      cfg.NewSession,
 		// Turn 1 is the session before the first prompt, and it is over before
 		// it starts: nothing is in flight, so both of its endings have landed.
@@ -401,7 +413,7 @@ func New(cfg Config) Model {
 	if m.newSession != nil && !m.providerLocked {
 		m.pickingProvider = true
 		m.dialog = dialogProvider
-		m.providerCursor = providerIndex(prov)
+		m.providerCursor = m.providerIndex(prov)
 	} else {
 		if m.sess == nil && m.newSession != nil {
 			m.sess = m.newSession(prov)

@@ -100,6 +100,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 		Yolo:            f.force,
 		NoMouse:         f.noMouse,
 		Provider:        resolved.Provider,
+		Providers:       pickerProviders(f.agentBin),
 		ProviderLocked:  resolved.Locked,
 		PersistProvider: true,
 		FallbackDefault: resolved.Fallback,
@@ -111,6 +112,32 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	err = tui.Run(cfg)
 	diag.flush(os.Stderr)
 	return err
+}
+
+// pickerProviders is the startup picker's row list: every provider craze knows,
+// less the optional ones whose binary does not resolve. gx is a personal fork,
+// so a machine without it is not shown a row that could only fail at spawn;
+// cursor and grok are never filtered, which is what makes an empty picker
+// impossible (§3.3).
+//
+// explicitBin is --agent-bin. Resolution is the same question spawn asks, so an
+// override makes every optional provider resolve — with one set, a gx session
+// genuinely would spawn that binary — and an override that resolves to nothing
+// hides gx even with gx on PATH, because the override is exclusive.
+//
+// This filters for availability and nothing else. Inserting the resolved
+// default belongs to tui.New, which guarantees it for every caller rather than
+// for the ones that remember (§3.4).
+func pickerProviders(explicitBin string) []agent.Provider {
+	all := agent.Providers()
+	out := make([]agent.Provider, 0, len(all))
+	for _, p := range all {
+		if p.Optional() && !p.BinaryResolves(explicitBin) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // deferredStderr holds what the agent said until the terminal is craze's to
