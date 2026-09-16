@@ -8,7 +8,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -569,7 +568,6 @@ func TestSearchRowDoesNotRepeatTheQuery(t *testing.T) {
 // but hangingRows' seven call sites predate the styled variant and must keep
 // rendering exactly as they did.
 func TestHangingRowsClampsAcrossThePrefixBoundary(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	st := styleFG(Preset("tokyo-night").Err)
 	rows := hangingRows("x", "error: ", "  ", 7, st)
 	if len(rows) != 1 {

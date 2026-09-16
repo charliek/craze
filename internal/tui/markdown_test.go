@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 )
 
 func mdLines(t *testing.T, text string, width int) []string {
@@ -189,7 +188,6 @@ func TestMarkdownCapsWidthOnWideTerminals(t *testing.T) {
 // continuation prefix that is a visible glyph, like this one; the blockquote
 // itself still goes through plain hangingRows, which paints the whole row.
 func TestBlockquoteBarStaysDimWhenWrapped(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	th := Preset("tokyo-night")
 	rows := renderMarkdown("> "+strings.Repeat("word ", 20), 40, th)
 	if len(rows) < 2 {
