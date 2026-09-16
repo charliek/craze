@@ -179,6 +179,14 @@ type interjectionText struct{ Text string }
 // onForeignTurn records a turn the agent started on its own and tells the
 // callers, so the drain that was about to run waits and re-runs at its end.
 func (s *session) onForeignTurn(info ForeignTurnInfo) {
+	// A replayed turn_completed is history, not a turn craze is watching.
+	// Today grok replays it on a method craze does not dispatch (plan 013
+	// §2.1), so this guard is insurance against it moving: a foreign turn
+	// opened or closed by the transcript would leave the drain waiting on a
+	// turn that ended yesterday.
+	if s.replaying.Load() {
+		return
+	}
 	s.mu.Lock()
 	s.foreign = info.Running
 	s.mu.Unlock()

@@ -302,6 +302,9 @@ type stubSession struct {
 	onPop func()
 	// subagents is what Snapshot reports, so the end-of-run drain runs at all.
 	subagents []agent.SubagentInfo
+	// title is whatever SetTitle was handed, so the interface method has
+	// somewhere to put it.
+	title string
 }
 
 // stubTurn is one Prompt: what it emits before it returns, and what it
@@ -439,6 +442,14 @@ func (s *stubSession) SetModel(context.Context, string) error                 { 
 func (s *stubSession) SetMode(context.Context, string) error                  { return nil }
 func (s *stubSession) SetConfig(context.Context, string, string) error        { return nil }
 func (s *stubSession) Close() error                                           { return nil }
+
+// SetTitle is the interface's, and nothing more: the run loop never renames a
+// session — /rename is the TUI's, and `craze prompt` has no title of its own.
+func (s *stubSession) SetTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.title = title
+}
 
 func (s *stubSession) Snapshot() agent.Snapshot {
 	s.mu.Lock()
