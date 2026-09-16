@@ -587,7 +587,7 @@ func TestConcurrentUpsertKeepsBothRows(t *testing.T) {
 		defer wg.Done()
 		errs <- s.Upsert(Row{SessionID: "s2", Provider: "cursor", CWD: "/ws", Title: "two", TitleKind: TitleKindFallback})
 	}()
-	wg.Wait()
+	waitDone(t, &wg)
 	close(errs)
 	for err := range errs {
 		if err != nil {
@@ -639,5 +639,22 @@ func TestFileModeIs0600(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+// waitDone waits for wg, but gives up rather than hanging. An unbounded Wait
+// on a WaitGroup a bug never satisfies blocks until the test binary's own
+// timeout fires, which kills every other test in the package and reports a
+// goroutine dump instead of a failure. The deadline is far longer than any of
+// these waits legitimately needs, so it only ever fires on a real bug -- and
+// then it names the test and the line.
+func waitDone(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the goroutines to finish")
 	}
 }

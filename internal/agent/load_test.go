@@ -479,7 +479,7 @@ func TestLoadLongReplayRacesConsumers(t *testing.T) {
 	}
 	err := s.Start(t.Context())
 	close(stop)
-	readers.Wait()
+	waitDone(t, &readers)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -539,9 +539,9 @@ func TestReplayPhaseFlipsUnderUpdates(t *testing.T) {
 			_ = s.Snapshot()
 		}
 	}()
-	work.Wait()
+	waitDone(t, &work)
 	close(stop)
-	drain.Wait()
+	waitDone(t, &drain)
 }
 
 func equalStrings(a, b []string) bool {
@@ -580,4 +580,21 @@ func jsonQuote(s string) string {
 		return s
 	}
 	return string(b)
+}
+
+// waitDone waits for wg, but gives up rather than hanging. An unbounded Wait
+// on a WaitGroup a bug never satisfies blocks until the test binary's own
+// timeout fires, which kills every other test in the package and reports a
+// goroutine dump instead of a failure. The deadline is far longer than any of
+// these waits legitimately needs, so it only ever fires on a real bug -- and
+// then it names the test and the line.
+func waitDone(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the goroutines to finish")
+	}
 }

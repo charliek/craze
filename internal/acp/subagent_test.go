@@ -876,7 +876,7 @@ func TestSubagentConcurrentHandlersRace(t *testing.T) {
 			p.client.onNotify(&Message{JSONRPC: jsonrpcVersion, Method: MethodSessionUpdate, Params: json.RawMessage(childUpdateParams(child, UpdateAgentMessage, "x"))})
 		}(i)
 	}
-	wg.Wait()
+	waitDone(t, &wg)
 	cap.waitFor(t, 8, 8)
 	if got := p.client.DroppedUpdates(); got != 0 {
 		t.Fatalf("dropped %d", got)
