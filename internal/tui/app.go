@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,13 @@ type Config struct {
 	// the message a no-op anyway, so nothing depends on it there. runTUI is
 	// the one caller that reads ConfigTerminalTitle() into this.
 	TerminalTitle bool
+	// Background turns on the themed terminal background: while craze runs it
+	// sets the terminal's own default colours with OSC 11/10 and resets them
+	// with OSC 111/110 on the way out (§3.3). Like TerminalTitle it defaults
+	// false, so every test Config and the frame runner emit nothing at all.
+	// runTUI is the one caller that fills it, from ConfigBackground(),
+	// --no-background and the colour profile.
+	Background bool
 }
 
 // SessionIndex is the write half of internal/sessions.Store, as the TUI needs
@@ -377,6 +385,9 @@ type Model struct {
 	// on every tick. It also doubles as "a title was ever set": Run's exit
 	// clear checks it on the final model rather than carrying a second flag.
 	lastTitle string
+
+	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
+	term *terminalColors
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -487,6 +498,9 @@ func New(cfg Config) Model {
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
 		terminalTitle:   cfg.TerminalTitle,
+		// Discard until Run says otherwise: a model built by a test, by
+		// `craze frame` or by any direct caller writes no OSC at all.
+		term: newTerminalColors(io.Discard),
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
@@ -542,6 +556,12 @@ func Run(cfg Config) error {
 		// cell rather than per pixel, which is all the selection needs.
 		opts = append(opts, tea.WithMouseCellMotion())
 	}
+	if cfg.Background {
+		// Set once, before the first frame: the pair goes through the same
+		// lock bubbletea renders through, so it can never tear a frame.
+		m.term = newTerminalColors(out)
+		m.term.apply(m.theme)
+	}
 	p := tea.NewProgram(m, opts...)
 	final, err := p.Run()
 	var sess agent.Session
@@ -554,6 +574,12 @@ func Run(cfg Config) error {
 		// through the same writer bubbletea rendered into (§3.10).
 		clearWindowTitle(out, fm)
 	}
+	// Unconditional, and immediately after the title clear: the controller is
+	// a pointer m and fm share, reset is a no-op unless a set was written, and
+	// this also covers a final that is not a Model. p.Run returns on /exit, on
+	// SIGINT/SIGTERM and on a recovered panic, so the terminal gets its own
+	// colours back on every exit path — before sess.Close, which may block.
+	m.term.reset()
 	if sess == nil {
 		sess = m.sess
 	}

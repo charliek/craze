@@ -559,3 +559,21 @@ func TestSearchRowDoesNotRepeatTheQuery(t *testing.T) {
 		})
 	}
 }
+
+// hangingRows renders each row as one seg. A two-seg split would clamp
+// differently when the prefix alone fills the width — renderSegSpans consumes
+// the prefix, finds no room left and breaks before the text seg, so it
+// truncates without the ellipsis a single seg would have produced. craze never
+// draws a transcript narrower than minFrameCols, so no caller reaches this,
+// but hangingRows' seven call sites predate the styled variant and must keep
+// rendering exactly as they did.
+func TestHangingRowsClampsAcrossThePrefixBoundary(t *testing.T) {
+	st := styleFG(Preset("tokyo-night").Err)
+	rows := hangingRows("x", "error: ", "  ", 7, st)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d: %q", len(rows), rows)
+	}
+	if got := plain(rows[0]); got != "error:…" {
+		t.Fatalf("hangingRows clamped to %q, want %q", got, "error:…")
+	}
+}

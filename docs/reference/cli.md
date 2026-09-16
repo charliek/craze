@@ -23,6 +23,7 @@ flags; see [craze prompt](#craze-prompt).
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
+| `--no-background` | Keep the terminal's own background and text colours instead of the theme's. Same as `background = false` |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |

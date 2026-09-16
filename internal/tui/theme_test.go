@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -130,7 +131,9 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 		got, want  lipgloss.Color
 		derivation string
 	}{
-		{"User", dark.User, dark.Bright, "Bright"},
+		{"User", dark.User, dark.Teal, "Teal"},
+		{"UserMark", dark.UserMark, dark.Accent, "Accent"},
+		{"Heading", dark.Heading, dark.OK, "OK"},
 		{"Assistant", dark.Assistant, dark.FG, "FG"},
 		{"Thought", dark.Thought, dark.Dim, "Dim"},
 		{"ToolKind", dark.ToolKind, dark.Accent, "Accent"},
@@ -162,6 +165,89 @@ func TestPresetTableIsTheSpec(t *testing.T) {
 	// frame; Border itself is too dim to read as a frame.
 	if got, want := dark.Rule, blend("#24242f", "#c9c9d4", ruleMix); got != want || got == dark.Border {
 		t.Fatalf("Rule = %s, want Border blended %d%% towards FG (%s)", got, ruleMix, want)
+	}
+
+	// Every preset, not just craze-dark, has to keep these three slots apart:
+	// a heading that reads as inline code, a user mark that vanishes into its
+	// own text, or a user row indistinguishable from the assistant's would
+	// defeat the point of splitting the slots out.
+	for _, name := range ThemeNames() {
+		th := Preset(name)
+		if th.Heading == th.Accent {
+			t.Fatalf("%s: Heading must not equal Accent (inline code / spinner / chips)", name)
+		}
+		if th.UserMark == th.User {
+			t.Fatalf("%s: UserMark must not equal User", name)
+		}
+		if th.User == th.Assistant {
+			t.Fatalf("%s: User must not equal Assistant", name)
+		}
+	}
+}
+
+// TestUserRowGlyphAndTextColour pins §U1: the ❯ that opens a prompt row is
+// UserMark, and the prompt text beside it is bold User, not the old plain
+// Bright that read as body text.
+func TestUserRowGlyphAndTextColour(t *testing.T) {
+	m := themeModel(t, "craze-dark")
+	th := m.theme
+	m.addUser("hello")
+	m.refreshViewport()
+	want := styleFG(th.UserMark).Render("❯ ") + styleFG(th.User).Bold(true).Render("hello")
+	if !strings.Contains(m.View(), want) {
+		t.Fatalf("user row missing mark+text styling:\n%s", m.View())
+	}
+}
+
+// TestInterjectionRowGlyphAndTextColour is the same pairing for the ↳ mark an
+// interjection draws instead of ❯.
+func TestInterjectionRowGlyphAndTextColour(t *testing.T) {
+	m := themeModel(t, "craze-dark")
+	th := m.theme
+	m.addInterjection("hi there")
+	m.refreshViewport()
+	want := styleFG(th.UserMark).Render("↳ ") + styleFG(th.User).Bold(true).Render("hi there")
+	if !strings.Contains(m.View(), want) {
+		t.Fatalf("interjection row missing mark+text styling:\n%s", m.View())
+	}
+}
+
+// TestUserRowContinuationIsUnstyled pins the other half of §U1: a wrapped
+// user row's continuation indent carries no glyph, so it must not carry a
+// colour either — only the text after it does.
+func TestUserRowContinuationIsUnstyled(t *testing.T) {
+	m := themeModel(t, "craze-dark")
+	th := m.theme
+	text := strings.Repeat("a", 40) + " " + strings.Repeat("b", 40)
+	m.addUser(text)
+	m.refreshViewport()
+	wrapped := wrapProse(text, 80-2)
+	lines := strings.Split(wrapped, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("test text did not wrap onto a continuation row: %q", wrapped)
+	}
+	want := "  " + styleFG(th.User).Bold(true).Render(lines[1])
+	if !strings.Contains(m.View(), want) {
+		t.Fatalf("continuation row is not a plain indent plus styled text:\n%s", m.View())
+	}
+}
+
+// TestMarkdownHeadingAndInlineCodeColours pins §U1's other half: a heading
+// paints with Heading, not the Accent that inline code, the spinner and chips
+// also use, so the two no longer collide in one reply.
+func TestMarkdownHeadingAndInlineCodeColours(t *testing.T) {
+	m := themeModel(t, "craze-dark")
+	th := m.theme
+	m.appendStream(entryAssistant, "## Title\n\n`code`", time.Time{})
+	m.refreshViewport()
+	view := m.View()
+	wantHeading := lipgloss.NewStyle().Foreground(th.Heading).Bold(true).Render("Title")
+	if !strings.Contains(view, wantHeading) {
+		t.Fatalf("heading missing Heading colour:\n%s", view)
+	}
+	wantCode := styleFG(th.ToolKind).Render("code")
+	if !strings.Contains(view, wantCode) {
+		t.Fatalf("inline code missing ToolKind colour:\n%s", view)
 	}
 }
 
@@ -387,6 +473,31 @@ func TestCardClosesThePickerAndRevertsThePreview(t *testing.T) {
 	}
 	if m.theme.Name != "craze-dark" {
 		t.Fatalf("the preview should go back with the picker, got %q", m.theme.Name)
+	}
+}
+
+// TestComposerTextCarriesTheThemeForeground: bubbles leaves FocusedStyle.Text
+// an empty style and makes the blurred one an AdaptiveColor, so typed text
+// would have no foreground of its own — and a light theme on a dark terminal
+// would then paint the terminal's light default text on the theme's light
+// background. styleComposer names the colour, which makes OSC 10 a
+// synchronisation rather than a necessity (§3.3).
+func TestComposerTextCarriesTheThemeForeground(t *testing.T) {
+	for _, name := range []string{"craze-dark", "craze-light"} {
+		th := Preset(name)
+		ta := newComposer(th)
+		if got := ta.FocusedStyle.Text.GetForeground(); got != th.FG {
+			t.Fatalf("%s: focused composer text is %v, want FG %v", name, got, th.FG)
+		}
+		if got := ta.BlurredStyle.Text.GetForeground(); got != th.FG {
+			t.Fatalf("%s: blurred composer text is %v, want FG %v", name, got, th.FG)
+		}
+		// And a live re-theme moves it, since that is all styleComposer is for.
+		other := Preset("gruvbox")
+		styleComposer(&ta, other)
+		if got := ta.FocusedStyle.Text.GetForeground(); got != other.FG {
+			t.Fatalf("%s: a re-theme left the composer text at %v", name, got)
+		}
 	}
 }
 

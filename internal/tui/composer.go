@@ -88,10 +88,19 @@ func newComposer(th Theme) textarea.Model {
 func styleComposer(ta *textarea.Model, th Theme) {
 	prompt := lipgloss.NewStyle().Foreground(th.Accent)
 	placeholder := lipgloss.NewStyle().Foreground(th.Dim)
+	// bubbles leaves FocusedStyle.Text an empty style and makes the blurred
+	// one an AdaptiveColor, so typed text would carry no foreground of its
+	// own — and a light theme on a dark terminal would then show the
+	// terminal's light default text on the theme's light background. Naming
+	// the colour here makes OSC 10 synchronisation rather than a necessity
+	// (§3.3).
+	text := lipgloss.NewStyle().Foreground(th.FG)
 	ta.FocusedStyle.Prompt = prompt
 	ta.BlurredStyle.Prompt = prompt
 	ta.FocusedStyle.Placeholder = placeholder
 	ta.BlurredStyle.Placeholder = placeholder
+	ta.FocusedStyle.Text = text
+	ta.BlurredStyle.Text = text
 	if ta.Focused() {
 		_ = ta.Focus()
 	} else {
