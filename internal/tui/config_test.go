@@ -254,3 +254,35 @@ func TestConfigBackgroundTable(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigHostStatusTable is the whole of host_status's parsing rule (plan
+// 015 §3.5): only a literal `host_status = false` turns host reporting off, and
+// everything else — a missing file, an unparseable one, a missing key, a value
+// that is not a bool — reads as on, exactly as background does.
+func TestConfigHostStatusTable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"missing key", "theme = \"dark\"\n", true},
+		{"malformed file", "this is not toml [[[\n", true},
+		{"true", "host_status = true\n", true},
+		{"false", "host_status = false\n", false},
+		{"non-bool", "host_status = \"no\"\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if got := ConfigHostStatus(); got != tc.want {
+				t.Fatalf("ConfigHostStatus() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "nothing", "config.toml"))
+		if !ConfigHostStatus() {
+			t.Fatal("no config file at all should still report host status")
+		}
+	})
+}

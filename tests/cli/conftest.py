@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -42,3 +43,15 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CRAZE_PROVIDER", "")
     monkeypatch.setenv("CRAZE_CONFIG", str(tmp_path / "craze-config.toml"))
+    # craze reports its status to the terminal multiplexer it runs in (herdr,
+    # roost) whenever that host's variables say so -- and this suite is often
+    # run from inside one. Inherited, they would point a test craze at the
+    # developer's own live pane or tab. Every host variable goes; a test that
+    # wants a host sets exactly the ones it needs, aimed at its own fake socket.
+    for name in host_env_names(os.environ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def host_env_names(env: Mapping[str, str]) -> list[str]:
+    """Every herdr and roost variable in env: the hosts craze may report to."""
+    return [name for name in env if name.startswith(("HERDR_", "ROOST_"))]

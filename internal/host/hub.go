@@ -62,10 +62,13 @@ type HubOptions struct {
 }
 
 const (
-	defaultIdleDelay    = 250 * time.Millisecond
-	defaultSendTimeout  = 500 * time.Millisecond
-	defaultCloseTimeout = time.Second
+	defaultIdleDelay   = 250 * time.Millisecond
+	defaultSendTimeout = 500 * time.Millisecond
 )
+
+// DefaultCloseTimeout is Close's whole budget when HubOptions leaves it unset.
+// It is exported so the caller's own bound on Close is the same second.
+const DefaultCloseTimeout = time.Second
 
 // queueCap bounds each reporter's backlog. A reporter slower than the TUI's
 // transitions loses the least informative entries first (see push).
@@ -144,7 +147,7 @@ func NewHub(rs []Reporter, o HubOptions) *Hub {
 		o.SendTimeout = defaultSendTimeout
 	}
 	if o.CloseTimeout <= 0 {
-		o.CloseTimeout = defaultCloseTimeout
+		o.CloseTimeout = DefaultCloseTimeout
 	}
 	h := &Hub{opts: o, closeDone: make(chan struct{})}
 	h.base, h.cancel = context.WithCancel(context.Background())

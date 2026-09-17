@@ -55,7 +55,7 @@ func TestTUIKeepsTheAgentStderrOffTheTerminal(t *testing.T) {
 	t.Cleanup(func() { os.Stdin, os.Stdout, os.Stderr = prevIn, prevOut, prevErr })
 
 	done := make(chan error, 1)
-	go func() { done <- runTUI(nil, &tuiFlags{agentBin: bin, workspace: dir, force: true}) }()
+	go func() { done <- runTUI(nil, &tuiFlags{agentBin: bin, workspace: dir, force: true}, hostEnv{}) }()
 
 	if !tail.wait("\x1b[?1049h", 10*time.Second) {
 		t.Fatalf("craze never entered the alt screen; got %q", tail.text())

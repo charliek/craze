@@ -108,29 +108,32 @@ func SaveTheme(name string) error {
 // (§3.10), defaulting to true: only an explicit `terminal_title = false`
 // turns it off. A config craze cannot read defaults true rather than false —
 // a broken config file is not a reason to also lose the tab title.
-func ConfigTerminalTitle() bool {
-	cfg, err := readConfig()
-	if err != nil {
-		return true
-	}
-	on, ok := cfg["terminal_title"].(bool)
-	if !ok {
-		return true
-	}
-	return on
-}
+func ConfigTerminalTitle() bool { return configSwitch("terminal_title") }
 
 // ConfigBackground is whether craze may set the terminal's own default
 // background and text colours from the theme (§3.3), defaulting to true: only
 // an explicit `background = false` turns it off. A config craze cannot read
 // defaults true rather than false, exactly as the tab title does — a broken
 // config file is not a reason to also lose the themed background.
-func ConfigBackground() bool {
+func ConfigBackground() bool { return configSwitch("background") }
+
+// ConfigHostStatus is whether craze may report its status to the terminal
+// multiplexer it runs in (plan 015 §3.5), defaulting to true: only an explicit
+// `host_status = false` turns it off. A config craze cannot read defaults true
+// rather than false, exactly as the tab title and the themed background do.
+// The host's own environment is still the gate: this only ever turns reporting
+// off.
+func ConfigHostStatus() bool { return configSwitch("host_status") }
+
+// configSwitch reads a default-on bool key: only a literal `key = false` turns
+// it off, and a missing file, an unparseable one, a missing key or a value
+// that is not a bool all read as true.
+func configSwitch(key string) bool {
 	cfg, err := readConfig()
 	if err != nil {
 		return true
 	}
-	on, ok := cfg["background"].(bool)
+	on, ok := cfg[key].(bool)
 	if !ok {
 		return true
 	}

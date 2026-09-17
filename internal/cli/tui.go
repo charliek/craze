@@ -33,6 +33,10 @@ type tuiFlags struct {
 	// noBackground keeps the terminal's own background and text colours: the
 	// only override, since there is no --background to force it back on.
 	noBackground bool
+	// noHostStatus reports nothing to the terminal multiplexer craze runs in
+	// and leaves the agent child's environment whole. Like noBackground it
+	// only turns something off: the host's own environment turns it on.
+	noHostStatus bool
 	ask          bool
 	plan         bool
 	// cont and resume are --continue/-c and --resume/-r: load the newest
@@ -59,6 +63,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
 	cmd.Flags().BoolVar(&f.noBackground, "no-background", false, "keep the terminal's own background and text colours")
+	cmd.Flags().BoolVar(&f.noHostStatus, "no-host-status", false, "do not report session status to the terminal multiplexer (herdr)")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
 	cmd.Flags().BoolVarP(&f.cont, "continue", "c", false, "load the newest session in this workspace instead of starting a new one")
@@ -66,7 +71,10 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	registerProviderFlag(cmd, &f.provider)
 }
 
-func runTUI(cmd *cobra.Command, f *tuiFlags) error {
+// runTUI runs the TUI. env is the environment host status is read from:
+// processHostEnv() for the real command, and an empty hostEnv for a test, which
+// must never report into the herdr pane the test suite itself may be running in.
+func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	if f.ask && f.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")
 	}
@@ -120,8 +128,14 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 		// id and skip the picker — the same as an explicit --provider.
 		resolved.Locked = true
 	}
+	// The hosts this run reports to are settled once, before the build
+	// closure: sessionOptions strips each active host's hook gate from the
+	// agent child's environment, and resolveLoad may build a session before
+	// tui.Run ever starts. The hub itself is built later (plan 015 §3.5).
+	hosts := resolveHosts(f, env)
+	childEnv := hosts.childEnv(env.list())
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		return agent.New(sessionOptions(f, ws, mode, diag, p, row))
+		return agent.New(sessionOptions(f, ws, mode, diag, childEnv, p, row))
 	}
 	newSession := func(p agent.Provider) agent.Session { return build(p, sessions.Row{}) }
 	cfg := tui.Config{
@@ -152,6 +166,10 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 	if cfg.Session == nil && cfg.Resume == nil && resolved.Locked {
 		cfg.Session = newSession(resolved.Provider)
 	}
+	// Only after resolveLoad: a --continue with no row has returned above, so
+	// the hub's goroutines start only for a run that reaches tui.Run, whose
+	// exit tail closes the hub before diag is flushed.
+	attachHost(&cfg, hosts, diag)
 	err = tui.Run(cfg)
 	diag.flush(os.Stderr)
 	return err
@@ -162,7 +180,10 @@ func runTUI(cmd *cobra.Command, f *tuiFlags) error {
 // differ in three fields and agree in every other, so they are spelled once —
 // --ask/--plan/--model apply to a loaded session exactly as they do to a fresh
 // one, because Start orders them after the session is set up either way (§3.1).
-func sessionOptions(f *tuiFlags, ws, mode string, stderr io.Writer, p agent.Provider, row sessions.Row) agent.Options {
+//
+// env is the agent child's environment, hostSet.childEnv's answer: nil inherits
+// craze's own, and anything else replaces it wholesale.
+func sessionOptions(f *tuiFlags, ws, mode string, stderr io.Writer, env []string, p agent.Provider, row sessions.Row) agent.Options {
 	return agent.Options{
 		Binary:      f.agentBin,
 		Workspace:   ws,
@@ -170,6 +191,7 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr io.Writer, p agent.Prov
 		Model:       f.model,
 		Mode:        mode,
 		Stderr:      stderr,
+		Env:         env,
 		PluginDirs:  f.pluginDirs,
 		Interactive: true,
 		Provider:    &p,

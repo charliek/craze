@@ -68,11 +68,12 @@ const (
 // rejects attention=set with an empty body (plan 015 §3.1).
 const failedFallback = "turn failed"
 
-// messageCap is the widest Message a host is sent, in cells. metaCap is
-// herdr's token value cap, applied to Provider and Model.
+// MessageCap is the widest Message a host is sent, in cells. MetaCap is
+// herdr's token value cap, applied to Provider and Model. They are exported so
+// the TUI bounds what it puts in Input by the same numbers.
 const (
-	messageCap = 200
-	metaCap    = 80
+	MessageCap = 200
+	MetaCap    = 80
 )
 
 // Input is the TUI's state reduced to what the host status depends on. The
@@ -130,7 +131,7 @@ func Derive(in Input) (Status, bool) {
 		s.Detail = cardDetail(in.Card)
 	case in.Errored || in.StartFailed:
 		s.Kind = Failed
-		s.Message = capMessage(firstLine(in.Err))
+		s.Message = capMessage(FirstLine(in.Err))
 		if s.Message == "" {
 			s.Message = failedFallback
 		}
@@ -170,9 +171,9 @@ func cardDetail(c Card) string {
 	return ""
 }
 
-// firstLine is the first non-blank line of s, trimmed: an error's headline,
+// FirstLine is the first non-blank line of s, trimmed: an error's headline,
 // not a leading blank line and not the stack of detail under it.
-func firstLine(s string) string {
+func FirstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
@@ -184,9 +185,9 @@ func firstLine(s string) string {
 // before Input, but the bound is here as well so no caller can hand a host an
 // unbounded line.
 func capMessage(s string) string {
-	return ansi.Truncate(s, messageCap, "…")
+	return ansi.Truncate(s, MessageCap, "…")
 }
 
 func capMeta(s string) string {
-	return ansi.Truncate(strings.TrimSpace(s), metaCap, "…")
+	return ansi.Truncate(strings.TrimSpace(s), MetaCap, "…")
 }

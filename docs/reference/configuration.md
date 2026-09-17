@@ -107,6 +107,53 @@ write (see [Tab title](tui.md#tab-title)); the default — including when the
 key is absent or the file cannot be parsed — is `true`. `craze prompt` never
 sets a tab title, and `craze frame` has no terminal to write one to.
 
+## Host status
+
+Inside a herdr pane, craze reports its own state to herdr, so the pane's
+sidebar, `herdr agent list` and `herdr agent wait` treat it as an agent named
+`craze`: `idle` once the session is up and after each turn, `working` while a
+turn runs, and `blocked` while a permission, question or plan card is waiting
+on you — or when the session fails to start, or a turn ends in an error (until
+the next send). A blocked state carries a one-line reason, the card's header or
+the error's first line. The provider and model go along as the pane's
+`provider` and `model` metadata tokens. That is all craze sends: state, the
+reason and those two tokens, never conversation content. A `--continue` or
+`--resume` replay is not reported — herdr first hears from craze when the
+restored session is ready. `idle` reaches herdr a quarter of a second after the
+turn ends, so a message that drains from the queue the moment a turn ends
+never shows as idle in between.
+
+craze reports only when herdr's own variables say it is in a herdr pane:
+`HERDR_ENV=1`, with `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` both set. Every
+exit it can see — `/exit`, `Ctrl+D`, `Ctrl+C`, `SIGTERM` — clears the tokens
+and releases the pane before the agent is shut down, waiting at most a second
+for herdr to take it, so an agent slow to exit cannot hold the pane.
+`SIGKILL` gives craze no chance to, and leaves its last state on the pane
+until the pane closes. A socket craze cannot reach costs one
+`host status: herdr: …` line on stderr once the TUI has exited, and nothing
+else.
+
+**The agent loses `HERDR_ENV`.** While craze reports to herdr, the agent it
+spawns (cursor-agent, grok or gx) gets craze's environment without
+`HERDR_ENV`, the one variable herdr's agent integrations gate on. If a herdr
+cursor or grok hook fired inside craze's child, it would tie the pane to that
+agent's session, and herdr would silently ignore every report craze sends for
+the rest of the session. `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` and
+`HERDR_BIN_PATH` stay, so the `herdr` CLI still works from inside the agent.
+The cost is that herdr's agent skill, run inside the child, believes it is not
+inside herdr.
+
+`host_status = false` in `config.toml`, or `--no-host-status` on the command
+line, turns reporting off and leaves the agent's environment whole, so the
+agent's own herdr hooks work again. The default — including when the key is
+absent or the file cannot be parsed — is `true`; outside a herdr pane there is
+nothing to report to either way. `craze prompt` and `craze frame` never report.
+
+If craze runs in a herdr pane but herdr never shows it, run
+`herdr pane get <pane>`: an `agent_session` from another source (such as
+`herdr:cursor`) means an agent hook tied the pane to its own session, and
+herdr ignores craze's reports while it stands. A fresh pane has none.
+
 ## Terminal colours
 
 The theme is more than craze's own cells: while craze runs it sets the
@@ -175,6 +222,7 @@ the dialect.
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `gx`) |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
+| `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |
 
 If neither `--agent-bin` nor `CRAZE_AGENT_BIN` is set, Cursor looks for
 `cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only. gx looks

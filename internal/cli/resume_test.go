@@ -118,7 +118,7 @@ func runResolveLoad(t *testing.T, cwd string, argv ...string) (tui.Config, []age
 	}
 	var built []agent.Options
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		built = append(built, sessionOptions(f, cwd, "", io.Discard, p, row))
+		built = append(built, sessionOptions(f, cwd, "", io.Discard, nil, p, row))
 		return nil
 	}
 	return cfg, built, resolveLoad(cmd, f, cwd, &cfg, build)
@@ -140,7 +140,7 @@ func exitCode(t *testing.T, err error) (int, string) {
 func TestContinueAndResumeAreMutuallyExclusive(t *testing.T) {
 	indexHome(t)
 	_, f := parseTUIFlags(t, "--continue", "--resume")
-	code, msg := exitCode(t, runTUI(nil, f))
+	code, msg := exitCode(t, runTUI(nil, f, hostEnv{}))
 	if code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}

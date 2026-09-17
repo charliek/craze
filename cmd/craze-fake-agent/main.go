@@ -41,6 +41,10 @@ Flags:
                       arrival order
           markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
+          env         reply "envset: <names> :end" naming which of
+                      ROOST_AGENT_HOOK, ROOST_TAB_ID, HERDR_ENV and
+                      HERDR_PANE_ID are set in the agent's environment
+                      ("none" when none is)
           planmode    session/new in plan mode; replies planned/implementing
           planmode-card same, plus the cursor/create_plan card cursor sends
           effort      same as echo (session/new includes effort configOptions)
@@ -111,6 +115,7 @@ func main() {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
+		"env",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",

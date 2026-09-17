@@ -137,20 +137,20 @@ func TestDeriveTruncates(t *testing.T) {
 	wide := strings.Repeat("界", 150) // 300 cells
 
 	s, _ := Derive(Input{Ready: true, Errored: true, Err: long + "\nsecond line"})
-	check("error", s.Message, messageCap)
-	if ansi.StringWidth(s.Message) != messageCap {
+	check("error", s.Message, MessageCap)
+	if ansi.StringWidth(s.Message) != MessageCap {
 		t.Errorf("an ASCII error fills the cap exactly: %d cells", ansi.StringWidth(s.Message))
 	}
 	s, _ = Derive(Input{Ready: true, Errored: true, Err: wide})
-	check("wide error", s.Message, messageCap)
+	check("wide error", s.Message, MessageCap)
 	s, _ = Derive(Input{Ready: true, Card: PermissionCard, CardLabel: "permission " + long})
-	check("card label", s.Message, messageCap)
+	check("card label", s.Message, MessageCap)
 	s, _ = Derive(Input{Ready: true, Provider: "  " + long + "  ", Model: wide})
-	check("provider", s.Provider, metaCap)
-	check("model", s.Model, metaCap)
+	check("provider", s.Provider, MetaCap)
+	check("model", s.Model, MetaCap)
 
 	// Exactly at the cap is not truncated.
-	exact := strings.Repeat("y", messageCap)
+	exact := strings.Repeat("y", MessageCap)
 	if s, _ := Derive(Input{Ready: true, Errored: true, Err: exact}); s.Message != exact {
 		t.Errorf("a message at the cap was changed: %q", s.Message)
 	}

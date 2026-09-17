@@ -113,6 +113,12 @@ user's own keystroke, not the agent asking for something. The title updates
 the instant the state changes and is cleared on every exit, so the tab falls
 back to the terminal's own derived name rather than a stale `✦ craze`.
 
+Inside a herdr pane the same states also go to herdr itself: `blocked` for an
+open card or an error, `working` for a turn, `idle` otherwise — a replay is not
+reported — so herdr's sidebar and `herdr agent wait` follow craze like any
+other agent. See [Host status](configuration.md#host-status) for what is sent,
+what it changes in the agent's environment, and how to turn it off.
+
 `terminal_title = false` in `~/.craze/config.toml` turns every write off
 (default: on) — see [Configuration](configuration.md#terminal-tab-title).
 `craze prompt` and `craze frame` never set a tab title.
