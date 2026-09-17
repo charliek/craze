@@ -15,4 +15,4 @@ package version
 // The value below stays "dev" until the first release bumps it to
 // "0.0.1" — that bump is also how release.yml's version-check job proves
 // the release skill ran before the tag was pushed.
-var Version = "dev"
+var Version = "0.0.1"
