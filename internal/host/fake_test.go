@@ -32,10 +32,9 @@ type fakeRequest struct {
 // the peer sends one.
 type fakeReplyFunc func(conn net.Conn, connIdx int, req map[string]any, stop <-chan struct{})
 
-// fakeUDS is a host-agnostic fake UDS listener, reused by herdr's tests here
-// and by roost's (Commit 4), which needs the same one-line-per-request
-// framing but echoes ids and prepends "event" frames from its own reply
-// function.
+// fakeUDS is a host-agnostic fake UDS listener, shared by herdr's tests and
+// roost's, which need the same one-line-per-request framing; roost's reply
+// function echoes ids and may prepend "event" frames.
 type fakeUDS struct {
 	t      testing.TB
 	ln     net.Listener
@@ -55,11 +54,11 @@ type fakeUDS struct {
 	n      int
 }
 
-// newFakeUDS starts a fake UDS listener under a fresh temp dir and stops it,
-// closing every connection it ever accepted, at test cleanup. The socket
-// path is asserted short: macOS's sun_path is 104 bytes, and t.TempDir()
-// paths routinely exceed that, so os.MkdirTemp("", ...) is used instead.
-func newFakeUDS(t *testing.T, reply fakeReplyFunc) *fakeUDS {
+// shortSocketPath is a unix socket path, not yet bound, in a fresh temp dir
+// removed at test cleanup. The path is asserted short: macOS's sun_path is 104
+// bytes, and t.TempDir() paths routinely exceed that, so os.MkdirTemp("", ...)
+// is used instead.
+func shortSocketPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "h")
 	if err != nil {
@@ -71,7 +70,14 @@ func newFakeUDS(t *testing.T, reply fakeReplyFunc) *fakeUDS {
 	if len(socket) >= 100 {
 		t.Fatalf("fake socket path %d bytes, want < 100 (macOS sun_path is 104): %s", len(socket), socket)
 	}
+	return socket
+}
 
+// newFakeUDS starts a fake UDS listener on a shortSocketPath and stops it,
+// closing every connection it ever accepted, at test cleanup.
+func newFakeUDS(t *testing.T, reply fakeReplyFunc) *fakeUDS {
+	t.Helper()
+	socket := shortSocketPath(t)
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
@@ -144,6 +150,13 @@ func (s *fakeUDS) requests() []fakeRequest {
 	return append([]fakeRequest(nil), s.reqs...)
 }
 
+// connections is how many connections have been accepted, lines or not.
+func (s *fakeUDS) connections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
 // close stops accepting, closes every connection it knows about (and any
 // accepted-but-not-yet-registered one, via the closed flag acceptLoop
 // checks), then joins the accept loop and every handler goroutine: nothing
@@ -180,7 +193,7 @@ func okReply(id string) map[string]any {
 	return map[string]any{"id": id, "result": map[string]any{"type": "ok"}}
 }
 
-// errReply is herdr's (and roost's) error shape for id.
+// errReply is herdr's error shape for id.
 func errReply(id string, code int, msg string) map[string]any {
 	return map[string]any{"id": id, "error": map[string]any{"code": code, "message": msg}}
 }

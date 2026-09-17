@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -42,6 +43,24 @@ func herdrGate(t *testing.T) map[string]string {
 		"HERDR_SOCKET_PATH": filepath.Join(t.TempDir(), "no-herdr.sock"),
 		"HERDR_PANE_ID":     "w9:p9",
 	}
+}
+
+// roostGate is roost's hook gate, met, against a socket nothing listens on,
+// plus the hook command variable craze strips from the agent child.
+func roostGate(t *testing.T) map[string]string {
+	return map[string]string{
+		"ROOST_SOCKET":     filepath.Join(t.TempDir(), "no-roost.sock"),
+		"ROOST_TAB_ID":     "7",
+		"ROOST_AGENT_HOOK": "/opt/roost/roostctl",
+	}
+}
+
+func merged(ms ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range ms {
+		maps.Copy(out, m)
+	}
+	return out
 }
 
 func withoutKey(m map[string]string, key string) map[string]string {
@@ -84,6 +103,95 @@ func TestHostChildEnvStripsTheHerdrGate(t *testing.T) {
 
 	if got := (hostSet{}).childEnv(environ); got != nil {
 		t.Fatalf("no host active must inherit (nil Env), got %q", got)
+	}
+}
+
+// TestHostChildEnvStripsTheRoostGate is the roost half of plan 015 §3.4's
+// child env strip: with roost active the child loses exactly ROOST_AGENT_HOOK,
+// the command roost's installed hooks run, and keeps the tab id and socket a
+// roostctl run by the agent itself needs — and ROOST_AGENT_HOOKS_FORCE, a
+// different roost variable that merely shares the prefix. With both hosts
+// active both gates go; with neither the child inherits (nil).
+func TestHostChildEnvStripsTheRoostGate(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin:/bin",
+		"ROOST_AGENT_HOOK=/opt/roost/roostctl",
+		"ROOST_AGENT_HOOKS_FORCE=1",
+		"ROOST_TAB_ID=7",
+		"ROOST_SOCKET=/tmp/roost.sock",
+		"HERDR_ENV=1",
+		"HERDR_PANE_ID=w4:p22",
+		"NOTE=ROOST_AGENT_HOOK=x",
+	}
+	orig := slices.Clone(environ)
+	drop := func(gone ...string) []string {
+		return slices.DeleteFunc(slices.Clone(environ), func(kv string) bool {
+			k, _, _ := strings.Cut(kv, "=")
+			return slices.Contains(gone, k)
+		})
+	}
+
+	roost := hostSet{roost: &host.Roost{}}
+	if got, want := roost.childEnv(environ), drop("ROOST_AGENT_HOOK"); !slices.Equal(got, want) {
+		t.Fatalf("roost active, child env:\n got %q\nwant %q", got, want)
+	}
+	both := hostSet{herdr: &host.Herdr{}, roost: &host.Roost{}}
+	if got, want := both.childEnv(environ), drop("ROOST_AGENT_HOOK", "HERDR_ENV"); !slices.Equal(got, want) {
+		t.Fatalf("both active, child env:\n got %q\nwant %q", got, want)
+	}
+	if got := (hostSet{}).childEnv(environ); got != nil {
+		t.Fatalf("no host active must inherit (nil Env), got %q", got)
+	}
+	if !slices.Equal(environ, orig) {
+		t.Fatalf("the caller's environ was modified: %q", environ)
+	}
+}
+
+// TestResolveHostsRoostGate: roost is active with ROOST_SOCKET set and
+// ROOST_TAB_ID a positive int64 (the edge cases are host's own test), whatever
+// herdr's gate says, and never when --no-host-status or `host_status = false`
+// turned reporting off.
+func TestResolveHostsRoostGate(t *testing.T) {
+	roost, herdr := roostGate(t), herdrGate(t)
+	cases := []struct {
+		name              string
+		argv              []string
+		config            string
+		vars              map[string]string
+		wantRoost, wantHd bool
+	}{
+		{"roost gate met", nil, "", roost, true, false},
+		{"ROOST_SOCKET unset", nil, "", withoutKey(roost, "ROOST_SOCKET"), false, false},
+		{"ROOST_TAB_ID unset", nil, "", withoutKey(roost, "ROOST_TAB_ID"), false, false},
+		{"ROOST_TAB_ID zero", nil, "", merged(roost, map[string]string{"ROOST_TAB_ID": "0"}), false, false},
+		{"ROOST_AGENT_HOOK is not part of the gate", nil, "", withoutKey(roost, "ROOST_AGENT_HOOK"), true, false},
+		{"both gates met", nil, "", merged(roost, herdr), true, true},
+		{"both, --no-host-status", []string{"--no-host-status"}, "", merged(roost, herdr), false, false},
+		{"both, host_status = false", nil, "host_status = false\n", merged(roost, herdr), false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			indexHome(t)
+			if tc.config != "" {
+				if err := os.WriteFile(os.Getenv("CRAZE_CONFIG"), []byte(tc.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, f := parseTUIFlags(t, tc.argv...)
+			s := resolveHosts(f, fakeHostEnv(tc.vars))
+			if (s.roost != nil) != tc.wantRoost || (s.herdr != nil) != tc.wantHd {
+				t.Fatalf("roost active = %v, herdr active = %v; want %v, %v", s.roost != nil, s.herdr != nil, tc.wantRoost, tc.wantHd)
+			}
+			want := 0
+			for _, on := range []bool{tc.wantRoost, tc.wantHd} {
+				if on {
+					want++
+				}
+			}
+			if len(s.reporters()) != want {
+				t.Fatalf("reporters %d, want %d", len(s.reporters()), want)
+			}
+		})
 	}
 }
 
@@ -134,7 +242,7 @@ func TestResolveHostsGates(t *testing.T) {
 // --no-host-status turned a met gate off — and is a hub when herdr's gate is
 // met. The child env the same run would spawn with agrees with it.
 func TestAttachHostBuildsAHubOnlyForAnActiveHost(t *testing.T) {
-	gate := herdrGate(t)
+	gate, roost := herdrGate(t), roostGate(t)
 	cases := []struct {
 		name string
 		argv []string
@@ -144,6 +252,9 @@ func TestAttachHostBuildsAHubOnlyForAnActiveHost(t *testing.T) {
 		{"no host", nil, nil, false},
 		{"--no-host-status", []string{"--no-host-status"}, gate, false},
 		{"herdr gate met", nil, gate, true},
+		{"roost gate met", nil, roost, true},
+		{"both gates met", nil, merged(gate, roost), true},
+		{"both, --no-host-status", []string{"--no-host-status"}, merged(gate, roost), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,11 +279,22 @@ func TestAttachHostBuildsAHubOnlyForAnActiveHost(t *testing.T) {
 
 			childEnv := hosts.childEnv(env.list())
 			opts := sessionOptions(f, t.TempDir(), "", io.Discard, childEnv, agent.CursorProvider(), sessions.Row{})
-			switch {
-			case !tc.want && opts.Env != nil:
-				t.Fatalf("no host active, but the child env is replaced: %q", opts.Env)
-			case tc.want && (opts.Env == nil || slices.Contains(opts.Env, "HERDR_ENV=1") || !slices.Contains(opts.Env, "HERDR_PANE_ID=w9:p9")):
-				t.Fatalf("herdr active, child env %q", opts.Env)
+			if !tc.want {
+				if opts.Env != nil {
+					t.Fatalf("no host active, but the child env is replaced: %q", opts.Env)
+				}
+				return
+			}
+			// Every variable the run was given reaches the child, less exactly
+			// the active hosts' hook gates.
+			for k, v := range tc.vars {
+				gated := k == "HERDR_ENV" || k == "ROOST_AGENT_HOOK"
+				if slices.Contains(opts.Env, k+"="+v) == gated {
+					t.Fatalf("child env %q: %s present = %v", opts.Env, k, !gated)
+				}
+			}
+			if !slices.Contains(opts.Env, "PATH=/usr/bin") {
+				t.Fatalf("child env %q lost PATH", opts.Env)
 			}
 		})
 	}

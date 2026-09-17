@@ -44,12 +44,19 @@ func (e hostEnv) list() []string {
 // reshaping of the callers. The zero value is "report to nobody".
 type hostSet struct {
 	herdr *host.Herdr
+	roost *host.Roost
 }
 
 // herdrHookGate is the one variable every herdr hook asset gates on (plan 015
 // §3.4). HERDR_SOCKET_PATH, HERDR_PANE_ID and HERDR_BIN_PATH are left alone, so
 // the plain herdr CLI still resolves the pane from inside the agent.
 const herdrHookGate = "HERDR_ENV"
+
+// roostHookGate is the one variable roost's installed agent hook commands gate
+// on: the path to the roostctl they run (plan 015 §3.4). ROOST_TAB_ID and
+// ROOST_SOCKET are left alone, so a roostctl the agent runs itself still
+// addresses the tab.
+const roostHookGate = "ROOST_AGENT_HOOK"
 
 // resolveHosts settles which hosts this run reports to: none when
 // `host_status = false` or --no-host-status turned reporting off, and
@@ -63,6 +70,9 @@ func resolveHosts(f *tuiFlags, env hostEnv) hostSet {
 	if h, ok := host.NewHerdrFromEnv(env.get); ok {
 		s.herdr = h
 	}
+	if r, ok := host.NewRoostFromEnv(env.get); ok {
+		s.roost = r
+	}
 	return s
 }
 
@@ -72,6 +82,9 @@ func (s hostSet) reporters() []host.Reporter {
 	if s.herdr != nil {
 		rs = append(rs, s.herdr)
 	}
+	if s.roost != nil {
+		rs = append(rs, s.roost)
+	}
 	return rs
 }
 
@@ -80,15 +93,20 @@ func (s hostSet) reporters() []host.Reporter {
 // environ less each active host's hook gate.
 //
 // The gate goes because the agent's own installed host hooks would otherwise
-// fire inside craze's child and fight craze for the pane: a herdr cursor or
-// grok hook stamps a session reference on the pane that silently disables
-// every craze report for the rest of the session (plan 015 §2.1). The cost is
-// that the child believes it is outside herdr; `host_status = false` is how a
-// user gets the child's own hooks back.
+// fire inside craze's child and fight craze for the pane or tab: a herdr cursor
+// or grok hook stamps a session reference on the pane that silently disables
+// every craze report for the rest of the session (plan 015 §2.1), and a roost
+// hook claims the tab as cursor or grok on the agent's session start. The cost
+// is that the child believes it is outside herdr, and roost's hooks are inert
+// inside it; `host_status = false` is how a user gets the child's own hooks
+// back.
 func (s hostSet) childEnv(environ []string) []string {
 	var strip []string
 	if s.herdr != nil {
 		strip = append(strip, herdrHookGate)
+	}
+	if s.roost != nil {
+		strip = append(strip, roostHookGate)
 	}
 	if len(strip) == 0 {
 		return nil

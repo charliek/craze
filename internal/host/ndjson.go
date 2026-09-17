@@ -24,9 +24,9 @@ const maxReplyLine = 16 << 20
 var errFrameTooLarge = errors.New("ndjson: reply frame exceeds the size cap")
 
 // roundTrip dials socket, writes req as one JSON line, then feeds reply lines
-// to accept until it reports done or an error. It is used by herdr directly
-// and will be used by roost (Commit 4), which skips "event" frames and
-// mismatched ids by asking accept for another line.
+// to accept until it reports done or an error. herdr accepts its one reply
+// line; roost skips "event" frames and mismatched ids by asking accept for
+// another line.
 //
 // The connection is bound to ctx: SetDeadline is set from ctx's deadline, if
 // any, and ctx.Done additionally closes the connection so a peer that accepts

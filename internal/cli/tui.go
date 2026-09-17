@@ -63,7 +63,7 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
 	cmd.Flags().BoolVar(&f.noBackground, "no-background", false, "keep the terminal's own background and text colours")
-	cmd.Flags().BoolVar(&f.noHostStatus, "no-host-status", false, "do not report session status to the terminal multiplexer (herdr)")
+	cmd.Flags().BoolVar(&f.noHostStatus, "no-host-status", false, "do not report session status to the terminal multiplexer (herdr, roost)")
 	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
 	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
 	cmd.Flags().BoolVarP(&f.cont, "continue", "c", false, "load the newest session in this workspace instead of starting a new one")
@@ -73,7 +73,8 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 
 // runTUI runs the TUI. env is the environment host status is read from:
 // processHostEnv() for the real command, and an empty hostEnv for a test, which
-// must never report into the herdr pane the test suite itself may be running in.
+// must never report into the herdr pane or roost tab the test suite itself may
+// be running in.
 func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	if f.ask && f.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")

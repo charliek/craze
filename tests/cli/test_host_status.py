@@ -1,10 +1,10 @@
-"""craze reporting its status to herdr (plan 015 §3.3, §3.7).
+"""craze reporting its status to herdr and roost (plan 015 §3.3, §3.4, §3.7).
 
-A thread serves a unix socket the way herdr's control socket answers: one
+A thread serves a unix socket the way each host's control socket answers: one
 newline-delimited JSON request per connection, one reply line. The tests point
-craze's herdr variables at that socket -- never at a real herdr; conftest strips
-every inherited HERDR_*/ROOST_* variable first -- and assert on the decoded
-lines in the order they arrived.
+craze's host variables at that socket -- never at a real herdr or roost;
+conftest strips every inherited HERDR_*/ROOST_* variable first -- and assert on
+the decoded lines in the order they arrived.
 """
 
 from __future__ import annotations
@@ -14,12 +14,13 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from test_tui import _ANSI, PTYCraze, _wait_fake_gone
@@ -28,20 +29,25 @@ PANE = "w9:p42"
 SOURCE = "custom:craze"
 AGENT = "craze"
 
+TAB = "7"
+# The fake agent's one session id: roost's ownership is (source, session id).
+FAKE_SESSION = "fake-session-1"
+
 # Generous: the macOS CI leg is slow, and every wait below ends as soon as its
 # condition holds.
 WAIT = 20.0
 LONG_WAIT = 45.0
 
 
-class FakeHerdr:
-    """A herdr control socket that records every request and answers ok.
+class _FakeHostSocket:
+    """A host control socket that records every request and answers it.
 
-    Connections are served one at a time, which is how craze's herdr reporter
-    sends -- one worker, one dial per request, each waiting for its reply -- so
-    the recorded order is the order craze wrote. The directory comes from
+    Connections are served one at a time, which is how craze's reporters send
+    -- one worker per host, one dial per request, each waiting for its reply --
+    so the recorded order is the order craze wrote. The directory comes from
     mkdtemp under /tmp because a unix socket path is capped at 104 bytes on
-    macOS, and pytest's tmp_path there is longer than that.
+    macOS, and pytest's tmp_path there is longer than that. A subclass says
+    what the host's variables are and what it answers.
     """
 
     def __init__(self) -> None:
@@ -63,15 +69,8 @@ class FakeHerdr:
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
-    def env(self, **overrides: str | None) -> dict[str, str]:
-        """herdr's gate, met against this socket; None drops a variable."""
-        env: dict[str, str | None] = {
-            "HERDR_ENV": "1",
-            "HERDR_SOCKET_PATH": self.path,
-            "HERDR_PANE_ID": PANE,
-        }
-        env.update(overrides)
-        return {k: v for k, v in env.items() if v is not None}
+    def reply(self, request: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
 
     def _serve(self) -> None:
         while not self._stop.is_set():
@@ -110,7 +109,7 @@ class FakeHerdr:
             self.lines.append(obj)
             self.arrivals.append(time.monotonic())
             self._cond.notify_all()
-        reply = {"id": obj.get("id"), "result": {"type": "ok"}}
+        reply = self.reply(obj)
         try:
             conn.sendall(json.dumps(reply).encode() + b"\n")
         except OSError:
@@ -134,11 +133,52 @@ class FakeHerdr:
         self._thread.join(timeout=5)
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def __enter__(self) -> FakeHerdr:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+class FakeHerdr(_FakeHostSocket):
+    """herdr's control socket: every request is answered ok."""
+
+    def env(self, **overrides: str | None) -> dict[str, str]:
+        """herdr's gate, met against this socket; None drops a variable."""
+        env: dict[str, str | None] = {
+            "HERDR_ENV": "1",
+            "HERDR_SOCKET_PATH": self.path,
+            "HERDR_PANE_ID": PANE,
+        }
+        env.update(overrides)
+        return {k: v for k, v in env.items() if v is not None}
+
+    def reply(self, request: dict[str, Any]) -> dict[str, Any]:
+        return {"id": request.get("id"), "result": {"type": "ok"}}
+
+
+class FakeRoost(_FakeHostSocket):
+    """roost's tab socket: every tab.agent_report is accepted.
+
+    The reply is roost's shape (tests/ipc-vectors/tab.agent_report.response.json
+    in roost), with the ownership the report asked for echoed back.
+    """
+
+    def env(self) -> dict[str, str]:
+        """What a roost tab's shell has: the gate, met against this socket,
+        and the hook command variable craze must keep from its agent."""
+        return {
+            "ROOST_SOCKET": self.path,
+            "ROOST_TAB_ID": TAB,
+            "ROOST_AGENT_HOOK": "/nonexistent/roostctl",
+        }
+
+    def reply(self, request: dict[str, Any]) -> dict[str, Any]:
+        params = request.get("params") or {}
+        tab: dict[str, Any] = {"id": TAB, "state": "none"}
+        if params.get("ownership_action") != "release":
+            tab["ownership"] = {"source": "craze", "session_id": params.get("session_id")}
+        return {"id": request.get("id"), "ok": True, "result": {"accepted": True, "tab": tab}}
 
 
 def states(lines: list[dict[str, Any]]) -> list[str]:
@@ -194,9 +234,10 @@ def seq_of(line: dict[str, Any]) -> int:
     return seq
 
 
-def assert_framing(herdr: FakeHerdr) -> None:
+def assert_framing(host: _FakeHostSocket) -> None:
     """One JSON object per connection, ending in exactly one newline."""
-    for raw in herdr.raw:
+    assert host.connections == len(host.raw), (host.connections, host.raw)
+    for raw in host.raw:
         assert raw.endswith(b"\n") and raw.count(b"\n") == 1, raw
 
 
@@ -488,3 +529,332 @@ def test_herdr_child_env_loses_the_hook_gate(
             quit_craze(tui)
         _wait_fake_gone(fake_agent_bin)
         assert herdr.connections == 0 and herdr.snapshot() == [], herdr.snapshot()
+
+
+# --- roost ---------------------------------------------------------------------
+
+# Every params field roost-session 0.0.19 accepts, as its unknown-field error
+# lists them. roost denies unknown fields, so a line carrying anything else --
+# lifecycle_if, which newer roost added -- is rejected whole.
+_ROOST_019_PARAMS = {
+    "tab_id",
+    "source",
+    "session_id",
+    "ownership_action",
+    "lifecycle",
+    "attention",
+    "severity",
+    "title",
+    "body",
+    "detail",
+    "metadata",
+}
+
+
+def roost_line(line_id: str, action: str, **params: Any) -> dict[str, Any]:
+    """One whole tab.agent_report request, for the fake agent's session."""
+    return {
+        "id": line_id,
+        "op": "tab.agent_report",
+        "params": {
+            "tab_id": TAB,
+            "source": "craze",
+            "session_id": FAKE_SESSION,
+            "ownership_action": action,
+            **params,
+        },
+    }
+
+
+def lifecycles(lines: list[dict[str, Any]]) -> list[str | None]:
+    """Each line's lifecycle, None for a line that leaves it unchanged."""
+    return [ln["params"].get("lifecycle") for ln in lines]
+
+
+def actions(lines: list[dict[str, Any]]) -> list[str]:
+    return [ln["params"]["ownership_action"] for ln in lines]
+
+
+def _has_claim(lines: list[dict[str, Any]]) -> bool:
+    return actions(lines)[:1] == ["claim"]
+
+
+def assert_roost_wire(lines: list[dict[str, Any]]) -> None:
+    """String-wrapped int64 ids, never decreasing (a claim and the state line
+    that follows it in one report share the report's seq), and no params field
+    roost-session 0.0.19 would reject."""
+    ids = [ln["id"] for ln in lines]
+    assert all(isinstance(i, str) and i.isdigit() for i in ids), ids
+    assert [int(i) for i in ids] == sorted(int(i) for i in ids), ids
+    for ln in lines:
+        assert set(ln["params"]) <= _ROOST_019_PARAMS, ln
+
+
+def craze_version(craze_bin: Path) -> str:
+    out = subprocess.run(
+        [str(craze_bin), "version"], capture_output=True, text=True, check=True, timeout=WAIT
+    )
+    return out.stdout.strip()
+
+
+def test_roost_echo_turn_sequence(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """R1: a plain turn is exactly claim, working, finished, release.
+
+    The claim carries the model, craze's provider and craze's version; the
+    turn's end raises roost's "Turn complete" banner.
+    """
+    version = craze_version(craze_bin)
+    assert version, "craze version printed nothing"
+    with FakeRoost() as roost, PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, env_extra=roost.env()
+    ) as tui:
+        tui.wait_contains("cursor", timeout=WAIT)
+        roost.wait_for(_has_claim, "the claim")
+        tui.write(b"hello\r")
+        tui.wait_contains("echo: hello", timeout=WAIT)
+        roost.wait_for(lambda ls: lifecycles(ls)[-1:] == ["finished"], "the finished line")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+    lines = roost.snapshot()
+    assert len(lines) == 4, lines
+    ids = [ln["id"] for ln in lines]
+    assert_roost_wire(lines)
+    assert len(set(ids)) == 4, ids
+    assert lines == [
+        roost_line(
+            ids[0],
+            "claim",
+            lifecycle="inactive",
+            attention="clear",
+            detail="session_start",
+            metadata={"model": "default", "craze.provider": "cursor", "version": version},
+        ),
+        roost_line(ids[1], "preserve", lifecycle="working", attention="clear", detail="prompt"),
+        roost_line(
+            ids[2],
+            "preserve",
+            lifecycle="finished",
+            attention="set",
+            severity="info",
+            title="craze",
+            body="Turn complete",
+            detail="stop",
+        ),
+        roost_line(ids[3], "release", lifecycle="inactive", attention="clear", detail="session_end"),
+    ]
+    assert_framing(roost)
+
+
+def test_roost_permission_card_waits(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """R2: a permission card is waiting/warn, with the card's header as the body."""
+    with FakeRoost() as roost, PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="permission",
+        extra_args=["--no-force"],
+        env_extra=roost.env(),
+    ) as tui:
+        tui.wait_contains("cursor", timeout=WAIT)
+        roost.wait_for(_has_claim, "the claim")
+        tui.write(b"run it\r")
+        tui.wait_contains("[a]llow", timeout=WAIT)
+        roost.wait_for(lambda ls: "waiting" in lifecycles(ls), "waiting")
+        tui.write(b"a")
+        tui.wait_contains("decision:opt-once", timeout=WAIT)
+        roost.wait_for(
+            lambda ls: lifecycles(ls) == ["inactive", "working", "waiting", "working", "finished"],
+            "working then finished after the answer",
+        )
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+    lines = roost.snapshot()
+    assert lifecycles(lines) == ["inactive", "working", "waiting", "working", "finished", "inactive"]
+    assert actions(lines) == ["claim", "preserve", "preserve", "preserve", "preserve", "release"]
+    assert_roost_wire(lines)
+    waiting = lines[2]
+    body = waiting["params"].get("body")
+    assert isinstance(body, str) and body.startswith("permission "), waiting
+    assert waiting == roost_line(
+        waiting["id"],
+        "preserve",
+        lifecycle="waiting",
+        attention="set",
+        severity="warn",
+        title="craze",
+        body=body,
+        detail="permission_prompt",
+    )
+
+
+def test_roost_failed_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """R2: a turn that ends in an error is failed/error, the error's first line
+    as the body."""
+    with FakeRoost() as roost, PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, script="turnfail", env_extra=roost.env()
+    ) as tui:
+        tui.wait_contains("cursor", timeout=WAIT)
+        roost.wait_for(_has_claim, "the claim")
+        tui.write(b"boom\r")
+        tui.wait_contains("the turn failed", timeout=WAIT)
+        roost.wait_for(lambda ls: "failed" in lifecycles(ls), "the failed line")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+    lines = roost.snapshot()
+    assert lifecycles(lines) == ["inactive", "working", "failed", "inactive"], lines
+    assert_roost_wire(lines)
+    failed = lines[2]
+    assert failed == roost_line(
+        failed["id"],
+        "preserve",
+        lifecycle="failed",
+        attention="set",
+        severity="error",
+        title="craze",
+        body="json-rpc error -32000: the turn failed",
+        detail="error",
+    )
+
+
+def test_roost_cancelled_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """R2: Esc on a running turn is finished with attention cleared: no banner
+    for a turn the user stopped themselves."""
+    with FakeRoost() as roost, PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, script="hang", env_extra=roost.env()
+    ) as tui:
+        tui.wait_contains("cursor", timeout=WAIT)
+        roost.wait_for(_has_claim, "the claim")
+        tui.write(b"wait for it\r")
+        roost.wait_for(lambda ls: "working" in lifecycles(ls), "the working line")
+        tui.write(b"\x1b")
+        roost.wait_for(lambda ls: "finished" in lifecycles(ls), "the finished line")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+    lines = roost.snapshot()
+    assert lifecycles(lines) == ["inactive", "working", "finished", "inactive"], lines
+    assert_roost_wire(lines)
+    finished = lines[2]
+    assert finished == roost_line(
+        finished["id"],
+        "preserve",
+        lifecycle="finished",
+        attention="clear",
+        detail="cancelled",
+    )
+
+
+def test_roost_queue_drain_has_no_finished_between_turns(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """D5: a queued message drained after a turn never reaches roost as finished.
+
+    Same shape as the herdr case: the second turn is a second long, so a
+    finished line between the two would outlive the hub's idle debounce.
+    """
+    with FakeRoost() as roost, PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        step="2s,500ms",
+        env_extra=roost.env(),
+    ) as tui:
+        tui.wait_contains("cursor", timeout=WAIT)
+        roost.wait_for(_has_claim, "the claim")
+        tui.write(b"go the long way\r")
+        tui.wait_contains("Working", timeout=WAIT)
+        tui.write(b"Reply with MANGO\r")
+        tui.wait_contains("#1 Reply with MANGO", timeout=WAIT)
+        mark = tui.mark()
+        tui.wait_contains_since("❯ Reply with MANGO", mark, timeout=LONG_WAIT)
+        drained = time.monotonic()
+        roost.wait_for(
+            lambda ls: _finished_after(roost, ls, drained),
+            "the finished line after the drained turn",
+            timeout=LONG_WAIT,
+        )
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+    lines = roost.snapshot()
+    assert lifecycles(lines) == ["inactive", "working", "finished", "inactive"], lines
+    assert_roost_wire(lines)
+
+
+def _finished_after(roost: FakeRoost, lines: list[dict[str, Any]], after: float) -> bool:
+    """The newest line is a finished one that arrived after the given moment.
+
+    Called under the server's lock, from wait_for, so lines and arrivals agree.
+    """
+    return bool(lines) and lifecycles(lines)[-1] == "finished" and roost.arrivals[-1] > after
+
+
+def test_roost_sigterm_still_releases(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """SIGTERM is an exit like any other, and the roost tab is released."""
+    with FakeRoost() as roost:
+        with PTYCraze(craze_bin, fake_agent_bin, tmp_path, env_extra=roost.env()) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            roost.wait_for(_has_claim, "the claim")
+            tui.close()
+            # close() escalates to SIGKILL after 2 s; a SIGTERM exit is not that.
+            assert tui.proc.returncode != -9, tui.screen()[-3000:]
+        _wait_fake_gone(fake_agent_bin)
+        lines = roost.snapshot()
+
+    assert actions(lines) == ["claim", "release"], lines
+    assert_roost_wire(lines)
+    assert int(lines[1]["id"]) > int(lines[0]["id"]), lines
+    assert lines[1] == roost_line(
+        lines[1]["id"], "release", lifecycle="inactive", attention="clear", detail="session_end"
+    )
+
+
+def test_child_env_loses_both_hook_gates(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """R4 and H5 together: reporting to both hosts, the agent child has neither
+    ROOST_AGENT_HOOK nor HERDR_ENV, and keeps ROOST_TAB_ID and HERDR_PANE_ID.
+
+    With --no-host-status all four reach the child, and neither socket hears
+    anything.
+    """
+    with FakeHerdr() as herdr, FakeRoost() as roost:
+        env = {**herdr.env(), **roost.env()}
+        with PTYCraze(craze_bin, fake_agent_bin, tmp_path, script="env", env_extra=env) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            herdr.wait_for(_has_ready_idle, "the ready idle")
+            roost.wait_for(_has_claim, "the claim")
+            assert _child_env_names(tui) == {"ROOST_TAB_ID", "HERDR_PANE_ID"}
+            quit_craze(tui)
+        _wait_fake_gone(fake_agent_bin)
+        assert herdr.snapshot() and roost.snapshot(), "both gates were met, so craze reported"
+
+    with FakeHerdr() as herdr, FakeRoost() as roost:
+        env = {**herdr.env(), **roost.env()}
+        with PTYCraze(
+            craze_bin,
+            fake_agent_bin,
+            tmp_path,
+            script="env",
+            extra_args=["--no-host-status"],
+            env_extra=env,
+        ) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            assert _child_env_names(tui) == {
+                "ROOST_AGENT_HOOK",
+                "ROOST_TAB_ID",
+                "HERDR_ENV",
+                "HERDR_PANE_ID",
+            }
+            quit_craze(tui)
+        _wait_fake_gone(fake_agent_bin)
+        assert herdr.connections == 0 and herdr.snapshot() == [], herdr.snapshot()
+        assert roost.connections == 0 and roost.snapshot() == [], roost.snapshot()

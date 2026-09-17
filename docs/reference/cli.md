@@ -24,7 +24,7 @@ flags; see [craze prompt](#craze-prompt).
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
 | `--no-background` | Keep the terminal's own background and text colours instead of the theme's. Same as `background = false` |
-| `--no-host-status` | Report nothing to the herdr pane craze runs in, and leave the agent's environment whole. Same as `host_status = false`. See [Host status](configuration.md#host-status) |
+| `--no-host-status` | Report nothing to the herdr pane or roost tab craze runs in, and leave the agent's environment whole. Same as `host_status = false`. See [Host status](configuration.md#host-status) |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--ask` | Set session mode to ask after `session/new` |
 | `--plan` | Set session mode to plan after `session/new` |

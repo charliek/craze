@@ -109,50 +109,89 @@ sets a tab title, and `craze frame` has no terminal to write one to.
 
 ## Host status
 
-Inside a herdr pane, craze reports its own state to herdr, so the pane's
-sidebar, `herdr agent list` and `herdr agent wait` treat it as an agent named
+Inside a herdr pane or a roost tab, craze reports its own state to that host,
+which then tracks craze like any other agent. That is all craze sends: its
+state, a one-line reason (a card's header or an error's first line), and the
+provider and model, never conversation content. A `--continue` or `--resume`
+replay is not reported — the host first hears from craze when the restored
+session is ready. The end of a turn reaches the host a quarter of a second after
+the turn ends, so a message that drains from the queue the moment a turn ends
+never shows as a finished turn in between.
+
+Every exit craze can see — `/exit`, `Ctrl+D`, `Ctrl+C`, `SIGTERM` — releases the
+pane or tab before the agent is shut down, waiting at most a second for the host
+to take it, so an agent slow to exit cannot hold it. `SIGKILL` gives craze no
+chance to, and leaves its last state in place until the pane or tab closes. A
+socket craze cannot reach costs one `host status: herdr: …` or
+`host status: roost: …` line on stderr once the TUI has exited, and nothing
+else.
+
+### herdr
+
+The pane's sidebar, `herdr agent list` and `herdr agent wait` see an agent named
 `craze`: `idle` once the session is up and after each turn, `working` while a
 turn runs, and `blocked` while a permission, question or plan card is waiting
 on you — or when the session fails to start, or a turn ends in an error (until
-the next send). A blocked state carries a one-line reason, the card's header or
-the error's first line. The provider and model go along as the pane's
-`provider` and `model` metadata tokens. That is all craze sends: state, the
-reason and those two tokens, never conversation content. A `--continue` or
-`--resume` replay is not reported — herdr first hears from craze when the
-restored session is ready. `idle` reaches herdr a quarter of a second after the
-turn ends, so a message that drains from the queue the moment a turn ends
-never shows as idle in between.
+the next send). A blocked state carries the one-line reason. The provider and
+model go along as the pane's `provider` and `model` metadata tokens, which
+craze clears when it releases the pane.
 
 craze reports only when herdr's own variables say it is in a herdr pane:
-`HERDR_ENV=1`, with `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` both set. Every
-exit it can see — `/exit`, `Ctrl+D`, `Ctrl+C`, `SIGTERM` — clears the tokens
-and releases the pane before the agent is shut down, waiting at most a second
-for herdr to take it, so an agent slow to exit cannot hold the pane.
-`SIGKILL` gives craze no chance to, and leaves its last state on the pane
-until the pane closes. A socket craze cannot reach costs one
-`host status: herdr: …` line on stderr once the TUI has exited, and nothing
-else.
-
-**The agent loses `HERDR_ENV`.** While craze reports to herdr, the agent it
-spawns (cursor-agent, grok or gx) gets craze's environment without
-`HERDR_ENV`, the one variable herdr's agent integrations gate on. If a herdr
-cursor or grok hook fired inside craze's child, it would tie the pane to that
-agent's session, and herdr would silently ignore every report craze sends for
-the rest of the session. `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` and
-`HERDR_BIN_PATH` stay, so the `herdr` CLI still works from inside the agent.
-The cost is that herdr's agent skill, run inside the child, believes it is not
-inside herdr.
-
-`host_status = false` in `config.toml`, or `--no-host-status` on the command
-line, turns reporting off and leaves the agent's environment whole, so the
-agent's own herdr hooks work again. The default — including when the key is
-absent or the file cannot be parsed — is `true`; outside a herdr pane there is
-nothing to report to either way. `craze prompt` and `craze frame` never report.
+`HERDR_ENV=1`, with `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` both set.
 
 If craze runs in a herdr pane but herdr never shows it, run
 `herdr pane get <pane>`: an `agent_session` from another source (such as
 `herdr:cursor`) means an agent hook tied the pane to its own session, and
 herdr ignores craze's reports while it stands. A fresh pane has none.
+
+### roost
+
+craze claims the tab under the source `craze` when its agent session starts,
+and the tab shows it the way it shows any agent: no agent state while the
+session sits ready, `running` while a turn runs, `needs input` with a
+notification while a permission, question or plan card is waiting on you, and
+`failed` with a notification when a turn ends in an error (until the next
+send); both notifications carry the one-line reason. A turn that ends normally
+leaves the tab idle with a "Turn complete" notification; a turn you cancel
+leaves it idle with none. `roostctl wait --state` sees the same states, a failed
+turn as `needs_input`. The claim carries the `model`, `craze.provider` and
+`version` metadata keys. A session that never starts has no session id to claim
+the tab with, so roost hears nothing about it.
+
+craze reports only when roost's own variables say it is in a roost tab:
+`ROOST_SOCKET` set, and `ROOST_TAB_ID` a positive integer with nothing around
+it — the same rule roost's own hooks apply.
+
+`roostctl tab set-state` on craze's tab wins. roost drops every report craze
+sends for that session from then on, craze never claims the tab back for it,
+and one `host status: roost: …` line on stderr after exit names the tab's
+owner. craze's next session — a new one in the same run, or the next run —
+claims the tab again. `set-state none` is different: it leaves the tab with no
+owner at all, which craze cannot tell from a restarted roost, so craze claims
+the tab back when it next reports after finding it unowned.
+
+### The agent's environment
+
+**The agent loses each host's hook gate.** While craze reports to a host, the
+agent it spawns (cursor-agent, grok or gx) gets craze's environment without the
+one variable that host's agent integrations gate on: `HERDR_ENV` for herdr,
+`ROOST_AGENT_HOOK` for roost. Otherwise a herdr or roost cursor or grok hook
+installed on this machine would fire inside craze's child and take the pane or
+tab from craze: herdr's would tie the pane to the agent's own session, and
+herdr would silently ignore every report craze sends for the rest of the
+session; roost's would claim the tab as `cursor` or `grok`. Everything else
+stays — `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` and `HERDR_BIN_PATH`, and
+`ROOST_TAB_ID` and `ROOST_SOCKET` — so the `herdr` CLI and `roostctl` still
+work from inside the agent. The cost is that herdr's agent skill, run inside
+the child, believes it is not inside herdr, and roost's own agent hooks do
+nothing inside the child.
+
+`host_status = false` in `config.toml`, or `--no-host-status` on the command
+line, turns reporting to both hosts off and leaves the agent's environment
+whole, so the agent's own herdr and roost hooks work again. The default —
+including when the key is absent or the file cannot be parsed — is `true`;
+outside a herdr pane or roost tab there is nothing to report to either way.
+`craze prompt` and `craze frame` never report.
 
 ## Terminal colours
 
@@ -223,6 +262,7 @@ the dialect.
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |
+| `ROOST_SOCKET`, `ROOST_TAB_ID` | Read, never set. `ROOST_SOCKET` set with a positive integer `ROOST_TAB_ID` means craze is in a roost tab and reports [host status](#host-status) to it; `ROOST_AGENT_HOOK` is then removed from the agent's environment |
 
 If neither `--agent-bin` nor `CRAZE_AGENT_BIN` is set, Cursor looks for
 `cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only. gx looks

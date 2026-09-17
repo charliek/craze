@@ -475,6 +475,10 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.callOrder(msg.ID, text)
 	case "env":
 		s.envReport(msg.ID)
+	case "turnfail":
+		// The session is up, so this is an error mid-session: the turn's
+		// ending is the error, with no stop reason at all.
+		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "the turn failed"})
 	default:
 		s.echo(msg.ID, text)
 	}

@@ -113,11 +113,14 @@ user's own keystroke, not the agent asking for something. The title updates
 the instant the state changes and is cleared on every exit, so the tab falls
 back to the terminal's own derived name rather than a stale `✦ craze`.
 
-Inside a herdr pane the same states also go to herdr itself: `blocked` for an
-open card or an error, `working` for a turn, `idle` otherwise — a replay is not
-reported — so herdr's sidebar and `herdr agent wait` follow craze like any
-other agent. See [Host status](configuration.md#host-status) for what is sent,
-what it changes in the agent's environment, and how to turn it off.
+Inside a herdr pane or a roost tab the same states also go to the host itself,
+so its sidebar and its wait command follow craze like any other agent. herdr
+sees `blocked` for an open card or an error, `working` for a turn and `idle`
+otherwise; roost shows `needs input` for an open card, `failed` for an error,
+`running` for a turn, and a "Turn complete" notification when a turn ends. A
+replay is not reported. See [Host status](configuration.md#host-status) for
+what is sent, what it changes in the agent's environment, and how to turn it
+off.
 
 `terminal_title = false` in `~/.craze/config.toml` turns every write off
 (default: on) — see [Configuration](configuration.md#terminal-tab-title).

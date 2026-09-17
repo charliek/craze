@@ -6,8 +6,6 @@ import (
 	"errors"
 	"maps"
 	"net"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -461,12 +459,7 @@ func TestHerdrAcceptNeverReplyHonoursDeadline(t *testing.T) {
 // it. Negative control checked: asserting zero Warn lines failed as
 // expected, then was reverted.
 func TestHerdrAbsentSocketWarnsOnce(t *testing.T) {
-	dir, err := os.MkdirTemp("", "h")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s") // nothing listening
+	socket := shortSocketPath(t) // nothing listening
 
 	h := &Herdr{socket: socket, pane: "w1:p1"}
 	g := newRig(t, nil, h)

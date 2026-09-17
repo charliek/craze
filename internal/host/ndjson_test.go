@@ -98,7 +98,7 @@ func TestRoundTripReadsSplitReply(t *testing.T) {
 }
 
 // TestRoundTripAcceptAsksForMoreLines: accept can decline a line and read
-// another on the same connection — the mechanism roost (Commit 4) uses to
+// another on the same connection — the mechanism roost uses to
 // skip "event" frames and mismatched ids. Negative control checked: making
 // accept report done=true on the first line made the test assert on the
 // event frame's own body and fail, confirming the second call really reads

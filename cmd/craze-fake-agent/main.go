@@ -53,6 +53,8 @@ Flags:
           plan        emit cursor/create_plan then finish the turn
           hang        do not finish the prompt until session/cancel
           authfail    initialize ok, authenticate error
+          turnfail    a normal session whose session/prompt fails with a
+                      JSON-RPC error (-32000 "the turn failed")
           noauth      initialize with empty authMethods; reject authenticate
           grok-echo   grok initialize/auth; echo; x.ai/session/prompt_complete
           grok-ask    x.ai/ask_user_question then complete
@@ -115,7 +117,7 @@ func main() {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
-		"env",
+		"env", "turnfail",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",

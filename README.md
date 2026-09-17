@@ -200,9 +200,9 @@ terminal's own default background and text colours to the theme's and
 restores them when it exits; `background = false` in `~/.craze/config.toml`,
 or `--no-background`, leaves your terminal's colours alone.
 
-Inside a herdr pane, craze also reports its state — idle, working, or blocked
-on a card or an error — to herdr, which shows it like any other agent's.
-`host_status = false`, or `--no-host-status`, turns that off.
+Inside a herdr pane or a roost tab, craze also reports its state — idle,
+working, or blocked on a card or an error — to the host, which shows it like
+any other agent's. `host_status = false`, or `--no-host-status`, turns that off.
 
 `Ctrl+G` or `/theme` opens a names-only picker that repaints the live screen as
 the cursor moves; `Enter` keeps the theme and saves it, `Esc` puts back the one
