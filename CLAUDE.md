@@ -13,7 +13,7 @@ proof of concept. Multi-project harness integration is later work.
 Run before every commit:
 
 ```shell
-make lint && make test && make build
+make lint && make test && make test-race && make build
 ```
 
 Once `tests/cli/pyproject.toml` exists, also run `make test-cli` (and CI will).

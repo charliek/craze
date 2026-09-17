@@ -62,11 +62,10 @@ jobs:
       # mean the same thing: with no flag `go test` uses its own 10m default, so
       # a run that passes under `make test` could die on a CI panic dump.
       - run: go test -timeout 5m -v ./...
-      # The three packages with concurrency worth the 10x slowdown: the ACP
-      # client's reader and writer goroutines, the session's event fan-out, and
-      # the TUI's clipboard seams and leaked command goroutines. Unconditional —
+      # The Makefile owns the package list and the reasoning; calling the target
+      # keeps this step and the local gate from drifting apart. Unconditional —
       # a race check that silently skips itself is worse than none.
-      - run: go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/tui
+      - run: make test-race
 
   lint:
     runs-on: ubuntu-latest
