@@ -262,7 +262,8 @@ the dialect.
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |
-| `ROOST_SOCKET`, `ROOST_TAB_ID` | Read, never set. `ROOST_SOCKET` set with a positive integer `ROOST_TAB_ID` means craze is in a roost tab and reports [host status](#host-status) to it; `ROOST_AGENT_HOOK` is then removed from the agent's environment |
+| `ROOST_SOCKET`, `ROOST_TAB_ID` | Read, never set. `ROOST_SOCKET` set with a positive integer `ROOST_TAB_ID` means craze is in a roost tab and reports [host status](#host-status) to it |
+| `ROOST_AGENT_HOOK` | Never read, never set by craze; plays no part in detecting roost. While craze reports [host status](#host-status) to roost, it is removed from the agent child's environment, so roost's own agent hooks stay inert inside craze's agent |
 
 If neither `--agent-bin` nor `CRAZE_AGENT_BIN` is set, Cursor looks for
 `cursor-agent`, then `agent`, on `PATH`. Grok looks for `grok` only. gx looks

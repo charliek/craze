@@ -404,11 +404,16 @@ func TestHerdrReplyNonOkResultType(t *testing.T) {
 // trailing newline is not accepted. Negative control checked: asserting
 // err == nil failed as expected, then was reverted.
 func TestHerdrCloseWithoutNewline(t *testing.T) {
+	// This reply function runs on a fake-server handler goroutine, never the
+	// test goroutine, so a failure here uses Errorf (recorded, not fatal)
+	// followed by an explicit return rather than Fatalf/FailNow, which must
+	// only be called from the test's own goroutine.
 	srv := newFakeUDS(t, func(conn net.Conn, _ int, req map[string]any, _ <-chan struct{}) {
 		id, _ := req["id"].(string)
 		b, err := json.Marshal(okReply(id))
 		if err != nil {
-			t.Fatalf("marshal: %v", err)
+			t.Errorf("marshal: %v", err)
+			return
 		}
 		if _, err := conn.Write(b); err != nil {
 			t.Logf("write: %v", err)
@@ -550,5 +555,60 @@ func TestHerdrHubReleaseIsLastUnderCloseRace(t *testing.T) {
 	}
 	if metaWithValues[0] > 1 {
 		t.Fatalf("a metadata-with-values line appeared after the held state line: %v", methods)
+	}
+}
+
+// TestHerdrReleaseKeepsHalfBudgetForReleaseLine: Release must not let a stuck
+// pane.report_metadata (the nulls call) starve pane.release_agent of ctx's
+// budget — a pane stays sticky without the release line, so it matters more.
+// The fake here never answers report_metadata but answers release_agent
+// immediately, and ctx's own deadline (200ms) is well under
+// herdrMetadataTimeout (300ms): the fixed 300ms bound this test
+// negative-controls against would let the nulls call ride out ctx's *entire*
+// remaining time (ctx's own deadline is the tighter of the two), leaving
+// release_agent nothing to run on and ctx already expired before it is even
+// dialled. The fix bounds the nulls call to half of what ctx has left
+// instead, so release always keeps a share — here, about 100ms, comfortably
+// enough for an instant local reply.
+//
+// Negative control checked: temporarily reverting nullsBudget's use back to
+// the fixed herdrMetadataTimeout bound made this test fail as expected
+// (release_agent never appears in the recorded methods, since ctx was
+// already expired by the time Release tried to dial it), then the fix was
+// restored.
+func TestHerdrReleaseKeepsHalfBudgetForReleaseLine(t *testing.T) {
+	// This reply function runs on a fake-server handler goroutine, never the
+	// test goroutine: it never calls Fatal, only blocks or replies.
+	srv := newFakeUDS(t, func(conn net.Conn, _ int, req map[string]any, stop <-chan struct{}) {
+		method, _ := req["method"].(string)
+		id, _ := req["id"].(string)
+		if method == "pane.report_metadata" {
+			<-stop // never reply: forces the nulls call to spend its whole budget
+			return
+		}
+		writeLine(t, conn, okReply(id))
+	})
+	h := &Herdr{socket: srv.socket, pane: "w1:p1", metadataAttempted: true}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := h.Release(ctx, 1)
+	if err == nil {
+		t.Fatal("want an error: the metadata nulls call never got a reply")
+	}
+
+	// Structure, not timing: release_agent must have been dialled and
+	// answered even though the nulls call ate into ctx's budget first.
+	methods := requestMethods(t, srv)
+	if !slices.Equal(methods, []string{"pane.report_metadata", "pane.release_agent"}) {
+		t.Fatalf("want both lines attempted, release_agent always given a share of ctx: got %v", methods)
+	}
+
+	// Exactly one error, the metadata one: a release error would show up as
+	// its own line in errors.Join's message.
+	lines := strings.Split(err.Error(), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "metadata:") {
+		t.Fatalf("want exactly one error, the metadata one (release_agent must have been answered ok): got %q", err)
 	}
 }

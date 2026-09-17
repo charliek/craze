@@ -208,13 +208,30 @@ func (h *Herdr) Report(ctx context.Context, s Status, seq uint64) error {
 	return nil
 }
 
+// nullsBudget bounds the nulls report_metadata call inside Release. It is the
+// smaller of herdrMetadataTimeout and half of ctx's remaining time, so that
+// pane.release_agent — the line that matters more, since a pane stays sticky
+// without it — always keeps at least half of whatever budget ctx has left.
+// When ctx has no deadline, herdrMetadataTimeout applies unchanged.
+func nullsBudget(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return herdrMetadataTimeout
+	}
+	half := time.Until(deadline) / 2
+	if half < herdrMetadataTimeout {
+		return half
+	}
+	return herdrMetadataTimeout
+}
+
 // Release nulls out any metadata this reporter ever sent, then always sends
 // pane.release_agent as the final write (plan 015 §3.3): a nulls failure
 // does not skip the release.
 func (h *Herdr) Release(ctx context.Context, seq uint64) error {
 	var errs []error
 	if h.metadataAttempted {
-		mctx, cancel := context.WithTimeout(ctx, herdrMetadataTimeout)
+		mctx, cancel := context.WithTimeout(ctx, nullsBudget(ctx))
 		err := h.call(mctx, fmt.Sprintf("craze:%d:metadata", seq), "pane.report_metadata", herdrMetadataParams{
 			PaneID: h.pane,
 			Source: herdrSource,

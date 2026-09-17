@@ -61,21 +61,28 @@ func TestRoundTripRejectsOversizedReply(t *testing.T) {
 // the other order (second half first) made the JSON invalid and the test
 // fail on decode, confirming the assembled bytes are actually asserted.
 func TestRoundTripReadsSplitReply(t *testing.T) {
+	// This reply function runs on a fake-server handler goroutine, never the
+	// test goroutine, so a failure here uses Errorf (recorded, not fatal)
+	// followed by an explicit return rather than Fatalf/FailNow, which must
+	// only be called from the test's own goroutine.
 	srv := newFakeUDS(t, func(conn net.Conn, _ int, req map[string]any, _ <-chan struct{}) {
 		id, _ := req["id"].(string)
 		full, err := json.Marshal(okReply(id))
 		if err != nil {
-			t.Fatalf("marshal: %v", err)
+			t.Errorf("marshal: %v", err)
+			return
 		}
 		// Several short writes, not one: proves readBoundedLine accumulates
 		// ReadSlice chunks rather than assuming one Read yields one line.
 		for _, b := range [][]byte{full[:3], full[3:7], full[7:]} {
 			if _, err := conn.Write(b); err != nil {
-				t.Fatalf("write chunk: %v", err)
+				t.Errorf("write chunk: %v", err)
+				return
 			}
 		}
 		if _, err := conn.Write([]byte("\n")); err != nil {
-			t.Fatalf("write newline: %v", err)
+			t.Errorf("write newline: %v", err)
+			return
 		}
 	})
 

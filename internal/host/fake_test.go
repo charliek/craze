@@ -176,11 +176,18 @@ func (s *fakeUDS) close() {
 
 // writeLine JSON-encodes v and writes it to conn as one NDJSON line. Test
 // reply functions use it for the ordinary canned-reply case.
+//
+// It runs on a fake-server handler goroutine, never the test goroutine, so a
+// failure here uses Errorf (recorded, not fatal) followed by an explicit
+// return: FailNow (which Fatalf calls) is only safe from the test's own
+// goroutine, and ending just this handler still surfaces the failure once the
+// test goroutine reaches its own t.Fatal/t.Errorf checks or the run ends.
 func writeLine(t testing.TB, conn net.Conn, v any) {
 	t.Helper()
 	b, err := json.Marshal(v)
 	if err != nil {
-		t.Fatalf("marshal fake reply: %v", err)
+		t.Errorf("marshal fake reply: %v", err)
+		return
 	}
 	b = append(b, '\n')
 	if _, err := conn.Write(b); err != nil {
