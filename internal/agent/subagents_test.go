@@ -932,7 +932,7 @@ func TestSubagentSnapshotRace(t *testing.T) {
 			Kind: acp.SubagentFinished, SubagentID: id, ChildSessionID: id, Status: "completed", Output: "o",
 		})
 	}
-	wg.Wait()
+	waitDone(t, &wg)
 }
 
 func spawnNotif(id, desc string) acp.SubagentNotification {

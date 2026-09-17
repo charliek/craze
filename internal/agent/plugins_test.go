@@ -1097,6 +1097,6 @@ func TestPromptDuringCommandsUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(stop)
-	wg.Wait()
+	waitDone(t, &wg)
 	log.waitTexts(t, "echo: hi")
 }

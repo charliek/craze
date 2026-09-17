@@ -218,7 +218,7 @@ func TestSyncWriterSerialisesWrites(t *testing.T) {
 			}
 		}()
 	}
-	wg.Wait()
+	waitDone(t, &wg)
 	if sink.maxLive != 1 {
 		t.Fatalf("%d writers were inside the writer at once", sink.maxLive)
 	}
@@ -355,7 +355,7 @@ func TestClipboardSeamsAreGuarded(t *testing.T) {
 		restore()
 	}
 	close(stop)
-	wg.Wait()
+	waitDone(t, &wg)
 }
 
 // TestCtrlVPastesThroughTheSeam: bubbles binds ctrl+v to a command that calls
@@ -405,5 +405,22 @@ func TestFramePasteStaysInsideTheRecorder(t *testing.T) {
 		"<wait:idle>hi<enter><wait:text:echo: hi><wait:idle><ctrl-y><wait:copied><ctrl-v><wait:text:❯ echo: hi>")
 	if !strings.Contains(plain, "❯ echo: hi") {
 		t.Fatalf("the paste never reached the composer:\n%s", plain)
+	}
+}
+
+// waitDone waits for wg, but gives up rather than hanging. An unbounded Wait
+// on a WaitGroup a bug never satisfies blocks until the test binary's own
+// timeout fires, which kills every other test in the package and reports a
+// goroutine dump instead of a failure. The deadline is far longer than any of
+// these waits legitimately needs, so it only ever fires on a real bug -- and
+// then it names the test and the line.
+func waitDone(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the goroutines to finish")
 	}
 }

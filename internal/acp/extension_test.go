@@ -322,7 +322,7 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 		t.Fatalf("ids answered %v", seen)
 	}
 	close(release)
-	wg.Wait()
+	waitDone(t, &wg)
 	p.noReply(t)
 }
 
