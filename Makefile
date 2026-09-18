@@ -19,14 +19,15 @@ lint:
 test:
 	go test -timeout 5m -v ./...
 
-# The three packages with concurrency worth the 10x slowdown: the ACP client's
-# reader and writer goroutines, the session's event fan-out, and the TUI's
-# clipboard seams and leaked command goroutines. Packages run concurrently, so
-# the wall clock is about the slowest of them. CI runs this same target, so a
-# local pass and a CI pass mean the same thing; the two flakes that reached main
-# in 2026-09 only ever showed under -race.
+# The four packages with concurrency worth the 10x slowdown: the ACP client's
+# reader and writer goroutines, the session's event fan-out, the TUI's
+# clipboard seams and leaked command goroutines, and the host Hub's
+# per-reporter workers. Packages run concurrently, so the wall clock is about
+# the slowest of them. CI runs this same target, so a local pass and a CI pass
+# mean the same thing; the two flakes that reached main in 2026-09 only ever
+# showed under -race.
 test-race:
-	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/tui
+	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/host ./internal/tui
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

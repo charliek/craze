@@ -473,6 +473,12 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.planmodeCard(msg.ID, text, n)
 	case "callorder":
 		s.callOrder(msg.ID, text)
+	case "env":
+		s.envReport(msg.ID)
+	case "turnfail":
+		// The session is up, so this is an error mid-session: the turn's
+		// ending is the error, with no stop reason at all.
+		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "the turn failed"})
 	default:
 		s.echo(msg.ID, text)
 	}
@@ -510,6 +516,32 @@ func (s *server) echo(id json.RawMessage, text string) {
 	s.update(sid, acp.SessionUpdate{
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
+	})
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// hostEnvNames are the host hook gates and tab/pane ids the env script
+// reports on, in the order it names them. craze strips a host's hook gate from
+// the agent child's environment while it reports to that host (plan 015 §3.4),
+// and this is how a test in another process sees what the child was given.
+var hostEnvNames = []string{"ROOST_AGENT_HOOK", "ROOST_TAB_ID", "HERDR_ENV", "HERDR_PANE_ID"}
+
+// envReport answers with the names from hostEnvNames that are set — present,
+// even empty — in this process's environment, as one text chunk.
+func (s *server) envReport(id json.RawMessage) {
+	var set []string
+	for _, name := range hostEnvNames {
+		if _, ok := os.LookupEnv(name); ok {
+			set = append(set, name)
+		}
+	}
+	names := "none"
+	if len(set) > 0 {
+		names = strings.Join(set, " ")
+	}
+	s.update(s.mainID(), acp.SessionUpdate{
+		SessionUpdate: acp.UpdateAgentMessage,
+		Content:       &acp.ContentBlock{Type: "text", Text: "envset: " + names + " :end"},
 	})
 	s.finishPrompt(id, acp.StopEndTurn)
 }

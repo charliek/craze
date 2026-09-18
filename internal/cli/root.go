@@ -30,7 +30,7 @@ func NewRootCmd() *cobra.Command {
 			} else if !stdoutIsTTY() {
 				return usagef("craze: refusing to start TUI on a non-tty")
 			}
-			return runTUI(cmd, flags)
+			return runTUI(cmd, flags, processHostEnv())
 		},
 	}
 	cmd.SetVersionTemplate("{{.Version}}\n")

@@ -41,6 +41,10 @@ Flags:
                       arrival order
           markdown    a thought run, then one reply exercising markdown-lite
           title       session_info_update then echo
+          env         reply "envset: <names> :end" naming which of
+                      ROOST_AGENT_HOOK, ROOST_TAB_ID, HERDR_ENV and
+                      HERDR_PANE_ID are set in the agent's environment
+                      ("none" when none is)
           planmode    session/new in plan mode; replies planned/implementing
           planmode-card same, plus the cursor/create_plan card cursor sends
           effort      same as echo (session/new includes effort configOptions)
@@ -49,6 +53,8 @@ Flags:
           plan        emit cursor/create_plan then finish the turn
           hang        do not finish the prompt until session/cancel
           authfail    initialize ok, authenticate error
+          turnfail    a normal session whose session/prompt fails with a
+                      JSON-RPC error (-32000 "the turn failed")
           noauth      initialize with empty authMethods; reject authenticate
           grok-echo   grok initialize/auth; echo; x.ai/session/prompt_complete
           grok-ask    x.ai/ask_user_question then complete
@@ -111,6 +117,7 @@ func main() {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
 		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
+		"env", "turnfail",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",

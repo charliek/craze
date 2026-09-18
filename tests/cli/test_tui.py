@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from conftest import host_env_names
 
 
 def _open_pty() -> tuple[int, int]:
@@ -95,6 +96,13 @@ class PTYCraze:
         # real terminal does, and a real terminal has no CI in its environment,
         # so popping it is what makes a CI run behave like a developer's.
         env.pop("CI", None)
+        # Nor any herdr or roost variable: craze reports its status to the host
+        # those name, and this suite may be running inside a real one. conftest
+        # already strips them from os.environ; this holds for a PTYCraze built
+        # outside that fixture too. A host-status test passes its own in
+        # env_extra, which is applied after this.
+        for name in host_env_names(env):
+            del env[name]
         if step:
             env["CRAZE_FAKE_STEP"] = step
         env.update(env_extra or {})

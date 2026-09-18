@@ -111,6 +111,7 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	m.dialog = dialogNone
 	m.providerLocked = true
 	m.providerDefault = p
+	m.sessProvider = p.Name()
 	// The session about to be built is a load, so the model is replaying
 	// before its first event, exactly as Config.Loading makes it for
 	// --continue: tea.Batch promises no ordering between startCmd and the

@@ -74,6 +74,7 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	m.pickingProvider = false
 	m.dialog = dialogNone
 	m.pickedExplicit = explicit
+	m.sessProvider = p.Name()
 	if m.newSession != nil {
 		if m.sess != nil {
 			_ = m.sess.Close()

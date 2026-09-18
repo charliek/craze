@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -123,6 +124,12 @@ type Config struct {
 	// runTUI is the one caller that fills it, from ConfigBackground(),
 	// --no-background and the colour profile.
 	Background bool
+	// Host receives the derived host status (plan 015 §3.1) — what herdr
+	// shows for this pane. nil means nothing is reported, which is what every
+	// test Config, every golden and the frame runner get; internal/cli builds
+	// one only when a host's environment gate is met, and Run closes it on
+	// every exit path.
+	Host Host
 }
 
 // SessionIndex is the write half of internal/sessions.Store, as the TUI needs
@@ -130,6 +137,15 @@ type Config struct {
 // recorder and so the zero Config persists nothing.
 type SessionIndex interface {
 	Upsert(sessions.Row) error
+}
+
+// Host is the host-status hub as the TUI needs it: internal/host.Hub in
+// production, a recorder in a test. Publish must never block — the Update
+// wrapper calls it on the bubbletea goroutine — and Close is called once, from
+// Run's exit tail, before the session is closed.
+type Host interface {
+	Publish(host.Status)
+	Close(context.Context)
 }
 
 type Model struct {
@@ -388,6 +404,21 @@ type Model struct {
 
 	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
 	term *terminalColors
+
+	// host is Config.Host: nil means no host status is derived at all. The
+	// rest is what host.go reads into host.Input. lastHost is the last status
+	// handed to host, so the Update wrapper publishes on change alone, the
+	// way lastTitle does. cancelled says the last turn ended cancelled, by
+	// either ending; prompted says a prompt has been sent this session, so the
+	// idle a session comes up with is "ready" and not a turn that stopped (a
+	// flag of its own, not a reading of turnSeq, which starts at 1).
+	// sessProvider is the id of the provider the current session was built
+	// for — the resolved default, or the picker's or the resume row's choice.
+	host         Host
+	lastHost     host.Status
+	cancelled    bool
+	prompted     bool
+	sessProvider string
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -498,6 +529,8 @@ func New(cfg Config) Model {
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
 		terminalTitle:   cfg.TerminalTitle,
+		host:            cfg.Host,
+		sessProvider:    prov.Name(),
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
 		term: newTerminalColors(io.Discard),
@@ -564,6 +597,27 @@ func Run(cfg Config) error {
 	}
 	p := tea.NewProgram(m, opts...)
 	final, err := p.Run()
+	startErr := finishRun(out, final, m, cfg.Host)
+	if err != nil {
+		return err
+	}
+	// A quit is clean unless the session never started. Only startCmd's
+	// failure counts: an error mid-session leaves a usable craze, and quitting
+	// out of one is a normal exit.
+	return startErr
+}
+
+// finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
+// is cleared, the terminal's colours are reset, the host hub releases, and the
+// session closes. p.Run returns on /exit, on SIGINT/SIGTERM and on a recovered
+// panic, and every one of them lands here.
+//
+// final is whatever p.Run handed back, which on a recovered panic is not a
+// Model; m is the model Run started with. The hub arrives as its own argument
+// — Config.Host, never a field read through final — so the panic path still
+// releases the pane: herdr leaves a pane that was never released showing the
+// last state it was told. It returns the start failure final carries, if any.
+func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
 	var sess agent.Session
 	var startErr error
 	if fm, ok := final.(Model); ok {
@@ -576,22 +630,20 @@ func Run(cfg Config) error {
 	}
 	// Unconditional, and immediately after the title clear: the controller is
 	// a pointer m and fm share, reset is a no-op unless a set was written, and
-	// this also covers a final that is not a Model. p.Run returns on /exit, on
-	// SIGINT/SIGTERM and on a recovered panic, so the terminal gets its own
+	// this also covers a final that is not a Model. The terminal gets its own
 	// colours back on every exit path — before sess.Close, which may block.
 	m.term.reset()
+	// Before sess.Close for the same reason: the release is bounded, and the
+	// session's close is not. On a quit craze asked for, requestQuit has
+	// already done both in this order and the hub's Close is idempotent; on
+	// SIGTERM or a recovered panic this is the first and only release.
+	closeHost(h)
 	if sess == nil {
 		sess = m.sess
 	}
 	if sess != nil {
 		_ = sess.Close()
 	}
-	if err != nil {
-		return err
-	}
-	// A quit is clean unless the session never started. Only startCmd's
-	// failure counts: an error mid-session leaves a usable craze, and quitting
-	// out of one is a normal exit.
 	return startErr
 }
 
@@ -665,6 +717,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next.lastTitle = title
 			cmd = tea.Batch(cmd, tea.SetWindowTitle(title))
 		}
+	}
+	// The host status rides the same choke point for the same reason, and is
+	// handed to the hub on change alone, so a tick never reaches its lock
+	// (plan 015 §3.1).
+	if next.host != nil {
+		next.publishHost()
 	}
 	return next, cmd
 }
@@ -864,6 +922,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the row it already drew the same note — Esc leaves nothing else
 			// behind. No event of any kind is coming, so the stream ends here.
 			m.streamEndSeq = m.turnSeq
+			m.cancelled = true
 			m.addNote(stopCancelled)
 			return m.finishTurn()
 		}
@@ -1617,6 +1676,8 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	m.cardsCancelled = false
 	m.turnStart = m.now()
 	m.err = ""
+	m.cancelled = false
+	m.prompted = true
 	// The new turn's identity is the one thing that retires the last one: its
 	// evidence, its offer and the kill that retired it all belong to a number
 	// this turn no longer has.
@@ -1837,10 +1898,17 @@ type cancelFailedMsg struct {
 // requestQuit closes the session, which answers every card still queued with
 // its cancelled outcome on the way out. The queue is left alone: the model is
 // on its way out with it, and clearing it would only restart the tick chain.
+//
+// The host is released first, exactly as finishRun orders it (plan 015 §3.2):
+// sess.Close may block, and a pane that is never released stays showing
+// craze's last state. It also means the cancelled cards the close produces are
+// never reported, since a closed hub ignores Publish.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	sess := m.sess
+	h := m.host
 	return m, func() tea.Msg {
+		closeHost(h)
 		if sess != nil {
 			_ = sess.Close()
 		}
@@ -1982,6 +2050,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// Esc leaves nothing else behind: the spinner going away is the
 			// only other sign the cancel landed, and it is indistinguishable
 			// from the turn having finished on its own.
+			m.cancelled = true
 			m.addNote(stopCancelled)
 		}
 		// EventDone, not promptDoneMsg, is what orders the transcript, so it is
