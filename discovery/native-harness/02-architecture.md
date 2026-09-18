@@ -17,29 +17,39 @@ flowchart LR
   session --> native["native session (adapter)"]
   live --> acp["acp.Client → cursor / grok / gx"]
   native --> harness["internal/harness"]
-  harness --> fantasy["fantasy Agent.Stream"]
+  harness --> providers["model table + overlay → provider factory"]
+  providers --> fantasy["fantasy providers → finish-normalizing wrapper → Agent.Stream"]
   harness --> store["JSONL tree store"]
   harness --> tools["tool stack"]
-  fantasy --> providers["catwalk + overlay → provider factory"]
 ```
+
+H0 accepted Fantasy `v0.43.2`'s providers. Its streamed `Agent.Stream` loop
+dispatches and continues only when the finish reason is `tool-calls`, so a
+complete tool call reported as `stop` would be dropped. H0 never saw that
+live, and a small `LanguageModel` wrapper removes it, so H1 runs on
+`Agent.Stream` behind that wrapper (D-21). The turn runner sits behind the
+harness's own interface: a craze-owned `LanguageModel.Stream` loop remains an
+option if `PrepareStep` proves too narrow, not a prerequisite. The catalog is
+a small craze-owned model table rather than embedded Catwalk (D-22).
 
 ## Package split
 
 | package | owns | must not import |
 |---|---|---|
-| `internal/harness` | catalog, provider factory, turn runner, tools, permissions, store, compaction, prompt assembly, import command logic | `internal/agent`, `internal/tui`, `internal/acp` |
+| `internal/harness` | model table, Fantasy provider factory, finish-normalizing wrapper, turn runner, tools, permissions, store, compaction, prompt assembly, import command logic | `internal/agent`, `internal/tui`, `internal/acp` |
 | `internal/agent` (new file, e.g. `native.go`) | the adapter: `Provider` constructor for `native`, `Session` implementation that maps harness callbacks onto `Event`/`Snapshot` | — |
 | `internal/cli` | flag plumbing only (`--provider native`), the `import` subcommand entry | — |
 
 The rule that matters: **`internal/harness` knows nothing about craze
 types.** It exposes its own small event and request types. That is what
 keeps a later ACP server binary a wrapper rather than a rewrite, and what
-lets the harness be tested with a scripted fantasy `LanguageModel` instead
+lets the harness be tested with a scripted Fantasy `LanguageModel` instead
 of a fake agent process.
 
 ## The turn loop
 
-Copied from what opencode, grok, and pi all converged on:
+The loop follows the shape opencode, grok, and pi converged on, run through
+Fantasy's `Agent.Stream` the way crush does:
 
 1. **Re-read history from the store every iteration.** No in-memory
    conversation across steps. Queued messages, interject, resume, and
@@ -48,27 +58,37 @@ Copied from what opencode, grok, and pi all converged on:
    `06`), instruction files, skill catalog, then the message list from the
    store's leaf-to-root walk with the latest compaction applied.
 3. **Drain steering** (interject) into the message list at this safe point;
-   this is fantasy's `PrepareStep` hook.
+   this is Fantasy's `PrepareStep` hook, which H0 verified replaces history
+   without duplicating tool-call pairs.
 4. **Compact if needed** before sampling (`03`, `07`).
-5. **`Agent.Stream`** with callbacks: text delta → `EventText`, reasoning
-   delta → `EventThought`, tool input start/delta/end and tool call/result →
-   `EventTool` (merged by id), step finish → usage, stream finish → done.
-6. **Exit on parts, not finish reason.** Some providers return `stop` with
-   tool calls present. The turn ends when the last assistant step has no
-   unfinished tool calls and did not request more.
-7. **Guards**: three consecutive identical tool calls (name + input) raise a
-   doom-loop permission ask; a `length` stop with tool calls fails the calls
-   rather than executing truncated arguments (pi's rule, D-07).
-8. **Cancel**: context cancellation. In-flight tool calls are closed as
-   errored results marked interrupted so every tool call has a result on
+5. **`Agent.Stream`** with callbacks: text delta → text event, reasoning
+   delta → thought event, tool input start/delta/end and tool call/result →
+   tool event (merged by id), step finish → usage, stream finish → done.
+6. **Continue on parts, not finish reason.** The wrapper under the agent
+   rewrites a `stop` finish to `tool-calls` when the step carried complete
+   tool calls (Fantasy's providers already suppress truncated ones), and
+   turns an empty `stop` step with no content and no usage into an error:
+   that is how Meta reports reasoning that exhausted the output ceiling
+   (D-25). `length`, content-filter, and error finishes are left alone so
+   Fantasy keeps refusing to dispatch possibly truncated calls.
+7. **Guard execution**: three consecutive identical tool calls (name +
+   input) raise a doom-loop permission ask; a `length` stop with tool calls
+   fails the calls rather than executing possibly truncated arguments (D-07).
+8. **Cancel** through context cancellation. In-flight tool calls are closed
+   as errored results marked interrupted so every tool call has a result on
    replay. If the turn produced no output, the prompt is put back on the
    queue (grok's rewind).
-9. **Follow-ups**: after the turn, the TUI drains craze's own queue exactly
-   as it does for grok today; the harness does not drive the queue.
+9. **Drain follow-ups** after the turn through craze's existing queue. The
+   harness does not own the TUI queue.
+
+The wrapper is about 40 lines plus four fixture tests (the review follow-up
+in Plan 016's artifact directory has a working copy). H0 sized the
+alternative, a craze-owned direct-stream loop, at roughly 1.5–2.5 kLOC plus
+comparable fixtures.
 
 ## Tool stack
 
-Every tool is a fantasy `AgentTool` wrapped in this order, innermost first:
+Every tool is a Fantasy `AgentTool` wrapped in this order, innermost first:
 
 1. the tool itself (read, bash, edit, …)
 2. **kind metadata** — attaches grok's `x.ai/tool` vocabulary (kind,
@@ -79,9 +99,8 @@ Every tool is a fantasy `AgentTool` wrapped in this order, innermost first:
    entirely under `Force` (yolo)
 5. (later) hooks, MCP — same wrapper shape, not built now
 
-Modes filter which tools are active (`ActiveTools`) and add a prompt
-reminder; plan mode is additionally enforced in the dispatcher so it
-survives yolo (`05`).
+Modes filter which tools are active and add a prompt reminder; plan mode is
+additionally enforced in the dispatcher so it survives yolo (`05`).
 
 ## Home directory
 
@@ -104,10 +123,11 @@ unless `10-open-questions.md` Q1 is resolved otherwise.
 
 ## Testing pattern
 
-- **Unit**: a scripted `fantasy.LanguageModel` that returns canned text,
-  reasoning, and tool calls replaces `craze-fake-agent` for the native path.
-- **Wire**: fantasy's `charm.land/x/vcr` records live provider cassettes for
-  the few tests that must see real SSE.
+- **Unit**: a scripted Fantasy `LanguageModel` returns canned text,
+  reasoning, tool calls, finish reasons, usage, warnings, and in-band errors.
+- **Wire**: local canned server-sent events exercise Fantasy's released
+  provider normalization; a small reviewed cassette set may be added only
+  where a real provider shape cannot be represented locally.
 - **Golden**: the existing TUI frame and golden tests run against the native
   session with the scripted model.
 - **Live**: each phase ends with a tmux smoke on the mac-mini against real

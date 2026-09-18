@@ -1,7 +1,9 @@
 # 10 — Open questions
 
 Owner's calls, in the order the roadmap meets them. Resolve by adding a row
-to `08-decisions.md`.
+to `08-decisions.md`. H0 did not resolve Q4: the probe reproduced gx's
+configuration semantics only for evaluation, not as a production read/import
+decision.
 
 | # | question | default if unanswered | needed by |
 |---|---|---|---|

@@ -6,8 +6,8 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 
 | ID | status | one line |
 |---|---|---|
-| H0 | not started | spike: Go 1.27, fantasy, catwalk in; every gx model through a three-step tool loop; decisions recorded |
-| H1 | not started | skeleton: home dir + env override, catalog overlay, provider factory, re-read loop over the JSONL tree store, hidden native provider, effort option, cancel, interject |
+| H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
+| H1 | next | skeleton: home dir + env override, craze-owned model table + overlay, provider factory, wrapper + `Agent.Stream` turn runner over the JSONL tree store, hidden native provider, effort option, cancel, interject |
 | H2 | not started | tools: read, bash, edit, write, then ls, glob, grep; truncation wrapper; kind metadata; edit diffs; doom-loop guard; scripted-model test harness |
 | H3 | not started | permissions: once / always / reject-with-feedback, prefix table, dangerous list, per-workspace grants, Claude rule syntax, yolo |
 | H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
@@ -19,36 +19,76 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 ## Phase detail
 
 ### H0 — spike
-- Bump Go to 1.27 in `.mise.toml`, `go.mod`, CI, goreleaser; add fantasy and
-  catwalk.
-- Throwaway `main` under `/tmp` or a scratch branch: for each model in the
-  gx set, run a scripted three-step tool loop; record streaming tool-call
-  behaviour, effort field acceptance, image rejection, reasoning replay.
-- **Exit**: a table in `04` of pass/fail per model per quirk; D-01…D-05
-  confirmed or amended.
+
+Completed on 2026-09-18. The external Go 1.27 probe pinned released Fantasy
+`v0.43.2` and Catwalk `v0.52.43`; no unused root dependency was added.
+
+- The fixed 11-model Linux campaign ran through both a bounded public
+  `LanguageModel.Stream` driver and released `Agent.Stream`. Eight aliases
+  passed `S,S` in both modes, DeepSeek V4 Pro was rejected by Fireworks with
+  HTTP 404, and both Meta aliases exhausted their attempt caps (see the
+  review below for why).
+- A deterministic local fixture proved that the direct driver continues a
+  complete tool call reported with finish reason `stop`, while released
+  `Agent.Stream` ends after one request and does not dispatch it.
+- Catwalk required two demonstrated reasoning-contract corrections: Kimi K2.7
+  Code's false capability flag and MiniMax M3's unsupported effort
+  levels/default. It therefore crossed the no-go threshold.
+- gx reachability controls were not dispatched because gx exposes no
+  enforceable numeric output-token ceiling. Effort/replay and cancellation
+  variants ran; image variants were skipped because the approved live
+  manifest is text-only.
+- Four macOS provider representatives used the identical approved probe
+  manifest and only credentials already present on the mac-mini. Detailed
+  attempt sequences and platform limits are recorded in `11`.
+
+A review on 2026-09-18 re-ran what H0 could not explain (`04`, `11`):
+
+- The Meta failures were the probe's 512-token ceiling truncating reasoning,
+  which Meta reports as an empty `stop`. Both aliases then passed 13 of 13
+  released `Agent.Stream` loops.
+- The `stop`-with-tool-call hazard never appeared live, and a roughly 40-line
+  `LanguageModel` wrapper removes it.
+- DeepSeek V4 Pro's 404 was a stale wire id in gx's configuration.
+
+**Exit result:** Fantasy's provider layer fits; `Agent.Stream` fits behind the
+wrapper (D-21); the catalog is a craze-owned model table (D-22); the Go floor
+is 1.27.0 with toolchain 1.27.1, landed separately (D-23); ten of 11 aliases
+are qualified (D-24). Nothing blocks H1.
 
 ### H1 — skeleton
-- `internal/harness`: home dir, catalog (catwalk embedded + overlay + gx
-  TOML reader), provider factory, store with header/message/model_change/
-  effort_change entries, turn runner (text and thought only, no tools),
-  cancel, `PrepareStep` steering.
+
+- `internal/harness`: home dir; model table plus overlay (gx TOML read or
+  import per `10` Q4); Fantasy provider factory; the finish-normalizing
+  `LanguageModel` wrapper with its fixtures (D-21, D-25); store with
+  header/message/model_change/effort_change entries; turn runner on
+  `Agent.Stream` behind the harness's own interface (text and thought only,
+  no tools); cancel; `PrepareStep` steering.
 - `internal/agent`: `NativeProvider()` with `hidden: true`; session adapter;
-  `Capabilities{Effort, Modes, Interject}`; model dialog lists catalog
-  models; effort as a config option.
-- **Exit**: a conversation with every gx model from the real TUI via
-  `--provider native`, mid-session model switch, cancel, interject, and
-  `craze prompt --json` unchanged. Picker never shows the provider.
+  `Capabilities{Effort, Modes, Interject}`; model dialog lists the model
+  table; effort as a config option.
+- A lint rule fails any import of `internal/agent`, `internal/tui`, or
+  `internal/acp` from `internal/harness` (D-02, D-26).
+- Output ceilings come from the model table and leave room for reasoning
+  (D-25).
+- **Exit**: a conversation with all ten qualified models from the real TUI
+  via `--provider native`, mid-session model switch, cancel, interject, and
+  `craze prompt --json` unchanged. DeepSeek V4 Pro joins once its wire id is
+  corrected and it passes one tool loop. Picker never shows the provider.
 
 ### H2 — tools
+
 - PR 1: read, bash, edit, write with the truncation and kind wrappers, the
   edit ladder, per-file mutation queue, diffs through `textdiff`.
 - PR 2: ls, glob, grep; doom-loop guard; length-stop rule; orphaned-tool
   closing on cancel.
-- Testing pattern established: scripted `LanguageModel`, VCR cassettes.
+- Testing pattern established: scripted `LanguageModel` and local streamed
+  fixtures.
 - **Exit**: the agent makes a real change in the craze repo, on Linux and
   on the mac-mini, with tool cards and diffs rendering as they do for grok.
 
 ### H3 — permissions
+
 - Permission wrapper, grant file, arity table, dangerous list, compound
   command splitting, Claude rule syntax parser, reject cascade with
   feedback, `Force` removes the wrapper.
@@ -56,6 +96,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
   restart; `Bash(git *)` written by hand in the grant file works.
 
 ### H4 — Claude compat
+
 - Instruction loader with imports, rules with `paths`, lazy injection;
   skills catalog in the prompt; commands; `craze import claude`; compat
   toggles.
@@ -64,23 +105,27 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
   import command reports added / upgraded / kept.
 
 ### H5 — modes
+
 - Plan, ask, implement as rulesets + reminders; dispatcher enforcement;
   `exit_plan_mode` and `ask_user_question` tools; `todo_write`.
 - **Exit**: a plan-mode round trip with the plan card and accept →
   implement; a question card answered; todos in the tasks panel.
 
 ### H6 — sub-agents
+
 - Child-process `agent` tool, event tagging, cancel propagation, personas.
 - **Exit**: a task fanned out to two children with both transcripts in the
   sub-agent view.
 
 ### H7 — resume and compaction
+
 - Replay, `--continue`, `--resume`, rename over the store; compaction with
   the fixed template, 20k-token tail, segment files; cost in the status
   row.
 - **Exit**: resume a compacted session; spend visible per turn.
 
 ### H8 — images
+
 - Clipboard image read (Linux, macOS), composer attachment, `FilePart`,
   per-model strip with placeholder.
 - **Exit**: paste a screenshot, GLM gets the placeholder, a vision model
@@ -90,14 +135,19 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 
 settings.json translation · hooks · MCP and plugin `.mcp.json` · native
 marketplace installer · ACP server binary · ChatGPT-plan (codex) auth ·
-Meta direct overlay (one config entry, do when needed) · background bash
-with auto-background · in-process sub-agents · sandboxing · flipping the
-provider to visible.
+background bash with auto-background · in-process sub-agents · sandboxing ·
+flipping the provider to visible.
 
 ## Conventions per phase
 
-- Plan first (panel review), then `flows:gauntlet` or `flows:gated-commit`.
-- `make lint && make test && make build` per commit; `make docs` only if
-  `docs/` changes (these files are not `docs/`).
+- Plan first (panel review), then the repository's normal gated implementation
+  flow.
+- `make lint && make test && make test-race && make build && make test-cli`
+  per commit; `make docs` when published docs or docs tooling changes.
 - Update `08-decisions.md` when a phase changes a decision; update the
   status column above when a phase merges.
+- The harness is a side quest beside the daily-driver TUI (D-26): size each
+  phase's process to its risk. A spike is a throwaway `main`, and it keeps
+  raw provider responses (credentials stripped) so a failure can be diagnosed
+  rather than retried. H0's recorder discarded them, which is why its Meta
+  failures were mislabelled.

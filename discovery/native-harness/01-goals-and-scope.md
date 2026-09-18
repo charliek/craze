@@ -26,7 +26,7 @@ grok session gives today, without a second process on the wire.
 
 | area | first phase |
 |---|---|
-| gx model set via catwalk + overlay, reasoning effort, model switch mid-session | H1 |
+| gx model set via a craze-owned model table + overlay, reasoning effort, model switch mid-session | H1 |
 | JSONL tree session store; resume, fork, rename | H1, H7 |
 | read, ls, glob, grep, bash, write, edit; centralized truncation; edit diffs | H2 |
 | permission cards: once / always / reject-with-feedback; per-project grants; yolo | H3 |
