@@ -1,0 +1,127 @@
+# Synthetic gx config.toml for craze's importer tests. It is not a copy of a
+# real gx file: every host is an example domain, and the only key in it is the
+# obvious canary sk-canary-not-a-secret.
+
+# A UI table the importer ignores.
+[ui]
+theme = "dark"
+
+# The default names a model the importer skips, so the lexicographic rule
+# picks the default instead.
+[models]
+default = "responses/big"
+default_reasoning_effort = "high"
+
+# Chat Completions, keyed by one env var. providers.toml adds a second.
+[model_providers.fireworks]
+base_url = "https://api.fireworks.example/inference/v1"
+api_backend = "chat_completions"
+env_key = "FIREWORKS_API_KEY"
+
+# A list of env vars (with a blank one gx drops) and an inline key.
+[model_providers.zai]
+base_url = "https://api.zai.example/api/paas/v4"
+api_backend = "chat_completions"
+env_key = ["ZAI_API_KEY", "", "ZHIPUAI_API_KEY"]
+api_key = "sk-canary-not-a-secret"
+
+# OpenRouter: the openrouter driver, and no base_url in providers.toml.
+[model_providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_backend = "chat_completions"
+env_key = "OPENROUTER_API_KEY"
+
+# A Responses backend: skipped.
+[model_providers.openai]
+base_url = "https://api.openai.example/v1"
+api_backend = "responses"
+env_key = "OPENAI_API_KEY"
+
+# An auth command (ChatGPT-plan auth): skipped.
+[model_providers.chatgpt]
+base_url = "https://chatgpt.example/backend-api/codex"
+api_backend = "chat_completions"
+
+[model_providers.chatgpt.auth]
+command = "gx"
+args = ["providers", "token", "openai"]
+timeout_secs = 30
+
+# Extra headers: skipped rather than imported without them.
+[model_providers.headers]
+base_url = "https://headers.example/v1"
+api_backend = "chat_completions"
+env_key = "HEADERS_API_KEY"
+
+[model_providers.headers.extra_headers]
+X-Title = "craze-test"
+
+# providers.toml overrides max_completion_tokens and replaces the effort list.
+# The fields gx has and the importer does not use are ignored.
+[model."fireworks/kimi-k3"]
+model = "accounts/fireworks/models/kimi-k3"
+name = "Kimi K3 (Fireworks)"
+description = "ignored by the importer"
+model_provider = "fireworks"
+context_window = 262144
+max_completion_tokens = 32768
+stream_tool_calls = true
+supports_reasoning_effort = true
+reasoning_effort = "high"
+reasoning_efforts = ["low", "medium", "high", "max"]
+system_prompt_label = "ignored"
+codex_compat = false
+model_family = "kimi"
+
+# supports_reasoning_effort = false: no efforts, although a list is given. No
+# max_completion_tokens either.
+[model."glm-5.3"]
+model = "glm-5.3"
+name = "GLM 5.3"
+model_provider = "zai"
+context_window = 200000
+supports_reasoning_effort = false
+reasoning_effort = "high"
+reasoning_efforts = ["low", "high"]
+
+# supports_reasoning_effort absent: no efforts. No `model`: the alias is the
+# wire id, as it is to gx.
+[model."glm-5.3-flash"]
+name = "GLM 5.3 Flash"
+model_provider = "zai"
+context_window = 200000
+max_completion_tokens = 16384
+reasoning_efforts = ["low", "high"]
+
+# Table-form efforts with a default flag and a repeated value, and no
+# reasoning_effort: the flagged entry is the default.
+[model."openrouter/gemini-3.8-flash"]
+model = "google/gemini-3.8-flash"
+name = "Gemini 3.8 Flash"
+model_provider = "openrouter"
+context_window = 1048576
+supports_vision = true
+supports_reasoning_effort = true
+reasoning_efforts = [{ value = "low" }, { value = "high", default = true }, "high"]
+
+# Models on skipped providers.
+[model."responses/big"]
+model = "big-1"
+model_provider = "openai"
+
+[model."chatgpt/codex"]
+model = "codex-1"
+model_provider = "chatgpt"
+
+[model."headers/one"]
+model = "one-1"
+model_provider = "headers"
+
+# A gx built-in model override: no model_provider.
+[model."grok-4.5"]
+context_window = 500000
+
+# A provider nobody defined.
+[model."ghost/model"]
+model = "ghost-1"
+model_provider = "ghost"

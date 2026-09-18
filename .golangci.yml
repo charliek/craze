@@ -3,12 +3,43 @@ version: "2"
 linters:
   default: none
   enable:
+    - depguard
     - errcheck
     - staticcheck
     - unused
     - govet
     - ineffassign
     - misspell
+  settings:
+    depguard:
+      rules:
+        # One half of craze's import boundary; the other half is the `go list`
+        # check in the Makefile's lint target (internal/tui and internal/cli
+        # must not import internal/acp). The native harness imports nothing
+        # from the rest of craze except internal/atomicfile, so it runs without
+        # the ACP stack and could leave the repo whole (D-02; plan 018 §3.1).
+        # A denylist scoped to the harness's files: the stdlib, third-party
+        # modules and internal/atomicfile stay allowed, and no other package
+        # is affected.
+        harness:
+          list-mode: lax
+          files:
+            - "**/internal/harness/**"
+          deny:
+            - pkg: github.com/charliek/craze/internal/agent
+              desc: "the harness must not import craze's session layer; internal/agent's adapter imports the harness, never the reverse (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the harness must not import the TUI (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the harness must not import the ACP client (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the harness must not import the CLI (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal/sessions
+              desc: "the harness must not import the shared session index (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal/host
+              desc: "the harness must not import host integrations (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal/paths
+              desc: "the harness receives its directory as Options.Home and must not import internal/paths (D-02, plan 018 §3.1)"
   exclusions:
     presets:
       - std-error-handling
