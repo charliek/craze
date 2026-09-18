@@ -16,28 +16,30 @@ these documents, one per roadmap phase.
 |---|---|
 | 2026-09-15 | Discovery: fantasy, catwalk, acp-go-sdk inspected; opencode, grok-build, crush reviewed |
 | 2026-09-16 | pi reviewed; scope narrowed (Claude compat via import, hooks/settings/MCP deferred); this folder written |
+| 2026-09-17 | H0 started: exact candidate pins, the standalone probe, safety controls, and bounded live campaign were approved |
+| 2026-09-18 | H0 complete: Fantasy `v0.43.2` is a provider-only fit; released `Agent.Stream` and Catwalk `v0.52.43` are no-go ([progress and results](11-h0-progress-and-results.md)) |
 
-No code exists yet. The first implementation phase is **H0** in
-[07-roadmap.md](07-roadmap.md).
+No production harness code exists yet. **H0 is complete.** Its self-contained evidence, exact verdicts, H1 handoff, and local-only supporting artifact reference are in [11-h0-progress-and-results.md](11-h0-progress-and-results.md). A separate panel-reviewed catalog replacement spike is required before H1.
 
 ## Reading order
 
 1. [01-goals-and-scope.md](01-goals-and-scope.md) — what we are building, what we are not, who sees it
 2. [02-architecture.md](02-architecture.md) — package split, the craze seam, the turn loop, the home directory
 3. [03-session-store.md](03-session-store.md) — the JSONL tree that every other subsystem reads
-4. [04-providers-and-catalog.md](04-providers-and-catalog.md) — fantasy, catwalk, the gx overlay, per-provider quirks
+4. [04-providers-and-catalog.md](04-providers-and-catalog.md) — Fantasy provider findings, the catalog decision, gx overlay, and per-provider behavior
 5. [05-tools-and-permissions.md](05-tools-and-permissions.md) — the tool set, its limits, the permission model, plan mode
 6. [06-claude-compat.md](06-claude-compat.md) — CLAUDE.md, skills, marketplace plugins: live vs imported
 7. [07-roadmap.md](07-roadmap.md) — phases H0–H8 with exit criteria, plus the deferred list
 8. [08-decisions.md](08-decisions.md) — the decision log; do not reopen a decision without a new entry
 9. [09-references.md](09-references.md) — the clones under `../thirdparty/` and what to read in each
 10. [10-open-questions.md](10-open-questions.md) — items still the owner's call
+11. [11-h0-progress-and-results.md](11-h0-progress-and-results.md) — checkpoint chronology, sanitized H0 evidence, verdicts, and the exact resume point
 
 ## How to use this folder in a future session
 
 - Read `README.md`, `01`, `02`, `07`, and `08` first. Read the rest as the phase needs them.
 - Each roadmap phase becomes one panel-reviewed plan outside the repo and
-  one or two PRs, gated by `make lint && make test && make build` per commit
+  one or two PRs, gated by `make lint && make test && make test-race && make build && make test-cli` per commit
   (see `CLAUDE.md`). Live smoke on the mac-mini closes each phase.
 - When a phase changes a decision, add a row to `08-decisions.md` and update
   the affected document. When it finishes, update the status table above and

@@ -86,7 +86,7 @@ make build
 ./bin/craze prompt --json --agent-bin ./bin/craze-fake-agent "hello"
 ```
 
-Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
+Needs Go 1.27+ (this repo pins 1.27.1 via `.mise.toml`; `mise install`).
 
 ## Running
 
