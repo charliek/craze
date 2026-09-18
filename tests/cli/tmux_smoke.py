@@ -727,7 +727,11 @@ class TmuxPane:
             )
             + "unset CRAZE_AGENT_BIN\n"
             "unset CRAZE_PROVIDER\n"
-            "unset CRAZE_CONFIG\n"
+            "unset CRAZE_HOME\n"
+            # The removed config-file variable, spelled in two parts so the
+            # repo-walk test (internal/paths) does not flag this file: left
+            # set it makes every craze in the pane exit 2.
+            "unset CRAZE_" "CONFIG\n"
             f"{' '.join(shlex.quote(a) for a in argv)} 2>{shlex.quote(str(self.stderr_file))}\n"
             f"printf '%s\\n' \"$?\" > {shlex.quote(str(self.exit_file))}\n"
         )

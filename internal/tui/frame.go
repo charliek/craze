@@ -62,12 +62,12 @@ type FrameOpts struct {
 	// what the script under test is exercising.
 	Freeze bool
 	// Setup builds the Config the runner drives, and is called after HOME has
-	// been isolated and before New. Everything a frame reads out of the home
-	// directory — the config file, the session index --continue and --resume
-	// resolve against — therefore comes from the isolated one, which the
-	// Config passed to RunFrameScript cannot: it is built by the caller,
-	// outside. Its result replaces that Config entirely (§3.7). nil leaves
-	// the passed Config alone.
+	// been isolated (and CRAZE_HOME unset) and before New. Everything a frame
+	// reads out of the craze directory — the config file, the session index
+	// --continue and --resume resolve against — therefore comes from the
+	// isolated one, which the Config passed to RunFrameScript cannot: it is
+	// built by the caller, outside. Its result replaces that Config entirely
+	// (§3.7). nil leaves the passed Config alone.
 	Setup func() (Config, error)
 }
 
@@ -695,9 +695,12 @@ func (r *frameRunner) sync(what string) error {
 // otherwise restore each other's already-deleted directory.
 var frameHomeMu sync.Mutex
 
-// isolateFrameHome points HOME at an empty directory so a developer's own
-// config and skills cannot change a frame. The child agent inherits it, because
-// the process environment is read when the child is spawned.
+// isolateFrameHome points HOME at an empty directory and unsets CRAZE_HOME, so
+// a developer's own config, session index and skills cannot change a frame —
+// and a frame's seeded index cannot land in their craze directory, wherever
+// CRAZE_HOME had moved it. The child agent inherits both, because the process
+// environment is read when the child is spawned. The returned func puts each
+// variable back as it was, set or unset.
 func isolateFrameHome() (func(), error) {
 	frameHomeMu.Lock()
 	dir, err := os.MkdirTemp("", "craze-frame-home")
@@ -705,19 +708,37 @@ func isolateFrameHome() (func(), error) {
 		frameHomeMu.Unlock()
 		return nil, err
 	}
-	prev, had := os.LookupEnv("HOME")
-	if err := os.Setenv("HOME", dir); err != nil {
+	restoreHome, restoreCrazeHome := envRestorer("HOME"), envRestorer("CRAZE_HOME")
+	restore := func() {
+		restoreCrazeHome()
+		restoreHome()
 		_ = os.RemoveAll(dir)
+	}
+	if err := os.Setenv("HOME", dir); err != nil {
+		restore()
+		frameHomeMu.Unlock()
+		return nil, err
+	}
+	if err := os.Unsetenv("CRAZE_HOME"); err != nil {
+		restore()
 		frameHomeMu.Unlock()
 		return nil, err
 	}
 	return func() {
 		defer frameHomeMu.Unlock()
-		if had {
-			_ = os.Setenv("HOME", prev)
-		} else {
-			_ = os.Unsetenv("HOME")
-		}
-		_ = os.RemoveAll(dir)
+		restore()
 	}, nil
+}
+
+// envRestorer records one variable's current state and returns the func that
+// puts it back: the same value, or unset if it was unset.
+func envRestorer(name string) func() {
+	prev, had := os.LookupEnv(name)
+	return func() {
+		if had {
+			_ = os.Setenv(name, prev)
+		} else {
+			_ = os.Unsetenv(name)
+		}
+	}
 }

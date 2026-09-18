@@ -11,13 +11,13 @@ import (
 	"time"
 )
 
-// setIndex points CRAZE_CONFIG at a fresh file under t.TempDir(), so the
-// index sits next to it -- never the developer's real ~/.craze/sessions.jsonl.
-// Returns the sessions.jsonl path.
+// setIndex points CRAZE_HOME at a fresh t.TempDir(), so the index sits inside
+// it -- never the developer's real ~/.craze/sessions.jsonl. Returns the
+// sessions.jsonl path.
 func setIndex(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("CRAZE_CONFIG", filepath.Join(dir, "config.toml"))
+	t.Setenv("CRAZE_HOME", dir)
 	return filepath.Join(dir, "sessions.jsonl")
 }
 
@@ -544,7 +544,7 @@ func TestDuplicateKeyLastWins(t *testing.T) {
 
 func TestNoHomeDirectoryReadsEmptyAndWritesError(t *testing.T) {
 	t.Setenv("HOME", "")
-	t.Setenv("CRAZE_CONFIG", "")
+	t.Setenv("CRAZE_HOME", "")
 	dir := t.TempDir()
 	t.Chdir(dir)
 
@@ -608,8 +608,7 @@ func TestConcurrentUpsertKeepsBothRows(t *testing.T) {
 
 func TestUpsertLockFailureIsAnError(t *testing.T) {
 	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.toml")
-	t.Setenv("CRAZE_CONFIG", configPath)
+	t.Setenv("CRAZE_HOME", dir)
 
 	// Make the directory the index would live in read-only. Upsert's own
 	// MkdirAll is a no-op (the directory already exists), so this exercises

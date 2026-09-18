@@ -18,6 +18,12 @@ var (
 	fakeOnce sync.Once
 	fakeBin  string
 	fakeErr  error
+	// buildEnv is the environment before any test rewrites HOME: the one
+	// fake-agent build runs in it, so it keeps the developer's warm build
+	// cache and never writes a Go cache into whichever test's temp HOME
+	// happened to trigger it (which a test asserting that HOME stays empty
+	// would then see, but only when run on its own).
+	buildEnv = os.Environ()
 )
 
 func fakeAgentPath(t *testing.T) string {
@@ -32,7 +38,9 @@ func fakeAgentPath(t *testing.T) string {
 			return
 		}
 		fakeBin = filepath.Join(dir, "craze-fake-agent")
-		out, err := exec.Command("go", "build", "-o", fakeBin, "github.com/charliek/craze/cmd/craze-fake-agent").CombinedOutput()
+		build := exec.Command("go", "build", "-o", fakeBin, "github.com/charliek/craze/cmd/craze-fake-agent")
+		build.Env = buildEnv
+		out, err := build.CombinedOutput()
 		if err != nil {
 			fakeErr = err
 			t.Log(string(out))
@@ -60,12 +68,34 @@ func isolateHome(t *testing.T) {
 }
 
 // isolateRunEnv is everything a headless run reads out of the environment
-// before it reaches the agent: HOME, the provider override and the config file.
+// before it reaches the agent: HOME, the provider override and the craze
+// directory, whose config file does not exist yet.
 func isolateRunEnv(t *testing.T) {
 	t.Helper()
 	isolateHome(t)
 	t.Setenv("CRAZE_PROVIDER", "")
-	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+	crazeHome(t)
+}
+
+// crazeHome points CRAZE_HOME at a fresh, empty directory, so the config file
+// and the session index a case reads and writes are its own and a developer's
+// exported CRAZE_HOME is never touched. Returns the directory.
+func crazeHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("CRAZE_HOME", dir)
+	return dir
+}
+
+// writeCrazeConfig points CRAZE_HOME at a fresh directory holding a
+// config.toml with body in it. Returns the config file's path.
+func writeCrazeConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(crazeHome(t), "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // runPromptJSON runs one headless turn against a fake script and returns each

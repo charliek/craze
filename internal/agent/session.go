@@ -11,10 +11,10 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
-// HomeDir is the home directory craze reads its own files out of: the config
-// file, the user-level skills and the plugin caches. HOME wins over the account
-// database so a test (and the frame runner) can isolate all of them with one
-// variable.
+// HomeDir is the home directory craze reads the user-level skills and the
+// plugin caches out of. HOME wins over the account database so a test (and the
+// frame runner) can isolate them with one variable. CRAZE_HOME never moves
+// them: it relocates only craze's own directory (internal/paths).
 func HomeDir() string {
 	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
 		return home

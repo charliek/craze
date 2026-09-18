@@ -16,16 +16,16 @@ import (
 	"github.com/charliek/craze/internal/tui"
 )
 
-// indexHome points HOME and the config path at a fresh temp directory, so the
-// session index a case reads and writes is its own. CRAZE_CONFIG is set rather
-// than left alone because it is what decides where the index sits (it is the
-// config file's sibling), and a developer with one exported would otherwise
-// send these writes to their own ~/.craze.
+// indexHome points HOME and CRAZE_HOME at a fresh temp directory, so the
+// config file and the session index a case reads and writes are its own, both
+// directly inside it. CRAZE_HOME is set rather than left alone because it is
+// what decides where the index sits, and a developer with one exported would
+// otherwise send these writes to their own craze directory.
 func indexHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	t.Setenv("CRAZE_CONFIG", filepath.Join(dir, "config.toml"))
+	t.Setenv("CRAZE_HOME", dir)
 	t.Setenv("CRAZE_PROVIDER", "")
 	return dir
 }
@@ -79,7 +79,7 @@ func replaceJSONTime(line, field, value string) string {
 
 func indexPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(filepath.Dir(os.Getenv("CRAZE_CONFIG")), "sessions.jsonl")
+	return filepath.Join(os.Getenv("CRAZE_HOME"), "sessions.jsonl")
 }
 
 // parseTUIFlags runs the root command's flag set over argv without running
@@ -289,8 +289,8 @@ func TestIndexIsNotFilteredByAnImplicitProvider(t *testing.T) {
 		apply func(t *testing.T, home string)
 	}{
 		{"CRAZE_PROVIDER", func(t *testing.T, _ string) { t.Setenv("CRAZE_PROVIDER", "grok") }},
-		{"config file", func(t *testing.T, _ string) {
-			if err := os.WriteFile(os.Getenv("CRAZE_CONFIG"), []byte("provider = \"grok\"\n"), 0o600); err != nil {
+		{"config file", func(t *testing.T, home string) {
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("provider = \"grok\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},

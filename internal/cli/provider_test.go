@@ -93,7 +93,7 @@ func TestUnknownProviderFlagExits2(t *testing.T) {
 
 func TestProviderFlagEmptyIsUnset(t *testing.T) {
 	t.Setenv("CRAZE_PROVIDER", "")
-	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+	crazeHome(t)
 	got, _, err := providerFor(t, false, "--provider", "")
 	if err != nil {
 		t.Fatal(err)
@@ -104,11 +104,7 @@ func TestProviderFlagEmptyIsUnset(t *testing.T) {
 }
 
 func TestProviderPrecedence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("provider = \"grok\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRAZE_CONFIG", path)
+	writeCrazeConfig(t, "provider = \"grok\"\n")
 
 	t.Run("flag beats env and config", func(t *testing.T) {
 		t.Setenv("CRAZE_PROVIDER", "grok")
@@ -145,7 +141,7 @@ func TestProviderPrecedence(t *testing.T) {
 func TestUnknownEnvAndConfigFallback(t *testing.T) {
 	t.Run("env", func(t *testing.T) {
 		t.Setenv("CRAZE_PROVIDER", "codex")
-		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+		crazeHome(t)
 		got, stderr, err := providerFor(t, false)
 		if err != nil {
 			t.Fatal(err)
@@ -158,11 +154,7 @@ func TestUnknownEnvAndConfigFallback(t *testing.T) {
 		}
 	})
 	t.Run("config", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "config.toml")
-		if err := os.WriteFile(path, []byte("provider = \"codex\"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CRAZE_CONFIG", path)
+		writeCrazeConfig(t, "provider = \"codex\"\n")
 		t.Setenv("CRAZE_PROVIDER", "")
 		got, stderr, err := providerFor(t, false)
 		if err != nil {
@@ -178,11 +170,7 @@ func TestUnknownEnvAndConfigFallback(t *testing.T) {
 }
 
 func TestFrameIgnoresEnvAndConfigProvider(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("provider = \"grok\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRAZE_CONFIG", path)
+	writeCrazeConfig(t, "provider = \"grok\"\n")
 	t.Setenv("CRAZE_PROVIDER", "grok")
 	got, _, err := providerFor(t, true)
 	if err != nil {
@@ -205,8 +193,7 @@ func TestPromptPersistsProviderAfterStart(t *testing.T) {
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_PROVIDER", "")
 	isolateHome(t)
-	cfg := filepath.Join(t.TempDir(), "config.toml")
-	t.Setenv("CRAZE_CONFIG", cfg)
+	crazeHome(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-echo")
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()
@@ -225,11 +212,7 @@ func TestPromptPersistsProviderAfterStart(t *testing.T) {
 func TestPromptDoesNotPersistFallback(t *testing.T) {
 	t.Setenv("CRAZE_PROVIDER", "codex")
 	isolateHome(t)
-	cfg := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(cfg, []byte("theme = \"gruvbox\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRAZE_CONFIG", cfg)
+	writeCrazeConfig(t, "theme = \"gruvbox\"\n")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()
@@ -251,8 +234,7 @@ func TestPromptDoesNotPersistFallback(t *testing.T) {
 func TestPromptDoesNotPersistFailedStart(t *testing.T) {
 	t.Setenv("CRAZE_PROVIDER", "")
 	isolateHome(t)
-	cfg := filepath.Join(t.TempDir(), "config.toml")
-	t.Setenv("CRAZE_CONFIG", cfg)
+	crazeHome(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "authfail")
 	cmd := NewRootCmd()
 	cmd.SetOut(&bytes.Buffer{})
@@ -339,7 +321,7 @@ func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Run("flag", func(t *testing.T) {
 		t.Setenv("CRAZE_PROVIDER", "")
-		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+		crazeHome(t)
 		got, _, err := providerFor(t, false, "--provider", "gx")
 		if err != nil {
 			t.Fatal(err)
@@ -350,7 +332,7 @@ func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
 	})
 	t.Run("env", func(t *testing.T) {
 		t.Setenv("CRAZE_PROVIDER", "gx")
-		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+		crazeHome(t)
 		got, stderr, err := providerFor(t, false)
 		if err != nil {
 			t.Fatal(err)
@@ -361,11 +343,7 @@ func TestGxResolvesThroughEveryEntryPoint(t *testing.T) {
 	})
 	t.Run("config", func(t *testing.T) {
 		t.Setenv("CRAZE_PROVIDER", "")
-		path := filepath.Join(t.TempDir(), "config.toml")
-		if err := os.WriteFile(path, []byte("provider = \"gx\"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CRAZE_CONFIG", path)
+		writeCrazeConfig(t, "provider = \"gx\"\n")
 		got, stderr, err := providerFor(t, false)
 		if err != nil {
 			t.Fatal(err)
@@ -386,11 +364,7 @@ func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
 	t.Setenv("CRAZE_PROVIDER", "")
 	isolateHome(t)
-	cfg := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(cfg, []byte("theme = \"gruvbox\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRAZE_CONFIG", cfg)
+	writeCrazeConfig(t, "theme = \"gruvbox\"\n")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "grok-echo")
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCmd()

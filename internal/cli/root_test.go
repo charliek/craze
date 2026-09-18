@@ -2,6 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,6 +13,72 @@ import (
 
 	"github.com/charliek/craze/internal/version"
 )
+
+// TestRemovedConfigEnvIsAUsageErrorEverywhere is the CLI half of the
+// tripwire: while the removed config variable is set, every command — the
+// root, each subcommand, and any added later — exits 2 before it runs, with a
+// message that names CRAZE_HOME, and leaves both HOME and CRAZE_HOME
+// untouched. --version still answers: it reads nothing.
+func TestRemovedConfigEnvIsAUsageErrorEverywhere(t *testing.T) {
+	// Spelled in two parts on purpose: the repo-walk test in internal/paths
+	// keeps the whole name out of every file outside that package, so a branch
+	// still isolating itself with it fails CI. This is the one deliberate use.
+	removed := "CRAZE_" + "CONFIG"
+	home, crazeHome := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CRAZE_HOME", crazeHome)
+	t.Setenv("CRAZE_PROVIDER", "")
+	t.Setenv(removed, filepath.Join(t.TempDir(), "config.toml"))
+
+	// Every runnable command, found by walking the tree so a new one is covered
+	// without being listed, plus one prompt that would persist a provider.
+	argvs := [][]string{{"prompt", "--json", "--provider", "grok", "hi"}}
+	var walk func(c *cobra.Command, argv []string)
+	walk = func(c *cobra.Command, argv []string) {
+		if c.Runnable() {
+			argvs = append(argvs, argv)
+		}
+		for _, sub := range c.Commands() {
+			walk(sub, append(slices.Clone(argv), sub.Name()))
+		}
+	}
+	walk(NewRootCmd(), nil)
+	for _, argv := range argvs {
+		var stdout, stderr bytes.Buffer
+		cmd := NewRootCmd()
+		cmd.SetIn(&bytes.Buffer{})
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(argv)
+		err := cmd.Execute()
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 2 {
+			t.Fatalf("craze %q: got %v, want a usage error (exit 2)", argv, err)
+		}
+		for _, want := range []string{removed, "CRAZE_HOME"} {
+			if !strings.Contains(ee.msg, want) {
+				t.Fatalf("craze %q: message %q does not name %s", argv, ee.msg, want)
+			}
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("craze %q ran anyway: %q", argv, stdout.String())
+		}
+	}
+
+	for _, dir := range []string{home, crazeHome} {
+		if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+			t.Fatalf("%s was touched: %v %v", dir, entries, err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--version"})
+	if err := cmd.Execute(); err != nil || strings.TrimSpace(stdout.String()) != version.Version {
+		t.Fatalf("--version: %v %q", err, stdout.String())
+	}
+}
 
 func TestVersionCommand(t *testing.T) {
 	var buf bytes.Buffer

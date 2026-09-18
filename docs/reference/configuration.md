@@ -42,10 +42,38 @@ the cursor moves; `Enter` keeps the theme and saves it, `Esc` puts back the one
 that was active when the picker opened. `/theme <name>` sets and saves one
 directly.
 
+## The craze directory
+
+craze keeps its own files in one directory, `~/.craze` by default, under
+fixed names:
+
+| File | Holds |
+|------|-------|
+| `config.toml` | The saved theme, provider, and other settings — see [Config file](#config-file) |
+| `sessions.jsonl` | The [session index](#session-index) |
+
+`CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
+reads and writes `/some/dir/config.toml` and `/some/dir/sessions.jsonl` and
+nothing under `~/.craze`. A relative value stays relative to the working
+directory craze runs in, and a leading `~` or `~/` means your home
+directory. No variable moves a single file on its own.
+
+`CRAZE_HOME` moves only craze's own directory. The user-level skills and the
+plugin caches craze scans (see [Slash commands](tui.md#slash-commands)) are
+still found under `HOME`, so a test or a container that wants those isolated
+as well sets `HOME` too.
+
+Earlier builds read a different variable, one that named the config *file*.
+It has been removed, not kept as an alias: while it is still set, `craze`,
+`craze prompt`, and `craze frame` exit with status 2 and a message that names
+it, before reading or writing anything. Unset it and set `CRAZE_HOME` to the
+directory the file was in — `CRAZE_HOME=/some/dir` for `/some/dir/config.toml`.
+A config file with any other name has to be renamed `config.toml`.
+
 ## Config file
 
-The saved theme lives in `~/.craze/config.toml`. `CRAZE_CONFIG` overrides the
-whole path.
+The saved theme lives in `config.toml` in the [craze
+directory](#the-craze-directory), `~/.craze/config.toml` by default.
 
 ```toml
 theme = "gruvbox"
@@ -65,9 +93,9 @@ the default.
 `~/.craze/sessions.jsonl` is the on-disk index behind `--continue`,
 `--resume` and `/rename` (see [CLI](cli.md#-continue-and-resume) and
 [TUI](tui.md#resuming-a-session)). It is **always the sibling of the config
-file** — the same directory, `sessions.jsonl` next to `config.toml` — so a
-`CRAZE_CONFIG` pointing somewhere else carries the index along with it, and
-`craze frame`'s isolated `HOME` isolates it too. There is no separate
+file** in the [craze directory](#the-craze-directory), so `CRAZE_HOME` carries
+the index along with the config, and `craze frame`, which isolates `HOME` and
+unsets `CRAZE_HOME` for its run, isolates it too. There is no separate
 environment variable for it.
 
 One JSON object per line:
@@ -256,7 +284,7 @@ the dialect.
 
 | Variable | Purpose |
 |----------|---------|
-| `CRAZE_CONFIG` | Replace the config path (`~/.craze/config.toml`); the [session index](#session-index) always follows it, as its sibling |
+| `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | Agent binary when `--agent-bin` is unset |
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `gx`) |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |

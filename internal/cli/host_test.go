@@ -171,9 +171,9 @@ func TestResolveHostsRoostGate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			indexHome(t)
+			home := indexHome(t)
 			if tc.config != "" {
-				if err := os.WriteFile(os.Getenv("CRAZE_CONFIG"), []byte(tc.config), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(tc.config), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -219,9 +219,9 @@ func TestResolveHostsGates(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			indexHome(t)
+			home := indexHome(t)
 			if tc.config != "" {
-				if err := os.WriteFile(os.Getenv("CRAZE_CONFIG"), []byte(tc.config), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(tc.config), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}

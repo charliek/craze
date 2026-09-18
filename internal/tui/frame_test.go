@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/paths"
 )
 
 var updateGoldens = flag.Bool("update", false, "rewrite internal/tui/testdata/*.golden")
@@ -695,6 +696,59 @@ func TestFrameIsolatesHomeFromTheChild(t *testing.T) {
 	}
 	if os.Getenv("HOME") != outer {
 		t.Fatalf("HOME was not restored: %q", os.Getenv("HOME"))
+	}
+}
+
+// TestIsolateFrameHomeUnsetsCrazeHome: a developer-exported CRAZE_HOME must
+// not reach a frame — inside the run, the craze directory is the isolated
+// HOME's, so no golden reads their config and no seeded row lands in their
+// index — and afterwards each variable is back as it was, set or unset.
+func TestIsolateFrameHomeUnsetsCrazeHome(t *testing.T) {
+	for _, exported := range []bool{true, false} {
+		t.Run(fmt.Sprintf("exported=%v", exported), func(t *testing.T) {
+			outer, sentinel := t.TempDir(), t.TempDir()
+			t.Setenv("HOME", outer)
+			t.Setenv("CRAZE_HOME", sentinel)
+			if !exported {
+				if err := os.Unsetenv("CRAZE_HOME"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			restore, err := isolateFrameHome()
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored := false
+			t.Cleanup(func() {
+				if !restored {
+					restore()
+				}
+			})
+			if v, ok := os.LookupEnv("CRAZE_HOME"); ok {
+				t.Fatalf("CRAZE_HOME is %q inside the run, want it unset", v)
+			}
+			home := os.Getenv("HOME")
+			if home == "" || home == outer {
+				t.Fatalf("HOME %q inside the run, outer %q", home, outer)
+			}
+			if got, want := paths.CrazeDir(), filepath.Join(home, ".craze"); got != want {
+				t.Fatalf("CrazeDir() = %q inside the run, want %q", got, want)
+			}
+
+			restore()
+			restored = true
+			v, ok := os.LookupEnv("CRAZE_HOME")
+			if ok != exported || (exported && v != sentinel) {
+				t.Fatalf("CRAZE_HOME after the run = %q (set %v), want %q (set %v)", v, ok, sentinel, exported)
+			}
+			if got := os.Getenv("HOME"); got != outer {
+				t.Fatalf("HOME was not restored: %q", got)
+			}
+			if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the isolated HOME %s outlived the run: %v", home, err)
+			}
+		})
 	}
 }
 

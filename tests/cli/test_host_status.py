@@ -424,9 +424,10 @@ def test_herdr_off_switches_send_nothing(
         if case == "--no-host-status":
             extra_args = ["--no-host-status"]
         elif case == "host_status = false":
-            config = tmp_path / "host-off.toml"
-            config.write_text("host_status = false\n", encoding="utf-8")
-            env["CRAZE_CONFIG"] = str(config)
+            craze_home = tmp_path / "host-off"
+            craze_home.mkdir()
+            (craze_home / "config.toml").write_text("host_status = false\n", encoding="utf-8")
+            env["CRAZE_HOME"] = str(craze_home)
         else:
             env = herdr.env(**{case.split()[0]: None})
         with PTYCraze(

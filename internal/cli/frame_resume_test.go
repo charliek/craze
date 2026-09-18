@@ -3,20 +3,21 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// frameHome is a frame case's environment: HOME is its own, and CRAZE_CONFIG
-// is cleared so the session index is the config file's sibling under the
-// runner's *isolated* HOME rather than a path that would escape it.
+// frameHome is a frame case's environment: HOME is its own, and CRAZE_HOME is
+// cleared, so outside the runner the craze directory is under that HOME too.
+// The runner isolates both again for the run itself.
 func frameHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("CRAZE_CONFIG", "")
+	t.Setenv("CRAZE_HOME", "")
 	t.Setenv("CRAZE_PROVIDER", "")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "")
 	return home
@@ -67,26 +68,40 @@ func TestFrameContinueLoadsASeededRow(t *testing.T) {
 
 // TestFrameSeedingStaysInsideTheIsolatedHome is the §3.7 regression: the
 // seeded rows have to be visible to the model — the case above only passes if
-// they are — and invisible to the developer's own home directory. The runner
-// enters its isolated HOME only after the caller has built the Config, so
-// seeding from the caller would write the real ~/.craze/sessions.jsonl.
+// they are — and invisible to the developer's own craze directory, whether it
+// is under HOME or wherever an exported CRAZE_HOME moved it. The runner
+// isolates both only after the caller has built the Config, so seeding from
+// the caller would write the real index.
 func TestFrameSeedingStaysInsideTheIsolatedHome(t *testing.T) {
-	outer := frameHome(t)
-	runFrame(t, "frame", "--cols", "100", "--rows", "30",
-		"--agent-bin", fakeAgentPath(t), "--fake-script", "load",
-		"--seed-session", "cursor:sess-load-1:seeded session",
-		"--continue", "--keys", "<wait:text:restored>", "--timeout", "20s")
+	for _, exported := range []bool{false, true} {
+		t.Run(fmt.Sprintf("CRAZE_HOME exported=%v", exported), func(t *testing.T) {
+			outer := frameHome(t)
+			exportedDir := ""
+			if exported {
+				exportedDir = crazeHome(t)
+			}
+			runFrame(t, "frame", "--cols", "100", "--rows", "30",
+				"--agent-bin", fakeAgentPath(t), "--fake-script", "load",
+				"--seed-session", "cursor:sess-load-1:seeded session",
+				"--continue", "--keys", "<wait:text:restored>", "--timeout", "20s")
 
-	index := filepath.Join(outer, ".craze", "sessions.jsonl")
-	if _, err := os.Stat(index); !errors.Is(err, os.ErrNotExist) {
-		body, _ := os.ReadFile(index)
-		t.Fatalf("the frame wrote the outer HOME's index (%v):\n%s", err, body)
-	}
-	if entries, err := os.ReadDir(outer); err == nil && len(entries) != 0 {
-		t.Fatalf("the frame left %d entries under the outer HOME", len(entries))
-	}
-	if os.Getenv("HOME") != outer {
-		t.Fatalf("HOME was not restored: %q", os.Getenv("HOME"))
+			index := filepath.Join(outer, ".craze", "sessions.jsonl")
+			if _, err := os.Stat(index); !errors.Is(err, os.ErrNotExist) {
+				body, _ := os.ReadFile(index)
+				t.Fatalf("the frame wrote the outer HOME's index (%v):\n%s", err, body)
+			}
+			for _, dir := range []string{outer, exportedDir} {
+				if entries, err := os.ReadDir(dir); dir != "" && err == nil && len(entries) != 0 {
+					t.Fatalf("the frame left %d entries in %s", len(entries), dir)
+				}
+			}
+			if os.Getenv("HOME") != outer {
+				t.Fatalf("HOME was not restored: %q", os.Getenv("HOME"))
+			}
+			if os.Getenv("CRAZE_HOME") != exportedDir {
+				t.Fatalf("CRAZE_HOME was not restored: %q", os.Getenv("CRAZE_HOME"))
+			}
+		})
 	}
 }
 
