@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -153,6 +154,7 @@ type Model struct {
 	vp    viewport.Model
 	input textarea.Model
 
+	// sess is assigned only through setSession, which records it in owner too.
 	sess   agent.Session
 	cwd    string
 	model  string
@@ -404,6 +406,9 @@ type Model struct {
 
 	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
 	term *terminalColors
+	// owner is the session the program holds, shared by every copy the way
+	// term is; see sessionOwner. Nil only in a zero Model a test built.
+	owner *sessionOwner
 
 	// host is Config.Host: nil means no host status is derived at all. The
 	// rest is what host.go reads into host.Input. lastHost is the last status
@@ -489,6 +494,42 @@ type planImplementFailedMsg struct {
 	err  error
 }
 
+// sessionOwner is the one record of which session the program holds. Model.sess
+// is a plain field, so every copy bubbletea makes carries its own, and the
+// session a picker builds lives only in the copies made after it. On a quit
+// that is harmless: p.Run hands back the last model. On a recovered Update or
+// View panic it hands back nil, and the model Run started with still holds
+// whatever New gave it — often nothing — so the agent the picker spawned would
+// never be closed and its process group never signalled. Model carries the
+// owner as a pointer, allocated in New, so every copy shares it, and the exit
+// tails close what it holds rather than what some copy remembers.
+type sessionOwner struct {
+	mu   sync.Mutex
+	sess agent.Session
+}
+
+func (o *sessionOwner) set(s agent.Session) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sess = s
+}
+
+// current is the session last set. The lock is released before it returns, so
+// a caller never holds it across Close, which blocks until the agent is reaped.
+func (o *sessionOwner) current() agent.Session {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.sess
+}
+
+// setSession is the only way the model's session is assigned: it writes
+// m.sess and the owner together, so the two can never name different
+// sessions and a new assignment site cannot forget the owner.
+func (m *Model) setSession(s agent.Session) {
+	m.sess = s
+	m.owner.set(s)
+}
+
 func New(cfg Config) Model {
 	cwd := cfg.Workspace
 	if cwd == "" {
@@ -514,7 +555,6 @@ func New(cfg Config) Model {
 		queueHov:        noHover(),
 		vp:              vp,
 		input:           newComposer(th),
-		sess:            cfg.Session,
 		cwd:             cwd,
 		model:           cfg.Model,
 		yolo:            cfg.Yolo,
@@ -533,7 +573,8 @@ func New(cfg Config) Model {
 		sessProvider:    prov.Name(),
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
-		term: newTerminalColors(io.Discard),
+		term:  newTerminalColors(io.Discard),
+		owner: &sessionOwner{},
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
@@ -545,6 +586,7 @@ func New(cfg Config) Model {
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
+	sess := cfg.Session
 	switch {
 	case len(m.resume) > 0:
 		// --resume outranks the provider picker: every row carries its own
@@ -558,13 +600,16 @@ func New(cfg Config) Model {
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
 	default:
-		if m.sess == nil && m.newSession != nil {
-			m.sess = m.newSession(prov)
+		if sess == nil && m.newSession != nil {
+			sess = m.newSession(prov)
 		}
-		if m.sess == nil {
-			m.sess = NewStub()
+		if sess == nil {
+			sess = NewStub()
 		}
 	}
+	// Once the switch has decided: a picker starts with whatever Config.Session
+	// was, usually nothing, and its own setSession replaces it.
+	m.setSession(sess)
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
@@ -612,16 +657,16 @@ func Run(cfg Config) error {
 // session closes. p.Run returns on /exit, on SIGINT/SIGTERM and on a recovered
 // panic, and every one of them lands here.
 //
-// final is whatever p.Run handed back, which on a recovered panic is not a
-// Model; m is the model Run started with. The hub arrives as its own argument
-// — Config.Host, never a field read through final — so the panic path still
-// releases the pane: herdr leaves a pane that was never released showing the
-// last state it was told. It returns the start failure final carries, if any.
+// final is whatever p.Run handed back, which on a recovered Update or View
+// panic is nil; m is the model Run started with. The hub arrives as its own
+// argument — Config.Host, never a field read through final — so the panic path
+// still releases the pane: herdr leaves a pane that was never released showing
+// the last state it was told. The session comes from m's owner, never from
+// final, for the same reason. It returns the start failure final carries, if
+// any.
 func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
-	var sess agent.Session
 	var startErr error
 	if fm, ok := final.(Model); ok {
-		sess = fm.sess
 		startErr = fm.startErr
 		// Every exit path lands here: clearWindowTitle no-ops when titles
 		// were off or a title was never set, and otherwise writes OSC 2
@@ -638,11 +683,14 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
 	// already done both in this order and the hub's Close is idempotent; on
 	// SIGTERM or a recovered panic this is the first and only release.
 	closeHost(h)
-	if sess == nil {
-		sess = m.sess
-	}
-	if sess != nil {
-		_ = sess.Close()
+	// The owner and not m.sess: m is the model Run started with, and a session
+	// a picker built after it lives only in later copies — which a recovered
+	// panic does not hand back. Every copy shares the owner, so it names the
+	// session the program ended with on every exit path. A zero Model has none.
+	if m.owner != nil {
+		if sess := m.owner.current(); sess != nil {
+			_ = sess.Close()
+		}
 	}
 	return startErr
 }
@@ -1918,6 +1966,12 @@ type cancelFailedMsg struct {
 // sess.Close may block, and a pane that is never released stays showing
 // craze's last state. It also means the cancelled cards the close produces are
 // never reported, since a closed hub ignores Publish.
+//
+// finishRun closes the owner's session again once p.Run returns, and that is
+// this same session: setSession writes both. The second Close serialises
+// behind this one — the live session's closeOnce runs the close once and every
+// other caller waits on closeDone — so it returns when the first does and
+// cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	sess := m.sess

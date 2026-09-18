@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -386,24 +387,25 @@ func (h *orderHost) Close(ctx context.Context) {
 type orderSession struct {
 	*Stub
 	log *orderLog
+	// name tells a second session's close apart from the first's in the same
+	// log. The session a model starts with leaves it empty.
+	name string
 }
 
 func (s orderSession) Close() error {
-	s.log.add("sess close")
+	if s.name == "" {
+		s.log.add("sess close")
+	} else {
+		s.log.add("sess close " + s.name)
+	}
 	return s.Stub.Close()
 }
 
-// notAModel is what a recovered panic hands back from p.Run: a tea.Model that
-// is not craze's.
-type notAModel struct{}
-
-func (notAModel) Init() tea.Cmd                       { return nil }
-func (notAModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return notAModel{}, nil }
-func (notAModel) View() string                        { return "" }
-
 // exitTailModel is a model the way Run leaves it: colours applied through the
 // recording writer (their set is written before the log starts) and a tab
-// title that was set.
+// title that was set. It is also a provider picker nobody has answered yet: its
+// Config carries a NewSession, without which confirmProvider swaps nothing,
+// and the session that swap builds logs its close as "sess close picked".
 func exitTailModel(t *testing.T) (Model, *orderLog, orderWriter) {
 	t.Helper()
 	isolateSkillsHome(t)
@@ -411,7 +413,17 @@ func exitTailModel(t *testing.T) (Model, *orderLog, orderWriter) {
 	w := orderWriter{log: log}
 	stub := NewStub()
 	t.Cleanup(func() { _ = stub.Close() })
-	m := New(Config{Session: orderSession{Stub: stub, log: log}, Theme: "tokyo-night", Workspace: t.TempDir()})
+	m := New(Config{
+		Session: orderSession{Stub: stub, log: log},
+		NewSession: func(p agent.Provider) agent.Session {
+			picked := NewStub()
+			picked.SetProvider(p)
+			t.Cleanup(func() { _ = picked.Close() })
+			return orderSession{Stub: picked, log: log, name: "picked"}
+		},
+		Theme:     "tokyo-night",
+		Workspace: t.TempDir(),
+	})
 	m.term = newTerminalColors(w)
 	m.term.apply(m.theme)
 	m.lastTitle = "✦ craze"
@@ -427,8 +439,9 @@ func assertOrder(t *testing.T, log *orderLog, want ...string) {
 }
 
 // TestFinishRunOrder is B4: title clear, terminal reset, host close, session
-// close, in that order — and with a final that is not a Model, the recovered
-// panic's, the host still closes, from the argument and not from final.
+// close, in that order — and with the nil final a recovered panic hands back,
+// the host still closes, from the argument and not from final, and the session
+// that closes is the one the program ended with, not the one it started with.
 func TestFinishRunOrder(t *testing.T) {
 	t.Run("final is the model", func(t *testing.T) {
 		m, log, w := exitTailModel(t)
@@ -445,20 +458,161 @@ func TestFinishRunOrder(t *testing.T) {
 		}
 	})
 	t.Run("final is not a model", func(t *testing.T) {
+		// nil, because that is what p.Run returns on a recovered Update or
+		// View panic: its recover sets only the error, and the model it
+		// returns keeps its zero value. TestRecoveredPanicClosesThePickedSession
+		// pins that against the real program.
 		m, log, w := exitTailModel(t)
 		h := &orderHost{log: log}
-		if err := finishRun(w, notAModel{}, m, h); err != nil {
+		if err := finishRun(w, nil, m, h); err != nil {
 			t.Fatalf("finishRun returned %v", err)
 		}
 		// No title clear: without a Model there is no lastTitle to say one
 		// was set, exactly as before the tail was extracted.
 		assertOrder(t, log, "term reset", "host close", "sess close")
 	})
+	t.Run("the picker swapped the session", func(t *testing.T) {
+		// Issue #19. The session the picker builds lives only in the model
+		// copies made after the swap, and a recovered panic hands back none
+		// of them: finishRun gets a nil final and the model Run started with.
+		// Passing the swapped model instead would prove nothing — reading its
+		// own session was never the bug.
+		initial, log, w := exitTailModel(t)
+		h := &orderHost{log: log}
+		updated, cmd := initial.confirmProvider(agent.GrokProvider(), true)
+		_ = cmd // the new session's Start: nothing here runs it
+		// The picker closes the session it replaces itself. That close is the
+		// swap's, not the exit tail's, so the log starts again after it.
+		assertOrder(t, log, "sess close")
+		log.events = nil
+		if updated.(Model).sess == initial.sess {
+			t.Fatal("setup: confirmProvider did not swap the session")
+		}
+		if err := finishRun(w, nil, initial, h); err != nil {
+			t.Fatalf("finishRun returned %v", err)
+		}
+		// Exact: the picked session closes, last, and the initial one is not
+		// closed again — a plain "sess close" here would be it, with the
+		// picked session and its agent left running.
+		assertOrder(t, log, "term reset", "host close", "sess close picked")
+	})
 	t.Run("no host", func(t *testing.T) {
 		m, log, w := exitTailModel(t)
 		_ = finishRun(w, m, m, nil)
 		assertOrder(t, log, "title clear", "term reset", "sess close")
 	})
+}
+
+// swapThenPanic drives a real program through issue #19's two steps: the
+// provider picker's swap on one message, then a panic inside Update on the
+// next. The swap's own Cmd is dropped, so no Start runs; the returned Cmd is
+// what delivers the panic, so the order does not depend on scheduling.
+type swapThenPanic struct{ inner Model }
+
+type (
+	swapSessionMsg struct{}
+	panicUpdateMsg struct{}
+)
+
+func (s swapThenPanic) Init() tea.Cmd {
+	return func() tea.Msg { return swapSessionMsg{} }
+}
+
+func (s swapThenPanic) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg.(type) {
+	case swapSessionMsg:
+		updated, cmd := s.inner.confirmProvider(agent.GrokProvider(), true)
+		_ = cmd
+		s.inner = updated.(Model)
+		return s, func() tea.Msg { return panicUpdateMsg{} }
+	case panicUpdateMsg:
+		panic("swapThenPanic: the Update panic issue #19 is about")
+	}
+	return s, nil
+}
+
+func (s swapThenPanic) View() string { return "" }
+
+// TestRecoveredPanicClosesThePickedSession is issue #19 end to end on a real
+// bubbletea program, built the way the frame runner builds one. It pins the
+// third-party fact the fix rests on — an Update panic makes p.Run return a nil
+// model and an error wrapping tea.ErrProgramPanic — so an upgrade that changes
+// it fails here rather than quietly reopening the leak; then finishRun, handed
+// only the model Run started with, still closes the session the picker built.
+//
+// bubbletea's recover prints "Caught panic:" and a stack trace to the test's
+// output. That is the recovery working, not the suite breaking.
+func TestRecoveredPanicClosesThePickedSession(t *testing.T) {
+	initial, log, w := exitTailModel(t)
+	h := &orderHost{log: log}
+	p := tea.NewProgram(swapThenPanic{inner: initial}, tea.WithoutRenderer(), tea.WithInput(nil))
+	final, err := p.Run()
+	if final != nil {
+		t.Fatalf("p.Run returned a %T after an Update panic, want nil", final)
+	}
+	if !errors.Is(err, tea.ErrProgramPanic) {
+		t.Fatalf("p.Run returned %v, want an error wrapping tea.ErrProgramPanic", err)
+	}
+	// Update ran on this goroutine, inside p.Run, so the picker's own close of
+	// the initial session is already in the log.
+	assertOrder(t, log, "sess close")
+	log.events = nil
+	if err := finishRun(w, final, initial, h); err != nil {
+		t.Fatalf("finishRun returned %v", err)
+	}
+	assertOrder(t, log, "term reset", "host close", "sess close picked")
+}
+
+// beginPanics is a session whose Begin panics. sendText calls Begin inside
+// Update, where it claims the turn, so a prompt typed at it is an Update panic
+// with no hook in production code. closes counts Close calls from any copy.
+type beginPanics struct {
+	*Stub
+	closes *atomic.Int32
+}
+
+func (s beginPanics) Begin(string) func(context.Context) (agent.Result, error) {
+	panic("beginPanics: the Update panic issue #19 is about")
+}
+
+func (s beginPanics) Close() error {
+	s.closes.Add(1)
+	return s.Stub.Close()
+}
+
+// TestFramePanicClosesThePickedSession is issue #19 in the frame runner, which
+// had the same hole: it closed the session of the model p.Run handed back, and
+// a recovered panic hands back nil. The model starts as a provider picker with
+// no session at all, Enter builds one, and a prompt panics inside Update. The
+// runner has nothing to read the session from but the owner, so it is the
+// owner's that must close. On a quit the old path already found the right
+// session; only the panic tells the two apart. That p.Run's model is nil here
+// is TestRecoveredPanicClosesThePickedSession's to pin; this sees the error it
+// comes with.
+func TestFramePanicClosesThePickedSession(t *testing.T) {
+	isolateSkillsHome(t)
+	var built, closes atomic.Int32
+	_, _, err := RunFrameScript(Config{
+		Theme:     "tokyo-night",
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+		NewSession: func(p agent.Provider) agent.Session {
+			built.Add(1)
+			s := NewStub()
+			s.SetProvider(p)
+			return beginPanics{Stub: s, closes: &closes}
+		},
+	}, 80, 24, "<enter><wait:idle>hi<enter>", FrameOpts{Timeout: 5 * time.Second})
+	if !errors.Is(err, tea.ErrProgramPanic) {
+		t.Fatalf("RunFrameScript returned %v, want the program's panic", err)
+	}
+	if n := built.Load(); n != 1 {
+		t.Fatalf("the picker built %d sessions, want 1", n)
+	}
+	if n := closes.Load(); n != 1 {
+		t.Fatalf("the picked session was closed %d times, want once", n)
+	}
 }
 
 // ------------------------------------------------------------------ quits

@@ -23,6 +23,19 @@ func pickerFactory(t *testing.T) func(agent.Provider) agent.Session {
 	}
 }
 
+// assertOwned fails unless m.sess and the owner every copy of m shares hold
+// the same session. The exit tails close the owner's, so a session assigned
+// around setSession is one that no exit path would close.
+func assertOwned(t *testing.T, m Model) {
+	t.Helper()
+	if m.owner == nil {
+		t.Fatal("the model has no session owner")
+	}
+	if got := m.owner.current(); got != m.sess {
+		t.Fatalf("the owner holds %T %p, m.sess is %T %p", got, got, m.sess, m.sess)
+	}
+}
+
 func newPicker(t *testing.T, def agent.Provider) Model {
 	t.Helper()
 	return newPickerRows(t, def, nil)
@@ -89,6 +102,7 @@ func TestProviderPickerShowsBeforeStart(t *testing.T) {
 	if m.started || m.sess != nil {
 		t.Fatal("session must not exist until a row is chosen")
 	}
+	assertOwned(t, m)
 	view := plainView(m)
 	if strings.Contains(view, "starting…") {
 		t.Fatalf("starting chip during picker:\n%s", view)
@@ -126,6 +140,7 @@ func TestProviderLockedSkipsPicker(t *testing.T) {
 	if m.sess == nil {
 		t.Fatal("locked path must construct immediately")
 	}
+	assertOwned(t, m)
 	if m.snap.Provider.Name != "grok" {
 		t.Fatalf("provider %q", m.snap.Provider.Name)
 	}
@@ -138,10 +153,18 @@ func TestProviderPickerEnterStartsSelected(t *testing.T) {
 	if m.providerCursor != 1 {
 		t.Fatalf("cursor %d", m.providerCursor)
 	}
+	before := m
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	if m.pickingProvider || m.dialog != dialogNone {
 		t.Fatal("picker still open after enter")
+	}
+	assertOwned(t, m)
+	// The copy from before the swap still has no session of its own, and
+	// reaches the new one through the owner it shares: that copy is the one
+	// Run holds, and all it has after a recovered panic.
+	if before.sess != nil || before.owner.current() != m.sess {
+		t.Fatal("the pre-swap copy does not see the picked session through its owner")
 	}
 	msg := runCmd(cmd)
 	if _, ok := msg.(startedMsg); !ok {
@@ -169,12 +192,39 @@ func TestProviderPickerEscStartsDefault(t *testing.T) {
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)
+	assertOwned(t, m)
 	msg := runCmd(cmd)
 	tm, _ = m.Update(msg)
 	m = tm.(Model)
 	if m.snap.Provider.Name != "grok" {
 		t.Fatalf("esc must start the default, got %q", m.snap.Provider.Name)
 	}
+}
+
+// TestProviderPickerNilFactoryFallsBackToAStub: a factory that builds nothing
+// leaves the picker's NewStub fallback, and that assignment goes through the
+// owner too, or the stub is a session no exit path closes.
+func TestProviderPickerNilFactoryFallsBackToAStub(t *testing.T) {
+	isolateSkillsHome(t)
+	m := New(Config{
+		Theme:      "tokyo-night",
+		Workspace:  t.TempDir(),
+		Yolo:       true,
+		Provider:   agent.CursorProvider(),
+		NewSession: func(agent.Provider) agent.Session { return nil },
+	})
+	if !m.pickingProvider || m.sess != nil {
+		t.Fatal("setup: no picker, or a session before a row was chosen")
+	}
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if m.pickingProvider {
+		t.Fatal("setup: Enter did not confirm the row")
+	}
+	if _, ok := m.sess.(*Stub); !ok {
+		t.Fatalf("a nil factory left %T, want the *Stub fallback", m.sess)
+	}
+	assertOwned(t, m)
 }
 
 func TestStartedMsgPersistsProvider(t *testing.T) {
