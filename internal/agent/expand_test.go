@@ -556,19 +556,51 @@ func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 	dir := probeFixtureDir(t)
 	s := startScriptOpts(t, "hang-ack", Options{PluginDirs: []string{dir}})
 	log := collect(t, s)
-	go func() { _, _ = s.Prompt(context.Background(), "hold the turn") }()
+	// The first prompt's ending is this test's too: it must come back
+	// cancelled, not just come back.
+	firstErr := make(chan error, 1)
+	var firstRes Result
+	go func() {
+		var err error
+		firstRes, err = s.Prompt(context.Background(), "hold the turn")
+		firstErr <- err
+	}()
 	log.waitTexts(t, "ack: hold the turn")
 
 	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrPromptInFlight) {
 		t.Fatalf("second prompt: %v", err)
 	}
-	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
-		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
-	}
+
 	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	if err := s.Cancel(cancelCtx); err != nil {
 		t.Fatal(err)
+	}
+
+	select {
+	case err := <-firstErr:
+		if err != nil {
+			t.Fatalf("first prompt: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first prompt never returned")
+	}
+	if firstRes.StopReason != acp.StopCancelled {
+		t.Fatalf("first prompt stop reason = %q, want %q", firstRes.StopReason, acp.StopCancelled)
+	}
+
+	// The marker is the cancelled turn's own EventDone, and it is caused
+	// strictly after the refusal: the turn only ends because of the Cancel
+	// above, which was issued once the refused Prompt had returned. Anything
+	// that refused call emitted went into the same channel before it, and the
+	// collector appends on one goroutine in channel order, so once the log
+	// holds the done event it holds every event ahead of it. Counted rather
+	// than waited on by type, so no earlier done event could stand in for it.
+	waitUntil(t, "the cancelled turn's EventDone", func() bool {
+		return countType(log.snapshot(), EventDone) == 1
+	})
+	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
 	}
 }
 
@@ -612,10 +644,25 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("prompt during a foreign turn: %v", err)
 	}
+
+	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
+
+	// The foreign turn's end is not a safe marker: the fake ends it on its own
+	// clock, independent of anything the refused prompt did. A later plain
+	// prompt run to completion is. EventDone comes only from a prompt of
+	// craze's own that reached the wire — never from a foreign turn — so the
+	// second one is this prompt's, caused strictly after the refusal; the
+	// collector appends on one goroutine in channel order, so by then it holds
+	// every event the refused call could have emitted.
+	if _, err := s.Prompt(context.Background(), "plain prompt after the foreign turn"); err != nil {
+		t.Fatalf("plain prompt after the foreign turn: %v", err)
+	}
+	waitUntil(t, "the second EventDone", func() bool {
+		return countType(log.snapshot(), EventDone) == 2
+	})
 	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
 		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
 	}
-	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 }
 
 // TestGrokPromptUnchanged: grok advertises every plugin skill itself and
