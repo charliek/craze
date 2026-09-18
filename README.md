@@ -57,6 +57,8 @@ sudo apt install ./craze_<version>_<arch>.deb
 
 ### From source
 
+Source installs require Go 1.27 or later on `PATH`; verify with `go version`.
+
 ```shell
 go install github.com/charliek/craze/cmd/craze@latest
 ```
@@ -86,7 +88,7 @@ make build
 ./bin/craze prompt --json --agent-bin ./bin/craze-fake-agent "hello"
 ```
 
-Needs Go 1.24+ (this repo pins 1.24 via `.mise.toml`; `mise install`).
+Needs Go 1.27+ (this repo pins 1.27.1 via `.mise.toml`; `mise install`).
 
 ## Running
 
