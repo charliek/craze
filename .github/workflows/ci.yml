@@ -83,7 +83,7 @@ jobs:
       # and this job cannot disagree about what a lint failure is.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.10.1
+          version: v2.13.2
       # go.mod / go.sum drift is not a lint rule, and it breaks
       # `go install ...@main` for everyone else rather than anything in here.
       - name: go.mod and go.sum are tidy

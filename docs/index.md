@@ -23,7 +23,7 @@ headless path. Multi-project harness integration is later work.
 craze requires:
 
 - Linux or macOS
-- Go 1.24+ (this repo pins 1.24 via `.mise.toml`)
+- Go 1.27+ (this repo pins 1.27.1 via `.mise.toml`)
 - One of: the [Cursor CLI](https://cursor.com/cli), with a working login
   (`cursor-agent login`, the same binary is also installed as `agent`); the
   [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), with
