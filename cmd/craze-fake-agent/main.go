@@ -52,6 +52,10 @@ Flags:
           ask         emit cursor/ask_question then finish the turn
           plan        emit cursor/create_plan then finish the turn
           hang        do not finish the prompt until session/cancel
+          hang-ack    hang, plus one "ack: <prompt text>" chunk sent first so a
+                      client can wait for proof the prompt was read before it
+                      cancels, instead of racing session/cancel against
+                      session/prompt on the wire
           authfail    initialize ok, authenticate error
           turnfail    a normal session whose session/prompt fails with a
                       JSON-RPC error (-32000 "the turn failed")
@@ -115,7 +119,7 @@ func main() {
 	}
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
-		"hang", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
+		"hang", "hang-ack", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",

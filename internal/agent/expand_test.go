@@ -543,12 +543,21 @@ func TestAdvertisedBareNameIsSentVerbatim(t *testing.T) {
 // the wire, so nothing was expanded and nothing may be reported. The hook the
 // events come from runs one step after the refusal could happen, which is what
 // makes this hold for the CLI's foreign-turn retry too.
+//
+// The trailing Cancel shares the exact hazard TestCancelWaitsUntilPromptReturns
+// and TestSerializedPrompt (session_test.go) were fixed for: promptInFlight
+// flips true before session/prompt is written, so waiting on it alone would
+// let Cancel's session/cancel beat session/prompt onto the wire, get discarded
+// by the fake on purpose, and leave "hang" (and, with it, this test) waiting
+// forever for a second cancel that never comes. "hang-ack" and waiting for its
+// chunk prove the fake read the prompt before Cancel is allowed to run; the
+// bounded context is the same fail-fast backstop for if that regresses.
 func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 	dir := probeFixtureDir(t)
-	s := startScriptOpts(t, "hang", Options{PluginDirs: []string{dir}})
+	s := startScriptOpts(t, "hang-ack", Options{PluginDirs: []string{dir}})
 	log := collect(t, s)
 	go func() { _, _ = s.Prompt(context.Background(), "hold the turn") }()
-	waitUntil(t, "the turn to start", s.promptInFlight)
+	log.waitTexts(t, "ack: hold the turn")
 
 	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrPromptInFlight) {
 		t.Fatalf("second prompt: %v", err)
@@ -556,7 +565,9 @@ func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
 		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
 	}
-	if err := s.Cancel(t.Context()); err != nil {
+	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := s.Cancel(cancelCtx); err != nil {
 		t.Fatal(err)
 	}
 }
