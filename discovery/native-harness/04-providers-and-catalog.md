@@ -2,23 +2,26 @@
 
 ## H0 outcome
 
-H0 evaluated the provider, loop, and catalog layers independently:
+H0 evaluated the provider, loop, and catalog layers independently. A review
+on 2026-09-18 re-ran the rows H0 could not explain and corrected four of its
+conclusions; `11` records both.
 
-1. **Fantasy `v0.43.2` provider layer: fit.** H1 may use the released public
-   provider constructors and `LanguageModel.Stream` API.
-2. **Fantasy `v0.43.2` `Agent.Stream`: no-go.** The released loop stops on a
-   complete tool call whose finish reason is `stop`; craze must own the
-   direct-stream step loop described in `02`.
-3. **Catwalk `v0.52.43`: no-go as H1's catalog.** Two target models need
-   correctness-critical reasoning-capability corrections, crossing H0's
-   threshold. A separate panel-reviewed replacement spike blocks H1.
+1. **Fantasy `v0.43.2` provider layer: fit**, for Fireworks, Z.AI,
+   OpenRouter, and Meta.
+2. **Fantasy `v0.43.2` `Agent.Stream`: fit behind a wrapper.** The streamed
+   loop drops a complete tool call whose finish reason is `stop`. No live
+   model did that, and a small `LanguageModel` wrapper removes the hazard, so
+   H1 runs on `Agent.Stream` (`02`, D-21).
+3. **Catwalk `v0.52.43`: not embedded.** The catalog is a small craze-owned
+   model table seeded from gx's configuration; Catwalk is a reference to
+   consult when adding a model (D-22). Nothing blocks H1.
 4. **Overlay remains required.** It owns credentials, short aliases,
    owner-selected defaults, Meta direct, and narrowly documented provider
    overrides. Whether it reads gx's TOML or imports it remains open in `10`
    Q4.
 
-Fantasy remains Apache-2.0 with its NOTICE; Catwalk was evaluated under MIT
-but is not selected. H0 added neither module to craze's root dependencies.
+Fantasy remains Apache-2.0 with its NOTICE; Catwalk is MIT. H0 added neither
+module to craze's root dependencies.
 
 ## Fixed target results
 
@@ -32,36 +35,56 @@ owner-selected defaults, and metadata drift are ordinary overlay data.
 |---|---|---:|---:|---:|---|
 | `fireworks/kimi-k3` | `accounts/fireworks/models/kimi-k3` | `high` | `S,S` | `S,S` | backed; gx selects its default/allowlist |
 | `fireworks/qwen3p8-max` | `accounts/fireworks/models/qwen3p8-max` | `high` | `S,S` | `S,S` | backed; gx supplies effort values absent from the entry |
-| `fireworks/deepseek-v4-pro` | `accounts/fireworks/models/deepseek-v4-pro` | `high` | `R` | `R` | backed; Fireworks returned HTTP 404; catalog price is stale |
+| `fireworks/deepseek-v4-pro` | `accounts/fireworks/models/deepseek-v4-pro` | `high` | `R` | `R` | gx's wire id is stale (HTTP 404); `…/deepseek-v4-pro-0813` answers and Catwalk lists it; catalog price is stale |
 | `fireworks/kimi-k2p7-code` | `accounts/fireworks/models/kimi-k2p7-code` | `high` | `S,S` | `S,S` | **correction 1:** Catwalk says `can_reason:false`; all 12 high-effort requests emitted reasoning |
 | `fireworks/deepseek-v4-flash` | `accounts/fireworks/models/deepseek-v4-flash-0731` | `high` | `S,S` | `S,S` | backed; owner effort allowlist composes with the entry |
 | `glm-5.3` | `glm-5.3` | `max` | `S,S` | `S,S` | backed; gx selects its effort vocabulary/default |
 | `glm-5.3-flash` | `glm-5.3-flash` | `high` | `S,S` | `S,S` | backed; gx selects its effort vocabulary/default |
-| `muse-spark-1.3` | `muse-spark-1.3` | `high` | `S,F,F` | `F,F,F` | expected Meta overlay; HTTP 200 model noncompliance exhausted the cap |
-| `muse-spark-1.3-contributor` | `muse-spark-1.3-contributor` | `high` | `F,F,F` | `S,F,F` | expected Meta overlay; HTTP 200 model noncompliance exhausted the cap |
+| `muse-spark-1.3` | `muse-spark-1.3` | `high` | `S,F,F` | `F,F,F` | expected Meta overlay; failures were the probe's 512-token ceiling; **review: 8 of 8 Agent loops clean** |
+| `muse-spark-1.3-contributor` | `muse-spark-1.3-contributor` | `high` | `F,F,F` | `S,F,F` | expected Meta overlay; failures were the probe's 512-token ceiling; **review: 5 of 5 Agent loops clean** |
 | `openrouter/minimax-m3` | `minimax/minimax-m3` | none | `S,S` | `S,S` | **correction 2:** Catwalk invents effort levels/default absent from OpenRouter's model contract and gx |
 | `openrouter/gemini-3.8-flash` | `google/gemini-3.8-flash` | `medium` | `S,S` | `S,S` | backed; current public price differs from the embedded entry |
 
-The two Meta rows were reachable and returned valid HTTP streams; their
-failures were tool-structure noncompliance, not transport or Fantasy
-provider-construction failures. DeepSeek V4 Pro's HTTP 404 is retained as a
-provider rejection for that alias rather than evidence against the provider
-library. The eight other aliases passed both modes cleanly.
+The eight other aliases passed both modes cleanly. Every one of the 46
+successful attempts finished its steps `tool-calls, tool-calls, stop`; no
+live model reported `stop` on a tool turn.
+
+### Meta: what the failures were
+
+H0 labelled the Meta failures model noncompliance. They were not. Fourteen of
+the 18 Meta attempts were an HTTP 200 stream holding a single finish chunk:
+no text, no tool call, no usage, `finish_reason: "stop"`. H0's recorder
+discarded response bodies, so the review captured raw SSE directly:
+
+- At the probe's settings Meta returned a normal tool call; rate-limit
+  headers showed 3,000 requests and 4M tokens remaining, so throttling is
+  ruled out.
+- With `max_tokens` lowered to 80, below the model's reasoning, Meta
+  returned exactly the empty `stop` stream, twice out of two.
+
+Meta reports reasoning that exhausts `max_tokens` as an empty `stop` with no
+usage chunk rather than `length`. H0's 512-token ceiling sat at the edge:
+the Meta steps that succeeded used 283–438 output tokens, mostly reasoning.
+Through released `Agent.Stream` with an 8,192-token ceiling both aliases then
+passed 10 of 10 three-step loops, and `muse-spark-1.3` passed 3 of 3 at 512
+with a shorter prompt. The two remaining H0 failures (`invalid_tool`) cannot
+be diagnosed from the sanitized artifacts and did not recur.
+
+Two rules follow (D-25): an output ceiling must leave room for reasoning, and
+an empty `stop` step with no content and no usage is a failed step. Fantasy
+passes it through as a clean stop; D-21's wrapper turns it into an error.
 
 ## H1 alias disposition
 
-The catalog replacement spike carries all 11 alias records and their H0
-status so configured names are not silently lost. H1's initial supported set
-is the eight aliases that passed `S,S` in both modes. DeepSeek V4 Pro remains
-in the input registry as unavailable until Fireworks confirms a current wire
-id and it passes requalification. Both Meta aliases remain overlay records,
-consistent with D-19, but are unsupported for native tool use until each
-passes the same bounded consecutive-pass scenario. Requalification must also
-refresh prices, limits, and endpoint metadata. H1 must not advertise any of
-these three negative rows as supported merely because the selected catalog
-contains an entry.
+H1 carries all 11 alias records so configured names are not silently lost.
+Ten are qualified for native tool use: the eight that passed H0 in both modes
+and both Meta aliases. DeepSeek V4 Pro needs its wire id corrected to
+`accounts/fireworks/models/deepseek-v4-pro-0813` (a plain chat request to it
+returns 200) and one clean three-step tool loop before it is listed (D-24).
+Qualifying a new alias means that loop, through the path H1 ships, with an
+output ceiling that leaves room for reasoning.
 
-## Why Catwalk is a no-go
+## Why Catwalk is not embedded
 
 Catwalk contains the expected Fireworks, Z.AI, and OpenRouter provider
 identities/types/endpoints. Meta's absence was an explicitly allowed overlay.
@@ -87,19 +110,25 @@ not owner-selected defaults:
    separate. The required correction retains `can_reason:true` but removes
    Catwalk's unsupported effort values and default.
 
-H0's acceptance rule was zero such corrections for fit, one isolated
-correction for a bounded wrapper, and two or more for no-go. Catwalk therefore
-cannot be H1's catalog. The replacement investigation should compare smaller
-authoritative sources or a craze-owned target registry rather than disguising
-a second catalog as an overlay.
+Two corrections among nine backed targets would be ordinary overlay work, and
+D-04 expected the overlay to win on effort lists. The reason not to embed
+Catwalk is simpler: the harness targets 11 models whose owner-verified facts
+already live in gx's TOML, Meta is absent, and prices need provider sources
+anyway. A 40-provider embedded catalog adds a dependency and an update
+cadence without removing the table craze has to own. Catwalk is still worth
+reading when adding a model; it carried the current DeepSeek V4 Pro wire id
+that gx lacked.
 
 ## Provider and request behavior
 
 - OpenAI-compatible targets use Fantasy's `providers/openaicompat`; OpenRouter
   uses `providers/openrouter` with nested `reasoning.effort`.
 - H0 set `MaxRetries=0`, a 512-token output ceiling, per-request and
-  per-attempt deadlines, and a pre-dispatch budget reservation. Production
-  retry policy remains owned by the later harness plan.
+  per-attempt deadlines, and a pre-dispatch budget reservation. The ceiling
+  was too low for high-effort reasoning models and caused the Meta failures
+  above. Production retry policy remains owned by the later harness plan.
+- Meta's rate-limit headers (`x-ratelimit-remaining-requests`,
+  `x-ratelimit-remaining-tokens`) are present on every response.
 - The GLM 5.3 Flash low-effort live variant passed with top-level
   `reasoning_effort`. It emitted no reasoning content, so the run verified
   field placement and history continuity but did not add live reasoning

@@ -10,17 +10,19 @@ produced `05`–`08` are summarized in the owner's memory notes
 
 | module | exact release | tag commit | module checksum | license | H0 disposition |
 |---|---|---|---|---|---|
-| `charm.land/fantasy` | `v0.43.2` | `326027229d6a8a37444b98119456df5a4f07ef2c` | `h1:BHnC/iu72aZLG5SE1jIViOIStRUIPwxAlw55TZeKEzc=` | Apache-2.0 plus `NOTICE` | public providers and `LanguageModel.Stream` accepted; released `Agent.Stream` rejected |
-| `charm.land/catwalk` | `v0.52.43` | `aab3ef84556311c61900372867a1a90e20b65f8b` | `h1:VgwwWU7jtUxjgRFOo6pS53epQ2yNvIYaIv0p6sb9mYk=` | MIT | evaluated and rejected as H1's catalog |
+| `charm.land/fantasy` | `v0.43.2` | `326027229d6a8a37444b98119456df5a4f07ef2c` | `h1:BHnC/iu72aZLG5SE1jIViOIStRUIPwxAlw55TZeKEzc=` | Apache-2.0 plus `NOTICE` | providers and `LanguageModel.Stream` accepted; `Agent.Stream` accepted behind a finish-normalizing `LanguageModel` wrapper (D-21) |
+| `charm.land/catwalk` | `v0.52.43` | `aab3ef84556311c61900372867a1a90e20b65f8b` | `h1:VgwwWU7jtUxjgRFOo6pS53epQ2yNvIYaIv0p6sb9mYk=` | MIT | not embedded; a reference when adding models (D-22) |
 | `github.com/BurntSushi/toml` | `v1.6.0` | — | recorded in the external probe `go.sum` | MIT | probe-only parser pin; craze already uses this module |
 
 Fantasy's exact release files to read first are `provider.go`, `agent.go`,
 `tool.go`, `content.go`, `providers/openaicompat/`, and
-`providers/openrouter/`. The deterministic released-agent limitation is
-captured by external probe fixture
-`TestStopWithCompleteToolSeparatesDirectDriverFromAgent`: the direct driver
-continues a complete `stop` tool call for three requests; released Agent
-stops after one request without dispatching it.
+`providers/openrouter/`. The streamed agent loop dispatches and continues
+only on finish reason `tool-calls` (`agent.go`, the `stepFinishReason ==
+FinishReasonToolCalls` checks), and the OpenAI provider's streaming path does
+not rewrite `stop` into `tool-calls` the way its non-streaming path does.
+External fixture `TestStopWithCompleteToolSeparatesDirectDriverFromAgent`
+reproduces the consequence; `followup-2026-09-18/wrap_test.go` in the same
+artifact directory shows the wrapper that removes it.
 
 Catwalk's public API used in H0 was `pkg/embedded.GetAll`, with model/provider
 fields from `pkg/catwalk/provider.go`. The exact embedded target entries are
@@ -40,8 +42,9 @@ candidate or reference project.
 - `golangci-lint v2.10.1` could not load Go 1.27 export data. The synchronized
   pin is `v2.13.2`, built with Go 1.27.0 and verified against craze under Go
   1.27.1.
-- Catwalk requires Go 1.26.6, but its rejection means it does not determine
-  the production dependency floor.
+- Catwalk requires Go 1.26.6; it is not a dependency, so it does not set the
+  floor.
+- The toolchain change landed on its own, ahead of any harness code.
 
 ## Other libraries
 
@@ -53,11 +56,11 @@ candidate or reference project.
 
 | repo | inspected date | license | what it grounded |
 |---|---|---|---|
-| `crush` | 2026-09-11 | **FSL-1.1-MIT-future** (pointer-only; do not copy code) | how a coding agent sits on Fantasy: provider factory, tool wrappers, permissions, and sub-agent shape |
-| `opencode` | 2026-08-30 | MIT | turn loop, permissions, edit/truncation/shell tools, compaction, instructions, provider transforms, ACP server |
-| upstream `grok-build` (`xai-org/grok-build`) | 2026-09-09 | Apache-2.0 (`LICENSE`; third-party notices in `third_party/NOTICE`) | craze's current behavior: Claude compatibility, tool taxonomy, plan mode, sessions, compaction, sub-agents, and permissions |
+| `crush` | 2026-09-11 | **FSL-1.1-MIT-future** (pointer-only; do not copy code) | how a coding agent sits on fantasy: `internal/agent/agent.go` (callbacks → messages, `PrepareStep` queue fold), `coordinator.go` (provider factory by catwalk type, `buildTools`), `hooked_tool.go` (the wrapper pattern), `agent_tool.go` (sub-agent as a parallel tool), `internal/permission/` |
+| `opencode` | 2026-08-30 | MIT | the turn loop (`session/prompt.ts`, `processor.ts`), permissions (`permission/index.ts`, `arity.ts`), tools (`tool/edit.ts` ladder, `tool/truncate.ts`, `tool/shell.ts`), compaction (`session/compaction.ts`), instruction files (`session/instruction.ts`), provider quirks (`provider/transform.ts`), ACP server (`acp/`) |
+| upstream `grok-build` (`xai-org/grok-build`) | 2026-09-09 | Apache-2.0 (`LICENSE`; third-party notices in `third_party/NOTICE`) | the reference for craze's current wire; Claude compat (`xai-grok-agent/src/prompt/agents_md.rs`, `discovery.rs`, `plugins/discovery.rs`, `xai-grok-tools/.../skills/`, `xai-grok-workspace/src/permission/claude_settings.rs`, `xai-grok-shell/src/claude_import.rs`), tool taxonomy (`xai-grok-tools/src/tool_taxonomy.rs`, `normalization.rs`), plan mode (`session/acp_session_impl/tool_calls.rs`), sessions (`storage/`, `updates.jsonl`), compaction (`session/compaction.rs`, `xai-compaction-transcript`), sub-agents, the user guide under `xai-grok-pager/docs/user-guide/` (08 skills, 09 plugins, 12 project rules, 19 plan mode, 22 permissions) |
 | gx fork (`charliek/grok-build`) at `gx-v1.0.16-gx.12`, commit `66fe38c2e7b155769f72536e9d7a8c1ce1c8be77` | 2026-09-18 | Apache-2.0 (`LICENSE`; third-party notices in `third_party/NOTICE`) | effective gx model/provider configuration |
-| `pi` (`earendil-works/pi`) | 2026-09-16 | MIT | minimal agent loop, session tree, tools, compaction, extensions, skills, and package management |
+| `pi` (`earendil-works/pi`) | 2026-09-16 | MIT | the minimal core: `packages/agent/src/agent-loop.ts`, `agent.ts`; `packages/coding-agent/src/core/session-manager.ts`, `core/tools/`, `core/compaction/`, `core/extensions/`, `core/package-manager.ts`; docs `session-format.md`, `extensions.md`, `skills.md`, `packages.md`, `compaction.md`, README "Philosophy" |
 
 Permissive reference code still requires an explicit provenance note and
 license/notice handling if later adapted. H0 copied no application
@@ -80,9 +83,9 @@ implementation from these projects.
 | grok | session + agent + sampler | 300k+ |
 
 The original working estimate for broad craze parity was 12–15k lines of Go
-logic, plus tests. H0 adds a rough 1.5–2.5 kLOC estimate, plus comparable
-fixtures, for the craze-owned direct stream loop before later tools and
-permissions. These are planning inputs, not commitments.
+logic, plus tests. H0's probe suggests a craze-owned direct stream loop would
+add roughly 1.5–2.5 kLOC plus comparable fixtures; D-21 does not take that
+path first. These are planning inputs, not commitments.
 
 ## H0 gx facts
 
@@ -97,8 +100,15 @@ permissions. These are planning inputs, not commitments.
   claimed `thinking` object.
 - `stream_tool_calls` controls an optional Responses request field in current
   gx; it does not disable chat-completions tool streaming.
-- GLM 5.3 rejects images; Meta tool-result image placement remains deferred
-  to H8. The approved H0 live scenario was text-only.
+- GLM 5.3 rejects images anywhere. Meta's gateway returns 400 for images
+  inside tool messages; gx hoists them into a user message
+  (`xai-grok-shell/src/agent/gx_tool_images.rs`). Both are H8 work; the H0
+  live scenario was text-only.
+- Meta reports reasoning that exhausts `max_tokens` as an empty stream with
+  `finish_reason: "stop"` and no usage chunk, not as `length` (D-25).
+- The gx alias `fireworks/deepseek-v4-pro` points at a wire id Fireworks no
+  longer serves (HTTP 404). `accounts/fireworks/models/deepseek-v4-pro-0813`
+  answers; Catwalk lists both ids.
 - H0's gx control recorded version `1.0.16+gx.12` but sent zero requests
   because the headless command exposes no enforceable numeric generated-token
   ceiling.

@@ -6,9 +6,8 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 
 | ID | status | one line |
 |---|---|---|
-| H0 | complete | Fantasy `v0.43.2` is a provider-only fit; released `Agent.Stream` and Catwalk `v0.52.43` are no-go |
-| catalog replacement spike | required before H1 | select and verify the catalog source after Catwalk exceeded the correctness-correction threshold |
-| H1 | blocked | skeleton using Fantasy `LanguageModel.Stream` plus a craze-owned step loop; waits for the catalog replacement decision |
+| H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
+| H1 | next | skeleton: home dir + env override, craze-owned model table + overlay, provider factory, wrapper + `Agent.Stream` turn runner over the JSONL tree store, hidden native provider, effort option, cancel, interject |
 | H2 | not started | tools: read, bash, edit, write, then ls, glob, grep; truncation wrapper; kind metadata; edit diffs; doom-loop guard; scripted-model test harness |
 | H3 | not started | permissions: once / always / reject-with-feedback, prefix table, dangerous list, per-workspace grants, Claude rule syntax, yolo |
 | H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
@@ -27,8 +26,8 @@ Completed on 2026-09-18. The external Go 1.27 probe pinned released Fantasy
 - The fixed 11-model Linux campaign ran through both a bounded public
   `LanguageModel.Stream` driver and released `Agent.Stream`. Eight aliases
   passed `S,S` in both modes, DeepSeek V4 Pro was rejected by Fireworks with
-  HTTP 404, and both Meta aliases exhausted their caps through HTTP-200 model
-  noncompliance.
+  HTTP 404, and both Meta aliases exhausted their attempt caps (see the
+  review below for why).
 - A deterministic local fixture proved that the direct driver continues a
   complete tool call reported with finish reason `stop`, while released
   `Agent.Stream` ends after one request and does not dispatch it.
@@ -43,45 +42,39 @@ Completed on 2026-09-18. The external Go 1.27 probe pinned released Fantasy
   manifest and only credentials already present on the mac-mini. Detailed
   attempt sequences and platform limits are recorded in `11`.
 
-**Exit result:** Fantasy provider layer fit; Fantasy released agent loop
-no-go; combined Fantasy verdict provider-only fit; Catwalk no-go. The root Go
-floor is 1.27.0 with toolchain 1.27.1. H1 must own the direct stream loop and
-wait for the catalog replacement spike.
+A review on 2026-09-18 re-ran what H0 could not explain (`04`, `11`):
 
-### Catalog replacement spike — prerequisite
+- The Meta failures were the probe's 512-token ceiling truncating reasoning,
+  which Meta reports as an empty `stop`. Both aliases then passed 13 of 13
+  released `Agent.Stream` loops.
+- The `stop`-with-tool-call hazard never appeared live, and a roughly 40-line
+  `LanguageModel` wrapper removes it.
+- DeepSeek V4 Pro's 404 was a stale wire id in gx's configuration.
 
-- Compare candidate catalog sources against all 11 fixed H0 alias records,
-  including reasoning capability/defaults, attachments, provider
-  identity/type/endpoint, context/output metadata, independently verified
-  prices, and H0 support status.
-- Carry forward H0's explicit disposition: the eight aliases with `S,S` in
-  both modes form H1's initial supported set; DeepSeek V4 Pro remains
-  unavailable pending Fireworks revalidation; both Meta aliases remain
-  overlay records but are unsupported for native tool use pending clean
-  requalification under the same bounded scenario.
-- Prefer an authoritative small source or a deliberately owned craze registry
-  over a broad catalog that needs a competing overlay.
-- **Exit**: one panel-reviewed catalog decision, exact pin/provenance, all-11
-  target diff, update strategy, support-status representation, requalification
-  rule, and H1 input contract.
+**Exit result:** Fantasy's provider layer fits; `Agent.Stream` fits behind the
+wrapper (D-21); the catalog is a craze-owned model table (D-22); the Go floor
+is 1.27.0 with toolchain 1.27.1, landed separately (D-23); ten of 11 aliases
+are qualified (D-24). Nothing blocks H1.
 
 ### H1 — skeleton
 
-- `internal/harness`: home dir; the selected catalog plus overlay; Fantasy
-  provider factory; store with header/message/model_change/effort_change
-  entries; and a craze-owned `LanguageModel.Stream` loop for stream
-  collection, manual assistant/tool history, complete-call continuation
-  independent of finish reason, usage/finish accounting, event mapping,
-  steering/history replacement, cancellation, and hard bounds.
+- `internal/harness`: home dir; model table plus overlay (gx TOML read or
+  import per `10` Q4); Fantasy provider factory; the finish-normalizing
+  `LanguageModel` wrapper with its fixtures (D-21, D-25); store with
+  header/message/model_change/effort_change entries; turn runner on
+  `Agent.Stream` behind the harness's own interface (text and thought only,
+  no tools); cancel; `PrepareStep` steering.
 - `internal/agent`: `NativeProvider()` with `hidden: true`; session adapter;
-  `Capabilities{Effort, Modes, Interject}`; model dialog lists catalog
-  models; effort as a config option.
-- Refine H0's rough 1.5–2.5 kLOC direct-loop estimate and budget a comparable
-  amount of scripted/local-stream fixture work before implementation.
-- **Exit**: a conversation with all eight initially supported models from the
-  real TUI via `--provider native`, mid-session model switch, cancel,
-  interject, and `craze prompt --json` unchanged. The three retained-but-
-  unsupported records are not selectable. Picker never shows the provider.
+  `Capabilities{Effort, Modes, Interject}`; model dialog lists the model
+  table; effort as a config option.
+- A lint rule fails any import of `internal/agent`, `internal/tui`, or
+  `internal/acp` from `internal/harness` (D-02, D-26).
+- Output ceilings come from the model table and leave room for reasoning
+  (D-25).
+- **Exit**: a conversation with all ten qualified models from the real TUI
+  via `--provider native`, mid-session model switch, cancel, interject, and
+  `craze prompt --json` unchanged. DeepSeek V4 Pro joins once its wire id is
+  corrected and it passes one tool loop. Picker never shows the provider.
 
 ### H2 — tools
 
@@ -153,3 +146,8 @@ flipping the provider to visible.
   per commit; `make docs` when published docs or docs tooling changes.
 - Update `08-decisions.md` when a phase changes a decision; update the
   status column above when a phase merges.
+- The harness is a side quest beside the daily-driver TUI (D-26): size each
+  phase's process to its risk. A spike is a throwaway `main`, and it keeps
+  raw provider responses (credentials stripped) so a failure can be diagnosed
+  rather than retried. H0's recorder discarded them, which is why its Meta
+  failures were mislabelled.

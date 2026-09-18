@@ -1,10 +1,11 @@
 # 11 — H0 progress and results
 
-This is the durable, sanitized execution record for Plan 016, the H0
-provider-stack fit spike. It is self-contained for future native-harness
-implementers who cannot access the local supporting artifacts.
+This is the durable, sanitized record of Plan 016, the H0 provider-stack fit
+spike, and of the review that followed it. It is self-contained for future
+native-harness implementers who cannot access the local supporting artifacts.
 
-**Status:** complete — completed-negative experiment
+**Status:** complete. H0's own outcome was "completed-negative"; the review
+below overturned most of the negative part, and H1 is unblocked.
 
 **Completed:** 2026-09-18
 
@@ -19,21 +20,78 @@ understand this record)
 
 ## Outcome
 
-H0 evaluated three layers independently:
+| layer | exact candidate | H0 verdict | after review | consequence |
+|---|---|---|---|---|
+| Fantasy provider layer | `charm.land/fantasy v0.43.2` provider constructors and `LanguageModel.Stream` | fit, Meta unexplained | **fit, including Meta** | H1 uses the released provider layer (D-20) |
+| Fantasy agent loop | `charm.land/fantasy v0.43.2` `Agent.Stream` | no-go | **fit behind a finish-normalizing wrapper** | H1 runs on `Agent.Stream` plus a roughly 40-line `LanguageModel` wrapper (D-21) |
+| Catwalk catalog | `charm.land/catwalk v0.52.43` embedded catalog | no-go; replacement spike blocks H1 | **not embedded; no blocking spike** | a small craze-owned model table seeded from gx (D-22) |
 
-| layer | exact candidate | verdict | consequence |
-|---|---|---|---|
-| Fantasy provider layer | `charm.land/fantasy v0.43.2` public provider constructors and `LanguageModel.Stream` | **fit** | H1 may use the released provider layer |
-| Fantasy agent loop | `charm.land/fantasy v0.43.2` released `Agent.Stream` | **no-go** | craze must own the direct-stream step loop |
-| Fantasy combined | same release | **provider-only fit** | accept the provider layer, not the released agent loop |
-| Catwalk catalog | `charm.land/catwalk v0.52.43` embedded catalog | **no-go** | a separate panel-reviewed catalog replacement spike blocks H1 |
+H0's observations are reliable and are kept below as recorded. Four of its
+conclusions were not supported by them; the review section says which and
+why. DeepSeek V4 Pro's rejection, the skipped gx controls, and the skipped
+live image variants are bounded row or variant dispositions.
 
-The overall experiment is **completed-negative**, not blocked: the required
-bounded evidence completed and produced supported negative verdicts for the
-released Fantasy agent loop and Catwalk. DeepSeek V4 Pro's provider rejection,
-the skipped gx controls, and skipped live image variants are bounded row or
-variant dispositions described below; they do not make the three-layer
-verdicts inconclusive.
+## Review — 2026-09-18
+
+H0 was executed by one model and reviewed by another the next day. The review
+checked the load-bearing claims against the released module source and the
+raw result files, then ran what H0 had left unexplained. Its working files
+are in the artifact directory under `followup-2026-09-18/`.
+
+### Confirmed
+
+- Streamed `Agent.Stream` dispatches tools and continues only when the step's
+  finish reason is `tool-calls` (`agent.go`, the two
+  `stepFinishReason == FinishReasonToolCalls` checks). The OpenAI provider's
+  non-streaming path rewrites `stop` to `tool-calls` when calls are present;
+  its streaming path does not. H0's fixture reproduces the dropped call.
+- The Catwalk entries are as H0 described: Kimi K2.7 Code is
+  `can_reason:false`, and OpenRouter MiniMax M3 carries `low|medium|high`
+  with default `medium`.
+
+### Corrected
+
+1. **`Agent.Stream` is not a no-go.** Plan 016 asked whether the `stop` hazard
+   is observed live. It was not: all 46 successful attempts, and the 13 Meta
+   loops run in the review, finished `tool-calls, tool-calls, stop`. H0 wrote
+   that fixing it "requires owning the loop, not a configuration overlay". A
+   `LanguageModel` wrapper that rewrites the finish part does it through the
+   public API. Four fixtures pass under `-race` against the released module:
+   released Agent drops the call; the wrapped model dispatches it and
+   continues; a `length` finish with a partial call still dispatches nothing;
+   Meta's empty `stop` becomes an error. In Plan 016's own vocabulary that is
+   "conditional fit: bounded wrapper".
+2. **The Meta failures were not model noncompliance.** Fourteen of 18 Meta
+   attempts were an HTTP 200 stream with one finish chunk and nothing else:
+   no text, no tool call, no usage, finish `stop`. A model that disobeys a
+   tool protocol still emits something. Raw SSE capture showed Meta returns
+   exactly that stream when reasoning exhausts `max_tokens` (reproduced twice
+   of twice at an 80-token ceiling) and rate limits were nowhere near (3,000
+   requests and 4M tokens remaining). H0's 512-token ceiling sat at the edge:
+   its successful Meta steps used 283–438 output tokens. Through released
+   `Agent.Stream` at an 8,192-token ceiling, `muse-spark-1.3` and
+   `muse-spark-1.3-contributor` each passed 5 of 5 loops, and
+   `muse-spark-1.3` passed 3 of 3 at 512 with a shorter prompt. H0 could not
+   have found this from its artifacts, because its recorder discarded
+   response bodies; its three-attempt pass rule then absorbed the failures
+   instead of forcing a diagnosis. Two `invalid_tool` attempts remain
+   unexplained for the same reason and did not recur.
+3. **Catwalk "no-go" rested on a threshold the plan set for itself.** Two
+   corrections among nine backed targets is ordinary overlay work, which
+   D-04 already expected. The sound reason not to embed Catwalk is that 11
+   owner-verified models fit a table craze must own anyway (D-22). That needs
+   no separate panel-reviewed spike.
+4. **DeepSeek V4 Pro's 404 was a stale wire id** in gx's configuration.
+   `accounts/fireworks/models/deepseek-v4-pro-0813` answers a plain chat
+   request with 200; Catwalk lists it. It still needs one tool loop.
+
+### What this says about the process
+
+H0 wrote roughly 5.6k lines of Go and 2.8k of Python, with a locked budget
+ledger, canary scans, and checksum manifests, to spend USD 0.14. The safety
+work was careful and nothing leaked, but it also threw away the one thing
+needed to explain the only interesting failure. Later spikes should be a
+throwaway `main` that keeps raw responses with credentials stripped (`07`).
 
 ## Candidates, toolchain, and provenance
 
@@ -145,16 +203,16 @@ and `R` the terminal provider rejection.
 | `fireworks/deepseek-v4-flash` | `accounts/fireworks/models/deepseek-v4-flash-0731` | `high` | `S,S` | `S,S` | clean in both modes |
 | `glm-5.3` | `glm-5.3` | `max` | `S,S` | `S,S` | clean in both modes |
 | `glm-5.3-flash` | `glm-5.3-flash` | `high` | `S,S` | `S,S` | clean in both modes |
-| `muse-spark-1.3` | `muse-spark-1.3` | `high` | `S,F,F` | `F,F,F` | cap exhausted; HTTP-200 model noncompliance, including one invalid tool call |
-| `muse-spark-1.3-contributor` | `muse-spark-1.3-contributor` | `high` | `F,F,F` | `S,F,F` | cap exhausted; HTTP-200 model noncompliance, including one invalid tool call |
+| `muse-spark-1.3` | `muse-spark-1.3` | `high` | `S,F,F` | `F,F,F` | attempt cap exhausted; the probe classed the empty HTTP-200 streams `model_noncompliance` (see Review), plus one `invalid_tool` |
+| `muse-spark-1.3-contributor` | `muse-spark-1.3-contributor` | `high` | `F,F,F` | `S,F,F` | attempt cap exhausted; the probe classed the empty HTTP-200 streams `model_noncompliance` (see Review), plus one `invalid_tool` |
 | `openrouter/minimax-m3` | `minimax/minimax-m3` | none | `S,S` | `S,S` | clean in both modes |
 | `openrouter/gemini-3.8-flash` | `google/gemini-3.8-flash` | `medium` | `S,S` | `S,S` | clean in both modes |
 
 Eight aliases passed both modes cleanly. Both Meta aliases constructed,
-reached their intended endpoint, and returned valid HTTP streams; their
-failures were model tool-structure noncompliance rather than provider adapter
-failures. DeepSeek V4 Pro's endpoint also constructed correctly, but the
-configured model was unavailable through Fireworks at execution time.
+reached their intended endpoint, and returned valid HTTP streams. H0 read
+their failures as model noncompliance; the Review shows they were reasoning
+truncated by the 512-token ceiling. DeepSeek V4 Pro's endpoint also
+constructed correctly, but gx's configured wire id is no longer served.
 
 ### gx controls — 2026-09-18
 
@@ -191,7 +249,7 @@ and 18 attempts:
 |---|---:|---:|---:|---|
 | `fireworks/kimi-k3` | `high` | `S,S` | `S,S` | clean in both modes |
 | `glm-5.3-flash` | `high` | `S,S` | `S,S` | clean in both modes |
-| `muse-spark-1.3-contributor` | `high` | `F,F,F` | `F,F,F` | all six attempts: HTTP-200 `model_noncompliance`, finish `stop` |
+| `muse-spark-1.3-contributor` | `high` | `F,F,F` | `F,F,F` | all six attempts: empty HTTP-200 stream, finish `stop`, classed `model_noncompliance` (see Review) |
 | `openrouter/gemini-3.8-flash` | `medium` | `S,S` | `S,S` | clean in both modes |
 
 The remote campaign produced explicit terminal marker
@@ -246,99 +304,45 @@ reservations remain charged for requests without complete trusted billable
 usage; they were never released or reused. Every allocation and the global
 USD 10 ceiling remained below its limit.
 
-## Why the verdicts follow
+## H0's verdict reasoning, as recorded
 
-### Fantasy provider layer: fit
+Kept for the record; the review above supersedes it where they disagree.
 
-The released public provider constructors and `LanguageModel.Stream`
-constructed and streamed every provider class. Eight aliases passed two
-consecutive exact three-step loops in direct mode on Linux, and the three
-non-Meta macOS representatives repeated `S,S`. Meta returned valid streams
-but repeatedly disobeyed the requested tool structure; DeepSeek V4 Pro was
-rejected by Fireworks with HTTP 404. Neither result identifies a Fantasy
-provider-layer defect. Direct fixtures also proved bounded continuation,
-manual history, finish/usage accounting, endpoint containment, error
-classification, and cancellation through public APIs.
-
-### Released Fantasy Agent: no-go
-
-Live Agent rows show that released `Agent.Stream` can complete the scenario
-when a model reports the expected tool-call finish reason, but that is not the
-correctness boundary craze needs. Deterministic released-version fixture
-`TestStopWithCompleteToolSeparatesDirectDriverFromAgent` sends a complete,
-valid tool call with finish reason `stop`. The direct driver continues it and
-finishes all three requests; released Agent stops after one request and never
-dispatches the tool. Correct behavior cannot depend on every provider/model
-choosing `tool-calls` for a complete call. Fixing this requires owning the
-loop, not a configuration overlay around Agent.
-
-### Catwalk: no-go
-
-Catwalk has the expected Fireworks, Z.AI, and OpenRouter provider identities,
-types, and endpoints. Meta's absence was an allowed overlay. Price, context,
-and default-output drift remains independently changing metadata rather than
-a correctness verdict.
-
-Two target facts require demonstrated correctness-critical reasoning
-corrections rather than ordinary owner-selected defaults:
-
-1. Catwalk marks Kimi K2.7 Code `can_reason:false`. gx's Fireworks contract
-   enables high effort, and all four clean direct/Agent attempts sent high
-   effort on all three requests. Each attempt recorded three reasoning
-   starts/ends and nonzero reasoning content; its aggregate trusted
-   reasoning-token total was 197, 72, 184, or 254. Catwalk's capability claim
-   must therefore change to reasoning-enabled before gx's effort default can
-   compose with it.
-2. Catwalk's OpenRouter generator infers `low|medium|high` and default
-   `medium` whenever an endpoint lists generic `reasoning` support.
-   OpenRouter's public MiniMax M3 model record lists `reasoning` and
-   `include_reasoning` but not `reasoning_effort`, and publishes neither
-   supported efforts nor a default. gx's provider-verified preset accordingly
-   exposes and sends no effort. All four clean direct/Agent attempts made
-   three no-effort requests and still emitted reasoning, confirming that
-   reasoning capability and effort control are separate. The correction keeps
-   `can_reason:true` but clears the unsupported levels and default.
-
-H0's threshold was zero corrections for fit, one isolated correction for a
-bounded wrapper, and two or more for no-go. Catwalk therefore cannot be H1's
-catalog. The existing small overlay is still needed for credentials, aliases,
-owner-selected defaults, Meta direct, and narrow provider overrides; it must
-not conceal a second competing catalog.
+- **Provider layer, fit.** Every provider class constructed and streamed
+  through the released public API. Eight aliases passed two consecutive
+  three-step loops in direct mode on Linux, and the three non-Meta macOS
+  representatives repeated `S,S`.
+- **Released Agent, no-go.** Fixture
+  `TestStopWithCompleteToolSeparatesDirectDriverFromAgent` sends a complete,
+  valid tool call with finish reason `stop`; the direct driver continues it
+  and released Agent stops after one request. H0 concluded that correctness
+  cannot depend on the provider choosing `tool-calls`. True, and the wrapper
+  is what removes the dependency.
+- **Catwalk, no-go.** Kimi K2.7 Code is marked `can_reason:false` although
+  all four clean attempts sent high effort on three requests and recorded
+  197, 72, 184, and 254 reasoning tokens. Catwalk's OpenRouter generator
+  infers `low|medium|high` from generic `reasoning` support, while
+  OpenRouter's MiniMax M3 record publishes no effort contract and gx sends
+  none; all four clean attempts still emitted reasoning. H0's threshold was
+  zero corrections for fit, one for a bounded wrapper, two for no-go.
 
 ## H1 handoff
 
-A separate panel-reviewed catalog replacement spike is the next action and
-blocks H1. It must carry all 11 alias records and their H0 status so configured
-names are not silently lost, compare authoritative small sources or a
-deliberately owned craze registry against the fixed effective facts, define
-update and provenance rules, and select the catalog input contract.
+H1 is next and nothing blocks it.
 
-H1's initial supported set is the eight aliases that passed `S,S` in both
-modes. DeepSeek V4 Pro remains recorded as unavailable until Fireworks
-confirms a current wire id and it passes the same bounded requalification.
-Both Meta aliases remain overlay records, consistent with D-19, but are
-unsupported for native tool use until each passes that qualification. Every
-requalification also refreshes prices, numeric limits, and endpoint metadata;
-a catalog entry alone cannot promote one of these three rows to supported.
-
-After the catalog decision, H1 may add Fantasy's provider package and must implement
-a craze-owned `LanguageModel.Stream` loop covering:
-
-- stream collection and explicit terminal-part validation;
-- manual assistant tool-call and tool-result history;
-- continuation of every complete valid tool call independent of finish
-  reason;
-- per-step and aggregate usage/finish accounting;
-- mapping provider parts to craze events;
-- steering and history replacement at step boundaries;
-- sampling and tool cancellation; and
-- hard step, tool, time, retry, output, and budget bounds.
-
-The H0 implementation suggests roughly 1.5–2.5 kLOC for that production loop,
-plus a comparable amount of scripted/local-stream fixtures. This is a
-planning estimate, not an implementation commitment. H1 must refine it before
-coding. The direct-read-versus-import choice for gx configuration remains open
-in `10-open-questions.md` Q4.
+- **Turn runner**: released `Agent.Stream` behind the finish-normalizing
+  `LanguageModel` wrapper, behind the harness's own interface (D-21). The
+  wrapper and its four fixtures are the first code to port from the review
+  follow-up. H0 sized the alternative, a craze-owned `LanguageModel.Stream`
+  loop, at roughly 1.5–2.5 kLOC plus comparable fixtures.
+- **Catalog**: a craze-owned model table seeded from gx's configuration
+  (D-22); `10` Q4 still decides read versus import.
+- **Models**: all 11 aliases are carried; ten are qualified. DeepSeek V4 Pro
+  needs the `-0813` wire id and one clean tool loop (D-24).
+- **Output ceilings** leave room for reasoning, and an empty `stop` step with
+  no content and no usage is a failed step (D-25).
+- **Repository**: the harness lives here, hidden, with D-02's import rule
+  enforced by lint (D-26).
 
 ## Safety and validation
 
@@ -359,63 +363,32 @@ in `10-open-questions.md` Q4.
   and repository scans are part of the repository-verification checkpoint
   below.
 
-## Rerun guidance
+## Qualifying a model later
 
-No rerun is required to complete H0. If later facts justify one:
+No rerun of H0 is needed. To qualify a new or corrected alias (DeepSeek V4
+Pro first), run the three-step scenario from "Experiment contract" through
+the path H1 ships, with `MaxRetries=0` and deadlines, and:
 
-1. start from a fresh owner-only results directory and fresh ledger; never
-   mutate these accepted rows;
-2. reverify current provider prices, credentials by class, numeric output
-   ceilings, aliases, endpoints, and exact module checksums before traffic;
-3. keep the approved three-step scenario, `MaxRetries=0`, 512-token ceiling,
-   deadlines, per-request 2× reservation, three-attempt cap, and `S,S` or
-   `F,S,S` pass rule;
-4. use a unique reservation prefix and preserve held reservations on unknown
-   usage;
-5. rerun DeepSeek V4 Pro only after Fireworks confirms a reachable current
-   wire id; run gx only after it exposes an enforceable numeric output-token
-   ceiling;
-6. treat live image coverage as a newly reviewed manifest rather than silently
-   extending this text-only campaign; and
-7. on macOS, require the same source manifest, pre-existing local credentials,
-   immutable binary/path checks, explicit remote terminal marker, local result
-   validation, and ledger reconciliation before import.
+1. give the model an output ceiling that leaves room for its reasoning; do
+   not reuse H0's 512 tokens;
+2. keep the raw response with credentials stripped, and diagnose any failure
+   rather than counting it against an attempt cap;
+3. check the wire id against the provider's current model list first; and
+4. treat live image coverage as H8 work with its own scenario.
 
-## Repository verification
+## Repository record
 
-**Repository status:** pre-commit verification complete; ready to commit, not
-ready to merge.
-
-- CodeRabbit CLI `0.7.6` reviewed the complete uncommitted diff against
-  `main`, including this new file after it was marked intent-to-add. The
-  all-11 alias disposition, fixture-effort wording, and two record-clarity
-  findings were fixed. Its last pass had no remaining content defect; it
-  requested completion of this repository checkpoint.
-- `go mod tidy` under Go 1.27.1 produced no `go.mod` or `go.sum` drift.
-- `make lint && make test && make test-race && make build && make test-cli`
-  passed. `make docs` also passed with Zensical strict mode. The first CLI run
-  inherited this execution host's four color-suppression variables and failed
-  only the test whose baseline requires terminal colors; the focused test and
-  complete gate passed with those host overrides removed, matching CI. No
-  test or application change was made for that environmental isolation issue.
-- The final safety pass checked 272 combined campaign canaries in every
-  supported encoding across canonical results, repository changes, and final
-  narrative/log records. It checked four resolved credential classes across
-  all 295 private artifact files and all 16 changed repository files. No match
-  was found. The 106-entry stable evidence/tooling checksum inventory also
-  verified exactly.
-- `git diff --check` passed, every tracked/untracked path was inspected, and
-  the shared `main` worktree remained clean at `5d24c82`.
-
-Commit, open-PR, and CI results necessarily occur after this record's commit;
-they are reported on the PR and in the external Plan 016 progress log. The PR
-must remain open for the owner's merge decision.
+The toolchain floor (Go 1.27.0, toolchain 1.27.1, golangci-lint 2.13.2) landed
+on its own in PR #27. PR #26 carries these discovery documents only: no
+production harness code and no Fantasy or Catwalk dependency. H0's final
+safety pass found no credential or canary in the 295 private artifact files
+or the repository diff.
 
 ## Related decisions and documents
 
-- [02-architecture.md](02-architecture.md) — direct-stream ownership boundary
+- [02-architecture.md](02-architecture.md) — the wrapper and the turn loop
 - [04-providers-and-catalog.md](04-providers-and-catalog.md) — fixed target and catalog findings
-- [07-roadmap.md](07-roadmap.md) — catalog replacement prerequisite and H1 scope
-- [08-decisions.md](08-decisions.md) — D-20 through D-23
+- [07-roadmap.md](07-roadmap.md) — H1 scope
+- [08-decisions.md](08-decisions.md) — D-19 through D-26
 - [09-references.md](09-references.md) — exact pins, licenses, and provenance
 - [10-open-questions.md](10-open-questions.md) — unresolved H1 choices

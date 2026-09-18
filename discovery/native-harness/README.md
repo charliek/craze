@@ -17,9 +17,13 @@ these documents, one per roadmap phase.
 | 2026-09-15 | Discovery: fantasy, catwalk, acp-go-sdk inspected; opencode, grok-build, crush reviewed |
 | 2026-09-16 | pi reviewed; scope narrowed (Claude compat via import, hooks/settings/MCP deferred); this folder written |
 | 2026-09-17 | H0 started: exact candidate pins, the standalone probe, safety controls, and bounded live campaign were approved |
-| 2026-09-18 | H0 complete: Fantasy `v0.43.2` is a provider-only fit; released `Agent.Stream` and Catwalk `v0.52.43` are no-go ([progress and results](11-h0-progress-and-results.md)) |
+| 2026-09-18 | H0 complete, then reviewed: Fantasy `v0.43.2` providers fit all four provider classes, `Agent.Stream` fits behind a small wrapper, the catalog is a craze-owned table, Meta works ([progress and results](11-h0-progress-and-results.md)) |
 
-No production harness code exists yet. **H0 is complete.** Its self-contained evidence, exact verdicts, H1 handoff, and local-only supporting artifact reference are in [11-h0-progress-and-results.md](11-h0-progress-and-results.md). A separate panel-reviewed catalog replacement spike is required before H1.
+No production harness code exists yet. **H0 is complete and H1 is next.**
+[11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
+evidence and, at its top, the review that corrected four of its conclusions.
+The harness is built in this repository as a hidden side quest beside the
+daily-driver TUI (D-26).
 
 ## Reading order
 

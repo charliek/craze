@@ -17,26 +17,26 @@ flowchart LR
   session --> native["native session (adapter)"]
   live --> acp["acp.Client → cursor / grok / gx"]
   native --> harness["internal/harness"]
-  harness --> providers["catalog replacement + overlay → provider factory"]
-  providers --> fantasy["fantasy LanguageModel.Stream"]
+  harness --> providers["model table + overlay → provider factory"]
+  providers --> fantasy["fantasy providers → finish-normalizing wrapper → Agent.Stream"]
   harness --> store["JSONL tree store"]
   harness --> tools["tool stack"]
 ```
 
-H0 accepted Fantasy `v0.43.2` only at its public provider and
-`LanguageModel.Stream` boundary. The released `Agent.Stream` loop is not a
-production dependency: it deterministically stops instead of dispatching a
-complete tool call when the normalized finish reason is `stop`. The harness
-therefore owns step continuation, message history, usage and finish
-accounting, cancellation, and callback-to-event mapping. H0 also rejected
-Catwalk `v0.52.43` as the production catalog, so H1 is blocked until a
-separate panel-reviewed spike selects a replacement.
+H0 accepted Fantasy `v0.43.2`'s providers. Its streamed `Agent.Stream` loop
+dispatches and continues only when the finish reason is `tool-calls`, so a
+complete tool call reported as `stop` would be dropped. H0 never saw that
+live, and a small `LanguageModel` wrapper removes it, so H1 runs on
+`Agent.Stream` behind that wrapper (D-21). The turn runner sits behind the
+harness's own interface: a craze-owned `LanguageModel.Stream` loop remains an
+option if `PrepareStep` proves too narrow, not a prerequisite. The catalog is
+a small craze-owned model table rather than embedded Catwalk (D-22).
 
 ## Package split
 
 | package | owns | must not import |
 |---|---|---|
-| `internal/harness` | catalog adapter, Fantasy provider factory, direct-stream turn runner, tools, permissions, store, compaction, prompt assembly, import command logic | `internal/agent`, `internal/tui`, `internal/acp` |
+| `internal/harness` | model table, Fantasy provider factory, finish-normalizing wrapper, turn runner, tools, permissions, store, compaction, prompt assembly, import command logic | `internal/agent`, `internal/tui`, `internal/acp` |
 | `internal/agent` (new file, e.g. `native.go`) | the adapter: `Provider` constructor for `native`, `Session` implementation that maps harness callbacks onto `Event`/`Snapshot` | — |
 | `internal/cli` | flag plumbing only (`--provider native`), the `import` subcommand entry | — |
 
@@ -48,8 +48,8 @@ of a fake agent process.
 
 ## The turn loop
 
-The loop follows the common shape observed in opencode, grok, and pi, but is
-implemented by craze over Fantasy's public direct-stream API:
+The loop follows the shape opencode, grok, and pi converged on, run through
+Fantasy's `Agent.Stream` the way crush does:
 
 1. **Re-read history from the store every iteration.** No in-memory
    conversation across steps. Queued messages, interject, resume, and
@@ -57,18 +57,20 @@ implemented by craze over Fantasy's public direct-stream API:
 2. **Build the prompt**: system prompt (assembled once per session, see
    `06`), instruction files, skill catalog, then the message list from the
    store's leaf-to-root walk with the latest compaction applied.
-3. **Drain steering** (interject) into the message list at the safe boundary
-   before the next stream request. History replacement is owned by craze;
-   it is not delegated to `Agent.PrepareStep`.
+3. **Drain steering** (interject) into the message list at this safe point;
+   this is Fantasy's `PrepareStep` hook, which H0 verified replaces history
+   without duplicating tool-call pairs.
 4. **Compact if needed** before sampling (`03`, `07`).
-5. **Call `LanguageModel.Stream`**, collect normalized text, reasoning,
-   tool-input, finish, usage, warning, and error parts, and map them onto the
-   harness's events. A stream is complete only after an explicit finish
-   part; an in-band error without one is a failed step.
-6. **Persist the assistant step and tool results, then continue based on
-   complete parts, not only finish reason.** A complete, schema-valid tool
-   call continues even when the provider reports `stop`. Manual history must
-   retain adjacent assistant-call/tool-result pairs in order.
+5. **`Agent.Stream`** with callbacks: text delta → text event, reasoning
+   delta → thought event, tool input start/delta/end and tool call/result →
+   tool event (merged by id), step finish → usage, stream finish → done.
+6. **Continue on parts, not finish reason.** The wrapper under the agent
+   rewrites a `stop` finish to `tool-calls` when the step carried complete
+   tool calls (Fantasy's providers already suppress truncated ones), and
+   turns an empty `stop` step with no content and no usage into an error:
+   that is how Meta reports reasoning that exhausted the output ceiling
+   (D-25). `length`, content-filter, and error finishes are left alone so
+   Fantasy keeps refusing to dispatch possibly truncated calls.
 7. **Guard execution**: three consecutive identical tool calls (name +
    input) raise a doom-loop permission ask; a `length` stop with tool calls
    fails the calls rather than executing possibly truncated arguments (D-07).
@@ -79,14 +81,14 @@ implemented by craze over Fantasy's public direct-stream API:
 9. **Drain follow-ups** after the turn through craze's existing queue. The
    harness does not own the TUI queue.
 
-This owned loop adds roughly 1.5–2.5 kLOC plus a comparable body of fixtures
-before the later tools and permissions phases. That is an H0 sizing estimate,
-not an implementation commitment; H1 must refine it in its plan.
+The wrapper is about 40 lines plus four fixture tests (the review follow-up
+in Plan 016's artifact directory has a working copy). H0 sized the
+alternative, a craze-owned direct-stream loop, at roughly 1.5–2.5 kLOC plus
+comparable fixtures.
 
 ## Tool stack
 
-Every tool is exposed through Fantasy's public tool schema but dispatched by
-craze, wrapped in this order, innermost first:
+Every tool is a Fantasy `AgentTool` wrapped in this order, innermost first:
 
 1. the tool itself (read, bash, edit, …)
 2. **kind metadata** — attaches grok's `x.ai/tool` vocabulary (kind,
