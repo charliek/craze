@@ -21,6 +21,10 @@ const fakeSessionID = "fake-session-1"
 // tmux smoke's "● agent then ✓ agent" expectation is vacuous.
 const taskRunFor = 250 * time.Millisecond
 
+// lingerMax bounds CRAZE_FAKE_LINGER, so a test that crashes cannot leave a
+// lingering fake behind for long.
+const lingerMax = 30 * time.Second
+
 type server struct {
 	conn   *acp.Conn
 	script string
@@ -120,6 +124,13 @@ func run(script string) error {
 	conn.SetNotifyHandler(s.onNotify)
 	conn.Start()
 	<-conn.Done()
+	if os.Getenv("CRAZE_FAKE_LINGER") == "1" {
+		// Stay alive past stdin's EOF until a signal's default action ends
+		// the process. Without this the fake dies of its own closed pipe on
+		// every exit route craze has, including being killed outright, so a
+		// test cannot tell an agent craze shut down from one it orphaned.
+		time.Sleep(lingerMax)
+	}
 	return nil
 }
 

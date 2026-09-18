@@ -72,10 +72,14 @@ class PTYCraze:
         step: str | None = None,
         extra_args: list[str] | None = None,
         env_extra: dict[str, str] | None = None,
+        setctty: bool = False,
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
         self._closed = threading.Event()
+        self._master_open = False
+        self._answers_queries = setctty
+        self._answered_to = 0
         master, slave = _open_pty()
         _set_winsize(slave)
         _set_winsize(master)
@@ -124,6 +128,23 @@ class PTYCraze:
         if no_mouse:
             argv.append("--no-mouse")
         argv += extra_args or []
+        if setctty:
+            # start_new_session setsid()s and then dup2()s the slave, and a
+            # dup2 is not an open: the slave never becomes the session's
+            # controlling terminal, so closing the master signals nothing.
+            # A terminal hangs up only its controlling session, so this mode
+            # makes craze one. A fresh interpreter does it, never a
+            # preexec_fn: that callback runs after fork in a process that
+            # already has threads (FakeHerdr's server, this class's readers),
+            # which CPython documents as a deadlock hazard. execv keeps the
+            # pid, so proc.pid is still craze and still its own group.
+            argv = [
+                sys.executable,
+                "-c",
+                "import os,fcntl,termios,sys; os.setsid(); "
+                "fcntl.ioctl(0, termios.TIOCSCTTY, 0); os.execv(sys.argv[1], sys.argv[1:])",
+                *argv,
+            ]
         try:
             self.proc = subprocess.Popen(
                 argv,
@@ -132,7 +153,9 @@ class PTYCraze:
                 stderr=slave,
                 env=env,
                 cwd=str(workspace),
-                start_new_session=True,
+                # The helper does its own setsid, which must come before its
+                # ioctl.
+                start_new_session=not setctty,
                 close_fds=True,
             )
         except Exception:
@@ -141,6 +164,7 @@ class PTYCraze:
             raise
         os.close(slave)
         self.master = master
+        self._master_open = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -160,7 +184,33 @@ class PTYCraze:
                 continue
             if not chunk:
                 break
+            before = len(self.buf)
             self.buf.extend(chunk)
+            if self._answers_queries:
+                # Back by one query's length less one: a query split across
+                # two reads is still found whole.
+                self._answer_queries(max(0, before - len(_CPR_QUERY) + 1))
+
+    def _answer_queries(self, start: int) -> None:
+        """Answer the background-colour query the way a real terminal does.
+
+        Only a craze that owns its terminal asks: termenv queries a tty only
+        when it is the foreground of its controlling one. It writes the OSC 11
+        query and then a cursor-position query, reads both answers in that
+        order, and waits five seconds for them before carrying on without.
+        Unanswered, every setctty run would start five seconds late.
+        """
+        start = max(start, self._answered_to)
+        while (i := self.buf.find(_CPR_QUERY, start)) >= 0:
+            reply = _CPR_REPLY
+            if self.buf.rfind(_BG_QUERY, self._answered_to, i) >= 0:
+                reply = _BG_REPLY + reply
+            self._answered_to = start = i + len(_CPR_QUERY)
+            try:
+                os.write(self.master, reply)
+            except OSError:
+                # craze is gone, and with it whoever asked.
+                return
 
     def screen(self) -> str:
         return bytes(self.buf).decode("utf-8", "replace")
@@ -210,6 +260,32 @@ class PTYCraze:
         except subprocess.TimeoutExpired as err:
             raise AssertionError(f"craze did not exit: {self.screen()[-3000:]}") from err
 
+    def hangup(self, timeout: float = 5) -> int:
+        """Close the terminal under craze, the way a closed tab does, and
+        return its exit code.
+
+        Only a setctty craze is hung up by this: anything else has no
+        controlling terminal, and closing the master signals nothing. The
+        screen is frozen from here on, so nothing after it can be waited for
+        on the terminal.
+        """
+        # The reader stopped first: it selects on the master, and once the fd
+        # is closed its number can be reused by anything this process opens.
+        self._closed.set()
+        self._reader.join(timeout=1)
+        self._close_master()
+        return self.wait_exit(timeout)
+
+    def _close_master(self) -> None:
+        """Close the master exactly once, whichever of hangup and close runs."""
+        if not self._master_open:
+            return
+        self._master_open = False
+        try:
+            os.close(self.master)
+        except OSError:
+            pass
+
     def close(self) -> None:
         self._closed.set()
         if self.proc.poll() is None:
@@ -225,10 +301,7 @@ class PTYCraze:
                 except ProcessLookupError:
                     pass
                 self.proc.wait(timeout=1)
-        try:
-            os.close(self.master)
-        except OSError:
-            pass
+        self._close_master()
 
     def __enter__(self) -> PTYCraze:
         return self
@@ -241,6 +314,12 @@ class PTYCraze:
 # title (OSC 2), and an OSC string left in the text would otherwise survive
 # into what wait_contains matches.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+# termenv's terminal queries and a dark terminal's answers to them.
+_BG_QUERY = b"\x1b]11;?"
+_CPR_QUERY = b"\x1b[6n"
+_BG_REPLY = b"\x1b]11;rgb:0000/0000/0000\x1b\\"
+_CPR_REPLY = b"\x1b[1;1R"
 
 
 def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:

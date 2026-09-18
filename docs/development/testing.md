@@ -208,6 +208,12 @@ that finish at once, which is what a frame of a *drained* queue needs.
 make test-cli
 ```
 
+`CRAZE_FAKE_LINGER=1` keeps the fake agent alive after its stdin closes, until
+a signal ends it or 30 seconds pass. Without it the fake exits the moment craze
+does, however craze exits — killed outright included — so a check that the
+agent is gone could not tell an agent craze shut down from one it orphaned. The
+`SIGHUP` cases in `test_host_status.py` set it.
+
 ## tmux smoke
 
 `tests/cli/tmux_smoke.py` drives the real binary in a real terminal at 100x30

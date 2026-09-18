@@ -118,9 +118,10 @@ session is ready. The end of a turn reaches the host a quarter of a second after
 the turn ends, so a message that drains from the queue the moment a turn ends
 never shows as a finished turn in between.
 
-Every exit craze can see — `/exit`, `Ctrl+D`, `Ctrl+C`, `SIGTERM` — releases the
-pane or tab before the agent is shut down, waiting at most a second for the host
-to take it, so an agent slow to exit cannot hold it. `SIGKILL` gives craze no
+Every exit craze can see — `/exit`, `Ctrl+D`, `Ctrl+C`, `SIGTERM`, and `SIGHUP`,
+the terminal hangup a closed tab or window sends — releases the pane or tab
+before the agent is shut down, waiting at most a second for the host to take
+it, so an agent slow to exit cannot hold it. `SIGKILL` gives craze no
 chance to, and leaves its last state in place until the pane or tab closes. A
 socket craze cannot reach costs one `host status: herdr: …` or
 `host status: roost: …` line on stderr once the TUI has exited, and nothing

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -641,7 +643,51 @@ func Run(cfg Config) error {
 		m.term.apply(m.theme)
 	}
 	p := tea.NewProgram(m, opts...)
+	// A terminal hangup — what a closed tab or window sends — is an exit like
+	// SIGTERM. Left to its default action it kills craze before the tail
+	// below runs, and the agent, in a process group of its own, is never
+	// signalled. bubbletea turns SIGTERM into a QuitMsg; p.Quit sends that
+	// same message, so SIGHUP lands on precisely the SIGTERM path. No agent
+	// exists before this registration: sess.Start runs only from inside the
+	// event loop.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	stop := make(chan struct{})
+	handlerDone := make(chan struct{})
+	// Written by the handler, read only after the join below.
+	hungUp := false
+	go func() {
+		// Stopped in this goroutine's own defer, as bubbletea's handler does,
+		// and before handlerDone closes, so the join below means SIGHUP is
+		// unregistered. From the first SIGHUP onward the default action is
+		// back for the whole of bubbletea's shutdown and the tail, so a
+		// second hangup can still end a shutdown that is stuck.
+		defer func() {
+			signal.Stop(hup)
+			close(handlerDone)
+		}()
+		select {
+		case <-hup:
+			hungUp = true
+			// A no-op once the program has stopped, and safe before p.Run
+			// starts: Send waits for the event loop or for p.Run's cancel.
+			p.Quit()
+		case <-stop:
+		}
+	}()
 	final, err := p.Run()
+	// The exit that was not a hangup unregisters too, before the tail, just as
+	// bubbletea's own handler has stopped by the time p.Run returns.
+	close(stop)
+	<-handlerDone
+	// A hangup that arrived after p.Run returned, and before the handler
+	// stopped listening, is still waiting in the channel.
+	select {
+	case <-hup:
+		hungUp = true
+	default:
+	}
+	err = runErrAfterHangup(err, hungUp)
 	startErr := finishRun(out, final, m, cfg.Host)
 	if err != nil {
 		return err
@@ -652,10 +698,23 @@ func Run(cfg Config) error {
 	return startErr
 }
 
+// runErrAfterHangup is p.Run's error once a terminal hangup has ended the
+// program. By then the terminal is gone, and bubbletea may report that itself:
+// a read racing the hangup of a pty can fail with EIO rather than read EOF,
+// and that comes back as an input error. None of it is craze failing — a
+// hangup is an exit like SIGTERM, which exits 0 — so it is dropped. A
+// recovered panic is kept: that run failed whatever the terminal did.
+func runErrAfterHangup(err error, hungUp bool) error {
+	if hungUp && err != nil && !errors.Is(err, tea.ErrProgramPanic) {
+		return nil
+	}
+	return err
+}
+
 // finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
 // is cleared, the terminal's colours are reset, the host hub releases, and the
-// session closes. p.Run returns on /exit, on SIGINT/SIGTERM and on a recovered
-// panic, and every one of them lands here.
+// session closes. p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
+// own handler) and on a recovered panic, and every one of them lands here.
 //
 // final is whatever p.Run handed back, which on a recovered Update or View
 // panic is nil; m is the model Run started with. The hub arrives as its own
@@ -681,7 +740,7 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
 	// Before sess.Close for the same reason: the release is bounded, and the
 	// session's close is not. On a quit craze asked for, requestQuit has
 	// already done both in this order and the hub's Close is idempotent; on
-	// SIGTERM or a recovered panic this is the first and only release.
+	// SIGTERM, SIGHUP or a recovered panic this is the first and only release.
 	closeHost(h)
 	// The owner and not m.sess: m is the model Run started with, and a session
 	// a picker built after it lives only in later copies — which a recovered

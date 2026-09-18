@@ -13,9 +13,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
+import termios
 import threading
 import time
 from collections.abc import Callable
@@ -373,6 +375,20 @@ def _last_state_after(
     return False
 
 
+def _assert_ready_then_released(lines: list[dict[str, Any]]) -> None:
+    """An exit straight after the ready idle: that idle and its metadata, then
+    the nulls and the release, and nothing after them."""
+    assert [ln["method"] for ln in lines] == [
+        "pane.report_agent",
+        "pane.report_metadata",
+        "pane.report_metadata",
+        "pane.release_agent",
+    ], lines
+    ready, rel = seq_of(lines[0]), seq_of(lines[3])
+    assert rel > ready, lines
+    assert lines[2:] == [metadata(rel, None, None), release(rel)]
+
+
 def test_herdr_sigterm_still_releases(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 ) -> None:
@@ -389,15 +405,69 @@ def test_herdr_sigterm_still_releases(
         _wait_fake_gone(fake_agent_bin)
         lines = herdr.snapshot()
 
-    assert [ln["method"] for ln in lines] == [
-        "pane.report_agent",
-        "pane.report_metadata",
-        "pane.report_metadata",
-        "pane.release_agent",
-    ], lines
-    ready, rel = seq_of(lines[0]), seq_of(lines[3])
-    assert rel > ready, lines
-    assert lines[2:] == [metadata(rel, None, None), release(rel)]
+    _assert_ready_then_released(lines)
+
+
+# The fake agent otherwise exits the moment its stdin closes, which it does
+# however craze exits -- killed outright included -- so without this "the
+# agent is gone" would pass for a craze that orphaned it.
+LINGER = {"CRAZE_FAKE_LINGER": "1"}
+
+
+def test_herdr_sighup_still_releases(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """SIGHUP, what a multiplexer sends when it closes a tab, is an exit like
+    SIGTERM: herdr is released and the agent is shut down (#22)."""
+    with FakeHerdr() as herdr:
+        with PTYCraze(
+            craze_bin, fake_agent_bin, tmp_path, env_extra={**herdr.env(), **LINGER}
+        ) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            # The metadata line too: a SIGHUP between the state line and it
+            # would rightly send no nulls, and this case is about the release.
+            herdr.wait_for(_has_ready_metadata, "the ready idle and its metadata")
+            # craze is its own session and group leader, so its pid is the pgid.
+            os.killpg(tui.proc.pid, signal.SIGHUP)
+            # 0, not merely "not killed by SIGHUP": a quit that killed the
+            # program, or leaked its error into the exit status, would still
+            # run the tail and pass everything else here.
+            code = tui.wait_exit(timeout=WAIT)
+            assert code == 0, tui.screen()[-3000:]
+        _wait_fake_gone(fake_agent_bin)
+        lines = herdr.snapshot()
+
+    _assert_ready_then_released(lines)
+
+
+@pytest.mark.skipif(
+    not hasattr(termios, "TIOCSCTTY"), reason="no TIOCSCTTY: craze cannot own the pty"
+)
+def test_herdr_tty_hangup_still_releases(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The terminal itself going away, as a closed tab's does: the kernel
+    hangs up craze, and the exit is the same as a delivered SIGHUP's (#22).
+
+    The screen is frozen once the master closes, so only what outlives it is
+    asserted: the exit code, the release, and the agent being gone.
+    """
+    with FakeHerdr() as herdr:
+        with PTYCraze(
+            craze_bin,
+            fake_agent_bin,
+            tmp_path,
+            env_extra={**herdr.env(), **LINGER},
+            setctty=True,
+        ) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            herdr.wait_for(_has_ready_metadata, "the ready idle and its metadata")
+            code = tui.hangup(timeout=WAIT)
+            assert code == 0, tui.screen()[-3000:]
+        _wait_fake_gone(fake_agent_bin)
+        lines = herdr.snapshot()
+
+    _assert_ready_then_released(lines)
 
 
 @pytest.mark.parametrize(

@@ -87,6 +87,13 @@ The five load scripts refuse session/new with an error, so a test can prove no
 client fell back to it. Every other script advertises loadSession false and
 answers session/load with -32601.
 
+Environment:
+  CRAZE_FAKE_LINGER=1  do not exit when stdin closes: stay alive until a signal
+                       ends the process, or 30 s at most. Without it the fake
+                       dies of its own closed stdin however craze exits, so a
+                       test cannot tell an agent craze shut down from one it
+                       orphaned.
+
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in
 for cursor-agent acp or grok agent stdio.

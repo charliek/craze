@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -717,6 +718,35 @@ func TestQuitReleasesTheHostBeforeClosingTheSession(t *testing.T) {
 			}
 			if h.deadline <= 0 || h.deadline > host.DefaultCloseTimeout {
 				t.Fatalf("the first host close had deadline %v, want within %v", h.deadline, host.DefaultCloseTimeout)
+			}
+		})
+	}
+}
+
+// TestRunErrAfterHangup: once a hangup has ended the program, what the dead
+// terminal made bubbletea report is not a failure — a hangup exits 0 like
+// SIGTERM — but a recovered panic still is, and without a hangup nothing
+// changes.
+func TestRunErrAfterHangup(t *testing.T) {
+	eio := fmt.Errorf("%w: error reading input: %w", tea.ErrProgramKilled, syscall.EIO)
+	panicked := fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrProgramPanic)
+	cases := []struct {
+		name   string
+		err    error
+		hungUp bool
+		want   error
+	}{
+		{"a clean quit", nil, false, nil},
+		{"a clean hangup", nil, true, nil},
+		{"an input error without a hangup is kept", eio, false, eio},
+		{"the dead terminal after a hangup is dropped", eio, true, nil},
+		{"a panic is kept without a hangup", panicked, false, panicked},
+		{"a panic is kept after a hangup too", panicked, true, panicked},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runErrAfterHangup(tc.err, tc.hungUp); !errors.Is(got, tc.want) || (got == nil) != (tc.want == nil) {
+				t.Fatalf("runErrAfterHangup(%v, %v) = %v, want %v", tc.err, tc.hungUp, got, tc.want)
 			}
 		})
 	}
