@@ -10,7 +10,7 @@ and MCP are non-goals (`01`).
 | class | examples | handling |
 |---|---|---|
 | **Live from the workspace** | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.claude/rules/*.md`, `.claude/skills/**`, `.agents/skills/**`, `.claude/agents/*.md`, `.claude/commands/*.md` | read where they live, every session |
-| **Imported into the harness home** | `~/.claude/CLAUDE.md`, `~/.claude/skills/**`, `~/.claude/agents/*.md`, `~/.claude/commands/*.md`, marketplace plugins from `~/.claude/plugins/` | copied by `craze import claude` into `~/.craze/native/`; never read from `~/.claude` at runtime |
+| **Imported into the harness home** | `~/.claude/CLAUDE.md`, `~/.claude/skills/**`, `~/.claude/agents/*.md`, `~/.claude/commands/*.md`, marketplace plugins from `~/.claude/plugins/` | copied by `craze import claude` into the native directory (`~/.craze/native/` by default; it moves with `CRAZE_HOME`, D-27); never read from `~/.claude` at runtime. The tree inside it is H4's to design, so every such path in this document is provisional |
 
 ## Instruction files
 

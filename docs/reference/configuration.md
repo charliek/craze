@@ -63,8 +63,8 @@ plugin caches craze scans (see [Slash commands](tui.md#slash-commands)) are
 still found under `HOME`, so a test or a container that wants those isolated
 as well sets `HOME` too.
 
-Earlier builds read a different variable, one that named the config *file*.
-It has been removed, not kept as an alias: while it is still set, `craze`,
+Earlier builds read `CRAZE_CONFIG`, which named the config *file*. It has
+been removed, not kept as an alias: while it is still set, `craze`,
 `craze prompt`, and `craze frame` exit with status 2 and a message that names
 it, before reading or writing anything. Unset it and set `CRAZE_HOME` to the
 directory the file was in — `CRAZE_HOME=/some/dir` for `/some/dir/config.toml`.

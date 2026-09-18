@@ -23,8 +23,11 @@ conclusions; `11` records both.
    import time only: `providers.toml` wins over `config.toml` for the tables
    `model`, `model_providers`, and `auth_provider`, tables merge
    recursively, and arrays are replaced. `<grok home>` is `--grok-home`,
-   else `$GROK_HOME`, else `~/.grok`. The import writes `~/.craze/native/providers.toml`
-   (0600) and `~/.craze/native/models.toml` (0644, no secrets). Nothing reads
+   else `$GROK_HOME`, else `~/.grok`. The import writes `providers.toml`
+   (0600) and `models.toml` (0644, no secrets) into the native directory,
+   `paths.NativeDir()` — `~/.craze/native/` by default, and wherever
+   `CRAZE_HOME` moves the craze directory otherwise; the harness reads them
+   from the same place. Nothing reads
    `~/.grok` at runtime after that. This settles `10` Q4 (D-28) against the
    live-read alternative, to decouple the harness from gx's schema now that
    the owner may deprecate gx. Import rules: a provider is imported only

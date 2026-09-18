@@ -18,7 +18,9 @@ Ship in this order (D-06). pi's default loadout is the first four.
 | `exit_plan_mode` | other | blocks | H5; reads the plan from the plan file, never from arguments; outcome approved / cancelled / abandoned, unknown → cancelled |
 | `agent` | think | derived | H6; see below |
 
-Rules that apply to every tool:
+Rules that apply to every tool. (Paths under `~/.craze/native/` in this
+document are provisional: each phase designs its own files, and all of them
+move with `CRAZE_HOME` — D-27, `02`.)
 
 - **No read-before-edit enforcement.** opencode deleted theirs; grok and pi
   never had one. Prompt-only.

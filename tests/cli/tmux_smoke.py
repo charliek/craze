@@ -722,16 +722,18 @@ class TmuxPane:
             f"export CRAZE_SMOKE_CLIPBOARD={shlex.quote(str(self.clipboard_file))}\n"
             "export TERM=xterm-256color\n"
             f"export CRAZE_FAKE_SCRIPT={shlex.quote(script)}\n"
+            # The craze directory follows the pane's HOME unless a case sets
+            # CRAZE_HOME itself, so both unsets come before the case's env.
+            # The removed config-file variable is spelled in two parts so the
+            # repo-walk test (internal/paths) does not flag this file: left
+            # set it makes every craze in the pane exit 2.
+            "unset CRAZE_HOME\n"
+            "unset CRAZE_" "CONFIG\n"
             + "".join(
                 f"export {k}={shlex.quote(v)}\n" for k, v in env
             )
             + "unset CRAZE_AGENT_BIN\n"
             "unset CRAZE_PROVIDER\n"
-            "unset CRAZE_HOME\n"
-            # The removed config-file variable, spelled in two parts so the
-            # repo-walk test (internal/paths) does not flag this file: left
-            # set it makes every craze in the pane exit 2.
-            "unset CRAZE_" "CONFIG\n"
             f"{' '.join(shlex.quote(a) for a in argv)} 2>{shlex.quote(str(self.stderr_file))}\n"
             f"printf '%s\\n' \"$?\" > {shlex.quote(str(self.exit_file))}\n"
         )
