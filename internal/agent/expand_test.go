@@ -769,15 +769,35 @@ const (
 // timing it through a Prompt would time the fake's round trip instead.
 func waitingSession(t *testing.T) *session {
 	t.Helper()
-	s := newTestSession(t, Options{PluginDirs: []string{probeFixtureDir(t)}, Stderr: io.Discard})
-	s.plugins = s.discoverPlugins(t.TempDir())
-	if len(s.plugins) != 2 {
-		t.Fatalf("the fixture discovered %+v", s.plugins)
+	s := newTestSession(t, Options{})
+	withProbePlugins(t, s)
+	return s
+}
+
+// withProbePlugins gives a session the probe fixture's plugins, discovered and
+// resolved, with no catalog applied: what the wait is decided from. It serves a
+// bare session and an in-process one alike, because the options it sets are
+// read only by the discovery it runs.
+func withProbePlugins(t *testing.T, s *session) {
+	t.Helper()
+	s.opts.PluginDirs = []string{probeFixtureDir(t)}
+	s.opts.Stderr = io.Discard
+	plugins := s.discoverPlugins(t.TempDir())
+	if len(plugins) != 2 {
+		t.Fatalf("the fixture discovered %+v", plugins)
 	}
 	s.mu.Lock()
+	s.plugins = plugins
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
-	return s
+}
+
+// abortCatalogWait is Cancel's abort taken on its own, for the timing test
+// that ends a wait with nothing but the abort.
+func (s *session) abortCatalogWait() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abortCatalogWaitLocked()
 }
 
 // awaitOnce runs the wait exactly as Prompt runs it — awaitCatalog, then the
@@ -829,17 +849,24 @@ func waitForCatalogWait(t *testing.T, s *session) {
 	})
 }
 
-// promptOn runs one Prompt on its own goroutine, so the test can drive the
-// session while that prompt is parked in the wait. The context is Background
+// runOn runs a prompt on its own goroutine — as the TUI's Cmd runs the
+// continuation Begin returned — so the test can drive the session while that
+// prompt is parked in the wait or has not run yet. The context is Background
 // because both real callers pass that: Esc and a headless signal both arrive
 // through Session.Cancel, never through the prompt's context.
-func promptOn(s *session, text string) <-chan error {
+func runOn(run func(context.Context) (Result, error)) <-chan error {
 	out := make(chan error, 1)
 	go func() {
-		_, err := s.Prompt(context.Background(), text)
+		_, err := run(context.Background())
 		out <- err
 	}()
 	return out
+}
+
+// promptOn is runOn for a whole Prompt: the claim is taken on the prompt's own
+// goroutine too, not the test's.
+func promptOn(s *session, text string) <-chan error {
+	return runOn(func(ctx context.Context) (Result, error) { return s.Prompt(ctx, text) })
 }
 
 // promptReturn is what that prompt returned. The deadline is a deadlock guard,
@@ -1087,11 +1114,12 @@ func TestCancelDuringTheWaitLeavesTheNextPromptAlone(t *testing.T) {
 // TestASecondPromptDuringTheWaitIsRefused is the other half of that race: not
 // what Cancel does after the abort, but what a prompt sent while one is still
 // parked may do. The wait holds the prompt slot without holding s.inPrompt, so
-// the refusal has to come from the registration itself — otherwise the second
-// caller either overwrites the registration (a bare name, which would park too,
-// leaving Cancel with only the later channel to close while the first waiter
-// timed out and sent) or opens a turn straight over the parked one (plain text,
-// which never waits). Both are one prompt slot claimed twice.
+// the refusal has to come from something other than the turn — Begin's claim,
+// and behind it the registration itself — otherwise the second caller either
+// overwrites the registration (a bare name, which would park too, leaving
+// Cancel with only the later channel to close while the first waiter timed out
+// and sent) or opens a turn straight over the parked one (plain text, which
+// never waits). Both are one prompt slot claimed twice.
 //
 // B goes on a goroutine so a lost guard shows up as the deadline rather than as
 // a test that sits out the whole window; the pointer comparison is what says

@@ -314,15 +314,16 @@ func cancelBounded(t *testing.T, s *session) <-chan error {
 }
 
 // openTurnByHand sets exactly the turn state Cancel reads — inPrompt, the
-// wire, promptDone — with no Prompt behind it, and returns what ends that
-// turn as a release would. Ending it twice is harmless, and the test's
-// cleanup ends it too, so a failed assertion never leaves a Cancel waiting on
-// a turn nobody will end.
-func openTurnByHand(t *testing.T, s *session, in bool, wire *turnWire) (end func()) {
+// claim, the wire, promptDone — with no Prompt behind it, and returns what
+// ends that turn as a release would. Ending it twice is harmless, and the
+// test's cleanup ends it too, so a failed assertion never leaves a Cancel
+// waiting on a turn nobody will end.
+func openTurnByHand(t *testing.T, s *session, in, claimed bool, wire *turnWire) (end func()) {
 	t.Helper()
 	promptDone := make(chan struct{})
 	s.mu.Lock()
 	s.inPrompt = in
+	s.claimed = claimed
 	s.wire = wire
 	s.promptDone = promptDone
 	s.mu.Unlock()
@@ -331,6 +332,7 @@ func openTurnByHand(t *testing.T, s *session, in bool, wire *turnWire) (end func
 		once.Do(func() {
 			s.mu.Lock()
 			s.inPrompt = false
+			s.claimed = false
 			s.wire = nil
 			close(promptDone)
 			s.mu.Unlock()
@@ -348,6 +350,19 @@ func cancelReturn(t *testing.T, out <-chan error, d time.Duration) error {
 	case <-time.After(d):
 		t.Fatal("Cancel never returned")
 		return nil
+	}
+}
+
+// cancelStillWaiting fails if Cancel has already returned. It is called only
+// where nothing can have ended what Cancel is waiting on — its wire, or the
+// turn behind it — so it is a statement about what Cancel did, not a guess
+// about scheduling.
+func cancelStillWaiting(t *testing.T, cancelled <-chan error, why string) {
+	t.Helper()
+	select {
+	case err := <-cancelled:
+		t.Fatalf("Cancel returned %v %s", err, why)
+	default:
 	}
 }
 
@@ -372,6 +387,8 @@ func (o wireOutcome) String() string {
 		return "refused"
 	case wireFailed:
 		return "failed"
+	case wireWithdrawn:
+		return "withdrawn"
 	}
 	return "unknown"
 }
@@ -444,22 +461,31 @@ func TestCancelWaitsForThePromptToBeWritten(t *testing.T) {
 
 // TestCancelDecidesOnTheWireOutcome is Cancel's decision on its own, over every
 // state its one locked section can read: whether a turn of craze's own is open,
-// and what that turn's wire says — already, or once Cancel has started
-// waiting. The state is set by hand because the decision reads nothing else;
-// the schedules that reach each state through a real Prompt are the tests
-// below. "Nothing written" is exact: the test is the agent, and a read that
-// must time out is the proof.
+// whether a prompt has claimed the slot, and what that prompt's wire says —
+// already, or once Cancel has started waiting. The state is set by hand because
+// the decision reads nothing else; the schedules that reach each state through
+// a real Prompt or Begin are the tests below and in claim_test.go. "Nothing
+// written" is exact: the test is the agent, and a read that must time out is
+// the proof.
 func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 	cases := []struct {
 		name string
 		in   bool
+		// claimed is Begin's claim, which holds from before the turn opens
+		// until the prompt returns: claimed and not in is a prompt whose
+		// continuation has not opened its turn yet.
+		claimed bool
 		// noWire leaves s.wire nil. start is the wire's outcome when Cancel
 		// reads it; publish, when start is pending, is what the prompt then
 		// says while Cancel waits.
 		noWire  bool
 		start   wireOutcome
 		publish wireOutcome
-		writes  bool
+		// opens is what happens alongside the publish, before Cancel reads
+		// the turn again: the claimed prompt's own turn opening, or a later
+		// prompt's.
+		opens  turnOpening
+		writes bool
 		// waits: Cancel stays until the turn ends, as it always has.
 		waits bool
 	}{
@@ -469,9 +495,34 @@ func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 		{name: "sent", in: true, start: wireSent, writes: true, waits: true},
 		{name: "refused", in: true, start: wireRefused, writes: true, waits: true},
 		{name: "failed", in: true, start: wireFailed, waits: true},
+		{name: "withdrawn", in: true, start: wireWithdrawn, waits: true},
 		{name: "pending, then sent", in: true, start: wirePending, publish: wireSent, writes: true, waits: true},
 		{name: "pending, then refused", in: true, start: wirePending, publish: wireRefused, writes: true, waits: true},
 		{name: "pending, then failed", in: true, start: wirePending, publish: wireFailed, waits: true},
+		{name: "pending, then withdrawn", in: true, start: wirePending, publish: wireWithdrawn, waits: true},
+
+		// A claimed prompt whose turn is open: every turn, once claims exist.
+		{name: "claimed and open, sent", in: true, claimed: true, start: wireSent, writes: true, waits: true},
+		{name: "claimed and open, pending, then sent", in: true, claimed: true, start: wirePending, publish: wireSent, writes: true, waits: true},
+		{name: "claimed and open, pending, then failed", in: true, claimed: true, start: wirePending, publish: wireFailed, waits: true},
+
+		// Claimed and not open: Esc between Enter and the prompt's goroutine.
+		// The prompt withdraws, or fails before its turn opens, and nothing
+		// is written for it; with no turn open there is no turn to wait for.
+		{name: "claimed, pending, then withdrawn", claimed: true, start: wirePending, publish: wireWithdrawn},
+		{name: "claimed, pending, then failed", claimed: true, start: wirePending, publish: wireFailed},
+		{name: "claimed, withdrawn", claimed: true, start: wireWithdrawn},
+		{name: "claimed, failed", claimed: true, start: wireFailed},
+		// The decision is the outcome's, whatever the claim: a claimed prompt
+		// that did reach the wire is cancelled like any other.
+		{name: "claimed, pending, then sent", claimed: true, start: wirePending, publish: wireSent, writes: true},
+		{name: "claimed, pending, then refused", claimed: true, start: wirePending, publish: wireRefused, writes: true},
+		{name: "claimed with no wire", claimed: true, noWire: true, writes: true},
+		// The turn is read again after the wire settles: one that opened in the
+		// meantime is waited for if it is the claimed prompt's own, and not if
+		// it is a later prompt's.
+		{name: "claimed, then its turn opens and is sent", claimed: true, start: wirePending, publish: wireSent, opens: openClaimed, writes: true, waits: true},
+		{name: "claimed, withdrawn while a later turn is open", claimed: true, start: wirePending, publish: wireWithdrawn, opens: openLater},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -484,12 +535,22 @@ func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 					s.publishWire(wire, tc.start)
 				}
 			}
-			endTurn := openTurnByHand(t, s, tc.in, wire)
+			endTurn := openTurnByHand(t, s, tc.in, tc.claimed, wire)
 
 			cancelled := cancelBounded(t, s)
 			if tc.publish != wirePending {
 				waitCancelling(t, s)
 				p.expectNothing(t, "a cancel went out while its prompt's write was still pending")
+				cancelStillWaiting(t, cancelled, "while the wire was still pending")
+				s.mu.Lock()
+				switch tc.opens {
+				case openClaimed:
+					s.inPrompt = true
+				case openLater:
+					s.inPrompt = true
+					s.wire = &turnWire{done: make(chan struct{})}
+				}
+				s.mu.Unlock()
 				s.publishWire(wire, tc.publish)
 			}
 			if tc.writes {
@@ -497,11 +558,7 @@ func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 			}
 			p.expectNothing(t, "nothing more may be written")
 			if tc.waits {
-				select {
-				case err := <-cancelled:
-					t.Fatalf("Cancel returned %v before the turn ended", err)
-				default:
-				}
+				cancelStillWaiting(t, cancelled, "before the turn ended")
 				endTurn()
 			}
 			if err := cancelReturn(t, cancelled, 5*time.Second); err != nil {
@@ -510,6 +567,17 @@ func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 		})
 	}
 }
+
+// turnOpening is what TestCancelDecidesOnTheWireOutcome has the session do
+// alongside a publish; the zero value is nothing.
+type turnOpening int
+
+const (
+	// openClaimed: the claimed prompt's own turn opens — inPrompt, same wire.
+	openClaimed turnOpening = iota + 1
+	// openLater: a later prompt's turn is open, on a wire of its own.
+	openLater
+)
 
 // TestCancelReportsAFailedCancelWrite: when the cancel's own write fails,
 // Cancel says so — that error is what reaches the TUI as a failed cancel —
@@ -657,7 +725,7 @@ func TestCancelAroundARefusedOrFailedPrompt(t *testing.T) {
 			t.Fatalf("the refused prompt's wire: settled=%v outcome=%v, want refused", ok, got)
 		}
 
-		endTurn := openTurnByHand(t, p.s, true, wire)
+		endTurn := openTurnByHand(t, p.s, true, false, wire)
 		cancelled := cancelBounded(t, p.s)
 		p.expectCancel(t)
 		p.expectNothing(t, "a second cancel")

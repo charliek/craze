@@ -95,6 +95,31 @@ func TestSessionQueueEmitsEventsAndSnapshots(t *testing.T) {
 	}
 }
 
+// TestTakeRefusesWhileAPromptIsClaimed: a prompt Begin has claimed is in flight
+// before its turn opens, so no row may leave the queue then either — Begin
+// would refuse the row's own prompt, and the row would simply be gone.
+func TestTakeRefusesWhileAPromptIsClaimed(t *testing.T) {
+	s := startScript(t, "echo", true)
+	if _, err := s.Queue("next"); err != nil {
+		t.Fatal(err)
+	}
+	run := s.Begin("claimed")
+	if _, ok := s.PopQueue(); ok {
+		t.Fatal("a row left the queue while a prompt was claimed")
+	}
+	if _, ok := s.TakeQueued(s.Snapshot().Queue[0].ID); ok {
+		t.Fatal("TakeQueued must be guarded the same way")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if _, err := run(ctx); err != nil {
+		t.Fatalf("the claimed prompt: %v", err)
+	}
+	if _, ok := s.PopQueue(); !ok {
+		t.Fatal("the drain must run once the claimed prompt has returned")
+	}
+}
+
 // TestPopQueueRefusesWhileAPromptIsInFlight holds the guard the whole drain
 // rests on: nothing leaves the queue until the turn that is running has
 // returned, not merely emitted its EventDone.

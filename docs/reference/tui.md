@@ -133,7 +133,7 @@ off.
 | `Enter` | with the slash menu open on a token that is not already typed out in full, accept the highlighted row; otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; hide the slash menu for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of a prompt the session has opened |
+| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; hide the slash menu for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |

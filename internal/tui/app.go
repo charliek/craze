@@ -916,11 +916,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the chunks; this message races them and would split a run in two.
 		m.promptEndSeq = m.turnSeq
 		if errors.Is(msg.err, agent.ErrPromptCancelled) {
-			// Esc landed while the prompt was still waiting for the catalog.
-			// Nothing ran and nothing failed, so this is not an error state:
-			// it is the ending a cancelled turn has, and the transcript owes
-			// the row it already drew the same note — Esc leaves nothing else
-			// behind. No event of any kind is coming, so the stream ends here.
+			// Esc landed before the prompt's turn opened: while it was still
+			// waiting for the catalog, or right after Enter, before the Cmd
+			// that runs it had got that far. Nothing ran and nothing failed,
+			// so this is not an error state: it is the ending a cancelled turn
+			// has, and the transcript owes the row it already drew the same
+			// note — Esc leaves nothing else behind. No event of any kind is
+			// coming, so the stream ends here.
 			m.streamEndSeq = m.turnSeq
 			m.cancelled = true
 			m.addNote(stopCancelled)
@@ -1691,9 +1693,13 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	// evidence, its offer and the kill that retired it all belong to a number
 	// this turn no longer has.
 	m.turnSeq++
-	sess := m.sess
+	// The turn is claimed here, in the Update that says working, and not on
+	// the Cmd's goroutine: an Esc that Update handles before that goroutine
+	// runs then cancels this prompt — which withdraws without reaching the
+	// agent — instead of finding no turn and writing its cancel ahead of it.
+	run := m.sess.Begin(text)
 	return m, func() tea.Msg {
-		res, err := sess.Prompt(context.Background(), text)
+		res, err := run(context.Background())
 		return promptDoneMsg{res, err}
 	}
 }

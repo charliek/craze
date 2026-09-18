@@ -35,10 +35,12 @@ var ErrUnsupported = acp.ErrUnsupported
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
 
-// ErrPromptCancelled is a prompt Cancel stopped while it was still waiting for
-// the agent's first command catalog: no turn was opened and nothing reached the
-// wire. Like the two refusals above it has no ending of its own — no EventDone,
-// no EventError — so a consumer that draws a turn has to settle it on this.
+// ErrPromptCancelled is a prompt Cancel stopped before its turn opened: while it
+// was still waiting for the agent's first command catalog, or once it had been
+// claimed by Begin and before its continuation opened the turn. No turn was
+// opened and nothing reached the wire. Like the two refusals above it has no
+// ending of its own — no EventDone, no EventError — so a consumer that draws a
+// turn has to settle it on this.
 var ErrPromptCancelled = errors.New("agent: prompt cancelled before it was sent")
 
 type EventType string
@@ -406,7 +408,18 @@ type Options struct {
 
 type Session interface {
 	Start(ctx context.Context) error
+	// Prompt is Begin(text)(ctx): the claim and the prompt back to back.
 	Prompt(ctx context.Context, text string) (Result, error)
+	// Begin claims the prompt slot now and returns the prompt to run, so a
+	// caller that answers Esc on the goroutine it prompts from can claim the
+	// turn in the same step that shows it working. A Cancel after Begin has
+	// returned is for this prompt even before the continuation runs: the
+	// prompt then withdraws, returning ErrPromptCancelled with nothing sent,
+	// and the cancel writes nothing. A cancel asked before Begin is not for
+	// it. A Begin while another prompt holds the slot claims nothing, and its
+	// continuation returns ErrPromptInFlight. The continuation must be run
+	// exactly once; the slot stays claimed until it returns.
+	Begin(text string) func(ctx context.Context) (Result, error)
 	Events() <-chan Event
 	Cancel(ctx context.Context) error
 	// Queue appends a message to craze's own queue. It refuses a full queue

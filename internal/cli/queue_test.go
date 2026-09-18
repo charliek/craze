@@ -340,6 +340,12 @@ func (s *stubSession) Prompt(_ context.Context, text string) (agent.Result, erro
 	return turn.res, turn.err
 }
 
+// Begin is here for the interface: the run loop prompts through Prompt, and a
+// continuation that is Prompt itself records the same.
+func (s *stubSession) Begin(text string) func(context.Context) (agent.Result, error) {
+	return func(ctx context.Context) (agent.Result, error) { return s.Prompt(ctx, text) }
+}
+
 func (s *stubSession) Events() <-chan agent.Event { return s.events }
 func (s *stubSession) Cancel(context.Context) error {
 	return nil
