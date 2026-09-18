@@ -417,6 +417,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 	switch s.script {
 	case "hang":
 		s.hang(msg.ID)
+	case "hang-ack":
+		s.hangAck(msg.ID, text)
 	case "followup":
 		s.followup(msg.ID, n)
 	case "tool":
@@ -499,6 +501,23 @@ func (s *server) hang(id json.RawMessage) {
 	}
 	<-ch
 	s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
+}
+
+// hangAck is hang, plus one agent-message chunk sent before it blocks. hang by
+// itself gives a client nothing to wait on except its own in-flight flag,
+// which flips true before session/prompt is even on the wire — a client that
+// races Cancel off that flag can write session/cancel before this process has
+// read the prompt at all. session/prompt clears s.cancelled on the read loop
+// on purpose (see onRequest), so a cancel that arrives first is discarded and
+// hang then waits forever for a second one that never comes; that is the
+// ordering inversion behind the CI hang TestCancelWaitsUntilPromptReturns and
+// TestSerializedPrompt exist to close. The ack chunk is evidence a cancel can
+// wait on instead of the flag: once it is on the wire, session/prompt has
+// necessarily already been read and cleared s.cancelled, so a cancel written
+// after seeing the chunk can never lose the race.
+func (s *server) hangAck(id json.RawMessage, text string) {
+	s.say("ack: " + text)
+	s.hang(id)
 }
 
 func (s *server) echo(id json.RawMessage, text string) {

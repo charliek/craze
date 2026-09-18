@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -293,8 +294,23 @@ func TestPromptModePermissionAllowAndReject(t *testing.T) {
 	})
 }
 
+// TestCancelWaitsUntilPromptReturns pins the ordering the CI hang broke:
+// Cancel must never write session/cancel before session/prompt is on the
+// wire. session.Prompt sets s.inPrompt (what promptInFlight reads) before
+// client.PromptBlocks ever writes the request, so waiting on that flag alone
+// — as this test used to — lets Cancel race ahead of the prompt it means to
+// interrupt. The fake's session/prompt handler clears its own cancelled flag
+// on purpose the instant it reads a prompt (see onRequest in
+// cmd/craze-fake-agent/server.go), specifically so a cancel that arrived
+// first is discarded rather than answered twice; a discarded cancel then
+// leaves the "hang" script waiting forever for a second one that never
+// comes, which is exactly the 4m45s CI hang this test exists to close. The
+// "hang-ack" script sends one chunk the instant it reads the prompt, so
+// waiting for that chunk is proof of the read, not a hope about goroutine
+// scheduling.
 func TestCancelWaitsUntilPromptReturns(t *testing.T) {
-	s := startScript(t, "hang", true)
+	s := startScript(t, "hang-ack", true)
+	log := collect(t, s)
 	errCh := make(chan error, 1)
 	var res Result
 	go func() {
@@ -302,19 +318,28 @@ func TestCancelWaitsUntilPromptReturns(t *testing.T) {
 		res, err = s.Prompt(t.Context(), "wait")
 		errCh <- err
 	}()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && !s.promptInFlight() {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !s.promptInFlight() {
-		t.Fatal("prompt not in flight")
-	}
+	log.waitTexts(t, "ack: wait")
+
+	// Cancel gets its own bounded context so a regression of the ordering
+	// inversion above fails this one test in 15s with a clear message,
+	// instead of hanging the whole package to its 5-minute timeout the way
+	// the CI run that found this did.
+	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
 	start := time.Now()
-	if err := s.Cancel(t.Context()); err != nil {
-		t.Fatal(err)
+	if err := s.Cancel(cancelCtx); err != nil {
+		t.Fatalf("cancel: %v", err)
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("Cancel did not wait for prompt")
+	}
+	// The elapsed check above only says Cancel was not slow; this says it
+	// waited at all. Prompt clears inPrompt in the same locked section that
+	// closes promptDone, and Cancel returns on that close, so a Cancel that
+	// fired the notification and returned without waiting is caught here
+	// with no window of its own to race.
+	if s.promptInFlight() {
+		t.Fatal("Cancel returned while the prompt was still in flight")
 	}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
@@ -324,18 +349,27 @@ func TestCancelWaitsUntilPromptReturns(t *testing.T) {
 	}
 }
 
+// TestSerializedPrompt shares the "hang-ack" script with
+// TestCancelWaitsUntilPromptReturns, and its trailing Cancel shares the exact
+// same hazard: nothing else here writes to the wire (the second Prompt is
+// refused entirely in-process, before ever reaching the client), but the
+// cleanup Cancel is the same race against session/prompt described above.
+// Left on the old "hang" script and an unbounded context, a lost race would
+// hang this test's goroutine, and with it the package, forever.
 func TestSerializedPrompt(t *testing.T) {
-	s := startScript(t, "hang", true)
+	s := startScript(t, "hang-ack", true)
+	log := collect(t, s)
 	go func() { _, _ = s.Prompt(t.Context(), "one") }()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && !s.promptInFlight() {
-		time.Sleep(5 * time.Millisecond)
-	}
+	log.waitTexts(t, "ack: one")
 	_, err := s.Prompt(t.Context(), "two")
 	if err == nil {
 		t.Fatal("expected in-flight error")
 	}
-	_ = s.Cancel(t.Context())
+	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := s.Cancel(cancelCtx); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
 }
 
 func TestAuthFailStart(t *testing.T) {

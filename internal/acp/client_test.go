@@ -321,7 +321,20 @@ func TestCancelSemantics(t *testing.T) {
 	})
 
 	t.Run("hang unblocks", func(t *testing.T) {
-		c := spawnScript(t, "hang")
+		// c.PromptInFlight flips true before c.Prompt ever writes session/prompt
+		// (PromptBlocks sets c.inPrompt, then unlocks, then writes the RPC), so
+		// waiting on it alone — as this subtest used to — lets Cancel write
+		// session/cancel before the fake has read the prompt at all. The fake's
+		// session/prompt handler clears its own cancelled flag on purpose the
+		// instant it reads a prompt, discarding a cancel that beat it there,
+		// and "hang" then waits forever for a second cancel that never comes:
+		// the same ordering inversion behind the CI hang in
+		// TestCancelWaitsUntilPromptReturns (internal/agent/session_test.go).
+		// "hang-ack" sends one chunk the instant it reads the prompt, so
+		// waiting for that update is proof of the read rather than a hope
+		// about which goroutine the runtime scheduled first.
+		c := spawnScript(t, "hang-ack")
+		up := attachUpdates(c)
 		handshake(t, c)
 		errCh := make(chan error, 1)
 		var res *PromptResult
@@ -330,7 +343,7 @@ func TestCancelSemantics(t *testing.T) {
 			res, err = c.Prompt(t.Context(), "wait")
 			errCh <- err
 		}()
-		waitUntil(t, c.PromptInFlight)
+		waitUntil(t, func() bool { return textFrom(up.snapshot()) == "ack: wait" })
 		if err := c.Cancel(t.Context()); err != nil {
 			t.Fatal(err)
 		}
