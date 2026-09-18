@@ -928,16 +928,25 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			// A prompt the session never accepted emits no events at all, so
-			// its stream is over too: waiting for an ending that cannot come
-			// would leave the turn unfinishable. Any other failure was emitted
-			// as EventError before Prompt returned, so that ending is on its
-			// way.
-			if errors.Is(msg.err, agent.ErrPromptInFlight) || errors.Is(msg.err, agent.ErrForeignTurn) {
+			// its stream is over too — waiting for an ending that cannot come
+			// would leave the turn unfinishable — and this is the only place
+			// its row can be drawn. Any other failure was emitted as
+			// EventError, whose handler draws the row, so drawing it here too
+			// would draw it twice. The emit happens before Prompt returns, but
+			// that does not order the two messages: the eventMsg and this one
+			// come back from different Cmds, so this one can arrive first,
+			// and it must then already put the model in its error state. The
+			// assignments below are the handler's own, so repeating them is
+			// harmless either way round.
+			refused := errors.Is(msg.err, agent.ErrPromptInFlight) || errors.Is(msg.err, agent.ErrForeignTurn)
+			if refused {
 				m.streamEndSeq = m.turnSeq
 			}
 			m.status = statusError
 			m.err = msg.err.Error()
-			m.addError(m.err)
+			if refused {
+				m.addError(m.err)
+			}
 			m.dropStrongSend("")
 			m.confirm = nil
 			return m, nil

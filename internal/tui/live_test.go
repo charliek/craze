@@ -148,6 +148,57 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 	}
 }
 
+// TestWiredFakeAgentTurnFailDrawsOneErrorRow is #20's regression: Prompt
+// both emits EventError and returns the same error, so the TUI hears about one
+// failure twice — the eventMsg from waitEvent and the promptDoneMsg from the
+// prompt Cmd — and must draw exactly one row for it.
+func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
+	isolateSkillsHome(t)
+	bin := buildFakeAgent(t)
+	ws := t.TempDir()
+	sess := agent.New(agent.Options{
+		Binary:    bin,
+		ExtraArgs: []string{"-script=turnfail"},
+		Workspace: ws,
+		Force:     true,
+		Stderr:    io.Discard,
+	})
+	if err := sess.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	m.started = true
+
+	m.input.SetValue("go")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("expected prompt cmd")
+	}
+	// Prompt emits EventError before it returns, so once the Cmd has run the
+	// event is already on the channel. Event first, then promptDoneMsg: the
+	// order that used to draw the row twice.
+	doneMsg := runCmd(cmd)
+	m = drainEvents(t, m, sess)
+	tm, _ = m.Update(doneMsg)
+	m = tm.(Model)
+
+	if m.status != statusError {
+		t.Fatalf("status %s", m.status)
+	}
+	got := texts(m, entryError)
+	if len(got) != 1 {
+		t.Fatalf("want exactly one error row, got %d: %q", len(got), got)
+	}
+	const want = "json-rpc error -32000: the turn failed"
+	if got[0] != want {
+		t.Fatalf("row text %q, want %q", got[0], want)
+	}
+}
+
 func drainEvents(t *testing.T, m Model, sess agent.Session) Model {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
