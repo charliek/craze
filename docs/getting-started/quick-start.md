@@ -56,6 +56,10 @@ sudo apt install ./craze_<version>_<arch>.deb
 
 ### From source
 
+Source installs require Go 1.27 or later on `PATH`; verify with `go version`.
+For a checkout, `mise install` installs the repo-pinned Go 1.27.1, and `make`
+uses its mise shim without shell activation.
+
 ```bash
 go install github.com/charliek/craze/cmd/craze@latest
 ```
@@ -86,8 +90,7 @@ make build
 
 `make build` writes `./bin/craze` and `./bin/craze-fake-agent`. The fake agent
 is for tests; a live session uses `cursor-agent`, `grok`, or `gx` on `PATH` (or
-`--agent-bin` / `CRAZE_AGENT_BIN`). This path needs Go 1.27+ (this repo pins 1.27.1 via
-`.mise.toml`; `mise install`).
+`--agent-bin` / `CRAZE_AGENT_BIN`).
 
 ## First run
 

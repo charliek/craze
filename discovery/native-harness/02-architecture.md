@@ -17,10 +17,10 @@ flowchart LR
   session --> native["native session (adapter)"]
   live --> acp["acp.Client → cursor / grok / gx"]
   native --> harness["internal/harness"]
-  harness --> fantasy["fantasy LanguageModel.Stream"]
+  harness --> providers["catalog replacement + overlay → provider factory"]
+  providers --> fantasy["fantasy LanguageModel.Stream"]
   harness --> store["JSONL tree store"]
   harness --> tools["tool stack"]
-  fantasy --> providers["catalog replacement + overlay → provider factory"]
 ```
 
 H0 accepted Fantasy `v0.43.2` only at its public provider and
