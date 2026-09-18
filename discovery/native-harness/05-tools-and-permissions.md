@@ -23,7 +23,7 @@ Rules that apply to every tool:
 - **No read-before-edit enforcement.** opencode deleted theirs; grok and pi
   never had one. Prompt-only.
 - **Truncation is one wrapper**, not per tool. Full output always lands in
-  `~/.craze-acp/tool-output/<call-id>` with a 7-day sweep.
+  `~/.craze/native/tool-output/<call-id>` with a 7-day sweep.
 - **Parallel by default** (fantasy `NewParallelAgentTool`); a tool can
   declare itself sequential and force the batch sequential.
 - **Tool ids are stable.** Permission keys, grants, and the kind table
@@ -47,7 +47,7 @@ Three answers, and the pattern is computed by the tool, not the UI:
 | answer | effect |
 |---|---|
 | once | run this call |
-| always | remember `{tool, pattern}` for this workspace in `~/.craze-acp/permissions/<cwd>.toml`; for bash the pattern is a command prefix from an arity table (`git commit *`, `npm run *`), for files a path glob |
+| always | remember `{tool, pattern}` for this workspace in `~/.craze/native/permissions/<cwd-slug>.toml`; for bash the pattern is a command prefix from an arity table (`git commit *`, `npm run *`), for files a path glob |
 | reject | fail the call; optional feedback text goes back to the model as the tool result; every other pending ask in the session is rejected too |
 
 - Evaluation is last-match-wins over: built-in read-only allowances, the
@@ -77,7 +77,7 @@ Modes are **rulesets plus prompt reminders**, never separate loops.
 
 Plan mode is enforced in the **dispatcher** (any edit-kind call outside the
 plan file is rejected with a model-facing message), so it survives yolo.
-The plan file is `~/.craze-acp/sessions/<cwd>/<id>.plan.md`. Leaving plan
+The plan file is `~/.craze/native/sessions/<cwd-slug>/<id>.plan.md`. Leaving plan
 mode by accepting the plan sends the provider's implement prompt exactly as
 craze does for cursor and grok.
 
@@ -95,4 +95,4 @@ craze does for cursor and grok.
 - Result is the child's last text, capped at 50 KiB; child usage folds into
   the parent; parent cancel propagates.
 - Personas come from workspace `.claude/agents/*.md`, imported
-  `~/.craze-acp/agents/`, and plugin `agents/` (`06`).
+  `~/.craze/native/agents/`, and plugin `agents/` (`06`).
