@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -85,6 +86,49 @@ func TestPromptCompleteRPCFirst(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if p.client.PromptInFlight() {
 		t.Fatal("late notify must not reopen a prompt")
+	}
+}
+
+// TestGrokSentMayRunAfterPromptBlocksReturned is the late call sent's contract
+// warns about. prompt_complete settles a grok turn on its own, and PromptBlocks
+// then abandons the goroutine still writing the request; here that write is
+// held in the unbuffered pipe, so the turn is over before its bytes are out.
+// sent has not run when PromptBlocks returns, and it runs — once — when the
+// write finally completes: a caller has to expect it after the fact.
+func TestGrokSentMayRunAfterPromptBlocksReturned(t *testing.T) {
+	p := newRawPipeDialect(t, DialectGrok)
+	// Ahead of the client's own Close: should an assertion fail with the
+	// request still held in the pipe, the held write fails instead of keeping
+	// Close's cancel waiting behind it.
+	t.Cleanup(func() { _ = p.serverR.Close() })
+	p.setSession("s1")
+	var calls atomic.Int32
+	fired := make(chan struct{})
+	sent := func() {
+		if calls.Add(1) == 1 {
+			close(fired)
+		}
+	}
+	done := goPromptBlocks(p, []ContentBlock{{Type: "text", Text: "hi"}}, nil, sent)
+	// The completion is only routed to a turn that is open.
+	waitFor(t, p.client.PromptInFlight, "the turn to open")
+	p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","stopReason":"end_turn"}`)
+	if res := waitPrompt(t, done); res.StopReason != StopEndTurn {
+		t.Fatalf("stop %q", res.StopReason)
+	}
+	select {
+	case <-fired:
+		t.Fatal("sent ran while the request was still unread")
+	default:
+	}
+	p.readWithin(t, 3*time.Second, "session/prompt")
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the abandoned writer never reported its write")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("sent ran %d times", n)
 	}
 }
 

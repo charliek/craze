@@ -297,17 +297,20 @@ func TestPromptModePermissionAllowAndReject(t *testing.T) {
 // TestCancelWaitsUntilPromptReturns pins the ordering the CI hang broke:
 // Cancel must never write session/cancel before session/prompt is on the
 // wire. session.Prompt sets s.inPrompt (what promptInFlight reads) before
-// client.PromptBlocks ever writes the request, so waiting on that flag alone
-// — as this test used to — lets Cancel race ahead of the prompt it means to
-// interrupt. The fake's session/prompt handler clears its own cancelled flag
-// on purpose the instant it reads a prompt (see onRequest in
-// cmd/craze-fake-agent/server.go), specifically so a cancel that arrived
-// first is discarded rather than answered twice; a discarded cancel then
-// leaves the "hang" script waiting forever for a second one that never
-// comes, which is exactly the 4m45s CI hang this test exists to close. The
-// "hang-ack" script sends one chunk the instant it reads the prompt, so
-// waiting for that chunk is proof of the read, not a hope about goroutine
-// scheduling.
+// client.PromptBlocks ever writes the request, and until issue #18 was fixed
+// Cancel wrote off that flag alone, so waiting on it — as this test used to —
+// let Cancel race ahead of the prompt it meant to interrupt. The fake's
+// session/prompt handler clears its own cancelled flag on purpose the instant
+// it reads a prompt (see onRequest in cmd/craze-fake-agent/server.go),
+// specifically so a cancel that arrived first is discarded rather than
+// answered twice; a discarded cancel then left the "hang" script waiting
+// forever for a second one that never came, which is exactly the 4m45s CI
+// hang this test was moved to close. Cancel now waits for the prompt's own
+// write before it writes (TestCancelOffPromptInFlightOnHang is that shape,
+// re-added). This test keeps the "hang-ack" script, which sends one chunk the
+// instant it reads the prompt, so waiting for that chunk is proof of the read,
+// not a hope about goroutine scheduling — and what it pins does not lean on
+// that fix.
 func TestCancelWaitsUntilPromptReturns(t *testing.T) {
 	s := startScript(t, "hang-ack", true)
 	log := collect(t, s)
@@ -369,6 +372,49 @@ func TestSerializedPrompt(t *testing.T) {
 	defer cancel()
 	if err := s.Cancel(cancelCtx); err != nil {
 		t.Fatalf("cancel: %v", err)
+	}
+}
+
+// TestCancelOffPromptInFlightOnHang is the exact shape that hung CI for 4m45s
+// (run 35290845362), and the shape PR #17 had to move the tests above away
+// from: the plain, silent "hang" script, and Cancel issued the moment
+// promptInFlight says the turn is open, with nothing else to wait on. Then
+// promptInFlight flipped before session/prompt was written, the cancel could
+// reach the fake first, the fake dropped it by design, and hang waited forever
+// for another. It is re-addable only because of the fix for issue #18 —
+// Cancel now waits for the prompt's own write before writing — and it is not
+// a retry of a flaky test: under the fix it passes every time. On a regression
+// it fails probabilistically, since the race has to be lost, as a 15s timeout
+// with the message below rather than a package hang; the deterministic proof is
+// TestCancelWaitsForThePromptToBeWritten.
+func TestCancelOffPromptInFlightOnHang(t *testing.T) {
+	s := startScript(t, "hang", true)
+	type outcome struct {
+		res Result
+		err error
+	}
+	out := make(chan outcome, 1)
+	go func() {
+		res, err := s.Prompt(context.Background(), "wait")
+		out <- outcome{res, err}
+	}()
+	waitUntil(t, "the turn to open", s.promptInFlight)
+
+	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := s.Cancel(cancelCtx); err != nil {
+		t.Fatalf("cancel: %v (a cancel written ahead of its prompt is dropped, and hang never returns)", err)
+	}
+	select {
+	case o := <-out:
+		if o.err != nil {
+			t.Fatal(o.err)
+		}
+		if o.res.StopReason != acp.StopCancelled {
+			t.Fatalf("stop %q", o.res.StopReason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the prompt never returned after Cancel")
 	}
 }
 

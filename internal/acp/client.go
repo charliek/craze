@@ -360,7 +360,7 @@ func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
 
 // Prompt sends one text block: the draft, exactly as the user typed it.
 func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error) {
-	return c.PromptBlocks(ctx, []ContentBlock{{Type: "text", Text: text}}, nil)
+	return c.PromptBlocks(ctx, []ContentBlock{{Type: "text", Text: text}}, nil, nil)
 }
 
 // PromptBlocks sends one session/prompt carrying every block, in order, and
@@ -373,7 +373,16 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 // the request is written, so whatever it emits precedes the turn's first agent
 // update. It never runs on a refusal: nothing reached the wire, so nothing
 // happened.
-func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accepted func()) (*PromptResult, error) {
+//
+// sent runs after the session/prompt bytes were written to the agent's stdin
+// and before the call's reply wait begins, so a session/cancel written after it
+// can only land behind the prompt. It never runs on a refusal, and never when
+// the write failed or the connection was already closed. It does no I/O and
+// must not block: it only publishes. On cursor it runs on the caller's own
+// goroutine, inside this call. On grok the writer is the goroutine below, which
+// this call abandons once prompt_complete has settled the turn, so sent may run
+// after PromptBlocks has returned; a caller must tolerate a late call.
+func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accepted, sent func()) (*PromptResult, error) {
 	if len(blocks) == 0 {
 		return nil, errors.New("acp: prompt has no content")
 	}
@@ -431,7 +440,7 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	}
 	if dialect != DialectGrok {
 		var result PromptResult
-		if err := c.conn.Call(ctx, MethodSessionPrompt, params, &result); err != nil {
+		if err := c.conn.callSent(ctx, MethodSessionPrompt, params, &result, sent); err != nil {
 			return nil, err
 		}
 		return &result, nil
@@ -442,7 +451,7 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	rpcCh := make(chan promptResult, 1)
 	go func() {
 		var result PromptResult
-		err := c.conn.Call(rpcCtx, MethodSessionPrompt, params, &result)
+		err := c.conn.callSent(rpcCtx, MethodSessionPrompt, params, &result, sent)
 		rpcCh <- promptResult{res: result, err: err}
 	}()
 	select {

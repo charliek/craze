@@ -659,24 +659,34 @@ func TestSetConfigJSONShape(t *testing.T) {
 	}
 }
 
-// startPromptBlocks sends a multi-block prompt on its own goroutine and hands
-// back the request the client wrote, so a test can read the exact bytes.
-func startPromptBlocks(t *testing.T, p *rawPipe, blocks []ContentBlock, accepted func()) (<-chan struct {
+// goPromptBlocks sends a multi-block prompt on its own goroutine and leaves
+// the request unread, so a test can hold the write in the pipe.
+func goPromptBlocks(p *rawPipe, blocks []ContentBlock, accepted, sent func()) <-chan struct {
 	res *PromptResult
 	err error
-}, *Message) {
-	t.Helper()
+} {
 	done := make(chan struct {
 		res *PromptResult
 		err error
 	}, 1)
 	go func() {
-		res, err := p.client.PromptBlocks(context.Background(), blocks, accepted)
+		res, err := p.client.PromptBlocks(context.Background(), blocks, accepted, sent)
 		done <- struct {
 			res *PromptResult
 			err error
 		}{res, err}
 	}()
+	return done
+}
+
+// startPromptBlocks sends a multi-block prompt on its own goroutine and hands
+// back the request the client wrote, so a test can read the exact bytes.
+func startPromptBlocks(t *testing.T, p *rawPipe, blocks []ContentBlock, accepted, sent func()) (<-chan struct {
+	res *PromptResult
+	err error
+}, *Message) {
+	t.Helper()
+	done := goPromptBlocks(p, blocks, accepted, sent)
 	req := p.readWithin(t, 3*time.Second, "session/prompt")
 	if req.Method != MethodSessionPrompt {
 		t.Fatalf("method %q", req.Method)
@@ -695,7 +705,7 @@ func TestPromptBlocksSendsEveryBlockInOrder(t *testing.T) {
 		{Type: "text", Text: "block one"},
 		{Type: "text", Text: "block two"},
 	}
-	done, req := startPromptBlocks(t, p, blocks, nil)
+	done, req := startPromptBlocks(t, p, blocks, nil, nil)
 	want := `{"sessionId":"s1","prompt":[` +
 		`{"type":"text","text":"/watch-pr 12"},` +
 		`{"type":"text","text":"block one"},` +
@@ -759,7 +769,7 @@ func TestPromptBlocksHookRunsBeforeTheRequest(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		blocks := []ContentBlock{{Type: "text", Text: "draft"}, {Type: "text", Text: "block"}}
-		_, err := p.client.PromptBlocks(context.Background(), blocks, func() { hookAt <- order.Add(1) })
+		_, err := p.client.PromptBlocks(context.Background(), blocks, func() { hookAt <- order.Add(1) }, nil)
 		done <- err
 	}()
 	var hook, req int32
@@ -794,7 +804,7 @@ func TestPromptBlocksCopiesTheCallersBlocks(t *testing.T) {
 		_, err := p.client.PromptBlocks(context.Background(), blocks, func() {
 			blocks[0] = ContentBlock{Type: "text", Text: "rewritten"}
 			blocks[1] = ContentBlock{Type: "text", Text: "rewritten too"}
-		})
+		}, nil)
 		done <- err
 	}()
 	req := p.readWithin(t, 3*time.Second, "session/prompt")
@@ -812,17 +822,20 @@ func TestPromptBlocksCopiesTheCallersBlocks(t *testing.T) {
 }
 
 // TestPromptBlocksRefusesAnEmptyPrompt: nothing to say is not a turn, and
-// opening one would fire the hook and leave the session in flight over a
+// opening one would fire the hooks and leave the session in flight over a
 // request carrying "prompt": null.
 func TestPromptBlocksRefusesAnEmptyPrompt(t *testing.T) {
 	p := newRawPipe(t)
 	p.setSession("s1")
-	ran := false
-	if _, err := p.client.PromptBlocks(context.Background(), nil, func() { ran = true }); err == nil {
+	ran, sentRan := false, false
+	if _, err := p.client.PromptBlocks(context.Background(), nil, func() { ran = true }, func() { sentRan = true }); err == nil {
 		t.Fatal("an empty prompt was accepted")
 	}
 	if ran {
 		t.Fatal("the hook ran on an empty prompt")
+	}
+	if sentRan {
+		t.Fatal("sent ran on an empty prompt")
 	}
 	p.client.mu.Lock()
 	inFlight := p.client.inPrompt
@@ -833,19 +846,24 @@ func TestPromptBlocksRefusesAnEmptyPrompt(t *testing.T) {
 }
 
 // TestPromptBlocksHookSkippedOnRefusal: a prompt the client refuses never
-// reached the wire, so nothing happened and nothing may be reported.
+// reached the wire, so nothing happened and nothing may be reported — and
+// nothing was sent, so sent never says otherwise.
 func TestPromptBlocksHookSkippedOnRefusal(t *testing.T) {
 	p := newRawPipe(t)
 	p.setSession("s1")
-	ran := false
+	ran, sentRan := false, false
 	hook := func() { ran = true }
+	sent := func() { sentRan = true }
 
-	done, req := startPromptBlocks(t, p, []ContentBlock{{Type: "text", Text: "first"}}, nil)
-	if _, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "second"}}, hook); !errors.Is(err, ErrPromptInFlight) {
+	done, req := startPromptBlocks(t, p, []ContentBlock{{Type: "text", Text: "first"}}, nil, nil)
+	if _, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "second"}}, hook, sent); !errors.Is(err, ErrPromptInFlight) {
 		t.Fatalf("second prompt: %v", err)
 	}
 	if ran {
 		t.Fatal("the hook ran on ErrPromptInFlight")
+	}
+	if sentRan {
+		t.Fatal("sent ran on ErrPromptInFlight")
 	}
 	replyPrompt(t, p, req.ID, StopEndTurn)
 	if out := <-done; out.err != nil {
@@ -856,11 +874,129 @@ func TestPromptBlocksHookSkippedOnRefusal(t *testing.T) {
 	p.client.mu.Lock()
 	p.client.foreignID = "interject-fallback-1"
 	p.client.mu.Unlock()
-	if _, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "third"}}, hook); !errors.Is(err, ErrForeignTurn) {
+	if _, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "third"}}, hook, sent); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("prompt during a foreign turn: %v", err)
 	}
 	if ran {
 		t.Fatal("the hook ran on ErrForeignTurn")
+	}
+	if sentRan {
+		t.Fatal("sent ran on ErrForeignTurn")
+	}
+}
+
+// stampWriter is the client's end of the pipe, watched from inside Write. It
+// says when a session/prompt frame's Write has begun, and when that Write has
+// returned it stamps order — on the writing goroutine, before control goes
+// back to the encoder. sent stamps the same counter from that same goroutine,
+// so the two stamps are ordered by program order rather than by whichever side
+// of the pipe the scheduler woke first.
+type stampWriter struct {
+	w       io.Writer
+	order   atomic.Int32
+	wrote   atomic.Int32
+	entered chan struct{}
+}
+
+func (s *stampWriter) Write(b []byte) (int, error) {
+	prompt := bytes.Contains(b, []byte(`"method":"session/prompt"`))
+	if prompt {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+	}
+	n, err := s.w.Write(b)
+	if prompt && err == nil {
+		s.wrote.Store(s.order.Add(1))
+	}
+	return n, err
+}
+
+// TestPromptBlocksSentRunsAfterTheWrite pins the one promise a cancel leans
+// on: sent runs only once the session/prompt bytes are out, so anything the
+// caller writes after it lands behind the prompt. The pipe is unbuffered, so
+// while nothing reads the request its Write physically cannot return — and sent
+// must not have run by then. Once the request is read, sent runs, and its stamp
+// comes after the write's. Both dialects: cursor writes inline, grok on a
+// goroutine of its own, and sent runs on whichever one wrote.
+func TestPromptBlocksSentRunsAfterTheWrite(t *testing.T) {
+	for _, d := range []DialectID{DialectCursor, DialectGrok} {
+		t.Run(string(d), func(t *testing.T) {
+			w := &stampWriter{entered: make(chan struct{}, 1)}
+			p := newRawPipeWriter(t, d, func(out io.Writer) io.Writer {
+				w.w = out
+				return w
+			})
+			// Ahead of the client's own Close: should an assertion fail with
+			// the request still held in the pipe, the held write fails
+			// instead of keeping Close's cancel waiting behind it.
+			t.Cleanup(func() { _ = p.serverR.Close() })
+			p.setSession("s1")
+			var sentAt atomic.Int32
+			fired := make(chan struct{})
+			// A second call closes fired twice and panics: sent runs once.
+			sent := func() {
+				sentAt.Store(w.order.Add(1))
+				close(fired)
+			}
+			done := goPromptBlocks(p, []ContentBlock{{Type: "text", Text: "hi"}}, nil, sent)
+
+			select {
+			case <-w.entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the request was never written")
+			}
+			// The write has begun and nothing has read it, so it cannot have
+			// finished: a sent that fires in this window fired before the bytes
+			// were out.
+			select {
+			case <-fired:
+				t.Fatal("sent ran while the request was still unread")
+			case <-time.After(150 * time.Millisecond):
+			}
+
+			req := p.readWithin(t, 3*time.Second, "session/prompt")
+			select {
+			case <-fired:
+			case <-time.After(3 * time.Second):
+				t.Fatal("sent never ran after the request was read")
+			}
+			if wrote, at := w.wrote.Load(), sentAt.Load(); wrote == 0 || at <= wrote {
+				t.Fatalf("write stamped %d, sent %d: sent must come after the write returned", wrote, at)
+			}
+
+			replyPrompt(t, p, req.ID, StopEndTurn)
+			waitPrompt(t, done)
+		})
+	}
+}
+
+// TestPromptBlocksSentSkippedOnAFailedWrite: a request whose write failed never
+// reached the agent, so sent must not say it did. Only the client-write
+// direction is closed — the agent's end of it — so the connection itself stays
+// open and this is the write failing, not the closed-connection check that
+// comes before it.
+func TestPromptBlocksSentSkippedOnAFailedWrite(t *testing.T) {
+	for _, d := range []DialectID{DialectCursor, DialectGrok} {
+		t.Run(string(d), func(t *testing.T) {
+			p := newRawPipeDialect(t, d)
+			p.setSession("s1")
+			_ = p.serverR.Close()
+			var sentRan atomic.Bool
+			_, err := p.client.PromptBlocks(context.Background(), []ContentBlock{{Type: "text", Text: "hi"}}, nil, func() { sentRan.Store(true) })
+			if !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("prompt over a closed write direction: %v", err)
+			}
+			if sentRan.Load() {
+				t.Fatal("sent ran on a failed write")
+			}
+			select {
+			case <-p.client.Conn().Done():
+				t.Fatal("the connection closed: this was not the write failing")
+			default:
+			}
+		})
 	}
 }
 

@@ -544,14 +544,16 @@ func TestAdvertisedBareNameIsSentVerbatim(t *testing.T) {
 // events come from runs one step after the refusal could happen, which is what
 // makes this hold for the CLI's foreign-turn retry too.
 //
-// The trailing Cancel shares the exact hazard TestCancelWaitsUntilPromptReturns
-// and TestSerializedPrompt (session_test.go) were fixed for: promptInFlight
-// flips true before session/prompt is written, so waiting on it alone would
-// let Cancel's session/cancel beat session/prompt onto the wire, get discarded
-// by the fake on purpose, and leave "hang" (and, with it, this test) waiting
-// forever for a second cancel that never comes. "hang-ack" and waiting for its
-// chunk prove the fake read the prompt before Cancel is allowed to run; the
-// bounded context is the same fail-fast backstop for if that regresses.
+// The trailing Cancel is the one TestCancelWaitsUntilPromptReturns and
+// TestSerializedPrompt (session_test.go) were moved to "hang-ack" for:
+// promptInFlight flips true before session/prompt is written, and until issue
+// #18 was fixed, waiting on it alone let Cancel's session/cancel beat
+// session/prompt onto the wire, get discarded by the fake on purpose, and
+// leave "hang" (and, with it, this test) waiting forever for a second cancel
+// that never came. Cancel now waits for the prompt's own write; "hang-ack" and
+// waiting for its chunk still prove the fake read the prompt before Cancel
+// runs, and the bounded context is the fail-fast backstop should that
+// ordering ever regress.
 func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 	dir := probeFixtureDir(t)
 	s := startScriptOpts(t, "hang-ack", Options{PluginDirs: []string{dir}})

@@ -30,8 +30,12 @@ type session struct {
 	closed     bool
 	inPrompt   bool
 	promptDone chan struct{}
-	waiting    map[string]pendingAsk
-	seq        map[string]int
+	// wire is the running turn's wire outcome, set in the same locked section
+	// as inPrompt and cleared with it: what Cancel waits on so that its
+	// session/cancel can never reach the agent ahead of the prompt it stops.
+	wire    *turnWire
+	waiting map[string]pendingAsk
+	seq     map[string]int
 	// turn counts prompts; cancelledTurn records the one a cancel was issued
 	// for, so a request that arrives while the turn is being cancelled is
 	// answered instead of parked. Which turn a *card* belongs to is the client's
@@ -108,6 +112,67 @@ type session struct {
 
 // taskReceiptCap bounds the parked receipts of a single turn.
 const taskReceiptCap = 32
+
+// wireOutcome is what became of one turn's session/prompt: still on its way
+// out, written, refused before the wire, or failed without reaching it.
+type wireOutcome int
+
+const (
+	wirePending wireOutcome = iota
+	// wireSent: the prompt's bytes were written. A write whose reply then
+	// failed still counts: the agent has the prompt.
+	wireSent
+	// wireRefused: the client refused the prompt before the wire. The one
+	// refusal Prompt can reach is ErrForeignTurn, and then a turn of the
+	// agent's own is running — which is what a cancel would stop.
+	wireRefused
+	// wireFailed: the write failed or the connection was already closed, so
+	// nothing reached the agent.
+	wireFailed
+)
+
+// turnWire carries one turn's wire outcome from Prompt, which learns it, to
+// Cancel, which has to wait for it. Each turn gets its own: grok's writer can
+// report a write after the turn it belongs to has ended, and a report into the
+// old turn's value can then no longer speak for the next one.
+type turnWire struct {
+	outcome wireOutcome // written under s.mu, before done is closed
+	done    chan struct{}
+}
+
+// publishWire settles a turn's wire outcome. The first outcome wins and later
+// ones change nothing, so every path that learns something may say it: the
+// written bytes, the client's return, and the turn's release. It takes only
+// s.mu, sets one field and closes one channel: as the prompt's sent hook it
+// runs inside acp's write path, where anything that blocked would hold the
+// prompt's reply wait with it.
+func (s *session) publishWire(w *turnWire, o wireOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w.publishLocked(o)
+}
+
+func (w *turnWire) publishLocked(o wireOutcome) {
+	if w.outcome != wirePending {
+		return
+	}
+	w.outcome = o
+	close(w.done)
+}
+
+// outcomeOf reads a settled outcome. The close of done already orders the
+// read after the write; the lock is for uniformity with every other field.
+func (s *session) outcomeOf(w *turnWire) wireOutcome {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return w.outcome
+}
+
+// testBeforeWire runs, when set, right before Prompt hands its request to the
+// client: the one point where a turn is open and its prompt is not yet on the
+// wire, which a test can only hold still from here. It is a var only so the
+// tests can set it; nothing in craze writes it.
+var testBeforeWire func(s *session)
 
 // pendingAsk is one blocking request the UI still owes an answer to. kind is
 // askPermission, askQuestion or askPlan; decide carries that kind's own
@@ -641,6 +706,10 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	s.cancelling = false
 	done := make(chan struct{})
 	s.promptDone = done
+	// The wire outcome is opened with the turn, so a Cancel that finds the
+	// turn always finds its wire too.
+	wire := &turnWire{done: make(chan struct{})}
+	s.wire = wire
 	// The references are read in the same locked section as everything else
 	// the turn depends on: an available_commands_update landing now either
 	// renamed the entries before this prompt resolved them or after, never
@@ -649,6 +718,13 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
+		// The client's return has settled the wire by now; this is the
+		// backstop for a turn that ends any other way, so that no Cancel can
+		// outlive the turn waiting on its wire.
+		wire.publishLocked(wireFailed)
+		if s.wire == wire {
+			s.wire = nil
+		}
 		s.inPrompt = false
 		s.cancelling = false
 		s.clearTaskReceiptsLocked()
@@ -676,7 +752,29 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 			}
 		}
 	}
-	res, err := client.PromptBlocks(ctx, blocks, accepted)
+	// sent reports the bytes leaving, and it reports them into this turn's own
+	// wire, never s.wire: on grok it can run after PromptBlocks has returned,
+	// and by then s.wire may be the next turn's, whose prompt is not out yet.
+	sent := func() { s.publishWire(wire, wireSent) }
+	if testBeforeWire != nil {
+		testBeforeWire(s)
+	}
+	res, err := client.PromptBlocks(ctx, blocks, accepted, sent)
+	// The outcome is settled the moment the client returns — before the
+	// rollback below and before the deferred release — so a Cancel landing
+	// anywhere after this finds it decided. The first outcome wins: a prompt
+	// whose bytes went out and whose reply then failed stays sent.
+	switch {
+	case refusedBeforeWire(err):
+		s.publishWire(wire, wireRefused)
+	case err != nil:
+		s.publishWire(wire, wireFailed)
+	default:
+		// A clean return is taken as sent: grok's writer may not have
+		// reported yet, and short of Close ending the turn from this side,
+		// the agent only ends a turn it was given.
+		s.publishWire(wire, wireSent)
+	}
 	if refusedBeforeWire(err) {
 		// The prompt never left craze: no turn ran, so this turn number was
 		// never spent and there is nothing for the stream to report. Telling
@@ -838,13 +936,13 @@ func (s *session) Cancel(ctx context.Context) error {
 	// Aborting one is the whole of this cancel, and everything below is
 	// skipped. The abort happened under s.mu with !s.inPrompt, so there was no
 	// turn of craze's own to cancel; the rest of the path — marking the turn
-	// cancelling, answering blocked requests against s.turn, session/cancel,
-	// waiting on s.promptDone — is written for a turn that is on the wire, and
-	// from here it can only land on one that starts later. The aborted prompt
-	// returns ErrPromptCancelled, its consumer settles the turn and drains
-	// whatever it had queued, and the tail running on would cancel that next
-	// prompt instead: Esc for the one the user stopped would stop the one they
-	// did not.
+	// cancelling, answering blocked requests against s.turn, waiting for its
+	// prompt to be written, session/cancel, waiting on s.promptDone — is
+	// written for a turn that is on the wire, and from here it can only land
+	// on one that starts later. The aborted prompt returns ErrPromptCancelled,
+	// its consumer settles the turn and drains whatever it had queued, and the
+	// tail running on would cancel that next prompt instead: Esc for the one
+	// the user stopped would stop the one they did not.
 	//
 	// So an Esc that lands here does not answer a foreign turn's blocked
 	// request. Nothing is lost by that: no wait is registered any more, so a
@@ -854,17 +952,55 @@ func (s *session) Cancel(ctx context.Context) error {
 		return nil
 	}
 	// From here until the turn ends an interjection would be stranded, which
-	// is what makes grok mint a turn of its own.
+	// is what makes grok mint a turn of its own. The turn and its wire are read
+	// in the same section that marks it, so the wire is the marked turn's own:
+	// Prompt sets both in one locked section and clears both in another.
 	s.mu.Lock()
 	s.cancelling = true
+	in, wire := s.inPrompt, s.wire
 	s.mu.Unlock()
 	s.cancelWaiting()
-	if err := client.Cancel(ctx); err != nil {
-		return err
+	if !in || wire == nil {
+		// No turn of craze's own is open: nothing is running, or the agent is
+		// running one it started itself. Either way there is no prompt of
+		// ours for the cancel to overtake, so it goes now.
+		return client.Cancel(ctx)
 	}
+	// Prompt raises inPrompt before its request is written, so the cancel
+	// waits for the wire to say what became of it: written first, a cancel
+	// can only land behind it. Without the wait it could reach the agent
+	// first, be dropped as belonging to no turn, and leave the prompt running
+	// as if Esc had never been pressed. The wait is bounded by the caller's
+	// context, the same one the wait on promptDone below has always used; it
+	// is one marshal and one pipe write unless the agent has stopped reading,
+	// and then saying the cancel failed is the honest answer.
+	select {
+	case <-wire.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return nil
+	}
+	switch s.outcomeOf(wire) {
+	case wireSent, wireRefused:
+		// Each Cancel writes once at most: here, or on the no-turn path above.
+		// Two racing Cancels can each write one, which the agent tolerates.
+		// A refused prompt is cancelled too: the refusal that reaches here
+		// is a foreign turn, and that turn is still running.
+		if err := client.Cancel(ctx); err != nil {
+			return err
+		}
+	default:
+		// wireFailed: the prompt never reached the agent, so there is no turn
+		// there to stop and nothing is written.
+	}
+	// The wait is for the turn this cancel was for, and only that one: the
+	// release clears s.wire together with inPrompt, so a wire that is no
+	// longer s.wire means that turn is over and whatever runs now started
+	// after this cancel.
 	s.mu.Lock()
 	done := s.promptDone
-	in := s.inPrompt
+	in = s.inPrompt && s.wire == wire
 	s.mu.Unlock()
 	if !in || done == nil {
 		return nil
