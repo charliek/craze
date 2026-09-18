@@ -166,6 +166,10 @@ func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	if err := sess.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	// Nothing here quits, so the child is reaped by hand: a fake left running
+	// would still be in the process table when another wired test asks
+	// processRunning whether its own child was reaped.
+	t.Cleanup(func() { _ = sess.Close() })
 
 	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

@@ -656,7 +656,9 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 	// second one is this prompt's, caused strictly after the refusal; the
 	// collector appends on one goroutine in channel order, so by then it holds
 	// every event the refused call could have emitted.
-	if _, err := s.Prompt(context.Background(), "plain prompt after the foreign turn"); err != nil {
+	markerCtx, cancelMarker := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancelMarker()
+	if _, err := s.Prompt(markerCtx, "plain prompt after the foreign turn"); err != nil {
 		t.Fatalf("plain prompt after the foreign turn: %v", err)
 	}
 	waitUntil(t, "the second EventDone", func() bool {
