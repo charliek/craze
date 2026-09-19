@@ -675,3 +675,52 @@ func TestSearchParameters(t *testing.T) {
 		})
 	}
 }
+
+// TestSearchRefusesWithoutAnEnvironment: with no Env.Environ, grep and glob
+// run nothing — as bash refuses (TestBashRefusesWithoutAnEnvironment), and
+// rather than run rg with an environment of PWD alone, which is not what the
+// session configured. The control is a configured environment: the same
+// search finds the file.
+func TestSearchRefusesWithoutAnEnvironment(t *testing.T) {
+	t.Parallel()
+	requireRG(t)
+	p, err := Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		in   map[string]any
+	}{
+		{"grep", map[string]any{"pattern": "needle"}},
+		{"glob", map[string]any{"pattern": "*.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			i := slices.IndexFunc(p.Tools, func(tl tool.Tool) bool { return tl.Spec().ID == tc.name })
+			if i < 0 {
+				t.Fatalf("no %s tool in the profile", tc.name)
+			}
+			env := tool.Env{Workspace: t.TempDir(), Home: t.TempDir()}
+			put(t, filepath.Join(env.Workspace, "hay.txt"), "needle\n")
+			raw, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(env tool.Env) tool.Result {
+				t.Helper()
+				c, err := p.Tools[i].Prepare(env, tool.Call{ID: "t1.1.1", Tool: tc.name, Input: raw})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return c.Run(context.Background(), env)
+			}
+			failed(t, run(env), tool.ClassToolError, noEnviron(tc.name))
+
+			env.Environ = tool.ChildEnviron(os.Environ(), nil)
+			if text := ok(t, run(env)); !strings.Contains(text, "hay.txt") {
+				t.Fatalf("control: with an environment, %s did not find the file: %q", tc.name, text)
+			}
+		})
+	}
+}

@@ -340,8 +340,14 @@ func TestBashShell(t *testing.T) {
 	if _, err := os.Stat(bashPath); err != nil {
 		t.Skipf("no %s on this machine: %v", bashPath, err)
 	}
-	h := thisHost()
-	if h.shell != bashPath || h.tmp != filepath.Join(os.TempDir(), "craze") {
+	h, err := thisHost()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The temporary directory is the fixed one, or — where something else
+	// holds that name on this machine — a session's own under the same base
+	// (TestBashTmpDir); either way one that passes the check.
+	if h.shell != bashPath || filepath.Dir(h.tmp) != os.TempDir() || !strings.HasPrefix(filepath.Base(h.tmp), "craze") || ensureTmp(h.tmp) != nil {
 		t.Fatalf("thisHost = %+v", h)
 	}
 	tl, err := newBash()
@@ -1237,7 +1243,7 @@ func stallOp(t *testing.T, c *bashCall, op string) *stall {
 	case "workdir stat":
 		c.ops.stat = func(p string) (os.FileInfo, error) { s.hold(); return real.stat(p) }
 	case "tmp mkdir":
-		c.ops.mkdirAll = func(p string, m os.FileMode) error { s.hold(); return real.mkdirAll(p, m) }
+		c.ops.ensureTmp = func(p string) error { s.hold(); return real.ensureTmp(p) }
 	case "exec start":
 		c.ops.start = func(cmd *exec.Cmd) (*group, error) { s.hold(); return real.start(cmd) }
 	case "spill open":
@@ -2145,4 +2151,114 @@ func TestSetupStopsBeforeTheStart(t *testing.T) {
 			gone(t, <-pids, "sleep 649")
 		})
 	}
+}
+
+// TestBashTmpDir: the directory bash offers for temporary work is the fixed
+// one under the machine's temporary directory when it can be made or is
+// safely ours; when something else holds that name — a symlink, a directory
+// of ours with the wrong mode, a file: what another user of the machine
+// could plant — a directory with a random name is made for the session
+// instead, and the plant is left as it was. Before every command the
+// directory is checked again: one replaced since is refused, and the command
+// does not run; one merely removed is remade. The control is nothing
+// planted. A directory owned by another user cannot be planted by a test
+// without privileges; the check on it is the same check.
+func TestBashTmpDir(t *testing.T) {
+	t.Parallel()
+	fallback := func(t *testing.T, base, got string) {
+		t.Helper()
+		if got == filepath.Join(base, "craze") || filepath.Dir(got) != base || !strings.HasPrefix(filepath.Base(got), "craze-") {
+			t.Fatalf("tmpDir = %q; want a session's own directory under %s", got, base)
+		}
+		if err := ensureTmp(got); err != nil {
+			t.Fatalf("the fallback does not pass the check: %v", err)
+		}
+	}
+	t.Run("control: nothing planted", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		got, err := tmpDir(base)
+		if err != nil || got != filepath.Join(base, "craze") || perm(t, got) != 0o700 {
+			t.Fatalf("tmpDir = %q, %v; want %s, mode 0700", got, err, filepath.Join(base, "craze"))
+		}
+		if again, err := tmpDir(base); err != nil || again != got {
+			t.Fatalf("a second session got %q, %v; want the same directory, already ours", again, err)
+		}
+	})
+	t.Run("a planted symlink", func(t *testing.T) {
+		t.Parallel()
+		base, elsewhere := t.TempDir(), t.TempDir()
+		fixed := filepath.Join(base, "craze")
+		if err := os.Symlink(elsewhere, fixed); err != nil {
+			t.Fatal(err)
+		}
+		got, err := tmpDir(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fallback(t, base, got)
+		if info, err := os.Lstat(fixed); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the planted symlink was touched: %v, %v", info, err)
+		}
+	})
+	t.Run("a planted directory with the wrong mode", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		fixed := filepath.Join(base, "craze")
+		if err := os.Mkdir(fixed, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(fixed, 0o755); err != nil { // whatever the umask
+			t.Fatal(err)
+		}
+		got, err := tmpDir(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fallback(t, base, got)
+		if perm(t, fixed) != 0o755 {
+			t.Fatal("the planted directory's mode was changed")
+		}
+	})
+	t.Run("a planted file", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		put(t, filepath.Join(base, "craze"), "")
+		got, err := tmpDir(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fallback(t, base, got)
+	})
+	t.Run("an unusable base", func(t *testing.T) {
+		t.Parallel()
+		if got, err := tmpDir(filepath.Join(t.TempDir(), "missing", "base")); err == nil {
+			t.Fatalf("tmpDir = %q under a base that does not exist; want an error", got)
+		}
+	})
+	t.Run("checked before every command", func(t *testing.T) {
+		t.Parallel()
+		env := bashEnv(t, nil)
+		tmp := filepath.Join(env.Home, "tmp") // prepareBash's
+		if text := ok(t, runBash(t, env, map[string]any{"command": "echo ran"})); text != "ran\n" || perm(t, tmp) != 0o700 {
+			t.Fatalf("control: the first command did not run, or left %s with mode %v", tmp, perm(t, tmp))
+		}
+		if err := os.Remove(tmp); err != nil {
+			t.Fatal(err)
+		}
+		if text := ok(t, runBash(t, env, map[string]any{"command": "echo ran"})); text != "ran\n" || perm(t, tmp) != 0o700 {
+			t.Fatal("a removed directory was not remade for the next command")
+		}
+		if err := os.Remove(tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), tmp); err != nil {
+			t.Fatal(err)
+		}
+		res := runBash(t, env, map[string]any{"command": ": > ran"})
+		failed(t, res, tool.ClassToolError, "The temporary directory cannot be used: "+tmp+" is a symlink")
+		if _, err := os.Stat(filepath.Join(env.Workspace, "ran")); err == nil {
+			t.Fatal("the command ran with the directory replaced")
+		}
+	})
 }

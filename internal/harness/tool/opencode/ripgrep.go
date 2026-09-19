@@ -83,6 +83,16 @@ var errRecordTooLong = fail(tool.ClassToolError, fmt.Sprintf("Ripgrep JSON recor
 // it wants: the lines it asked for, or a line it could not use.
 var errEnough = errors.New("opencode: no more ripgrep output is wanted")
 
+// errNoEnviron is run's error when Env.Environ is nil: nothing is started
+// (plan 019 §3.8). searchOutcome phrases it for the tool.
+var errNoEnviron = errors.New("opencode: no child environment configured")
+
+// noEnviron is a tool's result text for a nil Env.Environ: bash's wording,
+// for the tool named.
+func noEnviron(name string) string {
+	return "The " + name + " tool cannot run: no child environment configured."
+}
+
 // rgEnd is how a run of rg ended.
 type rgEnd struct {
 	why ending
@@ -114,6 +124,12 @@ type rgEnd struct {
 // ctx is done or the timeout passes. The records it reads are bounded too:
 // at most maxRecordBytes each, and none once each has had enough.
 func (r *ripgrep) run(ctx context.Context, env tool.Env, bin, dir string, args []string, sep byte, each func(rec []byte) (more bool, err error)) (end rgEnd, readErr, err error) {
+	if env.Environ == nil {
+		// As bash refuses (noEnvironText): with no environment configured,
+		// rg would run with none but PWD, which is not what the session
+		// meant, and the tool cannot know which variables it should drop.
+		return rgEnd{}, nil, errNoEnviron
+	}
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		return rgEnd{}, nil, err
@@ -240,6 +256,8 @@ func searchOutcome(ctx context.Context, name string, end rgEnd, readErr, runErr 
 	switch {
 	case ctx.Err() != nil:
 		return tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted}, false
+	case errors.Is(runErr, errNoEnviron):
+		return tool.Result{Text: noEnviron(name), IsError: true, Class: tool.ClassToolError}, false
 	case runErr != nil:
 		// opencode's words for any failure to run rg (ripgrep.ts:149), with
 		// the cause, which opencode keeps out of the message.

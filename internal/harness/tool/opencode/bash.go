@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,15 +43,17 @@ const (
 
 // The texts craze adds to opencode's (NOTICE).
 const (
-	// noEnvironText refuses a call whose Env has no child environment. The
-	// tool cannot tell which variables hold craze's provider keys, so it
-	// never falls back to its own environment (plan 019 §3.8).
-	noEnvironText = "The bash tool cannot run: no child environment configured."
 	// partialText says the output was not read to its end: something the
 	// command left running outside its process group still held the pipe
 	// when reading stopped.
 	partialText = "The output may be incomplete: something the command started still held its output open when the call ended, and what it wrote after that was not read."
 )
+
+// noEnvironText refuses a call whose Env has no child environment. The tool
+// cannot tell which variables hold craze's provider keys, so it never falls
+// back to its own environment (plan 019 §3.8). grep and glob refuse in the
+// same words (noEnviron).
+var noEnvironText = noEnviron("bash")
 
 // host is what bash's description tells the model about the machine, and the
 // shell it runs commands with.
@@ -60,11 +63,63 @@ type host struct {
 	tmp   string // the directory the description offers for temporary work
 }
 
-// thisHost returns this machine's host. The specs golden replaces it, so the
-// description it pins does not depend on the machine the test runs on.
-var thisHost = func() host {
-	// opencode offers os.tmpdir()/opencode (core/src/global.ts:15).
-	return host{os: runtime.GOOS, shell: pickShell(bashPath, shPath), tmp: filepath.Join(os.TempDir(), "craze")}
+// thisHost returns this machine's host, with the temporary directory made
+// (tmpDir): it is called once per profile, so that is the session's. The
+// specs golden replaces it, so the description it pins does not depend on
+// the machine the test runs on.
+var thisHost = func() (host, error) {
+	tmp, err := tmpDir(os.TempDir())
+	if err != nil {
+		return host{}, err
+	}
+	return host{os: runtime.GOOS, shell: pickShell(bashPath, shPath), tmp: tmp}, nil
+}
+
+// tmpDir makes the directory bash offers for temporary work and returns it:
+// base/craze — opencode offers os.tmpdir()/opencode (core/src/global.ts:15)
+// — when it can be made, or is already there and safely ours (ensureTmp);
+// otherwise a directory with a random name under base, made for this
+// session. A path anyone on the machine can predict is one anyone can plant
+// — as a symlink, or a directory they own — and a command's scratch files
+// would then land where they choose; the plant is left alone and not used.
+// An error means base itself is unusable.
+func tmpDir(base string) (string, error) {
+	fixed := filepath.Join(base, "craze")
+	if err := ensureTmp(fixed); err == nil {
+		return fixed, nil
+	}
+	return os.MkdirTemp(base, "craze-")
+}
+
+// ensureTmp makes path as the temporary directory, mode 0700, or checks what
+// is there: it must be a directory, not a symlink, owned by this user, with
+// mode 0700 exactly. Anything else may be a plant, and is refused. It runs
+// before every command as well as at the start: a directory that was safe
+// can be replaced.
+func ensureTmp(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("%s is a symlink", path)
+	case !info.IsDir():
+		return fmt.Errorf("%s is not a directory", path)
+	case info.Mode().Perm() != 0o700:
+		return fmt.Errorf("%s has mode %04o, not 0700", path, info.Mode().Perm())
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: the owner cannot be checked", path)
+	}
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is owned by uid %d, not this user (uid %d)", path, st.Uid, os.Getuid())
+	}
+	return nil
 }
 
 // pickShell returns bash when it is an executable file, else sh.
@@ -81,7 +136,10 @@ type bashTool struct {
 }
 
 func newBash() (tool.Tool, error) {
-	h := thisHost()
+	h, err := thisHost()
+	if err != nil {
+		return nil, fmt.Errorf("bash: no usable temporary directory: %w", err)
+	}
 	// The values opencode's ShellPrompt.render puts in for a bash shell
 	// (shell/prompt.ts:273-291); NOTICE says how the rest were rendered.
 	desc, err := description("bash", map[string]string{
@@ -179,12 +237,12 @@ type bashCall struct {
 // real ones.
 type ops struct {
 	stat      func(string) (os.FileInfo, error) // the workdir check
-	mkdirAll  func(string, os.FileMode) error   // the temporary directory
+	ensureTmp func(string) error                // the temporary directory: made, or checked
 	start     func(*exec.Cmd) (*group, error)   // exec, in the workdir
 	openSpill spillOpener                       // the spill file, under the harness home
 }
 
-var realOps = ops{stat: os.Stat, mkdirAll: os.MkdirAll, start: startGroup, openSpill: openSpill}
+var realOps = ops{stat: os.Stat, ensureTmp: ensureTmp, start: startGroup, openSpill: openSpill}
 
 // errLaunchTimeout is launch's error when the call's timeout passed before the
 // command had started.
@@ -402,7 +460,9 @@ func (c *bashCall) setup(ctx context.Context, env tool.Env, deadline time.Time, 
 	if err := checkWorkdir(c.ops.stat, c.dir); err != nil {
 		return nil, nil, err
 	}
-	_ = c.ops.mkdirAll(c.host.tmp, 0o700)
+	if err := c.ops.ensureTmp(c.host.tmp); err != nil {
+		return nil, nil, fail(tool.ClassToolError, "The temporary directory cannot be used: "+err.Error())
+	}
 	if err := stopped(ctx, env.Closing, deadline); err != nil {
 		return nil, nil, err
 	}

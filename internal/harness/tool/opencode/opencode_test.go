@@ -204,7 +204,9 @@ func TestSpecsGolden(t *testing.T) {
 	// directory; the golden pins bashVars' instead, whatever runs the test.
 	// Not parallel: thisHost is package state.
 	machine := thisHost
-	thisHost = func() host { return host{os: bashVars["os"], shell: "/bin/" + bashVars["shell"], tmp: bashVars["tmp"]} }
+	thisHost = func() (host, error) {
+		return host{os: bashVars["os"], shell: "/bin/" + bashVars["shell"], tmp: bashVars["tmp"]}, nil
+	}
 	t.Cleanup(func() { thisHost = machine })
 	p, err := Profile()
 	if err != nil {
