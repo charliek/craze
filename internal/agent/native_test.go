@@ -1240,8 +1240,8 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 		// "high" is kept: test/b lists it too (plan 018 §3.7).
 		t.Fatalf("after SetModel: current %q, effort %+v", snap.CurrentModel, opt)
 	}
-	if evs := drained(s); len(ofType(evs, EventMeta)) != 0 {
-		t.Fatalf("SetModel emitted %+v", evs)
+	if meta := ofType(drained(s), EventMeta); len(meta) != 1 || meta[0].Text != "" {
+		t.Fatalf("SetModel during a turn emitted %+v, want one bare EventMeta", meta)
 	}
 	close(h.release)
 	if got := await(t, out, "the turn on test/a"); got.err != nil || got.res.StopReason != "end_turn" {
@@ -1279,6 +1279,70 @@ func cat(parts ...[]fantasy.StreamPart) []fantasy.StreamPart {
 		all = append(all, p...)
 	}
 	return all
+}
+
+// TestNativeSwitchesAnnounceTheirOptions: a model or effort change that took
+// emits exactly one bare EventMeta — the native session's
+// config_option_update, which is what makes the TUI re-read the snapshot —
+// and the snapshot it points at already carries the new model's effort
+// option, or none. A switch that failed, or was never supported, emits
+// nothing.
+func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Model: "other/c"})
+	if opt := EffortOption(s.Snapshot()); opt != nil {
+		t.Fatalf("other/c has no efforts, yet the snapshot offers %+v", opt)
+	}
+	oneMeta := func(t *testing.T, what string) {
+		t.Helper()
+		evs := drained(s)
+		if len(evs) != 1 || evs[0].Type != EventMeta || evs[0].Text != "" || evs[0].Mode != "" {
+			t.Fatalf("%s emitted %+v, want exactly one bare EventMeta", what, evs)
+		}
+	}
+	none := func(t *testing.T, what string) {
+		t.Helper()
+		if evs := drained(s); len(evs) != 0 {
+			t.Fatalf("%s emitted %+v, want nothing", what, evs)
+		}
+	}
+
+	if err := s.SetModel(context.Background(), "test/a"); err != nil {
+		t.Fatal(err)
+	}
+	oneMeta(t, "SetModel to a model with efforts")
+	if opt := EffortOption(s.Snapshot()); opt == nil || opt.Current != "high" {
+		t.Fatalf("after the switch to test/a the effort option is %+v, want low/high at high", opt)
+	}
+
+	if err := s.SetConfig(context.Background(), nativeEffortID, "low"); err != nil {
+		t.Fatal(err)
+	}
+	oneMeta(t, "SetConfig(effort)")
+	if opt := EffortOption(s.Snapshot()); opt == nil || opt.Current != "low" {
+		t.Fatalf("after SetConfig the effort option is %+v, want low", opt)
+	}
+
+	if err := s.SetModel(context.Background(), "nokey/d"); err == nil {
+		t.Fatal("a switch to an unfunded model succeeded")
+	}
+	none(t, "a failed SetModel")
+	if err := s.SetConfig(context.Background(), nativeEffortID, "max"); err == nil {
+		t.Fatal("an effort the model does not offer was taken")
+	}
+	none(t, "a refused SetConfig")
+	if err := s.SetConfig(context.Background(), "fast", "true"); !errors.Is(err, ErrUnsupported) {
+		t.Fatal(err)
+	}
+	none(t, "an unsupported SetConfig")
+
+	if err := s.SetModel(context.Background(), "other/c"); err != nil {
+		t.Fatal(err)
+	}
+	oneMeta(t, "SetModel to a model with no efforts")
+	if snap := s.Snapshot(); EffortOption(snap) != nil || snap.Config != nil {
+		t.Fatalf("after the switch back to other/c the config is %+v, want none", snap.Config)
+	}
 }
 
 // TestNativeSetConfig: the effort option's id sets the harness's effort, and

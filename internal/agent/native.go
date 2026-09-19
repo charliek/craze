@@ -574,8 +574,9 @@ func (s *nativeSession) Close() error {
 // turn runs, as on the live session: the running turn finishes on its own
 // model and the snapshot shows the new one at once. The harness builds the
 // new model's client now, so an unknown alias or a missing key fails here
-// and leaves the current model in place. It emits nothing; the caller
-// re-reads the snapshot.
+// and leaves the current model in place. A switch that took is announced
+// (announceCurrent), because the new model can bring or take away the effort
+// option.
 func (s *nativeSession) SetModel(_ context.Context, modelID string) error {
 	s.mu.Lock()
 	hs, table := s.hs, s.table
@@ -591,18 +592,37 @@ func (s *nativeSession) SetModel(_ context.Context, modelID string) error {
 	if err := hs.SetModel(alias); err != nil {
 		return phraseSetupError(err, table, alias)
 	}
+	s.announceCurrent()
+	return nil
+}
+
+// announceCurrent republishes the current model and its effort option after
+// a switch, then emits one bare EventMeta — no Text, so `craze prompt --json`
+// prints nothing for it — outside s.mu, through the close-aware emit. It is
+// the native session's config_option_update: an ACP agent answers a model or
+// effort change with one, the live session turns it into exactly this event
+// (live.go's onUpdate), and the TUI re-reads the snapshot on it. Without it a
+// /model with no effort — whose command returns no message of its own —
+// left the TUI's snapshot on the old model's options, so a switch from a
+// model with no efforts to one with them never showed the effort, and the
+// next `/model <id> <effort>` could not tell the effort from the model name.
+//
+// It runs on the caller's goroutine, which for SetModel and SetConfig is a
+// command goroutine in the TUI (never Update) and may therefore wait on a
+// full channel like any other emit; Close releases it.
+func (s *nativeSession) announceCurrent() {
 	s.mu.Lock()
 	s.refreshCurrentLocked()
 	s.mu.Unlock()
-	return nil
+	s.emit(Event{Type: EventMeta})
 }
 
 // SetMode is unsupported: the harness has no modes until H5.
 func (s *nativeSession) SetMode(context.Context, string) error { return ErrUnsupported }
 
 // SetConfig sets the effort, the one option the native session advertises;
-// any other id is unsupported. Like SetModel it is allowed during a turn and
-// emits nothing.
+// any other id is unsupported. Like SetModel it is allowed during a turn, and
+// a change that took is announced the same way.
 func (s *nativeSession) SetConfig(_ context.Context, id, value string) error {
 	if id != nativeEffortID {
 		return ErrUnsupported
@@ -626,9 +646,7 @@ func (s *nativeSession) SetConfig(_ context.Context, id, value string) error {
 	if err := hs.SetEffort(value); err != nil {
 		return phraseSetupError(err, table, alias)
 	}
-	s.mu.Lock()
-	s.refreshCurrentLocked()
-	s.mu.Unlock()
+	s.announceCurrent()
 	return nil
 }
 

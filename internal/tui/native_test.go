@@ -210,3 +210,79 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 		t.Fatalf("a native turn replaced the persisted default: %q\n%s", got, body)
 	}
 }
+
+// TestNativeModelSwitchGainsTheEffortOption is the live smoke's bug, through
+// the TUI's own /model path on a real native session: started on a model with
+// no efforts, `/model <a model with efforts>` must leave the snapshot — and
+// so the status row — with that model's effort option, because a following
+// `/model <id> <effort>` is split by SplitModelEffort against exactly that
+// option. /model with no effort returns no message of its own; what brings
+// the new options in is the session's bare EventMeta, as an ACP agent's
+// config_option_update does.
+func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
+	isolateSkillsHome(t)
+	table := &modeltable.Table{
+		DefaultModel: "test/plain",
+		Providers: map[string]modeltable.Provider{
+			"test": {Driver: modeltable.DriverOpenAICompat, BaseURL: "http://127.0.0.1:9/v1", EnvKeys: []string{"NATIVE_TUI_TEST_KEY"}},
+		},
+		Models: map[string]modeltable.Model{
+			"test/plain":   {Provider: "test", WireModel: "wire-plain", Name: "Plain"},
+			"test/thinker": {Provider: "test", WireModel: "wire-thinker", Name: "Thinker", Efforts: []string{"low", "high"}, DefaultEffort: "high"},
+			"test/sage":    {Provider: "test", WireModel: "wire-sage", Name: "Sage", Efforts: []string{"low", "medium"}, DefaultEffort: "medium"},
+		},
+	}
+	model := &nativeScriptedModel{provider: "test", wire: "wire"}
+	ws := t.TempDir()
+	sess := agent.NewNative(agent.Options{Workspace: ws}, nativeSessionTweak(t.TempDir(), table, model))
+	if err := sess.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	m := New(Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true, ProviderLocked: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	if agent.EffortOption(m.snap) != nil || !strings.Contains(plainView(m), "native │ Plain │") {
+		t.Fatalf("a model with no efforts shows one:\n%s", plainView(m))
+	}
+
+	// slash runs one /model command the way the composer does, then its
+	// command, then whatever the session emitted while that command ran.
+	slash := func(line string) {
+		t.Helper()
+		m.input.SetValue(line)
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		if msg := runCmd(cmd); msg != nil {
+			tm, _ = m.Update(msg)
+			m = tm.(Model)
+		}
+		drainSessionEvents(t, &m, sess)
+		if errs := texts(m, entryError); len(errs) > 0 {
+			t.Fatalf("%s: %q", line, errs)
+		}
+	}
+
+	slash("/model test/thinker")
+	opt := agent.EffortOption(m.snap)
+	if m.snap.CurrentModel != "test/thinker" || opt == nil || opt.Current != "high" {
+		t.Fatalf("after /model test/thinker: model %q, effort option %+v; want test/thinker at high",
+			m.snap.CurrentModel, opt)
+	}
+	if !strings.Contains(plainView(m), "native │ Thinker (high) │") {
+		t.Fatalf("the status row does not show the effort:\n%s", plainView(m))
+	}
+
+	slash("/model test/sage low")
+	opt = agent.EffortOption(m.snap)
+	if m.snap.CurrentModel != "test/sage" || opt == nil || opt.Current != "low" {
+		t.Fatalf("after /model test/sage low: model %q, effort option %+v; want test/sage at low",
+			m.snap.CurrentModel, opt)
+	}
+	if !strings.Contains(plainView(m), "native │ Sage (low) │") {
+		t.Fatalf("the status row does not show the new effort:\n%s", plainView(m))
+	}
+}
