@@ -82,7 +82,7 @@ are qualified (D-24). Nothing blocks H1.
   surfaces `ErrModelNotFound` until its wire id is corrected, then joins
   once it passes one tool loop. Picker never shows the provider.
 
-**Exit result:** shipped across PRs #28, #30, and PR 3. `craze --provider
+**Exit result:** shipped across PRs #28, #30, and #31. `craze --provider
 native` (hidden) held one clean TUI turn on 14 of 15 imported models, and
 multi-turn sessions (switching across OpenRouter, Fireworks and Meta) and
 `craze prompt --json` ran on a subset of them; `fireworks/deepseek-v4-pro`
@@ -91,11 +91,11 @@ D-24 expected. Mid-session model switch, effort switch, cancel, and queued
 follow-ups all round-tripped live. A bug surfaced in the first live session —
 after switching from a model with no efforts to one with efforts, the TUI
 never re-read the snapshot, hiding the new effort row and failing
-`/model <id> <effort>` — fixed in 0733dd5 (the adapter now emits a bare
+`/model <id> <effort>` — fixed in b2c851c (the adapter now emits a bare
 `EventMeta` after `SetModel`/`SetConfig`) and re-verified clean in a second
 session. Two decisions were made during execution: OpenRouter runs on
-`openaicompat`, not `providers/openrouter` (D-35, owner to confirm or
-reverse), and a content-filter finish maps to `refusal` (D-36).
+`openaicompat`, not `providers/openrouter` (D-35, since confirmed by the
+owner), and a content-filter finish maps to `refusal` (D-36).
 
 Live smoke, Linux (2026-09-19), one TUI turn per imported alias:
 
@@ -133,12 +133,16 @@ Cache-read tokens were observed (recorded, not a pass condition): OpenRouter
 Meta `muse-spark-1.3` 241 and 497 on later turns; Fireworks `kimi-k2p7-code`
 219 on the third turn; 0 on the first turn after each model switch.
 
-Binary size (C9): stripped `bin/craze` grew 9.5 MB → 32.4 MB once the harness
-linked — not an SDK (the deps check covers `./cmd/craze`); cobra's help
-template makes `text/template` reachable, and its reflective `MethodByName`
-keeps every exported method of every reachable type, including openai-go's
-thousands. A probe with the adapter but no reachable `text/template` was
-14.4 MB. This is D-26's binary-size split trigger; the owner decides.
+Binary size: stripped `bin/craze` grew 9.5 MB → 32.4 MB once the harness
+linked (C9) — not an SDK (the deps check covers `./cmd/craze`). The cause was
+one line in craze, not the harness: `SetVersionTemplate` on the root command.
+cobra 1.10 reaches `text/template`'s executor only through its `Set*Template`
+calls; that executor looks methods up by name, so the linker kept every
+exported method of every linked type, which cost 1.7 MB before the harness and
+13.7 MB with openai-go linked (34,541 of its symbols against 9,495). craze now
+prints `--version` itself and a test links the binary to keep run-time method
+lookup out (D-37): 18.7 MB stripped, against 7.8 MB for the same fix on the
+pre-harness tree. D-26's binary-size trigger is not tripped.
 
 Known limitations / follow-ups: DeepSeek V4 Pro's wire id needs correcting
 (in gx before re-importing, or in `models.toml` with `source = "manual"`);
@@ -147,8 +151,7 @@ gx's own default was skipped (`fireworks/deepseek-v4-flash` on Linux); the
 harness's one-line error cleanup drops an ESC byte before the adapter's
 sanitizer can strip the whole escape sequence, so a provider message can show
 harmless cosmetic leftovers like `[2J`; interject (H2), modes (H5), idle
-timeout (H2), resume/indexing (H7), and cost display (H7) remain as planned,
-and the binary-size decision (D-26) is still open.
+timeout (H2), resume/indexing (H7), and cost display (H7) remain as planned.
 
 ### H2 — tools
 
@@ -161,6 +164,10 @@ and the binary-size decision (D-26) is still open.
 - **Interject via a `PrepareStep` drain at tool boundaries**, turning
   `Capabilities.Interject` on (D-34): with tool steps in place there is
   finally a safe point to merge steered text into history between steps.
+- **OpenRouter tool-loop check (D-35)**: run a multi-step tool loop on the
+  OpenRouter reasoning models. If one degrades or fails without
+  `reasoning_details` replay, first carry the replay in craze's own wrapper;
+  the owner accepts `providers/openrouter` and its SDKs if quality needs it.
 - **Exit**: the agent makes a real change in the craze repo, on Linux and
   on the mac-mini, with tool cards and diffs rendering as they do for grok.
 

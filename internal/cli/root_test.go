@@ -94,6 +94,24 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+// TestVersionFlag pins what cobra's built-in version flag did, now that craze
+// owns the flag (D-37): the bare version and a newline, for both spellings, and
+// answered before argument validation.
+func TestVersionFlag(t *testing.T) {
+	for _, argv := range [][]string{{"--version"}, {"-v"}, {"--version", "stray"}} {
+		var buf bytes.Buffer
+		cmd := NewRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetArgs(argv)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("craze %q: %v", argv, err)
+		}
+		if got, want := buf.String(), version.Version+"\n"; got != want {
+			t.Fatalf("craze %q printed %q, want %q", argv, got, want)
+		}
+	}
+}
+
 // TestPluginDirFlagOnEveryEntryPoint is §3.4: the same flag, spelled the same
 // way and repeatable, on the root TUI command, on craze prompt and on craze
 // frame. An entry point that lost it would start a session that silently
