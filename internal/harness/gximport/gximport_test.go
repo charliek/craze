@@ -330,17 +330,19 @@ model_provider = "p"
 }
 
 // TestImportDropsAShortAPIKeyWithANote: the model table refuses an inline
-// key under 8 bytes at load, so an import that carried one over would write
-// a table nothing can load. It drops only the key, like a $VAR one, and the
-// saved table loads; an 8-byte key is the negative control, imported as is.
+// key under 8 bytes, or one the redaction marker could print back, at load,
+// so an import that carried one over would write a table nothing can load.
+// It drops only the key, like a $VAR one, and the saved table loads; an
+// 8-byte key is the negative control, imported as is.
 func TestImportDropsAShortAPIKeyWithANote(t *testing.T) {
-	const short, eight = "zq-1234", "zq-12345"
+	const short, eight, marker = "zq-1234", "zq-12345", "redacted-cred"
 	for _, tc := range []struct {
 		key     string
 		wantKey string
 		notes   []Note
 	}{
 		{short, "", []Note{{ID: "p", Text: noteShortAPIKey}}},
+		{marker, "", []Note{{ID: "p", Text: noteMarkerAPIKey}}},
 		{eight, eight, nil},
 	} {
 		dir := gxHome(t, okProvider+`
@@ -362,7 +364,7 @@ model_provider = "p"
 		if !reflect.DeepEqual(report.Providers.Notes, tc.notes) {
 			t.Fatalf("key %q: notes = %+v, want %+v", tc.key, report.Providers.Notes, tc.notes)
 		}
-		if strings.Contains(fmt.Sprintf("%+v", report), short) {
+		if tc.wantKey == "" && strings.Contains(fmt.Sprintf("%+v", report), tc.key) {
 			t.Fatal("the report echoes the api_key value")
 		}
 		out := t.TempDir()
