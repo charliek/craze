@@ -18,28 +18,22 @@ linters:
         # must not import internal/acp). The native harness imports nothing
         # from the rest of craze except internal/atomicfile, so it runs without
         # the ACP stack and could leave the repo whole (D-02; plan 018 §3.1).
-        # A denylist scoped to the harness's files: the stdlib, third-party
-        # modules and internal/atomicfile stay allowed, and no other package
-        # is affected.
+        # All of craze's internal packages are denied to the harness's files,
+        # and the two allow entries win as longer matches: the harness's own
+        # packages and internal/atomicfile. A package added under internal/
+        # later is therefore denied by default. The stdlib and third-party
+        # modules stay allowed, and no file outside internal/harness is
+        # affected.
         harness:
           list-mode: lax
           files:
             - "**/internal/harness/**"
+          allow:
+            - github.com/charliek/craze/internal/harness
+            - github.com/charliek/craze/internal/atomicfile
           deny:
-            - pkg: github.com/charliek/craze/internal/agent
-              desc: "the harness must not import craze's session layer; internal/agent's adapter imports the harness, never the reverse (D-02, plan 018 §3.1)"
-            - pkg: github.com/charliek/craze/internal/tui
-              desc: "the harness must not import the TUI (D-02, plan 018 §3.1)"
-            - pkg: github.com/charliek/craze/internal/acp
-              desc: "the harness must not import the ACP client (D-02, plan 018 §3.1)"
-            - pkg: github.com/charliek/craze/internal/cli
-              desc: "the harness must not import the CLI (D-02, plan 018 §3.1)"
-            - pkg: github.com/charliek/craze/internal/sessions
-              desc: "the harness must not import the shared session index (D-02, plan 018 §3.1)"
-            - pkg: github.com/charliek/craze/internal/host
-              desc: "the harness must not import host integrations (D-02, plan 018 §3.1)"
-            - pkg: github.com/charliek/craze/internal/paths
-              desc: "the harness receives its directory as Options.Home and must not import internal/paths (D-02, plan 018 §3.1)"
+            - pkg: github.com/charliek/craze/internal
+              desc: "the harness imports nothing from craze except internal/atomicfile; internal/agent's adapter imports the harness, never the reverse, and the harness receives its directory as Options.Home (D-02, plan 018 §3.1)"
   exclusions:
     presets:
       - std-error-handling
