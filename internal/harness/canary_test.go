@@ -356,15 +356,15 @@ func TestSwitchLearnsAKeyForTheNextTurn(t *testing.T) {
 	// the tools — a schema's own bytes, which no description holds — each
 	// refuses the switch and leaves the model where it was.
 	for what, key := range map[string]string{
-		"unredactable":      "k3y-x7",
-		"in the prompt":     f.workspace, // the prompt names the working directory
-		"in the tools":      `"required":["filePath"]`,
+		"unredactable":  "k3y-x7",
+		"in the prompt": f.workspace, // the prompt names the working directory
+		"in the tools":  `"required":["filePath"]`,
 		// A sentence of bash's own description, taken as it is written rather
 		// than rebuilt from the machine: the directory it names is chosen at
 		// runtime (os.TempDir()'s spelling differs per platform, and a
 		// planted path falls back to a random name), so a hand-built copy of
 		// it does not always appear in what is sent.
-		"in a description": "for temporary work outside the workspace",
+		"in a description":  "for temporary work outside the workspace",
 		"nowhere in either": "sk-not-in-what-is-sent-0003",
 	} {
 		env["NOKEY_API_KEY"] = key
