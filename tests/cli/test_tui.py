@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from conftest import host_env_names
+from sse_fixture import CANARY, SSEFixture, write_native_config
 
 
 def _open_pty() -> tuple[int, int]:
@@ -83,7 +84,7 @@ class PTYCraze:
     def __init__(
         self,
         craze_bin: Path,
-        fake_agent_bin: Path,
+        fake_agent_bin: Path | None,
         workspace: Path,
         script: str = "echo",
         provider: str = "cursor",
@@ -139,9 +140,12 @@ class PTYCraze:
             # explicit --provider filters the session index and is still
             # allowed to write the persisted default.
             argv += ["--provider", provider]
+        if fake_agent_bin is not None:
+            # None means an in-process provider (native, plan 018): there is
+            # no binary to spawn, and --agent-bin with one is a usage error
+            # (internal/cli/provider.go's refuseInProcess).
+            argv += ["--agent-bin", str(fake_agent_bin)]
         argv += [
-            "--agent-bin",
-            str(fake_agent_bin),
             "--workspace",
             str(workspace),
             "--theme",
@@ -863,3 +867,81 @@ def test_tui_continue_replays_and_leaves_the_config_alone(
     _wait_fake_gone(fake_agent_bin)
 
     assert config.read_text(encoding="utf-8") == before
+
+
+def test_tui_native_one_turn_leaves_config_and_index_alone(
+    craze_bin: Path, tmp_path: Path
+) -> None:
+    """Plan 018 C11: a native turn in the real TUI never persists.
+
+    The provider is hidden (§3.4): the status bar shows it (it still has to
+    be usable), but startedMsg's SaveProvider skips it, so the config file's
+    provider is exactly what it was before, and no sessions.jsonl is created
+    at all -- writeIndex skips a hidden provider's snapshot too. No fake
+    agent is spawned here (`--agent-bin` and an in-process provider are a
+    usage error, refuseInProcess), so the only server on the other end of
+    this turn is the loopback SSE fixture standing in for a real provider.
+    """
+    craze_home = tmp_path / "craze-home"
+    craze_home.mkdir()
+    config_path = craze_home / "config.toml"
+    before = 'provider = "grok"\ntheme = "tokyo-night"\n'
+    config_path.write_text(before, encoding="utf-8")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    with SSEFixture() as fixture:
+        fixture.set_ok(text_parts=["native fixture reply"])
+        write_native_config(craze_home / "native", fixture.base_url)
+
+        with PTYCraze(
+            craze_bin,
+            None,
+            workspace,
+            provider="native",
+            env_extra={"CRAZE_HOME": str(craze_home)},
+        ) as tui:
+            tui.wait_contains("native")
+            tui.write(b"hi\r")
+            tui.wait_contains("native fixture reply")
+            quit_craze(tui)
+        text = _ANSI.sub("", tui.screen())
+        assert CANARY not in text, text[-3000:]
+
+    assert config_path.read_text(encoding="utf-8") == before
+    assert not (craze_home / "sessions.jsonl").exists()
+
+
+def test_tui_continue_prefers_the_cursor_row_over_a_native_default(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """§3.4's exception: --continue starts the index row's own provider, not
+    the resolved default, so a hidden default never refuses --agent-bin (or
+    stops the load) for a session that is really cursor's.
+
+    CRAZE_PROVIDER=native stands in for "whatever the environment or config
+    resolved" (§3.4's "a native default from env or config"); runTUI skips
+    refuseInProcess entirely under --continue/--resume (internal/cli/tui.go),
+    and resolveLoad hands the seeded cursor row to LoadSession instead of the
+    resolved provider, so the fake agent still runs and still gets
+    session/load for that id -- proof cursor, not native, is what actually
+    started.
+    """
+    _seed_index(tmp_path, tmp_path, "sess-load-1", "cursor", "yesterday's thread")
+
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="load",
+        provider="",
+        extra_args=["--continue"],
+        env_extra={"CRAZE_PROVIDER": "native"},
+    ) as tui:
+        tui.wait_contains("the workspace holds main.py and README.md")
+        tui.wait_contains("restored")
+        tui.wait_contains("yesterday's thread")
+        tui.write(b"\x04")
+        assert tui.wait_exit() == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
