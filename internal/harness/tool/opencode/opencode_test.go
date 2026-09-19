@@ -138,7 +138,7 @@ func TestProfile(t *testing.T) {
 	if p.Name != Name || Name != "opencode" {
 		t.Fatalf("profile name = %q", p.Name)
 	}
-	if got := names(p); !slices.Equal(got, []string{"read", "write"}) {
+	if got := names(p); !slices.Equal(got, []string{"read", "edit", "write"}) {
 		t.Fatalf("tools = %q, want opencode's order of the tools this build has", got)
 	}
 	want := map[string]struct {
@@ -147,6 +147,7 @@ func TestProfile(t *testing.T) {
 		trunc              tool.Direction
 	}{
 		"read":  {tool.KindRead, true, true, tool.None},
+		"edit":  {tool.KindEdit, false, false, tool.Head},
 		"write": {tool.KindEdit, false, false, tool.Head},
 	}
 	for _, tl := range p.Tools {
@@ -303,15 +304,18 @@ func TestDescriptions(t *testing.T) {
 	}
 }
 
-// TestParameters ports opencode's parameters.test.ts cases for read and
-// write, and adds what opencode's schemas refuse and Fantasy would not: a
-// number sent as a string, a fraction, a negative, null, a value past the
-// safe-integer range. Each refusal is an invalid_input result naming the
-// field; each acceptance is its negative control.
+// TestParameters ports opencode's parameters.test.ts cases for read, write
+// and edit, and adds what opencode's schemas refuse and Fantasy would not: a
+// number or a boolean sent as a string, a fraction, a negative, null, a
+// value past the safe-integer range. Each refusal is an invalid_input result
+// naming the field; each acceptance is its negative control.
 func TestParameters(t *testing.T) {
 	f := newFixture(t)
 	put(t, f.path("a"), "x\n")
 	a := f.path("a")
+	// The edit cases' own file: the accepted ones edit it x -> y -> z -> x.
+	put(t, f.path("e"), "x\n")
+	e := f.path("e")
 	cases := []struct {
 		name, tool, input string
 		field             string // "" when the input is accepted
@@ -334,6 +338,17 @@ func TestParameters(t *testing.T) {
 		{"write refuses a missing filePath", "write", `{"content":"hi"}`, "filePath"},
 		{"write refuses a missing content", "write", fmt.Sprintf(`{"filePath":%q}`, a), "content"},
 		{"write refuses non-string content", "write", fmt.Sprintf(`{"content":123,"filePath":%q}`, a), "content"},
+		{"edit accepts all four fields", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"x","newString":"y","replaceAll":true}`, e), ""},
+		{"edit: replaceAll is optional", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"y","newString":"z"}`, e), ""},
+		{"edit accepts replaceAll false", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"z","newString":"x","replaceAll":false}`, e), ""},
+		{"edit rejects missing filePath", "edit", `{"oldString":"x","newString":"y"}`, "filePath"},
+		{"edit rejects an empty filePath", "edit", `{"filePath":"","oldString":"x","newString":"y"}`, "filePath is required"},
+		{"edit rejects missing oldString", "edit", fmt.Sprintf(`{"filePath":%q,"newString":"y"}`, e), "oldString"},
+		{"edit rejects missing newString", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"x"}`, e), "newString"},
+		{"edit rejects a boolean string", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"x","newString":"y","replaceAll":"true"}`, e), "replaceAll"},
+		{"edit rejects a numeric replaceAll", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"x","newString":"y","replaceAll":1}`, e), "replaceAll"},
+		{"edit rejects a null replaceAll", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":"x","newString":"y","replaceAll":null}`, e), "replaceAll"},
+		{"edit rejects a non-string oldString", "edit", fmt.Sprintf(`{"filePath":%q,"oldString":1,"newString":"y"}`, e), "oldString"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

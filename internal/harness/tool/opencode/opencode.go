@@ -34,6 +34,7 @@ const CredentialsFile = "providers.toml"
 // place in that order, never at the end.
 var builders = []func() (tool.Tool, error){
 	newRead,
+	newEdit,
 	newWrite,
 }
 

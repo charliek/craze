@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -129,14 +130,21 @@ func missing(err error) bool {
 }
 
 // isCredentials reports whether real, a path realPath resolved, is the
-// harness's key file (plan 019 §3.8): by resolved path, or, when real
+// harness's key file (plan 019 §3.8): by name and directory, or, when real
 // exists (info is its), by identity, so a hard link to it is refused too.
+//
+// The name is compared ignoring case and the directory by identity. On a
+// case-insensitive file system (macOS's APFS, by default) a file has many
+// spellings and a resolved path keeps the one it was given, so while the
+// key file does not exist yet, <Home>/PROVIDERS.TOML — or the file under
+// another spelling of Home — would otherwise create it. Refusing those
+// names on a case-sensitive file system costs nothing.
 func isCredentials(env tool.Env, real string, info fs.FileInfo) bool {
 	cred := filepath.Join(env.Home, CredentialsFile)
 	if r, err := realPath(cred); err == nil {
 		cred = r
 	}
-	if real == cred {
+	if strings.EqualFold(filepath.Base(real), filepath.Base(cred)) && sameDir(filepath.Dir(real), filepath.Dir(cred)) {
 		return true
 	}
 	if info == nil {
@@ -144,6 +152,24 @@ func isCredentials(env tool.Env, real string, info fs.FileInfo) bool {
 	}
 	ci, err := os.Stat(cred)
 	return err == nil && os.SameFile(info, ci)
+}
+
+// sameDir reports whether a and b name one directory: by identity when both
+// exist, so that any two spellings of it agree; by name, ignoring case, when
+// neither does; and not when only one does.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, errA := os.Stat(a)
+	bi, errB := os.Stat(b)
+	switch {
+	case errA == nil && errB == nil:
+		return os.SameFile(ai, bi)
+	case errA != nil && errB != nil:
+		return strings.EqualFold(a, b)
+	}
+	return false
 }
 
 // openFile opens real for reading without blocking and stats what it
@@ -202,12 +228,15 @@ type target struct {
 
 	f      *os.File    // open for reading; nil for a new file
 	info   fs.FileInfo // the file as opened; nil for a new file
+	data   []byte      // what read returned, which unchanged checks is still there
+	isRead bool        // read has returned data
 	unlock func()
 }
 
-// beforeCheck, when set, runs just before replace's last check. Tests use it
-// to change the file at the worst moment.
-var beforeCheck func(real string)
+// beforeCheck, when set, runs just before replace's last check, and
+// afterReplace just after its rename. Tests use them to change the file, or
+// cancel the call, at the worst moments.
+var beforeCheck, afterReplace func(real string)
 
 // openTarget resolves abs, waits for craze's lock on the resolved path, and
 // opens what is there. It refuses the harness's key file, anything that
@@ -220,6 +249,11 @@ func openTarget(ctx context.Context, env tool.Env, abs string) (*target, error) 
 	if err != nil {
 		return nil, err
 	}
+	// On a case-insensitive file system two spellings of one file take two
+	// locks. Within a session that never matters: edit and write are not
+	// Parallel, so Fantasy runs them one at a time and this lock is never
+	// contended there. Across sessions, replace's last check is what
+	// catches the other writer, as it catches an editor.
 	unlock, err := env.Locks.Lock(ctx, real)
 	if err != nil {
 		return nil, err
@@ -268,7 +302,12 @@ func (t *target) read() ([]byte, error) {
 	if t.f == nil {
 		return nil, nil
 	}
-	return io.ReadAll(io.NewSectionReader(t.f, 0, math.MaxInt64))
+	b, err := io.ReadAll(io.NewSectionReader(t.f, 0, math.MaxInt64))
+	if err != nil {
+		return nil, err
+	}
+	t.data, t.isRead = b, true
+	return b, nil
 }
 
 // replace writes data to the file: to a temp file beside it, renamed over
@@ -277,8 +316,17 @@ func (t *target) read() ([]byte, error) {
 // existing file keeps its mode, and a symlink stays a symlink because the
 // rename lands on its resolved target. Just before the rename the file must
 // still be the one openTarget found — same inode, size and modification
-// time, or still absent — or nothing is written: the path lock covers only
-// craze's own calls, not an editor or a formatter.
+// time, and the content read returned, or still absent — or nothing is
+// written: the path lock covers only craze's own calls, not an editor or a
+// formatter (plan 019 §3.9). What is left is the moment between that check
+// and the rename: a write in it is lost, and a rename-based write cannot
+// close it.
+//
+// A cancel is honoured up to the same moment: the context is the last thing
+// checked before the rename, so a call cancelled by then writes nothing and
+// reports aborted. Once the rename is done the file has changed, and the
+// call reports that, whatever the context says after; a call is never
+// aborted for a change it made.
 //
 // The rename gives the file a new inode, so hard links to it keep the old
 // content, and ownership, ACLs and extended attributes are not carried over;
@@ -293,7 +341,19 @@ func (t *target) replace(ctx context.Context, data []byte) error {
 	} else if err := os.MkdirAll(filepath.Dir(t.Real), dirMode); err != nil {
 		return err
 	}
-	return atomicfile.WriteChecked(t.Real, data, mode, t.unchanged)
+	err := atomicfile.WriteChecked(t.Real, data, mode, func() error {
+		if err := t.unchanged(); err != nil {
+			return err
+		}
+		return ctx.Err()
+	})
+	if err != nil {
+		return err
+	}
+	if afterReplace != nil {
+		afterReplace(t.Real)
+	}
+	return nil
 }
 
 // unchanged is replace's last check.
@@ -306,10 +366,29 @@ func (t *target) unchanged() error {
 	case !t.Exists && missing(err):
 		return nil
 	case !t.Exists || err != nil,
-		!os.SameFile(now, t.info), now.Size() != t.info.Size(), !now.ModTime().Equal(t.info.ModTime()):
+		!os.SameFile(now, t.info), now.Size() != t.info.Size(), !now.ModTime().Equal(t.info.ModTime()),
+		!t.sameContent():
 		return fail(tool.ClassToolError, changedText)
 	}
 	return nil
+}
+
+// sameContent reports whether the file still holds what read returned, when
+// read was called. The inode, size and time above miss a rewrite in place
+// that keeps the size inside one tick of a coarse file-system clock, which
+// leaves the modification time as it was; an edit computed from the old
+// content would then quietly undo it. The inode is the one opened (checked
+// above), so the open descriptor reads the file as it is now.
+func (t *target) sameContent() bool {
+	if !t.isRead {
+		return true
+	}
+	now := make([]byte, len(t.data)+1)
+	n, err := t.f.ReadAt(now, 0)
+	if err != nil && err != io.EOF {
+		return false
+	}
+	return bytes.Equal(now[:n], t.data)
 }
 
 // release closes the file and drops the lock. It is safe to call twice.

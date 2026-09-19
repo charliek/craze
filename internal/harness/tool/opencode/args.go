@@ -50,6 +50,23 @@ func (a args) str(name string, required bool) (s string, ok bool, err error) {
 	return s, true, nil
 }
 
+// boolean returns the optional boolean field name, which must be a JSON true
+// or false: "true" as a string, or null, is refused. ok is false when it is
+// absent.
+func (a args) boolean(name string) (b, ok bool, err error) {
+	raw, present := a[name]
+	if !present {
+		return false, false, nil
+	}
+	if t := jsonType(raw); t != "boolean" {
+		return false, false, fmt.Errorf("%s must be a boolean, got a JSON %s", name, t)
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return false, false, fmt.Errorf("%s must be a boolean: %v", name, err)
+	}
+	return b, true, nil
+}
+
 // integer returns the optional integer field name, which must be a JSON
 // number with no fraction, from min to maxSafeInteger. ok is false when it
 // is absent. As in opencode's schemas (Schema.Int), 5.0 and 5e0 are the
