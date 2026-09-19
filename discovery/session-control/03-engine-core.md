@@ -163,6 +163,12 @@ rather than to one client's view). Clients submit commands and observe
 results. Goldens are preserved through that canonical projection, including
 the injected clock.
 
+The driver also **publishes activity**. `host.Hub.Publish` is driven by the
+TUI's transitions today, and a headless host has no TUI: the engine feeds the
+status stream that `host.Derive` consumes, and the roster's activity field
+comes from it. The roost and herdr reporters stay wired only where there is a
+tab to report to (SD-15).
+
 ### 6. Asks (SD-25, SD-26)
 
 An engine registry: each permission, question, or plan ask is a resource with
@@ -224,6 +230,12 @@ no text budget today, and 5,000 entries at the 64 KiB stream cap approach
 313 MiB before encoding. S1c sets aggregate byte bounds for the model, for a
 snapshot, and for replay working memory (bounded decoding, never whole-file
 loads), chosen so a snapshot can succeed inside a subscriber's budget.
+
+**Fold cost is a plan gate.** The fold runs under the one lock every emit
+path shares, where today the equivalent work happens on consumer goroutines.
+It must be amortized O(1) per event (builder-style text append, pointer-swap
+tool state, never a re-merge of an entry's whole text), and S1c's convergence
+check also asserts lock-hold bounds.
 
 This is still the riskiest item: about 580 lines of `transcript_test.go` and
 about 1,600 lines of frame goldens are pinned to today's rendering. "Goldens

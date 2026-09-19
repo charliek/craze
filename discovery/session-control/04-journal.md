@@ -64,7 +64,9 @@ eye (SQ1). JSONL over SQLite for the harness's reasons (`D-03`).
   (SQ13): it needs rules for which source wins when they differ, for turning
   historical asks and interrupted turns into terminal records rather than
   actionable ones, and for a failed load never reaching `synchronized`.
-- Native sessions have no resume until H7; H7 is planned on two rails (`11`).
+- Native sessions have no resume until H7, whose replay is the store's
+  leaf→root walk; that walk is the cross-incarnation authority for native
+  (`11`).
 
 This narrows the first draft's promise. The journal makes attach exact while a
 host lives and gives a complete record afterwards; it does not yet make craze
@@ -80,6 +82,7 @@ Line 1 is a header; every other line has `ts` (RFC3339Nano UTC) and `type`.
 | `header` | format version, incarnation id, craze version, OS/arch, provider, agent binary, cwd, options that shape behavior (force, interactive, mode) | provenance for every later question | S1a |
 | `session` | provider session id, loaded-from id, durable craze id (S1b), agent version when known | identity as it becomes known | S1a |
 | `event` | `seq` + the `agent.Event` in the **lossless codec** (`03`) | replay; one line per emitted event, never coalesced (SD-18) | S1a |
+| `prompt` / `prompt_end` | prompt id, the text as typed, kind (prompt or interject); then stop reason, error class, duration | the user's side of the conversation, which never reaches the event stream until S1b (SD-30). Journal-only, no `seq` | S1a |
 | `diag` | kind + fields: agent stderr lines, wire outcomes, ACP errors with codes, signals, recovered panics, harness diagnostics, subscriber drops, journal health | everything that is not transcript | S1a |
 | `command` | command id, verb, arguments, client kind, outcome or error code, latency | who did what, and what craze answered | S1b |
 | `ask` | ask id, kind, options offered, transitions with timestamps, answering client, time blocked | the "blocked on you" record | S1b |
@@ -97,13 +100,16 @@ treat that as an integration dependency to verify when both have landed, not
 as a code fact (`11`).
 
 The optional `.wire.jsonl` sidecar holds raw ACP JSON-RPC frames in both
-directions. H0's lesson applies: a recorder that discards raw responses turns
-a diagnosable failure into a mislabelled one.
+directions. It is off until its size is measured (SQ4); when it ships it has a
+byte cap after which it stops with one `diag`, rather than rotating, because
+rotation would break the one-file-per-incarnation pairing. H0's lesson
+applies: a recorder that discards raw responses turns a diagnosable failure
+into a mislabelled one.
 
 ## Writer rules (SD-21)
 
-- **The writer never blocks the engine.** It is a budgeted subscriber with a
-  bounded queue, writing on its own goroutine. "Backpressure briefly" was
+- **The writer never blocks the engine.** It is fed without blocking into a
+  bounded queue and writes on its own goroutine. "Backpressure briefly" was
   dropped: a regular-file write that stalls is not bounded.
 - **Overflow or a write error is a gap, recorded and published.** The writer
   marks the journal degraded, says so once in the TUI and in `diag` when it
@@ -132,4 +138,7 @@ a diagnosable failure into a mislabelled one.
 `craze journal` subcommands to mine the data: errors by provider and tool,
 turn latency percentiles, ask wait time, retry rates by model, slow-subscriber
 drops, journal gaps. The line shapes are chosen so these are `jq` one-liners
-first. Retention and pruning wait for measured sizes (SQ3).
+first. Retention and pruning wait for measured sizes (SQ3); one size to
+measure is the cross-incarnation aggregate, because each resume re-journals
+the provider's full replay (SD-23), so a session resumed N times costs about N
+times its history.

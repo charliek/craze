@@ -70,6 +70,18 @@ ordinary sequenced events.
    A session whose `session/load` failed never reaches `synchronized` and
    accepts no mutating command.
 
+**Attach during a `session/load` replay.** The host's socket exists from
+process start and replayed events are ordinary sequenced events, so a large
+replayed history crossing a budgeted subscriber as live delivery could trip
+`slow_consumer` and loop. An attach that arrives while a load replay is in
+progress is answered after `EventReplay{end}`, or served as a snapshot at the
+cutoff.
+
+**Responses and events.** A command's response is ordered **after** the
+events its execution emitted on the same subscription, which follows from the
+engine applying a command's effect inside the command call (`03`). Fixtures
+and clients may rely on it.
+
 Replay and live use the same per-event representation; nothing is coalesced
 in the log (SD-18). Unlike gx, **ask transitions are sequenced events in the
 same log**, so they resume exactly; gx lists "an API-owned journal" as future
@@ -109,6 +121,12 @@ so two clients editing one row cannot silently overwrite each other.
 because a client needs them to keep the user's draft: `queue_full`,
 `text_too_long`, `prompt_in_flight`, `foreign_turn`, `prompt_cancelled`,
 `stale_version`, `stale_turn`. No client should ever match on message text.
+
+Two cases are pinned because they are otherwise ambiguous: an answer to an ask
+whose terminal record has been evicted from the bounded registry is
+`already_resolved` (never `unknown_ask`, which means the id was never issued
+by this incarnation); and a resend with the same `commandId` but a different
+payload is `bad_request`, never a re-execution.
 
 ## One session per connection (SQ14)
 

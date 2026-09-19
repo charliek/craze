@@ -58,7 +58,9 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   ask answered twice yields one resolution and one `already_resolved`, and an
   invalid answer leaves it open; every ask ending is a sequenced event; a
   cancel names its turn and cannot hit the next one; two concurrent settings
-  changes converge on every client; golden files byte-identical.
+  changes converge on every client; golden files byte-identical; and, because
+  `craze prompt`'s own driver moves into the engine, its `--json` fixtures and
+  tests are byte-identical apart from `seq`.
 - **Exit (S1c)**: golden files byte-identical and `transcript_test.go`
   assertions move packages unchanged; a second in-process subscriber attached
   mid-turn from a snapshot reproduces the first's transcript exactly; snapshot

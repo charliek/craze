@@ -69,7 +69,7 @@ declared settled and feedback limited to technical merit.
 |---|---|
 | Codex, `gpt-6-astra`, high effort, read-only | 20 findings (2 blocker, 18 major), all code-grounded |
 | CodeRabbit | 18 findings (2 blocker, 13 major, 3 minor) |
-| GLM 5.3 via opencode | first run ended with no review (opencode's own permission rules rejected its shell calls); a retry limited to read-only tools had not finished when this was committed, and anything it adds lands as a follow-up |
+| GLM 5.3 via opencode | first run ended with no review (opencode's own permission rules rejected its shell calls); a retry limited to read-only tools returned 11 findings (3 major, 8 minor), applied in a follow-up commit |
 
 ### Confirmed
 
@@ -102,6 +102,15 @@ read for S1a had found two of the same problems.
    (SD-31).
 9. New open questions SQ12 (rewritten: hosts born detached), SQ13–SQ16.
    **SQ12 should be decided before the S2 plan.**
+
+10. From GLM's retry: a browser can reach a loopback WebSocket, so S6 needs an
+    `Origin` allow-list and a per-boot token, with an optional auth field in
+    `hello` from S2; the hub dials the host per attached client and splices;
+    the fold under the lock must be amortized O(1); attach during a load
+    replay; responses ordered after their events; the engine publishes
+    activity for headless hosts; `craze prompt --json` stability in S1b's exit;
+    two pinned error cases. Its "folder drift" finding described files it read
+    mid-edit and was already resolved.
 
 Not taken: CodeRabbit's proposal that the engine be a wrapper that is the sole
 reader of `Events()` with sequence numbers assigned there. It needs a delivery

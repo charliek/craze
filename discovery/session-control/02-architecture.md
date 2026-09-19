@@ -53,6 +53,13 @@ and, later, one outbound uplink per machine rather than per session.
 with headless hosts (S4) and speaks the identical protocol. `craze bridge`
 hides which of the two it dialed, so `shed-craze` never changes.
 
+The hub↔host leg is part of that promise: the hub **dials the host's own
+socket once per attached client and splices bytes** (SQ14). Hosts keep only a
+small registration connection to the hub for the roster. Session traffic is
+never multiplexed through a hub-side buffer, so the host's per-subscriber
+budget stays end to end, there is no head-of-line blocking across clients,
+and S4 reuses S2's socket server unchanged.
+
 A `sessionId` on every method is necessary and **not sufficient** for that
 promise (SD-28). S2's protocol must already separate connection-level from
 session-level capabilities and incarnation (a hub fronts heterogeneous hosts;
@@ -137,6 +144,14 @@ keeping: credentials are provenance, state is the gate.
 - **S6, `craze web`:** the hub serves the protocol over WebSocket and a static
   bundle, bound to loopback or a tailnet address only. This is t3code's
   direct/Tailscale route: "bring your own network", no relay, no accounts.
+  **Loopback is not an auth boundary for a browser.** A WebSocket is not
+  same-origin-gated: any page open in the user's browser can dial
+  `ws://127.0.0.1:<port>` and, with no credential in `hello`, attach, prompt,
+  and answer `allow_always`, which is remote code execution from arbitrary web
+  content. S6 therefore needs at least an enforced `Origin` allow-list and a
+  per-boot connection token minted by the hub and delivered out of band (the
+  URL `craze web` prints). `hello` carries an **optional auth field from S2**,
+  so S6 never forces a breaking handshake change.
   Binding rules can copy prox's listen-address classifier
   (`internal/proxyd/hub.go`): loopback or a point-to-point tunnel interface,
   never `0.0.0.0`.
