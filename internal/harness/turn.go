@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 )
 
@@ -25,6 +30,15 @@ const (
 	// 1 on any stop reason but end_turn, does not pass a filtered answer off
 	// as a clean one.
 	StopRefusal = "refusal"
+	// StopMaxTurnRequests is a turn the harness stopped while the model
+	// still had tool results to read: at the step limit (maxSteps). `craze
+	// prompt` exits 1 for it, as for any stop but end_turn.
+	StopMaxTurnRequests = "max_turn_requests"
+	// StopToolUse is the stop reason a step whose tool calls ran records in
+	// the transcript: the model is not done, the next step reads the
+	// results. A turn never ends with it; a turn stopped after such a step
+	// ends cancelled or max_turn_requests.
+	StopToolUse = "tool_use"
 )
 
 // maxRetries is Fantasy's retry budget for a step. Retrying has no surface
@@ -33,42 +47,67 @@ const (
 // (plan 018 §3.5, §3.7).
 const maxRetries = 1
 
+// maxSteps bounds the model requests one turn makes: a model that keeps
+// calling tools is stopped after this many steps, with max_turn_requests
+// (plan 019 §3.5).
+const maxSteps = 200
+
 // Result is how a turn that did not fail ended. Usage is the turn's token
-// counts; it is zero for a cancelled turn, whose provider never reported
-// them.
+// counts, every step's summed; it is zero for a cancelled turn.
 type Result struct {
 	StopReason string
 	Usage      Usage
 }
 
-// Run sends text as the next user turn and blocks until the turn ends. The
-// answer's text and thinking stream to sink as they arrive (see Event); sink
-// runs synchronously on Fantasy's callbacks, so it must not block for long,
-// and it must not call Close. A nil sink discards events.
+// Run sends text as the next user turn and blocks until the turn ends. What
+// the turn does streams to sink as it happens (see Event): the answer's text
+// and thinking, the tool calls the model makes — which the session runs, a
+// step at a time, until the model answers without one — and each step's
+// end. A nil sink discards events.
+//
+// sink is called only while the turn holds its own lock, so it is never
+// called twice at once, though tool events arrive from Fantasy's tool
+// goroutines; nothing reaches it after Run returns. It must not block for
+// long, and it must never block on a ToolProgress: progress is lossy by
+// contract, and a snapshot the turn cannot hand over at once (its lock is
+// busy) is dropped, never queued — a consumer that may block delivers
+// ToolProgress without blocking, or drops it. sink may call the session's
+// other methods, but not Close, which waits for this Run.
 //
 // It returns a Result when the model finished (end_turn, max_tokens,
-// refusal) or the turn was cancelled — by ctx, or by Close — and an error,
-// with a zero Result, when it failed (see errors.go). A second Run while one
-// is live is ErrInTurn; a Run after Close is ErrClosed.
+// refusal), when the harness stopped it (max_turn_requests), or when the
+// turn was cancelled — by ctx, or by Close — and an error, with a zero
+// Result, when it failed (see errors.go). A second Run while one is live is
+// ErrInTurn; a Run after Close is ErrClosed.
 //
-// The turn is persisted from Fantasy's callbacks, the way crush does it
-// (plan 018 §2.6, §3.7):
+// The turn is persisted from Fantasy's callbacks, a step at a time (plan
+// 019 §3.5, §3.6):
 //
 //   - The user entry is handed to the store at the start; the store holds it
-//     and writes it together with the answer, so a turn that produced
-//     nothing leaves nothing in the file, and the next turn's prompt
-//     replaces it.
-//   - A finished step appends the answer (OnStepFinish), with its usage and
-//     stop reason, and resets the runner's copy of the streamed deltas. When
+//     and writes it together with the first step that has output, so a turn
+//     that produced nothing leaves nothing in the file, and the next turn's
+//     prompt replaces it.
+//   - A finished step appends its assistant message (text, reasoning and
+//     tool calls, as Fantasy recorded them) with its usage and stop reason,
+//     and, when it called tools, the tool message holding their results, in
+//     one append (store.AppendStep). A step whose calls Fantasy did not run —
+//     an abnormal finish — gets a not_executed result per call first. When
 //     the step's messages lack text the user saw stream — Fantasy commits a
 //     text block only on its end part, which a provider can omit — the
-//     answer is built from those deltas instead.
-//   - A cancel or failure with text streamed appends what streamed, marked
+//     answer's text is the streamed deltas, with the step's tool calls.
+//   - A step that cannot be saved stops the turn before another request,
+//     and Run returns the error. A step whose calls have an empty or repeated
+//     provider id runs none of them, is not saved, and fails the turn with
+//     ErrBadToolCalls.
+//   - A cancel or failure mid-step appends what streamed, marked
 //     interrupted, once Fantasy has returned; the append uses no context, so
 //     the cancel that ended the turn cannot abort it. With no text streamed
-//     (thinking alone counts as none) nothing is written.
-//   - A cancel that lands after the step was persisted writes nothing more,
-//     and the turn keeps the step's stop reason.
+//     (thinking alone counts as none) nothing is written. Tools honour the
+//     cancel and report "Tool execution aborted"; their step then finishes
+//     and is saved as usual, and the turn stops there, cancelled.
+//   - A cancel that lands after the model's final step was persisted writes
+//     nothing more, and the turn keeps that step's stop reason; a cancel
+//     after a tool step is a cancelled turn, whatever Fantasy reports.
 //
 // A model or effort switch made since the last turn (SetModel, SetEffort) is
 // handed to the store first, so it is written just ahead of this turn's
@@ -80,7 +119,7 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	if sink == nil {
 		sink = func(Event) {}
 	}
-	m, changes, turnCtx, err := s.begin(ctx)
+	m, changes, turnCtx, number, err := s.begin(ctx)
 	if err != nil {
 		return Result{}, err
 	}
@@ -89,7 +128,19 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	if err := s.record(m, changes); err != nil {
 		return Result{}, err
 	}
-	history := s.store.Context(m.id())
+	// The history the request replays, redacted with this turn's redactor: an
+	// entry written before the session knew a key can hold one — a switch
+	// resolves keys mid-session, and this turn may be the one that adopted
+	// them — and the replay would send it to the model, the newly switched
+	// one included. The same places are redacted as when a step is persisted
+	// (redactCalls, redactResults): a tool call's arguments and a tool
+	// result's text, never the model's own text or reasoning.
+	//
+	// It leaves the transcript on disk as it was written; and with no key in
+	// the history — every other turn of every other session — it changes
+	// nothing at all, so the request's bytes, and the provider's prefix
+	// cache, are what they would have been.
+	history := redactHistory(s.tools.redactor(), s.store.Context(m.id()))
 	// A prompt still held is an earlier turn's that produced nothing. It is
 	// not in history, so this turn's request never sent it; written ahead of
 	// this turn's answer, it would put in the transcript what the model never
@@ -100,55 +151,39 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 		Model:   m.id(),
 		Effort:  m.effort,
 	}); err != nil {
-		return Result{}, fmt.Errorf("harness: %w", err)
+		return Result{}, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
 
-	t := &turn{store: s.store, model: m, sink: sink}
-	agent := fantasy.NewAgent(m.lm, fantasy.WithSystemPrompt(s.system), fantasy.WithMaxRetries(maxRetries))
+	t := &turn{
+		ctx:    turnCtx,
+		store:  s.store,
+		model:  m,
+		sink:   sink,
+		number: number,
+		calls:  calls{tools: s.tools},
+	}
+	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
+	agent := s.newAgent(m.lm, s.system, t.agentTools())
 	res, err := agent.Stream(turnCtx, t.call(text, history))
-	if err == nil {
-		if t.saveErr != nil {
-			return Result{}, fmt.Errorf("harness: saving the answer: %w", t.saveErr)
-		}
-		stop := StopEndTurn
-		if n := len(res.Steps); n > 0 {
-			stop = stopReason(res.Steps[n-1].FinishReason)
-		}
-		return Result{StopReason: stop, Usage: *store.UsageOf(res.TotalUsage)}, nil
-	}
-
-	// Fantasy discards everything on a cancel or a failure (plan 018 §2.4);
-	// only the deltas this runner kept say what the user saw. A context
-	// cancelled for any reason is a cancel, whatever error it surfaced as.
-	cancelled := turnCtx.Err() != nil
-	partial := t.text.Len() > 0 || t.reasoning.Len() > 0
-	saveErr := t.saveInterrupted(cancelled)
-	switch {
-	case cancelled && saveErr != nil:
-		return Result{}, fmt.Errorf("harness: saving the interrupted answer: %w", saveErr)
-	case cancelled && t.stepped && !partial:
-		return Result{StopReason: t.stop, Usage: t.usage}, nil
-	case cancelled:
-		return Result{StopReason: StopCancelled}, nil
-	case saveErr != nil:
-		return Result{}, errors.Join(classify(err, m.id()), fmt.Errorf("harness: saving the interrupted answer: %w", saveErr))
-	default:
-		return Result{}, classify(err, m.id())
-	}
+	return t.finish(res, err)
 }
 
 // begin claims the session for one turn: it refuses when closed or busy,
-// fixes the model the turn runs on, works out which switches the transcript
-// has not been told about, and registers the turn's cancel func before the
-// lock is released, so a Close from then on finds it (crush's order).
-func (s *Session) begin(ctx context.Context) (model, []func(*store.Store) error, context.Context, error) {
+// fixes the model the turn runs on — and the redactor, taking up one a
+// switch resolved while the turn before it ran (toolset.adopt), so a turn
+// redacts everything it reports and persists with the same one — works out
+// which switches the transcript has not been told about, numbers the turn
+// (its tool calls' ids start with it), and registers the turn's cancel func
+// before the lock is released, so a Close from then on finds it (crush's
+// order).
+func (s *Session) begin(ctx context.Context) (model, []func(*store.Store) error, context.Context, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case s.closed:
-		return model{}, nil, nil, ErrClosed
+		return model{}, nil, nil, 0, ErrClosed
 	case s.running:
-		return model{}, nil, nil, ErrInTurn
+		return model{}, nil, nil, 0, ErrInTurn
 	}
 	m := s.cur
 	// A switch and a switch back before this turn leave nothing to record;
@@ -163,9 +198,16 @@ func (s *Session) begin(ctx context.Context) (model, []func(*store.Store) error,
 		changes = append(changes, func(st *store.Store) error { return st.AppendEffortChange(effort) })
 	}
 
-	turnCtx, cancel := context.WithCancel(ctx)
+	// No turn is running here, so this is the one point at which changing the
+	// session's redactor cannot cut across a step.
+	s.tools.adopt()
+
+	// A cancel cause, so Close can tell a tool the session is closing
+	// (tool.ErrClosing) rather than that the user stopped the turn.
+	turnCtx, cancel := context.WithCancelCause(ctx)
+	s.turns++
 	s.running, s.cancel, s.done = true, cancel, make(chan struct{})
-	return m, changes, turnCtx, nil
+	return m, changes, turnCtx, s.turns, nil
 }
 
 // record hands the turn's switches to the store and, only once all of them
@@ -175,7 +217,7 @@ func (s *Session) begin(ctx context.Context) (model, []func(*store.Store) error,
 func (s *Session) record(m model, changes []func(*store.Store) error) error {
 	for _, c := range changes {
 		if err := c(s.store); err != nil {
-			return fmt.Errorf("harness: %w", err)
+			return fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}
 	}
 	s.mu.Lock()
@@ -188,67 +230,110 @@ func (s *Session) record(m model, changes []func(*store.Store) error) error {
 func (s *Session) end() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cancel() // releases the turn context's resources
+	s.cancel(nil) // releases the turn context's resources
 	close(s.done)
 	s.running, s.cancel, s.done = false, nil, nil
 }
 
-// turn is one Run's state. Fantasy calls every callback on the goroutine
-// that called Stream, so none of it needs a lock.
+// turn is one Run's state.
+//
+// Fantasy calls the stream callbacks, OnToolCall and OnStepFinish on the
+// goroutine that called Stream, but it runs tools — and calls OnToolResult —
+// on goroutines of its own, up to five at once, and a tool's progress
+// arrives on the dispatcher's (plan 019 §2.4). So everything a callback
+// touches is guarded by mu, and the sink is called only while mu is held:
+// the sink keeps H1's single-caller contract. Steps do not overlap: Fantasy
+// waits for every tool before it finishes a step.
 type turn struct {
-	store *store.Store
-	model model
-	sink  func(Event)
+	ctx    context.Context // the turn's: its cancel is the turn's
+	store  *store.Store
+	model  model
+	sink   func(Event)
+	number int // the turn's number in the session, from 1
+
+	mu sync.Mutex
+	// ended is set as Run returns: nothing reaches the sink after it, not
+	// even a progress snapshot a tool goroutine delivers late.
+	ended bool
 
 	// The deltas streamed since the step began: what the user has seen of an
 	// answer that may never finish.
 	text, reasoning strings.Builder
 
-	stepped bool   // a step finished (and was persisted, unless it had no text)
+	step       int           // the step streaming or last finished, from 1
+	stepStart  time.Time     // when its request went out (a retry's, after the backoff)
+	firstToken time.Duration // from stepStart to its first text, thinking or tool call; 0 before
+	retries    int           // the step's retries so far
+
+	stepped bool   // a step finished
 	stop    string // that step's stop reason
 	usage   Usage  // that step's usage
 	saveErr error  // the first failed append of a finished step
+	badIDs  bool   // a step's tool calls had an unusable provider id (ErrBadToolCalls)
+
+	calls // this step's tool calls (toolbridge.go)
+
+	// Interject's steers, spliced into every step's messages from the one
+	// that first saw them (plan 019 §3.10), are more of this state, under mu.
+}
+
+// redactor is the session's, as it is now — fixed for the whole turn, since
+// only a turn's start adopts a new one (toolset.adopt): everything the turn
+// replays, reports and writes down is redacted with the same one.
+func (t *turn) redactor() *redact.Replacer { return t.tools.redactor() }
+
+// emit hands ev to the sink unless the turn has ended. mu is held.
+func (t *turn) emit(ev Event) {
+	if !t.ended {
+		t.sink(ev)
+	}
 }
 
 // call is the turn's request. MaxOutputTokens, effort and retries are per
-// call; the system prompt is the agent's.
+// call; the system prompt and the tools are the agent's.
 func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamCall {
 	c := fantasy.AgentStreamCall{
 		Prompt:          text,
 		Messages:        history,
 		ProviderOptions: t.model.effortOpts,
-		// No tools are offered, so a turn is one step. If a model answers
-		// with a tool call anyway, Fantasy records an error result for it;
-		// this keeps it from sending that back for another, unasked-for,
-		// paid step.
-		StopWhen: []fantasy.StopCondition{fantasy.StepCountIs(1)},
+		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(maxSteps), t.halted},
 
+		OnStepStart: t.stepStarted,
 		OnTextDelta: func(_, delta string) error {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.firstOutput()
 			t.text.WriteString(delta)
-			t.sink(TextDelta{Text: delta})
+			t.emit(TextDelta{Text: delta})
 			return nil
 		},
 		// A reasoning block's first part may already carry text.
 		OnReasoningStart: func(_ string, r fantasy.ReasoningContent) error {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.firstOutput()
 			if r.Text != "" {
 				t.reasoning.WriteString(r.Text)
-				t.sink(ThoughtDelta{Text: r.Text})
+				t.emit(ThoughtDelta{Text: r.Text})
 			}
 			return nil
 		},
 		OnReasoningDelta: func(_, delta string) error {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.firstOutput()
 			t.reasoning.WriteString(delta)
-			t.sink(ThoughtDelta{Text: delta})
+			t.emit(ThoughtDelta{Text: delta})
 			return nil
 		},
-		// A retry replays the step from the start and every callback fires
-		// again (plan 018 §2.4); what the failed attempt streamed is not
-		// part of the answer.
-		OnRetry: func(_ *fantasy.ProviderError, delay time.Duration) {
-			t.resetDeltas()
-			t.sink(Retrying{Delay: delay})
-		},
-		OnStepFinish: t.stepFinished,
+		// Every callback returns nil: an error from OnToolCall leaks
+		// Fantasy's tool coordinator (agent.go:1744, 1758), and the others'
+		// would fail the turn over what is only a report.
+		OnToolInputStart: t.toolInputStart,
+		OnToolCall:       t.toolCall,
+		OnToolResult:     t.toolResult,
+		OnRetry:          t.retry,
+		OnStepFinish:     t.stepFinished,
 	}
 	if n := t.model.r.MaxOutputTokens; n > 0 {
 		ceiling := int64(n)
@@ -257,53 +342,230 @@ func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamC
 	return c
 }
 
-// stepFinished persists a finished step's answer (the store writes the held
-// user entry with it) and forgets the deltas, which the answer now holds.
-// A step with no text persists nothing (store.ErrNoOutput). Fantasy ignores
-// a callback's error here, so a failed append is kept for Run to return.
-//
-// Fantasy puts a text or reasoning block in the step's messages only when
-// the block's end part arrives (agent.go processStepStream). A provider that
-// streams text and then finishes without ending the block leaves the step's
-// messages with no text, though the user saw it all; the answer is then the
-// streamed deltas, as saveInterrupted would build it, but complete.
+// halted is the turn's own stop condition, checked after every step
+// alongside the step limit: a save failed (Fantasy ignores OnStepFinish's
+// error, so without it the turn would go on paying for steps, and a tool
+// changing files, that the transcript cannot hold), a step's call ids were
+// unusable, or the turn was cancelled — a cancel during tools lets their
+// step finish, and no request may follow it. The doom-loop guard's stop
+// (plan 019 §3.7) joins these.
+func (t *turn) halted([]fantasy.StepResult) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.saveErr != nil || t.badIDs || t.ctx.Err() != nil
+}
+
+// stepStarted opens step n (from 0): its number, its clock, and an empty
+// set of tool calls.
+func (t *turn) stepStarted(n int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.step = n + 1
+	t.stepStart, t.firstToken, t.retries = time.Now(), 0, 0
+	t.resetCalls(true)
+	return nil
+}
+
+// firstOutput stamps the step's time to first token. mu is held.
+func (t *turn) firstOutput() {
+	if t.firstToken == 0 && !t.stepStart.IsZero() {
+		t.firstToken = max(time.Since(t.stepStart), time.Nanosecond)
+	}
+}
+
+// retry is OnRetry. A retry replays the step from the start and every
+// callback fires again (plan 018 §2.4): what the failed attempt streamed is
+// not part of the answer, and a call it began never arrives.
+func (t *turn) retry(err *fantasy.ProviderError, delay time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.resetDeltas()
+	t.settleCalls(incomplete)
+	t.resetCalls(false)
+	t.retries++
+	t.stepStart, t.firstToken = time.Now().Add(delay), 0
+	t.emit(Retrying{Delay: delay, Attempt: t.retries, Reason: t.redactor().String(retryReason(err))})
+}
+
+// retryReason is a retried failure on one line.
+func retryReason(err *fantasy.ProviderError) string {
+	if err == nil {
+		return "the request failed before the provider answered"
+	}
+	msg := err.Message
+	if msg == "" {
+		msg = err.Title
+	}
+	msg = oneLine(msg, maxMessageBytes)
+	switch {
+	case err.StatusCode == 0:
+		return msg
+	case msg == "":
+		return "HTTP " + strconv.Itoa(err.StatusCode)
+	}
+	return "HTTP " + strconv.Itoa(err.StatusCode) + ": " + msg
+}
+
+// stepFinished persists a finished step (the store writes the held user
+// entries with the first) and forgets the deltas, which the step now holds;
+// see Run. Fantasy ignores a callback's error here, so a failed append is
+// kept for halted and Run.
 func (t *turn) stepFinished(step fantasy.StepResult) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	text, reasoning := t.text.String(), t.reasoning.String()
 	t.resetDeltas()
 	t.stepped = true
-	t.stop = stopReason(step.FinishReason)
+
+	assistant, ok := assistantOf(step.Messages)
+	if (!ok || !hasText(assistant)) && text != "" {
+		assistant, ok = withStreamed(assistant, reasoning, text), true
+	}
+	open := openCalls(assistant)
+	t.stop = stepStop(step.FinishReason, len(open))
 	t.usage = *store.UsageOf(step.Usage)
-	msg, ok := answer(step.Messages)
-	if (!ok || !hasText(msg)) && text != "" {
-		msg, ok = streamed(reasoning, text), true
+	done := t.stepDone(step)
+
+	results, bad := t.stepResults(step, open)
+	if bad {
+		t.badIDs = true
+		t.emit(Diag{Kind: DiagBadToolCalls, Fields: map[string]string{
+			"step": strconv.Itoa(t.step), "calls": strconv.Itoa(len(open)),
+		}})
+		t.emit(done)
+		return nil
 	}
 	if ok {
-		err := t.store.AppendAssistant(store.MessageEntry{
-			Message:    msg,
+		entry := store.MessageEntry{
+			Message:    redactCalls(t.redactor(), assistant),
 			Model:      t.model.id(),
 			Effort:     t.model.effort,
 			Usage:      store.UsageOf(step.Usage),
 			StopReason: t.stop,
-		})
-		if err != nil && !errors.Is(err, store.ErrNoOutput) && t.saveErr == nil {
-			t.saveErr = err
+		}
+		var toolEntry *store.MessageEntry
+		if results != nil {
+			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort}
+		}
+		ids, err := t.store.AppendStep(nil, entry, toolEntry)
+		switch {
+		case err == nil:
+			done.Saved, done.Entries = true, ids
+		case errors.Is(err, store.ErrNoOutput): // thinking alone: nothing to persist
+		default:
+			if t.saveErr == nil {
+				t.saveErr = err
+			}
+			done.SaveError = t.redactor().String(err.Error())
+			t.emit(Diag{Kind: DiagSaveFailed, Fields: map[string]string{"step": strconv.Itoa(t.step), "error": done.SaveError}})
 		}
 	}
-	t.sink(StepDone{Usage: t.usage})
+	t.emit(done)
 	return nil
 }
 
-// saveInterrupted appends the answer the deltas hold, marked interrupted,
-// with the stop reason "cancelled" for a cancel and none for a failure.
-// Thinking with no text is not persisted (the store's ErrNoOutput), and
-// neither is nothing.
-func (t *turn) saveInterrupted(cancelled bool) error {
-	if t.text.Len() == 0 && t.reasoning.Len() == 0 {
-		return nil
+// stepDone is the StepDone for step, with its persistence outcome still to
+// fill in. mu is held.
+func (t *turn) stepDone(step fantasy.StepResult) StepDone {
+	id := t.model.id()
+	raw, ok := llm.RawFinish(step.ProviderMetadata)
+	if !ok {
+		raw = step.FinishReason // nothing normalized it
 	}
+	return StepDone{
+		Step:             t.step,
+		Provider:         id.Provider,
+		Model:            id.Alias,
+		WireModel:        id.WireModel,
+		Finish:           string(step.FinishReason),
+		FinishRaw:        string(raw),
+		StopReason:       t.stop,
+		TimeToFirstToken: t.firstToken,
+		Usage:            t.usage,
+	}
+}
+
+// finish is how Run ends once Fantasy has returned: the step a cancel or a
+// failure cut short is persisted as far as it streamed, every tool call
+// still open is settled, and the result is worked out (see Run).
+func (t *turn) finish(res *fantasy.AgentResult, err error) (Result, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	defer func() { t.ended = true }()
+	cancelled := t.ctx.Err() != nil
+
+	if err == nil {
+		// Fantasy finishes every step it starts, so there is nothing to
+		// settle; this is a defence, not a path.
+		t.settleCalls(incomplete)
+		switch {
+		case t.saveErr != nil:
+			return Result{}, fmt.Errorf("harness: saving the answer: %w", t.tools.redactErr(t.saveErr))
+		case t.badIDs:
+			return Result{}, badToolCalls(t.model.id())
+		}
+		stop := StopEndTurn
+		if t.stepped {
+			stop = t.stop
+		}
+		if stop == StopToolUse {
+			// The model had results to read and the turn stopped anyway:
+			// the user did, or the step limit did.
+			if cancelled {
+				return Result{StopReason: StopCancelled}, nil
+			}
+			stop = StopMaxTurnRequests
+		}
+		var total Usage
+		if res != nil {
+			total = *store.UsageOf(res.TotalUsage)
+		}
+		return Result{StopReason: stop, Usage: total}, nil
+	}
+
+	// Fantasy discards everything on a cancel or a failure (plan 018 §2.4);
+	// only what this runner kept says what the user saw. A context
+	// cancelled for any reason is a cancel, whatever error it surfaced as.
+	partial := t.text.Len() > 0 || t.reasoning.Len() > 0 || t.announced() > 0
+	saveErr := t.saveInterrupted(cancelled)
+	why := incomplete
+	if cancelled {
+		why = aborted
+	}
+	t.settleCalls(why)
+	switch {
+	case cancelled && saveErr != nil:
+		return Result{}, fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr))
+	case cancelled && t.stepped && !partial && t.stop != StopToolUse:
+		// The model's last step was final and is persisted: the cancel came
+		// too late to stop anything.
+		return Result{StopReason: t.stop, Usage: t.usage}, nil
+	case cancelled:
+		return Result{StopReason: StopCancelled}, nil
+	case saveErr != nil:
+		return Result{}, errors.Join(classify(err, t.model.id()),
+			fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr)))
+	default:
+		return Result{}, classify(err, t.model.id())
+	}
+}
+
+// saveInterrupted appends the step a cancel or a failure cut short, marked
+// interrupted, with the stop reason "cancelled" for a cancel and none for a
+// failure: the tool calls it announced with their results, when there were
+// any (synthesizeStep), otherwise the answer the deltas hold. Thinking with
+// no text and no call is not persisted (the store's ErrNoOutput), and
+// neither is nothing. mu is held.
+func (t *turn) saveInterrupted(cancelled bool) error {
 	stop := ""
 	if cancelled {
 		stop = StopCancelled
+	}
+	if done, err := t.synthesizeStep(stop); done {
+		return err
+	}
+	if t.text.Len() == 0 && t.reasoning.Len() == 0 {
+		return nil
 	}
 	err := t.store.AppendAssistant(store.MessageEntry{
 		Message:     streamed(t.reasoning.String(), t.text.String()),
@@ -323,6 +585,22 @@ func (t *turn) resetDeltas() {
 	t.reasoning.Reset()
 }
 
+// stepStop is a finished step's stop reason: "length" is max_tokens and
+// "content-filter" is refusal; a "tool-calls" finish with calls to answer is
+// tool_use, the turn going on; every other finish, "error" and "unknown"
+// included, is a turn the model ended.
+func stepStop(r fantasy.FinishReason, calls int) string {
+	switch {
+	case r == fantasy.FinishReasonLength:
+		return StopMaxTokens
+	case r == fantasy.FinishReasonContentFilter:
+		return StopRefusal
+	case r == fantasy.FinishReasonToolCalls && calls > 0:
+		return StopToolUse
+	}
+	return StopEndTurn
+}
+
 // streamed is an assistant message built from streamed deltas: the
 // reasoning, when there was any, then the text.
 func streamed(reasoning, text string) fantasy.Message {
@@ -332,6 +610,22 @@ func streamed(reasoning, text string) fantasy.Message {
 	}
 	parts = append(parts, fantasy.TextPart{Text: text})
 	return fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: parts}
+}
+
+// withStreamed is m, the step's assistant message (or the zero Message), with
+// its text and reasoning replaced by the streamed deltas' — text the user
+// saw that Fantasy never committed — and its other parts, the tool calls
+// among them, kept after them in order.
+func withStreamed(m fantasy.Message, reasoning, text string) fantasy.Message {
+	out := streamed(reasoning, text)
+	for _, p := range m.Content {
+		switch p.GetType() {
+		case fantasy.ContentTypeText, fantasy.ContentTypeReasoning:
+		default:
+			out.Content = append(out.Content, p)
+		}
+	}
+	return out
 }
 
 // hasText reports whether m has a text part with something besides
@@ -345,38 +639,121 @@ func hasText(m fantasy.Message) bool {
 	return false
 }
 
-// answer is the assistant message of a step's messages, as the transcript
-// keeps it: its text and reasoning parts. With no tools offered, a tool call
-// in an answer has nothing to pair with; replayed, it would be a call with
-// no result, which strict providers refuse on every later request. H2
-// persists tool calls with their results.
-func answer(msgs []fantasy.Message) (fantasy.Message, bool) {
+// assistantOf is the assistant message of a step's messages, whole: its
+// text, reasoning and tool calls, as Fantasy recorded them.
+func assistantOf(msgs []fantasy.Message) (fantasy.Message, bool) {
 	for _, m := range msgs {
-		if m.Role != fantasy.MessageRoleAssistant {
-			continue
+		if m.Role == fantasy.MessageRoleAssistant {
+			return m, true
 		}
-		kept := make([]fantasy.MessagePart, 0, len(m.Content))
-		for _, p := range m.Content {
-			switch p.GetType() {
-			case fantasy.ContentTypeText, fantasy.ContentTypeReasoning:
-				kept = append(kept, p)
-			}
-		}
-		m.Content = kept
-		return m, true
 	}
 	return fantasy.Message{}, false
 }
 
-// stopReason maps a step's finish reason onto the turn's: "length" is
-// max_tokens and "content-filter" is refusal; every other finish, "error"
-// and "unknown" included, is a turn the model ended.
-func stopReason(r fantasy.FinishReason) string {
-	switch r {
-	case fantasy.FinishReasonLength:
-		return StopMaxTokens
-	case fantasy.FinishReasonContentFilter:
-		return StopRefusal
+// toolMessageOf is the tool message of a step's messages, holding the
+// results of the calls Fantasy ran, or nil.
+func toolMessageOf(msgs []fantasy.Message) *fantasy.Message {
+	for i := range msgs {
+		if msgs[i].Role == fantasy.MessageRoleTool {
+			return &msgs[i]
+		}
 	}
-	return StopEndTurn
+	return nil
+}
+
+// openCalls are the tool calls in m the next message must answer: all but
+// the ones the provider executed itself, which carry their own results.
+func openCalls(m fantasy.Message) []fantasy.ToolCallPart {
+	var calls []fantasy.ToolCallPart
+	for _, p := range m.Content {
+		if c, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](p); ok && !c.ProviderExecuted {
+			calls = append(calls, c)
+		}
+	}
+	return calls
+}
+
+// redactCalls is m with every provider key redacted from its tool calls'
+// arguments: the model's own output, but what the transcript keeps must not
+// hold a key verbatim (plan 019 §3.8). A message holding none is returned as
+// it is, so its bytes do not change.
+//
+// Only the stored copy is redacted. Fantasy keeps the step's own messages
+// and sends them again at the turn's next step (agent.go:943-944,
+// 1072-1074), so an argument the model wrote goes back to the model as the
+// model wrote it, and a later turn, replaying the transcript, sends the
+// marker in its place. That is deliberate: what returns within the turn is
+// what the model itself sent, so no key can be learned from it, while
+// nothing craze keeps holds one. (The canary test checks what the model is
+// sent: every tool-role message of every request.)
+func redactCalls(red *redact.Replacer, m fantasy.Message) fantasy.Message {
+	return mapParts(m, func(p fantasy.MessagePart) (fantasy.MessagePart, bool) {
+		if c, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](p); ok {
+			if in := red.String(c.Input); in != c.Input {
+				c.Input = in
+				return c, true
+			}
+		}
+		return p, false
+	})
+}
+
+// redactResults is m with every provider key redacted from its results'
+// text. The results a tool produced are redacted already; the ones Fantasy
+// wrote itself — its refusal of an invalid call — are not. A message holding
+// none is returned as it is.
+func redactResults(red *redact.Replacer, m fantasy.Message) fantasy.Message {
+	return mapParts(m, func(p fantasy.MessagePart) (fantasy.MessagePart, bool) {
+		r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
+		if !ok {
+			return p, false
+		}
+		if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](r.Output); ok {
+			if s := red.String(o.Text); s != o.Text {
+				r.Output = fantasy.ToolResultOutputContentText{Text: s}
+				return r, true
+			}
+		}
+		if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](r.Output); ok && o.Error != nil {
+			if s := red.String(o.Error.Error()); s != o.Error.Error() {
+				r.Output = fantasy.ToolResultOutputContentError{Error: errors.New(s)}
+				return r, true
+			}
+		}
+		return p, false
+	})
+}
+
+// redactHistory is msgs with every provider key gone from the tool calls'
+// arguments and the tool results' text (see Run). A message holding none is
+// carried over as it is, parts and all, so the bytes a provider sees do not
+// change; msgs itself, which the store owns, is never written to.
+func redactHistory(red *redact.Replacer, msgs []fantasy.Message) []fantasy.Message {
+	out := slices.Clone(msgs)
+	for i, m := range out {
+		out[i] = redactResults(red, redactCalls(red, m))
+	}
+	return out
+}
+
+// mapParts is m with f applied to each part, f reporting whether it changed
+// one; m itself, its parts untouched, when f changes none. (Parts are not
+// compared: some hold maps, and an interface holding one panics on ==.)
+func mapParts(m fantasy.Message, f func(fantasy.MessagePart) (fantasy.MessagePart, bool)) fantasy.Message {
+	var out []fantasy.MessagePart
+	for i, p := range m.Content {
+		q, changed := f(p)
+		if out == nil && !changed {
+			continue
+		}
+		if out == nil {
+			out = append(make([]fantasy.MessagePart, 0, len(m.Content)), m.Content[:i]...)
+		}
+		out = append(out, q)
+	}
+	if out == nil {
+		return m
+	}
+	m.Content = out
+	return m
 }

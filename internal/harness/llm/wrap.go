@@ -2,7 +2,9 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 
 	"charm.land/fantasy"
@@ -164,16 +166,61 @@ func (m *model) stepError(err error, output bool) error {
 
 // normalizeFinish is rules 1 and 2. The provider suppresses the ToolCall
 // parts of a truncated call before a "length" finish, so every ToolCall part
-// counted here is complete.
+// counted here is complete. A finish that stays a finish records the reason
+// the provider sent, before either rule, in its provider metadata
+// (RawFinish).
 func normalizeFinish(part fantasy.StreamPart, output bool, toolCalls int) fantasy.StreamPart {
-	if part.FinishReason != fantasy.FinishReasonStop {
-		return part
+	raw := part.FinishReason
+	if raw == fantasy.FinishReasonStop {
+		switch {
+		case toolCalls > 0:
+			part.FinishReason = fantasy.FinishReasonToolCalls
+		case !output && part.Usage.TotalTokens == 0:
+			return fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: ErrEmptyStep}
+		}
 	}
-	switch {
-	case toolCalls > 0:
-		part.FinishReason = fantasy.FinishReasonToolCalls
-	case !output && part.Usage.TotalTokens == 0:
-		part = fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: ErrEmptyStep}
+	// A copy: the map is the provider's, and may be shared.
+	md := maps.Clone(part.ProviderMetadata)
+	if md == nil {
+		md = fantasy.ProviderMetadata{}
 	}
+	md[rawFinishKey] = &rawFinish{Reason: raw}
+	part.ProviderMetadata = md
 	return part
+}
+
+// rawFinishKey is the provider-metadata key the wrapper records a step's raw
+// finish reason under. It names no provider, so no provider's own metadata
+// can be under it.
+const rawFinishKey = "craze.raw_finish"
+
+// rawFinish is the finish reason a provider sent for a step, before the
+// wrapper's rules. It rides in the step's provider metadata, which Fantasy
+// keeps on the step's response and never puts in a message, so it reaches
+// neither the transcript nor the wire.
+type rawFinish struct{ Reason fantasy.FinishReason }
+
+func (*rawFinish) Options() {}
+
+func (r *rawFinish) MarshalJSON() ([]byte, error) { return json.Marshal(string(r.Reason)) }
+
+func (r *rawFinish) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	r.Reason = fantasy.FinishReason(s)
+	return nil
+}
+
+// RawFinish returns the finish reason the provider sent for a step, before
+// the wrapper turned a "stop" into "tool-calls" (rule 1), from the step's
+// provider metadata (fantasy.StepResult.ProviderMetadata). ok is false for a
+// step from a model New did not build, whose finish nothing normalized.
+func RawFinish(md fantasy.ProviderMetadata) (reason fantasy.FinishReason, ok bool) {
+	r, ok := md[rawFinishKey].(*rawFinish)
+	if !ok {
+		return "", false
+	}
+	return r.Reason, true
 }

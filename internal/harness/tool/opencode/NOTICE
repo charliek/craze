@@ -45,6 +45,7 @@ Where each description comes from
 | descriptions/grep.txt   | grep.txt                                                  |
 | descriptions/glob.txt   | glob.txt                                                  |
 | descriptions/bash.txt   | shell/shell.txt with shell/prompt.ts's bash values        |
+| system.txt              | ../session/prompt/default.txt (see "The system prompt")   |
 
 opencode renders its shell description at run time from shell/shell.txt and
 shell/prompt.ts. descriptions/bash.txt is that rendering for a bash shell,
@@ -87,6 +88,32 @@ asset.
 No description names opencode, LSP, WebFetch or TodoWrite, so the other
 allowed edits change nothing. opencode fills ${tmp} with its own directory
 (os.tmpdir()/opencode); craze's bash tool supplies craze's.
+
+
+The system prompt
+-----------------
+
+system.txt is the profile's system prompt (plan 019 section 3.6). It is
+opencode's packages/opencode/src/session/prompt/default.txt, the prompt
+opencode sends a model with no family prompt of its own
+(session/system.ts:50), byte for byte except for the edits below, followed
+by the environment block of craze's H1 prompt. The same rules apply as to
+the descriptions, by analogy: remove what is false of craze, replace
+"opencode" with "craze", and reword nothing else. opencode's own
+environment block (session/system.ts:69-86) is not used: it holds the
+date, which would change the prompt, and with it every request's cache
+prefix, at midnight (D-30).
+
+| original                                                                                                          | now                                   | why |
+|-------------------------------------------------------------------------------------------------------------------|---------------------------------------|-----|
+| "You are opencode, an interactive CLI tool ..."                                                                   | "You are craze, an interactive CLI tool ..." | the rename |
+| "If the user asks for help or wants to give feedback inform them of the following:" and its two bullets (/help, opencode's issue tracker) | removed | opencode's own help command and tracker |
+| "When the user directly asks about opencode (...), first use the WebFetch tool to gather information to answer the question from opencode docs at https://opencode.ai" | removed | names WebFetch, which craze does not have, and opencode's docs |
+| the example "user: what command should I run to watch files in the current directory?", whose answer is "[use the ls tool to list the files ...] npm run dev" | removed | names an ls tool, which craze does not have (read lists directories) |
+| "If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time." (end of the lint bullet) | removed; the sentence before it stays | false: craze reads no AGENTS.md until instruction files arrive (H4-H6) |
+| "- Tool results and user messages may include <system-reminder> tags. ..." (with the blank line before it)        | removed                               | false: craze adds no system-reminder tags (read's are not ported, above) |
+| "- When doing file search, prefer to use the Task tool in order to reduce context usage."                         | removed                               | names the Task tool, which craze does not have |
+| (none: appended after the final example)                                                                          | "\nEnvironment:\n- Working directory: ${workspace}\n- Operating system: ${os}\n" | H1's environment block, kept (D-30): the session's workspace and runtime.GOOS, the prompt's only two substitutions |
 
 
 Parameter schemas

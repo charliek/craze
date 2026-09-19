@@ -489,8 +489,11 @@ func nativeTitle(prompt string) string {
 // the session's events, sanitized, because unsanitized model output is a
 // terminal-escape path into the TUI. StepDone and Retrying have no agent
 // event in H1 and are dropped: usage goes to the transcript only, and the
-// harness allows one silent retry (plan 018 §3.8). It runs synchronously on
-// Fantasy's callbacks, which is why emit gives up once Close has begun.
+// harness allows one silent retry (plan 018 §3.8). The tool events and Diag
+// are dropped too until the tool rows land (plan 019 §3.10); ToolProgress
+// must never block here once it is mapped, since the harness drops a
+// snapshot rather than wait. It runs synchronously on Fantasy's callbacks,
+// which is why emit gives up once Close has begun.
 func (s *nativeSession) sink(ev harness.Event) {
 	switch e := ev.(type) {
 	case harness.TextDelta:
@@ -539,11 +542,17 @@ func (s *nativeSession) Cancel(ctx context.Context) error {
 }
 
 // Close ends the session: the event signal closes first, so no emit can
-// block on a reader that has gone; a live turn is cancelled and waited for —
-// its partial answer is persisted interrupted, as for Cancel — and then the
-// harness, and with it the transcript, is closed. A prompt claimed and not
-// yet open is not waited for (its continuation may be due on the caller's own
-// goroutine); it finds the session closed when it runs and sends nothing.
+// block on a reader that has gone; a live turn is cancelled, the harness —
+// and with it the transcript — is closed, which waits for the turn (its
+// partial answer is persisted interrupted, as for Cancel), and then the
+// turn's continuation is waited for. A prompt claimed and not yet open is not
+// waited for (its continuation may be due on the caller's own goroutine); it
+// finds the session closed when it runs and sends nothing.
+//
+// The harness's Close is what waits for the turn, not the turn's own
+// cancel: it tells a running tool the session is closing, so a command is
+// killed at once rather than given the grace an ordinary cancel gets, and
+// Close returns within about 3 s even while one runs (plan 019 §7.7).
 //
 // It is safe before Start and idempotent, and it returns nil: there is no
 // agent process whose exit ErrAgentExited could report. A failure to close
@@ -556,14 +565,17 @@ func (s *nativeSession) Close() error {
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
 		s.mu.Unlock()
-		if in && cancel != nil && rel != nil {
+		live := in && cancel != nil && rel != nil
+		if live {
 			cancel()
-			<-rel
 		}
 		if hs != nil {
 			if err := hs.Close(); err != nil {
 				s.note(sanitizeLine(err.Error()))
 			}
+		}
+		if live {
+			<-rel
 		}
 	})
 	<-s.closeDone
@@ -860,7 +872,7 @@ func phraseTurnError(err error) error {
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
 	case errors.Is(err, harness.ErrContextTooLarge):
-		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window%s; start a new session",
+		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window%s; start a new session (compaction arrives with H7)",
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)

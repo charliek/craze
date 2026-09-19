@@ -80,5 +80,5 @@ assistant: Clients are marked as failed in the `connectToServer` function in src
 </example>
 
 Environment:
-- Working directory: /home/user/project
-- Operating system: linux
+- Working directory: ${workspace}
+- Operating system: ${os}

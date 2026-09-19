@@ -135,9 +135,9 @@ func names(p tool.Profile) []string {
 }
 
 // TestProfile: the tools come in opencode's registry order, each Spec
-// passes the registry's rules, and the profile is not registrable until it
-// has its system prompt — the negative control shows that is the only thing
-// missing.
+// passes the registry's rules, and the profile registers as it is — with its
+// system prompt; the negative control, the same profile without one, is
+// refused.
 func TestProfile(t *testing.T) {
 	p, err := Profile()
 	if err != nil {
@@ -172,12 +172,13 @@ func TestProfile(t *testing.T) {
 	}
 
 	var r tool.Registry
-	if err := r.Register(p); err == nil || !strings.Contains(err.Error(), "no System func") {
+	bare := p
+	bare.System = nil
+	if err := r.Register(bare); err == nil || !strings.Contains(err.Error(), "no System func") {
 		t.Fatalf("Register without a system prompt = %v, want it refused for that reason", err)
 	}
-	p.System = func(tool.SystemEnv) string { return "stub" }
 	if err := r.Register(p); err != nil {
-		t.Fatalf("with a System func the profile registers: %v", err)
+		t.Fatalf("the profile as Profile returns it does not register: %v", err)
 	}
 	// Each call builds its own tools, so two sessions share none; within a
 	// session, grep and glob share the one ripgrep that finds rg.
@@ -190,6 +191,52 @@ func TestProfile(t *testing.T) {
 	}
 	if p.Tools[2].(*globTool).rg == q.Tools[2].(*globTool).rg {
 		t.Fatal("control: two sessions share a ripgrep")
+	}
+}
+
+// TestSystemPrompt: the profile's prompt is opencode's default.txt with
+// exactly the edits NOTICE lists — each removed passage gone, the sentence
+// or line on either side of it kept (the negative controls), "opencode"
+// renamed — and H1's environment block, filled with the session's two facts
+// and nothing else; a value that looks like a placeholder is inserted as it
+// is. (The whole text is pinned by internal/harness's system_prompt.golden.)
+func TestSystemPrompt(t *testing.T) {
+	p, err := Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux"})
+	for _, gone := range []string{
+		"opencode", "OpenCode", "/help", "report the issue", "WebFetch", "use the ls tool", "npm run dev",
+		"AGENTS.md", "system-reminder", "Task tool", "TodoWrite", "${",
+	} {
+		if strings.Contains(got, gone) {
+			t.Errorf("the prompt still says %q", gone)
+		}
+	}
+	for _, kept := range []string{
+		"You are craze, an interactive CLI tool that helps users with software engineering tasks.",
+		"IMPORTANT: You must NEVER generate or guess URLs",
+		"# Tone and style\n",
+		"user: what command should I run to list files in the current directory?\nassistant: ls\n</example>\n\n<example>\nuser: what files are in the directory src/?",
+		"# Proactiveness\n", "# Following conventions\n", "# Code style\n", "# Doing tasks\n",
+		"with Bash if they were provided to you to ensure your code is correct.\nNEVER commit changes unless the user explicitly asks you to.",
+		"otherwise the user will feel that you are being too proactive.\n\n# Tool usage policy\n- You have the capability to call multiple tools in a single response.",
+		"`file_path:line_number`",
+	} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("the prompt lost %q", kept)
+		}
+	}
+	if !strings.HasSuffix(got, "</example>\n\nEnvironment:\n- Working directory: /home/user/project\n- Operating system: linux\n") {
+		t.Errorf("the prompt does not end in the environment block:\n%s", got[max(0, len(got)-300):])
+	}
+	if again := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux"}); again != got {
+		t.Error("two calls built different prompts")
+	}
+	odd := p.System(tool.SystemEnv{Workspace: "/tmp/${os}", OS: "darwin"})
+	if !strings.Contains(odd, "- Working directory: /tmp/${os}\n- Operating system: darwin\n") {
+		t.Errorf("a workspace holding a placeholder was not inserted as it is:\n%s", odd[len(odd)-120:])
 	}
 }
 
