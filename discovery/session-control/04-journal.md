@@ -83,11 +83,26 @@ Line 1 is a header; every other line has `ts` (RFC3339Nano UTC) and `type`.
 | `session` | provider session id, loaded-from id, durable craze id (S1b), agent version when known | identity as it becomes known | S1a |
 | `event` | `seq` + the `agent.Event` in the **lossless codec** (`03`) | replay; one line per emitted event, never coalesced (SD-18) | S1a |
 | `prompt` / `prompt_end` | prompt id, the text as typed, kind (prompt or interject); then stop reason, error class, duration | the user's side of the conversation, which never reaches the event stream until S1b (SD-30). Journal-only, no `seq` | S1a |
-| `diag` | kind + fields: agent stderr lines, wire outcomes, ACP errors with codes, signals, recovered panics, harness diagnostics, subscriber drops, journal health | everything that is not transcript | S1a |
+| `diag` | kind + fields. S1a ships exactly seven kinds: `start_failed`, `agent_stderr`, `agent_stderr_dropped`, `subscriber_dropped`, `record_omitted`, `closing`, and `note_too_large` (the writer's own, for a note it cannot cut to fit) | everything that is not transcript | S1a |
 | `command` | command id, verb, arguments, client kind, outcome or error code, latency | who did what, and what craze answered | S1b |
 | `ask` | ask id, kind, options offered, transitions with timestamps, answering client, time blocked | the "blocked on you" record | S1b |
 | `turn` | engine turn id, start/end, duration, stop reason, time to first event, tool and error counts, tokens and cost when known, queue depth | one line per turn to aggregate over | S1b |
 | `client` | attach / detach / dropped-as-slow, client kind, protocol version, cursor used | reconnect and backpressure behavior | S2 |
+
+The first draft of that row promised more kinds than S1a built. What it did
+**not** ship, and who should pick each up:
+
+| not shipped | where it should land |
+|---|---|
+| wire outcomes (per-request method, result or error, latency) | the `.wire.jsonl` sidecar, still SQ4 — it is the same data at a different grain, and deciding one decides the other |
+| signals, and recovered panics | S1b, with the engine's own lifecycle: neither reaches `internal/agent` today, and the handlers that see them (`internal/cli`, the TUI's recover) are above the seam the journal sits on |
+| harness diagnostics | the adapter, once Plan 019's `harness.Event` fields exist; S1a shipped the journal-only `Note` path they will use, and whichever of the two lands second wires it up (`11`) |
+
+ACP errors with codes did ship, but as transcript, not as `diag`: the lossless
+codec carries `Event.Err` as `{message, class, code}` with the RPC code or HTTP
+status in `code`, so an errored turn is an `event` line. Journal health is read
+through the writer's own `Health()` and announced once on stderr; it is not a
+`diag` kind. The `gap` line, not a `diag`, is what a reader keys on.
 
 Native harness diagnostics arrive as `diag` lines from the adapter: tool
 start/end and duration, exit code and error class, truncation (kept vs total,
