@@ -188,9 +188,12 @@ func answer(reasoning, text string, m Model) MessageEntry {
 	return MessageEntry{Message: assistantMsg(reasoning, text), Model: m, StopReason: "end_turn"}
 }
 
-// turn writes one whole turn and fails the test on error.
+// turn writes one whole turn and fails the test on error. Like the turn
+// runner, it first discards a prompt still held from a turn that wrote
+// nothing.
 func turn(t *testing.T, s *Store, prompt, reply string, m Model) {
 	t.Helper()
+	s.DiscardHeldUsers()
 	if err := s.AppendUser(user(prompt, m)); err != nil {
 		t.Fatalf("AppendUser: %v", err)
 	}
@@ -225,8 +228,8 @@ func lineType(line string) (string, error) {
 	return env.Type, err
 }
 
-// messageTexts is each message's role and text parts, for comparing
-// contexts at a glance.
+// messageTexts is each message's role and its text, reasoning and tool
+// parts, for comparing contexts at a glance.
 func messageTexts(msgs []fantasy.Message) []string {
 	var out []string
 	for _, m := range msgs {
@@ -239,11 +242,126 @@ func messageTexts(msgs []fantasy.Message) []string {
 			case fantasy.ContentTypeReasoning:
 				rp, _ := fantasy.AsMessagePart[fantasy.ReasoningPart](p)
 				parts = append(parts, "(thinking: "+rp.Text+")")
+			case fantasy.ContentTypeToolCall:
+				c, _ := fantasy.AsMessagePart[fantasy.ToolCallPart](p)
+				parts = append(parts, "[call "+c.ToolCallID+" "+c.ToolName+" "+c.Input+"]")
+			case fantasy.ContentTypeToolResult:
+				r, _ := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
+				parts = append(parts, "[result "+r.ToolCallID+": "+resultText(r.Output)+"]")
 			}
 		}
 		out = append(out, string(m.Role)+": "+strings.Join(parts, " "))
 	}
 	return out
+}
+
+// resultText is a tool result's text, prefixed "error: " for an error.
+func resultText(o fantasy.ToolResultOutputContent) string {
+	if tx, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](o); ok {
+		return tx.Text
+	}
+	if e, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](o); ok && e.Error != nil {
+		return "error: " + e.Error.Error()
+	}
+	return fmt.Sprintf("%#v", o)
+}
+
+// callsMsg is an assistant message with reasoning and text as assistantMsg
+// makes them, then a read call per id.
+func callsMsg(reasoning, text string, ids ...string) fantasy.Message {
+	m := assistantMsg(reasoning, text)
+	for _, id := range ids {
+		m.Content = append(m.Content, fantasy.ToolCallPart{ToolCallID: id, ToolName: "read", Input: `{"filePath":"` + id + `.go"}`})
+	}
+	return m
+}
+
+// resultsMsg is a tool message with a text result per id, in that order.
+func resultsMsg(ids ...string) fantasy.Message {
+	m := fantasy.Message{Role: fantasy.MessageRoleTool}
+	for _, id := range ids {
+		m.Content = append(m.Content, fantasy.ToolResultPart{ToolCallID: id, Output: fantasy.ToolResultOutputContentText{Text: "body of " + id}})
+	}
+	return m
+}
+
+func calls(m Model, ids ...string) MessageEntry {
+	return MessageEntry{Message: callsMsg("", "", ids...), Model: m, StopReason: "tool_use"}
+}
+
+func results(m Model, ids ...string) *MessageEntry {
+	return &MessageEntry{Message: resultsMsg(ids...), Model: m}
+}
+
+// unpairedIn is the first break of the pairing invariant in msgs, in order:
+// an assistant message's calls not answered, in order, by the tool message
+// right after it, or a tool message after anything else. It is written
+// apart from the store's own checker, so that no test grades the store with
+// the store's code.
+func unpairedIn(msgs []fantasy.Message) error {
+	callIDs := func(m fantasy.Message) (out []string) {
+		for _, p := range m.Content {
+			if c, ok := p.(fantasy.ToolCallPart); ok && !c.ProviderExecuted {
+				out = append(out, c.ToolCallID)
+			}
+		}
+		return out
+	}
+	answerIDs := func(m fantasy.Message) (out []string) {
+		for _, p := range m.Content {
+			if r, ok := p.(fantasy.ToolResultPart); ok && !r.ProviderExecuted {
+				out = append(out, r.ToolCallID)
+			}
+		}
+		return out
+	}
+	for i, m := range msgs {
+		switch m.Role {
+		case fantasy.MessageRoleTool:
+			if i == 0 || len(callIDs(msgs[i-1])) == 0 {
+				return fmt.Errorf("message %d: tool results with no calls before them", i)
+			}
+		case fantasy.MessageRoleAssistant:
+			want := callIDs(m)
+			if len(want) == 0 {
+				continue
+			}
+			if i+1 == len(msgs) || msgs[i+1].Role != fantasy.MessageRoleTool {
+				return fmt.Errorf("message %d: calls %q with no tool message after them", i, want)
+			}
+			if got := answerIDs(msgs[i+1]); !reflect.DeepEqual(got, want) {
+				return fmt.Errorf("message %d: calls %q answered by %q", i, want, got)
+			}
+		}
+	}
+	return nil
+}
+
+// TestUnpairedInCatchesEachBreak is the negative control for every test that
+// relies on unpairedIn to say a transcript is paired: it does report each
+// kind of break.
+func TestUnpairedInCatchesEachBreak(t *testing.T) {
+	u := fantasy.NewUserMessage("q")
+	for name, tc := range map[string]struct {
+		msgs   []fantasy.Message
+		broken bool
+	}{
+		"paired":                     {[]fantasy.Message{u, callsMsg("", "", "a", "b"), resultsMsg("a", "b"), assistantMsg("", "done")}, false},
+		"text only":                  {[]fantasy.Message{u, assistantMsg("", "hi")}, false},
+		"calls at the end":           {[]fantasy.Message{u, callsMsg("", "", "a")}, true},
+		"calls then a user message":  {[]fantasy.Message{u, callsMsg("", "", "a"), u}, true},
+		"results after a user":       {[]fantasy.Message{u, resultsMsg("a")}, true},
+		"results after an answer":    {[]fantasy.Message{u, assistantMsg("", "hi"), resultsMsg("a")}, true},
+		"results out of order":       {[]fantasy.Message{u, callsMsg("", "", "a", "b"), resultsMsg("b", "a")}, true},
+		"a result missing":           {[]fantasy.Message{u, callsMsg("", "", "a", "b"), resultsMsg("a")}, true},
+		"a result extra":             {[]fantasy.Message{u, callsMsg("", "", "a"), resultsMsg("a", "b")}, true},
+		"results for other calls":    {[]fantasy.Message{u, callsMsg("", "", "a"), resultsMsg("x")}, true},
+		"results of a dropped reply": {[]fantasy.Message{u, resultsMsg("a"), assistantMsg("", "done")}, true},
+	} {
+		if err := unpairedIn(tc.msgs); (err != nil) != tc.broken {
+			t.Errorf("%s: unpairedIn = %v, want broken %v", name, err, tc.broken)
+		}
+	}
 }
 
 func TestNewDoesNoIO(t *testing.T) {
@@ -375,7 +493,8 @@ func TestChangeWaitsForOutput(t *testing.T) {
 		t.Fatalf("a change and a turn with no output made %d writes in all, want 1 (the first turn)", n)
 	}
 
-	// The next turn switches again, then answers.
+	// The next turn switches again, then answers; like the runner, it first
+	// discards the cancelled turn's held prompt (turn does).
 	if err := s.AppendModelChange(minimax); err != nil {
 		t.Fatal(err)
 	}
@@ -460,6 +579,10 @@ func TestFirstAssistantNeedsAUser(t *testing.T) {
 	if err := s.AppendAssistant(answer("", "hi", kimi)); !errors.Is(err, ErrNoUser) {
 		t.Fatalf("AppendAssistant with no user entry = %v, want ErrNoUser", err)
 	}
+	// A steer is not the turn's prompt.
+	if _, err := s.AppendStep([]MessageEntry{user("steer", kimi)}, answer("", "hi", kimi), nil); !errors.Is(err, ErrNoUser) {
+		t.Fatalf("AppendStep with a steer and no user entry = %v, want ErrNoUser", err)
+	}
 }
 
 // TestLaterStepAppendsAlone covers a turn's second step (H2's tool loop):
@@ -506,9 +629,11 @@ func TestAppendAfterCloseIsAnError(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("a second Close = %v, want nil", err)
 	}
+	_, stepErr := s.AppendStep(nil, calls(kimi, "a"), results(kimi, "a"))
 	for name, err := range map[string]error{
 		"AppendUser":         s.AppendUser(user("q", kimi)),
 		"AppendAssistant":    s.AppendAssistant(answer("", "a", kimi)),
+		"AppendStep":         stepErr,
 		"AppendModelChange":  s.AppendModelChange(minimax),
 		"AppendEffortChange": s.AppendEffortChange("low"),
 	} {

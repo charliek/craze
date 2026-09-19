@@ -34,6 +34,34 @@ linters:
           deny:
             - pkg: github.com/charliek/craze/internal
               desc: "the harness imports nothing from craze except internal/atomicfile; internal/agent's adapter imports the harness, never the reverse, and the harness receives its directory as Options.Home (D-02, plan 018 §3.1)"
+        # The tool framework's tighter boundary inside the harness (plan 019
+        # §3.1). depguard applies every rule whose files match, so these
+        # files answer to `harness` above as well, and an import either rule
+        # denies is reported: here, of the harness's own packages only the
+        # framework and the redactor are allowed, and Fantasy is denied.
+        # depguard sees direct imports only; internal/harness/tool's
+        # deps_test.go checks the whole dependency closure.
+        harness-tool:
+          list-mode: lax
+          files:
+            - "**/internal/harness/tool/**"
+            - "**/internal/harness/redact/**"
+          allow:
+            - github.com/charliek/craze/internal/harness/tool
+            - github.com/charliek/craze/internal/harness/redact
+            - github.com/charliek/craze/internal/atomicfile
+          deny:
+            - pkg: github.com/charliek/craze/internal
+              desc: "the tool framework imports nothing from craze except internal/atomicfile and internal/harness/redact; toolbridge.go in the harness adapts it to Fantasy (plan 019 §3.1)"
+            - pkg: charm.land/fantasy
+              desc: "tools are craze's own contract: only internal/harness/toolbridge.go knows both a Tool and Fantasy (plan 019 §3.1, Seam 1)"
+        # The redactor is a leaf under everything: the standard library only.
+        harness-redact:
+          list-mode: strict
+          files:
+            - "**/internal/harness/redact/**"
+          allow:
+            - $gostd
   exclusions:
     presets:
       - std-error-handling

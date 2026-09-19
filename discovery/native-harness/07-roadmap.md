@@ -8,13 +8,14 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 |---|---|---|
 | H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
 | H1 | complete | skeleton shipped: hidden `native` provider; 14 of 15 imported models held a clean TUI turn, multi-turn sessions and `craze prompt --json` ran on a subset (OpenRouter via `openaicompat`, D-35); no interject, no modes (D-34) |
-| H2 | not started | tools: read, bash, edit, write, then ls, glob, grep; truncation wrapper; kind metadata; edit diffs; doom-loop guard; scripted-model test harness |
-| H3 | not started | permissions: once / always / reject-with-feedback, prefix table, dangerous list, per-workspace grants, Claude rule syntax, yolo |
+| H2 | in progress | tools: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38); the gate seam allowing everything (D-39); ripgrep on `PATH` (D-41); the doom-loop guard, nudge-then-stop (D-42); abnormal-finish handling (D-43); interject |
+| H3 | not started | approval: owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
 | H5 | not started | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
 | H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
+| HL | unscheduled | own the turn loop — see D-40's triggers |
 
 ## Phase detail
 
@@ -155,15 +156,34 @@ timeout (H2), resume/indexing (H7), and cost display (H7) remain as planned.
 
 ### H2 — tools
 
-- PR 1: read, bash, edit, write with the truncation and kind wrappers, the
-  edit ladder, per-file mutation queue, diffs through `textdiff`.
-- PR 2: ls, glob, grep; doom-loop guard; length-stop rule; orphaned-tool
-  closing on cancel.
-- Testing pattern established: scripted `LanguageModel` and local streamed
-  fixtures.
-- **Interject via a `PrepareStep` drain at tool boundaries**, turning
-  `Capabilities.Interject` on (D-34): with tool steps in place there is
-  finally a safe point to merge steered text into history between steps.
+Plan 019, four sequential PRs, each branched from `main` after the previous
+one merges (Plan 019 §5). No idle timeout: H1's follow-up list above names
+"idle timeout (H2)", but nothing specifies it for H2; it moves to HL/H7
+(Plan 019 §4).
+
+- **PR 1 — foundations (C1–C3, no user-visible change)**: this docs commit
+  (C1); the store's `AppendStep`, pairing invariant, and tail rollback for
+  tool steps (C2); `internal/harness/redact` and the `tool` framework —
+  `Tool`/`Prepared`/`Spec`/`Result`/`Env`, the dispatcher, the gate, the
+  profile registry, truncation, the per-path lock, description rendering —
+  tested with fake tools only (C3).
+- **PR 2 — the tools, not yet wired (C4–C7, no user-visible change)**:
+  `read`/`write` and the `opencode` profile (C4); `edit` (C5, reviewed
+  alone, adversarial); `bash` (C6, reviewed alone, process lifetime and
+  concurrency); `grep`/`glob` (C7, CI gains ripgrep).
+- **PR 3 — switching tools on (C8–C11)**: the runner wired to
+  `toolbridge.go` with per-turn state, tool events and ids, cancel
+  precedence, abnormal-finish handling (D-43), `max_turn_requests`, and the
+  new system prompt (C8, reviewed alone, re-runs D-40's constraint table in
+  its commit message); the doom-loop guard (C9, D-42); the adapter's tool
+  event merge and TUI golden frame (C10); the pytest tool-loop fixtures
+  (C11). This is where tools first reach users.
+- **PR 4 — interject, smoke, record (C12–C14)**: `Steer`/`PrepareStep`
+  drain turning `Capabilities.Interject` on (D-34) — with tool steps in
+  place there is finally a safe point to merge steered text into history
+  between steps (C12, reviewed alone, races); the live smoke and any fix it
+  finds (C13); this docs update, recording the smoke tables and D-40's
+  second table re-run (C14).
 - **OpenRouter tool-loop check (D-35)**: run a multi-step tool loop on the
   OpenRouter reasoning models. If one degrades or fails without
   `reasoning_details` replay, first carry the replay in craze's own wrapper;
@@ -171,13 +191,18 @@ timeout (H2), resume/indexing (H7), and cost display (H7) remain as planned.
 - **Exit**: the agent makes a real change in the craze repo, on Linux and
   on the mac-mini, with tool cards and diffs rendering as they do for grok.
 
-### H3 — permissions
+### H3 — approval
 
-- Permission wrapper, grant file, arity table, dangerous list, compound
-  command splitting, Claude rule syntax parser, reject cascade with
-  feedback, `Force` removes the wrapper.
-- **Exit**: permission cards behave as for grok; "always" survives a
-  restart; `Bash(git *)` written by hand in the grant file works.
+Reworded from "permissions" (Plan 019 §3.3): D-12 and `05`'s permission
+model stay as written but lose their phase. The owner's direction is
+**likely an auto-mode evaluator layered over H2's gate** (`Gate.Check`),
+not ask-on-everything — a model or evaluation step flags only
+dangerous-looking actions, perhaps through hooks — but the scope is decided
+when this phase is actually planned, **after session-control S1** lands its
+engine-owned ask registry (D-39; `10` Q6). Nothing in H2 reads or writes a
+grants file.
+
+- **Exit**: not yet defined; depends on the shape chosen when planned.
 
 ### H4 — Claude compat
 
@@ -214,6 +239,25 @@ timeout (H2), resume/indexing (H7), and cost display (H7) remain as planned.
   per-model strip with placeholder.
 - **Exit**: paste a screenshot, GLM gets the placeholder, a vision model
   gets the image.
+
+### HL — own the turn loop (unscheduled)
+
+Not a numbered phase: no plan exists yet. Recorded so H2's pragmatic choice
+to stay on Fantasy's `Agent.Stream` (D-40) is not forgotten. Any one of
+these five triggers starts a plan:
+
+- H7 needs persist-before-run or mid-turn compaction.
+- A Fantasy bug in the loop cannot be worked around from outside.
+- A Fantasy upgrade changes callback semantics the runner depends on.
+- The gate needs to pause a whole step rather than one call.
+- The workaround table (`08-decisions.md`, "D-40 constraint table") gains a
+  row that costs more than a day.
+
+Estimated 500–700 lines plus tests, replacing `turn.go`'s driver and
+`toolbridge.go` with a craze-owned `LanguageModel.Stream` loop (H1's
+wrapper, Fantasy's providers, and `jsonrepair` all still apply). D-40's
+constraint table is re-run on evidence in C8's commit message and after H2's
+live smoke (C14); see `08-decisions.md`.
 
 ## Deferred (not scheduled)
 

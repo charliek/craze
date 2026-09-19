@@ -28,6 +28,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/redact"
 )
 
 const (
@@ -109,6 +110,19 @@ type Note struct {
 // reference: gx expands it at load, an import cannot, and the variable's
 // value is a key that belongs in the environment, not in providers.toml.
 const noteVarAPIKey = "inline api_key references an env var ($VAR); not imported — set it via env_keys"
+
+// noteShortAPIKey is the note for a provider whose inline api_key is under
+// modeltable.MinKeyLen bytes: the model table refuses such a key at load, so
+// importing it would make the whole table unloadable, and it cannot be a
+// real key anyway.
+var noteShortAPIKey = fmt.Sprintf("inline api_key is under %d bytes, too short to be a real key; not imported — set it via env_keys",
+	modeltable.MinKeyLen)
+
+// noteMarkerAPIKey is the note for a provider whose inline api_key overlaps
+// craze's redaction marker: the model table refuses such a key at load,
+// because the marker would print it back in its own place, so it is dropped
+// like a short one rather than making the whole import fail.
+const noteMarkerAPIKey = "inline api_key overlaps craze's redaction marker; not imported — set it via env_keys"
 
 // DefaultRule is which of §3.3's default_model rules chose the default.
 type DefaultRule string
@@ -315,6 +329,12 @@ func importProvider(entry map[string]any) (p modeltable.Provider, contextWindow 
 	}
 	if strings.Contains(apiKey, "$") {
 		apiKey, note = "", noteVarAPIKey
+	}
+	if apiKey != "" && len(apiKey) < modeltable.MinKeyLen {
+		apiKey, note = "", noteShortAPIKey
+	}
+	if apiKey != "" && redact.MarkerOverlaps(apiKey) {
+		apiKey, note = "", noteMarkerAPIKey
 	}
 	if contextWindow < 0 {
 		return skip("context_window is negative")

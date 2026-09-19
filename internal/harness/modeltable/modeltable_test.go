@@ -2,6 +2,7 @@ package modeltable
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/charliek/craze/internal/harness/redact"
 )
 
 // canary is the only key any test file holds. It is obviously not a secret,
@@ -638,6 +641,8 @@ func TestValidateFailuresNameFileTableAndKey(t *testing.T) {
 			setProvider(t, "openrouter", func(p *Provider) { p.BaseURL = "https://openrouter.ai/api/v1" })
 		}, ProvidersFile, "providers.openrouter", "base_url"},
 		{"env_keys empty entry", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.EnvKeys = []string{"A", " "} }) }, ProvidersFile, fw, "env_keys"},
+		{"api_key under 8 bytes", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.APIKey = " zq-1234 " }) }, ProvidersFile, fw, "api_key"},
+		{"api_key inside the redaction marker", func(t *Table) { setProvider(t, "fireworks", func(p *Provider) { p.APIKey = "credential" }) }, ProvidersFile, fw, "api_key"},
 		{"empty provider id", func(t *Table) { t.Providers[""] = t.Providers["fireworks"] }, ProvidersFile, `providers.""`, ""},
 		{"empty alias", func(t *Table) { t.Models[""] = t.Models["fireworks/kimi-k3"] }, ModelsFile, `models.""`, ""},
 		{"model provider missing", func(t *Table) { setModel(t, "fireworks/kimi-k3", func(m *Model) { m.Provider = "" }) }, ModelsFile, kimi, "provider"},
@@ -670,6 +675,114 @@ func TestValidateFailuresNameFileTableAndKey(t *testing.T) {
 	// A valid table stays valid: the cases above fail for their own reason.
 	if err := validTable().Validate(); err != nil {
 		t.Fatalf("validTable: %v", err)
+	}
+}
+
+// TestLoadRefusesAShortKeyOnAnUnusedProvider: every provider's key is
+// redacted from tool output, so the floor applies to providers no model
+// names too — a short key there could reach a model through a file. The
+// error names the provider and the key's place, never the key. An 8-byte key
+// is the negative control; a blank one is no key at all and loads.
+func TestLoadRefusesAShortKeyOnAnUnusedProvider(t *testing.T) {
+	const short = "zq-1234" // 7 bytes, text no message would hold by accident
+	spare := func(key string) string {
+		return validProviders + "\n[providers.spare]\ndriver = \"openrouter\"\napi_key = \"" + key + "\"\n"
+	}
+	for _, key := range []string{short, "  " + short + "\t"} {
+		dir := writeFiles(t, spare(key), validModels)
+		_, err := Load(dir)
+		fe := wantFileError(t, err, filepath.Join(dir, ProvidersFile), "providers.spare", "api_key")
+		if msg := err.Error(); strings.Contains(msg, short) || !strings.Contains(msg, "spare") || !strings.Contains(msg, "8 bytes") {
+			t.Fatalf("Load error %q must name the provider and the floor, and not the key", msg)
+		}
+		if strings.Contains(fmt.Sprintf("%+v", fe), short) {
+			t.Fatal("the FileError's fields carry the key")
+		}
+	}
+	for _, key := range []string{"zq-12345", "   "} {
+		if _, err := Load(writeFiles(t, spare(key), validModels)); err != nil {
+			t.Fatalf("api_key %q: %v", key, err)
+		}
+	}
+}
+
+// TestKeysCoversEveryProviderAndRefusesShortOnes: the redactor's key list is
+// every provider's inline key and every set env_keys variable, used or not;
+// an env value under 8 bytes, which Load cannot see, fails here naming the
+// provider and the variable only.
+func TestKeysCoversEveryProviderAndRefusesShortOnes(t *testing.T) {
+	tbl := validTable() // fireworks: env FIREWORKS_API_KEY; openrouter: env OPENROUTER_API_KEY + inline canary
+	setProvider(tbl, "fireworks", func(p *Provider) { p.EnvKeys = []string{"FIREWORKS_API_KEY", "FW_KEY"} })
+	env := map[string]string{
+		"FIREWORKS_API_KEY": " fw-key-0000001\n", // trimmed
+		"FW_KEY":            "fw-key-0000002",    // not the one Resolve picks, still a key
+		"UNRELATED":         "zq-1",
+	}
+	keys, err := tbl.Keys(fakeEnv(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, k := range keys {
+		got = append(got, k.Reveal())
+	}
+	if want := []string{"fw-key-0000001", "fw-key-0000002", canary}; !slices.Equal(got, want) {
+		t.Fatalf("Keys = %q, want %q", got, want)
+	}
+
+	// An unused provider's short env value fails the whole list.
+	env["OPENROUTER_API_KEY"] = "zq-1234"
+	_, err = tbl.Keys(fakeEnv(env))
+	if !errors.Is(err, ErrKeyTooShort) {
+		t.Fatalf("err = %v, want ErrKeyTooShort", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, "zq-1234") || !strings.Contains(msg, `"openrouter"`) || !strings.Contains(msg, "OPENROUTER_API_KEY") {
+		t.Fatalf("err = %q must name the provider and the variable, and not the value", msg)
+	}
+	// The negative control: eight bytes pass.
+	env["OPENROUTER_API_KEY"] = "zq-12345"
+	if _, err := tbl.Keys(fakeEnv(env)); err != nil {
+		t.Fatalf("an 8-byte env key: %v", err)
+	}
+}
+
+// TestKeysTheMarkerPrintsBackAreRefused: a key inside the redaction marker
+// ("credential"), holding it, or overlapping either end of it would come
+// back out of the redactor verbatim, so Load refuses one inline and Keys one
+// from the environment, naming the place and not the value. The negative
+// controls: the redactor really does print such a key back, and an ordinary
+// key of the same length passes both.
+func TestKeysTheMarkerPrintsBackAreRefused(t *testing.T) {
+	if out := redact.New("credential").String("pw=credential"); !strings.Contains(out, "credential") {
+		t.Fatalf("redacting %q gave %q: the marker no longer contains it, so this test proves nothing", "credential", out)
+	}
+	spare := func(key string) string {
+		return validProviders + "\n[providers.spare]\ndriver = \"openrouter\"\napi_key = \"" + key + "\"\n"
+	}
+	for _, key := range []string{"credential", "redacted", redact.Marker, "sk-live-" + redact.Marker[:6], "ential]-live-key"} {
+		dir := writeFiles(t, spare(key), validModels)
+		_, err := Load(dir)
+		wantFileError(t, err, filepath.Join(dir, ProvidersFile), "providers.spare", "api_key")
+		if msg := err.Error(); strings.Contains(msg, key) || !strings.Contains(msg, "redaction marker") {
+			t.Fatalf("Load error %q must name the marker rule and not the key", msg)
+		}
+
+		tbl := validTable()
+		_, err = tbl.Keys(fakeEnv(map[string]string{"OPENROUTER_API_KEY": key}))
+		if !errors.Is(err, ErrKeyOverlapsMarker) {
+			t.Fatalf("Keys with %q in the environment = %v, want ErrKeyOverlapsMarker", key, err)
+		}
+		if msg := err.Error(); strings.Contains(msg, key) || !strings.Contains(msg, "OPENROUTER_API_KEY") || !strings.Contains(msg, `"openrouter"`) {
+			t.Fatalf("Keys error %q must name the provider and the variable, and not the value", msg)
+		}
+	}
+	// Holding a piece of the marker is not overlapping it: redacting this key
+	// leaves a marker that does not contain it.
+	if _, err := Load(writeFiles(t, spare("credentialx"), validModels)); err != nil {
+		t.Fatalf("an ordinary key: %v", err)
+	}
+	if _, err := validTable().Keys(fakeEnv(map[string]string{"OPENROUTER_API_KEY": "sk-live-0000"})); err != nil {
+		t.Fatalf("an ordinary env key: %v", err)
 	}
 }
 

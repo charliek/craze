@@ -11,18 +11,23 @@
 //
 // # Writes
 //
-// A transcript only ever grows by whole turns. The file and its directory
-// are created lazily, by the first turn that produced output. The header,
-// that turn's user entry and its assistant entry go out in one write(2) to a
-// temporary file beside the session's, which is then hard-linked into place:
-// the session path either does not exist or holds the complete first turn,
-// so a turn cancelled before any output leaves nothing and a crashed process
-// leaves no header with a dangling user message. After that, each turn's
-// user entry is held in memory (AppendUser) and written in the same write as
-// its assistant entry (AppendAssistant), on an O_APPEND descriptor.
+// A transcript only ever grows by whole steps. A turn is one or more steps;
+// a step is the model's assistant message and, when it called tools, the
+// tool message holding their results, led by any steers (user messages
+// interjected mid-turn) that the model first saw at that step. The file and
+// its directory are created lazily, by the first step that produced output.
+// The header, the turn's user entry and that step go out in one write(2) to
+// a temporary file beside the session's, which is then hard-linked into
+// place: the session path either does not exist or holds the complete first
+// step, so a turn cancelled before any output leaves nothing and a crashed
+// process leaves no header with a dangling user message. After that, a
+// turn's user entry is held in memory (AppendUser) and written in the same
+// write as the step that answers it (AppendStep), on an O_APPEND descriptor.
+// User entries held for a step not yet written accumulate, in order, and
+// all go out ahead of it; DiscardHeldUsers drops them instead.
 //
 // A model_change or effort_change is held the same way and goes out in the
-// next turn's write, ahead of its user entry. So nothing is ever written
+// next step's write, ahead of its user entries. So nothing is ever written
 // ahead of a turn that produced no output: switching model and then
 // cancelling before any output leaves no lone model_change in the file, and
 // the change is written with the next turn that does produce output (or
@@ -30,12 +35,16 @@
 // record the model either way). A later change of the same kind replaces an
 // unwritten one.
 //
+// A step's tool calls and results keep the pairing invariant (see pairing),
+// which AppendStep checks before writing and Load checks on every line.
+//
 // One write(2) is not atomic across a crash: what reaches the disk can be any
 // prefix of it, possibly ending on a line boundary. There is no fsync (a
 // transcript is not a database); Load instead drops a malformed last line
-// and then everything after the last assistant message, which is exactly an
-// incomplete turn. After a power loss the first turn's file can also be
-// empty or zero-filled, which Load reports as ErrNoHeader.
+// and then everything after the last complete step, which is exactly what a
+// cut step leaves: a step's append is recovered as a transaction at load, not
+// written as one. After a power loss the first turn's file can also be empty
+// or zero-filled, which Load reports as ErrNoHeader.
 //
 // A later append that fails after writing some of its bytes leaves the store
 // failed (ErrFailed) rather than appending after the torn line, which would
@@ -75,18 +84,19 @@ var (
 	// it.
 	ErrFailed = errors.New("store: an earlier write failed")
 
-	// ErrNoOutput is AppendAssistant's refusal of a message with no
-	// non-blank text: an answer cut short while the model was still only
-	// reasoning is not persisted, because replayed it would be an assistant
-	// message with empty content, which some providers answer with a 400
-	// (plan 018 §3.6). Nothing changes; the caller treats it as "nothing to
-	// persist", not as a turn failure. H2 extends "output" to tool calls.
-	ErrNoOutput = errors.New("store: assistant message has no text")
+	// ErrNoOutput is AppendStep's refusal of an assistant message with no
+	// output — no non-blank text and no tool call — and AppendAssistant's of
+	// one with no non-blank text: an answer cut short while the model was
+	// still only reasoning is not persisted, because replayed it would be an
+	// assistant message with empty content, which some providers answer with
+	// a 400 (plan 018 §3.6). Nothing changes; the caller treats it as
+	// "nothing to persist", not as a turn failure.
+	ErrNoOutput = errors.New("store: assistant message has no output")
 
-	// ErrNoUser is AppendAssistant's error before the file exists when no
-	// user entry is waiting: the first write must carry the turn's user
-	// entry, or the transcript would start with an answer to nothing.
-	ErrNoUser = errors.New("store: no user entry to write with the first assistant entry")
+	// ErrNoUser is AppendStep's error before the file exists when no user
+	// entry is held: the first write must carry the turn's user entry, or
+	// the transcript would start with an answer to nothing.
+	ErrNoUser = errors.New("store: no user entry to write with the first step")
 )
 
 // Options are a session's fixed facts.
@@ -95,6 +105,12 @@ type Options struct {
 	Workspace    string // the session's working directory; absolute
 	CrazeVersion string // recorded in the header
 	SystemPrompt string // its SHA-256 goes in the header; the text is never stored
+	// ToolProfile names the session's tool contract and Tools is the tools
+	// array its requests send, serialized; the header records the name and
+	// the SHA-256 of Tools, never Tools itself. Both are empty for a session
+	// with no tools, and the header then has neither field.
+	ToolProfile string
+	Tools       []byte
 	// Now stamps the header and every entry; nil means time.Now.
 	Now func() time.Time
 
@@ -129,7 +145,7 @@ type Store struct {
 	openFile func(name string, flag int, perm os.FileMode) (file, error)
 
 	f       file    // nil until the first write, and after Close
-	user    *Entry  // the current turn's user entry, until its answer is written
+	users   []Entry // held user entries, in order, until the step answering them is written
 	changes []Entry // unwritten model and effort changes, in order
 	closed  bool
 	err     error // non-nil once a write to an existing file failed
@@ -168,6 +184,11 @@ func New(opts Options) (*Store, error) {
 		Cwd:                cwd,
 		CrazeVersion:       opts.CrazeVersion,
 		SystemPromptSHA256: hex.EncodeToString(sum[:]),
+		ToolProfile:        opts.ToolProfile,
+	}
+	if len(opts.Tools) > 0 {
+		sum := sha256.Sum256(opts.Tools)
+		h.ToolsSHA256 = hex.EncodeToString(sum[:])
 	}
 	s.t = newTranscript(h)
 	s.path = sessionPath(filepath.Clean(opts.Home), cwd, id, h.Timestamp)
@@ -206,14 +227,22 @@ func (s *Store) usable() error {
 	return s.err
 }
 
-// AppendUser holds the turn's user entry until AppendAssistant writes it
-// with the answer. A second call before that replaces it: the earlier turn
-// produced no output, and its prompt is not persisted.
-func (s *Store) AppendUser(e MessageEntry) error {
-	if e.Message.Role != fantasy.MessageRoleUser {
-		return fmt.Errorf("store: AppendUser needs a user message, got role %q", e.Message.Role)
+// checkMessage refuses e unless it has role and names its model in full.
+func checkMessage(call string, e MessageEntry, role fantasy.MessageRole) error {
+	if e.Message.Role != role {
+		return fmt.Errorf("store: %s needs a %s message, got role %q", call, role, e.Message.Role)
 	}
-	if err := e.Model.validate("a message entry"); err != nil {
+	return e.Model.validate("a message entry")
+}
+
+// AppendUser holds a user entry until AppendStep writes it, ahead of the
+// step that answers it. A second call before that holds a second entry
+// after the first; both are written, in order. A caller that wants an
+// earlier turn's unanswered prompt left out of the transcript — because no
+// request it sent since had that prompt in its history — calls
+// DiscardHeldUsers first.
+func (s *Store) AppendUser(e MessageEntry) error {
+	if err := checkMessage("AppendUser", e, fantasy.MessageRoleUser); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -221,8 +250,16 @@ func (s *Store) AppendUser(e MessageEntry) error {
 	if err := s.usable(); err != nil {
 		return err
 	}
-	s.user = &Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: e}
+	s.users = append(s.users, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: e})
 	return nil
+}
+
+// DiscardHeldUsers drops the user entries held for a step not yet written:
+// they belong to a turn that produced no output. Held changes stay held.
+func (s *Store) DiscardHeldUsers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users = nil
 }
 
 // AppendModelChange records a switch to m, written ahead of the next turn
@@ -259,41 +296,102 @@ func (s *Store) holdChange(e Entry) error {
 	return nil
 }
 
-// AppendAssistant writes the turn: any held changes, the held user entry,
-// and e, in one write — the first one also carrying the header and creating
-// the file. With no user entry held (a later step of a turn already
-// written), it writes the changes and e. A message with no non-blank text is
-// ErrNoOutput and changes nothing.
+// AppendStep writes a finished step in one append: any held changes, the
+// held user entries, steers (user messages interjected mid-turn that the
+// model first saw at this step), the assistant message, and tool — the tool
+// message holding the results of the assistant message's tool calls — when
+// the model called tools. The first append also carries the header and
+// creates the file. It returns the ids of the entries it wrote, in file
+// order: the assistant message's is the last, or the one before the tool
+// message's.
 //
-// Every entry is encoded and decoded back before anything is written, so an
-// entry that Load could not read (say, provider metadata of a type Fantasy
-// has no decoder registered for) fails here, with nothing written, and what
-// Context replays is exactly what a later Load would.
-func (s *Store) AppendAssistant(e MessageEntry) error {
-	if e.Message.Role != fantasy.MessageRoleAssistant {
-		return fmt.Errorf("store: AppendAssistant needs an assistant message, got role %q", e.Message.Role)
+// The assistant message must have output, non-blank text or a tool call,
+// or AppendStep returns ErrNoOutput and changes nothing. The step must keep
+// the pairing invariant (see pairing): tool must be there exactly when the
+// assistant message has calls to answer, and answer them, in order.
+// Breaking it is a bug in the caller, refused with ErrUnpaired, with nothing
+// written.
+//
+// The append is one write, recovered as a transaction at load, not atomic:
+// a crash can persist any prefix of it, which Load rolls back to the last
+// complete step (see the package comment).
+func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *MessageEntry) ([]string, error) {
+	for _, st := range steers {
+		if err := checkMessage("a steer", st, fantasy.MessageRoleUser); err != nil {
+			return nil, err
+		}
 	}
-	if err := e.Model.validate("a message entry"); err != nil {
+	if err := checkMessage("AppendStep", assistant, fantasy.MessageRoleAssistant); err != nil {
+		return nil, err
+	}
+	if tool != nil {
+		if err := checkMessage("AppendStep's tool entry", *tool, fantasy.MessageRoleTool); err != nil {
+			return nil, err
+		}
+	}
+	if !hasOutput(assistant.Message) {
+		return nil, ErrNoOutput
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.usable(); err != nil {
+		return nil, err
+	}
+	if s.f == nil && len(s.users) == 0 {
+		return nil, ErrNoUser
+	}
+
+	batch := append(append([]Entry(nil), s.changes...), s.users...)
+	for _, st := range steers {
+		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: st})
+	}
+	batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: assistant})
+	if tool != nil {
+		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: *tool})
+	}
+	if err := s.write(batch); err != nil {
+		return nil, err
+	}
+	s.users, s.changes = nil, nil
+	ids := make([]string, len(batch))
+	for i, b := range batch {
+		ids[i] = b.ID
+	}
+	return ids, nil
+}
+
+// AppendAssistant writes a text-only answer as a step with no steers and no
+// tool message: what the runner saves of a step a cancel or a failure cut
+// short. A message with no non-blank text is ErrNoOutput and changes
+// nothing.
+func (s *Store) AppendAssistant(e MessageEntry) error {
+	if err := checkMessage("AppendAssistant", e, fantasy.MessageRoleAssistant); err != nil {
 		return err
 	}
 	if !hasText(e.Message) {
 		return ErrNoOutput
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.usable(); err != nil {
-		return err
-	}
-	if s.f == nil && s.user == nil {
-		return ErrNoUser
-	}
+	_, err := s.AppendStep(nil, e, nil)
+	return err
+}
 
-	batch := append([]Entry(nil), s.changes...)
-	if s.user != nil {
-		batch = append(batch, *s.user)
-	}
-	batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: e})
-
+// write gives batch its ids and parents, as a chain from the leaf, and
+// appends it in one write, the header first when the file does not exist
+// yet; then batch holds the entries as they read back, and so does the
+// transcript. The caller holds mu, and on success clears what it held.
+//
+// Every entry is encoded and decoded back before anything is written, so an
+// entry that Load could not read (say, provider metadata of a type Fantasy
+// has no decoder registered for) fails here, with nothing written, and the
+// transcript keeps the decoded entry, so what Context replays is exactly
+// what a later Load would. Nothing compares the decoded entry with the one
+// handed in: they differ in harmless ways (an error result reads back as
+// errors.New of its text; a number inside provider options held as
+// map[string]any reads back as a float64), and refusing those would refuse
+// entries H1 saves. The pairing invariant, and the result checks that go
+// with it, run on the entries as they read back, from the transcript's last
+// entry on.
+func (s *Store) write(batch []Entry) error {
 	var buf bytes.Buffer
 	if s.f == nil {
 		line, err := encodeHeader(s.t.Header)
@@ -303,15 +401,18 @@ func (s *Store) AppendAssistant(e MessageEntry) error {
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	parent := s.t.Leaf()
+	parent := s.t.last()
+	pair := pairingAfter(parent)
 	taken := map[string]bool{}
 	for i := range batch {
 		id, err := s.newEntryID(taken)
 		if err != nil {
 			return err
 		}
-		batch[i].ID, batch[i].ParentID = id, parent
-		parent = id
+		batch[i].ID, batch[i].ParentID = id, ""
+		if parent != nil {
+			batch[i].ParentID = parent.ID
+		}
 		line, err := encodeEntry(batch[i])
 		if err != nil {
 			return fmt.Errorf("store: encode %s entry: %w", batch[i].Type, err)
@@ -320,9 +421,16 @@ func (s *Store) AppendAssistant(e MessageEntry) error {
 		if err != nil {
 			return fmt.Errorf("store: %s entry would not read back: %w", batch[i].Type, err)
 		}
+		if err := pair.next(back, parent); err != nil {
+			return err
+		}
 		batch[i] = back
+		parent = &batch[i]
 		buf.Write(line)
 		buf.WriteByte('\n')
+	}
+	if pair.open != nil {
+		return unpaired("assistant entry %q has tool calls and no tool message after it", pair.open.ID)
 	}
 
 	if s.f == nil {
@@ -332,7 +440,7 @@ func (s *Store) AppendAssistant(e MessageEntry) error {
 	} else if n, err := s.f.Write(buf.Bytes()); err != nil {
 		if n == 0 {
 			// Nothing reached the file (the disk was already full, say),
-			// so it still ends on a whole turn: fail this turn only.
+			// so it still ends on a whole step: fail this step only.
 			return fmt.Errorf("store: append to %s: %w", s.path, err)
 		}
 		s.err = fmt.Errorf("%w: append to %s: %v", ErrFailed, s.path, err)
@@ -341,7 +449,6 @@ func (s *Store) AppendAssistant(e MessageEntry) error {
 	for _, b := range batch {
 		s.t.add(b)
 	}
-	s.user, s.changes = nil, nil
 	return nil
 }
 
@@ -413,6 +520,17 @@ func hasText(m fantasy.Message) bool {
 	return false
 }
 
+// hasOutput reports whether m has text or a tool call: a step whose only
+// content is tool calls is output, and replays as a message with calls.
+func hasOutput(m fantasy.Message) bool {
+	for _, p := range m.Content {
+		if p != nil && p.GetType() == fantasy.ContentTypeToolCall {
+			return true
+		}
+	}
+	return hasText(m)
+}
+
 // Context is the history the next request sends to current: the written
 // messages from the root to the last entry, with Transcript.ContextAt's
 // rules applied. Held entries are not in it. It works after Close.
@@ -432,7 +550,7 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	s.user, s.changes = nil, nil
+	s.users, s.changes = nil, nil
 	if s.f == nil {
 		return nil
 	}
