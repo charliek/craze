@@ -272,6 +272,8 @@ func (o *promptOpts) runLoop(ctx context.Context, sess agent.Session, text strin
 			// The row was taken and never sent. The signal's own clear cannot
 			// report it — it had already left the queue — so the line for it
 			// is written here, or the stream would simply lose a message.
+			// It is craze's own line and not the session's: nothing numbered
+			// it, so `--json` writes it with no `seq` key (events.go).
 			if err := o.writeEvent(agent.Event{
 				Type:        agent.EventQueue,
 				Queue:       &next,

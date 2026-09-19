@@ -155,6 +155,16 @@ def test_prompt_writes_one_journal(
     seqs = [ln["seq"] for ln in lines if ln["type"] == "event"]
     assert seqs, "the turn journaled no events"
     assert seqs == sorted(set(seqs)) and seqs[0] == 1, seqs
+
+    # The `seq` on a `--json` line is this same number, which is what lets a
+    # headless caller line its stream against the journal (plan 020 §3.6). The
+    # stream is a lossy projection, so its seqs are a subset -- in order, and
+    # never contiguous by accident.
+    stream = [json.loads(ln) for ln in proc.stdout.splitlines() if ln.strip()]
+    stream_seqs = [ln["seq"] for ln in stream if "seq" in ln]
+    assert stream_seqs, proc.stdout
+    assert stream_seqs == sorted(stream_seqs), stream_seqs
+    assert set(stream_seqs) <= set(seqs), (stream_seqs, seqs)
     types = [ln["eventType"] for ln in lines if ln["type"] == "event"]
     assert "text" in types and "done" in types, types
 

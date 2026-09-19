@@ -155,6 +155,22 @@ stderr if it is still going after that.
 | `title` | The title the session took |
 | `done` / `error` | Turn finished / turn failed |
 
+Every line that came from the session's event stream carries `seq`, an integer,
+as its **second** key — right after `type`. It is the number the session's
+event log gave that event, the same one the session journal records for it, so
+a headless caller can line the two up.
+
+`seq` is increasing but **not** contiguous. The JSON above is a projection:
+events it has nothing to say about (a mode change, a title-less metadata
+update) are dropped, and a dropped event still took its number. Rely on the
+order of two lines; never on the arithmetic between them.
+
+The lines craze writes itself carry **no** `seq` at all, and craze never
+invents one: a startup failure (an `error` line written before any session
+existed), and the `queue` `removed` line for a row that left the queue just as
+a signal landed, which no session ever saw. An absent `seq` means craze said
+it, not the agent.
+
 `agent` is the sub-agent's own session id (grok) and appears only on lines
 that belong to one; main-session lines have no `agent` field. Grok streams a
 sub-agent's session on the same connection, so its prompt, thoughts, tool
