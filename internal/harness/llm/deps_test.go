@@ -14,9 +14,11 @@ import (
 // sdkFreePackages are the package patterns, relative to the module root,
 // whose dependencies must not include a provider SDK (owner decision 2:
 // Fantasy is a plain import, but only its OpenAI-compatible provider is
-// linked). The binary joins the list when it first links the harness.
+// linked). The binary joined the list when it first linked the harness,
+// through the native adapter in internal/agent (plan 018 C9).
 var sdkFreePackages = []string{
 	"./internal/harness/...",
+	"./cmd/craze",
 }
 
 // forbiddenSDKs are import-path fragments of the SDKs Fantasy's other

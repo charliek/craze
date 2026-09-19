@@ -28,6 +28,7 @@ const (
 	cursorName = "cursor"
 	grokName   = "grok"
 	gxName     = "gx"
+	nativeName = "native"
 	// cursorImplementPrompt is what leaving plan mode sends as the user's
 	// turn; it is provider-shaped because the wording is the agent's, not
 	// craze's. Grok uses the same wording this cut.
@@ -297,6 +298,27 @@ func GxProvider() Provider {
 	return p
 }
 
+// NativeProvider is craze's own harness (plan 018): a provider craze runs in
+// process rather than spawning, so everything ACP-shaped — binaries, spawn
+// args, dialect, auth, skill and plugin scans — is zero. It is hidden: it
+// resolves by id (--provider native, CRAZE_PROVIDER, a hand-written
+// config.toml) and no listing shows it, it is never persisted as the default,
+// and its sessions are never indexed until H7 gives them a loader (§3.4).
+//
+// Effort is its one capability: interject waits for H2, where a tool step
+// gives it something to merge into, and modes for H5. The display label is
+// its own field so the UI can later say "craze" without touching the id that
+// flags and config hold.
+func NativeProvider() Provider {
+	return Provider{
+		name:         nativeName,
+		displayName:  nativeName,
+		hidden:       true,
+		inProcess:    true,
+		capabilities: Capabilities{Effort: true},
+	}
+}
+
 // Providers is every provider craze lists, in picker order. It is the single
 // public registry: ProviderByName and ProviderNames both read it, so a new
 // provider is a constructor and one line here. It builds the slice per call
@@ -323,7 +345,7 @@ func Providers() []Provider {
 // provider names on another goroutine.
 var (
 	hiddenMu        sync.RWMutex
-	hiddenProviders []Provider
+	hiddenProviders = []Provider{NativeProvider()}
 )
 
 // hiddenProvider is ProviderByName's lookup in the hidden list. Ids are

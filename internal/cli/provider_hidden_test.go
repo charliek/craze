@@ -14,7 +14,8 @@ import (
 )
 
 // hiddenID is the id of the hidden provider these cases plant: a stand-in for
-// the native provider, which does not exist yet, holding the same rules.
+// the native provider holding the same rules, so they are tested as rules of
+// the hidden list and not of one entry in it.
 const hiddenID = "hush"
 
 func plantHidden(t *testing.T) agent.Provider {
@@ -184,5 +185,98 @@ func TestProviderIDsNeverNameAHiddenProvider(t *testing.T) {
 	}
 	if want := `craze: unknown provider "codex" (want cursor, grok, or gx)`; ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
+	}
+}
+
+// TestInProcessProviderRefusesSpawnFlags is plan 018 §3.4's usage errors: an
+// in-process provider has no binary to spawn and no modes, so --agent-bin,
+// CRAZE_AGENT_BIN and --ask/--plan are refused with exit 2 in all three
+// commands, whether the provider came from the flag or the environment.
+func TestInProcessProviderRefusesSpawnFlags(t *testing.T) {
+	const (
+		binMsg  = ": --agent-bin cannot be used with provider native, which runs inside craze"
+		envMsg  = ": CRAZE_AGENT_BIN cannot be used with provider native, which runs inside craze; unset it"
+		askMsg  = "craze: --ask cannot be used with provider native, which has no modes"
+		planMsg = "craze: --plan cannot be used with provider native, which has no modes"
+	)
+	for _, tc := range []struct {
+		name string
+		tui  []string // the root command's flags; nil runs NewRootCmd with argv instead
+		argv []string
+		env  map[string]string
+		want string
+	}{
+		{name: "craze --agent-bin", tui: []string{"--provider", "native", "--agent-bin", "/bin/true"}, want: "craze" + binMsg},
+		{name: "craze CRAZE_AGENT_BIN", tui: []string{"--provider", "native"},
+			env: map[string]string{"CRAZE_AGENT_BIN": "/bin/true"}, want: "craze" + envMsg},
+		{name: "craze --ask", tui: []string{"--provider", "native", "--ask"}, want: askMsg},
+		{name: "craze --plan from the environment's provider", tui: []string{"--plan"},
+			env: map[string]string{"CRAZE_PROVIDER": "native"}, want: planMsg},
+		{name: "prompt --agent-bin", argv: []string{"prompt", "--provider", "native", "--agent-bin", "/bin/true", "hi"}, want: "craze" + binMsg},
+		{name: "prompt CRAZE_AGENT_BIN", argv: []string{"prompt", "--provider", "native", "hi"},
+			env: map[string]string{"CRAZE_AGENT_BIN": "/bin/true"}, want: "craze" + envMsg},
+		{name: "prompt --ask", argv: []string{"prompt", "--provider", "native", "--ask", "hi"}, want: askMsg},
+		{name: "prompt --plan from the environment's provider", argv: []string{"prompt", "--plan", "hi"},
+			env: map[string]string{"CRAZE_PROVIDER": "native"}, want: planMsg},
+		{name: "frame --agent-bin", argv: []string{"frame", "--provider", "native", "--agent-bin", "/bin/true"}, want: "craze frame" + binMsg},
+		{name: "frame CRAZE_AGENT_BIN", argv: []string{"frame", "--provider", "native"},
+			env: map[string]string{"CRAZE_AGENT_BIN": "/bin/true"}, want: "craze frame" + envMsg},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			crazeHome(t)
+			t.Setenv("CRAZE_PROVIDER", "")
+			t.Setenv("CRAZE_AGENT_BIN", "")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			var err error
+			if tc.tui != nil {
+				cmd, f := parseTUIFlags(t, tc.tui...)
+				err = runTUI(cmd, f, hostEnv{})
+			} else {
+				cmd := NewRootCmd()
+				cmd.SetOut(&bytes.Buffer{})
+				cmd.SetErr(&bytes.Buffer{})
+				cmd.SetArgs(tc.argv)
+				err = cmd.Execute()
+			}
+			code, msg := exitCode(t, err)
+			if code != 2 || msg != tc.want {
+				t.Fatalf("exit %d %q, want 2 %q", code, msg, tc.want)
+			}
+		})
+	}
+}
+
+// TestRefuseInProcessLeavesSpawnedProvidersAlone: the refusal is for
+// in-process providers only; every ACP provider takes --agent-bin and the
+// modes exactly as before, and native with neither is let through.
+func TestRefuseInProcessLeavesSpawnedProvidersAlone(t *testing.T) {
+	t.Setenv("CRAZE_AGENT_BIN", "/bin/true")
+	for _, p := range agent.Providers() {
+		if err := refuseInProcess("craze", p, "/bin/true", "plan"); err != nil {
+			t.Fatalf("%s: %v", p.Name(), err)
+		}
+	}
+	t.Setenv("CRAZE_AGENT_BIN", "")
+	if err := refuseInProcess("craze", agent.NativeProvider(), "", ""); err != nil {
+		t.Fatalf("native with no spawn flags: %v", err)
+	}
+}
+
+// TestInProcessRefusalSkipsALoad: --continue and --resume start the indexed
+// row's provider, never the resolved one, so an in-process provider resolved
+// from the environment does not turn --agent-bin or --ask into a usage error
+// there. With nothing to continue the run ends the way it always has.
+func TestInProcessRefusalSkipsALoad(t *testing.T) {
+	ws := indexHome(t)
+	t.Setenv("CRAZE_PROVIDER", "native")
+	t.Setenv("CRAZE_AGENT_BIN", "")
+	for _, flag := range []string{"--continue", "--resume"} {
+		cmd, f := parseTUIFlags(t, flag, "--agent-bin", "/bin/true", "--ask", "--workspace", ws)
+		code, msg := exitCode(t, runTUI(cmd, f, hostEnv{}))
+		if code != 1 || !strings.HasPrefix(msg, "craze: no session to continue in ") {
+			t.Fatalf("%s: exit %d %q, want the no-session exit 1", flag, code, msg)
+		}
 	}
 }

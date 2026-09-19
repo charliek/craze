@@ -79,6 +79,35 @@ func resolveProvider(cmd *cobra.Command, flag string, stderr io.Writer, hermetic
 	return resolvedProvider{Provider: agent.CursorProvider(), Locked: locked}, nil
 }
 
+// envAgentBin is the environment's --agent-bin, read by acp's binary lookup.
+const envAgentBin = "CRAZE_AGENT_BIN"
+
+// refuseInProcess is the usage error for asking an in-process provider for
+// something only a spawned agent has (plan 018 §3.4): an agent binary, from
+// --agent-bin or CRAZE_AGENT_BIN, has nothing to be spawned as, and a mode
+// (--ask or --plan, as mode) has no harness mode to map onto until H5 —
+// silently ignoring a requested plan mode would be worse than refusing it.
+// cmd is the command's name as its other usage errors spell it. It is nil for
+// every provider craze spawns.
+//
+// The environment variable counts exactly as acp reads it — set and
+// non-empty — so a run the refusal lets through could never have spawned that
+// binary either.
+func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error {
+	if !p.InProcess() {
+		return nil
+	}
+	switch {
+	case agentBin != "":
+		return usagef("%s: --agent-bin cannot be used with provider %s, which runs inside craze", cmd, p.Name())
+	case os.Getenv(envAgentBin) != "":
+		return usagef("%s: %s cannot be used with provider %s, which runs inside craze; unset it", cmd, envAgentBin, p.Name())
+	case mode != "":
+		return usagef("%s: --%s cannot be used with provider %s, which has no modes", cmd, mode, p.Name())
+	}
+	return nil
+}
+
 // knownProvider is the session index's view of the registry: a row whose
 // provider id this build does not know is kept in the file but never offered
 // (§3.2), because craze has no way to start it. A hidden provider counts as
