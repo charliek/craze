@@ -127,9 +127,9 @@ of up to 32 KiB each; past either bound the run stops with an error rather
 than sending a truncated message.
 
 The chain still ends the way it always did: a stop reason that is not
-`end_turn`, or an error, stops it with exit 1 and no further turn. `SIGINT`
-and `SIGTERM` clear the queue first and then cancel, so nothing starts behind
-the signal; the run exits 1.
+`end_turn`, or an error, stops it with exit 1 and no further turn. `SIGINT`,
+`SIGTERM` and `SIGHUP` (the hangup a closed terminal sends) clear the queue
+first and then cancel, so nothing starts behind the signal; the run exits 1.
 
 When the agent starts a turn craze did not prompt for — Grok's interject
 fallback (see [Queued messages](tui.md#queued-messages)) — the next queued

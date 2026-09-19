@@ -13,9 +13,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
+import termios
 import threading
 import time
 from collections.abc import Callable
@@ -23,7 +25,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
-from test_tui import _ANSI, PTYCraze, _wait_fake_gone
+from test_tui import _ANSI, PTYCraze, _wait_fake_gone, _wait_output, quit_craze
 
 PANE = "w9:p42"
 SOURCE = "custom:craze"
@@ -241,12 +243,6 @@ def assert_framing(host: _FakeHostSocket) -> None:
         assert raw.endswith(b"\n") and raw.count(b"\n") == 1, raw
 
 
-def quit_craze(tui: PTYCraze) -> None:
-    tui.write(b"\x04")
-    code = tui.wait_exit(timeout=WAIT)
-    assert code == 0, tui.screen()[-3000:]
-
-
 def test_herdr_echo_turn_sequence(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """H2: a plain turn is exactly idle, metadata, working, idle, nulls, release.
 
@@ -261,7 +257,7 @@ def test_herdr_echo_turn_sequence(craze_bin: Path, fake_agent_bin: Path, tmp_pat
         tui.write(b"hello\r")
         tui.wait_contains("echo: hello", timeout=WAIT)
         herdr.wait_for(lambda ls: states(ls) == ["idle", "working", "idle"], "the turn's idle")
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     lines = herdr.snapshot()
@@ -309,7 +305,7 @@ def test_herdr_permission_card_blocks(
             lambda ls: states(ls) == ["idle", "working", "blocked", "working", "idle"],
             "working then idle after the answer",
         )
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     reports = [ln for ln in herdr.snapshot() if ln["method"] == "pane.report_agent"]
@@ -354,7 +350,7 @@ def test_herdr_queue_drain_has_no_idle_between_turns(
             "the idle after the drained turn",
             timeout=LONG_WAIT,
         )
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     assert states(herdr.snapshot()) == ["idle", "working", "idle"], herdr.snapshot()
@@ -373,6 +369,21 @@ def _last_state_after(
     return False
 
 
+def _assert_ready_then_released(lines: list[dict[str, Any]]) -> None:
+    """An exit straight after the ready idle: that idle and its metadata, then
+    the nulls and the release, and nothing after them."""
+    assert [ln["method"] for ln in lines] == [
+        "pane.report_agent",
+        "pane.report_metadata",
+        "pane.report_metadata",
+        "pane.release_agent",
+    ], lines
+    ready, rel = seq_of(lines[0]), seq_of(lines[3])
+    assert rel > ready, lines
+    assert lines[:2] == [report("idle", ready), metadata(ready, "cursor", "default")], lines
+    assert lines[2:] == [metadata(rel, None, None), release(rel)]
+
+
 def test_herdr_sigterm_still_releases(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 ) -> None:
@@ -389,15 +400,69 @@ def test_herdr_sigterm_still_releases(
         _wait_fake_gone(fake_agent_bin)
         lines = herdr.snapshot()
 
-    assert [ln["method"] for ln in lines] == [
-        "pane.report_agent",
-        "pane.report_metadata",
-        "pane.report_metadata",
-        "pane.release_agent",
-    ], lines
-    ready, rel = seq_of(lines[0]), seq_of(lines[3])
-    assert rel > ready, lines
-    assert lines[2:] == [metadata(rel, None, None), release(rel)]
+    _assert_ready_then_released(lines)
+
+
+# The fake agent otherwise exits the moment its stdin closes, which it does
+# however craze exits -- killed outright included -- so without this "the
+# agent is gone" would pass for a craze that orphaned it.
+LINGER = {"CRAZE_FAKE_LINGER": "1"}
+
+
+def test_herdr_sighup_still_releases(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """SIGHUP, what a multiplexer sends when it closes a tab, is an exit like
+    SIGTERM: herdr is released and the agent is shut down (#22)."""
+    with FakeHerdr() as herdr:
+        with PTYCraze(
+            craze_bin, fake_agent_bin, tmp_path, env_extra={**herdr.env(), **LINGER}
+        ) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            # The metadata line too: a SIGHUP between the state line and it
+            # would rightly send no nulls, and this case is about the release.
+            herdr.wait_for(_has_ready_metadata, "the ready idle and its metadata")
+            # craze is its own session and group leader, so its pid is the pgid.
+            os.killpg(tui.proc.pid, signal.SIGHUP)
+            # 0, not merely "not killed by SIGHUP": a quit that killed the
+            # program, or leaked its error into the exit status, would still
+            # run the tail and pass everything else here.
+            code = tui.wait_exit(timeout=WAIT)
+            assert code == 0, tui.screen()[-3000:]
+        _wait_fake_gone(fake_agent_bin)
+        lines = herdr.snapshot()
+
+    _assert_ready_then_released(lines)
+
+
+@pytest.mark.skipif(
+    not hasattr(termios, "TIOCSCTTY"), reason="no TIOCSCTTY: craze cannot own the pty"
+)
+def test_herdr_tty_hangup_still_releases(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The terminal itself going away, as a closed tab's does: the kernel
+    hangs up craze, and the exit is the same as a delivered SIGHUP's (#22).
+
+    The screen is frozen once the master closes, so only what outlives it is
+    asserted: the exit code, the release, and the agent being gone.
+    """
+    with FakeHerdr() as herdr:
+        with PTYCraze(
+            craze_bin,
+            fake_agent_bin,
+            tmp_path,
+            env_extra={**herdr.env(), **LINGER},
+            setctty=True,
+        ) as tui:
+            tui.wait_contains("cursor", timeout=WAIT)
+            herdr.wait_for(_has_ready_metadata, "the ready idle and its metadata")
+            code = tui.hangup(timeout=WAIT)
+            assert code == 0, tui.screen()[-3000:]
+        _wait_fake_gone(fake_agent_bin)
+        lines = herdr.snapshot()
+
+    _assert_ready_then_released(lines)
 
 
 @pytest.mark.parametrize(
@@ -435,21 +500,9 @@ def test_herdr_off_switches_send_nothing(
             tui.wait_contains("cursor", timeout=WAIT)
             tui.write(b"hello\r")
             tui.wait_contains("echo: hello", timeout=WAIT)
-            quit_craze(tui)
+            quit_craze(tui, timeout=WAIT)
         _wait_fake_gone(fake_agent_bin)
         assert herdr.connections == 0 and herdr.snapshot() == [], herdr.snapshot()
-
-
-def _wait_output(tui: PTYCraze, needle: str, timeout: float = WAIT) -> str:
-    """wait_contains that expects craze to have exited already."""
-    deadline = time.monotonic() + timeout
-    text = ""
-    while time.monotonic() < deadline:
-        text = _ANSI.sub("", tui.screen())
-        if needle in text:
-            return text
-        time.sleep(0.05)
-    raise AssertionError(f"timeout waiting for {needle!r}: {text[-3000:]!r}")
 
 
 def test_herdr_unreachable_socket_warns_once_after_exit(
@@ -469,8 +522,8 @@ def test_herdr_unreachable_socket_warns_once_after_exit(
             tui.wait_contains("echo: hello", timeout=WAIT)
             # The failed sends so far are held, not drawn over the frame.
             assert "host status" not in _ANSI.sub("", tui.screen())
-            quit_craze(tui)
-            _wait_output(tui, "host status: herdr: ")
+            quit_craze(tui, timeout=WAIT)
+            _wait_output(tui, "host status: herdr: ", timeout=WAIT)
             # The reader stops at the pty's end of file, so the count below is
             # over everything craze wrote.
             tui._reader.join(timeout=WAIT)
@@ -511,7 +564,7 @@ def test_herdr_child_env_loses_the_hook_gate(
             tui.wait_contains("cursor", timeout=WAIT)
             herdr.wait_for(_has_ready_idle, "the ready idle")
             assert _child_env_names(tui) == {"HERDR_PANE_ID"}
-            quit_craze(tui)
+            quit_craze(tui, timeout=WAIT)
         _wait_fake_gone(fake_agent_bin)
         assert herdr.snapshot(), "the herdr gate was met, so craze reported"
 
@@ -526,7 +579,7 @@ def test_herdr_child_env_loses_the_hook_gate(
         ) as tui:
             tui.wait_contains("cursor", timeout=WAIT)
             assert _child_env_names(tui) == {"HERDR_ENV", "HERDR_PANE_ID"}
-            quit_craze(tui)
+            quit_craze(tui, timeout=WAIT)
         _wait_fake_gone(fake_agent_bin)
         assert herdr.connections == 0 and herdr.snapshot() == [], herdr.snapshot()
 
@@ -613,7 +666,7 @@ def test_roost_echo_turn_sequence(craze_bin: Path, fake_agent_bin: Path, tmp_pat
         tui.write(b"hello\r")
         tui.wait_contains("echo: hello", timeout=WAIT)
         roost.wait_for(lambda ls: lifecycles(ls)[-1:] == ["finished"], "the finished line")
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     lines = roost.snapshot()
@@ -669,7 +722,7 @@ def test_roost_permission_card_waits(
             lambda ls: lifecycles(ls) == ["inactive", "working", "waiting", "working", "finished"],
             "working then finished after the answer",
         )
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     lines = roost.snapshot()
@@ -702,7 +755,7 @@ def test_roost_failed_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
         tui.write(b"boom\r")
         tui.wait_contains("the turn failed", timeout=WAIT)
         roost.wait_for(lambda ls: "failed" in lifecycles(ls), "the failed line")
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     lines = roost.snapshot()
@@ -733,7 +786,7 @@ def test_roost_cancelled_turn(craze_bin: Path, fake_agent_bin: Path, tmp_path: P
         roost.wait_for(lambda ls: "working" in lifecycles(ls), "the working line")
         tui.write(b"\x1b")
         roost.wait_for(lambda ls: "finished" in lifecycles(ls), "the finished line")
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     lines = roost.snapshot()
@@ -779,7 +832,7 @@ def test_roost_queue_drain_has_no_finished_between_turns(
             "the finished line after the drained turn",
             timeout=LONG_WAIT,
         )
-        quit_craze(tui)
+        quit_craze(tui, timeout=WAIT)
     _wait_fake_gone(fake_agent_bin)
 
     lines = roost.snapshot()
@@ -833,7 +886,7 @@ def test_child_env_loses_both_hook_gates(
             herdr.wait_for(_has_ready_idle, "the ready idle")
             roost.wait_for(_has_claim, "the claim")
             assert _child_env_names(tui) == {"ROOST_TAB_ID", "HERDR_PANE_ID"}
-            quit_craze(tui)
+            quit_craze(tui, timeout=WAIT)
         _wait_fake_gone(fake_agent_bin)
         assert herdr.snapshot() and roost.snapshot(), "both gates were met, so craze reported"
 
@@ -854,7 +907,7 @@ def test_child_env_loses_both_hook_gates(
                 "HERDR_ENV",
                 "HERDR_PANE_ID",
             }
-            quit_craze(tui)
+            quit_craze(tui, timeout=WAIT)
         _wait_fake_gone(fake_agent_bin)
         assert herdr.connections == 0 and herdr.snapshot() == [], herdr.snapshot()
         assert roost.connections == 0 and roost.snapshot() == [], roost.snapshot()

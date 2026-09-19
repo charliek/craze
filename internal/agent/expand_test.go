@@ -544,31 +544,65 @@ func TestAdvertisedBareNameIsSentVerbatim(t *testing.T) {
 // events come from runs one step after the refusal could happen, which is what
 // makes this hold for the CLI's foreign-turn retry too.
 //
-// The trailing Cancel shares the exact hazard TestCancelWaitsUntilPromptReturns
-// and TestSerializedPrompt (session_test.go) were fixed for: promptInFlight
-// flips true before session/prompt is written, so waiting on it alone would
-// let Cancel's session/cancel beat session/prompt onto the wire, get discarded
-// by the fake on purpose, and leave "hang" (and, with it, this test) waiting
-// forever for a second cancel that never comes. "hang-ack" and waiting for its
-// chunk prove the fake read the prompt before Cancel is allowed to run; the
-// bounded context is the same fail-fast backstop for if that regresses.
+// The trailing Cancel is the one TestCancelWaitsUntilPromptReturns and
+// TestSerializedPrompt (session_test.go) were moved to "hang-ack" for:
+// promptInFlight flips true before session/prompt is written, and until issue
+// #18 was fixed, waiting on it alone let Cancel's session/cancel beat
+// session/prompt onto the wire, get discarded by the fake on purpose, and
+// leave "hang" (and, with it, this test) waiting forever for a second cancel
+// that never came. Cancel now waits for the prompt's own write; "hang-ack" and
+// waiting for its chunk still prove the fake read the prompt before Cancel
+// runs, and the bounded context is the fail-fast backstop should that
+// ordering ever regress.
 func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 	dir := probeFixtureDir(t)
 	s := startScriptOpts(t, "hang-ack", Options{PluginDirs: []string{dir}})
 	log := collect(t, s)
-	go func() { _, _ = s.Prompt(context.Background(), "hold the turn") }()
+	// The first prompt's ending is this test's too: it must come back
+	// cancelled, not just come back.
+	firstErr := make(chan error, 1)
+	var firstRes Result
+	go func() {
+		var err error
+		firstRes, err = s.Prompt(context.Background(), "hold the turn")
+		firstErr <- err
+	}()
 	log.waitTexts(t, "ack: hold the turn")
 
 	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrPromptInFlight) {
 		t.Fatalf("second prompt: %v", err)
 	}
-	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
-		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
-	}
+
 	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	if err := s.Cancel(cancelCtx); err != nil {
 		t.Fatal(err)
+	}
+
+	select {
+	case err := <-firstErr:
+		if err != nil {
+			t.Fatalf("first prompt: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first prompt never returned")
+	}
+	if firstRes.StopReason != acp.StopCancelled {
+		t.Fatalf("first prompt stop reason = %q, want %q", firstRes.StopReason, acp.StopCancelled)
+	}
+
+	// The marker is the cancelled turn's own EventDone, and it is caused
+	// strictly after the refusal: the turn only ends because of the Cancel
+	// above, which was issued once the refused Prompt had returned. Anything
+	// that refused call emitted went into the same channel before it, and the
+	// collector appends on one goroutine in channel order, so once the log
+	// holds the done event it holds every event ahead of it. Counted rather
+	// than waited on by type, so no earlier done event could stand in for it.
+	waitUntil(t, "the cancelled turn's EventDone", func() bool {
+		return countType(log.snapshot(), EventDone) == 1
+	})
+	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
+		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
 	}
 }
 
@@ -612,10 +646,27 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("prompt during a foreign turn: %v", err)
 	}
+
+	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
+
+	// The foreign turn's end is not a safe marker: the fake ends it on its own
+	// clock, independent of anything the refused prompt did. A later plain
+	// prompt run to completion is. EventDone comes only from a prompt of
+	// craze's own that reached the wire — never from a foreign turn — so the
+	// second one is this prompt's, caused strictly after the refusal; the
+	// collector appends on one goroutine in channel order, so by then it holds
+	// every event the refused call could have emitted.
+	markerCtx, cancelMarker := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancelMarker()
+	if _, err := s.Prompt(markerCtx, "plain prompt after the foreign turn"); err != nil {
+		t.Fatalf("plain prompt after the foreign turn: %v", err)
+	}
+	waitUntil(t, "the second EventDone", func() bool {
+		return countType(log.snapshot(), EventDone) == 2
+	})
 	if cmds := commandEvents(log.snapshot()); len(cmds) != 0 {
 		t.Fatalf("a refused prompt reported %+v", cmds[0].Command)
 	}
-	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 }
 
 // TestGrokPromptUnchanged: grok advertises every plugin skill itself and
@@ -720,15 +771,35 @@ const (
 // timing it through a Prompt would time the fake's round trip instead.
 func waitingSession(t *testing.T) *session {
 	t.Helper()
-	s := newTestSession(t, Options{PluginDirs: []string{probeFixtureDir(t)}, Stderr: io.Discard})
-	s.plugins = s.discoverPlugins(t.TempDir())
-	if len(s.plugins) != 2 {
-		t.Fatalf("the fixture discovered %+v", s.plugins)
+	s := newTestSession(t, Options{})
+	withProbePlugins(t, s)
+	return s
+}
+
+// withProbePlugins gives a session the probe fixture's plugins, discovered and
+// resolved, with no catalog applied: what the wait is decided from. It serves a
+// bare session and an in-process one alike, because the options it sets are
+// read only by the discovery it runs.
+func withProbePlugins(t *testing.T, s *session) {
+	t.Helper()
+	s.opts.PluginDirs = []string{probeFixtureDir(t)}
+	s.opts.Stderr = io.Discard
+	plugins := s.discoverPlugins(t.TempDir())
+	if len(plugins) != 2 {
+		t.Fatalf("the fixture discovered %+v", plugins)
 	}
 	s.mu.Lock()
+	s.plugins = plugins
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
-	return s
+}
+
+// abortCatalogWait is Cancel's abort taken on its own, for the timing test
+// that ends a wait with nothing but the abort.
+func (s *session) abortCatalogWait() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abortCatalogWaitLocked()
 }
 
 // awaitOnce runs the wait exactly as Prompt runs it — awaitCatalog, then the
@@ -780,17 +851,24 @@ func waitForCatalogWait(t *testing.T, s *session) {
 	})
 }
 
-// promptOn runs one Prompt on its own goroutine, so the test can drive the
-// session while that prompt is parked in the wait. The context is Background
+// runOn runs a prompt on its own goroutine — as the TUI's Cmd runs the
+// continuation Begin returned — so the test can drive the session while that
+// prompt is parked in the wait or has not run yet. The context is Background
 // because both real callers pass that: Esc and a headless signal both arrive
 // through Session.Cancel, never through the prompt's context.
-func promptOn(s *session, text string) <-chan error {
+func runOn(run func(context.Context) (Result, error)) <-chan error {
 	out := make(chan error, 1)
 	go func() {
-		_, err := s.Prompt(context.Background(), text)
+		_, err := run(context.Background())
 		out <- err
 	}()
 	return out
+}
+
+// promptOn is runOn for a whole Prompt: the claim is taken on the prompt's own
+// goroutine too, not the test's.
+func promptOn(s *session, text string) <-chan error {
+	return runOn(func(ctx context.Context) (Result, error) { return s.Prompt(ctx, text) })
 }
 
 // promptReturn is what that prompt returned. The deadline is a deadlock guard,
@@ -1038,11 +1116,12 @@ func TestCancelDuringTheWaitLeavesTheNextPromptAlone(t *testing.T) {
 // TestASecondPromptDuringTheWaitIsRefused is the other half of that race: not
 // what Cancel does after the abort, but what a prompt sent while one is still
 // parked may do. The wait holds the prompt slot without holding s.inPrompt, so
-// the refusal has to come from the registration itself — otherwise the second
-// caller either overwrites the registration (a bare name, which would park too,
-// leaving Cancel with only the later channel to close while the first waiter
-// timed out and sent) or opens a turn straight over the parked one (plain text,
-// which never waits). Both are one prompt slot claimed twice.
+// the refusal has to come from something other than the turn — Begin's claim,
+// and behind it the registration itself — otherwise the second caller either
+// overwrites the registration (a bare name, which would park too, leaving
+// Cancel with only the later channel to close while the first waiter timed out
+// and sent) or opens a turn straight over the parked one (plain text, which
+// never waits). Both are one prompt slot claimed twice.
 //
 // B goes on a goroutine so a lost guard shows up as the deadline rather than as
 // a test that sits out the whole window; the pointer comparison is what says

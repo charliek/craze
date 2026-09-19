@@ -619,6 +619,89 @@ func TestErroredTurnDrainsNothing(t *testing.T) {
 	if m.turnSeq != seq {
 		t.Fatalf("nothing drains from an error state: turnSeq %d", m.turnSeq)
 	}
+	// EventError draws the row; the promptDoneMsg that follows must not draw
+	// a second one (#20).
+	if got := len(texts(m, entryError)); got != 1 {
+		t.Fatalf("event-then-promptDone: want one error row, got %d", got)
+	}
+}
+
+// TestErroredTurnPromptDoneBeforeEventDrawsOneRow is TestErroredTurnDrainsNothing's
+// twin in the other delivery order: bubbletea does not order the eventMsg
+// from waitEvent against the promptDoneMsg from the prompt Cmd, so
+// promptDoneMsg can land first. It alone must already put the model into the
+// error state — but the row is EventError's to draw, so there must be none
+// yet until the event lands (#20).
+func TestErroredTurnPromptDoneBeforeEventDrawsOneRow(t *testing.T) {
+	m, _ := queueWorking(t)
+	m = typeEnter(t, m, "PINEAPPLE")
+	seq := m.turnSeq
+
+	// Arm a send-now and raise a confirm directly (a legitimate model state,
+	// just not one the real key flow can reach at the same time as an armed
+	// send-now) so the "dropped"/"cleared" assertions below are not vacuous.
+	m.strong = &strongSend{text: "MANGO", seq: seq}
+	m.confirm = &strongSend{text: "KIWI"}
+
+	tm, _ := m.Update(promptDoneMsg{res: agent.Result{}, err: errors.New("boom")})
+	m = tm.(Model)
+
+	if m.status != statusError {
+		t.Fatalf("promptDoneMsg alone must set the error status: got %s", m.status)
+	}
+	if m.err != "boom" {
+		t.Fatalf("promptDoneMsg alone must set m.err: got %q", m.err)
+	}
+	if got := len(texts(m, entryError)); got != 0 {
+		t.Fatalf("the row is the event's to draw, not promptDoneMsg's: got %d rows", got)
+	}
+	if m.strong != nil {
+		t.Fatal("the armed send-now must be dropped")
+	}
+	if m.confirm != nil {
+		t.Fatal("the confirm must be cleared")
+	}
+	if m.streamEndSeq == seq {
+		t.Fatal("the stream has not ended yet: only EventError ends it")
+	}
+
+	m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
+	if got := len(texts(m, entryError)); got != 1 {
+		t.Fatalf("promptDone-then-event: want exactly one error row, got %d", got)
+	}
+	if m.streamEndSeq != seq {
+		t.Fatalf("the event ends the stream: streamEndSeq %d want %d", m.streamEndSeq, seq)
+	}
+}
+
+// TestRefusedPromptDrawsOneRowAndEndsTheStream covers the refusals that emit
+// no event at all: promptDoneMsg is the only ending coming, so it must draw
+// the row itself and end the stream, for both refusal errors (#20).
+func TestRefusedPromptDrawsOneRowAndEndsTheStream(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"prompt in flight", agent.ErrPromptInFlight},
+		{"foreign turn", agent.ErrForeignTurn},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := queueWorking(t)
+			m = typeEnter(t, m, "PINEAPPLE")
+			seq := m.turnSeq
+
+			tm, _ := m.Update(promptDoneMsg{res: agent.Result{}, err: tc.err})
+			m = tm.(Model)
+
+			if got := len(texts(m, entryError)); got != 1 {
+				t.Fatalf("a refusal draws exactly one row: got %d", got)
+			}
+			if m.streamEndSeq != seq {
+				t.Fatalf("a refusal emits no event, so promptDoneMsg must end the stream: streamEndSeq %d want %d", m.streamEndSeq, seq)
+			}
+		})
+	}
 }
 
 func TestForeignTurnHoldsTheDrainAndNotesItself(t *testing.T) {

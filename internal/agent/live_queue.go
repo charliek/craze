@@ -109,12 +109,13 @@ func (s *session) PopQueue() (p QueuedPrompt, ok bool) {
 }
 
 // takeGuarded is the guard and the removal as one critical section: a row that
-// left the queue and could not then be prompted would simply be gone. The
-// caller holds queueOp.
+// left the queue and could not then be prompted would simply be gone. A claimed
+// prompt counts as in flight even before its turn opens: Begin would refuse the
+// row's prompt then. The caller holds queueOp.
 func (s *session) takeGuarded(take func() (QueueEvent, bool)) (QueueEvent, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.inPrompt || s.foreign {
+	if s.inPrompt || s.claimed || s.foreign {
 		return QueueEvent{}, false
 	}
 	return take()

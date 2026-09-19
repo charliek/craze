@@ -62,11 +62,21 @@ type Stub struct {
 	queue   agent.PromptQueue
 	// inPrompt, doneEmitted and cancelling mirror the live session's turn
 	// state, which is what the queue guards and Interject are decided from.
+	// claimed is the live session's claim: Begin takes the prompt slot before
+	// the prompt's own goroutine opens the turn, and a Cancel in between
+	// withdraws the prompt instead of reaching the agent.
 	inPrompt     bool
+	claimed      bool
 	doneEmitted  bool
 	cancelling   bool
 	foreign      bool
 	interjectErr error
+	// prompts is every prompt handed to Begin, in order, and a withdrawn one
+	// stays recorded, as its row stays in the transcript. cancelsSent counts
+	// the cancels the live session would have written to the agent: every
+	// Cancel but one that a claimed, unopened prompt withdraws for.
+	prompts     []string
+	cancelsSent int
 }
 
 type stubOpen struct{ id, method string }
@@ -156,9 +166,9 @@ func (s *Stub) HangNext() {
 //
 // The channel it returns closes as that prompt goes into the wait. A test that
 // cancels without receiving from it is not testing a cancelled wait at all: the
-// Cancel would buffer its token and the prompt would take it on arrival, which
-// is a queued cancellation and passes whether or not Cancel can reach a prompt
-// that is already parked.
+// Cancel would find the prompt claimed and not yet parked, and the prompt would
+// withdraw without parking, which passes whether or not Cancel can reach a
+// prompt that is already parked.
 func (s *Stub) ParkNext() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -292,15 +302,70 @@ func (s *Stub) Start(context.Context) error {
 
 func (s *Stub) Events() <-chan agent.Event { return s.events }
 
+// Prompt is Begin and its continuation back to back, as on the live session.
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
+	return s.Begin(text)(ctx)
+}
+
+// Begin is the live session's claim, taken on the caller's goroutine. It
+// clears the cancel mark and any cancellation token a Cancel left buffered:
+// a cancel asked before the claim is not for this prompt. A Begin while the
+// slot is claimed or a turn is open claims nothing and is refused.
+func (s *Stub) Begin(text string) func(context.Context) (agent.Result, error) {
 	s.mu.Lock()
-	park, parked := s.park, s.parked
+	defer s.mu.Unlock()
+	s.prompts = append(s.prompts, text)
+	if s.claimed || s.inPrompt {
+		return func(context.Context) (agent.Result, error) { return agent.Result{}, agent.ErrPromptInFlight }
+	}
+	s.claimed = true
+	s.cancelling = false
+	select {
+	case <-s.cancel:
+	default:
+	}
+	return func(ctx context.Context) (agent.Result, error) { return s.run(ctx, text) }
+}
+
+// Prompts is every prompt handed to Begin, in order.
+func (s *Stub) Prompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.prompts...)
+}
+
+// CancelsSent is how many cancels would have reached the agent.
+func (s *Stub) CancelsSent() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancelsSent
+}
+
+// run is Begin's continuation. Like the live session's, it withdraws — no
+// turn, no event, agent.ErrPromptCancelled — when it finds itself cancelled
+// before its turn is open: it does not park, and the opening withdraws it.
+func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
+	opened := false
+	defer func() {
+		s.mu.Lock()
+		s.claimed = false
+		s.cancelling = false
+		if opened {
+			s.inPrompt = false
+		}
+		s.mu.Unlock()
+	}()
+	s.mu.Lock()
+	// Cancelled since the claim: a prompt the live session would have held
+	// for the catalog does not park once it is cancelled, and goes straight
+	// on to the opening, which withdraws it.
+	park, parked := s.park && !s.cancelling, s.parked
 	s.park, s.parked = false, nil
 	s.mu.Unlock()
 	if park {
-		// Before the bookkeeping, where the live session's wait also sits:
-		// nothing has been claimed, so the cancelled ending is the whole of
-		// what this prompt leaves behind.
+		// Before the bookkeeping, where the live session's wait also sits: no
+		// turn is open, so the cancelled ending is the whole of what this
+		// prompt leaves behind.
 		if parked != nil {
 			// The barrier goes down one statement short of the select, which
 			// is as close as Go gets. The gap is not observable: s.cancel is
@@ -317,6 +382,11 @@ func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 		return agent.Result{}, agent.ErrPromptCancelled
 	}
 	s.mu.Lock()
+	if s.cancelling {
+		// Cancelled since the claim, and the turn is not open: withdraw.
+		s.mu.Unlock()
+		return agent.Result{}, agent.ErrPromptCancelled
+	}
 	// One prompt at a time, as the live session has it: without the guard a
 	// second prompt's deferred clear would report the first one's turn over
 	// while it is still running, and the queue would drain into it.
@@ -329,15 +399,9 @@ func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 	s.n++
 	n := s.n
 	s.inPrompt = true
+	opened = true
 	s.doneEmitted = false
-	s.cancelling = false
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.inPrompt = false
-		s.cancelling = false
-		s.mu.Unlock()
-	}()
 
 	if hang {
 		select {
@@ -371,6 +435,12 @@ func (s *Stub) markDone() {
 func (s *Stub) Cancel(context.Context) error {
 	s.mu.Lock()
 	s.cancelling = true
+	// A prompt claimed and not yet open finds the mark and withdraws, or is
+	// parked where the live session aborts its wait: either way nothing
+	// reaches the agent for it. Every other cancel would.
+	if !s.claimed || s.inPrompt {
+		s.cancelsSent++
+	}
 	s.mu.Unlock()
 	s.cancelOpen()
 	select {

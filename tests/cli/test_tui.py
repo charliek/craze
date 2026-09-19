@@ -33,31 +33,50 @@ def _set_winsize(fd: int, rows: int = 24, cols: int = 80) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def _cmdline_has(needle: str) -> bool:
+def _cmdline_pids(needle: str) -> list[int]:
+    """Every pid whose argv[0] is exactly needle.
+
+    argv[0], not "needle appears somewhere in argv": craze's own process
+    names the fake agent's path too, as --agent-bin's value, so a substring
+    search would also catch craze itself while it is still running -- which
+    a caller hunting for the agent's own pid to signal must never do. Only
+    Linux has /proc; everywhere else ps -o pid=,args= is the one portable
+    view of another process's argv paired with its pid, and an absolute
+    path's own first token is its argv[0] there too. check=True on purpose:
+    a caller waiting for the list to empty reads [] as proof the child is
+    gone, so a ps that failed must raise rather than quietly turn a leak
+    check green.
+    """
     encoded = needle.encode()
     if sys.platform != "linux":
-        # Only Linux has /proc; everywhere else ps is the one portable view of
-        # another process's argv. check=True on purpose: every caller reads a
-        # False as proof the child is gone, so a ps that failed must raise
-        # rather than quietly turn a leak check green.
         out = subprocess.run(
-            ["ps", "-axww", "-o", "args="],
+            ["ps", "-axww", "-o", "pid=,args="],
             capture_output=True,
             check=True,
         ).stdout
-        return encoded in out
+        pids = []
+        for line in out.splitlines():
+            pid_str, _, args = line.strip().partition(b" ")
+            if pid_str.isdigit() and args.split(b" ", 1)[0] == encoded:
+                pids.append(int(pid_str))
+        return pids
     try:
         entries = Path("/proc").glob("[0-9]*/cmdline")
     except OSError:
-        return False
+        return []
+    pids = []
     for path in entries:
         try:
             data = path.read_bytes()
         except OSError:
             continue
-        if encoded in data:
-            return True
-    return False
+        if data.split(b"\0", 1)[0] == encoded:
+            pids.append(int(path.parent.name))
+    return pids
+
+
+def _cmdline_has(needle: str) -> bool:
+    return bool(_cmdline_pids(needle))
 
 
 class PTYCraze:
@@ -72,10 +91,14 @@ class PTYCraze:
         step: str | None = None,
         extra_args: list[str] | None = None,
         env_extra: dict[str, str] | None = None,
+        setctty: bool = False,
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
         self._closed = threading.Event()
+        self._master_open = False
+        self._answers_queries = setctty
+        self._answered_to = 0
         master, slave = _open_pty()
         _set_winsize(slave)
         _set_winsize(master)
@@ -124,6 +147,23 @@ class PTYCraze:
         if no_mouse:
             argv.append("--no-mouse")
         argv += extra_args or []
+        if setctty:
+            # start_new_session setsid()s and then dup2()s the slave, and a
+            # dup2 is not an open: the slave never becomes the session's
+            # controlling terminal, so closing the master signals nothing.
+            # A terminal hangs up only its controlling session, so this mode
+            # makes craze one. A fresh interpreter does it, never a
+            # preexec_fn: that callback runs after fork in a process that
+            # already has threads (FakeHerdr's server, this class's readers),
+            # which CPython documents as a deadlock hazard. execv keeps the
+            # pid, so proc.pid is still craze and still its own group.
+            argv = [
+                sys.executable,
+                "-c",
+                "import os,fcntl,termios,sys; os.setsid(); "
+                "fcntl.ioctl(0, termios.TIOCSCTTY, 0); os.execv(sys.argv[1], sys.argv[1:])",
+                *argv,
+            ]
         try:
             self.proc = subprocess.Popen(
                 argv,
@@ -132,7 +172,9 @@ class PTYCraze:
                 stderr=slave,
                 env=env,
                 cwd=str(workspace),
-                start_new_session=True,
+                # The helper does its own setsid, which must come before its
+                # ioctl.
+                start_new_session=not setctty,
                 close_fds=True,
             )
         except Exception:
@@ -141,6 +183,7 @@ class PTYCraze:
             raise
         os.close(slave)
         self.master = master
+        self._master_open = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -160,7 +203,33 @@ class PTYCraze:
                 continue
             if not chunk:
                 break
+            before = len(self.buf)
             self.buf.extend(chunk)
+            if self._answers_queries:
+                # Back by one query's length less one: a query split across
+                # two reads is still found whole.
+                self._answer_queries(max(0, before - len(_CPR_QUERY) + 1))
+
+    def _answer_queries(self, start: int) -> None:
+        """Answer the background-colour query the way a real terminal does.
+
+        Only a craze that owns its terminal asks: termenv queries a tty only
+        when it is the foreground of its controlling one. It writes the OSC 11
+        query and then a cursor-position query, reads both answers in that
+        order, and waits five seconds for them before carrying on without.
+        Unanswered, every setctty run would start five seconds late.
+        """
+        start = max(start, self._answered_to)
+        while (i := self.buf.find(_CPR_QUERY, start)) >= 0:
+            reply = _CPR_REPLY
+            if self.buf.rfind(_BG_QUERY, self._answered_to, i) >= 0:
+                reply = _BG_REPLY + reply
+            self._answered_to = start = i + len(_CPR_QUERY)
+            try:
+                os.write(self.master, reply)
+            except OSError:
+                # craze is gone, and with it whoever asked.
+                return
 
     def screen(self) -> str:
         return bytes(self.buf).decode("utf-8", "replace")
@@ -210,6 +279,32 @@ class PTYCraze:
         except subprocess.TimeoutExpired as err:
             raise AssertionError(f"craze did not exit: {self.screen()[-3000:]}") from err
 
+    def hangup(self, timeout: float = 5) -> int:
+        """Close the terminal under craze, the way a closed tab does, and
+        return its exit code.
+
+        Only a setctty craze is hung up by this: anything else has no
+        controlling terminal, and closing the master signals nothing. The
+        screen is frozen from here on, so nothing after it can be waited for
+        on the terminal.
+        """
+        # The reader stopped first: it selects on the master, and once the fd
+        # is closed its number can be reused by anything this process opens.
+        self._closed.set()
+        self._reader.join(timeout=1)
+        self._close_master()
+        return self.wait_exit(timeout)
+
+    def _close_master(self) -> None:
+        """Close the master exactly once, whichever of hangup and close runs."""
+        if not self._master_open:
+            return
+        self._master_open = False
+        try:
+            os.close(self.master)
+        except OSError:
+            pass
+
     def close(self) -> None:
         self._closed.set()
         if self.proc.poll() is None:
@@ -225,10 +320,7 @@ class PTYCraze:
                 except ProcessLookupError:
                     pass
                 self.proc.wait(timeout=1)
-        try:
-            os.close(self.master)
-        except OSError:
-            pass
+        self._close_master()
 
     def __enter__(self) -> PTYCraze:
         return self
@@ -242,6 +334,12 @@ class PTYCraze:
 # into what wait_contains matches.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
+# termenv's terminal queries and a dark terminal's answers to them.
+_BG_QUERY = b"\x1b]11;?"
+_CPR_QUERY = b"\x1b[6n"
+_BG_REPLY = b"\x1b]11;rgb:0000/0000/0000\x1b\\"
+_CPR_REPLY = b"\x1b[1;1R"
+
 
 def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:
     needle = str(fake_agent_bin)
@@ -251,6 +349,32 @@ def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"fake-agent still running: {needle}")
+
+
+def quit_craze(tui: PTYCraze, timeout: float = 5) -> None:
+    """Ctrl+D, then assert a clean exit. Moved here from test_host_status.py
+    (issue #23) so test_tui.py's own cases can use it too; it closes over no
+    module-level WAIT, so it gets its own default, matching wait_exit's.
+    """
+    tui.write(b"\x04")
+    code = tui.wait_exit(timeout=timeout)
+    assert code == 0, tui.screen()[-3000:]
+
+
+def _wait_output(tui: PTYCraze, needle: str, timeout: float = 5) -> str:
+    """wait_contains that expects craze to have exited already.
+
+    Moved here from test_host_status.py (issue #23) for the same reason as
+    quit_craze, with its own default timeout rather than that module's WAIT.
+    """
+    deadline = time.monotonic() + timeout
+    text = ""
+    while time.monotonic() < deadline:
+        text = _ANSI.sub("", tui.screen())
+        if needle in text:
+            return text
+        time.sleep(0.05)
+    raise AssertionError(f"timeout waiting for {needle!r}: {text[-3000:]!r}")
 
 
 def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
@@ -303,6 +427,103 @@ def test_tui_authfail_exits_nonzero(
         code = tui.wait_exit()
         assert code != 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_clean_exit_prints_no_agent_stderr(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """F1/#23: a clean /exit never shows the agent's own stderr.
+
+    The pair is what makes the negative sound: `plugin dir skipped:` (craze's
+    own lane, from the missing --plugin-dir) is present, proving post-exit
+    bytes survive this harness at all, so the canary's absence is the agent
+    lane being discarded on a clean run, not a pty that dropped bytes.
+    """
+    canary = "CANARY-CLEAN-EXIT"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        env_extra={"CRAZE_FAKE_STDERR": canary},
+        extra_args=["--plugin-dir", "definitely-not-here"],
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"hello\r")
+        tui.wait_contains("echo: hello")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+    text = _ANSI.sub("", tui.screen())
+    assert "plugin dir skipped:" in text, text[-3000:]
+    assert canary not in text, text[-3000:]
+
+
+def test_tui_authfail_prints_agent_stderr(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """#23's deterministic start-failure companion to
+    test_tui_authfail_exits_nonzero: a session that never started still shows
+    the agent's stderr, and exits exactly 1.
+
+    authfail's error lands before the user can press anything (§2.7 fact 6),
+    with nothing racing errMsg the way Ctrl+D's requestQuit does elsewhere, so
+    unlike TestTUIKeepsTheAgentStderrOffTheTerminal in Go this one can assert
+    the exit code too. No `plugin dir skipped:` line is expected:
+    discoverPlugins runs only after authenticate, which authfail never
+    reaches — the positive control here is the exit code, not a second line.
+    """
+    canary = "CANARY-AUTHFAIL"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="authfail",
+        env_extra={"CRAZE_FAKE_STDERR": canary},
+    ) as tui:
+        tui.wait_contains("authentication failed")
+        tui.write(b"\x04")
+        code = tui.wait_exit()
+        assert code == 1, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+    text = _ANSI.sub("", tui.screen())
+    assert canary in text, text[-3000:]
+    assert "plugin dir skipped:" not in text, text[-3000:]
+
+
+def test_tui_agent_death_prints_stderr_and_exits_clean(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """#23 end to end: an agent that dies on its own is not craze failing.
+
+    The stored ErrAgentExited travels session.Close -> finishRun's bool ->
+    flush's failed, so the agent's stderr (including the startup canary)
+    survives past the exit — and craze still exits 0, because a dead agent is
+    not craze's own failure. CRAZE_FAKE_LINGER keeps the fake from dying of
+    its own closed stdin on some other path than the SIGTERM this test sends;
+    `Working` is long-turn's proof the prompt was read and a turn is genuinely
+    open, so the kill lands mid-session rather than racing session/prompt.
+    """
+    canary = "CANARY-AGENT-DIED"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        step="30s",
+        env_extra={"CRAZE_FAKE_STDERR": canary, "CRAZE_FAKE_LINGER": "1"},
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"go the long way\r")
+        tui.wait_contains("Working")
+        pids = _cmdline_pids(str(fake_agent_bin))
+        assert len(pids) == 1, pids
+        os.kill(pids[0], signal.SIGTERM)
+        tui.wait_contains("error: ")
+        tui.write(b"\x04")
+        code = tui.wait_exit()
+        assert code == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+    text = _ANSI.sub("", tui.screen())
+    assert canary in text, text[-3000:]
 
 
 def test_tui_subagent_view_enter_esc(

@@ -142,9 +142,38 @@ func TestResumePickerEnterLoadsTheRow(t *testing.T) {
 	if out.sess == nil {
 		t.Fatal("no session was built")
 	}
+	assertOwned(t, out)
 	if cmd == nil {
 		t.Fatal("Enter must return the start batch")
 	}
+}
+
+// TestResumePickerNilLoadFallsBackToAStub: a LoadSession that builds nothing
+// leaves confirmResume's NewStub fallback, and that assignment goes through the
+// owner as well.
+func TestResumePickerNilLoadFallsBackToAStub(t *testing.T) {
+	isolateSkillsHome(t)
+	m := New(Config{
+		Theme:       "tokyo-night",
+		Workspace:   t.TempDir(),
+		Yolo:        true,
+		Provider:    agent.CursorProvider(),
+		Resume:      threeResumeRows(),
+		LoadSession: func(agent.Provider, sessions.Row) agent.Session { return nil },
+	})
+	if !m.pickingResume || m.sess != nil {
+		t.Fatal("setup: no resume picker, or a session before a row was chosen")
+	}
+	assertOwned(t, m)
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	out := tm.(Model)
+	if out.pickingResume {
+		t.Fatal("setup: Enter did not confirm the row")
+	}
+	if _, ok := out.sess.(*Stub); !ok {
+		t.Fatalf("a nil LoadSession left %T, want the *Stub fallback", out.sess)
+	}
+	assertOwned(t, out)
 }
 
 // TestResumePickerClickLoads: a click on a row loads it. The provider picker
@@ -161,6 +190,7 @@ func TestResumePickerClickLoads(t *testing.T) {
 	if out.dialog != dialogNone || out.sess == nil {
 		t.Fatal("the click did not start the chosen session")
 	}
+	assertOwned(t, out)
 }
 
 // TestResumePickerSwallowsAClickOutside is §3.7's pin: a click outside a

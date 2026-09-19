@@ -113,7 +113,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// $CRAZE_PROVIDER or the config file resolved to is only the picker's
 	// preselection and the explicit-flag filter — and an unknown id's
 	// fallback diagnostic would be about a choice the row overrides (§3.1).
-	provDiag := io.Writer(diag)
+	provDiag := diag.craze()
 	if f.cont || f.resume {
 		provDiag = io.Discard
 	}
@@ -136,7 +136,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	hosts := resolveHosts(f, env)
 	childEnv := hosts.childEnv(env.list())
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		return agent.New(sessionOptions(f, ws, mode, diag, childEnv, p, row))
+		return agent.New(sessionOptions(f, ws, mode, diag.agent(), diag.craze(), childEnv, p, row))
 	}
 	newSession := func(p agent.Provider) agent.Session { return build(p, sessions.Row{}) }
 	cfg := tui.Config{
@@ -170,9 +170,12 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// Only after resolveLoad: a --continue with no row has returned above, so
 	// the hub's goroutines start only for a run that reaches tui.Run, whose
 	// exit tail closes the hub before diag is flushed.
-	attachHost(&cfg, hosts, diag)
-	err = tui.Run(cfg)
-	diag.flush(os.Stderr)
+	attachHost(&cfg, hosts, diag.craze())
+	failed, err := tui.Run(cfg)
+	// err != nil is also folded into Run's own bool, but the craze lane
+	// prints either way and a p.Run error is what makes runTUI see err at
+	// all, so it stays explicit here too (§3.7.3).
+	diag.flush(os.Stderr, err != nil || failed)
 	return err
 }
 
@@ -184,7 +187,11 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 //
 // env is the agent child's environment, hostSet.childEnv's answer: nil inherits
 // craze's own, and anything else replaces it wholesale.
-func sessionOptions(f *tuiFlags, ws, mode string, stderr io.Writer, env []string, p agent.Provider, row sessions.Row) agent.Options {
+//
+// stderr and diag are the two lanes deferredStderr splits (§3.7.1): stderr is
+// the agent child's own stderr, diag is where craze's own notes about the
+// session — discoverPlugins' warn closure — go instead.
+func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p agent.Provider, row sessions.Row) agent.Options {
 	return agent.Options{
 		Binary:      f.agentBin,
 		Workspace:   ws,
@@ -192,6 +199,7 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr io.Writer, env []string
 		Model:       f.model,
 		Mode:        mode,
 		Stderr:      stderr,
+		Diag:        diag,
 		Env:         env,
 		PluginDirs:  f.pluginDirs,
 		Interactive: true,
@@ -299,47 +307,87 @@ func pickerProviders(explicitBin string) []agent.Provider {
 	return out
 }
 
-// deferredStderr holds what the agent said until the terminal is craze's to
-// write on again. internal/acp copies the child's stderr from a goroutine of
-// its own, so the buffer is guarded.
+// deferredStderr holds what was said until the terminal is craze's to write
+// on again, in two lanes behind one mutex (§3.7.1, issue #23): crazeBuf is
+// craze's own diagnostics — a host-status line, the unknown-provider line,
+// a plugin-dir note — and agentBuf is the agent child's stderr, which
+// internal/acp copies from a goroutine of its own. craze's own lane is
+// UNBOUNDED BY DESIGN: it holds a handful of one-line notes, each written at
+// most once or twice per run, and it must never be crowded out by an agent
+// that loops on its own stderr for an hour — which is what deferredStderrMax
+// exists to cap, and caps on the agent's lane alone.
 type deferredStderr struct {
-	mu      sync.Mutex
-	buf     bytes.Buffer
-	dropped int
+	mu       sync.Mutex
+	crazeBuf bytes.Buffer
+	agentBuf bytes.Buffer
+	dropped  int
 }
 
-// deferredStderrMax is how much diagnostic craze will hold. An agent looping on
-// stderr for an hour must not grow the buffer without bound; past the cap the
-// tail is dropped and counted, because the first thing it said is the thing
-// worth reading.
+// deferredStderrMax is how much of the agent's own stderr craze will hold.
+// An agent looping on its own stderr for an hour must not grow that lane
+// without bound; past the cap the tail is dropped and counted, because the
+// first thing it said is the thing worth reading. It does not apply to
+// craze's own lane (see deferredStderr's doc comment).
 const deferredStderrMax = 256 << 10
 
-func (d *deferredStderr) Write(p []byte) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if room := deferredStderrMax - d.buf.Len(); room < len(p) {
+// craze is the writer view of craze's own lane: host warnings, the
+// unknown-provider line and discoverPlugins' notes go here, never through the
+// agent's own Stderr.
+func (d *deferredStderr) craze() io.Writer { return crazeLane{d} }
+
+// agent is the writer view of the agent child's own stderr lane, capped at
+// deferredStderrMax.
+func (d *deferredStderr) agent() io.Writer { return agentLane{d} }
+
+type crazeLane struct{ d *deferredStderr }
+
+func (l crazeLane) Write(p []byte) (int, error) {
+	l.d.mu.Lock()
+	defer l.d.mu.Unlock()
+	return l.d.crazeBuf.Write(p)
+}
+
+type agentLane struct{ d *deferredStderr }
+
+func (l agentLane) Write(p []byte) (int, error) {
+	l.d.mu.Lock()
+	defer l.d.mu.Unlock()
+	d := l.d
+	if room := deferredStderrMax - d.agentBuf.Len(); room < len(p) {
 		d.dropped += len(p) - max(room, 0)
 		if room <= 0 {
 			return len(p), nil
 		}
 		p = p[:room]
 	}
-	return d.buf.Write(p)
+	return d.agentBuf.Write(p)
 }
 
-// flush prints the diagnostics to the real stderr. It is called after Run has
-// returned, which is after bubbletea has left the alt screen.
-func (d *deferredStderr) flush(w io.Writer) {
+// flush prints the diagnostics to the real stderr, once, after Run has
+// returned — which is after bubbletea has left the alt screen. craze's own
+// lane always prints; the agent's lane and its dropped count print only when
+// failed says the run did not end cleanly. Either way both lanes are gone
+// afterwards: a clean run's flush(false) DISCARDS the agent lane and its
+// count rather than holding them back, so a later flush(true) — there is
+// none, flush runs exactly once per process, but nothing here depends on
+// that — could never resurrect them.
+func (d *deferredStderr) flush(w io.Writer, failed bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.buf.Len() > 0 {
-		_, _ = w.Write(d.buf.Bytes())
-		d.buf.Reset()
+	if d.crazeBuf.Len() > 0 {
+		_, _ = w.Write(d.crazeBuf.Bytes())
+		d.crazeBuf.Reset()
 	}
-	if d.dropped > 0 {
-		_, _ = fmt.Fprintf(w, "craze: dropped %d further bytes of agent diagnostics\n", d.dropped)
-		d.dropped = 0
+	if failed {
+		if d.agentBuf.Len() > 0 {
+			_, _ = w.Write(d.agentBuf.Bytes())
+		}
+		if d.dropped > 0 {
+			_, _ = fmt.Fprintf(w, "craze: dropped %d further bytes of agent diagnostics\n", d.dropped)
+		}
 	}
+	d.agentBuf.Reset()
+	d.dropped = 0
 }
 
 // themeFlagUsage names the presets once, for both commands that take --theme.

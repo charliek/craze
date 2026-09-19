@@ -413,9 +413,9 @@ func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 	// The send runs where the tea runtime runs it, on its own goroutine, so
 	// the Esc below lands while it is still parked. Starting that goroutine
 	// does not order it against the Esc, though: without the barrier the Esc
-	// can run first, and the prompt then takes the buffered cancellation on
-	// arrival — a queued cancel, not a cancel of a prompt already in the wait,
-	// which is the only thing this test is about.
+	// can run first, and the prompt then withdraws without parking — a cancel
+	// of a claimed prompt, not of a prompt already in the wait, which is the
+	// only thing this test is about.
 	done := make(chan tea.Msg, 1)
 	go func() { done <- runCmd(send) }()
 	select {
@@ -457,6 +457,123 @@ func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 	if !strings.Contains(view, stopCancelled) {
 		t.Fatalf("the cancel left no note:\n%s", view)
 	}
+}
+
+// TestEscRightAfterEnterWithdrawsTheClaimedPrompt is #18's pre-open window at
+// the TUI: Enter and then Esc in consecutive Updates, and the command Enter
+// returned — the prompt's goroutine, which the runtime may schedule late — has
+// not run yet when the cancel does. Enter claimed the turn inside Update, so
+// the cancel is this prompt's: the prompt withdraws when its command does run,
+// and the cancel reaches nothing. What is left is what every cancel leaves: the
+// row, the note, no error, and no failed cancel.
+func TestEscRightAfterEnterWithdrawsTheClaimedPrompt(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	m := startStub(t, stub, t.TempDir(), 80, 24)
+	m, prompt := typeAndEnter(t, m, "stop me")
+	if m.status != statusWorking {
+		t.Fatal("want working")
+	}
+	m, esc := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if esc == nil {
+		t.Fatal("expected cancel cmd")
+	}
+
+	if msg := runCmd(esc); msg != nil {
+		t.Fatalf("the cancel failed: %+v", msg)
+	}
+	m = deliver(t, m, withdrawnPrompt(t, prompt))
+	if m.status != statusIdle {
+		t.Fatalf("status %s", m.status)
+	}
+	if m.err != "" {
+		t.Fatalf("a cancel is not an error: %q", m.err)
+	}
+	if rows := texts(m, entryError); len(rows) != 0 {
+		t.Fatalf("error rows %q", rows)
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "stop me") {
+		t.Fatalf("the prompt left the transcript:\n%s", view)
+	}
+	if !strings.Contains(view, stopCancelled) {
+		t.Fatalf("the cancel left no note:\n%s", view)
+	}
+	if prompts := stub.Prompts(); len(prompts) != 1 || prompts[0] != "stop me" {
+		t.Fatalf("the stub recorded %q", prompts)
+	}
+	if n := stub.CancelsSent(); n != 0 {
+		t.Fatalf("%d cancels reached the agent for a prompt that never did", n)
+	}
+	select {
+	case ev := <-stub.Events():
+		t.Fatalf("a withdrawn prompt emitted %+v", ev)
+	default:
+	}
+}
+
+// TestEscAfterEnterDuringAForeignTurnWritesNoCancel is the corner the claim
+// accepts. The agent is running a turn of its own that the model has not heard
+// about yet — its event is still in the channel — so Enter sends rather than
+// queues, and Esc lands before the prompt's command runs. The claimed prompt
+// withdraws and the cancel writes nothing, so the foreign turn keeps running: a
+// cancel for the withdrawn prompt would stop a turn the user never started.
+// A second Esc, pressed while the turn still shows working, finds no claim by
+// the time it runs, and that cancel goes out at once. (Once the model has
+// settled, Esc does not reach the session for a foreign turn at all: the turn
+// is the agent's, as it always was.)
+func TestEscAfterEnterDuringAForeignTurnWritesNoCancel(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	m := startStub(t, stub, t.TempDir(), 80, 24)
+	stub.SetForeignTurn(agent.ForeignTurnInfo{Running: true})
+	m, prompt := typeAndEnter(t, m, "mine")
+	if m.status != statusWorking {
+		t.Fatalf("status %s: the prompt should have been sent, not queued", m.status)
+	}
+	m, first := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, second := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if first == nil || second == nil {
+		t.Fatal("expected two cancel cmds")
+	}
+
+	if msg := runCmd(first); msg != nil {
+		t.Fatalf("the first cancel failed: %+v", msg)
+	}
+	if n := stub.CancelsSent(); n != 0 {
+		t.Fatalf("the Esc for the claimed prompt wrote %d cancels", n)
+	}
+	got := withdrawnPrompt(t, prompt)
+	if !stub.Snapshot().ForeignTurn {
+		t.Fatal("the foreign turn was stopped")
+	}
+
+	if msg := runCmd(second); msg != nil {
+		t.Fatalf("the second cancel failed: %+v", msg)
+	}
+	if n := stub.CancelsSent(); n != 1 {
+		t.Fatalf("the second Esc wrote %d cancels, want 1", n)
+	}
+	m = deliver(t, m, got)
+	if m.status != statusIdle || m.err != "" {
+		t.Fatalf("status %s, err %q", m.status, m.err)
+	}
+	if !strings.Contains(plainView(m), stopCancelled) {
+		t.Fatalf("the cancel left no note:\n%s", plainView(m))
+	}
+}
+
+// withdrawnPrompt runs the command a send returned — the claimed prompt's
+// continuation, after the Esc that cancelled it — and returns its message,
+// which has to be the withdraw: agent.ErrPromptCancelled, and nothing else.
+func withdrawnPrompt(t *testing.T, prompt tea.Cmd) promptDoneMsg {
+	t.Helper()
+	msg := runCmd(prompt)
+	got, ok := msg.(promptDoneMsg)
+	if !ok || !errors.Is(got.err, agent.ErrPromptCancelled) {
+		t.Fatalf("the claimed prompt returned %#v", msg)
+	}
+	return got
 }
 
 func TestPermissionOverlayKeys(t *testing.T) {

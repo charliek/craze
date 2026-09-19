@@ -79,10 +79,10 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 		if m.sess != nil {
 			_ = m.sess.Close()
 		}
-		m.sess = m.newSession(p)
+		m.setSession(m.newSession(p))
 	}
 	if m.sess == nil {
-		m.sess = NewStub()
+		m.setSession(NewStub())
 	}
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {

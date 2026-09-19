@@ -24,14 +24,28 @@ type session struct {
 
 	closeOnce sync.Once
 	closeDone chan struct{}
+	// closeErr is client.Close()'s stored result: the sentinel wrapping
+	// agent.ErrAgentExited when the agent's exit had been reaped before this
+	// Close sampled it, nil otherwise. Every Close call after the first
+	// returns this rather than nil, so a second caller sees the same answer
+	// the first did (§3.7.3).
+	closeErr error
 
-	mu         sync.Mutex
-	started    bool
-	closed     bool
-	inPrompt   bool
+	mu       sync.Mutex
+	started  bool
+	closed   bool
+	inPrompt bool
+	// claimed holds from Begin until the prompt it claimed has returned. It is
+	// wider than inPrompt, which is the turn itself: a claimed prompt may not
+	// have opened its turn yet, and a Cancel in that gap is still for it.
+	claimed    bool
 	promptDone chan struct{}
-	waiting    map[string]pendingAsk
-	seq        map[string]int
+	// wire is the claimed prompt's wire outcome, set by Begin with the claim
+	// and cleared when the claim ends: what Cancel waits on so that its
+	// session/cancel can never reach the agent ahead of the prompt it stops.
+	wire    *turnWire
+	waiting map[string]pendingAsk
+	seq     map[string]int
 	// turn counts prompts; cancelledTurn records the one a cancel was issued
 	// for, so a request that arrives while the turn is being cancelled is
 	// answered instead of parked. Which turn a *card* belongs to is the client's
@@ -67,8 +81,10 @@ type session struct {
 	// way. inPrompt is still true until Prompt's defer runs, so it alone
 	// cannot say whether there is still a turn to interject into.
 	doneEmitted bool
-	// cancelling holds from Cancel until the turn ends. An interjection sent
-	// in that window is exactly what grok strands.
+	// cancelling holds from Cancel until the claim it was for is released,
+	// and Begin clears it, so a cancel asked before a claim is never that
+	// prompt's. An interjection sent in that window is exactly what grok
+	// strands.
 	cancelling bool
 	// foreign mirrors the client's foreign-turn state for Snapshot.
 	foreign      bool
@@ -108,6 +124,73 @@ type session struct {
 
 // taskReceiptCap bounds the parked receipts of a single turn.
 const taskReceiptCap = 32
+
+// wireOutcome is what became of one turn's session/prompt: still on its way
+// out, written, refused before the wire, or failed without reaching it.
+type wireOutcome int
+
+const (
+	wirePending wireOutcome = iota
+	// wireSent: the prompt's bytes were written. A write whose reply then
+	// failed still counts: the agent has the prompt.
+	wireSent
+	// wireRefused: the client refused the prompt before the wire. The one
+	// refusal Prompt can reach is ErrForeignTurn, and then a turn of the
+	// agent's own is running — which is what a cancel would stop.
+	wireRefused
+	// wireFailed: nothing reached the agent — the write failed, the
+	// connection was already closed, or the claimed prompt returned before
+	// its turn opened without withdrawing.
+	wireFailed
+	// wireWithdrawn: the claimed prompt found itself cancelled before its
+	// turn opened, and withdrew. Nothing was sent, and nothing will be.
+	wireWithdrawn
+)
+
+// turnWire carries one prompt's wire outcome from the prompt, which learns it,
+// to Cancel, which has to wait for it. Begin creates it with the claim, and the
+// same value then carries the prompt through its turn's opening to the write.
+// Each prompt gets its own: grok's writer can report a write after the turn it
+// belongs to has ended, and a report into the old turn's value can then no
+// longer speak for the next one.
+type turnWire struct {
+	outcome wireOutcome // written under s.mu, before done is closed
+	done    chan struct{}
+}
+
+// publishWire settles a turn's wire outcome. The first outcome wins and later
+// ones change nothing, so every path that learns something may say it: the
+// written bytes, the client's return, and the claim's release. It takes only
+// s.mu, sets one field and closes one channel: as the prompt's sent hook it
+// runs inside acp's write path, where anything that blocked would hold the
+// prompt's reply wait with it.
+func (s *session) publishWire(w *turnWire, o wireOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w.publishLocked(o)
+}
+
+func (w *turnWire) publishLocked(o wireOutcome) {
+	if w.outcome != wirePending {
+		return
+	}
+	w.outcome = o
+	close(w.done)
+}
+
+// outcomeOf reads a settled outcome. The close of done already orders the
+// read after the write; the lock is for uniformity with every other field.
+func (s *session) outcomeOf(w *turnWire) wireOutcome {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return w.outcome
+}
+
+// testBeforeWire runs, when set, right before Prompt hands its request to the
+// client: the one point where a turn is open and its prompt is not yet on the
+// wire, which a test can only hold still from here. It is a var only so the
+// tests can set it; nothing in craze writes it.
+var testBeforeWire func(s *session)
 
 // pendingAsk is one blocking request the UI still owes an answer to. kind is
 // askPermission, askQuestion or askPlan; decide carries that kind's own
@@ -429,11 +512,18 @@ func (s *session) flushReplayUser() {
 // would be strictly worse than a session without them.
 func (s *session) discoverPlugins(workspace string) []PluginEntry {
 	scan := s.provider().PluginScan()
+	// Both of this closure's lines are craze's own — "plugin dirs ignored for
+	// …" below and "plugin dir skipped: …" from the package function — so
+	// both go to Diag, not the agent's own Stderr lane (§3.7.1).
+	diag := s.opts.Diag
+	if diag == nil {
+		diag = s.opts.Stderr
+	}
 	warn := func(msg string) {
-		if s.opts.Stderr == nil {
+		if diag == nil {
 			return
 		}
-		fmt.Fprintln(s.opts.Stderr, msg)
+		fmt.Fprintln(diag, msg)
 	}
 	if !scan.Dirs && len(s.opts.PluginDirs) > 0 {
 		warn("plugin dirs ignored for " + s.provider().Name())
@@ -537,7 +627,14 @@ var catalogWait = 5 * time.Second
 // caller that would not have waited at all (a qualified name, plain text) is
 // refused for the same reason: starting its turn while a waiter is parked
 // leaves two prompts racing for one slot. Nothing has been spent at this point,
-// so the refusal costs the refused caller nothing to roll back.
+// so the refusal costs the refused caller nothing to roll back. Begin's claim
+// now refuses such a caller a step earlier; this stays the wait's own guard.
+//
+// A prompt that has been cancelled since its claim does not park at all. The
+// Cancel that marked it looked for a wait to abort in the same locked section
+// and found none, so it is waiting on the wire instead, and a parked prompt
+// would hold it there for the whole window. Registering nothing sends the
+// prompt straight on to its opening, which withdraws it.
 func (s *session) awaitCatalog(ctx context.Context, text string) (chan struct{}, error) {
 	s.mu.Lock()
 	if s.catalogAbort != nil {
@@ -546,7 +643,7 @@ func (s *session) awaitCatalog(ctx context.Context, text string) (chan struct{},
 	}
 	applied := s.commandsApplied
 	var abort chan struct{}
-	if !s.commandsSeen && len(s.plugins) > 0 && hasUnresolvedSlash(text, s.pluginLookupLocked()) {
+	if !s.cancelling && !s.commandsSeen && len(s.plugins) > 0 && hasUnresolvedSlash(text, s.pluginLookupLocked()) {
 		abort = make(chan struct{})
 		s.catalogAbort = abort
 	}
@@ -570,7 +667,8 @@ func (s *session) awaitCatalog(ctx context.Context, text string) (chan struct{},
 // Cancel closed it. It runs in the same locked section that marks the turn
 // started, so an Esc can never land between the end of the wait and the
 // bookkeeping: a Cancel either finds the registration — and this returns true,
-// before anything has been claimed — or finds the turn and cancels that.
+// before the turn has been opened — or finds no wait and marks the prompt,
+// which the same section then withdraws, or finds the turn and cancels that.
 func (s *session) clearCatalogWaitLocked(abort chan struct{}) bool {
 	if abort == nil {
 		return false
@@ -586,15 +684,14 @@ func (s *session) clearCatalogWaitLocked(abort chan struct{}) bool {
 	}
 }
 
-// abortCatalogWait ends a pending catalog wait, at most once, and reports
+// abortCatalogWaitLocked ends a pending catalog wait, at most once, and reports
 // whether it ended one: the registration is dropped under the same lock that
 // closes it, so a second Cancel finds nothing to close and answers false. A
 // prompt already on the wire is not this — that turn is the agent's to cancel —
 // which is why a registration is only honoured while there is no turn in
-// flight.
-func (s *session) abortCatalogWait() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// flight. The caller holds s.mu: Cancel, which has to look for the wait and
+// mark the prompt cancelling in one locked section.
+func (s *session) abortCatalogWaitLocked() bool {
 	if s.inPrompt || s.catalogAbort == nil {
 		return false
 	}
@@ -603,12 +700,84 @@ func (s *session) abortCatalogWait() bool {
 	return true
 }
 
+// Prompt is Begin and its continuation back to back, on the caller's own
+// goroutine. It claims nothing earlier than the prompt itself starts, so a
+// Cancel from another goroutine can still land before the claim: headless
+// `craze prompt`'s signal handler is such a caller, and keeps that narrower
+// window. Only a caller that can claim in the step that shows the turn
+// working — the TUI's Update — closes it, with Begin.
 func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
+	return s.Begin(text)(ctx)
+}
+
+// Begin claims the prompt slot for text now, on the caller's goroutine, and
+// returns the rest of the prompt to run. The TUI claims inside Update, in the
+// same step that shows the turn working, and runs the continuation on a Cmd
+// goroutine. Without the claim, an Esc that Update handled before that
+// goroutine opened the turn found no turn at all and wrote its cancel at once,
+// and the prompt followed it onto the wire — to an agent that drops a cancel
+// for a turn it has not seen.
+//
+// The claim clears cancelling, because a cancel asked before it was for
+// whatever ran then and not for this prompt, and it opens the prompt's wire
+// outcome, still pending. A Cancel from here on waits on that outcome. If the
+// continuation finds the prompt cancelling before its turn is open, it
+// withdraws: it publishes wireWithdrawn and returns ErrPromptCancelled, and
+// the Cancel writes nothing, because nothing reached the agent.
+//
+// A Begin while the slot is already claimed, or a turn is open, claims nothing
+// and changes nothing: its continuation returns ErrPromptInFlight, the answer
+// the session's gate has always given a second prompt, only given earlier. A
+// claim that went ahead would replace the running prompt's wire and clear its
+// cancel, and a Cancel for that prompt would then decide on the wrong one.
+// Nothing in craze begins a prompt over a running one — the TUI queues while
+// a turn is working and sends only once it has settled, by which time the
+// claim has been released — so the refusal is the gate's, not a new one.
+//
+// The continuation must be run, once: the slot stays claimed until it returns.
+func (s *session) Begin(text string) func(context.Context) (Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claimed || s.inPrompt {
+		return func(context.Context) (Result, error) { return Result{}, acp.ErrPromptInFlight }
+	}
+	s.claimed = true
+	s.cancelling = false
+	wire := &turnWire{done: make(chan struct{})}
+	s.wire = wire
+	return func(ctx context.Context) (Result, error) { return s.prompt(ctx, text, wire) }
+}
+
+// prompt is Begin's continuation: the claimed prompt from its catalog wait to
+// the end of its turn.
+func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Result, error) {
+	// One release for the whole claim, whichever way it ends. done is set once
+	// the turn has opened; until then there is no turn to close, only the claim
+	// to give back. For an opened turn the client's return has settled the
+	// wire by now, and the publish here is the backstop for a prompt that ends
+	// any other way — every return before the opening included — so that no
+	// Cancel can outlive the claim waiting on its wire.
+	var done chan struct{}
+	defer func() {
+		s.mu.Lock()
+		wire.publishLocked(wireFailed)
+		if s.wire == wire {
+			s.wire = nil
+		}
+		s.claimed = false
+		s.cancelling = false
+		if done != nil {
+			s.inPrompt = false
+			s.clearTaskReceiptsLocked()
+			close(done)
+		}
+		s.mu.Unlock()
+	}()
 	// Before any of the turn's bookkeeping: this waits, and a turn that has
-	// been opened must not be left open across a wait — nothing has been
-	// claimed yet, so a caller that gives up here gives up on nothing. Its
-	// refusal comes back the same way: the slot was already another prompt's,
-	// and returning here spends no turn number and rolls nothing back.
+	// been opened must not be left open across a wait — no turn is open yet,
+	// so a caller that gives up here gives up only its claim. Its refusal comes
+	// back the same way: the slot was already another prompt's, and returning
+	// here spends no turn number and rolls nothing back.
 	abort, err := s.awaitCatalog(ctx, text)
 	if err != nil {
 		return Result{}, err
@@ -618,6 +787,16 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 		// Cancelled while waiting. Nothing was opened, nothing was sent and
 		// nothing will be emitted, so saying so to the caller is the whole of
 		// it — the turn it drew is its own to settle.
+		s.mu.Unlock()
+		return Result{}, ErrPromptCancelled
+	}
+	if s.cancelling {
+		// Cancelled since the claim, and the turn is not open: withdraw. The
+		// Cancel that marked it is waiting on this wire, and withdrawn tells it
+		// nothing reached the agent. The mark is read here and not cleared,
+		// which is why the opening below no longer clears it: Begin does, before
+		// any cancel could be this prompt's.
+		wire.publishLocked(wireWithdrawn)
 		s.mu.Unlock()
 		return Result{}, ErrPromptCancelled
 	}
@@ -635,11 +814,10 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	prevTurn, prevDone := s.turn, s.doneEmitted
 	s.inPrompt = true
 	s.turn++
-	// A new turn: it has not ended and no cancel has been asked for it, so
-	// an interjection is live again.
+	// A new turn: it has not ended, so an interjection is live again. No
+	// cancel has been asked for it either — the withdraw above says so.
 	s.doneEmitted = false
-	s.cancelling = false
-	done := make(chan struct{})
+	done = make(chan struct{})
 	s.promptDone = done
 	// The references are read in the same locked section as everything else
 	// the turn depends on: an available_commands_update landing now either
@@ -647,14 +825,6 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	// halfway through.
 	refs := pluginRefs(text, s.pluginLookupLocked())
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.inPrompt = false
-		s.cancelling = false
-		s.clearTaskReceiptsLocked()
-		close(done)
-		s.mu.Unlock()
-	}()
 
 	// Block 1 is the draft; what craze expanded follows it. The events go out
 	// from the hook, which runs only once the client has accepted the prompt:
@@ -676,7 +846,29 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 			}
 		}
 	}
-	res, err := client.PromptBlocks(ctx, blocks, accepted)
+	// sent reports the bytes leaving, and it reports them into this turn's own
+	// wire, never s.wire: on grok it can run after PromptBlocks has returned,
+	// and by then s.wire may be the next turn's, whose prompt is not out yet.
+	sent := func() { s.publishWire(wire, wireSent) }
+	if testBeforeWire != nil {
+		testBeforeWire(s)
+	}
+	res, err := client.PromptBlocks(ctx, blocks, accepted, sent)
+	// The outcome is settled the moment the client returns — before the
+	// rollback below and before the deferred release — so a Cancel landing
+	// anywhere after this finds it decided. The first outcome wins: a prompt
+	// whose bytes went out and whose reply then failed stays sent.
+	switch {
+	case refusedBeforeWire(err):
+		s.publishWire(wire, wireRefused)
+	case err != nil:
+		s.publishWire(wire, wireFailed)
+	default:
+		// A clean return is taken as sent: grok's writer may not have
+		// reported yet, and short of Close ending the turn from this side,
+		// the agent only ends a turn it was given.
+		s.publishWire(wire, wireSent)
+	}
 	if refusedBeforeWire(err) {
 		// The prompt never left craze: no turn ran, so this turn number was
 		// never spent and there is nothing for the stream to report. Telling
@@ -838,33 +1030,85 @@ func (s *session) Cancel(ctx context.Context) error {
 	// Aborting one is the whole of this cancel, and everything below is
 	// skipped. The abort happened under s.mu with !s.inPrompt, so there was no
 	// turn of craze's own to cancel; the rest of the path — marking the turn
-	// cancelling, answering blocked requests against s.turn, session/cancel,
-	// waiting on s.promptDone — is written for a turn that is on the wire, and
-	// from here it can only land on one that starts later. The aborted prompt
-	// returns ErrPromptCancelled, its consumer settles the turn and drains
-	// whatever it had queued, and the tail running on would cancel that next
-	// prompt instead: Esc for the one the user stopped would stop the one they
-	// did not.
+	// cancelling, answering blocked requests against s.turn, waiting for its
+	// prompt to be written, session/cancel, waiting on s.promptDone — is
+	// written for a turn that is on the wire, and from here it can only land
+	// on one that starts later. The aborted prompt returns ErrPromptCancelled,
+	// its consumer settles the turn and drains whatever it had queued, and the
+	// tail running on would cancel that next prompt instead: Esc for the one
+	// the user stopped would stop the one they did not.
 	//
 	// So an Esc that lands here does not answer a foreign turn's blocked
 	// request. Nothing is lost by that: no wait is registered any more, so a
 	// second Esc falls straight through to the normal path and answers it
 	// exactly as it always did.
-	if s.abortCatalogWait() {
+	//
+	// The abort and the mark below are one locked section. A claimed prompt
+	// decides whether to park by reading that mark in the section that
+	// registers its wait, so it either registered before this — and is
+	// aborted here — or finds the mark and does not park. Two sections would
+	// leave a prompt free to park between them, unaborted and unmarked, and
+	// this Cancel waiting on its wire for the whole window.
+	s.mu.Lock()
+	if s.abortCatalogWaitLocked() {
+		s.mu.Unlock()
 		return nil
 	}
 	// From here until the turn ends an interjection would be stranded, which
-	// is what makes grok mint a turn of its own.
-	s.mu.Lock()
+	// is what makes grok mint a turn of its own. The claim, the turn and the
+	// wire are read in the same section that marks it, so the wire is the
+	// marked prompt's own: Begin sets the claim and the wire together, the
+	// opening sets the turn, and the claim's release clears all three.
 	s.cancelling = true
+	in, claimed, wire := s.inPrompt, s.claimed, s.wire
 	s.mu.Unlock()
 	s.cancelWaiting()
-	if err := client.Cancel(ctx); err != nil {
-		return err
+	if (!in && !claimed) || wire == nil {
+		// No prompt of craze's own is claimed: nothing is running, or the
+		// agent is running a turn it started itself. Either way there is no
+		// prompt of ours for the cancel to overtake, so it goes now.
+		return client.Cancel(ctx)
 	}
+	// The prompt is claimed before its turn opens and its turn opens before
+	// its request is written, so the cancel waits for the wire to say what
+	// became of it: written first, a cancel can only land behind it. Without
+	// the wait it could reach the agent first, be dropped as belonging to no
+	// turn, and leave the prompt running as if Esc had never been pressed. A
+	// prompt claimed and not yet open cannot get as far as the wire any more
+	// — it finds the mark just set and withdraws — so for it the wait is only
+	// for the withdraw, and nothing is written. The wait is bounded by the
+	// caller's context, the same one the wait on promptDone below has always
+	// used; it is one marshal and one pipe write unless the agent has stopped
+	// reading, and then saying the cancel failed is the honest answer.
+	select {
+	case <-wire.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return nil
+	}
+	switch s.outcomeOf(wire) {
+	case wireSent, wireRefused:
+		// Each Cancel writes once at most: here, or on the no-turn path above.
+		// Two racing Cancels can each write one, which the agent tolerates.
+		// A refused prompt is cancelled too: the refusal that reaches here
+		// is a foreign turn, and that turn is still running.
+		if err := client.Cancel(ctx); err != nil {
+			return err
+		}
+	default:
+		// wireFailed or wireWithdrawn: the prompt never reached the agent, so
+		// there is no turn there to stop and nothing is written.
+	}
+	// The wait is for the turn this cancel was for, and only that one: the
+	// release clears s.wire together with inPrompt, so a wire that is no
+	// longer s.wire means that turn is over and whatever runs now started
+	// after this cancel. Both are read again rather than trusted from the
+	// section above, so a claimed prompt whose turn opened after that read is
+	// waited for like any other.
 	s.mu.Lock()
 	done := s.promptDone
-	in := s.inPrompt
+	in = s.inPrompt && s.wire == wire
 	s.mu.Unlock()
 	if !in || done == nil {
 		return nil
@@ -974,7 +1218,11 @@ func (s *session) AnswerPlan(id string, accept bool) error {
 }
 
 // Close reaps the child exactly once; later callers block until that reap has
-// finished rather than returning while the child is still alive.
+// finished rather than returning while the child is still alive. It stores
+// client.Close()'s result and returns the same value on every call, so
+// requestQuit's own close and finishRun's later one — the same session,
+// closed twice — agree: errors.Is(err, ErrAgentExited) holds on both when the
+// agent's exit was reaped first, on neither when craze closed it.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
@@ -984,11 +1232,11 @@ func (s *session) Close() error {
 		client := s.client
 		s.mu.Unlock()
 		if client != nil {
-			_ = client.Close()
+			s.closeErr = client.Close()
 		}
 	})
 	<-s.closeDone
-	return nil
+	return s.closeErr
 }
 
 func (s *session) onPermission(turn int, req acp.PermissionRequest) acp.PermissionDecision {

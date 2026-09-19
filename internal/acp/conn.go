@@ -76,7 +76,18 @@ func (c *Conn) Err() error {
 }
 
 func (c *Conn) Call(ctx context.Context, method string, params, result any) error {
-	raw, err := c.callRaw(ctx, method, params)
+	return c.callSent(ctx, method, params, result, nil)
+}
+
+// callSent is Call with a signal for the one caller that has to know when its
+// request left: sent runs once, after the request's bytes were written and
+// before the reply is waited on, and never when the write failed or the
+// connection was already closed — nothing reached the agent then. It runs on
+// the goroutine that made the call, inside it, so it must do no I/O and must
+// not block: a hook that blocked would hold this call's reply wait with it.
+// It publishes, and that is all.
+func (c *Conn) callSent(ctx context.Context, method string, params, result any, sent func()) error {
+	raw, err := c.callRaw(ctx, method, params, sent)
 	if err != nil {
 		return err
 	}
@@ -86,7 +97,7 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 	return json.Unmarshal(raw, result)
 }
 
-func (c *Conn) callRaw(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *Conn) callRaw(ctx context.Context, method string, params any, sent func()) (json.RawMessage, error) {
 	paramRaw, err := marshalRaw(params)
 	if err != nil {
 		return nil, err
@@ -111,6 +122,12 @@ func (c *Conn) callRaw(ctx context.Context, method string, params any) (json.Raw
 		delete(c.pending, idKey(id))
 		c.mu.Unlock()
 		return nil, err
+	}
+	// The encoder writes each frame whole under its own lock, so from here
+	// every later write on this connection — a session/cancel included — is
+	// behind this request in the pipe.
+	if sent != nil {
+		sent()
 	}
 
 	select {

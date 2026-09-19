@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -153,6 +156,7 @@ type Model struct {
 	vp    viewport.Model
 	input textarea.Model
 
+	// sess is assigned only through setSession, which records it in owner too.
 	sess   agent.Session
 	cwd    string
 	model  string
@@ -404,6 +408,9 @@ type Model struct {
 
 	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
 	term *terminalColors
+	// owner is the session the program holds, shared by every copy the way
+	// term is; see sessionOwner. Nil only in a zero Model a test built.
+	owner *sessionOwner
 
 	// host is Config.Host: nil means no host status is derived at all. The
 	// rest is what host.go reads into host.Input. lastHost is the last status
@@ -489,6 +496,42 @@ type planImplementFailedMsg struct {
 	err  error
 }
 
+// sessionOwner is the one record of which session the program holds. Model.sess
+// is a plain field, so every copy bubbletea makes carries its own, and the
+// session a picker builds lives only in the copies made after it. On a quit
+// that is harmless: p.Run hands back the last model. On a recovered Update or
+// View panic it hands back nil, and the model Run started with still holds
+// whatever New gave it — often nothing — so the agent the picker spawned would
+// never be closed and its process group never signalled. Model carries the
+// owner as a pointer, allocated in New, so every copy shares it, and the exit
+// tails close what it holds rather than what some copy remembers.
+type sessionOwner struct {
+	mu   sync.Mutex
+	sess agent.Session
+}
+
+func (o *sessionOwner) set(s agent.Session) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sess = s
+}
+
+// current is the session last set. The lock is released before it returns, so
+// a caller never holds it across Close, which blocks until the agent is reaped.
+func (o *sessionOwner) current() agent.Session {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.sess
+}
+
+// setSession is the only way the model's session is assigned: it writes
+// m.sess and the owner together, so the two can never name different
+// sessions and a new assignment site cannot forget the owner.
+func (m *Model) setSession(s agent.Session) {
+	m.sess = s
+	m.owner.set(s)
+}
+
 func New(cfg Config) Model {
 	cwd := cfg.Workspace
 	if cwd == "" {
@@ -514,7 +557,6 @@ func New(cfg Config) Model {
 		queueHov:        noHover(),
 		vp:              vp,
 		input:           newComposer(th),
-		sess:            cfg.Session,
 		cwd:             cwd,
 		model:           cfg.Model,
 		yolo:            cfg.Yolo,
@@ -533,7 +575,8 @@ func New(cfg Config) Model {
 		sessProvider:    prov.Name(),
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
-		term: newTerminalColors(io.Discard),
+		term:  newTerminalColors(io.Discard),
+		owner: &sessionOwner{},
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
@@ -545,6 +588,7 @@ func New(cfg Config) Model {
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
+	sess := cfg.Session
 	switch {
 	case len(m.resume) > 0:
 		// --resume outranks the provider picker: every row carries its own
@@ -558,13 +602,16 @@ func New(cfg Config) Model {
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
 	default:
-		if m.sess == nil && m.newSession != nil {
-			m.sess = m.newSession(prov)
+		if sess == nil && m.newSession != nil {
+			sess = m.newSession(prov)
 		}
-		if m.sess == nil {
-			m.sess = NewStub()
+		if sess == nil {
+			sess = NewStub()
 		}
 	}
+	// Once the switch has decided: a picker starts with whatever Config.Session
+	// was, usually nothing, and its own setSession replaces it.
+	m.setSession(sess)
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
@@ -575,7 +622,10 @@ func New(cfg Config) Model {
 	return m
 }
 
-func Run(cfg Config) error {
+// Run returns whether the agent's own diagnostics should print after exit —
+// broader than just an agent exit, see finishRun — and the start failure, if
+// any (§3.7.3).
+func Run(cfg Config) (bool, error) {
 	m := New(cfg)
 	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
 	// are written from different goroutines, and a copy landing inside a frame
@@ -596,33 +646,105 @@ func Run(cfg Config) error {
 		m.term.apply(m.theme)
 	}
 	p := tea.NewProgram(m, opts...)
+	// A terminal hangup — what a closed tab or window sends — is an exit like
+	// SIGTERM. Left to its default action it kills craze before the tail
+	// below runs, and the agent, in a process group of its own, is never
+	// signalled. bubbletea turns SIGTERM into a QuitMsg; p.Quit sends that
+	// same message, so SIGHUP lands on precisely the SIGTERM path. No agent
+	// exists before this registration: sess.Start runs only from inside the
+	// event loop.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	stop := make(chan struct{})
+	handlerDone := make(chan struct{})
+	// Written by the handler, read only after the join below.
+	hungUp := false
+	go func() {
+		// Stopped in this goroutine's own defer, as bubbletea's handler does,
+		// and before handlerDone closes, so the join below means SIGHUP is
+		// unregistered. From the first SIGHUP onward the default action is
+		// back for the whole of bubbletea's shutdown and the tail, so a
+		// second hangup can still end a shutdown that is stuck.
+		defer func() {
+			signal.Stop(hup)
+			close(handlerDone)
+		}()
+		select {
+		case <-hup:
+			hungUp = true
+			// A no-op once the program has stopped, and safe before p.Run
+			// starts: Send waits for the event loop or for p.Run's cancel.
+			p.Quit()
+		case <-stop:
+		}
+	}()
 	final, err := p.Run()
-	startErr := finishRun(out, final, m, cfg.Host)
+	// The exit that was not a hangup unregisters too, before the tail, just as
+	// bubbletea's own handler has stopped by the time p.Run returns.
+	close(stop)
+	<-handlerDone
+	// A hangup that arrived after p.Run returned, and before the handler
+	// stopped listening, is still waiting in the channel.
+	select {
+	case <-hup:
+		hungUp = true
+	default:
+	}
+	err = runErrAfterHangup(err, hungUp)
+	showAgentDiag, startErr := finishRun(out, final, m, cfg.Host)
+	// p.Run's own error is folded in here too: a recovered panic or another
+	// run failure is reason enough to show the agent's stderr, whatever
+	// finishRun made of the session close (§3.7.3).
+	showAgentDiag = showAgentDiag || err != nil
 	if err != nil {
-		return err
+		return showAgentDiag, err
 	}
 	// A quit is clean unless the session never started. Only startCmd's
 	// failure counts: an error mid-session leaves a usable craze, and quitting
 	// out of one is a normal exit.
-	return startErr
+	return showAgentDiag, startErr
+}
+
+// runErrAfterHangup is p.Run's error once a terminal hangup has ended the
+// program. By then the terminal is gone, and bubbletea may report that itself:
+// a read racing the hangup of a pty can fail with EIO rather than read EOF,
+// and that comes back as an input error. None of it is craze failing — a
+// hangup is an exit like SIGTERM, which exits 0 — so it is dropped. A
+// recovered panic is kept: that run failed whatever the terminal did.
+func runErrAfterHangup(err error, hungUp bool) error {
+	if hungUp && err != nil && !errors.Is(err, tea.ErrProgramPanic) {
+		return nil
+	}
+	return err
 }
 
 // finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
 // is cleared, the terminal's colours are reset, the host hub releases, and the
-// session closes. p.Run returns on /exit, on SIGINT/SIGTERM and on a recovered
-// panic, and every one of them lands here.
+// session closes. p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
+// own handler) and on a recovered panic, and every one of them lands here.
 //
-// final is whatever p.Run handed back, which on a recovered panic is not a
-// Model; m is the model Run started with. The hub arrives as its own argument
-// — Config.Host, never a field read through final — so the panic path still
-// releases the pane: herdr leaves a pane that was never released showing the
-// last state it was told. It returns the start failure final carries, if any.
-func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
-	var sess agent.Session
+// final is whatever p.Run handed back, which on a recovered Update or View
+// panic is nil; m is the model Run started with. The hub arrives as its own
+// argument — Config.Host, never a field read through final — so the panic path
+// still releases the pane: herdr leaves a pane that was never released showing
+// the last state it was told. The session comes from m's owner, never from
+// final, for the same reason.
+//
+// It returns the start failure final carries, if any, and — issue #23 —
+// whether the agent's own stderr should print: the broader "the run failed"
+// predicate, not just an agent exit, so it is named for what it decides
+// rather than for the issue. That predicate is startErr != nil, or the
+// session never having started at all (a nil final — a recovered panic —
+// leaves started false, same as one that never got startedMsg), or the
+// agent's own exit having been reaped before this Close on it sampled that.
+// internal/cli folds in a fourth term, p.Run's own error, which this frame
+// never sees.
+func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	var startErr error
+	started := false
 	if fm, ok := final.(Model); ok {
-		sess = fm.sess
 		startErr = fm.startErr
+		started = fm.started
 		// Every exit path lands here: clearWindowTitle no-ops when titles
 		// were off or a title was never set, and otherwise writes OSC 2
 		// through the same writer bubbletea rendered into (§3.10).
@@ -636,15 +758,20 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
 	// Before sess.Close for the same reason: the release is bounded, and the
 	// session's close is not. On a quit craze asked for, requestQuit has
 	// already done both in this order and the hub's Close is idempotent; on
-	// SIGTERM or a recovered panic this is the first and only release.
+	// SIGTERM, SIGHUP or a recovered panic this is the first and only release.
 	closeHost(h)
-	if sess == nil {
-		sess = m.sess
+	// The owner and not m.sess: m is the model Run started with, and a session
+	// a picker built after it lives only in later copies — which a recovered
+	// panic does not hand back. Every copy shares the owner, so it names the
+	// session the program ended with on every exit path. A zero Model has none.
+	var agentExited bool
+	if m.owner != nil {
+		if sess := m.owner.current(); sess != nil {
+			agentExited = errors.Is(sess.Close(), agent.ErrAgentExited)
+		}
 	}
-	if sess != nil {
-		_ = sess.Close()
-	}
-	return startErr
+	failed := startErr != nil || agentExited || !started
+	return failed, startErr
 }
 
 // Init starts the session and arms the event reader in the same batch. The
@@ -916,11 +1043,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the chunks; this message races them and would split a run in two.
 		m.promptEndSeq = m.turnSeq
 		if errors.Is(msg.err, agent.ErrPromptCancelled) {
-			// Esc landed while the prompt was still waiting for the catalog.
-			// Nothing ran and nothing failed, so this is not an error state:
-			// it is the ending a cancelled turn has, and the transcript owes
-			// the row it already drew the same note — Esc leaves nothing else
-			// behind. No event of any kind is coming, so the stream ends here.
+			// Esc landed before the prompt's turn opened: while it was still
+			// waiting for the catalog, or right after Enter, before the Cmd
+			// that runs it had got that far. Nothing ran and nothing failed,
+			// so this is not an error state: it is the ending a cancelled turn
+			// has, and the transcript owes the row it already drew the same
+			// note — Esc leaves nothing else behind. No event of any kind is
+			// coming, so the stream ends here.
 			m.streamEndSeq = m.turnSeq
 			m.cancelled = true
 			m.addNote(stopCancelled)
@@ -928,16 +1057,25 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			// A prompt the session never accepted emits no events at all, so
-			// its stream is over too: waiting for an ending that cannot come
-			// would leave the turn unfinishable. Any other failure was emitted
-			// as EventError before Prompt returned, so that ending is on its
-			// way.
-			if errors.Is(msg.err, agent.ErrPromptInFlight) || errors.Is(msg.err, agent.ErrForeignTurn) {
+			// its stream is over too — waiting for an ending that cannot come
+			// would leave the turn unfinishable — and this is the only place
+			// its row can be drawn. Any other failure was emitted as
+			// EventError, whose handler draws the row, so drawing it here too
+			// would draw it twice. The emit happens before Prompt returns, but
+			// that does not order the two messages: the eventMsg and this one
+			// come back from different Cmds, so this one can arrive first,
+			// and it must then already put the model in its error state. The
+			// assignments below are the handler's own, so repeating them is
+			// harmless either way round.
+			refused := errors.Is(msg.err, agent.ErrPromptInFlight) || errors.Is(msg.err, agent.ErrForeignTurn)
+			if refused {
 				m.streamEndSeq = m.turnSeq
 			}
 			m.status = statusError
 			m.err = msg.err.Error()
-			m.addError(m.err)
+			if refused {
+				m.addError(m.err)
+			}
 			m.dropStrongSend("")
 			m.confirm = nil
 			return m, nil
@@ -1682,9 +1820,13 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	// evidence, its offer and the kill that retired it all belong to a number
 	// this turn no longer has.
 	m.turnSeq++
-	sess := m.sess
+	// The turn is claimed here, in the Update that says working, and not on
+	// the Cmd's goroutine: an Esc that Update handles before that goroutine
+	// runs then cancels this prompt — which withdraws without reaching the
+	// agent — instead of finding no turn and writing its cancel ahead of it.
+	run := m.sess.Begin(text)
 	return m, func() tea.Msg {
-		res, err := sess.Prompt(context.Background(), text)
+		res, err := run(context.Background())
 		return promptDoneMsg{res, err}
 	}
 }
@@ -1903,6 +2045,12 @@ type cancelFailedMsg struct {
 // sess.Close may block, and a pane that is never released stays showing
 // craze's last state. It also means the cancelled cards the close produces are
 // never reported, since a closed hub ignores Publish.
+//
+// finishRun closes the owner's session again once p.Run returns, and that is
+// this same session: setSession writes both. The second Close serialises
+// behind this one — the live session's closeOnce runs the close once and every
+// other caller waits on closeDone — so it returns when the first does and
+// cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	sess := m.sess
