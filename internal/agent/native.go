@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/version"
 )
@@ -108,7 +109,9 @@ func NewNative(opts Options, tweak func(*harness.Options)) Session {
 }
 
 func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
-	log := NewEventLog(EventLogOptions{})
+	// A journal's header names the native provider whatever the caller
+	// passed, as the snapshot does, and no binary: there is no process.
+	log := newSessionLog(opts, journalHeader{provider: NativeProvider().Name()})
 	s := &nativeSession{
 		opts:      opts,
 		tweak:     tweak,
@@ -163,11 +166,11 @@ func (s *nativeSession) Start(context.Context) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
 		// Close ran while the table was loading and found no harness to
 		// close; this one is closed here so it cannot outlive the session.
 		_ = hs.Close()
+		s.mu.Unlock()
 		return fmt.Errorf("agent: session closed")
 	}
 	s.hs = hs
@@ -176,6 +179,9 @@ func (s *nativeSession) Start(context.Context) error {
 	s.snap.Models = infos
 	s.snap.SessionID = hs.ID()
 	s.refreshCurrentLocked()
+	s.mu.Unlock()
+	// Noted with s.mu released, as every note is (plan 020 §3.5).
+	s.log.noteSession(journal.SessionNote{ProviderSessionID: hs.ID()})
 	return nil
 }
 

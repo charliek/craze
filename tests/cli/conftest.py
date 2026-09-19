@@ -54,6 +54,11 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CRAZE_PROVIDER", "")
     monkeypatch.setenv("CRAZE_HOME", str(tmp_path / "craze-home"))
     monkeypatch.delenv(REMOVED_CONFIG_ENV, raising=False)
+    # The session journal's opt-out (plan 020 §3.5). An exported one would
+    # otherwise turn journaling off under the cases that assert a journal was
+    # written -- or, unparseable, print a diagnostic into a run whose stderr a
+    # case reads. A case that wants it sets it itself.
+    monkeypatch.delenv("CRAZE_JOURNAL", raising=False)
     # craze reports its status to the terminal multiplexer it runs in (herdr,
     # roost) whenever that host's variables say so -- and this suite is often
     # run from inside one. Inherited, they would point a test craze at the

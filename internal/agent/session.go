@@ -424,6 +424,15 @@ type Options struct {
 	// session's title can come from.
 	Title       string
 	TitlePinned bool
+	// JournalDir is the session journal's directory (plan 020 §3.4), which
+	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
+	// "" means no journal, and is what every caller that does not ask for
+	// one gets: nothing is written to disk. When set it must be absolute; a
+	// journal that cannot be built is one line on Diag (else Stderr) and the
+	// session runs without one. The file itself appears only once there is
+	// something to write, so a session that is built and closed without
+	// starting leaves nothing behind.
+	JournalDir string
 }
 
 type Session interface {

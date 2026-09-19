@@ -68,12 +68,16 @@ func isolateHome(t *testing.T) {
 }
 
 // isolateRunEnv is everything a headless run reads out of the environment
-// before it reaches the agent: HOME, the provider override and the craze
-// directory, whose config file does not exist yet.
+// before it reaches the agent: HOME, the provider override, the journal
+// switch and the craze directory, whose config file does not exist yet. The
+// journal switch is cleared (empty reads as unset) so a developer's exported
+// CRAZE_JOURNAL can neither turn a run's journal off nor print a diagnostic
+// into a run whose stderr a case asserts on.
 func isolateRunEnv(t *testing.T) {
 	t.Helper()
 	isolateHome(t)
 	t.Setenv("CRAZE_PROVIDER", "")
+	t.Setenv("CRAZE_JOURNAL", "")
 	crazeHome(t)
 }
 

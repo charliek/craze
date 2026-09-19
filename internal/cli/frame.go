@@ -109,6 +109,8 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		}
 	}
 	prov := resolved.Provider
+	// JournalDir stays empty here and in seedAndResolve's build: the frame
+	// runner is hermetic, and journalDir is never asked (plan 020 §3.5).
 	sess := agent.New(agent.Options{
 		Binary:      o.agentBin,
 		Workspace:   ws,

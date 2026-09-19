@@ -144,6 +144,9 @@ func (o *promptOpts) run() (retErr error) {
 		Stderr:     o.stderr,
 		PluginDirs: o.pluginDirs,
 		Provider:   &prov,
+		// Headless craze has one stream for its own notes, stderr, as it
+		// does for discoverPlugins' (Options.Diag falls back to it).
+		JournalDir: journalDir(o.stderr),
 	})
 	defer func() { _ = sess.Close() }()
 

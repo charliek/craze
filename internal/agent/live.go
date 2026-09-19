@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/journal"
 )
 
 type session struct {
@@ -229,11 +230,8 @@ func New(opts Options) Session {
 }
 
 func newSession(opts Options) *session {
-	log := NewEventLog(EventLogOptions{})
 	s := &session{
 		opts:      opts,
-		log:       log,
-		events:    log.Primary(),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
 		waiting:   make(map[string]pendingAsk),
@@ -249,6 +247,11 @@ func newSession(opts Options) *session {
 		s.opts.Provider = &p
 	}
 	s.opts.PluginDirs = append([]string(nil), opts.PluginDirs...)
+	// The log is built once the provider is settled, because a journal's
+	// header names it, with the binary as it was asked for: which one the
+	// spawn resolved is Start's to learn (the session note).
+	s.log = newSessionLog(s.opts, journalHeader{provider: s.provider().Name(), binary: s.opts.Binary})
+	s.events = s.log.Primary()
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
@@ -324,6 +327,9 @@ func (s *session) Start(ctx context.Context) error {
 		s.unstart()
 		return err
 	}
+	// The binary the spawn just found, for the session note; asked right
+	// after it, so the lookup sees what the spawn's did.
+	binary := s.log.resolvedBinary(s.opts.Binary, s.provider().Bins())
 	// Close may have run while we were spawning; adopt the child only if the
 	// session is still open, otherwise reap it here so it cannot be orphaned.
 	s.mu.Lock()
@@ -377,7 +383,7 @@ func (s *session) Start(ctx context.Context) error {
 	loading := s.opts.LoadSessionID != ""
 	var snap Snapshot
 	if loading {
-		if err := s.loadSession(ctx, client, initRes, cwd); err != nil {
+		if err := s.loadSession(ctx, client, initRes, cwd, binary); err != nil {
 			_ = s.Close()
 			return err
 		}
@@ -393,6 +399,8 @@ func (s *session) Start(ctx context.Context) error {
 		s.mu.Lock()
 		s.sessionID = sess.SessionID
 		s.mu.Unlock()
+		// Noted with s.mu released, as every note is (plan 020 §3.5).
+		s.log.noteSession(journal.SessionNote{ProviderSessionID: sess.SessionID, AgentBinary: binary})
 	}
 	// The --ask/--plan/--model tail, unchanged: it runs after session setup
 	// either way. On a load that means after the restored snapshot has been
@@ -459,7 +467,11 @@ func (s *session) Start(ctx context.Context) error {
 // rows, sub-agent rows, todos, commands, the seeded title — is kept: the load
 // result is merged into the snapshot rather than assigned over it, which is the
 // whole difference from the session/new path above.
-func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd string) error {
+//
+// binary is the agent binary the spawn resolved, for the session note, which
+// is written here because this is where Start learns the id: after the
+// replay, and before the end bracket.
+func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd, binary string) error {
 	if !initRes.LoadSession() {
 		// Nothing has reached the wire: an agent without the capability is
 		// told so before the RPC rather than by its own error.
@@ -509,6 +521,8 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.snap.Provider = s.provider().Info()
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
+	// Noted with s.mu released, as every note is (plan 020 §3.5).
+	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
 	s.replaying.Store(false)
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
 	return nil
