@@ -3,12 +3,37 @@ version: "2"
 linters:
   default: none
   enable:
+    - depguard
     - errcheck
     - staticcheck
     - unused
     - govet
     - ineffassign
     - misspell
+  settings:
+    depguard:
+      rules:
+        # One half of craze's import boundary; the other half is the `go list`
+        # check in the Makefile's lint target (internal/tui and internal/cli
+        # must not import internal/acp). The native harness imports nothing
+        # from the rest of craze except internal/atomicfile, so it runs without
+        # the ACP stack and could leave the repo whole (D-02; plan 018 §3.1).
+        # All of craze's internal packages are denied to the harness's files,
+        # and the two allow entries win as longer matches: the harness's own
+        # packages and internal/atomicfile. A package added under internal/
+        # later is therefore denied by default. The stdlib and third-party
+        # modules stay allowed, and no file outside internal/harness is
+        # affected.
+        harness:
+          list-mode: lax
+          files:
+            - "**/internal/harness/**"
+          allow:
+            - github.com/charliek/craze/internal/harness
+            - github.com/charliek/craze/internal/atomicfile
+          deny:
+            - pkg: github.com/charliek/craze/internal
+              desc: "the harness imports nothing from craze except internal/atomicfile; internal/agent's adapter imports the harness, never the reverse, and the harness receives its directory as Options.Home (D-02, plan 018 §3.1)"
   exclusions:
     presets:
       - std-error-handling
