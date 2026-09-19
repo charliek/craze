@@ -25,12 +25,19 @@ const envGrokHome = "GROK_HOME"
 // and writes of providers.toml/models.toml. It never becomes a Save target
 // itself and is never renamed, so every writer locks the same inode — the
 // same rule config.toml's own lock follows (internal/tui/config.go).
+//
+// It lives in the craze directory, beside config.toml, and not in native/:
+// taking a lock inside native/ meant creating native/ first, so a first
+// import that then failed — no gx home, nothing importable — left an empty
+// native/ (and the lock) behind. native/ is created by modeltable.Save, only
+// once there is something to write into it.
 const importLockName = "import.lock"
 
-// nativeDirPerm is the mode craze import gx creates the harness's directory
-// with before it takes the lock; modeltable.Save enforces the same mode on
-// every write, this is only what a first import needs before Save ever runs.
-const nativeDirPerm = 0o700
+// crazeDirPerm is the mode a first import creates the craze directory with
+// when nothing has created it yet, so the lock has somewhere to live. An
+// existing craze directory's mode is left as it is: it is shared with
+// config.toml and the session index, and not this command's to change.
+const crazeDirPerm = 0o700
 
 // newImportCmd is `craze import`, a parent with one subcommand today (`gx`);
 // `craze import claude` is later work (D-13). It defines no PersistentPreRunE
@@ -79,8 +86,11 @@ func newImportGxCmd() *cobra.Command {
 // (exit 1: internal/cli/exit.go) — the command was invoked correctly, the
 // import itself did not go through.
 func (o *importGxOpts) run(out io.Writer) error {
-	grokHome, err := resolveGrokHome(o.grokHome)
+	grokHome, source, err := resolveGrokHome(o.grokHome)
 	if err != nil {
+		return err
+	}
+	if err := checkGrokHome(grokHome, source); err != nil {
 		return err
 	}
 	destDir := paths.NativeDir()
@@ -91,18 +101,19 @@ func (o *importGxOpts) run(out io.Writer) error {
 	// A real import is locked end to end, from the read that decides what
 	// merges to the write that lands it, so two invocations racing each other
 	// cannot each merge into the same starting point and then both save,
-	// silently dropping one's changes. A dry run reads and writes nothing, so
-	// there is no race for it to have and nothing of its own to create —
-	// "prefer creating nothing at all on --dry-run" (plan 018 §3.3): not even
-	// the directory or this lock file.
+	// silently dropping one's changes. The lock is in the craze directory —
+	// native/'s parent, which NativeDir has already made absolute — so
+	// nothing under native/ exists until Save has something to write
+	// (importLockName). A dry run reads and writes nothing, so there is no
+	// race for it to have and nothing of its own to create — "prefer creating
+	// nothing at all on --dry-run" (plan 018 §3.3): not even the craze
+	// directory or this lock file.
 	if !o.dryRun {
-		if err := os.MkdirAll(destDir, nativeDirPerm); err != nil {
+		crazeDir := filepath.Dir(destDir)
+		if err := os.MkdirAll(crazeDir, crazeDirPerm); err != nil {
 			return fmt.Errorf("craze: %w", err)
 		}
-		if err := os.Chmod(destDir, nativeDirPerm); err != nil {
-			return fmt.Errorf("craze: %w", err)
-		}
-		unlock, err := atomicfile.Lock(filepath.Join(destDir, importLockName))
+		unlock, err := atomicfile.Lock(filepath.Join(crazeDir, importLockName))
 		if err != nil {
 			return fmt.Errorf("craze: taking the import lock: %w", err)
 		}
@@ -143,21 +154,37 @@ func (o *importGxOpts) run(out io.Writer) error {
 
 // resolveGrokHome is --grok-home, else $GROK_HOME, else ~/.grok — the same
 // three-level precedence every other craze setting resolves through, flag
-// first (plan 018 §3.3). paths.HomeDir is what finds "~" here, exactly as it
-// does for craze's own directory, rather than this package guessing at the
-// account database on its own.
-func resolveGrokHome(flag string) (string, error) {
+// first (plan 018 §3.3) — and which of the three it came from, so an error
+// about the directory can name the setting that chose it. paths.HomeDir is
+// what finds "~" here, exactly as it does for craze's own directory, rather
+// than this package guessing at the account database on its own.
+func resolveGrokHome(flag string) (dir, source string, err error) {
 	if v := strings.TrimSpace(flag); v != "" {
-		return v, nil
+		return v, "--grok-home", nil
 	}
 	if v := strings.TrimSpace(os.Getenv(envGrokHome)); v != "" {
-		return v, nil
+		return v, envGrokHome, nil
 	}
 	home := paths.HomeDir()
 	if home == "" {
-		return "", errors.New("craze: no home directory to find gx's config in (set --grok-home, GROK_HOME, or HOME)")
+		return "", "", errors.New("craze: no home directory to find gx's config in (set --grok-home, GROK_HOME, or HOME)")
 	}
-	return filepath.Join(home, ".grok"), nil
+	return filepath.Join(home, ".grok"), "~/.grok", nil
+}
+
+// checkGrokHome refuses a gx home that is a file rather than a directory —
+// the easy mistake is to point --grok-home at ~/.grok/config.toml itself,
+// which otherwise surfaces as a puzzling ".../config.toml/config.toml" error.
+// A directory that does not exist, or one Stat cannot read, is left for the
+// import to report the way it always has (it names the directory and what it
+// looked for); only the file case gets its own message. source names the
+// setting that chose dir (resolveGrokHome).
+func checkGrokHome(dir, source string) error {
+	info, err := os.Stat(dir)
+	if err != nil || info.IsDir() {
+		return nil
+	}
+	return fmt.Errorf("craze: %s must be gx's home directory (the one holding config.toml), not a file: %s", source, dir)
 }
 
 // printReport is the whole of what `craze import gx` prints: stable and

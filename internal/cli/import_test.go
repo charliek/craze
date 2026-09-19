@@ -344,6 +344,116 @@ func TestImportGxMissingGrokHome(t *testing.T) {
 	}
 }
 
+// TestImportGxFailedFirstImportLeavesNoNativeDir: the import lock lives in
+// the craze directory, so a first import that fails — before the merge or at
+// it — leaves no native/ behind (an empty native/ would look like a set-up
+// harness with its files missing). Only a successful import creates native/,
+// through modeltable.Save, at 0700 with the files at their modes, and a craze
+// directory that did not exist yet is created 0700 to hold the lock.
+func TestImportGxFailedFirstImportLeavesNoNativeDir(t *testing.T) {
+	nothingImportable := `[model_providers.respo]
+base_url = "https://api.respo.example/v1"
+api_backend = "responses"
+env_key = "RESPO_API_KEY"
+
+[model."respo/one"]
+model = "wire-one"
+model_provider = "respo"
+`
+	for _, tc := range []struct {
+		name     string
+		grokHome func(t *testing.T) string
+		want     string
+	}{
+		{"missing grok home", func(t *testing.T) string { return filepath.Join(t.TempDir(), "does-not-exist") }, "holds neither"},
+		{"nothing importable", func(t *testing.T) string {
+			return writeGxHome(t, map[string]string{"config.toml": nothingImportable})
+		}, "no model could be imported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := crazeHome(t)
+			_, err := runImportGx(t, "--grok-home", tc.grokHome(t))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("import = %v, want a failure saying %q", err, tc.want)
+			}
+			if _, err := os.Stat(filepath.Join(dest, "native")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("a failed first import left native/ behind (stat: %v)", err)
+			}
+		})
+	}
+
+	t.Run("success in a fresh craze directory", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "fresh")
+		t.Setenv("CRAZE_HOME", dest)
+		grokHome := writeGxHome(t, map[string]string{"config.toml": importFixtureConfig})
+		if stdout, err := runImportGx(t, "--grok-home", grokHome); err != nil {
+			t.Fatalf("import: %v\n%s", err, stdout)
+		}
+		nativeDir := filepath.Join(dest, "native")
+		assertPerm(t, dest, 0o700)
+		assertPerm(t, nativeDir, 0o700)
+		assertPerm(t, filepath.Join(nativeDir, "providers.toml"), 0o600)
+		assertPerm(t, filepath.Join(nativeDir, "models.toml"), 0o644)
+		if _, err := os.Stat(filepath.Join(dest, importLockName)); err != nil {
+			t.Fatalf("the import lock is not in the craze directory: %v", err)
+		}
+		entries, err := os.ReadDir(nativeDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if strings.Join(names, " ") != "models.toml providers.toml" {
+			t.Fatalf("native/ holds %q, want only the two table files", names)
+		}
+	})
+}
+
+// TestImportGxGrokHomeIsAFile: pointing --grok-home or $GROK_HOME at a file
+// — typically gx's config.toml itself — is refused with a message that says
+// what the setting has to be, naming the setting and the path, before the
+// craze directory is touched; it is never the puzzling
+// ".../config.toml/config.toml" a read would otherwise produce.
+func TestImportGxGrokHomeIsAFile(t *testing.T) {
+	grokHome := writeGxHome(t, map[string]string{"config.toml": importFixtureConfig})
+	file := filepath.Join(grokHome, "config.toml")
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		env    string
+		source string
+	}{
+		{name: "flag", args: []string{"--grok-home", file}, source: "--grok-home"},
+		{name: "flag with spaces", args: []string{"--grok-home", "  " + file + " "}, source: "--grok-home"},
+		{name: "environment", env: file, source: "GROK_HOME"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := crazeHome(t)
+			t.Setenv("GROK_HOME", tc.env)
+			stdout, err := runImportGx(t, tc.args...)
+			want := "craze: " + tc.source + " must be gx's home directory (the one holding config.toml), not a file: " + file
+			if err == nil || err.Error() != want {
+				t.Fatalf("import = %v, want %q", err, want)
+			}
+			if strings.Contains(err.Error(), "config.toml/config.toml") {
+				t.Fatalf("the error still doubles the file name: %v", err)
+			}
+			var ee *exitError
+			if errors.As(err, &ee) {
+				t.Fatalf("unexpected exit error %+v, want a plain error like the missing-home one", ee)
+			}
+			if stdout != "" {
+				t.Fatalf("a refused import printed a report:\n%s", stdout)
+			}
+			if entries, err := os.ReadDir(dest); err != nil || len(entries) != 0 {
+				t.Fatalf("a refused import touched the craze directory: %v %v", entries, err)
+			}
+		})
+	}
+}
+
 // TestImportGxNoCrazeDirectory: with no HOME and no CRAZE_HOME there is
 // nowhere to import into, and the CLI says so rather than falling back to a
 // relative path.
