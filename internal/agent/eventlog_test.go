@@ -313,9 +313,146 @@ func closeLog(t testing.TB, l *EventLog, w *journal.Writer) {
 	}
 }
 
-// fromJournal is a journal record as the log's own Record.
-func fromJournal(r journal.Record) Record {
-	return Record{Seq: r.Seq, At: r.At, Type: EventType(r.EventType), Body: r.Body, Omitted: r.Omitted}
+// flushThrough waits for the journal to have written every line through seq,
+// so a resume's head is served from the file with no wait at all. It is the
+// journal's own handshake — WaitFlushed asks for the flush itself — and not a
+// sleep waiting for the writer's 250 ms timer.
+func flushThrough(t *testing.T, w *journal.Writer, seq uint64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	defer cancel()
+	if err := w.WaitFlushed(ctx, seq); err != nil {
+		t.Fatalf("waiting for the journal to reach seq %d: %v", seq, err)
+	}
+}
+
+// heldPublisher publishes a run of events on a goroutine of its own and holds
+// at one of them until it is released: the way these tests put a cutoff inside
+// a run of publishes rather than after one. Event n carries the text n, so
+// every record says which seq it should have.
+type heldPublisher struct {
+	release func() // let it run to the end; idempotent
+	wg      sync.WaitGroup
+}
+
+// publishHeldAt starts a publisher of total events and returns once it has
+// published hold of them and stopped there. It is released by the returned
+// value's release, and by the test's end whatever happens, so a failure never
+// leaves a publisher holding the log.
+func publishHeldAt(t *testing.T, l *EventLog, total, hold int) *heldPublisher {
+	t.Helper()
+	reached, resume := make(chan struct{}), make(chan struct{})
+	p := &heldPublisher{release: sync.OnceFunc(func() { close(resume) })}
+	t.Cleanup(func() {
+		p.release()
+		waitDone(t, &p.wg)
+	})
+	p.wg.Go(func() {
+		for i := range total {
+			if !l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1))) {
+				return // the log closed under it: the test is ending.
+			}
+			if i+1 == hold {
+				close(reached)
+				<-resume
+			}
+		}
+	})
+	await(t, reached, "the publisher to reach the barrier")
+	return p
+}
+
+// heldJournal stands in front of a real journal writer, so a test can count
+// what the file leg of a resume asks of it and, when it is held, keep the
+// file behind: the boundary reads as empty, ReadRange says ErrBehind and
+// WaitFlushed waits, until the test lets it go and every call is the real
+// writer's again. What a released resume finally reads is a real journal file.
+//
+// It exists because the journal's own stall seams are unexported, its tests'
+// alone, and because letting the writer's 250 ms flush timer decide when a
+// writer catches up would make these tests a race with a clock.
+type heldJournal struct {
+	journalFile // the real writer
+	release     chan struct{}
+	releaseOnce sync.Once
+	waiting     chan struct{} // closed when a wait begins
+	waitingOnce sync.Once
+	reads       atomic.Int64
+	waits       atomic.Int64
+}
+
+// holdJournal puts a heldJournal in front of l's journal, held back when hold
+// is set and counting only otherwise. The caller must call it before anything
+// subscribes, which is the only time the field is read.
+func holdJournal(t *testing.T, l *EventLog, hold bool) *heldJournal {
+	t.Helper()
+	j := &heldJournal{journalFile: l.file, release: make(chan struct{}), waiting: make(chan struct{})}
+	if !hold {
+		j.letGo()
+	}
+	l.file = j
+	// Before the log's own Close, which waits for every owner: a failing test
+	// must not leave one waiting out the bound.
+	t.Cleanup(j.letGo)
+	return j
+}
+
+func (j *heldJournal) letGo() { j.releaseOnce.Do(func() { close(j.release) }) }
+
+func (j *heldJournal) held() bool {
+	select {
+	case <-j.release:
+		return false
+	default:
+		return true
+	}
+}
+
+func (j *heldJournal) Flushed() (uint64, int64) {
+	if j.held() {
+		return 0, 0
+	}
+	return j.journalFile.Flushed()
+}
+
+func (j *heldJournal) ReadRange(from, to uint64, fn func(journal.Record) error) error {
+	j.reads.Add(1)
+	if j.held() {
+		return fmt.Errorf("%w: the file is held at seq 0, the range ends at %d", journal.ErrBehind, to)
+	}
+	return j.journalFile.ReadRange(from, to, fn)
+}
+
+func (j *heldJournal) WaitFlushed(ctx context.Context, seq uint64) error {
+	j.waits.Add(1)
+	j.waitingOnce.Do(func() { close(j.waiting) })
+	select {
+	case <-j.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return j.journalFile.WaitFlushed(ctx, seq)
+}
+
+// shortJournalWait shortens the file leg's wait for a stalled writer for one
+// test, so a bound that must run out runs out at once instead of being waited
+// through.
+func shortJournalWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	was := journalWaitBound
+	journalWaitBound = d
+	t.Cleanup(func() { journalWaitBound = was })
+}
+
+// assertUnresolvable fails unless err is an ErrCursorUnresolvable with reason,
+// and returns it.
+func assertUnresolvable(t *testing.T, what string, err error, reason CursorReason) ErrCursorUnresolvable {
+	t.Helper()
+	var cu ErrCursorUnresolvable
+	if !errors.As(err, &cu) || cu.Reason != reason {
+		t.Fatalf("%s: %v; want ErrCursorUnresolvable{%s}", what, err, reason)
+	}
+	return cu
 }
 
 // fileRecords is every event record in the journal's file.
@@ -323,7 +460,7 @@ func fileRecords(t *testing.T, w *journal.Writer) []Record {
 	t.Helper()
 	var recs []Record
 	err := journal.ReadFile(w.Path(), 1, journal.MaxSeq, func(r journal.Record) error {
-		recs = append(recs, fromJournal(r))
+		recs = append(recs, recordFromJournal(r))
 		return nil
 	})
 	if err != nil {
@@ -1074,6 +1211,347 @@ func TestEventLogSubscribeRefusesACursorItCannotServeAndRegistersNothing(t *test
 	}
 	l.Publish(context.Background(), nil, textEvent("next"))
 	assertRun(t, "a cursor at the last seq", readN(t, tip, 1), published+2, 1)
+}
+
+// TestEventLogResumeWithItsHeadInTheJournal is A9(b): a cursor whose head has
+// left the ring is served from the journal file. The ring holds one record, so
+// all but the tip of the replay comes from the file, and a publisher runs
+// throughout: the cutoff is taken with the publisher held mid-run, and it
+// finishes while the owner is still delivering the file's part. The
+// subscription delivers exactly (After.Seq, …] in order, with no duplicate and
+// no hole across either seam — file to pinned record, pinned record to live.
+func TestEventLogResumeWithItsHeadInTheJournal(t *testing.T) {
+	const total, after, cutoff = 600, 10, 400
+	l, w := newJournaledLog(t, EventLogOptions{RingEvents: 1})
+	keepDrained(t, l)
+	file := holdJournal(t, l, false)
+	p := publishHeldAt(t, l, total, cutoff)
+	// The publisher is held, so the file can be brought level with the cutoff
+	// first: this case is about a head the file already holds.
+	flushThrough(t, w, cutoff)
+	s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation(), Seq: after}, MaxItems: total})
+	if n := lastSeq(t, l); n != cutoff {
+		t.Fatalf("the cutoff is seq %d, want %d", n, cutoff)
+	}
+	p.release()
+
+	recs := readN(t, s, total-after)
+	assertRun(t, "the resumed subscription", recs, after+1, total-after)
+	for i, text := range recordTexts(t, recs) {
+		if text != fmt.Sprint(recs[i].Seq) {
+			t.Fatalf("seq %d carries %q", recs[i].Seq, text)
+		}
+	}
+	if n := file.reads.Load(); n != 1 {
+		t.Fatalf("the journal file was read %d times, want once: the head must come from it", n)
+	}
+	if n := file.waits.Load(); n != 0 {
+		t.Fatalf("the owner waited %d times for a file that already reached the cutoff", n)
+	}
+}
+
+// TestEventLogResumeSpanningTheJournalAndTheRing is A9(c): one cursor whose
+// range is served in three parts — the head from the journal file, the middle
+// from the ring records the cutoff pinned, and the rest live, published while
+// the owner is delivering. Each part is substantial, and the delivered run is
+// one contiguous sequence across both seams.
+func TestEventLogResumeSpanningTheJournalAndTheRing(t *testing.T) {
+	const total, after, cutoff, ring = 600, 10, 400, 64
+	const pinnedFrom = cutoff - ring + 1 // the ring's oldest record at the cutoff
+	l, w := newJournaledLog(t, EventLogOptions{RingEvents: ring})
+	keepDrained(t, l)
+	file := holdJournal(t, l, false)
+	p := publishHeldAt(t, l, total, cutoff)
+	flushThrough(t, w, cutoff)
+	s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation(), Seq: after}, MaxItems: total})
+	if n := lastSeq(t, l); n != cutoff {
+		t.Fatalf("the cutoff is seq %d, want %d", n, cutoff)
+	}
+	p.release()
+
+	recs := readN(t, s, total-after)
+	assertRun(t, "the resumed subscription", recs, after+1, total-after)
+	for i, text := range recordTexts(t, recs) {
+		if text != fmt.Sprint(recs[i].Seq) {
+			t.Fatalf("seq %d carries %q", recs[i].Seq, text)
+		}
+	}
+	// The three parts are each real: the file served (after, pinnedFrom), the
+	// pin served [pinnedFrom, cutoff], and the rest was published live.
+	if n := file.reads.Load(); n != 1 {
+		t.Fatalf("the journal file was read %d times, want once", n)
+	}
+	if pinnedFrom-after-1 < ring || total-cutoff < ring {
+		t.Fatalf("the case is degenerate: %d records from the file, %d pinned, %d live", pinnedFrom-after-1, ring, total-cutoff)
+	}
+}
+
+// TestEventLogTheJournalsHeadCostsTheSubscriptionNoBudget: the file range is
+// streamed, never held, so it does not count against MaxBytes — only the
+// pinned ring records do. A subscription with room for exactly its one pinned
+// record replays hundreds from the file and is not dropped.
+func TestEventLogTheJournalsHeadCostsTheSubscriptionNoBudget(t *testing.T) {
+	const total = 200
+	l, w := newJournaledLog(t, EventLogOptions{RingEvents: 1})
+	keepDrained(t, l)
+	for i := range total {
+		publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
+	}
+	flushThrough(t, w, total)
+	// Room for the pinned record and not a byte more; the head is the other
+	// 199 records.
+	pinned, err := EncodeEvent(textEvent(fmt.Sprint(total)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}, MaxBytes: len(pinned)})
+	assertRun(t, "the resumed subscription", readN(t, s, total), 1, total)
+	if h := l.Health(); h.SubscribersDropped != 0 {
+		t.Fatalf("the subscription was dropped (%v): the streamed head was charged to its budget", s.terminal())
+	}
+}
+
+// TestEventLogAResumeWaitsForAStalledJournalAndThenServesIt is A9(e): at the
+// cutoff the writer has not written the head of the range, so the owner asks
+// for a flush and waits — delivering nothing while it does — and once the
+// writer catches up it serves the whole range from the file. A publisher runs
+// throughout.
+func TestEventLogAResumeWaitsForAStalledJournalAndThenServesIt(t *testing.T) {
+	const total, after, cutoff, ring = 300, 5, 200, 8
+	l, _ := newJournaledLog(t, EventLogOptions{RingEvents: ring})
+	keepDrained(t, l)
+	stalled := holdJournal(t, l, true)
+	p := publishHeldAt(t, l, total, cutoff)
+	s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation(), Seq: after}, MaxItems: total})
+	p.release()
+
+	await(t, stalled.waiting, "the owner to wait for the stalled journal")
+	select {
+	case r, ok := <-s.Records():
+		t.Fatalf("record %d was delivered (open: %v) while the file was behind the range", r.Seq, ok)
+	default:
+	}
+	stalled.letGo()
+	recs := readN(t, s, total-after)
+	assertRun(t, "the resumed subscription", recs, after+1, total-after)
+	for i, text := range recordTexts(t, recs) {
+		if text != fmt.Sprint(recs[i].Seq) {
+			t.Fatalf("seq %d carries %q", recs[i].Seq, text)
+		}
+	}
+	if n := stalled.waits.Load(); n != 1 {
+		t.Fatalf("the owner waited %d times, want once", n)
+	}
+}
+
+// TestEventLogAResumeGivesUpOnAJournalThatNeverCatchesUp is A9(f): a file that
+// never reaches the head of the range fails the subscription with
+// journal_behind and delivers nothing of it — neither when the wait's bound
+// runs out on a writer stuck inside a write, nor when the writer has finished
+// and will never write those seqs at all. The journal's own error is kept, so
+// a caller can tell the two apart.
+func TestEventLogAResumeGivesUpOnAJournalThatNeverCatchesUp(t *testing.T) {
+	t.Run("the wait's bound runs out", func(t *testing.T) {
+		const total, after, cutoff, ring = 300, 5, 200, 8
+		shortJournalWait(t, 20*time.Millisecond)
+		l, _ := newJournaledLog(t, EventLogOptions{RingEvents: ring})
+		keepDrained(t, l)
+		stalled := holdJournal(t, l, true)
+		p := publishHeldAt(t, l, total, cutoff)
+		s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation(), Seq: after}, MaxItems: total})
+		p.release()
+
+		if recs := readAll(t, s); len(recs) != 0 {
+			t.Fatalf("%d records were delivered of a range the file never reached", len(recs))
+		}
+		cu := assertUnresolvable(t, "a stalled journal", s.Err(), CursorJournalBehind)
+		if !errors.Is(cu, context.DeadlineExceeded) {
+			t.Fatalf("the subscription ended with %v, want the wait's own deadline", cu)
+		}
+		if n := stalled.reads.Load(); n != 0 {
+			t.Fatalf("the file was read %d times after the wait gave up", n)
+		}
+	})
+
+	t.Run("the writer has finished", func(t *testing.T) {
+		const written, more, ring = 50, 200, 8
+		l, w := newJournaledLog(t, EventLogOptions{RingEvents: ring})
+		keepDrained(t, l)
+		for i := range written {
+			publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
+		}
+		// The journal is closed under the session: what it has is on disk, and
+		// nothing published from here on will ever be.
+		if err := w.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := writerExited(w); !errors.Is(err, journal.ErrClosed) {
+			t.Fatalf("waiting for the journal writer to finish: %v", err)
+		}
+		for i := range more {
+			publishWithin(t, l, textEvent(fmt.Sprint(written+i+1)))
+		}
+		if gaps := w.Health().Gaps; len(gaps) != 0 {
+			t.Fatalf("the journal recorded gaps %v: this case is about a file that is merely short", gaps)
+		}
+		s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
+		if recs := readAll(t, s); len(recs) != 0 {
+			t.Fatalf("%d records were delivered of a range the file will never hold", len(recs))
+		}
+		cu := assertUnresolvable(t, "a finished journal writer", s.Err(), CursorJournalBehind)
+		if !errors.Is(cu, journal.ErrClosed) {
+			t.Fatalf("the subscription ended with %v, want the journal's own ErrClosed", cu)
+		}
+	})
+}
+
+// answeringJournal is a journal that answers the file leg with what a test
+// names, so the one mapping from the journal's errors to cursor reasons can be
+// exercised for every error — several of which a real writer produces only
+// from a corrupt file or a failing disk. Health reports lateGaps only after
+// the cutoff has read it, which is where a writer that failed under the wait
+// would record one.
+type answeringJournal struct {
+	journalFile
+	waitErr  error
+	readErr  error
+	lateGaps []journal.SeqRange
+	healths  atomic.Int64
+}
+
+func (j *answeringJournal) Health() journal.Health {
+	h := j.journalFile.Health()
+	if j.healths.Add(1) > 1 {
+		h.Gaps = j.lateGaps
+	}
+	return h
+}
+
+// Flushed reports the file as empty when the wait is the leg under test, so
+// the owner waits instead of reading.
+func (j *answeringJournal) Flushed() (uint64, int64) {
+	if j.waitErr != nil {
+		return 0, 0
+	}
+	return j.journalFile.Flushed()
+}
+
+func (j *answeringJournal) WaitFlushed(ctx context.Context, seq uint64) error {
+	if j.waitErr != nil {
+		return j.waitErr
+	}
+	return j.journalFile.WaitFlushed(ctx, seq)
+}
+
+func (j *answeringJournal) ReadRange(from, to uint64, fn func(journal.Record) error) error {
+	if j.readErr != nil {
+		return j.readErr
+	}
+	return j.journalFile.ReadRange(from, to, fn)
+}
+
+// TestEventLogTheFileLegsErrorsEachMapToOneReason pins the mapping in
+// headRange.unresolvable: what the journal said, and why the cursor could not
+// be resumed. Whichever it is, the subscription ends and no part of the range
+// is delivered, and the journal's own error is kept for the caller.
+func TestEventLogTheFileLegsErrorsEachMapToOneReason(t *testing.T) {
+	const published, ring = 60, 4
+	lost := []journal.SeqRange{{From: 1, To: journal.MaxSeq}}
+	for _, c := range []struct {
+		name string
+		wait error
+		read error
+		gaps []journal.SeqRange
+		want CursorReason
+	}{
+		{name: "a gap line inside the range", read: fmt.Errorf("%w: seqs 4..9 were dropped", journal.ErrGap), want: CursorJournalGap},
+		{name: "the file is still behind the range", read: fmt.Errorf("%w: it reaches seq 3", journal.ErrBehind), want: CursorJournalBehind},
+		{name: "a line over the reader's limit", read: journal.ErrLineTooLong, want: CursorEvicted},
+		{name: "a file that is not a journal", read: fmt.Errorf("%w: no header", journal.ErrMalformed), want: CursorEvicted},
+		{name: "the file could not be opened", read: fs.ErrPermission, want: CursorEvicted},
+		{name: "no journal after all", read: journal.ErrNoJournal, want: CursorNoJournal},
+		{name: "the writer failed under the wait", wait: journal.ErrFailed, want: CursorJournalBehind},
+		{name: "the writer failed and recorded the loss", wait: journal.ErrFailed, gaps: lost, want: CursorJournalGap},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, w := newJournaledLog(t, EventLogOptions{RingEvents: ring})
+			keepDrained(t, l)
+			for i := range published {
+				publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
+			}
+			flushThrough(t, w, published)
+			l.file = &answeringJournal{journalFile: l.file, waitErr: c.wait, readErr: c.read, lateGaps: c.gaps}
+
+			s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
+			if recs := readAll(t, s); len(recs) != 0 {
+				t.Fatalf("%d records were delivered of a range the file could not serve", len(recs))
+			}
+			cu := assertUnresolvable(t, "the file leg", s.Err(), c.want)
+			said := c.read
+			if c.wait != nil {
+				said = c.wait
+			}
+			if !errors.Is(cu, said) {
+				t.Fatalf("the subscription ended with %v, which does not carry %v", cu, said)
+			}
+		})
+	}
+}
+
+// TestEventLogAJournaledSubscribeStillRefusesWhatItCannotServe is A9's
+// synchronous failures with a journal attached: a range crossing a gap the
+// journal recorded is refused as journal_gap without the file being read at
+// all, and a foreign incarnation, a future seq and a backlog over the budget
+// fail exactly as they do without a journal — before the head is even
+// considered. Every refusal registers nothing: no subscription, no owner
+// goroutine, no read.
+func TestEventLogAJournaledSubscribeStillRefusesWhatItCannotServe(t *testing.T) {
+	const ring, publishes = 8, 400
+	// A queue one entry deep: the writer gives a slot back only when a line
+	// reaches the OS, so a run of publishes overflows it within a few events
+	// and the drop is recorded as a gap.
+	w, inc := newTestJournalWith(t, func(o *journal.Options) { o.QueueEntries = 2 })
+	l := newTestLog(t, EventLogOptions{Journal: w, Incarnation: inc, RingEvents: ring})
+	keepDrained(t, l)
+	file := holdJournal(t, l, false)
+	for i := range publishes {
+		publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
+	}
+	gaps := w.Health().Gaps
+	oldest := uint64(publishes - ring + 1) // the ring's oldest record
+	if len(gaps) == 0 || gaps[0].From >= oldest {
+		t.Fatalf("the journal's gaps are %v: none of them is below the ring's oldest record, seq %d", gaps, oldest)
+	}
+	owners := l.liveOwners.Load()
+	base := subscriberCount(t, l)
+
+	for _, c := range []struct {
+		name string
+		o    SubscribeOptions
+		want CursorReason
+	}{
+		{"another incarnation", SubscribeOptions{After: &Cursor{Incarnation: NewIncarnation(), Seq: 30}}, CursorForeignIncarnation},
+		{"a seq not yet published", SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: publishes + 1}}, CursorFutureSeq},
+		// The budget is judged before the head: this cursor's head needs the
+		// file too, and it is the pinned backlog that refuses it.
+		{"a backlog over the budget", SubscribeOptions{After: &Cursor{Incarnation: inc}, MaxBytes: 1}, CursorBacklogTooLarge},
+		{"a range crossing a recorded gap", SubscribeOptions{After: &Cursor{Incarnation: inc}}, CursorJournalGap},
+	} {
+		s, err := l.Subscribe(c.o)
+		if s != nil {
+			t.Fatalf("%s: a subscription was registered: %v", c.name, err)
+		}
+		assertUnresolvable(t, c.name, err, c.want)
+		if n := subscriberCount(t, l); n != base {
+			t.Fatalf("%s: %d subscribers registered after the refusal, want %d", c.name, n, base)
+		}
+		if n := l.liveOwners.Load(); n != owners {
+			t.Fatalf("%s: %d owner goroutines after the refusal, want %d", c.name, n, owners)
+		}
+		if n := file.reads.Load(); n != 0 {
+			t.Fatalf("%s: the journal file was read %d times; a refusal reads nothing", c.name, n)
+		}
+	}
 }
 
 // TestEventLogALiveOnlySubscriptionStartsWithTheNextEvent: After nil is live
@@ -1979,6 +2457,70 @@ func TestEventLogOmittedRecordsAreTheSameInLiveRingAndFile(t *testing.T) {
 	}
 }
 
+// TestEventLogOmittedRecordsAreTheSameInAFileReplay is A12's file-replay leg:
+// an oversized event, one the codec refuses and one whose type is too long to
+// be a type each reach the primary whole, and a resume whose head has left the
+// ring and is served from the journal file carries exactly the records a live
+// subscription was handed — same seq, type, time and marker — with the
+// sequence contiguous around them.
+func TestEventLogOmittedRecordsAreTheSameInAFileReplay(t *testing.T) {
+	const maxRecord, ring, filler = 4096, 4, 20
+	l, w := newJournaledLog(t, EventLogOptions{MaxRecordBytes: maxRecord, RingEvents: ring})
+	keepDrained(t, l)
+	file := holdJournal(t, l, false)
+	live := mustSubscribe(t, l, SubscribeOptions{})
+	far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) // no form the journal can write back
+	long := EventType(strings.Repeat("t", journal.MaxEventTypeBytes+1))
+	events := []Event{
+		textEvent("before"),
+		{Type: EventPlan, At: logTestTime, Plan: &PlanEvent{ID: "plan-1", Plan: strings.Repeat("a plan line\n", 1000)}},
+		{Type: EventTool, At: logTestTime, Tool: &ToolEvent{ID: "call-1", At: far}},
+		{Type: long, At: logTestTime, Text: "wordy"},
+		textEvent("after"),
+	}
+	for _, ev := range events {
+		publishWithin(t, l, ev)
+	}
+	// Push them all out of the ring, so the resume's head must come from the
+	// file rather than from a pinned record.
+	for i := range filler {
+		publishWithin(t, l, textEvent(fmt.Sprintf("filler %d", i+1)))
+	}
+	total := len(events) + filler
+	liveRecs := readN(t, live, total)
+	if n := len(liveRecs) - ring; n < len(events) {
+		t.Fatalf("only %d records left the ring, want at least the %d that are omitted", n, len(events))
+	}
+	flushThrough(t, w, uint64(total))
+
+	replay := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
+	fileRecs := readN(t, replay, total)
+	if n := file.reads.Load(); n != 1 {
+		t.Fatalf("the journal file was read %d times, want once", n)
+	}
+	assertRun(t, "the file replay", fileRecs, 1, total)
+	for i, r := range fileRecs {
+		lr := liveRecs[i]
+		if r.Seq != lr.Seq || r.Type != lr.Type || !r.At.Equal(lr.At) || r.Body != lr.Body {
+			t.Fatalf("seq %d from the file is %s at %v with %d body bytes; live it was %s at %v with %d",
+				r.Seq, r.Type, r.At, len(r.Body), lr.Type, lr.At, len(lr.Body))
+		}
+		if (r.Omitted == nil) != (lr.Omitted == nil) || r.Omitted != nil && *r.Omitted != *lr.Omitted {
+			t.Fatalf("seq %d's marker from the file is %+v, live it was %+v", r.Seq, r.Omitted, lr.Omitted)
+		}
+	}
+	// The three omissions are the ones A12 names, and they are omitted
+	// records in the file replay too, not full bodies.
+	for i, want := range map[int]string{1: journal.OmittedOversized, 2: journal.OmittedEncodeError, 3: journal.OmittedEncodeError} {
+		if o := fileRecs[i].Omitted; o == nil || o.Reason != want || fileRecs[i].Body != "" {
+			t.Fatalf("seq %d in the file replay is %+v with %d body bytes, want an omitted %s record", i+1, o, len(fileRecs[i].Body), want)
+		}
+	}
+	if h := l.Health(); h.Omitted != 3 {
+		t.Fatalf("the log counts %d omitted records, want 3", h.Omitted)
+	}
+}
+
 // TestEventLogTakesTheJournalsSmallerRecordLimit: the log and the journal
 // each have a MaxRecordBytes, and a journal built with the smaller one lowers
 // the log's. An event between the two limits is then the same oversized
@@ -2166,7 +2708,7 @@ func TestSubscriptionEndsRatherThanDeliverAHole(t *testing.T) {
 		{Seq: 14, Type: EventText, Body: body(14)},
 	}
 	s := l.newSubscription(defaultSubscribeItems, defaultSubscribeBytes, 0)
-	l.startOwner(s, pinned, 10)
+	l.startOwner(s, nil, pinned, 10)
 	recs := readAll(t, s)
 	assertRun(t, "the delivered records", recs, 11, 2)
 	if !errors.Is(s.Err(), errNotContiguous) {

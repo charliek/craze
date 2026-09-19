@@ -25,6 +25,12 @@ import (
 // own goroutine, so nothing is ever between an emit and the primary channel.
 // That is what keeps "emitted means buffered" (internal/cli/prompt.go's
 // drainBuffered) exactly true.
+//
+// A subscription resuming from further back than the ring reaches has the
+// head of its range read from the journal's own file instead (headRange), so
+// a cursor outlives an eviction for as long as the journal holds what it
+// points at. The whole range is served or the subscription fails: nothing is
+// ever truncated or skipped.
 
 // Defaults for EventLogOptions and SubscribeOptions (plan 020 §3.1–3.2).
 const (
@@ -42,6 +48,11 @@ const (
 // the journal's own cap, so the journal keeps the message exactly as the ring
 // holds it and a ring replay and a file replay carry the same record.
 const maxOmittedError = 1 << 10
+
+// journalWaitBound is how long the file leg of a resume waits for a writer
+// that has not yet written the head of the range (plan 020 §3.2). It is a var
+// only so a test can shorten it; nothing in production changes it.
+var journalWaitBound = 2 * time.Second
 
 var (
 	// ErrClosed ends a subscription that was closed, by its own Close or by
@@ -63,8 +74,10 @@ var (
 type CursorReason string
 
 // Reasons Subscribe gives for refusing a cursor. The last four belong to the
-// journal leg of a resume (plan 020 §3.2), which C5c adds; until then a head
-// that has left the ring is always no_journal.
+// journal leg of a resume (plan 020 §3.2): they are why a head that has left
+// the ring could not be served from the journal file either, and the last
+// three of those reach the caller through the subscription, since the reading
+// is the owner's (headRange.unresolvable has the mapping).
 const (
 	// CursorForeignIncarnation: the cursor names another incarnation (an
 	// earlier process, another session), whose numbers mean nothing here.
@@ -90,11 +103,24 @@ const (
 // errors.As to read it. The range is never served in part.
 type ErrCursorUnresolvable struct {
 	Reason CursorReason
+	// Err is what the journal said, when the journal's leg of a resume is why
+	// (headRange.unresolvable): a wrapped journal.ErrBehind, ErrGap, ErrFailed
+	// or ErrClosed, the wait's own deadline, or an I/O error. It is nil for a
+	// cursor refused without reading anything.
+	Err error
 }
 
 func (e ErrCursorUnresolvable) Error() string {
-	return "agent: event log: cannot resume from the cursor: " + string(e.Reason)
+	s := "agent: event log: cannot resume from the cursor: " + string(e.Reason)
+	if e.Err != nil {
+		s += ": " + e.Err.Error()
+	}
+	return s
 }
+
+// Unwrap gives the journal's own error, so a caller can tell a writer that
+// failed from one that was merely behind.
+func (e ErrCursorUnresolvable) Unwrap() error { return e.Err }
 
 // Omitted is why a record has no body: an event the codec could not encode
 // (a programming error), or one larger than MaxRecordBytes (a legitimate
@@ -161,6 +187,14 @@ func (r Record) journalRecord() journal.Record {
 	return journal.Record{Seq: r.Seq, At: r.At, EventType: string(r.Type), Body: r.Body, Omitted: r.Omitted}
 }
 
+// recordFromJournal is a record read back from a journal file, as the log's
+// own: the same envelope, and the same body or omitted marker the ring held
+// when it was published. The reader builds an Omitted of its own per record,
+// so nothing here is shared with anything.
+func recordFromJournal(r journal.Record) Record {
+	return Record{Seq: r.Seq, At: r.At, Type: EventType(r.EventType), Body: r.Body, Omitted: r.Omitted}
+}
+
 // Cursor is a position in one incarnation's sequence: the last seq a reader
 // has, in the log that numbered it.
 type Cursor struct {
@@ -196,6 +230,22 @@ type EventSource interface {
 }
 
 var _ EventSource = (*EventLog)(nil)
+
+// journalFile is what the file leg of a resume needs of the journal: the
+// health it consults before it reads anything, the complete-record boundary
+// it takes at the cutoff, the writer's own live file, and the wait for a
+// writer that has not caught up. Every method is the *journal.Writer's, which
+// is what production always passes; it is an interface so that a test can
+// hold a writer still, which the journal's own stall seams (unexported, and
+// its tests' alone) cannot do from here.
+type journalFile interface {
+	Health() journal.Health
+	Flushed() (seq uint64, bytes int64)
+	ReadRange(from, to uint64, fn func(journal.Record) error) error
+	WaitFlushed(ctx context.Context, seq uint64) error
+}
+
+var _ journalFile = (*journal.Writer)(nil)
 
 // EventLogOptions are an event log's bounds and its journal. Zero values mean
 // the defaults.
@@ -271,7 +321,10 @@ type EventLog struct {
 	closed      chan struct{} // closed by Close: the admission cutoff
 	closeOnce   sync.Once
 	journal     *journal.Writer
-	maxRecord   int
+	// file is the journal again, as the file leg of a resume uses it; nil
+	// without a journal, so a head that has left the ring is no_journal.
+	file      journalFile
+	maxRecord int
 
 	// Guarded by the boundary.
 	next uint64          // the last seq committed
@@ -364,7 +417,7 @@ func NewEventLog(o EventLogOptions) *EventLog {
 	if j := o.Journal.MaxRecordBytes(); j > 0 {
 		maxRecord = min(maxRecord, j)
 	}
-	return &EventLog{
+	l := &EventLog{
 		incarnation: inc,
 		primary:     make(chan Event, primaryCap),
 		sem:         make(chan struct{}, 1),
@@ -377,6 +430,13 @@ func NewEventLog(o EventLogOptions) *EventLog {
 			maxBytes: orDefault(o.RingBytes, defaultRingBytes),
 		},
 	}
+	if o.Journal != nil {
+		// Only when there is one: a nil *journal.Writer in the interface would
+		// be a non-nil journalFile, and the file leg asks whether there is a
+		// journal by asking whether this is nil.
+		l.file = o.Journal
+	}
+	return l
 }
 
 func orDefault(v, def int) int {
@@ -667,9 +727,8 @@ func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 	default:
 	}
 	n := l.next
-	// C5c reads the journal's complete-record boundary here, under the same
-	// admission, so the file leg and the pin describe one instant.
 	prev := n
+	var head *headRange
 	var pinned []Record
 	var pinnedBytes int
 	if a := o.After; a != nil {
@@ -689,7 +748,8 @@ func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 			oldest = l.ring.at(skip).Seq
 		}
 		if oldest > a.Seq+1 {
-			if err := l.headFromFile(a.Seq+1, oldest-1); err != nil {
+			var err error
+			if head, err = l.headFromFile(a.Seq+1, oldest-1); err != nil {
 				return nil, err
 			}
 		}
@@ -698,7 +758,7 @@ func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 	s := l.newSubscription(o.MaxItems, o.MaxBytes, pinnedBytes)
 	l.sweepLocked()
 	l.subs = append(l.subs, s)
-	l.startOwner(s, pinned, prev)
+	l.startOwner(s, head, pinned, prev)
 	return s, nil
 }
 
@@ -717,23 +777,147 @@ func (l *EventLog) newSubscription(maxItems, maxBytes, pinnedBytes int) *Subscri
 	}
 }
 
-// startOwner starts s's owner goroutine, which delivers pinned (the replay,
-// oldest first) after prev and then the live buffer. Subscribe calls it
-// inside the boundary, so Close, which acquires the boundary before it
-// waits, always finds the owner counted.
-func (l *EventLog) startOwner(s *Subscription, pinned []Record, prev uint64) {
+// startOwner starts s's owner goroutine, which delivers head (the journal
+// file's part of the replay), then pinned (the ring's, oldest first) after
+// prev, and then the live buffer. Subscribe calls it inside the boundary, so
+// Close, which acquires the boundary before it waits, always finds the owner
+// counted.
+func (l *EventLog) startOwner(s *Subscription, head *headRange, pinned []Record, prev uint64) {
 	l.owners.Add(1)
 	l.liveOwners.Add(1)
-	go s.run(pinned, prev)
+	go s.run(head, pinned, prev)
 }
 
 // headFromFile is where a resume whose head, [from, to], has left the ring
-// gets it from the journal file. That leg is C5c's (plan 020 §3.2: ReadRange
-// from the writer's own file, gaps and a stalled writer refused); until it
-// lands the head is never servable, so the cursor is no_journal whether or
-// not a journal is attached.
-func (l *EventLog) headFromFile(from, to uint64) error {
-	return ErrCursorUnresolvable{Reason: CursorNoJournal}
+// gets it: the journal's own file. What happens here, inside the boundary and
+// at the same instant as the pin, is only the decision — is there a journal,
+// and does a gap it has already recorded cross the range — and the capture of
+// the complete-record boundary, so the pin and the file's position describe
+// one instant. The reading itself is the owner's (headRange.serve), outside
+// the boundary, because it is I/O.
+func (l *EventLog) headFromFile(from, to uint64) (*headRange, error) {
+	if l.file == nil {
+		return nil, ErrCursorUnresolvable{Reason: CursorNoJournal}
+	}
+	h := l.file.Health()
+	if h.State == journal.StateOff {
+		return nil, ErrCursorUnresolvable{Reason: CursorNoJournal}
+	}
+	if h.Overlaps(from, to) {
+		// Recorded missing: those seqs were dropped or lost to a failure, and
+		// no file will ever hold them. Refuse without reading a byte.
+		return nil, ErrCursorUnresolvable{Reason: CursorJournalGap}
+	}
+	flushed, _ := l.file.Flushed()
+	return &headRange{file: l.file, from: from, to: to, flushed: flushed}, nil
+}
+
+// headRange is the head of a resume the ring no longer holds, [from, to], and
+// what the cutoff learned about serving it: the journal to read it from, and
+// the complete-record boundary as it stood at the cutoff. The records are
+// streamed from the file one at a time, so the range costs the subscription
+// nothing against its MaxBytes — only the pinned ring records count (plan 020
+// §3.2).
+type headRange struct {
+	file     journalFile
+	from, to uint64
+	flushed  uint64 // the journal's boundary at the cutoff
+}
+
+// serve delivers [from, to] from the journal file, before the pinned records
+// and before anything live. The whole range is delivered or the subscription
+// fails: ReadRange refuses a range with a seq missing inside it rather than
+// skipping one, and send refuses a record that does not follow the last. The
+// owner calls it, and it is the only I/O any of this does.
+func (h *headRange) serve(s *Subscription, prev *uint64) error {
+	if h.flushed < h.to {
+		// The writer had not written the range's end at the cutoff. Ask for a
+		// flush and wait for it rather than read a file that cannot answer
+		// yet: a --continue replay is a burst of thousands of small events,
+		// enough to evict from the ring what is still in the writer's buffer.
+		if err := h.await(s); err != nil {
+			return err
+		}
+	}
+	// A record is handed straight to send, which is where the contiguity
+	// assertion and the escape on the subscription's end live. Its error is
+	// kept apart from the journal's: it ends the subscription as it is, and is
+	// not a reason the cursor was unresolvable.
+	var sendErr error
+	err := h.file.ReadRange(h.from, h.to, func(r journal.Record) error {
+		sendErr = s.send(recordFromJournal(r), prev)
+		return sendErr
+	})
+	switch {
+	case sendErr != nil:
+		return sendErr
+	case err != nil:
+		return h.unresolvable(err)
+	}
+	return nil
+}
+
+// await asks the writer to flush and waits until the file reaches the range's
+// end, for at most journalWaitBound and no longer than the subscription
+// itself: WaitFlushed returns as soon as the writer fails or finishes, so the
+// bound is only ever reached by a writer that is genuinely stuck inside a
+// write. The wait ends at once when the subscription does, so a stalled
+// journal never holds up the log's Close, which waits for every owner.
+func (h *headRange) await(s *Subscription) error {
+	ctx, cancel := context.WithTimeout(context.Background(), journalWaitBound)
+	defer cancel()
+	ended := make(chan struct{})
+	defer close(ended)
+	go func() {
+		select {
+		case <-s.kill:
+			cancel()
+		case <-ended:
+		}
+	}()
+	err := h.file.WaitFlushed(ctx, h.to)
+	if cause := s.terminal(); cause != nil {
+		return cause // the subscription ended under the wait; that is why.
+	}
+	if err != nil {
+		return h.unresolvable(err)
+	}
+	return nil
+}
+
+// unresolvable is the cursor error for what the journal said while the file
+// leg was serving the head. The mapping, in one place (plan 020 §3.2):
+//
+//	no journal at all, or a nil writer          no_journal
+//	a gap line, a seq the file skips, or a
+//	  gap recorded while we waited              journal_gap
+//	the file never reached the range: still
+//	  behind, the wait's bound ran out, or
+//	  the writer failed or finished first       journal_behind
+//	anything else: a malformed file, a line
+//	  over the reader's limit, an I/O error     evicted
+//
+// evicted reads true for that last group and only there: the records are gone
+// from the ring, and the file that held them cannot be read, so the range is
+// lost rather than late. Whichever it is, the subscription fails and no part
+// of the range is delivered as if it were whole.
+func (h *headRange) unresolvable(err error) error {
+	reason := CursorEvicted
+	switch {
+	case errors.Is(err, journal.ErrNoJournal):
+		reason = CursorNoJournal
+	case errors.Is(err, journal.ErrGap):
+		reason = CursorJournalGap
+	case errors.Is(err, journal.ErrBehind), errors.Is(err, journal.ErrFailed),
+		errors.Is(err, journal.ErrClosed), errors.Is(err, context.DeadlineExceeded):
+		reason = CursorJournalBehind
+		// A writer that failed or dropped entries under the wait records what
+		// it lost: that is a gap, not lateness, and it is permanent.
+		if h.file.Health().Overlaps(h.from, h.to) {
+			reason = CursorJournalGap
+		}
+	}
+	return ErrCursorUnresolvable{Reason: reason, Err: err}
 }
 
 // sweepLocked unregisters subscriptions that have ended, so a log that sees
@@ -1096,22 +1280,29 @@ func (s *Subscription) offer(rec Record) offerResult {
 
 // run is the owner goroutine: it delivers, then records why it stopped
 // before closing Records.
-func (s *Subscription) run(pinned []Record, prev uint64) {
+func (s *Subscription) run(head *headRange, pinned []Record, prev uint64) {
 	defer s.log.ownerDone()
-	s.finish(s.pump(pinned, prev))
+	s.finish(s.pump(head, pinned, prev))
 }
 
 // pump delivers the replay and then the live buffer until the subscription
 // ends, and returns why it did. prev is the seq the reader already has: the
 // cursor, or the cutoff for a live-only subscription.
 //
-// Each record's charge against the budget is released just before its
-// blocking send, not after it returns: once Records has taken a record, a
-// publisher may offer the next before this goroutine runs again, and a
-// subscription that kept within its budget must not be dropped for a record
-// its reader already has.
-func (s *Subscription) pump(pinned []Record, prev uint64) error {
-	// C5c: the file leg, (After.Seq, R-1], is streamed here first.
+// The replay is in two parts, in sequence order: the head the ring no longer
+// holds, streamed from the journal file, and then the ring records the cutoff
+// pinned. Each pinned record's charge against the budget is released just
+// before its blocking send, not after it returns: once Records has taken a
+// record, a publisher may offer the next before this goroutine runs again,
+// and a subscription that kept within its budget must not be dropped for a
+// record its reader already has. A record from the file was never charged —
+// the range is streamed, never held — so it has nothing to release.
+func (s *Subscription) pump(head *headRange, pinned []Record, prev uint64) error {
+	if head != nil {
+		if err := head.serve(s, &prev); err != nil {
+			return err
+		}
+	}
 	for i := range pinned {
 		rec := pinned[i]
 		pinned[i] = Record{} // handed over: the pin no longer holds it
