@@ -9,9 +9,16 @@ import (
 	"time"
 )
 
+// waitUntil polls for a condition the test cannot be handed as a barrier —
+// a scripted agent's own progress, mostly. Its deadline is a deadlock
+// watchdog, never a timing assertion, so it is deliberately far longer than
+// any wait that is working: a scripted multi-step turn on a box that is also
+// running a live smoke and another -race suite took more than the 10 seconds
+// this used to allow, and failed a test that had nothing wrong with it. A
+// genuine hang still fails well inside the package's own timeout.
 func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
