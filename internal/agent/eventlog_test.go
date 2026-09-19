@@ -1,0 +1,1814 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+	"uuid"
+
+	"github.com/charliek/craze/internal/journal"
+)
+
+// logWatchdog is these tests' wall-clock bound, like the package's await and
+// waitDone: a generous limit on a wait a correct log satisfies at once, so a
+// deadlock fails the test instead of hanging the run. Nothing here sleeps to
+// let something happen; the tests know where a goroutine is from a hook or a
+// channel it closed.
+const logWatchdog = 10 * time.Second
+
+// The functions whose goroutines the leak checks count, as runtime.Stack
+// prints their frames.
+const (
+	ownerFrame  = "github.com/charliek/craze/internal/agent.(*Subscription).run("
+	writerFrame = "github.com/charliek/craze/internal/journal.(*Writer).run("
+)
+
+var logTestTime = time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+
+func textEvent(text string) Event { return Event{Type: EventText, Text: text, At: logTestTime} }
+
+// within runs fn on a goroutine of its own and fails the test if it has not
+// returned within the watchdog: the way a test says "this returns at once"
+// without a clock deciding what "at once" is.
+func within(t testing.TB, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(logWatchdog):
+		t.Fatalf("%s: still blocked after %v", what, logWatchdog)
+	}
+}
+
+// mustSubscribe is l.Subscribe(o), failing the test on an error.
+func mustSubscribe(t *testing.T, l *EventLog, o SubscribeOptions) *Subscription {
+	t.Helper()
+	s, err := l.Subscribe(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// readN reads exactly n records, failing if the subscription ends first.
+func readN(t *testing.T, s *Subscription, n int) []Record {
+	t.Helper()
+	recs := make([]Record, 0, n)
+	deadline := time.After(logWatchdog)
+	for len(recs) < n {
+		select {
+		case r, ok := <-s.Records():
+			if !ok {
+				t.Fatalf("the subscription ended (%v) after %d of %d records", s.Err(), len(recs), n)
+			}
+			recs = append(recs, r)
+		case <-deadline:
+			t.Fatalf("timed out after %d of %d records", len(recs), n)
+		}
+	}
+	return recs
+}
+
+// readAll reads until Records closes.
+func readAll(t *testing.T, s *Subscription) []Record {
+	t.Helper()
+	var recs []Record
+	deadline := time.After(logWatchdog)
+	for {
+		select {
+		case r, ok := <-s.Records():
+			if !ok {
+				return recs
+			}
+			recs = append(recs, r)
+		case <-deadline:
+			t.Fatalf("the subscription was still open after %v and %d records", logWatchdog, len(recs))
+		}
+	}
+}
+
+// drainPrimary empties the primary without waiting: what is there now.
+func drainPrimary(l *EventLog) []Event {
+	var evs []Event
+	for {
+		select {
+		case ev := <-l.Primary():
+			evs = append(evs, ev)
+		default:
+			return evs
+		}
+	}
+}
+
+// runSeqs is the first problem with seqs being exactly from, from+1, …, or "".
+func runSeqs(seqs []uint64, from uint64) string {
+	for i, s := range seqs {
+		if want := from + uint64(i); s != want {
+			return fmt.Sprintf("position %d is seq %d, want %d (a hole, a duplicate, or out of order)", i, s, want)
+		}
+	}
+	return ""
+}
+
+// assertRun fails unless recs are seqs from, from+1, … and n of them (n < 0:
+// any number).
+func assertRun(t *testing.T, what string, recs []Record, from uint64, n int) {
+	t.Helper()
+	seqs := make([]uint64, len(recs))
+	for i, r := range recs {
+		seqs[i] = r.Seq
+	}
+	if p := runSeqs(seqs, from); p != "" {
+		t.Fatalf("%s: %s", what, p)
+	}
+	if n >= 0 && len(recs) != n {
+		t.Fatalf("%s: %d records, want %d", what, len(recs), n)
+	}
+}
+
+// recordTexts decodes each record's Text.
+func recordTexts(t *testing.T, recs []Record) []string {
+	t.Helper()
+	out := make([]string, len(recs))
+	for i, r := range recs {
+		ev, err := r.Event()
+		if err != nil {
+			t.Fatalf("seq %d: %v", r.Seq, err)
+		}
+		out[i] = ev.Text
+	}
+	return out
+}
+
+func assertNoText(t *testing.T, what string, got []string, bad ...string) {
+	t.Helper()
+	for _, g := range got {
+		for _, b := range bad {
+			if g == b {
+				t.Fatalf("%s: %q reached it", what, b)
+			}
+		}
+	}
+}
+
+// fillPrimary publishes until the primary's buffer is full: primaryCap
+// events, seqs 1 to 256, with nobody reading.
+func fillPrimary(t *testing.T, l *EventLog) {
+	t.Helper()
+	for i := range primaryCap {
+		if !l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("fill %d", i+1))) {
+			t.Fatalf("filling the primary: publish %d returned false", i+1)
+		}
+	}
+}
+
+// publishWithin publishes one event that must go through, failing the test
+// rather than hanging it if the primary has no room.
+func publishWithin(t *testing.T, l *EventLog, ev Event) {
+	t.Helper()
+	ok := false
+	within(t, fmt.Sprintf("publishing %q", ev.Text), func() { ok = l.Publish(context.Background(), nil, ev) })
+	if !ok {
+		t.Fatalf("publishing %q returned false", ev.Text)
+	}
+}
+
+// collectPrimary reads the next n events off the primary on a goroutine and
+// hands them over, in order, on the returned channel.
+func collectPrimary(l *EventLog, n int) <-chan []Event {
+	out := make(chan []Event, 1)
+	go func() {
+		evs := make([]Event, 0, n)
+		for range n {
+			evs = append(evs, <-l.Primary())
+		}
+		out <- evs
+	}()
+	return out
+}
+
+// keepDrained reads the primary on a goroutine until the test ends, as a
+// session's consumer would, for tests about something else.
+func keepDrained(t testing.TB, l *EventLog) {
+	t.Helper()
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-l.Primary():
+			case <-stop:
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-done
+	})
+}
+
+// insideAt is a beforePrimarySend hook that closes the returned channel when
+// a publisher is inside the boundary about to block with seq.
+func insideAt(seq uint64) (func(uint64), <-chan struct{}) {
+	inside := make(chan struct{})
+	var once sync.Once
+	return func(s uint64) {
+		if s == seq {
+			once.Do(func() { close(inside) })
+		}
+	}, inside
+}
+
+// newTestJournal is a journal in a fresh directory, built with a fresh
+// incarnation, as C5a's wiring will build one.
+func newTestJournal(t testing.TB) (*journal.Writer, string) {
+	t.Helper()
+	inc := NewIncarnation()
+	w, err := journal.New(journal.Options{
+		Dir:         filepath.Join(t.TempDir(), "journal"),
+		Incarnation: inc,
+		Cwd:         t.TempDir(),
+		Provider:    "test",
+		EventCodec:  EventCodecVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close bounds its wait at 500 ms; the cleanup waits for the writer to
+	// finish as well, so no test leaves a writer running into the next one
+	// (the leak checks count them).
+	t.Cleanup(func() {
+		_ = w.Close(context.Background())
+		_ = writerExited(w)
+	})
+	return w, inc
+}
+
+// writerExited waits, up to the watchdog, for w's writer goroutine to finish
+// after its Close. WaitFlushed for a seq never reached returns ErrClosed
+// exactly when the writer has finished.
+func writerExited(w *journal.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	defer cancel()
+	return w.WaitFlushed(ctx, journal.MaxSeq)
+}
+
+// newJournaledLog is an event log feeding a fresh journal, closed when the
+// test ends.
+func newJournaledLog(t testing.TB, o EventLogOptions) (*EventLog, *journal.Writer) {
+	t.Helper()
+	w, inc := newTestJournal(t)
+	o.Journal, o.Incarnation = w, inc
+	return newTestLog(t, o), w
+}
+
+// newTestLog is an event log with o's journal, if any, closed when the test
+// ends.
+func newTestLog(t testing.TB, o EventLogOptions) *EventLog {
+	t.Helper()
+	l := NewEventLog(o)
+	t.Cleanup(func() { l.Close(context.Background()) })
+	return l
+}
+
+// closeLog closes l and, when it has a journal, waits for the journal's
+// writer goroutine to finish: l.Close bounds its own wait at 500 ms, and a
+// slow -race run must not make a test read a file the writer is still
+// writing.
+func closeLog(t testing.TB, l *EventLog, w *journal.Writer) {
+	t.Helper()
+	within(t, "EventLog.Close", func() { l.Close(context.Background()) })
+	if w == nil {
+		return
+	}
+	if err := writerExited(w); !errors.Is(err, journal.ErrClosed) {
+		t.Fatalf("waiting for the journal writer to finish: %v", err)
+	}
+}
+
+// fromJournal is a journal record as the log's own Record.
+func fromJournal(r journal.Record) Record {
+	return Record{Seq: r.Seq, At: r.At, Type: EventType(r.EventType), Body: r.Body, Omitted: r.Omitted}
+}
+
+// fileRecords is every event record in the journal's file.
+func fileRecords(t *testing.T, w *journal.Writer) []Record {
+	t.Helper()
+	var recs []Record
+	err := journal.ReadFile(w.Path(), 1, journal.MaxSeq, func(r journal.Record) error {
+		recs = append(recs, fromJournal(r))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading the journal: %v", err)
+	}
+	return recs
+}
+
+// fileLines is every line of the journal's file, notes included, as JSON.
+func fileLines(t *testing.T, w *journal.Writer) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(w.Path())
+	if err != nil {
+		t.Fatalf("reading the journal: %v", err)
+	}
+	var lines []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n")) {
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("a journal line is not JSON: %v: %s", err, line)
+		}
+		lines = append(lines, m)
+	}
+	return lines
+}
+
+// diags is the file's diag lines of one kind, their fields.
+func diags(lines []map[string]any, kind string) []map[string]any {
+	var out []map[string]any
+	for _, l := range lines {
+		if l["type"] == "diag" && l["kind"] == kind {
+			out = append(out, l["fields"].(map[string]any))
+		}
+	}
+	return out
+}
+
+// assertClosingIsLast fails unless the file's last line is the closing diag
+// and no other closing precedes it: no note is ever written after closing.
+func assertClosingIsLast(t *testing.T, lines []map[string]any) map[string]any {
+	t.Helper()
+	if len(lines) == 0 {
+		t.Fatal("the journal is empty")
+	}
+	last := lines[len(lines)-1]
+	if last["type"] != "diag" || last["kind"] != journal.DiagClosing {
+		t.Fatalf("the journal's last line is %v, want the closing diag", last)
+	}
+	if n := len(diags(lines, journal.DiagClosing)); n != 1 {
+		t.Fatalf("%d closing diags, want 1", n)
+	}
+	return last["fields"].(map[string]any)
+}
+
+// subscriberCount is how many subscriptions are registered and have not
+// ended, read inside the boundary.
+func subscriberCount(t *testing.T, l *EventLog) int {
+	t.Helper()
+	n := -1
+	within(t, "counting subscribers", func() {
+		l.sem <- struct{}{}
+		defer l.release()
+		n = 0
+		for _, s := range l.subs {
+			if s.terminal() == nil {
+				n++
+			}
+		}
+	})
+	return n
+}
+
+// goroutinesRunning counts the goroutines with frame on their stack.
+func goroutinesRunning(frame string) int {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return bytes.Count(buf[:n], []byte(frame))
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// settleGoroutines waits until at most want goroutines run frame. A
+// goroutine that has signalled its end (a closed channel, a Done) still has
+// a few instructions to run before the runtime stops listing it; the wait is
+// bounded by the watchdog, so a real leak fails.
+func settleGoroutines(t *testing.T, frame string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(logWatchdog)
+	for {
+		got := goroutinesRunning(frame)
+		if got <= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines still run %s, want at most %d", got, frame, want)
+		}
+		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestEventLogIncarnationIsAStableUUIDv7: the id NewEventLog mints is a
+// UUIDv7, the same on every call, different per log, and a name the journal
+// accepts in a file name. A given one is kept.
+func TestEventLogIncarnationIsAStableUUIDv7(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	id := l.Incarnation()
+	u, err := uuid.Parse(id)
+	if err != nil {
+		t.Fatalf("incarnation %q is not a UUID: %v", id, err)
+	}
+	if v := u[6] >> 4; v != 7 {
+		t.Fatalf("incarnation %q is a version %d UUID, want 7", id, v)
+	}
+	if l.Incarnation() != id {
+		t.Fatal("the incarnation changed between calls")
+	}
+	if other := newTestLog(t, EventLogOptions{}).Incarnation(); other == id {
+		t.Fatalf("two logs share the incarnation %q", id)
+	}
+	if got := newTestLog(t, EventLogOptions{Incarnation: "given"}).Incarnation(); got != "given" {
+		t.Fatalf("a given incarnation came back as %q", got)
+	}
+	if _, err := journal.New(journal.Options{Dir: t.TempDir(), Incarnation: id, Cwd: t.TempDir()}); err != nil {
+		t.Fatalf("the journal refuses the incarnation: %v", err)
+	}
+}
+
+// TestRecordEventDecodesTheBodyAndSetsSeq: a record replays as the event that
+// was published, under the codec's equivalence, with Seq restored from the
+// envelope — the same Seq the primary saw.
+func TestRecordEventDecodesTheBodyAndSetsSeq(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	l.Publish(context.Background(), nil, textEvent("first"))
+	ev := Event{Type: EventTool, At: codecTestTime, Tool: &ToolEvent{
+		ID: "call-1", Status: "completed", Output: &ToolOutput{ExitCode: ptr(0), Stdout: "ok"}, Task: &TaskInfo{},
+	}}
+	if !l.Publish(context.Background(), nil, ev) {
+		t.Fatal("Publish returned false")
+	}
+	prim := drainPrimary(l)
+	if len(prim) != 2 || prim[1].Seq != 2 {
+		t.Fatalf("the primary has %+v", prim)
+	}
+	s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation(), Seq: 1}})
+	rec := readN(t, s, 1)[0]
+	got, err := rec.Event()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Seq != 2 || rec.Seq != 2 {
+		t.Fatalf("the replayed event has Seq %d (record %d), want 2", got.Seq, rec.Seq)
+	}
+	if d := codecDiff(ev, got); len(d) > 0 {
+		t.Fatalf("the replayed event differs:\n  %s", strings.Join(d, "\n  "))
+	}
+	if rec.Type != EventTool || !rec.At.Equal(codecTestTime) {
+		t.Fatalf("the envelope is %v at %v", rec.Type, rec.At)
+	}
+	if _, err := (Record{Seq: 3, Type: EventPlan, Omitted: &Omitted{Reason: journal.OmittedOversized}}).Event(); err == nil {
+		t.Fatal("an omitted record decoded without an error")
+	}
+}
+
+// TestEventLogConcurrentPublishersGetOneGaplessSequenceEverywhere is A4: with
+// G goroutines publishing at once, the primary receives strictly increasing
+// Seq from 1 with no holes, every subscriber that was not dropped receives
+// the identical sequence (the same bodies at the same numbers), a subscriber
+// that was dropped received a gapless prefix of it, and the journal holds it
+// too.
+func TestEventLogConcurrentPublishersGetOneGaplessSequenceEverywhere(t *testing.T) {
+	const publishers, each = 8, 250
+	const total = publishers * each
+	l, w := newJournaledLog(t, EventLogOptions{})
+
+	full := make([]*Subscription, 3)
+	for i := range full {
+		s := mustSubscribe(t, l, SubscribeOptions{MaxItems: total})
+		full[i] = s
+	}
+	tiny := mustSubscribe(t, l, SubscribeOptions{MaxItems: 1})
+
+	got := make([][]Record, len(full))
+	reached := make([]chan struct{}, len(full))
+	var readers sync.WaitGroup
+	for i, s := range full {
+		reached[i] = make(chan struct{})
+		readers.Go(func() {
+			for r := range s.Records() {
+				got[i] = append(got[i], r)
+				if r.Seq == total {
+					close(reached[i])
+				}
+			}
+		})
+	}
+	var tinyGot []Record
+	readers.Go(func() {
+		for r := range tiny.Records() {
+			tinyGot = append(tinyGot, r)
+		}
+	})
+	primary := collectPrimary(l, total)
+
+	var failed atomic.Int64
+	var pubs sync.WaitGroup
+	for p := range publishers {
+		pubs.Go(func() {
+			for i := range each {
+				if !l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("p%d-%d", p, i))) {
+					failed.Add(1)
+				}
+			}
+		})
+	}
+	waitDone(t, &pubs)
+	if n := failed.Load(); n != 0 {
+		t.Fatalf("%d publishes returned false on an open log", n)
+	}
+	evs := await(t, primary, "the primary's events")
+	for i := range full {
+		await(t, reached[i], fmt.Sprintf("subscriber %d to reach seq %d", i, total))
+	}
+	closeLog(t, l, w)
+	waitDone(t, &readers)
+
+	primSeqs := make([]uint64, len(evs))
+	byseq := make(map[uint64]string, total)
+	lastIndex := map[int]int{}
+	for i, ev := range evs {
+		primSeqs[i] = ev.Seq
+		byseq[ev.Seq] = ev.Text
+		// Each publisher's own events keep its order.
+		var p, n int
+		if _, err := fmt.Sscanf(ev.Text, "p%d-%d", &p, &n); err != nil {
+			t.Fatalf("event %q: %v", ev.Text, err)
+		}
+		if prev, ok := lastIndex[p]; ok && n <= prev {
+			t.Fatalf("publisher %d's event %d reached the primary after its event %d", p, n, prev)
+		}
+		lastIndex[p] = n
+	}
+	if p := runSeqs(primSeqs, 1); p != "" {
+		t.Fatalf("the primary: %s", p)
+	}
+	check := func(what string, recs []Record, n int) {
+		t.Helper()
+		assertRun(t, what, recs, 1, n)
+		for i, text := range recordTexts(t, recs) {
+			if text != byseq[recs[i].Seq] {
+				t.Fatalf("%s: seq %d is %q, the primary had %q", what, recs[i].Seq, text, byseq[recs[i].Seq])
+			}
+		}
+	}
+	for i, s := range full {
+		if !errors.Is(s.Err(), ErrClosed) {
+			t.Fatalf("subscriber %d ended with %v, want ErrClosed: it was not to be dropped", i, s.Err())
+		}
+		check(fmt.Sprintf("subscriber %d", i), got[i], total)
+	}
+	if err := tiny.Err(); !errors.Is(err, ErrSlowConsumer) && !errors.Is(err, ErrClosed) {
+		t.Fatalf("the tiny subscriber ended with %v", err)
+	}
+	check("the tiny subscriber's prefix", tinyGot, -1)
+	check("the journal", fileRecords(t, w), total)
+}
+
+// TestEventLogWhatAReturnedPublisherEmittedIsAlreadyInThePrimary is A5,
+// "emitted means buffered": up to 256 events published from a goroutine that
+// has returned are all found by a non-blocking drain of the primary — with a
+// journal attached and a subscriber that never reads, neither of which may
+// put anything between Publish and the primary.
+func TestEventLogWhatAReturnedPublisherEmittedIsAlreadyInThePrimary(t *testing.T) {
+	l, _ := newJournaledLog(t, EventLogOptions{})
+	mustSubscribe(t, l, SubscribeOptions{MaxItems: 8})
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range primaryCap {
+			if !l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1))) {
+				failed.Store(true)
+			}
+		}
+	})
+	waitDone(t, &wg)
+	if failed.Load() {
+		t.Fatal("a publish returned false")
+	}
+	evs := drainPrimary(l)
+	if len(evs) != primaryCap {
+		t.Fatalf("a non-blocking drain found %d events, want %d", len(evs), primaryCap)
+	}
+	for i, ev := range evs {
+		if ev.Seq != uint64(i+1) || ev.Text != fmt.Sprint(i+1) {
+			t.Fatalf("position %d is seq %d %q", i, ev.Seq, ev.Text)
+		}
+	}
+}
+
+// TestEventLogAWaitingPublisherHonorsItsCtxWhileAnotherIsBlockedInside is A6,
+// cancellable admission: with the primary full and publisher A blocked on it
+// inside the boundary, publisher B, waiting to be admitted, returns false
+// when its ctx is cancelled — while A is still blocked. A mutex boundary
+// would hold B until A got out. B consumes no number.
+func TestEventLogAWaitingPublisherHonorsItsCtxWhileAnotherIsBlockedInside(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	fillPrimary(t, l)
+
+	hook, aInside := insideAt(primaryCap + 1)
+	var arrivals atomic.Int64
+	bWaiting := make(chan struct{})
+	l.hooks = &logHooks{
+		beforePrimarySend: hook,
+		admitting: func(admitKind) {
+			if arrivals.Add(1) == 2 {
+				close(bWaiting)
+			}
+		},
+	}
+	aResult := make(chan bool, 1)
+	go func() { aResult <- l.Publish(context.Background(), nil, textEvent("A")) }()
+	await(t, aInside, "A to block on the full primary inside the boundary")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	bResult := make(chan bool, 1)
+	go func() { bResult <- l.Publish(ctx, nil, textEvent("B")) }()
+	await(t, bWaiting, "B to wait for admission")
+	cancel()
+	if await(t, bResult, "B to give up on its cancelled ctx") {
+		t.Fatal("B returned true")
+	}
+	select {
+	case <-aResult:
+		t.Fatal("A returned while the primary was still full")
+	default:
+	}
+
+	first := await(t, l.Primary(), "the primary's first event")
+	if first.Seq != 1 {
+		t.Fatalf("the primary's first event is seq %d", first.Seq)
+	}
+	if !await(t, aResult, "A, once the primary had room") {
+		t.Fatal("A returned false")
+	}
+	// A filled the slot it waited for; make room for C.
+	evs := drainPrimary(l)
+	publishWithin(t, l, textEvent("C"))
+	evs = append(evs, drainPrimary(l)...)
+	last := evs[len(evs)-2:]
+	if last[0].Text != "A" || last[0].Seq != 257 || last[1].Text != "C" || last[1].Seq != 258 {
+		t.Fatalf("the primary ends %+v, want A at 257 and C at 258: B took no number", last)
+	}
+	if n := l.Health().DroppedAtClose; n != 0 {
+		t.Fatalf("DroppedAtClose is %d: a ctx escape is not a drop at close", n)
+	}
+}
+
+// TestEventLogASubscriberThatNeverReadsIsDroppedAndHoldsNobodyBack is A7: a
+// subscriber that never reads ends with ErrSlowConsumer; the publisher is
+// never held by it, and the primary and the other subscriber lose nothing.
+// The drop is recorded once, in the health and in the journal.
+func TestEventLogASubscriberThatNeverReadsIsDroppedAndHoldsNobodyBack(t *testing.T) {
+	const total = 200
+	l, w := newJournaledLog(t, EventLogOptions{})
+	stuck := mustSubscribe(t, l, SubscribeOptions{MaxItems: 8})
+	reader := mustSubscribe(t, l, SubscribeOptions{MaxItems: total})
+	readerGot := make(chan []Record, 1)
+	go func() {
+		var recs []Record
+		for r := range reader.Records() {
+			if recs = append(recs, r); r.Seq == total {
+				break
+			}
+		}
+		readerGot <- recs
+	}()
+	primary := collectPrimary(l, total)
+
+	within(t, "publishing past a subscriber that never reads", func() {
+		for i := range total {
+			if !l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1))) {
+				t.Errorf("publish %d returned false", i+1)
+			}
+		}
+	})
+	evs := await(t, primary, "the primary's events")
+	for i, ev := range evs {
+		if ev.Seq != uint64(i+1) {
+			t.Fatalf("the primary's position %d is seq %d", i, ev.Seq)
+		}
+	}
+	assertRun(t, "the reading subscriber", await(t, readerGot, "the reading subscriber"), 1, total)
+
+	// The owner closes the stuck subscription on its own: reading it now
+	// finds the channel closed, after at most the one record the owner held
+	// when the overflow came.
+	stuckGot := readAll(t, stuck)
+	if !errors.Is(stuck.Err(), ErrSlowConsumer) {
+		t.Fatalf("the stuck subscriber ended with %v, want ErrSlowConsumer", stuck.Err())
+	}
+	if len(stuckGot) > 1 {
+		t.Fatalf("the stuck subscriber was delivered %d records after its drop", len(stuckGot))
+	}
+	assertRun(t, "the stuck subscriber", stuckGot, 1, -1)
+	if n := l.Health().SubscribersDropped; n != 1 {
+		t.Fatalf("SubscribersDropped is %d, want 1", n)
+	}
+	closeLog(t, l, w)
+	dropped := diags(fileLines(t, w), journal.DiagSubscriberDropped)
+	if len(dropped) != 1 || dropped[0]["seq"] != float64(9) || dropped[0]["subscribers"] != float64(1) {
+		t.Fatalf("the journal's subscriber_dropped notes are %v, want one at seq 9 (its 8-item buffer full)", dropped)
+	}
+}
+
+// TestEventLogAnAbandonedPublishConsumesNoSeqAndReachesNothing is A8: a
+// Publish abandoned — on done or ctx while blocked on the primary, on done
+// while waiting for admission, or by the log closing — takes no number and
+// reaches no subscriber, the ring, or the journal, and leaves no orphan note.
+// Escapes on done and the cutoff are counted for the closing diag; a ctx
+// escape is not.
+func TestEventLogAnAbandonedPublishConsumesNoSeqAndReachesNothing(t *testing.T) {
+	type abandon struct {
+		name      string
+		atAdmit   bool // abandoned while waiting for admission, behind a blocked publisher
+		byClose   bool // abandoned by the log closing
+		byCtx     bool // abandoned by ctx rather than done
+		wantDrops int
+	}
+	for _, c := range []abandon{
+		{name: "done while blocked on the primary", wantDrops: 1},
+		{name: "ctx while blocked on the primary", byCtx: true},
+		{name: "done while waiting for admission", atAdmit: true, wantDrops: 1},
+		{name: "ctx while waiting for admission", atAdmit: true, byCtx: true},
+		{name: "the log closing", byClose: true, wantDrops: 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, w := newJournaledLog(t, EventLogOptions{})
+			// The watcher is read by the test itself, up to the last seq
+			// committed, before the log closes: Close ends a subscription at
+			// once and discards what it had not delivered yet, so a watcher
+			// on its own goroutine could lose its tail to a slow scheduler
+			// and prove nothing.
+			watch := mustSubscribe(t, l, SubscribeOptions{MaxItems: 4096})
+			fillPrimary(t, l)
+			watchedRecs := readN(t, watch, primaryCap)
+
+			hook, blocked := insideAt(primaryCap + 1)
+			// Every later Publish and Subscribe arrives here too; the buffer
+			// is far larger than the handful this test makes, so the hook
+			// never blocks one of them.
+			arrived := make(chan struct{}, 64)
+			l.hooks = &logHooks{beforePrimarySend: hook, admitting: func(admitKind) { arrived <- struct{}{} }}
+			done := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			abandon := func() {
+				if c.byCtx {
+					cancel()
+				} else {
+					close(done)
+				}
+			}
+
+			var blocker chan bool
+			if c.atAdmit {
+				// A publisher that will not be abandoned holds the boundary
+				// on the full primary; the abandoned one waits behind it.
+				blocker = make(chan bool, 1)
+				go func() { blocker <- l.Publish(context.Background(), nil, textEvent("blocker")) }()
+				await(t, arrived, "the blocker's admission")
+				await(t, blocked, "the blocker to block inside the boundary")
+			}
+			result := make(chan bool, 1)
+			go func() { result <- l.Publish(ctx, done, textEvent("abandoned")) }()
+			await(t, arrived, "the abandoned publisher's admission")
+			if !c.atAdmit {
+				await(t, blocked, "the publisher to block inside the boundary")
+			}
+			closed := make(chan struct{})
+			if c.byClose {
+				go func() {
+					defer close(closed)
+					l.Close(context.Background())
+				}()
+			} else {
+				abandon()
+			}
+			if await(t, result, "the abandoned publish to return") {
+				t.Fatal("the abandoned publish returned true")
+			}
+
+			want := uint64(primaryCap)
+			if c.byClose {
+				await(t, closed, "Close")
+			} else {
+				await(t, l.Primary(), "one event off the full primary")
+				if c.atAdmit {
+					if !await(t, blocker, "the blocker") {
+						t.Fatal("the blocker returned false")
+					}
+					want++
+				}
+				// The blocker, if any, filled the slot it waited for; make
+				// room for the publish after.
+				evs := drainPrimary(l)
+				publishWithin(t, l, textEvent("after"))
+				want++
+				evs = append(evs, drainPrimary(l)...)
+				if last := evs[len(evs)-1]; last.Seq != want || last.Text != "after" {
+					t.Fatalf("the primary ends with seq %d %q, want %d \"after\": the abandoned event took a number", last.Seq, last.Text, want)
+				}
+				// The ring: a replay of everything has every number once and
+				// not the abandoned event.
+				replay := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}, MaxItems: 4096})
+				recs := readN(t, replay, int(want))
+				assertRun(t, "the ring's replay", recs, 1, int(want))
+				assertNoText(t, "the ring", recordTexts(t, recs), "abandoned")
+				watchedRecs = append(watchedRecs, readN(t, watch, int(want)-primaryCap)...)
+			}
+			if n := l.Health().DroppedAtClose; n != c.wantDrops {
+				t.Fatalf("DroppedAtClose is %d, want %d", n, c.wantDrops)
+			}
+			closeLog(t, l, w)
+
+			// Everything committed was read; the abandoned event never
+			// follows it.
+			watchedRecs = append(watchedRecs, readAll(t, watch)...)
+			if !errors.Is(watch.Err(), ErrClosed) {
+				t.Fatalf("the watcher ended with %v", watch.Err())
+			}
+			assertRun(t, "the watching subscriber", watchedRecs, 1, int(want))
+			assertNoText(t, "the watching subscriber", recordTexts(t, watchedRecs), "abandoned")
+			fileRecs := fileRecords(t, w)
+			assertRun(t, "the journal", fileRecs, 1, int(want))
+			assertNoText(t, "the journal", recordTexts(t, fileRecs), "abandoned")
+			lines := fileLines(t, w)
+			closing := assertClosingIsLast(t, lines)
+			if closing["droppedAtClose"] != float64(c.wantDrops) {
+				t.Fatalf("closing says droppedAtClose %v, want %d", closing["droppedAtClose"], c.wantDrops)
+			}
+			for _, kind := range []string{journal.DiagRecordOmitted, journal.DiagSubscriberDropped} {
+				if n := len(diags(lines, kind)); n != 0 {
+					t.Fatalf("the journal has %d %s notes: an abandoned publish left an orphan", n, kind)
+				}
+			}
+		})
+	}
+}
+
+// TestEventLogResumeInsideTheRingWhileAPublisherRuns is A9(a): a cursor
+// inside the ring, taken while a publisher runs throughout, delivers exactly
+// (After.Seq, …] in order, with no duplicate and no hole across the seam
+// between the pinned replay and the live buffer.
+func TestEventLogResumeInsideTheRingWhileAPublisherRuns(t *testing.T) {
+	const total, after = 2000, 300
+	l := newTestLog(t, EventLogOptions{})
+	reached := make(chan struct{})
+	go func() {
+		for range total {
+			if ev := <-l.Primary(); ev.Seq == 500 {
+				close(reached)
+			}
+		}
+	}()
+	var pub sync.WaitGroup
+	pub.Go(func() {
+		for i := range total {
+			l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1)))
+		}
+	})
+	await(t, reached, "the publisher to pass seq 500")
+	s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation(), Seq: after}, MaxItems: total})
+	recs := readN(t, s, total-after)
+	waitDone(t, &pub)
+	assertRun(t, "the resumed subscription", recs, after+1, total-after)
+	for i, text := range recordTexts(t, recs) {
+		if text != fmt.Sprint(recs[i].Seq) {
+			t.Fatalf("seq %d carries %q", recs[i].Seq, text)
+		}
+	}
+}
+
+// TestEventLogSubscribePinsItsBacklogAgainstLaterEviction is A9(d): the ring
+// evicts every record a subscription pinned, after the cutoff and before the
+// subscriber reads one, and the subscription still delivers them all,
+// followed by the live records, gapless. A second cursor at the same place,
+// taken after the eviction, proves the ring no longer holds them.
+func TestEventLogSubscribePinsItsBacklogAgainstLaterEviction(t *testing.T) {
+	const ring, before, after, more = 64, 100, 50, 200
+	l := newTestLog(t, EventLogOptions{RingEvents: ring})
+	keepDrained(t, l)
+	for i := range before {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1)))
+	}
+	cursor := &Cursor{Incarnation: l.Incarnation(), Seq: after}
+	s, err := l.Subscribe(SubscribeOptions{After: cursor, MaxItems: more})
+	if err != nil {
+		t.Fatalf("the cursor at %d is inside a ring holding %d..%d: %v", after, before-ring+1, before, err)
+	}
+	within(t, "publishing while the subscriber reads nothing", func() {
+		for i := range more {
+			l.Publish(context.Background(), nil, textEvent(fmt.Sprint(before+i+1)))
+		}
+	})
+	var cu ErrCursorUnresolvable
+	if _, err := l.Subscribe(SubscribeOptions{After: cursor}); !errors.As(err, &cu) || cu.Reason != CursorNoJournal {
+		t.Fatalf("a second cursor at %d after the eviction: %v, want no_journal", after, err)
+	}
+	recs := readN(t, s, before+more-after)
+	assertRun(t, "the pinned subscription", recs, after+1, before+more-after)
+	for i, text := range recordTexts(t, recs) {
+		if text != fmt.Sprint(recs[i].Seq) {
+			t.Fatalf("seq %d carries %q", recs[i].Seq, text)
+		}
+	}
+}
+
+// TestEventLogSubscribeRefusesACursorItCannotServeAndRegistersNothing is A9's
+// synchronous failures: a foreign incarnation, a future seq, a head that has
+// left the ring with no journal to serve it, and a backlog over the budget
+// each fail with their reason, return no subscription, and register nothing
+// — no subscriber, no owner goroutine. The cursors either side of each
+// boundary succeed.
+func TestEventLogSubscribeRefusesACursorItCannotServeAndRegistersNothing(t *testing.T) {
+	const ring, published = 16, 40 // the ring holds 25..40
+	l := newTestLog(t, EventLogOptions{RingEvents: ring})
+	keepDrained(t, l)
+	for i := range published {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("event %d", i+1)))
+	}
+	inc := l.Incarnation()
+	owners := l.liveOwners.Load()
+	base := subscriberCount(t, l)
+
+	for _, c := range []struct {
+		name string
+		o    SubscribeOptions
+		want CursorReason
+	}{
+		{"another incarnation", SubscribeOptions{After: &Cursor{Incarnation: NewIncarnation(), Seq: 30}}, CursorForeignIncarnation},
+		{"no incarnation", SubscribeOptions{After: &Cursor{Seq: 30}}, CursorForeignIncarnation},
+		{"a seq not yet published", SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: published + 1}}, CursorFutureSeq},
+		{"a head long evicted", SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: 10}}, CursorNoJournal},
+		{"a head one seq evicted", SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: published - ring - 1}}, CursorNoJournal},
+		{"from the start", SubscribeOptions{After: &Cursor{Incarnation: inc}}, CursorNoJournal},
+		{"a backlog over the budget", SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: 30}, MaxBytes: 64}, CursorBacklogTooLarge},
+	} {
+		s, err := l.Subscribe(c.o)
+		var cu ErrCursorUnresolvable
+		if s != nil || !errors.As(err, &cu) || cu.Reason != c.want {
+			t.Fatalf("%s: got %v, %v; want ErrCursorUnresolvable{%s}", c.name, s, err, c.want)
+		}
+		if n := subscriberCount(t, l); n != base {
+			t.Fatalf("%s: %d subscribers registered after the refusal, want %d", c.name, n, base)
+		}
+		if n := l.liveOwners.Load(); n != owners {
+			t.Fatalf("%s: %d owner goroutines after the refusal, want %d", c.name, n, owners)
+		}
+	}
+	// Nothing lingers to be offered the next record either.
+	l.Publish(context.Background(), nil, textEvent("after the refusals"))
+	if n := subscriberCount(t, l); n != base {
+		t.Fatalf("%d subscribers after a later publish, want %d", n, base)
+	}
+
+	// The edges that are servable: the oldest record the ring holds, and
+	// the last seq published (nothing to replay).
+	oldest := uint64(published - ring + 1 + 1) // the later publish evicted one more
+	s, err := l.Subscribe(SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: oldest - 1}})
+	if err != nil {
+		t.Fatalf("a cursor just before the ring's oldest record: %v", err)
+	}
+	assertRun(t, "the ring's whole content", readN(t, s, ring), oldest, ring)
+	s.Close()
+	tip, err := l.Subscribe(SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: published + 1}})
+	if err != nil {
+		t.Fatalf("a cursor at the last seq: %v", err)
+	}
+	l.Publish(context.Background(), nil, textEvent("next"))
+	assertRun(t, "a cursor at the last seq", readN(t, tip, 1), published+2, 1)
+}
+
+// TestEventLogALiveOnlySubscriptionStartsWithTheNextEvent: After nil is live
+// only, from the first event published after Subscribe returns.
+func TestEventLogALiveOnlySubscriptionStartsWithTheNextEvent(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	for i := range 5 {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1)))
+	}
+	s := mustSubscribe(t, l, SubscribeOptions{})
+	for i := range 3 {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprint(6+i)))
+	}
+	assertRun(t, "a live-only subscription", readN(t, s, 3), 6, 3)
+}
+
+// TestEventLogSubscriptionsSurviveConcurrentPublishDropCloseAndLogClose is
+// A10's churn: publishers, a subscriber that is dropped, one that closes
+// itself, one closed from elsewhere, one that walks away from its backlog,
+// subscribes and closes in a loop, and the log's own Close, all at once.
+// Every subscription ends with ErrClosed or ErrSlowConsumer and was handed a
+// gapless run; the number of publishes that returned true is the last seq
+// the primary and the journal hold, gaplessly; every one that returned false
+// is counted as dropped at close; and no owner goroutine or journal writer
+// is left behind.
+func TestEventLogSubscriptionsSurviveConcurrentPublishDropCloseAndLogClose(t *testing.T) {
+	const publishers, each = 6, 400
+	const total = publishers * each
+	// The log closes once the primary has seen this seq: well into the run,
+	// with publishers, drops and resumes still going.
+	const closeAt = 1000
+	settleGoroutines(t, ownerFrame, 0)
+	settleGoroutines(t, writerFrame, 0)
+	l, w := newJournaledLog(t, EventLogOptions{RingEvents: 256})
+	inc := l.Incarnation()
+
+	var latest atomic.Uint64
+	progress := make(chan struct{})
+	stopDrain := make(chan struct{})
+	drained := make(chan []uint64, 1)
+	go func() {
+		var seqs []uint64
+		defer func() { drained <- seqs }()
+		for {
+			select {
+			case ev := <-l.Primary():
+				seqs = append(seqs, ev.Seq)
+				latest.Store(ev.Seq)
+				if ev.Seq == closeAt {
+					close(progress)
+				}
+			case <-stopDrain:
+				return
+			}
+		}
+	}()
+
+	type sub struct {
+		name  string
+		s     *Subscription
+		from  uint64
+		recs  []Record
+		drop  bool // may end as a slow consumer
+		reads chan struct{}
+	}
+	subscribe := func(name string, o SubscribeOptions, from uint64, drop bool) *sub {
+		s := mustSubscribe(t, l, o)
+		return &sub{name: name, s: s, from: from, drop: drop, reads: make(chan struct{})}
+	}
+	fast := subscribe("fast", SubscribeOptions{MaxItems: total}, 1, false)
+	slow := subscribe("slow", SubscribeOptions{MaxItems: 4}, 1, true)
+	self := subscribe("closes itself", SubscribeOptions{MaxItems: total}, 1, false)
+	other := subscribe("closed from elsewhere", SubscribeOptions{MaxItems: total}, 1, false)
+	subs := []*sub{fast, slow, self, other}
+
+	var readers sync.WaitGroup
+	read := func(x *sub, stopAfter int) {
+		readers.Go(func() {
+			defer close(x.reads)
+			for r := range x.s.Records() {
+				x.recs = append(x.recs, r)
+				if len(x.recs) == stopAfter {
+					x.s.Close()
+				}
+			}
+		})
+	}
+	read(fast, -1)
+	read(self, 50)
+	read(other, -1)
+
+	var pubs sync.WaitGroup
+	var trues, falses atomic.Int64
+	for p := range publishers {
+		pubs.Go(func() {
+			for i := range each {
+				if l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("p%d-%d", p, i))) {
+					trues.Add(1)
+				} else {
+					falses.Add(1)
+				}
+			}
+		})
+	}
+
+	// A resumer subscribes behind the tip, reads a little, and closes, over
+	// and over, until the log refuses it; one resume walks away from its
+	// backlog without reading or closing, left for the log's Close.
+	type resume struct {
+		s     *Subscription
+		after uint64
+	}
+	var churn sync.WaitGroup
+	var abandoned atomic.Pointer[resume]
+	churn.Go(func() {
+		for i := 0; ; i++ {
+			after := latest.Load()
+			after -= min(after, 20)
+			s, err := l.Subscribe(SubscribeOptions{After: &Cursor{Incarnation: inc, Seq: after}})
+			if errors.Is(err, ErrClosed) {
+				return
+			}
+			var cu ErrCursorUnresolvable
+			if errors.As(err, &cu) {
+				continue // the tip moved past the ring; try again
+			}
+			if err != nil {
+				t.Errorf("resume %d: %v", i, err)
+				return
+			}
+			if abandoned.Load() == nil {
+				abandoned.Store(&resume{s, after})
+				continue
+			}
+			var got []uint64
+			for r := range s.Records() {
+				if got = append(got, r.Seq); len(got) == 5 {
+					s.Close()
+				}
+			}
+			if p := runSeqs(got, after+1); p != "" {
+				t.Errorf("resume %d after %d: %s", i, after, p)
+			}
+			if err := s.Err(); !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSlowConsumer) {
+				t.Errorf("resume %d ended with %v", i, err)
+			}
+		}
+	})
+
+	await(t, progress, "the primary to reach the close point")
+	other.s.Close()
+	closeLog(t, l, w)
+	waitDone(t, &pubs)
+	waitDone(t, &churn)
+	close(stopDrain)
+	seqs := await(t, drained, "the drainer")
+	for _, ev := range drainPrimary(l) {
+		seqs = append(seqs, ev.Seq)
+	}
+	read(slow, -1)
+	waitDone(t, &readers)
+
+	if n := int(trues.Load() + falses.Load()); n != total {
+		t.Fatalf("%d publishes returned, want %d", n, total)
+	}
+	committed := int(trues.Load())
+	t.Logf("%d publishes committed and %d abandoned by the close", committed, falses.Load())
+	if p := runSeqs(seqs, 1); p != "" || len(seqs) != committed {
+		t.Fatalf("the primary holds %d events (%s); %d publishes returned true", len(seqs), p, committed)
+	}
+	if n := l.Health().DroppedAtClose; n != int(falses.Load()) {
+		t.Fatalf("DroppedAtClose is %d; %d publishes returned false", n, falses.Load())
+	}
+	for _, x := range subs {
+		err := x.s.Err()
+		dropped := x.drop && errors.Is(err, ErrSlowConsumer)
+		if !errors.Is(err, ErrClosed) && !dropped {
+			t.Fatalf("%s ended with %v", x.name, err)
+		}
+		assertRun(t, x.name, x.recs, x.from, -1)
+	}
+	// The resume that walked away: its owner was holding the first record
+	// of its replay when the end came, and may hand over just that one.
+	if r := abandoned.Load(); r != nil {
+		recs := readAll(t, r.s)
+		if err := r.s.Err(); !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSlowConsumer) {
+			t.Fatalf("the abandoned resume ended with %v", err)
+		}
+		if len(recs) > 1 {
+			t.Fatalf("the abandoned resume was handed %d records nobody read for", len(recs))
+		}
+		assertRun(t, "the abandoned resume", recs, r.after+1, -1)
+	}
+	assertRun(t, "the journal", fileRecords(t, w), 1, committed)
+	assertClosingIsLast(t, fileLines(t, w))
+
+	if n := l.liveOwners.Load(); n != 0 {
+		t.Fatalf("%d owner goroutines counted after Close", n)
+	}
+	settleGoroutines(t, ownerFrame, 0)
+	settleGoroutines(t, writerFrame, 0)
+}
+
+// TestEventLogAnAbandonedBacklogReaderNeedsNoReaderToEnd is A10's abandoned
+// backlog: two subscriptions resume from the start of a large backlog, read
+// three records, and their readers walk away. One is closed explicitly; the
+// other is left to the log's Close. Neither owner needs anyone to read to
+// exit: Close, which waits for every owner, returns while nobody reads, and
+// both channels are closed afterwards with ErrClosed.
+func TestEventLogAnAbandonedBacklogReaderNeedsNoReaderToEnd(t *testing.T) {
+	const backlog = 1000
+	l := newTestLog(t, EventLogOptions{})
+	keepDrained(t, l)
+	for i := range backlog {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1)))
+	}
+	from := &Cursor{Incarnation: l.Incarnation()}
+	closed := mustSubscribe(t, l, SubscribeOptions{After: from})
+	left := mustSubscribe(t, l, SubscribeOptions{After: from})
+	assertRun(t, "the closed reader's first records", readN(t, closed, 3), 1, 3)
+	assertRun(t, "the left reader's first records", readN(t, left, 3), 1, 3)
+
+	closed.Close()
+	within(t, "Close with two abandoned backlog readers", func() { l.Close(context.Background()) })
+	if n := l.liveOwners.Load(); n != 0 {
+		t.Fatalf("%d owner goroutines counted after Close", n)
+	}
+	for name, s := range map[string]*Subscription{"closed": closed, "left": left} {
+		// An owner blocked in its send when the end came may still hand over
+		// that one record; never more, and never a hole.
+		recs := readAll(t, s)
+		if len(recs) > 1 || len(recs) == 1 && recs[0].Seq != 4 {
+			t.Fatalf("the %s reader got %d more records after the end", name, len(recs))
+		}
+		if !errors.Is(s.Err(), ErrClosed) {
+			t.Fatalf("the %s reader ended with %v", name, s.Err())
+		}
+	}
+}
+
+// TestEventLogCloseTwiceAndErrStaysPut is A10's idempotence: Close on a
+// subscription twice, on the log from several goroutines at once and then
+// again; Err is nil while the subscription runs and the same value on every
+// read once Records has closed; a closed log refuses everything quietly.
+func TestEventLogCloseTwiceAndErrStaysPut(t *testing.T) {
+	l := NewEventLog(EventLogOptions{})
+	s := mustSubscribe(t, l, SubscribeOptions{})
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err before the end is %v", err)
+	}
+	s.Close()
+	s.Close()
+	readAll(t, s)
+	for range 3 {
+		if err := s.Err(); !errors.Is(err, ErrClosed) {
+			t.Fatalf("Err after the end is %v", err)
+		}
+	}
+	byLog := mustSubscribe(t, l, SubscribeOptions{})
+	var closers sync.WaitGroup
+	for range 3 {
+		closers.Go(func() { l.Close(context.Background()) })
+	}
+	waitDone(t, &closers)
+	within(t, "a later Close", func() { l.Close(context.Background()) })
+	readAll(t, byLog)
+	if err := byLog.Err(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("a subscription the log closed ended with %v", err)
+	}
+	byLog.Close()
+	if err := byLog.Err(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Close after the end changed Err to %v", err)
+	}
+	if l.Publish(context.Background(), nil, textEvent("late")) || l.TryPublish(textEvent("late")) {
+		t.Fatal("a publish on a closed log returned true")
+	}
+	if _, err := l.Subscribe(SubscribeOptions{}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Subscribe on a closed log: %v", err)
+	}
+	l.Note(journal.DiagNote{Kind: journal.DiagAgentStderr})
+	h := l.Health()
+	if h.DroppedAtClose != 2 || h.NotesDropped != 1 || h.Journal.State != journal.StateOff {
+		t.Fatalf("health after close is %+v", h)
+	}
+	if n := len(drainPrimary(l)); n != 0 {
+		t.Fatalf("%d events reached the primary after Close", n)
+	}
+}
+
+// TestEventLogAWedgedPrimaryHoldsNeitherNotesNorCloseAndCloseReleasesSubscribers
+// is A10's wedge: the primary full and a publisher blocked on it inside the
+// boundary. Note, Health and Subscription.Close all return at once;
+// Subscribe calls wait; Close releases the publisher (false) and every
+// waiting Subscribe (ErrClosed). Every note written before Close is in the
+// journal ahead of closing, which counts the abandoned publish.
+func TestEventLogAWedgedPrimaryHoldsNeitherNotesNorCloseAndCloseReleasesSubscribers(t *testing.T) {
+	const waiters, notes = 4, 20
+	l, w := newJournaledLog(t, EventLogOptions{})
+	pre := mustSubscribe(t, l, SubscribeOptions{})
+	fillPrimary(t, l)
+
+	hook, inside := insideAt(primaryCap + 1)
+	arrivals := make(chan admitKind, 2*waiters)
+	l.hooks = &logHooks{beforePrimarySend: hook, admitting: func(k admitKind) { arrivals <- k }}
+	aResult := make(chan bool, 1)
+	go func() { aResult <- l.Publish(context.Background(), nil, textEvent("wedged")) }()
+	await(t, inside, "the publisher to block on the full primary")
+	if k := await(t, arrivals, "the publisher's arrival"); k != admitPublish {
+		t.Fatalf("the first arrival was %v", k)
+	}
+
+	type subResult struct {
+		s   *Subscription
+		err error
+	}
+	subResults := make(chan subResult, waiters)
+	for range waiters {
+		go func() {
+			s, err := l.Subscribe(SubscribeOptions{})
+			subResults <- subResult{s, err}
+		}()
+	}
+	for range waiters {
+		if k := await(t, arrivals, "a Subscribe's arrival"); k != admitSubscribe {
+			t.Fatalf("an arrival was %v, want a Subscribe", k)
+		}
+	}
+	within(t, "Note with the primary wedged", func() {
+		for i := range notes {
+			l.Note(journal.DiagNote{Kind: journal.DiagAgentStderr, Fields: map[string]any{"line": i}})
+		}
+	})
+	within(t, "Health with the primary wedged", func() { l.Health() })
+	within(t, "Subscription.Close with the primary wedged", pre.Close)
+	select {
+	case r := <-subResults:
+		t.Fatalf("a Subscribe returned (%v) while the boundary was held", r.err)
+	default:
+	}
+
+	closeLog(t, l, w)
+	if await(t, aResult, "the wedged publisher") {
+		t.Fatal("the wedged publisher returned true")
+	}
+	for range waiters {
+		if r := await(t, subResults, "a waiting Subscribe"); r.s != nil || !errors.Is(r.err, ErrClosed) {
+			t.Fatalf("a waiting Subscribe returned %v, %v; want ErrClosed", r.s, r.err)
+		}
+	}
+	lines := fileLines(t, w)
+	closing := assertClosingIsLast(t, lines)
+	if closing["droppedAtClose"] != float64(1) {
+		t.Fatalf("closing says droppedAtClose %v, want 1", closing["droppedAtClose"])
+	}
+	if n := len(diags(lines, journal.DiagAgentStderr)); n != notes {
+		t.Fatalf("the journal has %d of the %d notes", n, notes)
+	}
+	assertRun(t, "the journal", fileRecords(t, w), 1, primaryCap)
+}
+
+// TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind is A10's leak check,
+// by counting: with subscriptions in every state and a journal writing, the
+// counts first show the goroutines running (so the check can see them), and
+// after Close none is left.
+func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
+	settleGoroutines(t, ownerFrame, 0)
+	settleGoroutines(t, writerFrame, 0)
+	l, w := newJournaledLog(t, EventLogOptions{})
+	keepDrained(t, l)
+	live := mustSubscribe(t, l, SubscribeOptions{})
+	stuck := mustSubscribe(t, l, SubscribeOptions{MaxItems: 2})
+	for i := range 300 {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1)))
+	}
+	backlog := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
+	readN(t, backlog, 1)
+	closedOne := mustSubscribe(t, l, SubscribeOptions{})
+	closedOne.Close()
+	readN(t, live, 1)
+
+	// A goroutine the scheduler has not run yet shows only its go
+	// statement's wrapper on its stack, not the function the count looks
+	// for. The owners of live and backlog have run (each delivered a record);
+	// the writer has once it has flushed.
+	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	defer cancel()
+	if err := w.WaitFlushed(ctx, 300); err != nil {
+		t.Fatal(err)
+	}
+	if got := goroutinesRunning(ownerFrame); got < 2 {
+		t.Fatalf("%d owner goroutines running with live and backlog open, want at least 2: the count cannot see them", got)
+	}
+	if got := goroutinesRunning(writerFrame); got != 1 {
+		t.Fatalf("%d journal writers running, want 1: the count cannot see it", got)
+	}
+	closeLog(t, l, w)
+	if n := l.liveOwners.Load(); n != 0 {
+		t.Fatalf("%d owner goroutines counted after Close", n)
+	}
+	settleGoroutines(t, ownerFrame, 0)
+	settleGoroutines(t, writerFrame, 0)
+	for _, s := range []*Subscription{live, stuck, backlog, closedOne} {
+		readAll(t, s)
+		if err := s.Err(); !errors.Is(err, ErrClosed) && !errors.Is(err, ErrSlowConsumer) {
+			t.Fatalf("a subscription ended with %v", err)
+		}
+	}
+}
+
+// TestEventLogNoNoteEverFollowsClosing: notes racing Close either land
+// before the closing diag or are counted as dropped, never after it, and a
+// note after Close is counted and dropped.
+func TestEventLogNoNoteEverFollowsClosing(t *testing.T) {
+	const noters, each = 4, 200
+	l, w := newJournaledLog(t, EventLogOptions{})
+	l.Note(journal.PromptNote{Attempt: "a1", Kind: journal.PromptKindPrompt, Text: "hello"})
+	l.Publish(context.Background(), nil, textEvent("x"))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for n := range noters {
+		wg.Go(func() {
+			<-start
+			for i := range each {
+				l.Note(journal.DiagNote{Kind: journal.DiagAgentStderr, Fields: map[string]any{"noter": n, "i": i}})
+			}
+		})
+	}
+	close(start)
+	closeLog(t, l, w)
+	waitDone(t, &wg)
+	l.Note(journal.PromptEndNote{Attempt: "a1"})
+
+	lines := fileLines(t, w)
+	assertClosingIsLast(t, lines)
+	written := len(diags(lines, journal.DiagAgentStderr))
+	dropped := l.Health().NotesDropped
+	if written+dropped != noters*each+1 {
+		t.Fatalf("%d notes written and %d dropped, want %d in all", written, dropped, noters*each+1)
+	}
+	for _, line := range lines {
+		if line["type"] == "prompt_end" {
+			t.Fatal("a note after Close was written")
+		}
+	}
+}
+
+// TestEventLogCloseOnANeverUsedLogIsSafeAndLeavesNothing: a log built and
+// closed without an event leaves no journal file and no directory, and one
+// with no journal closes with a nil ctx too.
+func TestEventLogCloseOnANeverUsedLogIsSafeAndLeavesNothing(t *testing.T) {
+	l, w := newJournaledLog(t, EventLogOptions{})
+	closeLog(t, l, w)
+	dir := filepath.Dir(filepath.Dir(w.Path())) // the journal directory, above the workspace's slug
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("closing an unused log left %s behind (%v)", dir, err)
+	}
+	if n := l.liveOwners.Load(); n != 0 {
+		t.Fatalf("%d owner goroutines after closing an unused log", n)
+	}
+	bare := NewEventLog(EventLogOptions{})
+	within(t, "Close on a log with no journal", func() { bare.Close(context.Background()) })
+}
+
+// TestEventLogARetainedRecordNeverChanges is A11: a record a subscriber holds
+// — a live one, a replayed one, one with a body and one omitted — is
+// unchanged after later publishes and after the ring has evicted it, and
+// what a subscriber does to its own record's Omitted reaches no other
+// holder.
+func TestEventLogARetainedRecordNeverChanges(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{RingEvents: 8, MaxRecordBytes: 4096})
+	keepDrained(t, l)
+	a := mustSubscribe(t, l, SubscribeOptions{MaxItems: 1000})
+	b := mustSubscribe(t, l, SubscribeOptions{MaxItems: 1000})
+	l.Publish(context.Background(), nil, textEvent("kept"))
+	l.Publish(context.Background(), nil, Event{Type: EventPlan, At: logTestTime, Plan: &PlanEvent{Plan: strings.Repeat("p", 8000)}})
+	replay := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}, MaxItems: 1000})
+	type snapshot struct {
+		rec     Record
+		body    string
+		omitted *Omitted
+	}
+	snap := func(r Record) snapshot {
+		s := snapshot{rec: r, body: strings.Clone(r.Body)}
+		if r.Omitted != nil {
+			o := *r.Omitted
+			s.omitted = &o
+		}
+		return s
+	}
+	var held []snapshot
+	for _, s := range []*Subscription{a, b, replay} {
+		for _, r := range readN(t, s, 2) {
+			held = append(held, snap(r))
+		}
+	}
+	// Subscriber a tampers with its own copy of the omitted record.
+	held[1].rec.Omitted.Reason, held[1].rec.Omitted.Error = "tampered", "tampered"
+	held[1].omitted = &Omitted{Reason: "tampered", Error: "tampered", Bytes: held[1].omitted.Bytes}
+
+	for i := range 100 {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("later %d with other bytes", i)))
+	}
+	for _, s := range []*Subscription{a, b, replay} {
+		readN(t, s, 100)
+	}
+	for i, h := range held {
+		r := h.rec
+		if r.Body != h.body || r.Seq != uint64(i%2+1) || !r.At.Equal(logTestTime) {
+			t.Fatalf("held record %d changed: seq %d body %q", i, r.Seq, r.Body)
+		}
+		if (r.Omitted == nil) != (h.omitted == nil) || r.Omitted != nil && *r.Omitted != *h.omitted {
+			t.Fatalf("held record %d's Omitted changed: %+v, want %+v", i, r.Omitted, h.omitted)
+		}
+	}
+	for _, i := range []int{3, 5} {
+		if held[i].rec.Omitted.Reason != journal.OmittedOversized {
+			t.Fatalf("subscriber a's tampering reached holder %d: %+v", i, held[i].rec.Omitted)
+		}
+	}
+	if recordTexts(t, []Record{held[0].rec})[0] != "kept" {
+		t.Fatal("a held body no longer decodes to what was published")
+	}
+}
+
+// TestEventLogOmittedRecordsAreTheSameInLiveRingAndFile is A12's live, ring
+// and file parts: an oversized event and two events the codec refuses each
+// reach the primary whole, and appear as the same omitted record — seq,
+// type, time and marker — in a live subscription, a ring replay and the
+// journal file, with the sequence contiguous around them. Each is counted
+// and noted once.
+func TestEventLogOmittedRecordsAreTheSameInLiveRingAndFile(t *testing.T) {
+	const maxRecord = 4096
+	l, w := newJournaledLog(t, EventLogOptions{MaxRecordBytes: maxRecord})
+	live := mustSubscribe(t, l, SubscribeOptions{})
+	far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	plan := strings.Repeat("a plan line\n", 1000)
+	events := []Event{
+		textEvent("before"),
+		{Type: EventPlan, At: logTestTime, Plan: &PlanEvent{ID: "plan-1", Plan: plan}},
+		{Type: EventTool, At: logTestTime, Tool: &ToolEvent{ID: "call-1", At: far}},
+		{At: logTestTime, Text: "no type"},
+		textEvent("after"),
+	}
+	for _, ev := range events {
+		if !l.Publish(context.Background(), nil, ev) {
+			t.Fatal("Publish returned false")
+		}
+	}
+	prim := drainPrimary(l)
+	if len(prim) != len(events) || prim[1].Plan.Plan != plan || !prim[2].Tool.At.Equal(far) || prim[3].Text != "no type" {
+		t.Fatal("the primary did not receive every event whole")
+	}
+	liveRecs := readN(t, live, len(events))
+	ring := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
+	ringRecs := readN(t, ring, len(events))
+	closeLog(t, l, w)
+	fileRecs := fileRecords(t, w)
+
+	planBody, err := EncodeEvent(events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planBody) <= maxRecord {
+		t.Fatalf("the plan's body is %d bytes, not over the %d-byte cap", len(planBody), maxRecord)
+	}
+	for _, where := range []struct {
+		name string
+		recs []Record
+	}{{"live", liveRecs}, {"ring replay", ringRecs}, {"journal file", fileRecs}} {
+		assertRun(t, where.name, where.recs, 1, len(events))
+		for i, r := range where.recs {
+			if r.Type != events[i].Type || !r.At.Equal(logTestTime) {
+				t.Fatalf("%s seq %d: envelope %q at %v", where.name, r.Seq, r.Type, r.At)
+			}
+			lr := liveRecs[i]
+			if r.Body != lr.Body || (r.Omitted == nil) != (lr.Omitted == nil) || r.Omitted != nil && *r.Omitted != *lr.Omitted {
+				t.Fatalf("%s seq %d differs from the live record:\n %+v %+v\nwant\n %+v %+v", where.name, r.Seq, r, r.Omitted, lr, lr.Omitted)
+			}
+		}
+	}
+	if o := liveRecs[1].Omitted; o == nil || o.Reason != journal.OmittedOversized || o.Bytes != len(planBody) || o.Error != "" {
+		t.Fatalf("the oversized plan's record is %+v, want oversized with %d bytes", o, len(planBody))
+	}
+	for _, i := range []int{2, 3} {
+		if o := liveRecs[i].Omitted; o == nil || o.Reason != journal.OmittedEncodeError || o.Error == "" || o.Bytes != 0 {
+			t.Fatalf("seq %d's record is %+v, want an encode_error with its message", i+1, o)
+		}
+		if liveRecs[i].Body != "" {
+			t.Fatalf("seq %d's omitted record has a body", i+1)
+		}
+	}
+	for _, r := range liveRecs {
+		if _, err := r.Event(); (err != nil) != (r.Omitted != nil) {
+			t.Fatalf("seq %d: Event() error %v with Omitted %+v", r.Seq, err, r.Omitted)
+		}
+	}
+	if h := l.Health(); h.Omitted != 3 || h.Journal.Omitted != 3 {
+		t.Fatalf("health counts %d omitted in the log and %d in the journal, want 3", h.Omitted, h.Journal.Omitted)
+	}
+	noted := diags(fileLines(t, w), journal.DiagRecordOmitted)
+	if len(noted) != 3 {
+		t.Fatalf("%d record_omitted notes, want 3", len(noted))
+	}
+	for i, n := range noted {
+		if n["seq"] != float64(i+2) || n["reason"] != liveRecs[i+1].Omitted.Reason {
+			t.Fatalf("record_omitted note %d is %v", i, n)
+		}
+	}
+}
+
+// TestEventLogTryPublishNeverWaitsAndDropsForEveryone is A23: TryPublish
+// publishes when there is room, and with a wedged primary — full, or held by
+// a publisher blocked inside the boundary — returns false at once, takes no
+// number, and reaches no subscriber, the ring, or the journal.
+func TestEventLogTryPublishNeverWaitsAndDropsForEveryone(t *testing.T) {
+	l, w := newJournaledLog(t, EventLogOptions{})
+	// Read by the test itself before Close, which discards what a
+	// subscription has not delivered.
+	watch := mustSubscribe(t, l, SubscribeOptions{MaxItems: 4096})
+	if !l.TryPublish(textEvent("tried")) {
+		t.Fatal("TryPublish with room returned false")
+	}
+	for i := 1; i < primaryCap; i++ {
+		l.Publish(context.Background(), nil, textEvent(fmt.Sprint(i+1)))
+	}
+	within(t, "TryPublish on a full primary", func() {
+		if l.TryPublish(textEvent("dropped: full")) {
+			t.Error("TryPublish on a full primary returned true")
+		}
+	})
+	hook, inside := insideAt(primaryCap + 1)
+	l.hooks = &logHooks{beforePrimarySend: hook}
+	blocked := make(chan bool, 1)
+	go func() { blocked <- l.Publish(context.Background(), nil, textEvent("blocked")) }()
+	await(t, inside, "a publisher to block inside the boundary")
+	within(t, "TryPublish while a publisher holds the boundary", func() {
+		if l.TryPublish(textEvent("dropped: busy")) {
+			t.Error("TryPublish past a held boundary returned true")
+		}
+	})
+	evs := []Event{await(t, l.Primary(), "the primary's first event")}
+	if !await(t, blocked, "the blocked publisher") {
+		t.Fatal("the blocked publisher returned false")
+	}
+	evs = append(evs, drainPrimary(l)...)
+	if !l.TryPublish(textEvent("tried again")) {
+		t.Fatal("TryPublish with room returned false")
+	}
+	evs = append(evs, drainPrimary(l)...)
+	const want = primaryCap + 2
+	primSeqs := make([]uint64, len(evs))
+	for i, ev := range evs {
+		primSeqs[i] = ev.Seq
+		if strings.HasPrefix(ev.Text, "dropped") {
+			t.Fatalf("%q reached the primary", ev.Text)
+		}
+	}
+	if p := runSeqs(primSeqs, 1); p != "" || len(evs) != want {
+		t.Fatalf("the primary has %d events: %s", len(evs), p)
+	}
+	if evs[0].Text != "tried" || evs[want-2].Text != "blocked" || evs[want-1].Text != "tried again" {
+		t.Fatalf("the primary's events are out of place: %q %q %q", evs[0].Text, evs[want-2].Text, evs[want-1].Text)
+	}
+	replay := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
+	ringRecs := readN(t, replay, want)
+	watched := readN(t, watch, want)
+	closeLog(t, l, w)
+	watched = append(watched, readAll(t, watch)...)
+	for _, where := range []struct {
+		name string
+		recs []Record
+	}{{"the ring", ringRecs}, {"the watching subscriber", watched}, {"the journal", fileRecords(t, w)}} {
+		assertRun(t, where.name, where.recs, 1, want)
+		assertNoText(t, where.name, recordTexts(t, where.recs), "dropped: full", "dropped: busy")
+	}
+	if n := l.Health().DroppedAtClose; n != 0 {
+		t.Fatalf("DroppedAtClose is %d: a TryPublish that found no room is not a drop at close", n)
+	}
+}
+
+// TestSubscriptionEndsRatherThanDeliverAHole: the owner's own guard. Handed
+// a replay with a hole in it — which nothing in the log produces — it
+// delivers up to the hole and ends with the error, never the record after
+// it.
+func TestSubscriptionEndsRatherThanDeliverAHole(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	body := func(n int) string { return fmt.Sprintf(`{"type":"text","text":"%d"}`, n) }
+	pinned := []Record{
+		{Seq: 11, Type: EventText, Body: body(11)},
+		{Seq: 12, Type: EventText, Body: body(12)},
+		{Seq: 14, Type: EventText, Body: body(14)},
+	}
+	s := l.newSubscription(defaultSubscribeItems, defaultSubscribeBytes, 0)
+	l.startOwner(s, pinned, 10)
+	recs := readAll(t, s)
+	assertRun(t, "the delivered records", recs, 11, 2)
+	if !errors.Is(s.Err(), errNotContiguous) {
+		t.Fatalf("the subscription ended with %v, want the contiguity error", s.Err())
+	}
+}
+
+// TestRecordRingEvictsByCountAndBytesAndKeepsItsOrder: the ring stays
+// contiguous and ends at the newest record through growth and wrap-around;
+// it evicts by count and by bytes, keeps the newest record even when that
+// one alone is over the byte bound, and locates the records after a seq.
+func TestRecordRingEvictsByCountAndBytesAndKeepsItsOrder(t *testing.T) {
+	r := recordRing{maxItems: 40, maxBytes: 1000}
+	check := func(what string, last uint64, n int) {
+		t.Helper()
+		if r.n != n {
+			t.Fatalf("%s: %d records, want %d", what, r.n, n)
+		}
+		total := 0
+		for i := range r.n {
+			rec := r.at(i)
+			total += rec.size()
+			if want := last - uint64(r.n-1-i); rec.Seq != want {
+				t.Fatalf("%s: position %d is seq %d, want %d", what, i, rec.Seq, want)
+			}
+		}
+		if total != r.bytes {
+			t.Fatalf("%s: bytes %d, counted %d", what, r.bytes, total)
+		}
+	}
+	rec := func(seq uint64, size int) Record {
+		return Record{Seq: seq, Type: EventText, Body: strings.Repeat("x", size)}
+	}
+	var seq uint64
+	for range 100 {
+		seq++
+		r.push(rec(seq, 10))
+	}
+	check("by count", seq, 40)
+	if len(r.buf) != 40 {
+		t.Fatalf("the buffer grew to %d, past its bound of 40", len(r.buf))
+	}
+	seq++
+	r.push(rec(seq, 700)) // 39 records of 10 bytes plus 700 is over 1000
+	check("by bytes", seq, 31)
+	seq++
+	r.push(rec(seq, 5000))
+	check("one record over the bound on its own", seq, 1)
+	for range 5 {
+		seq++
+		r.push(rec(seq, 10))
+	}
+	check("after the large one is evicted", seq, 5)
+
+	skip, count, bytes := r.after(seq - 3)
+	if skip != 2 || count != 3 || bytes != 30 {
+		t.Fatalf("after(%d) = %d, %d, %d; want 2, 3, 30", seq-3, skip, count, bytes)
+	}
+	if _, count, _ := r.after(seq); count != 0 {
+		t.Fatalf("after the newest seq: %d records", count)
+	}
+	skip, count, _ = r.after(1)
+	if skip != 0 || count != 5 {
+		t.Fatalf("after a seq older than the ring: %d, %d", skip, count)
+	}
+	got := r.copyOut(skip, count)
+	r.push(rec(seq+1, 10000)) // evicts everything the copy holds
+	check("after evicting what was copied", seq+1, 1)
+	for i, g := range got {
+		if g.Seq != seq-4+uint64(i) || len(g.Body) != 10 {
+			t.Fatalf("a pinned copy changed under eviction: %d is seq %d", i, g.Seq)
+		}
+	}
+}
+
+// BenchmarkEventLogPublish is V4: Publish's cost on the emit path, encoding
+// included, for a streamed text delta and for a large tool event (8 KiB of
+// output and a diff), without and with a journal attached. The primary is
+// drained by a goroutine, as a session's reader would. Budget: a text delta
+// under 5 µs with the journal attached.
+func BenchmarkEventLogPublish(b *testing.B) {
+	tail := strings.Repeat("output line <with> & some text\n", outputTailCap/32)
+	cases := []struct {
+		name string
+		ev   Event
+	}{
+		{"TextDelta", Event{Type: EventText, Text: "Here is the next chunk of the answer, ", At: time.Now()}},
+		{"LargeTool", Event{Type: EventTool, At: time.Now(), Tool: &ToolEvent{
+			ID: "call-1", Title: "Run make", Status: "completed", Kind: "execute", RawInput: "make",
+			Output: &ToolOutput{ExitCode: ptr(1), Stdout: tail, StdoutHead: tail[:outputHeadCap], Truncated: true},
+			Diffs:  []ToolDiff{{Path: "/a.go", OldText: tail, NewText: tail + "x", Added: 1}},
+			At:     time.Now(),
+		}}},
+	}
+	for _, c := range cases {
+		for _, journaled := range []bool{false, true} {
+			b.Run(fmt.Sprintf("%s/journal=%v", c.name, journaled), func(b *testing.B) {
+				var w *journal.Writer
+				inc := ""
+				if journaled {
+					w, inc = newTestJournal(b)
+				}
+				l := newTestLog(b, EventLogOptions{Journal: w, Incarnation: inc})
+				keepDrained(b, l)
+				b.ReportAllocs()
+				for b.Loop() {
+					if !l.Publish(context.Background(), nil, c.ev) {
+						b.Fatal("Publish returned false")
+					}
+				}
+				b.StopTimer()
+				closeLog(b, l, w)
+				if w != nil {
+					// A writer that cannot keep up sheds records into gap
+					// lines rather than slow Publish; say how much it shed,
+					// since that changes what the journal's cost includes.
+					b.ReportMetric(float64(w.Health().DroppedEvents)/float64(b.N), "journal-drops/op")
+				}
+			})
+		}
+	}
+}

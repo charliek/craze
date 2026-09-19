@@ -23,10 +23,16 @@ import (
 // codecExcluded names the fields the codec deliberately does not carry, as
 // "DeclaringType.Field", each with its reason. The completeness filler leaves
 // them zero and the comparison skips them, so an exclusion is one documented
-// line here rather than a hole in the test. Plan 020's C3 adds the first,
-// Event.Seq, which belongs to the record envelope and not to the codec's
-// object.
-var codecExcluded = map[string]string{}
+// line here rather than a hole in the test.
+var codecExcluded = map[string]string{
+	"Event.Seq": "the record envelope's (Record.Seq, the journal line's seq), not the codec object's; Record.Event sets it back",
+}
+
+// codecSkips reports whether typ's field is one of codecExcluded.
+func codecSkips(typ reflect.Type, field string) bool {
+	_, ok := codecExcluded[typ.Name()+"."+field]
+	return ok
+}
 
 var (
 	codecTimeType  = reflect.TypeFor[time.Time]()
@@ -138,7 +144,7 @@ func (f *codecFiller) fill(path string, v reflect.Value) {
 			if !field.IsExported() {
 				f.t.Fatalf("%s.%s is unexported: the codec cannot carry it, and the filler cannot set it", path, field.Name)
 			}
-			if _, ok := codecExcluded[typ.Name()+"."+field.Name]; ok {
+			if codecSkips(typ, field.Name) {
 				continue
 			}
 			f.fill(path+"."+field.Name, v.Field(i))
@@ -245,7 +251,7 @@ func codecCompare(path string, want, got reflect.Value, d *[]string) {
 		typ := want.Type()
 		for i := 0; i < typ.NumField(); i++ {
 			name := typ.Field(i).Name
-			if _, ok := codecExcluded[typ.Name()+"."+name]; ok {
+			if codecSkips(typ, name) {
 				continue
 			}
 			codecCompare(path+"."+name, want.Field(i), got.Field(i), d)
@@ -350,7 +356,8 @@ func TestEventCodecCarriesEveryFieldReachableFromEvent(t *testing.T) {
 
 // TestEventCodecCompletenessFillerReachesEveryField pins the filler itself: a
 // pass that left some field zero would let a dropped field through, so every
-// leaf of the distinct pass must be set.
+// leaf of the distinct pass must be set — every leaf but the documented
+// exclusions, which the filler skips on purpose.
 func TestEventCodecCompletenessFillerReachesEveryField(t *testing.T) {
 	ev, _ := filledEvent(t, false, func(int) bool { return true })
 	var zeros []string
@@ -384,8 +391,13 @@ func TestEventCodecCompletenessFillerReachesEveryField(t *testing.T) {
 				walk(fmt.Sprintf("%s[%v]", path, k), v.MapIndex(k))
 			}
 		case reflect.Struct:
+			typ := v.Type()
 			for i := 0; i < v.NumField(); i++ {
-				walk(path+"."+v.Type().Field(i).Name, v.Field(i))
+				name := typ.Field(i).Name
+				if codecSkips(typ, name) {
+					continue
+				}
+				walk(path+"."+name, v.Field(i))
 			}
 		default:
 			if v.IsZero() {

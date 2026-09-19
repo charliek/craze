@@ -241,6 +241,11 @@ type Event struct {
 	Err        error
 	StopReason string
 	At         time.Time
+	// Seq is assigned by the session's event log; 0 on an event that never
+	// passed through one. It is the log's record envelope's, not the event's
+	// own: the codec does not carry it (eventcodec.go), and Record.Event
+	// sets it back from the envelope.
+	Seq uint64
 }
 
 // ExpandedCommand is one plugin entry craze expanded into a prompt: the row the

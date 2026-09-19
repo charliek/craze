@@ -55,7 +55,10 @@ import (
 //     own text, a plugin file's body in ExpandedCommand.Text — reached the
 //     agent as JSON too, so the replaced text is what the agent was given.
 //
-// Every other field is carried exactly, uncapped.
+// Every other field is carried exactly, uncapped, except Event.Seq: the
+// sequence number belongs to the record envelope (the event log's Record.Seq,
+// the journal line's seq), not to the event's object, so the body is the
+// same whatever number the event took.
 
 // EventCodecVersion is the version of the wire shape EncodeEvent writes. A
 // decoder ignores keys it does not know, so adding a field is compatible and
