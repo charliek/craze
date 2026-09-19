@@ -19,7 +19,12 @@ import (
 type session struct {
 	opts   Options
 	client *acp.Client
-	events chan Event
+	// log is where every event goes (eventlog.go): emitCtx publishes into it
+	// and Events is its primary. events is the same channel as Primary, kept
+	// receive-only so that nothing can send on it past the log's numbering;
+	// a few tests read it by name.
+	log    *EventLog
+	events <-chan Event
 	done   chan struct{}
 
 	closeOnce sync.Once
@@ -73,7 +78,14 @@ type session struct {
 	// queueOp and held across the transaction's emits, which happen after
 	// queueOp is released: emit blocks on a full event channel, and a reader
 	// that is waiting on something holding queueOp would wedge the session.
-	// Lock order: queueOp → emitMu → s.mu → the queue's own lock.
+	// Lock order: queueOp → emitMu → s.mu → the queue's own lock, and
+	// emitMu → the event log's publishing boundary. Every emit takes the
+	// boundary, and it is a leaf: nothing holding it takes any of these
+	// locks. It may be taken with emitMu held (queueTx) and is never taken
+	// with s.mu held, because a publisher blocked on a full primary while
+	// holding s.mu would stop Close, which needs s.mu to close done — the
+	// one thing that releases it. That was already the rule for emit
+	// (emitParked says why); the boundary makes it a lock-order rule.
 	queueOp sync.Mutex
 	emitMu  sync.Mutex
 	queue   PromptQueue
@@ -217,9 +229,11 @@ func New(opts Options) Session {
 }
 
 func newSession(opts Options) *session {
+	log := NewEventLog(EventLogOptions{})
 	s := &session{
 		opts:      opts,
-		events:    make(chan Event, 256),
+		log:       log,
+		events:    log.Primary(),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
 		waiting:   make(map[string]pendingAsk),
@@ -258,8 +272,14 @@ func (s *session) clientRef() *acp.Client {
 }
 
 func (s *session) Events() <-chan Event {
-	return s.events
+	return s.log.Primary()
 }
+
+// Subscribe and Incarnation are the session's EventSource: its log's.
+func (s *session) Subscribe(o SubscribeOptions) (*Subscription, error) { return s.log.Subscribe(o) }
+func (s *session) Incarnation() string                                 { return s.log.Incarnation() }
+
+var _ EventSource = (*session)(nil)
 
 func (s *session) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -1226,6 +1246,14 @@ func (s *session) AnswerPlan(id string, accept bool) error {
 // requestQuit's own close and finishRun's later one — the same session,
 // closed twice — agree: errors.Is(err, ErrAgentExited) holds on both when the
 // agent's exit was reaped first, on neither when craze closed it.
+//
+// The event log closes last (plan 020 §3.5), once the teardown above has run:
+// done is closed first, so every publisher blocked on the primary gives up,
+// and client.Close is where the agent's last words are written. Closing the
+// log is the admission cutoff: a handler goroutine that emits after this —
+// Close does not join the prompt goroutine or the client's handlers — is
+// refused by the log and reaches no subscriber. It is called with s.mu
+// released, as every publish is.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
@@ -1237,6 +1265,8 @@ func (s *session) Close() error {
 		if client != nil {
 			s.closeErr = client.Close()
 		}
+		// C5b: the stderr tee's final flush goes here, between the reap and the log.
+		s.log.Close(context.Background())
 	})
 	<-s.closeDone
 	return s.closeErr
@@ -1691,6 +1721,13 @@ func (s *session) emit(ev Event) { s.emitCtx(context.Background(), ev) }
 // emitCtx is emit with a caller's cancellation as a third way out, and reports
 // whether the event was delivered. A session that is closing drops it either
 // way; ctx is for a caller that must not be held by a consumer's backlog.
+//
+// Delivery is the event log's Publish, which numbers the event and hands it
+// to the primary on this goroutine, so a true return still means the event is
+// in Events()'s buffer. Publish encodes ev before it waits for anything,
+// which is why every caller hands emit a payload of its own (cloneTool,
+// cloneSubagent, a copied slice): nothing may change it while it is read.
+// No caller holds s.mu here; the log's boundary is never taken under it.
 func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
@@ -1703,13 +1740,7 @@ func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 		return false
 	default:
 	}
-	select {
-	case s.events <- ev:
-		return true
-	case <-s.done:
-	case <-ctx.Done():
-	}
-	return false
+	return s.log.Publish(ctx, s.done, ev)
 }
 
 func (s *session) promptInFlight() bool {

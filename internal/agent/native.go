@@ -50,7 +50,12 @@ type nativeSession struct {
 	// NewNative exposes, nil in production.
 	tweak func(*harness.Options)
 
-	events chan Event
+	// log is where every event goes, as on the live session: emit publishes
+	// into it and Events is its primary. events is the same channel, kept as
+	// the live session keeps its own: receive-only, so nothing can send on it
+	// past the log's numbering.
+	log    *EventLog
+	events <-chan Event
 	// done is closed first by Close, so no emit — the harness's sink
 	// included, which runs on Fantasy's callbacks — can block on a reader
 	// that has gone.
@@ -62,7 +67,10 @@ type nativeSession struct {
 	// The queue's transactions are ordered exactly as the live session's
 	// (live_queue.go): queueOp orders the mutation, emitMu is held across its
 	// emits after queueOp is released. Lock order: queueOp → emitMu → s.mu →
-	// the queue's own lock → the harness's lock (Current, under s.mu).
+	// the queue's own lock → the harness's lock (Current, under s.mu), and
+	// emitMu → the event log's publishing boundary, a leaf that is never
+	// taken with s.mu held: a publish blocked on a full primary under s.mu
+	// would stop Close from closing done, which is what releases it.
 	queueOp sync.Mutex
 	emitMu  sync.Mutex
 	queue   PromptQueue
@@ -100,10 +108,12 @@ func NewNative(opts Options, tweak func(*harness.Options)) Session {
 }
 
 func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
+	log := NewEventLog(EventLogOptions{})
 	s := &nativeSession{
 		opts:      opts,
 		tweak:     tweak,
-		events:    make(chan Event, 256),
+		log:       log,
+		events:    log.Primary(),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
 	}
@@ -113,7 +123,13 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	return s
 }
 
-func (s *nativeSession) Events() <-chan Event { return s.events }
+func (s *nativeSession) Events() <-chan Event { return s.log.Primary() }
+
+// Subscribe and Incarnation are the session's EventSource: its log's.
+func (s *nativeSession) Subscribe(o SubscribeOptions) (*Subscription, error) {
+	return s.log.Subscribe(o)
+}
+func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
 
 // Start loads the model table, opens the harness on the requested model (or
 // the table's default) and publishes the first snapshot. It does no network
@@ -548,6 +564,10 @@ func (s *nativeSession) Cancel(ctx context.Context) error {
 // It is safe before Start and idempotent, and it returns nil: there is no
 // agent process whose exit ErrAgentExited could report. A failure to close
 // the transcript is a diagnostic, not a reason to fail the caller's shutdown.
+//
+// The event log closes last, as on the live session (plan 020 §3.5), with
+// s.mu released: the continuation this does not wait for, and anything else
+// that emits late, is refused by the log from then on.
 func (s *nativeSession) Close() error {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
@@ -565,6 +585,7 @@ func (s *nativeSession) Close() error {
 				s.note(sanitizeLine(err.Error()))
 			}
 		}
+		s.log.Close(context.Background())
 	})
 	<-s.closeDone
 	return nil
@@ -687,7 +708,10 @@ func (s *nativeSession) AnswerPlan(string, bool) error { return ErrUnsupported }
 
 // emit delivers ev unless the session is closing, exactly as the live
 // session's emitCtx does with no caller context: a reader that stopped
-// draining can hold a turn back, but never Close.
+// draining can hold a turn back, but never Close. Delivery is the event log's
+// Publish, on this goroutine, so an emit that returned has its event in
+// Events()'s buffer; Publish reads ev before it waits, so the payload must be
+// the caller's own. s.mu is never held here.
 func (s *nativeSession) emit(ev Event) {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
@@ -697,10 +721,7 @@ func (s *nativeSession) emit(ev Event) {
 		return
 	default:
 	}
-	select {
-	case s.events <- ev:
-	case <-s.done:
-	}
+	s.log.Publish(context.Background(), s.done, ev)
 }
 
 // queueTx is the live session's queue transaction (live_queue.go): fn
@@ -894,4 +915,7 @@ func noKeyText(table *modeltable.Table, alias string) string {
 	return fmt.Sprintf("native: model %q has no API key: its provider %q has none; %s", alias, m.Provider, how)
 }
 
-var _ Session = (*nativeSession)(nil)
+var (
+	_ Session     = (*nativeSession)(nil)
+	_ EventSource = (*nativeSession)(nil)
+)
