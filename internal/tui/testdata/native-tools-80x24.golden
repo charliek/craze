@@ -1,0 +1,24 @@
+❯ go                                                                            
+✓ read  main.go                                                                 
+  package main                                                                  
+  // TODO: ship it                                                              
+✓ edit  notes.txt  +1 −1                                                        
+     1 - alpha                                                                  
+     1 + beta                                                                   
+✓ bash  echo hi                                                                 
+  hi                                                                            
+✓ bash  echo boom >&2; exit 3  exit 3                                           
+  boom                                                                          
+✓ search  TODO in .                                                             
+done tools                                                                      
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+─────────────────────────────────────────────────────────────────────────── go ─
+❯ message  / for commands                                                       
+────────────────────────────────────────────────────────────────────────────────
+ws │ native │ Echo │ 0m                                                         
+▸▸ bypass permissions on                                                        
