@@ -273,6 +273,8 @@ type turn struct {
 
 	calls // this step's tool calls (toolbridge.go)
 
+	loop doomLoop // the doom-loop guard's count, across the turn's steps (doomloop.go)
+
 	// Interject's steers, spliced into every step's messages from the one
 	// that first saw them (plan 019 §3.10), are more of this state, under mu.
 }
@@ -346,13 +348,17 @@ func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamC
 // alongside the step limit: a save failed (Fantasy ignores OnStepFinish's
 // error, so without it the turn would go on paying for steps, and a tool
 // changing files, that the transcript cannot hold), a step's call ids were
-// unusable, or the turn was cancelled — a cancel during tools lets their
-// step finish, and no request may follow it. The doom-loop guard's stop
-// (plan 019 §3.7) joins these.
+// unusable, the doom-loop guard refused a fifth identical call (plan 019
+// §3.7), or the turn was cancelled — a cancel during tools lets their step
+// finish, and no request may follow it.
+//
+// The guard's step ends with tool results the model never gets to read, so
+// finish turns its tool_use into max_turn_requests, as it does for the step
+// limit.
 func (t *turn) halted([]fantasy.StepResult) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.saveErr != nil || t.badIDs || t.ctx.Err() != nil
+	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.ctx.Err() != nil
 }
 
 // stepStarted opens step n (from 0): its number, its clock, and an empty
@@ -508,9 +514,13 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (Result, error) {
 		if t.stepped {
 			stop = t.stop
 		}
-		if stop == StopToolUse {
-			// The model had results to read and the turn stopped anyway:
-			// the user did, or the step limit did.
+		if stop == StopToolUse || t.loop.stopped {
+			// The model had results to read and the turn stopped anyway: the
+			// user did, the step limit did, or the doom-loop guard did. The
+			// guard is asked separately because a call it refused can arrive
+			// under a finish that leaves its step's own stop reason end_turn
+			// — Fantasy announces a call on any finish but the abnormal four,
+			// and dispatches it only on "tool-calls" (plan 019 §3.7).
 			if cancelled {
 				return Result{StopReason: StopCancelled}, nil
 			}

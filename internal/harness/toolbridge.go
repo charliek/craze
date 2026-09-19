@@ -150,17 +150,16 @@ func (t *turn) toolCall(tc fantasy.ToolCallContent) error {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.vet(c, tc)
 	c.at = time.Now()
 	t.emit(ToolCalled{ID: c.id, CallID: req.CallID, Request: requestOf(req), At: c.at})
+	// The doom-loop guard (doomloop.go) sees every announced call here, in
+	// call order across steps, invalid ones included, and refuses one by
+	// setting its veto, which runTool returns instead of running it. Fantasy
+	// runs nothing until every call of the step has been through this
+	// callback (agent.go:1755-1782), so a veto is always in place in time.
+	t.vet(c)
 	return nil
 }
-
-// vet is the doom-loop guard's seam (plan 019 §3.7, the next commit): it
-// sees every announced call in call order across steps, invalid ones
-// included, and refuses one by setting its veto, which Run then returns
-// instead of running it. It refuses nothing yet. mu is held.
-func (t *turn) vet(*toolCall, fantasy.ToolCallContent) {}
 
 // runTool is every bridged tool's Run, on Fantasy's tool goroutines. The
 // dispatcher runs the call under the id OnToolCall prepared it with; a call
@@ -351,8 +350,19 @@ func (t *turn) stepResults(step fantasy.StepResult, open []fantasy.ToolCallPart)
 			parts = append(parts, r)
 			continue
 		}
-		unrun++
+		// A call the guard refused is answered with the guard's own text,
+		// whichever finish carried it: Fantasy dispatches only on a
+		// "tool-calls" finish, so under any other one the veto never reached
+		// runTool, and D-43's "not executed, its arguments may be truncated"
+		// would tell the model the opposite of what happened. The refusal is
+		// already in the guard's own Diag (plan 019 §3.7), so it is not
+		// counted among the calls a finish left unrun.
 		res := notExecuted(t, oc.ToolName, finish)
+		if v := recorded[i].veto; v != nil {
+			res = *v
+		} else {
+			unrun++
+		}
 		t.finishCall(recorded[i], res)
 		parts = append(parts, resultPart(oc.ToolCallID, recorded[i].id, res))
 	}

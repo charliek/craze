@@ -139,7 +139,8 @@ type Retrying struct {
 }
 
 // Diag reports what has no other event: results the runner wrote for calls
-// that never ran, a save that failed, a step refused for its call ids.
+// that never ran, a save that failed, a step refused for its call ids, a
+// doom-loop nudge and the stop that follows it.
 // Kind names the case (the Diag* constants); Fields are its facts. The
 // adapter shows none of it; it is for the journal and for diagnosis.
 type Diag struct {
@@ -163,6 +164,11 @@ const (
 	// DiagBadToolCalls: a step's tool calls had an empty or repeated provider
 	// id; nothing in it ran and it was not persisted (ErrBadToolCalls).
 	DiagBadToolCalls = "bad_tool_call_ids"
+	// DiagDoomLoop: the doom-loop guard refused a call the model had made
+	// identically three times or more in a row (§3.7). Fields name the step,
+	// the call, the tool, the count, and whether this one also ended the turn
+	// ("stopped"), which the fifth does.
+	DiagDoomLoop = "doom_loop"
 )
 
 func (TextDelta) isEvent()    {}
