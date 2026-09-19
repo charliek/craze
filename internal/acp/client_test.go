@@ -1578,3 +1578,93 @@ func TestCloseSignalsWhatAnExitedAgentLeftBehind(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestCloseKillsWhatIgnoresSIGTERM: the grace is the process group's, not only
+// the agent's. A member that ignores SIGTERM outlives an agent that exits on
+// it, and must still be killed when the grace runs out. Here the "agent" is a
+// shell that starts a sleep ignoring SIGTERM in its own group and exits.
+func TestCloseKillsWhatIgnoresSIGTERM(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "stubborn.pid")
+	c, err := Spawn(SpawnOptions{
+		Binary: "/bin/sh",
+		Args:   []string{"-c", "trap '' TERM; sleep 60 & echo $! > " + pidFile + "; exit 0"},
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-c.child.waitCh
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	_ = c.Close()
+	deadline := time.Now().Add(shutdownGrace + 3*time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("a process group member that ignores SIGTERM survived Close")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestCloseDoesNotWaitOnAWedgedStdin: with a prompt's write stuck in a pipe
+// nobody reads — an agent that stopped reading its stdin — Close's own cancel
+// cannot be written either, and it must not keep Close from shutting down.
+func TestCloseDoesNotWaitOnAWedgedStdin(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	_ = goPromptBlocks(p, []ContentBlock{{Type: "text", Text: "never read"}}, nil, nil)
+	waitFor(t, p.client.PromptInFlight, "the prompt to be in flight")
+
+	closed := make(chan error, 1)
+	go func() { closed <- p.client.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(closeCancelWait + 5*time.Second):
+		// Unwedge before failing, or the cleanup's own Close would wait on
+		// this one and hang the package instead of reporting.
+		_ = p.serverR.Close()
+		t.Fatal("Close waited on a cancel an agent that stopped reading stdin could never take")
+	}
+}
+
+// TestCloseDoesNotWaitToAnswerOnAWedgedStdin: Close answers every request the
+// agent is blocked on before it shuts the agent down, and with nobody reading
+// the agent's stdin that answer cannot be written. It must not keep Close
+// from shutting down either.
+func TestCloseDoesNotWaitToAnswerOnAWedgedStdin(t *testing.T) {
+	p := newRawPipeDialect(t, DialectGrok)
+	p.setSession("s1")
+	asked := make(chan struct{}, 1)
+	release := make(chan struct{})
+	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+		asked <- struct{}{}
+		<-release
+		return AskDecision{Skip: true}
+	})
+	t.Cleanup(func() { close(release) })
+	p.send(t, 1, MethodGrokAskUserQuestion, grokAskParams)
+	select {
+	case <-asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ask never reached its handler")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- p.client.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(closeCancelWait + 5*time.Second):
+		// Unwedge before failing, or the cleanup's own Close would wait on
+		// this one and hang the package instead of reporting.
+		_ = p.serverR.Close()
+		t.Fatal("Close waited to answer a request on a stdin nobody reads")
+	}
+}

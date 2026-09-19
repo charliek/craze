@@ -14,6 +14,10 @@ import (
 
 const shutdownGrace = 2 * time.Second
 
+// groupPoll is how often Shutdown looks for the agent's process group to have
+// emptied after its SIGTERM.
+const groupPoll = 20 * time.Millisecond
+
 // ErrAgentExited is Client.Close's answer when the non-blocking probe of
 // child.waitCh found it already closed: the agent's exit had been reaped
 // before craze's first Close on it sampled it. It does not mean Close
@@ -111,20 +115,43 @@ func (ch *Child) Wait() {
 // — a tool's subprocess — is still in its group, and that is exactly what
 // would otherwise be left running. A later call signals nothing, because by
 // then the group may be gone and its id free for something else.
+//
+// The grace is the group's too, not only the agent's: a member that ignores
+// SIGTERM outlives an agent that exits on it, so Shutdown waits for the group
+// to empty and sends SIGKILL to whatever is still in it when the grace runs
+// out.
 func (ch *Child) Shutdown() {
 	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
 		return
 	}
 	ch.shutdownOnce.Do(func() {
 		_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGTERM)
+		deadline := time.After(shutdownGrace)
+		for !ch.groupGone() {
+			select {
+			case <-deadline:
+				_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGKILL)
+				<-ch.waitCh
+				return
+			case <-time.After(groupPoll):
+			}
+		}
+		<-ch.waitCh
+	})
+}
+
+// groupGone reports whether nothing is left to signal: the agent's process
+// group is empty, or — with no group to ask about — the agent has been reaped.
+func (ch *Child) groupGone() bool {
+	if ch.pgid <= 0 {
 		select {
 		case <-ch.waitCh:
-			return
-		case <-time.After(shutdownGrace):
-			_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGKILL)
-			<-ch.waitCh
+			return true
+		default:
+			return false
 		}
-	})
+	}
+	return errors.Is(syscall.Kill(-ch.pgid, 0), syscall.ESRCH)
 }
 
 func signalGroup(pgid int, proc *os.Process, sig syscall.Signal) error {

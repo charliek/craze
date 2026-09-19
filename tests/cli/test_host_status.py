@@ -380,6 +380,7 @@ def _assert_ready_then_released(lines: list[dict[str, Any]]) -> None:
     ], lines
     ready, rel = seq_of(lines[0]), seq_of(lines[3])
     assert rel > ready, lines
+    assert lines[:2] == [report("idle", ready), metadata(ready, "cursor", "default")], lines
     assert lines[2:] == [metadata(rel, None, None), release(rel)]
 
 

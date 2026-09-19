@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/charliek/craze/internal/version"
 )
@@ -563,6 +564,11 @@ func (c *Client) AnswerPermission(id string, dec PermissionDecision) {
 	}
 }
 
+// closeCancelWait bounds how long Close waits to write what it still owes the
+// agent — cancelled answers and its own session/cancel — before it shuts the
+// agent down regardless.
+const closeCancelWait = 500 * time.Millisecond
+
 // Close shuts the agent down and reports whether it had already exited on
 // its own: a non-blocking probe of c.child.waitCh, at the very top, before
 // anything else — including the pre-close session/cancel below — so an agent
@@ -590,14 +596,29 @@ func (c *Client) Close() error {
 			default:
 			}
 		}
-		c.completeIncomingCancelled()
 		c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
 		c.mu.Lock()
 		inFlight := c.inPrompt
 		sid := c.sessionID
 		c.mu.Unlock()
-		if inFlight && sid != "" {
-			_ = c.conn.Notify(context.Background(), MethodSessionCancel, CancelParams{SessionID: sid})
+		// What Close still owes the agent — the cancelled answer to every
+		// request it is blocked on, then a cancel for a prompt in flight — is
+		// written best effort, and is never a reason to stay: an agent that
+		// has stopped reading its stdin would hold these writes forever, and
+		// the shutdown below is the only thing that ends such an agent. The
+		// wait is bounded; Conn.Close then closes the writer, which fails any
+		// write still blocked, so the goroutine does not outlive the close.
+		owed := make(chan struct{})
+		go func() {
+			defer close(owed)
+			c.completeIncomingCancelled()
+			if inFlight && sid != "" {
+				_ = c.conn.Notify(context.Background(), MethodSessionCancel, CancelParams{SessionID: sid})
+			}
+		}()
+		select {
+		case <-owed:
+		case <-time.After(closeCancelWait):
 		}
 		if c.child != nil {
 			c.child.Shutdown()
