@@ -705,8 +705,11 @@ def alive(pid: int, marker: str) -> bool:
     reads as dead (it has been killed and is only waiting to be reaped), and
     the marker means a pid the OS has reused is not mistaken for the command.
     """
+    # -ww: ps truncates argv to the screen width by default, and the marker
+    # is at the end of a long command line, so without it a running process
+    # reads as dead on a narrow terminal — which is how CI first failed.
     out = subprocess.run(
-        ["ps", "-o", "stat=", "-o", "args=", "-p", str(pid)],
+        ["ps", "-ww", "-o", "stat=", "-o", "args=", "-p", str(pid)],
         capture_output=True,
         text=True,
         check=False,

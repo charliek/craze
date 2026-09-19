@@ -359,7 +359,12 @@ func TestSwitchLearnsAKeyForTheNextTurn(t *testing.T) {
 		"unredactable":      "k3y-x7",
 		"in the prompt":     f.workspace, // the prompt names the working directory
 		"in the tools":      `"required":["filePath"]`,
-		"in a description":  "Use `" + os.TempDir() + "/craze` for temporary work",
+		// A sentence of bash's own description, taken as it is written rather
+		// than rebuilt from the machine: the directory it names is chosen at
+		// runtime (os.TempDir()'s spelling differs per platform, and a
+		// planted path falls back to a random name), so a hand-built copy of
+		// it does not always appear in what is sent.
+		"in a description": "for temporary work outside the workspace",
 		"nowhere in either": "sk-not-in-what-is-sent-0003",
 	} {
 		env["NOKEY_API_KEY"] = key
