@@ -353,8 +353,11 @@ func TestBashShell(t *testing.T) {
 	if h.shell != bashPath {
 		t.Errorf("shell = %q, want %q", h.shell, bashPath)
 	}
-	if dir := filepath.Dir(h.tmp); dir != os.TempDir() {
-		t.Errorf("the temporary directory %q is under %q, not the machine's %q", h.tmp, dir, os.TempDir())
+	// Cleaned on both sides: on macOS os.TempDir() is $TMPDIR as the
+	// environment spells it, trailing slash and all, while filepath.Dir of
+	// the joined path has none.
+	if dir, want := filepath.Dir(h.tmp), filepath.Clean(os.TempDir()); dir != want {
+		t.Errorf("the temporary directory %q is under %q, not the machine's %q", h.tmp, dir, want)
 	}
 	if base := filepath.Base(h.tmp); !strings.HasPrefix(base, "craze") {
 		t.Errorf("the temporary directory is named %q, which is neither craze nor a craze- fallback", base)
