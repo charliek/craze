@@ -46,15 +46,25 @@ func pickerRows(list []agent.Provider, def agent.Provider) []agent.Provider {
 			delete(want, p.Name())
 		}
 	}
-	// A name the registry does not know keeps the order it arrived in. Every
-	// provider is in the registry today, so this is belt and braces against a
-	// caller that builds one some other way.
+	// A name agent.Providers() does not list keeps the order it arrived in.
+	// That is where a hidden provider lands when it is the resolved default
+	// (from --provider, $CRAZE_PROVIDER or config.toml): one tagged row after
+	// the listed ones, and never a row otherwise (plan 018 §3.4).
 	for _, name := range arrived {
 		if got, ok := want[name]; ok {
 			rows = append(rows, got)
 		}
 	}
 	return rows
+}
+
+// hiddenProvider reports whether id resolves to a provider the registry never
+// lists. Such a provider is not written as the default on startedMsg and its
+// sessions are not indexed (plan 018 §3.4). The registry answers rather than
+// the snapshot, which carries the id alone.
+func hiddenProvider(id string) bool {
+	p, err := agent.ProviderByName(id)
+	return err == nil && p.Hidden()
 }
 
 func (m Model) providerIndex(p agent.Provider) int {
@@ -153,7 +163,9 @@ func (m Model) providerDialogBody(inner, budget int) []string {
 		if p.Name() == m.providerDefault.Name() {
 			tag = "default"
 		}
-		rows = append(rows, m.dialogRow(p.Name(), tag, i == m.providerCursor, true, inner))
+		// The row shows the label; the id stays what the tag, the cursor and
+		// the started session are matched by.
+		rows = append(rows, m.dialogRow(p.DisplayName(), tag, i == m.providerCursor, true, inner))
 	}
 	if footer {
 		rows = append(rows, m.dialogFooter(providerDialogHint, inner))

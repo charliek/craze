@@ -142,8 +142,13 @@ that gx lacked.
 
 ## Provider and request behavior
 
-- OpenAI-compatible targets use Fantasy's `providers/openaicompat`; OpenRouter
-  uses `providers/openrouter` with nested `reasoning.effort`.
+- OpenAI-compatible targets use Fantasy's `providers/openaicompat`. H1 also
+  runs OpenRouter on `openaicompat`, pinned to `https://openrouter.ai/api/v1`
+  with effort sent as `reasoning.effort` via `ExtraBody`, rather than on
+  `providers/openrouter` (D-35): that driver imports Fantasy's anthropic and
+  google providers, linking SDKs the catalog does not otherwise need.
+  `openaicompat` reads both `reasoning_content` and `reasoning` deltas, so
+  thinking still streams.
 - H0 set `MaxRetries=0`, a 512-token output ceiling, per-request and
   per-attempt deadlines, and a pre-dispatch budget reservation. The ceiling
   was too low for high-effort reasoning models and caused the Meta failures
@@ -169,10 +174,12 @@ that gx lacked.
 - Current gx sends ordinary top-level effort for Z.AI GLM. H0 found no basis
   for the earlier claim that the effective gx request adds a `thinking`
   object.
-- Reasoning replay is not uniformly lossy: Fantasy has explicit
-  OpenAI-compatible and OpenRouter replay paths. H1 preserves structured
-  fields and drops reasoning only when an entry's `provider` or `wire_model`
-  differs from the current model's (D-33), rather than blanket-stripping.
+- Reasoning replay is not uniformly lossy: Fantasy's `openaicompat`
+  provider replays reasoning as `reasoning_content`. H1 uses it for every
+  provider, OpenRouter included (D-35), so OpenRouter's own
+  `reasoning_details` replay is not used. H1 preserves structured fields and
+  drops reasoning only when an entry's `provider` or `wire_model` differs
+  from the current model's (D-33), rather than blanket-stripping.
 
 ## Cost inputs
 

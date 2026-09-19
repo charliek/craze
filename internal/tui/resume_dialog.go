@@ -35,13 +35,18 @@ const (
 // there is nothing Enter could do with it. A provider craze knows whose binary
 // does not resolve *is* offered: the spawn error is the right message, which
 // is what plan 012 settled for `--provider gx` on a machine without gx.
+//
+// A hidden provider's row is dropped the same way, although the registry
+// resolves the id: its sessions have no loader yet (plan 018 §3.4).
+// internal/cli's knownProvider already keeps such a row out of the list it
+// hands over; this is the same rule for a Config built any other way.
 func resumeRows(rows []sessions.Row) []sessions.Row {
 	out := make([]sessions.Row, 0, len(rows))
 	for _, row := range rows {
 		if len(out) >= resumeDialogMax {
 			break
 		}
-		if _, err := agent.ProviderByName(row.Provider); err != nil {
+		if p, err := agent.ProviderByName(row.Provider); err != nil || p.Hidden() {
 			continue
 		}
 		out = append(out, row)

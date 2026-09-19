@@ -101,6 +101,13 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	if !o.cont && !o.resume {
+		// As on the root command: a load starts the seeded row's provider,
+		// not the resolved one. The frame runner has no --ask/--plan.
+		if err := refuseInProcess("craze frame", resolved.Provider, o.agentBin, ""); err != nil {
+			return err
+		}
+	}
 	prov := resolved.Provider
 	sess := agent.New(agent.Options{
 		Binary:      o.agentBin,

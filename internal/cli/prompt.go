@@ -121,6 +121,9 @@ func (o *promptOpts) run() (retErr error) {
 	if err != nil {
 		return err
 	}
+	if err := refuseInProcess("craze", resolved.Provider, o.agentBin, o.mode()); err != nil {
+		return err
+	}
 
 	parent := context.Background()
 	if o.cmd != nil {

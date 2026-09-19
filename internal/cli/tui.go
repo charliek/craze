@@ -123,6 +123,12 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	}
 	if f.cont || f.resume {
 		resolved.Fallback = false
+	} else if err := refuseInProcess("craze", resolved.Provider, f.agentBin, mode); err != nil {
+		// Only a new session is started on the resolved provider. A load
+		// starts the row's own provider, which is never an in-process one
+		// (knownProvider), so --agent-bin and --ask/--plan still mean what
+		// they say there, whatever the environment or the config resolved.
+		return err
 	}
 	if cmd == nil {
 		// Direct callers (tests) have no cobra flag set, so lock the resolved

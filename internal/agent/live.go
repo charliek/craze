@@ -210,6 +210,9 @@ const (
 )
 
 func New(opts Options) Session {
+	if opts.Provider != nil && opts.Provider.InProcess() {
+		return newNative(opts, nil)
+	}
 	return newSession(opts)
 }
 

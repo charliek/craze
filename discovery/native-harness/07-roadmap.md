@@ -7,7 +7,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | ID | status | one line |
 |---|---|---|
 | H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
-| H1 | in progress | skeleton: `CRAZE_HOME` (replaces `CRAZE_CONFIG`), two-file model/provider config imported once via `craze import gx`, provider factory, wrapper + `Agent.Stream` turn runner over the JSONL tree store, hidden native provider, effort option, cancel; no interject, no modes (D-34) |
+| H1 | complete | skeleton shipped: hidden `native` provider; 14 of 15 imported models held a clean TUI turn, multi-turn sessions and `craze prompt --json` ran on a subset (OpenRouter via `openaicompat`, D-35); no interject, no modes (D-34) |
 | H2 | not started | tools: read, bash, edit, write, then ls, glob, grep; truncation wrapper; kind metadata; edit diffs; doom-loop guard; scripted-model test harness |
 | H3 | not started | permissions: once / always / reject-with-feedback, prefix table, dangerous list, per-workspace grants, Claude rule syntax, yolo |
 | H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
@@ -60,11 +60,13 @@ are qualified (D-24). Nothing blocks H1.
 
 - `internal/harness`: `CRAZE_HOME` (single env var, replaces
   `CRAZE_CONFIG`, D-27); two-file config, `providers.toml` + `models.toml`,
-  populated once by `craze import gx` (D-28); Fantasy provider factory; the
-  finish-normalizing `LanguageModel` wrapper with its fixtures (D-21, D-25);
-  store with header/message/model_change/effort_change entries; turn runner
-  on `Agent.Stream` behind the harness's own interface (text and thought
-  only, no tools).
+  populated once by `craze import gx` (D-28); Fantasy provider factory
+  (OpenRouter via `openaicompat`, not `providers/openrouter`, D-35); the
+  finish-normalizing `LanguageModel` wrapper with its fixtures, including the
+  `refusal` stop reason (D-21, D-25, D-36); store with
+  header/message/model_change/effort_change entries; turn runner on
+  `Agent.Stream` behind the harness's own interface (text and thought only,
+  no tools).
 - `internal/agent`: `NativeProvider()` with `hidden: true`; session adapter;
   `Capabilities{Effort}` only — interject stays off until H2's `PrepareStep`
   drain, modes stay off until H5's dispatcher (D-34); model dialog lists the
@@ -79,6 +81,74 @@ are qualified (D-24). Nothing blocks H1.
   `craze prompt --json` unchanged (no interject in H1). DeepSeek V4 Pro
   surfaces `ErrModelNotFound` until its wire id is corrected, then joins
   once it passes one tool loop. Picker never shows the provider.
+
+**Exit result:** shipped across PRs #28, #30, and PR 3. `craze --provider
+native` (hidden) held one clean TUI turn on 14 of 15 imported models, and
+multi-turn sessions (switching across OpenRouter, Fireworks and Meta) and
+`craze prompt --json` ran on a subset of them; `fireworks/deepseek-v4-pro`
+surfaces its stale gx wire id as a 404 (`ErrModelNotFound`-shaped), exactly as
+D-24 expected. Mid-session model switch, effort switch, cancel, and queued
+follow-ups all round-tripped live. A bug surfaced in the first live session —
+after switching from a model with no efforts to one with efforts, the TUI
+never re-read the snapshot, hiding the new effort row and failing
+`/model <id> <effort>` — fixed in 0733dd5 (the adapter now emits a bare
+`EventMeta` after `SetModel`/`SetConfig`) and re-verified clean in a second
+session. Two decisions were made during execution: OpenRouter runs on
+`openaicompat`, not `providers/openrouter` (D-35, owner to confirm or
+reverse), and a content-filter finish maps to `refusal` (D-36).
+
+Live smoke, Linux (2026-09-19), one TUI turn per imported alias:
+
+| alias | result |
+|---|---|
+| `fireworks/kimi-k3` | clean, thinking shown |
+| `fireworks/qwen3p8-max` | clean, thinking shown |
+| `fireworks/kimi-k2p7-code` | clean, thinking shown |
+| `fireworks/deepseek-v4-flash` | clean, thinking shown |
+| `fireworks/deepseek-v4-pro` | 404, stale wire id — expected (D-24) |
+| `glm-5.3` | clean, no reasoning text streamed |
+| `glm-5.3-flash` | clean, thinking shown |
+| `muse-spark-1.3` | clean, no reasoning text streamed |
+| `muse-spark-1.3-contributor` | clean, no reasoning text streamed |
+| `openrouter/minimax-m3` | clean, thinking shown, no effort row |
+| `openrouter/gemini-3.8-flash` | clean, no reasoning text streamed |
+| `openrouter/glm-5.3-flash` | clean, no reasoning text streamed |
+| `openrouter/gpt-5.6-luna` | clean, no reasoning text streamed |
+| `openrouter/gpt-5.6-terra` | clean, no reasoning text streamed |
+| `openrouter/gpt-5.6-sol` | clean, no reasoning text streamed |
+
+macOS (mac-mini, cross-compiled darwin/arm64): `craze import gx` produced the
+same 4 providers and 15 models; one TUI turn each on `fireworks/kimi-k3`
+(thinking shown), `glm-5.3`, and `muse-spark-1.3` all answered clean.
+
+No disruption: on Linux, `config.toml` (`provider = "cursor"`) and
+`sessions.jsonl` were byte-identical (size, mtime, SHA-256, 15 rows) after 16
+native sessions and the import; a plain `craze` still opens the picker with
+cursor as default and no native row; `--continue` still restored an ACP
+(grok) session. On the mac-mini, `config.toml` (`provider = "grok"`) was
+unchanged and no `sessions.jsonl` was created.
+
+Cache-read tokens were observed (recorded, not a pass condition): OpenRouter
+`minimax-m3` 148 on a session's first turn (prefix shared with earlier runs);
+Meta `muse-spark-1.3` 241 and 497 on later turns; Fireworks `kimi-k2p7-code`
+219 on the third turn; 0 on the first turn after each model switch.
+
+Binary size (C9): stripped `bin/craze` grew 9.5 MB → 32.4 MB once the harness
+linked — not an SDK (the deps check covers `./cmd/craze`); cobra's help
+template makes `text/template` reachable, and its reflective `MethodByName`
+keeps every exported method of every reachable type, including openai-go's
+thousands. A probe with the adapter but no reachable `text/template` was
+14.4 MB. This is D-26's binary-size split trigger; the owner decides.
+
+Known limitations / follow-ups: DeepSeek V4 Pro's wire id needs correcting
+(in gx before re-importing, or in `models.toml` with `source = "manual"`);
+the default model after import is the lexicographically first alias when
+gx's own default was skipped (`fireworks/deepseek-v4-flash` on Linux); the
+harness's one-line error cleanup drops an ESC byte before the adapter's
+sanitizer can strip the whole escape sequence, so a provider message can show
+harmless cosmetic leftovers like `[2J`; interject (H2), modes (H5), idle
+timeout (H2), resume/indexing (H7), and cost display (H7) remain as planned,
+and the binary-size decision (D-26) is still open.
 
 ### H2 — tools
 
