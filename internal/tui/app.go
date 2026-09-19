@@ -884,8 +884,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if name == "" {
 				name = agent.CursorProvider().Name()
 			}
-			if err := SaveProvider(name); err != nil {
-				m.addError(err.Error())
+			// A hidden provider is never written as the default (plan 018
+			// §3.4): trying it once must not change what a plain craze
+			// starts. A session that has not reported its provider yet was
+			// started as the resolved default (as in writeIndex), so a hidden
+			// default is skipped too rather than saving the cursor fallback.
+			hidden := hiddenProvider(name) || (m.snap.Provider.Name == "" && m.providerDefault.Hidden())
+			if !hidden {
+				if err := SaveProvider(name); err != nil {
+					m.addError(err.Error())
+				}
 			}
 		}
 		m.sessionUp()
@@ -2339,21 +2347,29 @@ func capRunes(s string, n int) string {
 // craze not being able to remember a session is not a reason to stop running
 // it.
 // writeIndex upserts this session's row, reporting whether the index now holds
-// it. A nil index is "nothing to persist", which counts as done; a session that
-// has not learned its id yet, and a write that failed, both count as not done,
-// so a caller that only writes once can retry on its next chance.
+// it. A nil index is "nothing to persist", which counts as done, and so is a
+// hidden provider's session; a session that has not learned its id yet, and a
+// write that failed, both count as not done, so a caller that only writes once
+// can retry on its next chance.
 func (m *Model) writeIndex(title string, kind sessions.TitleKind) bool {
 	if m.sessionIndex == nil {
 		return true
-	}
-	if m.snap.SessionID == "" {
-		return false
 	}
 	provider := m.snap.Provider.Name
 	if provider == "" {
 		// Only reachable before a session has answered with its own
 		// provider; the resolved default is the one it was started as.
 		provider = m.providerDefault.Name()
+	}
+	if hiddenProvider(provider) {
+		// A hidden provider's sessions stay out of the shared index until it
+		// has a loader (plan 018 §3.4), so --continue and --resume never
+		// pick a row nothing can load. Done, not failed: no retry and no
+		// error line.
+		return true
+	}
+	if m.snap.SessionID == "" {
+		return false
 	}
 	row := sessions.Row{
 		SessionID: m.snap.SessionID,

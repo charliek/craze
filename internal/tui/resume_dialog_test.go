@@ -268,6 +268,24 @@ func TestResumePickerDropsAnUnknownProvider(t *testing.T) {
 	}
 }
 
+// TestResumePickerDropsAHiddenProvider: a hidden provider resolves by id, but
+// its sessions have no loader yet (plan 018 §3.4), so its row is dropped
+// exactly as an unknown provider's is — even as the newest row, and even when
+// the caller built the list without internal/cli's filter.
+func TestResumePickerDropsAHiddenProvider(t *testing.T) {
+	plantHidden(t)
+	m, _ := newResumePicker(t, []sessions.Row{
+		resumeRow("s-1", hiddenID, "a hidden session", time.Minute),
+		resumeRow("s-2", "grok", "a session craze can start", 2*time.Minute),
+	}, 100, 30)
+	if len(m.resume) != 1 || m.resume[0].SessionID != "s-2" {
+		t.Fatalf("rows %+v", m.resume)
+	}
+	if strings.Contains(plainView(m), "a hidden session") {
+		t.Fatalf("the hidden row was offered:\n%s", plainView(m))
+	}
+}
+
 // TestResumeRowClampsTheTitleFirst: the provider and the age are what tell two
 // sessions apart, so a title long enough to fill the box gives up its own
 // cells rather than theirs.

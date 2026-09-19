@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -251,6 +252,159 @@ func TestStartedMsgPersistsProvider(t *testing.T) {
 	}
 	if got := ConfigProvider(); got != "grok" {
 		t.Fatalf("persisted %q", got)
+	}
+}
+
+// hiddenID and hiddenLabel are the hidden provider these cases plant: a
+// stand-in for the native provider, which does not exist yet, holding the
+// same rules. The label differs from the id in case alone, so a surface that
+// showed the id instead of the label is caught by a plain substring check.
+const (
+	hiddenID    = "hush"
+	hiddenLabel = "Hush"
+)
+
+func plantHidden(t *testing.T) agent.Provider {
+	t.Helper()
+	p, restore := agent.RegisterHiddenProviderForTest(hiddenID, hiddenLabel)
+	t.Cleanup(restore)
+	return p
+}
+
+// TestStartedMsgDoesNotPersistAHiddenProvider is the TUI half of "never
+// persisted" (plan 018 §3.4): the TUI writes the provider itself on
+// startedMsg, and a hidden provider there must leave the previous default
+// where it was, so trying it once never changes what a plain craze starts.
+func TestStartedMsgDoesNotPersistAHiddenProvider(t *testing.T) {
+	hidden := plantHidden(t)
+	// Skills first: isolateSkillsHome clears CRAZE_HOME, which is where
+	// writeConfigFile puts the seeded default.
+	isolateSkillsHome(t)
+	path := writeConfigFile(t, "provider = \"grok\"\n")
+	stub := NewStub()
+	stub.SetProvider(hidden)
+	m := New(Config{
+		Session:         stub,
+		Theme:           "tokyo-night",
+		Workspace:       t.TempDir(),
+		Yolo:            true,
+		PersistProvider: true,
+		ProviderLocked:  true,
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	if !m.started {
+		t.Fatal("not started")
+	}
+	if got := ConfigProvider(); got != "grok" {
+		body, _ := os.ReadFile(path)
+		t.Fatalf("a hidden provider replaced the default: %q\n%s", got, body)
+	}
+	if got := texts(m, entryError); len(got) != 0 {
+		t.Fatalf("skipping the write is not an error: %q", got)
+	}
+	// The status bar shows the label; the id stays in the snapshot.
+	if row := statusText(m.statusRow1()); !strings.Contains(row, hiddenLabel) || strings.Contains(row, hiddenID) {
+		t.Fatalf("status row %q, want the label %q and not the id", row, hiddenLabel)
+	}
+	if m.snap.Provider.Name != hiddenID {
+		t.Fatalf("snapshot provider %q, want the id", m.snap.Provider.Name)
+	}
+}
+
+// TestStartedMsgDoesNotPersistTheFallbackForAHiddenDefault: a session that
+// has not reported its provider was started as the resolved default. When
+// that default is hidden, startedMsg must not save the cursor fallback in its
+// place — writeIndex resolves the same way.
+func TestStartedMsgDoesNotPersistTheFallbackForAHiddenDefault(t *testing.T) {
+	hidden := plantHidden(t)
+	isolateSkillsHome(t)
+	path := writeConfigFile(t, "provider = \"grok\"\n")
+	m := New(Config{
+		Session:         NewStub(), // reports no provider
+		Provider:        hidden,
+		Theme:           "tokyo-night",
+		Workspace:       t.TempDir(),
+		Yolo:            true,
+		PersistProvider: true,
+		ProviderLocked:  true,
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	if !m.started {
+		t.Fatal("not started")
+	}
+	if m.snap.Provider.Name != "" {
+		t.Fatalf("the stub reported %q; this test needs a session that reports none", m.snap.Provider.Name)
+	}
+	if got := ConfigProvider(); got != "grok" {
+		body, _ := os.ReadFile(path)
+		t.Fatalf("the cursor fallback replaced the default: %q\n%s", got, body)
+	}
+}
+
+// TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow is plan 018 §3.4's
+// picker rule: a hidden provider is never a row of its own accord, and one
+// that was resolved as the default (from $CRAZE_PROVIDER or config.toml, which
+// do not lock the picker) is the one tagged row after the listed ones — drawn
+// with its label, preselected, and started by Enter without being written as
+// the default.
+func TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow(t *testing.T) {
+	hidden := plantHidden(t)
+	for _, tc := range []struct {
+		name string
+		list []agent.Provider
+		want []string
+	}{
+		{"default list", nil, []string{"cursor", "grok", hiddenID}},
+		{"every provider", agent.Providers(), []string{"cursor", "grok", "gx", hiddenID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := providerRowNames(pickerRows(tc.list, agent.CursorProvider())); slices.Contains(got, hiddenID) {
+				t.Fatalf("a hidden provider that is not the default got a row: %q", got)
+			}
+			isolateSkillsHome(t)
+			path := writeConfigFile(t, "provider = \"grok\"\n")
+			m := New(Config{
+				Theme:           "tokyo-night",
+				Workspace:       t.TempDir(),
+				Yolo:            true,
+				Provider:        hidden,
+				Providers:       tc.list,
+				PersistProvider: true,
+				NewSession:      pickerFactory(t),
+			})
+			tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = tm.(Model)
+			if got := providerRowNames(m.providers); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("rows %q, want %q", got, tc.want)
+			}
+			if want := len(tc.want) - 1; m.providerCursor != want {
+				t.Fatalf("cursor %d, want the hidden default preselected at %d", m.providerCursor, want)
+			}
+			if row := pickerRowLine(t, m, hiddenLabel); !strings.Contains(row, "default") {
+				t.Fatalf("the hidden default is not tagged: %q", row)
+			}
+			if view := plainView(m); strings.Contains(view, hiddenID) {
+				t.Fatalf("the picker shows the id instead of the label:\n%s", view)
+			}
+
+			tm, cmd := m.Update(enter())
+			m = tm.(Model)
+			tm, _ = m.Update(runCmd(cmd))
+			m = tm.(Model)
+			if !m.started || m.snap.Provider.Name != hiddenID {
+				t.Fatalf("enter started %q (started=%v), want the hidden row", m.snap.Provider.Name, m.started)
+			}
+			if got := ConfigProvider(); got != "grok" {
+				body, _ := os.ReadFile(path)
+				t.Fatalf("picking the hidden row replaced the default: %q\n%s", got, body)
+			}
+		})
 	}
 }
 

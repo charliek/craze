@@ -520,6 +520,72 @@ func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 	}
 }
 
+// TestHiddenProviderSessionIsNeverIndexed is plan 018 §3.4: a hidden
+// provider's sessions stay out of the shared index until they have a loader,
+// so no write moment — the first send, an agent title, a turn's end, /rename —
+// reaches Upsert. Skipping counts as done, so the first-prompt write is not
+// retried, and it is not an error line. The provider is read from the
+// snapshot, or from the resolved default before a session has reported one.
+func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
+	hidden := plantHidden(t)
+	for _, tc := range []struct {
+		name      string
+		configure func(stub *Stub) agent.Provider
+	}{
+		{"snapshot", func(stub *Stub) agent.Provider {
+			stub.SetProvider(hidden)
+			return agent.CursorProvider()
+		}},
+		{"resolved default", func(*Stub) agent.Provider { return hidden }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateSkillsHome(t)
+			idx := &fakeIndex{}
+			stub := NewStub()
+			t.Cleanup(func() { _ = stub.Close() })
+			def := tc.configure(stub)
+			m := New(Config{
+				Session:        stub,
+				Theme:          "tokyo-night",
+				Workspace:      t.TempDir(),
+				Model:          "grok",
+				Yolo:           true,
+				Provider:       def,
+				ProviderLocked: true,
+				SessionIndex:   idx,
+			})
+			tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = deliver(t, tm.(Model), startedMsg{})
+			if m.snap.SessionID == "" {
+				t.Fatal("fixture: the session has no id, so nothing would be written anyway")
+			}
+
+			m, cmd := typeAndEnter(t, m, "the first prompt")
+			if cmd == nil {
+				t.Fatal("the send was refused")
+			}
+			if !m.indexSeeded {
+				t.Fatal("a skipped write is done, not failed: the first-prompt write must not be retried")
+			}
+			m = feed(t, m,
+				agent.Event{Type: agent.EventMeta, Text: "an agent title"},
+				agent.Event{Type: agent.EventDone, StopReason: "end_turn"},
+			)
+			m = deliver(t, m, promptDoneMsg{})
+			m = runSlash(t, m, "/rename a user title")
+			if len(idx.rows) != 0 {
+				t.Fatalf("a hidden provider's session was indexed: %+v", idx.rows)
+			}
+			if m.indexRow {
+				t.Fatal("no row was written, so none may be claimed")
+			}
+			if got := texts(m, entryError); len(got) != 0 {
+				t.Fatalf("skipping the index is not an error: %q", got)
+			}
+		})
+	}
+}
+
 // TestNilSessionIndexWritesNothing is the isolation §3.2 pins: a nil index is
 // what every TUI unit test and every golden runs with, so nothing here can
 // reach a developer's real ~/.craze/sessions.jsonl.

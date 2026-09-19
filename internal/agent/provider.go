@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/charliek/craze/internal/acp"
 )
@@ -85,6 +87,19 @@ type Provider struct {
 	// it resolves. gx is a personal fork; cursor and grok are always offered,
 	// so an empty picker is impossible.
 	optional bool
+	// hidden keeps a provider out of Providers() altogether: it lives in the
+	// hidden list, which only ProviderByName reads, so it resolves by id but
+	// no listing ever shows it, and it is never persisted as the default nor
+	// written to the session index (plan 018 §3.4). optional is "listed when
+	// installed"; hidden is "never listed".
+	hidden bool
+	// inProcess is a provider craze runs itself rather than spawning over ACP,
+	// so there is no binary to look up.
+	inProcess bool
+	// displayName is the label the UI shows. The id — name — is what flags,
+	// the environment, config.toml and the session index hold, so the label
+	// can change without touching anything persisted. Empty is the id.
+	displayName string
 }
 
 // authMethod is one way a provider can authenticate, in preference order.
@@ -282,13 +297,83 @@ func GxProvider() Provider {
 	return p
 }
 
-// Providers is every provider craze knows, in picker order. It is the single
-// registry: ProviderByName and ProviderNames both read it, so a new provider
-// is a constructor and one line here. It builds the slice per call rather
-// than handing back a package-level one, for the same reason Bins and
+// Providers is every provider craze lists, in picker order. It is the single
+// public registry: ProviderByName and ProviderNames both read it, so a new
+// provider is a constructor and one line here. It builds the slice per call
+// rather than handing back a package-level one, for the same reason Bins and
 // SkillScan copy: nothing a caller does to the result can reach the registry.
+//
+// A hidden provider is not here at all but in hiddenProviders, so every
+// listing — the picker, --help, the unknown-provider error, and any written
+// later — leaves it out without having to remember a filter (plan 018
+// §3.4).
 func Providers() []Provider {
 	return []Provider{CursorProvider(), GrokProvider(), GxProvider()}
+}
+
+// hiddenProviders is the second registry: providers ProviderByName resolves
+// and nothing lists. Listing them in Providers and filtering at each listing
+// site was the alternative; keeping them out makes the safe answer the
+// default one. ProviderByName reads this list after the public one, so a
+// hidden entry can never shadow a listed id.
+//
+// hiddenMu exists for RegisterHiddenProviderForTest. Production code never
+// writes the list once the package is initialised, but a test in another
+// package plants and removes an entry while a TUI it built may be resolving
+// provider names on another goroutine.
+var (
+	hiddenMu        sync.RWMutex
+	hiddenProviders []Provider
+)
+
+// hiddenProvider is ProviderByName's lookup in the hidden list. Ids are
+// lowercase-exact there as in the public list: "Native" is no more an alias
+// for "native" than "Grok" is for "grok".
+func hiddenProvider(name string) (Provider, bool) {
+	hiddenMu.RLock()
+	defer hiddenMu.RUnlock()
+	for _, p := range hiddenProviders {
+		if p.name == name {
+			return p, true
+		}
+	}
+	return Provider{}, false
+}
+
+// RegisterHiddenProviderForTest is for tests only; production code never
+// calls it. It adds a hidden, in-process provider with id name and display
+// label label to the hidden list, and returns it with the function that takes
+// it out again (idempotent; pass it to t.Cleanup). Its only purpose is to let
+// the tests in internal/tui and internal/cli hold the hidden-provider rules —
+// never listed, never persisted, never indexed — without a real hidden
+// provider to hand. It lives outside a _test.go file because other packages'
+// tests cannot see those.
+//
+// It panics on an empty name, or on one the registry already resolves: an
+// entry that collided with a listed provider could never be reached, and one
+// that collided with another hidden entry would be removed with it, so either
+// is a broken test rather than something to carry on from.
+func RegisterHiddenProviderForTest(name, label string) (Provider, func()) {
+	if name == "" {
+		panic("agent: RegisterHiddenProviderForTest: empty provider id")
+	}
+	p := Provider{name: name, displayName: label, hidden: true, inProcess: true}
+	hiddenMu.Lock()
+	defer hiddenMu.Unlock()
+	taken := slices.ContainsFunc(Providers(), func(q Provider) bool { return q.name == name }) ||
+		slices.ContainsFunc(hiddenProviders, func(q Provider) bool { return q.name == name })
+	if taken {
+		panic(fmt.Sprintf("agent: RegisterHiddenProviderForTest: provider %q is already registered", name))
+	}
+	hiddenProviders = append(hiddenProviders, p)
+	var once sync.Once
+	return p, func() {
+		once.Do(func() {
+			hiddenMu.Lock()
+			defer hiddenMu.Unlock()
+			hiddenProviders = slices.DeleteFunc(hiddenProviders, func(q Provider) bool { return q.name == name })
+		})
+	}
 }
 
 // ProviderNames is every registered provider's id, in Providers order.
@@ -314,8 +399,10 @@ func DefaultProviders() []Provider {
 	return out
 }
 
-// ProviderByName looks up a provider by id. An empty name is unset, not
-// unknown: it reads as cursor. Ids are lowercase-exact.
+// ProviderByName looks up a provider by id: the listed providers first, then
+// the hidden ones, which is how --provider, $CRAZE_PROVIDER and config.toml
+// reach a provider no listing shows (plan 018 §3.4). An empty name is unset,
+// not unknown: it reads as cursor. Ids are lowercase-exact.
 func ProviderByName(name string) (Provider, error) {
 	if name == "" {
 		return CursorProvider(), nil
@@ -325,21 +412,51 @@ func ProviderByName(name string) (Provider, error) {
 			return p, nil
 		}
 	}
+	if p, ok := hiddenProvider(name); ok {
+		return p, nil
+	}
 	return Provider{}, fmt.Errorf("agent: unknown provider %q", name)
 }
 
 func (p Provider) Name() string { return p.name }
 
+// DisplayName is the label the UI shows for p: the picker row, and the status
+// bar and sub-agent view through ProviderInfo.Label. It falls back to the id,
+// which is what every ACP provider shows. Flags, the environment, config.toml,
+// the session index, craze prompt --json and host reports all keep the id
+// (plan 018 §3.4).
+func (p Provider) DisplayName() string {
+	if p.displayName != "" {
+		return p.displayName
+	}
+	return p.name
+}
+
 // Optional reports whether p is left out of the startup picker on a machine
 // that has no binary for it.
 func (p Provider) Optional() bool { return p.optional }
+
+// Hidden reports whether p is one no listing shows: resolvable by id through
+// ProviderByName, never in Providers, never persisted as the default and never
+// written to the session index (plan 018 §3.4).
+func (p Provider) Hidden() bool { return p.hidden }
+
+// InProcess reports whether craze runs p itself rather than spawning an agent
+// binary over ACP.
+func (p Provider) InProcess() bool { return p.inProcess }
 
 // BinaryResolves reports whether binary lookup for p succeeds — the same
 // question acp.Spawn asks, with the same precedence: --agent-bin (explicit),
 // then $CRAZE_AGENT_BIN, then p's own PATH candidates. It mirrors lookup and
 // nothing more: an absolute override is accepted on os.Stat alone, so a true
 // result is not a promise that the process will start.
+//
+// An in-process provider has nothing to spawn, so it always resolves and
+// neither PATH nor the override is consulted.
 func (p Provider) BinaryResolves(explicit string) bool {
+	if p.inProcess {
+		return true
+	}
 	_, err := acp.ResolveBinaryCandidates(explicit, p.Bins())
 	return err == nil
 }
@@ -470,8 +587,10 @@ func (p ProviderInfo) Dialect() acp.DialectID { return p.provider().Dialect() }
 // SkillScan is where the snapshot's provider discovers skills.
 func (p ProviderInfo) SkillScan() SkillScan { return p.provider().SkillScan() }
 
-// Label is the provider name the status row shows.
-func (p ProviderInfo) Label() string { return p.provider().Name() }
+// Label is what the status row and the sub-agent view show for the snapshot's
+// provider: its display label, rebuilt from the id like everything else here.
+// For every ACP provider that is the id itself (plan 018 §3.4).
+func (p ProviderInfo) Label() string { return p.provider().DisplayName() }
 
 // Kind is what the session's provider means by a mode id.
 func (p ProviderInfo) Kind(id string) ModeKind { return p.provider().ModeKind(id) }
