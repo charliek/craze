@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -32,6 +33,19 @@ const (
 // the first maxLineLength runes of any line lie inside it; so a line of any
 // length costs read no more than this.
 const keepBytes = 4 * maxLineLength
+
+// A directory listing's bounds. opencode reads a whole directory before it
+// slices it, so a huge directory, or an endless one on a FUSE mount, costs
+// unbounded memory and never sees a cancel. read takes the entries dirChunk
+// at a time, checking for a cancel between chunks, and stops at
+// maxDirEntries, saying so (NOTICE). Variables so tests can shrink them.
+var (
+	dirChunk      = 1000
+	maxDirEntries = 100_000
+)
+
+// dirCapNote ends a listing that stopped at maxDirEntries.
+const dirCapNote = "(Listing stopped at %d entries: the directory has more, and only the first %d it returned are listed. Use the bash tool to see the rest.)"
 
 type readTool struct{ spec tool.Spec }
 
@@ -125,7 +139,7 @@ func (c *readCall) run(ctx context.Context, env tool.Env) (tool.Result, error) {
 	case isCredentials(env, real, info):
 		return tool.Result{}, fail(tool.ClassToolError, credentialsText)
 	case info.IsDir():
-		return c.list(f, real)
+		return c.list(ctx, f, real)
 	case !info.Mode().IsRegular():
 		// A FIFO, a device or a socket: opencode would block on it or read
 		// it forever (plan 019 §3.9).
@@ -159,23 +173,34 @@ func (c *readCall) miss() error {
 // list is read's directory mode (read.ts:264-298): the entries sorted, a
 // directory (or a symlink to one) with a trailing slash, sliced by offset
 // and limit.
-func (c *readCall) list(dir *os.File, real string) (tool.Result, error) {
-	entries, err := dir.ReadDir(-1)
-	if err != nil {
-		return tool.Result{}, err
-	}
-	items := make([]string, 0, len(entries))
-	for _, e := range entries {
-		name := e.Name()
-		switch {
-		case e.IsDir():
-			name += "/"
-		case e.Type()&fs.ModeSymlink != 0:
-			if st, err := os.Stat(filepath.Join(real, name)); err == nil && st.IsDir() {
-				name += "/"
-			}
+//
+// The entries are taken a chunk at a time, with a cancel checked between
+// chunks, and no more than maxDirEntries are kept: a directory of millions
+// of names, or one on a mount that never ends, must cost neither the memory
+// of all of them nor a turn that cannot be stopped. A listing that stopped
+// says so, and what it shows is then the first maxDirEntries the directory
+// returned, sorted among themselves.
+func (c *readCall) list(ctx context.Context, dir *os.File, real string) (tool.Result, error) {
+	var items []string
+	capped := false
+	for !capped {
+		if err := ctx.Err(); err != nil {
+			return tool.Result{}, err
 		}
-		items = append(items, name)
+		entries, err := dir.ReadDir(dirChunk)
+		for _, e := range entries {
+			if len(items) == maxDirEntries {
+				capped = true // one more than the cap exists
+				break
+			}
+			items = append(items, entryName(real, e))
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return tool.Result{}, err
+		}
 	}
 	// Byte order, not opencode's localeCompare: see NOTICE.
 	slices.Sort(items)
@@ -188,6 +213,14 @@ func (c *readCall) list(dir *os.File, real string) (tool.Result, error) {
 		footer = fmt.Sprintf("\n(Showing %d of %d entries. Use 'offset' parameter to read beyond entry %d)",
 			len(sliced), len(items), c.offset+len(sliced))
 	}
+	if capped {
+		note := fmt.Sprintf(dirCapNote, len(items), len(items))
+		if truncated {
+			footer += "\n" + note
+		} else {
+			footer = "\n" + note
+		}
+	}
 	content := strings.Join(sliced, "\n")
 	res := tool.Result{
 		Text: strings.Join([]string{
@@ -195,13 +228,32 @@ func (c *readCall) list(dir *os.File, real string) (tool.Result, error) {
 		}, "\n"),
 		Content: content,
 	}
-	if truncated {
+	if truncated || capped {
+		total := len(items)
+		if capped {
+			total++ // the one that was seen and not kept: a lower bound
+		}
 		res.Trunc = tool.Truncation{
 			KeptBytes: len(content), TotalBytes: len(strings.Join(items, "\n")),
-			KeptLines: len(sliced), TotalLines: len(items),
+			KeptLines: len(sliced), TotalLines: total,
 		}
 	}
 	return res, nil
+}
+
+// entryName is one directory entry as a listing shows it: its name, with a
+// trailing slash for a directory or a symlink to one.
+func entryName(dir string, e fs.DirEntry) string {
+	name := e.Name()
+	switch {
+	case e.IsDir():
+		return name + "/"
+	case e.Type()&fs.ModeSymlink != 0:
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && st.IsDir() {
+			return name + "/"
+		}
+	}
+	return name
 }
 
 // file is read's file mode (read.ts:300-377) for a regular file of
@@ -236,7 +288,7 @@ func (c *readCall) file(ctx context.Context, f *os.File, fileSize int64) (tool.R
 		if count%4096 == 0 && ctx.Err() != nil {
 			return tool.Result{}, ctx.Err()
 		}
-		line, long, ok, err := lr.next()
+		line, long, ok, err := lr.next(ctx)
 		if err != nil {
 			return tool.Result{}, err
 		}
@@ -385,7 +437,13 @@ func newLineReader(f io.Reader) *lineReader {
 
 // next returns the next line — its first keepBytes bytes, or all of it when
 // it is no longer — and whether it was longer. ok is false at the end.
-func (lr *lineReader) next() (line []byte, long, ok bool, err error) {
+//
+// A line longer than the reader's buffer arrives in chunks: what is past
+// keepBytes is counted and dropped, never held, and a cancel is checked
+// between chunks. So one line of any length — a minified bundle, a file
+// with no newline at all — costs neither memory nor a turn that cannot be
+// stopped.
+func (lr *lineReader) next(ctx context.Context) (line []byte, long, ok bool, err error) {
 	lr.line = lr.line[:0]
 	n := 0        // the line's length so far, its ending not counted
 	var last byte // the line's last byte so far, when n > 0
@@ -415,7 +473,10 @@ func (lr *lineReader) next() (line []byte, long, ok bool, err error) {
 			}
 			long = n > keepBytes
 			return lr.line[:min(len(lr.line), keepBytes)], long, true, nil
-		case err == bufio.ErrBufferFull:
+		case errors.Is(err, bufio.ErrBufferFull):
+			if err := ctx.Err(); err != nil {
+				return nil, false, false, err
+			}
 			continue
 		default:
 			return nil, false, false, err

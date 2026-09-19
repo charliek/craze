@@ -297,6 +297,80 @@ func TestWriteRefusesAnExternalChange(t *testing.T) {
 	}
 }
 
+// TestWriteOverALargeFileIsNotLoaded: a file over the cap is replaced
+// without being read, so overwriting a huge one costs neither its size in
+// memory for the card's diff nor a second read for the last check. Two
+// things prove it was not read: the result carries no edit to diff, and a
+// change only the content check could see is not seen. The same file under
+// the cap is the negative control for both, and a change the inode, size
+// and time do show is still refused above the cap.
+func TestWriteOverALargeFileIsNotLoaded(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(func() { maxWriteBytes, beforeCheck = maxEditBytes, nil })
+	maxWriteBytes = 16
+
+	// A rewrite in place of the same size, with the modification time put
+	// back: the same inode, size and time, and only the content differs.
+	inPlace := func(path, content string) func(string) {
+		return func(string) {
+			before, err := os.Stat(path)
+			must(t, err)
+			must(t, os.WriteFile(path, []byte(content), 0o644))
+			must(t, os.Chtimes(path, before.ModTime(), before.ModTime()))
+		}
+	}
+
+	big := strings.Repeat("a", 64)
+	put(t, f.path("big.txt"), big)
+	beforeCheck = inPlace(f.path("big.txt"), strings.Repeat("b", 64))
+	_, res := f.call(t, "write", map[string]any{"filePath": "big.txt", "content": "small now"})
+	ok(t, res)
+	if res.Edits != nil {
+		t.Fatalf("edits = %+v, want none: the old content was never read", res.Edits)
+	}
+	if load(t, f.path("big.txt")) != "small now" {
+		t.Fatal("the large file was not written")
+	}
+
+	// The negative control: under the cap the same change is caught, and
+	// the result carries the edit the card diffs.
+	put(t, f.path("small.txt"), "aaaa")
+	beforeCheck = inPlace(f.path("small.txt"), "bbbb")
+	_, res = f.call(t, "write", map[string]any{"filePath": "small.txt", "content": "x"})
+	failed(t, res, tool.ClassToolError, changedText)
+	beforeCheck = nil
+	_, res = f.call(t, "write", map[string]any{"filePath": "small.txt", "content": "x"})
+	ok(t, res)
+	if want := []tool.FileEdit{{Path: f.path("small.txt"), Old: "bbbb", New: "x"}}; !reflect.DeepEqual(res.Edits, want) {
+		t.Fatalf("edits = %+v, want %+v", res.Edits, want)
+	}
+
+	// Above the cap the inode, size and time still guard the file.
+	put(t, f.path("big2.txt"), big)
+	beforeCheck = func(string) { put(t, f.path("big2.txt"), big+"grown") }
+	_, res = f.call(t, "write", map[string]any{"filePath": "big2.txt", "content": "y"})
+	failed(t, res, tool.ClassToolError, changedText)
+	if load(t, f.path("big2.txt")) != big+"grown" {
+		t.Fatal("the external change was overwritten")
+	}
+	beforeCheck = nil
+
+	// A byte order mark is kept over the cap too: only those bytes are read.
+	put(t, f.path("bom.txt"), "\xef\xbb\xbf"+big)
+	_, res = f.call(t, "write", map[string]any{"filePath": "bom.txt", "content": "after"})
+	ok(t, res)
+	if got := load(t, f.path("bom.txt")); got != "\xef\xbb\xbfafter" {
+		t.Fatalf("file = %q, want its BOM kept", got)
+	}
+	// The negative control: no mark, none added.
+	put(t, f.path("plain.txt"), big)
+	_, res = f.call(t, "write", map[string]any{"filePath": "plain.txt", "content": "after"})
+	ok(t, res)
+	if got := load(t, f.path("plain.txt")); got != "after" {
+		t.Fatalf("file = %q, want no BOM", got)
+	}
+}
+
 // TestWriteRefusesTheMarker: content holding the redaction marker would
 // put the marker on disk in place of a real key (plan 019 §3.8). Content
 // with only part of it is the negative control.

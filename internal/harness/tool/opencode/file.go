@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,17 +296,36 @@ func (t *target) check(env tool.Env) error {
 	return w.Close()
 }
 
-// read returns the file's content, or nil for a new file.
+// read returns the file's content, or nil for a new file. It reads one byte
+// more than the size openTarget saw and no further: a file that grew since
+// then cannot be written anyway — replace's check refuses it — and reading
+// all of it could cost any amount of memory. The caller sees the extra byte
+// and can say what it likes about a file that outgrew its own limit.
 func (t *target) read() ([]byte, error) {
 	if t.f == nil {
 		return nil, nil
 	}
-	b, err := io.ReadAll(io.NewSectionReader(t.f, 0, math.MaxInt64))
+	b, err := io.ReadAll(io.NewSectionReader(t.f, 0, t.Size+1))
 	if err != nil {
 		return nil, err
 	}
 	t.data, t.isRead = b, true
 	return b, nil
+}
+
+// startsWithBOM reports whether the file begins with a byte order mark,
+// reading only those bytes: all a rewrite needs of a file too large to
+// load.
+func (t *target) startsWithBOM() (bool, error) {
+	if t.f == nil {
+		return false, nil
+	}
+	head := make([]byte, len(bom))
+	n, err := t.f.ReadAt(head, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return string(head[:n]) == bom, nil
 }
 
 // replace writes data to the file: to a temp file beside it, renamed over
@@ -379,6 +397,9 @@ func (t *target) unchanged() error {
 // leaves the modification time as it was; an edit computed from the old
 // content would then quietly undo it. The inode is the one opened (checked
 // above), so the open descriptor reads the file as it is now.
+//
+// A caller that did not read the content — write, over a file too large to
+// hold — has only the inode, size and time, and NOTICE says so.
 func (t *target) sameContent() bool {
 	if !t.isRead {
 		return true

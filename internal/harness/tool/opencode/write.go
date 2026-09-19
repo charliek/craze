@@ -10,6 +10,14 @@ import (
 // diagnostics it appends: craze has no language servers.
 const wroteText = "Wrote file successfully."
 
+// maxWriteBytes is the largest existing file a write loads. write needs the
+// old content only for the card's diff and for replace's content check, so a
+// file over the cap is replaced without being read: no diff, and the change
+// check on the inode, size and modification time alone (NOTICE). Overwriting
+// a multi-gigabyte log must not cost its size in memory, twice. It is edit's
+// cap, for the same reason, and a variable so tests can shrink it.
+var maxWriteBytes int64 = maxEditBytes
+
 type writeTool struct{ spec tool.Spec }
 
 func newWrite() (tool.Tool, error) {
@@ -72,14 +80,29 @@ func (c *writeCall) Run(ctx context.Context, env tool.Env) tool.Result {
 		return errorResult(err)
 	}
 	defer t.release()
-	source, err := t.read()
-	if err != nil {
+
+	// A file over the cap is replaced unread: its byte order mark is still
+	// kept, but there is no old content to diff against or to check.
+	var old string
+	var oldBOM, loaded bool
+	if t.Size <= maxWriteBytes {
+		source, err := t.read()
+		if err != nil {
+			return errorResult(err)
+		}
+		old, oldBOM = splitBOM(string(source))
+		loaded = true
+	} else if oldBOM, err = t.startsWithBOM(); err != nil {
 		return errorResult(err)
 	}
-	old, oldBOM := splitBOM(string(source))
+
 	next, nextBOM := splitBOM(c.content)
 	if err := t.replace(ctx, []byte(joinBOM(next, oldBOM || nextBOM))); err != nil {
 		return errorResult(err)
 	}
-	return tool.Result{Text: wroteText, Edits: []tool.FileEdit{{Path: c.abs, Old: old, New: next}}}
+	res := tool.Result{Text: wroteText}
+	if loaded {
+		res.Edits = []tool.FileEdit{{Path: c.abs, Old: old, New: next}}
+	}
+	return res
 }

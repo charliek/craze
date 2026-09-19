@@ -3,11 +3,13 @@ package opencode
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -281,6 +283,168 @@ func TestReadDirectory(t *testing.T) {
 	if ok(t, res) != "<path>"+mixed+"</path>\n<type>directory</type>\n<entries>\na-link/\nb.txt\nc-link\nsub/\n\n(4 entries)\n</entries>" {
 		t.Fatalf("text = %q", res.Text)
 	}
+}
+
+// liveFor returns a context that is live for its first n checks of Err and
+// cancelled from then on: a cancel at an exact point in a loop, with no
+// timing in the test. It answers Err, which is what the file tools ask.
+func liveFor(n int64) *countdownCtx {
+	c := &countdownCtx{Context: context.Background()}
+	c.left.Store(n)
+	return c
+}
+
+type countdownCtx struct {
+	context.Context
+	left, seen atomic.Int64
+}
+
+func (c *countdownCtx) Err() error {
+	c.seen.Add(1)
+	if c.left.Add(-1) < 0 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// checks is how many times the code under test asked whether it may go on.
+func (c *countdownCtx) checks() int64 { return c.seen.Load() }
+
+// readCallFor is the read tool's prepared call for in, run directly so that
+// the dispatcher's own cancel check does not stand in for the tool's.
+func readCallFor(t *testing.T, env tool.Env, in string) tool.Prepared {
+	t.Helper()
+	rt, err := newRead()
+	must(t, err)
+	p, err := rt.Prepare(env, tool.Call{ID: "t1.1.1", Tool: "read", Input: []byte(in)})
+	must(t, err)
+	return p
+}
+
+// TestReadDirectoryIsBounded: a directory is read in chunks, with a cancel
+// checked between them, and the listing stops at a cap and says so — so a
+// directory of millions of entries, or one on a mount that never ends,
+// costs neither unbounded memory nor a turn that cannot be stopped. The
+// negative controls: a directory exactly at the cap says nothing about
+// stopping, and with a context that stays live the same read lists
+// everything after more than one check.
+func TestReadDirectoryIsBounded(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(func() { dirChunk, maxDirEntries = 1000, 100_000 })
+	dirChunk, maxDirEntries = 10, 20
+
+	big := f.path("big")
+	for i := range 50 {
+		put(t, filepath.Join(big, fmt.Sprintf("f%02d", i)), "")
+	}
+	_, res := f.call(t, "read", map[string]any{"filePath": "big"})
+	text := ok(t, res)
+	if n := strings.Count(res.Content, "\n") + 1; n != 20 {
+		t.Fatalf("listed %d entries, want the cap of 20:\n%s", n, text)
+	}
+	if !strings.Contains(text, fmt.Sprintf(dirCapNote, 20, 20)) {
+		t.Fatalf("the listing does not say it stopped:\n%s", text)
+	}
+	if tr := res.Trunc; !tr.Truncated() || tr.KeptLines != 20 || tr.TotalLines != 21 {
+		t.Fatalf("trunc = %+v, want the cap kept and more seen", tr)
+	}
+	// A window inside a capped listing says both things.
+	_, res = f.call(t, "read", map[string]any{"filePath": "big", "limit": 5})
+	text = ok(t, res)
+	if !strings.Contains(text, "(Showing 5 of 20 entries. Use 'offset' parameter to read beyond entry 6)") ||
+		!strings.Contains(text, fmt.Sprintf(dirCapNote, 20, 20)) {
+		t.Fatalf("a window of a capped listing:\n%s", text)
+	}
+
+	// The negative control: exactly the cap is the whole directory.
+	exact := f.path("exact")
+	for i := range 20 {
+		put(t, filepath.Join(exact, fmt.Sprintf("f%02d", i)), "")
+	}
+	_, res = f.call(t, "read", map[string]any{"filePath": "exact"})
+	if text = ok(t, res); !strings.HasSuffix(text, "\n\n(20 entries)\n</entries>") || strings.Contains(text, "Listing stopped") || res.Trunc.Truncated() {
+		t.Fatalf("a directory of exactly the cap:\n%s", text)
+	}
+
+	// Cancelled between chunks: 50 entries in chunks of ten, so the read
+	// is only part way through at the third check.
+	p := readCallFor(t, f.env, `{"filePath":"big"}`)
+	ctx := liveFor(2)
+	failed(t, p.Run(ctx, f.env), tool.ClassAborted, tool.AbortedText)
+	if ctx.checks() != 3 {
+		t.Fatalf("the listing asked %d times whether to go on, want 3", ctx.checks())
+	}
+	// The negative control: the same read, never cancelled, and it checked
+	// more than once.
+	live := liveFor(1 << 30)
+	if res := p.Run(live, f.env); res.IsError || live.checks() < 3 {
+		t.Fatalf("result %+v after %d checks", res, live.checks())
+	}
+}
+
+// TestReadHonoursCancelInsideOneLongLine: a file of one endless line — a
+// minified bundle, a file with no newline at all — is read in chunks that
+// hold nothing past the per-line cap, and a cancel between them ends the
+// read. Without the check the whole line would be read before the loop
+// asked again.
+func TestReadHonoursCancelInsideOneLongLine(t *testing.T) {
+	f := newFixture(t)
+	line := strings.Repeat("x", 1<<20) // sixteen buffers' worth, no newline
+	put(t, f.path("one-line.txt"), line)
+
+	p := readCallFor(t, f.env, `{"filePath":"one-line.txt"}`)
+	ctx := liveFor(3) // the loop's first check, then two chunks
+	failed(t, p.Run(ctx, f.env), tool.ClassAborted, tool.AbortedText)
+	if ctx.checks() != 4 {
+		t.Fatalf("the read asked %d times whether to go on, want 4", ctx.checks())
+	}
+
+	// The negative control: never cancelled, the line is read and cut, and
+	// the read checked at every chunk.
+	live := liveFor(1 << 30)
+	res := p.Run(live, f.env)
+	if !strings.Contains(ok(t, res), "1: "+strings.Repeat("x", maxLineLength)+maxLineSuffix+"\n") {
+		t.Fatalf("text = %q", res.Text[:120])
+	}
+	if live.checks() < 10 {
+		t.Fatalf("a 1 MiB line was read in %d checks, want one per chunk", live.checks())
+	}
+}
+
+// TestLineReaderHoldsOneCapAtMost is the memory half of the same bound: a
+// line with no end costs the reader keepBytes and no more, however much it
+// reads, and it stops on a cancel. A finite long line is the negative
+// control: the same cap, with the line returned.
+func TestLineReaderHoldsOneCapAtMost(t *testing.T) {
+	endless := endlessReader{}
+	lr := newLineReader(endless)
+	ctx := liveFor(4)
+	if _, _, _, err := lr.next(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("next over an endless line = %v, want a cancel", err)
+	}
+	if len(lr.line) > keepBytes+1 {
+		t.Fatalf("the reader held %d bytes of one line, want at most %d", len(lr.line), keepBytes+1)
+	}
+
+	lr = newLineReader(strings.NewReader(strings.Repeat("y", 1<<20) + "\ntail\n"))
+	line, long, ok, err := lr.next(liveFor(1 << 30))
+	if err != nil || !ok || !long || len(line) != keepBytes {
+		t.Fatalf("next = %d bytes, long %v, ok %v, %v; want the cap and no more", len(line), long, ok, err)
+	}
+	line, long, ok, _ = lr.next(liveFor(1 << 30))
+	if !ok || long || string(line) != "tail" {
+		t.Fatalf("the line after it = %q, long %v, ok %v", line, long, ok)
+	}
+}
+
+// endlessReader is a line that never ends.
+type endlessReader struct{}
+
+func (endlessReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
 }
 
 // TestReadMediaAndBinary ports the image, attachment-sniffing, .fbs, and
