@@ -278,7 +278,7 @@ func TestAttachHostBuildsAHubOnlyForAnActiveHost(t *testing.T) {
 			}
 
 			childEnv := hosts.childEnv(env.list())
-			opts := sessionOptions(f, t.TempDir(), "", io.Discard, childEnv, agent.CursorProvider(), sessions.Row{})
+			opts := sessionOptions(f, t.TempDir(), "", io.Discard, io.Discard, childEnv, agent.CursorProvider(), sessions.Row{})
 			if !tc.want {
 				if opts.Env != nil {
 					t.Fatalf("no host active, but the child env is replaced: %q", opts.Env)
@@ -338,7 +338,7 @@ func TestHostWarnIsOneLineOnDiag(t *testing.T) {
 	diag := &deferredStderr{}
 	var cfg tui.Config
 	gate := map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": sock, "HERDR_PANE_ID": "w9:p9"}
-	attachHost(&cfg, resolveHosts(f, fakeHostEnv(gate)), diag)
+	attachHost(&cfg, resolveHosts(f, fakeHostEnv(gate)), diag.craze())
 	if cfg.Host == nil {
 		t.Fatal("setup: herdr gate met but no hub")
 	}
@@ -353,7 +353,8 @@ func TestHostWarnIsOneLineOnDiag(t *testing.T) {
 	cfg.Host.Close(ctx)
 
 	var out bytes.Buffer
-	diag.flush(&out)
+	// false: this is craze's own lane, which prints on a clean exit too.
+	diag.flush(&out, false)
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], "host status: herdr: ") {
 		t.Fatalf("diag = %q, want one host status: herdr: line", out.String())

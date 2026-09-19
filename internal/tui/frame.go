@@ -573,18 +573,11 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 
 	m := New(cfg)
 	m.frozen = opts.Freeze
-	sess := m.sess
 	p := tea.NewProgram(frameModel{inner: m, bus: bus}, tea.WithoutRenderer(), tea.WithInput(nil))
 	done := make(chan error, 1)
 	finished := make(chan struct{})
-	// The last model the program held, for the session it ended with: a
-	// pre-start picker has none at New, and the one the picker built is the
-	// one that owns a child process. Written before done is sent and read
-	// after it is received, so the channel orders the two.
-	var last tea.Model
 	go func() {
-		final, runErr := p.Run()
-		last = final
+		_, runErr := p.Run()
 		done <- runErr
 		close(finished)
 	}()
@@ -602,12 +595,13 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		p.Kill()
 		<-done
 	}
-	if fm, ok := last.(frameModel); ok && fm.inner.sess != nil {
-		sess = fm.inner.sess
-	}
-	// Close blocks until the child is reaped, and is safe even if Start is
+	// The session the program ended with is the owner's, not m's: a pre-start
+	// picker has none at New, the one the picker built is the one that owns a
+	// child process, and on a recovered panic p.Run hands back no model to read
+	// it from. Read after done is received, so the program has stopped setting
+	// it. Close blocks until the child is reaped, and is safe even if Start is
 	// still in flight: it will not adopt a child into a closed session.
-	if sess != nil {
+	if sess := m.owner.current(); sess != nil {
 		_ = sess.Close()
 	}
 

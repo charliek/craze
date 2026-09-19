@@ -126,7 +126,9 @@ func (o *promptOpts) run() (retErr error) {
 	if o.cmd != nil {
 		parent = o.cmd.Context()
 	}
-	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	// SIGHUP too: a closed terminal is an exit like any other, and left to
+	// its default action it would kill craze with the agent still running.
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
 	prov := resolved.Provider

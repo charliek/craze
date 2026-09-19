@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/charliek/craze/internal/version"
 )
@@ -14,6 +15,10 @@ import (
 type Client struct {
 	conn  *Conn
 	child *Child
+
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
 
 	mu        sync.Mutex
 	sessionID string
@@ -91,10 +96,11 @@ type promptResult struct {
 
 func newClient(conn *Conn, child *Child) *Client {
 	c := &Client{
-		conn:     conn,
-		child:    child,
-		dialect:  DialectCursor,
-		incoming: make(map[string]*pendingReq),
+		conn:      conn,
+		child:     child,
+		dialect:   DialectCursor,
+		incoming:  make(map[string]*pendingReq),
+		closeDone: make(chan struct{}),
 	}
 	conn.SetRequestHandler(c.onRequest)
 	conn.SetNotifyHandler(c.onNotify)
@@ -360,7 +366,7 @@ func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
 
 // Prompt sends one text block: the draft, exactly as the user typed it.
 func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error) {
-	return c.PromptBlocks(ctx, []ContentBlock{{Type: "text", Text: text}}, nil)
+	return c.PromptBlocks(ctx, []ContentBlock{{Type: "text", Text: text}}, nil, nil)
 }
 
 // PromptBlocks sends one session/prompt carrying every block, in order, and
@@ -373,7 +379,16 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 // the request is written, so whatever it emits precedes the turn's first agent
 // update. It never runs on a refusal: nothing reached the wire, so nothing
 // happened.
-func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accepted func()) (*PromptResult, error) {
+//
+// sent runs after the session/prompt bytes were written to the agent's stdin
+// and before the call's reply wait begins, so a session/cancel written after it
+// can only land behind the prompt. It never runs on a refusal, and never when
+// the write failed or the connection was already closed. It does no I/O and
+// must not block: it only publishes. On cursor it runs on the caller's own
+// goroutine, inside this call. On grok the writer is the goroutine below, which
+// this call abandons once prompt_complete has settled the turn, so sent may run
+// after PromptBlocks has returned; a caller must tolerate a late call.
+func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accepted, sent func()) (*PromptResult, error) {
 	if len(blocks) == 0 {
 		return nil, errors.New("acp: prompt has no content")
 	}
@@ -431,7 +446,7 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	}
 	if dialect != DialectGrok {
 		var result PromptResult
-		if err := c.conn.Call(ctx, MethodSessionPrompt, params, &result); err != nil {
+		if err := c.conn.callSent(ctx, MethodSessionPrompt, params, &result, sent); err != nil {
 			return nil, err
 		}
 		return &result, nil
@@ -442,7 +457,7 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	rpcCh := make(chan promptResult, 1)
 	go func() {
 		var result PromptResult
-		err := c.conn.Call(rpcCtx, MethodSessionPrompt, params, &result)
+		err := c.conn.callSent(rpcCtx, MethodSessionPrompt, params, &result, sent)
 		rpcCh <- promptResult{res: result, err: err}
 	}()
 	select {
@@ -549,25 +564,81 @@ func (c *Client) AnswerPermission(id string, dec PermissionDecision) {
 	}
 }
 
+// closeCancelWait bounds how long Close waits to write what it still owes the
+// agent — cancelled answers and its own session/cancel — before it shuts the
+// agent down regardless.
+const closeCancelWait = 500 * time.Millisecond
+
+// Close shuts the agent down and reports whether it had already exited on
+// its own: a non-blocking probe of c.child.waitCh, at the very top, before
+// anything else — including the pre-close session/cancel below — so an agent
+// that exits *because of* that cancel is never misread as having exited
+// first. If the channel is already closed the agent's exit had been reaped
+// before this probe sampled it, and Close returns an error wrapping
+// ErrAgentExited; a craze-initiated shutdown returns nil, as before. The rest
+// of Close is unchanged and still runs either way — only the return value
+// depends on the probe.
+//
+// Close is idempotent with a stored result: the first call is authoritative
+// and every later call blocks on closeDone and returns the same value,
+// exactly the shape session.Close already has. Without this, a repeated
+// Close — spawnScript's own t.Cleanup, or requestQuit followed by
+// finishRun — would find waitCh already closed by the first call's own
+// Shutdown and misreport a craze-initiated close as a self-exit.
 func (c *Client) Close() error {
-	c.completeIncomingCancelled()
-	c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
-	c.mu.Lock()
-	inFlight := c.inPrompt
-	sid := c.sessionID
-	c.mu.Unlock()
-	if inFlight && sid != "" {
-		_ = c.conn.Notify(context.Background(), MethodSessionCancel, CancelParams{SessionID: sid})
-	}
-	if c.child != nil {
-		c.child.Shutdown()
-	}
-	_ = c.conn.Close()
-	<-c.conn.Done()
-	if c.child != nil {
-		c.child.Wait()
-	}
-	return nil
+	c.closeOnce.Do(func() {
+		defer close(c.closeDone)
+		var exited error
+		if c.child != nil {
+			select {
+			case <-c.child.waitCh:
+				exited = agentExitedErr(c.child.waitErr)
+			default:
+			}
+		}
+		c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
+		c.mu.Lock()
+		inFlight := c.inPrompt
+		sid := c.sessionID
+		c.mu.Unlock()
+		// What Close still owes the agent — the cancelled answer to every
+		// request it is blocked on, then a cancel for a prompt in flight — is
+		// written best effort, and is never a reason to stay: an agent that
+		// has stopped reading its stdin would hold these writes forever, and
+		// the shutdown below is the only thing that ends such an agent. The
+		// wait is bounded; Conn.Close then closes the writer, which fails any
+		// write still blocked, so the goroutine does not outlive the close.
+		owed := make(chan struct{})
+		go func() {
+			defer close(owed)
+			c.completeIncomingCancelled()
+			if inFlight && sid != "" {
+				_ = c.conn.Notify(context.Background(), MethodSessionCancel, CancelParams{SessionID: sid})
+			}
+		}()
+		select {
+		case <-owed:
+		case <-time.After(closeCancelWait):
+		}
+		if c.child != nil {
+			c.child.Shutdown()
+		}
+		_ = c.conn.Close()
+		<-c.conn.Done()
+		if c.child != nil {
+			c.child.Wait()
+		}
+		c.closeErr = exited
+	})
+	<-c.closeDone
+	return c.closeErr
+}
+
+// PID is the agent child's process id, or 0 for an in-process test client
+// with no child. It exists for anything that needs to reach the process
+// directly rather than through Close.
+func (c *Client) PID() int {
+	return c.child.PID()
 }
 
 // onRequest and onNotify route the cursor extension methods identically; the

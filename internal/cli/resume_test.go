@@ -118,7 +118,7 @@ func runResolveLoad(t *testing.T, cwd string, argv ...string) (tui.Config, []age
 	}
 	var built []agent.Options
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		built = append(built, sessionOptions(f, cwd, "", io.Discard, nil, p, row))
+		built = append(built, sessionOptions(f, cwd, "", io.Discard, io.Discard, nil, p, row))
 		return nil
 	}
 	return cfg, built, resolveLoad(cmd, f, cwd, &cfg, build)

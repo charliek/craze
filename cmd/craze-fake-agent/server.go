@@ -21,6 +21,10 @@ const fakeSessionID = "fake-session-1"
 // tmux smoke's "● agent then ✓ agent" expectation is vacuous.
 const taskRunFor = 250 * time.Millisecond
 
+// lingerMax bounds CRAZE_FAKE_LINGER, so a test that crashes cannot leave a
+// lingering fake behind for long.
+const lingerMax = 30 * time.Second
+
 type server struct {
 	conn   *acp.Conn
 	script string
@@ -116,15 +120,37 @@ func run(script string) error {
 		cfg = grokConfigOptions()
 	}
 	s := &server{conn: conn, script: script, config: cfg}
+	s.writeFakeStderr()
 	conn.SetRequestHandler(s.onRequest)
 	conn.SetNotifyHandler(s.onNotify)
 	conn.Start()
 	<-conn.Done()
+	if os.Getenv("CRAZE_FAKE_LINGER") == "1" {
+		// Stay alive past stdin's EOF until a signal's default action ends
+		// the process. Without this the fake dies of its own closed pipe on
+		// every exit route craze has, including being killed outright, so a
+		// test cannot tell an agent craze shut down from one it orphaned.
+		time.Sleep(lingerMax)
+	}
 	return nil
 }
 
 func grokScript(script string) bool {
 	return strings.HasPrefix(script, "grok-")
+}
+
+// writeFakeStderr is CRAZE_FAKE_STDERR's whole definition: every script
+// except hang and hang-ack writes the line it names to stderr once here (at
+// startup, from run) and once more per session/prompt (from handlePrompt).
+// hang and hang-ack stay silent by house rule — the exclusion is the knob's,
+// not the caller's, so nothing else has to remember it.
+func (s *server) writeFakeStderr() {
+	if s.script == "hang" || s.script == "hang-ack" {
+		return
+	}
+	if line := os.Getenv("CRAZE_FAKE_STDERR"); line != "" {
+		fmt.Fprintln(os.Stderr, line)
+	}
 }
 
 // advertiseCommands is the available_commands_update both session/new branches
@@ -408,6 +434,7 @@ func (s *server) onNotify(msg *acp.Message) {
 }
 
 func (s *server) handlePrompt(msg *acp.Message) {
+	s.writeFakeStderr()
 	text := promptText(msg.Params)
 	s.mu.Lock()
 	s.promptN++

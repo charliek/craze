@@ -496,8 +496,13 @@ def test_grok_interject_fallback_is_waited_out(
     assert users, events
 
 
-def test_signal_clears_the_queue(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
-    """SIGINT stops everything pending, not just the running turn."""
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGHUP], ids=lambda s: s.name)
+def test_signal_clears_the_queue(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, sig: signal.Signals
+) -> None:
+    """A signal stops everything pending, not just the running turn. SIGHUP,
+    a closed terminal, is one more way to end the run: left to its default
+    action it would kill craze with the agent still running."""
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = "hang"
     env.pop("CRAZE_PROVIDER", None)
@@ -521,7 +526,7 @@ def test_signal_clears_the_queue(craze_bin: Path, fake_agent_bin: Path, tmp_path
         env=env,
     )
     time.sleep(1.0)
-    proc.send_signal(signal.SIGINT)
+    proc.send_signal(sig)
     stdout, stderr = proc.communicate(timeout=10)
     assert proc.returncode == 1, stderr
     events = parse_events(stdout)

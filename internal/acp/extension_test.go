@@ -9,11 +9,14 @@ import (
 )
 
 // rawPipe wires a Client to a raw Encoder/Decoder pair so a test can send an
-// exact envelope and read the exact reply bytes back.
+// exact envelope and read the exact reply bytes back. serverR is the agent's
+// end of the client-write direction: closing it fails the client's next write
+// while leaving the other direction, and the connection, open.
 type rawPipe struct {
-	client *Client
-	enc    *Encoder
-	dec    *Decoder
+	client  *Client
+	enc     *Encoder
+	dec     *Decoder
+	serverR *io.PipeReader
 }
 
 func newRawPipe(t *testing.T) *rawPipe {
@@ -23,6 +26,13 @@ func newRawPipe(t *testing.T) *rawPipe {
 
 func newRawPipeDialect(t *testing.T, d DialectID) *rawPipe {
 	t.Helper()
+	return newRawPipeWriter(t, d, nil)
+}
+
+// newRawPipeWriter is newRawPipeDialect with the client's writer wrapped, so a
+// test can watch the client's writes from inside them.
+func newRawPipeWriter(t *testing.T, d DialectID, wrap func(io.Writer) io.Writer) *rawPipe {
+	t.Helper()
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	t.Cleanup(func() {
@@ -31,9 +41,13 @@ func newRawPipeDialect(t *testing.T, d DialectID) *rawPipe {
 		_ = serverR.Close()
 		_ = serverW.Close()
 	})
-	c := DialWithDialect(clientR, clientW, d)
+	var out io.Writer = clientW
+	if wrap != nil {
+		out = wrap(clientW)
+	}
+	c := DialWithDialect(clientR, out, d)
 	t.Cleanup(func() { _ = c.Close() })
-	return &rawPipe{client: c, enc: NewEncoder(serverW), dec: NewDecoder(serverR)}
+	return &rawPipe{client: c, enc: NewEncoder(serverW), dec: NewDecoder(serverR), serverR: serverR}
 }
 
 func (p *rawPipe) setSession(sid string) {

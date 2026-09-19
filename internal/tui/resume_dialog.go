@@ -122,10 +122,10 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 		if m.sess != nil {
 			_ = m.sess.Close()
 		}
-		m.sess = m.loadSession(p, row)
+		m.setSession(m.loadSession(p, row))
 	}
 	if m.sess == nil {
-		m.sess = NewStub()
+		m.setSession(NewStub())
 	}
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {
