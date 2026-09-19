@@ -1,0 +1,139 @@
+craze's opencode tool profile
+=============================
+
+The tool contract in this directory -- tool ids, parameter names, types and
+required lists, the model-facing descriptions in descriptions/, limits, and
+result phrasing -- is ported from opencode:
+
+    https://github.com/anomalyco/opencode
+    commit 5f9d9187c01708b4e700c9c81c1045ab482bf31d (2026-09-18)
+    packages/opencode/src/tool/
+
+opencode is distributed under the MIT License, reproduced here in full:
+
+    MIT License
+
+    Copyright (c) 2025 opencode
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+
+Where each description comes from
+---------------------------------
+
+| craze                   | opencode (packages/opencode/src/tool/)                    |
+|-------------------------|-----------------------------------------------------------|
+| descriptions/read.txt   | read.txt                                                  |
+| descriptions/write.txt  | write.txt                                                 |
+| descriptions/edit.txt   | edit.txt                                                  |
+| descriptions/grep.txt   | grep.txt                                                  |
+| descriptions/glob.txt   | glob.txt                                                  |
+| descriptions/bash.txt   | shell/shell.txt with shell/prompt.ts's bash values        |
+
+opencode renders its shell description at run time from shell/shell.txt and
+shell/prompt.ts. descriptions/bash.txt is that rendering for a bash shell,
+the only kind craze runs: shell.txt with prompt.ts's bash values put in for
+${intro} (prompt.ts:258-259), ${workdirSection} (prompt.ts:260-261) and
+${commandSection} (bashCommandSection, prompt.ts:78-119, whose ${chain} is
+chainGuidance's bash sentence, prompt.ts:75). The values that depend on the
+machine stay placeholders, which the bash tool renders with tool.Render:
+${os}, ${shell}, ${tmp}, ${defaultTimeoutMs}, ${maxLines} and ${maxBytes}.
+Rendering opencode's own ShellPrompt.render for a bash shell, with those six
+left as placeholders, gives descriptions/bash.txt byte for byte except for
+the edits below.
+
+Every other file is the upstream file byte for byte except for the edits
+below.
+
+
+Edits to the descriptions
+-------------------------
+
+The edits allowed are exactly these (plan 019 section 3.2): remove the two
+false claims that edit and write refuse a file the model has not read;
+remove sentences naming tools craze does not have; replace "opencode" with
+"craze"; render ${...} placeholders; add the sentences the behavioural
+differences below require. Nothing else is reworded: the text is the tuned
+asset.
+
+| file      | original                                                                                                                  | now                                                                                                                                                           | why |
+|-----------|---------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| read.txt  | "- This tool can read image files and PDFs and return them as file attachments."                                          | "- This tool cannot read image files or PDFs yet."                                                                                                            | difference: images and PDFs are refused, not attached |
+| write.txt | "This tool will fail if you did not read the file first." (end of the fifth line)                                         | removed; the instruction before it, to read the file first, stays                                                                                            | false: nothing enforces reading first (D-12, D-42) |
+| edit.txt  | "This tool will error if you attempt an edit without reading the file." (end of the fourth line, with its trailing space) | removed; the instruction before it, to read the file first, stays                                                                                            | false: nothing enforces reading first (D-12, D-42) |
+| grep.txt  | "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead" | removed                                                                                                                                                 | names the Task tool, which craze does not have |
+| glob.txt  | "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead" | removed                                                                                                                                                 | names the Task tool, which craze does not have |
+| bash.txt  | "If not specified, commands will time out after ${defaultTimeoutMs}ms." (ends the timeout bullet)                         | the same, followed by " The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms."                                             | difference: a 10-minute cap |
+| bash.txt  | (none: a new bullet after the timeout bullet)                                                                              | "  - When the command returns, every process it started that is still running is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call." | difference: nothing outlives the call |
+| bash.txt  | ${limits.maxLines}, ${limits.maxBytes} (JavaScript interpolations in prompt.ts)                                           | ${maxLines}, ${maxBytes}                                                                                                                                      | rendering: tool.Render's placeholder names are \w+ |
+
+No description names opencode, LSP, WebFetch or TodoWrite, so the other
+allowed edits change nothing. opencode fills ${tmp} with its own directory
+(os.tmpdir()/opencode); craze's bash tool supplies craze's.
+
+
+Parameter schemas
+-----------------
+
+Each tool's parameters are opencode's JSON Schema as its own snapshot test
+pins it (packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap),
+written by hand in each Spec, less "$schema", which the wire does not carry.
+Numbers must be JSON numbers: opencode removed string coercion
+(read.ts:23-27), so "10" for a number is refused.
+
+
+Deliberate differences in behaviour
+-----------------------------------
+
+Recorded in D-38 (discovery/native-harness/08-decisions.md) as well.
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| bash's timeout has no maximum                                   | a 10-minute cap, stated in the description                                                                                                          | a hidden provider must not hold a turn for hours |
+| bash's children may outlive the call                            | everything left in the command's session is killed when the command returns; the description says so                                              | no background jobs (Q5) |
+| bash's exit code is in metadata only (shell.ts:585-594)         | also "exit code: N" in <shell_metadata> when it is not zero                                                                                         | a failed command with no output would otherwise read "(no output)" |
+| read returns images and PDFs as attachments                     | refused: an image with "Cannot read image file yet: <path>"; a PDF with opencode's binary message, "Cannot read binary file: <path>", since opencode has no refusal of its own for one | images arrive with H8; the provider turns media results into a synthetic user message |
+| write and edit write the file in place (edit.ts:155)            | a temp file renamed over it, under a per-path lock, with an external-change check just before the rename (inode, size and modification time, or still absent for a new file): "File changed on disk since it was read. Read it again before editing." | crash safety. The cost: a rewritten file gets a new inode, so hard links to it keep the old content, and its ownership, ACLs and extended attributes are not carried over; nothing is fsynced, so durability is not promised |
+| edit's thresholds count UTF-16 units; replaceAll expands $& and $1 in newString (edit.ts:714) | thresholds count runes; the replacement is literal                                                                  | Go semantics; the second is a bug fix |
+| a formatter, LSP diagnostics, file-watcher events               | not ported                                                                                                                                          | craze has no such subsystems |
+| tree-sitter parsing of bash commands                            | not ported; the gate sees the raw command                                                                                                           | it exists only for permission patterns |
+| apply_patch instead of edit and write for GPT-5 models          | not ported; every model gets edit and write                                                                                                         | a later profile, if wanted |
+| a hidden "invalid" tool for unknown tool names                  | Fantasy's own error result: "tool not found: X. Available tools: ..."                                                                                | the same effect, with no extra tool |
+| the doom-loop guard asks the user                               | a nudge, then the turn stops                                                                                                                        | there is no approval channel |
+| a plugin hook sets bash's environment                           | craze's own provider credentials are removed from it                                                                                                | secrets |
+| an external-directory permission                                | none                                                                                                                                                | no permission prompts (plan 019 decision 2) |
+| system prompts per model family                                 | one system prompt                                                                                                                                   | D-30; a second profile carries the future |
+
+Smaller differences found porting read and write:
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| read cuts a line at 2000 UTF-16 units                           | at 2000 runes (Unicode code points), never inside a character                                                                                       | Go semantics, as for edit's thresholds |
+| read sorts a directory's entries with localeCompare             | in byte order                                                                                                                                       | deterministic without a collation table |
+| read's "Did you mean" takes names in readdir order              | in name order                                                                                                                                       | os.ReadDir sorts; deterministic |
+| TextDecoder shows one U+FFFD per invalid UTF-8 sequence         | one per invalid byte                                                                                                                                | Go's decoder; differs only inside a truncated multi-byte sequence |
+| read opens a FIFO or a device and waits or reads forever        | refused: "Path is not a regular file or a directory: <path>"                                                                                        | such a read ignores cancel and would hang the turn (plan 019 section 3.9) |
+| read appends AGENTS.md instructions (<system-reminder>) and warms the LSP | neither                                                                                                                                   | instruction files arrive with H4-H6; no LSP |
+| read and write may touch any file                               | <Home>/providers.toml is refused, by resolved path or as the same file: "Cannot access craze's credentials file"                                    | craze's own keys (plan 019 section 3.8) |
+| write writes any content                                        | content holding the redaction marker is refused: "This text contains a redaction marker, not the file's real content. Re-read the file around the change and leave the credential untouched." | writing it back would put the marker on disk in place of the real key |
+| a new file is 0666 and new parents 0777, less the umask         | a new file is 0644 and new parents 0755 (less the umask); an existing file keeps its mode, setuid, setgid and sticky bits included              | the rename sets the mode itself; the same result under the usual umask 022 |
+| write through a symlink writes its target                       | the same, and the link is kept; a dangling link creates its target                                                                                  | a rename would otherwise replace the link |
+| write fails on a file it cannot write                           | the same, checked before anything is written                                                                                                        | a rename needs only the directory, and would replace a read-only file |
+| write to a directory or a special file fails from the OS        | "Path is a directory, not a file: <path>" (edit.ts:125's words) or "Path is not a regular file: <path>"                                             | a FIFO must never be opened to wait for a reader |
+| write's result lists LSP errors after "Wrote file successfully." | "Wrote file successfully." alone                                                                                                                   | no LSP |

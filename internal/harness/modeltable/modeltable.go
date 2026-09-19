@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -67,6 +68,17 @@ const (
 	// (ErrKeyOverlapsMarker).
 	MinKeyLen = 8
 )
+
+// toolProfiles are the names a model's tool_profile may give, the default
+// first. The native harness registers the profiles themselves (package
+// internal/harness/tool/opencode); the catalog keeps its own copy of their
+// names, so loading models.toml — which `craze import gx` does too — links no
+// tool code. A test pins the copy to the profiles.
+var toolProfiles = []string{"opencode"}
+
+// ToolProfiles returns the names a model's tool_profile may give, the
+// default first.
+func ToolProfiles() []string { return slices.Clone(toolProfiles) }
 
 // The modes Save writes: the directory and the key file private, the model
 // file shareable.
@@ -117,7 +129,13 @@ type Model struct {
 	Efforts       []string
 	DefaultEffort string // "" or one of Efforts
 	Vision        bool
-	Source        string
+	// ToolProfile names the tool profile — tools and system prompt — a
+	// session started on this model gets (plan 019 §3.1, Seam 2). "" is the
+	// default. Load refuses a name not in ToolProfiles. An import never
+	// writes it, so on a gx-sourced model it lasts only until the next
+	// import; source = "manual" keeps it.
+	ToolProfile string
+	Source      string
 }
 
 // Resolved is everything the llm factory needs to build one model's client.
@@ -134,6 +152,7 @@ type Resolved struct {
 	Efforts         []string
 	DefaultEffort   string
 	Vision          bool
+	ToolProfile     string // "" is the default profile
 }
 
 // The on-disk shapes. They are separate from the public types so the key is a
@@ -170,6 +189,7 @@ type modelEntry struct {
 	Efforts         []string `toml:"efforts,omitempty"`
 	DefaultEffort   string   `toml:"default_effort,omitempty"`
 	Vision          bool     `toml:"vision,omitempty"`
+	ToolProfile     string   `toml:"tool_profile,omitempty"`
 	Source          string   `toml:"source,omitempty"`
 }
 
@@ -587,6 +607,14 @@ func validateModel(file, alias string, m Model, providers map[string]Provider, c
 	if m.DefaultEffort != "" && !seen[m.DefaultEffort] {
 		return at("default_effort", fmt.Sprintf("%q is not one of efforts", m.DefaultEffort))
 	}
+	if m.ToolProfile != "" && !slices.Contains(toolProfiles, m.ToolProfile) {
+		names := make([]string, len(toolProfiles))
+		for i, p := range toolProfiles {
+			names[i] = strconv.Quote(p)
+		}
+		return at("tool_profile", fmt.Sprintf("unknown tool profile %q: want one of %s, or leave it out for the default",
+			m.ToolProfile, strings.Join(names, ", ")))
+	}
 	return nil
 }
 
@@ -637,6 +665,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		Efforts:         slices.Clone(m.Efforts),
 		DefaultEffort:   m.DefaultEffort,
 		Vision:          m.Vision,
+		ToolProfile:     m.ToolProfile,
 	}, nil
 }
 

@@ -46,6 +46,16 @@ func Lock(path string) (unlock func(), err error) {
 // file is removed on any error path; once the rename succeeds, removing it
 // is a no-op.
 func Write(path string, b []byte, perm os.FileMode) error {
+	return WriteChecked(path, b, perm, nil)
+}
+
+// WriteChecked is Write with a last check before the rename: check, when it
+// is not nil, runs once the temp file is written and chmod'd, and an error
+// from it is returned as it is, with path untouched and the temp file
+// removed. It is for a caller that must not replace a file someone else
+// changed while it was preparing the new content: the check sits as close to
+// the rename as a rename-based write allows.
+func WriteChecked(path string, b []byte, perm os.FileMode, check func() error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -65,6 +75,11 @@ func Write(path string, b []byte, perm os.FileMode) error {
 	}
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	return os.Rename(tmpName, path)
 }

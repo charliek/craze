@@ -1,6 +1,7 @@
 package atomicfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,47 @@ func TestWriteCleansUpTempFileOnError(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "sessions.jsonl" {
 		t.Fatalf("directory contents = %v, want only the target directory itself", entries)
 	}
+}
+
+// TestWriteCheckedRefusesBeforeTheRename: a failing check leaves the target
+// as it was and no temp file behind, and the check runs after the new
+// content is complete (it can see the temp file). A passing check is the
+// negative control.
+func TestWriteCheckedRefusesBeforeTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("changed on disk")
+	sawTemp := false
+	err := WriteChecked(path, []byte("new"), 0o644, func() error {
+		matches, _ := filepath.Glob(filepath.Join(dir, ".notes.txt.*"))
+		for _, m := range matches {
+			if b, _ := os.ReadFile(m); string(b) == "new" {
+				sawTemp = true
+			}
+		}
+		return refused
+	})
+	if !errors.Is(err, refused) {
+		t.Fatalf("WriteChecked = %v, want the check's error", err)
+	}
+	if !sawTemp {
+		t.Fatal("the check ran before the temp file held the new content")
+	}
+	if b, _ := os.ReadFile(path); string(b) != "old" {
+		t.Fatalf("content = %q after a refused write, want %q", b, "old")
+	}
+	assertOnlyFile(t, dir, "notes.txt")
+
+	if err := WriteChecked(path, []byte("new"), 0o644, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new" {
+		t.Fatalf("content = %q after a passing check, want %q", b, "new")
+	}
+	assertOnlyFile(t, dir, "notes.txt")
 }
 
 func assertOnlyFile(t *testing.T, dir, want string) {
