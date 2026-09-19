@@ -99,10 +99,15 @@ Fantasy's `Agent.Stream` the way crush does:
 7. **Guard execution**: three consecutive identical tool calls (name +
    input) raise a doom-loop permission ask; a `length` stop with tool calls
    fails the calls rather than executing possibly truncated arguments (D-07).
+   **H2 amends the ask**: no approval channel exists, so the guard nudges on
+   the 3rd and 4th repeat and stops the turn after the 5th instead of asking
+   (D-42).
 8. **Cancel** through context cancellation. In-flight tool calls are closed
    as errored results marked interrupted so every tool call has a result on
    replay. If the turn produced no output, the prompt is put back on the
-   queue (grok's rewind).
+   queue (grok's rewind). **The native adapter does not do this today**
+   (`internal/agent/native.go`'s error path); recorded in Plan 019 §2.7 and
+   left as is.
 9. **Drain follow-ups** after the turn through craze's existing queue. The
    harness does not own the TUI queue.
 

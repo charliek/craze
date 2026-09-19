@@ -20,8 +20,9 @@ these documents, one per roadmap phase.
 | 2026-09-18 | H0 complete, then reviewed: Fantasy `v0.43.2` providers fit all four provider classes, `Agent.Stream` fits behind a small wrapper, the catalog is a craze-owned table, Meta works ([progress and results](11-h0-progress-and-results.md)) |
 | 2026-09-18 | Plan 018 (H1 walking skeleton) planned and started; decisions D-27..D-34 |
 | 2026-09-19 | H1 complete: `craze --provider native` (hidden) held a clean turn with 14 of 15 imported models and multi-turn sessions across providers; live smoke on Linux and the mac-mini |
+| 2026-09-19 | Plan 019 (H2 tools) planned and panel-reviewed; execution started; decisions D-38..D-43 |
 
-**H0 and H1 are complete; H2 (tools) is next.**
+**H0 and H1 are complete; H2 (tools) is in progress.**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
 The harness is built in this repository as a hidden side quest beside the
