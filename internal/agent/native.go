@@ -137,7 +137,15 @@ func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
 // Start loads the model table, opens the harness on the requested model (or
 // the table's default) and publishes the first snapshot. It does no network
 // I/O: the first request goes out with the first prompt.
-func (s *nativeSession) Start(context.Context) error {
+func (s *nativeSession) Start(ctx context.Context) error {
+	err := s.start(ctx)
+	// Noted before anything is torn down, as on the live session (plan 020
+	// §3.5); nothing here closes the session, so the note is the whole of it.
+	s.log.noteStartFailed(err)
+	return err
+}
+
+func (s *nativeSession) start(context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -365,7 +373,17 @@ func (s *nativeSession) Prompt(ctx context.Context, text string) (Result, error)
 	return s.Begin(text)(ctx)
 }
 
-// Begin claims the prompt slot now, on the caller's goroutine, with the live
+// Begin is the claim and its journal record, as on the live session (plan 020
+// §3.5): the prompt note is written here with s.mu released, and the
+// continuation writes the prompt_end its own (Result, error) says. A
+// continuation run a second time is refused without a second ending: the
+// attempt is already closed by the run that happened.
+func (s *nativeSession) Begin(text string) func(context.Context) (Result, error) {
+	run := s.claim(text)
+	return s.log.wrapPrompt(journal.PromptKindPrompt, text, run)
+}
+
+// claim claims the prompt slot now, on the caller's goroutine, with the live
 // session's semantics: a Begin while the slot is claimed or a turn is open
 // claims nothing and its continuation returns ErrPromptInFlight; the claim
 // clears a cancel asked before it, which was not for this prompt; and a
@@ -376,7 +394,7 @@ func (s *nativeSession) Prompt(ctx context.Context, text string) (Result, error)
 // touches nothing — the claim, its release and the turn all belong to the
 // first call, and running them twice would send the prompt again and then
 // close the claim's release a second time.
-func (s *nativeSession) Begin(text string) func(context.Context) (Result, error) {
+func (s *nativeSession) claim(text string) func(context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.claimed || s.inPrompt {
@@ -395,7 +413,7 @@ func (s *nativeSession) Begin(text string) func(context.Context) (Result, error)
 	}
 }
 
-// prompt is Begin's continuation: one harness turn, ended the way the live
+// prompt is the claim's continuation: one harness turn, ended the way the live
 // session ends one (live.go's prompt) — success, or a cancel by Cancel or
 // Close, is exactly one EventDone; failure, the caller's own context ending
 // included (callerEnded), is exactly one EventError and no EventDone,
@@ -698,8 +716,14 @@ func (s *nativeSession) Snapshot() Snapshot {
 }
 
 // Interject is deferred to H2 (plan 018 §3.4): an H1 turn has no tool step to
-// merge text into, and queueing already runs a follow-up next.
-func (s *nativeSession) Interject(context.Context, string) error { return ErrUnsupported }
+// merge text into, and queueing already runs a follow-up next. It is journaled
+// all the same, by the wrapper the live session uses, so the text the user
+// sent and the refusal it met are both on the record.
+func (s *nativeSession) Interject(_ context.Context, text string) error {
+	a := s.log.beginAttempt(journal.PromptKindInterject, text)
+	a.end("", ErrUnsupported)
+	return ErrUnsupported
+}
 
 // The harness has no tools in H1, so nothing ever asks for permission, asks a
 // question or proposes a plan.

@@ -289,10 +289,22 @@ type EventLog struct {
 
 	// noteMu orders Note against Close: Note holds it shared while it checks
 	// the cutoff and queues its note, and Close holds it while it sets the
-	// cutoff and writes closing, so no note can land after closing. It never
-	// spans anything that blocks.
+	// cutoff, ends the attempts still open and writes closing, so no note can
+	// land after closing. It never spans anything that blocks. Nothing takes
+	// it twice: the attempt helpers queue their notes themselves rather than
+	// going back through Note, because a second RLock behind a waiting Lock
+	// would deadlock.
 	noteMu   sync.RWMutex
 	notesCut bool
+
+	// attempts are the prompt attempts whose prompt_end has not been written
+	// (plan 020 §3.5), oldest first, so Close can end the one whose
+	// continuation never ran and the one whose turn it is ending underneath.
+	// Nothing is registered at all without a journal. attemptsMu guards them
+	// and the id counter; it is a leaf under noteMu, held across nothing.
+	attemptsMu sync.Mutex
+	attempts   []openAttempt
+	attemptSeq uint64
 
 	// owners counts subscription owner goroutines, so Close can wait for
 	// every one of them; liveOwners is the same count, readable by tests.
@@ -753,8 +765,131 @@ func (l *EventLog) Note(n journal.Note) {
 	l.journal.Note(n)
 }
 
+// openAttempt is one prompt attempt the journal is still following: the id its
+// prompt note carries, and when that note was written, which is what a
+// synthesized ending's duration is measured from.
+type openAttempt struct {
+	id    string
+	start time.Time
+}
+
+// promptAttempt is what a wrapped prompt or interjection holds between its
+// prompt note and its prompt_end. Its zero value journals nothing, which is
+// what every session without a journal gets.
+type promptAttempt struct {
+	log     *EventLog
+	id      string
+	started time.Time
+}
+
+// wrapPrompt is the journal's half of Begin (plan 020 §3.5): the prompt note
+// now, on the caller's goroutine, and the prompt_end once the continuation
+// returns — with the Result and error it actually returned, so that every way
+// a prompt can end is recorded, refusals and withdrawals included. A log with
+// no journal hands the continuation straight back, so an unjournaled session
+// pays nothing for this.
+//
+// The caller must not hold its session lock: no note is ever written under it.
+func (l *EventLog) wrapPrompt(kind journal.PromptKind, text string, run func(context.Context) (Result, error)) func(context.Context) (Result, error) {
+	a := l.beginAttempt(kind, text)
+	if a.log == nil {
+		return run
+	}
+	return func(ctx context.Context) (Result, error) {
+		res, err := run(ctx)
+		a.end(res.StopReason, err)
+		return res, err
+	}
+}
+
+// beginAttempt writes text's prompt note and registers the attempt as open. It
+// never blocks, and is refused after the cutoff like any other note.
+func (l *EventLog) beginAttempt(kind journal.PromptKind, text string) promptAttempt {
+	if l.journal == nil {
+		return promptAttempt{}
+	}
+	l.noteMu.RLock()
+	defer l.noteMu.RUnlock()
+	if l.notesCut {
+		l.notesDropped.Add(1)
+		return promptAttempt{}
+	}
+	now := time.Now()
+	l.attemptsMu.Lock()
+	l.attemptSeq++
+	id := fmt.Sprintf("%s-%d", kind, l.attemptSeq)
+	l.attempts = append(l.attempts, openAttempt{id: id, start: now})
+	l.attemptsMu.Unlock()
+	l.journal.Note(journal.PromptNote{Attempt: id, Kind: kind, Text: text})
+	return promptAttempt{log: l, id: id, started: now}
+}
+
+// end writes the attempt's prompt_end: the stop reason of a turn that
+// finished, or the class and message of whatever ended it instead
+// (promptErrClass). Only the first caller writes one — a continuation run
+// twice reports the run that happened, and an attempt Close has already ended
+// is never reported twice.
+func (a promptAttempt) end(stopReason string, err error) {
+	if a.log == nil {
+		return
+	}
+	n := journal.PromptEndNote{Attempt: a.id, StopReason: stopReason, Duration: time.Since(a.started)}
+	if err != nil {
+		n.ErrClass, n.ErrMessage = promptErrClass(err), err.Error()
+	}
+	a.log.endAttempt(n)
+}
+
+// endAttempt queues n for an attempt that is still open, and closes it.
+func (l *EventLog) endAttempt(n journal.PromptEndNote) {
+	l.noteMu.RLock()
+	defer l.noteMu.RUnlock()
+	if l.notesCut {
+		// Close ended every attempt still open before it cut notes off, so
+		// this one already has its ending.
+		l.notesDropped.Add(1)
+		return
+	}
+	if !l.takeAttempt(n.Attempt) {
+		return
+	}
+	l.journal.Note(n)
+}
+
+// takeAttempt unregisters id and reports whether it was still open. The list
+// holds the attempts of one session — one prompt and the interjections sent
+// into it — so a scan is cheaper than a map.
+func (l *EventLog) takeAttempt(id string) bool {
+	l.attemptsMu.Lock()
+	defer l.attemptsMu.Unlock()
+	for i := range l.attempts {
+		if l.attempts[i].id == id {
+			l.attempts = slices.Delete(l.attempts, i, i+1)
+			return true
+		}
+	}
+	return false
+}
+
+// endOpenAttemptsLocked writes prompt_end{errClass: closed} for every attempt
+// still open, oldest first. Close calls it inside the boundary, under noteMu
+// and before the closing diag, so a prompt whose continuation never ran — and
+// one whose turn Close is ending underneath, which the live session does not
+// wait for — has an ending in the file all the same. It publishes nothing and
+// never blocks.
+func (l *EventLog) endOpenAttemptsLocked(now time.Time) {
+	l.attemptsMu.Lock()
+	open := l.attempts
+	l.attempts = nil
+	l.attemptsMu.Unlock()
+	for _, a := range open {
+		l.journal.Note(journal.PromptEndNote{Attempt: a.id, ErrClass: promptEndClosed, Duration: now.Sub(a.start)})
+	}
+}
+
 // Close shuts the log (plan 020 §3.5): the admission cutoff, so every later
 // Publish returns false and every later Note is counted and dropped; a
+// prompt_end for every attempt still open; a
 // closing diag counting the publishes abandoned on done or the cutoff — every
 // one that was in flight when the cutoff came included, and every emit its
 // session dropped on its own done fast path before then (Abandoned); every
@@ -773,8 +908,9 @@ func (l *EventLog) Close(ctx context.Context) {
 		l.subs = nil
 		l.noteMu.Lock()
 		l.notesCut = true
-		// C5b: prompt attempts still open get their prompt_end{errClass:
+		// Every prompt attempt still open gets its prompt_end{errClass:
 		// closed} here, before closing and under the same cutoff.
+		l.endOpenAttemptsLocked(time.Now())
 		if l.journal != nil {
 			l.journal.Note(journal.DiagNote{Kind: journal.DiagClosing, Fields: map[string]any{
 				"droppedAtClose": l.droppedAtClose.Load(),

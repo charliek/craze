@@ -161,8 +161,17 @@ def test_prompt_writes_one_journal(
     assert lines[-1]["type"] == "diag" and lines[-1]["kind"] == "closing", lines[-1]
     assert [ln for ln in lines if ln["type"] == "gap"] == [], "the journal fell behind"
 
-    # C5b adds the prompt notes: a `prompt` line with the text as typed and a
-    # `prompt_end` line with the turn's stop reason. Their assertions go here.
+    # The prompt notes: the draft as it was typed, and how the attempt ended.
+    prompts = [ln for ln in lines if ln["type"] == "prompt"]
+    assert len(prompts) == 1, prompts
+    assert prompts[0]["text"] == "hello", prompts[0]
+    assert prompts[0]["kind"] == "prompt", prompts[0]
+    ends = [ln for ln in lines if ln["type"] == "prompt_end"]
+    assert len(ends) == 1, ends
+    assert ends[0]["attempt"] == prompts[0]["attempt"], (prompts[0], ends[0])
+    assert ends[0]["stopReason"] == "end_turn", ends[0]
+    assert "errClass" not in ends[0], ends[0]
+    assert isinstance(ends[0]["durationMs"], int), ends[0]
 
 
 def test_journal_off_leaves_no_directory(

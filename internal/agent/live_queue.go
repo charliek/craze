@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/charliek/craze/internal/journal"
 )
 
 // The queue's transactions are ordered by s.queueOp: a mutation and the
@@ -148,7 +150,19 @@ func (s *session) ClearQueue() int {
 // while the request is in flight strands it regardless. That ending is the
 // foreign turn craze already models and shows — this guard is what keeps the
 // obvious cases from producing one.
+//
+// It is journaled like a prompt (plan 020 §3.5), and by the same helpers, so
+// the refusals above are recorded rather than lost: the attempt id is the
+// journal's own, not the craze-N id below, which only an accepted interjection
+// ever spends.
 func (s *session) Interject(ctx context.Context, text string) error {
+	a := s.log.beginAttempt(journal.PromptKindInterject, text)
+	err := s.interject(ctx, text)
+	a.end("", err)
+	return err
+}
+
+func (s *session) interject(ctx context.Context, text string) error {
 	if !s.provider().Capabilities().Interject {
 		return ErrUnsupported
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +27,11 @@ type session struct {
 	// a few tests read it by name.
 	log    *EventLog
 	events <-chan Event
-	done   chan struct{}
+	// tee is the agent child's stderr on its way to opts.Stderr, copied into
+	// the journal a line at a time (stderr.go). nil without a journal, and
+	// then the child writes straight to opts.Stderr as it always did.
+	tee  *stderrTee
+	done chan struct{}
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -252,6 +257,10 @@ func newSession(opts Options) *session {
 	// spawn resolved is Start's to learn (the session note).
 	s.log = newSessionLog(s.opts, journalHeader{provider: s.provider().Name(), binary: s.opts.Binary})
 	s.events = s.log.Primary()
+	// The tee is the child's lane alone. Options.Stderr stays what it was, so
+	// craze's own notes about the session — which fall back to it when Diag is
+	// unset — are still craze's and are never journaled as the agent's words.
+	s.tee = newStderrTee(s.opts.Stderr, s.log)
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
@@ -284,15 +293,33 @@ func (s *session) Incarnation() string                                 { return 
 
 var _ EventSource = (*session)(nil)
 
+// Start spawns the agent and sets the session up. Its body is start; what is
+// here is the journal's half (plan 020 §3.5): a failure is noted before the
+// session tears down what it built, because Close is the log's admission
+// cutoff and a note written after it would be counted and dropped. teardown
+// says the failure is one of those the body used to answer with an inner
+// Close; the paths that only give the start back (unstart) keep doing that.
 func (s *session) Start(ctx context.Context) error {
+	teardown, err := s.start(ctx)
+	if err == nil {
+		return nil
+	}
+	s.log.noteStartFailed(err)
+	if teardown {
+		_ = s.Close()
+	}
+	return err
+}
+
+func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
-		return fmt.Errorf("agent: session already started")
+		return false, fmt.Errorf("agent: session already started")
 	}
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("agent: session closed")
+		return false, fmt.Errorf("agent: session closed")
 	}
 	s.started = true
 	s.mu.Unlock()
@@ -305,13 +332,13 @@ func (s *session) Start(ctx context.Context) error {
 		cwd, err = os.Getwd()
 		if err != nil {
 			s.unstart()
-			return err
+			return false, err
 		}
 	}
 	cwd, err := filepath.Abs(cwd)
 	if err != nil {
 		s.unstart()
-		return err
+		return false, err
 	}
 
 	client, err := acp.Spawn(acp.SpawnOptions{
@@ -320,12 +347,12 @@ func (s *session) Start(ctx context.Context) error {
 		Args:       args,
 		Dir:        cwd,
 		Env:        s.opts.Env,
-		Stderr:     s.opts.Stderr,
+		Stderr:     s.stderrSink(),
 		Dialect:    s.provider().Dialect(),
 	})
 	if err != nil {
 		s.unstart()
-		return err
+		return false, err
 	}
 	// The binary the spawn just found, for the session note; asked right
 	// after it, so the lookup sees what the spawn's did.
@@ -336,7 +363,7 @@ func (s *session) Start(ctx context.Context) error {
 	if s.closed {
 		s.mu.Unlock()
 		_ = client.Close()
-		return fmt.Errorf("agent: session closed")
+		return false, fmt.Errorf("agent: session closed")
 	}
 	s.client = client
 	s.mu.Unlock()
@@ -356,19 +383,16 @@ func (s *session) Start(ctx context.Context) error {
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
-		_ = s.Close()
-		return err
+		return true, err
 	}
 	if methodID, meta, ok := s.authMethod(initRes); ok {
 		if err := client.Authenticate(ctx, methodID, meta); err != nil {
-			_ = s.Close()
-			return fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
+			return true, fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
 		}
 	} else if len(initRes.AuthMethods) > 0 && len(s.provider().AuthMethodIDs()) > 0 {
 		// The daemon offered only methods craze will not start (interactive
 		// browser login); say how to fix it instead of hanging later.
-		_ = s.Close()
-		return fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
+		return true, fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
 	}
 	// The disk scan runs before session/new so the first snapshot the session
 	// ever publishes already carries its plugins; a catalog update that beats
@@ -384,14 +408,12 @@ func (s *session) Start(ctx context.Context) error {
 	var snap Snapshot
 	if loading {
 		if err := s.loadSession(ctx, client, initRes, cwd, binary); err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 	} else {
 		sess, err := client.NewSession(ctx, cwd)
 		if err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 		snap = snapshotFromNewProvider(sess, s.provider(), initRes)
 		snap.Provider = s.provider().Info()
@@ -413,12 +435,10 @@ func (s *session) Start(ctx context.Context) error {
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(modes))
 		if !ok {
-			_ = s.Close()
-			return fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
+			return true, fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
 		}
 		if err := client.SetMode(ctx, modeID); err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 		if loading {
 			s.mu.Lock()
@@ -430,8 +450,7 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	if s.opts.Model != "" {
 		if err := client.SetModel(ctx, s.opts.Model); err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 		if loading {
 			s.mu.Lock()
@@ -442,7 +461,7 @@ func (s *session) Start(ctx context.Context) error {
 		}
 	}
 	if loading {
-		return nil
+		return false, nil
 	}
 	s.mu.Lock()
 	commands := s.snap.Commands
@@ -455,7 +474,16 @@ func (s *session) Start(ctx context.Context) error {
 	// is honoured and one that arrives next redoes the work.
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
-	return nil
+	return false, nil
+}
+
+// stderrSink is where the agent child's stderr goes: the journal's tee when
+// this session has one, and Options.Stderr itself otherwise.
+func (s *session) stderrSink() io.Writer {
+	if s.tee == nil {
+		return s.opts.Stderr
+	}
+	return s.tee
 }
 
 // loadSession is Start's session/load path: the replay, bracketed.
@@ -747,7 +775,19 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	return s.Begin(text)(ctx)
 }
 
-// Begin claims the prompt slot for text now, on the caller's goroutine, and
+// Begin is the claim and the journal's record of it: the prompt note is
+// written here, after the claim and with s.mu released, and the continuation
+// that comes back writes the prompt_end its own (Result, error) says (plan 020
+// §3.5). Wrapping the continuation rather than the prompt's body is what makes
+// every ending a record: a claim that was refused, a prompt withdrawn before
+// the wire and one cancelled in the catalog wait all return from here, and
+// none of them reaches the body at all.
+func (s *session) Begin(text string) func(context.Context) (Result, error) {
+	run := s.claim(text)
+	return s.log.wrapPrompt(journal.PromptKindPrompt, text, run)
+}
+
+// claim claims the prompt slot for text now, on the caller's goroutine, and
 // returns the rest of the prompt to run. The TUI claims inside Update, in the
 // same step that shows the turn working, and runs the continuation on a Cmd
 // goroutine. Without the claim, an Esc that Update handled before that
@@ -772,7 +812,7 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 // claim has been released — so the refusal is the gate's, not a new one.
 //
 // The continuation must be run, once: the slot stays claimed until it returns.
-func (s *session) Begin(text string) func(context.Context) (Result, error) {
+func (s *session) claim(text string) func(context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.claimed || s.inPrompt {
@@ -785,7 +825,7 @@ func (s *session) Begin(text string) func(context.Context) (Result, error) {
 	return func(ctx context.Context) (Result, error) { return s.prompt(ctx, text, wire) }
 }
 
-// prompt is Begin's continuation: the claimed prompt from its catalog wait to
+// prompt is the claim's continuation: the claimed prompt from its catalog wait to
 // the end of its turn.
 func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Result, error) {
 	// One release for the whole claim, whichever way it ends. done is set once
@@ -1279,7 +1319,10 @@ func (s *session) Close() error {
 		if client != nil {
 			s.closeErr = client.Close()
 		}
-		// C5b: the stderr tee's final flush goes here, between the reap and the log.
+		// The child's stderr copy has finished by now (Client.Close waits for
+		// it), so this is where its last unterminated line can be noted — and
+		// it has to be before the log, which is the note cutoff.
+		s.tee.Flush()
 		s.log.Close(context.Background())
 	})
 	<-s.closeDone

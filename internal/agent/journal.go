@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/version"
 )
@@ -104,6 +107,87 @@ func (l *EventLog) noteSession(n journal.SessionNote) {
 		return
 	}
 	l.Note(n)
+}
+
+// The prompt_end error classes (plan 020 §3.3–3.4). This is the second of the
+// two class tables, and deliberately not the codec's EventErrClass: that one
+// names what reaches Event.Err on the wire (RPC codes, HTTP statuses, an
+// agent's exit), while these name how a prompt attempt ended for its caller —
+// the sentinels of session.go and queue.go, which are return values and emit
+// nothing. A turn the agent failed is other here, with its message kept; its
+// classified form is on the EventError the turn emitted.
+//
+// What each path can return, and the class it lands in:
+//
+//	Begin refused, native's duplicate continuation      prompt_in_flight
+//	the wire refused it: another prompt in flight       prompt_in_flight
+//	the wire refused it: the agent's own turn is on     foreign_turn
+//	cancelled in the catalog wait, or withdrawn         prompt_cancelled
+//	Interject with no turn to merge into                not_in_turn
+//	Interject on a provider without it, native's        unsupported
+//	the connection or the harness closed under the turn closed
+//	Close ending an attempt that was still open         closed
+//	the caller's own context ended the turn             caller_ended
+//	a queue refusal (no prompt path reaches one today)  queue_full,
+//	                                                    queue_text_too_long
+//	anything else, message kept: a turn the agent
+//	failed, a session not started, a spawn that failed  other
+const (
+	promptEndPromptInFlight   = "prompt_in_flight"
+	promptEndPromptCancelled  = "prompt_cancelled"
+	promptEndForeignTurn      = "foreign_turn"
+	promptEndUnsupported      = "unsupported"
+	promptEndNotInTurn        = "not_in_turn"
+	promptEndClosed           = "closed"
+	promptEndCallerEnded      = "caller_ended"
+	promptEndQueueFull        = "queue_full"
+	promptEndQueueTextTooLong = "queue_text_too_long"
+	promptEndOther            = "other"
+)
+
+// promptErrClass is err's class for a prompt_end or a start_failed note, "" for
+// no error. The order is the table above: every case is a distinct sentinel, so
+// only the wrapping decides which matches — a native turn error carries the
+// harness's typed cause, and phraseTurnError's wrapper keeps errors.Is working
+// through it.
+func promptErrClass(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrPromptInFlight):
+		return promptEndPromptInFlight
+	case errors.Is(err, ErrPromptCancelled):
+		return promptEndPromptCancelled
+	case errors.Is(err, ErrForeignTurn):
+		return promptEndForeignTurn
+	case errors.Is(err, ErrUnsupported):
+		return promptEndUnsupported
+	case errors.Is(err, ErrNotInTurn):
+		return promptEndNotInTurn
+	case errors.Is(err, acp.ErrClosed), errors.Is(err, harness.ErrClosed):
+		return promptEndClosed
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return promptEndCallerEnded
+	case errors.Is(err, ErrQueueFull):
+		return promptEndQueueFull
+	case errors.Is(err, ErrQueueTextTooLong):
+		return promptEndQueueTextTooLong
+	}
+	return promptEndOther
+}
+
+// noteStartFailed records a Start that failed, with the class and message of
+// what failed it. Both sessions write it before they tear down what Start
+// built (plan 020 §3.5): Close is the log's admission cutoff, and a note
+// written after it would be counted and dropped.
+func (l *EventLog) noteStartFailed(err error) {
+	if l.journal == nil || err == nil {
+		return
+	}
+	l.Note(journal.DiagNote{Kind: journal.DiagStartFailed, Fields: map[string]any{
+		"errClass":   promptErrClass(err),
+		"errMessage": err.Error(),
+	}})
 }
 
 // resolvedBinary is the agent binary acp.Spawn resolved for a session with a
