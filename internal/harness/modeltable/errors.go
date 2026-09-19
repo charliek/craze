@@ -22,6 +22,18 @@ var (
 	// api_key. The wrapped message names the provider and the variable names
 	// it tried, never a value.
 	ErrNoAPIKey = errors.New("modeltable: no API key")
+
+	// ErrKeyTooShort is Keys' error for a key under MinKeyLen bytes. The
+	// wrapped message names the provider and the variable, never the value.
+	// Load reports a short inline key as a *FileError at its api_key.
+	ErrKeyTooShort = errors.New("modeltable: API key too short to be real")
+
+	// ErrKeyOverlapsMarker is Keys' error for a key the redaction marker
+	// could print back (redact.MarkerOverlaps) — "credential", say, which
+	// the marker contains. Like ErrKeyTooShort, its wrapped message names the
+	// provider and the variable, and Load reports an inline one as a
+	// *FileError at its api_key.
+	ErrKeyOverlapsMarker = errors.New("modeltable: API key overlaps craze's redaction marker")
 )
 
 // FileError locates a problem in one of the two files: the file, and then

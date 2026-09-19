@@ -13,7 +13,7 @@ four-tools-then-`ls` plan and its multi-edit shape.
 | `read` | read | yes | `filePath`, `offset?` (1-indexed), `limit?` (default 2000); lines as `<n>: <content>`; 2000 lines, 2000 chars per line, 50 KiB cap; `<path>`/`<type>`/`<content>` envelope; directories listed with a trailing `/`, sorted (there is no separate `ls` tool); binary refused by extension list, NUL byte, or >30% non-printable in a 4096-byte sample; "Did you mean" suggestions on a missing file; images and PDFs refused (H8) |
 | `write` | edit | no | `filePath`, `content`; overwrite, parent directories created (`MkdirAll` 0755 before the atomic write); BOM preserved; result `Wrote file successfully.`; temp-file-and-rename under a path lock (see Shared rules) |
 | `edit` | edit | no | `filePath`, `oldString`, `newString`, `replaceAll?`; nine replacers tried in order (simple, line-trimmed, block-anchor, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, context-aware, multi-occurrence); an ambiguous hit falls through to the next replacer; a match much larger than `oldString` is refused; CRLF and BOM preserved; empty `oldString` only creates a new file; result `Edit applied successfully.`; the diff goes to `Result.Edits` only — **the adapter**, not the tool, computes the card's diff with `internal/textdiff` (the tool package may not import it, §"Seams" below) |
-| `bash` | execute | no | `command`, `timeout?` (ms), `workdir?`; `/bin/bash -c`, else `sh -c`; `Setsid` (new session, no controlling terminal); stdin `/dev/null`; stdout/stderr merged; default timeout 120 s, cap 600 s (a larger request is clamped and the result says so); everything left in the command's session is killed when it returns; a non-zero exit is **not** an error result — the model reads the code; live output streams through a harness-owned progress channel, throttled to 100 ms, lossy; tail kept at 2000 lines / 50 KiB, full output spilled; `exit code: N` added to `<shell_metadata>` on a non-zero exit |
+| `bash` | execute | no | `command`, `timeout?` (ms), `workdir?`; `/bin/bash -c`, else `sh -c`; `Setsid` (new session, no controlling terminal); stdin `/dev/null`; stdout/stderr merged; default timeout 120 s, cap 600 s (a larger request is clamped and the result says so); everything left in the command's session is killed when it returns; a non-zero exit is **not** an error result — the model reads the code; live output streams through a harness-owned progress channel, throttled to 100 ms, lossy; tail kept at 2000 lines / 50 KiB by the tool itself, full output spilled once it passes 50 KiB; `exit code: N` added to `<shell_metadata>` on a non-zero exit |
 | `grep` | search | yes | `pattern`, `path?`, `include?`; ripgrep (`PATH`), `--hidden`, `.gitignore` respected, 100 matches, grouped by file as `  Line n: text` |
 | `glob` | search | yes | `pattern`, `path?`; ripgrep `--files --glob`, no `--hidden`, 100 results, ripgrep's own order |
 | `todo_write` | other | — | H5; replaces the list; feeds `EventTodos` |
@@ -29,12 +29,19 @@ and **no multi-edit** (owner decision 1, D-38 supersedes D-06).
 - **No read-before-edit enforcement.** Prompt-only (D-12, amended by D-42
   only for the doom loop, not this rule). opencode's `edit.txt`/`write.txt`
   claim it is enforced; that claim is not ported (§3.2 of Plan 019).
-- **Truncation is centralized**, not per tool: head truncation for `read`,
-  `grep`, `glob`; tail truncation for `bash`. Full output always lands in
-  `<Home>/tool-output/tool_<id>` — `<Home>` being the harness directory
-  `~/.craze/native/` — created 0700, files 0600, `O_EXCL|O_NOFOLLOW`, never
-  overwritten (the model can still reach the directory through `bash`).
-  Swept at `Open` for files older than 7 days; no background timer.
+- **Truncation is shared**, not written per tool: the dispatcher keeps the
+  head of a long result (`read`, `grep`, `glob`) at 2000 lines / 50 KiB,
+  and only when a limit is hit does it write the full text to
+  `<Home>/tool-output/tool_<id>` and say where. `bash` is the exception: it
+  truncates its own stream (it asks the dispatcher for no truncation), keeps
+  the tail, and spills beyond 50 KiB itself, through the same spill-file
+  rules. `<Home>` is the harness directory `~/.craze/native/`; the spill
+  directory is created 0700 and used only through a handle opened on it
+  after checking it is a real directory, so swapping in a symlink cannot
+  redirect a write; files are 0600, `O_EXCL|O_NOFOLLOW`, never overwritten
+  (a taken name gets a random suffix; the model can still reach the
+  directory through `bash`). Swept at `Open` for files older than 7 days;
+  no background timer.
 - **Parallelism is Fantasy's own**: a semaphore of 5 for parallel tools
   (`read`, `grep`, `glob`); non-parallel tools (`bash`, `edit`, `write`)
   serialize against each other but do not hold up parallel calls already
@@ -148,7 +155,13 @@ event, the transcript, or a spill file **verbatim and by accident**:
   `AWS_*`, `SSH_AUTH_SOCK`) stay, because `gh`, `git push`, and cloud CLIs
   are the point of a shell tool; an allowlist was considered and rejected
   for that reason.
-- A provider key under 8 bytes is refused at config load, not just at use.
+- A provider key the redactor cannot handle is refused for every provider,
+  used or not: one under 8 bytes, which would shred ordinary text, and one
+  that overlaps the redaction marker (`credential`, say, which the marker
+  contains), which the marker would print back. An inline `api_key` is
+  refused when `providers.toml` loads; a key from the environment when a
+  session opens, where `Table.Keys` gathers every provider's keys for the
+  redactor; and the llm factory still refuses a short key at use.
 
 ## Modes
 

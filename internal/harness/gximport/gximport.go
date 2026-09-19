@@ -110,6 +110,13 @@ type Note struct {
 // value is a key that belongs in the environment, not in providers.toml.
 const noteVarAPIKey = "inline api_key references an env var ($VAR); not imported — set it via env_keys"
 
+// noteShortAPIKey is the note for a provider whose inline api_key is under
+// modeltable.MinKeyLen bytes: the model table refuses such a key at load, so
+// importing it would make the whole table unloadable, and it cannot be a
+// real key anyway.
+var noteShortAPIKey = fmt.Sprintf("inline api_key is under %d bytes, too short to be a real key; not imported — set it via env_keys",
+	modeltable.MinKeyLen)
+
 // DefaultRule is which of §3.3's default_model rules chose the default.
 type DefaultRule string
 
@@ -315,6 +322,9 @@ func importProvider(entry map[string]any) (p modeltable.Provider, contextWindow 
 	}
 	if strings.Contains(apiKey, "$") {
 		apiKey, note = "", noteVarAPIKey
+	}
+	if apiKey != "" && len(apiKey) < modeltable.MinKeyLen {
+		apiKey, note = "", noteShortAPIKey
 	}
 	if contextWindow < 0 {
 		return skip("context_window is negative")

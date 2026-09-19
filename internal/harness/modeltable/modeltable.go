@@ -32,6 +32,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/charliek/craze/internal/atomicfile"
+	"github.com/charliek/craze/internal/harness/redact"
 )
 
 const (
@@ -55,6 +56,16 @@ const (
 	// manual, never touched by an import — the safe reading of a typo.
 	SourceGX     = "gx"
 	SourceManual = "manual"
+
+	// MinKeyLen is the shortest API key craze accepts, in bytes, after
+	// surrounding whitespace is trimmed. No real provider issues a shorter
+	// one, so it is a placeholder or a typo; and every key is redacted from
+	// tool output wherever it appears, so a key like "a" or "error" would
+	// shred ordinary text (plan 019 §3.8). Load refuses an inline one, Keys
+	// one from the environment, and the llm factory any it is handed. The
+	// same two places refuse a key the redaction marker could print back
+	// (ErrKeyOverlapsMarker).
+	MinKeyLen = 8
 )
 
 // The modes Save writes: the directory and the key file private, the model
@@ -506,7 +517,39 @@ func validateProvider(file, id string, p Provider) error {
 			return at("env_keys", fmt.Sprintf("entry %d is empty", i+1))
 		}
 	}
+	// Every provider's key is checked, not only the ones a session uses:
+	// the redactor covers every loaded key, and one it cannot redact could
+	// reach a model through a file or a command's output. The reason names
+	// the rule, never the value.
+	if err := keyProblem(strings.TrimSpace(p.APIKey.Reveal())); err != nil {
+		return at("api_key", keyReason(err))
+	}
 	return nil
+}
+
+// keyProblem says why k, already trimmed, cannot be a key craze redacts —
+// ErrKeyTooShort or ErrKeyOverlapsMarker, never quoting k — or returns nil,
+// as it does for "" (no key).
+func keyProblem(k string) error {
+	switch {
+	case k == "":
+		return nil
+	case len(k) < MinKeyLen:
+		return ErrKeyTooShort
+	case redact.MarkerOverlaps(k):
+		return ErrKeyOverlapsMarker
+	}
+	return nil
+}
+
+// keyReason is keyProblem's error as a FileError reason. It neither quotes
+// the marker nor uses its words ("redacted", "credential"): a key that
+// overlaps the marker may be one of them.
+func keyReason(err error) string {
+	if errors.Is(err, ErrKeyTooShort) {
+		return fmt.Sprintf("shorter than %d bytes: too short to be a real key, or to redact from tool output", MinKeyLen)
+	}
+	return "overlaps craze's redaction marker, which would print the key back in its own place"
 }
 
 func validateModel(file, alias string, m Model, providers map[string]Provider, checkProvider bool) error {
@@ -607,6 +650,47 @@ func resolveKey(id string, p Provider, getenv func(string) string) (Secret, erro
 		return Secret(v), nil
 	}
 	return "", noAPIKey(id, p.EnvKeys)
+}
+
+// Keys returns every key the table knows of, for the redactor that keeps
+// them out of tool output (plan 019 §3.8): for every provider, used or not,
+// the value of each of its env_keys variables that getenv reports set — all
+// of them, not only the first, which is the one Resolve picks — and its
+// inline api_key, each with surrounding whitespace trimmed. A nil getenv is
+// os.Getenv.
+//
+// A value the redactor cannot handle fails, naming the provider and the
+// variable, never the value: under MinKeyLen bytes is ErrKeyTooShort, and
+// one that overlaps the redaction marker is ErrKeyOverlapsMarker. Load
+// already refuses such an inline key, but it reads no environment — a table
+// loads the same whatever is exported, and `craze import gx` never depends
+// on it — so one in an env var is caught here, when a session opens, for
+// every provider.
+func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	var keys []Secret
+	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
+		p := t.Providers[id]
+		for _, name := range p.EnvKeys {
+			v := strings.TrimSpace(getenv(name))
+			if err := keyProblem(v); err != nil {
+				return nil, fmt.Errorf("%w: provider %q: the value of %s", err, id, name)
+			}
+			if v != "" {
+				keys = append(keys, Secret(v))
+			}
+		}
+		v := strings.TrimSpace(p.APIKey.Reveal())
+		if err := keyProblem(v); err != nil { // a table built in memory, not loaded
+			return nil, fmt.Errorf("%w: provider %q: its api_key in %s", err, id, ProvidersFile)
+		}
+		if v != "" {
+			keys = append(keys, Secret(v))
+		}
+	}
+	return keys, nil
 }
 
 // Aliases returns every model alias, sorted.

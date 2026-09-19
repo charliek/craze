@@ -329,6 +329,52 @@ model_provider = "p"
 	}
 }
 
+// TestImportDropsAShortAPIKeyWithANote: the model table refuses an inline
+// key under 8 bytes at load, so an import that carried one over would write
+// a table nothing can load. It drops only the key, like a $VAR one, and the
+// saved table loads; an 8-byte key is the negative control, imported as is.
+func TestImportDropsAShortAPIKeyWithANote(t *testing.T) {
+	const short, eight = "zq-1234", "zq-12345"
+	for _, tc := range []struct {
+		key     string
+		wantKey string
+		notes   []Note
+	}{
+		{short, "", []Note{{ID: "p", Text: noteShortAPIKey}}},
+		{eight, eight, nil},
+	} {
+		dir := gxHome(t, okProvider+`
+[model_providers.p]
+base_url = "https://p.example/v1"
+env_key = "P_KEY"
+api_key = "`+tc.key+`"
+
+[model."p/m"]
+model_provider = "p"
+`, "")
+		got, report, err := Import(dir, nil)
+		if err != nil {
+			t.Fatalf("key %q: %v", tc.key, err)
+		}
+		if k := got.Providers["p"].APIKey.Reveal(); k != tc.wantKey {
+			t.Fatalf("key %q: imported api_key %q, want %q", tc.key, k, tc.wantKey)
+		}
+		if !reflect.DeepEqual(report.Providers.Notes, tc.notes) {
+			t.Fatalf("key %q: notes = %+v, want %+v", tc.key, report.Providers.Notes, tc.notes)
+		}
+		if strings.Contains(fmt.Sprintf("%+v", report), short) {
+			t.Fatal("the report echoes the api_key value")
+		}
+		out := t.TempDir()
+		if err := modeltable.Save(out, got); err != nil {
+			t.Fatalf("key %q: saving the import: %v", tc.key, err)
+		}
+		if _, err := modeltable.Load(out); err != nil {
+			t.Fatalf("key %q: the saved import does not load: %v", tc.key, err)
+		}
+	}
+}
+
 // TestImportCompletesAHalfWrittenPair is the recovery Save's write order and
 // LoadForImport exist for: a first import interrupted between its two writes
 // leaves providers.toml alone; Load refuses that, and re-running the import

@@ -36,8 +36,9 @@ import (
 // client's transport.
 const openRouterBaseURL = "https://openrouter.ai/api/v1"
 
-// minKeyLen is the shortest API key New accepts, in bytes.
-const minKeyLen = 8
+// minKeyLen is the shortest API key New accepts, in bytes: the model
+// table's floor, which Load and Keys enforce too.
+const minKeyLen = modeltable.MinKeyLen
 
 // ErrAPIKeyTooShort is New's error for a key under minKeyLen bytes. No real
 // provider issues one that short, so it is a placeholder or a typo — and the

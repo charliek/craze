@@ -17,7 +17,8 @@ const redacted = "[redacted]"
 // cannot put a key in a log line, an error or an event. Reveal is the one way
 // to read the value. Outside this package (where Save writes providers.toml
 // and Resolve trims the inline key) only the llm factory calls it, to hand
-// the key to the provider's HTTP client.
+// the key to the provider's HTTP client, and the harness, to hand Keys to
+// the redactor that removes them from tool output.
 //
 // The redaction only holds through exported fields: fmt and encoding/json
 // read an unexported field by reflection without calling its methods. Every
