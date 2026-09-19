@@ -17,10 +17,12 @@ decisions `SD-nn`, open questions `SQ-n`.
 |---|---|
 | 2026-09-19 | Discovery session: craze, prox, shed + shed-mobile + gx, and t3code reviewed; owner settled topology, protocol, remote scope, and journaling (SD-02, SD-03, SD-07, SD-12). Folder written. |
 | 2026-09-19 | craze-harness session briefed on the overlap (`11`). |
+| 2026-09-19 | Panel review (Codex `gpt-6-astra`, CodeRabbit, GLM 5.3): SD-18 to SD-31, SQ12–SQ16, S1 re-sized; record in `12`. |
 
-**Current phase: S0 complete. S1 (engine core) is next and needs its own
-panel-reviewed plan.** S1–S5 are committed; S6–S7 are directional and get
-decided after S1–S5 are in daily use (SD-12).
+**Current phase: S0 complete. S1a (the first slice of the engine core) is
+next, under its own panel-reviewed plan; progress is recorded in `12`.**
+S1–S5 are committed; S6–S7 are directional and get decided after S1–S5 are in
+daily use (SD-12).
 
 ## Reading order
 
@@ -35,14 +37,16 @@ decided after S1–S5 are in daily use (SD-12).
 9. [09 — References](09-references.md): what to read in prox, shed, gx, roost, t3code, and craze itself.
 10. [10 — Open questions](10-open-questions.md): `SQ-n`, each with a default.
 11. [11 — Harness coordination](11-harness-coordination.md): overlap with `discovery/native-harness/` and the ordering that matters.
+12. [12 — Progress and results](12-progress.md): what each phase actually did, with a template for recording one.
 
 ## How to use this folder in a future session
 
 - Planning a phase: read `README`, `01`, `02`, `07`, `08`, then the topic
   file for the phase (`03`+`04` for S1, `05` for S2, `06` for S3).
 - Any plan touching `internal/agent` or the native adapter: read `11` first.
-- Update `07`'s phase table and this README's status table when a phase
-  merges; add an **Exit result** under the phase in `07`.
+- When a phase's plan is final, add its section to `12` as planned. When it
+  merges, in the same PR: fill in `12`, update `07`'s phase table and this
+  README's status table, and add an **Exit result** under the phase in `07`.
 - Decisions are never edited. A reversal is a new `SD-nn` row naming the old
   one. Resolved questions stay in `10`, rewritten in place as
   `**Resolved (SD-nn).**`.

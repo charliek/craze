@@ -25,21 +25,44 @@ SD-01 to SD-17, open questions SQ1–SQ12, harness overlap in `11`.
 
 ### S1 — engine core
 
-Detail in `03` and `04`. Three PRs: S1a broker + sequence numbers + journal
-writer; S1b ask registry, turn state, acknowledged cancel, command ids, index
-writes; S1c render-free transcript and in-process snapshot/`afterSeq` attach.
+Detail in `03` and `04`. Three slices, each its own plan and PR:
 
-- Size: L, about 3–4k lines plus test churn. S1c is the risk: frame goldens
-  and `transcript_test.go` must not move.
-- Ordering against the harness: does not block H2; should precede any harness
-  phase that introduces an ask channel, sub-agent event plumbing, or resume
-  (`11`).
-- **Exit**: the TUI is byte-identical on the existing goldens while consuming
-  a subscription; a second in-process subscriber attached mid-turn with
-  `afterSeq` reproduces the first's transcript exactly; every session,
-  ACP and native, leaves a journal that replays to the same transcript;
-  `craze prompt --json` lines carry `seq`; an ask answered twice yields one
-  resolution and one `already_resolved`.
+- **S1a** — the ordering boundary and `Subscribe` (primary and budgeted
+  subscribers) as one component shared by the ACP session, the native
+  adapter, and `tui.Stub`; sequence numbers; incarnation identity; the
+  lossless event codec; the ring; the journal writer; `seq` on
+  `craze prompt --json`. No behavior change.
+- **S1b** — the engine turn driver (admission, queue drain, send-now, foreign
+  turn wait, synthetic endings and rows); the shared/client-local split of
+  TUI-authored rows and state deltas in place of bare `EventMeta`; ask
+  registry with sequenced terminal outcomes; cancel outcomes on an engine turn
+  id; command ids; settings order; approval policy separated from frontend
+  presence; durable craze session id and index writes in the engine.
+- **S1c** — the render-free transcript model folded inside the boundary;
+  bounded snapshots; in-process attach with snapshot + cursor; the
+  convergence check per event kind.
+
+- Size: L, about 4–5k lines plus test churn (raised after the panel: S1b is a
+  driver, not a field move). S1b and S1c are the risk.
+- Ordering against the harness: does not block H2; S1b should precede the
+  first harness phase that adds an ask channel, and H6 and H7 (`11`).
+- **Exit (S1a)**: goldens and `craze prompt --json` output unchanged apart
+  from `seq`; a budgeted subscriber attached mid-turn with a cursor receives
+  exactly the events the primary did after it, in order, across the
+  ring/journal seam; a stalled budgeted subscriber is dropped without delaying
+  the primary; every session, ACP and native, leaves a journal whose `event`
+  lines decode losslessly to the emitted events; a failing or stalled disk
+  degrades to a recorded gap, never a stalled turn; race detector clean.
+- **Exit (S1b)**: two in-process clients on one session cannot double-drain
+  the queue; a session with no client drains its own queue and parks asks; an
+  ask answered twice yields one resolution and one `already_resolved`, and an
+  invalid answer leaves it open; every ask ending is a sequenced event; a
+  cancel names its turn and cannot hit the next one; two concurrent settings
+  changes converge on every client; golden files byte-identical.
+- **Exit (S1c)**: golden files byte-identical and `transcript_test.go`
+  assertions move packages unchanged; a second in-process subscriber attached
+  mid-turn from a snapshot reproduces the first's transcript exactly; snapshot
+  and replay memory stay inside stated byte bounds on a worst-case session.
 
 ### S2 — control socket
 
@@ -47,7 +70,17 @@ Detail in `05`. The protocol package, schema, socket server in the host,
 `craze bridge`, a minimal `craze attach` (a second TUI on a running session,
 which is also the best test client), the fake host, published reference docs.
 
-- Size: M, about 2–3k lines.
+- Size: M, about 3k lines.
+- Settled in S2 even though they pay off later (`02`, `05`): the runtime
+  namespace (short, absolute, validated, lifetime locks, identity-checked
+  unlink, peer checks both ways); transport close vs view close vs
+  `session.stop`; connection-level vs session-level capabilities,
+  subscription ids, the roster's own epoch; one attached session per
+  connection (SQ14); bounded history pages; what `craze bridge` may assume
+  under an SSH exec; what happens when `--continue` starts a second host for
+  one session (SQ16). **Decide SQ12 before this plan**: if hosts are born
+  detached, the socket-backed `Session` is the TUI's permanent path and S2's
+  exit adds "the full TUI runs unchanged over it, goldens included".
 - **Exit**: two TUIs on one live `cursor-agent` and one `grok` session show
   the same transcript; a prompt from either appears in both; an ask answered
   in one closes in the other; kill and reattach resumes silently from
@@ -74,6 +107,16 @@ the session (SQ12), the hub at `run/hub.sock` with roster, routing, spawn,
 and stop; `craze ps`; `craze attach <id>`; `session.create` turns shed's
 `create` capability on.
 
+- **Detach is not a key binding (SQ12).** The TUI process is a job of the
+  terminal's shell; Go cannot fork without exec and a process-group leader
+  cannot `setsid`; closing a roost or tmux tab, or a systemd login scope with
+  `KillUserProcesses=yes`, kills it whatever it ignores. The robust shape is
+  **hosts born detached, with the TUI always a socket client**; what a host
+  does when its last client leaves (stop, or keep running) is then policy.
+  Spawning from a bridge must fully detach (`setsid`, stdio to `/dev/null`)
+  or the SSH channel never closes. A headless host parks asks with zero
+  clients (`03`), and on macOS cannot start `cursor-agent` from a plain SSH
+  exec (locked login keychain).
 - Size: M, about 2k lines. prox's lesson: every hard bug here is a
   **lifecycle** bug (leaked registrations, late close callbacks racing a
   reconnect, shutdown order). Write generation-guarded registration and

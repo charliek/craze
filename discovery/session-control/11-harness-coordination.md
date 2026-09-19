@@ -10,21 +10,29 @@ first.
 **The tracks are complementary and only S1 overlaps.** The harness lives
 below the `agent.Session` seam and is lint-isolated from the rest of craze;
 session control lives at and above that seam. Ordering matters at one point:
-**S1 should land before the harness adds an ask channel, sub-agent event
-plumbing, or resume** (SD-17). H2 is not blocked.
+**S1b should land before the harness adds an ask channel, sub-agent event
+plumbing, or resume** (SD-17). H2 is not blocked, and S1a touches nothing the
+harness owns beyond one emit call in `native.go`.
+
+As recorded in `discovery/native-harness/07-roadmap.md`, the first ask channel
+is **H3** (permission cards). The craze-harness session reports that the owner
+has since deferred native permission prompts, possibly well past H3; until
+that is written down as a harness decision, read the constraint as "S1b before
+H3".
 
 ## Where they touch
 
 | surface | harness | session control | resolution |
 |---|---|---|---|
-| `internal/agent/native.go` emit path | H2 maps tool events through the adapter's sink | S1a puts a broker and sequence numbers on the emit path | One emit choke point, kept by both. Whoever lands second rebases a small conflict. |
+| `internal/agent/native.go` emit path | H2 maps tool events through the adapter's sink | S1a puts the ordering boundary and sequence numbers on the emit path | One emit choke point, kept by both. Whoever lands second rebases a small conflict. |
 | `agent.Session` interface | H2 does not change it; native gains `Interject` via `Capabilities` | S1 adds `Subscribe`, ask reads, acknowledged cancel | No conflict while H2 leaves the interface alone. |
-| `agent.Event` / `internal/cli/events.go` | H2 adds no field; one new stop reason, `max_turn_requests`; a test asserts every native event renders through `events.go` | These shapes become the wire schema (`05`) | Any later field must round-trip through `events.go` in the same PR. |
-| Persistence | `internal/harness/store`: the model-facing rail | The journal: the UI-facing rail (`04`) | Two rails, never merged (SD-08). Journal lines carry store entry ids. |
+| `agent.Event` and its encoders | H2 adds no field; one new stop reason, `max_turn_requests`; a test asserts every native event renders through `internal/cli/events.go` | S1a adds a **lossless codec** that is the journal and wire schema; `events.go` stays a lossy CLI projection (SD-20) | H2's test is right for the CLI. From S1a, any new `agent.Event` field must also round-trip the lossless codec in the same PR; that codec, not `events.go`, is what native events must survive. |
+| Persistence | `internal/harness/store`: pi's single tree store. The harness **dropped** its own two-rail proposal (harness D-03), and `03-session-store.md` defines TUI replay as the leaf→root walk | The journal: a UI-facing log craze adds above the provider seam (`04`, SD-31) | No harness change. The leaf→root walk stays the cross-incarnation replay authority for native (SD-23); the journal serves attach within an incarnation and is the debug record. Lines are joined by store entry id **with the persistence outcome**, because `StepDone` is emitted even when the store append failed. The journal does not import `internal/harness/store`. |
+| Rewind and fork | The store is a tree: rewind moves the leaf, fork copies the file | The journal is linear | A `transcript.reset{fromEntryId}` event kind is reserved so a rewind can be expressed in a linear log (`03`). |
 | Asks | Deferred; H2 ships a `Gate` seam (Allow / Deny{reason} / Ask) that allows everything | S1b's engine-owned ask registry | A future native Ask plugs into the registry. **Do not copy `live.go`'s parked-ask map into `native.go`.** |
 | Sub-agents (H6) | Child processes speaking `craze prompt --json` | The protocol's event schema; headless hosts (S4) | Children should speak the session-control event schema with `seq`, not a private variant; after S4 a child can be a real headless host and appear in the agent view under its parent id. |
-| Resume (H7) | "Replay for the TUI is the same leaf→root walk emitting Events" | The journal replays UI events for every provider | Plan H7 on two rails: model context from the store, UI replay from the journal. The leaf→root walk remains the fallback for a session with no journal. |
-| Session index (H7) | Native sessions join `sessions.jsonl` | S1b moves index writes into the engine; S4's hub roster lists hosts | Coordinate so a native session is indexed once, by the engine. |
+| Resume (H7) | "Replay for the TUI is the same leaf→root walk emitting Events" | The journal replays UI events for every provider | The leaf→root walk is H7's replay and stays the cross-incarnation authority for native (SD-23); the new incarnation journals those replayed events, flagged. Whether earlier journals ever enrich a restored transcript is SQ13, not H7's problem. |
+| Session index (H7) | Native sessions join `sessions.jsonl` at H7; until then `writeIndex` deliberately excludes them and `nativeSession.open` rejects a load | S1b moves index writes into the engine; S4's hub roster lists hosts | S1b **keeps the native exclusion** until H7. Attachable live sessions (the roster) and resumable stored sessions (the index) are different lists. |
 | TUI state | H2 adds nothing to `tui.Model` | S1 moves session semantics out of `tui.Model` | New session semantics go in the adapter or engine, never `tui.Model`. |
 
 ## State of the harness track (2026-09-19)
@@ -49,15 +57,19 @@ review; execution will be a separate session in worktree `../craze-plan019`):
 5. Permission prompts are deferred, possibly well past H3; the likely shape is
    an auto-mode evaluator behind the `Gate` seam.
 
-Item 5 relaxes the ordering: with no native ask channel soon, S1 is not racing
-H3. The constraint is now "before whichever harness phase first needs an ask
-(H5's plan and question tools are the likely first), before H6, before H7".
+If item 5 is recorded as a harness decision, the ordering relaxes to "S1b
+before whichever harness phase first needs an ask (H5's plan and question
+tools are the likely first), before H6, before H7". Items 3 and 4 are Plan
+019's stated intent, not yet code: treat the diagnostic and entry-id handoff
+as an **integration dependency to verify** when both sides have landed. Today
+`harness.StepDone` carries usage only.
 
 ## What S1 owes the harness
 
 - A way for the native adapter to forward `harness.Event` diagnostics to the
   journal that does not widen `agent.Event` for clients: a journal-only
-  `diag` path on the emit side (`04`).
+  `diag` path beside the event path (`04`). S1a ships it; the adapter starts
+  using it once H2's events exist, whichever lands second.
 - The ask registry's API early, so a harness `Gate` that returns Ask has
   something to plug into.
 - `seq` on `craze prompt --json` lines (S1a), so H6's child processes are born
@@ -65,9 +77,8 @@ H3. The constraint is now "before whichever harness phase first needs an ask
 
 ## Practical notes
 
-- This folder was written untracked in the shared checkout on `main`
-  (2026-09-19). Until it is committed, a harness worktree reads it by absolute
-  path: `/home/charliek/projects/craze/discovery/session-control/`.
+- This folder is on `main` from `f943472` (2026-09-19); a harness worktree
+  sees it after rebasing onto or merging `origin/main`.
 - Plan 019 tells its executing session to re-read this file before the runner
   commit and flag conflicts to the owner.
 - Keep the two sessions talking: an S1 plan should be sent to the

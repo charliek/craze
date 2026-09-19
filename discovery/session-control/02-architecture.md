@@ -50,32 +50,77 @@ instead of N connections, one stable path, a place to spawn headless hosts,
 and, later, one outbound uplink per machine rather than per session.
 
 **Sequencing (SD-06):** per-session sockets ship first (S2); the hub arrives
-with headless hosts (S4) and speaks the identical protocol. Every
-session-scoped method carries a `sessionId` from day one, so a per-session
-socket is simply a hub whose roster has one row. `craze bridge` hides which of
-the two it dialed, so `shed-craze` never changes.
+with headless hosts (S4) and speaks the identical protocol. `craze bridge`
+hides which of the two it dialed, so `shed-craze` never changes.
+
+A `sessionId` on every method is necessary and **not sufficient** for that
+promise (SD-28). S2's protocol must already separate connection-level from
+session-level capabilities and incarnation (a hub fronts heterogeneous hosts;
+`hello` cannot return one provider's capabilities), give every subscription
+an id with unsubscribe, and route notifications by it. The **roster has its
+own epoch and cursor**: a crashed host cannot journal its own removal and
+per-session sequences do not order a machine, so after a hub restart clients
+reseed the roster authoritatively. The hub also needs a registration grace
+before idle exit, and must pass host identity and unknown payload fields
+through untouched.
+
+**Lifecycle separation comes before the hub, too (SD-28).** Today
+`requestQuit`, `finishRun`, and `SIGHUP` all close the owned session. S2
+defines transport close, closing an attached view, and explicitly stopping
+the session as three different things, keeping today's quit behavior. S4's
+detach is more than a key binding: the process must give the shell back,
+release the terminal, and keep owning its agent child, and `acp.Spawn` today
+isolates only the child's process group; startup and process-group
+preparation are prerequisites.
 
 ## Paths
 
 ```
-$CRAZE_HOME/run/                 0700
+<runtime dir>/                   0700, validated (below)
   hub.sock                       0600   S4
-  hub.pid                        flock singleton, prox's pattern
-  host/<session-id>.sock         0600   S2
-$CRAZE_HOME/journal/<cwd-slug>/<utc>_<session-id>.jsonl   0600   S1 (SQ1)
+  hub.lock                       lifetime flock, prox's and roost's pattern
+  h/<short-id>.sock              0600   S2
+  h/<short-id>.lock              lifetime flock held by the host
+$CRAZE_HOME/journal/<cwd-slug>/<utc>_<incarnation-id>.jsonl   0600   S1 (SQ1)
 ```
 
-Stale sockets are detected by connect failure and unlinked by the next host
-or hub that finds them; a host removes its own socket on exit, including the
-`SIGHUP` path added in plan 017.
+**The runtime namespace is an S2 design item, not a detail (SD-27).** Three
+facts make `$CRAZE_HOME/run/host/<session-id>.sock` wrong as written:
+
+- `sun_path` is about 104 bytes on macOS and 108 on Linux; a long
+  `CRAZE_HOME` plus a uuid overflows it. Names must be short, and the runtime
+  dir should prefer a short base (`$XDG_RUNTIME_DIR/craze` where it exists),
+  with an actionable refusal when no path fits.
+- `paths.CrazeDir` deliberately allows a **relative** `CRAZE_HOME`, so two
+  working directories could select two hubs. The runtime dir is resolved to
+  one absolute, normalized path per user and `CRAZE_HOME`.
+- An SSH exec does not inherit the environment or `PATH` of the tab that
+  launched craze. How `craze bridge` finds the same namespace and how the
+  client finds the binary must be specified; roost's `remote_command_for`
+  (`roost-ipc/src/ssh.rs`) exists for exactly this. Session ids are validated
+  as opaque identifiers before any path is built, and are shell-quoted if they
+  ever appear in a command line; protocol input never becomes shell text.
+
+**Connect failure is not authority to unlink.** It races another host's bind
+and a predecessor's shutdown. The rules, all with working references in roost:
+validate the runtime tree's owner, type, and mode (and its ancestors) before
+probing, with an explicit symlink policy (`roost-ipc/src/runtime_dir.rs`);
+hold a **lifetime lock** around probe, unlink, and bind
+(`roost-engine/src/single_instance.rs`); unlink only a socket that is
+provably ours (`roost-session/src/socket_guard.rs`); classify staleness
+conservatively. A host removes its own socket on exit, including the `SIGHUP`
+path added in plan 017.
 
 ## Local trust model (SD-04)
 
-The boundary is **same uid on this machine**: a `0700` directory, `0600`
-sockets, and a peer-credential uid check on accept (`SO_PEERCRED` on Linux,
-`LOCAL_PEERCRED` on macOS). Logging in over SSH as the owner *is* the
-authorization, exactly as for roost (`epics/roost-pivot.md`: "UDS + SSH. No
-network listener, no auth layer").
+The boundary is **same uid on this machine**: a validated `0700` directory,
+`0600` sockets, and a peer-credential uid check (`SO_PEERCRED` on Linux,
+`LOCAL_PEERCRED` on macOS; roost's `roost-ipc/src/peer.rs` has both). The
+check runs on **accept and on dial**, because a client resolving a runtime
+path can be handed a substituted endpoint, and a failed credential lookup
+rejects. Logging in over SSH as the owner *is* the authorization, exactly as
+for roost (`epics/roost-pivot.md`: "UDS + SSH. No network listener, no auth
+layer").
 
 This is the main thing done differently from the gx lane. Loopback TCP has no
 peer identity, so gx needs a token file with `O_EXCL`/`O_NOFOLLOW`/mode

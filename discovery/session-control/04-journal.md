@@ -3,17 +3,15 @@
 craze journals **every session, every provider** to disk (SD-07). The journal
 has two jobs, and the owner asked for both on 2026-09-19:
 
-1. **Replay and attach.** A client that connects late, reconnects, or
-   attaches after the host restarted gets history from the journal instead of
-   depending on the agent's own `session/load` replay.
+1. **Replay and attach.** A client that connects late or reconnects gets the
+   events it missed from the ring and the journal (`03`).
 2. **Debug and improvement data.** A record rich enough to look over later
    for errors, slow paths, and product optimizations, for ACP agents and the
    native harness alike.
 
-## Two rails (SD-08)
+Revised 2026-09-19 after the panel review (`12`): SD-18, SD-21, SD-22, SD-23.
 
-The harness design rule (`discovery/native-harness/`, reference review) is two
-persistence rails from day one. They stay separate:
+## Two rails (SD-08)
 
 | rail | what | where | owner |
 |---|---|---|---|
@@ -22,74 +20,116 @@ persistence rails from day one. They stay separate:
 
 `internal/harness` stays ignorant of the journal; the depguard rule is
 unchanged. The harness hands diagnosis-grade events to its sink and the
-adapter forwards them (`11`). Journal lines carry the store entry ids that a
-step wrote, so the two rails join.
+adapter forwards them (`11`). The rails are **joined, never merged**: a journal
+line can name the store entries a step wrote, and must say whether that write
+**succeeded**, because the harness emits `StepDone` even when the store append
+failed. A UI journal can legitimately contain streamed output that is absent
+from the recovered model context; the join is what lets a reader explain the
+divergence.
 
-For ACP providers the journal makes craze a second source of truth beside the
-agent's own replay. That is accepted (owner, 2026-09-19): the agent's store is
-opaque, provider-specific, and cannot be mined.
+`journal = false` turns off the journal and its wire sidecar. It does not and
+cannot turn off the native model-history rail.
 
-## File
+## One file per host incarnation (SD-21, SD-22)
 
 ```
-$CRAZE_HOME/journal/<cwd-slug>/<UTC yyyymmddThhmmssZ>_<session-id>.jsonl   0600
-$CRAZE_HOME/journal/<cwd-slug>/<…>_<session-id>.wire.jsonl                 0600, optional (SQ4)
+$CRAZE_HOME/journal/<cwd-slug>/<UTC yyyymmddThhmmssZ>_<incarnation-id>.jsonl        0600
+$CRAZE_HOME/journal/<cwd-slug>/<UTC yyyymmddThhmmssZ>_<incarnation-id>.wire.jsonl   0600, optional (SQ4)
 ```
 
-Same slug and timestamp scheme as the harness store so the two sort and pair
-by eye (SQ1). Append-only JSONL, torn last line tolerated on load, created
-lazily on the first event, one writer (the host). JSONL over SQLite for the
-same reasons as the harness (`D-03`): greppable, append-only, no migrations
-to keep replayable forever.
+A journal file belongs to exactly one process lifetime. **No process ever
+appends to a file another process wrote.** That is the recovery policy: a torn
+last line is tolerated on read and never becomes interior corruption, because
+the next incarnation starts a new file. The harness store's harder problem
+(it poisons further writes after a partial append) does not arise.
+
+The header names the incarnation, and later lines record the provider session
+id once `Start` learns it, the id it was loaded from, and, from S1b, the
+durable craze session id. A session's history across restarts is the ordered
+set of its incarnation files, linked by those ids.
+
+Same slug and timestamp scheme as the harness store so files sort and pair by
+eye (SQ1). JSONL over SQLite for the harness's reasons (`D-03`).
+
+## Transcript authority (SD-23)
+
+- **Within an incarnation** the ring plus the journal are authoritative for
+  attach and resume.
+- **Across incarnations** the provider's own replay (`session/load`) stays the
+  transcript authority for ACP sessions, as today. The new incarnation
+  journals the replayed events, flagged `Replayed`, so each file is
+  self-contained and restoring from it never duplicates history.
+- Earlier incarnations' files are debug data. Restoring a transcript from them
+  instead of, or reconciled with, the provider's replay is a later decision
+  (SQ13): it needs rules for which source wins when they differ, for turning
+  historical asks and interrupted turns into terminal records rather than
+  actionable ones, and for a failed load never reaching `synchronized`.
+- Native sessions have no resume until H7; H7 is planned on two rails (`11`).
+
+This narrows the first draft's promise. The journal makes attach exact while a
+host lives and gives a complete record afterwards; it does not yet make craze
+the source of truth for a dead host's transcript.
 
 ## Lines
 
-Line 1 is a header; every other line has `seq` (monotonic, the attach cursor),
-`ts` (RFC3339Nano UTC), and `type`.
+Line 1 is a header; every other line has `ts` (RFC3339Nano UTC) and `type`.
+`event` lines carry the session's `seq`; other lines are ordered by position.
 
-| type | payload | purpose |
-|---|---|---|
-| `header` | format version, session id, provider, agent binary + version, craze version, OS/arch, cwd, resumed-from id, host instance id | provenance for every later question |
-| `event` | the `agent.Event` in its wire JSON (`05`), entry id it touched | replay; identical bytes to what subscribers got |
-| `command` | command id, verb, arguments (prompt text included), client kind (`tui`, `socket`, `bridge`, `web`), outcome or error code, latency | who did what, and what craze answered |
-| `ask` | ask id, kind, options offered, transitions with timestamps, answering client, time blocked | the "blocked on you" record; approval latency |
-| `turn` | start/end, duration, stop reason, time to first event, tool count, error count, tokens and cost when known, queue depth at start | one line per turn to aggregate over |
-| `client` | attach / detach / dropped-as-slow, client kind, protocol version, resume cursor used | reconnect and backpressure behavior |
-| `diag` | kind + fields: agent stderr lines, wire outcome (`pending/sent/refused/failed/withdrawn`), ACP errors with codes, reconnects, host signals, panics recovered, harness diagnostics | everything that is not transcript |
+| type | payload | purpose | from |
+|---|---|---|---|
+| `header` | format version, incarnation id, craze version, OS/arch, provider, agent binary, cwd, options that shape behavior (force, interactive, mode) | provenance for every later question | S1a |
+| `session` | provider session id, loaded-from id, durable craze id (S1b), agent version when known | identity as it becomes known | S1a |
+| `event` | `seq` + the `agent.Event` in the **lossless codec** (`03`) | replay; one line per emitted event, never coalesced (SD-18) | S1a |
+| `diag` | kind + fields: agent stderr lines, wire outcomes, ACP errors with codes, signals, recovered panics, harness diagnostics, subscriber drops, journal health | everything that is not transcript | S1a |
+| `command` | command id, verb, arguments, client kind, outcome or error code, latency | who did what, and what craze answered | S1b |
+| `ask` | ask id, kind, options offered, transitions with timestamps, answering client, time blocked | the "blocked on you" record | S1b |
+| `turn` | engine turn id, start/end, duration, stop reason, time to first event, tool and error counts, tokens and cost when known, queue depth | one line per turn to aggregate over | S1b |
+| `client` | attach / detach / dropped-as-slow, client kind, protocol version, cursor used | reconnect and backpressure behavior | S2 |
 
 Native harness diagnostics arrive as `diag` lines from the adapter: tool
 start/end and duration, exit code and error class, truncation (kept vs total,
 spill path), doom-loop trips, length-stop handling, cancel-synthesized tool
 results, steers, per-step provider / model / wire model, raw **and** normalized
 finish reason, time to first token, usage including cache-read tokens, retry
-attempt + reason + backoff. Plan 019 (H2) already pins these on
-`harness.Event` (`11`).
+attempt + reason + backoff, and the store entry ids a step wrote **with the
+persistence outcome**. Plan 019 (H2) pins most of these on `harness.Event`;
+treat that as an integration dependency to verify when both have landed, not
+as a code fact (`11`).
 
 The optional `.wire.jsonl` sidecar holds raw ACP JSON-RPC frames in both
-directions with direction and timestamp. H0's lesson applies
-(`discovery/native-harness/07-roadmap.md`, conventions): a recorder that
-discards raw responses turns a diagnosable failure into a mislabelled one.
+directions. H0's lesson applies: a recorder that discards raw responses turns
+a diagnosable failure into a mislabelled one.
 
-## Rules
+## Writer rules (SD-21)
 
+- **The writer never blocks the engine.** It is a budgeted subscriber with a
+  bounded queue, writing on its own goroutine. "Backpressure briefly" was
+  dropped: a regular-file write that stalls is not bounded.
+- **Overflow or a write error is a gap, recorded and published.** The writer
+  marks the journal degraded, says so once in the TUI and in `diag` when it
+  can, exposes journal health outside the journal itself, and invalidates
+  replay guarantees across the gap: a resume that needs the gap gets `reset`.
+- **Readers see complete records only.** The writer publishes a
+  complete-record boundary (bytes flushed through the last newline); replay
+  reads to that boundary and takes the rest from the ring. Replay decodes
+  with bounded memory, never a whole-file load.
+- **Durability is stated, not implied.** Flush on a short timer and at turn
+  end; `fsync` at turn end and close; a crash can lose the last unflushed
+  window, which the ring covered while the host lived.
+- **Shutdown is bounded**: a final flush with a deadline, like
+  `Close`'s owed writes in plan 017.
+- **Disk exhaustion** degrades to journaling off with one notice, never a
+  stalled or failed session.
 - **Append-only, never rewritten.** Corrections are new lines.
-- **Sequence numbers are the protocol's cursors.** A subscriber's `afterSeq`
-  is a journal position; nothing else numbers events.
-- **Streaming text** is journaled per transcript entry, not per delta: the
-  writer coalesces deltas for an entry and flushes on size, time, kind change,
-  or turn end (shed-gx's segmentation: 8 KiB / 2 s). Replay into the middle of
-  an entry re-sends the entry as an upsert by id (SQ2).
-- **The journal may backpressure the engine briefly; nothing else may.** A
-  failing disk degrades to "journaling off" with one `diag` and a TUI notice,
-  never a stalled agent.
 - **Secrets.** Tool output and prompts can contain secrets. Files are `0600`
-  in a `0700` tree, never uploaded, and `journal = false` turns it off (SQ3).
-  The remote phases must treat journal content as sensitive as the session.
+  in a `0700` tree, never uploaded (SQ3). Anything remote must treat journal
+  content as sensitive as the session itself.
 - **Version the format** with an integer in the header. Old journals must stay
-  loadable, which is t3code's hard-won rule for persisted events.
+  loadable.
 
 ## Later, not scheduled
 
 `craze journal` subcommands to mine the data: errors by provider and tool,
 turn latency percentiles, ask wait time, retry rates by model, slow-subscriber
-drops. The line shapes above are chosen so these are `jq` one-liners first.
+drops, journal gaps. The line shapes are chosen so these are `jq` one-liners
+first. Retention and pruning wait for measured sizes (SQ3).
