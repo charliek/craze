@@ -1411,13 +1411,24 @@ func TestEventLogAResumeGivesUpOnAJournalThatNeverCatchesUp(t *testing.T) {
 // from a corrupt file or a failing disk. Health reports lateGaps only after
 // the cutoff has read it, which is where a writer that failed under the wait
 // would record one.
+//
+// A read error is injected after deliver records of the range have been read
+// from the real file and handed over, because that is where a real one is
+// found: ReadRange parses and calls back per record, so a malformed line, an
+// overlong one or a missing seq late in the range is discovered only once the
+// records before it have gone out (headRange.serve).
 type answeringJournal struct {
 	journalFile
 	waitErr  error
 	readErr  error
+	deliver  int
 	lateGaps []journal.SeqRange
 	healths  atomic.Int64
 }
+
+// errStopRead ends the real read once the injected prefix has been delivered.
+// The reader returns a callback's error as it is, so it never leaves here.
+var errStopRead = errors.New("test: the injected prefix has been delivered")
 
 func (j *answeringJournal) Health() journal.Health {
 	h := j.journalFile.Health()
@@ -1444,18 +1455,44 @@ func (j *answeringJournal) WaitFlushed(ctx context.Context, seq uint64) error {
 }
 
 func (j *answeringJournal) ReadRange(from, to uint64, fn func(journal.Record) error) error {
-	if j.readErr != nil {
-		return j.readErr
+	if j.readErr == nil {
+		return j.journalFile.ReadRange(from, to, fn)
 	}
-	return j.journalFile.ReadRange(from, to, fn)
+	if j.deliver > 0 {
+		left := j.deliver
+		err := j.journalFile.ReadRange(from, to, func(r journal.Record) error {
+			if left == 0 {
+				return errStopRead
+			}
+			left--
+			return fn(r)
+		})
+		// The owner's own error (a subscription that ended under the send)
+		// goes back as it is; only the stop is this fake's.
+		if err != nil && !errors.Is(err, errStopRead) {
+			return err
+		}
+	}
+	return j.readErr
 }
 
 // TestEventLogTheFileLegsErrorsEachMapToOneReason pins the mapping in
 // headRange.unresolvable: what the journal said, and why the cursor could not
-// be resumed. Whichever it is, the subscription ends and no part of the range
-// is delivered, and the journal's own error is kept for the caller.
+// be resumed. Whichever it is, the subscription ends with that reason and
+// keeps the journal's own error for the caller.
+//
+// Each read error is injected after a prefix of the range has been delivered,
+// which is the shape a real one has: the range is streamed, so a file that
+// turns out not to hold it whole is discovered with records already gone out
+// (headRange.serve). What the subscription owes then is exactly this — it
+// ends, with the reason, rather than stopping where the file stopped and
+// passing the prefix off as the range. The consumer's half is to discard what
+// it received, and the prefix is asserted here so that a leg which silently
+// finished early instead of failing could not pass.
 func TestEventLogTheFileLegsErrorsEachMapToOneReason(t *testing.T) {
-	const published, ring = 60, 4
+	// The head of the range is 56 records long (the ring keeps the last four
+	// of the 60 published), so a prefix of three is well inside it.
+	const published, ring, prefix = 60, 4, 3
 	lost := []journal.SeqRange{{From: 1, To: journal.MaxSeq}}
 	for _, c := range []struct {
 		name string
@@ -1480,12 +1517,18 @@ func TestEventLogTheFileLegsErrorsEachMapToOneReason(t *testing.T) {
 				publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
 			}
 			flushThrough(t, w, published)
-			l.file = &answeringJournal{journalFile: l.file, waitErr: c.wait, readErr: c.read, lateGaps: c.gaps}
+			l.file = &answeringJournal{journalFile: l.file, waitErr: c.wait, readErr: c.read, deliver: prefix, lateGaps: c.gaps}
 
 			s := mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}})
-			if recs := readAll(t, s); len(recs) != 0 {
-				t.Fatalf("%d records were delivered of a range the file could not serve", len(recs))
+			// The wait leg fails before a byte is read, so it delivers
+			// nothing; a read that fails has already handed over what it
+			// parsed before the failure, and no more than that — never the
+			// ring records behind it, and never anything live.
+			delivered := prefix
+			if c.wait != nil {
+				delivered = 0
 			}
+			assertRun(t, "what the file leg delivered before it failed", readAll(t, s), 1, delivered)
 			cu := assertUnresolvable(t, "the file leg", s.Err(), c.want)
 			said := c.read
 			if c.wait != nil {

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -218,6 +219,96 @@ func TestJournalLiveSessionWritesOneFile(t *testing.T) {
 	}
 	assertEventLines(t, lines, w, primary)
 	assertClosingIsLast(t, lines)
+}
+
+// linkAgent puts a link to the fake agent at path, as a directory on PATH
+// would hold it.
+func linkAgent(t *testing.T, agent, path string) {
+	t.Helper()
+	abs, err := filepath.Abs(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(abs, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeDecoy puts an executable at path that is not an agent at all: it
+// records that it ran and exits. A session that spawned it would hang on
+// initialize, so the marker is what a test asserts on rather than the failure.
+func writeDecoy(t *testing.T, path, marker string) {
+	t.Helper()
+	script := fmt.Sprintf("#!/bin/sh\n: > %q\nexit 1\n", marker)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestJournalSessionNoteNamesTheBinaryThatRan: the agent binary is resolved
+// once, before the spawn, and that one path is both what runs and what the
+// session note records. So a PATH that leads somewhere else by the time the
+// note is written — a candidate swapped on disk, a CRAZE_AGENT_BIN changed
+// under the process — cannot make the note name a binary the session never
+// ran, or name none at all. Both spellings of "which binary" are here, because
+// the single resolution has to keep CRAZE_AGENT_BIN's precedence exactly.
+func TestJournalSessionNoteNamesTheBinaryThatRan(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		explicit bool
+	}{
+		{"asked for by name", true},
+		{"asked for through CRAZE_AGENT_BIN", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			const name = "craze-test-agent"
+			onPath, decoy := t.TempDir(), t.TempDir()
+			ran := filepath.Join(onPath, name)
+			linkAgent(t, fakeAgentPath(t), ran)
+			marker := filepath.Join(t.TempDir(), "the-decoy-ran")
+			writeDecoy(t, filepath.Join(decoy, name), marker)
+			t.Setenv("PATH", onPath)
+			t.Setenv("CRAZE_AGENT_BIN", "")
+
+			dir := filepath.Join(t.TempDir(), "journal")
+			opts := Options{
+				ExtraArgs:  []string{"-script=echo"},
+				Workspace:  t.TempDir(),
+				Force:      true,
+				Stderr:     io.Discard,
+				Diag:       io.Discard,
+				JournalDir: dir,
+			}
+			if c.explicit {
+				opts.Binary = name
+			} else {
+				t.Setenv("CRAZE_AGENT_BIN", name)
+			}
+			// The swap, at the one instant that used to matter: from here the
+			// name leads to the decoy, and nothing after the resolution may
+			// look it up again — not the spawn, and not the note.
+			testAfterBinaryResolved = func() { t.Setenv("PATH", decoy) }
+			t.Cleanup(func() { testAfterBinaryResolved = nil })
+
+			s := newTestSession(t, opts)
+			w := journalOf(t, s.log)
+			if err := s.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Prompt(t.Context(), "hello"); err != nil {
+				t.Fatal(err)
+			}
+			closeJournaled(t, s, w)
+
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatalf("the session ran %s, the decoy the PATH led to after the resolution", filepath.Join(decoy, name))
+			}
+			notes := sessionNotes(fileLines(t, w))
+			if len(notes) != 1 || notes[0]["agentBinary"] != ran {
+				t.Fatalf("session notes %v, want one naming %s, the binary that ran", notes, ran)
+			}
+		})
+	}
 }
 
 // TestJournalNativeSessionWritesOneFile is A18's Go half for the native

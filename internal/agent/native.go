@@ -141,6 +141,8 @@ func (s *nativeSession) Start(ctx context.Context) error {
 	err := s.start(ctx)
 	// Noted before anything is torn down, as on the live session (plan 020
 	// §3.5); nothing here closes the session, so the note is the whole of it.
+	// A Close racing this start can cut the log's note admission first, which
+	// noteStartFailed accepts and counts.
 	s.log.noteStartFailed(err)
 	return err
 }
@@ -188,7 +190,8 @@ func (s *nativeSession) start(context.Context) error {
 	s.snap.SessionID = hs.ID()
 	s.refreshCurrentLocked()
 	s.mu.Unlock()
-	// Noted with s.mu released, as every note is (plan 020 §3.5).
+	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
+	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: hs.ID()})
 	return nil
 }

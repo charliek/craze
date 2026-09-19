@@ -124,6 +124,72 @@ func TestStderrTeeDoesNotGrowWithoutANewline(t *testing.T) {
 	}
 }
 
+// TestStderrTeeDoesNotChargeALineEndingToTheCap is the 4 KiB boundary with
+// both line endings: the \r of a \r\n is line punctuation, not what the agent
+// said, so it neither counts toward the cap nor marks the line truncated. A
+// line of exactly the cap ends the same way whether it ends \n or \r\n, and
+// whether the ending arrives in the same write as the line or the one after
+// it — the child's stderr is chunked by the pipe, not by lines.
+func TestStderrTeeDoesNotChargeALineEndingToTheCap(t *testing.T) {
+	for _, n := range []int{stderrLineCap - 1, stderrLineCap, stderrLineCap + 1} {
+		for _, ending := range []string{"\n", "\r\n"} {
+			for _, split := range []bool{false, true} {
+				name := fmt.Sprintf("%d bytes ending %q", n, ending)
+				if split {
+					name += " in a write of its own"
+				}
+				t.Run(name, func(t *testing.T) {
+					tee, notes := newCollectingTee(io.Discard)
+					line := strings.Repeat("x", n)
+					writes := []string{line + ending}
+					if split {
+						writes = []string{line, ending}
+					}
+					for _, w := range writes {
+						if _, err := tee.Write([]byte(w)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					texts, truncated := notes.diagTexts(t)
+					if len(texts) != 1 {
+						t.Fatalf("the tee noted %d lines, want one", len(texts))
+					}
+					wantLen, wantCut := min(n, stderrLineCap), n > stderrLineCap
+					if len(texts[0]) != wantLen || truncated[0] != wantCut {
+						t.Fatalf("a %d-byte line ending %q was noted as %d bytes, truncated=%v; want %d and %v",
+							n, ending, len(texts[0]), truncated[0], wantLen, wantCut)
+					}
+					if strings.ContainsRune(texts[0], '\r') {
+						t.Fatalf("the noted line carries the \\r of its own line ending: %q", texts[0][len(texts[0])-1:])
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestStderrTeeKeepsAFinalCarriageReturn: a \r at the end of an unterminated
+// last fragment is content — the child stopped there, so nothing makes it a
+// line ending — and Flush keeps it. A \r that does turn out to be one is still
+// dropped, so both spellings are in the same test.
+func TestStderrTeeKeepsAFinalCarriageReturn(t *testing.T) {
+	tee, notes := newCollectingTee(io.Discard)
+	if _, err := tee.Write([]byte("first\r\nerror\r")); err != nil {
+		t.Fatal(err)
+	}
+	if texts, _ := notes.diagTexts(t); !equalStrings(texts, []string{"first"}) {
+		t.Fatalf("before the flush the tee noted %q, want only the terminated line", texts)
+	}
+	tee.Flush()
+	texts, truncated := notes.diagTexts(t)
+	if !equalStrings(texts, []string{"first", "error\r"}) {
+		t.Fatalf("the tee noted %q, want the terminated line and the fragment with its own carriage return", texts)
+	}
+	if truncated[1] {
+		t.Fatalf("the final fragment %q was marked truncated", texts[1])
+	}
+}
+
 // countingWriter answers a short write and then an error, so the tee's answers
 // can be compared with the ones the same writer gives on its own.
 type countingWriter struct {

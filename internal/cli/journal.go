@@ -35,6 +35,14 @@ const journalEnv = "CRAZE_JOURNAL"
 //
 // A run resolves this once, before it builds any session: the TUI's provider
 // picker can build several, and the reason it is off is worth saying once.
+//
+// The two switches below read the environment separately — tui.ConfigJournal
+// finds config.toml under CRAZE_HOME, and paths.JournalDir reads CRAZE_HOME
+// again for the directory — so an environment that changed between the two
+// reads would answer with one craze home's config and another's journal
+// directory. Accepted: craze never mutates its own environment or working
+// directory after start, and this resolver runs once per run, on the single
+// goroutine that sets a run up, before any session exists.
 func journalDir(diag io.Writer) string {
 	if raw := strings.TrimSpace(os.Getenv(journalEnv)); raw != "" {
 		on, err := strconv.ParseBool(raw)

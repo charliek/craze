@@ -204,6 +204,12 @@ func (s *session) outcomeOf(w *turnWire) wireOutcome {
 	return w.outcome
 }
 
+// testAfterBinaryResolved runs, when set, between Start resolving the agent
+// binary and the spawn that runs it: the one point where a test can change
+// what that name resolves to next and see that nothing after it looks again.
+// It is a var only so the tests can set it; nothing in craze writes it.
+var testAfterBinaryResolved func()
+
 // testBeforeWire runs, when set, right before Prompt hands its request to the
 // client: the one point where a turn is open and its prompt is not yet on the
 // wire, which a test can only hold still from here. It is a var only so the
@@ -253,8 +259,8 @@ func newSession(opts Options) *session {
 	}
 	s.opts.PluginDirs = append([]string(nil), opts.PluginDirs...)
 	// The log is built once the provider is settled, because a journal's
-	// header names it, with the binary as it was asked for: which one the
-	// spawn resolved is Start's to learn (the session note).
+	// header names it, with the binary as it was asked for: which file that
+	// name resolves to is Start's to settle (the session note).
 	s.log = newSessionLog(s.opts, journalHeader{provider: s.provider().Name(), binary: s.opts.Binary})
 	s.events = s.log.Primary()
 	// The tee is the child's lane alone. Options.Stderr stays what it was, so
@@ -299,6 +305,8 @@ var _ EventSource = (*session)(nil)
 // cutoff and a note written after it would be counted and dropped. teardown
 // says the failure is one of those the body used to answer with an inner
 // Close; the paths that only give the start back (unstart) keep doing that.
+// A Close racing this start can cut that admission first, which
+// noteStartFailed accepts and counts.
 func (s *session) Start(ctx context.Context) error {
 	teardown, err := s.start(ctx)
 	if err == nil {
@@ -341,22 +349,43 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		return false, err
 	}
 
+	// The agent binary is resolved exactly once, here, and that one path is
+	// both what is spawned and what the session note records (plan 020 §3.5).
+	// Asking twice — once inside the spawn, once again for the note — was
+	// enough for a PATH change, a changed CRAZE_AGENT_BIN or a candidate
+	// swapped on disk between the two lookups to put a binary in the note that
+	// the session never ran, or to leave the note empty when the second lookup
+	// found nothing.
+	//
+	// Handing the answer back to Spawn as its Binary changes nothing about the
+	// spawn: resolving is the first thing Spawn does, an explicit Binary is
+	// what it resolves (so CRAZE_AGENT_BIN's precedence is applied here, in
+	// the same call, and the candidates below it are unreachable either way),
+	// and a resolved path resolves to itself — exec.LookPath returns an
+	// executable it is handed by path unchanged, and an absolute path it
+	// refuses still passes Spawn's own os.Stat fallback, which is where such a
+	// path came from. Candidates are left out for that reason: with a resolved
+	// Binary they can never be reached.
+	binary, err := acp.ResolveBinaryCandidates(s.opts.Binary, s.provider().Bins())
+	if err != nil {
+		s.unstart()
+		return false, err
+	}
+	if testAfterBinaryResolved != nil {
+		testAfterBinaryResolved()
+	}
 	client, err := acp.Spawn(acp.SpawnOptions{
-		Binary:     s.opts.Binary,
-		Candidates: s.provider().Bins(),
-		Args:       args,
-		Dir:        cwd,
-		Env:        s.opts.Env,
-		Stderr:     s.stderrSink(),
-		Dialect:    s.provider().Dialect(),
+		Binary:  binary,
+		Args:    args,
+		Dir:     cwd,
+		Env:     s.opts.Env,
+		Stderr:  s.stderrSink(),
+		Dialect: s.provider().Dialect(),
 	})
 	if err != nil {
 		s.unstart()
 		return false, err
 	}
-	// The binary the spawn just found, for the session note; asked right
-	// after it, so the lookup sees what the spawn's did.
-	binary := s.log.resolvedBinary(s.opts.Binary, s.provider().Bins())
 	// Close may have run while we were spawning; adopt the child only if the
 	// session is still open, otherwise reap it here so it cannot be orphaned.
 	s.mu.Lock()
@@ -421,7 +450,8 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		s.mu.Lock()
 		s.sessionID = sess.SessionID
 		s.mu.Unlock()
-		// Noted with s.mu released, as every note is (plan 020 §3.5).
+		// Noted with s.mu released, as every note is (plan 020 §3.5); a
+		// Close in that window drops it, which noteSession accepts and counts.
 		s.log.noteSession(journal.SessionNote{ProviderSessionID: sess.SessionID, AgentBinary: binary})
 	}
 	// The --ask/--plan/--model tail, unchanged: it runs after session setup
@@ -496,8 +526,8 @@ func (s *session) stderrSink() io.Writer {
 // result is merged into the snapshot rather than assigned over it, which is the
 // whole difference from the session/new path above.
 //
-// binary is the agent binary the spawn resolved, for the session note, which
-// is written here because this is where Start learns the id: after the
+// binary is the agent binary Start resolved and spawned, for the session note,
+// which is written here because this is where Start learns the id: after the
 // replay, and before the end bracket.
 func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd, binary string) error {
 	if !initRes.LoadSession() {
@@ -549,7 +579,8 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.snap.Provider = s.provider().Info()
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
-	// Noted with s.mu released, as every note is (plan 020 §3.5).
+	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
+	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
 	s.replaying.Store(false)
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})

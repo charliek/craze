@@ -56,6 +56,14 @@ type stderrTee struct {
 	// and truncated says bytes of it were discarded past that cap.
 	line      []byte
 	truncated bool
+	// pendingCR holds back a carriage return that arrived at the end of a
+	// chunk, whose meaning the next byte decides: the \r of a \r\n line
+	// ending, which is punctuation and belongs to neither the line nor its
+	// cap, or content, when anything else follows it — including nothing at
+	// all, which is what a child that stops mid-line leaves behind. Holding
+	// it out of the line is what makes a 4 KiB line ending \r\n a whole line
+	// rather than a truncated one, whichever chunk the ending arrives in.
+	pendingCR bool
 	// bytes and lines are what this session has journaled, against the budget;
 	// dropped and droppedBytes are what it refused once the budget was gone.
 	bytes        int
@@ -103,9 +111,34 @@ func (t *stderrTee) absorb(p []byte) {
 	}
 }
 
-// appendLocked adds b to the line being scanned, keeping what fits under the
-// cap and discarding the rest: the line is bounded whatever the child writes.
+// appendLocked adds b to the line being scanned, settling whatever carriage
+// return the last chunk ended on: b's first byte proves it was content, since
+// a \r that ends a line is followed by the \n absorb split on and never
+// reaches here. A trailing \r of b's own is held back in turn.
 func (t *stderrTee) appendLocked(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	t.settleCRLocked()
+	if b[len(b)-1] == '\r' {
+		t.pendingCR = true
+		b = b[:len(b)-1]
+	}
+	t.addLocked(b)
+}
+
+// settleCRLocked takes a held carriage return as content: it joins the line
+// and counts against the cap like any other byte.
+func (t *stderrTee) settleCRLocked() {
+	if t.pendingCR {
+		t.pendingCR = false
+		t.addLocked([]byte{'\r'})
+	}
+}
+
+// addLocked adds b to the line being scanned, keeping what fits under the cap
+// and discarding the rest: the line is bounded whatever the child writes.
+func (t *stderrTee) addLocked(b []byte) {
 	room := stderrLineCap - len(t.line)
 	if len(b) <= room {
 		t.line = append(t.line, b...)
@@ -121,9 +154,12 @@ func (t *stderrTee) appendLocked(b []byte) {
 // session's budget is gone, and starts the next one. It keeps the line's
 // storage, so a steady stream allocates nothing beyond the note's own text.
 func (t *stderrTee) emitLocked() {
-	// A \r\n line ends with a carriage return that is not part of what the
-	// agent said.
-	line := bytes.TrimSuffix(t.line, []byte("\r"))
+	// A carriage return still held here is the \r of a \r\n line ending: the
+	// line is over, so nothing can follow it but the \n absorb already took.
+	// It is punctuation rather than what the agent said, so it is dropped —
+	// and, never having joined the line, it cost the cap nothing.
+	t.pendingCR = false
+	line := t.line
 	truncated := t.truncated
 	if len(line) == 0 {
 		t.line, t.truncated = t.line[:0], false
@@ -158,6 +194,10 @@ func (t *stderrTee) Flush() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// The child wrote nothing after it, so a carriage return held back at the
+	// end of the last fragment ends no line: it is the last thing the agent
+	// said, and it is kept.
+	t.settleCRLocked()
 	t.emitLocked()
 	if t.dropped == 0 {
 		return

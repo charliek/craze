@@ -30,7 +30,9 @@ import (
 // head of its range read from the journal's own file instead (headRange), so
 // a cursor outlives an eviction for as long as the journal holds what it
 // points at. The whole range is served or the subscription fails: nothing is
-// ever truncated or skipped.
+// ever truncated or skipped. A failure over the file may come after a prefix
+// of the range has been delivered — headRange.serve says why, and what a
+// consumer owes that prefix.
 
 // Defaults for EventLogOptions and SubscribeOptions (plan 020 §3.1–3.2).
 const (
@@ -829,6 +831,20 @@ type headRange struct {
 // fails: ReadRange refuses a range with a seq missing inside it rather than
 // skipping one, and send refuses a record that does not follow the last. The
 // owner calls it, and it is the only I/O any of this does.
+//
+// A subscription that fails here may already have delivered a prefix of its
+// range, and that is the resolution of §3.2's two rules where they meet — the
+// file range is "streamed, not held", so it cannot be buffered until it is
+// known to be whole, and yet "the whole range is covered or the subscription
+// fails". ReadRange calls back per record as it parses, so a malformed line, a
+// line over the reader's limit or a seq missing late in the range is found
+// only after the records before it have gone out. The terminal error is what
+// makes the whole subscription void: a consumer must discard what it received
+// rather than read the prefix as a partial transcript, because a prefix is
+// never what a subscription promised. Nothing is truncated silently — the
+// failure is always reported, as the subscription's Err and its closed
+// Records channel, and a subscription that ends is never resumable from what
+// it delivered.
 func (h *headRange) serve(s *Subscription, prev *uint64) error {
 	if h.flushed < h.to {
 		// The writer had not written the range's end at the cutoff. Ask for a
@@ -995,6 +1011,18 @@ func (l *EventLog) beginAttempt(kind journal.PromptKind, text string) promptAtte
 	l.noteMu.RLock()
 	defer l.noteMu.RUnlock()
 	if l.notesCut {
+		// Close cut the notes off between the prompt's claim and this
+		// registration, so this attempt has neither a prompt note nor a
+		// prompt_end: Close's endOpenAttemptsLocked had nothing to end,
+		// because nothing was registered yet, and the zero attempt returned
+		// here writes nothing later either. Accepted (plan 020 §3.5): the
+		// drop is counted in the log's health (EventLogHealth.NotesDropped)
+		// like any other note refused after the cutoff, and it happens only
+		// when the session is being closed underneath the prompt that claimed
+		// it — the same window a session or start note is lost in. Registering
+		// before the cutoff check would be worse: an attempt could then be
+		// registered after Close ended the open ones, and never be ended at
+		// all.
 		l.notesDropped.Add(1)
 		return promptAttempt{}
 	}

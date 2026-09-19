@@ -19,7 +19,7 @@ import (
 // fixed there, at construction: the workspace made absolute by the rule Start
 // applies later, the agent binary as requested, and the options that shape
 // the session. What only Start learns — the provider's session id, and the
-// binary the spawn actually resolved — goes in the session note (noteSession)
+// binary Start resolved and spawned — goes in the session note (noteSession)
 // once Start has it. The log writes the closing diag itself, in its Close.
 
 // journalHeader is what a session's journal header records beyond what
@@ -77,6 +77,13 @@ func newSessionJournal(opts Options, h journalHeader, inc string) (*journal.Writ
 // they use it (live Start, nativeWorkspace): the process's working directory
 // when none was given, made absolute. The journal applies it at construction,
 // so its header names the directory Start will run in.
+//
+// Start applies it again later, so a process that changed its working
+// directory in between would journal a path the agent does not run in.
+// Accepted: craze never chdirs, and every production caller settles the
+// workspace once before the session is built — internal/cli/tui.go and
+// prompt.go both go through resolveWorkspace — so the rule applied here and
+// the one applied in Start name the same directory.
 func absWorkspace(ws string) (string, error) {
 	if ws == "" {
 		wd, err := os.Getwd()
@@ -100,8 +107,18 @@ func diagWriter(opts Options) io.Writer {
 
 // noteSession writes the session note: the provider's session id once Start
 // has learned it, the id it was loaded from on a resume, and the agent binary
-// the spawn resolved. It is a Note, so it never blocks; the caller must not
+// Start resolved and ran. It is a Note, so it never blocks; the caller must not
 // hold s.mu (plan 020 §3.5: no note is ever written under it).
+//
+// Both sessions read the id under their lock and note it after releasing it
+// (live.go's two call sites, native.go's), so a Close that cuts the log's note
+// admission in that window drops this note. Accepted: the drop is counted in
+// the log's health (EventLogHealth.NotesDropped), the file's closing diag is
+// still the last line, and it happens only when a session is being closed
+// concurrently with its own start — a session nobody will read a journal for.
+// Holding s.mu across the note to close the window is the one thing §3.5
+// forbids, because a note written under it would put the journal's queue
+// inside the session's lock.
 func (l *EventLog) noteSession(n journal.SessionNote) {
 	if l.journal == nil {
 		return
@@ -180,6 +197,10 @@ func promptErrClass(err error) string {
 // what failed it. Both sessions write it before they tear down what Start
 // built (plan 020 §3.5): Close is the log's admission cutoff, and a note
 // written after it would be counted and dropped.
+//
+// A Close from another goroutine can still cut the admission first, and then
+// this note is dropped — accepted for the same reason as the session note
+// above, and counted the same way.
 func (l *EventLog) noteStartFailed(err error) {
 	if l.journal == nil || err == nil {
 		return
@@ -188,20 +209,4 @@ func (l *EventLog) noteStartFailed(err error) {
 		"errClass":   promptErrClass(err),
 		"errMessage": err.Error(),
 	}})
-}
-
-// resolvedBinary is the agent binary acp.Spawn resolved for a session with a
-// journal: the same lookup Spawn makes (an explicit binary, else
-// CRAZE_AGENT_BIN, else the provider's candidates on PATH), asked again
-// because the spawn does not report it. "" without a journal, where nothing
-// would record it, and if the lookup no longer finds it.
-func (l *EventLog) resolvedBinary(explicit string, candidates []string) string {
-	if l.journal == nil {
-		return ""
-	}
-	bin, err := acp.ResolveBinaryCandidates(explicit, candidates)
-	if err != nil {
-		return ""
-	}
-	return bin
 }
