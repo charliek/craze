@@ -346,9 +346,25 @@ func TestBashShell(t *testing.T) {
 	}
 	// The temporary directory is the fixed one, or — where something else
 	// holds that name on this machine — a session's own under the same base
-	// (TestBashTmpDir); either way one that passes the check.
-	if h.shell != bashPath || filepath.Dir(h.tmp) != os.TempDir() || !strings.HasPrefix(filepath.Base(h.tmp), "craze") || ensureTmp(h.tmp) != nil {
-		t.Fatalf("thisHost = %+v", h)
+	// (TestBashTmpDir); either way one that passes the check. Each part is
+	// reported on its own: this runs against whatever the machine's temp
+	// directory already holds, so a failure has to say which part was wrong
+	// and what it saw.
+	if h.shell != bashPath {
+		t.Errorf("shell = %q, want %q", h.shell, bashPath)
+	}
+	if dir := filepath.Dir(h.tmp); dir != os.TempDir() {
+		t.Errorf("the temporary directory %q is under %q, not the machine's %q", h.tmp, dir, os.TempDir())
+	}
+	if base := filepath.Base(h.tmp); !strings.HasPrefix(base, "craze") {
+		t.Errorf("the temporary directory is named %q, which is neither craze nor a craze- fallback", base)
+	}
+	if err := ensureTmp(h.tmp); err != nil {
+		info, statErr := os.Lstat(h.tmp)
+		t.Errorf("the temporary directory thisHost chose does not pass the check: %v (Lstat: %v, %v)", err, info, statErr)
+	}
+	if t.Failed() {
+		t.FailNow() // the rest of this test builds on the host it chose
 	}
 	tl, err := newBash()
 	if err != nil {
