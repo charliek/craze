@@ -93,6 +93,11 @@ Environment:
                        dies of its own closed stdin however craze exits, so a
                        test cannot tell an agent craze shut down from one it
                        orphaned.
+  CRAZE_FAKE_STDERR=<line>  every script except hang and hang-ack writes this
+                       line to stderr once at startup and once per
+                       session/prompt. hang and hang-ack stay silent, by the
+                       same house rule that keeps their behaviour otherwise
+                       unchanged.
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in

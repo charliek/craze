@@ -1,16 +1,39 @@
 package acp
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const shutdownGrace = 2 * time.Second
+
+// ErrAgentExited is Client.Close's answer when the non-blocking probe of
+// child.waitCh found it already closed: the agent's exit had been reaped
+// before craze's first Close on it sampled it. It does not mean Close
+// failed — match it with errors.Is, never a nil check, because a
+// craze-initiated close still returns nil. There is a real window between
+// the process exiting, cmd.Wait returning and the reaper closing waitCh, so
+// an agent that crashes in the same microseconds as craze's own close is
+// reported as craze-initiated (§9, accepted).
+var ErrAgentExited = errors.New("acp: agent exited")
+
+// agentExitedErr wraps ErrAgentExited with what the reaper recorded: the
+// wait error when the agent exited non-zero or crashed, and "exit 0" when it
+// exited clean — the one case Conn.Err() cannot otherwise tell apart from
+// craze's own close (both read ErrClosed).
+func agentExitedErr(waitErr error) error {
+	if waitErr != nil {
+		return fmt.Errorf("%w: %v", ErrAgentExited, waitErr)
+	}
+	return fmt.Errorf("%w: exit 0", ErrAgentExited)
+}
 
 type SpawnOptions struct {
 	Binary string
@@ -58,11 +81,12 @@ func ResolveBinaryCandidates(explicit string, candidates []string) (string, erro
 }
 
 type Child struct {
-	cmd        *exec.Cmd
-	pgid       int
-	waitCh     chan struct{}
-	waitErr    error
-	stderrDone chan struct{}
+	cmd          *exec.Cmd
+	pgid         int
+	waitCh       chan struct{}
+	waitErr      error
+	stderrDone   chan struct{}
+	shutdownOnce sync.Once
 }
 
 func (ch *Child) PID() int {
@@ -82,18 +106,25 @@ func (ch *Child) Wait() {
 	}
 }
 
+// Shutdown signals the agent's whole process group, once per child. The first
+// call signals even when the agent itself has already exited: what it started
+// — a tool's subprocess — is still in its group, and that is exactly what
+// would otherwise be left running. A later call signals nothing, because by
+// then the group may be gone and its id free for something else.
 func (ch *Child) Shutdown() {
 	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
 		return
 	}
-	_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGTERM)
-	select {
-	case <-ch.waitCh:
-		return
-	case <-time.After(shutdownGrace):
-		_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGKILL)
-		<-ch.waitCh
-	}
+	ch.shutdownOnce.Do(func() {
+		_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGTERM)
+		select {
+		case <-ch.waitCh:
+			return
+		case <-time.After(shutdownGrace):
+			_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGKILL)
+			<-ch.waitCh
+		}
+	})
 }
 
 func signalGroup(pgid int, proc *os.Process, sig syscall.Signal) error {

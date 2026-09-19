@@ -391,6 +391,10 @@ type orderSession struct {
 	// name tells a second session's close apart from the first's in the same
 	// log. The session a model starts with leaves it empty.
 	name string
+	// exited makes Close report the agent exited on its own instead of nil —
+	// the shape session.Close has after issue #23 when the child's exit was
+	// reaped before craze's own Close on it.
+	exited bool
 }
 
 func (s orderSession) Close() error {
@@ -399,7 +403,11 @@ func (s orderSession) Close() error {
 	} else {
 		s.log.add("sess close " + s.name)
 	}
-	return s.Stub.Close()
+	_ = s.Stub.Close()
+	if s.exited {
+		return agent.ErrAgentExited
+	}
+	return nil
 }
 
 // exitTailModel is a model the way Run leaves it: colours applied through the
@@ -443,6 +451,9 @@ func assertOrder(t *testing.T, log *orderLog, want ...string) {
 // close, in that order — and with the nil final a recovered panic hands back,
 // the host still closes, from the argument and not from final, and the session
 // that closes is the one the program ended with, not the one it started with.
+// It is also the chain's seam for issue #23 (§3.7): the "the agent exited on
+// its own" case proves the bool finishRun returns follows the session's
+// close, not just startErr.
 func TestFinishRunOrder(t *testing.T) {
 	t.Run("final is the model", func(t *testing.T) {
 		m, log, w := exitTailModel(t)
@@ -450,8 +461,12 @@ func TestFinishRunOrder(t *testing.T) {
 		startErr := errors.New("never started")
 		final := m
 		final.startErr = startErr
-		if got := finishRun(w, final, m, h); !errors.Is(got, startErr) {
+		showAgentDiag, got := finishRun(w, final, m, h)
+		if !errors.Is(got, startErr) {
 			t.Fatalf("finishRun returned %v, want the start failure", got)
+		}
+		if !showAgentDiag {
+			t.Fatal("finishRun did not report the run as failed for a start error")
 		}
 		assertOrder(t, log, "title clear", "term reset", "host close", "sess close")
 		if h.deadline <= 0 || h.deadline > host.DefaultCloseTimeout {
@@ -465,8 +480,15 @@ func TestFinishRunOrder(t *testing.T) {
 		// pins that against the real program.
 		m, log, w := exitTailModel(t)
 		h := &orderHost{log: log}
-		if err := finishRun(w, nil, m, h); err != nil {
+		showAgentDiag, err := finishRun(w, nil, m, h)
+		if err != nil {
 			t.Fatalf("finishRun returned %v", err)
+		}
+		// A nil final leaves started false, which alone makes this a failed
+		// run: the recovered-panic case must show the agent's stderr even
+		// with no start error of its own.
+		if !showAgentDiag {
+			t.Fatal("finishRun did not report the run as failed for a nil final")
 		}
 		// No title clear: without a Model there is no lastTitle to say one
 		// was set, exactly as before the tail was extracted.
@@ -489,7 +511,7 @@ func TestFinishRunOrder(t *testing.T) {
 		if updated.(Model).sess == initial.sess {
 			t.Fatal("setup: confirmProvider did not swap the session")
 		}
-		if err := finishRun(w, nil, initial, h); err != nil {
+		if _, err := finishRun(w, nil, initial, h); err != nil {
 			t.Fatalf("finishRun returned %v", err)
 		}
 		// Exact: the picked session closes, last, and the initial one is not
@@ -499,8 +521,30 @@ func TestFinishRunOrder(t *testing.T) {
 	})
 	t.Run("no host", func(t *testing.T) {
 		m, log, w := exitTailModel(t)
-		_ = finishRun(w, m, m, nil)
+		_, _ = finishRun(w, m, m, nil)
 		assertOrder(t, log, "title clear", "term reset", "sess close")
+	})
+	t.Run("the agent exited on its own", func(t *testing.T) {
+		// An orderSession-style stub whose Close reports agent.ErrAgentExited
+		// — the shape session.Close has after issue #23 — with no start error
+		// at all: showAgentDiag must still come back true, and startErr must
+		// stay nil and unaffected, proving the two terms are separate.
+		// started is set explicitly: exitTailModel's own New() never sends
+		// startedMsg, and leaving started false would let !started alone
+		// carry showAgentDiag, masking whether agentExited was folded in at
+		// all.
+		m, log, w := exitTailModel(t)
+		m.setSession(orderSession{Stub: NewStub(), log: log, exited: true})
+		m.started = true
+		h := &orderHost{log: log}
+		showAgentDiag, startErr := finishRun(w, m, m, h)
+		if startErr != nil {
+			t.Fatalf("finishRun returned a start error %v, want nil", startErr)
+		}
+		if !showAgentDiag {
+			t.Fatal("finishRun did not report the agent's own exit")
+		}
+		assertOrder(t, log, "title clear", "term reset", "host close", "sess close")
 	})
 }
 
@@ -558,7 +602,7 @@ func TestRecoveredPanicClosesThePickedSession(t *testing.T) {
 	// the initial session is already in the log.
 	assertOrder(t, log, "sess close")
 	log.events = nil
-	if err := finishRun(w, final, initial, h); err != nil {
+	if _, err := finishRun(w, final, initial, h); err != nil {
 		t.Fatalf("finishRun returned %v", err)
 	}
 	assertOrder(t, log, "term reset", "host close", "sess close picked")
@@ -710,7 +754,7 @@ func TestQuitReleasesTheHostBeforeClosingTheSession(t *testing.T) {
 			if msg := handlerMsg(cmd); msg != (tea.QuitMsg{}) {
 				t.Fatalf("the quit command returned %T, want tea.QuitMsg", msg)
 			}
-			_ = finishRun(io.Discard, m, m, h)
+			_, _ = finishRun(io.Discard, m, m, h)
 
 			hostAt, sessAt := slices.Index(log.events, "host close"), slices.Index(log.events, "sess close")
 			if hostAt < 0 || sessAt < 0 || hostAt > sessAt {

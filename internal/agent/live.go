@@ -24,6 +24,12 @@ type session struct {
 
 	closeOnce sync.Once
 	closeDone chan struct{}
+	// closeErr is client.Close()'s stored result: the sentinel wrapping
+	// agent.ErrAgentExited when the agent's exit had been reaped before this
+	// Close sampled it, nil otherwise. Every Close call after the first
+	// returns this rather than nil, so a second caller sees the same answer
+	// the first did (§3.7.3).
+	closeErr error
 
 	mu       sync.Mutex
 	started  bool
@@ -506,11 +512,18 @@ func (s *session) flushReplayUser() {
 // would be strictly worse than a session without them.
 func (s *session) discoverPlugins(workspace string) []PluginEntry {
 	scan := s.provider().PluginScan()
+	// Both of this closure's lines are craze's own — "plugin dirs ignored for
+	// …" below and "plugin dir skipped: …" from the package function — so
+	// both go to Diag, not the agent's own Stderr lane (§3.7.1).
+	diag := s.opts.Diag
+	if diag == nil {
+		diag = s.opts.Stderr
+	}
 	warn := func(msg string) {
-		if s.opts.Stderr == nil {
+		if diag == nil {
 			return
 		}
-		fmt.Fprintln(s.opts.Stderr, msg)
+		fmt.Fprintln(diag, msg)
 	}
 	if !scan.Dirs && len(s.opts.PluginDirs) > 0 {
 		warn("plugin dirs ignored for " + s.provider().Name())
@@ -1205,7 +1218,11 @@ func (s *session) AnswerPlan(id string, accept bool) error {
 }
 
 // Close reaps the child exactly once; later callers block until that reap has
-// finished rather than returning while the child is still alive.
+// finished rather than returning while the child is still alive. It stores
+// client.Close()'s result and returns the same value on every call, so
+// requestQuit's own close and finishRun's later one — the same session,
+// closed twice — agree: errors.Is(err, ErrAgentExited) holds on both when the
+// agent's exit was reaped first, on neither when craze closed it.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
@@ -1215,11 +1232,11 @@ func (s *session) Close() error {
 		client := s.client
 		s.mu.Unlock()
 		if client != nil {
-			_ = client.Close()
+			s.closeErr = client.Close()
 		}
 	})
 	<-s.closeDone
-	return nil
+	return s.closeErr
 }
 
 func (s *session) onPermission(turn int, req acp.PermissionRequest) acp.PermissionDecision {

@@ -214,6 +214,13 @@ does, however craze exits — killed outright included — so a check that the
 agent is gone could not tell an agent craze shut down from one it orphaned. The
 `SIGHUP` cases in `test_host_status.py` set it.
 
+`CRAZE_FAKE_STDERR=<line>` makes every fake-agent script except `hang` and
+`hang-ack` write that line to stderr once at startup and once per
+session/prompt. `hang` and `hang-ack` stay silent, the same house rule that
+keeps their behaviour otherwise unchanged. It is the canary the
+`test_tui.py` cases for issue #23 use to prove the agent's own stderr is
+gated on the run having failed.
+
 ## tmux smoke
 
 `tests/cli/tmux_smoke.py` drives the real binary in a real terminal at 100x30

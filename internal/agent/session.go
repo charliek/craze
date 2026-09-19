@@ -35,6 +35,13 @@ var ErrUnsupported = acp.ErrUnsupported
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
 
+// ErrAgentExited is session.Close's answer when the agent's own exit had
+// been reaped before craze's first Close on it sampled the child's wait
+// channel — not that Close failed. Match it with errors.Is; internal/tui
+// imports this package rather than internal/acp directly, which make lint
+// forbids (Makefile's acp-import rule).
+var ErrAgentExited = acp.ErrAgentExited
+
 // ErrPromptCancelled is a prompt Cancel stopped before its turn opened: while it
 // was still waiting for the agent's first command catalog, or once it had been
 // claimed by Begin and before its continuation opened the turn. No turn was
@@ -381,8 +388,16 @@ type Options struct {
 	Force     bool
 	Model     string
 	Mode      string
-	Stderr    io.Writer
-	Env       []string
+	// Stderr is the agent child's own stderr sink. Diag is where craze's own
+	// notes about this session go — discoverPlugins' warn closure — and
+	// falls back to Stderr when nil, so headless craze prompt and craze
+	// frame, which never set it, keep printing those notes on the same
+	// stream as the agent's own diagnostics (§3.7.1). A TUI splits the two:
+	// the agent's stderr is deferred and gated on the run having failed,
+	// craze's own notes are not.
+	Stderr io.Writer
+	Diag   io.Writer
+	Env    []string
 	// PluginDirs are extra plugin roots to read, cursor-agent's --plugin-dir
 	// by another route. A relative path is the workspace's. Providers whose
 	// PluginScan does not want them ignore them.

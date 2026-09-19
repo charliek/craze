@@ -33,31 +33,50 @@ def _set_winsize(fd: int, rows: int = 24, cols: int = 80) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def _cmdline_has(needle: str) -> bool:
+def _cmdline_pids(needle: str) -> list[int]:
+    """Every pid whose argv[0] is exactly needle.
+
+    argv[0], not "needle appears somewhere in argv": craze's own process
+    names the fake agent's path too, as --agent-bin's value, so a substring
+    search would also catch craze itself while it is still running -- which
+    a caller hunting for the agent's own pid to signal must never do. Only
+    Linux has /proc; everywhere else ps -o pid=,args= is the one portable
+    view of another process's argv paired with its pid, and an absolute
+    path's own first token is its argv[0] there too. check=True on purpose:
+    a caller waiting for the list to empty reads [] as proof the child is
+    gone, so a ps that failed must raise rather than quietly turn a leak
+    check green.
+    """
     encoded = needle.encode()
     if sys.platform != "linux":
-        # Only Linux has /proc; everywhere else ps is the one portable view of
-        # another process's argv. check=True on purpose: every caller reads a
-        # False as proof the child is gone, so a ps that failed must raise
-        # rather than quietly turn a leak check green.
         out = subprocess.run(
-            ["ps", "-axww", "-o", "args="],
+            ["ps", "-axww", "-o", "pid=,args="],
             capture_output=True,
             check=True,
         ).stdout
-        return encoded in out
+        pids = []
+        for line in out.splitlines():
+            pid_str, _, args = line.strip().partition(b" ")
+            if pid_str.isdigit() and args.split(b" ", 1)[0] == encoded:
+                pids.append(int(pid_str))
+        return pids
     try:
         entries = Path("/proc").glob("[0-9]*/cmdline")
     except OSError:
-        return False
+        return []
+    pids = []
     for path in entries:
         try:
             data = path.read_bytes()
         except OSError:
             continue
-        if encoded in data:
-            return True
-    return False
+        if data.split(b"\0", 1)[0] == encoded:
+            pids.append(int(path.parent.name))
+    return pids
+
+
+def _cmdline_has(needle: str) -> bool:
+    return bool(_cmdline_pids(needle))
 
 
 class PTYCraze:
@@ -332,6 +351,32 @@ def _wait_fake_gone(fake_agent_bin: Path, timeout: float = 3) -> None:
     raise AssertionError(f"fake-agent still running: {needle}")
 
 
+def quit_craze(tui: PTYCraze, timeout: float = 5) -> None:
+    """Ctrl+D, then assert a clean exit. Moved here from test_host_status.py
+    (issue #23) so test_tui.py's own cases can use it too; it closes over no
+    module-level WAIT, so it gets its own default, matching wait_exit's.
+    """
+    tui.write(b"\x04")
+    code = tui.wait_exit(timeout=timeout)
+    assert code == 0, tui.screen()[-3000:]
+
+
+def _wait_output(tui: PTYCraze, needle: str, timeout: float = 5) -> str:
+    """wait_contains that expects craze to have exited already.
+
+    Moved here from test_host_status.py (issue #23) for the same reason as
+    quit_craze, with its own default timeout rather than that module's WAIT.
+    """
+    deadline = time.monotonic() + timeout
+    text = ""
+    while time.monotonic() < deadline:
+        text = _ANSI.sub("", tui.screen())
+        if needle in text:
+            return text
+        time.sleep(0.05)
+    raise AssertionError(f"timeout waiting for {needle!r}: {text[-3000:]!r}")
+
+
 def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
@@ -382,6 +427,103 @@ def test_tui_authfail_exits_nonzero(
         code = tui.wait_exit()
         assert code != 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_clean_exit_prints_no_agent_stderr(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """F1/#23: a clean /exit never shows the agent's own stderr.
+
+    The pair is what makes the negative sound: `plugin dir skipped:` (craze's
+    own lane, from the missing --plugin-dir) is present, proving post-exit
+    bytes survive this harness at all, so the canary's absence is the agent
+    lane being discarded on a clean run, not a pty that dropped bytes.
+    """
+    canary = "CANARY-CLEAN-EXIT"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        env_extra={"CRAZE_FAKE_STDERR": canary},
+        extra_args=["--plugin-dir", "definitely-not-here"],
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"hello\r")
+        tui.wait_contains("echo: hello")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+    text = _ANSI.sub("", tui.screen())
+    assert "plugin dir skipped:" in text, text[-3000:]
+    assert canary not in text, text[-3000:]
+
+
+def test_tui_authfail_prints_agent_stderr(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """#23's deterministic start-failure companion to
+    test_tui_authfail_exits_nonzero: a session that never started still shows
+    the agent's stderr, and exits exactly 1.
+
+    authfail's error lands before the user can press anything (§2.7 fact 6),
+    with nothing racing errMsg the way Ctrl+D's requestQuit does elsewhere, so
+    unlike TestTUIKeepsTheAgentStderrOffTheTerminal in Go this one can assert
+    the exit code too. No `plugin dir skipped:` line is expected:
+    discoverPlugins runs only after authenticate, which authfail never
+    reaches — the positive control here is the exit code, not a second line.
+    """
+    canary = "CANARY-AUTHFAIL"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="authfail",
+        env_extra={"CRAZE_FAKE_STDERR": canary},
+    ) as tui:
+        tui.wait_contains("authentication failed")
+        tui.write(b"\x04")
+        code = tui.wait_exit()
+        assert code == 1, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+    text = _ANSI.sub("", tui.screen())
+    assert canary in text, text[-3000:]
+    assert "plugin dir skipped:" not in text, text[-3000:]
+
+
+def test_tui_agent_death_prints_stderr_and_exits_clean(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """#23 end to end: an agent that dies on its own is not craze failing.
+
+    The stored ErrAgentExited travels session.Close -> finishRun's bool ->
+    flush's failed, so the agent's stderr (including the startup canary)
+    survives past the exit — and craze still exits 0, because a dead agent is
+    not craze's own failure. CRAZE_FAKE_LINGER keeps the fake from dying of
+    its own closed stdin on some other path than the SIGTERM this test sends;
+    `Working` is long-turn's proof the prompt was read and a turn is genuinely
+    open, so the kill lands mid-session rather than racing session/prompt.
+    """
+    canary = "CANARY-AGENT-DIED"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="long-turn",
+        step="30s",
+        env_extra={"CRAZE_FAKE_STDERR": canary, "CRAZE_FAKE_LINGER": "1"},
+    ) as tui:
+        tui.wait_contains("cursor")
+        tui.write(b"go the long way\r")
+        tui.wait_contains("Working")
+        pids = _cmdline_pids(str(fake_agent_bin))
+        assert len(pids) == 1, pids
+        os.kill(pids[0], signal.SIGTERM)
+        tui.wait_contains("error: ")
+        tui.write(b"\x04")
+        code = tui.wait_exit()
+        assert code == 0, tui.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+    text = _ANSI.sub("", tui.screen())
+    assert canary in text, text[-3000:]
 
 
 def test_tui_subagent_view_enter_esc(

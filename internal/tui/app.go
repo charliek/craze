@@ -622,7 +622,10 @@ func New(cfg Config) Model {
 	return m
 }
 
-func Run(cfg Config) error {
+// Run returns whether the agent's own diagnostics should print after exit —
+// broader than just an agent exit, see finishRun — and the start failure, if
+// any (§3.7.3).
+func Run(cfg Config) (bool, error) {
 	m := New(cfg)
 	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
 	// are written from different goroutines, and a copy landing inside a frame
@@ -688,14 +691,18 @@ func Run(cfg Config) error {
 	default:
 	}
 	err = runErrAfterHangup(err, hungUp)
-	startErr := finishRun(out, final, m, cfg.Host)
+	showAgentDiag, startErr := finishRun(out, final, m, cfg.Host)
+	// p.Run's own error is folded in here too: a recovered panic or another
+	// run failure is reason enough to show the agent's stderr, whatever
+	// finishRun made of the session close (§3.7.3).
+	showAgentDiag = showAgentDiag || err != nil
 	if err != nil {
-		return err
+		return showAgentDiag, err
 	}
 	// A quit is clean unless the session never started. Only startCmd's
 	// failure counts: an error mid-session leaves a usable craze, and quitting
 	// out of one is a normal exit.
-	return startErr
+	return showAgentDiag, startErr
 }
 
 // runErrAfterHangup is p.Run's error once a terminal hangup has ended the
@@ -721,12 +728,23 @@ func runErrAfterHangup(err error, hungUp bool) error {
 // argument — Config.Host, never a field read through final — so the panic path
 // still releases the pane: herdr leaves a pane that was never released showing
 // the last state it was told. The session comes from m's owner, never from
-// final, for the same reason. It returns the start failure final carries, if
-// any.
-func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
+// final, for the same reason.
+//
+// It returns the start failure final carries, if any, and — issue #23 —
+// whether the agent's own stderr should print: the broader "the run failed"
+// predicate, not just an agent exit, so it is named for what it decides
+// rather than for the issue. That predicate is startErr != nil, or the
+// session never having started at all (a nil final — a recovered panic —
+// leaves started false, same as one that never got startedMsg), or the
+// agent's own exit having been reaped before this Close on it sampled that.
+// internal/cli folds in a fourth term, p.Run's own error, which this frame
+// never sees.
+func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	var startErr error
+	started := false
 	if fm, ok := final.(Model); ok {
 		startErr = fm.startErr
+		started = fm.started
 		// Every exit path lands here: clearWindowTitle no-ops when titles
 		// were off or a title was never set, and otherwise writes OSC 2
 		// through the same writer bubbletea rendered into (§3.10).
@@ -746,12 +764,14 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) error {
 	// a picker built after it lives only in later copies — which a recovered
 	// panic does not hand back. Every copy shares the owner, so it names the
 	// session the program ended with on every exit path. A zero Model has none.
+	var agentExited bool
 	if m.owner != nil {
 		if sess := m.owner.current(); sess != nil {
-			_ = sess.Close()
+			agentExited = errors.Is(sess.Close(), agent.ErrAgentExited)
 		}
 	}
-	return startErr
+	failed := startErr != nil || agentExited || !started
+	return failed, startErr
 }
 
 // Init starts the session and arms the event reader in the same batch. The

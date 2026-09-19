@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -688,6 +690,41 @@ func TestChildCrashStart(t *testing.T) {
 	if err == nil {
 		_ = s.Close()
 		t.Fatal("expected start error after child exit")
+	}
+}
+
+// TestSessionCloseReportsAgentExitedRepeatedly is issue #23's §3.7.3: two
+// session.Close calls on a session whose client self-exited both give an
+// errors.Is(…, ErrAgentExited) error, which is what requestQuit-then-
+// finishRun relies on. The agent is killed directly, by pid, rather than
+// through any craze API, so the death is genuinely the agent's own.
+//
+// kill(pid, 0) reporting ESRCH is deterministic proof the reaper's own
+// cmd.Wait has already reaped the zombie: nothing else in this process calls
+// wait4 on this child, so the pid cannot disappear from the process table
+// any earlier than that — the same fact Close's own waitCh probe rests on.
+func TestSessionCloseReportsAgentExitedRepeatedly(t *testing.T) {
+	s := startScript(t, "echo", true)
+	pid := s.client.PID()
+	if pid == 0 {
+		t.Fatal("setup: the session has no child pid")
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatalf("find process: %v", err)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitUntil(t, "the agent to be reaped", func() bool {
+		return proc.Signal(syscall.Signal(0)) != nil
+	})
+	first := s.Close()
+	if !errors.Is(first, ErrAgentExited) {
+		t.Fatalf("Close() = %v, want an error wrapping ErrAgentExited", first)
+	}
+	if second := s.Close(); !errors.Is(second, ErrAgentExited) {
+		t.Fatalf("second Close() = %v, want an error wrapping ErrAgentExited", second)
 	}
 }
 

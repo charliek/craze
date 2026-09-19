@@ -15,6 +15,10 @@ type Client struct {
 	conn  *Conn
 	child *Child
 
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
+
 	mu        sync.Mutex
 	sessionID string
 	inPrompt  bool
@@ -91,10 +95,11 @@ type promptResult struct {
 
 func newClient(conn *Conn, child *Child) *Client {
 	c := &Client{
-		conn:     conn,
-		child:    child,
-		dialect:  DialectCursor,
-		incoming: make(map[string]*pendingReq),
+		conn:      conn,
+		child:     child,
+		dialect:   DialectCursor,
+		incoming:  make(map[string]*pendingReq),
+		closeDone: make(chan struct{}),
 	}
 	conn.SetRequestHandler(c.onRequest)
 	conn.SetNotifyHandler(c.onNotify)
@@ -558,25 +563,61 @@ func (c *Client) AnswerPermission(id string, dec PermissionDecision) {
 	}
 }
 
+// Close shuts the agent down and reports whether it had already exited on
+// its own: a non-blocking probe of c.child.waitCh, at the very top, before
+// anything else — including the pre-close session/cancel below — so an agent
+// that exits *because of* that cancel is never misread as having exited
+// first. If the channel is already closed the agent's exit had been reaped
+// before this probe sampled it, and Close returns an error wrapping
+// ErrAgentExited; a craze-initiated shutdown returns nil, as before. The rest
+// of Close is unchanged and still runs either way — only the return value
+// depends on the probe.
+//
+// Close is idempotent with a stored result: the first call is authoritative
+// and every later call blocks on closeDone and returns the same value,
+// exactly the shape session.Close already has. Without this, a repeated
+// Close — spawnScript's own t.Cleanup, or requestQuit followed by
+// finishRun — would find waitCh already closed by the first call's own
+// Shutdown and misreport a craze-initiated close as a self-exit.
 func (c *Client) Close() error {
-	c.completeIncomingCancelled()
-	c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
-	c.mu.Lock()
-	inFlight := c.inPrompt
-	sid := c.sessionID
-	c.mu.Unlock()
-	if inFlight && sid != "" {
-		_ = c.conn.Notify(context.Background(), MethodSessionCancel, CancelParams{SessionID: sid})
-	}
-	if c.child != nil {
-		c.child.Shutdown()
-	}
-	_ = c.conn.Close()
-	<-c.conn.Done()
-	if c.child != nil {
-		c.child.Wait()
-	}
-	return nil
+	c.closeOnce.Do(func() {
+		defer close(c.closeDone)
+		var exited error
+		if c.child != nil {
+			select {
+			case <-c.child.waitCh:
+				exited = agentExitedErr(c.child.waitErr)
+			default:
+			}
+		}
+		c.completeIncomingCancelled()
+		c.failPromptWaiters(PromptResult{StopReason: StopCancelled}, nil)
+		c.mu.Lock()
+		inFlight := c.inPrompt
+		sid := c.sessionID
+		c.mu.Unlock()
+		if inFlight && sid != "" {
+			_ = c.conn.Notify(context.Background(), MethodSessionCancel, CancelParams{SessionID: sid})
+		}
+		if c.child != nil {
+			c.child.Shutdown()
+		}
+		_ = c.conn.Close()
+		<-c.conn.Done()
+		if c.child != nil {
+			c.child.Wait()
+		}
+		c.closeErr = exited
+	})
+	<-c.closeDone
+	return c.closeErr
+}
+
+// PID is the agent child's process id, or 0 for an in-process test client
+// with no child. It exists for anything that needs to reach the process
+// directly rather than through Close.
+func (c *Client) PID() int {
+	return c.child.PID()
 }
 
 // onRequest and onNotify route the cursor extension methods identically; the

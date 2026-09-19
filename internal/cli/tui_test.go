@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -77,7 +78,13 @@ func TestTUIKeepsTheAgentStderrOffTheTerminal(t *testing.T) {
 	}
 	select {
 	// The fake agent never answered initialize, so whatever runTUI returns is
-	// craze's exit status doing its job, not a test failure.
+	// craze's exit status doing its job, not a test failure. It is
+	// deliberately not asserted: Ctrl+D's requestQuit closes the session,
+	// which unblocks startCmd's Initialize and sends errMsg racing the
+	// QuitMsg the quit itself produces, so on some schedules the error comes
+	// back nil (§2.7 fact 4, §3.7.3 F2). The term that makes the canary print
+	// on every schedule is !Model.started, true either way here, since
+	// startedMsg never arrives on either race outcome.
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("craze did not quit after ctrl+d")
@@ -87,18 +94,20 @@ func TestTUIKeepsTheAgentStderrOffTheTerminal(t *testing.T) {
 	}
 }
 
-// TestDeferredStderrCapsWhatItHolds: an agent looping on stderr must not grow
-// the buffer without bound, and the cap has to say what it swallowed.
+// TestDeferredStderrCapsWhatItHolds: an agent looping on its own stderr must
+// not grow that lane without bound, and — on a failed run, the only run that
+// ever shows the agent's lane at all (issue #23, §3.7.1) — the cap has to say
+// what it swallowed.
 func TestDeferredStderrCapsWhatItHolds(t *testing.T) {
 	d := &deferredStderr{}
 	chunk := bytes.Repeat([]byte("x"), 4096)
 	for written := 0; written < deferredStderrMax+2*len(chunk); written += len(chunk) {
-		if n, err := d.Write(chunk); n != len(chunk) || err != nil {
+		if n, err := d.agent().Write(chunk); n != len(chunk) || err != nil {
 			t.Fatalf("write %d, %v", n, err)
 		}
 	}
 	var out bytes.Buffer
-	d.flush(&out)
+	d.flush(&out, true)
 	if got := strings.Count(out.String(), "x"); got != deferredStderrMax {
 		t.Fatalf("kept %d bytes, want the cap %d", got, deferredStderrMax)
 	}
@@ -107,9 +116,57 @@ func TestDeferredStderrCapsWhatItHolds(t *testing.T) {
 	}
 	// A flush empties it: the note is not repeated on the next one.
 	out.Reset()
-	d.flush(&out)
+	d.flush(&out, true)
 	if out.Len() != 0 {
 		t.Fatalf("a second flush wrote %q", out.String())
+	}
+}
+
+// TestDeferredStderrCleanExitDropsTheAgentLane: flush(false) — a clean exit —
+// must not print one byte of the agent's own lane, or its dropped count, even
+// after that lane has overflowed its cap. craze's own lane is written *after*
+// overflowing the agent's, and still has to survive: it lives outside the
+// cap by design, so an agent that fills its own lane to the brim can never
+// crowd out the one line craze documents printing there.
+func TestDeferredStderrCleanExitDropsTheAgentLane(t *testing.T) {
+	d := &deferredStderr{}
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	for written := 0; written < deferredStderrMax+2*len(chunk); written += len(chunk) {
+		if _, err := d.agent().Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fmt.Fprintln(d.craze(), "host status: herdr: unreachable")
+	var out bytes.Buffer
+	d.flush(&out, false)
+	if strings.Contains(out.String(), "x") {
+		t.Fatalf("a clean exit printed the agent's stderr: %q", out.String())
+	}
+	if strings.Contains(out.String(), "dropped") {
+		t.Fatalf("a clean exit printed the dropped count: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "host status: herdr: unreachable") {
+		t.Fatalf("a clean exit dropped craze's own line: %q", out.String())
+	}
+}
+
+// TestDeferredStderrFlushFalseThenTrueDiscardsTheHeldAgentLane is the
+// sequence a reviewer asked for (§3.7.1): flush(false) must DISCARD the
+// agent lane and its dropped count rather than hold them back, so a later
+// flush(true) — there is only ever one flush per process, but nothing here
+// depends on that — could never resurrect what a clean run chose not to show.
+func TestDeferredStderrFlushFalseThenTrueDiscardsTheHeldAgentLane(t *testing.T) {
+	d := &deferredStderr{}
+	_, _ = d.agent().Write([]byte("agent said something"))
+	var first bytes.Buffer
+	d.flush(&first, false)
+	if first.Len() != 0 {
+		t.Fatalf("flush(false) wrote %q, want nothing", first.String())
+	}
+	var second bytes.Buffer
+	d.flush(&second, true)
+	if second.Len() != 0 {
+		t.Fatalf("flush(true) after flush(false) wrote %q, want the first flush to have discarded it", second.String())
 	}
 }
 

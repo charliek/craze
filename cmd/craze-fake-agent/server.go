@@ -120,6 +120,7 @@ func run(script string) error {
 		cfg = grokConfigOptions()
 	}
 	s := &server{conn: conn, script: script, config: cfg}
+	s.writeFakeStderr()
 	conn.SetRequestHandler(s.onRequest)
 	conn.SetNotifyHandler(s.onNotify)
 	conn.Start()
@@ -136,6 +137,20 @@ func run(script string) error {
 
 func grokScript(script string) bool {
 	return strings.HasPrefix(script, "grok-")
+}
+
+// writeFakeStderr is CRAZE_FAKE_STDERR's whole definition: every script
+// except hang and hang-ack writes the line it names to stderr once here (at
+// startup, from run) and once more per session/prompt (from handlePrompt).
+// hang and hang-ack stay silent by house rule — the exclusion is the knob's,
+// not the caller's, so nothing else has to remember it.
+func (s *server) writeFakeStderr() {
+	if s.script == "hang" || s.script == "hang-ack" {
+		return
+	}
+	if line := os.Getenv("CRAZE_FAKE_STDERR"); line != "" {
+		fmt.Fprintln(os.Stderr, line)
+	}
 }
 
 // advertiseCommands is the available_commands_update both session/new branches
@@ -419,6 +434,7 @@ func (s *server) onNotify(msg *acp.Message) {
 }
 
 func (s *server) handlePrompt(msg *acp.Message) {
+	s.writeFakeStderr()
 	text := promptText(msg.Params)
 	s.mu.Lock()
 	s.promptN++
