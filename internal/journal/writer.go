@@ -449,10 +449,12 @@ func (w *Writer) MaxRecordBytes() int {
 // Append queues one event record. It never blocks and never does I/O. It
 // must be called in increasing Seq order, which the event log's publishing
 // boundary guarantees; a body larger than MaxRecordBytes is journaled as an
-// oversized omitted record, and an EventType longer than 256 bytes (it is a
-// type's name) makes the record an encode_error omitted record under the
-// type "<event type too long>". An Omitted's Error is kept to its first
-// 4 KiB and its Reason to 256 bytes.
+// oversized omitted record, and an EventType longer than MaxEventTypeBytes
+// (it is a type's name) makes the record an encode_error omitted record under
+// OverlongEventType. An Omitted's Error is kept to its first 4 KiB and its
+// Reason to 256 bytes. The event log applies both rules itself, so what it
+// hands over is already what a ring replay carries; these are the defence
+// against any other caller, and against the two limits differing.
 func (w *Writer) Append(rec Record) {
 	if w == nil {
 		return
@@ -473,7 +475,7 @@ func (w *Writer) Append(rec Record) {
 // really held and no line the record makes is too long to read back.
 func (w *Writer) acceptRecord(rec Record) Record {
 	if len(rec.EventType) > maxIdentifier {
-		return Record{Seq: rec.Seq, At: rec.At, EventType: eventTypeTooLong, Omitted: &Omitted{
+		return Record{Seq: rec.Seq, At: rec.At, EventType: OverlongEventType, Omitted: &Omitted{
 			Reason: OmittedEncodeError,
 			Error: "journal: the event type is " + strconv.Itoa(len(rec.EventType)) +
 				" bytes, over the " + strconv.Itoa(maxIdentifier) + "-byte cap",

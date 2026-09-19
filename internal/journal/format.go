@@ -84,10 +84,16 @@ const maxOmittedError = 4 << 10
 // pathological one from being what makes a line too long for the reader.
 const maxIdentifier = 256
 
-// eventTypeTooLong is the event type a record is journaled under when its
-// own is over maxIdentifier. The record keeps its seq, as an encode_error
-// omitted record with no body.
-const eventTypeTooLong = "<event type too long>"
+// MaxEventTypeBytes is maxIdentifier for a record's EventType, and
+// OverlongEventType is the type a record whose own is over it is journaled
+// under — an encode_error omitted record with no body, keeping its seq. Both
+// are exported because the caller that builds records (the event log) applies
+// the rule itself: if the journal alone applied it, a ring replay and a file
+// replay of the same seq would disagree.
+const (
+	MaxEventTypeBytes = maxIdentifier
+	OverlongEventType = "<event type too long>"
+)
 
 // PromptKind is a prompt note's kind: what the user sent.
 type PromptKind string

@@ -1529,6 +1529,11 @@ func TestEventLogAWedgedPrimaryHoldsNeitherNotesNorCloseAndCloseReleasesSubscrib
 // cutoff is B's only way out) and is held there, not yet counted; A then
 // gives up, is counted and releases the boundary. Close must wait for B too:
 // a Close that waited only for the boundary would write closing with 1.
+//
+// B is released only once Close's closeWaits hook has fired, and that hook
+// runs inside Close's wait, with the publishes it is waiting for — so the
+// test cannot pass without the wait: without it the hook never fires and the
+// test times out on it rather than reaching the count.
 func TestEventLogClosingCountsEveryPublishInFlightAtTheCutoff(t *testing.T) {
 	l, w := newJournaledLog(t, EventLogOptions{})
 	fillPrimary(t, l)
@@ -1539,7 +1544,7 @@ func TestEventLogClosingCountsEveryPublishInFlightAtTheCutoff(t *testing.T) {
 	held := make(chan struct{})
 	releaseHeld := sync.OnceFunc(func() { close(held) })
 	t.Cleanup(releaseHeld) // before the log's Close: a failure must not strand either publisher
-	closeWaits := make(chan struct{})
+	closeWaiting := make(chan int, 1)
 	l.hooks = &logHooks{
 		beforePrimarySend: aHook,
 		admitting: func(admitKind) {
@@ -1559,7 +1564,7 @@ func TestEventLogClosingCountsEveryPublishInFlightAtTheCutoff(t *testing.T) {
 			close(bGaveUp)
 			<-held
 		},
-		closeWaits: func() { close(closeWaits) },
+		closeWaits: func(inflight int) { closeWaiting <- inflight },
 	}
 	aResult, bResult := make(chan bool, 1), make(chan bool, 1)
 	go func() { aResult <- l.Publish(context.Background(), nil, textEvent("A")) }()
@@ -1573,13 +1578,10 @@ func TestEventLogClosingCountsEveryPublishInFlightAtTheCutoff(t *testing.T) {
 		l.Close(context.Background())
 	}()
 	await(t, bGaveUp, "B to give up on the cutoff")
-	// Hold B until Close has either finished without it or begun waiting for
-	// the publishers in flight, which B is one of.
-	select {
-	case <-closeWaits:
-	case <-closed:
-	case <-time.After(logWatchdog):
-		t.Fatal("Close neither finished nor waited for the publishers in flight")
+	// Hold B until Close is waiting for the publishes in flight, which B is
+	// one of: B is inside the region and cannot leave until it is released.
+	if n := await(t, closeWaiting, "Close to wait for the publishes in flight"); n < 1 {
+		t.Fatalf("Close waited for %d publishes in flight, want at least B's", n)
 	}
 	releaseHeld()
 	if await(t, aResult, "A") || await(t, bResult, "B") {
@@ -1591,6 +1593,112 @@ func TestEventLogClosingCountsEveryPublishInFlightAtTheCutoff(t *testing.T) {
 	closing := assertClosingIsLast(t, fileLines(t, w))
 	if got, want := closing["droppedAtClose"], l.Health().DroppedAtClose; got != float64(2) || want != 2 {
 		t.Fatalf("closing says droppedAtClose %v and Health %d, want 2 for both: a publish in flight at the cutoff was left out", got, want)
+	}
+}
+
+// TestEventLogAPublishArrivingWhileCloseWaitsIsRefusedRatherThanHeld: the
+// in-flight region's door never makes a publisher wait. With A in flight and
+// Close waiting for it, C arrives with a live ctx of its own and must come
+// straight back false: a door that waited for Close would hold C's event off
+// the wire with neither its ctx nor its session's done able to release it,
+// which is exactly what emitCtx's pre-wire EventCommand must never meet.
+func TestEventLogAPublishArrivingWhileCloseWaitsIsRefusedRatherThanHeld(t *testing.T) {
+	l, w := newJournaledLog(t, EventLogOptions{})
+	fillPrimary(t, l)
+
+	aHook, aInside := insideAt(primaryCap + 1)
+	held := make(chan struct{})
+	releaseHeld := sync.OnceFunc(func() { close(held) })
+	t.Cleanup(releaseHeld) // before the log's Close: a failure must not strand A
+	closeWaiting := make(chan int, 1)
+	l.hooks = &logHooks{
+		beforePrimarySend: aHook,
+		abandoning: func(inside bool) {
+			if inside {
+				<-held // A stays in flight while Close waits for it
+			}
+		},
+		closeWaits: func(inflight int) { closeWaiting <- inflight },
+	}
+	aResult := make(chan bool, 1)
+	go func() { aResult <- l.Publish(context.Background(), nil, textEvent("A")) }()
+	await(t, aInside, "A to block on the full primary inside the boundary")
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		l.Close(context.Background())
+	}()
+	await(t, closeWaiting, "Close to wait for A")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cResult := make(chan bool, 1)
+	within(t, "a publish arriving while Close waits", func() {
+		cResult <- l.Publish(ctx, nil, textEvent("C"))
+	})
+	if <-cResult {
+		t.Fatal("a publish after the cutoff returned true")
+	}
+	releaseHeld()
+	if await(t, aResult, "A") {
+		t.Fatal("a publish abandoned at the cutoff returned true")
+	}
+	await(t, closed, "Close")
+	closeLog(t, l, w)
+
+	if got := l.Health().DroppedAtClose; got != 2 {
+		t.Fatalf("Health counts %d dropped at close, want A's and C's", got)
+	}
+}
+
+// publishingError is an error whose Error method does the two things a
+// caller's error must never be able to wedge: it publishes to the log, and it
+// closes it. Encoding calls Error and classifies it (errors.Is, errors.As),
+// all on the publisher's goroutine, so encoding must happen before the
+// publisher is in flight — with the encoding inside, this error's own Publish
+// and Close would each wait for a region the publisher itself holds.
+type publishingError struct {
+	l     *EventLog
+	once  sync.Once
+	inner chan bool // capacity 1: what the re-entrant Publish returned
+}
+
+func (e *publishingError) Error() string {
+	e.once.Do(func() {
+		e.inner <- e.l.Publish(context.Background(), nil, textEvent("inner"))
+		e.l.Close(context.Background())
+	})
+	return "agent test: an error whose message publishes and closes"
+}
+
+// TestEventLogAnErrorThatPublishesAndClosesWhileItIsEncodedDeadlocksNothing:
+// the event carrying that error is encoded with nothing held, so its Error
+// method publishes (that event lands, numbered 1) and closes the log, and the
+// outer publish then finds the cutoff and returns false.
+func TestEventLogAnErrorThatPublishesAndClosesWhileItIsEncodedDeadlocksNothing(t *testing.T) {
+	l, w := newJournaledLog(t, EventLogOptions{})
+	e := &publishingError{l: l, inner: make(chan bool, 1)}
+	ok := true
+	within(t, "publishing an event whose Error publishes and closes", func() {
+		ok = l.Publish(context.Background(), nil, Event{Type: EventError, At: logTestTime, Err: e})
+	})
+	if ok {
+		t.Fatal("the publish returned true although its own error closed the log first")
+	}
+	if !await(t, e.inner, "the re-entrant publish inside Error") {
+		t.Fatal("the publish made from inside Error returned false")
+	}
+	closeLog(t, l, w)
+
+	if evs := drainPrimary(l); len(evs) != 1 || evs[0].Seq != 1 || evs[0].Text != "inner" {
+		t.Fatalf("the primary holds %+v, want only the event published from inside Error", evs)
+	}
+	recs := fileRecords(t, w)
+	assertRun(t, "the journal file", recs, 1, 1)
+	assertNoneOmitted(t, "the journal file", recs)
+	if got := l.Health().DroppedAtClose; got != 1 {
+		t.Fatalf("Health counts %d dropped at close, want the one the cutoff refused", got)
 	}
 }
 
@@ -1921,6 +2029,57 @@ func TestEventLogTakesTheJournalsSmallerRecordLimit(t *testing.T) {
 	}
 	if noted := diags(fileLines(t, w), journal.DiagRecordOmitted); len(noted) != 1 || noted[0]["seq"] != float64(2) {
 		t.Fatalf("the record_omitted notes are %v, want one for seq 2", noted)
+	}
+}
+
+// TestEventLogAnOverlongEventTypeIsTheSameOmittedRecordEverywhere: the
+// journal cannot write an event type over its cap — it would make a line no
+// reader accepts — so the log applies that rule where the record is built.
+// The event still reaches the primary whole; its record is one omitted
+// record, the same in a live subscription, a ring replay and the file,
+// counted and noted once, rather than a full body in the ring and a
+// placeholder in the file.
+func TestEventLogAnOverlongEventTypeIsTheSameOmittedRecordEverywhere(t *testing.T) {
+	l, w := newJournaledLog(t, EventLogOptions{})
+	live := mustSubscribe(t, l, SubscribeOptions{})
+	long := EventType(strings.Repeat("t", journal.MaxEventTypeBytes+1))
+	events := []Event{textEvent("before"), {Type: long, At: logTestTime, Text: "wordy"}, textEvent("after")}
+	for _, ev := range events {
+		publishWithin(t, l, ev)
+	}
+	if prim := drainPrimary(l); len(prim) != len(events) || prim[1].Type != long || prim[1].Text != "wordy" {
+		t.Fatal("the primary did not receive the event with the overlong type whole")
+	}
+	liveRecs := readN(t, live, len(events))
+	ringRecs := readN(t, mustSubscribe(t, l, SubscribeOptions{After: &Cursor{Incarnation: l.Incarnation()}}), len(events))
+	closeLog(t, l, w)
+
+	for _, where := range []struct {
+		name string
+		recs []Record
+	}{{"the live subscription", liveRecs}, {"the ring replay", ringRecs}, {"the journal file", fileRecords(t, w)}} {
+		assertRun(t, where.name, where.recs, 1, len(events))
+		r := where.recs[1]
+		if r.Type != journal.OverlongEventType || r.Body != "" || r.Omitted == nil ||
+			r.Omitted.Reason != journal.OmittedEncodeError || !strings.Contains(r.Omitted.Error, "event type") {
+			t.Fatalf("%s: seq 2 is %q with %d body bytes and Omitted %+v, want an encode_error omitted record under %q",
+				where.name, r.Type, len(r.Body), r.Omitted, journal.OverlongEventType)
+		}
+		if lr := liveRecs[1]; *r.Omitted != *lr.Omitted {
+			t.Fatalf("%s: seq 2's marker %+v differs from the live record's %+v", where.name, r.Omitted, lr.Omitted)
+		}
+		for _, i := range []int{0, 2} {
+			if r := where.recs[i]; r.Omitted != nil || r.Body != liveRecs[i].Body || r.Type != EventText {
+				t.Fatalf("%s: seq %d differs from the live record", where.name, r.Seq)
+			}
+		}
+	}
+	if h := l.Health(); h.Omitted != 1 || h.Journal.Omitted != 1 {
+		t.Fatalf("health counts %d omitted in the log and %d in the journal, want 1", h.Omitted, h.Journal.Omitted)
+	}
+	noted := diags(fileLines(t, w), journal.DiagRecordOmitted)
+	if len(noted) != 1 || noted[0]["seq"] != float64(2) || noted[0]["eventType"] != journal.OverlongEventType {
+		t.Fatalf("the record_omitted notes are %v, want one for seq 2 under %q", noted, journal.OverlongEventType)
 	}
 }
 

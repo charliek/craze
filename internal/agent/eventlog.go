@@ -246,18 +246,24 @@ func NewIncarnation() string {
 // session, or writes a diagnostic; the only locks taken under it are leaves:
 // a subscription's mu and the journal's queue mutex. Note never takes it.
 //
-// inflight is held shared by every Publish and TryPublish for its whole call,
-// outside the boundary, and exclusively only by Close, after the cutoff, so
-// the closing diag's count includes every publish that was in flight when
-// the cutoff came. Close can always get it: every wait a Publish makes
-// selects on closed, and TryPublish never waits. A publisher holding it
-// waits for nothing Close holds (Close is never called from inside a
-// Publish, and takes nothing a publisher's caller holds), and nothing that
-// holds it takes it again.
+// Around the boundary is the in-flight region: every Publish and TryPublish
+// enters it before the boundary and leaves it as it returns, so the closing
+// diag's count includes every publish that was in flight when the cutoff
+// came. It is a counter, not a lock, and entering it never waits: a publisher
+// either counts itself in or, once Close has begun, is refused on the spot.
+// That is what makes Close safe to wait for it — every publisher inside
+// escapes on closed — without a waiting Close ever holding a publisher off
+// the wire, which is emitCtx's contract for the pre-wire EventCommand. An
+// event is encoded before the region is entered, so no caller code (an Err's
+// Error method, a classification over the caller's error type) ever runs
+// where Close is waiting.
 //
-// Lock order: a session's queueOp → emitMu → inflight → the boundary → a
-// subscription's mu, and the boundary → the journal's queue mutex; noteMu →
-// the journal's queue mutex, and only Close takes noteMu under the boundary.
+// Lock order: a session's queueOp → emitMu → the in-flight region → the
+// boundary → a subscription's mu, and the boundary → the journal's queue
+// mutex; noteMu → the journal's queue mutex, and only Close takes noteMu
+// under the boundary. inflightMu guards the counter alone and is a leaf below
+// everything: it is never held across the boundary, a channel operation, a
+// hook, or any other lock.
 type EventLog struct {
 	incarnation string
 	primary     chan Event
@@ -272,9 +278,14 @@ type EventLog struct {
 	ring recordRing      // recent records, oldest first
 	subs []*Subscription // subscriptions offered each record; a terminated one is swept lazily
 
-	// inflight: shared for a whole Publish or TryPublish, exclusive for Close
-	// once the cutoff is closed (see above).
-	inflight sync.RWMutex
+	// inflightMu guards the in-flight region's state (see above): closing,
+	// set once by Close, after which no publisher is admitted; inflight, the
+	// publishers inside; and idle, closed by the last of them to leave once
+	// closing is set, which is what Close waits on.
+	inflightMu sync.Mutex
+	closing    bool
+	inflight   int
+	idle       chan struct{}
 
 	// noteMu orders Note against Close: Note holds it shared while it checks
 	// the cutoff and queues its note, and Close holds it while it sets the
@@ -319,9 +330,10 @@ type logHooks struct {
 	// abandoning runs when a Publish or TryPublish gives its event up, before
 	// the drop is counted; inside says whether it holds the boundary.
 	abandoning func(inside bool)
-	// closeWaits runs in Close once the cutoff is closed, just before it
-	// waits for every Publish and TryPublish in flight to leave.
-	closeWaits func()
+	// closeWaits runs inside Close's wait for the publishes in flight, with
+	// how many there are — so it runs only while Close is really waiting for
+	// one, never merely on its way to the wait.
+	closeWaits func(inflight int)
 	// delivered runs in a subscription's owner just after Records took the
 	// record with seq. A subscription keeps the hooks its log had when it
 	// was opened.
@@ -345,6 +357,7 @@ func NewEventLog(o EventLogOptions) *EventLog {
 		primary:     make(chan Event, primaryCap),
 		sem:         make(chan struct{}, 1),
 		closed:      make(chan struct{}),
+		idle:        make(chan struct{}),
 		journal:     o.Journal,
 		maxRecord:   maxRecord,
 		ring: recordRing{
@@ -372,6 +385,30 @@ func (l *EventLog) Primary() <-chan Event { return l.primary }
 // release leaves the boundary.
 func (l *EventLog) release() { <-l.sem }
 
+// enter joins the in-flight region, or refuses once Close has begun. It never
+// waits: the only thing it takes is the counter's own leaf mutex, which
+// nothing holds across anything. A publisher that entered must leave.
+func (l *EventLog) enter() bool {
+	l.inflightMu.Lock()
+	defer l.inflightMu.Unlock()
+	if l.closing {
+		return false
+	}
+	l.inflight++
+	return true
+}
+
+// leave leaves the in-flight region, waking a Close that is waiting for the
+// last publisher out.
+func (l *EventLog) leave() {
+	l.inflightMu.Lock()
+	defer l.inflightMu.Unlock()
+	l.inflight--
+	if l.closing && l.inflight == 0 {
+		close(l.idle)
+	}
+}
+
 // Publish numbers ev, hands it to the primary, and records it for the ring,
 // every subscription and the journal. It blocks while the primary is full,
 // exactly as a send on the session's events channel did, and returns false —
@@ -380,13 +417,17 @@ func (l *EventLog) release() { <-l.sem }
 // boundary or for the primary. A true return means the event is in the
 // primary's buffer. ctx and done may be nil.
 //
-// The event is encoded before the boundary, on the publisher's goroutine: the
-// value is the publisher's own copy by then (cloneTool and its kin), and
-// encoding is the expensive part.
+// The event is encoded before the boundary and before the in-flight region,
+// on the publisher's goroutine: the value is the publisher's own copy by then
+// (cloneTool and its kin), encoding is the expensive part, and it runs the
+// caller's own code (an Err's Error method), which must not run anywhere a
+// Close is waiting for it.
 func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) bool {
-	l.inflight.RLock()
-	defer l.inflight.RUnlock()
 	rec := l.record(ev)
+	if !l.enter() {
+		return l.abandon(true)
+	}
+	defer l.leave()
 	var cancelled <-chan struct{}
 	if ctx != nil {
 		cancelled = ctx.Done()
@@ -465,13 +506,13 @@ func (l *EventLog) abandon(counted bool) bool {
 // is full, the event is dropped for everyone, consumes no number, and it
 // returns false.
 func (l *EventLog) TryPublish(ev Event) bool {
-	// Only Close holds inflight exclusively, or waits to, and only once the
-	// cutoff is closed: failing to get it shared is the cutoff.
-	if !l.inflight.TryRLock() {
+	rec := l.record(ev)
+	// Entering the in-flight region never waits, so this keeps its contract
+	// trivially: refused means Close has begun, and the event is dropped.
+	if !l.enter() {
 		return l.abandon(true)
 	}
-	defer l.inflight.RUnlock()
-	rec := l.record(ev)
+	defer l.leave()
 	select {
 	case <-l.closed:
 		return l.abandon(true)
@@ -501,9 +542,22 @@ func (l *EventLog) TryPublish(ev Event) bool {
 }
 
 // record builds ev's record, without its seq: the body, or the omitted
-// marker for an event the codec refuses or one over MaxRecordBytes.
+// marker for an event the codec refuses, one over MaxRecordBytes, or one
+// whose type is too long to be a type.
+//
+// The journal refuses an EventType over journal.MaxEventTypeBytes as well —
+// a line no reader would accept — and the rule is applied here, where the
+// record is built, so the ring, every subscription and the file carry the one
+// omitted record and the log counts and notes the omission like any other.
+// The primary still gets the event whole; only the record is omitted.
 func (l *EventLog) record(ev Event) Record {
 	rec := Record{At: ev.At, Type: ev.Type}
+	if len(ev.Type) > journal.MaxEventTypeBytes {
+		rec.Type = journal.OverlongEventType
+		rec.Omitted = &Omitted{Reason: journal.OmittedEncodeError, Error: fmt.Sprintf(
+			"agent: the event type is %d bytes, over the %d-byte cap", len(ev.Type), journal.MaxEventTypeBytes)}
+		return rec
+	}
 	body, err := EncodeEvent(ev)
 	switch {
 	case err != nil:
@@ -711,15 +765,7 @@ func (l *EventLog) Note(n journal.Note) {
 func (l *EventLog) Close(ctx context.Context) {
 	l.closeOnce.Do(func() {
 		close(l.closed)
-		if h := l.hooks; h != nil && h.closeWaits != nil {
-			h.closeWaits()
-		}
-		// Wait for every Publish and TryPublish in flight to leave, counted
-		// if it gave its event up: each one's waits select on closed, so
-		// each leaves at once. A publish that arrives from here on waits
-		// for this to be released and then finds the cutoff; it is counted
-		// in Health, after closing.
-		l.inflight.Lock()
+		l.awaitInFlight()
 		// Serialize with a Subscribe mid-registration. No publisher holds
 		// the boundary now, and Subscribe waits for nothing inside it.
 		l.sem <- struct{}{}
@@ -736,7 +782,6 @@ func (l *EventLog) Close(ctx context.Context) {
 		}
 		l.noteMu.Unlock()
 		l.release()
-		l.inflight.Unlock()
 		for _, s := range subs {
 			s.terminate(ErrClosed)
 		}
@@ -750,6 +795,32 @@ func (l *EventLog) Close(ctx context.Context) {
 		}
 		_ = l.journal.Close(ctx)
 	})
+}
+
+// awaitInFlight shuts the in-flight region and waits for the publishes inside
+// it to leave, counted if they gave their event up: each one's waits select on
+// closed, which Close has closed by now, so each leaves at once. A publish
+// that arrives from here on is refused at the region's door rather than made
+// to wait; it is counted in Health, after closing.
+//
+// The wait is a channel receive, not a wait under the counter's mutex, so the
+// mutex stays a leaf held across nothing — the hook included.
+func (l *EventLog) awaitInFlight() {
+	for {
+		l.inflightMu.Lock()
+		l.closing = true
+		n := l.inflight
+		l.inflightMu.Unlock()
+		if n == 0 {
+			return
+		}
+		if h := l.hooks; h != nil && h.closeWaits != nil {
+			h.closeWaits(n)
+		}
+		// idle is closed by the last publisher out, which can only be once
+		// closing is set, so this loop goes round at most twice.
+		<-l.idle
+	}
 }
 
 // EventLogHealth is a copy of the log's counters and its journal's health.
