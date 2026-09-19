@@ -33,6 +33,7 @@ const CredentialsFile = "providers.toml"
 // order is part of every request's cache prefix, so a tool is added at its
 // place in that order, never at the end.
 var builders = []func() (tool.Tool, error){
+	newBash,
 	newRead,
 	newEdit,
 	newWrite,

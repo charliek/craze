@@ -39,6 +39,7 @@ func newFixture(t *testing.T) *fixture {
 		Workspace: t.TempDir(),
 		Home:      t.TempDir(),
 		Redactor:  redact.New(keyA),
+		Environ:   tool.ChildEnviron(os.Environ(), nil),
 		Locks:     &tool.PathLocks{},
 	}
 	p, err := Profile()
@@ -138,7 +139,7 @@ func TestProfile(t *testing.T) {
 	if p.Name != Name || Name != "opencode" {
 		t.Fatalf("profile name = %q", p.Name)
 	}
-	if got := names(p); !slices.Equal(got, []string{"read", "edit", "write"}) {
+	if got := names(p); !slices.Equal(got, []string{"bash", "read", "edit", "write"}) {
 		t.Fatalf("tools = %q, want opencode's order of the tools this build has", got)
 	}
 	want := map[string]struct {
@@ -146,6 +147,7 @@ func TestProfile(t *testing.T) {
 		readOnly, parallel bool
 		trunc              tool.Direction
 	}{
+		"bash":  {tool.KindExecute, false, false, tool.None},
 		"read":  {tool.KindRead, true, true, tool.None},
 		"edit":  {tool.KindEdit, false, false, tool.Head},
 		"write": {tool.KindEdit, false, false, tool.Head},
@@ -182,6 +184,12 @@ func TestProfile(t *testing.T) {
 //
 //	go test ./internal/harness/tool/opencode -run TestSpecsGolden -update
 func TestSpecsGolden(t *testing.T) {
+	// bash's description names the machine's OS, shell and temporary
+	// directory; the golden pins bashVars' instead, whatever runs the test.
+	// Not parallel: thisHost is package state.
+	machine := thisHost
+	thisHost = func() host { return host{os: bashVars["os"], shell: "/bin/" + bashVars["shell"], tmp: bashVars["tmp"]} }
+	t.Cleanup(func() { thisHost = machine })
 	p, err := Profile()
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +291,7 @@ func TestDescriptions(t *testing.T) {
 		{"glob", "use the Task tool instead", "as a batch that are potentially useful.\n", ""},
 		{"bash", "", "commands will time out after 120000ms.",
 			" The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms.\n" +
-				"  - When the command returns, every process it started that is still running is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call.\n"},
+				"  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this.\n"},
 	}
 	for _, e := range edits {
 		d := rendered[e.file]
@@ -304,11 +312,11 @@ func TestDescriptions(t *testing.T) {
 	}
 }
 
-// TestParameters ports opencode's parameters.test.ts cases for read, write
-// and edit, and adds what opencode's schemas refuse and Fantasy would not: a
-// number or a boolean sent as a string, a fraction, a negative, null, a
-// value past the safe-integer range. Each refusal is an invalid_input result
-// naming the field; each acceptance is its negative control.
+// TestParameters ports opencode's parameters.test.ts cases for bash, read,
+// write and edit, and adds what opencode's schemas refuse and Fantasy would
+// not: a number or a boolean sent as a string, a fraction, a negative, null,
+// a value past the safe-integer range. Each refusal is an invalid_input
+// result naming the field; each acceptance is its negative control.
 func TestParameters(t *testing.T) {
 	f := newFixture(t)
 	put(t, f.path("a"), "x\n")
@@ -334,6 +342,15 @@ func TestParameters(t *testing.T) {
 		{"read refuses a missing filePath", "read", `{"offset":1}`, "filePath"},
 		{"read refuses a numeric filePath", "read", `{"filePath":5}`, "filePath"},
 		{"read refuses a non-object", "read", `["a"]`, "JSON object"},
+		{"bash accepts command", "bash", `{"command":"ls"}`, ""},
+		{"bash accepts optional timeout + workdir", "bash", fmt.Sprintf(`{"command":"ls","timeout":5000,"workdir":%q}`, f.env.Workspace), ""},
+		{"bash accepts an empty command", "bash", `{"command":""}`, ""},
+		{"bash refuses a missing command", "bash", `{}`, "command"},
+		{"bash refuses a numeric string timeout", "bash", `{"command":"ls","timeout":"5000"}`, "timeout"},
+		{"bash refuses a zero timeout", "bash", `{"command":"ls","timeout":0}`, "timeout"},
+		{"bash refuses a negative timeout", "bash", `{"command":"ls","timeout":-1}`, "timeout"},
+		{"bash refuses a fractional timeout", "bash", `{"command":"ls","timeout":1.5}`, "timeout"},
+		{"bash refuses a non-string workdir", "bash", `{"command":"ls","workdir":1}`, "workdir"},
 		{"write accepts content + filePath", "write", fmt.Sprintf(`{"content":"hi","filePath":%q}`, a), ""},
 		{"write refuses a missing filePath", "write", `{"content":"hi"}`, "filePath"},
 		{"write refuses a missing content", "write", fmt.Sprintf(`{"filePath":%q}`, a), "content"},

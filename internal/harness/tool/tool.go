@@ -235,10 +235,19 @@ type Env struct {
 	// snapshot and the spill file are redacted too).
 	Redactor *redact.Replacer
 	// Environ is the environment a child process gets: the user's, less
-	// craze's own provider keys (ChildEnviron).
+	// craze's own provider keys (ChildEnviron). nil is no environment
+	// configured, and a tool that starts processes refuses to run rather
+	// than fall back to craze's own, provider keys and all (plan 019 §3.8).
 	Environ []string
 	// Locks serializes craze's own writes to a file (PathLocks).
 	Locks *PathLocks
+	// Closing is closed when the session is closing. A tool that runs
+	// processes must stop them at once when it closes, with no grace, even
+	// if its ctx was already cancelled for another reason: a ctx's cause is
+	// fixed by its first cancel, so this is how a cancel becomes a close. A
+	// ctx cancelled with ErrClosing means the same (SessionClosing). nil
+	// never closes.
+	Closing <-chan struct{}
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken
