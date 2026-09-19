@@ -1,0 +1,212 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"charm.land/fantasy"
+
+	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/modeltable"
+)
+
+// nativeScriptedModel is a fantasy.LanguageModel that answers each Stream
+// call with the next queued step: the test seam plan 018 §3.8 built for
+// exactly this (harness.Options.NewModel, through agent.NewNative's tweak),
+// so both the "never persisted/indexed" test and the native-echo golden run a
+// real native session without a network call.
+type nativeScriptedModel struct {
+	provider, wire string
+	steps          [][]fantasy.StreamPart
+	calls          int
+}
+
+func (m *nativeScriptedModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
+	if m.calls >= len(m.steps) {
+		return nil, errors.New("nativeScriptedModel: no step queued")
+	}
+	step := m.steps[m.calls]
+	m.calls++
+	return func(yield func(fantasy.StreamPart) bool) {
+		for _, p := range step {
+			if !yield(p) {
+				return
+			}
+		}
+	}, nil
+}
+
+func (m *nativeScriptedModel) Generate(context.Context, fantasy.Call) (*fantasy.Response, error) {
+	return nil, errors.New("nativeScriptedModel: Generate is not used")
+}
+
+func (m *nativeScriptedModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
+	return nil, errors.New("nativeScriptedModel: GenerateObject is not used")
+}
+
+func (m *nativeScriptedModel) StreamObject(context.Context, fantasy.ObjectCall) (fantasy.ObjectStreamResponse, error) {
+	return nil, errors.New("nativeScriptedModel: StreamObject is not used")
+}
+
+func (m *nativeScriptedModel) Provider() string { return m.provider }
+func (m *nativeScriptedModel) Model() string    { return m.wire }
+
+func nativeTextParts(chunks ...string) []fantasy.StreamPart {
+	parts := []fantasy.StreamPart{{Type: fantasy.StreamPartTypeTextStart, ID: "0"}}
+	for _, c := range chunks {
+		parts = append(parts, fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "0", Delta: c})
+	}
+	return append(parts, fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "0"})
+}
+
+func nativeThoughtParts(chunks ...string) []fantasy.StreamPart {
+	parts := []fantasy.StreamPart{{Type: fantasy.StreamPartTypeReasoningStart, ID: "r"}}
+	for _, c := range chunks {
+		parts = append(parts, fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "r", Delta: c})
+	}
+	return append(parts, fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: "r"})
+}
+
+func nativeFinishParts() []fantasy.StreamPart {
+	return []fantasy.StreamPart{{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop,
+		Usage: fantasy.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}}}
+}
+
+// nativeOneModelTable is the smallest table Start can open: one provider, one
+// model, no efforts.
+func nativeOneModelTable() *modeltable.Table {
+	return &modeltable.Table{
+		DefaultModel: "test/echo",
+		Providers: map[string]modeltable.Provider{
+			"test": {Driver: modeltable.DriverOpenAICompat, BaseURL: "http://127.0.0.1:9/v1", EnvKeys: []string{"NATIVE_TUI_TEST_KEY"}},
+		},
+		Models: map[string]modeltable.Model{
+			"test/echo": {Provider: "test", WireModel: "wire-echo", Name: "Echo"},
+		},
+	}
+}
+
+// nativeSessionTweak is agent.NewNative's test seam: it points the harness at
+// home directly, rather than paths.NativeDir() — the frame runner's
+// isolateFrameHome swaps HOME during a run, so a golden or a test that wants
+// its own fixed table must hand it in here instead of relying on whatever the
+// isolated HOME holds (plan 018 §3.8, C9's note to C10). Getenv never reads
+// the real environment (plan 018 §3.5).
+func nativeSessionTweak(home string, table *modeltable.Table, model *nativeScriptedModel) func(*harness.Options) {
+	return func(o *harness.Options) {
+		o.Home = home
+		o.Table = table
+		o.Getenv = func(k string) string {
+			if k == "NATIVE_TUI_TEST_KEY" {
+				return "test-key"
+			}
+			return ""
+		}
+		o.NewModel = func(modeltable.Resolved) (fantasy.LanguageModel, error) { return model, nil }
+		o.Now = func() time.Time { return time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC) }
+	}
+}
+
+// drainSessionEvents feeds every event sess has already buffered into m, the
+// way waitEvent/eventMsg would one at a time in a real program. A native
+// turn's callbacks run synchronously inside the harness (plan 018 §3.7), so
+// by the time runCmd(cmd) has returned, the whole turn is already sitting in
+// the channel with nothing left to arrive.
+func drainSessionEvents(t *testing.T, m *Model, sess agent.Session) {
+	t.Helper()
+	for {
+		select {
+		case ev, ok := <-sess.Events():
+			if !ok {
+				return
+			}
+			tm, _ := m.Update(eventMsg{ev})
+			*m = tm.(Model)
+		default:
+			return
+		}
+	}
+}
+
+// TestNativeSessionDoesNotPersistOrIndex drives a real native session — not
+// tui.Stub — through startedMsg and one full turn, and holds plan 018 §3.4's
+// two "never persisted, never indexed" rules together against production
+// code neither TestStartedMsgDoesNotPersistAHiddenProvider (a planted stub)
+// nor internal/agent's own tests (no TUI in them) can reach: a hidden
+// provider's session must not write a row to the shared index (the
+// fakeIndex recorder catches an Upsert), and must not replace the persisted
+// default (config.toml's seeded "grok" must survive startedMsg's own
+// SaveProvider).
+func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
+	isolateSkillsHome(t)
+	path := writeConfigFile(t, "provider = \"grok\"\n")
+
+	table := nativeOneModelTable()
+	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+	model.steps = [][]fantasy.StreamPart{append(nativeTextParts("hi there"), nativeFinishParts()...)}
+
+	ws := t.TempDir()
+	harnessHome := t.TempDir()
+	sess := agent.NewNative(agent.Options{Workspace: ws}, nativeSessionTweak(harnessHome, table, model))
+	if err := sess.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	idx := &fakeIndex{}
+	m := New(Config{
+		Session:         sess,
+		Theme:           "tokyo-night",
+		Workspace:       ws,
+		Yolo:            true,
+		PersistProvider: true,
+		ProviderLocked:  true,
+		SessionIndex:    idx,
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	if !m.started || m.snap.Provider.Name != "native" {
+		t.Fatalf("started=%v provider=%q, want a started native session", m.started, m.snap.Provider.Name)
+	}
+	// startedMsg's own persist already had its chance by the time it returns.
+	if len(idx.rows) != 0 {
+		t.Fatalf("startedMsg indexed a session with no prompt yet: %+v", idx.rows)
+	}
+	if got := ConfigProvider(); got != "grok" {
+		t.Fatalf("startedMsg replaced the persisted default with %q", got)
+	}
+
+	m.input.SetValue("hello")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking || cmd == nil {
+		t.Fatal("Enter did not start a turn")
+	}
+	msg := runCmd(cmd)
+	drainSessionEvents(t, &m, sess)
+	tm, _ = m.Update(msg)
+	m = tm.(Model)
+	if m.status != statusIdle {
+		t.Fatalf("status %s after the turn, want idle", m.status)
+	}
+	if !strings.Contains(plainView(m), "hi there") {
+		t.Fatalf("the answer never rendered:\n%s", plainView(m))
+	}
+
+	if len(idx.rows) != 0 {
+		t.Fatalf("a completed turn on a hidden provider was indexed: %+v", idx.rows)
+	}
+	if got := ConfigProvider(); got != "grok" {
+		body, _ := os.ReadFile(path)
+		t.Fatalf("a native turn replaced the persisted default: %q\n%s", got, body)
+	}
+}
