@@ -18,7 +18,12 @@ As recorded in `discovery/native-harness/07-roadmap.md`, the first ask channel
 is **H3** (permission cards). The craze-harness session reports that the owner
 has since deferred native permission prompts, possibly well past H3; until
 that is written down as a harness decision, read the constraint as "S1b before
-H3".
+H3". The harness session reports (2026-09-19) that the decision is written as
+**harness D-39** on Plan 019's branch (`15a3553`, landing with H2's first PR):
+native permission prompts lose their phase, the gate ships allow-all, and the
+owner's direction is an auto-mode evaluator over it, **after S1's ask
+registry**. Once that PR merges, cite D-39 here and relax the constraint to
+"S1b before the first harness phase that needs an ask, and before H6 and H7".
 
 ## Where they touch
 
@@ -63,6 +68,25 @@ tools are the likely first), before H6, before H7". Items 3 and 4 are Plan
 019's stated intent, not yet code: treat the diagnostic and entry-id handoff
 as an **integration dependency to verify** when both sides have landed. Today
 `harness.StepDone` carries usage only.
+
+## Agreed for the H2 / S1a integration (2026-09-19)
+
+Both plans are final; the harness session adopted all five points of Plan 020's
+§2.7 and R7:
+
+1. `internal/cli/events.go` stays the CLI projection (Plan 019 §3.10 amended);
+   the lossless codec is the journal and wire schema.
+2. **No session lock is held across a publish.** Plan 019's C12 orders an
+   accepted interjection before `EventDone` by making the turn goroutine the
+   sole emitter of both, not by emitting under `s.mu`.
+3. Native tool events are deep-copied before the merge lock is released (C10).
+4. Lossy tool progress keeps its `select … default` send until S1a's
+   `TryPublish` exists; whoever lands second switches it.
+5. `StepDone` carries the persistence outcome, with store entry ids only when
+   the append succeeded (C8).
+
+Plan 019 ships in four PRs; `native.go`'s emit path changes in PR 3 (tools) and
+PR 4 (interject). Whoever lands second rebases and owns the joint `-race` test.
 
 ## What S1 owes the harness
 

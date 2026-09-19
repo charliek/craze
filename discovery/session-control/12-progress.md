@@ -119,5 +119,42 @@ inline shared component gets the same ordering without one. Recorded in `03`.
 
 ### Handoff
 
-S1 is next. Its first slice, S1a, has its own plan; see the S1 section below
-once it is recorded.
+S1 is next. Its first slice, S1a, is recorded below.
+
+## S1a — event log, codec, journal
+
+| | |
+|---|---|
+| Status | planned |
+| Plan | `020-session-control-s1a-event-log` (outside the repo, with its raw panel reviews) |
+| Baseline | `b3f7b0f` |
+| Branch / PRs | `feature/plan-020-session-control-s1a`, worktree `../craze-plan020` |
+| Merged | — |
+
+### Plan review — 2026-09-19
+
+| reviewer | result |
+|---|---|
+| Codex, `gpt-6-astra`, high effort, read-only | 20 findings (2 blocker, 16 major, 2 minor) |
+| GLM 5.3 via opencode, read-only tools | 18 findings (2 blocker, 8 major, 8 minor), against the first draft |
+| CodeRabbit | 18 findings (1 blocker, 10 major, 7 minor), against the first draft |
+
+Both blockers were concurrency schedules in the draft's design, found before
+any code existed: a publisher waiting for the ordering lock could no longer be
+cancelled by its own context, and the attach cutoff read a range it had not
+retained, so eviction or a journal gap could leave a silent hole.
+
+CodeRabbit added what the other two missed: Plan 019's tool progress is lossy
+by contract and needs a non-blocking publish; the journal opt-out failed open
+on a malformed config; and the error classes in the draft were sentinels that
+never reach an event. The design that came out is roadmap SD-32: cancellable admission, encode before admission,
+the sequence number in the envelope, the journal fed directly, pinned ring
+records at the cutoff, and one delivery owner per subscription.
+
+What S1a does **not** ship from `04`'s S1a rows: `diag` kinds for wire
+outcomes, signals, and recovered panics, and the raw wire sidecar. Those stay
+follow-ups; the executing session narrows `04`'s row when it lands.
+
+Outcome, deviations, live smoke, measurements (journal size by event type and
+the cost of a resume, inputs to SQ3 and SQ15), and handoff are filled in by the
+executing session in the PR's last commit.

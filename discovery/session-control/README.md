@@ -18,6 +18,7 @@ decisions `SD-nn`, open questions `SQ-n`.
 | 2026-09-19 | Discovery session: craze, prox, shed + shed-mobile + gx, and t3code reviewed; owner settled topology, protocol, remote scope, and journaling (SD-02, SD-03, SD-07, SD-12). Folder written. |
 | 2026-09-19 | craze-harness session briefed on the overlap (`11`). |
 | 2026-09-19 | Panel review (Codex `gpt-6-astra`, CodeRabbit, GLM 5.3): SD-18 to SD-31, SQ12–SQ16, S1 re-sized; record in `12`. |
+| 2026-09-19 | Plan 020 (S1a) written and panel-reviewed; SD-32. Not yet executed. |
 
 **Current phase: S0 complete. S1a (the first slice of the engine core) is
 next, under its own panel-reviewed plan; progress is recorded in `12`.**
