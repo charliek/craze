@@ -1,0 +1,205 @@
+craze's opencode tool profile
+=============================
+
+The tool contract in this directory -- tool ids, parameter names, types and
+required lists, the model-facing descriptions in descriptions/, limits, and
+result phrasing -- is ported from opencode:
+
+    https://github.com/anomalyco/opencode
+    commit 5f9d9187c01708b4e700c9c81c1045ab482bf31d (2026-09-18)
+    packages/opencode/src/tool/
+
+opencode is distributed under the MIT License, reproduced here in full:
+
+    MIT License
+
+    Copyright (c) 2025 opencode
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+
+Where each description comes from
+---------------------------------
+
+| craze                   | opencode (packages/opencode/src/tool/)                    |
+|-------------------------|-----------------------------------------------------------|
+| descriptions/read.txt   | read.txt                                                  |
+| descriptions/write.txt  | write.txt                                                 |
+| descriptions/edit.txt   | edit.txt                                                  |
+| descriptions/grep.txt   | grep.txt                                                  |
+| descriptions/glob.txt   | glob.txt                                                  |
+| descriptions/bash.txt   | shell/shell.txt with shell/prompt.ts's bash values        |
+
+opencode renders its shell description at run time from shell/shell.txt and
+shell/prompt.ts. descriptions/bash.txt is that rendering for a bash shell,
+the only kind craze runs: shell.txt with prompt.ts's bash values put in for
+${intro} (prompt.ts:258-259), ${workdirSection} (prompt.ts:260-261) and
+${commandSection} (bashCommandSection, prompt.ts:78-119, whose ${chain} is
+chainGuidance's bash sentence, prompt.ts:75). The values that depend on the
+machine stay placeholders, which the bash tool renders with tool.Render:
+${os}, ${shell}, ${tmp}, ${defaultTimeoutMs}, ${maxLines} and ${maxBytes}.
+Rendering opencode's own ShellPrompt.render for a bash shell, with those six
+left as placeholders, gives descriptions/bash.txt byte for byte except for
+the edits below.
+
+Every other file is the upstream file byte for byte except for the edits
+below.
+
+
+Edits to the descriptions
+-------------------------
+
+The edits allowed are exactly these (plan 019 section 3.2): remove the two
+false claims that edit and write refuse a file the model has not read;
+remove sentences naming tools craze does not have; replace "opencode" with
+"craze"; render ${...} placeholders; add the sentences the behavioural
+differences below require. Nothing else is reworded: the text is the tuned
+asset.
+
+| file      | original                                                                                                                  | now                                                                                                                                                           | why |
+|-----------|---------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| read.txt  | "- This tool can read image files and PDFs and return them as file attachments."                                          | "- This tool cannot read image files or PDFs yet."                                                                                                            | difference: images and PDFs are refused, not attached |
+| write.txt | "This tool will fail if you did not read the file first." (end of the fifth line)                                         | removed; the instruction before it, to read the file first, stays                                                                                            | false: nothing enforces reading first (D-12, D-42) |
+| edit.txt  | "This tool will error if you attempt an edit without reading the file." (end of the fourth line, with its trailing space) | removed; the instruction before it, to read the file first, stays                                                                                            | false: nothing enforces reading first (D-12, D-42) |
+| grep.txt  | "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead" | removed                                                                                                                                                 | names the Task tool, which craze does not have |
+| glob.txt  | "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead" | removed                                                                                                                                                 | names the Task tool, which craze does not have |
+| bash.txt  | "If not specified, commands will time out after ${defaultTimeoutMs}ms." (ends the timeout bullet)                         | the same, followed by " The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms."                                             | difference: a 10-minute cap |
+| bash.txt  | (none: a new bullet after the timeout bullet)                                                                              | "  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this." | difference: nothing left in the process group outlives the call |
+| bash.txt  | "...it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching." | "...it will be truncated and the output will be written to a file when it can be. The result names the file when there is one, and says when the file holds only part of the output. When the result gives a path, you can use Read with offset/limit to read specific sections or Grep to search the saved content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the output will already be captured to a file for more precise searching whenever it can be." | difference: the spill file is capped at 100 MiB, may hold only what was read, and may not be written at all (the bash rows below); the model must not be promised a full file it may not get |
+| bash.txt  | ${limits.maxLines}, ${limits.maxBytes} (JavaScript interpolations in prompt.ts)                                           | ${maxLines}, ${maxBytes}                                                                                                                                      | rendering: tool.Render's placeholder names are \w+ |
+
+No description names opencode, LSP, WebFetch or TodoWrite, so the other
+allowed edits change nothing. opencode fills ${tmp} with its own directory
+(os.tmpdir()/opencode); craze's bash tool supplies craze's.
+
+
+Parameter schemas
+-----------------
+
+Each tool's parameters are opencode's JSON Schema as its own snapshot test
+pins it (packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap),
+written by hand in each Spec, less "$schema", which the wire does not carry.
+Numbers must be JSON numbers: opencode removed string coercion
+(read.ts:23-27), so "10" for a number is refused.
+
+
+Deliberate differences in behaviour
+-----------------------------------
+
+Recorded in D-38 (discovery/native-harness/08-decisions.md) as well.
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| bash's timeout has no maximum                                   | a 10-minute cap, stated in the description                                                                                                          | a hidden provider must not hold a turn for hours |
+| bash's children may outlive the call                            | everything left in the command's process group is killed when the command returns; the description says so. A process that leaves the group (setsid, or setpgid as `set -m` job control does) escapes | no background jobs (Q5) |
+| bash's exit code is in metadata only (shell.ts:585-594)         | also "exit code: N" in <shell_metadata> when it is not zero                                                                                         | a failed command with no output would otherwise read "(no output)" |
+| read returns images and PDFs as attachments                     | refused: an image with "Cannot read image file yet: <path>"; a PDF with opencode's binary message, "Cannot read binary file: <path>", since opencode has no refusal of its own for one | images arrive with H8; the provider turns media results into a synthetic user message |
+| write and edit write the file in place (edit.ts:155)            | a temp file renamed over it, under a per-path lock, with an external-change check just before the rename (inode, size, modification time and the content that was read, or still absent for a new file): "File changed on disk since it was read. Read it again before editing." | crash safety. The cost: a rewritten file gets a new inode, so hard links to it keep the old content, and its ownership, ACLs and extended attributes are not carried over; nothing is fsynced, so durability is not promised |
+| edit's thresholds count UTF-16 units; replaceAll expands $& and $1 in newString (edit.ts:714) | thresholds count runes; the replacement is literal                                                                  | Go semantics; the second is a bug fix |
+| a formatter, LSP diagnostics, file-watcher events               | not ported                                                                                                                                          | craze has no such subsystems |
+| tree-sitter parsing of bash commands                            | not ported; the gate sees the raw command                                                                                                           | it exists only for permission patterns |
+| apply_patch instead of edit and write for GPT-5 models          | not ported; every model gets edit and write                                                                                                         | a later profile, if wanted |
+| a hidden "invalid" tool for unknown tool names                  | Fantasy's own error result: "tool not found: X. Available tools: ..."                                                                                | the same effect, with no extra tool |
+| the doom-loop guard asks the user                               | a nudge, then the turn stops                                                                                                                        | there is no approval channel |
+| a plugin hook sets bash's environment                           | craze's own provider credentials are removed from it                                                                                                | secrets |
+| an external-directory permission                                | none                                                                                                                                                | no permission prompts (plan 019 decision 2) |
+| system prompts per model family                                 | one system prompt                                                                                                                                   | D-30; a second profile carries the future |
+
+Smaller differences found porting read and write:
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| read cuts a line at 2000 UTF-16 units                           | at 2000 runes (Unicode code points), never inside a character                                                                                       | Go semantics, as for edit's thresholds |
+| read sorts a directory's entries with localeCompare             | in byte order                                                                                                                                       | deterministic without a collation table |
+| read's "Did you mean" takes names in readdir order              | in name order                                                                                                                                       | os.ReadDir sorts; deterministic |
+| TextDecoder shows one U+FFFD per invalid UTF-8 sequence         | one per invalid byte                                                                                                                                | Go's decoder; differs only inside a truncated multi-byte sequence |
+| read opens a FIFO or a device and waits or reads forever        | refused: "Path is not a regular file or a directory: <path>"                                                                                        | such a read ignores cancel and would hang the turn (plan 019 section 3.9) |
+| read takes a whole directory before it slices it, with no cancel checked | the entries are taken 1000 at a time, with a cancel checked between chunks, and the listing stops at 100,000 entries, saying so: "(Listing stopped at 100000 entries: the directory has more, and only the first 100000 it returned are listed. Use the bash tool to see the rest.)" Those entries are sorted among themselves, not the directory's first 100,000 in order | a directory of millions of names, or one on a mount that never ends, must cost neither the memory of all of them nor a turn that cannot be stopped |
+| read holds a line in memory while it reads it, and checks a cancel only between lines | it holds at most 8000 bytes of any line — enough for the 2000 characters it shows — and checks a cancel between the chunks of a long one | a file of one endless line (a minified bundle, a file with no newline) must cost neither memory nor a turn that cannot be stopped |
+| write reads the whole file it overwrites                        | it reads at most one byte past the size it found, and a file over 5 MiB it does not read at all: the result then carries no edit, so the card shows no diff, and the change check has the inode, size and modification time but not the content. The byte order mark is still read and kept | overwriting a multi-gigabyte log must not cost its size in memory; the cap is edit's |
+| read appends AGENTS.md instructions (<system-reminder>) and warms the LSP | neither                                                                                                                                   | instruction files arrive with H4-H6; no LSP |
+| read and write may touch any file                               | <Home>/providers.toml is refused, by resolved path — its name compared ignoring case and its directory by identity, since a case-insensitive file system (APFS) gives one file many spellings — or as the same file: "Cannot access craze's credentials file" | craze's own keys (plan 019 section 3.8) |
+| write writes any content                                        | content holding the redaction marker is refused: "This text contains a redaction marker, not the file's real content. Re-read the file around the change and leave the credential untouched." | writing it back would put the marker on disk in place of the real key |
+| a new file is 0666 and new parents 0777, less the umask         | a new file is 0644 and new parents 0755 (less the umask); an existing file keeps its mode, setuid, setgid and sticky bits included              | the rename sets the mode itself; the same result under the usual umask 022 |
+| write through a symlink writes its target                       | the same, and the link is kept; a dangling link creates its target                                                                                  | a rename would otherwise replace the link |
+| write fails on a file it cannot write                           | the same, checked before anything is written                                                                                                        | a rename needs only the directory, and would replace a read-only file |
+| write to a directory or a special file fails from the OS        | "Path is a directory, not a file: <path>" (edit.ts:125's words) or "Path is not a regular file: <path>"                                             | a FIFO must never be opened to wait for a reader |
+| write's result lists LSP errors after "Wrote file successfully." | "Wrote file successfully." alone                                                                                                                   | no LSP |
+
+Smaller differences found porting edit:
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| edit decodes the file as UTF-8 and writes the text back, so any edit turns every invalid UTF-8 byte in the file into U+FFFD | edit matches against the file as read shows it (each invalid byte as U+FFFD), so which span is found, and whether once, is judged on what the model saw; it then replaces that span in the file's bytes, and nothing outside it changes | an edit must not change what it did not match |
+| in a file that is not valid UTF-8, an oldString's U+FFFD matches an invalid byte (decoded to U+FFFD), and the edit writes U+FFFD back in its place | in such a file, an oldString containing U+FFFD is refused before matching: "The file contains bytes that are not valid UTF-8, which read shows as U+FFFD; an oldString containing U+FFFD cannot match them exactly. Use bash to edit this file." A match whose span holds an invalid byte, or an edit that would join invalid bytes around it into a different character (deleting "b" between E2 82 and 80 makes U+2080), is refused too: "The text oldString matched contains, or borders on, bytes that are not valid UTF-8, which read shows as U+FFFD; edit cannot keep them exactly. Use bash to edit this part of the file." | no JSON string can carry an invalid byte back; every invalid byte survives an edit and still reads as U+FFFD |
+| a replacer's empty span counts as found (indexOf("") is 0): for a whitespace-only oldString that is not in the file, replaceAll puts newString between every character of the file, and an empty file gets newString | an empty span is no match: "Could not find oldString in the file. ..."                          | a span that is everywhere locates nothing |
+| a BOM at the front of the edited text becomes the file's BOM, whatever put it there (edit.ts:133-135), so a file that begins with two BOMs, or an edit that deletes what stood before a second, loses one | only a BOM that newString brings to the very start merges with the file's; any other is content and kept | nothing outside the replaced span changes |
+| any size of file is searched, and the search ignores a cancel   | a file over 5 MiB is refused before any matching: "File too large to edit; use bash"; the search stops on a cancel ("Tool execution aborted")        | the fuzzy replacers are quadratic (plan 019 section 3.9) |
+| oldString and newString of any size                             | either over 5 MiB is refused before any matching: "oldString or newString is larger than 5 MiB, too large to edit; use write or bash"            | the replacers' memory and time grow with oldString as with the file |
+| replaceAll's result of any size                                 | a result over 10 MiB is refused before it is built: "The edit would make the file larger than 10 MiB; use bash" (one replacement always fits)     | replaceAll multiplies newString by the occurrences |
+| a cancel is noticed wherever the call happens to check it       | write and edit check it last just before the rename: a call cancelled by then writes nothing and is aborted; once the file is renamed the call reports success | a call is never reported aborted for a change it made |
+| an empty oldString on an existing directory: "oldString cannot be empty when editing an existing file. ..." | "Path is a directory, not a file: <path>", the file tools' check, which runs first                                   | one set of checks for every file tool |
+| an empty filePath fails when the call runs: "filePath is required" | refused before it runs, as invalid arguments: "... invalid arguments: filePath is required. ..."                                                 | the input is checked before the gate |
+| edit's result lists LSP errors after "Edit applied successfully." | "Edit applied successfully." alone                                                                                                                | no LSP |
+
+The replacers trim and match whitespace as JavaScript does (String.trim and a
+regular expression's \s), not as Go's unicode.IsSpace does: U+FEFF is
+whitespace to them and U+0085 is not. That is ported, not changed.
+
+Smaller differences found porting bash:
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| runs the user's $SHELL when it is an acceptable one             | /bin/bash, else /bin/sh; the description's ${shell} is its name                                                                                     | plan 019 section 3.9 pins the shell |
+| ${tmp} is os.tmpdir()/opencode, made at startup                 | os.TempDir()/craze, made (0700, if missing) before every command                                                                                    | the description promises the directory exists; the tool framework has no startup hook |
+| a timed-out or aborted command is an ordinary result            | the same text, as an error result classed timeout or aborted; an aborted result's text starts with "Tool execution aborted" (processor.ts's words) and keeps the output | craze classifies every failed call (plan 019 section 3.5) |
+| (no cap, so no note)                                            | a reduced timeout adds "The requested timeout of N ms is above the maximum of 600000 ms; the command ran with a timeout of 600000 ms." to <shell_metadata> | the result says so (plan 019 section 3.9) |
+| a shell killed by a signal has no exit code                     | "exit code: 128+N" for signal N, as a shell reports it                                                                                              | the model reads why the command failed |
+| SIGTERM on abort or timeout, then SIGKILL after 3 s             | the same, with SIGCONT alongside the SIGTERM so a stopped command acts on it; when the session closes, SIGKILL at once; a stop that lands between the pre-start check and launch taking the started command kills it at once, without the grace, since it has run for the width of that window and produced nothing. The shutdown has one deadline, set when it starts (5 s after the SIGTERM, 2 s after a close's SIGKILL): a leader that dies late does not restart the 2 s drain wait | a stopped command would otherwise wait out the grace; closing must not wait; the bounds (6.7 s, 2.7 s) must hold whenever the leader dies (plan 019 section 3.9) |
+| live output after every chunk, the last 30,000 characters       | a snapshot of the redacted in-memory tail (up to 100 KiB) at most every 100 ms, and only when it changed; it lags the output by up to the longest provider key's length less one byte | plan 019 sections 3.5 and 3.8: progress is lossy, and a key split across reads must not show half of itself |
+| output decoded as UTF-8 text                                    | the bytes as written; the tail is cut at a line end or, for one overlong line, on a character boundary                                              | Go; the kept text is opencode's |
+| the full output is always saved (the write cannot fail), with no size limit | tool_<call id> under <Home>/tool-output, mode 0600, written by a goroutine of its own that the pipe's reader never waits on and that holds no lock while it touches the file; when the file cannot be opened or written, falls some 8 MiB behind, or is not finished 1 s after the output ends (at once, when the session is closing), it is given up: its backlog is dropped, "The full output could not be saved." stands where the path would, and whatever was written is left unnamed for the seven-day sweep, never removed by name (a remove is one more call a stalled filesystem could hold, and the name may by then belong to another file). When the output was not read to its end (below), a finished file is offered as "Output saved to: <path>" then "The saved output holds only what was read of the output.", never as full | a stalled filesystem under <Home> must not hold the turn, Close or the TUI, nor stop the pipe being read (output.go says how) |
+| the timeout runs from the spawn                                 | the timeout runs from the call's start, so the work before the command (the workdir check, making ${tmp}, the exec) is under it too; a start that has not finished by then is abandoned and the call is a timeout | a workspace or ${tmp} on a filesystem that does not answer must not hold the turn |
+| (no cap)                                                        | the spill file stops at 100 MiB (maxSpillBytes); the output is still read to its end and its tail kept, and the notice reads "Output saved to: <path>" then "The saved output stops at 100 MiB; the rest was not saved." | a runaway command (`yes`) would otherwise fill the disk within the timeout |
+| reads the output until the stream ends                          | once the command's process group is dead, reads what is left in the pipe for at most 0.5 s; when something outside the group still holds it, <shell_metadata> says "The output may be incomplete: ..." | the output of a process that left the group has no end, and Run must return |
+| a workdir that does not exist or is a file fails to spawn       | refused before anything runs: "workdir does not exist: <path>" (not_found) or "workdir is not a directory: <path>"                                 | a clear message instead of a spawn error |
+| bash's environment is opencode's own process's                  | the environment the harness passes (craze's provider keys already gone), less OPENAI_*; with none passed, bash runs nothing: "The bash tool cannot run: no child environment configured." | the tool cannot know which variables hold provider keys, so it fails closed (plan 019 section 3.8) |
+| PWD is opencode's own                                           | PWD is the working directory                                                                                                                        | what exec.Cmd does itself when it builds the environment |
+
+Smaller differences found porting grep and glob:
+
+| opencode                                                        | craze                                                                                                                                               | why |
+|-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+| ripgrep comes from opencode's own binary service                | rg found on PATH, once per session (grep and glob share the lookup); without it both return "ripgrep (rg) is not installed or not on PATH. Use the bash tool with grep or find instead." | plan 019 decision 3: no download code |
+| rg runs with opencode's environment and no time limit           | rg runs as bash's command does: its own session, the environment bash gives a command (craze's provider keys removed), killed with its group on a cancel, and SIGKILLed at once when the session closes; after 20 s it is stopped with "<grep or glob> tool terminated ripgrep after exceeding timeout 20000 ms. Consider using a more specific path or pattern." (class timeout) | a search must not hold a turn, or outlive it (plan 019 section 3.9) |
+| grep shows a match's line with rg's line terminator, so every "  Line n:" line is followed by a blank line, and a CRLF line keeps its "\r" | the terminator ("\n" or "\r\n") is dropped                                                                                   | the blank lines only cost tokens |
+| grep cuts a line at 2000 UTF-16 units, then "..."               | at 2000 runes (Unicode code points), never inside a character                                                                                       | Go semantics, as for read |
+| a line or path that is not valid UTF-8, which rg reports as base64 bytes, fails the whole grep: "Invalid ripgrep match output" | the bytes are decoded: the line shows U+FFFD for each invalid byte, the path keeps its bytes                                      | one Latin-1 file must not break every search that reaches it |
+| a line is shown as rg printed it                                | craze's provider keys are redacted from it before the 2000-rune cut                                                                                 | a key the cut would halve must not leave its first half behind (plan 019 section 3.8) |
+| exactly 100 matches (or files) are reported as truncated: "(more matches available)" and the truncation note | only when rg printed a 101st                                                                                                          | exactly 100 is all of them; the note would send the model to narrow a complete answer |
+| a grep path that is a file searches the whole directory holding it (grep.ts runs rg in that directory and does not pass the file to Ripgrep.grep) | that file alone, searched by name from its directory; include does not filter it, as rg filters no file it is given by name | grep.test.ts's "supports exact file paths" intends the file; a sibling's matches would mislead |
+| a grep path that does not exist searches its parent directory; a glob path that does not exist fails to spawn: "ripgrep execution failed" | refused before rg runs: "grep path does not exist: <path>" / "glob path does not exist: <path>" (not_found)            | a clear message; the parent's matches would mislead |
+| glob refuses a file with "glob path must be a directory: <path>"; grep reads whatever the path names | glob refuses anything that is not a directory with those words; grep refuses a path that is neither a file nor a directory: "Path is not a regular file or a directory: <path>" | a FIFO named outright would be read until a writer came (plan 019 section 3.9) |
+| a glob rg cannot parse (glob's pattern, grep's include) exits 2 with "error parsing glob", which opencode reads as a search with no rows: "No files found" | rg's message, as an error, as opencode already does for a regex rg cannot parse                         | "No files found" would tell the model the files do not exist |
+| an empty grep pattern fails when the call runs: "pattern is required" | refused before it runs, as invalid arguments: "... invalid arguments: pattern is required. ..."                                            | the input is checked before the gate |
+| rg failing to start: "ripgrep execution failed", the cause kept out of the message | "ripgrep execution failed: <cause>"                                                                                                       | the model and the transcript see why |
+| "\" in a path rg prints becomes "/"                             | kept                                                                                                                                                | a Windows rule; on Linux and macOS "\" is part of a name |
+| glob reads `rg --files` a line at a time, so a name with a newline in it splits into two paths, and a file in a directory named "x\n.." reads as "../secret", joined onto the search's parent: a path outside the search, never searched | glob passes --null and splits rg's output on NUL, the one byte a name cannot hold. Every path rg prints, glob's and grep's (whose JSON escapes a newline and so could not split), must lie strictly under the directory searched once cleaned and joined, or the search fails: "Invalid ripgrep output: "<path>" is not a path under <dir>" | a path above the search must never be shown as found in it; rg never prints one, so one means its output cannot be trusted, and failing says so where dropping it would hide it |
+| each path, or each file's header, is shown as it is, one a line | a path holding a control character (a newline, a tab, a carriage return) is shown Go-quoted: "/w/x\n../secret"                                  | otherwise a newline in a name reads as two paths, one of them outside the search |
+| grep's card title is the pattern; glob's is the directory searched, relative to the worktree | both: the pattern, then " in <path>" when the call names a path, relative to the workspace                                           | one line that says what was searched for, and where; not model-facing |

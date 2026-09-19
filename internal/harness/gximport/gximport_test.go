@@ -632,6 +632,55 @@ func TestImportIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestImportKeepsAManualToolProfile: an import never writes tool_profile,
+// so the owner's choice survives a re-import, Save and Load on a manual
+// model; on a gx-sourced model the import replaces the entry wholesale and
+// the hand edit goes — the negative control, and the rule models.toml's
+// header states.
+func TestImportKeepsAManualToolProfile(t *testing.T) {
+	first, _, err := Import(fixture, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for alias, m := range first.Models {
+		if m.ToolProfile != "" {
+			t.Fatalf("the import wrote tool_profile %q on %s", m.ToolProfile, alias)
+		}
+	}
+	manual := first.Models["glm-5.3"]
+	manual.ToolProfile, manual.Source = "opencode", modeltable.SourceManual
+	first.Models["glm-5.3"] = manual
+	gx := first.Models["fireworks/kimi-k3"]
+	gx.ToolProfile = "opencode"
+	first.Models["fireworks/kimi-k3"] = gx
+
+	dir := filepath.Join(t.TempDir(), "native")
+	if err := modeltable.Save(dir, first); err != nil {
+		t.Fatal(err)
+	}
+	existing, err := modeltable.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _, err := Import(fixture, existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := modeltable.Save(dir, merged); err != nil {
+		t.Fatal(err)
+	}
+	back, err := modeltable.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Models["glm-5.3"]; got.ToolProfile != "opencode" || got.Source != modeltable.SourceManual {
+		t.Fatalf("the manual model = %+v, want its tool_profile kept", got)
+	}
+	if got := back.Models["fireworks/kimi-k3"].ToolProfile; got != "" {
+		t.Fatalf("the gx model kept a hand-set tool_profile %q through a re-import", got)
+	}
+}
+
 func TestImportDefaultModelRule(t *testing.T) {
 	const two = okProvider + `
 [model."ok/a"]

@@ -658,6 +658,7 @@ func TestValidateFailuresNameFileTableAndKey(t *testing.T) {
 		{"default_effort without efforts", func(t *Table) {
 			setModel(t, "fireworks/kimi-k3", func(m *Model) { m.Efforts, m.DefaultEffort = nil, "high" })
 		}, ModelsFile, kimi, "default_effort"},
+		{"tool_profile unknown", func(t *Table) { setModel(t, "fireworks/kimi-k3", func(m *Model) { m.ToolProfile = "gpt" }) }, ModelsFile, kimi, "tool_profile"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
