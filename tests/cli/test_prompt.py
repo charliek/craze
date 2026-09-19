@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import REMOVED_CONFIG_ENV
+
 
 def parse_events(stdout: str) -> list[dict]:
     events = []
@@ -33,7 +35,8 @@ def run_prompt(
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = script
     env.pop("CRAZE_PROVIDER", None)
-    env["CRAZE_CONFIG"] = str(workspace / "missing-craze-config.toml")
+    # Per workspace, and with no config.toml in it until a run saves one.
+    env["CRAZE_HOME"] = str(workspace / "craze-home")
     env["XAI_API_KEY"] = ""
     env["GROK_CODE_XAI_API_KEY"] = ""
     cmd = [str(craze_bin), "prompt"]
@@ -270,6 +273,43 @@ def test_usage_exit_2(craze_bin: Path, tmp_path: Path) -> None:
     assert proc.stdout == ""
 
 
+def test_removed_config_env_exits_2(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """The variable CRAZE_HOME replaced is a usage error that names CRAZE_HOME.
+
+    The run would otherwise succeed and save its provider; it refuses before
+    reading or writing anything, so neither HOME nor CRAZE_HOME gains a file.
+    """
+    env = os.environ.copy()
+    env[REMOVED_CONFIG_ENV] = str(tmp_path / "old" / "config.toml")
+    env["CRAZE_FAKE_SCRIPT"] = "echo"
+    proc = subprocess.run(
+        [
+            str(craze_bin),
+            "prompt",
+            "--json",
+            "--provider",
+            "cursor",
+            "--agent-bin",
+            str(fake_agent_bin),
+            "--workspace",
+            str(tmp_path),
+            "hi",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert REMOVED_CONFIG_ENV in proc.stderr and "CRAZE_HOME" in proc.stderr, proc.stderr
+    assert proc.stdout == ""
+    assert not Path(env["CRAZE_HOME"]).exists()
+    assert list(Path(env["HOME"]).iterdir()) == []
+
+
 def _lifecycle(events: list[dict], agent_id: str | None = None) -> list[str]:
     out = []
     for e in events:
@@ -312,7 +352,7 @@ def test_grok_subagent_cancel_json(craze_bin: Path, fake_agent_bin: Path, tmp_pa
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = "grok-subagent-cancel"
     env.pop("CRAZE_PROVIDER", None)
-    env["CRAZE_CONFIG"] = str(tmp_path / "missing-craze-config.toml")
+    env["CRAZE_HOME"] = str(tmp_path / "craze-home")
     env["XAI_API_KEY"] = ""
     env["GROK_CODE_XAI_API_KEY"] = ""
     proc = subprocess.Popen(
@@ -466,7 +506,7 @@ def test_signal_clears_the_queue(
     env = os.environ.copy()
     env["CRAZE_FAKE_SCRIPT"] = "hang"
     env.pop("CRAZE_PROVIDER", None)
-    env["CRAZE_CONFIG"] = str(tmp_path / "missing-craze-config.toml")
+    env["CRAZE_HOME"] = str(tmp_path / "craze-home")
     proc = subprocess.Popen(
         [
             str(craze_bin),

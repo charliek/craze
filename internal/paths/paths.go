@@ -1,31 +1,45 @@
 // Package paths is where craze decides where its own files live on disk: the
-// user's home directory, the config file inside it, and the session index
-// that sits next to the config file. Both internal/tui (config) and
+// user's home directory, the craze directory inside it, and the fixed names
+// in that directory — the config file, the session index next to it, and the
+// native harness's own directory. Both internal/tui (config) and
 // internal/sessions (the index) call this package so neither depends on the
 // other for something as basic as "where is home".
 package paths
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 const (
-	// configDir / configName make up ~/.craze/config.toml; CRAZE_CONFIG
-	// replaces the whole path.
-	configDir  = ".craze"
-	configName = "config.toml"
-	// sessionsName is the session index file, always a sibling of the
-	// config file.
+	// crazeHomeEnv relocates the craze directory: everything below lives in
+	// $CRAZE_HOME instead of ~/.craze when it is set.
+	crazeHomeEnv = "CRAZE_HOME"
+	// crazeDirName is the craze directory's name under the home directory.
+	crazeDirName = ".craze"
+	// configName, sessionsName and nativeName are fixed names inside the
+	// craze directory: the config file, the session index next to it, and
+	// the native harness's directory.
+	configName   = "config.toml"
 	sessionsName = "sessions.jsonl"
+	nativeName   = "native"
+
+	// removedConfigEnv named the config *file* before CRAZE_HOME replaced it.
+	// It is kept only as a tripwire (tripped, CheckEnv): a script or test
+	// still isolating itself with it would otherwise be silently ignored and
+	// read and write the real ~/.craze. Delete it, the tripwire in CrazeDir,
+	// and CheckEnv together, a release after the switch.
+	removedConfigEnv = "CRAZE_CONFIG"
 )
 
-// HomeDir is the home directory craze reads its own files out of: the config
-// file, the session index, the user-level skills and the plugin caches. HOME
-// wins over the account database so a test (and the frame runner) can
-// isolate all of them with one variable. "" means there is no home directory
-// to use.
+// HomeDir is the user's home directory: HOME wins over the account database,
+// so a test (and the frame runner) can isolate it with one variable. It keys
+// the user-level skills and plugin caches (see agent.HomeDir), and it is the
+// default parent of the craze directory. CRAZE_HOME relocates only the craze
+// directory's contents, never the skills or plugin caches. "" means there is
+// no home directory to use.
 func HomeDir() string {
 	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
 		return home
@@ -37,30 +51,93 @@ func HomeDir() string {
 	return strings.TrimSpace(home)
 }
 
-// ConfigPath is where the persisted settings live, or "" when there is no
-// home directory to put them in. CRAZE_CONFIG overrides the whole path and
-// may be relative, in which case it stays relative to the current working
-// directory.
-func ConfigPath() string {
-	if p := strings.TrimSpace(os.Getenv("CRAZE_CONFIG")); p != "" {
-		return p
+// CrazeDir is the directory craze keeps its own files in: $CRAZE_HOME when it
+// is set, else ~/.craze. A relative CRAZE_HOME stays relative to the current
+// working directory, except that a leading "~" or "~/" means the home
+// directory: an env file or a quoted shell assignment passes the tilde
+// through unexpanded, and taking it literally would put the owner's config in
+// a directory called "~" under wherever craze happened to start. "" when
+// there is neither — or when the removed
+// CRAZE_CONFIG is still set (see CheckEnv) — and every caller then persists
+// nothing rather than fall back to a relative path of its own.
+func CrazeDir() string {
+	if tripped() {
+		return ""
+	}
+	if dir := strings.TrimSpace(os.Getenv(crazeHomeEnv)); dir != "" {
+		return expandTilde(dir)
 	}
 	home := HomeDir()
 	if home == "" {
 		return ""
 	}
-	return filepath.Join(home, configDir, configName)
+	return filepath.Join(home, crazeDirName)
 }
 
-// SessionsPath is the session index, always the sibling of the config file
-// (same directory, "sessions.jsonl") -- so a relative CRAZE_CONFIG carries
-// the index along with it, and the frame runner's isolated HOME isolates the
-// index for free. "" when ConfigPath is "" (no home directory): callers must
-// never fall back to a relative "./sessions.jsonl".
+// ConfigPath is where the persisted settings live, or "" when CrazeDir is "".
+func ConfigPath() string {
+	return inCrazeDir(configName)
+}
+
+// SessionsPath is the session index, always the config file's sibling in the
+// craze directory. "" when CrazeDir is "": callers must never fall back to a
+// relative "./sessions.jsonl".
 func SessionsPath() string {
-	cfg := ConfigPath()
-	if cfg == "" {
+	return inCrazeDir(sessionsName)
+}
+
+// NativeDir is the native harness's directory inside the craze directory. It
+// is absolute even when CRAZE_HOME is relative, because the harness is handed
+// it once and must not follow a later change of working directory. "" when
+// CrazeDir is "" or the working directory cannot be read.
+func NativeDir() string {
+	dir := inCrazeDir(nativeName)
+	if dir == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(cfg), sessionsName)
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+// expandTilde cleans dir, first replacing a leading "~" or "~/" with the home
+// directory. "~user" is not expanded. With no home directory to expand into
+// it returns "", so nothing is persisted rather than a literal "~" directory.
+func expandTilde(dir string) string {
+	if dir != "~" && !strings.HasPrefix(dir, "~/") && !strings.HasPrefix(dir, "~"+string(filepath.Separator)) {
+		return filepath.Clean(dir)
+	}
+	home := HomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, dir[1:])
+}
+
+func inCrazeDir(name string) string {
+	dir := CrazeDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, name)
+}
+
+// CheckEnv refuses the removed CRAZE_CONFIG. The CLI calls it before any
+// command runs and reports its error as a usage error; CrazeDir enforces the
+// same rule for every caller that never goes through the CLI.
+func CheckEnv() error {
+	if !tripped() {
+		return nil
+	}
+	return errors.New(removedConfigEnv + " is no longer supported; unset it and set " +
+		crazeHomeEnv + " to the directory that holds config.toml instead (it defaults to ~/.craze)")
+}
+
+// tripped reports whether the removed CRAZE_CONFIG is set. Set means
+// non-empty after trimming, so a test that cleared it the old way, with
+// t.Setenv(name, ""), does not trip it.
+func tripped() bool {
+	return strings.TrimSpace(os.Getenv(removedConfigEnv)) != ""
 }

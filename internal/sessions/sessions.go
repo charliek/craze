@@ -99,8 +99,9 @@ func (r record) key() key { return key{provider: r.Row.Provider, sessionID: r.Ro
 
 // Store is the session index. The zero value is ready to use: like
 // config.go, every method recomputes paths.SessionsPath() itself, so a test
-// that changes CRAZE_CONFIG between calls (or a single process across a
-// config reload) always reads and writes the current file.
+// that changes HOME or CRAZE_HOME between calls (or the frame runner, which
+// swaps both for the length of a run) always reads and writes the current
+// file.
 type Store struct {
 	// KnownProvider reports whether a provider id is one this build knows
 	// about. Latest and Recent skip rows for a provider this returns false

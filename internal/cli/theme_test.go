@@ -2,8 +2,6 @@ package cli
 
 import (
 	"io"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -36,11 +34,7 @@ func themeFor(t *testing.T, args ...string) string {
 
 func writeThemeConfig(t *testing.T, name string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("theme = \""+name+"\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRAZE_CONFIG", path)
+	writeCrazeConfig(t, "theme = \""+name+"\"\n")
 }
 
 // TestThemePrecedence is the pinned order: an explicit --theme, then the config
@@ -74,7 +68,7 @@ func TestThemePrecedence(t *testing.T) {
 	})
 
 	t.Run("default without a config", func(t *testing.T) {
-		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+		crazeHome(t)
 		if got := themeFor(t); got != tui.DefaultTheme {
 			t.Fatalf("theme %q, want the default %q", got, tui.DefaultTheme)
 		}
@@ -84,11 +78,7 @@ func TestThemePrecedence(t *testing.T) {
 	})
 
 	t.Run("a malformed config falls back to the default", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "config.toml")
-		if err := os.WriteFile(path, []byte("not [[ toml"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CRAZE_CONFIG", path)
+		writeCrazeConfig(t, "not [[ toml")
 		if got := themeFor(t); got != tui.DefaultTheme {
 			t.Fatalf("theme %q, want the default", got)
 		}

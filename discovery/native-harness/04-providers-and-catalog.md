@@ -15,10 +15,29 @@ conclusions; `11` records both.
 3. **Catwalk `v0.52.43`: not embedded.** The catalog is a small craze-owned
    model table seeded from gx's configuration; Catwalk is a reference to
    consult when adding a model (D-22). Nothing blocks H1.
-4. **Overlay remains required.** It owns credentials, short aliases,
-   owner-selected defaults, Meta direct, and narrowly documented provider
-   overrides. Whether it reads gx's TOML or imports it remains open in `10`
-   Q4.
+4. **The harness owns credentials, short aliases, owner-selected defaults,
+   Meta direct, and narrowly documented provider overrides through its own
+   two-file config, not a live overlay of gx's TOML.** `craze import gx
+   [--grok-home DIR] [--dry-run]` reads `<grok home>/config.toml` layered
+   with `<grok home>/providers.toml` once, using gx's own layering rule at
+   import time only: `providers.toml` wins over `config.toml` for the tables
+   `model`, `model_providers`, and `auth_provider`, tables merge
+   recursively, and arrays are replaced. `<grok home>` is `--grok-home`,
+   else `$GROK_HOME`, else `~/.grok`. The import writes `providers.toml`
+   (0600) and `models.toml` (0644, no secrets) into the native directory,
+   `paths.NativeDir()` — `~/.craze/native/` by default, and wherever
+   `CRAZE_HOME` moves the craze directory otherwise; the harness reads them
+   from the same place. Nothing reads
+   `~/.grok` at runtime after that. This settles `10` Q4 (D-28) against the
+   live-read alternative, to decouple the harness from gx's schema now that
+   the owner may deprecate gx. Import rules: a provider is imported only
+   when `api_backend = "chat_completions"` and it has no `auth` command
+   table (Responses backends and ChatGPT-plan auth are reported `skipped`
+   with a reason); `driver` becomes `openrouter` when the base URL's host is
+   `openrouter.ai`, else `openai-compat`; re-running the import replaces or
+   adds entries whose `source = "gx"`, keeps every entry with any other
+   `source` (e.g. `"manual"`) untouched, and keeps-and-reports as `stale` a
+   gx-sourced entry gx no longer has; nothing is ever deleted.
 
 Fantasy remains Apache-2.0 with its NOTICE; Catwalk is MIT. H0 added neither
 module to craze's root dependencies.
@@ -80,7 +99,9 @@ H1 carries all 11 alias records so configured names are not silently lost.
 Ten are qualified for native tool use: the eight that passed H0 in both modes
 and both Meta aliases. DeepSeek V4 Pro needs its wire id corrected to
 `accounts/fireworks/models/deepseek-v4-pro-0813` (a plain chat request to it
-returns 200) and one clean three-step tool loop before it is listed (D-24).
+returns 200) and one clean three-step tool loop before it is qualified
+(D-24). H1 imports it as gx has it and surfaces the stale id's 404 as
+`ErrModelNotFound`; fixing the wire id is the owner's edit (Plan 018 §4).
 Qualifying a new alias means that loop, through the path H1 ships, with an
 output ceiling that leaves room for reasoning.
 
@@ -126,7 +147,9 @@ that gx lacked.
 - H0 set `MaxRetries=0`, a 512-token output ceiling, per-request and
   per-attempt deadlines, and a pre-dispatch budget reservation. The ceiling
   was too low for high-effort reasoning models and caused the Meta failures
-  above. Production retry policy remains owned by the later harness plan.
+  above. Production retry policy is D-32: Fantasy retries a step only before
+  its first byte of output (one retry in H1), never after output reached the
+  screen.
 - Meta's rate-limit headers (`x-ratelimit-remaining-requests`,
   `x-ratelimit-remaining-tokens`) are present on every response.
 - The GLM 5.3 Flash low-effort live variant passed with top-level
@@ -147,8 +170,9 @@ that gx lacked.
   for the earlier claim that the effective gx request adds a `thinking`
   object.
 - Reasoning replay is not uniformly lossy: Fantasy has explicit
-  OpenAI-compatible and OpenRouter replay paths. H1 must test and preserve
-  structured fields per provider rather than blanket-strip them.
+  OpenAI-compatible and OpenRouter replay paths. H1 preserves structured
+  fields and drops reasoning only when an entry's `provider` or `wire_model`
+  differs from the current model's (D-33), rather than blanket-stripping.
 
 ## Cost inputs
 

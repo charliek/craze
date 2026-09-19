@@ -526,7 +526,7 @@ func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 func TestNilSessionIndexWritesNothing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("CRAZE_CONFIG", "")
+	t.Setenv("CRAZE_HOME", "")
 
 	stub := NewStub()
 	t.Cleanup(func() { _ = stub.Close() })

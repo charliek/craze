@@ -96,6 +96,12 @@ that's `t.Setenv("HOME", t.TempDir())` in the test's own setup
 `internal/cli/frame_test.go`, `internal/cli/tui_test.go`, …); in the Python
 suite it's the autouse `isolate_run_env` fixture in `tests/cli/conftest.py`.
 
+`HOME` alone does not isolate craze's own files: a developer's exported
+`CRAZE_HOME` would still decide where the config file and the session index
+live. A Go test that reads or writes either also sets `CRAZE_HOME` — to a temp
+directory, or to `""` so the craze directory follows the isolated `HOME` —
+and the Python fixture sets it to `<tmp>/craze-home`.
+
 To drive a plugin command through the JSON interface:
 
 ```bash
@@ -153,12 +159,12 @@ never reads `~/.craze/config.toml`, so a saved theme cannot reach a golden.
 `--seed-session` rows are written **inside** the isolated `HOME`, and
 `--continue` / `--resume` resolve against that isolated index, so a replay or
 picker golden can never see — or touch — a developer's real
-`~/.craze/sessions.jsonl`.
+`~/.craze/sessions.jsonl`, or the one an exported `CRAZE_HOME` points at.
 
 `craze frame` cannot drive the real `cursor-agent`. It points `HOME` at an
-empty directory for the duration of the run — that is what keeps a developer's
-config and skills out of a golden — and `cursor-agent` loses its credentials
-along with it. Use `./bin/craze-fake-agent`. To drive a live agent in a
+empty directory and unsets `CRAZE_HOME` for the duration of the run — that is
+what keeps a developer's config and skills out of a golden — and
+`cursor-agent` loses its credentials along with it. Use `./bin/craze-fake-agent`. To drive a live agent in a
 terminal, use the [tmux smoke](#tmux-smoke) or just run `craze`.
 
 In a key script, literal text is typed rune by rune and anything in angle

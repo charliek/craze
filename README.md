@@ -211,11 +211,18 @@ the cursor moves; `Enter` keeps the theme and saves it, `Esc` puts back the one
 that was active when the picker opened. `/theme <name>` sets and saves one
 directly.
 
-The saved theme lives in `~/.craze/config.toml` (`CRAZE_CONFIG` overrides the
-path). Unrelated keys in that file are preserved; a file craze cannot parse is
-never clobbered, and the save that refused to overwrite it is reported in the
-transcript. An explicit `--theme` beats the config file, which beats
-`craze-dark`.
+The saved theme lives in `~/.craze/config.toml`. Unrelated keys in that file
+are preserved; a file craze cannot parse is never clobbered, and the save that
+refused to overwrite it is reported in the transcript. An explicit `--theme`
+beats the config file, which beats `craze-dark`.
+
+`CRAZE_HOME` moves the whole `~/.craze` directory — the config file and the
+session index both live directly inside it, as `config.toml` and
+`sessions.jsonl`. It does not move the user-level skills or plugin caches,
+which stay under `HOME`. It replaces an earlier variable that named the
+config file itself: while that one is still set, every craze command exits
+with status 2 and a message that names it (`--help` and `--version` still
+answer).
 
 ## Mouse and copy
 
@@ -275,10 +282,11 @@ default 10s) and `--print-frames` (stream every frame to stderr). There is no
 `~/.craze/config.toml`, so a saved theme cannot reach a golden.
 
 **`craze frame` cannot drive the real `cursor-agent`.** It points `HOME` at an
-empty directory for the duration of the run — that is what keeps a developer's
-config and skills out of a golden — and `cursor-agent` loses its credentials
-along with it, so `Start` never returns and the run dies on the implicit
-`<start>` barrier after the full `--timeout`. Use it with
+empty directory and unsets `CRAZE_HOME` for the duration of the run — that is
+what keeps a developer's config and skills out of a golden — and
+`cursor-agent` loses its credentials along with it, so `Start` never returns
+and the run dies on the implicit `<start>` barrier after the full `--timeout`.
+Use it with
 `./bin/craze-fake-agent`; to drive a live agent in a terminal, use the tmux
 smoke below or just run `craze`.
 

@@ -8,6 +8,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The config-file variable CRAZE_HOME replaced. craze refuses to run while it
+# is set, so an inherited one is scrubbed below. It is spelled in two parts on
+# purpose: the repo-walk test in internal/paths keeps the whole name out of
+# every file outside that package, so a test still isolating itself with it
+# fails CI instead of reaching the developer's real ~/.craze.
+REMOVED_CONFIG_ENV = "CRAZE_" + "CONFIG"
+
 
 def _bin(env_name: str, *parts: str) -> Path:
     override = os.environ.get(env_name)
@@ -36,13 +43,17 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     Every helper here builds its child environment from ``os.environ``, so one
     fixture covers them all. HOME is in it because craze walks the plugin
     caches under HOME at session start: without it a run would find whatever
-    the developer happens to have installed.
+    the developer happens to have installed. CRAZE_HOME is set explicitly --
+    never left to follow HOME -- so a developer's exported one cannot leak in,
+    and the config file and session index are ``<tmp>/craze-home/config.toml``
+    and ``<tmp>/craze-home/sessions.jsonl``.
     """
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CRAZE_PROVIDER", "")
-    monkeypatch.setenv("CRAZE_CONFIG", str(tmp_path / "craze-config.toml"))
+    monkeypatch.setenv("CRAZE_HOME", str(tmp_path / "craze-home"))
+    monkeypatch.delenv(REMOVED_CONFIG_ENV, raising=False)
     # craze reports its status to the terminal multiplexer it runs in (herdr,
     # roost) whenever that host's variables say so -- and this suite is often
     # run from inside one. Inherited, they would point a test craze at the

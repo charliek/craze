@@ -18,8 +18,9 @@ these documents, one per roadmap phase.
 | 2026-09-16 | pi reviewed; scope narrowed (Claude compat via import, hooks/settings/MCP deferred); this folder written |
 | 2026-09-17 | H0 started: exact candidate pins, the standalone probe, safety controls, and bounded live campaign were approved |
 | 2026-09-18 | H0 complete, then reviewed: Fantasy `v0.43.2` providers fit all four provider classes, `Agent.Stream` fits behind a small wrapper, the catalog is a craze-owned table, Meta works ([progress and results](11-h0-progress-and-results.md)) |
+| 2026-09-18 | Plan 018 (H1 walking skeleton) planned and started; decisions D-27..D-34 |
 
-No production harness code exists yet. **H0 is complete and H1 is next.**
+No production harness code exists yet. **H0 is complete and H1 is in progress.**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
 The harness is built in this repository as a hidden side quest beside the
@@ -30,7 +31,7 @@ daily-driver TUI (D-26).
 1. [01-goals-and-scope.md](01-goals-and-scope.md) — what we are building, what we are not, who sees it
 2. [02-architecture.md](02-architecture.md) — package split, the craze seam, the turn loop, the home directory
 3. [03-session-store.md](03-session-store.md) — the JSONL tree that every other subsystem reads
-4. [04-providers-and-catalog.md](04-providers-and-catalog.md) — Fantasy provider findings, the catalog decision, gx overlay, and per-provider behavior
+4. [04-providers-and-catalog.md](04-providers-and-catalog.md) — Fantasy provider findings, the catalog decision, the one-time gx import, and per-provider behavior
 5. [05-tools-and-permissions.md](05-tools-and-permissions.md) — the tool set, its limits, the permission model, plan mode
 6. [06-claude-compat.md](06-claude-compat.md) — CLAUDE.md, skills, marketplace plugins: live vs imported
 7. [07-roadmap.md](07-roadmap.md) — phases H0–H8 with exit criteria, plus the deferred list

@@ -10,7 +10,7 @@ and MCP are non-goals (`01`).
 | class | examples | handling |
 |---|---|---|
 | **Live from the workspace** | `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.claude/rules/*.md`, `.claude/skills/**`, `.agents/skills/**`, `.claude/agents/*.md`, `.claude/commands/*.md` | read where they live, every session |
-| **Imported into the harness home** | `~/.claude/CLAUDE.md`, `~/.claude/skills/**`, `~/.claude/agents/*.md`, `~/.claude/commands/*.md`, marketplace plugins from `~/.claude/plugins/` | copied by `craze import claude` into `~/.craze-acp/`; never read from `~/.claude` at runtime |
+| **Imported into the harness home** | `~/.claude/CLAUDE.md`, `~/.claude/skills/**`, `~/.claude/agents/*.md`, `~/.claude/commands/*.md`, marketplace plugins from `~/.claude/plugins/` | copied by `craze import claude` into the native directory (`~/.craze/native/` by default; it moves with `CRAZE_HOME`, D-27); never read from `~/.claude` at runtime. The tree inside it is H4's to design, so every such path in this document is provisional |
 
 ## Instruction files
 
@@ -18,14 +18,14 @@ Load, at every directory from the repo root down to the cwd, all of:
 `AGENTS.override.md` (wins for that directory, pi), `AGENTS.md`,
 `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`,
 `.claude/CLAUDE.local.md`. Deeper files come later in the prompt so they
-win on conflict. Then `~/.craze-acp/instructions/*.md` first of all
+win on conflict. Then `~/.craze/native/instructions/*.md` first of all
 (global). Files matched by `.gitignore` are skipped except `CLAUDE.local.md`.
 
 - **`@path` imports** inside an instruction file are followed, relative to
   the file, depth-capped at 5, cycles ignored. grok does not do this; Claude
   Code does.
 - **Rules directories**: `.claude/rules/*.md` at each level and
-  `~/.craze-acp/instructions/rules/*.md`, alphabetical. Frontmatter
+  `~/.craze/native/instructions/rules/*.md`, alphabetical. Frontmatter
   `paths:` globs gate a rule to matching files: a gated rule is loaded when
   the cwd or a file the agent touches matches. grok strips frontmatter and
   ignores `paths`; Claude Code honours it; we honour it.
@@ -38,7 +38,7 @@ win on conflict. Then `~/.craze-acp/instructions/*.md` first of all
 
 Agent Skills spec (`SKILL.md` with frontmatter). Roots, highest priority
 first: `.claude/skills` and `.agents/skills` at each level from cwd to repo
-root, then `~/.craze-acp/skills/` (imported), then plugin skills. Dedup by
+root, then `~/.craze/native/skills/` (imported), then plugin skills. Dedup by
 name, first wins; a collision is qualified `plugin:name`.
 
 - Frontmatter honoured: `name`, `description`, `when-to-use`,
@@ -62,7 +62,7 @@ substitution, `!`cmd`` shell splice deferred.
 Source of truth is **Claude Code's own install**: `craze import claude`
 reads `~/.claude/plugins/installed_plugins.json` ∩ the enabled list (craze's
 `plugins.go` already does this walk), copies each plugin snapshot into
-`~/.craze-acp/plugins/<id>/` and records `{source, version, sha}` in a
+`~/.craze/native/plugins/<id>/` and records `{source, version, sha}` in a
 manifest. Components consumed: `skills/`, `commands/`, `agents/`. Ignored
 for now: `hooks/hooks.json`, `.mcp.json`. `CLAUDE_PLUGIN_ROOT` resolves to
 the snapshot directory for skills that reference it.
@@ -73,14 +73,16 @@ install`. A native marketplace installer (git clone of
 
 ## Agents
 
-`.claude/agents/*.md` at each level, `~/.craze-acp/agents/` (imported),
+`.claude/agents/*.md` at each level, `~/.craze/native/agents/` (imported),
 plugin `agents/`; frontmatter `name`, `description`, `tools`, `model`.
 Name-dedup, highest priority wins. Used as sub-agent personas (`05`).
 
 ## Toggles
 
-`[compat.claude]` in `~/.craze-acp/config.toml` with `instructions`,
-`rules`, `skills`, `commands`, `agents`, `plugins` booleans, default on.
+`[compat.claude]` with `instructions`, `rules`, `skills`, `commands`,
+`agents`, `plugins` booleans, default on. Which file holds it is H4's call:
+H1's native config is only `providers.toml` and `models.toml` (D-28), and
+neither is the right home for compat toggles.
 
 ## Explicit non-goals
 

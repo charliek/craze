@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/version"
 )
 
@@ -20,6 +21,17 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version.Version,
 		Args:          cobra.NoArgs,
+		// Every command, the root included, refuses to run while the removed
+		// config-file variable is set (paths.CheckEnv), before it can read or
+		// write anything. No subcommand may define a PersistentPreRunE of its
+		// own: it would replace this one. --help and --version never reach a
+		// hook and touch no file, so they still answer.
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			if err := paths.CheckEnv(); err != nil {
+				return usagef("craze: %v", err)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
 			if f, ok := out.(*os.File); ok {

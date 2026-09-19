@@ -108,7 +108,10 @@ class PTYCraze:
         env["HOME"] = str(workspace)
         env.pop("CRAZE_AGENT_BIN", None)
         env.pop("CRAZE_PROVIDER", None)
-        env.pop("CRAZE_CONFIG", None)
+        # The craze directory follows HOME here, so a case seeds its config
+        # and its session index under <workspace>/.craze. A case that wants
+        # CRAZE_HOME passes it in env_extra.
+        env.pop("CRAZE_HOME", None)
         # Never inherited: a developer with CRAZE_FAKE_STEP exported would
         # otherwise change the timing of every case that did not ask for it.
         env.pop("CRAZE_FAKE_STEP", None)

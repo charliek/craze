@@ -9,14 +9,16 @@ import (
 	"time"
 )
 
+// writeConfigFile points CRAZE_HOME at a fresh directory and writes body as
+// its config.toml. Returns the config file's path.
 func writeConfigFile(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+	path := filepath.Join(dir, configName)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CRAZE_CONFIG", path)
+	t.Setenv("CRAZE_HOME", dir)
 	return path
 }
 
@@ -162,8 +164,10 @@ func TestSaveThemeSerialisesWithAnotherWriter(t *testing.T) {
 	}
 }
 
+// TestConfigThemeWithoutAFile reads empty, and the first save creates the
+// craze directory itself as well as the file.
 func TestConfigThemeWithoutAFile(t *testing.T) {
-	t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "nested", "config.toml"))
+	t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nested"))
 	if got := ConfigTheme(); got != "" {
 		t.Fatalf("theme %q, want empty", got)
 	}
@@ -175,19 +179,21 @@ func TestConfigThemeWithoutAFile(t *testing.T) {
 	}
 }
 
-// TestConfigPathFollowsHomeAndOverride pins where the file lives, because the
-// isolation every test and the frame runner rely on is HOME-based.
-func TestConfigPathFollowsHomeAndOverride(t *testing.T) {
+// TestConfigPathFollowsHomeAndCrazeHome pins where the file lives, because
+// the isolation every test and the frame runner rely on is HOME and
+// CRAZE_HOME based: ~/.craze/config.toml by default, and config.toml directly
+// inside CRAZE_HOME when that is set.
+func TestConfigPathFollowsHomeAndCrazeHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("CRAZE_CONFIG", "")
-	if got, want := configPath(), filepath.Join(home, ".craze", "config.toml"); got != want {
+	t.Setenv("CRAZE_HOME", "")
+	if got, want := configPath(), filepath.Join(home, configDir, configName); got != want {
 		t.Fatalf("configPath %q, want %q", got, want)
 	}
-	override := filepath.Join(t.TempDir(), "elsewhere.toml")
-	t.Setenv("CRAZE_CONFIG", override)
-	if got := configPath(); got != override {
-		t.Fatalf("CRAZE_CONFIG ignored: %q", got)
+	crazeHome := t.TempDir()
+	t.Setenv("CRAZE_HOME", crazeHome)
+	if got, want := configPath(), filepath.Join(crazeHome, configName); got != want {
+		t.Fatalf("configPath %q with CRAZE_HOME set, want %q", got, want)
 	}
 }
 
@@ -248,7 +254,7 @@ func TestConfigBackgroundTable(t *testing.T) {
 	}
 
 	t.Run("missing file", func(t *testing.T) {
-		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "nothing", "config.toml"))
+		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
 		if !ConfigBackground() {
 			t.Fatal("no config file at all should still theme the background")
 		}
@@ -280,7 +286,7 @@ func TestConfigHostStatusTable(t *testing.T) {
 	}
 
 	t.Run("missing file", func(t *testing.T) {
-		t.Setenv("CRAZE_CONFIG", filepath.Join(t.TempDir(), "nothing", "config.toml"))
+		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
 		if !ConfigHostStatus() {
 			t.Fatal("no config file at all should still report host status")
 		}

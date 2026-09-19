@@ -17,9 +17,14 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
+// isolateSkillsHome points HOME at an empty directory, which isolates the
+// skills and plugin caches, and clears CRAZE_HOME so the craze directory sits
+// under that HOME too: a test that saves a theme or a provider must not write
+// into a CRAZE_HOME the developer exported.
 func isolateSkillsHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRAZE_HOME", "")
 }
 
 // plainView is the frame as text. TestMain forces a true-colour profile so the

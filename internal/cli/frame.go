@@ -125,10 +125,12 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 	}
 	var setup func() (tui.Config, error)
 	if o.cont || o.resume || len(o.seedSessions) > 0 {
-		// The index lives under HOME, and the runner only isolates HOME after
-		// this function has handed it a Config — so the seeding and the row
-		// lookup have to happen in a callback it runs inside the isolation,
-		// or a golden would read (and write) the developer's own index (§3.7).
+		// The index lives in the craze directory (CRAZE_HOME, else under
+		// HOME), and the runner only isolates it — HOME swapped, CRAZE_HOME
+		// unset — after this function has handed it a Config. So the seeding
+		// and the row lookup have to happen in a callback it runs inside the
+		// isolation, or a golden would read (and write) the developer's own
+		// index (§3.7).
 		setup = func() (tui.Config, error) { return o.seedAndResolve(cmd, base, ws, force) }
 	}
 

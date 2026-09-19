@@ -7,7 +7,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | ID | status | one line |
 |---|---|---|
 | H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
-| H1 | next | skeleton: home dir + env override, craze-owned model table + overlay, provider factory, wrapper + `Agent.Stream` turn runner over the JSONL tree store, hidden native provider, effort option, cancel, interject |
+| H1 | in progress | skeleton: `CRAZE_HOME` (replaces `CRAZE_CONFIG`), two-file model/provider config imported once via `craze import gx`, provider factory, wrapper + `Agent.Stream` turn runner over the JSONL tree store, hidden native provider, effort option, cancel; no interject, no modes (D-34) |
 | H2 | not started | tools: read, bash, edit, write, then ls, glob, grep; truncation wrapper; kind metadata; edit diffs; doom-loop guard; scripted-model test harness |
 | H3 | not started | permissions: once / always / reject-with-feedback, prefix table, dangerous list, per-workspace grants, Claude rule syntax, yolo |
 | H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
@@ -58,23 +58,27 @@ are qualified (D-24). Nothing blocks H1.
 
 ### H1 — skeleton
 
-- `internal/harness`: home dir; model table plus overlay (gx TOML read or
-  import per `10` Q4); Fantasy provider factory; the finish-normalizing
-  `LanguageModel` wrapper with its fixtures (D-21, D-25); store with
-  header/message/model_change/effort_change entries; turn runner on
-  `Agent.Stream` behind the harness's own interface (text and thought only,
-  no tools); cancel; `PrepareStep` steering.
+- `internal/harness`: `CRAZE_HOME` (single env var, replaces
+  `CRAZE_CONFIG`, D-27); two-file config, `providers.toml` + `models.toml`,
+  populated once by `craze import gx` (D-28); Fantasy provider factory; the
+  finish-normalizing `LanguageModel` wrapper with its fixtures (D-21, D-25);
+  store with header/message/model_change/effort_change entries; turn runner
+  on `Agent.Stream` behind the harness's own interface (text and thought
+  only, no tools).
 - `internal/agent`: `NativeProvider()` with `hidden: true`; session adapter;
-  `Capabilities{Effort, Modes, Interject}`; model dialog lists the model
-  table; effort as a config option.
-- A lint rule fails any import of `internal/agent`, `internal/tui`, or
-  `internal/acp` from `internal/harness` (D-02, D-26).
+  `Capabilities{Effort}` only — interject stays off until H2's `PrepareStep`
+  drain, modes stay off until H5's dispatcher (D-34); model dialog lists the
+  model table; effort as a config option.
+- A depguard rule fails any import of `internal/agent`, `internal/tui`,
+  `internal/acp`, `internal/cli`, `internal/sessions`, `internal/host`, or
+  `internal/paths` from `internal/harness` (D-02, D-26; Plan 018 §3.1).
 - Output ceilings come from the model table and leave room for reasoning
   (D-25).
 - **Exit**: a conversation with all ten qualified models from the real TUI
-  via `--provider native`, mid-session model switch, cancel, interject, and
-  `craze prompt --json` unchanged. DeepSeek V4 Pro joins once its wire id is
-  corrected and it passes one tool loop. Picker never shows the provider.
+  via `--provider native`, mid-session model switch, cancel, and
+  `craze prompt --json` unchanged (no interject in H1). DeepSeek V4 Pro
+  surfaces `ErrModelNotFound` until its wire id is corrected, then joins
+  once it passes one tool loop. Picker never shows the provider.
 
 ### H2 — tools
 
@@ -84,6 +88,9 @@ are qualified (D-24). Nothing blocks H1.
   closing on cancel.
 - Testing pattern established: scripted `LanguageModel` and local streamed
   fixtures.
+- **Interject via a `PrepareStep` drain at tool boundaries**, turning
+  `Capabilities.Interject` on (D-34): with tool steps in place there is
+  finally a safe point to merge steered text into history between steps.
 - **Exit**: the agent makes a real change in the craze repo, on Linux and
   on the mac-mini, with tool cards and diffs rendering as they do for grok.
 
