@@ -90,6 +90,11 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 		return Result{}, err
 	}
 	history := s.store.Context(m.id())
+	// A prompt still held is an earlier turn's that produced nothing. It is
+	// not in history, so this turn's request never sent it; written ahead of
+	// this turn's answer, it would put in the transcript what the model never
+	// saw.
+	s.store.DiscardHeldUsers()
 	if err := s.store.AppendUser(store.MessageEntry{
 		Message: fantasy.NewUserMessage(text), // byte for byte what Fantasy sends for Prompt
 		Model:   m.id(),

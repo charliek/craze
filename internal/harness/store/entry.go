@@ -69,16 +69,18 @@ func UsageOf(u fantasy.Usage) *Usage {
 	}
 }
 
-// MessageEntry is what a caller hands AppendUser or AppendAssistant: the
-// message in Fantasy's own shape and what it was sent to. Usage, StopReason
-// and Interrupted belong to assistant messages; Effort is optional on both.
+// MessageEntry is what a caller hands AppendUser or AppendStep: the message
+// in Fantasy's own shape and what it was sent to. Usage and StopReason belong
+// to assistant messages. Interrupted belongs to an assistant message, and to
+// the tool message the runner's cancel defence writes with one (results it
+// made up for calls a cancel cut off). Effort is optional on every role.
 type MessageEntry struct {
 	Message     fantasy.Message
 	Model       Model
 	Effort      string
 	Usage       *Usage
 	StopReason  string
-	Interrupted bool // a partial answer, cut short by a cancel or an error
+	Interrupted bool // a partial step, cut short by a cancel or an error
 }
 
 // Entry is one line after the header, as written or read back. Type selects
@@ -134,7 +136,9 @@ type effortChangeLine struct {
 
 // Header is the file's first line. The system prompt is never stored, only
 // its hash, so H7 can tell whether a resumed session would see the prompt it
-// was written under.
+// was written under. The tool profile and the tools array's hash do the same
+// for the tool contract; both are optional, and absent for a session with no
+// tools, so a header without them reads as it always has.
 type Header struct {
 	Version            int
 	ID                 string // the session id, a UUID
@@ -142,6 +146,8 @@ type Header struct {
 	Cwd                string
 	CrazeVersion       string
 	SystemPromptSHA256 string // hex
+	ToolProfile        string // "" for none
+	ToolsSHA256        string // hex; "" for none
 }
 
 type headerLine struct {
@@ -152,6 +158,8 @@ type headerLine struct {
 	Cwd                string `json:"cwd"`
 	CrazeVersion       string `json:"craze_version"`
 	SystemPromptSHA256 string `json:"system_prompt_sha256"`
+	ToolProfile        string `json:"tool_profile,omitempty"`
+	ToolsSHA256        string `json:"tools_sha256,omitempty"`
 }
 
 func formatTime(t time.Time) string { return t.UTC().Format(timeLayout) }
@@ -165,6 +173,8 @@ func encodeHeader(h Header) ([]byte, error) {
 		Cwd:                h.Cwd,
 		CrazeVersion:       h.CrazeVersion,
 		SystemPromptSHA256: h.SystemPromptSHA256,
+		ToolProfile:        h.ToolProfile,
+		ToolsSHA256:        h.ToolsSHA256,
 	})
 }
 
@@ -193,6 +203,8 @@ func decodeHeader(line []byte) (Header, error) {
 		Cwd:                hl.Cwd,
 		CrazeVersion:       hl.CrazeVersion,
 		SystemPromptSHA256: hl.SystemPromptSHA256,
+		ToolProfile:        hl.ToolProfile,
+		ToolsSHA256:        hl.ToolsSHA256,
 	}, nil
 }
 
