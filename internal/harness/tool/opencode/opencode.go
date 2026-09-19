@@ -27,25 +27,27 @@ const Name = "opencode"
 // pins the two together.
 const CredentialsFile = "providers.toml"
 
-// builders make the profile's tools in the order the model is offered them:
-// opencode's registry order (tool/registry.ts:229-246 — bash, read, glob,
-// grep, edit, write), less the tools this build does not have yet. The
-// order is part of every request's cache prefix, so a tool is added at its
-// place in that order, never at the end.
-var builders = []func() (tool.Tool, error){
-	newBash,
-	newRead,
-	newEdit,
-	newWrite,
-}
-
-// Profile returns the opencode profile with a fresh set of its tools.
+// Profile returns the opencode profile with a fresh set of its tools. A
+// session builds its own, so grep and glob share one ripgrep, and look for
+// rg on PATH once per session.
 //
 // Its System func is nil: the system prompt the profile will carry arrives
 // with the runner that sends it (plan 019 §3.6), and until then
 // tool.Registry refuses to register the profile, so no session can be
 // opened on half of it.
 func Profile() (tool.Profile, error) {
+	rg := newRipgrep()
+	// The tools in the order the model is offered them: opencode's registry
+	// order (tool/registry.ts:229-246). The order is part of every request's
+	// cache prefix, so a tool is added at its place in it, never at the end.
+	builders := []func() (tool.Tool, error){
+		newBash,
+		newRead,
+		func() (tool.Tool, error) { return newGlob(rg) },
+		func() (tool.Tool, error) { return newGrep(rg) },
+		newEdit,
+		newWrite,
+	}
 	p := tool.Profile{Name: Name}
 	for _, build := range builders {
 		t, err := build()

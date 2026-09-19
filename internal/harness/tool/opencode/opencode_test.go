@@ -35,10 +35,17 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, redact.New(keyA))
+}
+
+// newFixtureWith is newFixture with red as the session's redactor; a nil
+// one redacts nothing.
+func newFixtureWith(t *testing.T, red *redact.Replacer) *fixture {
+	t.Helper()
 	env := tool.Env{
 		Workspace: t.TempDir(),
 		Home:      t.TempDir(),
-		Redactor:  redact.New(keyA),
+		Redactor:  red,
 		Environ:   tool.ChildEnviron(os.Environ(), nil),
 		Locks:     &tool.PathLocks{},
 	}
@@ -139,8 +146,8 @@ func TestProfile(t *testing.T) {
 	if p.Name != Name || Name != "opencode" {
 		t.Fatalf("profile name = %q", p.Name)
 	}
-	if got := names(p); !slices.Equal(got, []string{"bash", "read", "edit", "write"}) {
-		t.Fatalf("tools = %q, want opencode's order of the tools this build has", got)
+	if got := names(p); !slices.Equal(got, []string{"bash", "read", "glob", "grep", "edit", "write"}) {
+		t.Fatalf("tools = %q, want opencode's registry order", got)
 	}
 	want := map[string]struct {
 		kind               tool.Kind
@@ -149,6 +156,8 @@ func TestProfile(t *testing.T) {
 	}{
 		"bash":  {tool.KindExecute, false, false, tool.None},
 		"read":  {tool.KindRead, true, true, tool.None},
+		"glob":  {tool.KindSearch, true, true, tool.None},
+		"grep":  {tool.KindSearch, true, true, tool.None},
 		"edit":  {tool.KindEdit, false, false, tool.Head},
 		"write": {tool.KindEdit, false, false, tool.Head},
 	}
@@ -170,10 +179,17 @@ func TestProfile(t *testing.T) {
 	if err := r.Register(p); err != nil {
 		t.Fatalf("with a System func the profile registers: %v", err)
 	}
-	// Each call builds its own tools, so two sessions share none.
+	// Each call builds its own tools, so two sessions share none; within a
+	// session, grep and glob share the one ripgrep that finds rg.
 	q, _ := Profile()
 	if q.Tools[0] == p.Tools[0] {
 		t.Fatal("two profiles share a tool")
+	}
+	if p.Tools[2].(*globTool).rg != p.Tools[3].(*grepTool).rg {
+		t.Fatal("a session's grep and glob do not share their ripgrep")
+	}
+	if p.Tools[2].(*globTool).rg == q.Tools[2].(*globTool).rg {
+		t.Fatal("control: two sessions share a ripgrep")
 	}
 }
 

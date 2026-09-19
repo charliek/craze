@@ -1,5 +1,5 @@
 # The opencode profile's tools as a model is offered them (Profile.ToolsJSON).
-# tools_sha256: 8cb7763988d07026152ebfb23351b0b1329a5693a1c5be4a5ba94d93056bc08a
+# tools_sha256: 3db91a78abc8ce7713e856f9cb5e91710436b6b25798929deef0a80eedc56b20
 
 === tool: bash
 --- description
@@ -128,6 +128,62 @@ Usage:
   },
   "required": [
     "filePath"
+  ]
+}
+
+=== tool: glob
+--- description
+- Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths
+- Use this tool when you need to find files by name patterns
+- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided.",
+      "type": "string"
+    },
+    "pattern": {
+      "description": "The glob pattern to match files against",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pattern"
+  ]
+}
+
+=== tool: grep
+--- description
+- Fast content search tool that works with any codebase size
+- Searches file contents using regular expressions
+- Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
+- Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
+- Returns file paths and line numbers with matching lines
+- Use this tool when you need to find files containing specific patterns
+- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "include": {
+      "description": "File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")",
+      "type": "string"
+    },
+    "path": {
+      "description": "The directory to search in. Defaults to the current working directory.",
+      "type": "string"
+    },
+    "pattern": {
+      "description": "The regex pattern to search for in file contents",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pattern"
   ]
 }
 

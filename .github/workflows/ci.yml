@@ -47,6 +47,12 @@ jobs:
     # so 15 minutes started clipping it — 20 keeps the same generous-but-bounded
     # intent for the new ceiling.
     timeout-minutes: 20
+    # The native harness's grep and glob tools run ripgrep found on PATH
+    # (plan 019 §3.9, D-41), and their tests skip when it is missing, so a
+    # laptop without rg still passes. Here that skip would be a quiet pass on
+    # a runner that lost rg; CRAZE_REQUIRE_RG turns it into a failure.
+    env:
+      CRAZE_REQUIRE_RG: "1"
     steps:
       # persist-credentials: false — actions/checkout otherwise leaves the job
       # token in .git/config, and the very next step runs `go test ./...`, i.e.
@@ -58,6 +64,16 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # Neither runner image ships ripgrep. Ubuntu's comes from apt (the index
+      # is refreshed first: a stale one 404s), macOS's from Homebrew, as the
+      # mac-mini's does. `rg --version` fails the step, not a test three
+      # minutes later, if the install did not put rg on PATH.
+      - name: install ripgrep (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep && rg --version
+      - name: install ripgrep (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep && rg --version
       # -timeout must match the Makefile's, or a local pass and a CI pass do not
       # mean the same thing: with no flag `go test` uses its own 10m default, so
       # a run that passes under `make test` could die on a CI panic dump.
@@ -115,6 +131,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    # See the test job: the pytest suites drive the native harness's tools
+    # too, and must fail, not skip, without ripgrep.
+    env:
+      CRAZE_REQUIRE_RG: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -122,6 +142,13 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # The same install as the test job's, and for the same reasons.
+      - name: install ripgrep (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep && rg --version
+      - name: install ripgrep (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep && rg --version
       - uses: astral-sh/setup-uv@v6
       # The pytest suites drive the real binaries — `craze frame`'s token
       # scripts and `craze prompt` against the fake agent — so the build is a
