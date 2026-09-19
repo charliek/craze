@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -263,25 +264,82 @@ func TestAnErrorFromTheCallbackStopsTheRead(t *testing.T) {
 	}
 }
 
-// TestTheLineLimitIsExact: a line of MaxLineBytes is read; one byte more is
-// ErrLineTooLong, found without buffering the whole line.
-func TestTheLineLimitIsExact(t *testing.T) {
-	atLimit := strings.Repeat("x", MaxLineBytes)
-	line, complete, err := readLine(bufio.NewReaderSize(strings.NewReader(atLimit+"\n"), readBufferBytes), nil)
-	if err != nil || !complete || len(line) != MaxLineBytes {
-		t.Fatalf("a %d-byte line: %d bytes, complete %v, %v", MaxLineBytes, len(line), complete, err)
+// TestTheLineLimitIsExactWhereverTheLineIs (finding 4): a line of up
+// to MaxLineBytes is read and one byte more is ErrLineTooLong, whether the
+// line is interior, last with its newline, or last without one. The newline
+// is the one byte a line may have past the limit, and only when it is the
+// newline: an unterminated tail of MaxLineBytes+1 is too long, not a torn
+// line to skip. A torn tail within the limit is still tolerated.
+func TestTheLineLimitIsExactWhereverTheLineIs(t *testing.T) {
+	// sized is event 2's line, valid JSON padded to exactly n bytes.
+	const prefix = `{"ts":"2026-09-19T10:00:00Z","type":"event","seq":2,"at":"2026-09-19T10:00:00Z","eventType":"text","event":{"pad":"`
+	const suffix = `"}}`
+	pad := strings.Repeat("x", MaxLineBytes+1)
+	sized := func(n int) io.Reader {
+		return io.MultiReader(strings.NewReader(prefix), strings.NewReader(pad[:n-len(prefix)-len(suffix)]), strings.NewReader(suffix))
 	}
-	_, _, err = readLine(bufio.NewReaderSize(strings.NewReader(atLimit+"x\n"), readBufferBytes), nil)
-	if !errors.Is(err, ErrLineTooLong) {
-		t.Fatalf("a %d-byte line: %v, want ErrLineTooLong", MaxLineBytes+1, err)
+	tails := map[string]string{
+		"interior":     "\n" + eventFixture(3) + "\n",
+		"last":         "\n",
+		"unterminated": "",
+	}
+	for _, n := range []int{MaxLineBytes - 1, MaxLineBytes, MaxLineBytes + 1} {
+		for where, tail := range tails {
+			var want []uint64
+			var wantErr error
+			switch {
+			case n > MaxLineBytes:
+				want, wantErr = []uint64{1}, ErrLineTooLong
+			case where == "interior":
+				want = []uint64{1, 2, 3}
+			case where == "last":
+				want = []uint64{1, 2}
+			default:
+				want = []uint64{1} // a torn tail: ignored
+			}
+			r := io.MultiReader(strings.NewReader(headerFixture+"\n"+eventFixture(1)+"\n"), sized(n), strings.NewReader(tail))
+			recs, err := collect(func(fn func(Record) error) error { return readRange(r, false, 1, MaxSeq, fn) })
+			if !errors.Is(err, wantErr) || !slices.Equal(seqs(recs), want) {
+				t.Errorf("a %s line of MaxLineBytes%+d: %v, %v; want %v, %v", where, n-MaxLineBytes, seqs(recs), err, want, wantErr)
+			}
+		}
 	}
 
+	// The reported case end to end: a dead file whose unterminated last line
+	// is one byte over.
 	path := filepath.Join(t.TempDir(), "long.jsonl")
-	if err := os.WriteFile(path, []byte(headerFixture+"\n"+eventFixture(1)+"\n"+atLimit+"x\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(headerFixture+"\n"+eventFixture(1)+"\n"+pad), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if recs, err := readFile(path, 1, MaxSeq); !errors.Is(err, ErrLineTooLong) || len(recs) != 1 {
+		t.Fatalf("ReadFile over an unterminated long tail = %v, %v; want record 1 then ErrLineTooLong", seqs(recs), err)
+	}
+	// And readLine alone finds it without the newline it never reaches.
+	if _, _, err := readLine(bufio.NewReaderSize(strings.NewReader(pad), readBufferBytes), nil); !errors.Is(err, ErrLineTooLong) {
+		t.Fatalf("readLine over %d unterminated bytes = %v, want ErrLineTooLong", len(pad), err)
+	}
+}
+
+// TestAnUnreadableEventTimeCostsOnlyThatTime (finding 6): an event line
+// whose "at" does not parse (a year past 9999, as a writer once formatted
+// it) or is missing reads as the zero time; the record and every line after
+// it are still delivered.
+func TestAnUnreadableEventTimeCostsOnlyThatTime(t *testing.T) {
+	path := journalFixture(t, headerFixture, eventFixture(1),
+		`{"ts":"2026-09-19T10:00:00Z","type":"event","seq":2,"at":"10000-01-01T00:00:00Z","eventType":"text","event":{"n":2}}`,
+		`{"type":"event","seq":3,"eventType":"text","event":{"n":3}}`,
+		`{"ts":"2026-09-19T10:00:00Z","type":"event","seq":4,"at":17,"eventType":"text","event":{"n":4}}`,
+		eventFixture(5))
 	recs, err := readFile(path, 1, MaxSeq)
-	if !errors.Is(err, ErrLineTooLong) || len(recs) != 1 {
-		t.Fatalf("ReadFile over a long line = %v, %v; want record 1 then ErrLineTooLong", seqs(recs), err)
+	if err != nil || !slices.Equal(seqs(recs), seqRange(1, 5)) {
+		t.Fatalf("ReadFile = %v, %v; want 1..5", seqs(recs), err)
+	}
+	for _, r := range recs[1:4] {
+		if !r.At.IsZero() || r.Body != fmt.Sprintf(`{"n":%d}`, r.Seq) {
+			t.Errorf("record %d = %+v, want its body at the zero time", r.Seq, r)
+		}
+	}
+	if recs[4].At.IsZero() {
+		t.Errorf("record 5 lost its time")
 	}
 }

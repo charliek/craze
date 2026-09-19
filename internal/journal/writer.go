@@ -62,6 +62,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,6 +106,12 @@ const maxRetainedBuffer = 4 << 20
 // cutSlack is what a truncated note's line gains besides its shorter field:
 // ,"truncated":true and a margin.
 const cutSlack = 32
+
+// maxHeaderField caps each of the header's strings at New: a version, a
+// provider, a binary, a workspace and a mode. Each is short in practice; the
+// cap is what keeps a pathological one, escaped, from making a header line
+// the reader refuses, which would make the whole file unreadable.
+const maxHeaderField = 4 << 10
 
 // maxCuts bounds re-encoding a note that is over the cap. One pass is
 // enough when the large field can give the bytes; the bound is only a
@@ -176,6 +183,9 @@ type Options struct {
 	flushBytes    int
 	flushLines    int
 	closeWait     time.Duration
+	// maxLineBytes lowers the longest event line the writer lets through
+	// (MaxLineBytes), so a test can reach the check behind the caps.
+	maxLineBytes int
 }
 
 // file is what the writer needs of its descriptor: the seam a test stalls,
@@ -230,6 +240,14 @@ type gapMarker struct {
 	hasRange      bool // an event was dropped into it: from and to are set
 	from, to      uint64
 	events, notes int
+	closings      int // how many of notes are closing diags
+}
+
+// onlyClosing reports whether every entry dropped into the marker was a
+// closing diag. Such a gap is as little worth a file as the closing note it
+// stands for.
+func (m *gapMarker) onlyClosing() bool {
+	return m.events == 0 && m.notes == m.closings
 }
 
 // lineMeta is one line in the writer's buffer: where it ends, and what its
@@ -270,6 +288,7 @@ type Writer struct {
 	flushBytes    int
 	flushLines    int
 	closeWait     time.Duration
+	maxLine       int // the longest event line written: MaxLineBytes but in tests
 	openFile      func(name string, flag int, perm os.FileMode) (file, error)
 	newTimer      func(time.Duration) flushTimer
 
@@ -286,7 +305,6 @@ type Writer struct {
 	queued      int     // records and notes accepted and not yet written, taken or not
 	queuedBytes int
 	markers     int  // gap markers not yet written
-	degraded    bool // an entry has been dropped into a gap
 	started     bool // the writer goroutine has been started
 	closed      bool // Close was called: admission has stopped
 	failed      bool
@@ -303,6 +321,7 @@ type Writer struct {
 	written      int64 // the file offset the buffer starts at
 	headerQueued bool  // the header is in the buffer or the file: the file exists or is about to
 	unsynced     bool  // written since the last fsync
+	gapEncoded   bool  // a gap line has been encoded: the notice is owed
 	noticed      bool
 }
 
@@ -330,6 +349,7 @@ func New(opts Options) (*Writer, error) {
 		flushBytes:    orDefault(opts.flushBytes, defaultFlushBytes),
 		flushLines:    orDefault(opts.flushLines, defaultFlushLines),
 		closeWait:     orDefault(opts.closeWait, defaultCloseWait),
+		maxLine:       min(orDefault(opts.maxLineBytes, MaxLineBytes), MaxLineBytes),
 		openFile:      opts.openFile,
 		newTimer:      opts.newTimer,
 		wake:          make(chan struct{}, 1),
@@ -365,12 +385,16 @@ func New(opts Options) (*Writer, error) {
 	if codec == 0 {
 		codec = 1
 	}
+	// The header's strings are capped (the file's path keeps the whole
+	// workspace, through its slug): the reader must be able to read line 1
+	// whatever the options held, or it can read nothing.
+	field := func(s string) string { return cutUTF8(s, maxHeaderField) }
 	if err := w.enc.Encode(headerLine{
 		TS: stamp(started), Type: typeHeader, Format: FormatVersion, EventCodec: codec,
-		Incarnation: opts.Incarnation, CrazeVersion: opts.CrazeVersion,
+		Incarnation: opts.Incarnation, CrazeVersion: field(opts.CrazeVersion),
 		OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Provider: opts.Provider, AgentBinary: opts.AgentBinary, Cwd: cwd,
-		Force: opts.Force, Interactive: opts.Interactive, Mode: opts.Mode, PID: os.Getpid(),
+		Provider: field(opts.Provider), AgentBinary: field(opts.AgentBinary), Cwd: field(cwd),
+		Force: opts.Force, Interactive: opts.Interactive, Mode: field(opts.Mode), PID: os.Getpid(),
 	}); err != nil {
 		return nil, fmt.Errorf("journal: header: %w", err)
 	}
@@ -412,27 +436,55 @@ func (w *Writer) Path() string {
 	return w.path
 }
 
+// MaxRecordBytes is the largest body Append journals whole: Options'
+// MaxRecordBytes, or its default. 0 for a nil *Writer. The event log lowers
+// its own limit to it, so the ring and the file omit the same records.
+func (w *Writer) MaxRecordBytes() int {
+	if w == nil {
+		return 0
+	}
+	return w.maxRecord
+}
+
 // Append queues one event record. It never blocks and never does I/O. It
 // must be called in increasing Seq order, which the event log's publishing
 // boundary guarantees; a body larger than MaxRecordBytes is journaled as an
-// oversized omitted record.
+// oversized omitted record, and an EventType longer than 256 bytes (it is a
+// type's name) makes the record an encode_error omitted record under the
+// type "<event type too long>". An Omitted's Error is kept to its first
+// 4 KiB and its Reason to 256 bytes.
 func (w *Writer) Append(rec Record) {
 	if w == nil {
 		return
 	}
 	ts := w.now()
 	rec = w.acceptRecord(rec)
-	w.admit(entry{kind: kindEvent, ts: ts, rec: rec, size: entryOverhead + len(rec.EventType) + len(rec.Body)})
+	size := entryOverhead + len(rec.EventType) + len(rec.Body)
+	if o := rec.Omitted; o != nil {
+		size += len(o.Reason) + len(o.Error)
+	}
+	w.admit(entry{kind: kindEvent, ts: ts, rec: rec, size: size})
 }
 
 // acceptRecord normalizes a record as it is accepted: an Omitted is copied
-// (the caller's pointer is not kept), its error capped, and a body over the
-// cap replaced by an oversized marker, so the queue's byte budget weighs
-// what is really held.
+// (the caller's pointer is not kept) and its strings capped, a body over the
+// cap is replaced by an oversized marker, and a type too long to be a type
+// replaces the whole record, so the queue's byte budget weighs what is
+// really held and no line the record makes is too long to read back.
 func (w *Writer) acceptRecord(rec Record) Record {
+	if len(rec.EventType) > maxIdentifier {
+		return Record{Seq: rec.Seq, At: rec.At, EventType: eventTypeTooLong, Omitted: &Omitted{
+			Reason: OmittedEncodeError,
+			Error: "journal: the event type is " + strconv.Itoa(len(rec.EventType)) +
+				" bytes, over the " + strconv.Itoa(maxIdentifier) + "-byte cap",
+		}}
+	}
 	switch {
 	case rec.Omitted != nil:
 		o := *rec.Omitted
+		if len(o.Reason) > maxIdentifier {
+			o.Reason = strings.Clone(cutUTF8(o.Reason, maxIdentifier))
+		}
 		if len(o.Error) > maxOmittedError {
 			o.Error = strings.Clone(cutUTF8(o.Error, maxOmittedError))
 		}
@@ -445,7 +497,9 @@ func (w *Writer) acceptRecord(rec Record) Record {
 
 // Note queues one journal-only note. It never blocks and never does I/O. A
 // DiagNote's fields are encoded here, on the caller's goroutine, so the map
-// is the caller's again when Note returns. A note whose large field is over
+// is the caller's again when Note returns; the encoding calls no method of
+// any value in it and its work is bounded by the note cap (DiagNote says
+// which values are kept). A note whose large field is over
 // MaxRecordBytes is cut here, so the queue holds no more than will be
 // written. A prompt_end asks for a sync even when the queue has no room for
 // the note itself: a turn's end is when durability matters.
@@ -557,9 +611,11 @@ func (w *Writer) dropLocked(e entry) {
 		w.pending = append(w.pending, entry{kind: kindGap, ts: e.ts, gap: m})
 		w.markers++
 	}
-	w.degraded = true
 	if e.kind == kindNote {
 		m.notes++
+		if isClosing(e.note) {
+			m.closings++
+		}
 		w.health.DroppedNotes++
 		return
 	}
@@ -824,11 +880,16 @@ func (w *Writer) writeBatch(batch []entry) error {
 
 // encode appends e's line to the buffer, the header first if the file has
 // no line yet. A closing diag that would be the file's first line is
-// discarded instead: a session that did nothing leaves no file.
+// discarded instead, and so is a gap line standing only for dropped closing
+// diags: a session that did nothing leaves no file, however small its queue.
 func (w *Writer) encode(e *entry) {
 	if !w.headerQueued {
-		if e.kind == kindNote && isClosing(e.note) {
+		switch {
+		case e.kind == kindNote && isClosing(e.note):
 			w.release(e.size)
+			return
+		case e.kind == kindGap && e.gap.onlyClosing():
+			w.discardGap(e.gap)
 			return
 		}
 		w.out.Write(w.header)
@@ -848,7 +909,9 @@ func (w *Writer) encode(e *entry) {
 // encodeEvent writes an event line with the body embedded as it is. A body
 // that is not one JSON object is journaled as an encode_error omitted
 // record instead, so the line stays one line of valid JSON and the seq is
-// still there.
+// still there. A line that would still be longer than the reader accepts is
+// journaled as an oversized omitted record: Append's caps already rule that
+// out, and this check is what makes it a guarantee.
 func (w *Writer) encodeEvent(e *entry) {
 	rec := e.rec
 	l := eventLine{TS: stamp(e.ts), Type: typeEvent, Seq: rec.Seq, At: stamp(rec.At), EventType: rec.EventType}
@@ -867,6 +930,12 @@ func (w *Writer) encodeEvent(e *entry) {
 		l.Event = nil
 		l.Omitted = &omittedJSON{Reason: OmittedEncodeError, Error: cutUTF8("journal: "+err.Error(), maxOmittedError)}
 		_ = w.enc.Encode(l) // strings, numbers and a struct: cannot fail
+	}
+	if w.out.Len()-start-1 > w.maxLine {
+		w.out.Truncate(start)
+		l.Event = nil
+		l.Omitted = &omittedJSON{Reason: OmittedOversized, Bytes: len(rec.Body)}
+		_ = w.enc.Encode(l)
 	}
 	w.lines = append(w.lines, lineMeta{end: w.out.Len(), seq: rec.Seq, kind: kindEvent, size: e.size,
 		counted: true, omitted: l.Omitted != nil})
@@ -936,6 +1005,17 @@ func (w *Writer) encodeGap(e *entry) {
 	}
 	_ = w.enc.Encode(l) // numbers and strings: cannot fail
 	w.lines = append(w.lines, lineMeta{end: w.out.Len(), seq: seq, kind: kindGap})
+	w.gapEncoded = true
+}
+
+// discardGap drops a gap marker that stands only for closing diags, when it
+// would be the file's first line. It is settled as a discarded closing note
+// is: the state returns to ok, and those notes are not counted as lost.
+func (w *Writer) discardGap(g *gapMarker) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.markers--
+	w.health.DroppedNotes -= g.closings
 }
 
 // flush writes the buffer, creating the file first if this is its first
@@ -1096,19 +1176,21 @@ func (w *Writer) finish() {
 
 // notice prints the journal's one notice the first time it finds the state
 // has left ok, describing the state as it is when printed: a writer that
-// dropped entries and then failed reports the failure.
+// dropped entries and then failed reports the failure. A drop is noticed
+// once its gap line is encoded, so a gap that was discarded (only closing
+// diags, and no file) is never announced as one the file has.
 func (w *Writer) notice() {
 	if w.noticed {
 		return
 	}
 	w.mu.Lock()
-	failed, degraded, cause := w.failed, w.degraded, w.health.Err
+	failed, cause := w.failed, w.health.Err
 	w.mu.Unlock()
 	var msg string
 	switch {
 	case failed:
 		msg = cause + "; nothing more is journaled to " + w.path + " (the session is unaffected)"
-	case degraded:
+	case w.gapEncoded:
 		msg = "the journal fell behind and dropped entries; " + w.path + " has a gap (the session is unaffected)"
 	default:
 		return

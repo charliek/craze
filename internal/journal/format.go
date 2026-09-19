@@ -3,8 +3,11 @@ package journal
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"math"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -75,6 +78,17 @@ const (
 // line large.
 const maxOmittedError = 4 << 10
 
+// maxIdentifier caps, in bytes, the strings that name something rather than
+// say it: an event's type, an omitted record's reason, a diag's kind and its
+// field names. Each is a short word in craze; the cap is what keeps a
+// pathological one from being what makes a line too long for the reader.
+const maxIdentifier = 256
+
+// eventTypeTooLong is the event type a record is journaled under when its
+// own is over maxIdentifier. The record keeps its seq, as an encode_error
+// omitted record with no body.
+const eventTypeTooLong = "<event type too long>"
+
 // PromptKind is a prompt note's kind: what the user sent.
 type PromptKind string
 
@@ -85,7 +99,8 @@ const (
 )
 
 // Diag kinds S1a writes (plan 020 §3.4). The field names inside each are the
-// writer's; the journal treats Fields as opaque.
+// writer's; the journal does not interpret them (DiagNote says which values
+// it keeps).
 const (
 	DiagStartFailed        = "start_failed"         // Start failed after the log existed
 	DiagAgentStderr        = "agent_stderr"         // one line of the agent child's stderr
@@ -148,7 +163,25 @@ type PromptEndNote struct {
 
 // DiagNote is a diagnostic that is not transcript. Fields is encoded when
 // the note is accepted, so the caller may reuse the map as soon as Note
-// returns; a value that cannot be encoded becomes {"encodeError": …}.
+// returns.
+//
+// Note runs inside the session's ordering boundary, so encoding a diag must
+// never call code the journal does not own, block, or cost more than the
+// note cap. Fields' values are therefore restricted to plain JSON values of
+// exactly these dynamic types: nil, string, bool, the int, uint and float
+// kinds, and []string. Any other value, including a named type over one of
+// those (a time.Duration, a json.Number) and anything implementing
+// json.Marshaler, fmt.Stringer or error, is written as "<unsupported>"
+// without any of its methods being called: convert it first (d.Milliseconds(),
+// err.Error()). A non-finite float is written as the string "NaN", "+Inf" or
+// "-Inf", which JSON has no number for.
+//
+// Every string (and each []string element) is cut, between runes, to its
+// share of the note cap before anything is encoded: scalars and field names
+// are served first, so a long text cannot crowd out a count or a flag, and
+// the texts split what is left evenly. A cut marks the line truncated. A
+// field name is cut at 256 bytes and a diag's Kind likewise. A diag with
+// more than 64 fields keeps only their count, as {"omittedFields": n}.
 type DiagNote struct {
 	Kind   string
 	Fields map[string]any
@@ -165,15 +198,106 @@ type encodedDiag struct {
 // has an object there for jq.
 var emptyFields = json.RawMessage(`{}`)
 
-// encodeDiag freezes n's fields. It runs on the caller's goroutine, before
-// the queue's lock, so the map is read before Note returns.
+// unsupportedField is what a diag field holds in place of a value whose type
+// DiagNote does not allow.
+const unsupportedField = "<unsupported>"
+
+// maxDiagFields bounds how many fields a diag keeps. A map with more is
+// replaced by its size: keeping some would mean choosing which, and ranging
+// over all of them would make the work the caller's map's size.
+const maxDiagFields = 64
+
+// diagEnvelope is what a diag line needs besides its fields: ts, type, a
+// kind at maxIdentifier with every byte escaped, "truncated" and the keys.
+// Fields get the note cap less this.
+const diagEnvelope = 2 << 10
+
+// Costs a diag field is charged beyond its name's and its text's encoded
+// bytes: a name's quotes, colon and comma; a string's quotes; an element's
+// quotes and comma; and any scalar, at most (a float64's longest form is 24
+// bytes).
+const (
+	fieldCost   = 4
+	stringCost  = 2
+	elementCost = 3
+	scalarCost  = 32
+)
+
+// encodeDiag freezes n. It runs on the caller's goroutine, before the
+// queue's lock, so the map is read before Note returns, and its work is
+// bounded by maxBytes and maxDiagFields whatever the map holds: values are
+// sanitized (diagScalar, fitEncoded) before any encoding, so no method of a
+// caller's type runs and no text is encoded past the cap.
 func encodeDiag(n DiagNote, maxBytes int) encodedDiag {
 	d := encodedDiag{kind: n.Kind, fields: emptyFields}
-	if len(n.Fields) == 0 {
+	if len(d.kind) > maxIdentifier {
+		d.kind, d.truncated = strings.Clone(cutUTF8(d.kind, maxIdentifier)), true
+	}
+	switch {
+	case len(n.Fields) == 0:
+		return d
+	case len(n.Fields) > maxDiagFields:
+		d.fields, _ = marshal(map[string]int{"omittedFields": len(n.Fields)})
+		d.truncated = true
 		return d
 	}
-	raw, err := marshal(n.Fields)
+	keys := slices.Sorted(maps.Keys(n.Fields))
+	fields := make(map[string]any, len(keys))
+	budget := maxBytes - diagEnvelope
+	// Two passes over at most 64 names: scalars first, then the texts, in
+	// name order, each offered an even share of what is left, so a short one
+	// leaves more for the next and a long one cannot starve the rest.
+	texts := 0
+	for _, k := range keys {
+		v, text := diagScalar(n.Fields[k])
+		if text {
+			texts++
+			continue
+		}
+		name, cost := fitEncoded(k, maxIdentifier)
+		cost += fieldCost + scalarCost
+		if len(name) < len(k) || cost > budget {
+			d.truncated = true
+		}
+		if cost > budget {
+			continue
+		}
+		fields[name] = v
+		budget -= cost
+	}
+	for _, k := range keys {
+		var v any
+		var used int
+		var cut bool
+		name, cost := fitEncoded(k, maxIdentifier)
+		cost += fieldCost + stringCost
+		share := budget / max(texts, 1)
+		switch t := n.Fields[k].(type) {
+		case string:
+			var s string
+			s, used = fitEncoded(t, share-cost)
+			v, cut = s, len(s) < len(t)
+		case []string:
+			v, used, cut = fitStrings(t, share-cost)
+		default:
+			continue
+		}
+		texts--
+		cost += used
+		if len(name) < len(k) || cut || cost > budget {
+			d.truncated = true
+		}
+		if cost > budget {
+			continue
+		}
+		fields[name] = v
+		budget -= cost
+	}
+	raw, err := marshal(fields)
 	if err != nil {
+		// Unreachable: every value is a plain scalar, a string or a
+		// []string, and non-finite floats are strings. Kept so the bound
+		// holds even if that changes.
 		raw, _ = marshal(map[string]string{"encodeError": err.Error()})
 	}
 	if len(raw) > maxBytes {
@@ -182,6 +306,60 @@ func encodeDiag(n DiagNote, maxBytes int) encodedDiag {
 	}
 	d.fields = raw
 	return d
+}
+
+// diagScalar is v as a diag field may hold it, found by its concrete type
+// alone and never by calling a method on it: a caller's type could marshal
+// itself slowly, block or panic, and Note runs inside the session's ordering
+// boundary. text reports a string or a []string, which encodeDiag cuts to
+// its budget itself; anything DiagNote does not allow is the unsupported
+// marker.
+func diagScalar(v any) (_ any, text bool) {
+	switch v := v.(type) {
+	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr:
+		return v, false
+	case float32:
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			return strconv.FormatFloat(f, 'g', -1, 32), false
+		}
+		return v, false
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return strconv.FormatFloat(v, 'g', -1, 64), false
+		}
+		return v, false
+	case string, []string:
+		return v, true
+	}
+	return unsupportedField, false
+}
+
+// fitStrings is the longest prefix of ss whose JSON array body fits budget
+// bytes, its last element cut between runes if it does not fit whole (and
+// left out if nothing of it fits), and the bytes that body takes. It reads
+// no further into ss than the budget reaches. A nil slice stays nil (null),
+// as encoding/json would write it.
+func fitStrings(ss []string, budget int) (_ []string, used int, cut bool) {
+	if ss == nil {
+		return nil, len("null") - stringCost, false
+	}
+	out := []string{}
+	for _, s := range ss {
+		if used+elementCost > budget {
+			return out, used, true
+		}
+		part, n := fitEncoded(s, budget-used-elementCost)
+		if len(part) < len(s) {
+			if part != "" {
+				out = append(out, part)
+				used += elementCost + n
+			}
+			return out, used, true
+		}
+		out = append(out, part)
+		used += elementCost + n
+	}
+	return out, used, false
 }
 
 // marshal is json.Marshal as the lines are written: without HTML escaping,
@@ -197,10 +375,11 @@ func marshal(v any) ([]byte, error) {
 }
 
 // The lines, one struct each so the key order is fixed: ts, then type, then
-// the table's fields in plan 020 §3.4's order.
+// the table's fields in plan 020 §3.4's order. A ts (and an event's at) is
+// absent only when the time has no form a reader can parse back (stamp).
 
 type headerLine struct {
-	TS           string `json:"ts"`
+	TS           string `json:"ts,omitempty"`
 	Type         string `json:"type"`
 	Format       int    `json:"format"`
 	EventCodec   int    `json:"eventCodec"`
@@ -218,7 +397,7 @@ type headerLine struct {
 }
 
 type sessionLine struct {
-	TS                string `json:"ts"`
+	TS                string `json:"ts,omitempty"`
 	Type              string `json:"type"`
 	ProviderSessionID string `json:"providerSessionId"`
 	LoadedFrom        string `json:"loadedFrom,omitempty"`
@@ -227,10 +406,10 @@ type sessionLine struct {
 }
 
 type eventLine struct {
-	TS        string          `json:"ts"`
+	TS        string          `json:"ts,omitempty"`
 	Type      string          `json:"type"`
 	Seq       uint64          `json:"seq"`
-	At        string          `json:"at"`
+	At        string          `json:"at,omitempty"`
 	EventType string          `json:"eventType"`
 	Event     json.RawMessage `json:"event,omitempty"`
 	Omitted   *omittedJSON    `json:"omitted,omitempty"`
@@ -245,7 +424,7 @@ type omittedJSON struct {
 // gapLine's fromSeq and toSeq are absent for a note-only gap: seq 0 is
 // never assigned, so omitempty is exact.
 type gapLine struct {
-	TS            string `json:"ts"`
+	TS            string `json:"ts,omitempty"`
 	Type          string `json:"type"`
 	FromSeq       uint64 `json:"fromSeq,omitempty"`
 	ToSeq         uint64 `json:"toSeq,omitempty"`
@@ -255,7 +434,7 @@ type gapLine struct {
 }
 
 type promptLine struct {
-	TS        string     `json:"ts"`
+	TS        string     `json:"ts,omitempty"`
 	Type      string     `json:"type"`
 	Attempt   string     `json:"attempt"`
 	Text      string     `json:"text"`
@@ -264,7 +443,7 @@ type promptLine struct {
 }
 
 type promptEndLine struct {
-	TS         string `json:"ts"`
+	TS         string `json:"ts,omitempty"`
 	Type       string `json:"type"`
 	Attempt    string `json:"attempt"`
 	StopReason string `json:"stopReason,omitempty"`
@@ -275,7 +454,7 @@ type promptEndLine struct {
 }
 
 type diagLine struct {
-	TS        string          `json:"ts"`
+	TS        string          `json:"ts,omitempty"`
 	Type      string          `json:"type"`
 	Kind      string          `json:"kind"`
 	Fields    json.RawMessage `json:"fields"`
@@ -286,8 +465,18 @@ type diagLine struct {
 // reaches the file is an overflow, since a failed writer writes nothing more.
 const gapQueueFull = "journal queue full"
 
-// stamp is how every time in a line is written: RFC3339Nano in UTC.
-func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+// stamp is how every time in a line is written: RFC3339Nano in UTC. A time
+// whose year is outside 0000–9999 has no such form a reader can parse back:
+// Format writes "10000-…" or "-0001-…", and time.Time's UnmarshalJSON
+// refuses both, which would make the line unreadable. stamp returns "" for
+// one, and the line leaves the key out; the reader sees the zero time.
+func stamp(t time.Time) string {
+	t = t.UTC()
+	if y := t.Year(); y < 0 || y > 9999 {
+		return ""
+	}
+	return t.Format(time.RFC3339Nano)
+}
 
 func (n SessionNote) line(ts string) any {
 	return sessionLine{TS: ts, Type: typeSession, ProviderSessionID: n.ProviderSessionID,
@@ -337,11 +526,12 @@ func (n PromptEndNote) cut(f func(string) string) (Note, bool) {
 
 // A DiagNote is never queued as itself: Note freezes it into an encodedDiag
 // first, which is what the writer encodes and cuts. These methods exist so
-// a DiagNote satisfies Note, and give the frozen form's answers.
-func (n DiagNote) line(ts string) any { return encodeDiag(n, math.MaxInt).line(ts) }
-func (n DiagNote) size() int          { return encodeDiag(n, math.MaxInt).size() }
+// a DiagNote satisfies Note, and give the frozen form's answers at the
+// default cap.
+func (n DiagNote) line(ts string) any { return encodeDiag(n, DefaultMaxRecordBytes).line(ts) }
+func (n DiagNote) size() int          { return encodeDiag(n, DefaultMaxRecordBytes).size() }
 func (n DiagNote) cut(f func(string) string) (Note, bool) {
-	return encodeDiag(n, math.MaxInt).cut(f)
+	return encodeDiag(n, DefaultMaxRecordBytes).cut(f)
 }
 
 func (d encodedDiag) line(ts string) any {
@@ -382,25 +572,26 @@ func cutUTF8(s string, n int) string {
 // way because escaping can make a byte cost six (a control character is
 // \u00XX), and cutting by raw bytes would then cut far more than needed.
 func cutEncoded(s string, by int) string {
-	total := 0
-	for i := 0; i < len(s); {
-		e, n := encodedRune(s, i)
-		total += e
-		i += n
-	}
-	budget, used := total-by, 0
-	if budget <= 0 {
-		return ""
-	}
+	_, total := fitEncoded(s, math.MaxInt)
+	cut, _ := fitEncoded(s, total-by)
+	return cut
+}
+
+// fitEncoded is s's longest prefix, cut between runes, whose JSON string
+// body (quotes excluded, HTML escaping off) is at most budget bytes, and the
+// size of that body. It reads no further into s than the budget reaches, so
+// a huge s costs no more than one at the budget.
+func fitEncoded(s string, budget int) (string, int) {
+	used := 0
 	for i := 0; i < len(s); {
 		e, n := encodedRune(s, i)
 		if used+e > budget {
-			return s[:i]
+			return s[:i], used
 		}
 		used += e
 		i += n
 	}
-	return s
+	return s, used
 }
 
 // encodedRune is how many bytes encoding/json (HTML escaping off) writes for

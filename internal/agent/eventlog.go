@@ -175,10 +175,14 @@ type SubscribeOptions struct {
 	// means live only, from the next event published.
 	After *Cursor
 	// MaxItems bounds the live buffer: records published and not yet
-	// delivered. Default 1024.
+	// handed to Records. Default 1024.
 	MaxItems int
 	// MaxBytes bounds the live buffer and the pinned replay backlog
 	// together, on encoded size. Default 8 MiB.
+	//
+	// A record stops counting against both as the owner begins to send it,
+	// so a record the reader has taken never counts; at worst a subscription
+	// holds its budget plus the one record it is blocked sending.
 	MaxBytes int
 }
 
@@ -204,8 +208,10 @@ type EventLogOptions struct {
 	RingBytes  int
 	// MaxRecordBytes is the largest body kept: a larger event becomes an
 	// oversized omitted record (the primary still gets it whole). Default
-	// 8 MiB, the journal's own default; it must not exceed the journal's
-	// MaxRecordBytes, or the file and the ring would disagree.
+	// 8 MiB, the journal's own default. With a journal, the journal's
+	// MaxRecordBytes caps it, so an event over either limit is the same
+	// omitted record in the ring, every subscription and the file, and the
+	// log counts and notes the omission.
 	MaxRecordBytes int
 	// Journal receives every record and every Note. nil: no journal.
 	Journal *journal.Writer
@@ -240,9 +246,18 @@ func NewIncarnation() string {
 // session, or writes a diagnostic; the only locks taken under it are leaves:
 // a subscription's mu and the journal's queue mutex. Note never takes it.
 //
-// Lock order: a session's queueOp → emitMu → the boundary → a subscription's
-// mu, and the boundary → the journal's queue mutex; noteMu → the journal's
-// queue mutex, and only Close takes noteMu under the boundary.
+// inflight is held shared by every Publish and TryPublish for its whole call,
+// outside the boundary, and exclusively only by Close, after the cutoff, so
+// the closing diag's count includes every publish that was in flight when
+// the cutoff came. Close can always get it: every wait a Publish makes
+// selects on closed, and TryPublish never waits. A publisher holding it
+// waits for nothing Close holds (Close is never called from inside a
+// Publish, and takes nothing a publisher's caller holds), and nothing that
+// holds it takes it again.
+//
+// Lock order: a session's queueOp → emitMu → inflight → the boundary → a
+// subscription's mu, and the boundary → the journal's queue mutex; noteMu →
+// the journal's queue mutex, and only Close takes noteMu under the boundary.
 type EventLog struct {
 	incarnation string
 	primary     chan Event
@@ -256,6 +271,10 @@ type EventLog struct {
 	next uint64          // the last seq committed
 	ring recordRing      // recent records, oldest first
 	subs []*Subscription // subscriptions offered each record; a terminated one is swept lazily
+
+	// inflight: shared for a whole Publish or TryPublish, exclusive for Close
+	// once the cutoff is closed (see above).
+	inflight sync.RWMutex
 
 	// noteMu orders Note against Close: Note holds it shared while it checks
 	// the cutoff and queues its note, and Close holds it while it sets the
@@ -288,7 +307,8 @@ const (
 )
 
 // logHooks let a test know, rather than guess, where a goroutine is: waiting
-// for the boundary, or inside it about to block on the primary.
+// for the boundary, inside it about to block on the primary, giving an event
+// up, or delivering one — and hold it there.
 type logHooks struct {
 	// admitting runs just before a Publish or Subscribe waits for the
 	// boundary.
@@ -296,6 +316,16 @@ type logHooks struct {
 	// beforePrimarySend runs inside the boundary, just before Publish's
 	// blocking primary send, with the seq the event would take.
 	beforePrimarySend func(seq uint64)
+	// abandoning runs when a Publish or TryPublish gives its event up, before
+	// the drop is counted; inside says whether it holds the boundary.
+	abandoning func(inside bool)
+	// closeWaits runs in Close once the cutoff is closed, just before it
+	// waits for every Publish and TryPublish in flight to leave.
+	closeWaits func()
+	// delivered runs in a subscription's owner just after Records took the
+	// record with seq. A subscription keeps the hooks its log had when it
+	// was opened.
+	delivered func(seq uint64)
 }
 
 // NewEventLog builds an event log. It starts nothing: the only goroutines a
@@ -306,13 +336,17 @@ func NewEventLog(o EventLogOptions) *EventLog {
 	if inc == "" {
 		inc = NewIncarnation()
 	}
+	maxRecord := orDefault(o.MaxRecordBytes, defaultMaxRecordBytes)
+	if j := o.Journal.MaxRecordBytes(); j > 0 {
+		maxRecord = min(maxRecord, j)
+	}
 	return &EventLog{
 		incarnation: inc,
 		primary:     make(chan Event, primaryCap),
 		sem:         make(chan struct{}, 1),
 		closed:      make(chan struct{}),
 		journal:     o.Journal,
-		maxRecord:   orDefault(o.MaxRecordBytes, defaultMaxRecordBytes),
+		maxRecord:   maxRecord,
 		ring: recordRing{
 			maxItems: orDefault(o.RingEvents, defaultRingEvents),
 			maxBytes: orDefault(o.RingBytes, defaultRingBytes),
@@ -350,6 +384,8 @@ func (l *EventLog) release() { <-l.sem }
 // value is the publisher's own copy by then (cloneTool and its kin), and
 // encoding is the expensive part.
 func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) bool {
+	l.inflight.RLock()
+	defer l.inflight.RUnlock()
 	rec := l.record(ev)
 	var cancelled <-chan struct{}
 	if ctx != nil {
@@ -361,13 +397,11 @@ func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) 
 	select {
 	case l.sem <- struct{}{}:
 	case <-done:
-		l.droppedAtClose.Add(1)
-		return false
+		return l.abandon(true)
 	case <-cancelled:
-		return false
+		return l.abandon(false)
 	case <-l.closed:
-		l.droppedAtClose.Add(1)
-		return false
+		return l.abandon(true)
 	}
 	// A select picks at random among ready cases, so a publisher can be
 	// admitted after the cutoff or after its session began closing; the
@@ -405,10 +439,24 @@ func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) 
 // before the boundary is released, so a Close waiting for the boundary reads
 // it. It returns false, Publish's answer.
 func (l *EventLog) abandonLocked(counted bool) bool {
+	if h := l.hooks; h != nil && h.abandoning != nil {
+		h.abandoning(true)
+	}
 	if counted {
 		l.droppedAtClose.Add(1)
 	}
 	l.release()
+	return false
+}
+
+// abandon is abandonLocked for a publisher that never entered the boundary.
+func (l *EventLog) abandon(counted bool) bool {
+	if h := l.hooks; h != nil && h.abandoning != nil {
+		h.abandoning(false)
+	}
+	if counted {
+		l.droppedAtClose.Add(1)
+	}
 	return false
 }
 
@@ -417,11 +465,16 @@ func (l *EventLog) abandonLocked(counted bool) bool {
 // is full, the event is dropped for everyone, consumes no number, and it
 // returns false.
 func (l *EventLog) TryPublish(ev Event) bool {
+	// Only Close holds inflight exclusively, or waits to, and only once the
+	// cutoff is closed: failing to get it shared is the cutoff.
+	if !l.inflight.TryRLock() {
+		return l.abandon(true)
+	}
+	defer l.inflight.RUnlock()
 	rec := l.record(ev)
 	select {
 	case <-l.closed:
-		l.droppedAtClose.Add(1)
-		return false
+		return l.abandon(true)
 	default:
 	}
 	select {
@@ -584,10 +637,11 @@ func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 }
 
 // newSubscription is a subscription with its budgets, the pinned replay's
-// bytes already counted against maxBytes until they are delivered.
+// bytes already counted against maxBytes until each is handed over.
 func (l *EventLog) newSubscription(maxItems, maxBytes, pinnedBytes int) *Subscription {
 	return &Subscription{
 		log:      l,
+		hooks:    l.hooks,
 		out:      make(chan Record),
 		kill:     make(chan struct{}),
 		notify:   make(chan struct{}, 1),
@@ -623,6 +677,14 @@ func (l *EventLog) sweepLocked() {
 	l.subs = slices.DeleteFunc(l.subs, func(s *Subscription) bool { return s.terminal() != nil })
 }
 
+// Abandoned counts an emit its caller dropped on its own done fast path,
+// before reaching Publish: an event given up since the session's teardown
+// began, which the closing diag's droppedAtClose counts beside the publishes
+// the log gave up itself (plan 020 §3.5). It never blocks and never takes
+// the boundary. One that races Close may land after closing was written;
+// Health counts it all the same.
+func (l *EventLog) Abandoned() { l.droppedAtClose.Add(1) }
+
 // Note queues a journal-only note (a session id, a prompt, a diagnostic). It
 // never blocks and never takes the boundary, so a wedged primary never holds
 // back a prompt note or the stderr tee. After Close it is counted and
@@ -639,7 +701,9 @@ func (l *EventLog) Note(n journal.Note) {
 
 // Close shuts the log (plan 020 §3.5): the admission cutoff, so every later
 // Publish returns false and every later Note is counted and dropped; a
-// closing diag counting the publishes abandoned on done or the cutoff; every
+// closing diag counting the publishes abandoned on done or the cutoff — every
+// one that was in flight when the cutoff came included, and every emit its
+// session dropped on its own done fast path before then (Abandoned); every
 // subscription ended with ErrClosed and its owner goroutine waited for; and
 // the journal closed, waiting at most its own bound (500 ms) and at most
 // until ctx ends. It is idempotent: a second call returns once the first has
@@ -647,8 +711,17 @@ func (l *EventLog) Note(n journal.Note) {
 func (l *EventLog) Close(ctx context.Context) {
 	l.closeOnce.Do(func() {
 		close(l.closed)
-		// Serialize with a publisher mid-commit. Every blocking point inside
-		// the boundary selects on closed, so this cannot wedge.
+		if h := l.hooks; h != nil && h.closeWaits != nil {
+			h.closeWaits()
+		}
+		// Wait for every Publish and TryPublish in flight to leave, counted
+		// if it gave its event up: each one's waits select on closed, so
+		// each leaves at once. A publish that arrives from here on waits
+		// for this to be released and then finds the cutoff; it is counted
+		// in Health, after closing.
+		l.inflight.Lock()
+		// Serialize with a Subscribe mid-registration. No publisher holds
+		// the boundary now, and Subscribe waits for nothing inside it.
 		l.sem <- struct{}{}
 		subs := l.subs
 		l.subs = nil
@@ -663,6 +736,7 @@ func (l *EventLog) Close(ctx context.Context) {
 		}
 		l.noteMu.Unlock()
 		l.release()
+		l.inflight.Unlock()
 		for _, s := range subs {
 			s.terminate(ErrClosed)
 		}
@@ -684,7 +758,8 @@ type EventLogHealth struct {
 	Omitted int
 	// SubscribersDropped counts subscriptions ended as slow consumers.
 	SubscribersDropped int
-	// DroppedAtClose counts publishes abandoned on done or the cutoff.
+	// DroppedAtClose counts publishes abandoned on done or the cutoff, and
+	// emits their session dropped on its own done fast path (Abandoned).
 	DroppedAtClose int
 	// NotesDropped counts notes refused after Close.
 	NotesDropped int
@@ -716,6 +791,7 @@ func (l *EventLog) ownerDone() {
 // ErrSlowConsumer instead of making a publisher wait.
 type Subscription struct {
 	log      *EventLog
+	hooks    *logHooks // the log's test seams when it was opened; nil in production
 	out      chan Record
 	kill     chan struct{} // closed, once, with cause set: the subscription is over
 	notify   chan struct{} // capacity 1: the live buffer has something new
@@ -726,8 +802,8 @@ type Subscription struct {
 	// boundary, and nothing holding it waits on anything.
 	mu        sync.Mutex
 	live      []Record // published, not yet taken by the owner
-	liveItems int      // live records not yet delivered, those the owner holds included
-	bytes     int      // their bytes, plus the pinned replay not yet delivered
+	liveItems int      // live records not yet handed over: buffered, or taken by the owner and not yet being sent
+	bytes     int      // their bytes, plus the pinned replay's not yet being sent
 	cause     error    // the first terminal cause
 	err       error    // cause, published once the owner has stopped
 }
@@ -787,7 +863,7 @@ const (
 )
 
 // offer appends rec to the live buffer without blocking. Overflow, by items
-// or by bytes (the pinned replay not yet delivered counts toward the bytes),
+// or by bytes (the pinned replay not yet handed over counts toward the bytes),
 // marks the subscription dropped and signals its owner; the owner closes
 // Records.
 func (s *Subscription) offer(rec Record) offerResult {
@@ -821,17 +897,21 @@ func (s *Subscription) run(pinned []Record, prev uint64) {
 // pump delivers the replay and then the live buffer until the subscription
 // ends, and returns why it did. prev is the seq the reader already has: the
 // cursor, or the cutoff for a live-only subscription.
+//
+// Each record's charge against the budget is released just before its
+// blocking send, not after it returns: once Records has taken a record, a
+// publisher may offer the next before this goroutine runs again, and a
+// subscription that kept within its budget must not be dropped for a record
+// its reader already has.
 func (s *Subscription) pump(pinned []Record, prev uint64) error {
 	// C5c: the file leg, (After.Seq, R-1], is streamed here first.
 	for i := range pinned {
-		if err := s.send(pinned[i], &prev); err != nil {
+		rec := pinned[i]
+		pinned[i] = Record{} // handed over: the pin no longer holds it
+		s.handOver(0, rec.size())
+		if err := s.send(rec, &prev); err != nil {
 			return err
 		}
-		size := pinned[i].size()
-		pinned[i] = Record{} // delivered: the pin no longer holds it
-		s.mu.Lock()
-		s.bytes -= size
-		s.mu.Unlock()
 	}
 	var batch []Record
 	for {
@@ -852,17 +932,24 @@ func (s *Subscription) pump(pinned []Record, prev uint64) error {
 			continue
 		}
 		for i := range batch {
-			if err := s.send(batch[i], &prev); err != nil {
+			rec := batch[i]
+			batch[i] = Record{}
+			s.handOver(1, rec.size())
+			if err := s.send(rec, &prev); err != nil {
 				return err
 			}
-			size := batch[i].size()
-			batch[i] = Record{}
-			s.mu.Lock()
-			s.liveItems--
-			s.bytes -= size
-			s.mu.Unlock()
 		}
 	}
+}
+
+// handOver releases one record's charge as the owner begins to send it:
+// items is 1 for a live record, 0 for a pinned one, which counts against
+// the bytes only.
+func (s *Subscription) handOver(items, bytes int) {
+	s.mu.Lock()
+	s.liveItems -= items
+	s.bytes -= bytes
+	s.mu.Unlock()
 }
 
 // send delivers one record, unless the subscription ends first. A record that
@@ -880,6 +967,9 @@ func (s *Subscription) send(rec Record, prev *uint64) error {
 	select {
 	case s.out <- rec.detached():
 		*prev = rec.Seq
+		if h := s.hooks; h != nil && h.delivered != nil {
+			h.delivered(rec.Seq)
+		}
 		return nil
 	case <-s.kill:
 		return s.terminal()

@@ -195,4 +195,9 @@ func TestStubCloseCutsOffALateEmitter(t *testing.T) {
 	if err := sub.Err(); !errors.Is(err, agent.ErrClosed) {
 		t.Fatalf("the subscription ended with %v, want agent.ErrClosed", err)
 	}
+	// Both were given up since Close began, and both are counted, whichever
+	// way each went: in the log, or on the Stub's own closed fast path.
+	if n := s.log.Health().DroppedAtClose; n != 2 {
+		t.Fatalf("DroppedAtClose is %d, want 2: late and after", n)
+	}
 }

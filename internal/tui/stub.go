@@ -676,6 +676,7 @@ func (s *Stub) emit(ev agent.Event) {
 	s.noteOpen(ev)
 	select {
 	case <-s.closed:
+		s.log.Abandoned()
 		return
 	default:
 	}

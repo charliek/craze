@@ -12,8 +12,10 @@ import (
 
 // MaxLineBytes is the longest line the reader accepts, newline excluded. A
 // longer line is an error, never an unbounded allocation. The writer keeps
-// every line well under it: bodies and notes are capped at MaxRecordBytes,
-// which New holds at least 64 KiB below this.
+// every line under it: bodies and notes are capped at MaxRecordBytes, which
+// New holds at least 64 KiB below this; the header's strings, event types
+// and omitted records' text are capped where they are accepted; and an event
+// line that would still be longer is written as an omitted record.
 const MaxLineBytes = 16 << 20
 
 // readBufferBytes is the reader's buffered chunk; a longer line is
@@ -99,7 +101,7 @@ type fileLine struct {
 	Type      string          `json:"type"`
 	Format    int             `json:"format"`
 	Seq       uint64          `json:"seq"`
-	At        time.Time       `json:"at"`
+	At        json.RawMessage `json:"at"` // parsed leniently: see at
 	EventType string          `json:"eventType"`
 	Event     json.RawMessage `json:"event"`
 	Omitted   *omittedJSON    `json:"omitted"`
@@ -190,7 +192,7 @@ func readRange(r io.Reader, live bool, from, to uint64, fn func(Record) error) e
 
 // record is an event line as a Record.
 func (l fileLine) record() (Record, error) {
-	rec := Record{Seq: l.Seq, At: l.At, EventType: l.EventType}
+	rec := Record{Seq: l.Seq, At: l.at(), EventType: l.EventType}
 	switch {
 	case l.Omitted != nil:
 		rec.Omitted = &Omitted{Reason: l.Omitted.Reason, Bytes: l.Omitted.Bytes, Error: l.Omitted.Error}
@@ -202,15 +204,33 @@ func (l fileLine) record() (Record, error) {
 	return rec, nil
 }
 
+// at is the event's time as the line holds it. A line without one (the
+// writer leaves out a time it cannot write in a form this reads back), or
+// with one that does not parse, reads as the zero time: one event's
+// timestamp is never worth the rest of the file.
+func (l fileLine) at() time.Time {
+	var t time.Time
+	if len(l.At) == 0 || t.UnmarshalJSON(l.At) != nil {
+		return time.Time{}
+	}
+	return t
+}
+
 // readLine reads the next line into buf's storage and returns it without
 // its newline, and whether it had one. At the end of the input it returns
 // io.EOF with whatever unterminated bytes were left. A line longer than
-// MaxLineBytes is ErrLineTooLong, found before it is fully buffered.
+// MaxLineBytes, terminated or not, is ErrLineTooLong, found before it is
+// fully buffered: the newline is the one byte past the limit a line may
+// have, and only when it is the newline.
 func readLine(br *bufio.Reader, buf []byte) ([]byte, bool, error) {
 	buf = buf[:0]
 	for {
 		frag, err := br.ReadSlice('\n')
-		if len(buf)+len(frag) > MaxLineBytes+1 {
+		content := len(frag)
+		if err == nil {
+			content-- // the newline is not part of the line
+		}
+		if len(buf)+content > MaxLineBytes {
 			return nil, false, ErrLineTooLong
 		}
 		buf = append(buf, frag...)

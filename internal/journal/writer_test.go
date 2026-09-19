@@ -3,14 +3,17 @@ package journal
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -866,9 +869,10 @@ func TestALongPromptIsCutToTheCapAndMarked(t *testing.T) {
 	}
 }
 
-// TestNotesWithNoFieldToCutAreReplacedNotWrittenLarge: oversized diag fields
-// become a count, and a note with nothing left to give becomes a small
-// note_too_large diag; no line ever exceeds the cap.
+// TestNotesWithNoFieldToCutAreReplacedNotWrittenLarge: an oversized diag
+// field is cut to the cap and marked, a note with nothing left to give
+// becomes a small note_too_large diag, and a field DiagNote does not allow
+// is the unsupported marker; no line ever exceeds the cap.
 func TestNotesWithNoFieldToCutAreReplacedNotWrittenLarge(t *testing.T) {
 	const cap = 8 << 10
 	opts := testOptions(t)
@@ -886,13 +890,152 @@ func TestNotesWithNoFieldToCutAreReplacedNotWrittenLarge(t *testing.T) {
 	}
 	got := rawLines(t, w.Path())[1:]
 	for i, want := range []string{
-		`"kind":"agent_stderr","fields":{"omittedBytes":`,
+		`"kind":"agent_stderr","fields":{"line":"xxxx`,
 		`"kind":"note_too_large","fields":{"bytes":` + fmt.Sprint(3*cap) + `,"type":"session"},"truncated":true`,
-		`"kind":"start_failed","fields":{"encodeError":`,
+		`"kind":"start_failed","fields":{"bad":"<unsupported>"}}`,
 	} {
 		if !strings.Contains(got[i], want) {
-			t.Errorf("line %d = %s, want it to contain %s", i+2, got[i], want)
+			t.Errorf("line %d = %.200s, want it to contain %s", i+2, got[i], want)
 		}
+	}
+	if !strings.HasSuffix(got[0], `"},"truncated":true}`) {
+		t.Errorf("line 2 ends %q, want the cut marked", got[0][len(got[0])-40:])
+	}
+}
+
+// callTrap is a diag field value whose every method a journal could be
+// tempted to call counts the call and then blocks until the test ends.
+type callTrap struct {
+	calls *atomic.Int32
+	stall *gate
+}
+
+func (c callTrap) trap()                        { c.calls.Add(1); c.stall.block() }
+func (c callTrap) MarshalJSON() ([]byte, error) { c.trap(); return []byte(`"ran"`), nil }
+func (c callTrap) String() string               { c.trap(); return "ran" }
+func (c callTrap) Error() string                { c.trap(); return "ran" }
+
+// textTrap is a callTrap reached through encoding.TextMarshaler, which
+// encoding/json calls when a type has no MarshalJSON.
+type textTrap struct{ c callTrap }
+
+func (t textTrap) MarshalText() ([]byte, error) { t.c.trap(); return []byte("ran"), nil }
+
+// namedString is a named type over string with no methods at all: still not
+// a string, so still not allowed.
+type namedString string
+
+// TestDiagFieldsNeverCallIntoTheCallersValues (finding 1): Note runs inside
+// the session's ordering boundary, so no method of a field's value is ever
+// called, whatever it implements. Note returns at once holding values whose
+// MarshalJSON or MarshalText would block forever; every value DiagNote does
+// not allow (a named type, a Duration, a map, an []int, a pointer) is the
+// unsupported marker; plain scalars, strings and []string are kept as they
+// are. A non-finite float, which JSON has no number for, is a string rather
+// than a failure that costs the note its other fields.
+func TestDiagFieldsNeverCallIntoTheCallersValues(t *testing.T) {
+	w := newWriter(t, testOptions(t))
+	var calls atomic.Int32
+	trap := callTrap{calls: &calls, stall: newGate(t)}
+	noted := make(chan struct{})
+	go func() {
+		defer close(noted)
+		w.Note(DiagNote{Kind: DiagStartFailed, Fields: map[string]any{
+			"marshaler": trap,
+			"pointer":   &trap,
+			"text":      textTrap{trap},
+			"named":     namedString("x"),
+			"duration":  time.Second,
+			"map":       map[string]any{"a": 1},
+			"ints":      []int{1},
+			"s":         "plain <kept>",
+			"b":         true,
+			"i":         -3,
+			"u":         uint8(7),
+			"f":         1.5,
+			"f32":       float32(0.25),
+			"nil":       nil,
+			"list":      []string{"a", "b"},
+			"nilList":   []string(nil),
+		}})
+	}()
+	select {
+	case <-noted:
+	case <-time.After(watchdog):
+		t.Fatal("Note waited on a method of a field's value")
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("Note called %d methods of the fields' values", n)
+	}
+	w.Note(DiagNote{Kind: DiagStartFailed, Fields: map[string]any{
+		"nan": math.NaN(), "inf": math.Inf(-1), "f32inf": float32(math.Inf(1)), "kept": "yes",
+	}})
+	closeWriter(t, w)
+	raw := rawLines(t, w.Path())
+	for i, want := range []string{
+		`"kind":"start_failed","fields":{"b":true,"duration":"<unsupported>","f":1.5,"f32":0.25,"i":-3,` +
+			`"ints":"<unsupported>","list":["a","b"],"map":"<unsupported>","marshaler":"<unsupported>",` +
+			`"named":"<unsupported>","nil":null,"nilList":null,"pointer":"<unsupported>","s":"plain <kept>",` +
+			`"text":"<unsupported>","u":7}}`,
+		`"kind":"start_failed","fields":{"f32inf":"+Inf","inf":"-Inf","kept":"yes","nan":"NaN"}}`,
+	} {
+		if !strings.HasSuffix(raw[i+1], want) {
+			t.Errorf("diag line %d:\n got %s\nwant it to end %s", i+2, raw[i+1], want)
+		}
+	}
+}
+
+// TestAHugeDiagFieldIsCutBeforeItIsEncoded (finding 1): a field far over
+// the note cap costs Note no more than the cap. Strings and []string
+// elements are cut between runes before anything is encoded, so a 16 MiB
+// value that would escape to 96 MiB is never escaped; the texts share the
+// room left after the scalars, which keep their place; the line is marked
+// truncated and fits the cap. A diag with more fields than it keeps is
+// reduced to their count.
+func TestAHugeDiagFieldIsCutBeforeItIsEncoded(t *testing.T) {
+	const cap = 8 << 10
+	opts := testOptions(t)
+	opts.MaxRecordBytes = cap
+	w := newWriter(t, opts)
+	huge := strings.Repeat("\x01", 16<<20)
+	list := slices.Repeat([]string{"é"}, 1<<16)
+	many := make(map[string]any, 65)
+	for i := range 65 {
+		many[fmt.Sprint("k", i)] = i
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	w.Note(DiagNote{Kind: DiagAgentStderr, Fields: map[string]any{"line": huge, "list": list, "truncated": true, "n": 3}})
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 4<<20 {
+		t.Fatalf("Note allocated %d bytes for a diag capped at %d", grew, cap)
+	}
+	w.Note(DiagNote{Kind: DiagAgentStderr, Fields: many})
+	closeWriter(t, w)
+
+	raw := rawLines(t, w.Path())
+	if len(raw[1]) > cap {
+		t.Fatalf("the diag line is %d bytes, over the %d cap", len(raw[1]), cap)
+	}
+	l := parsedLines(t, w.Path())[1]
+	fields, _ := l["fields"].(map[string]any)
+	line, _ := fields["line"].(string)
+	elems, _ := fields["list"].([]any)
+	if l["truncated"] != true || fields["truncated"] != true || fields["n"] != json.Number("3") {
+		t.Fatalf("diag line %v: want it marked truncated with the scalars kept", l)
+	}
+	if line == "" || !strings.HasPrefix(huge, line) || len(elems) == 0 || len(elems) >= len(list) {
+		t.Fatalf("line is %d bytes (a prefix %v), list has %d of %d: want both cut, neither emptied",
+			len(line), strings.HasPrefix(huge, line), len(elems), len(list))
+	}
+	for _, e := range elems {
+		if e != "é" {
+			t.Fatalf("list element %q, want only whole elements", e)
+		}
+	}
+	if want := `"fields":{"omittedFields":65},"truncated":true}`; !strings.HasSuffix(raw[2], want) {
+		t.Fatalf("a diag of 65 fields:\n got %s\nwant it to end %s", raw[2], want)
 	}
 }
 
@@ -1106,5 +1249,227 @@ func TestConcurrentUseIsRaceFree(t *testing.T) {
 	}
 	if h := w.Health(); h.State != StateOK || h.DroppedEvents != 0 || h.DroppedNotes != 0 {
 		t.Fatalf("Health = %+v, want nothing dropped", h)
+	}
+}
+
+// stallFirstWrite makes the hooks' first Write block until the returned
+// gate opens, so what Append admits while it is stuck is decided by the
+// bounds alone. Called after newWriter, so a failing test's cleanup opens
+// the gate before it closes the writer.
+func stallFirstWrite(t *testing.T, hooks *fileHooks) *gate {
+	stall := newGate(t)
+	hooks.mu.Lock()
+	defer hooks.mu.Unlock()
+	hooks.onWrite = func(call int, p []byte, f *os.File) (int, error) {
+		if call == 1 {
+			stall.block()
+		}
+		return f.Write(p)
+	}
+	return stall
+}
+
+// TestAnOmittedRecordsTextIsWeighedByTheQueue (finding 2): an omitted
+// record's error and reason count against QueueBytes as a body does, so a
+// record carrying a 4 KiB error is not admitted into a 1 KiB queue that a
+// stalled write already holds an event in: it is dropped into a gap, and
+// the queue never holds more than its budget.
+func TestAnOmittedRecordsTextIsWeighedByTheQueue(t *testing.T) {
+	hooks := newFileHooks()
+	opts := testOptions(t)
+	opts.openFile = hooks.open
+	opts.QueueBytes = 1024
+	w := newWriter(t, opts)
+	stall := stallFirstWrite(t, hooks)
+
+	w.Append(event(1))
+	w.RequestFlush()
+	stall.waitEntered(t) // event 1 is in flight and still weighs on the queue
+	w.Append(Record{Seq: 2, At: testBase, EventType: "tool",
+		Omitted: &Omitted{Reason: OmittedEncodeError, Error: strings.Repeat("e", 4<<10)}})
+	w.mu.Lock()
+	queued := w.queuedBytes
+	w.mu.Unlock()
+	if queued > opts.QueueBytes {
+		t.Fatalf("the queue holds %d bytes, over its %d budget", queued, opts.QueueBytes)
+	}
+	if h := w.Health(); h.DroppedEvents != 1 || !slices.Equal(h.Gaps, []SeqRange{{2, 2}}) {
+		t.Fatalf("Health = %+v, want record 2 dropped into a gap", h)
+	}
+	stall.open()
+	closeWriter(t, w)
+	if got := shape(parsedLines(t, w.Path())); got != "header 1 gap{2..2 e1 n0}" {
+		t.Fatalf("file layout %s, want record 2 recorded as a gap", got)
+	}
+}
+
+// TestAClosingNoteDroppedIntoAGapStillCreatesNothing (finding 3): with a
+// queue too small to hold it, the closing note is dropped into a gap marker
+// rather than queued; a gap that stands only for closing notes is discarded
+// as the note itself would have been, so still nothing is created, nothing
+// is counted lost, and no notice is printed.
+func TestAClosingNoteDroppedIntoAGapStillCreatesNothing(t *testing.T) {
+	diag := &diagSink{}
+	opts := testOptions(t)
+	opts.QueueBytes = 1 // nothing fits: every entry is dropped
+	opts.Diag = diag
+	w := newWriter(t, opts)
+	w.Note(DiagNote{Kind: DiagClosing, Fields: map[string]any{"droppedAtClose": 0}})
+	closeWriter(t, w)
+	if _, err := os.Stat(opts.Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat(%s) = %v, want nothing created", opts.Dir, err)
+	}
+	if h := w.Health(); h.State != StateOK || h.DroppedNotes != 0 || len(h.Gaps) != 0 {
+		t.Fatalf("Health = %+v; a discarded closing note is not a loss", h)
+	}
+	if n := diag.lines(); len(n) != 0 {
+		t.Fatalf("notices %q for a journal that wrote nothing", n)
+	}
+}
+
+// TestAClosingOnlyGapIsWrittenOnceTheFileExists (finding 3): the discard is
+// only for a file that does not exist. Once one does, a closing note
+// dropped into a gap is a loss like any other, and its gap line is written.
+func TestAClosingOnlyGapIsWrittenOnceTheFileExists(t *testing.T) {
+	hooks := newFileHooks()
+	opts := testOptions(t)
+	opts.openFile = hooks.open
+	opts.QueueEntries = 2 // event 1 in flight fills it
+	w := newWriter(t, opts)
+	stall := stallFirstWrite(t, hooks)
+	w.Append(event(1))
+	w.RequestFlush()
+	stall.waitEntered(t)
+	w.Note(DiagNote{Kind: DiagClosing})
+	stall.open()
+	closeWriter(t, w)
+	if got := shape(parsedLines(t, w.Path())); got != "header 1 gap{<nil>..<nil> e0 n1}" {
+		t.Fatalf("file layout %s, want the closing note counted in a gap line", got)
+	}
+	if h := w.Health(); h.State != StateOK || h.DroppedNotes != 1 {
+		t.Fatalf("Health = %+v, want the closing note counted lost", h)
+	}
+}
+
+// TestNoLineOutgrowsTheReaderWhateverItIsHanded (finding 5): an event type
+// or a header string that escaping would take past MaxLineBytes never makes
+// a line the reader refuses. An event type over 256 bytes makes its record
+// an encode_error omitted record under a placeholder type, keeping its
+// seq; a header string is cut at 4 KiB. Every line fits, the journal stays
+// healthy, and the file reads back whole.
+func TestNoLineOutgrowsTheReaderWhateverItIsHanded(t *testing.T) {
+	opts := testOptions(t)
+	opts.Mode = strings.Repeat("m", MaxLineBytes)
+	opts.Provider = strings.Repeat("é", 3<<10) // cut between runes
+	w := newWriter(t, opts)
+	w.Append(event(1))
+	w.Append(Record{Seq: 2, At: testBase, EventType: strings.Repeat("\x01", 3<<20), Body: `{"type":"text"}`})
+	w.Append(Record{Seq: 3, At: testBase, EventType: strings.Repeat("t", 256), Body: `{"type":"text"}`})
+	closeWriter(t, w)
+
+	for i, line := range rawLines(t, w.Path()) {
+		if len(line) > MaxLineBytes {
+			t.Fatalf("line %d is %d bytes, over MaxLineBytes", i+1, len(line))
+		}
+	}
+	header := parsedLines(t, w.Path())[0]
+	mode, _ := header["mode"].(string)
+	provider, _ := header["provider"].(string)
+	if len(mode) != 4<<10 || !utf8.ValidString(provider) || len(provider) > 4<<10 || len(provider) < 4<<10-1 {
+		t.Fatalf("header mode is %d bytes and provider %d (valid %v), want each cut to 4 KiB between runes",
+			len(mode), len(provider), utf8.ValidString(provider))
+	}
+	recs, err := collect(func(fn func(Record) error) error { return ReadFile(w.Path(), 1, MaxSeq, fn) })
+	if err != nil || !slices.Equal(seqs(recs), []uint64{1, 2, 3}) {
+		t.Fatalf("ReadFile = %v, %v; want 1..3", seqs(recs), err)
+	}
+	if r := recs[1]; r.EventType != "<event type too long>" || r.Body != "" || r.Omitted == nil ||
+		r.Omitted.Reason != OmittedEncodeError || !strings.Contains(r.Omitted.Error, "event type") {
+		t.Fatalf("record 2 = %+v, want an encode_error omitted record under the placeholder type", r)
+	}
+	if r := recs[2]; r.EventType != strings.Repeat("t", 256) || r.Omitted != nil {
+		t.Fatalf("record 3 = %+v, want a 256-byte event type kept with its body", r)
+	}
+	if h := w.Health(); h.State != StateOK || h.Omitted != 1 {
+		t.Fatalf("Health = %+v, want ok with one omitted record", h)
+	}
+}
+
+// TestAnEventLineOverTheLineCapIsWrittenOmitted (finding 5): the check
+// behind Append's caps. With the writer's line cap lowered below a body
+// the record cap allows, the record is journaled as an oversized omitted
+// record, keeping its seq, rather than as a line the reader would refuse.
+func TestAnEventLineOverTheLineCapIsWrittenOmitted(t *testing.T) {
+	const lineCap = 8 << 10
+	opts := testOptions(t)
+	opts.maxLineBytes = lineCap
+	w := newWriter(t, opts)
+	body := `{"text":"` + strings.Repeat("p", 2*lineCap) + `"}`
+	w.Append(event(1))
+	w.Append(Record{Seq: 2, At: testBase, EventType: "plan", Body: body})
+	w.Append(event(3))
+	closeWriter(t, w)
+	for i, line := range rawLines(t, w.Path()) {
+		if len(line) > lineCap {
+			t.Fatalf("line %d is %d bytes, over the %d line cap", i+1, len(line), lineCap)
+		}
+	}
+	recs, err := collect(func(fn func(Record) error) error { return ReadFile(w.Path(), 1, MaxSeq, fn) })
+	if err != nil || !slices.Equal(seqs(recs), []uint64{1, 2, 3}) {
+		t.Fatalf("ReadFile = %v, %v; want 1..3", seqs(recs), err)
+	}
+	if o := recs[1].Omitted; o == nil || *o != (Omitted{Reason: OmittedOversized, Bytes: len(body)}) || recs[1].EventType != "plan" {
+		t.Fatalf("record 2 = %+v, want an oversized omitted record of %d bytes", recs[1], len(body))
+	}
+}
+
+// TestATimeNoReaderCanParseIsLeftOut (finding 6): an event whose own time is
+// outside years 0000–9999 has no RFC 3339 form time.Time parses back, so its
+// line leaves "at" out and the record reads back between its neighbors with
+// the zero time, instead of the reader losing the rest of the file from that
+// line on. A line's own ts is left out the same way; the years at the edges
+// are written as they are.
+func TestATimeNoReaderCanParseIsLeftOut(t *testing.T) {
+	far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	edge := time.Date(9999, 12, 31, 23, 59, 59, 999_999_999, time.UTC)
+	clock := &testClock{}
+	var farNow atomic.Bool
+	opts := testOptions(t)
+	opts.Now = func() time.Time {
+		if farNow.Load() {
+			return far
+		}
+		return clock.now()
+	}
+	w := newWriter(t, opts)
+	w.Append(event(1))
+	w.Append(Record{Seq: 2, At: far, EventType: "text", Body: `{"n":2}`})
+	w.Append(Record{Seq: 3, At: time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC), EventType: "text", Body: `{"n":3}`})
+	w.Append(Record{Seq: 4, At: edge, EventType: "text", Body: `{"n":4}`})
+	farNow.Store(true)
+	w.Append(Record{Seq: 5, At: time.Date(0, 1, 1, 0, 0, 0, 0, time.UTC), EventType: "text", Body: `{"n":5}`})
+	farNow.Store(false)
+	w.Append(event(6))
+	closeWriter(t, w)
+
+	recs, err := collect(func(fn func(Record) error) error { return ReadFile(w.Path(), 1, MaxSeq, fn) })
+	if err != nil || !slices.Equal(seqs(recs), seqRange(1, 6)) {
+		t.Fatalf("ReadFile = %v, %v; want 1..6", seqs(recs), err)
+	}
+	for i, want := range []time.Time{testBase, {}, {}, edge, time.Date(0, 1, 1, 0, 0, 0, 0, time.UTC), testBase} {
+		if !recs[i].At.Equal(want) {
+			t.Errorf("record %d at %v, want %v", i+1, recs[i].At, want)
+		}
+	}
+	raw := rawLines(t, w.Path())
+	for i, l := range parsedLines(t, w.Path()) {
+		_, hasAt := l["at"]
+		_, hasTS := l["ts"]
+		if wantAt := i != 2 && i != 3; l["type"] == typeEvent && hasAt != wantAt {
+			t.Errorf("line %d has at: %v, want %v: %s", i+1, hasAt, wantAt, raw[i])
+		}
+		if wantTS := i != 5; hasTS != wantTS {
+			t.Errorf("line %d has ts: %v, want %v: %s", i+1, hasTS, wantTS, raw[i])
+		}
 	}
 }

@@ -718,6 +718,7 @@ func (s *nativeSession) emit(ev Event) {
 	}
 	select {
 	case <-s.done:
+		s.log.Abandoned()
 		return
 	default:
 	}

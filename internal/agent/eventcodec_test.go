@@ -21,17 +21,17 @@ import (
 )
 
 // codecExcluded names the fields the codec deliberately does not carry, as
-// "DeclaringType.Field", each with its reason. The completeness filler leaves
-// them zero and the comparison skips them, so an exclusion is one documented
-// line here rather than a hole in the test.
+// "DeclaringType.Field", each with its reason. The completeness filler sets
+// them like every other field and the comparison requires them to decode as
+// zero, so an exclusion is one documented line here rather than a hole in the
+// test: a codec that began carrying one fails it.
 var codecExcluded = map[string]string{
 	"Event.Seq": "the record envelope's (Record.Seq, the journal line's seq), not the codec object's; Record.Event sets it back",
 }
 
-// codecSkips reports whether typ's field is one of codecExcluded.
-func codecSkips(typ reflect.Type, field string) bool {
-	_, ok := codecExcluded[typ.Name()+"."+field]
-	return ok
+// codecExclusion is why typ's field is one of codecExcluded, or "".
+func codecExclusion(typ reflect.Type, field string) string {
+	return codecExcluded[typ.Name()+"."+field]
 }
 
 var (
@@ -144,9 +144,6 @@ func (f *codecFiller) fill(path string, v reflect.Value) {
 			if !field.IsExported() {
 				f.t.Fatalf("%s.%s is unexported: the codec cannot carry it, and the filler cannot set it", path, field.Name)
 			}
-			if codecSkips(typ, field.Name) {
-				continue
-			}
 			f.fill(path+"."+field.Name, v.Field(i))
 		}
 	default:
@@ -251,7 +248,10 @@ func codecCompare(path string, want, got reflect.Value, d *[]string) {
 		typ := want.Type()
 		for i := 0; i < typ.NumField(); i++ {
 			name := typ.Field(i).Name
-			if codecSkips(typ, name) {
+			if why := codecExclusion(typ, name); why != "" {
+				if g := got.Field(i); !g.IsZero() {
+					*d = append(*d, fmt.Sprintf("%s.%s: decoded as %v, want zero: the codec does not carry it (%s)", path, name, g.Interface(), why))
+				}
 				continue
 			}
 			codecCompare(path+"."+name, want.Field(i), got.Field(i), d)
@@ -356,8 +356,8 @@ func TestEventCodecCarriesEveryFieldReachableFromEvent(t *testing.T) {
 
 // TestEventCodecCompletenessFillerReachesEveryField pins the filler itself: a
 // pass that left some field zero would let a dropped field through, so every
-// leaf of the distinct pass must be set — every leaf but the documented
-// exclusions, which the filler skips on purpose.
+// leaf of the distinct pass must be set — the documented exclusions too, so
+// the comparison's "decodes as zero" says something.
 func TestEventCodecCompletenessFillerReachesEveryField(t *testing.T) {
 	ev, _ := filledEvent(t, false, func(int) bool { return true })
 	var zeros []string
@@ -393,11 +393,7 @@ func TestEventCodecCompletenessFillerReachesEveryField(t *testing.T) {
 		case reflect.Struct:
 			typ := v.Type()
 			for i := 0; i < v.NumField(); i++ {
-				name := typ.Field(i).Name
-				if codecSkips(typ, name) {
-					continue
-				}
-				walk(path+"."+name, v.Field(i))
+				walk(path+"."+typ.Field(i).Name, v.Field(i))
 			}
 		default:
 			if v.IsZero() {

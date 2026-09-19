@@ -287,6 +287,12 @@ func TestSessionCloseCutsOffALateEmitter(t *testing.T) {
 			if err := sub.Err(); !errors.Is(err, ErrClosed) {
 				t.Fatalf("the subscription ended with %v, want ErrClosed", err)
 			}
+			// Every one of them was given up since the teardown began, and
+			// counted: "late" by the log, "after" on the session's own done
+			// fast path, before the log, and the two Publishes by the log.
+			if n := log.Health().DroppedAtClose; n != 4 {
+				t.Fatalf("DroppedAtClose is %d, want 4: late, after, and the two Publishes past done", n)
+			}
 		})
 	}
 }

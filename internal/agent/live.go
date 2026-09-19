@@ -1737,6 +1737,7 @@ func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	}
 	select {
 	case <-s.done:
+		s.log.Abandoned()
 		return false
 	default:
 	}
