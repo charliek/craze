@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from conftest import host_env_names
-from sse_fixture import CANARY, SSEFixture, write_native_config
+from sse_fixture import CANARY, UNUSED_ENV_KEY, SSEFixture, write_native_config
 
 
 def _open_pty() -> tuple[int, int]:
@@ -130,6 +130,10 @@ class PTYCraze:
         # env_extra, which is applied after this.
         for name in host_env_names(env):
             del env[name]
+        # The native fixture's env_keys name: set, it would outrank the inline
+        # canary key and a native test could pass without sending the key it
+        # configured.
+        env.pop(UNUSED_ENV_KEY, None)
         if step:
             env["CRAZE_FAKE_STEP"] = step
         env.update(env_extra or {})
@@ -906,6 +910,9 @@ def test_tui_native_one_turn_leaves_config_and_index_alone(
             tui.write(b"hi\r")
             tui.wait_contains("native fixture reply")
             quit_craze(tui)
+        # The configured key really went out, so its absence below means
+        # something.
+        assert any(CANARY in r.authorization for r in fixture.requests), fixture.requests
         text = _ANSI.sub("", tui.screen())
         assert CANARY not in text, text[-3000:]
 
