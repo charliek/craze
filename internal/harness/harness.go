@@ -73,6 +73,13 @@ type Options struct {
 	Table *modeltable.Table
 	// Model is the alias the session starts on; "" is the table's default.
 	Model string
+	// Prompt is what the caller adds to the frozen system prompt: the
+	// instruction documents this workspace's user and project wrote, and the
+	// catalog of the skills and commands installed for it (plan 022 §3.4).
+	// The harness renders and redacts it once, in Open, and reads no file for
+	// it: the adapter in internal/agent resolves it first and hands it over
+	// as data. The zero value sends the tool profile's text alone.
+	Prompt PromptExtras
 	// Effort is the effort the session starts at; "" is the model's
 	// default_effort (none, for a model with no effort control).
 	Effort string
@@ -169,7 +176,8 @@ type logged struct {
 
 // Open starts a session: it resolves and builds the starting model, and from
 // it the session's tools (tools.go) — the profile, and with it the system
-// prompt, which the transcript's header records, and the redactor over every
+// prompt, which is the profile's text and Options.Prompt rendered after it
+// and whose hash the transcript's header records, and the redactor over every
 // key the table knows of. It writes nothing — the transcript appears with
 // the first turn that produces output — so a session closed before that
 // leaves nothing behind; it only sweeps old spill files. A starting model
@@ -209,7 +217,7 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), opts.Table, s.getenv, m.r, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

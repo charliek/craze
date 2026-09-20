@@ -74,11 +74,15 @@ type toolset struct {
 //     used or not, from the environment and inline (Table.Keys) — so a key
 //     too short to redact, or one the marker could print back, fails Open;
 //   - the profile ProfileFor picks for r, its specs, its tools array and its
-//     system prompt for workspace;
+//     system prompt for workspace, with prompt — the caller's instruction
+//     documents and catalog — rendered after it (system.go, plan 022 §3.4);
 //   - the tools' descriptions redacted, one of which names the environment's
 //     temporary directory: it goes to the model with every request, and
 //     unlike a tool's output nothing else redacts it. The tools array the
-//     header hashes is these same descriptions, encoded once (plan 019 §3.8);
+//     header hashes is these same descriptions, encoded once (plan 019 §3.8).
+//     The prompt's extras are redacted with that same redactor, and for the
+//     same reason: they are assembled out of files on disk, they go out with
+//     every request, and nothing downstream looks at them again;
 //   - before any of that, a refusal of a workspace whose path holds a
 //     provider key (errWorkspaceKey): the prompt names the working directory
 //     and the header records it, and neither can hold a key;
@@ -90,7 +94,7 @@ type toolset struct {
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
-func openTools(home, workspace string, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, seams toolSeams) (*toolset, error) {
+func openTools(home, workspace string, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -146,7 +150,14 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 	if ts.wire, err = tool.SpecsJSON(ts.specs); err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
-	ts.system = systemPrompt(p, workspace, runtime.GOOS)
+	// The profile's text, and the caller's extras rendered after it and
+	// redacted. With no extras this is the profile's text alone, byte for
+	// byte, and with them it still begins with it, so every session's
+	// requests share that prefix (D-30). Whatever it leaves in ts.system is
+	// covered from here on by resolve's scan for a key learned later
+	// (errFrozenKey) and by the transcript header's hash: both read this one
+	// field, and neither needed a line of its own for the extras.
+	ts.system = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red)
 
 	var keyNames []string
 	for _, prov := range table.Providers {
