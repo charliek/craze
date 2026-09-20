@@ -9,6 +9,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/store"
+	"github.com/charliek/craze/internal/harness/tool"
 )
 
 // Two turns: each streams its text, finishes end_turn with the step's usage,
@@ -29,9 +30,13 @@ func TestTurnsCarryHistory(t *testing.T) {
 	}
 	wantUsage := Usage{Input: 10, Output: 5, CacheRead: 4}
 	equal(t, "result", res, Result{StopReason: StopEndTurn, Usage: wantUsage})
-	equal(t, "events", ev.list(), []Event{
-		ThoughtDelta{Text: "greet back"}, TextDelta{Text: "hel"}, TextDelta{Text: "lo"}, StepDone{Usage: wantUsage},
+	equal(t, "events", plain(ev.list()), []Event{
+		ThoughtDelta{Text: "greet back"}, TextDelta{Text: "hel"}, TextDelta{Text: "lo"},
+		done(1, fantasy.FinishReasonStop, StopEndTurn, 2), // the user entry and the answer
 	})
+	if d := of[StepDone](ev.list())[0]; d.TimeToFirstToken <= 0 {
+		t.Errorf("StepDone's time to first token = %v, want the time the thinking took to start", d.TimeToFirstToken)
+	}
 	run(t, s, "again")
 
 	calls := a.requests()
@@ -78,7 +83,8 @@ func TestNoCeilingNoEffort(t *testing.T) {
 
 // Each finish reason's stop reason, in the result and in the file: "length"
 // is max_tokens, "content-filter" is refusal (so `craze prompt` does not
-// pass a filtered answer off as clean), and everything else is end_turn.
+// pass a filtered answer off as clean), and everything else is end_turn —
+// "tool-calls" too, for a step that called no tool.
 func TestFinishReasonsMapToStopReasons(t *testing.T) {
 	cases := []struct {
 		finish fantasy.FinishReason
@@ -153,24 +159,46 @@ func TestUnendedBlocksArePersisted(t *testing.T) {
 	}
 }
 
-// H1 offers no tools. A model that answers with a tool call anyway gets no
-// second, unasked-for step, and the call is not persisted: replayed without
-// a result, it would fail every later request on a strict provider.
-func TestToolCallIsNotReplayed(t *testing.T) {
+// A call to a tool the profile does not have — here with no input parts
+// before it, as a provider that does not stream arguments sends one — is not
+// run: Fantasy answers it with its own error, the model reads that at the
+// next step, and the step persists paired, so the next turn replays it. The
+// call is reported like any other (a ToolStarted made for it, since none
+// streamed), and its result is the text the model read.
+func TestUnknownToolIsAnErrorResult(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	s := f.open(f.options())
-	call := []fantasy.StreamPart{{Type: fantasy.StreamPartTypeToolCall, ID: "call-1", ToolCallName: "read_file", ToolCallInput: `{"path":"x"}`}}
-	f.models["test/a"].push(reply(textParts("let me look"), call, finish(fantasy.FinishReasonToolCalls)), answerWith("ok"))
-	if res := run(t, s, "read x"); res.StopReason != StopEndTurn {
-		t.Fatalf("stop reason %q, want end_turn", res.StopReason)
+	f.models["test/a"].push(
+		reply(textParts("let me look"), bareCall("call-1", "read_file", `{"path":"x"}`), finish(fantasy.FinishReasonToolCalls)),
+		answerWith("ok"),
+		answerWith("next ok"),
+	)
+	var ev events
+	res, err := s.Run(context.Background(), "read x", ev.sink)
+	if err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
 	}
-	if n := len(f.models["test/a"].requests()); n != 1 {
-		t.Fatalf("test/a saw %d requests, want 1: the turn went on to another step", n)
-	}
-	run(t, s, "next")
-	equal(t, "the next request", promptOf(f.models["test/a"].requests()[1])[1:], []string{
-		"user: read x", "assistant: let me look", "user: next",
+	notFound := "tool not found: read_file. Available tools: bash, read, glob, grep, edit, write"
+	equal(t, "events", plain(ev.list()), []Event{
+		TextDelta{Text: "let me look"},
+		ToolStarted{ID: "t1.1.1", Step: 1, Tool: "read_file"},
+		ToolCalled{ID: "t1.1.1", CallID: "call-1", Request: ToolRequest{Tool: "read_file", Input: `{"path":"x"}`}},
+		ToolFinished{ID: "t1.1.1", Result: tool.Result{Text: notFound, IsError: true, Class: tool.ClassInvalidInput}},
+		done(1, fantasy.FinishReasonToolCalls, StopToolUse, 3), // the user entry, the call, the result
+		TextDelta{Text: "ok"},
+		done(2, fantasy.FinishReasonStop, StopEndTurn, 1),
 	})
+	run(t, s, "next")
+	equal(t, "the next request", promptOf(f.models["test/a"].requests()[2])[1:], []string{
+		"user: read x",
+		`assistant: let me look [call call-1 read_file {"path":"x"}]`,
+		"tool: [error call-1: " + notFound + "]",
+		"assistant: ok",
+		"user: next",
+	})
+	if s.tools.d.Pending() != 0 {
+		t.Fatalf("the dispatcher still holds %d prepared calls", s.tools.d.Pending())
+	}
 }
 
 // cancelAt runs a turn whose step holds at g, cancels it there, and returns
@@ -295,7 +323,7 @@ func TestRetryResetsTheDeltas(t *testing.T) {
 	}
 	equal(t, "events", ev.list(), []Event{
 		ThoughtDelta{Text: "stale thought"}, TextDelta{Text: "stale "},
-		Retrying{Delay: time.Millisecond},
+		Retrying{Delay: time.Millisecond, Attempt: 1, Reason: "HTTP 503: overloaded"},
 		TextDelta{Text: "fresh"},
 	})
 	equal(t, "transcript", entries(transcript(t, s)), []string{
@@ -590,7 +618,7 @@ func TestRefusedSwitchIsHandedOverAgain(t *testing.T) {
 	if _, err := s.Run(context.Background(), "hi", nil); !errors.Is(err, store.ErrClosed) {
 		t.Fatalf("Run = %v, want the store's refusal", err)
 	}
-	_, changes, _, err := s.begin(context.Background())
+	_, changes, _, _, err := s.begin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,7 +635,7 @@ func TestRecordedIsTheTurnsModel(t *testing.T) {
 	if err := s.SetModel("test/b"); err != nil {
 		t.Fatal(err)
 	}
-	m, changes, _, err := s.begin(context.Background())
+	m, changes, _, _, err := s.begin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +646,7 @@ func TestRecordedIsTheTurnsModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.end()
-	_, next, _, err := s.begin(context.Background())
+	_, next, _, _, err := s.begin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,8 +706,15 @@ func TestFailedSaveFailsTheTurn(t *testing.T) {
 	if !errors.Is(err, store.ErrClosed) || res != (Result{}) {
 		t.Fatalf("Run = %+v, %v; want a zero Result and the store's error", res, err)
 	}
-	if n := len(ev.list()); n != 2 {
-		t.Fatalf("got %d events, want the text and StepDone", n)
-	}
+	// The step reports its failed save: a Diag, and a StepDone that says it
+	// was not saved, and why, with no entry ids.
+	evs := plain(ev.list())
+	failed := done(1, fantasy.FinishReasonStop, StopEndTurn, 0)
+	failed.SaveError = store.ErrClosed.Error()
+	equal(t, "events", evs, []Event{
+		TextDelta{Text: "lost"},
+		Diag{Kind: DiagSaveFailed, Fields: map[string]string{"step": "1", "error": store.ErrClosed.Error()}},
+		failed,
+	})
 	noTranscript(t, s)
 }

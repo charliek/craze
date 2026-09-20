@@ -592,9 +592,18 @@ func contentDiffs(raw json.RawMessage) []ToolDiff {
 }
 
 func toolDiff(it acp.ToolContent) ToolDiff {
-	oldText := sanitizeText(it.OldText)
-	newText := sanitizeText(it.NewText)
-	d := ToolDiff{Path: sanitizeText(it.Path)}
+	return diffOf(it.Path, it.OldText, it.NewText)
+}
+
+// diffOf is one diff row from the two texts it is between: sanitized, the
+// lines counted on them whole, and only then capped. The native adapter
+// builds its rows from tool.FileEdit rather than from a wire content item
+// (native_tools.go), and both spellings of "a diff" must count and cap the
+// same way, so the rule lives here once.
+func diffOf(path, oldText, newText string) ToolDiff {
+	oldText = sanitizeText(oldText)
+	newText = sanitizeText(newText)
+	d := ToolDiff{Path: sanitizeText(path)}
 	added, removed, _, err := textdiff.Lines(oldText, newText)
 	if err != nil {
 		d.Truncated = true

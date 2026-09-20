@@ -239,8 +239,46 @@ func TestFinishRules(t *testing.T) {
 				}
 			case last.Type != fantasy.StreamPartTypeFinish || last.FinishReason != tc.want:
 				t.Errorf("last part = %s/%s, want finish/%s", last.Type, last.FinishReason, tc.want)
+			default:
+				// The reason the provider sent survives the rules, beside the
+				// one they produced.
+				sent := tc.parts[len(tc.parts)-1].FinishReason
+				if raw, ok := RawFinish(last.ProviderMetadata); !ok || raw != sent {
+					t.Errorf("RawFinish = %q, %v; want %q, the reason the provider sent", raw, ok, sent)
+				}
 			}
 		})
+	}
+	// The control: metadata the wrapper did not write holds no raw finish.
+	if raw, ok := RawFinish(fantasy.ProviderMetadata{}); ok || raw != "" {
+		t.Errorf("RawFinish of empty metadata = %q, %v; want nothing", raw, ok)
+	}
+}
+
+// The raw finish is the wrapper's own entry: a provider's metadata on the
+// finish part is kept, and the provider's map is not written to.
+func TestRawFinishLeavesProviderMetadataAlone(t *testing.T) {
+	theirs := fantasy.ProviderMetadata{"test": &rawFinish{Reason: "theirs"}}
+	parts := []fantasy.StreamPart{
+		{Type: fantasy.StreamPartTypeTextDelta, ID: "0", Delta: "hi"},
+		{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop, Usage: fantasy.Usage{TotalTokens: 3}, ProviderMetadata: theirs},
+	}
+	resp, err := wrap(stubModel{parts: parts}, newScrubber(canary)).Stream(context.Background(), fantasy.Call{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last fantasy.StreamPart
+	for part := range resp {
+		last = part
+	}
+	if len(theirs) != 1 {
+		t.Fatalf("the provider's metadata map was written to: %v", theirs)
+	}
+	if last.ProviderMetadata["test"] != theirs["test"] {
+		t.Fatalf("the provider's own entry was lost: %v", last.ProviderMetadata)
+	}
+	if raw, ok := RawFinish(last.ProviderMetadata); !ok || raw != fantasy.FinishReasonStop {
+		t.Fatalf("RawFinish = %q, %v; want stop", raw, ok)
 	}
 }
 

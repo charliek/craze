@@ -18,8 +18,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from conftest import host_env_names
-from sse_fixture import CANARY, UNUSED_ENV_KEY, SSEFixture, write_native_config
+from conftest import host_env_names, require_rg
+from sse_fixture import (
+    CANARY,
+    UNUSED_ENV_KEY,
+    SSEFixture,
+    answer,
+    call_step,
+    write_native_config,
+)
 
 
 def _open_pty() -> tuple[int, int]:
@@ -918,6 +925,81 @@ def test_tui_native_one_turn_leaves_config_and_index_alone(
 
     assert config_path.read_text(encoding="utf-8") == before
     assert not (craze_home / "sessions.jsonl").exists()
+
+
+def test_tui_native_tool_loop_draws_its_rows(craze_bin: Path, tmp_path: Path) -> None:
+    """Plan 019 C11: a scripted tool loop in the real TUI, on a real terminal.
+
+    The Go golden (internal/tui/testdata/native-tools-80x24.golden) owns
+    "every cell is right" with an in-process session; this owns the whole
+    thing from outside -- the binary, a pty, and an HTTP fixture answering
+    each request with the next tool_calls delta. Four calls, one per step,
+    each row drawn by the same transcript code the ACP path uses, and then
+    the model's answer.
+
+    Ctrl+O expands the rows, which is where a read's content and an edit's
+    diff are drawn; collapsed they show only the header line.
+    """
+    require_rg()
+    craze_home = tmp_path / "craze-home"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("alpha\n", encoding="utf-8")
+    (workspace / "main.go").write_text("package main\n\n// TODO: ship it\n", encoding="utf-8")
+
+    with SSEFixture() as fixture:
+        write_native_config(craze_home / "native", fixture.base_url)
+        # Each call leaves a string of its own on the screen, so a row that
+        # never drew cannot be mistaken for one that did: main.go's TODO is
+        # the read's content, the diff's two lines are the edit's, and the
+        # command prints what it read back after the edit.
+        fixture.set_script(
+            [
+                call_step("read", {"filePath": "main.go"}),
+                call_step("grep", {"pattern": "TODO", "path": "."}),
+                call_step(
+                    "edit",
+                    {"filePath": "notes.txt", "oldString": "alpha", "newString": "beta"},
+                ),
+                call_step("bash", {"command": "echo saw-$(cat notes.txt)"}),
+                answer("all four ran"),
+            ]
+        )
+
+        with PTYCraze(
+            craze_bin,
+            None,
+            workspace,
+            provider="native",
+            env_extra={"CRAZE_HOME": str(craze_home)},
+        ) as tui:
+            tui.wait_contains("native")
+            tui.write(b"do the four\r")
+            # The turn's own end: the text only arrives once all four calls
+            # have run and their results have gone back.
+            tui.wait_contains("all four ran", timeout=30)
+            for row in (
+                "✓ read  main.go",
+                "✓ search  TODO in .",
+                "✓ edit  notes.txt  +1 −1",
+                "✓ bash  echo saw-$(cat notes.txt)",
+            ):
+                tui.wait_contains(row, timeout=5)
+            mark = tui.mark()
+            tui.write(b"\x0f")  # Ctrl+O: expand the rows
+            # The read's content, the edit's diff and the command's output,
+            # none of which a collapsed row draws.
+            for detail in ("// TODO: ship it", "- alpha", "+ beta", "saw-beta"):
+                tui.wait_contains_since(detail, mark, timeout=10)
+            quit_craze(tui)
+
+        # The configured key really went out, so its absence below means
+        # something -- and no tool's output carried it back onto the screen.
+        assert any(CANARY in r.authorization for r in fixture.requests), fixture.requests
+        assert fixture.unscripted == 0
+        text = _ANSI.sub("", tui.screen())
+        assert CANARY not in text, text[-3000:]
+    assert (workspace / "notes.txt").read_text(encoding="utf-8") == "beta\n"
 
 
 def test_tui_continue_prefers_the_cursor_row_over_a_native_default(

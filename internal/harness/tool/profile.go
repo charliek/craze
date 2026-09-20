@@ -213,16 +213,35 @@ type wireSchema struct {
 
 // ToolsJSON serializes the profile's tools as the model sees them — name,
 // description, and the JSON Schema object {type, properties, required} — in
-// the profile's order. The bytes are deterministic: struct fields marshal in
-// order, map keys sorted, HTML left unescaped, no trailing newline; required
-// is [] and properties {} when empty, never null. ToolsSHA256 hashes them.
+// the profile's order (SpecsJSON). ToolsSHA256 hashes them.
+//
+// A caller that changes a spec before it offers it — a session redacts the
+// machine's own facts out of a description — hashes what it offers with
+// SpecsJSON instead, so the hash and the wire cannot disagree.
 func (p Profile) ToolsJSON() ([]byte, error) {
-	tools := make([]wireTool, 0, len(p.Tools))
+	specs := make([]Spec, 0, len(p.Tools))
 	for i, t := range p.Tools {
 		s, err := specOf(t)
 		if err != nil {
 			return nil, fmt.Errorf("tool: profile %q: tool %d %w", p.Name, i, err)
 		}
+		specs = append(specs, s)
+	}
+	b, err := SpecsJSON(specs)
+	if err != nil {
+		return nil, fmt.Errorf("tool: profile %q: %w", p.Name, err)
+	}
+	return b, nil
+}
+
+// SpecsJSON serializes specs as the model sees them — name, description, and
+// the JSON Schema object {type, properties, required} — in their order. The
+// bytes are deterministic: struct fields marshal in order, map keys sorted,
+// HTML left unescaped, no trailing newline; required is [] and properties {}
+// when empty, never null.
+func SpecsJSON(specs []Spec) ([]byte, error) {
+	tools := make([]wireTool, 0, len(specs))
+	for _, s := range specs {
 		props := s.Parameters
 		if props == nil {
 			props = map[string]any{}
@@ -241,7 +260,7 @@ func (p Profile) ToolsJSON() ([]byte, error) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(tools); err != nil {
-		return nil, fmt.Errorf("tool: profile %q: %w", p.Name, err)
+		return nil, fmt.Errorf("tool: %w", err)
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

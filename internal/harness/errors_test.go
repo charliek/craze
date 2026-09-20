@@ -55,7 +55,7 @@ func TestClassify(t *testing.T) {
 			if got.StatusCode != tc.wantStatus || got.Message != tc.wantMsg || got.Provider != "test" || got.Model != "test/a" {
 				t.Errorf("got %+v; want status %d, message %q, provider test, model test/a", got, tc.wantStatus, tc.wantMsg)
 			}
-			for _, kind := range []error{ErrAuth, ErrModelNotFound, ErrContextTooLarge} {
+			for _, kind := range []error{ErrAuth, ErrModelNotFound, ErrContextTooLarge, ErrBadToolCalls} {
 				if is := errors.Is(err, kind); is != (kind == tc.kind) {
 					t.Errorf("errors.Is(err, %v) = %v", kind, is)
 				}
@@ -128,6 +128,12 @@ func TestProviderErrorText(t *testing.T) {
 			`harness: provider error (provider "p", model "m"): boom`},
 		{&ProviderError{Provider: "p", Model: "m", StatusCode: 500},
 			`harness: provider error (provider "p", model "m", HTTP 500)`},
+		// The session is done without compaction, and the text says so,
+		// naming the model (plan 019 §3.5).
+		{&ProviderError{Provider: "p", Model: "m", StatusCode: 400, Message: "too long", kind: ErrContextTooLarge},
+			`harness: the conversation no longer fits model "m"'s context window; start a new session (compaction arrives with H7) (provider "p", model "m", HTTP 400): too long`},
+		{badToolCalls(store.Model{Provider: "p", Alias: "m", WireModel: "w"}).(*ProviderError),
+			`harness: the provider sent tool calls with missing or repeated ids (provider "p", model "m"): a tool call in the response had an empty or repeated id, so none of the response's tool calls was run`},
 	}
 	for _, tc := range cases {
 		if got := tc.err.Error(); got != tc.want {

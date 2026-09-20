@@ -9,11 +9,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/harness/tool/opencode"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite internal/harness/testdata/system_prompt.golden")
 
 const systemGolden = "testdata/system_prompt.golden"
+
+// opencodeProfile is the profile every session gets.
+func opencodeProfile(t *testing.T) tool.Profile {
+	t.Helper()
+	p, err := opencode.Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
 // TestSystemPromptGolden pins the prompt's text: a change to it changes
 // every session's prompt-cache prefix, so it should be deliberate.
@@ -21,7 +34,7 @@ const systemGolden = "testdata/system_prompt.golden"
 //
 //	go test ./internal/harness -run TestSystemPromptGolden -update
 func TestSystemPromptGolden(t *testing.T) {
-	got := systemPrompt("/home/user/project", "linux")
+	got := systemPrompt(opencodeProfile(t), "/home/user/project", "linux")
 	if *updateGolden {
 		if err := os.WriteFile(systemGolden, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
@@ -34,12 +47,17 @@ func TestSystemPromptGolden(t *testing.T) {
 	if got != string(want) {
 		t.Fatalf("system prompt differs from %s\n--- want ---\n%s\n--- got ---\n%s", systemGolden, want, got)
 	}
+	// H1's prompt told the model it had no tools; this one must not.
+	if strings.Contains(got, "no tools") {
+		t.Fatal("the prompt still says the model has no tools")
+	}
 }
 
 // TestSystemPromptIsFrozen: two sessions on one workspace, opened at
-// different times, send byte-identical prompts, which name the workspace
-// and this OS; and a turn's transcript header records the prompt's hash and
-// craze's version.
+// different times, send byte-identical prompts — the profile's, which name
+// the workspace and this OS; and a turn's transcript header records the
+// prompt's hash, craze's version, the tool profile and the hash of the tools
+// the requests carried.
 func TestSystemPromptIsFrozen(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	first := f.open(f.options())
@@ -49,8 +67,8 @@ func TestSystemPromptIsFrozen(t *testing.T) {
 	if first.system != second.system {
 		t.Fatalf("two sessions built different prompts:\n%s\n---\n%s", first.system, second.system)
 	}
-	if first.system != systemPrompt(f.workspace, runtime.GOOS) {
-		t.Fatalf("Open's prompt is not systemPrompt(workspace, GOOS):\n%s", first.system)
+	if first.system != systemPrompt(opencodeProfile(t), f.workspace, runtime.GOOS) {
+		t.Fatalf("Open's prompt is not the opencode profile's for (workspace, GOOS):\n%s", first.system)
 	}
 	for _, want := range []string{"- Working directory: " + f.workspace + "\n", "- Operating system: " + runtime.GOOS + "\n"} {
 		if !strings.Contains(first.system, want) {
@@ -68,7 +86,10 @@ func TestSystemPromptIsFrozen(t *testing.T) {
 	}
 	h := transcript(t, first).Header
 	sum := sha256.Sum256([]byte(first.system))
-	if h.SystemPromptSHA256 != hex.EncodeToString(sum[:]) || h.CrazeVersion != "v0.0.0-test" {
-		t.Fatalf("header = %+v; want the prompt's SHA-256 %x and version v0.0.0-test", h, sum)
+	tools := sha256.Sum256(first.tools.wire)
+	if h.SystemPromptSHA256 != hex.EncodeToString(sum[:]) || h.CrazeVersion != "v0.0.0-test" ||
+		h.ToolProfile != opencode.Name || h.ToolsSHA256 != hex.EncodeToString(tools[:]) {
+		t.Fatalf("header = %+v; want the prompt's SHA-256 %x, version v0.0.0-test, profile %q and the tools' SHA-256 %x",
+			h, sum, opencode.Name, tools)
 	}
 }

@@ -235,6 +235,96 @@ func TestPromptCachePrefixIsStable(t *testing.T) {
 
 func keys(m map[string]json.RawMessage) []string { return slices.Sorted(maps.Keys(m)) }
 
+// toolCallChunk is one whole tool call in a Chat Completions stream.
+func toolCallChunk(id, name, args string) string {
+	return fmt.Sprintf(`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":%q,"type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":null}]}`, id, name, args)
+}
+
+// prefixBreak is the index of the first of prev's messages that next does
+// not begin with byte for byte, or -1 when next extends prev.
+func prefixBreak(prev, next []json.RawMessage) int {
+	for k := range prev {
+		if k >= len(next) || !bytes.Equal(prev[k], next[k]) {
+			return k
+		}
+	}
+	return -1
+}
+
+// TestToolLoopPrefixIsStable is plan 019 §3.6's cache property on the wire,
+// through Fantasy's and the provider's own encoding: across the steps of a
+// tool turn and across turns, every request begins with the whole of the
+// request before it — the system prompt, the history, each tool step's
+// assistant message (reasoning, as the provider replays it, included) and
+// its results — and carries the same tools, and everything else, byte for
+// byte. A tool step persisted and replayed next turn is the same bytes the
+// turn itself sent at its next step. The control is prefixBreak itself: a
+// request with one byte changed in one message breaks the prefix there.
+//
+// The second turn's call comes with a "stop" finish, which the wrapper turns
+// into "tool-calls" (D-21): its StepDone reports both.
+func TestToolLoopPrefixIsStable(t *testing.T) {
+	read := `{"filePath":"a.txt"}`
+	w := newWire(t,
+		sseReply(reasoningChunk("I should read it."), toolCallChunk("call_1", "read", read), finishChunk("tool_calls", true)),
+		sseReply(textChunk("It says alpha."), finishChunk("stop", true)),
+		sseReply(toolCallChunk("call_1", "read", read), finishChunk("stop", true)),
+		sseReply(textChunk("Still alpha."), finishChunk("stop", true)),
+	)
+	f, opts := wireFixture(t, w)
+	opts.Now = time.Now // a real clock: nothing may reach the prompt
+	s := f.open(opts)
+	f.put("a.txt", "alpha\n")
+
+	run(t, s, "What does a.txt say?")
+	var ev events
+	if _, err := s.Run(context.Background(), "And now?", ev.sink); err != nil {
+		t.Fatal(err)
+	}
+	if d := of[StepDone](ev.list())[0]; d.Finish != "tool-calls" || d.FinishRaw != "stop" {
+		t.Errorf("the normalized step's StepDone says finish %q, raw %q; want tool-calls, stop", d.Finish, d.FinishRaw)
+	}
+
+	bodies := w.requests()
+	if len(bodies) != 4 {
+		t.Fatalf("the server saw %d requests, want 4", len(bodies))
+	}
+	grow := []int{2, 2, 2} // step 1's call and result; turn 1's answer and turn 2's prompt; turn 2's call and result
+	for i := 1; i < len(bodies); i++ {
+		prev, next := messages(t, bodies[i-1]), messages(t, bodies[i])
+		if k := prefixBreak(prev, next); k >= 0 {
+			t.Fatalf("request %d does not begin with request %d: message %d differs\n%s\n%s", i+1, i, k, prev[k], next[min(k, len(next)-1)])
+		}
+		if len(next) != len(prev)+grow[i-1] {
+			t.Fatalf("request %d has %d messages, want request %d's %d plus %d", i+1, len(next), i, len(prev), grow[i-1])
+		}
+	}
+	first := fields(t, bodies[0])
+	for i, body := range bodies[1:] {
+		got := fields(t, body)
+		for k, v := range first {
+			if k != "messages" && !bytes.Equal(v, got[k]) {
+				t.Errorf("request %d's %q differs from request 1's:\n%s\n%s", i+2, k, got[k], v)
+			}
+		}
+	}
+	if !bytes.Contains(first["tools"], []byte(`"name":"read"`)) || bytes.Contains(first["tools"], []byte(`"required":null`)) {
+		t.Fatalf("request 1's tools: %s", first["tools"])
+	}
+	// The reasoning of the tool step was replayed, so the comparison covered it.
+	if a := messages(t, bodies[3])[2]; !bytes.Contains(a, []byte(`"reasoning_content":"I should read it."`)) || !bytes.Contains(a, []byte(`"call_1"`)) {
+		t.Fatalf("the tool step replayed without its reasoning or its call: %s", a)
+	}
+
+	// The control.
+	prev := messages(t, bodies[2])
+	next := slices.Clone(messages(t, bodies[3]))
+	next[2] = bytes.Replace(slices.Clone(next[2]), []byte("I should"), []byte("I shoulD"), 1)
+	if k := prefixBreak(prev, next); k != 2 {
+		t.Fatalf("control: a changed byte in message 2 broke the prefix at %d, want 2", k)
+	}
+}
+
 // TestWireErrors maps each provider failure onto the harness's errors, and
 // checks that no key reaches a returned error or an emitted event even when
 // the provider echoes it back.
@@ -361,10 +451,12 @@ func TestWireRetryBeforeOutput(t *testing.T) {
 	if err != nil || res.StopReason != StopEndTurn {
 		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
 	}
-	equal(t, "events", ev.list(), []Event{
-		Retrying{Delay: time.Millisecond},
+	recovered := done(1, fantasy.FinishReasonStop, StopEndTurn, 2)
+	recovered.Usage = Usage{Input: 56, Output: 8, CacheRead: 64}
+	equal(t, "events", plain(ev.list()), []Event{
+		Retrying{Delay: time.Millisecond, Attempt: 1, Reason: "HTTP 503: busy: Bearer [redacted]"},
 		TextDelta{Text: "recovered"},
-		StepDone{Usage: Usage{Input: 56, Output: 8, CacheRead: 64}},
+		recovered,
 	})
 	equal(t, "transcript", entries(transcript(t, s)), []string{
 		"user test/a high: hi",
