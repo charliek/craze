@@ -126,6 +126,11 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 		// comes from the environment. These specs are what the bridge offers
 		// the model, so the hash below is of exactly what is sent.
 		s.Description = red.String(s.Description)
+		// The same canonical form the bridge offers: a number becomes the
+		// value it parses as, so a literal written 1.0 is hashed as the 1 that
+		// goes out. Without this the digest would describe the profile's
+		// spelling rather than the wire.
+		s.Parameters = canonicalSchema(s.Parameters)
 		ts.specs = append(ts.specs, s)
 		ts.byID[s.ID] = s
 	}
