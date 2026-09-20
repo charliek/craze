@@ -102,7 +102,11 @@ func nativeJSONSession(t *testing.T, model *nativeJSONModel, ws string) agent.Se
 		},
 	}
 	home := t.TempDir()
-	sess := agent.NewNative(agent.Options{Workspace: ws}, func(o *harness.Options) {
+	// ContentHome is an empty directory of this test's own: from plan 022 C3 a
+	// native Start reads the user's Claude commands and skills, and this
+	// file's assertions are about the event projection, not about whatever the
+	// machine running them has installed.
+	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, func(o *harness.Options) {
 		o.Home = home
 		o.Table = table
 		o.Getenv = func(k string) string {
@@ -256,6 +260,17 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A command of the workspace's own, so the first prompt below expands and
+	// the turn carries an EventCommand (plan 022 §3.3). It is written into the
+	// workspace rather than the content home because a native session reads
+	// both, and the workspace needs no settings file to be read.
+	if err := os.MkdirAll(filepath.Join(ws, ".claude", "commands"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".claude", "commands", "expandme.md"),
+		[]byte("---\ndescription: a command of this project's\n---\nexpanded body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
 		nativeJSONCall("c1", "read", `{"filePath":"main.go"}`),
 		nativeJSONAnswer("thinking", "done"),
@@ -270,7 +285,7 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	if err := sess.SetModel(context.Background(), "test/b"); err != nil {
 		t.Fatalf("SetModel: %v", err)
 	}
-	if _, err := sess.Prompt(context.Background(), "go"); err != nil {
+	if _, err := sess.Prompt(context.Background(), "/expandme"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	if _, err := sess.Prompt(context.Background(), "again"); err == nil {
@@ -296,7 +311,7 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	}
 	// Without this the test would pass on a turn that emitted nothing.
 	for _, want := range []agent.EventType{
-		agent.EventText, agent.EventThought, agent.EventTool,
+		agent.EventText, agent.EventThought, agent.EventTool, agent.EventCommand,
 		agent.EventQueue, agent.EventMeta, agent.EventDone, agent.EventError,
 	} {
 		if !seen[want] {

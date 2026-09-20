@@ -40,7 +40,7 @@ func TestFrameGoldenNativeTools80x24(t *testing.T) {
 		nativeToolStep("c5", "grep", `{"pattern":"TODO","path":"."}`),
 		cat(nativeTextParts("done tools"), nativeFinishParts()),
 	}
-	sess := agent.NewNative(agent.Options{Workspace: ws}, nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
+	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
 
 	got, _, err := RunFrameScript(Config{
 		Session:   sess,

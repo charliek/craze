@@ -32,7 +32,7 @@ func TestFrameGoldenNativeEcho80x24(t *testing.T) {
 	}
 	harnessHome := t.TempDir()
 	ws := frameWorkspace(t)
-	sess := agent.NewNative(agent.Options{Workspace: ws}, nativeSessionTweak(harnessHome, table, model))
+	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(harnessHome, table, model))
 
 	got, _, err := RunFrameScript(Config{
 		Session:   sess,

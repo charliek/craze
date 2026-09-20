@@ -104,7 +104,10 @@ func openNative(t *testing.T) contractSession {
 		t.Fatal(err)
 	}
 	m := &echoModel{}
-	s := agent.NewNative(agent.Options{Workspace: t.TempDir()}, func(o *harness.Options) {
+	// ContentHome is an empty directory for the reason nativeFixture.session
+	// fills it: left unset a native Start reads the developer's own ~/.claude,
+	// and this suite would then answer differently on two machines.
+	s := agent.NewNative(agent.Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, func(o *harness.Options) {
 		o.Getenv = func(string) string { return "" }
 		o.NewModel = func(modeltable.Resolved) (fantasy.LanguageModel, error) { return m, nil }
 	})

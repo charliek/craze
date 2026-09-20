@@ -378,6 +378,26 @@ func (s *Session) Current() (model, effort string) {
 // ID is the session id: a UUID, in the transcript's header and file name.
 func (s *Session) ID() string { return s.store.ID() }
 
+// Redact is the session's redactor, over text a caller is about to hand to
+// Run or Steer. Everything the harness itself writes or reports goes through
+// that redactor already, but the user's own prompt does not: Run persists it
+// and sends it exactly as given (turn.go), which is the right rule for text a
+// person typed and the wrong one for text craze assembled out of files on
+// disk. A command body holding a provider key would otherwise reach the wire,
+// the transcript, the journal and `craze prompt --json` at once.
+//
+// It is the redactor over every key the session knows, which is a superset of
+// the one installed: a switch that resolved a provider key the environment
+// gained since Open leaves it prepared until the next turn's begin adopts it
+// (toolset.resolve, adopt), and a caller redacting between the two has to
+// cover it — the turn it is about to hand the text to will. Redacting more
+// than a turn needs is never a leak; redacting less puts the key on the wire.
+// Safe from any goroutine. What it cannot cover is a switch that lands after
+// it has returned and before the Run it was redacting for: two calls cannot
+// be made one from out here, and the caller that cares holds the prompt path
+// between them.
+func (s *Session) Redact(text string) string { return s.tools.widest().String(text) }
+
 // Close ends the session: it cancels a live Run and waits for it to return —
 // by which time a partial answer has been persisted, interrupted — then
 // closes the transcript. It is idempotent and safe from any goroutine,

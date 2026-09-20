@@ -602,6 +602,14 @@ type Options struct {
 	// through a subscription instead. S1b uses it in tests; from S4 on a
 	// detached host is its user (SD-33).
 	NoPrimary bool
+	// ContentHome is the home directory a native session reads the user's own
+	// Claude content under — commands, skills and the installed plugins
+	// (§3.1). "" is HomeDir(), which is what production wants and what every
+	// other provider already does through discoverPlugins; a test sets it to a
+	// directory of its own, because from plan 022 C3 a native session started
+	// with an empty Options reads whatever the developer happens to have
+	// installed and its result would depend on the machine it ran on.
+	ContentHome string
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for

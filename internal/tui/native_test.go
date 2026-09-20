@@ -154,7 +154,10 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 
 	ws := t.TempDir()
 	harnessHome := t.TempDir()
-	sess := agent.NewNative(agent.Options{Workspace: ws}, nativeSessionTweak(harnessHome, table, model))
+	// ContentHome, not HOME: from plan 022 C3 a native Start reads the user's
+	// own Claude commands and skills, and a golden or a row count that
+	// depended on the developer's ~/.claude would not be one.
+	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(harnessHome, table, model))
 	if err := sess.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -234,7 +237,7 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 	}
 	model := &nativeScriptedModel{provider: "test", wire: "wire"}
 	ws := t.TempDir()
-	sess := agent.NewNative(agent.Options{Workspace: ws}, nativeSessionTweak(t.TempDir(), table, model))
+	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(t.TempDir(), table, model))
 	if err := sess.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

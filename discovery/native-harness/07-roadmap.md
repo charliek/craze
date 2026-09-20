@@ -9,8 +9,8 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
 | H1 | complete | skeleton shipped: hidden `native` provider; 14 of 15 imported models held a clean TUI turn, multi-turn sessions and `craze prompt --json` ran on a subset (OpenRouter via `openaicompat`, D-35); no interject, no modes (D-34) |
 | H2 | complete | tools shipped across PRs #33, #34, #35, #37: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38), the gate seam allowing everything (D-39), ripgrep on `PATH` (D-41), the doom-loop guard (D-42), abnormal-finish handling (D-43), and interject; live smoke completed 14 of 15 imported models on Linux and 4 of 4 on the mac-mini; D-35's condition met, `openaicompat` stays |
-| H3 | not started | approval: owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
-| H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
+| H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
+| H4 | in progress | Claude compat, read live behind one seam (D-45): instruction files with `@path` imports and confinement, workspace and user skills and commands, Claude's installed plugins, a model-facing catalog of skills and commands in the frozen prompt, compat toggles — plus a composer shell mode for every provider |
 | H5 | not started | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
 | H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
@@ -307,16 +307,40 @@ when this phase is actually planned, **after session-control S1** lands its
 engine-owned ask registry (D-39; `10` Q6). Nothing in H2 reads or writes a
 grants file.
 
+**Scheduled after H8 (D-48).** The roadmap order is H4, H5, H6, H7, H8,
+then H3: the phases that make the harness useful come before the phase
+that constrains it. Native stays on H2's `AllowAll` gate until H3 lands.
+
 - **Exit**: not yet defined; depends on the shape chosen when planned.
 
 ### H4 — Claude compat
 
-- Instruction loader with imports, rules with `paths`, lazy injection;
-  skills catalog in the prompt; commands; `craze import claude`; compat
-  toggles.
-- **Exit**: this repo's `CLAUDE.md` is followed; a workspace skill and an
-  imported plugin skill both appear in the slash menu and expand; the
-  import command reports added / upgraded / kept.
+Re-scoped by the owner on 2026-09-20 and planned as Plan 022 (D-45..D-48):
+content is read live behind one seam (`contentSources`,
+`internal/agent/sources.go`) instead of `craze import claude`; the
+model-facing catalog lists commands alongside skills; lazy loading of
+nested instruction files and `paths:` gating of rules are deferred out of
+H4 (D-47); H3 (approval) moves after H8 (D-48). Plan 022 also carries one
+TUI feature the owner asked for alongside it: a composer shell mode
+(`!cmd`) for every provider, whose output is fed back to the agent as
+context with the next prompt.
+
+- Instruction loader with `@path` imports and confinement (no `paths:`
+  gating, no lazy loading); workspace and user skills and commands;
+  Claude's installed-and-enabled plugins; a model-facing catalog of skills
+  and commands in the frozen system prompt; `[compat.claude]` toggles; a
+  composer shell mode on cursor, grok, and native.
+- **Exit** (Plan 022 §7/§8), restated:
+  - this repo's `CLAUDE.md` is followed with no tool call needed to find
+    it;
+  - a workspace skill and a plugin command both appear in the menu and
+    expand;
+  - the model reaches a catalog file (a skill or a command) with no slash
+    typed;
+  - confinement holds — no file outside the chain's root or `UserRoot` is
+    ever read;
+  - the shell mode round-trips on all three providers.
+- **Exit result:** written in C7, when the phase closes.
 
 ### H5 — modes
 
@@ -369,7 +393,9 @@ live smoke (C14); see `08-decisions.md`.
 settings.json translation · hooks · MCP and plugin `.mcp.json` · native
 marketplace installer · ACP server binary · ChatGPT-plan (codex) auth ·
 background bash with auto-background · in-process sub-agents · sandboxing ·
-flipping the provider to visible.
+flipping the provider to visible · lazy loading of nested instruction files
+(deferred out of H4 by D-47) · `paths:` gating of rules (deferred out of H4
+by D-47).
 
 ## Conventions per phase
 
