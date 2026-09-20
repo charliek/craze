@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -172,6 +174,36 @@ func TestBridgedInfoKeepsNumbersExact(t *testing.T) {
 	if again, _ := json.Marshal(loose); bytes.Contains(again, []byte("9007199254740993")) {
 		t.Fatal("control: a plain decode no longer changes this number, so the canonical form proves nothing")
 	}
+
+	// The assertions above marshal with encoding/json, which writes a
+	// json.Number unquoted — which is why they stayed green through the live
+	// failure. The provider SDK's encoder quotes it instead, so the invariant
+	// has to be checked on the value handed over, not on its JSON.
+	if where := findJSONNumber(newBridged(spec, nil).Info().Parameters, "parameters"); where != "" {
+		t.Fatalf("a json.Number survived canonicalization at %s: a provider SDK writes it as a string", where)
+	}
+}
+
+// findJSONNumber returns the path of the first json.Number in a schema value,
+// or "" when there is none.
+func findJSONNumber(v any, path string) string {
+	switch v := v.(type) {
+	case map[string]any:
+		for _, k := range slices.Sorted(maps.Keys(v)) {
+			if where := findJSONNumber(v[k], path+"."+k); where != "" {
+				return where
+			}
+		}
+	case []any:
+		for i, x := range v {
+			if where := findJSONNumber(x, fmt.Sprintf("%s[%d]", path, i)); where != "" {
+				return where
+			}
+		}
+	case json.Number:
+		return path
+	}
+	return ""
 }
 
 // TestBridgedRunNeverFails: a bridged tool's Run hands Fantasy the result

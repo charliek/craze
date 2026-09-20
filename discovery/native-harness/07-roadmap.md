@@ -271,8 +271,14 @@ would describe the exact literals sent, but a `json.Number` is a string
 underneath and the provider's SDK wrote it quoted. Numbers are canonicalized
 to int64/float64 once and the hash is taken of that same form: 2^53+1 still
 goes out whole, the digest still describes the wire, and a literal's
-spelling (1.0 → 1) is what was given up. No unit test could have caught it;
-it needs a provider that validates its tool schemas.
+spelling (1.0 → 1) is what was given up, along with an integer past int64,
+which rounds. The tests that marshal the schema stayed green throughout,
+because the standard library writes a `json.Number` unquoted and only the
+provider's own encoder quotes it (checked against openai-go v3.54.0) — so
+the guard is an assertion on the value handed over, that no `json.Number`
+survives canonicalization, rather than on its JSON. Nothing in the repo
+marshals through a provider SDK's encoder, which is the coverage this class
+of bug really wants.
 
 Known limitations: a refusal's text reaches the model always, but the card
 shows it only for `read` and `bash` rows — `edit`, `write`, and search rows

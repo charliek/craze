@@ -653,8 +653,12 @@ func canonicalSchema(params map[string]any) map[string]any {
 // schema itself sends "9007199254740991", and a provider that validates its
 // tool schemas rejects the call (Fireworks: 'is not of type number'), which is
 // how the live smoke found this. int64 keeps every integer literal a provider
-// can hold exactly; anything else becomes the float64 it parses as. A literal
-// that is neither is left as it is: no wire format could carry it anyway.
+// can hold exactly; anything else becomes the float64 it parses as, so an
+// integer past int64 (a `maximum` of 2^64-1, say) is rounded — the price of
+// being a number at all, since the SDK writes the exact json.Number as a
+// string the provider then rejects (CodeRabbit finding, checked against
+// openai-go v3.54.0's own encoder). A literal that is neither is left as it
+// is: no wire format could carry it anyway.
 func plainNumbers(v any) any {
 	switch v := v.(type) {
 	case map[string]any:
