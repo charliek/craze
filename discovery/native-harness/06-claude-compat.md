@@ -157,6 +157,47 @@ directories, `argument-hint`, `allowed-tools`/`model`/`effort`, hooks, MCP,
 `settings.json` beyond `enabledPlugins`, `@file` expansion in the user's
 typed text, `skills/synced/`.
 
+## Limits
+
+What H4 does not do, as built, beyond the "Not built" list above:
+
+- **Confinement's threat model is a static hostile checkout**, not a
+  process racing craze on the same machine. `confinedPath` resolves and
+  checks a path, then the reader `Lstat`s and opens it; an adversary who
+  can swap a directory for a symlink between those two steps already has
+  code execution and does not need to trick craze into reading a file.
+  Closing that window needs `openat2`-style directory-handle walking with
+  per-component symlink refusal, which macOS has no equivalent of, so the
+  window is accepted and stated on `confinedPath` itself rather than
+  closed.
+- **The seam relocates `UserRoot`, not the plugin paths.** Moving
+  `UserRoot` to an imported tree or a configured location is purely a
+  `resolveNativeSources` change, which is what the relocation test covers.
+  Moving where plugins are read from is not: `scanClaudePlugins` builds
+  its `.claude` locations from `Home` directly, so pointing native's
+  plugin discovery elsewhere needs a change to that shared, cursor-owned
+  code, out of scope here.
+- **A project-scoped plugin under a symlinked or differently-cased path
+  can be missed.** Native hands `scanClaudePlugins` a physical workspace,
+  but the scan's own `samePath` compares it against the path an install
+  recorded with a plain string comparison. On the machine this was built
+  and smoked on every plugin is `scope: "user"`, so nothing is affected
+  today, but a project-scoped install under a linked or differently-cased
+  checkout would not be matched.
+- **`readDirCapped` takes the filesystem's first 4096 entries per
+  directory, then sorts.** Which files survive in a directory larger than
+  that is order-dependent, and the cap applies per directory rather than
+  across the whole scan. Both are cursor's pre-existing behaviour, kept
+  rather than changed, since changing them would change cursor's results
+  too.
+- **Skill names are normalised; command names are not.** A skill file's
+  name is lowercased and has whitespace folded to `-` before its
+  characters are checked, so `My Skill` becomes `my-skill` and is kept. A
+  command file named the same way fails the character check and is
+  skipped with a diagnostic line instead. This is cursor's existing,
+  tested behaviour and stays as is rather than being made symmetric,
+  since changing it risks cursor's own results.
+
 ## Explicit non-goals
 
 `~/.claude/settings.json` (permissions, env, defaultMode), hooks, MCP,
