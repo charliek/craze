@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -30,6 +32,17 @@ import (
 // is faked.
 type scriptedSession struct {
 	*Stub
+
+	// admit makes the whole of Begin one critical section: the busy check, the
+	// Stub's own claim and the script dequeue. Without it two concurrent Begins
+	// can both read "not busy", one claims and the other takes the Stub's
+	// refusal — and then swaps it for a scripted continuation, so two turns run
+	// where the Stub allows one. The model calls Begin from one goroutine today;
+	// the engine will call it from its own.
+	//
+	// Lock order: admit → Stub.mu, and admit → mu. Nothing under either of those
+	// ever calls back into the decorator, so it cannot cycle.
+	admit sync.Mutex
 
 	mu        sync.Mutex
 	scripts   []*scriptedTurn
@@ -71,9 +84,12 @@ func (s *scriptedSession) takeScript() *scriptedTurn {
 
 // Begin is the Stub's claim with a scripted continuation behind it. A Begin the
 // Stub would refuse — a prompt already claimed, or a turn already open — keeps
-// its refusal and consumes no script: a script may not override the one-in-flight
-// rule the model is tested against.
+// its refusal and consumes no script: a script may not override the
+// one-in-flight rule the model is tested against. The three steps are one
+// critical section under admit, so concurrent callers cannot both be admitted.
 func (s *scriptedSession) Begin(text string) func(context.Context) (agent.Result, error) {
+	s.admit.Lock()
+	defer s.admit.Unlock()
 	busy := s.stubBusy()
 	run := s.Stub.Begin(text)
 	if busy {
@@ -87,8 +103,9 @@ func (s *scriptedSession) Begin(text string) func(context.Context) (agent.Result
 }
 
 // stubBusy reports whether the Stub is already holding a prompt, in which case
-// its Begin refuses and no script may override that. The qualifier on the mutex
-// is not decoration: the decorator has one of its own.
+// its Begin refuses and no script may override that. It is only ever called with
+// admit held. The qualifier on the mutex is not decoration: the decorator has
+// one of its own.
 func (s *scriptedSession) stubBusy() bool {
 	s.Stub.mu.Lock()
 	defer s.Stub.mu.Unlock()
@@ -139,6 +156,15 @@ type scriptedTurn struct {
 	refuse error
 	// stop is the clean ending's stop reason; "" means end_turn.
 	stop string
+	// ended closes once the turn's one terminal event has been published, and
+	// pauseReturn then holds the continuation just short of returning. Together
+	// they are the window the model's two-ending rule exists for: the stream has
+	// ended and the prompt has not returned. They also make the turn's own
+	// terminal event the only one there is, so a test cannot paper over a lost
+	// first ending with a second one emitted by hand.
+	ended       chan struct{}
+	pauseReturn chan struct{}
+	returnOnce  sync.Once
 }
 
 // scriptHeld is a turn held open at a barrier: the test decides when it ends,
@@ -163,6 +189,19 @@ func (sc *scriptedTurn) held() *scriptedTurn {
 	return sc
 }
 
+// endsThenWaits makes the turn stop between its ending and its return: ended
+// closes when the one terminal event has gone out — through the Stub's own
+// markDone and Emit, so doneEmitted is honest — and Return lets the continuation
+// finish. A test that needs "the stream has ended, the prompt has not" uses this
+// rather than publishing an ending of its own, because a hand-emitted ending
+// beside the turn's own would let a model that dropped the first be repaired by
+// the second.
+func (sc *scriptedTurn) endsThenWaits() *scriptedTurn {
+	sc.ended = make(chan struct{})
+	sc.pauseReturn = make(chan struct{})
+	return sc
+}
+
 // Release ends a held turn. It is idempotent, so a test may release a turn the
 // cleanup would have closed anyway.
 func (sc *scriptedTurn) Release() {
@@ -170,6 +209,14 @@ func (sc *scriptedTurn) Release() {
 		return
 	}
 	sc.releaseOnce.Do(func() { close(sc.release) })
+}
+
+// Return lets a continuation paused after its ending go on and return.
+func (sc *scriptedTurn) Return() {
+	if sc.pauseReturn == nil {
+		return
+	}
+	sc.returnOnce.Do(func() { close(sc.pauseReturn) })
 }
 
 // run is the continuation. It keeps the Stub's turn state honest at every step,
@@ -218,21 +265,36 @@ func (sc *scriptedTurn) run(ctx context.Context, s *Stub) (agent.Result, error) 
 	}
 	switch {
 	case cancelled:
-		s.markDone()
-		s.Emit(agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
+		sc.end(ctx, s, agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
 		return agent.Result{StopReason: stopCancelled}, nil
 	case sc.fail != nil:
-		s.markDone()
-		s.Emit(agent.Event{Type: agent.EventError, Err: sc.fail})
+		sc.end(ctx, s, agent.Event{Type: agent.EventError, Err: sc.fail})
 		return agent.Result{}, sc.fail
 	default:
 		stop := sc.stop
 		if stop == "" {
 			stop = "end_turn"
 		}
-		s.markDone()
-		s.Emit(agent.Event{Type: agent.EventDone, StopReason: stop})
+		sc.end(ctx, s, agent.Event{Type: agent.EventDone, StopReason: stop})
 		return agent.Result{StopReason: stop}, nil
+	}
+}
+
+// end publishes the turn's one terminal event and, when the script asked for it,
+// holds the continuation there — after the ending, before the return.
+func (sc *scriptedTurn) end(ctx context.Context, s *Stub, ev agent.Event) {
+	s.markDone()
+	s.Emit(ev)
+	if sc.ended != nil {
+		close(sc.ended)
+	}
+	if sc.pauseReturn == nil {
+		return
+	}
+	select {
+	case <-sc.pauseReturn:
+	case <-s.closed:
+	case <-ctx.Done():
 	}
 }
 
@@ -259,4 +321,60 @@ func startScripted(t *testing.T, m Model, s *scriptedSession, text string, sc *s
 		awaitBarrier(t, sc.opened, "the scripted turn opening")
 	}
 	return m
+}
+
+// ---------------------------------------------------------- the decorator's own
+
+// TestScriptedSessionAdmitsOneBeginAtATime is the admission mutex's test. Two
+// Begins race for one claim: whichever wins gets the queued script, and the
+// other must keep the Stub's refusal — with the busy check and the claim in
+// separate critical sections, both could read "not busy" and the loser would
+// take the script too, running a second turn the Stub allows no room for.
+func TestScriptedSessionAdmitsOneBeginAtATime(t *testing.T) {
+	sess := newScriptedSession()
+	t.Cleanup(func() { _ = sess.Close() })
+	scripted := errors.New("the scripted refusal")
+	sess.Script(scriptRefused(scripted))
+
+	// The two admissions race; the continuations are run afterwards, so the claim
+	// the winner took is still held while the loser is admitted — which is the
+	// state the mutex is there to make unambiguous.
+	start := make(chan struct{})
+	runs := make([]func(context.Context) (agent.Result, error), 2)
+	var wg sync.WaitGroup
+	for i := range runs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			runs[i] = sess.Begin(fmt.Sprintf("prompt %d", i))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	errs := make([]error, len(runs))
+	for i, run := range runs {
+		_, errs[i] = run(context.Background())
+	}
+
+	var tookScript, refused int
+	for _, err := range errs {
+		switch {
+		case errors.Is(err, scripted):
+			tookScript++
+		case errors.Is(err, agent.ErrPromptInFlight):
+			refused++
+		default:
+			t.Fatalf("a Begin came back with %v", err)
+		}
+	}
+	if tookScript != 1 || refused != 1 {
+		t.Fatalf("two concurrent Begins: %d took the script, %d were refused", tookScript, refused)
+	}
+	// Both are recorded: the claim is the Stub's, so a refused prompt is still a
+	// prompt the session was handed.
+	if got := sess.Prompts(); len(got) != 2 {
+		t.Fatalf("prompts %q, want both recorded", got)
+	}
 }

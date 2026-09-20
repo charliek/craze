@@ -78,31 +78,34 @@ func TestStaleTickGenerationsAreDropped(t *testing.T) {
 }
 
 func TestIdleUsesTheSlowChain(t *testing.T) {
-	m := sized(t)
-	stub := m.sess.(*Stub)
+	m, sess := scriptedModel(t)
 	if !m.tickLive || m.tickFast {
 		t.Fatalf("idle runs the slow chain: live=%v fast=%v", m.tickLive, m.tickFast)
 	}
 	gen := m.tickGen
 
-	// A turn switches to the fast chain exactly once. The turn is held open, so
-	// the chain has to follow the whole turn and not the first thing that looks
-	// like its end.
-	m = heldTurn(t, m, stub, "go")
+	// A turn switches to the fast chain exactly once. The turn is a real one,
+	// open on the session, because the chain has to follow the whole turn and not
+	// the first thing that looks like its end.
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "go", sc)
 	if !m.tickFast || m.tickGen != gen+1 {
 		t.Fatalf("working: fast=%v gen=%d", m.tickFast, m.tickGen)
 	}
-	// The stream closes while the prompt is still out: the turn is not over, so
-	// the chain stays fast. The chunk behind it is the marker — events arrive in
-	// the order they were published, so seeing it means the ending was applied.
-	stub.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	stub.Emit(agent.Event{Type: agent.EventText, Text: "the stream closed"})
+	// The turn publishes its one ending and stops short of returning, so the turn
+	// is not over and the chain stays fast. The chunk behind it is only the marker
+	// — events arrive in the order they were published, so seeing it means the
+	// ending was applied.
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn's ending")
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "the stream closed"})
 	m = pumpUntil(t, m, viewHas("the stream closed"))
 	if !m.tickFast {
 		t.Fatalf("still working until the turn is over: fast=%v", m.tickFast)
 	}
-	m = pumpEsc(t, m)
+	sc.Return()
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.tickFast || m.tickGen != gen+2 {
 		t.Fatalf("back to idle: fast=%v gen=%d", m.tickFast, m.tickGen)
 	}

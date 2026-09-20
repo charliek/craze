@@ -166,6 +166,9 @@ func TestEnterSendsAndFollowUp(t *testing.T) {
 	}
 
 	m = pumpUntil(t, m, allOf(isIdle, viewHas("echo: hello")))
+	// Nothing of the first turn is left to report, so the follow-up below cannot
+	// be disturbed by it.
+	m = pumpSettled(t, m)
 
 	m = pumpEnter(t, m, "again")
 	if m.status != statusWorking {
@@ -365,6 +368,9 @@ func TestEscCancelsWorkingTurn(t *testing.T) {
 	}
 	m = pumpEsc(t, m)
 	m = pumpUntil(t, m, isIdle)
+	// Nothing of the turn is left to report, so "exactly one note" is a claim
+	// about a finished turn.
+	m = pumpSettled(t, m)
 	if notes := texts(m, entryNote); len(notes) != 1 || notes[0] != stopCancelled {
 		t.Fatalf("a cancel leaves exactly one note: %q", notes)
 	}
@@ -400,6 +406,7 @@ func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 
 	m = pumpEsc(t, m)
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.err != "" {
 		t.Fatalf("a cancel is not an error: %q", m.err)
 	}
@@ -444,6 +451,9 @@ func TestEscRightAfterEnterWithdrawsTheClaimedPrompt(t *testing.T) {
 	// with goes through the runtime.
 	m = pumpCmd(t, m, prompt)
 	m = pumpUntil(t, m, isIdle)
+	// The claims below are all "nothing else happened", so nothing may still be
+	// on its way when they are made.
+	m = pumpSettled(t, m)
 	if m.err != "" {
 		t.Fatalf("a cancel is not an error: %q", m.err)
 	}
@@ -517,6 +527,7 @@ func TestEscAfterEnterDuringAForeignTurnWritesNoCancel(t *testing.T) {
 	}
 	m = pumpMsg(t, m, withdrawn)
 	m = pumpUntil(t, m, allOf(isIdle, viewHas(stopCancelled)))
+	m = pumpSettled(t, m)
 	if m.err != "" {
 		t.Fatalf("err %q", m.err)
 	}
@@ -2018,7 +2029,10 @@ func startTurn(t *testing.T, m Model, text string) Model {
 func planTurn(t *testing.T, m Model) Model {
 	t.Helper()
 	m = pumpEnter(t, m, "plan it")
-	return pumpUntil(t, m, allOf(isIdle, viewHas("echo: plan it")))
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("echo: plan it")))
+	// Every caller goes on to act on the offer the finished turn left, so the
+	// turn has to be completely over: nothing of it still to report.
+	return pumpSettled(t, m)
 }
 
 func planOfferModel(t *testing.T) Model {
@@ -2049,6 +2063,7 @@ func TestPlanOfferAppearsOnlyOnceTheTurnIsOver(t *testing.T) {
 		t.Fatalf("the placeholder is drawn mid-turn:\n%s", plainView(m))
 	}
 	m = pumpUntil(t, m, allOf(isIdle, viewHas(planOfferPlaceholder)))
+	m = pumpSettled(t, m)
 	if !m.planOffering() {
 		t.Fatalf("the finished turn should offer:\n%s", plainView(m))
 	}
@@ -2127,15 +2142,17 @@ func TestPlanOfferNeedsAPlanToOffer(t *testing.T) {
 			case tc.fail != nil:
 				sc.Release()
 				m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
-				// The stream still ends after the error, and that ending must
-				// not arm an offer an errored turn cannot honour. The chunk
-				// behind it is the marker that says it was applied.
+				m = pumpSettled(t, m)
+				// A stream ending after the error must not arm an offer an
+				// errored turn cannot honour. The chunk behind it is the marker
+				// that says it was applied.
 				sess.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
 				sess.Emit(agent.Event{Type: agent.EventText, Text: "after the error"})
 				m = pumpUntil(t, m, viewHas("after the error"))
 			default:
 				sc.Release()
 				m = pumpUntil(t, m, isIdle)
+				m = pumpSettled(t, m)
 			}
 			if m.planArmed() || m.planOffering() {
 				t.Fatal("this turn left no plan to implement")
@@ -2516,6 +2533,7 @@ func TestPlanOfferIgnoresEmptyAssistantChunks(t *testing.T) {
 	sess.Emit(agent.Event{Type: agent.EventText, Text: ""})
 	sc.Release()
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.planArmed() || m.planOffering() {
 		t.Fatal("an empty reply left nothing to implement")
 	}
@@ -2576,19 +2594,23 @@ func TestPlanOfferSurvivesAnAnsweredCardInEitherOrder(t *testing.T) {
 // the prompt has yet to return, so Esc is still a cancel — and a cancel declines
 // the offer as surely as an Esc on the composer does.
 func TestPlanOfferEscWhileWorkingRetiresIt(t *testing.T) {
-	m := intoPlanMode(t, sized(t))
-	stub := m.sess.(*Stub)
-	// The turn is held open, so its stream can end — which arms the offer —
-	// while the prompt itself has not returned yet and Esc is still a cancel.
-	m = heldTurn(t, m, stub, "plan it")
-	stub.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
-	stub.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	// The turn publishes its one ending — which arms the offer — and then stops
+	// short of returning, so the prompt is still out and Esc is still a cancel.
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "plan it", sc)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn's ending")
 	m = pumpUntil(t, m, func(m Model) bool { return m.planArmed() })
 	if m.status != statusWorking {
 		t.Fatalf("the prompt has not returned: status %s", m.status)
 	}
 	m = pumpEsc(t, m)
+	sc.Return()
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.planArmed() || m.planOffering() {
 		t.Fatalf("the cancel declined the offer:\n%s", plainView(m))
 	}
@@ -2623,6 +2645,7 @@ func TestPlanOfferSurvivesACreatePlanCard(t *testing.T) {
 	}
 	sc.Release()
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.planOffering() {
 		t.Fatal("still unanswered, so still no offer")
 	}

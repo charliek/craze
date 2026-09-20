@@ -35,6 +35,9 @@ func TestCtrlLWhileEditingSavesThenSendsNowOnce(t *testing.T) {
 	// ends by itself with nothing left to drain — so if the text had also gone
 	// out as a draft there would be a third turn and a third user entry.
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	// Nothing of either turn is left to report, so a late drain cannot add a
+	// third turn behind these assertions.
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE!" {
 		t.Fatalf("user entries %q", got)
 	}
@@ -93,6 +96,7 @@ func TestArmedSendNowWaitsOutAForeignTurn(t *testing.T) {
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: false})
 	m = pumpUntil(t, m, turnsReached(stub, 2))
+	m = pumpSettled(t, m)
 	if sendNowArmed(m) {
 		t.Fatal("the armed send fires when the foreign turn ends")
 	}
@@ -126,6 +130,7 @@ func TestStrongSendClearsADraftWithTrailingWhitespace(t *testing.T) {
 	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
 	m = pumpKey(t, m, enter())
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	m = pumpSettled(t, m)
 	if m.input.Value() != "" {
 		t.Fatalf("the sent draft must leave the composer: %q", m.input.Value())
 	}
@@ -263,6 +268,7 @@ func TestEnterDuringAForeignTurnQueues(t *testing.T) {
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: false})
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	m = pumpSettled(t, m)
 	if !queueEmpty(m) {
 		t.Fatalf("the queue drains when the foreign turn ends: %q", queueTexts(m))
 	}

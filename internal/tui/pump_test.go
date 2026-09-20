@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -30,19 +32,24 @@ import (
 // internal/engine it arrives as an event on the session's stream. Both are "a
 // message the pump feeds back", so the tests do not have to know which.
 //
-// Two rules keep it honest:
+// Three rules keep it honest:
 //
 //  1. Every wait is a blocking read. Wall clock appears exactly once, in
 //     deadline(), as a watchdog that turns a deadlock into a readable failure
 //     rather than a hung run. There is no polling anywhere: a test that wants
-//     to be sure a prompt has reached a known point waits on a barrier the Stub
-//     hands it (ParkNext), not on a sleep.
+//     to be sure a prompt has reached a known point waits on a barrier the
+//     session hands it, not on a sleep.
 //  2. Timer commands are never run. tea.Tick's command blocks on a real timer,
 //     so executing the spinner chain would make every pumped test wait out
 //     beats it does not care about, and re-arm one per beat for ever. The event
 //     reader is skipped for a different reason: exactly one goroutine may
 //     receive from Events(), and two readers would steal each other's events,
 //     so the pump owns the one reader and drops the model's own waitEvent.
+//  3. A predicate says when a state has been *reached*, never that nothing more
+//     is coming. Stopping on one can leave the command that ran the turn still
+//     to report, so a test whose claim is "that turn is completely over" — one
+//     about to start another, or asserting that nothing else happened — says so
+//     with pumpSettled.
 
 // pumpWatchdog is how long a pumped wait may make no progress before the test
 // fails. It is not a timing assertion — nothing in a passing run waits this
@@ -53,6 +60,18 @@ const pumpWatchdog = 10 * time.Second
 // deadline is the one place this file reads the clock.
 func deadline() <-chan time.Time { return time.After(pumpWatchdog) }
 
+// pumpItem is one message on its way to Update, and whether resolving it
+// resolves a dispatched command: pumpSettled counts commands whose message has
+// not been applied yet, and it can only do that if the queue says which is
+// which.
+type pumpItem struct {
+	msg tea.Msg
+	// fromCmd marks a command's own report. An event the reader delivered is
+	// not one: the session produces those on its own account, not because the
+	// pump asked for anything.
+	fromCmd bool
+}
+
 // pump is one test's runtime: the message queue every goroutine reports into,
 // the single reader of the session's event stream, and the bookkeeping that
 // stops any of it outliving the test.
@@ -62,11 +81,27 @@ type pump struct {
 	// from the commands alike, in the order they were produced. Buffered so a
 	// command that has finished never holds its goroutine open waiting for the
 	// test to get round to it.
-	msgs chan tea.Msg
+	msgs chan pumpItem
 	// dead is closed at cleanup: a goroutine still holding a message gives up
 	// on delivering it instead of blocking on a queue nobody reads again.
 	dead chan struct{}
 	wg   sync.WaitGroup
+
+	// stateMu guards the two counters pumpSettled reads. It is a leaf: nothing
+	// is held across it.
+	stateMu sync.Mutex
+	// outstanding is how many dispatched commands have not been fully accounted
+	// for: a command is outstanding from the moment it is dispatched until the
+	// message it produced has been through Update (or until it turns out to
+	// produce none, or to be a batch, whose members take over the count).
+	outstanding int
+	// reading is set while the event reader is holding an event it has taken
+	// off the stream and not yet queued.
+	reading bool
+	// quietened is a one-slot wake-up: a goroutine that resolved the last
+	// outstanding command signals it, so pumpSettled can block instead of
+	// polling. One slot is enough — it is a "look again", not a queue.
+	quietened chan struct{}
 }
 
 // pumps is one pump per test. The helpers take the model by value — it is a
@@ -91,9 +126,10 @@ func pumpFor(t *testing.T, m Model) *pump {
 		return p
 	}
 	p := &pump{
-		sess: m.sess,
-		msgs: make(chan tea.Msg, 256),
-		dead: make(chan struct{}),
+		sess:      m.sess,
+		msgs:      make(chan pumpItem, 256),
+		dead:      make(chan struct{}),
+		quietened: make(chan struct{}, 1),
 	}
 	pumps[t] = p
 	pumpsMu.Unlock()
@@ -134,7 +170,10 @@ func (p *pump) read() {
 			if !ok {
 				return
 			}
-			if !p.deliver(eventMsg{ev}) {
+			p.setReading(true)
+			delivered := p.deliver(pumpItem{msg: eventMsg{ev}})
+			p.setReading(false)
+			if !delivered {
 				return
 			}
 		case <-p.dead:
@@ -144,9 +183,9 @@ func (p *pump) read() {
 }
 
 // deliver queues a message for Update, or reports that the test is over.
-func (p *pump) deliver(msg tea.Msg) bool {
+func (p *pump) deliver(item pumpItem) bool {
 	select {
-	case p.msgs <- msg:
+	case p.msgs <- item:
 		return true
 	case <-p.dead:
 		return false
@@ -161,24 +200,82 @@ func (p *pump) dispatch(cmd tea.Cmd) {
 	if cmd == nil || pumpSkips(cmd) {
 		return
 	}
+	p.began()
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		msg := cmd()
 		if msg == nil {
+			// Nothing to apply, so nothing is owed: the command is accounted
+			// for here.
+			p.resolved()
 			return
 		}
 		if batch, ok := msg.(tea.BatchMsg); ok {
 			// tea.Batch's message is "run these too", which the runtime does
-			// concurrently. Add before this goroutine's own Done, so the join
-			// at cleanup cannot miss a child.
+			// concurrently. Each member is counted before this one is released,
+			// so the count never dips through zero in the middle of a batch —
+			// and the join at cleanup cannot miss a child.
 			for _, c := range batch {
 				p.dispatch(c)
 			}
+			p.resolved()
 			return
 		}
-		p.deliver(msg)
+		if !p.deliver(pumpItem{msg: msg, fromCmd: true}) {
+			p.resolved()
+		}
 	}()
+}
+
+// began records a dispatched command; resolved accounts for one, waking a
+// pumpSettled that was waiting for the last of them.
+func (p *pump) began() {
+	p.stateMu.Lock()
+	p.outstanding++
+	p.stateMu.Unlock()
+}
+
+func (p *pump) resolved() {
+	p.stateMu.Lock()
+	p.outstanding--
+	p.stateMu.Unlock()
+	select {
+	case p.quietened <- struct{}{}:
+	default:
+	}
+}
+
+func (p *pump) setReading(v bool) {
+	p.stateMu.Lock()
+	p.reading = v
+	p.stateMu.Unlock()
+	if !v {
+		select {
+		case p.quietened <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// quiet reports that there is nothing left for the pump to do: no dispatched
+// command is owed an Update, nothing is queued, the session has published
+// nothing the reader has not passed on, and the reader is not holding an event.
+func (p *pump) quiet() bool {
+	if len(p.msgs) != 0 || len(p.sess.Events()) != 0 {
+		return false
+	}
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return p.outstanding == 0 && !p.reading
+}
+
+// pending is the quiet() terms as text, for the watchdog's message.
+func (p *pump) pending() string {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d reader holding=%v",
+		p.outstanding, len(p.msgs), len(p.sess.Events()), p.reading)
 }
 
 // pumpSkips names the two commands the pump must not run, and why.
@@ -242,20 +339,78 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 	timeout := deadline()
 	for {
 		select {
-		case msg := <-p.msgs:
-			tm, cmd := m.Update(msg)
-			m = tm.(Model)
-			p.dispatch(cmd)
+		case item := <-p.msgs:
+			m = p.apply(m, item)
 			if pred(m) {
 				return m
 			}
 		case <-timeout:
 			t.Fatalf("pumpUntil: no state satisfied the predicate in %s\n"+
-				"status=%s err=%q cancelled=%v prompted=%v queued=%q armed=%v messages waiting=%d\n%s",
+				"status=%s err=%q cancelled=%v prompted=%v queued=%q armed=%v %s\n%s",
 				pumpWatchdog, m.status, m.err, m.cancelled, m.prompted,
-				queueTexts(m), sendNowArmed(m), len(p.msgs), plainView(m))
+				queueTexts(m), sendNowArmed(m), p.pending(), plainView(m))
 		}
 	}
+}
+
+// pumpSettled returns once nothing the pump dispatched is still owed an Update
+// and nothing is queued. It is the barrier for the claim "that turn is
+// completely over": stopping on a predicate can return the moment the state the
+// predicate names is reached, with the command that ran the turn still to
+// report, and a test that then started another turn would never have applied the
+// old turn's completion — so a regression in which it lands on the new turn
+// would pass.
+//
+// It is a real barrier, not a poll: the counter is signalled by the goroutines
+// that resolve a command and by the apply step below.
+//
+// A turn held open has its prompt command outstanding on purpose, so this is
+// something a test calls where "the turn is over" is the claim, never while a
+// turn is held. Called then, the watchdog fails the test and says what is
+// outstanding rather than hanging.
+//
+// After the driver moves into internal/engine the prompt no longer runs in a
+// tea.Cmd at all, and this degenerates to "the queue is empty and no command is
+// outstanding" — which is still exactly the right claim, because the turn's
+// ending is then one of the messages the queue carries.
+func pumpSettled(t *testing.T, m Model) Model {
+	t.Helper()
+	p := pumpFor(t, m)
+	timeout := deadline()
+	for {
+		// Anything already queued is applied first: it may be the very message
+		// the last outstanding command is waiting to have accounted for.
+		select {
+		case item := <-p.msgs:
+			m = p.apply(m, item)
+			continue
+		default:
+		}
+		if p.quiet() {
+			return m
+		}
+		select {
+		case item := <-p.msgs:
+			m = p.apply(m, item)
+		case <-p.quietened:
+		case <-timeout:
+			t.Fatalf("pumpSettled: the pump was still busy after %s (%s)\n"+
+				"a turn held open keeps its prompt command outstanding — release it first\n%s",
+				pumpWatchdog, p.pending(), plainView(m))
+		}
+	}
+}
+
+// apply is the one place a message reaches Update: it runs the handler,
+// dispatches what it asked for, and accounts for the command that reported it.
+func (p *pump) apply(m Model, item pumpItem) Model {
+	tm, cmd := m.Update(item.msg)
+	next := tm.(Model)
+	p.dispatch(cmd)
+	if item.fromCmd {
+		p.resolved()
+	}
+	return next
 }
 
 // pumpApply hands the model one message and dispatches what it asked for,
@@ -493,5 +648,24 @@ func TestPumpSkipsTheTickChainAndTheEventReader(t *testing.T) {
 	ordinary := tea.Cmd(func() tea.Msg { return nil })
 	if pumpSkips(ordinary) {
 		t.Fatalf("an ordinary command was skipped: %q", cmdFuncName(ordinary))
+	}
+}
+
+// TestPumpSettledWaitsForACommandThatReportsLate is the barrier's own test: a
+// command that reports at a moment the test does not control still has its
+// message applied before pumpSettled returns. A barrier that returned first
+// would let the next turn start over a message belonging to the last one, which
+// is the whole reason it exists.
+func TestPumpSettledWaitsForACommandThatReportsLate(t *testing.T) {
+	m, _ := scriptedModel(t)
+	release := make(chan struct{})
+	m = pumpCmd(t, m, func() tea.Msg {
+		<-release
+		return actionErrMsg{err: errors.New("late")}
+	})
+	go func() { close(release) }()
+	m = pumpSettled(t, m)
+	if got := texts(m, entryError); len(got) != 1 || got[0] != "late" {
+		t.Fatalf("the late message was not applied: %q", got)
 	}
 }

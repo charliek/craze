@@ -397,6 +397,7 @@ func TestParentDoneWhileChildRunsKeepsRowAndFastTick(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m = pumpEnter(t, m, "spawn one")
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if len(m.visibleAgents()) == 0 {
 		t.Fatal("a running child must keep its row after parent done")
 	}

@@ -166,7 +166,7 @@ func TestHostStatusPermissionTurn(t *testing.T) {
 		t.Fatalf("published before the session was up: %s", fmtStatuses(rec.statuses))
 	}
 	m = deliver(t, m, startedMsg{})
-	sc := scriptHeld()
+	sc := scriptHeld().endsThenWaits()
 	m = startScripted(t, m, sess, "run it", sc)
 	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(false)})
 	m = pumpUntil(t, m, hasCard)
@@ -178,17 +178,20 @@ func TestHostStatusPermissionTurn(t *testing.T) {
 	if m.cardOpen() {
 		t.Fatal("setup: the answer did not close the card")
 	}
-	// The stream ending alone does not settle the turn, so it publishes nothing.
-	// The chunk behind it is the marker: the log orders them, so seeing it means
-	// the ending was applied.
-	sess.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	// The turn publishes its one terminal event and stops there, short of
+	// returning: the stream has ended and the prompt has not, which alone settles
+	// nothing and so publishes nothing. The chunk behind it is only the marker
+	// that says the ending was applied — the log orders them.
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn's ending")
 	sess.Emit(agent.Event{Type: agent.EventText, Text: "after the ending"})
 	m = pumpUntil(t, m, viewHas("after the ending"))
 	if n := len(rec.statuses); n != 4 {
-		t.Fatalf("EventDone alone published: %s", fmtStatuses(rec.statuses))
+		t.Fatalf("the stream ending alone published: %s", fmtStatuses(rec.statuses))
 	}
-	sc.Release()
-	_ = pumpUntil(t, m, isIdle)
+	sc.Return()
+	m = pumpUntil(t, m, isIdle)
+	_ = pumpSettled(t, m)
 
 	assertStatuses(t, rec,
 		idleStatus(host.DetailReady),
@@ -246,6 +249,11 @@ func TestHostStatusErrorThenNextPrompt(t *testing.T) {
 			sess.Script(scriptFailed(tc.err))
 			m = pumpEnter(t, m, "go")
 			m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+			// An errored turn has no idle status to wait for, so the barrier is
+			// the pump's own: the failed turn's prompt has reported and its
+			// message has been applied before the next turn starts. Without it a
+			// completion that landed on the *new* turn would go unnoticed.
+			m = pumpSettled(t, m)
 			// The next turn is held, so Working is the last thing published.
 			_ = startScripted(t, m, sess, "again", scriptHeld())
 			failed := hostStatus(host.Failed, host.DetailError, tc.want)
@@ -282,6 +290,7 @@ func TestHostStatusCancelEndings(t *testing.T) {
 		m = startScripted(t, m, sess, "go", scriptHeld())
 		m = pumpEsc(t, m)
 		m = pumpUntil(t, m, isIdle)
+		m = pumpSettled(t, m)
 		// The next turn is not scripted, so the Stub answers it and ends it.
 		m = pumpEnter(t, m, "again")
 		_ = pumpUntil(t, m, allOf(isIdle, viewHas("echo: again")))
@@ -296,6 +305,7 @@ func TestHostStatusCancelEndings(t *testing.T) {
 		m = heldTurn(t, m, stub, "go")
 		m = pumpEsc(t, m)
 		m = pumpUntil(t, m, isIdle)
+		m = pumpSettled(t, m)
 		// The next turn is not held, so the stub answers it and ends it. The
 		// parked prompt opened no turn, so this is the session's first: its
 		// reply is the "echo" one.

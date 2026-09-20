@@ -385,6 +385,7 @@ func TestFirstSendWritesTheFallbackTitle(t *testing.T) {
 	// turn's own end has touched the row by now, so what this counts is only
 	// what the second send added.
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	written := len(idx.rows)
 	m = pumpEnter(t, m, "second prompt")
 	if m.status != statusWorking {
@@ -508,6 +509,7 @@ func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 	// The next send finds the index working again.
 	idx.err = nil
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	m = pumpEnter(t, m, "the second prompt")
 	if len(idx.rows) != 1 {
 		t.Fatalf("the retry wrote %d rows, want 1", len(idx.rows))
@@ -541,11 +543,10 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateSkillsHome(t)
 			idx := &fakeIndex{}
-			stub := NewStub()
-			t.Cleanup(func() { _ = stub.Close() })
-			def := tc.configure(stub)
+			sess := newScriptedSession()
+			def := tc.configure(sess.Stub)
 			m := New(Config{
-				Session:        stub,
+				Session:        sess,
 				Theme:          "tokyo-night",
 				Workspace:      t.TempDir(),
 				Model:          "grok",
@@ -560,19 +561,21 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 				t.Fatal("fixture: the session has no id, so nothing would be written anyway")
 			}
 
-			// The turn is held open so the agent's own title lands inside it,
-			// which is the order a live session produces: every write moment —
-			// the first send, the agent title, the turn's end, /rename — is
-			// reached, and none of them may write.
-			m = heldTurn(t, m, stub, "the first prompt")
+			// The turn is a real one, open and then ended cleanly, so the agent's
+			// own title lands inside it and the turn's end runs the touch: every
+			// write moment — the first send, the agent title, the turn's end,
+			// /rename — is reached, and none of them may write.
+			sc := scriptHeld()
+			m = startScripted(t, m, sess, "the first prompt", sc)
 			if !m.indexSeeded {
 				t.Fatal("a skipped write is done, not failed: the first-prompt write must not be retried")
 			}
-			stub.AgentTitle("an agent title")
-			stub.Emit(agent.Event{Type: agent.EventMeta, Text: "an agent title"})
+			sess.AgentTitle("an agent title")
+			sess.Emit(agent.Event{Type: agent.EventMeta, Text: "an agent title"})
 			m = pumpUntil(t, m, viewHas("an agent title"))
-			m = pumpEsc(t, m)
+			sc.Release()
 			m = pumpUntil(t, m, isIdle)
+			m = pumpSettled(t, m)
 			m = runSlash(t, m, "/rename a user title")
 			if len(idx.rows) != 0 {
 				t.Fatalf("a hidden provider's session was indexed: %+v", idx.rows)

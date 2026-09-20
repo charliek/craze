@@ -414,6 +414,9 @@ func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
 	if sendNowArmed(m) {
 		t.Fatal("the armed send fired")
 	}
+	// Nothing of either turn is left to report, so "exactly these two prompts"
+	// is a claim about a finished chain and not a snapshot of a moment in it.
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
@@ -549,6 +552,7 @@ func TestEscLetsTheQueueContinue(t *testing.T) {
 	}
 	m = pumpCmd(t, m, cancel)
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
@@ -585,6 +589,9 @@ func TestEveryEndingDrainsTheNextRowExactlyOnce(t *testing.T) {
 	// The cancelled turn drains the head, and the head's own clean ending
 	// drains the row behind it.
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 3), isIdle))
+	// The whole chain is over, so a late drain cannot add a fourth turn behind
+	// the assertions.
+	m = pumpSettled(t, m)
 	if !queueEmpty(m) {
 		t.Fatalf("every row went: %q", queueTexts(m))
 	}
@@ -644,10 +651,11 @@ func TestErroredTurnDrainsNothing(t *testing.T) {
 	started := turnsStarted(sess)
 	sc.Release()
 	m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
-	// Once the status is error the drain is gated off for good — nothing starts
-	// a turn from an error state but a send of the user's own — so this count
-	// cannot move behind the assertion, whichever of the turn's two endings the
-	// model has already applied.
+	// An errored turn has no idle status to wait for, so the barrier is the
+	// pump's own: both of the turn's endings have been applied by the time this
+	// returns, which is what makes "nothing drained" a claim about a finished
+	// turn rather than about one still half-reported.
+	m = pumpSettled(t, m)
 	if n := turnsStarted(sess); n != started {
 		t.Fatalf("nothing drains from an error state: %d turns, was %d", n, started)
 	}
@@ -738,6 +746,9 @@ func TestRefusedPromptDrawsOneRowAndEndsTheStream(t *testing.T) {
 			sess.Script(scriptRefused(tc.err))
 			m = pumpEnter(t, m, "PINEAPPLE")
 			m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+			// The refusal is the whole of the turn, and the pump's barrier says
+			// so: nothing of it is left to report before the next send.
+			m = pumpSettled(t, m)
 			if got := texts(m, entryError); len(got) != 1 {
 				t.Fatalf("a refusal draws exactly one row: %q", got)
 			}
@@ -775,6 +786,7 @@ func TestForeignTurnHoldsTheDrainAndNotesItself(t *testing.T) {
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: false})
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
@@ -1149,6 +1161,7 @@ func TestEditedRowSentUnderTheEditor(t *testing.T) {
 	// instead — the same call Esc's command makes.
 	endHeldTurn(t, stub)
 	m = pumpUntil(t, m, turnsReached(stub, 2))
+	m = pumpSettled(t, m)
 	if m.queueEdit != "" {
 		t.Fatal("the edit ends with the row")
 	}
@@ -1230,6 +1243,7 @@ func TestSendNowOnARowSendsItExactlyOnce(t *testing.T) {
 	}
 	// That turn ends of its own accord; the row behind it drains once.
 	m = pumpUntil(t, m, allOf(turnsReached(stub, 3), isIdle))
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 3 || got[2] != "MANGO" {
 		t.Fatalf("user entries %q", got)
 	}
@@ -1252,6 +1266,7 @@ func TestConfirmDroppedWhenTheTurnEndsFirst(t *testing.T) {
 	// The turn ends while the question is still on screen.
 	endHeldTurn(t, stub)
 	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.confirm != nil {
 		t.Fatal("the confirm goes with the turn it was about")
 	}
@@ -1282,6 +1297,9 @@ func TestArmedSendDroppedByAnErroredTurn(t *testing.T) {
 	// returns it, so by the time the error row is up the turn is over.
 	sc.Release()
 	m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+	// Nothing of the failed turn is left to report, so the send it dropped
+	// cannot come back and the turn below starts on a clean model.
+	m = pumpSettled(t, m)
 	if sendNowArmed(m) {
 		t.Fatal("an errored turn takes the armed send with it")
 	}

@@ -52,9 +52,11 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 		t.Fatalf("the send was refused: status %s", m.status)
 	}
 	m = pumpUntil(t, m, allOf(isIdle, viewHas("first reply")))
+	m = pumpSettled(t, m)
 
 	m = pumpEnter(t, m, "two")
 	m = pumpUntil(t, m, allOf(isIdle, viewHas("second reply")))
+	m = pumpSettled(t, m)
 
 	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
