@@ -10,7 +10,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H1 | complete | skeleton shipped: hidden `native` provider; 14 of 15 imported models held a clean TUI turn, multi-turn sessions and `craze prompt --json` ran on a subset (OpenRouter via `openaicompat`, D-35); no interject, no modes (D-34) |
 | H2 | complete | tools shipped across PRs #33, #34, #35, #37: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38), the gate seam allowing everything (D-39), ripgrep on `PATH` (D-41), the doom-loop guard (D-42), abnormal-finish handling (D-43), and interject; live smoke completed 14 of 15 imported models on Linux and 4 of 4 on the mac-mini; D-35's condition met, `openaicompat` stays |
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
-| H4 | in progress | Claude compat, read live behind one seam (D-45): instruction files with `@path` imports and confinement, workspace and user skills and commands, Claude's installed plugins, a model-facing catalog of skills and commands in the frozen prompt, compat toggles — plus a composer shell mode for every provider |
+| H4 | in progress | Claude compat shipped across PRs #39 and PR 2 (`feature/plan-022-h4-prompt`): content sources behind one seam, discovery, expansion, instructions with `@path` imports and confinement, the model-facing catalog, `[compat.claude]` toggles; the composer shell mode (PR 3, every provider) has not merged |
 | H5 | not started | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
 | H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
@@ -340,7 +340,85 @@ context with the next prompt.
   - confinement holds — no file outside the chain's root or `UserRoot` is
     ever read;
   - the shell mode round-trips on all three providers.
-- **Exit result:** written in C7, when the phase closes.
+
+**Exit result:** shipped across two PRs; a third (the composer shell mode)
+is part of this plan but not of H4's own compat scope and has not merged,
+so the phase stays **in progress** — see the status table above. PR 1
+(#39, merged `b861865`) landed content sources behind one seam
+(`contentSources`, `internal/agent/sources.go`), native discovery of the
+workspace chain, the user root, and Claude's installed-and-enabled
+plugins, the menu/catalog projections over one resolved list, and
+expansion of a typed `/name` into the prompt for commands and skills. PR 2
+(this commit, `feature/plan-022-h4-prompt`) landed the harness's
+prompt-extras seam and its defensive renderer, the instruction loader with
+`@path` imports and confinement, the model-facing catalog, the
+`[compat.claude]` toggles, and the `prompt_sources` journal note.
+
+Live smoke (2026-09-20), Linux, headless `craze prompt` rather than tmux —
+every V-item here is about what reaches the prompt, not about the TUI.
+Binary rebuilt from the branch tip, model `fireworks/kimi-k3` (H2-qualified):
+
+| # | what | result |
+|---|---|---|
+| V1 | "what must run before every commit here?" in `craze` | pass — answered the gate command plus the conditional `make test-cli`, cited `CLAUDE.md` in its thinking, no tool call |
+| V3 | name the `shedtest` skills from `../shed/cmd`, a subdirectory | pass — both skills and one absolute path; the chain walked from the subdirectory to the repository root, no tool call |
+| V4 | a project command's `$ARGUMENTS` and `` !`cmd` `` splice | pass — one `command` event (`plugin: project`, "from this project"), `$ARGUMENTS` substituted, the splice reached the model literally and was quoted back verbatim; craze executed nothing (D-46) |
+| V5 | reach a catalog file with no slash typed; resolve `${CLAUDE_PLUGIN_ROOT}` | pass — the model declined the entry it was misnamed toward, found the real neighbour on its own, read its file unprompted, and resolved the variable from the row's `Root:` |
+| V6 | no disruption | pass — `native` absent from `--help` and from the unknown-provider error |
+| V7 | `prompt_sources`; `--json` prints `command` and no new kind | pass — `prompt_sha256` identical to the transcript header's, 2 instruction documents, 27 catalog rows; `--json` unchanged apart from `command` |
+| V10 | confinement, live: `@~/.ssh/…` and `@../outside.md` in a scratch repo | pass — both refused with the two diagnostics the plan specifies; zero canary bytes on disk, the literal import lines present, the document's own legitimate content present |
+| V2 | `../roost` menu rows | deferred — it is a TUI-menu check, belongs with PR 3's smoke |
+| V8 | mac-mini | deferred — the box is shared with the parallel session-control plan, and CI already runs macOS |
+
+R1, first-turn prompt size:
+
+| workspace | prompt bytes | ≈ tokens | instruction docs | catalog rows |
+|---|---|---|---|---|
+| `craze-plan022` | 17,439 | ~4.4k | 2 (`AGENTS.md` 74 B, `CLAUDE.md` 1,592 B) | 27 |
+| `shed/cmd` | 42,123 | ~10.5k | 1 (`CLAUDE.md` 26,103 B) | 30 |
+
+Both runs sit well inside §9's ceiling (the profile plus 96 KiB of
+instructions plus 24 KiB of catalog); neither tripped the 64 KiB
+diagnostic and shed's 26 KB `CLAUDE.md` loaded whole under the 32 KiB
+per-document cap with no truncation marker.
+
+R2 — does the model follow the catalog with no slash command typed?
+Yes, on `fireworks/kimi-k3`: V5 is the measurement, choosing to read a
+catalog entry and resolving `${CLAUDE_PLUGIN_ROOT}` from its `Root:` with
+nothing beyond the prompt's own preamble telling it to. V1 and V3 are the
+weaker form of the same result — answered from instructions and catalog
+with no tool call at all. A second model's measurement belongs with PR 3's
+smoke.
+
+Where real commands stall: no real command was driven to the point of
+stalling on a tool native lacks in this smoke, so this is a static
+identification rather than an observed one. The evidence is the survey
+from execution amendment X3: across the installed plugins and the three
+repositories' workspace skills, 19 files reference sub-agents, 26
+`run_in_background`, 42 `AskUserQuestion`, and 0 `WebFetch`/`WebSearch`.
+H5 (`AskUserQuestion`, plan mode) and H6 (sub-agents) are what close it.
+
+Two decisions made during execution carry forward into the rest of the
+roadmap. The vendor denylist (`pdf`, `docx`, `xlsx`, `pptx`,
+`skill-creator`) applies to native's own workspace and user sources only,
+never to plugin entries, because every plugin installs under
+`<home>/.claude` and the path test would otherwise match all of them
+(X6). Confinement's threat model is a static hostile checkout: the
+TOCTOU window between the containment check and the open is accepted and
+stated on `confinedPath` itself, because closing it would need
+`openat2`-style directory-handle walking that macOS has no equivalent of
+(X19).
+
+The two external review rounds per PR converge on one lesson about
+security: redaction has to run on the assembled prompt, not on the fields
+that feed it, because framing text reassembles a key across a boundary
+that did not exist when a per-field redactor ran (X17); a key embedded in
+an *identity* — a filename, a plugin id, a skill name — cannot be
+redacted without breaking the thing it identifies, so the entry is
+dropped or the session is refused instead (X23, X25, X26); and
+diagnostics written before the redactor existed were their own leak,
+because loader `warn` lines interpolate paths and import references
+straight from the untrusted tree (X22).
 
 ### H5 — modes
 

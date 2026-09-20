@@ -613,6 +613,12 @@ type Options struct {
 	// with an empty Options reads whatever the developer happens to have
 	// installed and its result would depend on the machine it ran on.
 	ContentHome string
+	// Compat is craze's [compat.claude] table: which classes of that content
+	// this session reads at all (§3.5). The zero value reads everything,
+	// which is what an absent table means and what every caller that does not
+	// care gets; the CLI fills it from config.toml. Only a native session
+	// reads it — no other provider's content is craze's to turn off.
+	Compat ClaudeCompat
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for

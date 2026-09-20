@@ -210,6 +210,100 @@ func TestWorkspaceWithAKeyIsRefused(t *testing.T) {
 	}
 }
 
+// keyEnv is the fixture's environment with one variable replaced, for a case
+// that plants a key of its own: testEnv is shared by every test in the
+// package and must not be written to.
+func keyEnv(name, value string) func(string) string {
+	return func(want string) string {
+		if want == name {
+			return value
+		}
+		return testEnv[want]
+	}
+}
+
+// TestProfileKeyIsRefused (plan 022, round-3 review): a configured key that
+// lies inside the tool profile's own words, or across the join between them
+// and the extras rendered after them, refuses the session.
+//
+// Neither can be redacted. The profile's text is craze's, not a caller's, so
+// there is nothing about the session that could be changed to take the key
+// out of it; and redacting either rewrites bytes on the profile's side of the
+// join, which moves the byte-identical prefix every request of every session
+// shares (D-30). Before this, the first case returned the profile unchanged —
+// the one path on which a configured key went out verbatim — and the second
+// quietly moved the prefix.
+func TestProfileKeyIsRefused(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	base := systemPrompt(opencodeProfile(t), filepath.Clean(f.workspace), runtime.GOOS)
+	inside, _, _ := strings.Cut(base, "\n")
+	if len(inside) < modeltable.MinKeyLen {
+		t.Fatalf("the profile's first line is %d bytes, too short to stand in for a key", len(inside))
+	}
+	// The join: the profile's last bytes and the extras' first, which is the
+	// heading withPromptExtras writes one newline after them.
+	across := base[len(base)-8:] + "\n" + instructionsHeading[:16]
+	docs := PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}}
+	for _, tc := range []struct {
+		name string
+		key  string
+		x    PromptExtras
+	}{
+		{name: "wholly inside the profile, with no extras", key: inside},
+		{name: "wholly inside the profile, with extras", key: inside, x: docs},
+		{name: "across the profile and the extras", key: across, x: docs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := f.options()
+			opts.Getenv = keyEnv("TEST_API_KEY", tc.key)
+			opts.Prompt = tc.x
+			s, err := Open(opts)
+			if err == nil {
+				s.Close()
+				t.Fatal("a prompt holding the key opened")
+			}
+			if !errors.Is(err, errProfileKey) || strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("Open = %v; want the refusal, naming no key", err)
+			}
+		})
+	}
+	// The control: the same session, with a key that is in none of it.
+	opts := f.options()
+	opts.Prompt = docs
+	if got := f.open(opts).system; !strings.HasPrefix(got, base) {
+		t.Fatalf("control: the prompt does not begin with the profile's text:\n%s", got)
+	}
+}
+
+// TestHeaderDigestKeyIsRefused (plan 022, round-3 review): the transcript
+// header's SHA-256 of the frozen prompt is disclosed as it is — the header
+// holds it, and the adapter's prompt_sources note repeats it, which C6
+// requires to be the same string — so a configured key that happens to be
+// that digest refuses the session. Redacting one copy would break the
+// equality and leave the other, and a digest with a marker in it is not a
+// digest.
+//
+// Contrived by construction: the digest is read off a session that opened
+// with an ordinary key, and planted as the key of a second session over the
+// same workspace, which is the only way to make the collision happen.
+func TestHeaderDigestKeyIsRefused(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	digest := f.open(f.options()).PromptSHA256()
+	if len(digest) != 64 {
+		t.Fatalf("the header's prompt digest is %q, want 64 hex characters", digest)
+	}
+	opts := f.options()
+	opts.Getenv = keyEnv("TEST_API_KEY", digest)
+	s, err := Open(opts)
+	if err == nil {
+		s.Close()
+		t.Fatal("a session whose prompt digest is a configured key opened")
+	}
+	if !errors.Is(err, errDigestKey) || strings.Contains(err.Error(), digest) {
+		t.Fatalf("Open = %v; want the refusal, naming no key", err)
+	}
+}
+
 // TestToolDescriptionsAreRedacted: bash's description names the machine's
 // temporary directory, which comes from the environment and goes to the
 // model with every request — nothing else redacts it. The tools the header

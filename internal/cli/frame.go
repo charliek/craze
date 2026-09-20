@@ -119,6 +119,11 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 		PluginDirs:  o.pluginDirs,
 		Interactive: true,
 		Provider:    &prov,
+		// Spelled out rather than left implicit: the frame runner never reads
+		// config.toml (the theme, above), so every [compat.claude] toggle is
+		// at its default here and a golden cannot depend on a table in the
+		// developer's own config (plan 022 §3.5).
+		Compat: agent.ClaudeCompat{},
 	})
 
 	base := tui.Config{
@@ -186,13 +191,15 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
 		prov := p
 		return agent.New(agent.Options{
-			Binary:        o.agentBin,
-			Workspace:     ws,
-			Force:         force,
-			Stderr:        cmd.ErrOrStderr(),
-			PluginDirs:    o.pluginDirs,
-			Interactive:   true,
-			Provider:      &prov,
+			Binary:      o.agentBin,
+			Workspace:   ws,
+			Force:       force,
+			Stderr:      cmd.ErrOrStderr(),
+			PluginDirs:  o.pluginDirs,
+			Interactive: true,
+			Provider:    &prov,
+			// The default, for the reason the session above spells it out.
+			Compat:        agent.ClaudeCompat{},
 			LoadSessionID: row.SessionID,
 			Title:         row.Title,
 			TitlePinned:   row.Pinned,

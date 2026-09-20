@@ -72,6 +72,14 @@ type nativeFixture struct {
 	dir    string // $CRAZE_HOME/native
 	env    map[string]string
 	models map[string]*scriptedModel
+	// getenv replaces the reading of env, for the one case that needs an
+	// environment which answers differently the second time it is asked.
+	getenv func(string) string
+	// edit is the case's own last word on the harness's options, applied
+	// after the fixture's: NewNative's seam is what a test edits the options
+	// through, and a case that wants to set one the fixture also sets — or
+	// one the adapter fills in, such as Prompt — has to run after it.
+	edit func(*harness.Options)
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
@@ -99,9 +107,17 @@ func newNativeFixture(t *testing.T) *nativeFixture {
 // fixed clock. Home and Table stay the adapter's own (paths.NativeDir and a
 // Load from it), so Start's real path is what runs.
 func (f *nativeFixture) tweak(o *harness.Options) {
-	o.Getenv = func(k string) string { return f.env[k] }
+	o.Getenv = func(k string) string {
+		if f.getenv != nil {
+			return f.getenv(k)
+		}
+		return f.env[k]
+	}
 	o.NewModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return f.models[r.Alias], nil }
 	o.Now = func() time.Time { return time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC) }
+	if f.edit != nil {
+		f.edit(o)
+	}
 }
 
 // session builds an unstarted adapter, closed when the test ends.

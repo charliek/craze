@@ -73,6 +73,13 @@ type Options struct {
 	Table *modeltable.Table
 	// Model is the alias the session starts on; "" is the table's default.
 	Model string
+	// Prompt is what the caller adds to the frozen system prompt: the
+	// instruction documents this workspace's user and project wrote, and the
+	// catalog of the skills and commands installed for it (plan 022 §3.4).
+	// The harness renders and redacts it once, in Open, and reads no file for
+	// it: the adapter in internal/agent resolves it first and hands it over
+	// as data. The zero value sends the tool profile's text alone.
+	Prompt PromptExtras
 	// Effort is the effort the session starts at; "" is the model's
 	// default_effort (none, for a model with no effort control).
 	Effort string
@@ -169,7 +176,8 @@ type logged struct {
 
 // Open starts a session: it resolves and builds the starting model, and from
 // it the session's tools (tools.go) — the profile, and with it the system
-// prompt, which the transcript's header records, and the redactor over every
+// prompt, which is the profile's text and Options.Prompt rendered after it
+// and whose hash the transcript's header records, and the redactor over every
 // key the table knows of. It writes nothing — the transcript appears with
 // the first turn that produces output — so a session closed before that
 // leaves nothing behind; it only sweeps old spill files. A starting model
@@ -209,7 +217,7 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), opts.Table, s.getenv, m.r, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -227,6 +235,17 @@ func Open(opts Options) (*Session, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
+	}
+	// The header's two digests are disclosed exactly as they are: the
+	// transcript holds them, and the adapter repeats the prompt's in its
+	// prompt_sources note, which C6 requires to be the same string as the
+	// header's. So a configured key that happens to be inside one refuses the
+	// session — errWorkspaceKey's reasoning applied to the one text craze
+	// computes rather than reads, since redacting a digest would break the
+	// equality and leave something that is no longer a digest. Contrived, and
+	// closed here because it is one comparison.
+	if h := st.Header(); s.tools.holdsKey(h.SystemPromptSHA256) || s.tools.holdsKey(h.ToolsSHA256) {
+		return nil, errDigestKey
 	}
 	s.store = st
 	s.cur = m
@@ -377,6 +396,20 @@ func (s *Session) Current() (model, effort string) {
 
 // ID is the session id: a UUID, in the transcript's header and file name.
 func (s *Session) ID() string { return s.store.ID() }
+
+// PromptSize and PromptSHA256 describe the frozen system prompt — the
+// profile's text with Options.Prompt rendered after it — without handing it
+// out: its size in bytes, and the digest the transcript's header already
+// records for it (store.New). The adapter writes both into the journal note
+// that says which files went into the prompt (plan 022 §3.4), and it is the
+// header's own value rather than a second SHA-256 of the same string, so a
+// note and a transcript can never disagree about which prompt a session sent.
+// The text itself stays unexported: it is never stored, and a caller that
+// could read it back would be a caller that could log it.
+//
+// Both are fixed at Open and take no lock.
+func (s *Session) PromptSize() int      { return len(s.system) }
+func (s *Session) PromptSHA256() string { return s.store.Header().SystemPromptSHA256 }
 
 // Redact is the session's redactor, over text a caller is about to hand to
 // Run or Steer. Everything the harness itself writes or reports goes through

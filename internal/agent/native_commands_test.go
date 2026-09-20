@@ -39,7 +39,15 @@ func startContent(t *testing.T, f *nativeFixture, opts Options, ws, home map[str
 	base := t.TempDir()
 	wsDir := writeTree(t, filepath.Join(base, "ws"), ws)
 	gitDir(t, wsDir)
-	homeDir := writeTree(t, filepath.Join(base, "home"), home)
+	return startTrees(t, f, opts, wsDir, writeTree(t, filepath.Join(base, "home"), home))
+}
+
+// startTrees is startContent over two directories the caller built itself, for
+// a case that needs something a map of files cannot say: an installed plugin,
+// whose record in installed_plugins.json names the absolute path it was
+// installed at, or a tree written after the session was constructed.
+func startTrees(t *testing.T, f *nativeFixture, opts Options, wsDir, homeDir string) *nativeContent {
+	t.Helper()
 	diag := &bytes.Buffer{}
 	opts.Workspace, opts.ContentHome, opts.Diag = wsDir, homeDir, diag
 	return &nativeContent{

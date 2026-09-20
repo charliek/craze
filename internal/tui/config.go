@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/paths"
 )
@@ -152,6 +153,63 @@ func ConfigJournal() (on bool, why string) {
 		return false, "config.toml journal is not a bool"
 	}
 	return on, ""
+}
+
+// ConfigCompatClaude is the [compat.claude] table — which classes of Claude's
+// own content a native session reads (plan 022 §3.5) — and the lines to say
+// about it. Every key defaults to true, so an absent table, a partial one and
+// a config craze cannot read all mean "read everything", and what comes back
+// is the set the user turned off (agent.ClaudeCompat).
+//
+// A value that is not a bool is the default *and* a line, which is where this
+// parts company with configSwitch above: those keys govern a decoration — a
+// tab title, a themed background — and a typo in one is not worth a word. A
+// typo here silently strips the user's own instructions or half their slash
+// menu out of a session, which looks like craze having lost them rather than
+// like a config file having a string where a bool goes. It is not a privacy
+// switch either, so unlike ConfigJournal it fails open: a config file craze
+// cannot parse must not also mean a model that no longer knows how this
+// repository builds.
+func ConfigCompatClaude() (agent.ClaudeCompat, []string) {
+	var c agent.ClaudeCompat
+	cfg, err := readConfig()
+	if err != nil {
+		return c, nil
+	}
+	table, ok := cfg["compat"].(map[string]any)
+	if !ok {
+		return c, nil
+	}
+	claude, ok := table["claude"].(map[string]any)
+	if !ok {
+		return c, nil
+	}
+	// Read in the order the table's own documentation lists them, so two
+	// mistakes are always reported in the same order.
+	off := []struct {
+		key string
+		to  *bool
+	}{
+		{"instructions", &c.NoInstructions},
+		{"rules", &c.NoRules},
+		{"skills", &c.NoSkills},
+		{"commands", &c.NoCommands},
+		{"plugins", &c.NoPlugins},
+	}
+	var why []string
+	for _, k := range off {
+		v, present := claude[k.key]
+		if !present {
+			continue
+		}
+		on, isBool := v.(bool)
+		if !isBool {
+			why = append(why, fmt.Sprintf("config.toml compat.claude.%s is not a bool; leaving it on", k.key))
+			continue
+		}
+		*k.to = !on
+	}
+	return c, why
 }
 
 // configSwitch reads a default-on bool key: only a literal `key = false` turns
