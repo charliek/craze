@@ -413,6 +413,15 @@ func TestNativeUnresolvedNameIsSentAsTyped(t *testing.T) {
 // TestNativeInterjectExpands is §3.3's interjection rule: the same text means
 // the same thing whether it was merged into a running turn or refused,
 // queued, and drained through Begin.
+//
+// And the other half of that rule, which the expansion nearly took away: what
+// goes to the model is the expansion, what goes in the transcript is the four
+// words the user typed. The harness echoes an accepted steer back as the text
+// it was handed, and the adapter turns that echo into the EventUser row, so
+// without the pairing a /ship would put a whole command file where the user's
+// own line belongs — the same "wire content is never display content" rule
+// §3.6 pins for the composer's shell mode. The control is the second
+// interjection, which expands to nothing and must be untouched.
 func TestNativeInterjectExpands(t *testing.T) {
 	f := newNativeFixture(t)
 	s := startContent(t, f, Options{}, map[string]string{
@@ -429,8 +438,10 @@ func TestNativeInterjectExpands(t *testing.T) {
 
 	out := startPrompt(s, "look around")
 	await(t, h.reached, "the held tool step")
-	if err := s.Interject(context.Background(), "/ship v3"); err != nil {
-		t.Fatalf("Interject: %v", err)
+	for _, text := range []string{"/ship v3", "and hurry"} {
+		if err := s.Interject(context.Background(), text); err != nil {
+			t.Fatalf("Interject(%q): %v", text, err)
+		}
 	}
 	close(h.release)
 	if got := await(t, out, "the prompt"); got.err != nil {
@@ -452,6 +463,86 @@ func TestNativeInterjectExpands(t *testing.T) {
 	}
 	if !strings.Contains(steered, "Ship v3 now.") {
 		t.Fatalf("the interjection was not expanded: %q", steered)
+	}
+	// The rows: the typed line for the expanded one, and the plain one back
+	// unchanged. No EventCommand is published for either — the announcement
+	// would have no ordering it could hold to against a turn already emitting.
+	evs := drained(s)
+	texts, _ := interjected(evs)
+	if len(texts) != 2 || texts[0] != "/ship v3" || texts[1] != "and hurry" {
+		t.Fatalf("interjection rows %q, want exactly what was typed", texts)
+	}
+	if n := len(ofType(evs, EventCommand)); n != 0 {
+		t.Fatalf("%d command events for an interjection, want none", n)
+	}
+	// And the body really did go out, so the row above is a translation and
+	// not an expansion that never happened.
+	if strings.Contains(strings.Join(texts, "\n"), "Ship v3 now.") {
+		t.Fatalf("a row carries the expansion: %q", texts)
+	}
+}
+
+// TestNativeUnansweredInterjectionQueuesTheTypedText is the other end of the
+// same pairing. An interjection accepted during a turn's final step has no
+// later step to take it up, so it comes back in Result.Unanswered — in the
+// spelling craze sent, expansion and all — and from there it is an ordinary
+// queued row. Three things go wrong if it is queued that way: the row is shown
+// as the whole command file, the size cap judges it by that length, and the
+// drain hands it to Begin, where the /ship still at the start of its first
+// line is expanded a second time. The last is the one the model would notice.
+//
+// The control is the drained turn's request, which must carry the body once.
+func TestNativeUnansweredInterjectionQueuesTheTypedText(t *testing.T) {
+	f := newNativeFixture(t)
+	s := startContent(t, f, Options{}, map[string]string{
+		".claude/commands/ship.md": commandFile("ship it", "Ship $ARGUMENTS now."),
+	}, nil)
+	h := newHeld(t)
+	m := f.models["test/a"]
+	// One step, and it is the turn's last: an interjection taken up here is
+	// accepted and unanswerable.
+	m.push(h.step(textParts("all done"), finishParts(fantasy.FinishReasonStop)))
+
+	out := startPrompt(s, "go")
+	await(t, h.reached, "the held final step")
+	if err := s.Interject(context.Background(), "/ship v3"); err != nil {
+		t.Fatalf("Interject: %v", err)
+	}
+	close(h.release)
+	if got := await(t, out, "the prompt"); got.err != nil {
+		t.Fatalf("Prompt: %v", got.err)
+	}
+	drained(s)
+
+	q := queueTexts(s)
+	if len(q) != 1 || q[0] != "/ship v3" {
+		t.Fatalf("the queue holds %q, want exactly the typed text", q)
+	}
+
+	// Drained as the TUI drains it: taken off the queue and sent through the
+	// ordinary prompt path, which expands it.
+	p, ok := s.PopQueue()
+	if !ok {
+		t.Fatal("the queued row could not be taken")
+	}
+	m.push(answer("shipped"))
+	if got := await(t, startPrompt(s, p.Text), "the drained row"); got.err != nil {
+		t.Fatalf("the drained prompt: %v", got.err)
+	}
+
+	calls := m.requests()
+	if len(calls) != 2 {
+		t.Fatalf("%d requests, want the turn and the drained row", len(calls))
+	}
+	// The last user message of that request, not the first: the drained row
+	// opens its turn behind the history the first one left.
+	texts := userTexts(calls[1])
+	sent := texts[len(texts)-1]
+	if n := strings.Count(sent, "Ship v3 now."); n != 1 {
+		t.Fatalf("the drained row carried the body %d times, want once:\n%s", n, sent)
+	}
+	if n := len(ofType(drained(s), EventCommand)); n != 1 {
+		t.Fatalf("%d command events for the drained row, want one", n)
 	}
 }
 

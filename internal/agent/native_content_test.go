@@ -142,6 +142,29 @@ func TestNativeSourceOrder(t *testing.T) {
 		}
 	})
 
+	t.Run("a command at the repository root beats a deeper skill", func(t *testing.T) {
+		// The chain is one source, so §3.2's "commands before skills within
+		// every source" runs across the whole of it: every command directory
+		// first, innermost first, and only then the skill roots. Read a
+		// directory at a time instead and this subdirectory's skill would take
+		// the name, so what /shared meant would depend on where in the
+		// checkout craze happened to be started.
+		base := t.TempDir()
+		repo := writeTree(t, filepath.Join(base, "repo"), map[string]string{
+			".claude/commands/shared.md": commandFile("the root's command", "body"),
+		})
+		gitDir(t, repo)
+		sub := writeTree(t, filepath.Join(repo, "service"), map[string]string{
+			".claude/skills/shared/SKILL.md": skillDoc("shared", "the subdirectory's skill"),
+			".claude/commands/own.md":        commandFile("the subdirectory's command", "body"),
+		})
+		got := discoverNative(resolveNativeSources(sub, ""), nil)
+		wantNames(t, got, "project:own", "project:shared")
+		if got[1].Kind != PluginKindCommand || got[1].Description != "the root's command" {
+			t.Fatalf("shared is %+v, want the repository root's command", got[1])
+		}
+	})
+
 	t.Run(".claude/skills is read before .agents/skills", func(t *testing.T) {
 		f := contentTree(t, map[string]string{
 			".claude/skills/dup/SKILL.md": skillDoc("dup", "from .claude"),
@@ -222,6 +245,39 @@ func TestNativeSameFileDeduplication(t *testing.T) {
 		// second is that it is the same file, which a path compare would miss
 		// here and a case-insensitive volume would miss elsewhere.
 		wantNames(t, got, "project:first")
+	})
+
+	t.Run("a plugin file hard-linked to a project one is read once", func(t *testing.T) {
+		// The de-duplication belongs to the shared discovery, not to native's
+		// own two sources: a plugin reaching the same inode by another route —
+		// a hard link, or two plugin roots exposing one file — would otherwise
+		// list it a second time under a qualified name of its own and spend a
+		// second file of the budget on it.
+		f := contentTree(t, map[string]string{
+			".claude/commands/shipit.md": commandFile("the project's", "body"),
+		}, nil)
+		install := writeTree(t, filepath.Join(f.home, ".claude", "plugins", "pack"), map[string]string{
+			"commands/other.md": commandFile("the plugin's own", "body"),
+		})
+		linked := filepath.Join(install, "commands", "shipit.md")
+		if err := os.Link(filepath.Join(f.workspace, ".claude", "commands", "shipit.md"), linked); err != nil {
+			t.Skipf("hard link: %v", err)
+		}
+		claudeFixture{
+			installs: map[string][]claudeInstall{"pack@mkt": {{Scope: "user", InstallPath: install}}},
+			user:     map[string]bool{"pack@mkt": true},
+		}.write(t, f.home, f.workspace)
+
+		n := newNativeScan(f.src, nil)
+		got := n.run()
+		// The project reached it first, so it keeps the project's id; the
+		// plugin's own file is still found.
+		wantNames(t, got, "project:shipit", "pack:other")
+		// Three entry files are named by the walks and two are read: the
+		// link is refused before the budget is spent on it.
+		if n.d.nFiles != 2 {
+			t.Fatalf("the scan spent %d files, want 2: one per inode", n.d.nFiles)
+		}
 	})
 }
 
@@ -462,6 +518,70 @@ func TestNativeKeepsAHiddenSkillCursorDrops(t *testing.T) {
 	}
 }
 
+// TestNativePluginsAreParsedNatively: the parse option is the scan's, not each
+// source's. An installed plugin is the bulk of the owner's content, so a plugin
+// read with cursor's rules inside a native scan would drop every hidden skill,
+// leave WhenToUse and NoModel empty for the catalog C6 builds out of exactly
+// these rows, and say nothing about a file whose name craze could never offer.
+// Each case asserts the native reading and the cursor reading of one tree, so
+// the difference is the option and not the fixture.
+func TestNativePluginsAreParsedNatively(t *testing.T) {
+	files := map[string]string{
+		"skills/quiet/SKILL.md": skillDoc("quiet", "not for the menu", "user-invocable: false"),
+		"skills/timed/SKILL.md": skillDoc("timed", "a listed skill", "when-to-use: after a release"),
+		"skills/mine/SKILL.md":  skillDoc("mine", "the user's alone", "disable-model-invocation: true"),
+		"commands/ok.md":        commandFile("a plain command", "body"),
+		"commands/bad name.md":  commandFile("a name craze could never offer", "body"),
+	}
+	f := contentTree(t, nil, nil)
+	install := writeTree(t, filepath.Join(f.home, ".claude", "plugins", "pack"), files)
+	claudeFixture{
+		installs: map[string][]claudeInstall{"pack@mkt": {{Scope: "user", InstallPath: install}}},
+		user:     map[string]bool{"pack@mkt": true},
+	}.write(t, f.home, f.workspace)
+
+	got, lines := f.discover()
+	// The hidden skill is kept, so it takes part in naming and reaches the
+	// catalog; the badly named command is the one entry that goes.
+	wantNames(t, got, "pack:ok", "pack:mine", "pack:quiet", "pack:timed")
+	byName := map[string]PluginEntry{}
+	for _, e := range got {
+		byName[e.Name] = e
+	}
+	if !byName["quiet"].Hidden {
+		t.Fatalf("quiet is %+v, want a Hidden entry rather than a dropped one", byName["quiet"])
+	}
+	if got := byName["timed"].WhenToUse; got != "after a release" {
+		t.Fatalf("timed when-to-use %q", got)
+	}
+	if !byName["mine"].NoModel {
+		t.Fatalf("mine is %+v, want NoModel", byName["mine"])
+	}
+	if byName["ok"].Hidden || byName["ok"].NoModel || byName["ok"].WhenToUse != "" {
+		t.Fatalf("ok is %+v, want the three fields at their zero values", byName["ok"])
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "bad name") {
+		t.Fatalf("diagnostics %q, want one naming the file craze refused", lines)
+	}
+
+	// Cursor over the same tree: the hidden skill is gone, the three fields
+	// are zero on every row, and nothing is said about the refused file.
+	cursorWS := t.TempDir()
+	writeTree(t, filepath.Join(cursorWS, "pack"), files)
+	var cursorLines []string
+	cursor := discoverPlugins(PluginScan{Dirs: true}, cursorWS, "", []string{"pack"},
+		func(msg string) { cursorLines = append(cursorLines, msg) })
+	wantNames(t, cursor, "pack:ok", "pack:mine", "pack:timed")
+	for _, e := range cursor {
+		if e.Hidden || e.NoModel || e.WhenToUse != "" {
+			t.Fatalf("cursor filled a native field: %+v", e)
+		}
+	}
+	if len(cursorLines) != 0 {
+		t.Fatalf("cursor said %q; it says nothing about a name it cannot offer", cursorLines)
+	}
+}
+
 // TestNativeLayoutDepth: a project's commands and skills are read at the depth
 // the convention puts them and no deeper, and the user's skills are the one
 // place a nested tree is walked.
@@ -523,7 +643,9 @@ func TestNativeUserSkillDepthCap(t *testing.T) {
 
 // TestNativeBudgetIsOneAcrossTheSources: the file budget is the scan's, not
 // each source's, so a workspace that exhausts it leaves nothing for the user
-// root or the plugins behind it.
+// root or the plugins behind it. The plugin source is installed and enabled
+// here on purpose: without one the case would pass just as well against a
+// plugin phase that started its own count.
 func TestNativeBudgetIsOneAcrossTheSources(t *testing.T) {
 	ws := make(map[string]string, maxPluginFiles)
 	for i := 0; i < maxPluginFiles; i++ {
@@ -533,6 +655,15 @@ func TestNativeBudgetIsOneAcrossTheSources(t *testing.T) {
 		".claude/commands/user-cmd.md":    commandFile("d", "body"),
 		".claude/skills/user-sk/SKILL.md": skillDoc("user-sk", "d"),
 	})
+	install := writeTree(t, filepath.Join(f.home, ".claude", "plugins", "pack"), map[string]string{
+		"commands/plugin-cmd.md":    commandFile("d", "body"),
+		"skills/plugin-sk/SKILL.md": skillDoc("plugin-sk", "d"),
+	})
+	claudeFixture{
+		installs: map[string][]claudeInstall{"pack@mkt": {{Scope: "user", InstallPath: install}}},
+		user:     map[string]bool{"pack@mkt": true},
+	}.write(t, f.home, f.workspace)
+
 	got, _ := f.discover()
 	if len(got) != maxPluginFiles {
 		t.Fatalf("read %d entries, want the budget %d", len(got), maxPluginFiles)
@@ -542,6 +673,15 @@ func TestNativeBudgetIsOneAcrossTheSources(t *testing.T) {
 			t.Fatalf("%s:%s was read past the budget", e.Plugin, e.Name)
 		}
 	}
+	// The control: the same plugin is found when there is budget left for it,
+	// so its absence above is the budget and not a misconfigured fixture.
+	bare := contentTree(t, nil, nil)
+	claudeFixture{
+		installs: map[string][]claudeInstall{"pack@mkt": {{Scope: "user", InstallPath: install}}},
+		user:     map[string]bool{"pack@mkt": true},
+	}.write(t, bare.home, bare.workspace)
+	spare, _ := bare.discover()
+	wantNames(t, spare, "pack:plugin-cmd", "pack:plugin-sk")
 }
 
 // TestNativeSymlinksAndGitignore: a link where content should be is not
@@ -599,6 +739,24 @@ func TestNativeSymlinksAndGitignore(t *testing.T) {
 		wantNames(t, got, "user:kept")
 	})
 
+	t.Run("a symlinked user root is followed", func(t *testing.T) {
+		// The root is configuration, not content: a ~/.claude that links into
+		// a dotfiles checkout is the ordinary arrangement, and it is the user
+		// pointing at their own files — exactly the distinction cursor draws
+		// between a --plugin-dir that is a link (followed) and a link inside a
+		// plugin (refused). Only what is under the root is filtered.
+		f := contentTree(t, nil, map[string]string{
+			"dotfiles/claude/skills/kept/SKILL.md": skillDoc("kept", "through the link"),
+			"dotfiles/claude/commands/also.md":     commandFile("through the link", "body"),
+		})
+		if err := os.Symlink(filepath.Join(f.home, "dotfiles", "claude"), f.src.UserRoot); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		got, lines := f.discover()
+		wantNoLines(t, lines)
+		wantNames(t, got, "user:also", "user:kept")
+	})
+
 	t.Run("a .gitignore changes nothing", func(t *testing.T) {
 		f := contentTree(t, map[string]string{
 			".gitignore":                    ".claude/\n.agents/\n",
@@ -611,13 +769,61 @@ func TestNativeSymlinksAndGitignore(t *testing.T) {
 	})
 }
 
+// TestNativeNameIdentityAsymmetry pins a difference native inherits rather
+// than chooses: a skill's name goes through cursor's plugin normalisation
+// (lowercased, whitespace runs folded to "-") before the identifier class is
+// applied, and a command's does not. So `name: Foo` is a skill called foo and
+// a command still called Foo, and `name: My Skill` is my-skill while
+// `name: My Command` is refused with a line.
+//
+// Both halves are deliberate. The normalisation is cursor's own tested
+// behaviour (parsePluginSkill), and changing it for native would move cursor's
+// rows or fork a parser; keeping it means the owner's skills survive a name
+// nobody kebab-cased. The command side stays strict because a command's name
+// is the file's stem as often as the frontmatter's, and folding it would
+// invent a spelling the author never wrote.
+func TestNativeNameIdentityAsymmetry(t *testing.T) {
+	f := contentTree(t, map[string]string{
+		".claude/commands/kept.md":        "---\nname: Ship\ndescription: d\n---\nbody\n",
+		".claude/commands/spaced.md":      "---\nname: My Command\ndescription: d\n---\nbody\n",
+		".claude/skills/a-upper/SKILL.md": skillDoc("Foo", "d"),
+		".claude/skills/b-space/SKILL.md": skillDoc("My Skill", "d"),
+	}, nil)
+	got, lines := f.discover()
+	wantNames(t, got, "project:Ship", "project:foo", "project:my-skill")
+	if len(lines) != 1 || !strings.Contains(lines[0], "spaced.md") {
+		t.Fatalf("diagnostics %q, want one about the command craze could not offer", lines)
+	}
+}
+
 // TestNativeRelocatedUserRoot is A2, the seam's whole point: the loaders are
 // told where content is and go nowhere else. The user root here has another
-// name in another place, there is no home at all, and no plugin source — so a
-// reader that reached for the developer's own ~/.claude would show up as an
-// entry this fixture never wrote.
+// name in another place, there is no home at all, and no plugin source.
+//
+// The process's own HOME is pointed at a decoy holding content of exactly the
+// shape a reader would look for, because an empty home proves nothing: the
+// assertion has to be that a loader reaching for HomeDir() *finds* something,
+// and that none of it is here. t.Setenv, not a real home, so the case says the
+// same thing on any machine.
 func TestNativeRelocatedUserRoot(t *testing.T) {
 	base := t.TempDir()
+	decoy := writeTree(t, filepath.Join(base, "decoy-home"), map[string]string{
+		".claude/commands/decoy-cmd.md":       commandFile("nobody asked for this", "body"),
+		".claude/skills/decoy-skill/SKILL.md": skillDoc("decoy-skill", "nobody asked for this"),
+	})
+	t.Setenv("HOME", decoy)
+	// The control: the decoy really is where a reader with no sources would
+	// go, so its absence below is the seam and not an empty directory.
+	if got := HomeDir(); got != decoy {
+		t.Fatalf("HomeDir() = %q, want the decoy %q", got, decoy)
+	}
+	if found := discoverNative(contentSources{
+		UserRoot: filepath.Join(HomeDir(), ".claude"),
+		Layout:   claudeLayout(),
+	}, nil); len(found) != 2 {
+		t.Fatalf("the decoy holds %v, want the two entries it was written with", qualifiedNames(found))
+	}
+
 	workspace := writeTree(t, filepath.Join(base, "ws"), map[string]string{
 		".claude/commands/project-cmd.md": commandFile("the project's", "body"),
 	})

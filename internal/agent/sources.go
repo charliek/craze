@@ -42,6 +42,13 @@ type contentLayout struct {
 	UserCommands string
 	UserSkills   string
 	UserRules    string
+	// UserInstructions are the instruction files read at the user root, before
+	// UserRules and before any chain directory (C5). It is a list for
+	// Instructions' reason — Claude's convention may grow another spelling —
+	// and it is here rather than a constant at C5's use site because a loader
+	// that knew one filename of its own would be a loader the owner could not
+	// relocate by changing this table.
+	UserInstructions []string
 }
 
 // claudeLayout is that convention, the whole of it, in one place.
@@ -61,9 +68,10 @@ func claudeLayout() contentLayout {
 			filepath.Join(".claude", "skills"),
 			filepath.Join(".agents", "skills"),
 		},
-		UserCommands: "commands",
-		UserSkills:   "skills",
-		UserRules:    "rules",
+		UserCommands:     "commands",
+		UserSkills:       "skills",
+		UserRules:        "rules",
+		UserInstructions: []string{"CLAUDE.md"},
 	}
 }
 
@@ -135,11 +143,25 @@ func resolveNativeSources(workspace, home string) contentSources {
 // repository's, and loading them would put another project's rules in front of
 // the model (§4, deliberate). When there is no .git within maxChainDirs, or the
 // filesystem root arrives first, the chain is the workspace alone — a directory
-// that is not in a checkout gets its own content and nothing above it.
+// that is not in a checkout gets its own content and nothing above it. So is a
+// workspace that does not resolve, and that one is not walked at all; see
+// below.
 func repoChain(workspace string) []string {
-	start := physicalPath(workspace)
+	start, resolved := physicalPath(workspace)
 	if start == "" {
 		return nil
+	}
+	if !resolved {
+		// The workspace is not there, or a component of it is unreadable or a
+		// symlink loop. Its ancestors are then not this session's ancestors in
+		// any sense craze can stand behind: walking the cleaned spelling would
+		// load /repo's instruction files, commands and skills for a session
+		// opened on /repo/missing, which is another project's content in front
+		// of the model on the strength of a path that resolved to nothing. The
+		// spelling is still returned rather than nothing, because a chain of
+		// one is still a session and refusing to open one over this would not
+		// be.
+		return []string{start}
 	}
 	// up holds the directories examined so far, innermost first, so the moment
 	// a .git turns up the chain is that slice read backwards.
@@ -163,22 +185,23 @@ func repoChain(workspace string) []string {
 	return []string{start}
 }
 
-// physicalPath is the workspace as the filesystem knows it. EvalSymlinks
-// resolves every component, so a checkout reached through a symlinked path
-// walks up its real ancestors — the link's parent is not the repository — and
-// the os.SameFile de-duplication in the discovery below compares like with
-// like. A path that cannot be resolved at all, because it is not there yet or a
-// component is unreadable, falls back to its cleaned absolute spelling: a chain
-// of one is still a session, and refusing to open one over it would not be.
-func physicalPath(path string) string {
+// physicalPath is the workspace as the filesystem knows it, and whether the
+// filesystem knew it at all. EvalSymlinks resolves every component, so a
+// checkout reached through a symlinked path walks up its real ancestors — the
+// link's parent is not the repository — and the os.SameFile de-duplication in
+// the discovery below compares like with like. A path that cannot be resolved,
+// because it is not there yet or a component is unreadable or links to itself,
+// comes back as its cleaned absolute spelling with false: the caller may still
+// open a session on that spelling, but it has no ancestors it may climb.
+func physicalPath(path string) (string, bool) {
 	abs := absOrSelf(path)
 	if abs == "" {
-		return ""
+		return "", false
 	}
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		return real
+		return real, true
 	}
-	return abs
+	return abs, false
 }
 
 // hasGitEntry reports that dir is the top of a checkout. Lstat, not Stat, and

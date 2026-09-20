@@ -83,6 +83,15 @@ type nativeSession struct {
 	emitMu  sync.Mutex
 	queue   PromptQueue
 
+	// steerMu guards steerTexts, the running turn's interjections in both of
+	// their spellings, and is a leaf: Interject takes it with nothing else
+	// held, so does the sink, and so does the prompt on its way out. Never
+	// under s.mu — an ordering is what a leaf is for not having. The pairs
+	// belong to one turn and are dropped when its claim is released, so a turn
+	// can never translate a row by the previous turn's expansions.
+	steerMu    sync.Mutex
+	steerTexts []steerText
+
 	// toolMu guards the tool rows, which are merged from the harness's tool
 	// events on Fantasy's tool goroutines as well as on its stream one
 	// (native_tools.go). It is its own lock, not s.mu: the sink runs inside
@@ -125,6 +134,103 @@ type nativeSession struct {
 	// returns, which is what Cancel and Close wait on.
 	turnCancel context.CancelFunc
 	released   chan struct{}
+}
+
+// steerText is one interjection in both of its spellings: sent is what went
+// into the turn, expansions and all, and typed is the line the user actually
+// wrote. Wire content is never display content — the rule §3.6 pins for the
+// composer's shell mode — and an interjection is the one place the two can
+// differ without anything else in the adapter noticing, because the harness
+// takes the sent text and hands it back twice: once as the echo the
+// transcript's row is made of, and once in Result.Unanswered, which is what a
+// turn could not answer and the queue then holds.
+//
+// Both of those have to be the typed text. The row for the display reason; the
+// queue for three: a queued row is shown, a queued row is drained through
+// Begin — where nativeRefs would find the /name still at the start of its line
+// and expand a second time, sending the block twice and spending the 128 KiB
+// total twice — and a queued row is refused over the queue's size cap, so an
+// interjection that fitted as four words could vanish as an expansion.
+type steerText struct{ sent, typed string }
+
+// rememberSteer records that pairing, before Steer is called: the turn's
+// goroutine may take the text up and echo it the instant Steer returns, or
+// sooner, so a pair remembered afterwards could arrive too late for its own
+// row. Identical spellings are not recorded — there is nothing to translate,
+// and typedSteer's fallback answers them.
+func (s *nativeSession) rememberSteer(sent, typed string) {
+	if sent == typed {
+		return
+	}
+	s.steerMu.Lock()
+	s.steerTexts = append(s.steerTexts, steerText{sent: sent, typed: typed})
+	s.steerMu.Unlock()
+}
+
+// dropSteer takes one pairing back, for a steer the harness refused: there
+// will be no echo and no unanswered entry for it, and a caller that keeps
+// interjecting into a turn already at the steer cap would otherwise grow the
+// list without bound inside one turn. The first exact match, since two
+// pairings of one sent text are identical by construction.
+func (s *nativeSession) dropSteer(sent string) {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	for i, st := range s.steerTexts {
+		if st.sent == sent {
+			s.steerTexts = append(s.steerTexts[:i], s.steerTexts[i+1:]...)
+			return
+		}
+	}
+}
+
+// typedSteer is what the user typed for one of this turn's steers, found by
+// what craze sent and deliberately not removed: one pairing answers both
+// readings of the same steer — the harness's echo, which arrives during Run,
+// and Result.Unanswered, which arrives after it — and a lookup that consumed
+// the pairing would leave the second one with nothing. Duplicates cost
+// nothing, because sent is a pure function of typed: two entries with one sent
+// hold one typed.
+//
+// Anything unmatched comes back as itself, so an echo craze never recorded
+// loses no row and an Unanswered element that was never expanded passes
+// through untouched.
+func (s *nativeSession) typedSteer(sent string) string {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	for _, st := range s.steerTexts {
+		if st.sent == sent {
+			return st.typed
+		}
+	}
+	return sent
+}
+
+// typedSteers is that lookup over the whole of Result.Unanswered, and it is
+// its own function on purpose: the translation belongs to native, on the value
+// the moment Run hands it over, not to whatever is downstream of it today. The
+// caller that puts these rows in the queue is being rewritten in parallel to
+// return them from Prompt instead, and a translation done here survives that
+// where one woven into the requeue would not.
+//
+// nil in, nil out: a turn that answered everything allocates nothing.
+func (s *nativeSession) typedSteers(sent []string) []string {
+	if len(sent) == 0 {
+		return sent
+	}
+	out := make([]string, 0, len(sent))
+	for _, text := range sent {
+		out = append(out, s.typedSteer(text))
+	}
+	return out
+}
+
+// forgetSteers drops the turn's pairings, from the release of its claim: the
+// next turn's expansions are its own, and a session that kept every turn's
+// would grow for as long as it ran.
+func (s *nativeSession) forgetSteers() {
+	s.steerMu.Lock()
+	s.steerTexts = nil
+	s.steerMu.Unlock()
 }
 
 // NewNative is the native adapter with a seam: tweak, when non-nil, edits the
@@ -544,8 +650,11 @@ func (s *nativeSession) claim(text string) func(context.Context) (Result, error)
 func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct{}) (Result, error) {
 	// One release for the whole claim, whichever way it ends, and after the
 	// turn's last event: a Cancel or Close waiting on rel then finds the
-	// ending already emitted and the slot free.
+	// ending already emitted and the slot free. The turn's steer pairings go
+	// with it, before s.mu is taken rather than under it, so steerMu stays a
+	// leaf with no lock ordering of its own.
 	defer func() {
+		s.forgetSteers()
 		s.mu.Lock()
 		s.claimed, s.inPrompt, s.cancelling = false, false, false
 		s.turnCancel = nil
@@ -611,6 +720,11 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	}
 
 	res, err := hs.Run(turnCtx, sent, s.sink)
+	// Translated the moment Run hands it over, and before anything reads it:
+	// what a turn could not answer comes back in the spelling craze sent, and
+	// every use of it downstream — the queue's row, the size cap that row is
+	// judged by, the draft Begin re-expands when it drains — is the user's.
+	unanswered := s.typedSteers(res.Unanswered)
 	if errors.Is(err, harness.ErrInTurn) {
 		// Unreachable: the claim admits one continuation at a time and each
 		// Run returns before its claim is released. Said as the refusal it
@@ -624,7 +738,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// the head of the queue, before the ending event: from there it is an
 	// ordinary queued row, taken by the drain after a done or a cancel and
 	// cleared with the rest after an error (plan 019 §3.10).
-	s.queueUnanswered(res.Unanswered)
+	s.queueUnanswered(unanswered)
 	var failed error
 	switch {
 	case err != nil:
@@ -795,13 +909,18 @@ func (s *nativeSession) sink(ev harness.Event) {
 	case harness.ToolFinished:
 		s.toolFinished(e)
 	case harness.Steered:
-		// The turn took up an interjection. The text is the caller's own,
-		// straight back out unchanged — it never went near the model or a
-		// provider, so there is nothing to sanitize, exactly as the live
-		// session emits grok's interjection broadcast. It comes from the
-		// turn's goroutine, always before the turn's ending event, so it can
-		// never follow the EventDone or EventError below.
-		s.emit(Event{Type: EventUser, Text: e.Text, Interjection: true})
+		// The turn took up an interjection. What the harness echoes is what
+		// craze sent it, which since §3.3 is the expansion — so the row is the
+		// line the user typed, looked up by that echo: a transcript that
+		// answered "/linux-test" with the whole skill file would be showing the
+		// wire back to the person who wrote four words. The text is the
+		// caller's own either way, straight back out unsanitized, exactly as
+		// the live session emits grok's interjection broadcast: it never went
+		// near the model or a provider.
+		//
+		// It comes from the turn's goroutine, always before the turn's ending
+		// event, so it can never follow the EventDone or EventError below.
+		s.emit(Event{Type: EventUser, Text: s.typedSteer(e.Text), Interjection: true})
 	}
 }
 
@@ -1067,11 +1186,27 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 	// text does not mean two different things depending on whether the turn
 	// happened to be running when it was sent: a refused interjection comes
 	// back to the caller and is queued, and a queued row is drained through
-	// Begin, which expands it. Nothing is published for it — the steer's own
-	// EventUser comes from the turn's goroutine through the sink, which is the
-	// only ordering that keeps it ahead of the turn's ending event.
+	// Begin, which expands it.
+	//
+	// No EventCommand is published for the expansion, unlike the prompt path.
+	// There it is announced before hs.Run under the turn's own context, which
+	// is what keeps it ahead of the turn's events; here the turn is already
+	// running and emitting, so an announcement made from this goroutine could
+	// land anywhere among them — after the model's answer to the very block it
+	// describes, or after the turn's ending. The expansion still reaches the
+	// model, and the row the user sees is the EventUser the sink emits, which
+	// is the only ordering that keeps an interjection ahead of that ending.
 	sent, _ := nativePrompt(text, refs, sessionID, hs.Redact)
-	switch err := hs.Steer(turn, sent); {
+	// Paired before the steer, because the turn's goroutine may echo it back
+	// through the sink before Steer has even returned here.
+	s.rememberSteer(sent, text)
+	err := hs.Steer(turn, sent)
+	if err != nil {
+		// Refused: nothing will ever be echoed or returned for it, so the
+		// pairing goes rather than sit out the turn.
+		s.dropSteer(sent)
+	}
+	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, harness.ErrNotInTurn):

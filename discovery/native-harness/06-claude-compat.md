@@ -24,9 +24,12 @@ D-13's method, not its destination.
 Discovery walks three sources, first wins on the dedupe key; within every
 source, commands are listed before skills:
 
-1. **Workspace**, each directory of the chain innermost first:
-   `.claude/commands/*.md`, `.claude/skills/*/SKILL.md`,
-   `.agents/skills/*/SKILL.md`. Pseudo plugin id `project`.
+1. **Workspace**, the whole chain as one source: every
+   `.claude/commands/*.md`, innermost directory first, and then every
+   `.claude/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md`, innermost
+   first again — commands before skills across the chain, not one
+   directory at a time, or a subdirectory's skill would beat the
+   repository root's command of the same name. Pseudo plugin id `project`.
 2. **User**, under `UserRoot`: `commands/*.md` and `skills/**/SKILL.md`,
    skipping `skills/synced/` (Claude's own app-synced skills). Pseudo id
    `user`.
@@ -34,11 +37,24 @@ source, commands are listed before skills:
 
 `project` and `user` are reserved ids: a real plugin named either is
 skipped for native, with one diagnostic line. Discovered files are
-de-duplicated by `os.SameFile` before naming, so a home directory that is
-also a chain directory does not list a skill twice. Claude's vendor default
-skills (`pdf`, `docx`, `xlsx`, `pptx`, `skill-creator`) are dropped when
-their path holds a `.claude` segment. Symlinked roots and entries are
-skipped; `.gitignore` is never consulted.
+de-duplicated by `os.SameFile` before naming, across all three sources, so
+a home directory that is also a chain directory does not list a skill
+twice and a hard link costs one file of the budget rather than two.
+
+Claude's vendor default skills (`pdf`, `docx`, `xlsx`, `pptx`,
+`skill-creator`) are dropped from **the workspace and user sources only**,
+and there only when their path holds a `.claude` segment. Plugins are not
+filtered by name at all: every plugin installs under `<home>/.claude`, so
+the path condition matches all of them and could only discriminate by
+name — which would throw away a skill somebody deliberately installed.
+Claude's own defaults do not arrive through a plugin; on this machine they
+sit under the user root's `skills/synced/`, which the scan skips whole.
+
+Symlinks are skipped **within** a root — a linked `.claude/commands`, a
+linked `SKILL.md`, a linked skill directory — but a root the user
+configured is followed: `UserRoot` itself may be a symlink, as a dotfiles
+`~/.claude` usually is, exactly as cursor follows a `--plugin-dir` pointed
+at a link while refusing links inside it. `.gitignore` is never consulted.
 
 ## The chain
 
@@ -46,7 +62,11 @@ skipped; `.gitignore` is never consulted.
 holding a `.git` entry of any kind — file, directory, or symlink —
 inclusive. If none is found within 16 levels or before the filesystem
 root, the chain is the workspace alone. A submodule or a worktree stops at
-its own `.git`, so a superproject's files are not loaded.
+its own `.git`, so a superproject's files are not loaded. A workspace
+`EvalSymlinks` cannot resolve — it is not there, a component is
+unreadable, a link loops — is the cleaned spelling alone and is **not**
+walked: a path that resolved to nothing has no ancestors whose
+instructions craze may put in front of the model.
 
 ## Instruction files
 

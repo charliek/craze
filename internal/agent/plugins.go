@@ -136,9 +136,29 @@ type pluginDiscovery struct {
 	// real plugin shipping either id would otherwise take entries under a
 	// spelling the menu and the expansion path already mean something else by.
 	skipID func(id string) bool
-	seen   map[string]struct{}
-	nFiles int
-	out    []PluginEntry
+	// parse is how every entry file of this run is read. The zero value is
+	// cursor's reading and is what newPluginDiscovery leaves here, so a
+	// provider scan is byte-identical; native sets its own before any source
+	// runs, because a plugin's entries go into the same list as its workspace's
+	// and its user's and have to answer the same questions — a Hidden skill
+	// kept rather than dropped, WhenToUse and NoModel filled for the
+	// model-facing catalog, one diagnostic for a file whose name craze could
+	// never offer. Three sources parsed two different ways would be one list
+	// whose rows meant different things depending on where they came from.
+	parse pluginParseOpts
+	// dedupeFiles turns on the os.SameFile check in readFile, and files is what
+	// that check has seen. It is off for cursor, whose budget accounting and
+	// results are a promise craze has already made, and on for native, whose
+	// three sources can reach one inode by several routes: a home directory
+	// that is also a chain directory offers every user skill twice, under two
+	// different plugin:name keys, and a hard link — or two plugin roots
+	// exposing one file — does the same inside a single source. A path compare
+	// would miss both, and a case-insensitive volume besides.
+	dedupeFiles bool
+	files       []os.FileInfo
+	seen        map[string]struct{}
+	nFiles      int
+	out         []PluginEntry
 }
 
 func (d *pluginDiscovery) note(format string, args ...any) {
@@ -496,7 +516,9 @@ func absOrSelf(path string) string {
 // rootEntries reads one plugin's conventional layout: commands/*.md at the top
 // level, then skills/*/SKILL.md one level down, each in lexical order. The
 // commands go first so that addPlugin's dedupe, the only one there is, resolves
-// a command and a skill of one name the way cursor's loader does.
+// a command and a skill of one name the way cursor's loader does. The files are
+// read under the run's own parse option, never a fresh zero value: which
+// reading a plugin gets is the scan's decision, not this function's.
 func (d *pluginDiscovery) rootEntries(id, root string) []PluginEntry {
 	var out []PluginEntry
 	add := func(e PluginEntry, ok bool) {
@@ -510,14 +532,14 @@ func (d *pluginDiscovery) rootEntries(id, root string) []PluginEntry {
 	for _, name := range pluginMarkdownFiles(commands) {
 		path := filepath.Join(commands, name)
 		if data, ok := d.readFile(path); ok {
-			add(parsePluginCommand(path, data, pluginParseOpts{}))
+			add(parsePluginCommand(path, data, d.parse))
 		}
 	}
 	skills := pluginSubdir(root, "skills")
 	for _, dir := range childDirs(skills) {
 		path := filepath.Join(skills, dir, "SKILL.md")
 		if data, ok := d.readFile(path); ok {
-			add(parsePluginSkill(path, data, pluginParseOpts{}))
+			add(parsePluginSkill(path, data, d.parse))
 		}
 	}
 	return out
@@ -599,6 +621,12 @@ func pluginMarkdownFiles(dir string) []string {
 // regular file within the per-file ceiling. The size is checked twice — once
 // from the stat and once from what was read — because the file can grow in
 // between.
+//
+// Lstat, not Stat: a symlinked entry file is not read at all, the convention
+// every walk feeding this holds to. When dedupeFiles is on, an inode this run
+// has already read is refused here rather than after parsing, so a file reached
+// twice costs the budget once and the first source to reach it is the one whose
+// id it keeps.
 func (d *pluginDiscovery) readFile(path string) ([]byte, bool) {
 	if d.nFiles >= maxPluginFiles {
 		return nil, false
@@ -607,8 +635,26 @@ func (d *pluginDiscovery) readFile(path string) ([]byte, bool) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPluginBytes {
 		return nil, false
 	}
+	if d.dedupeFiles {
+		for _, seen := range d.files {
+			if os.SameFile(seen, info) {
+				return nil, false
+			}
+		}
+	}
 	d.nFiles++
-	return readCappedFile(path)
+	data, ok := readCappedFile(path)
+	if !ok {
+		return nil, false
+	}
+	if d.dedupeFiles {
+		// Recorded from the stat above, not a second one: readCappedFile stats
+		// the open file itself, and what matters here is the inode the walk
+		// named, so that a file which changed underneath is still not read
+		// twice under two names.
+		d.files = append(d.files, info)
+	}
+	return data, true
 }
 
 // parsePluginCommand reads a commands/*.md the way cursor's own plugin command

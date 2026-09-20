@@ -77,9 +77,10 @@ func TestResolveNativeSources(t *testing.T) {
 				filepath.Join(".claude", "skills"),
 				filepath.Join(".agents", "skills"),
 			},
-			UserCommands: "commands",
-			UserSkills:   "skills",
-			UserRules:    "rules",
+			UserCommands:     "commands",
+			UserSkills:       "skills",
+			UserRules:        "rules",
+			UserInstructions: []string{"CLAUDE.md"},
 		},
 		Plugins: PluginScan{ClaudePlugins: true},
 		Home:    home,
@@ -107,15 +108,44 @@ func TestNativeChain(t *testing.T) {
 		build func(t *testing.T, base string) (workspace string, want []string)
 	}{
 		{
-			// The assertion is that the walk found nothing above the
-			// workspace. It holds unless the temporary directory itself sits
-			// inside a checkout, which would be a real finding about the
-			// machine rather than a flake.
+			// Deep on purpose: the walk examines the workspace and fifteen
+			// ancestors, so a fixture maxChainDirs levels down is one whose
+			// every examined directory this test created and none of which
+			// holds a .git. A shallower one would be asserting that TMPDIR has
+			// no checkout above it, which is a fact about the machine and not
+			// about the chain.
 			name: "no repository anywhere is the workspace alone",
 			build: func(t *testing.T, base string) (string, []string) {
-				dirs := nested(t, filepath.Join(base, "plain"), 2)
+				dirs := nested(t, filepath.Join(base, "plain"), maxChainDirs)
 				ws := dirs[len(dirs)-1]
 				return ws, []string{physical(t, ws)}
+			},
+		},
+		{
+			// A workspace that does not resolve has no ancestors craze may
+			// climb: /repo's content is not this session's just because the
+			// session was opened on a path spelled under it. The want is the
+			// unresolved spelling, which is what the chain keeps.
+			name: "a workspace that is not there does not load its repository",
+			build: func(t *testing.T, base string) (string, []string) {
+				repo := writeTree(t, filepath.Join(base, "repo"), nil)
+				gitDir(t, repo)
+				missing := filepath.Join(repo, "missing")
+				return missing, []string{missing}
+			},
+		},
+		{
+			// The same, reached the other way: EvalSymlinks fails on a loop
+			// rather than on an absence, and the answer has to be the same.
+			name: "a symlink loop does not load its repository",
+			build: func(t *testing.T, base string) (string, []string) {
+				repo := writeTree(t, filepath.Join(base, "repo"), nil)
+				gitDir(t, repo)
+				loop := filepath.Join(repo, "loop")
+				if err := os.Symlink(loop, loop); err != nil {
+					t.Skipf("symlink: %v", err)
+				}
+				return loop, []string{loop}
 			},
 		},
 		{

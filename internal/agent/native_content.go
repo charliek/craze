@@ -66,6 +66,14 @@ var vendorDefaultSkills = map[string]bool{
 // and what is on disk, so a caller can run it before the session exists and
 // assign the result afterwards.
 func discoverNative(src contentSources, warn func(string)) []PluginEntry {
+	return newNativeScan(src, warn).run()
+}
+
+// newNativeScan and run are discoverNative in two halves, so that a test can
+// hold the scan and read what it spent as well as what it found: the file
+// budget is shared across all three sources, and "one inode costs one file"
+// is not visible in the entries alone.
+func newNativeScan(src contentSources, warn func(string)) *nativeScan {
 	n := &nativeScan{
 		src: src,
 		// The workspace the plugin readers are given is the innermost chain
@@ -75,26 +83,32 @@ func discoverNative(src contentSources, warn func(string)) []PluginEntry {
 		d: newPluginDiscovery(src.workspace(), src.Home, warn),
 	}
 	n.d.skipID = n.reservedID
+	// Native's reading of an entry file, for every source of this run, plugins
+	// included: the three extra frontmatter fields, a hidden entry kept rather
+	// than dropped, and one line about a file whose name craze could never
+	// offer. The plugins are the bulk of the owner's content, and C6's catalog
+	// draws WhenToUse and NoModel from exactly those rows.
+	n.d.parse = pluginParseOpts{Native: true, Warn: n.d.warn}
+	// And the os.SameFile de-duplication, which therefore covers the plugin
+	// source too: a plugin command hard-linked to a project command, or one
+	// file exposed by two plugin roots, is one entry that costs one file.
+	n.d.dedupeFiles = true
+	return n
+}
+
+func (n *nativeScan) run() []PluginEntry {
 	n.scanChain()
 	n.scanUserRoot()
-	n.d.scanSources(src.Plugins, nil)
+	n.d.scanSources(n.src.Plugins, nil)
 	return n.d.out
 }
 
 // nativeScan is one run of that: the shared discovery — its file budget, its
-// plugin:name dedupe and its accumulating entries — plus the two things only
-// native has, where content comes from and which files it has already read.
+// plugin:name dedupe, its os.SameFile list and its accumulating entries — plus
+// the one thing only native has, where content comes from.
 type nativeScan struct {
 	src contentSources
 	d   *pluginDiscovery
-	// files are the entry files this scan has read, kept for os.SameFile. The
-	// plugin:name dedupe cannot stand in for it: a home directory that is also
-	// a chain directory — a dotfiles repository, or craze started in ~ — offers
-	// every one of the user's skills twice, once as project:name and once as
-	// user:name, and those are two different keys. Nor would comparing paths
-	// do, because a case-insensitive volume answers to two spellings of one
-	// file and a hard link to two names for it.
-	files []os.FileInfo
 }
 
 // reservedID is the veto the plugin sources run against. It writes its own line
@@ -109,16 +123,27 @@ func (n *nativeScan) reservedID(id string) bool {
 	return false
 }
 
-// scanChain is source 1: every directory of the chain, innermost first, so a
-// command a subdirectory ships beats the repository root's of the same name.
+// scanChain is source 1: the whole chain, which is one source and is ordered
+// as one. Every command directory first, innermost first, and only then every
+// skill root, innermost first — not a directory at a time. §3.2's rule is
+// "within every source, commands before skills", and a per-directory loop
+// would break it across the chain: a skill called foo three directories down
+// would beat the repository root's command of that name, so which of the two a
+// typed /foo meant would depend on where in the checkout craze was started.
+// Within one directory .claude/skills still precedes .agents/skills, the
+// layout's own order.
+//
 // The chain is outermost-first because that is the order the instruction loader
 // wants — a deeper file is read later and wins where two conflict — and
-// discovery wants the opposite, so it reads it backwards rather than keeping a
-// second copy of the same list in the other order.
+// discovery wants the opposite, so both loops read it backwards rather than
+// keeping a second copy of the same list in the other order.
 func (n *nativeScan) scanChain() {
 	for i := len(n.src.Chain) - 1; i >= 0; i-- {
 		dir := n.src.Chain[i]
 		n.readCommands(nativeSubdir(dir, n.src.Layout.Commands), nativeProjectID, dir)
+	}
+	for i := len(n.src.Chain) - 1; i >= 0; i-- {
+		dir := n.src.Chain[i]
 		for _, rel := range n.src.Layout.SkillRoots {
 			n.readSkillDirs(nativeSubdir(dir, rel), nativeProjectID, dir)
 		}
@@ -128,10 +153,18 @@ func (n *nativeScan) scanChain() {
 // nativeSubdir is one of the layout's names under a directory, or "" when
 // there is nothing there to read. pluginSubdir refuses a symlink, which is why
 // it is used rather than a join: a link where a project's commands belong is a
-// tree craze has no reason to read into a prompt. An empty name is refused
-// here rather than left to resolve to the directory itself, so a
-// contentSources assembled without a layout finds nothing instead of reading
-// every markdown file beside the workspace.
+// tree craze has no reason to read into a prompt.
+//
+// What is refused is a symlink *inside* a root, never a root itself. A chain
+// directory and the user root are where the owner said their content is —
+// UserRoot is configuration, and a ~/.claude that is a link into a dotfiles
+// checkout is the ordinary arrangement — so those are followed, exactly as
+// cursor follows a --plugin-dir the user pointed at a link while refusing a
+// link within the plugin (scanDirs, pluginSubdir).
+//
+// An empty name is refused here rather than left to resolve to the directory
+// itself, so a contentSources assembled without a layout finds nothing instead
+// of reading every markdown file beside the workspace.
 func nativeSubdir(dir, rel string) string {
 	if dir == "" || rel == "" {
 		return ""
@@ -141,7 +174,8 @@ func nativeSubdir(dir, rel string) string {
 
 // scanUserRoot is source 2: the user's own commands and skills. Their Root is
 // the user root itself, which is what ${CLAUDE_PLUGIN_ROOT} has to mean for a
-// file that belongs to no plugin.
+// file that belongs to no plugin. The root is used as it is given, symlink or
+// not — see nativeSubdir — and only what is under it is filtered.
 func (n *nativeScan) scanUserRoot() {
 	root := n.src.UserRoot
 	if root == "" {
@@ -161,11 +195,11 @@ func (n *nativeScan) readCommands(dir, id, root string) {
 	}
 	for _, name := range pluginMarkdownFiles(dir) {
 		path := filepath.Join(dir, name)
-		data, ok := n.read(path)
+		data, ok := n.d.readFile(path)
 		if !ok {
 			continue
 		}
-		if e, parsed := parsePluginCommand(path, data, n.opts()); parsed {
+		if e, parsed := parsePluginCommand(path, data, n.d.parse); parsed {
 			n.add(e, id, root)
 		}
 	}
@@ -218,11 +252,11 @@ func (n *nativeScan) walkUserSkills(dir string, depth int) {
 // through here so that a skill's identity — frontmatter name first, the
 // directory basename as the fallback, grok's rule — is decided in one place.
 func (n *nativeScan) readSkill(path, id, root string) {
-	data, ok := n.read(path)
+	data, ok := n.d.readFile(path)
 	if !ok {
 		return
 	}
-	if e, parsed := parsePluginSkill(path, data, n.opts()); parsed {
+	if e, parsed := parsePluginSkill(path, data, n.d.parse); parsed {
 		n.add(e, id, root)
 	}
 }
@@ -235,41 +269,6 @@ func (n *nativeScan) add(e PluginEntry, id, root string) {
 	}
 	e.Plugin, e.Root = id, root
 	n.d.addEntry(e)
-}
-
-// read spends one file of the shared budget on a path this scan has not read
-// before. The os.SameFile check is here rather than after parsing because a
-// file reached twice should cost the budget once, and because the first source
-// to reach it is the one whose id it keeps.
-//
-// Lstat, not Stat: a symlinked SKILL.md or command file is not read at all,
-// which is the convention the plugin and skill walks already hold to.
-func (n *nativeScan) read(path string) ([]byte, bool) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, false
-	}
-	for _, seen := range n.files {
-		if os.SameFile(seen, info) {
-			return nil, false
-		}
-	}
-	// readFile is the budget and the per-file ceiling, and it stats the path
-	// again itself: the file can change between the two calls, which is the
-	// same reason it checks the size twice.
-	data, ok := n.d.readFile(path)
-	if !ok {
-		return nil, false
-	}
-	n.files = append(n.files, info)
-	return data, true
-}
-
-// opts is native's reading of an entry file, everywhere in this scan: the three
-// extra frontmatter fields, a hidden entry kept rather than dropped, and one
-// line about a file whose name craze could never offer.
-func (n *nativeScan) opts() pluginParseOpts {
-	return pluginParseOpts{Native: true, Warn: n.d.warn}
 }
 
 // hasClaudeSegment reports that a path passes through a .claude directory,
