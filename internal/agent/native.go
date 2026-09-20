@@ -647,8 +647,9 @@ func (s *nativeSession) claim(text string) func(context.Context) (Result, error)
 // prompt is the claim's continuation: one harness turn, ended the way the live
 // session ends one (live.go's prompt) — success, or a cancel by Cancel or
 // Close, is exactly one EventDone; failure, the caller's own context ending
-// included (callerEnded), is exactly one EventError and no EventDone,
-// followed by an EventQueue removal per queued row.
+// included (callerEnded), is exactly one EventError and no EventDone. What
+// becomes of craze's queue after either is the engine's: it settles the turn
+// above this seam, after the ending published here.
 func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct{}) (Result, error) {
 	// One release for the whole claim, whichever way it ends, and after the
 	// turn's last event: a Cancel or Close waiting on rel then finds the
@@ -805,11 +806,11 @@ func (s *nativeSession) markDone() {
 // this session's Cancel or Close, and if so returns the failure it is. The
 // harness cannot tell the two apart: any end of the turn's context is a
 // clean cancel to it. The live session can, and treats the first as a failed
-// prompt (live.go's prompt: the client's error is EventError and the queue
-// is cleared), so the adapter does too; its own Cancel and Close stay the
-// user's "stop", one EventDone{cancelled} with the queue kept. A cancel of
-// ours that lands alongside the caller's counts as ours. nil when the cancel
-// was ours.
+// prompt (live.go's prompt: the client's error is EventError, which is what
+// makes the engine clear its queue), so the adapter does too; its own Cancel
+// and Close stay the user's "stop", one EventDone{cancelled}, after which the
+// engine's chain policy decides about the queue. A cancel of ours that lands
+// alongside the caller's counts as ours. nil when the cancel was ours.
 func (s *nativeSession) callerEnded(ctx context.Context) error {
 	s.mu.Lock()
 	ours := s.cancelling || s.closed

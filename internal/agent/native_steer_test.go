@@ -117,6 +117,12 @@ func TestNativeInterjectDuringAToolStep(t *testing.T) {
 			if got.err != nil || got.res.StopReason != "end_turn" {
 				t.Fatalf("Prompt = %+v, %v; want end_turn", got.res, got.err)
 			}
+			// Answered means answered once. The engine requeues whatever a turn
+			// reports it could not answer, so an interjection the model did take
+			// up and that also came back here would be sent a second time.
+			if len(got.res.Unanswered) != 0 {
+				t.Fatalf("the turn gave back %q as unanswered, want nothing", got.res.Unanswered)
+			}
 
 			evs := drained(s)
 			texts, last := interjected(evs)

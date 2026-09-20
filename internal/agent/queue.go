@@ -60,12 +60,13 @@ type QueueEvent struct {
 // has a server queue and cursor has none, and one code path that behaves the
 // same on both is worth more than either.
 //
-// Every method is one transaction, and the events it returns are emitted by
-// the caller. Callers hold their own transaction lock across the mutation and
-// its events, so consumers rebuilding the queue from the event stream see the
-// changes in the order they happened. The lock order is
-// caller's transaction lock → session lock → this one; nothing here ever
-// calls back into a caller, so it is the innermost.
+// Every method is one transaction, and the events it returns are the owner's
+// to publish. The owner is the engine (internal/engine), which calls these
+// under its own mutex and enqueues the events in that same section, so a
+// consumer rebuilding the queue from the event stream sees the changes in the
+// order they happened, with no lock held across a send. The lock order is
+// the engine's mutex → this one; nothing here ever calls back into a caller,
+// so it is the innermost.
 type PromptQueue struct {
 	mu    sync.Mutex
 	seq   int
