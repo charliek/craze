@@ -10,20 +10,20 @@ first.
 **The tracks are complementary and only S1 overlaps.** The harness lives
 below the `agent.Session` seam and is lint-isolated from the rest of craze;
 session control lives at and above that seam. Ordering matters at one point:
-**S1b should land before the harness adds an ask channel, sub-agent event
-plumbing, or resume** (SD-17). H2 is not blocked, and S1a touches nothing the
-harness owns beyond one emit call in `native.go`.
+**S1b before the first harness phase that needs an ask, and before H6 and H7**
+(SD-17, relaxed below). H2 is not blocked, and S1a touched nothing the harness
+owns beyond the emit path in `native.go`.
 
-As recorded in `discovery/native-harness/07-roadmap.md`, the first ask channel
-is **H3** (permission cards). The craze-harness session reports that the owner
-has since deferred native permission prompts, possibly well past H3; until
-that is written down as a harness decision, read the constraint as "S1b before
-H3". The harness session reports (2026-09-19) that the decision is written as
-**harness D-39** on Plan 019's branch (`15a3553`, landing with H2's first PR):
-native permission prompts lose their phase, the gate ships allow-all, and the
-owner's direction is an auto-mode evaluator over it, **after S1's ask
-registry**. Once that PR merges, cite D-39 here and relax the constraint to
-"S1b before the first harness phase that needs an ask, and before H6 and H7".
+**The ordering is relaxed, 2026-09-19.** The constraint used to read "S1b
+before H3", because `discovery/native-harness/07-roadmap.md` put the first ask
+channel at H3 (permission cards). **Harness D-39** is now on `main` — merged in
+PR #33 (`0277ce7`), written in `ee3c148` — and it takes permission prompts out
+of H3 entirely: the gate seam ships as `AllowAll`, `Ask` is treated as a deny,
+and the owner's direction is an auto-mode evaluator over the gate **after S1's
+ask registry**. So H3 no longer needs an ask, and the constraint is the one
+this file said to adopt once D-39 landed: S1b before whichever harness phase
+first needs an ask (H5's plan and question tools are the likely first), and
+before H6 (sub-agent event plumbing) and H7 (resume).
 
 ## Where they touch
 
@@ -62,12 +62,11 @@ review; execution will be a separate session in worktree `../craze-plan019`):
 5. Permission prompts are deferred, possibly well past H3; the likely shape is
    an auto-mode evaluator behind the `Gate` seam.
 
-If item 5 is recorded as a harness decision, the ordering relaxes to "S1b
-before whichever harness phase first needs an ask (H5's plan and question
-tools are the likely first), before H6, before H7". Items 3 and 4 are Plan
-019's stated intent, not yet code: treat the diagnostic and entry-id handoff
-as an **integration dependency to verify** when both sides have landed. Today
-`harness.StepDone` carries usage only.
+Item 5 is now harness D-39 on `main`, and the ordering is relaxed accordingly
+(see the summary). Items 3 and 4 are Plan 019's stated intent, not yet code:
+treat the diagnostic and entry-id handoff as an **integration dependency to
+verify** when both sides have landed. Today `harness.StepDone` carries usage
+only.
 
 ## Agreed for the H2 / S1a integration (2026-09-19)
 
@@ -86,7 +85,29 @@ Both plans are final; the harness session adopted all five points of Plan 020's
    the append succeeded (C8).
 
 Plan 019 ships in four PRs; `native.go`'s emit path changes in PR 3 (tools) and
-PR 4 (interject). Whoever lands second rebases and owns the joint `-race` test.
+PR 4 (interject).
+
+**Who owns the joint `-race` test: whoever lands the second change to
+`native.go`'s emit path.** That test is one run of tool progress + interject +
+cancel + `Close` together, under `-race`, proving the lock-order rule of point
+2 above still holds with both sides' code in place. As of S1a's own PR the
+state is:
+
+- `origin/main` carries Plan 019's PR #33 (`0277ce7`, foundations) and PR #34
+  (`bc2aaab`, the tool framework). Neither touches `internal/agent` at all —
+  `git log 215cac0..origin/main -- internal/agent/` is empty — so the emit path
+  is still as H1 left it.
+- **If S1a merges first** (the expected case, since Plan 019's PR 3 and PR 4
+  are not open yet), Plan 019's executing session rebases `native.go` onto the
+  `EventLog` publish, switches lossy tool progress from `select … default` to
+  `TryPublish` (point 4), and owns the joint `-race` test in PR 3 or PR 4.
+- **If Plan 019's PR 3 lands first**, S1a rebases onto it, converts whatever
+  emit sites it added, and owns the joint `-race` test in S1a's own PR — and
+  PR 4 then inherits the same rule again for interject.
+
+Either way the test lands in the PR that makes the emit path carry both
+changes, not in a follow-up, and the second lander tells the other session
+before merging.
 
 ## What S1 owes the harness
 

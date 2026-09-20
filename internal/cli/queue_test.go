@@ -490,10 +490,20 @@ func endTurn() stubTurn {
 // signal lands. Sending it now would start a whole turn on a context no second
 // Ctrl+C could cancel, and the row is already out of the queue, so the clear
 // the signal ran cannot report it. It is reported removed here instead.
+//
+// That line is craze's own, and it is where the no-`seq` rule (plan 020 §3.6,
+// A21) is visible from the outside: the turn's event is numbered here — the
+// stub numbers that one, standing in for the log a real session publishes
+// through — and its line carries the number, while the removed line, which no
+// session ever saw, carries no `seq` key at all.
 func TestSignalBetweenTheTakeAndTheSendRemovesTheRow(t *testing.T) {
+	const doneSeq = 77
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
-	s := newStubSession(64, endTurn())
+	s := newStubSession(64, stubTurn{
+		emit: []agent.Event{{Type: agent.EventDone, StopReason: "end_turn", Seq: doneSeq}},
+		res:  agent.Result{StopReason: "end_turn"},
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.onPop = func() { cancel() }
@@ -514,6 +524,9 @@ func TestSignalBetweenTheTakeAndTheSendRemovesTheRow(t *testing.T) {
 	evs := parseJSONLines(t, stdout.String())
 	var removed, sent int
 	for _, ev := range evs {
+		if ev.m["type"] == "done" && ev.m["seq"] != float64(doneSeq) {
+			t.Fatalf("the session's own line lost its seq: %s", ev.raw)
+		}
 		if ev.m["type"] != "queue" {
 			continue
 		}
@@ -522,6 +535,9 @@ func TestSignalBetweenTheTakeAndTheSendRemovesTheRow(t *testing.T) {
 			removed++
 			if ev.m["text"] != "follow-up" {
 				t.Fatalf("removed the wrong row: %s", ev.raw)
+			}
+			if _, ok := ev.m["seq"]; ok {
+				t.Fatalf("a line craze wrote itself must carry no seq: %s", ev.raw)
 			}
 		case "sent":
 			sent++

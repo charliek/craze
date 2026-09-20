@@ -1,7 +1,7 @@
 // Package paths is where craze decides where its own files live on disk: the
 // user's home directory, the craze directory inside it, and the fixed names
-// in that directory — the config file, the session index next to it, and the
-// native harness's own directory. Both internal/tui (config) and
+// in that directory — the config file, the session index next to it, the
+// native harness's own directory, and the session journals'. Both internal/tui (config) and
 // internal/sessions (the index) call this package so neither depends on the
 // other for something as basic as "where is home".
 package paths
@@ -19,12 +19,13 @@ const (
 	crazeHomeEnv = "CRAZE_HOME"
 	// crazeDirName is the craze directory's name under the home directory.
 	crazeDirName = ".craze"
-	// configName, sessionsName and nativeName are fixed names inside the
-	// craze directory: the config file, the session index next to it, and
-	// the native harness's directory.
+	// configName, sessionsName, nativeName and journalName are fixed names
+	// inside the craze directory: the config file, the session index next
+	// to it, the native harness's directory, and the session journals'.
 	configName   = "config.toml"
 	sessionsName = "sessions.jsonl"
 	nativeName   = "native"
+	journalName  = "journal"
 
 	// removedConfigEnv named the config *file* before CRAZE_HOME replaced it.
 	// It is kept only as a tripwire (tripped, CheckEnv): a script or test
@@ -91,15 +92,17 @@ func SessionsPath() string {
 // it once and must not follow a later change of working directory. "" when
 // CrazeDir is "" or the working directory cannot be read.
 func NativeDir() string {
-	dir := inCrazeDir(nativeName)
-	if dir == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return ""
-	}
-	return abs
+	return absInCrazeDir(nativeName)
+}
+
+// JournalDir is where session journals live, one directory per workspace
+// below it (internal/journal). It is absolute even when CRAZE_HOME is
+// relative, for NativeDir's reason: a session is handed it once, at
+// construction, and its journal must not follow a later change of working
+// directory. "" when CrazeDir is "" or the working directory cannot be read,
+// and the caller then journals nothing.
+func JournalDir() string {
+	return absInCrazeDir(journalName)
 }
 
 // expandTilde cleans dir, first replacing a leading "~" or "~/" with the home
@@ -122,6 +125,20 @@ func inCrazeDir(name string) string {
 		return ""
 	}
 	return filepath.Join(dir, name)
+}
+
+// absInCrazeDir is inCrazeDir made absolute once, against the working
+// directory at the time of the call; "" when either step fails.
+func absInCrazeDir(name string) string {
+	dir := inCrazeDir(name)
+	if dir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	return abs
 }
 
 // CheckEnv refuses the removed CRAZE_CONFIG. The CLI calls it before any

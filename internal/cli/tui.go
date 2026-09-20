@@ -141,8 +141,14 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// tui.Run ever starts. The hub itself is built later (plan 015 §3.5).
 	hosts := resolveHosts(f, env)
 	childEnv := hosts.childEnv(env.list())
+	// The journal directory is settled once too, for the same reason: the
+	// picker may build several sessions, and a journal that is off because of
+	// a mistake says so once, on craze's own lane.
+	journal := journalDir(diag.craze())
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		return agent.New(sessionOptions(f, ws, mode, diag.agent(), diag.craze(), childEnv, p, row))
+		opts := sessionOptions(f, ws, mode, diag.agent(), diag.craze(), childEnv, p, row)
+		opts.JournalDir = journal
+		return agent.New(opts)
 	}
 	newSession := func(p agent.Provider) agent.Session { return build(p, sessions.Row{}) }
 	cfg := tui.Config{
@@ -197,6 +203,9 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 // stderr and diag are the two lanes deferredStderr splits (§3.7.1): stderr is
 // the agent child's own stderr, diag is where craze's own notes about the
 // session — discoverPlugins' warn closure — go instead.
+//
+// JournalDir is left to runTUI's build closure, which sets the directory it
+// resolved once for the whole run (journalDir).
 func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p agent.Provider, row sessions.Row) agent.Options {
 	return agent.Options{
 		Binary:      f.agentBin,

@@ -4,8 +4,10 @@ craze persists the theme and the last successfully started **provider** in
 `~/.craze/config.toml`, and, once a session has a prompt or a title, a row
 about it in the session index (`~/.craze/sessions.jsonl`) that
 `--continue`, `--resume` and `/rename` use — see [Session
-index](#session-index). Session flags (`--workspace`, `--model`, `--force`,
-`--ask` / `--plan`, `--agent-bin`) are per-invocation.
+index](#session-index). Every session also writes a [journal](#session-journal)
+of what happened in it, which can contain secrets and can be turned off.
+Session flags (`--workspace`, `--model`, `--force`, `--ask` / `--plan`,
+`--agent-bin`) are per-invocation.
 
 ## Theme precedence
 
@@ -51,12 +53,13 @@ fixed names:
 |------|-------|
 | `config.toml` | The saved theme, provider, and other settings — see [Config file](#config-file) |
 | `sessions.jsonl` | The [session index](#session-index) |
+| `journal/` | One directory per workspace of [session journals](#session-journal) |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
-reads and writes `/some/dir/config.toml` and `/some/dir/sessions.jsonl` and
-nothing under `~/.craze`. A relative value stays relative to the working
-directory craze runs in, and a leading `~` or `~/` means your home
-directory. No variable moves a single file on its own.
+reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
+`/some/dir/journal/` and nothing under `~/.craze`. A relative value stays
+relative to the working directory craze runs in, and a leading `~` or `~/`
+means your home directory. No variable moves a single file on its own.
 
 `CRAZE_HOME` moves only craze's own directory. The user-level skills and the
 plugin caches craze scans (see [Slash commands](tui.md#slash-commands)) are
@@ -127,6 +130,80 @@ provider.** Loading yesterday's grok thread is not a decision about
 tomorrow's default: `provider` in `config.toml` is only touched when
 `--provider` was passed explicitly alongside `--continue`/`--resume`, the
 same as an ordinary run.
+
+## Session journal
+
+Every session craze starts writes a journal of what happened in it, one JSON
+object per line, under the [craze directory](#the-craze-directory):
+
+```
+~/.craze/journal/--home-me-src-app--/20260919T225929Z_01a0bbe5-69b4-79de-b75c-483a15b73d78.jsonl
+```
+
+The directory below `journal/` is the workspace's own path with its separators
+turned into dashes, wrapped in `--…--` — the same name the native harness gives
+that workspace's session store, so the two pair by eye. The file name is the
+UTC time the session was built and the session's own id, which the first line
+of the file repeats.
+
+**One file per session, and no process ever appends to a file another process
+wrote.** A `craze prompt` run leaves one; a TUI run leaves one per session it
+starts. `--continue` and `--resume` start a *new* session, so they get a new
+file, into which the agent's replay of the earlier conversation is written
+again, flagged as replay; the earlier file is never touched. The file is
+created with the first line worth writing, so a craze that is opened and quit
+without ever starting a session leaves nothing behind. `craze frame` never
+journals.
+
+| Line | Holds |
+|------|-------|
+| `header` | Format and codec versions, the session id, the craze version, OS and architecture, the provider, the agent binary asked for, the workspace, `force`, `interactive`, `mode`, and the pid |
+| `session` | The provider's own session id, the id it was loaded from on a resume, and the binary craze actually spawned |
+| `event` | One line per event the session emitted, with its `seq` and the whole event — the same numbers `craze prompt --json` prints (see [CLI](cli.md#json-events)) |
+| `prompt` / `prompt_end` | Your prompt or interjection **as typed**, before craze expanded any slash command into it; then how that turn ended — stop reason, or error class and message, and its duration |
+| `diag` | Everything that is not transcript: the agent's own stderr, a start that failed, an event too large to record, a reader craze dropped, and the line that closes the file |
+| `gap` | Written when the journal could not keep up: exactly what was lost, so a reader is never quietly short of events |
+
+A journal never slows a turn down and never fails a session. If it falls
+behind, it records what it lost as a `gap` rather than skipping it quietly; if
+a write fails outright — a full disk — journaling stops for that session and
+craze says so once on stderr. The session itself carries on either way.
+
+### Journals can contain secrets
+
+Prompts and tool output are written **verbatim, with no redaction**. Whatever
+you type and whatever a tool prints — an API key in a shell command, the
+contents of a file the agent read, a token in an error message — is on disk in
+plain text. That is the point of the record, and it is why the files are
+`0600` in `0700` directories, both *no broader than*: a restrictive umask
+narrows them further, and a directory that already exists is used as it is,
+never tightened. Treat a journal as being as sensitive as the session it came
+from.
+
+craze never uploads a journal, or any part of one, anywhere. They are local
+files. A running session reads its own journal back — that is how a client
+that reconnects is given the events it missed — but craze does not read a file
+from an earlier run: once a session ends, its journal is only there for you.
+
+craze does not prune them yet either: they accumulate until you delete them. As
+a sense of scale, a measured turn with one tool call cost 6 KB against cursor
+and about 50 KB against grok, which streams its reply token by token; a
+fifty-second cursor turn that read dozens of files cost 224 KB.
+
+### Turning it off
+
+`journal = false` in `config.toml`, or `CRAZE_JOURNAL=0` (or `false`) for one
+run, and craze writes no journal and creates no `journal` directory. Either
+switch turns it off on its own, and neither can turn it on against the other:
+`CRAZE_JOURNAL=1` does not defeat `journal = false`.
+
+**The opt-out fails closed**, unlike every other switch on this page. A
+journal holds prompts and tool output, so anything craze cannot read as a
+plain `true` means *off*, not on: a `config.toml` it cannot read or parse, a
+`journal` key that is not a bool (`journal = "false"` is a string), and a
+`CRAZE_JOURNAL` it cannot read as a bool. Each of those prints one line saying
+so; an explicit `false` is your own choice and is silent. Journaling is on only
+when the config parsed and `journal` is absent or exactly `true`.
 
 ## Terminal tab title
 
@@ -292,6 +369,7 @@ the dialect.
 | `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | Agent binary when `--agent-bin` is unset |
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `gx`) |
+| `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |

@@ -8,7 +8,7 @@ non-test source lines, from the reference reviews (`09`).
 | ID | status | one line |
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
-| S1 | not started | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client |
+| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; S1b next |
 | S2 | not started | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
@@ -27,8 +27,8 @@ SD-01 to SD-17, open questions SQ1–SQ12, harness overlap in `11`.
 
 Detail in `03` and `04`. Three slices, each its own plan and PR:
 
-- **S1a** — the ordering boundary and `Subscribe` (primary and budgeted
-  subscribers) as one component shared by the ACP session, the native
+- **S1a** (complete) — the ordering boundary and `Subscribe` (primary and
+  budgeted subscribers) as one component shared by the ACP session, the native
   adapter, and `tui.Stub`; sequence numbers; incarnation identity; the
   lossless event codec; the ring; the journal writer; `seq` on
   `craze prompt --json`. No behavior change.
@@ -45,7 +45,9 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
 - Size: L, about 4–5k lines plus test churn (raised after the panel: S1b is a
   driver, not a field move). S1b and S1c are the risk.
 - Ordering against the harness: does not block H2; S1b should precede the
-  first harness phase that adds an ask channel, and H6 and H7 (`11`).
+  first harness phase that adds an ask channel, and H6 and H7 (`11`). Harness
+  D-39, on `main` since 2026-09-19, moved permission prompts out of H3, so
+  that is no longer the first such phase.
 - **Exit (S1a)**: goldens and `craze prompt --json` output unchanged apart
   from `seq`; a budgeted subscriber attached mid-turn with a cursor receives
   exactly the events the primary did after it, in order, across the
@@ -65,6 +67,22 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   assertions move packages unchanged; a second in-process subscriber attached
   mid-turn from a snapshot reproduces the first's transcript exactly; snapshot
   and replay memory stay inside stated byte bounds on a worst-case session.
+
+**Exit result (S1a):** completed 2026-09-19, plan `020-session-control-s1a-event-log`,
+branch `feature/plan-020-session-control-s1a` (the PR number goes here on
+merge). All six exit clauses met,
+each against a named test or the Linux smoke; the criterion-by-criterion table,
+the amendments X1–X18, the Linux smoke record, and the V3/V4 measurements are in
+`12`. Two qualifications, both recorded there rather than waved through: the
+live smoke could not exercise a **native tool call** (H1 has no tools; re-run
+after H2 lands), and V6's "`config.toml` byte-identical" clause **fails for a
+pre-existing reason** — `persistProvider` writes the `provider` key on every
+run, unchanged on `origin/main` — so it is restated as "unchanged apart from
+the `provider` key". The mac-mini half ran at the branch tip and passed for
+grok and native; `cursor-agent` is skipped there because the login keychain
+blocks it over ssh, and that skip exercised the stderr tee against a real
+agent. Inputs to SQ3 (retention) and SQ15 (tool-event conflation) are
+measured in `12` and left undecided.
 
 ### S2 — control socket
 

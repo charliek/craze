@@ -55,6 +55,11 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CRAZE_PROVIDER", "")
     monkeypatch.setenv("CRAZE_HOME", str(tmp_path / "craze-home"))
     monkeypatch.delenv(REMOVED_CONFIG_ENV, raising=False)
+    # The session journal's opt-out (plan 020 §3.5). An exported one would
+    # otherwise turn journaling off under the cases that assert a journal was
+    # written -- or, unparseable, print a diagnostic into a run whose stderr a
+    # case reads. A case that wants it sets it itself.
+    monkeypatch.delenv("CRAZE_JOURNAL", raising=False)
     # craze reports its status to the terminal multiplexer it runs in (herdr,
     # roost) whenever that host's variables say so -- and this suite is often
     # run from inside one. Inherited, they would point a test craze at the
@@ -62,6 +67,44 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # wants a host sets exactly the ones it needs, aimed at its own fake socket.
     for name in host_env_names(os.environ):
         monkeypatch.delenv(name, raising=False)
+
+
+def without_seq(events: list[dict], subject: dict | list[dict]) -> dict | list[dict]:
+    """``subject`` with its ``seq`` key taken off, the run's seqs checked first.
+
+    Every ``craze prompt --json`` line that came from the session's event
+    stream carries, as its second key, the sequence number the session's event
+    log gave that event (plan 020 §3.6, A21). The numbers are increasing but
+    **not** contiguous -- the JSON projection drops kinds it has nothing to say
+    about, and a dropped event still took its number -- and how many of those a
+    run produces is a matter of timing, so a case that spelled an exact value
+    would be pinning a flake. What every run owes is the order, and that is
+    what is checked here, across the whole run: each seq is an integer strictly
+    greater than the one on the line before it.
+
+    The key is then taken off ``subject`` -- one line, or a list of them -- so
+    the rest can be compared exactly as it was before ``seq`` existed. Nothing
+    else is loosened. Each subject line must carry a seq: these are the
+    session's own. The lines craze writes itself (a startup error, the queue
+    row a signal took between the take and the send) carry none, and the Go
+    tests in internal/cli assert that where they are written.
+    """
+    previous: int | None = None
+    for event in events:
+        if "seq" not in event:
+            continue
+        seq = event["seq"]
+        assert isinstance(seq, int) and not isinstance(seq, bool), f"seq is not an integer: {event}"
+        assert previous is None or seq > previous, f"seq {seq} came after {previous}: {event}"
+        previous = seq
+
+    def strip(line: dict) -> dict:
+        assert "seq" in line, f"a line from the session's stream must carry a seq: {line}"
+        return {key: value for key, value in line.items() if key != "seq"}
+
+    if isinstance(subject, list):
+        return [strip(line) for line in subject]
+    return strip(subject)
 
 
 def host_env_names(env: Mapping[str, str]) -> list[str]:

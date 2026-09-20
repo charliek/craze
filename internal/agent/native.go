@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/version"
 )
@@ -50,7 +51,12 @@ type nativeSession struct {
 	// NewNative exposes, nil in production.
 	tweak func(*harness.Options)
 
-	events chan Event
+	// log is where every event goes, as on the live session: emit publishes
+	// into it and Events is its primary. events is the same channel, kept as
+	// the live session keeps its own: receive-only, so nothing can send on it
+	// past the log's numbering.
+	log    *EventLog
+	events <-chan Event
 	// done is closed first by Close, so no emit — the harness's sink
 	// included, which runs on Fantasy's callbacks — can block on a reader
 	// that has gone.
@@ -63,7 +69,10 @@ type nativeSession struct {
 	// (live_queue.go): queueOp orders the mutation, emitMu is held across its
 	// emits after queueOp is released. Lock order: queueOp → emitMu → s.mu →
 	// toolMu → the queue's own lock → the harness's lock (Current, under
-	// s.mu). No lock is ever held across an emit (plan 019 §3.10).
+	// s.mu). No lock is ever held across an emit (plan 019 §3.10), and
+	// emitMu → the event log's publishing boundary, a leaf that is never
+	// taken with s.mu held: a publish blocked on a full primary under s.mu
+	// would stop Close from closing done, which is what releases it.
 	//
 	// Interject adds no ordering: it reads the turn state under s.mu, releases
 	// it, and then hands the text to the harness's steer box, which takes a
@@ -120,10 +129,14 @@ func NewNative(opts Options, tweak func(*harness.Options)) Session {
 }
 
 func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
+	// A journal's header names the native provider whatever the caller
+	// passed, as the snapshot does, and no binary: there is no process.
+	log := newSessionLog(opts, journalHeader{provider: NativeProvider().Name()})
 	s := &nativeSession{
 		opts:      opts,
 		tweak:     tweak,
-		events:    make(chan Event, 256),
+		log:       log,
+		events:    log.Primary(),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
 	}
@@ -133,12 +146,28 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	return s
 }
 
-func (s *nativeSession) Events() <-chan Event { return s.events }
+func (s *nativeSession) Events() <-chan Event { return s.log.Primary() }
+
+// Subscribe and Incarnation are the session's EventSource: its log's.
+func (s *nativeSession) Subscribe(o SubscribeOptions) (*Subscription, error) {
+	return s.log.Subscribe(o)
+}
+func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
 
 // Start loads the model table, opens the harness on the requested model (or
 // the table's default) and publishes the first snapshot. It does no network
 // I/O: the first request goes out with the first prompt.
-func (s *nativeSession) Start(context.Context) error {
+func (s *nativeSession) Start(ctx context.Context) error {
+	err := s.start(ctx)
+	// Noted before anything is torn down, as on the live session (plan 020
+	// §3.5); nothing here closes the session, so the note is the whole of it.
+	// A Close racing this start can cut the log's note admission first, which
+	// noteStartFailed accepts and counts.
+	s.log.noteStartFailed(err)
+	return err
+}
+
+func (s *nativeSession) start(context.Context) error {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -167,11 +196,11 @@ func (s *nativeSession) Start(context.Context) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
 		// Close ran while the table was loading and found no harness to
 		// close; this one is closed here so it cannot outlive the session.
 		_ = hs.Close()
+		s.mu.Unlock()
 		return fmt.Errorf("agent: session closed")
 	}
 	s.hs = hs
@@ -180,6 +209,10 @@ func (s *nativeSession) Start(context.Context) error {
 	s.snap.Models = infos
 	s.snap.SessionID = hs.ID()
 	s.refreshCurrentLocked()
+	s.mu.Unlock()
+	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
+	// that window drops it, which noteSession accepts and counts.
+	s.log.noteSession(journal.SessionNote{ProviderSessionID: hs.ID()})
 	return nil
 }
 
@@ -363,7 +396,17 @@ func (s *nativeSession) Prompt(ctx context.Context, text string) (Result, error)
 	return s.Begin(text)(ctx)
 }
 
-// Begin claims the prompt slot now, on the caller's goroutine, with the live
+// Begin is the claim and its journal record, as on the live session (plan 020
+// §3.5): the prompt note is written here with s.mu released, and the
+// continuation writes the prompt_end its own (Result, error) says. A
+// continuation run a second time is refused without a second ending: the
+// attempt is already closed by the run that happened.
+func (s *nativeSession) Begin(text string) func(context.Context) (Result, error) {
+	run := s.claim(text)
+	return s.log.wrapPrompt(journal.PromptKindPrompt, text, run)
+}
+
+// claim claims the prompt slot now, on the caller's goroutine, with the live
 // session's semantics: a Begin while the slot is claimed or a turn is open
 // claims nothing and its continuation returns ErrPromptInFlight; the claim
 // clears a cancel asked before it, which was not for this prompt; and a
@@ -374,7 +417,7 @@ func (s *nativeSession) Prompt(ctx context.Context, text string) (Result, error)
 // touches nothing — the claim, its release and the turn all belong to the
 // first call, and running them twice would send the prompt again and then
 // close the claim's release a second time.
-func (s *nativeSession) Begin(text string) func(context.Context) (Result, error) {
+func (s *nativeSession) claim(text string) func(context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.claimed || s.inPrompt {
@@ -393,7 +436,7 @@ func (s *nativeSession) Begin(text string) func(context.Context) (Result, error)
 	}
 }
 
-// prompt is Begin's continuation: one harness turn, ended the way the live
+// prompt is the claim's continuation: one harness turn, ended the way the live
 // session ends one (live.go's prompt) — success, or a cancel by Cancel or
 // Close, is exactly one EventDone; failure, the caller's own context ending
 // included (callerEnded), is exactly one EventError and no EventDone,
@@ -677,6 +720,10 @@ func (s *nativeSession) Cancel(ctx context.Context) error {
 // It is safe before Start and idempotent, and it returns nil: there is no
 // agent process whose exit ErrAgentExited could report. A failure to close
 // the transcript is a diagnostic, not a reason to fail the caller's shutdown.
+//
+// The event log closes last, as on the live session (plan 020 §3.5), with
+// s.mu released: the continuation this does not wait for, and anything else
+// that emits late, is refused by the log from then on.
 func (s *nativeSession) Close() error {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
@@ -702,6 +749,10 @@ func (s *nativeSession) Close() error {
 		// closed, so every emit is a no-op by now — but a Snapshot taken
 		// after Close must not show a call still running (plan 019 §3.10).
 		s.settleTools()
+		// Last, after every teardown that can still emit: the log's close
+		// cuts admission, ends every subscription and closes the journal
+		// (plan 020 §3.5).
+		s.log.Close(context.Background())
 	})
 	<-s.closeDone
 	return nil
@@ -830,7 +881,18 @@ func (s *nativeSession) Snapshot() Snapshot {
 // the sink (harness.Steered), which is what makes it impossible for the
 // interjection to reach a consumer after the turn's ending event, and lets
 // Interject hold no lock while a consumer is being written to.
-func (s *nativeSession) Interject(_ context.Context, text string) error {
+// It is journaled by the same wrapper the live session uses (plan 020 §3.5),
+// so the text the user sent and what became of it — accepted, refused, or
+// offered to a turn that had already ended — are both on the record, under an
+// attempt id of the wrapper's own rather than any id the harness mints.
+func (s *nativeSession) Interject(ctx context.Context, text string) error {
+	a := s.log.beginAttempt(journal.PromptKindInterject, text)
+	err := s.interject(ctx, text)
+	a.end("", err)
+	return err
+}
+
+func (s *nativeSession) interject(_ context.Context, text string) error {
 	s.mu.Lock()
 	supported := s.snap.Provider.Capabilities().Interject
 	hs, closed := s.hs, s.closed
@@ -885,20 +947,21 @@ func (s *nativeSession) AnswerPlan(string, bool) error { return ErrUnsupported }
 
 // emit delivers ev unless the session is closing, exactly as the live
 // session's emitCtx does with no caller context: a reader that stopped
-// draining can hold a turn back, but never Close.
+// draining can hold a turn back, but never Close. Delivery is the event log's
+// Publish, on this goroutine, so an emit that returned has its event in
+// Events()'s buffer; Publish reads ev before it waits, so the payload must be
+// the caller's own. s.mu is never held here.
 func (s *nativeSession) emit(ev Event) {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
 	}
 	select {
 	case <-s.done:
+		s.log.Abandoned()
 		return
 	default:
 	}
-	select {
-	case s.events <- ev:
-	case <-s.done:
-	}
+	s.log.Publish(context.Background(), s.done, ev)
 }
 
 // emitLossy is emit for an event whose whole point is to be current: it
@@ -907,19 +970,24 @@ func (s *nativeSession) emit(ev Event) {
 // may block must deliver a ToolProgress without blocking or drop it (plan
 // 019 §3.5) — and because the next snapshot repeats the whole output
 // anyway, so a drop costs a frame and nothing else.
+//
+// It publishes through the log's TryPublish, which is that contract written
+// into the ordering boundary (plan 020 §3.1): the event is dropped for
+// everyone at once — the primary, every subscription and the journal — and
+// consumes no sequence number, so a dropped progress frame can never leave a
+// hole a reconnecting client would have to reason about. Sending on the
+// channel directly would have bypassed the numbering entirely.
 func (s *nativeSession) emitLossy(ev Event) {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
 	}
 	select {
 	case <-s.done:
+		s.log.Abandoned()
 		return
 	default:
 	}
-	select {
-	case s.events <- ev:
-	default:
-	}
+	s.log.TryPublish(ev)
 }
 
 // queueTx is the live session's queue transaction (live_queue.go): fn
@@ -1113,4 +1181,7 @@ func noKeyText(table *modeltable.Table, alias string) string {
 	return fmt.Sprintf("native: model %q has no API key: its provider %q has none; %s", alias, m.Provider, how)
 }
 
-var _ Session = (*nativeSession)(nil)
+var (
+	_ Session     = (*nativeSession)(nil)
+	_ EventSource = (*nativeSession)(nil)
+)

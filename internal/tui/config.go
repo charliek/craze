@@ -125,6 +125,35 @@ func ConfigBackground() bool { return configSwitch("background") }
 // off.
 func ConfigHostStatus() bool { return configSwitch("host_status") }
 
+// ConfigJournal is whether craze may journal its sessions (plan 020 §3.5),
+// and why not when it may not. It defaults to on, like the switches above,
+// but it is a privacy switch — a journal holds prompts and tool output — so
+// it fails closed where they fail open: on only when the config parsed and
+// the `journal` key is absent or exactly `true` (a missing file parses as an
+// empty config). An explicit `journal = false` is off with no reason given,
+// since that is the user's own choice; anything else off is a mistake the
+// user should hear about, so why says what it was, in a few words for a
+// one-line diagnostic: a file that could not be read or parsed, or a value
+// that is not a bool (`journal = "false"` is a string, and is off).
+func ConfigJournal() (on bool, why string) {
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return false, "config.toml could not be parsed"
+	case err != nil:
+		return false, "config.toml could not be read"
+	}
+	v, ok := cfg["journal"]
+	if !ok {
+		return true, ""
+	}
+	on, ok = v.(bool)
+	if !ok {
+		return false, "config.toml journal is not a bool"
+	}
+	return on, ""
+}
+
 // configSwitch reads a default-on bool key: only a literal `key = false` turns
 // it off, and a missing file, an unparseable one, a missing key or a value
 // that is not a bool all read as true.

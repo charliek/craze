@@ -11,8 +11,31 @@ import (
 // jsonStreamCap is how much of a tool's stdout/stderr the JSON stream carries.
 const jsonStreamCap = 2048
 
+// The `seq` key (plan 020 §3.6).
+//
+// Every line that came from the session's event stream carries the sequence
+// number the session's event log gave that event, as the second key, right
+// after `type` — each line type below declares Seq immediately after Type, and
+// encoding/json writes fields in declaration order, so the position is the
+// struct's and not a call site's. It is the same number the session journal
+// records for the same event, which is how a headless caller lines one against
+// the other.
+//
+// `seq` is increasing but **not contiguous**: this projection is lossy (it
+// drops kinds it has nothing to say about, and an EventMeta with no title),
+// and a dropped event still consumed its number. A reader may rely on the
+// order of two lines and never on the arithmetic between them.
+//
+// A line craze authors itself carries **no** `seq` at all: promptOpts.runLoop's
+// queue-removed line for a row taken as a signal landed, and writeErrorEvent's
+// startup failures, never passed through an event log. Their events have
+// Seq == 0, which `omitempty` leaves out — and nothing here ever fabricates a
+// number, so an absent `seq` always means "craze said this, the session did
+// not".
+
 type jsonEvent struct {
 	Type       string              `json:"type"`
+	Seq        uint64              `json:"seq,omitempty"`
 	Text       string              `json:"text,omitempty"`
 	Agent      string              `json:"agent,omitempty"`
 	Name       string              `json:"name,omitempty"`
@@ -40,6 +63,7 @@ type jsonEvent struct {
 // index when the change happened, which is not the same as where it sits now.
 type jsonQueue struct {
 	Type     string `json:"type"`
+	Seq      uint64 `json:"seq,omitempty"`
 	Event    string `json:"event"`
 	ID       string `json:"id"`
 	Position int    `json:"position"`
@@ -54,6 +78,7 @@ type jsonQueue struct {
 // only way a headless caller can see it.
 type jsonCommand struct {
 	Type      string `json:"type"`
+	Seq       uint64 `json:"seq,omitempty"`
 	Name      string `json:"name"`
 	Qualified string `json:"qualified"`
 	Plugin    string `json:"plugin"`
@@ -71,11 +96,12 @@ type jsonCommand struct {
 // `prompt --continue` would lose the bracket without a word.
 type jsonReplay struct {
 	Type  string `json:"type"`
+	Seq   uint64 `json:"seq,omitempty"`
 	Phase string `json:"phase"`
 }
 
 func replayJSON(ev agent.Event) jsonReplay {
-	j := jsonReplay{Type: "replay"}
+	j := jsonReplay{Type: "replay", Seq: ev.Seq}
 	if ev.Replay != nil {
 		j.Phase = ev.Replay.Phase
 	}
@@ -85,13 +111,14 @@ func replayJSON(ev agent.Event) jsonReplay {
 // jsonForeignTurn brackets a turn the agent ran without a craze prompt.
 type jsonForeignTurn struct {
 	Type  string `json:"type"`
+	Seq   uint64 `json:"seq,omitempty"`
 	Event string `json:"event"`
 	ID    string `json:"id,omitempty"`
 	Text  string `json:"text,omitempty"`
 }
 
 func queueJSON(ev agent.Event) jsonQueue {
-	j := jsonQueue{Type: "queue", Event: string(ev.QueueChange), Position: ev.QueuePos}
+	j := jsonQueue{Type: "queue", Seq: ev.Seq, Event: string(ev.QueueChange), Position: ev.QueuePos}
 	if ev.Queue != nil {
 		j.ID = ev.Queue.ID
 		j.Version = ev.Queue.Version
@@ -101,7 +128,7 @@ func queueJSON(ev agent.Event) jsonQueue {
 }
 
 func commandJSON(ev agent.Event) jsonCommand {
-	j := jsonCommand{Type: "command"}
+	j := jsonCommand{Type: "command", Seq: ev.Seq}
 	if ev.Command != nil {
 		j.Name = ev.Command.Bare
 		j.Qualified = ev.Command.Qualified
@@ -114,7 +141,7 @@ func commandJSON(ev agent.Event) jsonCommand {
 }
 
 func foreignTurnJSON(ev agent.Event) jsonForeignTurn {
-	j := jsonForeignTurn{Type: "foreign_turn", Event: "ended"}
+	j := jsonForeignTurn{Type: "foreign_turn", Seq: ev.Seq, Event: "ended"}
 	if ev.ForeignTurn != nil {
 		if ev.ForeignTurn.Running {
 			j.Event = "started"
@@ -127,6 +154,7 @@ func foreignTurnJSON(ev agent.Event) jsonForeignTurn {
 
 type jsonSubagent struct {
 	Type         string `json:"type"`
+	Seq          uint64 `json:"seq,omitempty"`
 	Event        string `json:"event"`
 	ID           string `json:"id"`
 	AttemptID    string `json:"attemptId,omitempty"`
@@ -189,11 +217,11 @@ func encodeEvent(w io.Writer, ev agent.Event) error {
 func eventJSON(ev agent.Event) (any, bool) {
 	switch ev.Type {
 	case agent.EventText:
-		return jsonEvent{Type: "text", Text: ev.Text, Agent: ev.Agent}, true
+		return jsonEvent{Type: "text", Seq: ev.Seq, Text: ev.Text, Agent: ev.Agent}, true
 	case agent.EventThought:
-		return jsonEvent{Type: "thought", Text: ev.Text, Agent: ev.Agent}, true
+		return jsonEvent{Type: "thought", Seq: ev.Seq, Text: ev.Text, Agent: ev.Agent}, true
 	case agent.EventUser:
-		return jsonEvent{Type: "user", Text: ev.Text, Agent: ev.Agent, Interjection: ev.Interjection}, true
+		return jsonEvent{Type: "user", Seq: ev.Seq, Text: ev.Text, Agent: ev.Agent, Interjection: ev.Interjection}, true
 	case agent.EventCommand:
 		return commandJSON(ev), ev.Command != nil
 	case agent.EventQueue:
@@ -207,13 +235,13 @@ func eventJSON(ev agent.Event) (any, bool) {
 	case agent.EventTool:
 		return toolJSON(ev), true
 	case agent.EventTodos:
-		j := jsonEvent{Type: "todos", Todos: make([]jsonTodo, 0, len(ev.Todos))}
+		j := jsonEvent{Type: "todos", Seq: ev.Seq, Todos: make([]jsonTodo, 0, len(ev.Todos))}
 		for _, t := range ev.Todos {
 			j.Todos = append(j.Todos, jsonTodo{ID: t.ID, Content: t.Content, Status: t.Status})
 		}
 		return j, true
 	case agent.EventPermission:
-		j := jsonEvent{Type: "permission"}
+		j := jsonEvent{Type: "permission", Seq: ev.Seq}
 		if ev.Permission != nil {
 			j.Tool = ev.Permission.Tool
 			ids := make([]string, 0, len(ev.Permission.Options))
@@ -224,7 +252,7 @@ func eventJSON(ev agent.Event) (any, bool) {
 		}
 		return j, true
 	case agent.EventQuestion:
-		j := jsonEvent{Type: "question"}
+		j := jsonEvent{Type: "question", Seq: ev.Seq}
 		if ev.Question != nil {
 			j.ID = ev.Question.ID
 			j.Title = ev.Question.Title
@@ -233,7 +261,7 @@ func eventJSON(ev agent.Event) (any, bool) {
 		}
 		return j, true
 	case agent.EventPlan:
-		j := jsonEvent{Type: "plan"}
+		j := jsonEvent{Type: "plan", Seq: ev.Seq}
 		if ev.Plan != nil {
 			j.ID = ev.Plan.ID
 			j.Name = ev.Plan.Name
@@ -247,22 +275,22 @@ func eventJSON(ev agent.Event) (any, bool) {
 		if ev.Text == "" {
 			return jsonEvent{}, false
 		}
-		return jsonEvent{Type: "title", Title: ev.Text}, true
+		return jsonEvent{Type: "title", Seq: ev.Seq, Title: ev.Text}, true
 	case agent.EventDone:
-		return jsonEvent{Type: "done", StopReason: ev.StopReason}, true
+		return jsonEvent{Type: "done", Seq: ev.Seq, StopReason: ev.StopReason}, true
 	case agent.EventError:
 		msg := ""
 		if ev.Err != nil {
 			msg = ev.Err.Error()
 		}
-		return jsonEvent{Type: "error", Message: msg}, true
+		return jsonEvent{Type: "error", Seq: ev.Seq, Message: msg}, true
 	default:
 		return jsonEvent{}, false
 	}
 }
 
 func subagentJSON(ev agent.Event) jsonSubagent {
-	j := jsonSubagent{Type: "subagent", Event: ev.SubagentChange}
+	j := jsonSubagent{Type: "subagent", Seq: ev.Seq, Event: ev.SubagentChange}
 	if ev.Subagent == nil {
 		return j
 	}
@@ -286,7 +314,7 @@ func subagentJSON(ev agent.Event) jsonSubagent {
 }
 
 func toolJSON(ev agent.Event) jsonEvent {
-	j := jsonEvent{Type: "tool", Agent: ev.Agent}
+	j := jsonEvent{Type: "tool", Seq: ev.Seq, Agent: ev.Agent}
 	t := ev.Tool
 	if t == nil {
 		return j
@@ -335,6 +363,9 @@ func headUTF8(s string, max int) string {
 	return s[:keep]
 }
 
+// writeErrorEvent is craze's own error line: a startup failure, before any
+// session existed to number it. The event never passed through an event log,
+// so its Seq is 0 and the line has no `seq` key — see "The `seq` key" above.
 func writeErrorEvent(w io.Writer, err error) {
 	if err == nil {
 		return

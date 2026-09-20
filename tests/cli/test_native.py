@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import require_rg
+from conftest import require_rg, without_seq
 from sse_fixture import (
     CANARY,
     UNUSED_ENV_KEY,
@@ -129,7 +129,7 @@ def test_native_prompt_streams_text_and_ends_end_turn(
     assert joined(events, "text") == "hello from native fixture"
     assert joined(events, "thought") == "thinking it over"
     terminals = [e for e in events if e.get("type") in ("done", "error")]
-    assert terminals == [{"type": "done", "stopReason": "end_turn"}], events
+    assert without_seq(events, terminals) == [{"type": "done", "stopReason": "end_turn"}], events
     assert CANARY not in proc.stdout
     assert CANARY not in proc.stderr
 
@@ -145,7 +145,7 @@ def test_native_prompt_model_flag_resolves_alias(
     assert proc.returncode == 0, proc.stderr
     events = parse_events(proc.stdout)
     assert joined(events, "text") == "picked by alias"
-    assert events[-1] == {"type": "done", "stopReason": "end_turn"}
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
 
 
 def test_native_absent_from_help_and_unknown_provider_error(
@@ -227,7 +227,7 @@ def test_native_canary_never_leaks(
     events = parse_events(proc.stdout)
     if mode == "ok":
         assert proc.returncode == 0, proc.stderr
-        assert events[-1] == {"type": "done", "stopReason": "end_turn"}
+        assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
     else:
         assert proc.returncode == 1, proc.stdout + proc.stderr
         errors = [e for e in events if e.get("type") == "error"]
@@ -318,7 +318,7 @@ def test_native_tool_loop_read_grep_edit_bash(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     events = parse_events(proc.stdout)
     assert joined(events, "text") == "all four ran"
-    assert events[-1] == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
 
     # Every scripted step was taken and nothing asked for a sixth.
     assert fixture_server.script_remaining == 0
@@ -521,7 +521,7 @@ def test_native_max_tokens_mid_call_leaves_no_pending_row(
     proc = run_native(craze_bin, craze_home, ws, "go", timeout=60)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     events = parse_events(proc.stdout)
-    assert events[-1] == {"type": "done", "stopReason": "max_tokens"}, events[-3:]
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "max_tokens"}, events[-3:]
 
     # The row opened pending, as a call whose arguments are still streaming
     # does, and was closed -- not left pending -- by the harness settling a

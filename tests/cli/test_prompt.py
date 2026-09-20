@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import REMOVED_CONFIG_ENV
+from conftest import REMOVED_CONFIG_ENV, without_seq
 
 
 def parse_events(stdout: str) -> list[dict]:
@@ -69,7 +69,7 @@ def test_grok_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> Non
     texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
     assert texts == "echo: hello"
     terminals = [e for e in events if e.get("type") in ("done", "error")]
-    assert terminals == [{"type": "done", "stopReason": "end_turn"}]
+    assert without_seq(events, terminals) == [{"type": "done", "stopReason": "end_turn"}]
 
 
 def test_gx_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
@@ -83,7 +83,7 @@ def test_gx_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
     assert texts == "echo: hello"
     terminals = [e for e in events if e.get("type") in ("done", "error")]
-    assert terminals == [{"type": "done", "stopReason": "end_turn"}]
+    assert without_seq(events, terminals) == [{"type": "done", "stopReason": "end_turn"}]
 
 
 def test_first_turn_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ def test_first_turn_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) 
     events = parse_events(proc.stdout)
     texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
     assert texts == "echo: hello"
-    assert events[-1] == {"type": "done", "stopReason": "end_turn"}
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
     assert all(e.get("type") != "error" for e in events)
     assert "NOPE" not in texts
     assert proc.stdout.endswith("\n")
@@ -243,7 +243,7 @@ def test_grok_ask_json(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) ->
     assert questions[0]["answers"]["Pick any"] == ["X"]
     texts = "".join(e.get("text", "") for e in events if e.get("type") == "text")
     assert texts == "asked:accepted:Pick one=A;Pick any=X"
-    assert events[-1] == {"type": "done", "stopReason": "end_turn"}
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
 
 
 def test_unknown_provider_exits_2(craze_bin: Path, tmp_path: Path) -> None:

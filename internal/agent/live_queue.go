@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/charliek/craze/internal/journal"
 )
 
 // The queue's transactions are ordered by s.queueOp: a mutation and the
 // events it produced go out together, so a consumer rebuilding the queue from
 // the event stream never sees them interleaved with another transaction's.
 // The lock order is queueOp → emitMu → s.mu → the queue's own lock, and
-// Snapshot takes the last two in that order as well.
+// Snapshot takes the last two in that order as well. Every emit takes the
+// event log's publishing boundary, a leaf below emitMu that is never taken
+// with s.mu held.
 
 // queueTx runs one queue transaction. fn mutates the queue under queueOp and
 // returns the events it produced; those are emitted after queueOp is released,
@@ -18,7 +22,11 @@ import (
 // waiting on something else holding queueOp — Prompt's error path clearing the
 // queue, say — would wedge the session. emitMu is taken inside queueOp and
 // held across the sends, so the transactions still reach the stream whole and
-// in the order they happened. Lock order: queueOp → emitMu, never the reverse.
+// in the order they happened. Lock order: queueOp → emitMu → the log's
+// boundary, never the reverse. Each publish takes the boundary on its own, so
+// what emitMu orders is one transaction against another, as it did on the
+// channel: an emitter outside a transaction could always land between two of
+// its events.
 func (s *session) queueTx(fn func() []QueueEvent) {
 	s.queueOp.Lock()
 	s.emitMu.Lock()
@@ -142,7 +150,19 @@ func (s *session) ClearQueue() int {
 // while the request is in flight strands it regardless. That ending is the
 // foreign turn craze already models and shows — this guard is what keeps the
 // obvious cases from producing one.
+//
+// It is journaled like a prompt (plan 020 §3.5), and by the same helpers, so
+// the refusals above are recorded rather than lost: the attempt id is the
+// journal's own, not the craze-N id below, which only an accepted interjection
+// ever spends.
 func (s *session) Interject(ctx context.Context, text string) error {
+	a := s.log.beginAttempt(journal.PromptKindInterject, text)
+	err := s.interject(ctx, text)
+	a.end("", err)
+	return err
+}
+
+func (s *session) interject(ctx context.Context, text string) error {
 	if !s.provider().Capabilities().Interject {
 		return ErrUnsupported
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,13 +15,23 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/journal"
 )
 
 type session struct {
 	opts   Options
 	client *acp.Client
-	events chan Event
-	done   chan struct{}
+	// log is where every event goes (eventlog.go): emitCtx publishes into it
+	// and Events is its primary. events is the same channel as Primary, kept
+	// receive-only so that nothing can send on it past the log's numbering;
+	// a few tests read it by name.
+	log    *EventLog
+	events <-chan Event
+	// tee is the agent child's stderr on its way to opts.Stderr, copied into
+	// the journal a line at a time (stderr.go). nil without a journal, and
+	// then the child writes straight to opts.Stderr as it always did.
+	tee  *stderrTee
+	done chan struct{}
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -73,7 +84,14 @@ type session struct {
 	// queueOp and held across the transaction's emits, which happen after
 	// queueOp is released: emit blocks on a full event channel, and a reader
 	// that is waiting on something holding queueOp would wedge the session.
-	// Lock order: queueOp → emitMu → s.mu → the queue's own lock.
+	// Lock order: queueOp → emitMu → s.mu → the queue's own lock, and
+	// emitMu → the event log's publishing boundary. Every emit takes the
+	// boundary, and it is a leaf: nothing holding it takes any of these
+	// locks. It may be taken with emitMu held (queueTx) and is never taken
+	// with s.mu held, because a publisher blocked on a full primary while
+	// holding s.mu would stop Close, which needs s.mu to close done — the
+	// one thing that releases it. That was already the rule for emit
+	// (emitParked says why); the boundary makes it a lock-order rule.
 	queueOp sync.Mutex
 	emitMu  sync.Mutex
 	queue   PromptQueue
@@ -186,6 +204,12 @@ func (s *session) outcomeOf(w *turnWire) wireOutcome {
 	return w.outcome
 }
 
+// testAfterBinaryResolved runs, when set, between Start resolving the agent
+// binary and the spawn that runs it: the one point where a test can change
+// what that name resolves to next and see that nothing after it looks again.
+// It is a var only so the tests can set it; nothing in craze writes it.
+var testAfterBinaryResolved func()
+
 // testBeforeWire runs, when set, right before Prompt hands its request to the
 // client: the one point where a turn is open and its prompt is not yet on the
 // wire, which a test can only hold still from here. It is a var only so the
@@ -219,7 +243,6 @@ func New(opts Options) Session {
 func newSession(opts Options) *session {
 	s := &session{
 		opts:      opts,
-		events:    make(chan Event, 256),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
 		waiting:   make(map[string]pendingAsk),
@@ -235,6 +258,15 @@ func newSession(opts Options) *session {
 		s.opts.Provider = &p
 	}
 	s.opts.PluginDirs = append([]string(nil), opts.PluginDirs...)
+	// The log is built once the provider is settled, because a journal's
+	// header names it, with the binary as it was asked for: which file that
+	// name resolves to is Start's to settle (the session note).
+	s.log = newSessionLog(s.opts, journalHeader{provider: s.provider().Name(), binary: s.opts.Binary})
+	s.events = s.log.Primary()
+	// The tee is the child's lane alone. Options.Stderr stays what it was, so
+	// craze's own notes about the session — which fall back to it when Diag is
+	// unset — are still craze's and are never journaled as the agent's words.
+	s.tee = newStderrTee(s.opts.Stderr, s.log)
 	// The provider is decided once, here, so every snapshot — including one
 	// taken before Start — names it.
 	s.snap.Provider = s.provider().Info()
@@ -258,18 +290,44 @@ func (s *session) clientRef() *acp.Client {
 }
 
 func (s *session) Events() <-chan Event {
-	return s.events
+	return s.log.Primary()
 }
 
+// Subscribe and Incarnation are the session's EventSource: its log's.
+func (s *session) Subscribe(o SubscribeOptions) (*Subscription, error) { return s.log.Subscribe(o) }
+func (s *session) Incarnation() string                                 { return s.log.Incarnation() }
+
+var _ EventSource = (*session)(nil)
+
+// Start spawns the agent and sets the session up. Its body is start; what is
+// here is the journal's half (plan 020 §3.5): a failure is noted before the
+// session tears down what it built, because Close is the log's admission
+// cutoff and a note written after it would be counted and dropped. teardown
+// says the failure is one of those the body used to answer with an inner
+// Close; the paths that only give the start back (unstart) keep doing that.
+// A Close racing this start can cut that admission first, which
+// noteStartFailed accepts and counts.
 func (s *session) Start(ctx context.Context) error {
+	teardown, err := s.start(ctx)
+	if err == nil {
+		return nil
+	}
+	s.log.noteStartFailed(err)
+	if teardown {
+		_ = s.Close()
+	}
+	return err
+}
+
+func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
-		return fmt.Errorf("agent: session already started")
+		return false, fmt.Errorf("agent: session already started")
 	}
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("agent: session closed")
+		return false, fmt.Errorf("agent: session closed")
 	}
 	s.started = true
 	s.mu.Unlock()
@@ -282,27 +340,51 @@ func (s *session) Start(ctx context.Context) error {
 		cwd, err = os.Getwd()
 		if err != nil {
 			s.unstart()
-			return err
+			return false, err
 		}
 	}
 	cwd, err := filepath.Abs(cwd)
 	if err != nil {
 		s.unstart()
-		return err
+		return false, err
 	}
 
+	// The agent binary is resolved exactly once, here, and that one path is
+	// both what is spawned and what the session note records (plan 020 §3.5).
+	// Asking twice — once inside the spawn, once again for the note — was
+	// enough for a PATH change, a changed CRAZE_AGENT_BIN or a candidate
+	// swapped on disk between the two lookups to put a binary in the note that
+	// the session never ran, or to leave the note empty when the second lookup
+	// found nothing.
+	//
+	// Handing the answer back to Spawn as its Binary changes nothing about the
+	// spawn: resolving is the first thing Spawn does, an explicit Binary is
+	// what it resolves (so CRAZE_AGENT_BIN's precedence is applied here, in
+	// the same call, and the candidates below it are unreachable either way),
+	// and a resolved path resolves to itself — exec.LookPath returns an
+	// executable it is handed by path unchanged, and an absolute path it
+	// refuses still passes Spawn's own os.Stat fallback, which is where such a
+	// path came from. Candidates are left out for that reason: with a resolved
+	// Binary they can never be reached.
+	binary, err := acp.ResolveBinaryCandidates(s.opts.Binary, s.provider().Bins())
+	if err != nil {
+		s.unstart()
+		return false, err
+	}
+	if testAfterBinaryResolved != nil {
+		testAfterBinaryResolved()
+	}
 	client, err := acp.Spawn(acp.SpawnOptions{
-		Binary:     s.opts.Binary,
-		Candidates: s.provider().Bins(),
-		Args:       args,
-		Dir:        cwd,
-		Env:        s.opts.Env,
-		Stderr:     s.opts.Stderr,
-		Dialect:    s.provider().Dialect(),
+		Binary:  binary,
+		Args:    args,
+		Dir:     cwd,
+		Env:     s.opts.Env,
+		Stderr:  s.stderrSink(),
+		Dialect: s.provider().Dialect(),
 	})
 	if err != nil {
 		s.unstart()
-		return err
+		return false, err
 	}
 	// Close may have run while we were spawning; adopt the child only if the
 	// session is still open, otherwise reap it here so it cannot be orphaned.
@@ -310,7 +392,7 @@ func (s *session) Start(ctx context.Context) error {
 	if s.closed {
 		s.mu.Unlock()
 		_ = client.Close()
-		return fmt.Errorf("agent: session closed")
+		return false, fmt.Errorf("agent: session closed")
 	}
 	s.client = client
 	s.mu.Unlock()
@@ -330,19 +412,16 @@ func (s *session) Start(ctx context.Context) error {
 
 	initRes, err := client.Initialize(ctx)
 	if err != nil {
-		_ = s.Close()
-		return err
+		return true, err
 	}
 	if methodID, meta, ok := s.authMethod(initRes); ok {
 		if err := client.Authenticate(ctx, methodID, meta); err != nil {
-			_ = s.Close()
-			return fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
+			return true, fmt.Errorf("%w (run `%s`)", err, s.provider().LoginHint())
 		}
 	} else if len(initRes.AuthMethods) > 0 && len(s.provider().AuthMethodIDs()) > 0 {
 		// The daemon offered only methods craze will not start (interactive
 		// browser login); say how to fix it instead of hanging later.
-		_ = s.Close()
-		return fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
+		return true, fmt.Errorf("agent: no supported auth method (run `%s`)", s.provider().LoginHint())
 	}
 	// The disk scan runs before session/new so the first snapshot the session
 	// ever publishes already carries its plugins; a catalog update that beats
@@ -357,15 +436,13 @@ func (s *session) Start(ctx context.Context) error {
 	loading := s.opts.LoadSessionID != ""
 	var snap Snapshot
 	if loading {
-		if err := s.loadSession(ctx, client, initRes, cwd); err != nil {
-			_ = s.Close()
-			return err
+		if err := s.loadSession(ctx, client, initRes, cwd, binary); err != nil {
+			return true, err
 		}
 	} else {
 		sess, err := client.NewSession(ctx, cwd)
 		if err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 		snap = snapshotFromNewProvider(sess, s.provider(), initRes)
 		snap.Provider = s.provider().Info()
@@ -373,6 +450,9 @@ func (s *session) Start(ctx context.Context) error {
 		s.mu.Lock()
 		s.sessionID = sess.SessionID
 		s.mu.Unlock()
+		// Noted with s.mu released, as every note is (plan 020 §3.5); a
+		// Close in that window drops it, which noteSession accepts and counts.
+		s.log.noteSession(journal.SessionNote{ProviderSessionID: sess.SessionID, AgentBinary: binary})
 	}
 	// The --ask/--plan/--model tail, unchanged: it runs after session setup
 	// either way. On a load that means after the restored snapshot has been
@@ -385,12 +465,10 @@ func (s *session) Start(ctx context.Context) error {
 	if s.opts.Mode != "" {
 		modeID, ok := ResolveMode(s.opts.Mode, modeIDs(modes))
 		if !ok {
-			_ = s.Close()
-			return fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
+			return true, fmt.Errorf("agent: session did not advertise mode %q", s.opts.Mode)
 		}
 		if err := client.SetMode(ctx, modeID); err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 		if loading {
 			s.mu.Lock()
@@ -402,8 +480,7 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	if s.opts.Model != "" {
 		if err := client.SetModel(ctx, s.opts.Model); err != nil {
-			_ = s.Close()
-			return err
+			return true, err
 		}
 		if loading {
 			s.mu.Lock()
@@ -414,7 +491,7 @@ func (s *session) Start(ctx context.Context) error {
 		}
 	}
 	if loading {
-		return nil
+		return false, nil
 	}
 	s.mu.Lock()
 	commands := s.snap.Commands
@@ -427,7 +504,16 @@ func (s *session) Start(ctx context.Context) error {
 	// is honoured and one that arrives next redoes the work.
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
-	return nil
+	return false, nil
+}
+
+// stderrSink is where the agent child's stderr goes: the journal's tee when
+// this session has one, and Options.Stderr itself otherwise.
+func (s *session) stderrSink() io.Writer {
+	if s.tee == nil {
+		return s.opts.Stderr
+	}
+	return s.tee
 }
 
 // loadSession is Start's session/load path: the replay, bracketed.
@@ -439,7 +525,11 @@ func (s *session) Start(ctx context.Context) error {
 // rows, sub-agent rows, todos, commands, the seeded title — is kept: the load
 // result is merged into the snapshot rather than assigned over it, which is the
 // whole difference from the session/new path above.
-func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd string) error {
+//
+// binary is the agent binary Start resolved and spawned, for the session note,
+// which is written here because this is where Start learns the id: after the
+// replay, and before the end bracket.
+func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd, binary string) error {
 	if !initRes.LoadSession() {
 		// Nothing has reached the wire: an agent without the capability is
 		// told so before the RPC rather than by its own error.
@@ -489,6 +579,9 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.snap.Provider = s.provider().Info()
 	s.snap.Plugins = s.resolvePluginsLocked()
 	s.mu.Unlock()
+	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
+	// that window drops it, which noteSession accepts and counts.
+	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
 	s.replaying.Store(false)
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
 	return nil
@@ -713,7 +806,19 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 	return s.Begin(text)(ctx)
 }
 
-// Begin claims the prompt slot for text now, on the caller's goroutine, and
+// Begin is the claim and the journal's record of it: the prompt note is
+// written here, after the claim and with s.mu released, and the continuation
+// that comes back writes the prompt_end its own (Result, error) says (plan 020
+// §3.5). Wrapping the continuation rather than the prompt's body is what makes
+// every ending a record: a claim that was refused, a prompt withdrawn before
+// the wire and one cancelled in the catalog wait all return from here, and
+// none of them reaches the body at all.
+func (s *session) Begin(text string) func(context.Context) (Result, error) {
+	run := s.claim(text)
+	return s.log.wrapPrompt(journal.PromptKindPrompt, text, run)
+}
+
+// claim claims the prompt slot for text now, on the caller's goroutine, and
 // returns the rest of the prompt to run. The TUI claims inside Update, in the
 // same step that shows the turn working, and runs the continuation on a Cmd
 // goroutine. Without the claim, an Esc that Update handled before that
@@ -738,7 +843,7 @@ func (s *session) Prompt(ctx context.Context, text string) (Result, error) {
 // claim has been released — so the refusal is the gate's, not a new one.
 //
 // The continuation must be run, once: the slot stays claimed until it returns.
-func (s *session) Begin(text string) func(context.Context) (Result, error) {
+func (s *session) claim(text string) func(context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.claimed || s.inPrompt {
@@ -751,7 +856,7 @@ func (s *session) Begin(text string) func(context.Context) (Result, error) {
 	return func(ctx context.Context) (Result, error) { return s.prompt(ctx, text, wire) }
 }
 
-// prompt is Begin's continuation: the claimed prompt from its catalog wait to
+// prompt is the claim's continuation: the claimed prompt from its catalog wait to
 // the end of its turn.
 func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Result, error) {
 	// One release for the whole claim, whichever way it ends. done is set once
@@ -1226,6 +1331,14 @@ func (s *session) AnswerPlan(id string, accept bool) error {
 // requestQuit's own close and finishRun's later one — the same session,
 // closed twice — agree: errors.Is(err, ErrAgentExited) holds on both when the
 // agent's exit was reaped first, on neither when craze closed it.
+//
+// The event log closes last (plan 020 §3.5), once the teardown above has run:
+// done is closed first, so every publisher blocked on the primary gives up,
+// and client.Close is where the agent's last words are written. Closing the
+// log is the admission cutoff: a handler goroutine that emits after this —
+// Close does not join the prompt goroutine or the client's handlers — is
+// refused by the log and reaches no subscriber. It is called with s.mu
+// released, as every publish is.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
@@ -1237,6 +1350,11 @@ func (s *session) Close() error {
 		if client != nil {
 			s.closeErr = client.Close()
 		}
+		// The child's stderr copy has finished by now (Client.Close waits for
+		// it), so this is where its last unterminated line can be noted — and
+		// it has to be before the log, which is the note cutoff.
+		s.tee.Flush()
+		s.log.Close(context.Background())
 	})
 	<-s.closeDone
 	return s.closeErr
@@ -1691,6 +1809,13 @@ func (s *session) emit(ev Event) { s.emitCtx(context.Background(), ev) }
 // emitCtx is emit with a caller's cancellation as a third way out, and reports
 // whether the event was delivered. A session that is closing drops it either
 // way; ctx is for a caller that must not be held by a consumer's backlog.
+//
+// Delivery is the event log's Publish, which numbers the event and hands it
+// to the primary on this goroutine, so a true return still means the event is
+// in Events()'s buffer. Publish encodes ev before it waits for anything,
+// which is why every caller hands emit a payload of its own (cloneTool,
+// cloneSubagent, a copied slice): nothing may change it while it is read.
+// No caller holds s.mu here; the log's boundary is never taken under it.
 func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	if ev.At.IsZero() {
 		ev.At = time.Now()
@@ -1700,16 +1825,11 @@ func (s *session) emitCtx(ctx context.Context, ev Event) bool {
 	}
 	select {
 	case <-s.done:
+		s.log.Abandoned()
 		return false
 	default:
 	}
-	select {
-	case s.events <- ev:
-		return true
-	case <-s.done:
-	case <-ctx.Done():
-	}
-	return false
+	return s.log.Publish(ctx, s.done, ev)
 }
 
 func (s *session) promptInFlight() bool {

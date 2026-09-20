@@ -442,8 +442,12 @@ func TestNativeToolProgressIsDroppedNotBlocked(t *testing.T) {
 	closeAtCleanup(t, s)
 	s.sink(harness.ToolStarted{ID: "t1.1.1", Step: 1, Tool: "bash", Kind: tool.KindExecute})
 	drained(s)
+	// Filled through the session's own emit: the primary is the event log's
+	// now, and the field is receive-only precisely so nothing can put an
+	// event into it without a sequence number (plan 020 §3.1). Each of these
+	// has room by the loop's own condition, so none of them blocks.
 	for len(s.events) < cap(s.events) {
-		s.events <- Event{Type: EventText, Text: "filler"}
+		s.emit(Event{Type: EventText, Text: "filler"})
 	}
 
 	// It must return: a test that hangs here has found the bug.

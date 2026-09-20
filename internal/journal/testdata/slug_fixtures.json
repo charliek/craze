@@ -1,0 +1,172 @@
+[
+  {
+    "name": "empty string",
+    "in": "",
+    "want": "----"
+  },
+  {
+    "name": "root",
+    "in": "/",
+    "want": "----"
+  },
+  {
+    "name": "a unix workspace",
+    "in": "/home/me/src/app",
+    "want": "--home-me-src-app--"
+  },
+  {
+    "name": "a space in a name",
+    "in": "/Users/me/My Project",
+    "want": "--Users-me-My Project--"
+  },
+  {
+    "name": "a trailing separator",
+    "in": "/home/me/app/",
+    "want": "--home-me-app---"
+  },
+  {
+    "name": "a doubled leading separator",
+    "in": "//double/lead",
+    "want": "---double-lead--"
+  },
+  {
+    "name": "a relative path",
+    "in": "relative/path",
+    "want": "--relative-path--"
+  },
+  {
+    "name": "a colon inside a name",
+    "in": "/srv/a:b",
+    "want": "--srv-a-b--"
+  },
+  {
+    "name": "collides with the next case",
+    "in": "/a/b-c",
+    "want": "--a-b-c--"
+  },
+  {
+    "name": "collides with the previous case",
+    "in": "/a/b/c",
+    "want": "--a-b-c--"
+  },
+  {
+    "name": "a Windows drive path",
+    "in": "C:\\Users\\me\\app",
+    "want": "--C--Users-me-app--"
+  },
+  {
+    "name": "a Windows drive root",
+    "in": "C:\\",
+    "want": "--C----"
+  },
+  {
+    "name": "a bare drive",
+    "in": "C:",
+    "want": "--C---"
+  },
+  {
+    "name": "a Windows backslash root",
+    "in": "\\",
+    "want": "----"
+  },
+  {
+    "name": "a UNC path",
+    "in": "\\\\server\\share\\app",
+    "want": "---server-share-app--"
+  },
+  {
+    "name": "mixed separators",
+    "in": "C:\\Users/me\\src/app",
+    "want": "--C--Users-me-src-app--"
+  },
+  {
+    "name": "non-ASCII names under the cut",
+    "in": "/home/José/проект/日本語",
+    "want": "--home-José-проект-日本語--"
+  },
+  {
+    "name": "exactly 200 bytes: left alone",
+    "in": "/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "want": "--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx--"
+  },
+  {
+    "name": "201 bytes: hashed",
+    "in": "/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "want": "--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-82b4db78--"
+  },
+  {
+    "name": "a long ASCII path",
+    "in": "/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/project",
+    "want": "--deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-de-1e025350--"
+  },
+  {
+    "name": "a long ASCII path differing past the cut",
+    "in": "/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/deep/project2",
+    "want": "--deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-de-ce77a939--"
+  },
+  {
+    "name": "long 2-byte runes, pad 0",
+    "in": "/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/",
+    "want": "--проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-пр-6358dd60--"
+  },
+  {
+    "name": "long 2-byte runes, pad 1",
+    "in": "/aпроект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/",
+    "want": "--aпроект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-пр-c2060c0d--"
+  },
+  {
+    "name": "long 2-byte runes, pad 2",
+    "in": "/aaпроект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/",
+    "want": "--aaпроект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-п-25699506--"
+  },
+  {
+    "name": "long 2-byte runes, pad 3",
+    "in": "/aaaпроект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/проект/",
+    "want": "--aaaпроект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-проект-п-a2419ffb--"
+  },
+  {
+    "name": "long 3-byte runes, pad 0",
+    "in": "/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/",
+    "want": "--项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项-b49766f2--"
+  },
+  {
+    "name": "long 3-byte runes, pad 1",
+    "in": "/a项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/",
+    "want": "--a项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项-062c82a6--"
+  },
+  {
+    "name": "long 3-byte runes, pad 2",
+    "in": "/aa项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/",
+    "want": "--aa项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项-7498c013--"
+  },
+  {
+    "name": "long 3-byte runes, pad 3",
+    "in": "/aaa项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/项目/",
+    "want": "--aaa项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目-项目--f5fd1a05--"
+  },
+  {
+    "name": "long 4-byte runes, pad 0",
+    "in": "/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/",
+    "want": "--🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀--9d8669af--"
+  },
+  {
+    "name": "long 4-byte runes, pad 1",
+    "in": "/a🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/",
+    "want": "--a🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀--517e9778--"
+  },
+  {
+    "name": "long 4-byte runes, pad 2",
+    "in": "/aa🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/",
+    "want": "--aa🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀--a298e8f8--"
+  },
+  {
+    "name": "long 4-byte runes, pad 3",
+    "in": "/aaa🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/🚀/",
+    "want": "--aaa🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-🚀-cbd22cc4--"
+  },
+  {
+    "name": "a long Windows path",
+    "in": "C:\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\Users\\app",
+    "want": "--C--Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-Users-User-e677154b--"
+  }
+]

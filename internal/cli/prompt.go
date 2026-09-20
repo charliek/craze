@@ -144,6 +144,9 @@ func (o *promptOpts) run() (retErr error) {
 		Stderr:     o.stderr,
 		PluginDirs: o.pluginDirs,
 		Provider:   &prov,
+		// Headless craze has one stream for its own notes, stderr, as it
+		// does for discoverPlugins' (Options.Diag falls back to it).
+		JournalDir: journalDir(o.stderr),
 	})
 	defer func() { _ = sess.Close() }()
 
@@ -269,6 +272,8 @@ func (o *promptOpts) runLoop(ctx context.Context, sess agent.Session, text strin
 			// The row was taken and never sent. The signal's own clear cannot
 			// report it — it had already left the queue — so the line for it
 			// is written here, or the stream would simply lose a message.
+			// It is craze's own line and not the session's: nothing numbered
+			// it, so `--json` writes it with no `seq` key (events.go).
 			if err := o.writeEvent(agent.Event{
 				Type:        agent.EventQueue,
 				Queue:       &next,

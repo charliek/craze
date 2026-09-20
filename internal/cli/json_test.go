@@ -8,10 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 var (
@@ -57,6 +61,10 @@ type jsonLineEvent struct {
 	m   map[string]any
 }
 
+// typeMemberOnly matches a line's head when nothing but `type` precedes the
+// key that follows it.
+var typeMemberOnly = regexp.MustCompile(`^\{"type":"[^"]*"$`)
+
 // isolateHome points HOME at an empty directory. The plugin scan walks the
 // caches under it at session start, so a run that skipped this would find
 // whatever the developer happens to have installed. It is separate from
@@ -68,12 +76,16 @@ func isolateHome(t *testing.T) {
 }
 
 // isolateRunEnv is everything a headless run reads out of the environment
-// before it reaches the agent: HOME, the provider override and the craze
-// directory, whose config file does not exist yet.
+// before it reaches the agent: HOME, the provider override, the journal
+// switch and the craze directory, whose config file does not exist yet. The
+// journal switch is cleared (empty reads as unset) so a developer's exported
+// CRAZE_JOURNAL can neither turn a run's journal off nor print a diagnostic
+// into a run whose stderr a case asserts on.
 func isolateRunEnv(t *testing.T) {
 	t.Helper()
 	isolateHome(t)
 	t.Setenv("CRAZE_PROVIDER", "")
+	t.Setenv("CRAZE_JOURNAL", "")
 	crazeHome(t)
 }
 
@@ -172,10 +184,52 @@ func pick(t *testing.T, evs []jsonLineEvent, typ string, match func(map[string]a
 	return got
 }
 
+// splitSeq takes the `seq` member off a raw line and returns it with the bytes
+// that surround it, untouched. The seq a run's lines carry depends on how many
+// events the session published before them — dropped kinds take numbers too
+// (plan 020 §3.6) — so an end-to-end case cannot spell one; the rest of the
+// line still can, byte for byte. A line with no `seq` returns 0 and itself.
+func splitSeq(t *testing.T, raw string) (uint64, string) {
+	t.Helper()
+	const key = `,"seq":`
+	i := strings.Index(raw, key)
+	if i < 0 {
+		return 0, raw
+	}
+	// `seq` is the second key: everything before it is the `type` member.
+	if !typeMemberOnly.MatchString(raw[:i]) {
+		t.Fatalf("line %s: seq must be the second key, right after type", raw)
+	}
+	j := i + len(key)
+	end := j
+	for end < len(raw) && raw[end] >= '0' && raw[end] <= '9' {
+		end++
+	}
+	seq, err := strconv.ParseUint(raw[j:end], 10, 64)
+	if err != nil {
+		t.Fatalf("line %s: seq %q is not a number: %v", raw, raw[j:end], err)
+	}
+	return seq, raw[:i] + raw[end:]
+}
+
+// sessionLine is one line of a run with its `seq` taken off, so an assertion
+// on the rest stays exact. The line must carry one: it came from the session's
+// event stream, and every such line is numbered (plan 020 A21). craze's own
+// lines — the signal window's queue removal, a startup error — are the ones
+// with no `seq`, and they are asserted where they are written.
+func sessionLine(t *testing.T, got jsonLineEvent) string {
+	t.Helper()
+	seq, rest := splitSeq(t, got.raw)
+	if seq == 0 {
+		t.Fatalf("line %s: a line from the session's stream must carry a seq", got.raw)
+	}
+	return rest
+}
+
 func wantLine(t *testing.T, got jsonLineEvent, want string) {
 	t.Helper()
-	if got.raw != want {
-		t.Fatalf("line\n got %s\nwant %s", got.raw, want)
+	if rest := sessionLine(t, got); rest != want {
+		t.Fatalf("line\n got %s\nwant %s", rest, want)
 	}
 }
 
@@ -184,6 +238,108 @@ func wantContains(t *testing.T, got jsonLineEvent, want string) {
 	if !strings.Contains(got.raw, want) {
 		t.Fatalf("line\n got %s\nwant it to contain %s", got.raw, want)
 	}
+}
+
+// TestJSONSeqIsTheSecondKeyOfEveryLine: one case per branch of eventJSON, each
+// encoded twice — once as the session's log numbered it, once as an event that
+// never passed through a log. A line shape that forgot the field, or declared
+// it anywhere but right after Type, would print a line no reader can place in
+// the sequence (plan 020 §3.6, A21); the pair also pins that `seq` is the only
+// difference between the two.
+func TestJSONSeqIsTheSecondKeyOfEveryLine(t *testing.T) {
+	const seq = 9
+	events := []agent.Event{
+		{Type: agent.EventText, Text: "hi"},
+		{Type: agent.EventThought, Text: "hmm"},
+		{Type: agent.EventUser, Agent: "sub-1", Text: "go"},
+		{Type: agent.EventCommand, Command: &agent.ExpandedCommand{
+			PluginCommand: agent.PluginCommand{Plugin: "p", Bare: "c", Qualified: "p:c", Kind: "command"},
+			Path:          "/p/commands/c.md",
+			Text:          "block",
+		}},
+		{Type: agent.EventQueue, QueueChange: agent.QueueQueued, Queue: &agent.QueuedPrompt{ID: "q-1", Text: "later"}},
+		{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: true}},
+		{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayStart}},
+		{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeSpawned, Subagent: &agent.SubagentInfo{ID: "sub-1"}},
+		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "call-1", Name: "Shell", Status: "pending"}},
+		{Type: agent.EventTodos, Todos: []agent.Todo{{ID: "1", Content: "read", Status: "pending"}}},
+		{Type: agent.EventPermission, Permission: &agent.PermissionEvent{Tool: "Shell"}},
+		{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Title: "Question"}},
+		{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Name: "Fake Plan"}},
+		{Type: agent.EventMeta, Text: "Fake Title"},
+		{Type: agent.EventDone, StopReason: "end_turn"},
+		{Type: agent.EventError, Err: errors.New("boom")},
+	}
+	var kinds []string
+	for _, ev := range events {
+		numbered := ev
+		numbered.Seq = seq
+		line := encodeOne(t, numbered)
+		kind, _ := parseJSONLines(t, line+"\n")[0].m["type"].(string)
+		kinds = append(kinds, kind)
+		head := `{"type":"` + kind + `","seq":` + strconv.Itoa(seq)
+		if !strings.HasPrefix(line, head) || (line != head+"}" && !strings.HasPrefix(line, head+",")) {
+			t.Fatalf("%s line\n got %s\nwant it to start %s", ev.Type, line, head)
+		}
+		// An event no log numbered is the same line without the key.
+		unnumbered := encodeOne(t, ev)
+		if strings.Contains(unnumbered, `"seq"`) {
+			t.Fatalf("%s: an event with no sequence number must print no seq: %s", ev.Type, unnumbered)
+		}
+		if _, rest := splitSeq(t, line); rest != unnumbered {
+			t.Fatalf("%s: seq is not the only difference\n got %s\nwant %s", ev.Type, rest, unnumbered)
+		}
+	}
+	want := []string{
+		"text", "thought", "user", "command", "queue", "foreign_turn", "replay",
+		"subagent", "tool", "todos", "permission", "question", "plan", "title",
+		"done", "error",
+	}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("line kinds\n got %v\nwant %v", kinds, want)
+	}
+}
+
+// TestJSONSeqExactLines is the bytes themselves, which an end-to-end run
+// cannot spell: the number goes between `type` and everything else, and
+// craze's own lines — a startup error, the queue row a signal took — carry no
+// `seq` at all.
+func TestJSONSeqExactLines(t *testing.T) {
+	row := agent.QueuedPrompt{ID: "q-1", Text: "follow-up"}
+	for _, tc := range []struct {
+		name string
+		ev   agent.Event
+		want string
+	}{
+		{"numbered text", agent.Event{Type: agent.EventText, Text: "hi", Seq: 7},
+			`{"type":"text","seq":7,"text":"hi"}`},
+		{"numbered done", agent.Event{Type: agent.EventDone, StopReason: "end_turn", Seq: 1234},
+			`{"type":"done","seq":1234,"stopReason":"end_turn"}`},
+		{"a startup error craze wrote itself", agent.Event{Type: agent.EventError, Err: errors.New("boom")},
+			`{"type":"error","message":"boom"}`},
+		{"the queue row a signal took", agent.Event{Type: agent.EventQueue, Queue: &row, QueueChange: agent.QueueRemoved},
+			`{"type":"queue","event":"removed","id":"q-1","position":0,"version":0,"text":"follow-up"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := encodeOne(t, tc.ev); got != tc.want {
+				t.Fatalf("line\n got %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// encodeOne is the one line ev projects to, without its newline.
+func encodeOne(t *testing.T, ev agent.Event) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := encodeEvent(&buf, ev); err != nil {
+		t.Fatal(err)
+	}
+	line := buf.String()
+	if !strings.HasSuffix(line, "\n") {
+		t.Fatalf("%s produced no line: %q", ev.Type, line)
+	}
+	return strings.TrimSuffix(line, "\n")
 }
 
 func TestPromptJSONTodos(t *testing.T) {
@@ -464,8 +620,8 @@ func TestPromptJSONPluginCommand(t *testing.T) {
 	got := pick(t, evs, "command", nil)
 	prefix := `{"type":"command","name":"gauntlet","qualified":"forge:gauntlet","plugin":"forge","kind":"command","path":"` +
 		filepath.Join(forge, "commands", "gauntlet.md") + `","text":"The user invoked /forge:gauntlet craze `
-	if !strings.HasPrefix(got.raw, prefix) {
-		t.Fatalf("line\n got %s\nwant it to start %s", got.raw, prefix)
+	if rest := sessionLine(t, got); !strings.HasPrefix(rest, prefix) {
+		t.Fatalf("line\n got %s\nwant it to start %s", rest, prefix)
 	}
 	wantContains(t, got, `Run the gauntlet on craze.`)
 	// The flows entry was never invoked, so it has no line.

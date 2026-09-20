@@ -12,8 +12,11 @@ import (
 // Stub is an in-process Session used by TUI chrome tests. It echoes each
 // prompt as assistant text and does not spawn cursor-agent.
 type Stub struct {
-	mu     sync.Mutex
-	events chan agent.Event
+	mu sync.Mutex
+	// log is the live session's event log, the same code: emit publishes
+	// into it and Events is its primary, so the goldens run on numbered
+	// events exactly as a real session produces them.
+	log    *agent.EventLog
 	closed chan struct{}
 	cancel chan struct{}
 	hang   bool
@@ -57,7 +60,8 @@ type Stub struct {
 	// queue is craze's own message queue — the real one, so the chrome tests
 	// run against the same transactions a live session does. queueOp orders
 	// whole transactions as the live session's does; the lock order is
-	// queueOp → mu → the queue's own lock.
+	// queueOp → mu → the queue's own lock, and queueOp → the log's publishing
+	// boundary, which is never taken with mu held.
 	queueOp sync.Mutex
 	queue   agent.PromptQueue
 	// inPrompt, doneEmitted and cancelling mirror the live session's turn
@@ -96,7 +100,7 @@ type stubCall struct {
 func NewStub() *Stub {
 	return &Stub{
 		failConfigAt: -1,
-		events:       make(chan agent.Event, 256),
+		log:          agent.NewEventLog(agent.EventLogOptions{}),
 		closed:       make(chan struct{}),
 		cancel:       make(chan struct{}, 1),
 		snap: agent.Snapshot{
@@ -300,7 +304,13 @@ func (s *Stub) Start(context.Context) error {
 	return nil
 }
 
-func (s *Stub) Events() <-chan agent.Event { return s.events }
+func (s *Stub) Events() <-chan agent.Event { return s.log.Primary() }
+
+// Subscribe and Incarnation are the Stub's agent.EventSource: its log's.
+func (s *Stub) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error) {
+	return s.log.Subscribe(o)
+}
+func (s *Stub) Incarnation() string { return s.log.Incarnation() }
 
 // Prompt is Begin and its continuation back to back, as on the live session.
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
@@ -631,15 +641,20 @@ func cloneStubTools(in []agent.ToolEvent) []agent.ToolEvent {
 	return out
 }
 
+// Close answers what is still open, closes the signal every emit and wait
+// selects on, and then closes the event log, as the live session's Close
+// does: the log last, and with mu released, because its boundary is never
+// taken under mu. It is idempotent; the log's Close is too.
 func (s *Stub) Close() error {
 	s.cancelOpen()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	select {
 	case <-s.closed:
 	default:
 		close(s.closed)
 	}
+	s.mu.Unlock()
+	s.log.Close(context.Background())
 	return nil
 }
 
@@ -651,6 +666,9 @@ func (s *Stub) now() time.Time {
 	return time.Now()
 }
 
+// emit publishes ev through the log, as the live session's emit does: on
+// this goroutine, so an emit that returned has its event in Events()'s
+// buffer, and never with mu held.
 func (s *Stub) emit(ev agent.Event) {
 	if ev.At.IsZero() {
 		ev.At = s.now()
@@ -658,13 +676,14 @@ func (s *Stub) emit(ev agent.Event) {
 	s.noteOpen(ev)
 	select {
 	case <-s.closed:
+		s.log.Abandoned()
 		return
 	default:
 	}
-	select {
-	case s.events <- ev:
-	case <-s.closed:
-	}
+	s.log.Publish(context.Background(), s.closed, ev)
 }
 
-var _ agent.Session = (*Stub)(nil)
+var (
+	_ agent.Session     = (*Stub)(nil)
+	_ agent.EventSource = (*Stub)(nil)
+)

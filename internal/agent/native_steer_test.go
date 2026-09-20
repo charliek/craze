@@ -534,8 +534,12 @@ func TestNativeInterjectRequeueDoesNotWedgeAConcurrentQueue(t *testing.T) {
 	// a handful for the turn itself and the concurrent Queue.
 	const burst = queueCap - 1
 	headroom := 2*burst + 8
+	// Filled through the session's own emit: the primary belongs to the event
+	// log now, and the field is receive-only precisely so nothing enters the
+	// stream without a sequence number (plan 020 §3.1). Each of these has room
+	// by the loop's own condition, so none of them blocks.
 	for len(s.events) < cap(s.events)-headroom {
-		s.events <- Event{Type: EventText, Text: "filler"}
+		s.emit(Event{Type: EventText, Text: "filler"})
 	}
 	if free := cap(s.events) - len(s.events); free != headroom || free > cap(s.events)/2 {
 		t.Fatalf("control: the channel has %d of %d slots free, want %d and well under half", free, cap(s.events), headroom)
