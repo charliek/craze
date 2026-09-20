@@ -78,8 +78,10 @@ live smoke could not exercise a **native tool call** (H1 has no tools; re-run
 after H2 lands), and V6's "`config.toml` byte-identical" clause **fails for a
 pre-existing reason** — `persistProvider` writes the `provider` key on every
 run, unchanged on `origin/main` — so it is restated as "unchanged apart from
-the `provider` key". The mac-mini half of the smoke is pending at the time of
-writing. Inputs to SQ3 (retention) and SQ15 (tool-event conflation) are
+the `provider` key". The mac-mini half ran at the branch tip and passed for
+grok and native; `cursor-agent` is skipped there because the login keychain
+blocks it over ssh, and that skip exercised the stderr tee against a real
+agent. Inputs to SQ3 (retention) and SQ15 (tool-event conflation) are
 measured in `12` and left undecided.
 
 ### S2 — control socket

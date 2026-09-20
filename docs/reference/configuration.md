@@ -181,7 +181,9 @@ never tightened. Treat a journal as being as sensitive as the session it came
 from.
 
 craze never uploads a journal, or any part of one, anywhere. They are local
-files, and nothing in craze reads an old one back today.
+files. A running session reads its own journal back — that is how a client
+that reconnects is given the events it missed — but craze does not read a file
+from an earlier run: once a session ends, its journal is only there for you.
 
 craze does not prune them yet either: they accumulate until you delete them. As
 a sense of scale, a measured turn with one tool call cost 6 KB against cursor

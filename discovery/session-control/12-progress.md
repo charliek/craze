@@ -418,13 +418,15 @@ agent, which the Linux leg could only do with a stub binary — two
 note, because the session never started. A second `start_failed` class
 (`other`, "native: no models configured") came free from the `CRAZE_HOME` run.
 
-The gate there passes: `make build`, `make test-race` (all 13 packages) and
-`go test` over every tracked package are green, and the known darwin-only
-`TestPTYAltScreenAndCtrlDQuit` failure did **not** reproduce at this commit.
-`make test` and `make lint` exit non-zero in that clone for a reason that is
-not the branch: an untracked, gitignored `scratch/` left from the plan-018
-spike has a missing `go.sum` entry, and `./...` walks into it. That clone needs
-tidying.
+The full gate did **not** run green in that clone, and the part that did is
+worth separating from the part that was blocked. Green: `make build`,
+`make test-race` (all 13 packages), and `go test` over every tracked package —
+and the known darwin-only `TestPTYAltScreenAndCtrlDQuit` failure did not
+reproduce at this commit. Blocked: `make test` and `make lint` both exit
+non-zero there, for a reason that is not the branch — an untracked, gitignored
+`scratch/` left from the plan-018 spike has a missing `go.sum` entry, and
+`./...` walks into it. That clone needs tidying before its gate means anything;
+CI's own macos-latest leg runs the same targets green on this branch.
 
 ### Measurements
 
