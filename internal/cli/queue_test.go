@@ -242,7 +242,7 @@ func TestPromptAnswersPermissionDuringAForeignTurn(t *testing.T) {
 	}
 	evs := parseJSONLines(t, stdout.String())
 	// The queued follow-up ran after the foreign turn, which is only true if
-	// nextQueued told "blocked" apart from "empty".
+	// the drain told a blocked queue apart from an empty one.
 	var sentAfterEnd bool
 	var ended bool
 	for _, ev := range evs {
@@ -283,23 +283,45 @@ func TestPermissionRejectedBetweenTurnsStillFailsTheRun(t *testing.T) {
 	}
 }
 
-// stubSession drives the run loop's edges directly. A signal landing between a
-// row leaving the queue and the prompt going out, a refusal the foreign-turn
+// stubSession drives the run's edges directly. A signal landing between a row
+// leaving the queue and the prompt going out, a refusal the foreign-turn
 // snapshot has not caught up with, a turn that keeps emitting after its
 // ending — none of them can be asked of a real agent on demand, and all of
-// them are where the queue loses messages if the loop is wrong.
+// them are where the queue loses messages if the driver is wrong.
+//
+// It publishes through a real agent.EventLog, the same type every session
+// publishes through, so Events() is that log's primary, the log numbers every
+// event rather than the test choosing a seq, and the stub already carries the
+// accessor a session needs to be driven at all (plan 021 §3.3: the engine
+// refuses a session with no event log). Nothing here numbers, buffers or
+// orders events on its own.
 type stubSession struct {
-	mu      sync.Mutex
-	events  chan agent.Event
+	mu sync.Mutex
+	// log is the session's event log and closed is its done signal, in the
+	// live session's order: Close closes the signal first, so an emit blocked
+	// on a primary nobody is reading gives its event up instead of waiting for
+	// a reader that has gone.
+	log     *agent.EventLog
+	closed  chan struct{}
 	queue   []agent.QueuedPrompt
 	prompts []string
 	turns   []stubTurn
 	answers []string
 	foreign bool
-	seq     int
+	// claimed is the session's prompt slot: Begin takes it and the
+	// continuation releases it, so a second Begin while one is claimed is
+	// refused exactly as a real session refuses it.
+	claimed bool
+	// nextID numbers the queue's rows. It is the queue's own counter and has
+	// nothing to do with the log's sequence numbers.
+	nextID int
 	// onPop runs inside PopQueue before the row leaves the queue: it is where
-	// the tests land a signal in the one window the loop cannot see.
+	// the tests land a signal in the one window the driver cannot see.
 	onPop func()
+	// onSnapshot runs once, before the first Snapshot answers, and is how a
+	// test puts an event on the stream at a moment it can name rather than one
+	// it guessed at with a sleep.
+	onSnapshot func()
 	// subagents is what Snapshot reports, so the end-of-run drain runs at all.
 	subagents []agent.SubagentInfo
 	// title is whatever SetTitle was handed, so the interface method has
@@ -307,23 +329,55 @@ type stubSession struct {
 	title string
 }
 
-// stubTurn is one Prompt: what it emits before it returns, and what it
-// returns. Turns are used in order, the last repeating.
+// stubTurn is one turn: what it emits before its continuation returns, and
+// what that returns. Turns are used in order, the last repeating.
 type stubTurn struct {
 	emit []agent.Event
 	res  agent.Result
 	err  error
 }
 
-func newStubSession(buffer int, turns ...stubTurn) *stubSession {
-	return &stubSession{events: make(chan agent.Event, buffer), turns: turns}
+// logOwner is agent.LogOwner spelled ahead of time: the accessor the engine
+// that takes this driver over will refuse a session without (plan 021 §3.3).
+// Naming it here is what keeps the stub honest about publishing through a log
+// instead of a channel of its own.
+type logOwner interface{ EventLog() *agent.EventLog }
+
+var (
+	_ agent.Session     = (*stubSession)(nil)
+	_ agent.EventSource = (*stubSession)(nil)
+	_ logOwner          = (*stubSession)(nil)
+)
+
+// newStubSession builds a stub with its own event log. The log's goroutines
+// and any emit still blocked on a full primary end with the test, whatever the
+// test did or failed to do.
+func newStubSession(t *testing.T, turns ...stubTurn) *stubSession {
+	t.Helper()
+	s := &stubSession{
+		log:    agent.NewEventLog(agent.EventLogOptions{}),
+		closed: make(chan struct{}),
+		turns:  turns,
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
 }
 
 func (s *stubSession) Start(context.Context) error { return nil }
 
-func (s *stubSession) Prompt(_ context.Context, text string) (agent.Result, error) {
+// Begin is the session's claim, taken on the caller's goroutine, and the
+// prompt is recorded here whether or not the claim succeeds — a real session
+// records an attempt the same way. A Begin while the slot is claimed claims
+// nothing and its continuation refuses, which is the contract the engine's
+// admission is built on.
+func (s *stubSession) Begin(text string) func(context.Context) (agent.Result, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.prompts = append(s.prompts, text)
+	if s.claimed {
+		return func(context.Context) (agent.Result, error) { return agent.Result{}, agent.ErrPromptInFlight }
+	}
+	s.claimed = true
 	var turn stubTurn
 	if len(s.turns) > 0 {
 		turn = s.turns[0]
@@ -331,40 +385,56 @@ func (s *stubSession) Prompt(_ context.Context, text string) (agent.Result, erro
 			s.turns = s.turns[1:]
 		}
 	}
-	s.mu.Unlock()
-	// Emitting before the return is what the session does, and it is what
-	// fills the buffer while the only reader is waiting for this call.
+	return func(context.Context) (agent.Result, error) { return s.runTurn(turn) }
+}
+
+// Prompt is Begin and its continuation back to back, as on every real session.
+func (s *stubSession) Prompt(ctx context.Context, text string) (agent.Result, error) {
+	return s.Begin(text)(ctx)
+}
+
+// runTurn is Begin's continuation. Emitting before it returns is what a
+// session does, and it is what fills the log's primary while the only reader
+// is waiting for this call.
+func (s *stubSession) runTurn(turn stubTurn) (agent.Result, error) {
+	defer func() {
+		s.mu.Lock()
+		s.claimed = false
+		s.mu.Unlock()
+	}()
 	for _, ev := range turn.emit {
-		s.events <- ev
+		s.emit(ev)
 	}
 	return turn.res, turn.err
 }
 
-// Begin is here for the interface: the run loop prompts through Prompt, and a
-// continuation that is Prompt itself records the same.
-func (s *stubSession) Begin(text string) func(context.Context) (agent.Result, error) {
-	return func(ctx context.Context) (agent.Result, error) { return s.Prompt(ctx, text) }
-}
+func (s *stubSession) Events() <-chan agent.Event { return s.log.Primary() }
 
-func (s *stubSession) Events() <-chan agent.Event { return s.events }
+// EventLog, Subscribe and Incarnation are the log's, as on every session: one
+// log per session, and every reader of it goes through the log's own seams.
+func (s *stubSession) EventLog() *agent.EventLog { return s.log }
+func (s *stubSession) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error) {
+	return s.log.Subscribe(o)
+}
+func (s *stubSession) Incarnation() string { return s.log.Incarnation() }
+
 func (s *stubSession) Cancel(context.Context) error {
 	return nil
 }
 
 func (s *stubSession) Queue(text string) (agent.QueuedPrompt, error) {
 	s.mu.Lock()
-	s.seq++
-	p := agent.QueuedPrompt{ID: fmt.Sprintf("q-%d", s.seq), Text: text}
+	s.nextID++
+	p := agent.QueuedPrompt{ID: fmt.Sprintf("q-%d", s.nextID), Text: text}
 	s.queue = append(s.queue, p)
 	pos := len(s.queue) - 1
 	s.mu.Unlock()
-	s.events <- agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueQueued, QueuePos: pos}
+	s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueQueued, QueuePos: pos})
 	return p, nil
 }
 
 func (s *stubSession) EditQueued(id, text string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.queue {
 		if s.queue[i].ID != id {
 			continue
@@ -372,9 +442,11 @@ func (s *stubSession) EditQueued(id, text string) error {
 		s.queue[i].Text = text
 		s.queue[i].Version++
 		p := s.queue[i]
-		s.events <- agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueEdited, QueuePos: i}
+		s.mu.Unlock()
+		s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueEdited, QueuePos: i})
 		return nil
 	}
+	s.mu.Unlock()
 	return fmt.Errorf("no queued message %q", id)
 }
 
@@ -395,7 +467,7 @@ func (s *stubSession) take(id string, change agent.QueueChange) (agent.QueuedPro
 		p := s.queue[i]
 		s.queue = append(s.queue[:i], s.queue[i+1:]...)
 		s.mu.Unlock()
-		s.events <- agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: change, QueuePos: i}
+		s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: change, QueuePos: i})
 		return p, true
 	}
 	s.mu.Unlock()
@@ -417,7 +489,7 @@ func (s *stubSession) PopQueue() (agent.QueuedPrompt, bool) {
 	p := s.queue[0]
 	s.queue = s.queue[1:]
 	s.mu.Unlock()
-	s.events <- agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueSent}
+	s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueSent})
 	return p, true
 }
 
@@ -428,7 +500,7 @@ func (s *stubSession) ClearQueue() int {
 	s.mu.Unlock()
 	for _, p := range rows {
 		row := p
-		s.events <- agent.Event{Type: agent.EventQueue, Queue: &row, QueueChange: agent.QueueRemoved}
+		s.emit(agent.Event{Type: agent.EventQueue, Queue: &row, QueueChange: agent.QueueRemoved})
 	}
 	return len(rows)
 }
@@ -447,9 +519,23 @@ func (s *stubSession) AnswerPlan(string, bool) error                          { 
 func (s *stubSession) SetModel(context.Context, string) error                 { return nil }
 func (s *stubSession) SetMode(context.Context, string) error                  { return nil }
 func (s *stubSession) SetConfig(context.Context, string, string) error        { return nil }
-func (s *stubSession) Close() error                                           { return nil }
 
-// SetTitle is the interface's, and nothing more: the run loop never renames a
+// Close is the live session's order: the done signal first, so an emit blocked
+// on a full primary gives its event up, then the log, which joins its own
+// goroutines. It is idempotent, as the log's Close is.
+func (s *stubSession) Close() error {
+	s.mu.Lock()
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	s.mu.Unlock()
+	s.log.Close(context.Background())
+	return nil
+}
+
+// SetTitle is the interface's, and nothing more: the run never renames a
 // session — /rename is the TUI's, and `craze prompt` has no title of its own.
 func (s *stubSession) SetTitle(title string) {
 	s.mu.Lock()
@@ -459,6 +545,15 @@ func (s *stubSession) SetTitle(title string) {
 
 func (s *stubSession) Snapshot() agent.Snapshot {
 	s.mu.Lock()
+	hook := s.onSnapshot
+	s.onSnapshot = nil
+	s.mu.Unlock()
+	if hook != nil {
+		// Outside the lock, because the hook publishes, and nothing publishes
+		// with a session's own mutex held.
+		hook()
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	return agent.Snapshot{
 		Queue:       append([]agent.QueuedPrompt(nil), s.queue...),
@@ -467,6 +562,17 @@ func (s *stubSession) Snapshot() agent.Snapshot {
 	}
 }
 
+// emit publishes through the log, as a live session's emit does: on this
+// goroutine, so an emit that returned has its event in the primary's buffer —
+// and blocking there once that buffer is full, which is the wedge
+// TestTurnKeepsReadingWhileThePromptReturns is about.
+func (s *stubSession) emit(ev agent.Event) {
+	s.log.Publish(context.Background(), s.closed, ev)
+}
+
+// sent is every prompt handed to the session, in order, refused attempts
+// included: it is how many times the driver tried, which is the observable
+// half of a retry.
 func (s *stubSession) sent() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -486,31 +592,76 @@ func endTurn() stubTurn {
 	}
 }
 
+// stubWatchdog is how long a run below may make no progress before the test
+// fails. It is not a timing assertion — nothing in a passing run waits this
+// long — it is the difference between a readable failure and `go test` hanging
+// until its own timeout kills the whole package.
+const stubWatchdog = 10 * time.Second
+
+// primaryBuffer is agent.EventLog's primary buffer, a constant 256 (see
+// EventLog.Primary). A test that needs a publisher to be genuinely blocked has
+// to emit more than this, and spelling the number here says why.
+const primaryBuffer = 256
+
+// runChain is the one seam between these tests and whatever drives
+// `craze prompt`'s turns. Today that is runLoop over the session itself,
+// followed by the same final sweep run() makes, so what a test reads on stdout
+// is what a script would get. When the driver moves into internal/engine this
+// function is what changes: every test below asserts stdout, stderr, the exit
+// status and what reached the session, and none of them names a driver
+// function.
+//
+// It takes no *testing.T on purpose: a test may run it on a goroutine of its
+// own — the only honest way to say "this run must not block" is to watch for it
+// returning — and t.Fatal off the test's goroutine is not allowed. A follow-up
+// the session refuses comes back as the error run() would have returned.
+func runChain(o *promptOpts, ctx context.Context, s *stubSession, text string, followUps ...string) error {
+	// --follow-up is the headless queue: every row is queued before the first
+	// turn, exactly as run() queues it.
+	for _, f := range followUps {
+		if _, err := s.Queue(f); err != nil {
+			return fmt.Errorf("craze: %w", err)
+		}
+	}
+	decisions := append([]string{}, o.decisions...)
+	err := o.runLoop(ctx, s, text, &decisions)
+	return o.finishRun(s, &decisions, err)
+}
+
+// stillQueued is what is left in the queue when a run is over, by text. It is
+// the other half of runChain's seam: today the queue is the session's, and
+// when it moves into the engine only this function follows it.
+func stillQueued(s *stubSession) []string {
+	var out []string
+	for _, row := range s.Snapshot().Queue {
+		out = append(out, row.Text)
+	}
+	return out
+}
+
 // TestSignalBetweenTheTakeAndTheSendRemovesTheRow: the row is taken, then the
 // signal lands. Sending it now would start a whole turn on a context no second
 // Ctrl+C could cancel, and the row is already out of the queue, so the clear
 // the signal ran cannot report it. It is reported removed here instead.
 //
 // That line is craze's own, and it is where the no-`seq` rule (plan 020 §3.6,
-// A21) is visible from the outside: the turn's event is numbered here — the
-// stub numbers that one, standing in for the log a real session publishes
-// through — and its line carries the number, while the removed line, which no
-// session ever saw, carries no `seq` key at all.
+// A21) is visible from the outside: the turn's own line went through the
+// session's event log, which numbered it, while the removed line, which no log
+// ever saw, carries no `seq` key at all.
+//
+// This is the one test plan 021 lists as going away (A-X8, §3.4): once taking
+// a row and starting its turn are one transaction in the engine, the window
+// this test holds open stops existing and the removal becomes an ordinary
+// session event. It therefore still reaches for the window deliberately, with
+// the session's onPop hook, rather than through anything observable.
 func TestSignalBetweenTheTakeAndTheSendRemovesTheRow(t *testing.T) {
-	const doneSeq = 77
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
-	s := newStubSession(64, stubTurn{
-		emit: []agent.Event{{Type: agent.EventDone, StopReason: "end_turn", Seq: doneSeq}},
-		res:  agent.Result{StopReason: "end_turn"},
-	})
+	s := newStubSession(t, endTurn())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.onPop = func() { cancel() }
-	if _, err := s.Queue("follow-up"); err != nil {
-		t.Fatal(err)
-	}
-	err := o.runLoop(ctx, s, "first", &[]string{})
+	err := runChain(o, ctx, s, "first", "follow-up")
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 1 {
 		t.Fatalf("a signal must end the run with exit 1: %v", err)
@@ -518,14 +669,13 @@ func TestSignalBetweenTheTakeAndTheSendRemovesTheRow(t *testing.T) {
 	if got := s.sent(); len(got) != 1 || got[0] != "first" {
 		t.Fatalf("the taken row must not be sent: %v", got)
 	}
-	if _, err := o.flushEvents(s, &[]string{}); err != nil {
-		t.Fatal(err)
-	}
 	evs := parseJSONLines(t, stdout.String())
 	var removed, sent int
 	for _, ev := range evs {
-		if ev.m["type"] == "done" && ev.m["seq"] != float64(doneSeq) {
-			t.Fatalf("the session's own line lost its seq: %s", ev.raw)
+		if ev.m["type"] == "done" {
+			if _, ok := ev.m["seq"].(float64); !ok {
+				t.Fatalf("a line from the session's stream must carry a seq: %s", ev.raw)
+			}
 		}
 		if ev.m["type"] != "queue" {
 			continue
@@ -551,40 +701,62 @@ func TestSignalBetweenTheTakeAndTheSendRemovesTheRow(t *testing.T) {
 	}
 }
 
-// TestNextQueuedDoesNotWaitOutAForeignTurnForAnEmptyQueue: with nothing
-// queued there is nothing to wait for. Waiting first would block a plain
+// TestNextQueuedDoesNotWaitOutAForeignTurnForAnEmptyQueue: with nothing queued
+// there is nothing to wait for. Waiting first would block a plain
 // `craze prompt` on a fallback turn it has no stake in, and then exit 1.
+//
+// "Promptly" is structural here, not a stopwatch. The agent's own turn is
+// never ended: nothing in this test ends it, and the budget is longer than any
+// run of the suite, so a driver that waits for it to clear does not finish
+// late — it does not finish, and the watchdog says so. A passing run waits on
+// nothing at all.
 func TestNextQueuedDoesNotWaitOutAForeignTurnForAnEmptyQueue(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
-	s := newStubSession(8)
+	o.foreignMax = time.Hour
+	s := newStubSession(t, endTurn())
+	// Set before the run starts, which is the happens-before edge to it.
 	s.foreign = true
-	start := time.Now()
-	_, ok, rejected, err := o.nextQueued(context.Background(), s, &[]string{})
-	if err != nil {
-		t.Fatalf("an empty queue is not a failure: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("an empty queue is not a failure: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run waited out a turn nothing was queued behind")
 	}
-	if ok || rejected {
-		t.Fatalf("ok=%v rejected=%v", ok, rejected)
+	if got := s.sent(); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("one turn, the caller's own: %v", got)
 	}
-	if time.Since(start) > o.foreignBudget() {
-		t.Fatalf("waited %s on a turn nothing was queued behind", time.Since(start))
+	if stderr.String() != "" {
+		t.Fatalf("a foreign turn with nothing queued behind it is not worth a word: %q", stderr.String())
 	}
 }
 
 // TestForeignTurnRefusalIsRetriedUntilItClears: the snapshot the wait reads
 // can lag the client, so the retry can be refused again. A single retry would
 // hand the caller a raw ErrForeignTurn on a session that was about to be free.
+// The refusal reached nothing, so a script sees no line for it either — only
+// the turn that did run.
 func TestForeignTurnRefusalIsRetriedUntilItClears(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
 	refused := stubTurn{err: agent.ErrForeignTurn}
-	s := newStubSession(8, refused, refused, endTurn())
-	if err := o.runLoop(context.Background(), s, "go", &[]string{}); err != nil {
+	s := newStubSession(t, refused, refused, endTurn())
+	if err := runChain(o, context.Background(), s, "go"); err != nil {
 		t.Fatalf("the retry must outlast a lagging snapshot: %v", err)
 	}
 	if got := s.sent(); len(got) != 3 {
 		t.Fatalf("%d attempts, want two refusals and a turn: %v", len(got), got)
+	}
+	evs := parseJSONLines(t, stdout.String())
+	if len(evs) != 1 || evs[0].m["type"] != "done" {
+		t.Fatalf("a refusal must print nothing:\n%s", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("a refusal craze recovered from is not worth a word: %q", stderr.String())
 	}
 }
 
@@ -594,14 +766,17 @@ func TestForeignTurnRefusalIsRetriedUntilItClears(t *testing.T) {
 func TestForeignTurnRefusalGivesUpWithAStatus(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
-	s := newStubSession(8, stubTurn{err: agent.ErrForeignTurn})
-	err := o.runLoop(context.Background(), s, "go", &[]string{})
+	s := newStubSession(t, stubTurn{err: agent.ErrForeignTurn})
+	err := runChain(o, context.Background(), s, "go")
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 1 {
 		t.Fatalf("err %v", err)
 	}
 	if !strings.Contains(stderr.String(), "kept the session") {
 		t.Fatalf("stderr %q", stderr.String())
+	}
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		t.Fatalf("a run that never got a turn has nothing to print: %q", out)
 	}
 }
 
@@ -611,22 +786,17 @@ func TestForeignTurnRefusalGivesUpWithAStatus(t *testing.T) {
 func TestNonEndTurnStopClearsTheQueue(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
-	s := newStubSession(64, stubTurn{
+	s := newStubSession(t, stubTurn{
 		emit: []agent.Event{{Type: agent.EventDone, StopReason: "cancelled"}},
 		res:  agent.Result{StopReason: "cancelled"},
 	})
-	for _, text := range []string{"one", "two"} {
-		if _, err := s.Queue(text); err != nil {
-			t.Fatal(err)
-		}
-	}
-	err := o.runLoop(context.Background(), s, "go", &[]string{})
+	err := runChain(o, context.Background(), s, "go", "one", "two")
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 1 {
 		t.Fatalf("err %v", err)
 	}
-	if got := s.Snapshot().Queue; len(got) != 0 {
-		t.Fatalf("the queue outlived the run: %+v", got)
+	if got := stillQueued(s); len(got) != 0 {
+		t.Fatalf("the queue outlived the run: %v", got)
 	}
 	var removed []string
 	for _, ev := range parseJSONLines(t, stdout.String()) {
@@ -644,28 +814,33 @@ func TestNonEndTurnStopClearsTheQueue(t *testing.T) {
 
 // TestTurnKeepsReadingWhileThePromptReturns: the error path emits the queue's
 // removals after the error, one per row. A reader that stopped at the error
-// and waited for Prompt to return would fill the session's buffer and wedge
-// the goroutine it was waiting on — with Close on the far side of it.
+// and waited for the turn to return would fill the session's event buffer and
+// wedge the goroutine it was waiting on — with Close on the far side of it.
+//
+// The count is not the queue's 32. The stub publishes through a real event log
+// whose primary buffer is a fixed 256, not a number a test can choose, so only
+// a turn that emits more than that leaves the publisher genuinely blocked. At
+// 33 events a reader that gave up at the error would still see the turn return
+// and this test would pass on a wedge it had not reproduced.
 func TestTurnKeepsReadingWhileThePromptReturns(t *testing.T) {
+	const removals = primaryBuffer + 64
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
 	boom := errors.New("wire broke")
 	emit := []agent.Event{{Type: agent.EventError, Err: boom}}
-	for i := 0; i < 32; i++ {
+	for i := 0; i < removals; i++ {
 		row := agent.QueuedPrompt{ID: fmt.Sprintf("q-%d", i), Text: "row"}
 		emit = append(emit, agent.Event{Type: agent.EventQueue, Queue: &row, QueueChange: agent.QueueRemoved})
 	}
-	// A buffer smaller than what the turn emits is the whole point: the turn
-	// cannot return until someone reads.
-	s := newStubSession(4, stubTurn{emit: emit, err: boom})
+	s := newStubSession(t, stubTurn{emit: emit, err: boom})
 	done := make(chan error, 1)
-	go func() { done <- o.runLoop(context.Background(), s, "go", &[]string{}) }()
+	go func() { done <- runChain(o, context.Background(), s, "go") }()
 	select {
 	case err := <-done:
 		if !errors.Is(err, boom) {
 			t.Fatalf("err %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(stubWatchdog):
 		t.Fatal("the turn wedged: nothing read the events the error dragged behind it")
 	}
 	var removed int
@@ -674,8 +849,8 @@ func TestTurnKeepsReadingWhileThePromptReturns(t *testing.T) {
 			removed++
 		}
 	}
-	if removed != 32 {
-		t.Fatalf("%d of 32 removals reached stdout", removed)
+	if removed != removals {
+		t.Fatalf("%d of %d removals reached stdout", removed, removals)
 	}
 }
 
@@ -686,22 +861,23 @@ func TestTurnKeepsReadingWhileThePromptReturns(t *testing.T) {
 func TestSubagentDrainAnswersPermissions(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
-	s := newStubSession(8)
+	s := newStubSession(t)
 	s.subagents = []agent.SubagentInfo{{ID: "sub-1", Status: agent.SubagentCompleted}}
-	// The request arrives once the drain is the only reader left: an event
-	// already buffered would be answered by the flush ahead of it and prove
-	// nothing about this one.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		s.events <- agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+	// The request has to arrive once the drain is the only reader left: an
+	// event already buffered would be answered by the flush ahead of it and
+	// prove nothing about this one. The drain's own first Snapshot is exactly
+	// that moment — the final flush takes none — so the hook is a barrier, not
+	// a guess about how long a sleep has to be.
+	s.onSnapshot = func() {
+		s.emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
 			ID:   "perm-1",
 			Tool: "Shell",
 			Options: []agent.PermissionOption{
 				{OptionID: "opt-allow", Kind: "allow_once"},
 				{OptionID: "opt-reject", Kind: "reject_once"},
 			},
-		}}
-	}()
+		}})
+	}
 	decisions := []string{"reject-once"}
 	err := o.finishRun(s, &decisions, nil)
 	var ee *exitError
