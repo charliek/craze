@@ -129,18 +129,19 @@ func TestACancelHeldBeforeTheSessionAdmitsNothing(t *testing.T) {
 // is no longer current, unknown when the call gave up.
 func TestCancelOutcomes(t *testing.T) {
 	t.Run("settled", func(t *testing.T) {
-		r := newRig(t, Options{})
+		// The turn is over by the time the session's cancel returns: the
+		// cancel is held at the session's exit until the turn has come back.
+		// The hooks are the engine's from birth, as they have to be: its
+		// goroutines read them.
+		back := make(chan struct{})
+		var once sync.Once
+		r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, &hooks{
+			turnReturned:       func(string) { once.Do(func() { close(back) }) },
+			afterSessionCancel: func(string) { await(t, back, "the cancelled turn to come back") },
+		})
 		turn := r.s.script(held())
 		res := r.submit("one")
 		await(t, turn.opened, "the turn to open")
-		// The turn is over by the time the session's cancel returns: the
-		// cancel is held at the session's exit until the turn has come back.
-		back := make(chan struct{})
-		var once sync.Once
-		r.e.hooks = &hooks{
-			turnReturned:       func(string) { once.Do(func() { close(back) }) },
-			afterSessionCancel: func(string) { await(t, back, "the cancelled turn to come back") },
-		}
 		got, err := r.e.Cancel(context.Background(), Command{}, res.Turn)
 		if err != nil || got.Outcome != CancelSettled || got.Turn != "turn-1" {
 			t.Fatalf("cancel answered %+v, %v", got, err)

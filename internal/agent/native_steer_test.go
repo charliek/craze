@@ -514,8 +514,11 @@ func TestNativeInterjectEndsAFullBurstBesideANearlyFullChannel(t *testing.T) {
 	}
 	// The control: the whole burst really came back, in order.
 	u := got.res.Unanswered
-	if len(u) != burst || u[0] != "steer 00" {
-		t.Fatalf("Unanswered holds %d texts headed by %q, want %d headed by the first interjection", len(u), u[0], burst)
+	if len(u) != burst {
+		t.Fatalf("Unanswered holds %d texts, want the whole burst of %d", len(u), burst)
+	}
+	if u[0] != "steer 00" {
+		t.Fatalf("Unanswered is headed by %q, want the first interjection", u[0])
 	}
 }
 

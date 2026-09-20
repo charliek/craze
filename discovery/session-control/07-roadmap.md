@@ -8,7 +8,7 @@ non-test source lines, from the reference reviews (`09`).
 | ID | status | one line |
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
-| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b planned (Plan 021, 2026-09-20)** |
+| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b in progress (Plan 021: PR 1 of 3, the driver, 2026-09-20)** |
 | S2 | not started | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
@@ -38,7 +38,7 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   registry with sequenced terminal outcomes; cancel outcomes on an engine turn
   id; command ids; settings order; approval policy separated from frontend
   presence; durable craze session id and index writes in the engine.
-  **Planned under Plan 021 (2026-09-20), panel-reviewed, not yet executed.**
+  **In progress under Plan 021 (panel-reviewed 2026-09-20): three PRs — the driver, the asks, state and identity.**
 - **S1c** — the render-free transcript model folded inside the boundary;
   bounded snapshots; in-process attach with snapshot + cursor; the
   convergence check per event kind.

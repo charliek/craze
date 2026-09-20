@@ -1089,8 +1089,11 @@ func TestASignalWhileTheDrainIsHeldEndsTheRunAtOnce(t *testing.T) {
 		return st.Prompted && st.Activity == engine.ActivityIdle && len(st.Queue) == 1
 	})
 	// The cancel the stop writes is what ends the agent's own turn, as it does on
-	// a real session, and the session says so on the stream.
+	// a real session, and the session says so on the stream. Set under the lock
+	// Cancel reads it under: the run is already going.
+	s.mu.Lock()
 	s.onCancel = func() { s.setForeign(false) }
+	s.mu.Unlock()
 	cancel()
 	select {
 	case err := <-done:

@@ -637,7 +637,7 @@ No follow-up issues were filed: the list above and `04`'s table of unshipped
 
 | | |
 |---|---|
-| Status | planned |
+| Status | in progress (PR 1 of 3: the driver) |
 | Plan | `021-session-control-s1b-engine` (outside the repo, `~/.claude/plans/craze/`) |
 | Baseline | `6581e0a` |
 | Branch / PRs | three sequential PRs, each from fresh `origin/main`: `feature/plan-021-s1b-driver`, `feature/plan-021-s1b-asks`, `feature/plan-021-s1b-state` |
