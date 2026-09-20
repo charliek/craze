@@ -214,7 +214,7 @@ test is a criterion nobody checked.
 | A25 stderr budget keeps a count and loses no events | pass | `TestStderrBudgetKeepsOneCountAndLosesNoEvents` |
 | A26 a session built and closed without starting leaves no file | pass | `TestJournalUnstartedSessionLeavesNothing`, `TestAnUnusedWriterOwnsNoGoroutineAndCreatesNothing`, `TestAClosingNoteAloneCreatesNothing` |
 | V1 live smoke, Linux | pass, **one leg not run** | see "Live smoke". The native **tool-call** leg is not satisfiable today: `--provider native` is harness H1, which has no tools. Re-run after H2 lands |
-| V2 live smoke, mac-mini | **pending** | not run at the time of writing; the orchestrator's next step |
+| V2 live smoke, mac-mini | pass | grok and native at `1dfc551`; `cursor-agent` skipped (login keychain over ssh), which instead exercised the stderr tee against a real agent. See Live smoke below |
 | V3 measurements | done | see "Measurements"; artifacts in the smoke folder |
 | V4 overhead benchmarks | pass | budget met: a text delta with the journal attached is ~0.9–1.2 µs against a 5 µs budget. See "Measurements" |
 | V5 `-race -count=20` | one pre-existing failure, diagnosed | see "V5" |
@@ -380,18 +380,51 @@ notes** (the stub run's `agent_stderr` notes carry `ts` ~70 µs earlier than the
 `start_failed` line that precedes them). File position is the contract, as §3.4
 says; a reader that sorts notes by `ts` will be wrong.
 
-#### mac-mini — pending
+#### mac-mini — run at `1dfc551` (three commits after the Linux leg)
 
-**Not run at the time this was written.** It is the orchestrator's next step
-before the PR, and this line is updated if it completes first. Per the plan,
-`cursor-agent` over ssh is blocked by the login keychain and is recorded as
-skipped rather than worked around, so the mac-mini pass is grok and native.
+macOS 26 arm64, clone `~/projects.bak/craze`. Artifacts:
+`020-session-control-s1a-event-log/smoke/macos/`.
 
 | provider | scenario | result |
 |---|---|---|
-| grok | — | pending |
-| native | — | pending |
-| cursor | — | expected skip (login keychain blocks `cursor-agent` over ssh) |
+| grok | headless turn with a real tool call | pass |
+| grok | TUI turn with a real tool call | pass |
+| grok | `--continue` | pass |
+| native | headless turn | pass, no tool call possible (H1 has no tools) |
+| native | TUI turn | pass |
+| cursor | any live turn | **skipped**: `Error: Your macOS login keychain is locked.` — recorded, not worked around |
+| — | `prompt --json` stdout `seq` ⊆ journal `seq` | pass (grok 20 lines, native 14, none missing) |
+| — | modes, `CRAZE_HOME` redirect, `CRAZE_JOURNAL=0`, V6 | pass; `config.toml` byte-identical here |
+
+All seven journals: `header` first with `os: darwin` and `arch: arm64`, a
+`session` note, `prompt` and `prompt_end`, `seq` contiguous from 1, no `gap`
+line, `closing` last with `droppedAtClose: 0`, files 0600 in directories craze
+created at 0700 under umask 022. The resume matched Linux exactly: `loadedFrom`
+equal to the previous `providerSessionId`, seven `replayed: true` events inside
+the bracket, and the first incarnation's file byte-identical afterwards.
+
+Two macOS facts a journal reader needs. Timestamps are microsecond-resolution
+on darwin (nanosecond on Linux), so ties are likelier and file position stays
+the contract. And `ts` must never be compared as a string: RFC3339Nano trims
+trailing zeros, so `.9701Z` sorts after `.970164Z` lexicographically while
+being earlier in time — compared as time, all seven files are strictly
+monotonic in file order. The Linux leg's out-of-order note timestamps did not
+reproduce here.
+
+The cursor skip paid for itself: it exercised the stderr tee against a **real**
+agent, which the Linux leg could only do with a stub binary — two
+`agent_stderr` notes with their ANSI intact and correctly escaped, then
+`start_failed{errClass: "closed"}` and `closing`, with no `session` or `prompt`
+note, because the session never started. A second `start_failed` class
+(`other`, "native: no models configured") came free from the `CRAZE_HOME` run.
+
+The gate there passes: `make build`, `make test-race` (all 13 packages) and
+`go test` over every tracked package are green, and the known darwin-only
+`TestPTYAltScreenAndCtrlDQuit` failure did **not** reproduce at this commit.
+`make test` and `make lint` exit non-zero in that clone for a reason that is
+not the branch: an untracked, gitignored `scratch/` left from the plan-018
+spike has a missing `go.sum` entry, and `./...` walks into it. That clone needs
+tidying.
 
 ### Measurements
 
