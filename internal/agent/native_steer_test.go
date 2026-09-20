@@ -512,6 +512,15 @@ func TestNativeInterjectLimitIsTheQueuesOwn(t *testing.T) {
 // two runs of the same commit, one green, one "the concurrent Queue = agent:
 // queue is full".)
 //
+// What this does not do is force the concurrent Queue to overlap the requeue
+// (CodeRabbit, round 3): the goroutine may run before it, during it, or after
+// it, and the test asserts what must hold in every one of those orders — the
+// prompt returns, the Queue returns, and the burst is at the head. Forcing the
+// overlap would need a test-only barrier inside queueUnanswered, and this
+// package keeps no hooks in production code; the test that actually creates
+// contention on queueOp and emitMu is TestNativeInterjectRacesTheTurnEnd,
+// which runs 24 interjecting goroutines against the turn's end under -race.
+//
 // The control is the vacuity check: the channel really was left with a small
 // fraction of its capacity free, and the whole burst really was requeued.
 func TestNativeInterjectRequeueDoesNotWedgeAConcurrentQueue(t *testing.T) {
