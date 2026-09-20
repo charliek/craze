@@ -251,28 +251,51 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		}
 	})
 
-	t.Run("the cancel it issued failed", func(t *testing.T) {
-		r := newRig(t, Options{})
-		turn := r.s.script(held())
-		r.submit("one")
-		await(t, turn.opened, "the turn to open")
-		row := r.queue("the row")
-		boom := errors.New("the pipe is gone")
-		r.s.mu.Lock()
-		r.s.cancelErr = boom
-		r.s.mu.Unlock()
-		r.sendNow(row.Text, row.ID)
-		// The turn the cancel did not stop is still running, so the send is
-		// waiting for an ending that is not coming: it goes, and the text stays
-		// in the composer, as the TUI's cancelFailedMsg has always left it.
-		wantDisarm(t, r, agent.SendNowCancelFailed)
-		wantRowUntouched(t, r, row)
-		if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking {
-			t.Fatalf("the turn the failed cancel left running: %+v", st)
-		}
-		turn.release()
-		r.until(lastEnding)
-	})
+	// A cancel that fails and one that gives up on its context are the same
+	// disarm: both leave the turn the send was armed against running, so its
+	// settlement — the moment the send was waiting for — is not coming. The
+	// context case is what a live session now answers when it abandons a
+	// session/cancel parked in an agent's pipe (live.go's writeCancel), which is
+	// the failure mode that used to hold the hold for good.
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the cancel it issued failed", errors.New("the pipe is gone")},
+		{"the cancel it issued gave up on its context", context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, Options{})
+			turn := r.s.script(held())
+			r.submit("one")
+			await(t, turn.opened, "the turn to open")
+			row := r.queue("the row")
+			r.s.mu.Lock()
+			r.s.cancelErr = tc.err
+			r.s.mu.Unlock()
+			r.sendNow(row.Text, row.ID)
+			// The turn the cancel did not stop is still running, so the send is
+			// waiting for an ending that is not coming: it goes, and the text
+			// stays where it was — the row in the queue, a draft in the client's
+			// composer — as the TUI's cancelFailedMsg has always left it.
+			wantDisarm(t, r, agent.SendNowCancelFailed)
+			wantRowUntouched(t, r, row)
+			if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking {
+				t.Fatalf("the turn the failed cancel left running: %+v", st)
+			}
+			// And the hold that cancel took is back, whatever it answered: the
+			// turn settles when it ends, and the row behind it runs.
+			r.e.mu.Lock()
+			holds := r.e.cancelsInFlight
+			r.e.mu.Unlock()
+			if holds != 0 {
+				t.Fatalf("%d holds stand after a cancel that did not reach the agent", holds)
+			}
+			turn.release()
+			r.until(lastEnding)
+			r.wantPrompts("one", "the row")
+		})
+	}
 
 	t.Run("the turn it was armed against failed", func(t *testing.T) {
 		r := newRig(t, Options{})
@@ -387,9 +410,11 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		r.sync()
 		turn.release()
 		wantDisarm(t, r, agent.SendNowRowGone)
-		// Nothing was sent in its place: the queue it would have fallen through
-		// to is empty too.
+		// The text is where the clear left it: gone, by the client's own command,
+		// with a removal event for it. Nothing was sent in its place either — the
+		// queue the send would have fallen through to is empty too.
 		r.wantPrompts("one")
+		r.wantRows()
 	})
 
 	t.Run("the engine was stopped", func(t *testing.T) {
@@ -402,7 +427,9 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		r.wantShapes(got[len(got)-2:],
 			// Stop clears the queue and the armed send with it: nothing may be
 			// admitted afterwards, so the turn it was waiting for will settle
-			// into nothing at all.
+			// into nothing at all. The row goes with the rest of the queue —
+			// deliberately, and with its removal in the record, which is how a
+			// client says where a follow-up went.
 			`queue removed "the row"`,
 			`disarmed stopped`,
 		)
@@ -419,7 +446,7 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		// Close returns. A subscription is cut off instead, which is the one
 		// reader that cannot be relied on for an event enqueued inside Close.
 		r := newRigOn(t, Options{}, agent.EventLogOptions{})
-		arm(t, r)
+		_, row := arm(t, r)
 		if err := r.e.Close(); err != nil {
 			t.Fatalf("close: %v", err)
 		}
@@ -440,6 +467,13 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		if st := r.e.State(); st.SendNow != nil {
 			t.Fatalf("something is still armed after Close: %+v", st.SendNow)
 		}
+		// The text is where it was: the row is still in the queue the session is
+		// going away with — Close clears nothing, because there is nobody left to
+		// tell — and the send never reached the session.
+		if st := r.e.State(); len(st.Queue) != 1 || st.Queue[0].ID != row.ID || st.Queue[0].Text != row.Text {
+			t.Fatalf("the row the send named is not where it was: %+v", st.Queue)
+		}
+		r.wantPrompts("one")
 	})
 }
 
@@ -481,44 +515,87 @@ func TestAnArmedSendFiresEvenWhereTheChainPolicyEndsTheChain(t *testing.T) {
 // armed — so between the arm and the cancel reaching the session nothing is
 // admitted by any path, and the cancel therefore lands on the turn the send was
 // armed against or on none.
+//
+// Every admission path is tried under the hold: a plain submit, and a submit that
+// names a queued row.
 func TestASendNowsCancelGoesThroughTheHold(t *testing.T) {
-	r := newRig(t, Options{})
+	r, returned := newRigReturning(t, Options{})
 	turn := r.s.script(held())
 	r.submit("one")
 	await(t, turn.opened, "the turn to open")
+	row := r.queue("a row of its own")
 
 	entered, release := r.s.holdNextCancel()
 	r.sendNow("now", "")
 	await(t, entered, "the arm's cancel to reach the session")
 
-	// The turn comes back on its own while the cancel is parked at the
-	// session's door.
+	// The turn comes back on its own while the cancel is parked at the session's
+	// door. Its done says only that the session has finished with it; what this
+	// test turns on is the engine having had its chance to settle it, so it waits
+	// for the continuation to come back and the pass that return allows to be
+	// over.
 	turn.release()
 	r.until(func(ev agent.Event) bool { return ev.Type == agent.EventDone })
+	awaitTurn(t, returned, "turn-1")
 
-	// Every admission path is shut: a submit queues instead of starting, the
-	// armed send has not fired, and the turn has not settled.
+	// Every admission path is shut: a submit queues instead of starting, a submit
+	// that names a row leaves it queued and sends nothing, the armed send has not
+	// fired, and the turn has not settled.
 	res, err := r.e.Submit(Command{}, "three", SubmitQueue, "")
 	if err != nil || res.Queued == nil {
 		t.Fatalf("a submit under the arm's hold answered %+v, %v", res, err)
+	}
+	res, err = r.e.Submit(Command{}, row.Text, SubmitQueue, row.ID)
+	if err != nil || res.Queued == nil || res.Queued.ID != row.ID {
+		t.Fatalf("a row-sourced submit under the arm's hold answered %+v, %v", res, err)
 	}
 	r.sync()
 	r.wantPrompts("one")
 	if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking || st.SendNow == nil {
 		t.Fatalf("the turn settled under the arm's hold: %+v", st)
 	}
+	r.wantRows("a row of its own", "three")
 
 	// The cancel goes through, the turn settles, and the armed send is the
-	// successor — ahead of the row that was queued behind it.
+	// successor — ahead of the rows that were queued behind it.
 	release()
 	got := r.until(started("turn-2"))
 	r.wantShapes(got[len(got)-3:],
 		`queue queued "three"`,
-		`ended turn-1 stop="end_turn" next="turn-2" pending=1`,
+		`ended turn-1 stop="end_turn" next="turn-2" pending=2`,
 		`started turn-2 send_now "now"`,
 	)
 	r.until(lastEnding)
-	r.wantPrompts("one", "now", "three")
+	r.wantPrompts("one", "now", "a row of its own", "three")
+}
+
+// TestAnImmediateSendNowUnderACancelHoldIsRefused is the other half of the hold,
+// where there is no turn to arm against: a cancel with no turn of craze's own is
+// on its way to the agent, and a prompt started now could be what it lands on.
+// There is nothing to be strong about and nothing may start, so the send-now is
+// refused rather than quietly queued — the text stays the client's, which is
+// what a send-now promises.
+func TestAnImmediateSendNowUnderACancelHoldIsRefused(t *testing.T) {
+	r := newRig(t, Options{})
+	entered, release := r.s.holdNextCancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.e.Cancel(context.Background(), Command{}, "")
+		done <- err
+	}()
+	await(t, entered, "the cancel to reach the session")
+	if _, err := r.e.Submit(Command{}, "now", SubmitSendNow, ""); !errors.Is(err, ErrNotAccepting) || Code(err) != "not_accepting" {
+		t.Fatalf("a send-now under a cancel with no turn: %v (%s)", err, Code(err))
+	}
+	if st := r.e.State(); st.SendNow != nil {
+		t.Fatalf("it armed against nothing: %+v", st.SendNow)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	r.sync()
+	r.wantPrompts()
 }
 
 // TestCloseJoinsTheCancelASendNowAsked: the cancel runs on a goroutine the

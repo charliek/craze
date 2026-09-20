@@ -305,6 +305,76 @@ func TestChainPolicy(t *testing.T) {
 func stopping(sc *script, stop string) *script { sc.stop = stop; return sc }
 func failing(sc *script, err error) *script    { sc.fail = err; return sc }
 
+// TestAnArmedRowSurvivesTheChainPolicysClear is the chain policy against a
+// send-now that named a queued row. The policy is about the follow-ups queued
+// *behind* a turn; the row an armed send is about is not one of those — it is
+// what the client cancelled the turn for — so the send takes its row before the
+// clear and the ordinary follow-up is cleared without it. A policy that took the
+// row with the rest would leave the send disarmed for a reason the client never
+// caused, with the text gone: the one thing a send-now promises is that nothing
+// is consumed until it fires.
+//
+// Under the TUI's policy nothing is cleared at all, and the follow-up simply
+// waits its turn behind the send. Both are driven by a turn that stops
+// `cancelled`, which is what a send-now's own cancel makes of it.
+func TestAnArmedRowSurvivesTheChainPolicysClear(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chain  ChainPolicy
+		want   []string
+		sent   []string
+		queued int
+	}{
+		{
+			name:  "the TUI keeps the queue",
+			chain: ChainPolicy{},
+			want: []string{
+				`queue sent "the row"`,
+				`ended turn-1 stop="cancelled" next="turn-2" pending=1`,
+				`started turn-2 send_now "the row"`,
+			},
+			sent: []string{"one", "the row", "a follow-up"},
+		},
+		{
+			name:  "the CLI ends the chain",
+			chain: ChainPolicy{StopOnNonEndTurn: true},
+			want: []string{
+				// The row the send is about goes out; the follow-up behind it is
+				// cleared, in the same batch and after it.
+				`queue sent "the row"`,
+				`queue removed "a follow-up"`,
+				`ended turn-1 stop="cancelled" next="turn-2" pending=0`,
+				`started turn-2 send_now "the row"`,
+			},
+			sent: []string{"one", "the row"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, Options{Chain: tc.chain})
+			// A turn that stops cancelled when the test lets it, and takes its
+			// cancel without acting on it, so the order of the record is the
+			// test's: the settlement's input is a clean stop whose reason is
+			// cancelled, exactly as a send-now's own cancel leaves it.
+			turn := r.s.script(stopping(held(), stopCancelled))
+			r.submit("one")
+			await(t, turn.opened, "the turn to open")
+			row := r.queue("the row")
+			r.queue("a follow-up")
+			r.ignoreCancels()
+			r.sendNow(row.Text, row.ID)
+			r.until(armedNow)
+			turn.release()
+			got := r.until(started("turn-2"))
+			r.wantShapes(got[len(got)-len(tc.want):], tc.want...)
+			r.until(lastEnding)
+			r.wantPrompts(tc.sent...)
+			if st := r.e.State(); len(st.Queue) != tc.queued || st.SendNow != nil {
+				t.Fatalf("state after the chain settled: %+v", st)
+			}
+		})
+	}
+}
+
 // TestARefusedTurnEndsSyntheticallyAndKeepsTheQueue is the TUI's row for a
 // refusal: the session emits nothing for it, so the engine authors the ending;
 // the state is an error; and the queue is left alone, because a refusal reached

@@ -390,15 +390,20 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 			if mode == SubmitSendNow {
 				origin = agent.TurnOriginSendNow
 			}
-			var before []agent.Event
+			// The row is read and validated here and taken only after the claim,
+			// because Begin can panic in a test double and a caller may recover
+			// from it: a row taken first would be gone from a queue whose event
+			// stream still shows it waiting.
+			var take func() []agent.Event
 			if fromRow != "" {
-				row, evs, err := e.takeRowLocked(fromRow, c.Cause())
-				if err != nil {
-					return SubmitResult{}, err
+				row, ok := e.rowLocked(fromRow)
+				if !ok {
+					return SubmitResult{}, fmt.Errorf("%w: %s", ErrUnknownRow, fromRow)
 				}
-				text, before = row, evs
+				text = row.Text
+				take = func() []agent.Event { return e.takeRowLocked(fromRow, c.Cause()) }
 			}
-			l := e.reserveLocked(text, origin, c.Cause(), before)
+			l := e.reserveLocked(text, origin, c.Cause(), take)
 			started = append(started, l)
 			return SubmitResult{Turn: l.t.id}, nil
 		}
@@ -432,19 +437,23 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 	return res, err
 }
 
-// takeRowLocked takes the row a submit named out of the queue and returns the
-// text it held with the event that says it has gone.
-func (e *Engine) takeRowLocked(id, cause string) (string, []agent.Event, error) {
+// takeRowLocked takes a row that has already been validated in this same
+// section out of the queue, and returns the event that says it has gone. The row
+// is there — nothing else can touch the queue under e.mu — so there is nothing
+// to report but the event.
+func (e *Engine) takeRowLocked(id, cause string) []agent.Event {
 	qev, ok := e.queue.Take(id)
 	if !ok {
-		return "", nil, fmt.Errorf("%w: %s", ErrUnknownRow, id)
+		// Unreachable: the row was read under this same lock.
+		return nil
 	}
-	return qev.Prompt.Text, []agent.Event{e.stamp(qev.Event(), cause)}, nil
+	return []agent.Event{e.stamp(qev.Event(), cause)}
 }
 
 // rowLocked is the queued row id names, and whether it is there at all. It
 // mutates nothing, which is what a verb that has to validate before it changes
-// anything needs.
+// anything needs — and what lets every path claim its turn before it takes the
+// row, so a Begin that panics leaves the row where the stream says it is.
 func (e *Engine) rowLocked(id string) (agent.QueuedPrompt, bool) {
 	for _, row := range e.queue.List() {
 		if row.ID == id {
@@ -454,12 +463,31 @@ func (e *Engine) rowLocked(id string) (agent.QueuedPrompt, bool) {
 	return agent.QueuedPrompt{}, false
 }
 
-// reserveLocked starts a turn: it claims it, and enqueues before — the queue
-// events that freed the text, if it came from a row — followed by the turn's
-// started, as one batch. The band shrinks before the user row appears, as it
-// always has.
-func (e *Engine) reserveLocked(text, origin, cause string, before []agent.Event) launch {
+// headLocked is the row at the head of the queue, and whether there is one. Like
+// rowLocked it mutates nothing: the drain reads the head, claims its turn, and
+// only then pops it, which under this lock can only be the same row.
+func (e *Engine) headLocked() (agent.QueuedPrompt, bool) {
+	rows := e.queue.List()
+	if len(rows) == 0 {
+		return agent.QueuedPrompt{}, false
+	}
+	return rows[0], true
+}
+
+// reserveLocked starts a turn: it claims it, then runs take — which frees the
+// text from the row it came from, if it came from one — and enqueues that row's
+// removal followed by the turn's started, as one batch. The band shrinks before
+// the user row appears, as it always has.
+//
+// take runs after the claim and not before, because claiming calls Begin, which
+// a session double can panic in: a row taken first would be gone from a queue
+// whose stream still shows it waiting.
+func (e *Engine) reserveLocked(text, origin, cause string, take func() []agent.Event) launch {
 	l := e.claimLocked(text, origin, cause)
+	var before []agent.Event
+	if take != nil {
+		before = take()
+	}
 	e.log.Enqueue(append(before, e.startedEvent(l.t))...)
 	return l
 }
@@ -643,7 +671,7 @@ func (e *Engine) retryLocked(t *turn) []launch {
 // to try it again — no wake-up is owed for room coming back — and it is bounded
 // by state as a completion is: two events a row, and the queue has a cap.
 func (e *Engine) drainLocked() []launch {
-	l, before, disarm := e.nextLocked()
+	l, before, disarm := e.nextLocked(true)
 	// The disarm comes first: a send whose row had already gone is why the
 	// head of the queue is running in its place.
 	batch := append(disarm, before...)
@@ -658,9 +686,16 @@ func (e *Engine) drainLocked() []launch {
 }
 
 // nextLocked decides what runs next, from a settlement or from the drain, and
-// claims it: the armed send-now first, then the head of the queue. The armed
-// send goes ahead of everything queued because it is what a client cancelled a
-// running turn for (A10).
+// claims it: the armed send-now first, then — if queueMayRun — the head of the
+// queue. The armed send goes ahead of everything queued because it is what a
+// client cancelled a running turn for (A10).
+//
+// queueMayRun is false where a settlement's chain policy is about to clear the
+// follow-ups behind the turn: the head is then not a candidate, but the armed
+// send still is, and its row is taken here, before that clear, so the policy
+// cannot delete the very text the send is about. An armed send is not a
+// follow-up — it is what a client asked for *instead of* the turn — which is why
+// one survives a policy the other does not.
 //
 // It returns the continuation it claimed, the queue events that freed its text,
 // and the disarm delta for an armed send whose row had already left the queue:
@@ -670,21 +705,20 @@ func (e *Engine) drainLocked() []launch {
 // Nothing runs from an error state — the turn that failed said so, and only the
 // next direct submit retires it — nor while the agent is running a turn of its
 // own, nor while a cancel is on its way to the session.
-func (e *Engine) nextLocked() (*launch, []agent.Event, []agent.Event) {
+func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.Event) {
 	if e.activity != ActivityIdle || !e.canStartLocked() {
 		return nil, nil, nil
 	}
 	var before, disarm []agent.Event
 	if a := e.armed; a != nil {
-		text, ok := a.text, true
+		text, from := a.text, agent.QueuedPrompt{}
+		ok := true
 		if a.from != "" {
-			// The row leaves the queue here and nowhere earlier, so it is taken
-			// exactly once and a send that never fired lost nothing.
-			var qev agent.QueueEvent
-			if qev, ok = e.queue.Take(a.from); ok {
-				text = qev.Prompt.Text
-				before = append(before, e.stamp(qev.Event(), a.cause))
-			}
+			// Read now, taken after the claim, and never before: the row's text
+			// as it stands — an edit while the send was armed is what goes — and
+			// the queue is left alone until Begin has been through.
+			from, ok = e.rowLocked(a.from)
+			text = from.Text
 		}
 		if ok {
 			// Firing consumes the arm with no delta of its own: the started it
@@ -692,15 +726,25 @@ func (e *Engine) nextLocked() (*launch, []agent.Event, []agent.Event) {
 			// gone. A delta is what the paths that lose one owe.
 			e.armed = nil
 			l := e.claimLocked(text, agent.TurnOriginSendNow, a.cause)
+			if a.from != "" {
+				// Here and nowhere earlier, so the row is taken exactly once and
+				// a send that never fired lost nothing.
+				before = append(before, e.takeRowLocked(a.from, a.cause)...)
+			}
 			return &l, before, nil
 		}
 		if ev, ok := e.disarmLocked(agent.SendNowRowGone, ""); ok {
 			disarm = append(disarm, ev)
 		}
 	}
-	if qev, ok := e.queue.Pop(); ok {
-		before = append(before, e.stamp(qev.Event(), ""))
-		l := e.claimLocked(qev.Prompt.Text, agent.TurnOriginDrain, "")
+	if !queueMayRun {
+		return nil, before, disarm
+	}
+	if head, ok := e.headLocked(); ok {
+		l := e.claimLocked(head.Text, agent.TurnOriginDrain, "")
+		if qev, popped := e.queue.Pop(); popped {
+			before = append(before, e.stamp(qev.Event(), ""))
+		}
 		return &l, before, disarm
 	}
 	return nil, before, disarm
@@ -714,13 +758,14 @@ func (e *Engine) nextLocked() (*launch, []agent.Event, []agent.Event) {
 //
 // It is one transaction. In order: the steers the turn accepted and could not
 // answer go back to the head of the queue; the armed send-now is decided, and
-// disarmed here if this turn is not the one it can fire after; the chain policy
-// decides what becomes of the queue; the successor, if there is one — the armed
-// send first, else the head of the queue — is taken off the queue and claimed;
-// the activity is set; and one batch is enqueued — the queue's events, then the
-// turn's ended with Next and Pending, then the disarm delta if there is one,
-// then the successor's started. So an ended is always preceded by everything its
-// settlement produced and followed only by its successor, and
+// disarmed here if this turn is not one it can fire after; the activity is set
+// and the chain policy's verdict on the queue is taken; the successor, if there
+// is one — the armed send first, else the head of the queue — is claimed and its
+// row taken; *then* the policy's clear runs, so it can never take the row the
+// armed send just claimed with it; and one batch is enqueued — the queue's
+// events, then the turn's ended with Next and Pending, then the disarm delta if
+// there is one, then the successor's started. So an ended is always preceded by
+// everything its settlement produced and followed only by its successor, and
 // ended{Next: "", Pending: 0} is the last event a chain produces. The batch is a
 // mandatory completion: it is enqueued whether or not the outbox reports room,
 // because a turn that has ended has ended.
@@ -800,34 +845,43 @@ func (e *Engine) settleLocked(t *turn) []launch {
 		}
 	}
 
-	var next []launch
+	// What the chain policy makes of the queue behind the turn, and whether the
+	// queue may supply a successor at all.
+	chainClears := false
 	switch {
 	case failed:
 		e.activity = ActivityError
 		e.err = info.Err
-		if !refused {
-			// Nothing drains from an error state, and a queue that outlived
-			// one would run behind whatever is sent next. A refusal reached
-			// nothing, and leaves the queue as it was.
-			clear()
-		}
+		// Nothing drains from an error state, and a queue that outlived one
+		// would run behind whatever is sent next. A refusal reached nothing,
+		// and leaves the queue as it was. A send armed against this turn was
+		// disarmed above, and the row it named is cleared with the rest: that
+		// is the one path where an armed send's text does not survive, and it
+		// is deliberate — the error took the whole queue with it.
+		chainClears = !refused
 	case e.stopped, e.opts.Chain.StopOnNonEndTurn && info.StopReason != stopEndTurn:
 		e.activity = ActivityIdle
-		clear()
+		chainClears = true
 	default:
 		e.activity = ActivityIdle
 	}
 	// The successor, from the same decision the drain makes: an armed send-now
-	// first, then the head of the queue. nextLocked starts nothing from an error
-	// state, so the failed branch above has already ruled it out; a chain policy
-	// that cleared the queue leaves only the armed send, which is a client's
-	// explicit "instead of this turn" and not a follow-up the policy is about.
-	l, before, rowGone := e.nextLocked()
+	// first, then the head of the queue. It runs *before* the clear and is told
+	// whether the queue may supply a successor, so that a policy which ends the
+	// chain still cannot delete the row an armed send is about: the send takes
+	// its row here, and the ordinary follow-ups are cleared below. nextLocked
+	// starts nothing from an error state, so the failed branch has already ruled
+	// everything out there.
+	var next []launch
+	l, before, rowGone := e.nextLocked(!chainClears)
 	batch = append(batch, before...)
 	disarm = append(disarm, rowGone...)
 	if l != nil {
 		info.Next = l.t.id
 		next = append(next, *l)
+	}
+	if chainClears {
+		clear()
 	}
 
 	info.Pending = e.queue.Len()

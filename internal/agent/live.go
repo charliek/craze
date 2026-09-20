@@ -1214,8 +1214,8 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 		// is the whole of Start before session/new returns, and a cancel then
 		// reached nobody.
 		known := client.SessionID() != ""
-		err := client.Cancel(ctx)
-		return CancelOutcome{Wrote: known && err == nil, Settled: true}, err
+		returned, err := s.writeCancel(ctx, client)
+		return CancelOutcome{Wrote: known && returned && err == nil, Settled: true}, err
 	}
 	// The prompt is claimed before its turn opens and its turn opens before
 	// its request is written, so the cancel waits for the wire to say what
@@ -1247,8 +1247,15 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 		// Two racing Cancels can each write one, which the agent tolerates.
 		// A refused prompt is cancelled too: the refusal that reaches here
 		// is a foreign turn, and that turn is still running.
-		if err := client.Cancel(ctx); err != nil {
+		returned, err := s.writeCancel(ctx, client)
+		switch {
+		case err != nil:
 			return CancelOutcome{}, err
+		case !returned:
+			// The session closed with the write still in the pipe. Nothing about
+			// it is known, which is the same answer the wire wait above gives for
+			// a close: no write, no withdrawal, no settlement, and no error.
+			return CancelOutcome{}, nil
 		}
 		wrote = true
 	default:
@@ -1279,6 +1286,57 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 		return CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: true}, nil
 	case <-ctx.Done():
 		return CancelOutcome{Wrote: wrote, Withdrew: withdrew}, ctx.Err()
+	}
+}
+
+// writeCancel writes the one session/cancel a Cancel owes, and makes the
+// caller's context mean what this session has always promised it means: a bound
+// on the whole call. returned says the write itself came back, so its error is
+// the wire's own answer; false says this call gave the write up while it was
+// still in flight, and then nothing about it is known.
+//
+// The bound has to be here because it is nowhere below: Conn.Notify checks the
+// context once, *before* a synchronous write (internal/acp/conn.go), and
+// Encoder.WriteMessage then marshals, takes the encoder's mutex and writes. With
+// the agent's stdin full — an agent that has stopped reading, which is exactly
+// the state a user presses Esc in — that write blocks for as long as the pipe
+// does, past any deadline. Before the engine such a cancel stranded one
+// goroutine; now the engine holds every admission path while a cancel is in
+// flight, so a cancel that never returns is a session that never settles another
+// turn and never admits another prompt. Giving the write up is the lesser
+// failure, and the seam already promised it.
+//
+// Abandoning a write is not free, and this is exactly what it costs. The write
+// is in one of two places. Either it is inside the encoder, holding its mutex,
+// in which case every later write — a prompt's included — takes that same mutex
+// afterwards and so reaches the agent *behind* this cancel, which an agent
+// answers by dropping a cancel that names no running turn: that is the same
+// tolerance the no-turn path above has always relied on. Or it is still waiting
+// for the encoder's mutex behind some other write, and then a prompt admitted
+// after this call returns can overtake it and be the turn the cancel lands on.
+// That window is not closed here, and is not claimed to be: plan 017's rule is
+// kept by the wire wait above for the turn this cancel *was* for, while this
+// residual case is a cancel the caller was told nothing is known about — the
+// engine reports it as `unknown`, which is precisely that — and the honest
+// remedy is a second cancel, not a longer wait that wedges the session.
+//
+// The goroutine outlives the call and ends when the pipe takes the bytes or the
+// transport is closed under it, which fails the parked write. Nothing is
+// published from it and its result is dropped. The client's own completion of the
+// requests it is holding rides in it too (acp.Client.Cancel), so on an abandoned
+// write that can land after this returns; nothing a client can see waits on it,
+// because the session answered its *own* parked asks before getting here
+// (cancelWaiting, above).
+func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned bool, err error) {
+	res := make(chan error, 1)
+	go func() { res <- client.Cancel(ctx) }()
+	select {
+	case err := <-res:
+		return true, err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-s.done:
+		return false, nil
 	}
 }
 

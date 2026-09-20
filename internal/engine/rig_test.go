@@ -265,6 +265,34 @@ func (r *rig) wantPrompts(want ...string) {
 	}
 }
 
+// newRigReturning is a rig that reports every continuation as it comes back. It
+// is the barrier for tests where "the session has finished with the turn" is not
+// the same claim as "the engine has had its chance to settle it": a turn's own
+// done event says the first, and only this says the second. The buffer is deep
+// enough for every turn the tests using it run, because the hook is on the
+// turn's goroutine and a full channel would hold it there.
+func newRigReturning(t *testing.T, opts Options) (*rig, <-chan string) {
+	t.Helper()
+	returned := make(chan string, 32)
+	r := newRigHooked(t, opts, agent.EventLogOptions{NoPrimary: true},
+		&hooks{turnReturned: func(id string) { returned <- id }})
+	return r, returned
+}
+
+// awaitTurn waits for a continuation to come back, with the watchdog; want, when
+// set, is the turn it must be.
+func awaitTurn(t *testing.T, returned <-chan string, want string) {
+	t.Helper()
+	select {
+	case id := <-returned:
+		if want != "" && id != want {
+			t.Fatalf("%s came back, want %s", id, want)
+		}
+	case <-time.After(watchdog):
+		t.Fatalf("no continuation came back in %s", watchdog)
+	}
+}
+
 // await waits on a barrier, with the watchdog.
 func await(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()

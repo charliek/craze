@@ -335,27 +335,15 @@ func TestTheQueueVerbsReturnWithAFullPrimary(t *testing.T) {
 // while the completions a turn owes — its settlement, and the steers it accepted
 // and could not answer — are enqueued all the same.
 func TestASaturatedOutboxRefusesTheQueueVerbsAndStillRequeuesSteers(t *testing.T) {
-	// A primary nobody reads wedges the drainer, so what is enqueued stays
-	// enqueued and the bound is reached.
-	s := newFake(t, agent.EventLogOptions{})
-	e, err := New(s, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = e.Close() })
-	if err := e.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	turn := s.script(steering(held(), "steered"))
-	go func() {
-		// The turn's first continuation waits for its started to be delivered,
-		// so something has to read that much.
-		for ev := range e.Events() {
-			if started("turn-1")(ev) {
-				return
-			}
-		}
-	}()
+	// A primary nobody reads is what makes the outbox undeliverable: the drainer
+	// parks on the first send it cannot make and holds the log's publishing
+	// boundary while it does, so everything enqueued behind it stays enqueued.
+	// The turn is silent for that reason — a turn that published anything would
+	// wait for that same boundary and never come back — and the settlement this
+	// test is about therefore happens with the outbox provably over its bound,
+	// before anything reads a single event.
+	s, e, returned := saturableEngine(t)
+	turn := s.script(silently(steering(held(), "steered")))
 	if _, err := e.Submit(Command{}, "one", SubmitQueue, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -364,14 +352,7 @@ func TestASaturatedOutboxRefusesTheQueueVerbsAndStillRequeuesSteers(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	filler := make([]agent.Event, 512)
-	for i := range filler {
-		filler[i] = agent.Event{Type: agent.EventText, Text: fmt.Sprintf("fill-%d", i)}
-	}
-	for e.log.OutboxRoom() {
-		e.log.Enqueue(filler...)
-	}
+	saturate(t, e)
 
 	before := e.State()
 	for what, err := range map[string]error{
@@ -391,8 +372,90 @@ func TestASaturatedOutboxRefusesTheQueueVerbsAndStillRequeuesSteers(t *testing.T
 		t.Fatalf("a refused command changed the engine: %+v → %+v", before, after)
 	}
 
-	// The turn ends. Its steer is requeued and its settlement enqueued over the
-	// bound, and both reach the record once somebody reads.
+	// The turn ends while the outbox is still over its bound. Its settlement is a
+	// mandatory completion: the steer is requeued, the successor claimed and the
+	// ending enqueued regardless, which is asserted on the engine's own state
+	// while nothing has yet been read — the record comes afterwards.
+	turn.release()
+	awaitTurn(t, returned, "turn-1")
+	if e.log.OutboxRoom() {
+		t.Fatal("the outbox came back under its bound before the settlement was checked")
+	}
+	st := e.State()
+	if st.Turn != "turn-2" || st.Activity != ActivityWorking {
+		t.Fatalf("the settlement under a saturated outbox left: %+v", st)
+	}
+	// The steer was requeued at the head and taken as the successor, ahead of the
+	// row queued before the flood, which is all that is left waiting.
+	if len(st.Queue) != 1 || st.Queue[0].Text != "queued before the flood" {
+		t.Fatalf("the queue after the settlement: %+v", st.Queue)
+	}
+	if got := s.prompts(); strings.Join(got, "|") != "one|steered" {
+		t.Fatalf("the session was handed %q", got)
+	}
+
+	// Only now does anyone read, and everything the settlement enqueued over the
+	// bound is in the record.
+	r := readerOn(t, s, e)
+	got := r.until(ended("turn-1"))
+	if last := got[len(got)-1].Turn; last.Next != "turn-2" || last.Pending != 1 {
+		t.Fatalf("the ending enqueued under a saturated outbox: %+v", last)
+	}
+	if !hasShape(got, `queue queued "steered"`) {
+		t.Fatalf("the requeue is not in the record: %s", describe(got))
+	}
+	r.until(lastEnding)
+	r.wantPrompts("one", "steered", "queued before the flood")
+}
+
+// saturableEngine is an engine whose log has a primary nobody reads: enqueue
+// enough and the outbox can no longer deliver anything, which is the state every
+// saturation test is about. It reports its continuations, because with nothing
+// reading the record a returned turn is the only barrier there is.
+//
+// One reader is allowed as far as the first turn's started, because a turn's
+// first continuation waits for it (runTurn's Flush) and would otherwise never
+// open at all.
+func saturableEngine(t *testing.T) (*fakeSession, *Engine, <-chan string) {
+	t.Helper()
+	s := newFake(t, agent.EventLogOptions{})
+	returned := make(chan string, 32)
+	e, err := newEngine(s, Options{}, &hooks{turnReturned: func(id string) { returned <- id }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for ev := range e.Events() {
+			if started("turn-1")(ev) {
+				return
+			}
+		}
+	}()
+	return s, e, returned
+}
+
+// saturate fills the outbox past its soft bound.
+func saturate(t *testing.T, e *Engine) {
+	t.Helper()
+	filler := make([]agent.Event, 512)
+	for i := range filler {
+		filler[i] = agent.Event{Type: agent.EventText, Text: fmt.Sprintf("fill-%d", i)}
+	}
+	for e.log.OutboxRoom() {
+		e.log.Enqueue(filler...)
+	}
+}
+
+// readerOn starts reading a saturated log: a budgeted subscription for the
+// record, and a goroutine on the primary to unwedge the drainer. The
+// subscription is opened after that goroutine because Subscribe waits for the
+// publishing boundary, which the parked drainer holds.
+func readerOn(t *testing.T, s *fakeSession, e *Engine) *rig {
+	t.Helper()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	stop := make(chan struct{})
@@ -406,23 +469,23 @@ func TestASaturatedOutboxRefusesTheQueueVerbsAndStillRequeuesSteers(t *testing.T
 			}
 		}
 	}()
-	defer func() { close(stop); wg.Wait() }()
+	t.Cleanup(func() { close(stop); wg.Wait() })
 	sub, err := e.Subscribe(agent.SubscribeOptions{MaxItems: 1 << 16, MaxBytes: 64 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(sub.Close)
-	turn.release()
-	r := &rig{t: t, s: s, e: e, sub: sub}
-	got := r.until(ended("turn-1"))
-	last := got[len(got)-1].Turn
-	if last.Next == "" || last.Pending != 1 {
-		t.Fatalf("the settlement under a saturated outbox: %+v", last)
+	return &rig{t: t, s: s, e: e, sub: sub}
+}
+
+// hasShape reports whether one of evs has the given shape.
+func hasShape(evs []agent.Event, want string) bool {
+	for _, ev := range evs {
+		if shape(ev) == want {
+			return true
+		}
 	}
-	// The steer went to the head, ahead of the row queued before the flood, and
-	// is what the settlement started.
-	r.until(lastEnding)
-	r.wantPrompts("one", "steered", "queued before the flood")
+	return false
 }
 
 // TestUnansweredSteersAreRequeuedLastFirstAheadOfTheQueue is A11's three rules

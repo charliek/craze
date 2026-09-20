@@ -74,7 +74,18 @@ type script struct {
 	once   sync.Once
 	// unanswered is what the turn reports it accepted and could not answer.
 	unanswered []string
+	// silent makes the turn publish nothing at all — no chunk, no ending — and
+	// report its result by returning alone. A publish takes the log's publishing
+	// boundary, which the outbox's drainer holds while it waits for room in the
+	// primary, so a turn that says anything cannot come back while the outbox is
+	// undeliverable. A test about what the engine does *while* the outbox is over
+	// its bound therefore needs a turn that says nothing; no real session is
+	// silent, and nothing but those tests uses it.
+	silent bool
 }
+
+// silently makes a script's turn end without publishing anything.
+func silently(sc *script) *script { sc.silent = true; return sc }
 
 // refusedAtAGate is a refusal held until the test opens its gate.
 func refusedAtAGate(err error) *script {
@@ -191,25 +202,29 @@ func (s *fakeSession) run(ctx context.Context, text string, sc *script) (agent.R
 		}
 	}
 	res := agent.Result{Unanswered: sc.unanswered}
+	emit := s.emit
+	if sc.silent {
+		emit = func(agent.Event) {}
+	}
 	switch {
 	case cancelled:
-		s.emit(agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
+		emit(agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
 		res.StopReason = stopCancelled
 		return res, nil
 	case sc.fail != nil:
-		s.emit(agent.Event{Type: agent.EventError, Err: sc.fail})
+		emit(agent.Event{Type: agent.EventError, Err: sc.fail})
 		return res, sc.fail
 	}
 	reply := sc.text
 	if reply == "" {
 		reply = "echo: " + text
 	}
-	s.emit(agent.Event{Type: agent.EventText, Text: reply})
+	emit(agent.Event{Type: agent.EventText, Text: reply})
 	stop := sc.stop
 	if stop == "" {
 		stop = stopEndTurn
 	}
-	s.emit(agent.Event{Type: agent.EventDone, StopReason: stop})
+	emit(agent.Event{Type: agent.EventDone, StopReason: stop})
 	res.StopReason = stop
 	return res, nil
 }

@@ -174,70 +174,119 @@ func TestCloseRacingSubmits(t *testing.T) {
 // Submit holds e.mu through a deferred unlock and claims before it changes
 // anything, so the panic reaches the caller, no lock is left held, and no turn
 // is left current.
+//
+// A submit that names a queued row is the same claim with a row behind it, and
+// the row is the reason the order matters: taken before the claim it would be
+// gone from a queue whose event stream still showed it waiting — a row nobody
+// could ever send or cancel again. It is read and validated first, taken only
+// once Begin has been through.
 func TestAPanicInBeginLeavesTheEngineAsItFoundIt(t *testing.T) {
+	for _, tc := range []struct{ name, fromRow string }{
+		{name: "a draft"},
+		{name: "a queued row", fromRow: "the row"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, Options{})
+			from := ""
+			if tc.fromRow != "" {
+				from = r.queue(tc.fromRow).ID
+			}
+			r.s.mu.Lock()
+			r.s.beginPanic = true
+			r.s.mu.Unlock()
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatal("the panic did not reach Submit's caller")
+					}
+				}()
+				_, _ = r.e.Submit(Command{}, "boom", SubmitQueue, from)
+			}()
+			r.s.mu.Lock()
+			r.s.beginPanic = false
+			r.s.mu.Unlock()
+			st := r.e.State()
+			if st.Activity != ActivityIdle || st.Turn != "" || st.Prompted {
+				t.Fatalf("state after a panicking Begin: %+v", st)
+			}
+			if tc.fromRow != "" {
+				if len(st.Queue) != 1 || st.Queue[0].ID != from {
+					t.Fatalf("the row the panicking claim was for: %+v", st.Queue)
+				}
+			}
+			// The engine is as it was, so the send goes through — as the turn
+			// whose id the panicking claim did not spend.
+			r.submit("fine")
+			got := r.until(started(""))
+			if last := got[len(got)-1].Turn; last.ID != "turn-1" || last.Text != "fine" {
+				t.Fatalf("the panicking claim spent a turn id: %+v", last)
+			}
+			r.until(lastEnding)
+		})
+	}
+}
+
+// TestAPanicInAClaimTheSettlementMakesLeavesItsRowQueued is the same order at
+// the other claim: the successor a settlement starts. A panic there takes the
+// engine's goroutine with it, and the row must still be in the queue the panic
+// left behind — recovered or not, the queue and the stream that describes it
+// cannot disagree.
+func TestAPanicInAClaimTheSettlementMakesLeavesItsRowQueued(t *testing.T) {
 	r := newRig(t, Options{})
+	turn := r.s.script(held())
+	r.submit("one")
+	await(t, turn.opened, "the turn to open")
+	row := r.queue("the successor")
+	r.sync()
+	// The settlement claims the successor on the turn's own goroutine. Recovering
+	// there is not the engine's business — a panicking session is craze's bug —
+	// so the schedule is driven through drainLocked instead, which any wake-up
+	// runs: the same claim, in the same order, with the panic in the test's own
+	// stack.
 	r.s.mu.Lock()
 	r.s.beginPanic = true
 	r.s.mu.Unlock()
 	func() {
 		defer func() {
 			if recover() == nil {
-				t.Fatal("the panic did not reach Submit's caller")
+				t.Fatal("the panic did not reach the caller")
 			}
 		}()
-		_, _ = r.e.Submit(Command{}, "boom", SubmitQueue, "")
+		r.e.mu.Lock()
+		defer r.e.mu.Unlock()
+		// Nothing is current and the queue has a head: exactly the state the
+		// drain runs in, straight after a settlement.
+		r.e.cur, r.e.activity = nil, ActivityIdle
+		_ = r.e.drainLocked()
 	}()
 	r.s.mu.Lock()
 	r.s.beginPanic = false
 	r.s.mu.Unlock()
-	if st := r.e.State(); st.Activity != ActivityIdle || st.Turn != "" || st.Prompted {
-		t.Fatalf("state after a panicking Begin: %+v", st)
+	if st := r.e.State(); len(st.Queue) != 1 || st.Queue[0].ID != row.ID {
+		t.Fatalf("the row the panicking drain was for: %+v", st.Queue)
 	}
-	r.submit("fine")
-	got := r.until(lastEnding)
-	if first := got[0].Turn; first.ID != "turn-1" {
-		t.Fatalf("the panicking claim spent a turn id: %+v", first)
-	}
+	turn.release()
 }
 
 // TestASaturatedOutboxRefusesAdmissionsAndStillCompletesTurns: with the outbox
 // over its bound a rejectable command is refused having changed nothing, and a
 // mandatory completion — the running turn's settlement — is enqueued all the
 // same, because a turn that has ended has ended.
+//
+// The settlement is asserted on the engine's own state while the outbox is still
+// provably undeliverable, before anything reads an event: a reader started
+// earlier would let the backlog through and leave the test proving only that a
+// turn settles once the log is healthy again. The turn is silent for the same
+// reason — a turn that published anything would wait for the publishing boundary
+// the parked drainer holds, and never come back at all.
 func TestASaturatedOutboxRefusesAdmissionsAndStillCompletesTurns(t *testing.T) {
-	// A primary nobody reads wedges the drainer, so what is enqueued stays
-	// enqueued.
-	s := newFake(t, agent.EventLogOptions{})
-	e, err := New(s, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = e.Close() })
-	if err := e.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	turn := s.script(held())
-	go func() {
-		// The turn's first continuation waits for its started to be delivered,
-		// so something has to read that much.
-		for ev := range e.Events() {
-			if started("turn-1")(ev) {
-				return
-			}
-		}
-	}()
+	s, e, returned := saturableEngine(t)
+	turn := s.script(silently(held()))
 	if _, err := e.Submit(Command{}, "one", SubmitQueue, ""); err != nil {
 		t.Fatal(err)
 	}
 	await(t, turn.opened, "the turn to open")
-
-	filler := make([]agent.Event, 0, 512)
-	for i := 0; i < cap(filler); i++ {
-		filler = append(filler, agent.Event{Type: agent.EventText, Text: fmt.Sprintf("fill-%d", i)})
-	}
-	for e.log.OutboxRoom() {
-		e.log.Enqueue(filler...)
-	}
+	saturate(t, e)
 
 	before := e.State()
 	if _, err := e.Submit(Command{}, "two", SubmitQueue, ""); !errors.Is(err, ErrUnavailable) || Code(err) != "unavailable" {
@@ -247,31 +296,17 @@ func TestASaturatedOutboxRefusesAdmissionsAndStillCompletesTurns(t *testing.T) {
 		t.Fatalf("a refused submit changed the engine: %+v → %+v", before, after)
 	}
 
-	// The turn ends. Its settlement is accepted over the bound, and reaches
-	// the record once somebody reads. The reader comes first: a Subscribe waits
-	// for the publishing boundary, which the drainer holds while it is parked
-	// on the full primary.
-	var wg sync.WaitGroup
-	wg.Add(1)
-	stop := make(chan struct{})
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-e.Events():
-			case <-stop:
-				return
-			}
-		}
-	}()
-	defer func() { close(stop); wg.Wait() }()
-	sub, err := e.Subscribe(agent.SubscribeOptions{MaxItems: 1 << 16, MaxBytes: 64 << 20})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(sub.Close)
 	turn.release()
-	r := &rig{t: t, s: s, e: e, sub: sub}
+	awaitTurn(t, returned, "turn-1")
+	if e.log.OutboxRoom() {
+		t.Fatal("the outbox came back under its bound before the settlement was checked")
+	}
+	if st := e.State(); st.Turn != "" || st.Activity != ActivityIdle {
+		t.Fatalf("the turn did not settle under a saturated outbox: %+v", st)
+	}
+
+	// And it is in the record, once somebody reads.
+	r := readerOn(t, s, e)
 	got := r.until(lastEnding)
 	if last := got[len(got)-1].Turn; last.ID != "turn-1" || last.StopReason != stopEndTurn {
 		t.Fatalf("the settlement under a saturated outbox: %+v", last)
