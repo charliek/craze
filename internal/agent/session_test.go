@@ -332,7 +332,7 @@ func TestCancelWaitsUntilPromptReturns(t *testing.T) {
 	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	start := time.Now()
-	if err := s.Cancel(cancelCtx); err != nil {
+	if _, err := s.Cancel(cancelCtx); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if time.Since(start) > 5*time.Second {
@@ -372,7 +372,7 @@ func TestSerializedPrompt(t *testing.T) {
 	}
 	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	if err := s.Cancel(cancelCtx); err != nil {
+	if _, err := s.Cancel(cancelCtx); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 }
@@ -404,7 +404,7 @@ func TestCancelOffPromptInFlightOnHang(t *testing.T) {
 
 	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	if err := s.Cancel(cancelCtx); err != nil {
+	if _, err := s.Cancel(cancelCtx); err != nil {
 		t.Fatalf("cancel: %v (a cancel written ahead of its prompt is dropped, and hang never returns)", err)
 	}
 	select {
@@ -583,7 +583,7 @@ func TestCancelPendingPermission(t *testing.T) {
 		errCh <- err
 	}()
 	log.waitType(t, EventPermission)
-	if err := s.Cancel(t.Context()); err != nil {
+	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-errCh; err != nil {

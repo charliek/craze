@@ -682,11 +682,24 @@ func (s *nativeSession) sink(ev harness.Event) {
 // answer persisted interrupted — or ctx ends; a prompt claimed and not yet
 // open withdraws when its continuation runs, and Cancel waits for that. With
 // nothing claimed it is a no-op.
-func (s *nativeSession) Cancel(ctx context.Context) error {
+//
+// Native has no wire, so CancelOutcome maps onto its own state instead (plan
+// 021 §3.7): Wrote is whether this call found a running turn's context to
+// cancel — s.turnCancel is registered in the same locked section that
+// s.cancelling is set here, so a nil turnCancel at that read means the
+// continuation has not opened its turn yet and never will reach the harness
+// for this call. Withdrew is exactly the complement: a claimed continuation
+// that has not run, or not yet opened, and is now marked cancelling — it
+// will see the mark and return ErrPromptCancelled with nothing ever sent.
+// Wrote and Withdrew are decided in that one locked read and do not change
+// with how the wait below ends; Settled is true only once rel has actually
+// closed, because that is the one signal that says the claim — and whatever
+// it was running — is over.
+func (s *nativeSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 	s.mu.Lock()
 	if s.hs == nil {
 		s.mu.Unlock()
-		return nil
+		return CancelOutcome{Settled: true}, nil
 	}
 	// The mark, the claim and the turn are read in one locked section, the
 	// one the continuation's opening also takes: a claimed prompt either sees
@@ -695,18 +708,21 @@ func (s *nativeSession) Cancel(ctx context.Context) error {
 	claimed, cancel, rel := s.claimed, s.turnCancel, s.released
 	s.mu.Unlock()
 	if !claimed || rel == nil {
-		return nil
+		return CancelOutcome{Settled: true}, nil
 	}
+	wrote := cancel != nil
 	if cancel != nil {
 		cancel()
 	}
+	outcome := CancelOutcome{Wrote: wrote, Withdrew: !wrote}
 	select {
 	case <-rel:
-		return nil
+		outcome.Settled = true
+		return outcome, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return outcome, ctx.Err()
 	case <-s.done:
-		return nil
+		return outcome, nil
 	}
 }
 
@@ -863,6 +879,16 @@ func (s *nativeSession) Snapshot() Snapshot {
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Config = cloneConfig(s.snap.Config)
 	return out
+}
+
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3). Native drives no
+// ACP agent of its own, so nothing it runs is ever a turn craze did not ask
+// for: this always answers false, taking s.mu only for the same reason
+// Snapshot does — so a reader never observes a half-written s.snap.
+func (s *nativeSession) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return false
 }
 
 // Interject merges text into the running turn: the harness takes it up before

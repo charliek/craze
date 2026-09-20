@@ -95,7 +95,11 @@ func TestBeginWithNoCancelIsPrompt(t *testing.T) {
 	if !bytes.Equal(viaBegin, viaPrompt) {
 		t.Fatalf("Begin wrote %s, Prompt wrote %s", viaBegin, viaPrompt)
 	}
-	if begun != prompted || begun.err != nil || begun.res.StopReason != acp.StopEndTurn {
+	// Result now carries Unanswered, a slice, so the two outcomes are compared
+	// field by field rather than with == (agent.Result is no longer
+	// comparable); neither this test nor anything it drives sets Unanswered,
+	// so StopReason alone says whether Begin and Prompt agreed.
+	if begun.err != nil || prompted.err != nil || begun.res.StopReason != prompted.res.StopReason || begun.res.StopReason != acp.StopEndTurn {
 		t.Fatalf("Begin returned %+v, Prompt returned %+v", begun, prompted)
 	}
 	if claimed, in, wire, _ := claimState(p.s); claimed || in || wire != nil {

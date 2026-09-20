@@ -518,7 +518,7 @@ func heldWorking(t *testing.T) (Model, *scriptedSession) {
 // clear the queue the test is watching.
 func endHeldTurn(t *testing.T, sess agent.Session) {
 	t.Helper()
-	if err := sess.Cancel(context.Background()); err != nil {
+	if _, err := sess.Cancel(context.Background()); err != nil {
 		t.Fatalf("cancelling the held turn: %v", err)
 	}
 }

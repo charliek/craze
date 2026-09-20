@@ -24,7 +24,9 @@ test:
 	go test -timeout 5m -v ./...
 
 # The packages with concurrency worth the 10x slowdown: the ACP client's
-# reader and writer goroutines, the session's event fan-out, the TUI's
+# reader and writer goroutines, the session's event fan-out, the engine (one
+# session's driver, its queue and its workers, raced from plan 021 on — the
+# whole tree, so a future subpackage is raced as it lands), the TUI's
 # clipboard seams and leaked command goroutines, the host Hub's per-reporter
 # workers, the native harness (its turn runner persists from stream
 # callbacks while cancel and Close run on other goroutines; the whole tree is
@@ -36,7 +38,7 @@ test:
 # same thing; the two flakes that reached main in 2026-09 only ever showed
 # under -race.
 test-race:
-	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/...
+	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

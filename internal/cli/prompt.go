@@ -159,7 +159,7 @@ func (o *promptOpts) run() (retErr error) {
 			// A signal stops everything pending, not just the running turn:
 			// the queue goes first so nothing starts behind the cancel.
 			sess.ClearQueue()
-			_ = sess.Cancel(context.Background())
+			_, _ = sess.Cancel(context.Background())
 		}
 	}()
 

@@ -479,13 +479,24 @@ func (s *Stub) markDone() {
 	s.mu.Unlock()
 }
 
-func (s *Stub) Cancel(context.Context) error {
+// Cancel mirrors the live session's CancelOutcome (plan 021 §3.7), fired and
+// forgotten rather than waited on: the Stub's Cancel never blocks, so it can
+// only ever report what is already known at the moment it is called. Wrote is
+// exactly the condition that already drove cancelsSent — nothing claimed (a
+// foreign turn or idle), or a turn genuinely open — and Withdrew its
+// complement, a claim not yet open. Settled is true only when nothing is
+// claimed or open: an open or about-to-withdraw turn is still going, by
+// definition, the instant this returns.
+func (s *Stub) Cancel(context.Context) (agent.CancelOutcome, error) {
 	s.mu.Lock()
 	s.cancelling = true
 	// A prompt claimed and not yet open finds the mark and withdraws, or is
 	// parked where the live session aborts its wait: either way nothing
 	// reaches the agent for it. Every other cancel would.
-	if !s.claimed || s.inPrompt {
+	wrote := !s.claimed || s.inPrompt
+	withdrew := s.claimed && !s.inPrompt
+	settled := !s.claimed
+	if wrote {
 		s.cancelsSent++
 	}
 	s.mu.Unlock()
@@ -494,7 +505,7 @@ func (s *Stub) Cancel(context.Context) error {
 	case s.cancel <- struct{}{}:
 	default:
 	}
-	return nil
+	return agent.CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: settled}, nil
 }
 
 func (s *Stub) AnswerPermission(id, optionID string) error {
@@ -634,6 +645,14 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	// mu → the queue's lock is the order every transaction takes.
 	out.Queue = s.queue.List()
 	return out
+}
+
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3): s.foreign under
+// s.mu alone, the same field Snapshot reports.
+func (s *Stub) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreign
 }
 
 func cloneStubSubagents(in []agent.SubagentInfo) []agent.SubagentInfo {

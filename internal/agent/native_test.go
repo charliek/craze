@@ -330,6 +330,13 @@ func startPrompt(s Session, text string) <-chan outcome {
 	return out
 }
 
+// zeroResult reports whether res is Result{}: Result now carries Unanswered,
+// a slice, so it is no longer comparable with ==; nothing in this build sets
+// Unanswered, so this is exactly what a bare == (Result{}) would have said.
+func zeroResult(res Result) bool {
+	return res.StopReason == "" && len(res.Unanswered) == 0
+}
+
 func await[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
 	select {
@@ -601,8 +608,8 @@ func TestNativeStartLifecycle(t *testing.T) {
 	if err := s.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("Start after Close = %v", err)
 	}
-	if err := s.Cancel(context.Background()); err != nil {
-		t.Fatalf("Cancel on a closed, never-started session: %v", err)
+	if outcome, err := s.Cancel(context.Background()); err != nil || outcome != (CancelOutcome{Settled: true}) {
+		t.Fatalf("Cancel on a closed, never-started session = %+v, %v", outcome, err)
 	}
 
 	s2 := f.started(Options{})
@@ -652,7 +659,7 @@ func TestNativeTurnEndings(t *testing.T) {
 					t.Fatalf("Prompt = %+v, %v; want %s", res, err, tc.stop)
 				}
 			} else {
-				if err == nil || res != (Result{}) {
+				if err == nil || !zeroResult(res) {
 					t.Fatalf("Prompt = %+v, %v; want a zero Result and an error", res, err)
 				}
 				if evErr != err {
@@ -750,6 +757,17 @@ func TestNativeFailureClearsTheQueue(t *testing.T) {
 	}
 }
 
+// TestNativeForeignTurnIsAlwaysFalse: native drives no ACP agent, so nothing
+// it runs is ever a turn craze did not ask for. The leaf accessor and
+// Snapshot's own field agree on that (plan 021 §3.3).
+func TestNativeForeignTurnIsAlwaysFalse(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	if s.ForeignTurn() || s.Snapshot().ForeignTurn {
+		t.Fatalf("ForeignTurn() = %v, Snapshot().ForeignTurn = %v; want both false", s.ForeignTurn(), s.Snapshot().ForeignTurn)
+	}
+}
+
 // TestNativeCancel: a cancelled turn ends in exactly one EventDone{cancelled}
 // and no EventError, returns Result{cancelled}, and its partial answer is
 // persisted interrupted. A Cancel with nothing claimed is a no-op that does
@@ -757,15 +775,15 @@ func TestNativeFailureClearsTheQueue(t *testing.T) {
 func TestNativeCancel(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
-	if err := s.Cancel(context.Background()); err != nil {
-		t.Fatalf("Cancel while idle: %v", err)
+	if outcome, err := s.Cancel(context.Background()); err != nil || outcome != (CancelOutcome{Settled: true}) {
+		t.Fatalf("Cancel while idle = %+v, %v", outcome, err)
 	}
 	h := newHeld(t)
 	f.models["test/a"].push(h.step(textParts("partial")[:2], nil))
 	out := startPrompt(s, "hi")
 	await(t, h.reached, "the turn to stream")
-	if err := s.Cancel(context.Background()); err != nil {
-		t.Fatalf("Cancel: %v", err)
+	if outcome, err := s.Cancel(context.Background()); err != nil || outcome != (CancelOutcome{Wrote: true, Settled: true}) {
+		t.Fatalf("Cancel = %+v, %v", outcome, err)
 	}
 	got := await(t, out, "the cancelled prompt to return")
 	if got.err != nil || got.res.StopReason != "cancelled" {
@@ -822,14 +840,24 @@ func TestNativeCancelWaits(t *testing.T) {
 	out := startPrompt(s, "first")
 	await(t, h.reached, "the first turn to open")
 	cctx, stop := context.WithCancel(context.Background())
-	cancelled := make(chan error, 1)
-	go func() { cancelled <- s.Cancel(cctx) }()
+	cancelled := make(chan cancelOutcomeResult, 1)
+	go func() {
+		outcome, err := s.Cancel(cctx)
+		cancelled <- cancelOutcomeResult{outcome, err}
+	}()
 	await(t, h.cancelled, "the turn to see its context end")
 	// The turn is still running (lingering), so a Cancel that waits is
 	// still waiting and can only answer with its own context's end.
 	stop()
-	if err := await(t, cancelled, "Cancel to give up"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Cancel = %v while the turn was still running, want context.Canceled: it did not wait", err)
+	r := await(t, cancelled, "Cancel to give up")
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("Cancel = %v while the turn was still running, want context.Canceled: it did not wait", r.err)
+	}
+	// Wrote is known the moment this call cancels the running turn's
+	// context, regardless of how the wait for rel then ends; Settled is not,
+	// because this call gave up before rel closed (plan 021 §3.7).
+	if want := (CancelOutcome{Wrote: true}); r.outcome != want {
+		t.Fatalf("CancelOutcome = %+v, want %+v", r.outcome, want)
 	}
 	close(h.linger)
 	if got := await(t, out, "the first prompt"); got.err != nil || got.res.StopReason != "cancelled" {
@@ -842,12 +870,20 @@ func TestNativeCancelWaits(t *testing.T) {
 	f.models["test/a"].push(h2.step(nil, nil))
 	out2 := startPrompt(s, "second")
 	await(t, h2.reached, "the second turn to open")
-	returned := make(chan error, 1)
-	go func() { returned <- s.Cancel(context.Background()) }()
+	returned := make(chan cancelOutcomeResult, 1)
+	go func() {
+		outcome, err := s.Cancel(context.Background())
+		returned <- cancelOutcomeResult{outcome, err}
+	}()
 	await(t, h2.cancelled, "the second turn to see its context end")
 	close(h2.linger)
-	if err := await(t, returned, "Cancel to return"); err != nil {
-		t.Fatalf("Cancel: %v", err)
+	r2 := await(t, returned, "Cancel to return")
+	if r2.err != nil {
+		t.Fatalf("Cancel: %v", r2.err)
+	}
+	// This Cancel waited rel out: Wrote and Settled are both true.
+	if want := (CancelOutcome{Wrote: true, Settled: true}); r2.outcome != want {
+		t.Fatalf("CancelOutcome = %+v, want %+v", r2.outcome, want)
 	}
 	// Cancel has returned, so the turn's ending is already buffered and the
 	// slot is free — no waiting on the prompt's goroutine.
@@ -878,11 +914,19 @@ func TestNativeBeginWithdraws(t *testing.T) {
 	// context that has already ended: it marks the claim and returns.
 	gone, stop := context.WithCancel(context.Background())
 	stop()
-	if err := s.Cancel(gone); !errors.Is(err, context.Canceled) {
+	outcome, err := s.Cancel(gone)
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Cancel on a claimed prompt = %v", err)
 	}
+	// Withdrew is known the moment this call marks the claim cancelling —
+	// turnCancel is still nil, so the continuation has not opened a turn —
+	// regardless of how the wait for rel then ends; Settled is not, because
+	// this call gave up (its context was already gone) before rel closed.
+	if want := (CancelOutcome{Withdrew: true}); outcome != want {
+		t.Fatalf("CancelOutcome = %+v, want %+v", outcome, want)
+	}
 	res, err := run(context.Background())
-	if !errors.Is(err, ErrPromptCancelled) || res != (Result{}) {
+	if !errors.Is(err, ErrPromptCancelled) || !zeroResult(res) {
 		t.Fatalf("the continuation = %+v, %v; want ErrPromptCancelled", res, err)
 	}
 	if evs := drained(s); len(evs) != 0 {
@@ -943,7 +987,7 @@ func TestNativeContinuationRunsOnce(t *testing.T) {
 			t.Fatalf("the first call = %+v, %v", res, err)
 		}
 		drained(s)
-		if res, err := run(context.Background()); !errors.Is(err, ErrPromptInFlight) || res != (Result{}) {
+		if res, err := run(context.Background()); !errors.Is(err, ErrPromptInFlight) || !zeroResult(res) {
 			t.Fatalf("the second call = %+v, %v; want ErrPromptInFlight", res, err)
 		}
 		// A later claim is not the stale continuation's to run or release.
@@ -1016,7 +1060,7 @@ func TestNativeCallerContextEndingIsAFailure(t *testing.T) {
 	}
 	failed := func(t *testing.T, s *nativeSession, got outcome, cause error, msg string) {
 		t.Helper()
-		if !errors.Is(got.err, cause) || got.err.Error() != msg || got.res != (Result{}) {
+		if !errors.Is(got.err, cause) || got.err.Error() != msg || !zeroResult(got.res) {
 			t.Fatalf("Prompt = %+v, %v; want a zero Result and %q wrapping %v", got.res, got.err, msg, cause)
 		}
 		evs := drained(s)
@@ -1072,7 +1116,7 @@ func TestNativeCallerContextEndingIsAFailure(t *testing.T) {
 		s, h := setup(t)
 		out := startPrompt(s, "hi")
 		await(t, h.reached, "the turn to open")
-		if err := s.Cancel(context.Background()); err != nil {
+		if _, err := s.Cancel(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		if got := await(t, out, "the cancelled prompt"); got.err != nil || got.res.StopReason != "cancelled" {
@@ -1508,7 +1552,7 @@ func TestNativeWireErrorsArePhrasedWithoutTheKey(t *testing.T) {
 			res, err := s.Prompt(context.Background(), "hi")
 			evs := drained(s)
 			evErr := endings(t, evs, "")
-			if err == nil || evErr != err || res != (Result{}) {
+			if err == nil || evErr != err || !zeroResult(res) {
 				t.Fatalf("Prompt = %+v, %v; EventError %v", res, err, evErr)
 			}
 			if !strings.Contains(err.Error(), tc.want) {

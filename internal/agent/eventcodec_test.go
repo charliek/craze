@@ -503,6 +503,16 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 		{"a replayed text", Event{Type: EventText, Text: "from history", Replayed: true, At: at}},
 		{"the replay's end", Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}, At: at}},
 		{"an error", Event{Type: EventError, Err: &acp.RPCError{Code: -32603, Message: "Internal error"}, At: at}},
+		{"a turn started, with its cause", Event{Type: EventTurn, Cause: "cli-1/7", Turn: &TurnInfo{
+			ID: "turn-3", Phase: TurnStarted, Text: "fix the tests", Origin: TurnOriginSubmit,
+		}, At: at}},
+		{"a turn ended cleanly, with a successor", Event{Type: EventTurn, Cause: "tui-1/12", Turn: &TurnInfo{
+			ID: "turn-3", Phase: TurnEnded, StopReason: "end_turn", Next: "turn-4", Pending: 2,
+		}, At: at}},
+		{"a turn ended synthetically, with no successor", Event{Type: EventTurn, Turn: &TurnInfo{
+			ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled,
+			Err: "agent: prompt cancelled before it was sent", Synthetic: true,
+		}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
 	for _, tc := range cases {
@@ -584,6 +594,10 @@ func TestEventCodecPinsTheWireShape(t *testing.T) {
 			`{"type":"question","question":{"id":"ask-1","auto":true,"answers":{"q1":["a"],"q2":null,"q3":[]}}}`},
 		{QueueEvent{Prompt: QueuedPrompt{ID: "q-1", Text: "next", QueuedAt: codecTestTime, Version: 1}, Change: QueueEdited, Pos: 1}.Event(),
 			`{"type":"queue","queue":{"id":"q-1","text":"next","queuedAt":"2026-09-19T10:30:45.123456789Z","version":1},"queueChange":"edited","queuePos":1}`},
+		{Event{Type: EventTurn, Cause: "cli-1/7", Turn: &TurnInfo{ID: "turn-3", Phase: TurnStarted, Text: "go", Origin: TurnOriginSubmit}},
+			`{"type":"turn","turn":{"id":"turn-3","phase":"started","text":"go","origin":"submit"},"cause":"cli-1/7"}`},
+		{Event{Type: EventTurn, Turn: &TurnInfo{ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled, Err: "agent: prompt cancelled before it was sent", Synthetic: true}},
+			`{"type":"turn","turn":{"id":"turn-3","phase":"ended","stopReason":"cancelled","errClass":"prompt_cancelled","err":"agent: prompt cancelled before it was sent","synthetic":true}}`},
 	} {
 		got, err := EncodeEvent(tc.ev)
 		if err != nil {
@@ -738,6 +752,53 @@ func TestEventCodecErrorsKeepMessageClassCodeAndIs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestClassifyEventErrKnowsTheThreeSyntheticEndings: session.go's three
+// refusals never reach Event.Err (they are returned from Prompt, not
+// emitted), so they are not in TestEventCodecErrorsKeepMessageClassCodeAndIs
+// above; ClassifyEventErr is how the engine classifies them into a
+// TurnInfo.ErrClass instead, and this pins that it does, without needing a
+// live turn to produce one.
+func TestClassifyEventErrKnowsTheThreeSyntheticEndings(t *testing.T) {
+	for _, tc := range []struct {
+		err   error
+		class EventErrClass
+	}{
+		{ErrPromptCancelled, EventErrPromptCancelled},
+		{ErrPromptInFlight, EventErrPromptInFlight},
+		{ErrForeignTurn, EventErrForeignTurn},
+	} {
+		if got := ClassifyEventErr(tc.err); got != tc.class {
+			t.Fatalf("ClassifyEventErr(%v) = %q, want %q", tc.err, got, tc.class)
+		}
+	}
+}
+
+// TestNewSentinelsDoNotReclassifyAnExistingError: adding the three synthetic
+// classes to eventErrSentinels must not change how any error that already
+// reaches Event.Err classifies (plan 021's C3a instruction) — every case in
+// TestEventCodecErrorsKeepMessageClassCodeAndIs already proves this by
+// construction (each case's class is pinned and none of them is one of the
+// three new ones), so this only says the negative out loud: none of the
+// errors that test covers is matched by one of the three new sentinels.
+func TestNewSentinelsDoNotReclassifyAnExistingError(t *testing.T) {
+	existing := []error{
+		acp.ErrClosed, acp.ErrAgentExited, context.Canceled, context.DeadlineExceeded,
+		harness.ErrAuth, harness.ErrModelNotFound, harness.ErrContextTooLarge,
+		harness.ErrEmptyStep, harness.ErrEmptyPrompt, harness.ErrClosed,
+	}
+	for _, err := range existing {
+		for _, synthetic := range []error{ErrPromptCancelled, ErrPromptInFlight, ErrForeignTurn} {
+			if errors.Is(err, synthetic) {
+				t.Fatalf("an existing sentinel %v now matches the new synthetic sentinel %v", err, synthetic)
+			}
+		}
+		class, _ := classifyEventErr(err)
+		if class == EventErrPromptCancelled || class == EventErrPromptInFlight || class == EventErrForeignTurn {
+			t.Fatalf("classifyEventErr(%v) = %q, a synthetic class it must never take", err, class)
+		}
 	}
 }
 

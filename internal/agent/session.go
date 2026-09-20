@@ -80,6 +80,12 @@ const (
 	// installed. Every event between the two carries Event.Replayed; the
 	// brackets themselves do not.
 	EventReplay EventType = "replay"
+	// EventTurn is one end of a turn the engine drove (plan 021 §3.4): started
+	// is "prompt accepted, with its text", and ended is the turn's one ordered
+	// ending, including the endings the wire never reports — a prompt
+	// withdrawn before it was sent, and a prompt the session refused. No
+	// session emits it: the engine, above this seam, is its one author.
+	EventTurn EventType = "turn"
 )
 
 // ReplayInfo is one end of the session/load replay bracket.
@@ -91,6 +97,64 @@ type ReplayInfo struct{ Phase string }
 const (
 	ReplayStart = "start"
 	ReplayEnd   = "end"
+)
+
+// TurnInfo is Event.Turn: one phase of one engine-driven turn (plan 021
+// §3.4). A turn's id is "turn-N" and is scoped to the log's incarnation, as
+// sequence numbers are: the counter restarts with the process. Phase started
+// carries what admitted the turn; phase ended carries how it finished,
+// synthetic or not, and what the settlement decided to run next.
+type TurnInfo struct {
+	// ID is this turn's id, "turn-N".
+	ID string
+	// Phase is TurnStarted or TurnEnded.
+	Phase string
+	// Text is the prompt's text, set on TurnStarted.
+	Text string
+	// Origin is TurnOriginSubmit, TurnOriginDrain or TurnOriginSendNow, set
+	// on TurnStarted: what admitted this turn, which a client that draws a
+	// drained or armed row differently from a typed one reads instead of
+	// guessing from other state.
+	Origin string
+	// StopReason is set on TurnEnded: the wire's own stop reason on a real
+	// ending, or the synthetic reason Synthetic marks.
+	StopReason string
+	// ErrClass is set on TurnEnded when the turn failed or was refused
+	// synthetically: the same EventErrClass vocabulary Event.Err's codec
+	// uses (eventcodec.go), extended with the three endings the wire never
+	// reports on its own — ErrPromptCancelled, ErrPromptInFlight,
+	// ErrForeignTurn — which ClassifyEventErr answers for too.
+	ErrClass EventErrClass
+	// Err is the failure as text, set on TurnEnded alongside ErrClass. It is
+	// text and never an error value: an event enqueued through the log's
+	// outbox (eventlog.go's Enqueue) is immutable once accepted, and the
+	// engine has no live error value for a synthetic ending in the first
+	// place — only what ClassifyEventErr made of one.
+	Err string
+	// Synthetic marks a TurnEnded the wire never produced: a withdrawn
+	// prompt (ErrPromptCancelled), or a refusal turned into an ending
+	// (ErrPromptInFlight, ErrForeignTurn).
+	Synthetic bool
+	// Next is the id of the successor turn this same settlement started, ""
+	// if none. It is set exactly when a successor was reserved, so a client
+	// never sees an ended with an empty Next that a moment later turns out
+	// to have had one after all (plan 021 §3.4).
+	Next string
+	// Pending is how many rows were still queued after this settlement.
+	Pending int
+}
+
+// The two phases a TurnInfo carries.
+const (
+	TurnStarted = "started"
+	TurnEnded   = "ended"
+)
+
+// The three origins a TurnStarted carries: what admitted the turn.
+const (
+	TurnOriginSubmit  = "submit"
+	TurnOriginDrain   = "drain"
+	TurnOriginSendNow = "send_now"
 )
 
 const (
@@ -237,7 +301,19 @@ type Event struct {
 	// Replayed marks an event the agent replayed out of its own history
 	// rather than produced now. It is stamped on every event emitted between
 	// the two EventReplay phases.
-	Replayed   bool
+	Replayed bool
+	// Turn is set on EventTurn: one phase of one engine-driven turn.
+	Turn *TurnInfo
+	// Cause is the Command (client/id, plan 021 §3.2) that caused an
+	// engine-authored event, "" when none: an EventTurn, an EventAsk ending,
+	// a settings delta the engine itself enqueued. It lets a client that
+	// already applied its own command's effect from that command's own
+	// return value skip only that one event's echo, without matching on
+	// anything the payload carries (§3.4, §3.8) — the same contract a
+	// socket client will use once the return and the event no longer arrive
+	// together. A session's own event never sets it: every event this plan
+	// found before it (§2) is still the session's alone.
+	Cause      string
 	Err        error
 	StopReason string
 	At         time.Time
@@ -384,6 +460,13 @@ type PlanEvent struct {
 
 type Result struct {
 	StopReason string
+	// Unanswered is text the turn accepted mid-run and could not answer, in
+	// the order it arrived — an interjection the harness had no step left to
+	// take up before its turn ended. The engine requeues each one, last
+	// first, ahead of whatever it decides to run next, before that decision
+	// is made (plan 021 §3.5): the steered text must be ahead of a queued
+	// row, never behind it. Only the native session can have any.
+	Unanswered []string
 }
 
 type Options struct {
@@ -442,6 +525,40 @@ type Options struct {
 	JournalDir string
 }
 
+// CancelOutcome is what one Session.Cancel call is known to have done, from
+// exactly what that call itself observed — never inferred from the schedule
+// that led to it (plan 021 §3.7). It exists because a bare error cannot say
+// whether the agent ever heard about the cancel, and the driver above this
+// seam has to answer a client honestly: requested, settled, or — when the call
+// gave up after a write may have happened — unknown.
+//
+//   - Wrote is true when this call is the one that put a cancel where the
+//     turn could see it: live, session/cancel actually went out on the wire
+//     — on the "no prompt of craze's own claimed" path as much as on the
+//     "a claimed prompt reached the wire" path, since both write; native, a
+//     running turn's context was cancelled by this call; the Stub, its
+//     cancelsSent counter was incremented for it.
+//   - Withdrew is true when a prompt claimed and not yet on the wire (live)
+//     or not yet running (native, the Stub) found itself cancelled by this
+//     call and will return ErrPromptCancelled with nothing ever sent. Wrote
+//     and Withdrew are never both true: a withdrawal is exactly the case in
+//     which nothing was written.
+//   - Settled is true when the turn this call was for — or the fact that
+//     there was none — is known to be over by the time Cancel returned:
+//     nothing of craze's own was running or claimed at all, a withdrawal
+//     that leaves nothing to wait for, or a wait for the turn's own ending
+//     that the ending itself won. It is false when Cancel gave up not
+//     knowing: its context ended, or the session closed, before the turn's
+//     ending did. False is not "still running" — only "this call cannot
+//     say" — which is why a caller that needs to know for certain waits for
+//     the turn's own ending event rather than trusting a false here.
+//
+// Every implementation's own Cancel documents its exact mapping onto these
+// three fields; this type is the contract they all answer to.
+type CancelOutcome struct {
+	Wrote, Withdrew, Settled bool
+}
+
 type Session interface {
 	Start(ctx context.Context) error
 	// Prompt is Begin(text)(ctx): the claim and the prompt back to back.
@@ -457,7 +574,24 @@ type Session interface {
 	// exactly once; the slot stays claimed until it returns.
 	Begin(text string) func(ctx context.Context) (Result, error)
 	Events() <-chan Event
-	Cancel(ctx context.Context) error
+	// Cancel stops whatever prompt of craze's own is running or claimed, and
+	// reports what this call is known to have done. Every implementation's
+	// exact mapping is in its own Cancel; CancelOutcome documents the
+	// contract they all answer to (plan 021 §3.7).
+	Cancel(ctx context.Context) (CancelOutcome, error)
+	// ForeignTurn is Snapshot().ForeignTurn, as a leaf: it takes the
+	// session's own mutex briefly and waits on nothing else — no provider
+	// call, no other lock, no clone of anything (plan 021 §3.3). It exists so
+	// a component above the seam — the engine — can read this one flag from
+	// inside its own admission check, under its own lock (e.mu), without
+	// paying for a whole Snapshot's clones (Queue, Models, Modes, Commands,
+	// Config, Todos, Tools, Subagents) just to read one bool. This and Begin
+	// are the two calls the engine may make under e.mu, both taking s.mu
+	// briefly and waiting on nothing: the order is e.mu → s.mu, and it
+	// cannot cycle, because the session never calls back into the engine. A
+	// session with no notion of a foreign turn (native) always answers
+	// false.
+	ForeignTurn() bool
 	// Queue appends a message to craze's own queue. It refuses a full queue
 	// or an oversized message without mutating anything, so the caller keeps
 	// the draft it tried to queue.

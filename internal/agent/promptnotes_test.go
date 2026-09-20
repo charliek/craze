@@ -184,7 +184,7 @@ func TestPromptNotesRecordACancelledCatalogWait(t *testing.T) {
 	s, w := journaledScript(t, "nocommands", Options{Force: true, PluginDirs: []string{probeFixtureDir(t)}})
 	out := promptOn(s, "/probe-echo banana")
 	waitForCatalogWait(t, s)
-	if err := s.Cancel(t.Context()); err != nil {
+	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if err := promptReturn(t, out, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
@@ -536,7 +536,7 @@ func TestNativePromptNotesRecordAWithdrawnPromptAndAFailedTurn(t *testing.T) {
 
 	run := s.Begin("withdrawn")
 	cancelled := make(chan error, 1)
-	go func() { cancelled <- s.Cancel(context.Background()) }()
+	go func() { _, err := s.Cancel(context.Background()); cancelled <- err }()
 	waitNativeCancelling(t, s)
 	if _, err := run(t.Context()); !errors.Is(err, ErrPromptCancelled) {
 		t.Fatalf("the claimed prompt returned %v", err)

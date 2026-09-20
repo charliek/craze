@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,5 +135,83 @@ func TestStubNoPrimaryEmitsWithNobodyReading(t *testing.T) {
 	}
 	if err := sub.Err(); !errors.Is(err, agent.ErrClosed) {
 		t.Fatalf("the subscription ended with %v, want agent.ErrClosed", err)
+	}
+}
+
+// stubOpenedProbe closes opened the first time its Done channel is asked for.
+// The Stub's hung turn — HangNext — parks on exactly one select whose first
+// case is <-ctx.Done(), evaluated once, right after inPrompt is set true and
+// the claim's continuation has genuinely opened its turn: it is
+// internal/agent/session_contract_test.go's openedProbe, copied here because
+// that file is a different package and this one cannot import it.
+type stubOpenedProbe struct {
+	context.Context
+	once   sync.Once
+	opened chan struct{}
+}
+
+func (p *stubOpenedProbe) Done() <-chan struct{} {
+	p.once.Do(func() { close(p.opened) })
+	return p.Context.Done()
+}
+
+// TestStubCancelOutcome pins the Stub's CancelOutcome mapping (plan 021 §3.7)
+// over the three states Cancel can find: nothing claimed, claimed and parked
+// (not yet open), and a running turn. The Stub never waits, so unlike live and
+// native its Settled is true only in the first: an open or about-to-withdraw
+// turn is still going, by definition, the instant Cancel returns.
+func TestStubCancelOutcome(t *testing.T) {
+	t.Run("nothing running", func(t *testing.T) {
+		s := NewStub()
+		t.Cleanup(func() { _ = s.Close() })
+		outcome, err := s.Cancel(context.Background())
+		if want := (agent.CancelOutcome{Wrote: true, Settled: true}); err != nil || outcome != want {
+			t.Fatalf("Cancel with nothing running = %+v, %v; want %+v, nil", outcome, err, want)
+		}
+	})
+	t.Run("claimed, not yet open", func(t *testing.T) {
+		s := NewStub()
+		t.Cleanup(func() { _ = s.Close() })
+		parked := s.ParkNext()
+		run := s.Begin("hi")
+		go func() { _, _ = run(context.Background()) }()
+		awaitBarrier(t, parked, "the prompt reaching the park")
+		outcome, err := s.Cancel(context.Background())
+		if want := (agent.CancelOutcome{Withdrew: true}); err != nil || outcome != want {
+			t.Fatalf("Cancel on a parked prompt = %+v, %v; want %+v, nil", outcome, err, want)
+		}
+	})
+	t.Run("running", func(t *testing.T) {
+		s := NewStub()
+		t.Cleanup(func() { _ = s.Close() })
+		s.HangNext()
+		probe := &stubOpenedProbe{Context: context.Background(), opened: make(chan struct{})}
+		run := s.Begin("hi")
+		go func() { _, _ = run(probe) }()
+		awaitBarrier(t, probe.opened, "the turn opening")
+		outcome, err := s.Cancel(context.Background())
+		if want := (agent.CancelOutcome{Wrote: true}); err != nil || outcome != want {
+			t.Fatalf("Cancel on a running turn = %+v, %v; want %+v, nil", outcome, err, want)
+		}
+	})
+}
+
+// TestStubForeignTurnAgreesWithSnapshot: the leaf accessor and Snapshot's own
+// field report the same thing across a foreign turn's start and end (plan 021
+// §3.3): they read the same field under the same lock, so this is mostly a
+// statement that ForeignTurn exists and is wired to it, not a race test.
+func TestStubForeignTurnAgreesWithSnapshot(t *testing.T) {
+	s := NewStub()
+	t.Cleanup(func() { _ = s.Close() })
+	if s.ForeignTurn() || s.Snapshot().ForeignTurn {
+		t.Fatal("a fresh Stub reports a foreign turn")
+	}
+	s.SetForeignTurn(agent.ForeignTurnInfo{ID: "p-1", Running: true})
+	if !s.ForeignTurn() || s.ForeignTurn() != s.Snapshot().ForeignTurn {
+		t.Fatalf("ForeignTurn() = %v, Snapshot().ForeignTurn = %v; want both true", s.ForeignTurn(), s.Snapshot().ForeignTurn)
+	}
+	s.SetForeignTurn(agent.ForeignTurnInfo{ID: "p-1", Running: false})
+	if s.ForeignTurn() || s.ForeignTurn() != s.Snapshot().ForeignTurn {
+		t.Fatalf("ForeignTurn() = %v, Snapshot().ForeignTurn = %v; want both false", s.ForeignTurn(), s.Snapshot().ForeignTurn)
 	}
 }

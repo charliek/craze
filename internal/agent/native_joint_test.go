@@ -98,7 +98,7 @@ func TestNativeToolEventsAndTheBoundaryAgreeUnderRace(t *testing.T) {
 	jointToolEvents(s, 8, 12)
 	// A cancel with nothing claimed is a no-op, but it runs the same locked
 	// sections a real one does while the publishers above are still settling.
-	if err := s.Cancel(t.Context()); err != nil {
+	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	s.settleTools()

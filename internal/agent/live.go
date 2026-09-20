@@ -1138,10 +1138,29 @@ func (s *session) Snapshot() Snapshot {
 	return out
 }
 
-func (s *session) Cancel(ctx context.Context) error {
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3): s.foreign under
+// s.mu alone, the same field Snapshot reports, with none of Snapshot's clones.
+func (s *session) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreign
+}
+
+// Cancel maps onto CancelOutcome as follows (plan 021 §3.7): with no client at
+// all, or with nothing of craze's own claimed or running (a foreign turn or
+// idle), Settled is true and Wrote is whether the write below succeeded — the
+// no-claim path and the wireSent/wireRefused path are the two writing paths,
+// and both set Wrote from client.Cancel's own return. A catalog-wait abort, or
+// a wire that settles wireWithdrawn, is a Withdrew with nothing written and
+// nothing left to wait for, so Settled is true too. Waiting on the wire's
+// outcome or the turn's own ending can be cut short by ctx or by the session
+// closing: Settled is then false, because this call does not know what
+// finished the wait — only what it already knew before giving up, which is
+// exactly what is reported alongside the error.
+func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return nil
+		return CancelOutcome{Settled: true}, nil
 	}
 	// A prompt still waiting for the catalog has opened no turn, so nothing
 	// below would reach it: without this, Esc would return having cancelled
@@ -1173,7 +1192,7 @@ func (s *session) Cancel(ctx context.Context) error {
 	s.mu.Lock()
 	if s.abortCatalogWaitLocked() {
 		s.mu.Unlock()
-		return nil
+		return CancelOutcome{Withdrew: true, Settled: true}, nil
 	}
 	// From here until the turn ends an interjection would be stranded, which
 	// is what makes grok mint a turn of its own. The claim, the turn and the
@@ -1187,8 +1206,12 @@ func (s *session) Cancel(ctx context.Context) error {
 	if (!in && !claimed) || wire == nil {
 		// No prompt of craze's own is claimed: nothing is running, or the
 		// agent is running a turn it started itself. Either way there is no
-		// prompt of ours for the cancel to overtake, so it goes now.
-		return client.Cancel(ctx)
+		// prompt of ours for the cancel to overtake, so it goes now. Settled
+		// is true regardless of whether the write itself succeeded: craze had
+		// no turn of its own in flight either way, so there is nothing here
+		// for a later wait to resolve.
+		err := client.Cancel(ctx)
+		return CancelOutcome{Wrote: err == nil, Settled: true}, err
 	}
 	// The prompt is claimed before its turn opens and its turn opens before
 	// its request is written, so the cancel waits for the wire to say what
@@ -1204,10 +1227,16 @@ func (s *session) Cancel(ctx context.Context) error {
 	select {
 	case <-wire.done:
 	case <-ctx.Done():
-		return ctx.Err()
+		// The write outcome is still unknown, so nothing is known: no write,
+		// no withdrawal, no settlement.
+		return CancelOutcome{}, ctx.Err()
 	case <-s.done:
-		return nil
+		// The session closed before the wire said anything. The outcome is
+		// exactly as unknown as the ctx.Done case above; "as today" is the nil
+		// error only.
+		return CancelOutcome{}, nil
 	}
+	var wrote, withdrew bool
 	switch s.outcomeOf(wire) {
 	case wireSent, wireRefused:
 		// Each Cancel writes once at most: here, or on the no-turn path above.
@@ -1215,11 +1244,15 @@ func (s *session) Cancel(ctx context.Context) error {
 		// A refused prompt is cancelled too: the refusal that reaches here
 		// is a foreign turn, and that turn is still running.
 		if err := client.Cancel(ctx); err != nil {
-			return err
+			return CancelOutcome{}, err
 		}
+		wrote = true
 	default:
 		// wireFailed or wireWithdrawn: the prompt never reached the agent, so
-		// there is no turn there to stop and nothing is written.
+		// there is no turn there to stop and nothing is written. Only the
+		// latter is a withdrawal this cancel caused; wireFailed is a prompt
+		// that ended some other way before this cancel could reach it.
+		withdrew = s.outcomeOf(wire) == wireWithdrawn
 	}
 	// The wait is for the turn this cancel was for, and only that one: the
 	// release clears s.wire together with inPrompt, so a wire that is no
@@ -1232,13 +1265,16 @@ func (s *session) Cancel(ctx context.Context) error {
 	in = s.inPrompt && s.wire == wire
 	s.mu.Unlock()
 	if !in || done == nil {
-		return nil
+		// Nothing left to wait for: either this wire's outcome already says
+		// there is no turn of ours running (withdrawn, failed), or the turn
+		// it did open has already ended by this read.
+		return CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: true}, nil
 	}
 	select {
 	case <-done:
-		return nil
+		return CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: true}, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return CancelOutcome{Wrote: wrote, Withdrew: withdrew}, ctx.Err()
 	}
 }
 

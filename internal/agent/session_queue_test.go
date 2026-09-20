@@ -177,10 +177,19 @@ func TestPopQueueRefusesDuringAForeignTurn(t *testing.T) {
 	}
 	<-done
 	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
+	// ForeignTurn is the same flag Snapshot() reports, plan 021's leaf
+	// accessor (§3.3): once the snapshot has caught the flag, the leaf must
+	// agree — both read s.foreign under s.mu.
+	if !s.ForeignTurn() {
+		t.Fatal("ForeignTurn() disagrees with Snapshot().ForeignTurn while a foreign turn is running")
+	}
 	if _, ok := s.PopQueue(); ok {
 		t.Fatal("a row left the queue during a foreign turn")
 	}
 	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
+	if s.ForeignTurn() {
+		t.Fatal("ForeignTurn() disagrees with Snapshot().ForeignTurn once the foreign turn ended")
+	}
 
 	// The snapshot flag is not the sync point for anything read out of the
 	// log. onForeignTurn flips s.foreign under the lock and emits only after
@@ -289,7 +298,7 @@ func TestInterjectRefusedInEveryStrandedState(t *testing.T) {
 		if !errors.Is(err, ErrNotInTurn) {
 			t.Fatalf("err %v", err)
 		}
-		_ = s.Cancel(context.Background())
+		_, _ = s.Cancel(context.Background())
 		<-done
 	})
 }

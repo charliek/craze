@@ -112,14 +112,16 @@ func (s *scriptedSession) stubBusy() bool {
 	return s.claimed || s.inPrompt
 }
 
-// Cancel fails once when a test armed a failure, and otherwise is the Stub's.
-func (s *scriptedSession) Cancel(ctx context.Context) error {
+// Cancel fails once when a test armed a failure — reporting a zero
+// CancelOutcome alongside it, since a cancel that never ran cannot know
+// anything — and otherwise is the Stub's.
+func (s *scriptedSession) Cancel(ctx context.Context) (agent.CancelOutcome, error) {
 	s.mu.Lock()
 	err := s.cancelErr
 	s.cancelErr = nil
 	s.mu.Unlock()
 	if err != nil {
-		return err
+		return agent.CancelOutcome{}, err
 	}
 	return s.Stub.Cancel(ctx)
 }

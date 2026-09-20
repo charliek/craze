@@ -262,7 +262,7 @@ func runHeld(t *testing.T, s contractSession, text string) <-chan promptOutcome 
 // does not rely on Cancel waiting, which the stub's does not.
 func cancelHeld(t *testing.T, s contractSession, out <-chan promptOutcome) promptOutcome {
 	t.Helper()
-	if err := s.Cancel(context.Background()); err != nil {
+	if _, err := s.Cancel(context.Background()); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
 	select {

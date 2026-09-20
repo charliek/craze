@@ -415,8 +415,19 @@ func (s *stubSession) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, 
 }
 func (s *stubSession) Incarnation() string { return s.log.Incarnation() }
 
-func (s *stubSession) Cancel(context.Context) error {
-	return nil
+// Cancel is a no-op that reports nothing running: this stub's turns never
+// wait on a cancel of their own, so every prompt it runs settles on its
+// turns' own scripted result instead.
+func (s *stubSession) Cancel(context.Context) (agent.CancelOutcome, error) {
+	return agent.CancelOutcome{Settled: true}, nil
+}
+
+// ForeignTurn is the session contract's leaf accessor, over the same field
+// Snapshot reports.
+func (s *stubSession) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreign
 }
 
 func (s *stubSession) Queue(text string) (agent.QueuedPrompt, error) {

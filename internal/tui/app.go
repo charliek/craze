@@ -2030,7 +2030,7 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := sess.Cancel(ctx); err != nil {
+		if _, err := sess.Cancel(ctx); err != nil {
 			return cancelFailedMsg{seq: seq, err: err}
 		}
 		return nil

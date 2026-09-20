@@ -170,7 +170,7 @@ func TestGrokSubagentCancelOrders(t *testing.T) {
 				errCh <- err
 			}()
 			waitFor(t, "spawned", func() bool { return hasSubagentChange(log, SubagentChangeSpawned, "sub-1") })
-			if err := s.Cancel(t.Context()); err != nil {
+			if _, err := s.Cancel(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			if err := <-errCh; err != nil {
