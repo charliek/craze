@@ -141,6 +141,34 @@ func TestExpandNativeBody(t *testing.T) {
 	}
 }
 
+// TestNativeDollarZeroStaysLiteral (round-2 review): the positional arguments
+// are one-based, so $0 names none of them. Cursor's regex matches it anyway
+// and consumes it — which deletes the two characters the author wrote and
+// counts as a placeholder the body spent, suppressing the fallback that would
+// have carried the arguments instead — and cursor's bytes are frozen, so the
+// literal reading is native's alone. $01 is a leading zero on a real index and
+// keeps meaning $1 for both.
+func TestNativeDollarZeroStaysLiteral(t *testing.T) {
+	vars := pluginVars{Root: "/root", Extras: true}
+	for _, tc := range []struct {
+		name, body, args, native, cursor string
+	}{
+		{"$0", "run $0", "alpha", "run $0\n\n**ARGUMENTS:** alpha", "run "},
+		{"$00", "run $00", "alpha", "run $00\n\n**ARGUMENTS:** alpha", "run "},
+		{"$0 with no arguments at all", "run $0", "", "run $0", "run "},
+		{"$01 is $1 for both", "run $01", "alpha", "run alpha", "run alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := expandNativeBody(tc.body, vars, tc.args); got != tc.native {
+				t.Fatalf("native\n got %q\nwant %q", got, tc.native)
+			}
+			if got := expandCommandBody(tc.body, "/root", tc.args); got != tc.cursor {
+				t.Fatalf("cursor\n got %q\nwant %q", got, tc.cursor)
+			}
+		})
+	}
+}
+
 // TestCursorBodyIgnoresNativesVariables is the other side of that seam: a
 // plugin body craze expands for cursor reaches cursor's agent as its author
 // wrote it, so the two variables only native fills stay literal there.
@@ -154,9 +182,22 @@ func TestCursorBodyIgnoresNativesVariables(t *testing.T) {
 	}
 }
 
-// nativeBlockOf is one entry expanded as native's wire would carry it.
+// nativeBlockOf is one entry expanded as native's wire would carry it, with no
+// redactor: the cases that are about the bytes of a block, rather than about
+// what is kept out of them, have no session to borrow one from.
 func nativeBlockOf(e PluginEntry, typed, args, sessionID string) string {
-	return nativeBlock(pluginRef{target: pluginTarget{entry: e}, typed: typed, args: args}, sessionID)
+	return nativeBlock(pluginRef{target: pluginTarget{entry: e}, typed: typed, args: args}, sessionID, nil)
+}
+
+// nativeFraming is what nativeBlock puts around a body: the sentence, the
+// element and its attributes for this entry and this invocation, redacted the
+// way the finished block will be. A ceiling assertion needs it exactly — a
+// slack of a kilobyte would hide a body that grew by hundreds of bytes under
+// redaction, which is the whole of C's bug.
+func nativeFraming(e PluginEntry, typed, sessionID string, redact func(string) string) int {
+	empty := e
+	empty.Body = ""
+	return len(nativeBlock(pluginRef{target: pluginTarget{entry: empty}, typed: typed}, sessionID, redact))
 }
 
 // TestNativeBlockNamesItsSource is the new golden of §3.3: the sentence says
@@ -215,18 +256,12 @@ func TestNativePromptJoin(t *testing.T) {
 	if len(cmds) != 2 {
 		t.Fatalf("%d expansions, want two", len(cmds))
 	}
-	parts := strings.Split(sent, "\n\n")
-	if parts[0] != draft {
-		t.Fatalf("the draft does not lead: %q", sent)
-	}
-	if !strings.HasPrefix(sent, draft+"\n\n") {
-		t.Fatalf("the blocks are not blank-line separated: %q", sent)
-	}
-	if !strings.Contains(sent, cmds[0].Text) || !strings.Contains(sent, cmds[1].Text) {
-		t.Fatal("an event's text is not what was sent")
-	}
-	if strings.Index(sent, cmds[0].Text) > strings.Index(sent, cmds[1].Text) {
-		t.Fatal("the blocks are out of reference order")
+	// The exact bytes, not a prefix and two containments: those would pass a
+	// join that separated the blocks twice, or one that put something of its
+	// own between them, and the join is the whole of what this pins.
+	want := draft + nativeBlockSep + cmds[0].Text + nativeBlockSep + cmds[1].Text
+	if sent != want {
+		t.Fatalf("the join\n got %q\nwant %q", sent, want)
 	}
 	if cmds[0].Qualified != "project:one" || cmds[1].Qualified != "user:two" {
 		t.Fatalf("names %q %q", cmds[0].Qualified, cmds[1].Qualified)
@@ -254,11 +289,40 @@ func TestNativePromptCaps(t *testing.T) {
 		if len(cmds) != 1 {
 			t.Fatalf("%d expansions, want one", len(cmds))
 		}
-		if len(cmds[0].Text) > maxPluginBodyBytes+1<<10 {
-			t.Fatalf("the block is %d bytes, over the ceiling plus its framing", len(cmds[0].Text))
+		// The real bound, not the ceiling plus a kilobyte of slack: the block
+		// is its framing and a body that has been capped, and nothing else.
+		if max := nativeFraming(e, "one", "", nil) + maxPluginBodyBytes; len(cmds[0].Text) > max {
+			t.Fatalf("the block is %d bytes, over the %d its framing and the ceiling allow", len(cmds[0].Text), max)
 		}
 		if !strings.Contains(sent, pluginTruncated) {
 			t.Fatal("a body over the ceiling was not marked truncated")
+		}
+	})
+
+	t.Run("a body seeded with keys is capped after it is redacted", func(t *testing.T) {
+		// Redaction grows what it rewrites — a key of 22 bytes becomes a
+		// marker of 27 — so a body capped before it ran would swell back
+		// through the ceiling by a fifth of its length. One line per key, just
+		// over the ceiling, so the cap has something to do either way.
+		line := nativeCanary + "\n"
+		e := entryOf("project", "one", PluginKindCommand, strings.Repeat(line, maxPluginBodyBytes/len(line)+1))
+		refs := nativeRefs("/one", nativeLookup([]PluginEntry{e}))
+		redact := func(s string) string { return strings.ReplaceAll(s, nativeCanary, "[redacted-credential-marker]") }
+		_, cmds := nativePrompt("/one", refs, "", redact)
+		if len(cmds) != 1 {
+			t.Fatalf("%d expansions, want one", len(cmds))
+		}
+		if max := nativeFraming(e, "one", "", redact) + maxPluginBodyBytes; len(cmds[0].Text) > max {
+			t.Fatalf("the redacted block is %d bytes, over the %d its framing and the ceiling allow",
+				len(cmds[0].Text), max)
+		}
+		// Capping before the frame is what keeps the element whole; capping
+		// the framed block would have taken its closing tag off.
+		if !strings.HasSuffix(cmds[0].Text, "</"+PluginKindCommand+">") {
+			t.Fatalf("the block lost its closing tag: %q", cmds[0].Text[max(0, len(cmds[0].Text)-80):])
+		}
+		if strings.Contains(cmds[0].Text, nativeCanary) {
+			t.Fatal("the cap put a key back in the block")
 		}
 	})
 
@@ -292,6 +356,43 @@ func TestNativePromptCaps(t *testing.T) {
 			t.Fatal("a block after the one that crossed the ceiling was still sent")
 		}
 	})
+
+	t.Run("blocks landing exactly on 128 KiB all fit, and one byte more does not", func(t *testing.T) {
+		// The boundary itself, which the case above is nowhere near. Two
+		// entries with names of the same length have framing of the same
+		// length, so each block can be made to cost exactly half the ceiling —
+		// its separator included, which is the byte accounting this pins.
+		half := maxNativeBlockBytes / 2
+		shape := entryOf("project", "one", PluginKindCommand, "")
+		body := strings.Repeat("x", half-len(nativeBlockSep)-nativeFraming(shape, "one", "", nil))
+		for _, tc := range []struct {
+			name  string
+			extra string
+			want  int
+		}{
+			{"exactly on it", "", 2},
+			{"one byte over", "x", 1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				entries := []PluginEntry{
+					entryOf("project", "one", PluginKindCommand, body),
+					entryOf("project", "two", PluginKindCommand, body+tc.extra),
+				}
+				draft := "/one\n/two"
+				refs := nativeRefs(draft, nativeLookup(entries))
+				sent, cmds := nativePrompt(draft, refs, "", nil)
+				if len(cmds) != tc.want {
+					t.Fatalf("%d expansions, want %d", len(cmds), tc.want)
+				}
+				if added := len(sent) - len(draft); added > maxNativeBlockBytes {
+					t.Fatalf("the blocks add %d bytes, over the %d ceiling", added, maxNativeBlockBytes)
+				}
+				if tc.want == 2 && len(sent)-len(draft) != maxNativeBlockBytes {
+					t.Fatalf("the blocks add %d bytes, want the ceiling exactly", len(sent)-len(draft))
+				}
+			})
+		}
+	})
 }
 
 // TestNativePromptRedacts: the block and the event carry the same redacted
@@ -311,6 +412,37 @@ func TestNativePromptRedacts(t *testing.T) {
 	}
 	if !strings.Contains(sent, "[redacted]") {
 		t.Fatalf("nothing was redacted at all: %q", sent)
+	}
+}
+
+// TestNativePromptRedactsTheRecordedPath (round-2 review): the path an
+// expansion records is data — it is what the event, the journal and --json
+// carry, and what the block's own sentence names — so a key in it leaks
+// exactly as a key in the body does. The entry keeps the real spelling, which
+// is what ${CLAUDE_SKILL_DIR} is derived from and what any later reader of the
+// file needs.
+func TestNativePromptRedactsTheRecordedPath(t *testing.T) {
+	e := entryOf("user", "leaky", PluginKindSkill, "in ${CLAUDE_SKILL_DIR}")
+	e.Path = "/home/" + nativeCanary + "/.claude/skills/leaky/SKILL.md"
+	refs := nativeRefs("/leaky", nativeLookup([]PluginEntry{e}))
+	redact := func(s string) string { return strings.ReplaceAll(s, nativeCanary, "[redacted]") }
+	sent, cmds := nativePrompt("/leaky", refs, "", redact)
+	if len(cmds) != 1 {
+		t.Fatalf("%d expansions, want one", len(cmds))
+	}
+	if strings.Contains(cmds[0].Path, nativeCanary) {
+		t.Fatalf("the canary reached the recorded path: %q", cmds[0].Path)
+	}
+	if !strings.Contains(cmds[0].Path, "[redacted]") {
+		t.Fatalf("the path was not redacted at all: %q", cmds[0].Path)
+	}
+	// The sentence names it too, and so does the substituted skill directory.
+	if strings.Contains(sent, nativeCanary) {
+		t.Fatalf("the canary reached the prompt: %q", sent)
+	}
+	// The entry itself is untouched: it is a filesystem handle, not a record.
+	if !strings.Contains(refs[0].target.entry.Path, nativeCanary) {
+		t.Fatalf("the entry's own path was rewritten: %q", refs[0].target.entry.Path)
 	}
 }
 

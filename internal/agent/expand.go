@@ -324,9 +324,22 @@ func substituteToken(body string, i int, vars pluginVars, fields []string) (stri
 	if digits == 0 || digits > 2 || (run < len(body) && isWordByte(body[run])) {
 		return "", 0, false
 	}
+	n, _ := strconv.Atoi(body[i+1 : run])
+	// $0 — and $00, which is the same number — is not a placeholder at all for
+	// native: the arguments are one-based, here as in Claude Code's own command
+	// files, so only $1..$99 name one. Left to the range check below it would
+	// still be consumed and would still count as a placeholder the body spent,
+	// which deletes the three bytes the author wrote and suppresses the
+	// **ARGUMENTS:** fallback that would have carried the arguments instead.
+	// Cursor's regex deliberately matches it, and those bytes are a promise
+	// craze has already made (expand_test.go), so the literal reading is
+	// native's alone — the same flag its two extra variables ride on.
+	if vars.Extras && n == 0 {
+		return "", 0, false
+	}
 	// A $1 with no first argument is still a placeholder the body spent, so
 	// the arguments must not also be appended under it.
-	if n, _ := strconv.Atoi(body[i+1 : run]); n >= 1 && n <= len(fields) {
+	if n >= 1 && n <= len(fields) {
 		return fields[n-1], run, true
 	}
 	return "", run, true
@@ -481,12 +494,22 @@ func pluginBlock(ref pluginRef) string {
 // the bytes safe — the escaped closing tag, the ceiling, the folded attributes
 // — lives here and not in either caller, so a second provider's expansion
 // cannot arrive at a differently-escaped block.
+//
+// Escaped, then capped, then framed: escaping can only grow a body, and a
+// ceiling something is applied after is not a ceiling; the frame goes on last
+// because capping a framed block would cut its own closing tag off. Native
+// needs one more step between the escape and the cap — its redaction, which
+// grows the body too — so it prepares its body itself and calls pluginFrame.
 func pluginBlockOf(ref pluginRef, kind, source, body string) string {
-	e := ref.target.entry
-	// Capped last: escaping can only grow a body, and a ceiling something is
-	// applied after is not a ceiling.
-	body = capPluginBody(escapeClosingTag(body, kind))
+	return pluginFrame(ref, kind, source, capPluginBody(escapeClosingTag(body, kind)))
+}
 
+// pluginFrame is the sentence and the element around a body the caller has
+// already escaped and capped: the invocation quoted back, the entry's name,
+// kind, source and path, and the attributes folded to one line and escaped so
+// that neither a quote nor an angle bracket can close the tag.
+func pluginFrame(ref pluginRef, kind, source, body string) string {
+	e := ref.target.entry
 	name, plugin := sanitizeLine(e.Name), sanitizeLine(e.Plugin)
 	args := sanitizeLine(ref.args)
 	invoked := "/" + sanitizeLine(ref.typed)

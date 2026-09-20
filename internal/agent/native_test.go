@@ -1576,7 +1576,9 @@ func wireSession(t *testing.T, replies ...http.HandlerFunc) Session {
 	if err := modeltable.Save(filepath.Join(home, "native"), table); err != nil {
 		t.Fatal(err)
 	}
-	s := NewNative(Options{Workspace: t.TempDir()}, func(o *harness.Options) {
+	// An empty ContentHome, as nativeFixture.session gives every other case:
+	// left unset, Start reads the developer's own ~/.claude.
+	s := NewNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, func(o *harness.Options) {
 		o.Getenv = func(string) string { return "" } // the inline key, whatever the real environment holds
 	})
 	closeAtCleanup(t, s)

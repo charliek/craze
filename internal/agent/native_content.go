@@ -69,6 +69,41 @@ func discoverNative(src contentSources, warn func(string)) []PluginEntry {
 	return newNativeScan(src, warn).run()
 }
 
+// redactNativeEntries runs the session's redactor over the fields of a
+// discovered entry that are carried rather than used, and returns entries. The
+// expansion path redacts the block it sends (nativeBlock), which is the body
+// and nothing else; these two travel by another road entirely — Description
+// becomes PluginCommand.Description, which is Snapshot.Plugins, the slash menu
+// and the EventCommand record the lossless codec writes to the journal, and
+// WhenToUse is the model-facing catalog's second line.
+//
+// A SKILL.md with no frontmatter description is given one from its body
+// (skillHeadingDescription), so a file whose first heading is a provider key
+// would put that key in every one of those places while the block it expands
+// to stayed clean. A8 names a catalog description explicitly.
+//
+// Name is deliberately left alone: it is what the menu draws, what the lookup
+// is keyed by and what the user types, and a redacted one would be a row that
+// answers to nothing. Path too — here it is a filesystem handle, the thing
+// ${CLAUDE_SKILL_DIR} is derived from — and it is redacted where it is
+// *recorded* instead (nativePrompt's ExpandedCommand.Path). Body is redacted
+// at expansion time, after substitution, which is the first point at which
+// what goes out is known.
+//
+// It is native's alone, and it runs at Start rather than inside discovery:
+// cursor's rows are what cursor's own loader would offer, byte for byte, and
+// cursor has no harness redactor to run anything through.
+func redactNativeEntries(entries []PluginEntry, redact func(string) string) []PluginEntry {
+	if redact == nil {
+		return entries
+	}
+	for i := range entries {
+		entries[i].Description = redact(entries[i].Description)
+		entries[i].WhenToUse = redact(entries[i].WhenToUse)
+	}
+	return entries
+}
+
 // newNativeScan and run are discoverNative in two halves, so that a test can
 // hold the scan and read what it spent as well as what it found: the file
 // budget is shared across all three sources, and "one inode costs one file"

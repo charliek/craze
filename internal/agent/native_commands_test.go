@@ -665,6 +665,63 @@ func TestNativeCommandBodyKeyIsRedacted(t *testing.T) {
 	}
 }
 
+// TestNativeSkillDescriptionKeyIsRedacted is A8's catalog half (round-2
+// review). A SKILL.md with no frontmatter description is given one from its
+// body — the first heading, else the first line (skillHeadingDescription) — so
+// a key written there travels by a road the block's own redaction never
+// touches: PluginCommand.Description, which is Snapshot.Plugins, the rows the
+// slash menu draws from it (internal/tui/slash.go), and the EventCommand
+// record the lossless codec writes to the journal and a headless caller prints
+// as --json. Start redacts the entries before any of them is built.
+func TestNativeSkillDescriptionKeyIsRedacted(t *testing.T) {
+	f := newNativeFixture(t)
+	dir := filepath.Join(t.TempDir(), "journal")
+	f.models["test/a"].push(answer("ok"))
+	// No description in the frontmatter, and a heading that is a key.
+	skill := "---\nname: leaky\n---\n# export NATIVE_TEST_KEY=" + nativeCanary + "\n\nrun it\n"
+	s := startContent(t, f, Options{JournalDir: dir},
+		map[string]string{".claude/skills/leaky/SKILL.md": skill}, nil)
+	w := journalOf(t, s.log)
+
+	rows := s.Snapshot().Plugins
+	wantDisplays(t, rows, "leaky")
+	// Sanity: the heading really did become the description, so its
+	// cleanliness below is the redactor's doing and not a description that
+	// never arrived.
+	if !strings.Contains(rows[0].Description, "export NATIVE_TEST_KEY=") {
+		t.Fatalf("the body's heading never became the description: %q", rows[0].Description)
+	}
+	if strings.Contains(rows[0].Description, nativeCanary) {
+		t.Fatalf("the key is in the menu's own row: %q", rows[0].Description)
+	}
+
+	if _, err := s.Prompt(context.Background(), "/leaky"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	evs := drained(s)
+	cmds := ofType(evs, EventCommand)
+	if len(cmds) != 1 {
+		t.Fatalf("%d command events, want one", len(cmds))
+	}
+	if strings.Contains(cmds[0].Command.Description, nativeCanary) {
+		t.Fatalf("the key is in the expansion's record: %+v", cmds[0].Command.PluginCommand)
+	}
+	for what, v := range map[string]any{
+		"the wire":     f.models["test/a"].requests(),
+		"the events":   evs,
+		"the snapshot": s.Snapshot(),
+	} {
+		if leaks := nativeLeaks(v, nativeCanary); len(leaks) > 0 {
+			t.Fatalf("the key leaked into %s at %v", what, leaks)
+		}
+	}
+	closeJournaled(t, s, w)
+	assertOneJournal(t, dir, w, s.Incarnation())
+	if written := journalBytes(t, w); strings.Contains(written, nativeCanary) {
+		t.Fatalf("the key leaked into the journal:\n%s", written)
+	}
+}
+
 // TestNativeCommandSpliceIsNotExecuted is A6's last clause through a real
 // turn: a body holding !`cmd` reaches the wire byte for byte, and craze runs
 // nothing — the file the command names is never written.

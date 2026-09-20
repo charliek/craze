@@ -321,6 +321,12 @@ func (s *nativeSession) start(context.Context) error {
 	// os.Getwd(): a session whose content came from one directory and whose
 	// tools ran in another would be a bug nobody could see.
 	entries := discoverNative(resolveNativeSources(ws, s.contentHome()), s.contentWarn())
+	// Redacted before anything is named or stored: a description and a
+	// when-to-use travel into the menu, the snapshot and the journal by a road
+	// the block's own redaction never touches, and a skill with no frontmatter
+	// description has one taken from its body, where a provider key can be
+	// (redactNativeEntries).
+	entries = redactNativeEntries(entries, hs.Redact)
 	// Naming runs over every entry, hidden ones included, so a visible row's
 	// spelling never depends on what is hidden; taken is nil because native
 	// advertises no commands of its own (ResolvePluginNames adds craze's

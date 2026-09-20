@@ -422,6 +422,57 @@ func TestSessionRedactIsTheCallersGuard(t *testing.T) {
 	}
 }
 
+// TestRedactCoversAKeyTheSwitchJustLearned (round-2 review of plan 022): a
+// switch resolves a provider key the environment gained since Open and leaves
+// it prepared for the next turn to adopt (toolset.resolve, adopt). Between
+// those two moments the installed replacer is the narrower one, so a caller
+// that expanded a command file, ran it through Session.Redact and handed the
+// result to Run would put that very key on the wire and in the transcript —
+// the turn adopts the wider replacer at begin and then sends the string it was
+// given unchanged. Redact reads pending for exactly this reason.
+//
+// Two controls: the same call before the switch, where the value is not
+// craze's credential and Redact leaves it alone, and the installed redactor
+// after it, which must still be the narrow one — otherwise the assertion
+// between them would pass without Redact having looked at pending at all.
+func TestRedactCoversAKeyTheSwitchJustLearned(t *testing.T) {
+	// A key of its own, sharing no text with the one Open knows.
+	const later = "sk-exported-later-0004"
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	env := map[string]string{"TEST_API_KEY": canary} // other/c's provider has no key yet
+	opts := f.options()
+	opts.Getenv = func(name string) string { return env[name] }
+	s := f.open(opts)
+
+	// What an adapter's expansion of a command file looks like.
+	body := "export OTHER_API_KEY=" + later
+	if got := s.Redact(body); got != body {
+		t.Fatalf("control: Redact rewrote a value craze had not resolved yet: %q", got)
+	}
+
+	env["OTHER_API_KEY"] = later
+	if err := s.SetModel("other/c"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	if got := s.tools.redactor().String(body); got != body {
+		t.Fatalf("control: the switch installed the new redactor, so reading pending proves nothing: %q", got)
+	}
+	if got := s.Redact(body); strings.Contains(got, later) {
+		t.Fatalf("Redact left the key the switch had already resolved in %q", got)
+	}
+
+	// End to end: the turn that adopts it sends and persists what Redact
+	// returned, so nothing of the key is left anywhere.
+	f.models["other/c"].push(answerWith("ok"))
+	runWith(t, s, s.Redact(body), nil)
+	if lines := entries(transcript(t, s)); strings.Contains(strings.Join(lines, "\n"), later) {
+		t.Fatalf("the key reached the transcript:\n%s", strings.Join(lines, "\n"))
+	}
+	if found := leaks(f.models["other/c"].requests(), later); len(found) > 0 {
+		t.Fatalf("the key reached the wire at %v", found)
+	}
+}
+
 // TestStoreErrorsAreRedacted (round-2 review): a store error names the file
 // it could not write, under the home craze was configured with, and that
 // error is what Run and Close return to the adapter, which puts it on the
