@@ -373,14 +373,25 @@ main and merged into this branch, and it passes: `craze prompt --provider
 native --model openrouter/gemini-3.8-flash` over a three-file workspace called
 `glob` and answered from what it read, and its journal holds a header, a
 session note, the prompt, seven events numbered 1–7 with the three tool events
-among them, a `prompt_end`, and `closing`. Two providers refuse H2's tool
-schema outright and never reach a turn — `fireworks` with
-`HTTP 400: Error validating JSON Schema: '0' is not of type 'number'` and
-`zai-coding-plan` with `HTTP 400: Invalid API parameter` — which is a harness
-matter, not S1a's; the harness track already guards the invariant that failure
-broke. Those runs are evidence of their own for the error path: each journaled
-the `error` event **and** a `prompt_end` carrying the class and the provider's
-message.
+among them, a `prompt_end`, and `closing`. Re-run from merged main
+(`ee94a788`), `fireworks/kimi-k3` and `glm-5.3-flash` (zai-coding-plan) each
+complete the same task too, calling `bash` and answering from what they read.
+
+A first pass of that re-run reported both of those providers refusing H2's
+tool schema with an HTTP 400, and **that was wrong**: the binary predated
+`cd4ff42`, the harness's schema-number fix, which was not yet in the tree the
+smoke was built from. Before it, every schema number was a `json.Number` —
+a string underneath — and the provider SDK's own encoder wrote it quoted, so
+the provider rejected it. The literal value each validator names is whichever
+property it reaches first, which is why the message differed between runs and
+why zai's vaguer wording is the same bug. The harness session reproduced both
+sides to establish this. It is recorded here because a smoke report is only
+worth what its build provenance is: rebuild before believing a provider
+failure.
+
+Those failed runs are still evidence for the error path, which is what S1a
+owns: each journaled the `error` event **and** a `prompt_end` carrying the
+class and the provider's message.
 
 Not covered by the Linux smoke, and why: `agent_exit_status` (a SIGKILL closes the pipe first,
 so the class is `closed`); a prompt **after** a resume (the `--continue` runs
@@ -587,10 +598,9 @@ Known limitations, none of them accidental:
   change to `native.go`'s emit path; `11` states the rule and the current state
   of both branches.
 - **The native tool-call smoke leg** was re-run on 2026-09-20 with H2's tools
-  merged in, and passes on `openrouter/gemini-3.8-flash`. `fireworks` and
-  `zai-coding-plan` refuse H2's tool schema with an HTTP 400 before a turn
-  starts; that belongs to the harness track, and S1a journals those failures
-  correctly.
+  merged in and passes on `openrouter/gemini-3.8-flash`, and again from merged
+  main on `fireworks/kimi-k3` and `glm-5.3-flash`. The HTTP 400s an earlier
+  pass reported were a stale binary, not a live limitation (above).
 - **`TestInterjectLandsAsAUserEventFromTheBroadcast`** bounds a scripted turn
   with wall-clock and should become a barrier.
 - **Note `ts` is not monotonic**; file position is the ordering contract. Any
