@@ -162,7 +162,8 @@ func parseSkillMarkdown(path string, data []byte, nameFromDir bool) (name, desc 
 	invocable = true
 	var fmName string
 	if hasFrontmatter {
-		fmName, desc, invocable = parseFrontmatterLines(fm)
+		meta := parseFrontmatterLines(fm)
+		fmName, desc, invocable = meta.Name, meta.Description, meta.Invocable
 	}
 	// The directory basename wins outright when nameFromDir is set, and by
 	// default whenever the frontmatter gave no name at all.
@@ -266,18 +267,41 @@ func cutFrontmatter(rest string) (string, bool) {
 	return "", false
 }
 
-// parseFrontmatterLines reads name, description and the user-invocable bit
-// off the line-oriented scalar frontmatter (no YAML library). invocable
-// defaults true; it goes false only for user-invocable/user_invocable
-// (cursor's and grok's own spellings of the same field, key case-insensitive)
-// with value false or no, quotes stripped by unquoteScalar.
+// frontmatter is everything craze reads off one entry file's top-level scalar
+// block. It is a struct rather than a tuple because the two readings of a file
+// want different subsets of it: cursor's parsers take the first three fields
+// and drop a skill Invocable denies, while native's (§3.2) keep such a skill,
+// mark it Hidden and also want WhenToUse and ModelInvocable for the catalog it
+// offers the model.
+//
+// Invocable and ModelInvocable both default true, so a file that says nothing
+// is offered to both the user and the model.
+type frontmatter struct {
+	Name        string
+	Description string
+	WhenToUse   string
+	// Invocable is user-invocable/user_invocable — cursor's and grok's own
+	// spellings of one field — and goes false for value false or no.
+	Invocable bool
+	// ModelInvocable is disable-model-invocation inverted: the file says what
+	// it wants taken away, and everything downstream asks what is offered.
+	ModelInvocable bool
+}
+
+// parseFrontmatterLines reads that block off the line-oriented scalar
+// frontmatter (no YAML library), quotes stripped by unquoteScalar.
 //
 // Only top-level keys count. An indented line belongs to a block — cursor's own
 // frontmatter nests things under `metadata:` — and the agents read only the
 // document's own field, so trimming the indentation away would hide a skill
 // they show.
-func parseFrontmatterLines(fm string) (name, desc string, invocable bool) {
-	invocable = true
+//
+// argument-hint, allowed-tools, model, effort and context are read by nothing
+// and are deliberately not fields here (§4): showing an argument hint would
+// need a snapshot field this plan does not add, and the other three are the
+// agent's own business, not craze's.
+func parseFrontmatterLines(fm string) frontmatter {
+	out := frontmatter{Invocable: true, ModelInvocable: true}
 	lines := strings.Split(fm, "\n")
 	for i := 0; i < len(lines); i++ {
 		raw := strings.TrimSuffix(lines[i], "\r")
@@ -300,19 +324,32 @@ func parseFrontmatterLines(fm string) (name, desc string, invocable bool) {
 		val = unquoteScalar(marker)
 		switch key {
 		case "name":
-			name = strings.TrimSpace(val)
+			out.Name = strings.TrimSpace(val)
 		case "description":
 			if block, used, ok := blockScalar(marker, lines[i+1:]); ok {
-				desc = block
+				out.Description = block
 				i += used
 				continue
 			}
-			desc = val
+			out.Description = val
+		// when-to-use gets description's block treatment because it is written
+		// the same way: the owner's own skills spell it as a folded scalar over
+		// three or four lines, and read flat it would be the two characters
+		// ">-".
+		case "when-to-use", "when_to_use":
+			if block, used, ok := blockScalar(marker, lines[i+1:]); ok {
+				out.WhenToUse = block
+				i += used
+				continue
+			}
+			out.WhenToUse = val
 		case "user-invocable", "user_invocable":
-			invocable = !isFalsyScalar(val)
+			out.Invocable = !isFalsyScalar(val)
+		case "disable-model-invocation", "disable_model_invocation":
+			out.ModelInvocable = !isTruthyScalar(val)
 		}
 	}
-	return name, desc, invocable
+	return out
 }
 
 // blockScalar is YAML's folded and literal scalars, read for the one key that
@@ -372,6 +409,24 @@ func isFalsyScalar(v string) bool {
 	}
 	switch strings.ToLower(fields[0]) {
 	case "false", "no":
+		return true
+	default:
+		return false
+	}
+}
+
+// isTruthyScalar is the other half of that grammar, for the keys that take a
+// field away rather than leaving one in: true or yes, case-insensitive. It
+// reads only the first field for isFalsyScalar's reason — YAML ends a plain
+// scalar at an unquoted " #", so "true # hidden from the model" is still true
+// and a trailing comment cannot flip the bit either way.
+func isTruthyScalar(v string) bool {
+	fields := strings.Fields(v)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "true", "yes":
 		return true
 	default:
 		return false

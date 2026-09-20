@@ -196,6 +196,29 @@ func holdsAKey(text string, keys []string) bool {
 // redactor is the session's, as it is now. It is never nil.
 func (ts *toolset) redactor() *redact.Replacer { return ts.red.Load() }
 
+// widest is the redactor over every key the session knows: the one resolve
+// prepared when there is one, and the installed one otherwise. It is never
+// nil.
+//
+// The two differ exactly while a switch has learned a key the environment
+// gained since Open and no turn has begun since (resolve, adopt). A caller
+// that redacts text and then hands it to Run — Session.Redact's whole reason
+// for existing — would otherwise redact with the narrower replacer and then
+// watch begin adopt the wider one and send the string unchanged, so the very
+// key that turn redacts everything else with would ride out inside the
+// prompt. Redacting more than a session strictly needs is never a leak
+// (resolve says so of the keys it leaves resolved); redacting less is the
+// bug. Under ts.mu rather than off the atomic, because pending and the
+// installed pointer have to be read as one fact.
+func (ts *toolset) widest() *redact.Replacer {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.pending != nil {
+		return ts.pending
+	}
+	return ts.red.Load()
+}
+
 // resolve takes the keys the table resolves now and, when one of them is new
 // to the session, prepares the redactor over all of them — the ones it had
 // included — for the next turn to adopt. A session learns a key this way

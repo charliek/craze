@@ -148,6 +148,95 @@ def test_native_prompt_model_flag_resolves_alias(
     assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
 
 
+def user_contents(request) -> list[str]:
+    """Every user message of a recorded request, as text.
+
+    openai-compat sends a user message's content as a string, but a provider
+    shape that sent the parts array would still be readable here: what the
+    case is about is the bytes craze put in the body, not how they were
+    framed.
+    """
+    out = []
+    for m in request.messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            out.append(content)
+        elif isinstance(content, list):
+            out.append("".join(p.get("text", "") for p in content if isinstance(p, dict)))
+    return out
+
+
+def test_native_expands_a_project_command_into_the_request_body(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 022 §3.3 from outside the process: a command file under the
+    workspace's own .claude is found at Start, a draft naming it is expanded,
+    and what reaches the provider is the typed draft followed by the block --
+    with the arguments and ${CLAUDE_PLUGIN_ROOT} substituted, and the source
+    named as this project rather than as a plugin.
+
+    HOME is the suite's isolated one (conftest.isolate_run_env), so the user
+    half of the scan finds nothing and the rows here are the workspace's.
+    """
+    fixture_server.set_ok(text_parts=["expanded"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    ws = tmp_path / "ws"
+    (ws / ".claude" / "commands").mkdir(parents=True)
+    (ws / ".claude" / "commands" / "ship.md").write_text(
+        "---\ndescription: ship it\n---\nShip $ARGUMENTS from ${CLAUDE_PLUGIN_ROOT}.\n",
+        encoding="utf-8",
+    )
+
+    proc = run_native(craze_bin, craze_home, ws, "/ship v2")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    events = parse_events(proc.stdout)
+    commands = [e for e in events if e.get("type") == "command"]
+    assert len(commands) == 1, events
+    assert commands[0]["qualified"] == "project:ship", commands[0]
+    assert commands[0]["plugin"] == "project", commands[0]
+    assert commands[0]["kind"] == "command", commands[0]
+    assert commands[0]["path"] == str(ws / ".claude" / "commands" / "ship.md"), commands[0]
+
+    assert len(fixture_server.requests) == 1
+    users = user_contents(fixture_server.requests[0])
+    assert len(users) == 1, fixture_server.requests[0].messages
+    body = users[0]
+    assert body.startswith("/ship v2\n\n"), body
+    assert "Ship v2 from " in body, body
+    assert "from this project" in body, body
+    # What the event announced is exactly what the request carried.
+    assert body == "/ship v2\n\n" + commands[0]["text"], body
+    # A command name typed mid-line is not a reference (§3.3): the scan would
+    # otherwise expand a body for every `cd /ship` in a draft.
+    assert body.count("<command ") == 1, body
+
+
+def test_native_mid_line_reference_is_not_expanded(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """The other half of that rule, end to end: `cd /ship && make` reaches the
+    provider as it was typed, with no block behind it and no command event."""
+    fixture_server.set_ok(text_parts=["nothing expanded"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    ws = tmp_path / "ws"
+    (ws / ".claude" / "commands").mkdir(parents=True)
+    (ws / ".claude" / "commands" / "ship.md").write_text(
+        "---\ndescription: ship it\n---\nship body\n", encoding="utf-8"
+    )
+
+    proc = run_native(craze_bin, craze_home, ws, "cd /ship && make")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    events = parse_events(proc.stdout)
+    assert [e for e in events if e.get("type") == "command"] == [], events
+    assert user_contents(fixture_server.requests[0]) == ["cd /ship && make"]
+
+
 def test_native_absent_from_help_and_unknown_provider_error(
     craze_bin: Path, tmp_path: Path
 ) -> None:

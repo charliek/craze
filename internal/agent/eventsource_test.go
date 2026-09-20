@@ -199,7 +199,9 @@ func TestACPSessionSubscriptionIsThePrimary(t *testing.T) {
 func TestNativeSessionSubscriptionIsThePrimary(t *testing.T) {
 	f := newNativeFixture(t)
 	f.models["test/a"].push(reply(thoughtParts("thinking"), textParts("hello ", "there"), finishParts(fantasy.FinishReasonStop)))
-	sess := NewNative(Options{Workspace: t.TempDir()}, f.tweak)
+	// An empty ContentHome, as nativeFixture.session gives every other case:
+	// left unset, Start reads the developer's own ~/.claude.
+	sess := NewNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, f.tweak)
 	closeAtCleanup(t, sess)
 	runSubscribedTurn(t, sess, "hi")
 }
