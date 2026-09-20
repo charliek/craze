@@ -523,7 +523,7 @@ func TestDelayedHandlerDoesNotRunForARequestThatIsOver(t *testing.T) {
 			ID:      json.RawMessage(`7`),
 			Method:  MethodCursorCreatePlan,
 			Params:  planParams,
-		})
+		}, RequestParams{})
 		// The cancel's own reply goes out on the unbuffered pipe, so it has to
 		// be read while the cancel is writing it.
 		go p.client.completeIncomingCancelled()
@@ -547,7 +547,7 @@ func TestDelayedHandlerDoesNotRunForARequestThatIsOver(t *testing.T) {
 			ID:      json.RawMessage(`8`),
 			Method:  MethodCursorCreatePlan,
 			Params:  planParams,
-		})
+		}, RequestParams{})
 		if !p.client.TurnLive(in.turn) {
 			t.Fatal("the turn a request arrived in must be live to begin with")
 		}
@@ -584,7 +584,7 @@ func TestHandlerRunsForTheRunningTurn(t *testing.T) {
 		ID:      json.RawMessage(`9`),
 		Method:  MethodCursorCreatePlan,
 		Params:  json.RawMessage(`{"name":"P","plan":"do it"}`),
-	})
+	}, RequestParams{})
 	ran := make(chan struct{})
 	go p.client.runIncoming(in, func(*pendingReq) {
 		close(ran)

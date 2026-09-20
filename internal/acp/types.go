@@ -396,6 +396,9 @@ type PermissionRequest struct {
 type PermissionDecision struct {
 	Cancelled bool
 	OptionID  string
+	// Replied, when set, is called exactly once with what became of the reply
+	// this decision asked for: see ReplyDisposition.
+	Replied func(ReplyDisposition)
 }
 
 type AskQuestionRequest struct {
@@ -422,6 +425,9 @@ type AskDecision struct {
 	Cancelled bool
 	Skip      bool
 	Answers   map[string][]string
+	// Replied, when set, is called exactly once with what became of the reply
+	// this decision asked for: see ReplyDisposition.
+	Replied func(ReplyDisposition)
 }
 
 // CreatePlanRequest is parsed leniently: cursor sends name or title, and plan
@@ -464,6 +470,83 @@ func (r CreatePlanRequest) PlanText() string {
 type PlanDecision struct {
 	Cancelled bool
 	Accept    bool
+	// Replied, when set, is called exactly once with what became of the reply
+	// this decision asked for: see ReplyDisposition.
+	Replied func(ReplyDisposition)
+}
+
+// ReplyDisposition is what became of one reply to a blocking agent request.
+// The client answers each request exactly once, and the cancelled answer a
+// cancel or a close writes while a handler is still deciding can win that race,
+// so a handler that took a decision has no way of its own to know whether the
+// agent ever heard it (plan 021 §3.6; panel: astra 13). Each decision type
+// carries an optional Replied hook that is handed one of these.
+type ReplyDisposition struct {
+	// Delivered says this reply was the one written to the agent, and the
+	// write returned no error.
+	Delivered bool
+	// Lost says why the decision never reached the agent, and is empty when it
+	// did. The reasons are the ReplyLost constants.
+	Lost string
+}
+
+// Why a decision never reached the agent, on ReplyDisposition.Lost.
+const (
+	// ReplyLostCancelled: a Cancel or CancelHeld had already answered the
+	// request cancelled.
+	ReplyLostCancelled = "cancelled"
+	// ReplyLostClosed: Close had already answered the request cancelled.
+	ReplyLostClosed = "closed"
+	// ReplyLostWriteFailed: this reply was the one to write and the write
+	// failed. The error itself is dropped, exactly as it always has been; only
+	// the fact is reported.
+	ReplyLostWriteFailed = "write_failed"
+	// ReplyLostInvalidOption: the decision named an option the request never
+	// offered, so the client replaced it with the cancelled outcome. The reply
+	// reached the agent; the decision did not.
+	ReplyLostInvalidOption = "invalid_option"
+)
+
+// RequestParams is one blocking agent request as it was decoded: exactly one
+// field is set, and the method it arrived on says which. It travels with the
+// registered request so a path that answers one without ever running its
+// handler can still say what was asked (EarlyAnswer).
+type RequestParams struct {
+	Permission *PermissionRequest
+	Ask        *AskQuestionRequest
+	Plan       *CreatePlanRequest
+}
+
+// EarlyAnswerReason says why a blocking request was answered before any handler
+// of the client's ran.
+type EarlyAnswerReason string
+
+const (
+	// EarlyCancelled: a Cancel or CancelHeld answered it where it lay.
+	EarlyCancelled EarlyAnswerReason = "cancelled"
+	// EarlyClosed: Close answered it on the way down.
+	EarlyClosed EarlyAnswerReason = "closed"
+	// EarlyStaleTurn: nothing had answered it, but the turn it arrived in was
+	// over by the time its handler goroutine ran, so the client answered it
+	// cancelled itself rather than let a card be raised for a turn that has
+	// ended.
+	EarlyStaleTurn EarlyAnswerReason = "stale_turn"
+)
+
+// EarlyAnswer is one blocking request the client answered by itself, before any
+// handler ran. Nothing above the client sees such a request otherwise — no
+// handler runs, so nothing parks and nothing is published — and the agent's
+// question then leaves no trace at all (plan 021 §2.3, §3.6; panel: astra 12).
+// The decoded parameters travel with it so the session can write one
+// self-contained record of what was asked and what became of it, without ever
+// raising a card nobody could answer.
+type EarlyAnswer struct {
+	// Reason is who answered it: see the EarlyAnswerReason constants.
+	Reason EarlyAnswerReason
+	// Turn is the turn the request arrived in (Client.TurnLive).
+	Turn int
+	// Params is the request itself, as decoded.
+	Params RequestParams
 }
 
 // TodoItem is one entry of a cursor/update_todos list, and of a plan's todos.
