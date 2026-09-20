@@ -21,8 +21,9 @@ these documents, one per roadmap phase.
 | 2026-09-18 | Plan 018 (H1 walking skeleton) planned and started; decisions D-27..D-34 |
 | 2026-09-19 | H1 complete: `craze --provider native` (hidden) held a clean turn with 14 of 15 imported models and multi-turn sessions across providers; live smoke on Linux and the mac-mini |
 | 2026-09-19 | Plan 019 (H2 tools) planned and panel-reviewed; execution started; decisions D-38..D-43 |
+| 2026-09-19 | H2 complete: opencode-ported tools (`read`, `write`, `edit`, `bash`, `grep`, `glob`) shipped across PRs #33, #34, #35, #37; live smoke on Linux (14 of 15 imported models) and the mac-mini (4 of 4) closed the phase; D-35's condition met, OpenRouter stays on `openaicompat` (D-44) |
 
-**H0 and H1 are complete; H2 (tools) is in progress.**
+**H0, H1, and H2 are complete; H3 is next.**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
 The harness is built in this repository as a hidden side quest beside the

@@ -368,8 +368,21 @@ from 1, `droppedAtClose` 0, modes 0600 in a 0700 directory, and the file name's
 UUID equal to the header's incarnation. `craze prompt --json`'s `seq` values are
 a subset of the journal's on all five headless runs.
 
-Not covered by the Linux smoke, and why: a **native tool call** (H1 has no
-tools — re-run after H2); `agent_exit_status` (a SIGKILL closes the pipe first,
+The **native tool call** was re-run on 2026-09-20, once H2's tools were on
+main and merged into this branch, and it passes: `craze prompt --provider
+native --model openrouter/gemini-3.8-flash` over a three-file workspace called
+`glob` and answered from what it read, and its journal holds a header, a
+session note, the prompt, seven events numbered 1–7 with the three tool events
+among them, a `prompt_end`, and `closing`. Two providers refuse H2's tool
+schema outright and never reach a turn — `fireworks` with
+`HTTP 400: Error validating JSON Schema: '0' is not of type 'number'` and
+`zai-coding-plan` with `HTTP 400: Invalid API parameter` — which is a harness
+matter, not S1a's; the harness track already guards the invariant that failure
+broke. Those runs are evidence of their own for the error path: each journaled
+the `error` event **and** a `prompt_end` carrying the class and the provider's
+message.
+
+Not covered by the Linux smoke, and why: `agent_exit_status` (a SIGKILL closes the pipe first,
 so the class is `closed`); a prompt **after** a resume (the `--continue` runs
 deliberately sent none, to keep the resumed file a pure measure of replay cost);
 `gx` (not in the brief); a grok 402. There was no `agent_stderr` on the
@@ -573,7 +586,11 @@ Known limitations, none of them accidental:
 - **The joint `-race` test with Plan 019** is owed by whoever lands the second
   change to `native.go`'s emit path; `11` states the rule and the current state
   of both branches.
-- **The native tool-call smoke leg** must be re-run after H2 lands.
+- **The native tool-call smoke leg** was re-run on 2026-09-20 with H2's tools
+  merged in, and passes on `openrouter/gemini-3.8-flash`. `fireworks` and
+  `zai-coding-plan` refuse H2's tool schema with an HTTP 400 before a turn
+  starts; that belongs to the harness track, and S1a journals those failures
+  correctly.
 - **`TestInterjectLandsAsAUserEventFromTheBroadcast`** bounds a scripted turn
   with wall-clock and should become a barrier.
 - **Note `ts` is not monotonic**; file position is the ordering contract. Any

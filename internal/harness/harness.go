@@ -35,6 +35,13 @@
 // the session never holds its lock while calling the sink or the model.
 // Close cancels a live Run and waits for it to return, so it must not be
 // called from the sink, which runs on that Run and would wait for itself.
+//
+// # Interjection
+//
+// Steer merges a user message into the running turn: the turn takes it up
+// before its next step, the model reads it, and the step that saw it writes it
+// to the transcript. Whatever no step persisted comes back in
+// Result.Unanswered (steer.go, plan 019 §3.10).
 package harness
 
 import (
@@ -109,6 +116,12 @@ type Session struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	// steers is Interject's accept side: the text Steer has handed the running
+	// turn and no step has taken up yet. It carries its own lock, which mu is
+	// never held across and which is held across nothing (steer.go), so an
+	// interjection can never wait on the turn it is meant for.
+	steers steerbox
 
 	mu      sync.Mutex
 	table   *modeltable.Table

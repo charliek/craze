@@ -223,7 +223,7 @@ func TestCancelKeepsThePartialAnswer(t *testing.T) {
 
 	var ev events
 	got := cancelAt(t, s, g, ev.sink)
-	if got.err != nil || got.res != (Result{StopReason: StopCancelled}) {
+	if got.err != nil || !only(got.res, StopCancelled) {
 		t.Fatalf("Run = %+v, %v; want a cancelled result and no error", got.res, got.err)
 	}
 	equal(t, "events", ev.list(), []Event{ThoughtDelta{Text: "think"}, TextDelta{Text: "par"}, TextDelta{Text: "tial"}})
@@ -296,7 +296,7 @@ func TestFailureKeepsThePartialAnswer(t *testing.T) {
 	f.models["test/a"].push(reply(openText("half an"), errorPart(&llm.MidStreamError{Message: "stream error - upstream gone"})))
 	res, err := s.Run(context.Background(), "hi", nil)
 	var pe *ProviderError
-	if res != (Result{}) || !errors.As(err, &pe) || pe.Message != "stream error - upstream gone" {
+	if !empty(res) || !errors.As(err, &pe) || pe.Message != "stream error - upstream gone" {
 		t.Fatalf("Run = %+v, %#v; want a zero Result and the provider's error", res, err)
 	}
 	equal(t, "transcript", entries(transcript(t, s)), []string{
@@ -703,7 +703,7 @@ func TestFailedSaveFailsTheTurn(t *testing.T) {
 			_ = s.store.Close() // the user entry is held; the answer's save will fail
 		}
 	})
-	if !errors.Is(err, store.ErrClosed) || res != (Result{}) {
+	if !errors.Is(err, store.ErrClosed) || !empty(res) {
 		t.Fatalf("Run = %+v, %v; want a zero Result and the store's error", res, err)
 	}
 	// The step reports its failed save: a Diag, and a StepDone that says it

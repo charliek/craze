@@ -559,20 +559,22 @@ func TestNativePromptNotesRecordAWithdrawnPromptAndAFailedTurn(t *testing.T) {
 	}
 }
 
-// TestNativeInterjectNoteRecordsTheRefusal: the harness has no interjections
-// until plan 019, and the text the user sent is journaled with the refusal all
-// the same — it is the one place it is kept.
+// TestNativeInterjectNoteRecordsTheRefusal: the text the user sent is
+// journaled with the refusal it met — it is the one place it is kept. Plan
+// 019 gave the native session a real Interject, so a session with no turn
+// running refuses with ErrNotInTurn where it once answered ErrUnsupported;
+// what this pins is the note, which is the same either way.
 func TestNativeInterjectNoteRecordsTheRefusal(t *testing.T) {
 	f := newNativeFixture(t)
 	s, w := journaledNative(t, f, Options{})
-	if err := s.Interject(t.Context(), "nope"); !errors.Is(err, ErrUnsupported) {
+	if err := s.Interject(t.Context(), "nope"); !errors.Is(err, ErrNotInTurn) {
 		t.Fatalf("the native Interject returned %v", err)
 	}
 	attempts, _ := journaledAttemptsOf(t, s, w)
 	if len(attempts) != 1 {
 		t.Fatalf("%d attempts, want one", len(attempts))
 	}
-	assertAttempt(t, "the refused interjection", attempts[0], journal.PromptKindInterject, "nope", "", promptEndUnsupported)
+	assertAttempt(t, "the refused interjection", attempts[0], journal.PromptKindInterject, "nope", "", promptEndNotInTurn)
 }
 
 // TestNativeCloseSynthesizesAnEndingForAnUnrunContinuation is the native

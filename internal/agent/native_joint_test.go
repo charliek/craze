@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/journal"
 )
 
 // The joint test Plan 020 §2.7 and R7 owe Plan 019: the native adapter's tool
@@ -240,4 +242,42 @@ func TestNativeCloseEndsATurnFullOfToolPublishers(t *testing.T) {
 	if s.log.Publish(context.Background(), nil, Event{Type: EventText, Text: "late"}) {
 		t.Fatal("a publish after Close was accepted")
 	}
+}
+
+// TestNativeInterjectIsJournaledWhateverBecameOfIt is R7's interject leg,
+// reachable now that H2's PR 4 gave the native session a real Interject.
+// Whatever the turn state does with the text — takes it, refuses it, or has
+// already ended — the attempt is on the record with the text as typed and a
+// class for the outcome, under an id of the journal wrapper's own rather than
+// any the harness mints. That is what lets a reader of the file account for
+// an interjection that never reached a transcript.
+func TestNativeInterjectIsJournaledWhateverBecameOfIt(t *testing.T) {
+	s := newNative(Options{JournalDir: filepath.Join(t.TempDir(), "journal")}, nil)
+	w := journalOf(t, s.log)
+
+	// Nothing is running, so this takes the refusal path — the one an
+	// interjection typed a moment too late also takes.
+	err := s.Interject(t.Context(), "BANANA")
+	if err == nil {
+		t.Fatal("an interjection with no turn was accepted")
+	}
+
+	attempts, lines := journaledAttemptsOf(t, s, w)
+	if len(attempts) != 1 {
+		t.Fatalf("%d attempts, want the interjection's own", len(attempts))
+	}
+	a := attempts[0]
+	if got := jsonString(a.prompt, "kind"); got != string(journal.PromptKindInterject) {
+		t.Fatalf("kind %q, want %q", got, journal.PromptKindInterject)
+	}
+	if got := jsonString(a.prompt, "text"); got != "BANANA" {
+		t.Fatalf("text %q, want the text as typed", got)
+	}
+	if got := jsonString(a.end, "errClass"); got == "" {
+		t.Fatalf("the refusal was journaled with no class: %v", a.end)
+	}
+	if id := jsonString(a.prompt, "attempt"); !strings.HasPrefix(id, "interject-") {
+		t.Fatalf("attempt id %q, want the wrapper's own", id)
+	}
+	assertClosingIsLast(t, lines)
 }

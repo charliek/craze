@@ -12,8 +12,8 @@ four-tools-then-`ls` plan and its multi-edit shape.
 |---|---|---|---|
 | `read` | read | yes | `filePath`, `offset?` (1-indexed), `limit?` (default 2000); lines as `<n>: <content>`; 2000 lines, 2000 chars per line, 50 KiB cap; `<path>`/`<type>`/`<content>` envelope; directories listed with a trailing `/`, sorted (there is no separate `ls` tool); binary refused by extension list, NUL byte, or >30% non-printable in a 4096-byte sample; "Did you mean" suggestions on a missing file; images and PDFs refused (H8) |
 | `write` | edit | no | `filePath`, `content`; overwrite, parent directories created (`MkdirAll` 0755 before the atomic write); BOM preserved; result `Wrote file successfully.`; temp-file-and-rename under a path lock (see Shared rules) |
-| `edit` | edit | no | `filePath`, `oldString`, `newString`, `replaceAll?`; nine replacers tried in order (simple, line-trimmed, block-anchor, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, context-aware, multi-occurrence); an ambiguous hit falls through to the next replacer; a match much larger than `oldString` is refused; CRLF and BOM preserved; empty `oldString` only creates a new file; result `Edit applied successfully.`; the diff goes to `Result.Edits` only — **the adapter**, not the tool, computes the card's diff with `internal/textdiff` (the tool package may not import it, §"Seams" below) |
-| `bash` | execute | no | `command`, `timeout?` (ms), `workdir?`; `/bin/bash -c`, else `sh -c`; `Setsid` (new session, no controlling terminal); stdin `/dev/null`; stdout/stderr merged; default timeout 120 s, cap 600 s (a larger request is clamped and the result says so); everything left in the command's session is killed when it returns; a non-zero exit is **not** an error result — the model reads the code; live output streams through a harness-owned progress channel, throttled to 100 ms, lossy; tail kept at 2000 lines / 50 KiB by the tool itself, full output spilled once it passes 50 KiB; `exit code: N` added to `<shell_metadata>` on a non-zero exit |
+| `edit` | edit | no | `filePath`, `oldString`, `newString`, `replaceAll?`; nine replacers tried in order (simple, line-trimmed, block-anchor, whitespace-normalized, indentation-flexible, escape-normalized, trimmed-boundary, context-aware, multi-occurrence); an ambiguous hit falls through to the next replacer; a match much larger than `oldString` is refused; CRLF and BOM preserved; empty `oldString` only creates a new file; result `Edit applied successfully.`; the diff goes to `Result.Edits` only — **the adapter**, not the tool, computes the card's diff with `internal/textdiff` (the tool package may not import it, §"Seams" below); known limitations: a Unicode-normalization spelling of Home could name `providers.toml` only while Home does not exist (a live session rules this out), and a kept BOM can put a `replaceAll` result three bytes over its 10 MiB cap |
+| `bash` | execute | no | `command`, `timeout?` (ms), `workdir?`; `/bin/bash -c`, else `sh -c`; `Setsid` (new session, no controlling terminal); stdin `/dev/null`; stdout/stderr merged; default timeout 120 s, cap 600 s (a larger request is clamped and the result says so); everything left in the command's session is killed when it returns; a non-zero exit is **not** an error result — the model reads the code; live output streams through a harness-owned progress channel, throttled to 100 ms, lossy; tail kept at 2000 lines / 50 KiB by the tool itself, full output spilled once it passes 50 KiB; `exit code: N` added to `<shell_metadata>` on a non-zero exit; known limitations: a stop landing between the pre-start check and launch taking the started command kills it without the TERM grace, a goroutine stuck in a syscall that never returns leaks until it returns (bounded memory), macOS reaps the leader before the final group kill (the same window `internal/acp/spawn.go` accepts), and a process that starts its own session or process group escapes the kill |
 | `grep` | search | yes | `pattern`, `path?`, `include?`; ripgrep (`PATH`), `--hidden`, `.gitignore` respected, 100 matches, grouped by file as `  Line n: text` |
 | `glob` | search | yes | `pattern`, `path?`; ripgrep `--files --glob`, no `--hidden`, 100 results, ripgrep's own order |
 | `todo_write` | other | — | H5; replaces the list; feeds `EventTodos` |
@@ -35,13 +35,20 @@ and **no multi-edit** (owner decision 1, D-38 supersedes D-06).
   `<Home>/tool-output/tool_<id>` and say where. `bash` is the exception: it
   truncates its own stream (it asks the dispatcher for no truncation), keeps
   the tail, and spills beyond 50 KiB itself, through the same spill-file
-  rules. `<Home>` is the harness directory `~/.craze/native/`; the spill
-  directory is created 0700 and used only through a handle opened on it
-  after checking it is a real directory, so swapping in a symlink cannot
-  redirect a write; files are 0600, `O_EXCL|O_NOFOLLOW`, never overwritten
-  (a taken name gets a random suffix; the model can still reach the
-  directory through `bash`). Swept at `Open` for files older than 7 days;
-  no background timer.
+  rules — this keeps `bash`'s spill off the critical path, unlike the
+  dispatcher's own spill write, which is synchronous on `Run`'s path, so a
+  hung filesystem there can still hold up a tool result. `<Home>` is the
+  harness directory `~/.craze/native/`; the spill directory is created 0700
+  and used only through a handle opened on it after checking it is a real
+  directory, so swapping in a symlink cannot redirect a write; files are
+  0600, `O_EXCL|O_NOFOLLOW`, never overwritten (a taken name gets a random
+  suffix; the model can still reach the directory through `bash`). Swept at
+  `Open` for files older than 7 days; no background timer.
+- **Known limitation, card text:** a refusal's text always reaches the
+  model, but the card shows it only for `read` and `bash` rows — `edit`,
+  `write`, and search rows show a failed row without it, because the TUI
+  draws only their diff or heading and §3.10 pins that `internal/tui` does
+  not change for this.
 - **Parallelism is Fantasy's own**: a semaphore of 5 for parallel tools
   (`read`, `grep`, `glob`); non-parallel tools (`bash`, `edit`, `write`)
   serialize against each other but do not hold up parallel calls already
@@ -134,6 +141,10 @@ means consecutive in call order across steps.
   the turn ends with stop reason `max_turn_requests`.
 - Once an approval channel exists, the 3rd call becomes an `Ask` instead
   (opencode's own behaviour).
+- **Known limitation:** a call Fantasy refuses before dispatch (invalid
+  arguments, an unknown tool) keeps Fantasy's own text on its card instead
+  of craze's; the doom-loop guard still counts it and still stops the turn
+  on the 5th.
 
 ### Secrets (accidental disclosure only)
 
@@ -162,6 +173,9 @@ event, the transcript, or a spill file **verbatim and by accident**:
   refused when `providers.toml` loads; a key from the environment when a
   session opens, where `Table.Keys` gathers every provider's keys for the
   redactor; and the llm factory still refuses a short key at use.
+- **Known limitation:** Fantasy re-sends the model's own tool-call arguments
+  within a turn, so an argument the model wrote comes back to it unredacted,
+  while the copy in the store carries the marker.
 
 ## Modes
 

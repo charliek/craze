@@ -643,7 +643,44 @@ func canonicalSchema(params map[string]any) map[string]any {
 	if err := dec.Decode(&out); err != nil || out == nil {
 		return map[string]any{}
 	}
-	return out
+	return plainNumbers(out).(map[string]any)
+}
+
+// plainNumbers rewrites every json.Number UseNumber left behind as an int64
+// or a float64. The decoder keeps a number's literal, which is what makes the
+// copy faithful, but a json.Number is a string underneath and only Go's own
+// encoder knows to write it as a number: a provider SDK that marshals the
+// schema itself sends "9007199254740991", and a provider that validates its
+// tool schemas rejects the call (Fireworks: 'is not of type number'), which is
+// how the live smoke found this. int64 keeps every integer literal a provider
+// can hold exactly; anything else becomes the float64 it parses as, so an
+// integer past int64 (a `maximum` of 2^64-1, say) is rounded — the price of
+// being a number at all, since the SDK writes the exact json.Number as a
+// string the provider then rejects (CodeRabbit finding, checked against
+// openai-go v3.54.0's own encoder). A literal that is neither is left as it
+// is: no wire format could carry it anyway.
+func plainNumbers(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, x := range v {
+			v[k] = plainNumbers(x)
+		}
+		return v
+	case []any:
+		for i, x := range v {
+			v[i] = plainNumbers(x)
+		}
+		return v
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i
+		}
+		if f, err := v.Float64(); err == nil {
+			return f
+		}
+		return v
+	}
+	return v
 }
 
 // cloneSchema is a deep copy of a canonical JSON Schema value
