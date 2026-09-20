@@ -175,11 +175,15 @@ func Code(err error) string {
 //
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
-// read to release. Submit, Disarm, the queue verbs, State, NewClientID, Events
-// and Subscribe wait on nothing: no channel, no provider call, no Publish.
-// Start, Interject, Cancel, Stop, Sync and Close block and belong on a
-// goroutine that is not the primary's reader — a tea.Cmd. Interject is the one
-// exception in use today: the TUI calls it from Update, as it always has.
+// read to release. Submit, Disarm, the queue verbs, State, NewClientID and
+// Events wait on nothing: no channel, no provider call, no Publish. Start,
+// Subscribe, Interject, Cancel, Stop, Sync and Close block and belong on a
+// goroutine that is not the primary's reader — a tea.Cmd. Subscribe is among
+// them because it registers inside the log's publishing boundary, which a
+// publisher holds while it waits for room in the primary: called by the
+// primary's own reader with the primary full, it would wait for a slot only it
+// can free. Interject is the one exception in use today: the TUI calls it from
+// Update, as it always has.
 //
 // A send-now is the one command whose provider call the engine makes for the
 // caller: Submit arms it and returns at once, and the cancel that makes room

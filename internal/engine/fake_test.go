@@ -54,8 +54,11 @@ type fakeSession struct {
 // script is one prompt's answer. It is built whole before it is queued.
 type script struct {
 	// refuse is returned with no turn and no event: the shape of
-	// ErrForeignTurn and ErrPromptInFlight.
-	refuse error
+	// ErrForeignTurn and ErrPromptInFlight. refusing and gate, when set, hold
+	// the continuation just short of that return.
+	refuse   error
+	refusing chan struct{}
+	gate     chan struct{}
 	// fail is published as EventError and then returned, in the live
 	// session's order.
 	fail error
@@ -71,6 +74,11 @@ type script struct {
 	once   sync.Once
 	// unanswered is what the turn reports it accepted and could not answer.
 	unanswered []string
+}
+
+// refusedAtAGate is a refusal held until the test opens its gate.
+func refusedAtAGate(err error) *script {
+	return &script{refuse: err, refusing: make(chan struct{}), gate: make(chan struct{})}
 }
 
 func held() *script {
@@ -149,6 +157,15 @@ func (s *fakeSession) run(ctx context.Context, text string, sc *script) (agent.R
 		s.mu.Unlock()
 	}()
 	if sc.refuse != nil {
+		// A refusal a test wants to stand beside: refusing closes as the
+		// continuation gets here, and it then waits for the gate.
+		if sc.refusing != nil {
+			close(sc.refusing)
+			select {
+			case <-sc.gate:
+			case <-s.done:
+			}
+		}
 		return agent.Result{}, sc.refuse
 	}
 	s.mu.Lock()

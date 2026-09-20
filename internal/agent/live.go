@@ -1209,9 +1209,13 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 		// prompt of ours for the cancel to overtake, so it goes now. Settled
 		// is true regardless of whether the write itself succeeded: craze had
 		// no turn of its own in flight either way, so there is nothing here
-		// for a later wait to resolve.
+		// for a later wait to resolve. Wrote is not merely "no error": the
+		// client answers nil without writing while it has no session id, which
+		// is the whole of Start before session/new returns, and a cancel then
+		// reached nobody.
+		known := client.SessionID() != ""
 		err := client.Cancel(ctx)
-		return CancelOutcome{Wrote: err == nil, Settled: true}, err
+		return CancelOutcome{Wrote: known && err == nil, Settled: true}, err
 	}
 	// The prompt is claimed before its turn opens and its turn opens before
 	// its request is written, so the cancel waits for the wire to say what

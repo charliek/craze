@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -43,14 +44,20 @@ func (e *Engine) Cancel(ctx context.Context, c Command, turn string) (CancelResu
 // own and is published directly, so without the barrier it could overtake
 // them, and `craze prompt --json` has always printed a signal's removed lines
 // ahead of the turn's done. Stop blocks already, and is never called from the
-// primary's reader. A log that is closing has nothing left to order: the
-// cancel goes ahead.
+// primary's reader. A log that is closing has nothing left to order, and the
+// cancel goes ahead; a context that ended while the removals were still waiting
+// is the caller giving up, and the cancel is not made — made then, it could
+// not keep the order it exists to keep. The engine stays stopped and its queue
+// stays cleared either way, and the hold is given back.
 func (e *Engine) Stop(ctx context.Context, c Command) error {
 	id, err := e.holdCancel("", true, c.Cause())
 	if err != nil {
 		return err
 	}
-	_ = e.log.Flush(ctx)
+	if err := e.log.Flush(ctx); err != nil && !errors.Is(err, agent.ErrLogClosing) {
+		e.releaseHold(id, c.Cause(), agent.CancelOutcome{}, nil)
+		return err
+	}
 	_, err = e.cancelHeld(ctx, id, c.Cause())
 	return err
 }
@@ -100,21 +107,57 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, cause string) (string,
 // hold, and lets the driver pass. cause is the command the cancel came from, for
 // the one event this path can author: the delta for a send-now the failure of
 // this cancel disarms.
-func (e *Engine) cancelHeld(ctx context.Context, id, cause string) (CancelResult, error) {
+func (e *Engine) cancelHeld(ctx context.Context, id, cause string) (res CancelResult, err error) {
+	var out agent.CancelOutcome
+	// The hold is given back however this ends. A hook or a session double that
+	// panics, under a caller that recovers, would otherwise leave it standing
+	// for good: nothing would settle and nothing would be admitted again.
+	released := false
+	defer func() {
+		if !released {
+			e.releaseHold(id, cause, out, errCancelAbandoned)
+		}
+	}()
 	if h := e.hooks; h != nil && h.beforeSessionCancel != nil {
 		h.beforeSessionCancel(id)
 	}
-	out, err := e.sess.Cancel(ctx)
+	out, err = e.sess.Cancel(ctx)
 	if h := e.hooks; h != nil && h.afterSessionCancel != nil {
 		h.afterSessionCancel(id)
 	}
+	released = true
+	settled := e.releaseHold(id, cause, out, err)
+
+	res = CancelResult{Turn: id, Outcome: CancelRequested}
+	switch {
+	case err != nil:
+		// The call gave up: its context ended, or the write failed. Whether a
+		// cancel reached the agent is then not something this call can say,
+		// and a timeout past the write is not a cancel that failed.
+		res.Outcome = CancelUnknown
+	case settled:
+		res.Outcome = CancelSettled
+	}
+	return res, err
+}
+
+// errCancelAbandoned stands for the failure of a cancel that never returned:
+// its hold is released on the way out of a panic, and a send armed behind it is
+// disarmed as it would be behind any cancel that failed.
+var errCancelAbandoned = errors.New("engine: the cancel did not complete")
+
+// releaseHold gives a cancel's hold back and lets the driver pass, which is
+// where a turn that came back meanwhile settles. cancelErr is what the
+// session's cancel came to, nil when none was made. It reports whether the turn
+// the hold was taken against is over.
+func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelErr error) bool {
 	var next []launch
 	settled := false
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.cancelsInFlight--
-		if err != nil && e.armed != nil && e.armed.turn == id {
+		if err := cancelErr; err != nil && e.armed != nil && e.armed.turn == id {
 			// The cancel never reached the agent, so the turn a send was armed
 			// against is still running and its settlement is not coming. The
 			// send disarms here, in the section that releases the hold and
@@ -134,16 +177,5 @@ func (e *Engine) cancelHeld(ctx context.Context, id, cause string) (CancelResult
 		settled = id == "" && out.Settled || id != "" && (e.cur == nil || e.cur.id != id)
 	}()
 	e.run(next)
-
-	res := CancelResult{Turn: id, Outcome: CancelRequested}
-	switch {
-	case err != nil:
-		// The call gave up: its context ended, or the write failed. Whether a
-		// cancel reached the agent is then not something this call can say,
-		// and a timeout past the write is not a cancel that failed.
-		res.Outcome = CancelUnknown
-	case settled:
-		res.Outcome = CancelSettled
-	}
-	return res, err
+	return settled
 }

@@ -33,8 +33,15 @@ func newRig(t *testing.T, opts Options) *rig {
 
 func newRigOn(t *testing.T, opts Options, lo agent.EventLogOptions) *rig {
 	t.Helper()
+	return newRigHooked(t, opts, lo, nil)
+}
+
+// newRigHooked is a rig whose engine has its hooks from birth, which is the
+// only way the driver's goroutine may be given any.
+func newRigHooked(t *testing.T, opts Options, lo agent.EventLogOptions, h *hooks) *rig {
+	t.Helper()
 	s := newFake(t, lo)
-	e, err := New(s, opts)
+	e, err := newEngine(s, opts, h)
 	if err != nil {
 		t.Fatal(err)
 	}

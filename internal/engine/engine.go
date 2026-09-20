@@ -57,8 +57,12 @@ type turn struct {
 	err      error
 	// retry says the claim was refused with ErrForeignTurn under
 	// ChainPolicy.RetryForeignTurn and is to be taken again: the turn is
-	// current, working, and has no continuation running.
-	retry bool
+	// current, working, and has no continuation running. retryDue says a tick
+	// has passed since that refusal, and only then is the claim taken: a wake-up
+	// alone never authorises it, or a session whose flag is already clear while
+	// its client still refuses would be claimed again as fast as it could refuse.
+	retry    bool
+	retryDue bool
 }
 
 // launch is a continuation the engine has claimed under e.mu and has still to
@@ -144,8 +148,12 @@ type hooks struct {
 	// hold is released.
 	afterSessionCancel func(turn string)
 	// turnReturned runs once a continuation has come back and the pass its
-	// return allowed is over, with e.mu released.
+	// return allowed is over, with e.mu released and the goroutine's count
+	// given back, so a hook may close the engine.
 	turnReturned func(turn string)
+	// retryTick, when set, stands in for the driver's timer: a refused claim is
+	// taken again when the test sends on it, and at no other time.
+	retryTick <-chan time.Time
 }
 
 // New builds the engine for sess. The session must own an event log
@@ -153,6 +161,12 @@ type hooks struct {
 // New installs the log's single observer, so a second engine on one session is
 // refused with agent.ErrObserverSet. It is called before sess.Start.
 func New(sess agent.Session, opts Options) (*Engine, error) {
+	return newEngine(sess, opts, nil)
+}
+
+// newEngine is New with a test's hooks, which have to be in place before the
+// driver's goroutine exists to read them.
+func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	owner, ok := sess.(agent.LogOwner)
 	if !ok || owner.EventLog() == nil {
 		return nil, fmt.Errorf("engine: %T has no event log", sess)
@@ -165,6 +179,7 @@ func New(sess agent.Session, opts Options) (*Engine, error) {
 		activity: ActivityStarting,
 		kick:     make(chan struct{}, 1),
 		done:     make(chan struct{}),
+		hooks:    h,
 	}
 	// The session's clock, not the wall's: the Stub's is injected, and every
 	// golden that shows a time shows one of its. It is read where the session
@@ -505,6 +520,12 @@ func (e *Engine) run(ls []launch) {
 // is run exactly once whatever it returns — Begin's contract — so on a closing
 // log the turn simply goes ahead and comes straight back.
 func (e *Engine) runTurn(l launch) {
+	// Deferred first, so it runs last: after the count has been given back.
+	defer func() {
+		if h := e.hooks; h != nil && h.turnReturned != nil {
+			h.turnReturned(l.t.id)
+		}
+	}()
 	defer e.wg.Done()
 	if l.barrier {
 		_ = e.log.Flush(context.Background())
@@ -518,9 +539,6 @@ func (e *Engine) runTurn(l launch) {
 		next = e.passLocked()
 	}()
 	e.run(next)
-	if h := e.hooks; h != nil && h.turnReturned != nil {
-		h.turnReturned(l.t.id)
-	}
 }
 
 // drive is the driver's loop: on every wake-up, try to settle, else try to
@@ -539,9 +557,11 @@ func (e *Engine) drive() {
 		}
 	}()
 	for {
+		ticked := false
 		select {
 		case <-e.kick:
 		case <-tick:
+			ticked = true
 		case <-e.done:
 			return
 		}
@@ -550,19 +570,30 @@ func (e *Engine) drive() {
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
+			if ticked && e.cur != nil && e.cur.retry {
+				// Only a tick makes a refused claim due. A kick says the state
+				// may have changed; it does not say time has passed, and a
+				// refusal with nothing else to wait for is paced by time alone.
+				e.cur.retryDue = true
+			}
 			next = e.passLocked()
 			retrying = e.cur != nil && e.cur.retry
 		}()
 		e.run(next)
 		tick = nil
-		if retrying {
-			if timer == nil {
-				timer = time.NewTimer(foreignRetryTick)
-			} else {
-				timer.Reset(foreignRetryTick)
-			}
-			tick = timer.C
+		if !retrying {
+			continue
 		}
+		if h := e.hooks; h != nil && h.retryTick != nil {
+			tick = h.retryTick
+			continue
+		}
+		if timer == nil {
+			timer = time.NewTimer(foreignRetryTick)
+		} else {
+			timer.Reset(foreignRetryTick)
+		}
+		tick = timer.C
 	}
 }
 
@@ -596,10 +627,10 @@ func (e *Engine) retryLocked(t *turn) []launch {
 		}
 		return e.settleLocked(t)
 	}
-	if e.cancelsInFlight > 0 || e.sess.ForeignTurn() {
+	if !t.retryDue || e.cancelsInFlight > 0 || e.sess.ForeignTurn() {
 		return nil
 	}
-	t.retry, t.returned = false, false
+	t.retry, t.retryDue, t.returned = false, false, false
 	return []launch{e.launchLocked(t, e.sess.Begin(t.text), false)}
 }
 

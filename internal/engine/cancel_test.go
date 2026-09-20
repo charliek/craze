@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -47,7 +48,9 @@ func TestACancelNamingAStaleTurnIsRefused(t *testing.T) {
 // session's Cancel is entered), Session.Cancel's entry, and admission, which is
 // observed by what the session was handed.
 func TestACancelHeldBeforeTheSessionAdmitsNothing(t *testing.T) {
-	r := newRig(t, Options{})
+	returned := make(chan string, 8)
+	r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true},
+		&hooks{turnReturned: func(id string) { returned <- id }})
 	first := r.s.script(held())
 	r.submit("one")
 	await(t, first.opened, "the first turn to open")
@@ -67,6 +70,17 @@ func TestACancelHeldBeforeTheSessionAdmitsNothing(t *testing.T) {
 	got := r.until(func(ev agent.Event) bool { return ev.Type == agent.EventDone })
 	if last := got[len(got)-1]; last.StopReason != stopEndTurn {
 		t.Fatalf("the turn ended %q before the cancel reached it, want its own ending", last.StopReason)
+	}
+	// Its done says only that the session has finished with it. What this test
+	// turns on is the engine having had its chance to settle it: the
+	// continuation has come back and the pass that return allows is over.
+	select {
+	case id := <-returned:
+		if id != "turn-1" {
+			t.Fatalf("%s came back, want turn-1", id)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("the turn never came back")
 	}
 
 	// Every admission path is shut: the drain has a row and starts nothing, a
