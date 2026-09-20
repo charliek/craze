@@ -8,7 +8,7 @@ non-test source lines, from the reference reviews (`09`).
 | ID | status | one line |
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
-| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; S1b next |
+| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b planned (Plan 021, 2026-09-20)** |
 | S2 | not started | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
@@ -38,6 +38,7 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   registry with sequenced terminal outcomes; cancel outcomes on an engine turn
   id; command ids; settings order; approval policy separated from frontend
   presence; durable craze session id and index writes in the engine.
+  **Planned under Plan 021 (2026-09-20), panel-reviewed, not yet executed.**
 - **S1c** — the render-free transcript model folded inside the boundary;
   bounded snapshots; in-process attach with snapshot + cursor; the
   convergence check per event kind.
@@ -98,9 +99,10 @@ which is also the best test client), the fake host, published reference docs.
   subscription ids, the roster's own epoch; one attached session per
   connection (SQ14); bounded history pages; what `craze bridge` may assume
   under an SSH exec; what happens when `--continue` starts a second host for
-  one session (SQ16). **Decide SQ12 before this plan**: if hosts are born
-  detached, the socket-backed `Session` is the TUI's permanent path and S2's
-  exit adds "the full TUI runs unchanged over it, goldens included".
+  one session (SQ16). **SQ12 is decided (SD-33): hosts are born detached from
+  S4 on and the TUI is a socket client for good**, so the socket-backed
+  `Session` is the TUI's permanent path and S2's exit adds "the full TUI runs
+  unchanged over it, goldens included".
 - **Exit**: two TUIs on one live `cursor-agent` and one `grok` session show
   the same transcript; a prompt from either appears in both; an ask answered
   in one closes in the other; kill and reattach resumes silently from
@@ -123,20 +125,20 @@ process ("mobile first").
 ### S4 — headless hosts and the hub
 
 `craze serve` (a host with no TUI), detach from a running TUI without ending
-the session (SQ12), the hub at `run/hub.sock` with roster, routing, spawn,
+the session (SD-33), the hub at `run/hub.sock` with roster, routing, spawn,
 and stop; `craze ps`; `craze attach <id>`; `session.create` turns shed's
 `create` capability on.
 
-- **Detach is not a key binding (SQ12).** The TUI process is a job of the
+- **Detach is not a key binding (SD-33).** The TUI process is a job of the
   terminal's shell; Go cannot fork without exec and a process-group leader
   cannot `setsid`; closing a roost or tmux tab, or a systemd login scope with
-  `KillUserProcesses=yes`, kills it whatever it ignores. The robust shape is
-  **hosts born detached, with the TUI always a socket client**; what a host
-  does when its last client leaves (stop, or keep running) is then policy.
-  Spawning from a bridge must fully detach (`setsid`, stdio to `/dev/null`)
-  or the SSH channel never closes. A headless host parks asks with zero
-  clients (`03`), and on macOS cannot start `cursor-agent` from a plain SSH
-  exec (locked login keychain).
+  `KillUserProcesses=yes`, kills it whatever it ignores. The robust shape,
+  decided as SD-33, is **hosts born detached, with the TUI always a socket
+  client**; what a host does when its last client leaves (stop, or keep
+  running) is then policy. Spawning from a bridge must fully detach
+  (`setsid`, stdio to `/dev/null`) or the SSH channel never closes. A
+  headless host parks asks with zero clients (`03`), and on macOS cannot
+  start `cursor-agent` from a plain SSH exec (locked login keychain).
 - Size: M, about 2k lines. prox's lesson: every hard bug here is a
   **lifecycle** bug (leaked registrations, late close callbacks racing a
   reconnect, shutdown order). Write generation-guarded registration and
