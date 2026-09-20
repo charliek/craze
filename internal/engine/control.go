@@ -110,7 +110,7 @@ type CancelResult struct {
 	Reported bool
 }
 
-// The refusals the engine adds to the session's own (agent.ErrQueueFull,
+// The refusals the engine adds to the ones internal/agent defines (agent.ErrQueueFull,
 // agent.ErrQueueTextTooLong, agent.ErrPromptInFlight, agent.ErrForeignTurn,
 // agent.ErrNotInTurn, agent.ErrUnsupported). Each has a protocol code, which
 // is what a client matches on: never the message text.
@@ -187,8 +187,8 @@ func Code(err error) string {
 //
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
-// read to release. Submit, Disarm, the queue verbs, State, NewClientID and
-// Events wait on nothing: no channel, no provider call, no Publish. Start,
+// read to release. Submit, Disarm, GiveUp, the queue verbs, State, NewClientID
+// and Events wait on nothing: no channel, no provider call, no Publish. Start,
 // Subscribe, Interject, Cancel, Stop, Sync and Close block and belong on a
 // goroutine that is not the primary's reader — a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
@@ -224,6 +224,15 @@ type Control interface {
 	// Stop refuses every later admission, clears the queue, and cancels what
 	// is running. It is what a signal does to `craze prompt`.
 	Stop(ctx context.Context, c Command) error
+	// GiveUp ends the engine's wait on a turn whose claim the agent keeps
+	// refusing because it is running a turn of its own (State.Waiting): that
+	// turn settles as the refusal it was, and nothing else of the session's is
+	// touched — no cancel is written and the queue is kept. It is conditional
+	// and atomic: ErrStaleTurn for a turn that is not current, ErrNotAccepting
+	// for one that is no longer waiting, and in both cases nothing changes,
+	// because a client decides from an observation and the claim may have gone
+	// through since.
+	GiveUp(c Command, turn string) error
 
 	// The queue's verbs. None of them starts a turn, and none of them waits.
 	Queue(c Command, text string) (agent.QueuedPrompt, error)

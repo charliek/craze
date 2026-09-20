@@ -34,20 +34,23 @@ type State struct {
 	Activity Activity
 	// Turn is the current turn's id, "" when none is.
 	Turn string
-	// Retries is how many times the current turn's claim has been refused
-	// because the agent was running a turn of its own, and taken again under
-	// ChainPolicy.RetryForeignTurn: 0 when nothing is current, and 0 for every
-	// turn that was never refused. It is the wait a client that owns the budget
-	// bounds (§3.4): the engine claims again for as long as the client lets it,
-	// and the client ends the wait with Stop.
+	// Waiting says the current turn's claim was refused because the agent is
+	// running a turn of its own, and the turn is waiting to be claimed again
+	// under ChainPolicy.RetryForeignTurn. It is the wait a client that owns the
+	// budget bounds (§3.4): the engine claims again for as long as the client
+	// lets it, and the client ends the wait with GiveUp.
 	//
-	// It is a count and not a flag because a flag cannot be read without a race:
-	// a turn's retry goes false for as long as its re-claim is in flight, so a
-	// client that looked then would see a turn which keeps being refused as one
-	// whose prompt went through. A count only grows — it grew since the last
-	// look, or the claim is through — so a client whose looks are further apart
-	// than the engine's own retry tick can tell the two apart every time.
-	Retries int
+	// The one subtlety, and it matters: Waiting is false for the instant a
+	// re-claim is in flight — a refused claim's continuation comes back at once,
+	// but not instantly — so **false does not mean "running"**. A client may act
+	// on Waiting == true (start timing, and give up once its budget is spent) and
+	// must never read a single false as "the prompt went through": it would clear
+	// a budget that is still being spent, and a genuinely running foreign turn —
+	// where the engine rightly declines to claim again and this stays true for as
+	// long as it lasts — would never be given up on. GiveUp is conditional for
+	// the other half of the same reason: by the time a client acts, the claim may
+	// have gone through.
+	Waiting bool
 	// SendNow is the armed send-now, nil when nothing is armed. Nothing it
 	// names has been consumed: the row it points at is still in Queue and a
 	// draft is still in the client's composer.
@@ -80,7 +83,7 @@ func (e *Engine) State() State {
 	}
 	if e.cur != nil {
 		st.Turn = e.cur.id
-		st.Retries = e.cur.retries
+		st.Waiting = e.cur.retry
 	}
 	if a := e.armed; a != nil {
 		st.SendNow = &ArmedSend{Text: a.text, FromRow: a.from, Turn: a.turn, Cause: a.cause}

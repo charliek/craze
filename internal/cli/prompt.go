@@ -67,6 +67,11 @@ type promptOpts struct {
 	// nil for a test that drives finishRun over a session alone, where every
 	// event was published directly and there is nothing asynchronous to wait for.
 	eng *engine.Engine
+	// beforeGiveUp is a test seam, nil in production: it runs on the run's own
+	// goroutine between deciding to give up on a refused claim and asking the
+	// engine to. That gap is where the claim can still go through, and a test that
+	// cannot land it there cannot show that the give-up is refused when it does.
+	beforeGiveUp func()
 }
 
 // foreignBudget is how long craze waits on turns the agent started on its own.
@@ -208,7 +213,14 @@ func (o *promptOpts) drive(ctx context.Context, eng *engine.Engine, text string)
 	var inRun atomic.Bool
 	inRun.Store(true)
 	defer inRun.Store(false)
+	// stopped is closed once the signal's own work is done, which is what a run
+	// waiting for a drain waits for: the rows are gone from the queue, their
+	// removals are delivered, and the cancel has been written. Waiting for the
+	// signal itself instead would race the stop — the final sweep could run
+	// before the removals were even enqueued, and the JSON would lose them.
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		if !inRun.Load() {
 			return
@@ -240,7 +252,7 @@ func (o *promptOpts) drive(ctx context.Context, eng *engine.Engine, text string)
 			return fmt.Errorf("craze: %w", err)
 		}
 	}
-	return o.readChain(ctx, eng, text, &decisions)
+	return o.readChain(ctx, eng, stopped, text, &decisions)
 }
 
 // finishRun is the run's last reader. Whatever the session was still writing
@@ -288,13 +300,13 @@ func (o *promptOpts) finishRun(sess agent.Session, decisions *[]string, retErr e
 // and an empty queue never waits for a turn the agent started on its own (plan
 // 021 §3.4, A8). An ending that has rows pending and no successor is the drain
 // held by such a turn: the run keeps reading until that drain's own started
-// arrives, or until the budget runs out, and then it says so and exits 1 rather
-// than wait for ever.
+// arrives, until a signal ends the wait, or until the budget runs out — and then
+// it says so and exits 1 rather than wait for ever.
 //
 // The exit statuses are the chain's own, unchanged: any stop reason but end_turn
 // is 1, a turn that failed returns its error, a permission any reader refused is
 // 1, a signal is 1, and end_turn all the way is 0.
-func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, text string, decisions *[]string) error {
+func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped <-chan struct{}, text string, decisions *[]string) error {
 	if ctx.Err() != nil {
 		// A signal ends the run here and nowhere later: a turn started after it
 		// runs on a context of its own, so it would run to completion with no
@@ -311,32 +323,56 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, text str
 
 	sess := eng.Session()
 	// rejected is a permission any reader refused, which counts towards the exit
-	// status exactly as one refused inside a turn does. streamErr is the current
-	// turn's own error event: what a turn returned reaches this client as the
-	// ending's text, and a caller that matches on the error wants the value the
-	// session published.
+	// status exactly as one refused inside a turn does.
 	rejected, inTurn := false, res.Turn != ""
 	var streamErr error
-	// waiting says the chain is between turns with rows still queued, and until
+	// waiting says the chain is between turns with rows still queued, and drainUntil
 	// is how long this run waits for the drain that is being held. A prompt the
 	// engine queued rather than started — nothing does that today, since a direct
 	// submit is admitted whatever the agent is doing — is the same wait.
-	waiting, until := !inTurn, time.Time{}
+	waiting, drainUntil := !inTurn, time.Time{}
 	if waiting {
-		until = time.Now().Add(o.foreignBudget())
+		drainUntil = time.Now().Add(o.foreignBudget())
 	}
-	// retries is the refusal count this run last saw for the current turn, and
-	// retryUntil the budget it is spending against. A count that grew since the
-	// last look says the claim is still being refused; one that did not says it
-	// went through (engine.State.Retries). gaveUp says the run has stopped
-	// waiting, so the ending that follows is the refusal, not a turn that failed.
-	retries, gaveUp := 0, false
-	var retryUntil time.Time
+	// claimTurn is the turn whose refused claim this run is timing, and claimUntil
+	// when it stops waiting for it. The budget is per turn, it starts at the
+	// first look that finds that turn waiting, and — this is the whole of the
+	// rule — it is NEVER cleared by a look that does not: State.Waiting is false
+	// for the instant a re-claim is in flight, and clearing on that would spend
+	// the budget for ever, while a genuinely running foreign turn (where the
+	// engine rightly declines to claim again) would never be given up on at all.
+	// Keying it to the turn is what makes "never cleared" safe: a turn's claim is
+	// refused only before it runs, so one turn id has one refusal streak.
+	claimTurn, gaveUp := "", false
+	var claimUntil time.Time
+
+	// signalDone says the stop a signal asked for has finished: the rows are out
+	// of the queue, their removals are delivered, and the cancel has been written.
+	signalDone := false
 
 	poll := time.NewTicker(o.foreignPoll())
 	defer poll.Stop()
 	events := eng.Events()
 	for {
+		// A signal ends a wait for a drain, and this is when that wait is over: the
+		// stop has done its work, so no successor is coming — it cleared the very
+		// row this was waiting for — and the turn the AGENT was running has ended,
+		// which is the same condition the baseline's own wait read to its end. That
+		// last part matters on the stream and not just in the clock: the session
+		// publishes the foreign turn's closing bracket when it ends, and a run that
+		// exited on the signal alone would leave that line unprinted.
+		//
+		// Bounded by the same budget as the wait it is part of: an agent that
+		// answers neither the cancel nor anything else does not hold the exit open.
+		if waiting && signalDone && (!eng.State().ForeignTurn || !time.Now().Before(drainUntil)) {
+			return &exitError{code: 1, msg: ""}
+		}
+		// While a turn of craze's own is running there is nothing to wait for here:
+		// its cancelled ending is coming, and it is the ending that ends the chain.
+		var signalled <-chan struct{}
+		if waiting && !signalDone {
+			signalled = stopped
+		}
 		select {
 		case ev, ok := <-events:
 			if !ok {
@@ -349,7 +385,20 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, text str
 			if err != nil {
 				return err
 			}
-			if ev.Type == agent.EventError && inTurn && streamErr == nil {
+			if ev.Type == agent.EventError && inTurn && streamErr == nil && !eng.State().Waiting {
+				// "The prompt succeeded but the stream carried an error" is still
+				// a failed run, and this is that error — with the scope the
+				// baseline's own reader had: the first error event of the turn
+				// that is running, and never one from a turn the AGENT is running
+				// while craze's claim waits to be taken again (the baseline threw
+				// those away with the refused attempt they arrived during).
+				//
+				// The scope is as close as a client can get, not exact: an engine
+				// event trails the state it describes and a session's own event
+				// leads it, so an error published in the instant either side of a
+				// refusal can be attributed either way. What is exact is the
+				// failure of the turn itself, which comes from the engine
+				// (eng.TurnErr) and takes precedence over this.
 				streamErr = ev.Err
 			}
 			if ev.Type != agent.EventTurn || ev.Turn == nil {
@@ -359,23 +408,35 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, text str
 			case agent.TurnStarted:
 				// A turn is running: the drain that was held has been released,
 				// or the successor of the one that just ended is away.
-				inTurn, streamErr = true, nil
-				waiting, retries, retryUntil = false, 0, time.Time{}
+				inTurn, streamErr, waiting = true, nil, false
 			case agent.TurnEnded:
 				inTurn = false
-				over, err := o.turnEnded(ctx, ev.Turn, streamErr, gaveUp, rejected)
+				over, err := o.turnEnded(ctx, eng, ev.Turn, streamErr, gaveUp, rejected)
 				if over {
 					return err
 				}
 				streamErr = nil
 				if ev.Turn.Next == "" {
 					// Rows behind it and no successor: the drain is held.
-					waiting, until = true, time.Now().Add(o.foreignBudget())
+					waiting, drainUntil = true, time.Now().Add(o.foreignBudget())
 				}
 			}
+		case <-signalled:
+			signalDone = true
 		case <-poll.C:
 			if waiting {
-				if time.Now().Before(until) {
+				if ctx.Err() != nil {
+					// A signal is already ending this wait, and what it is waiting
+					// for is that stop's completion. The queue is not blocked, it
+					// is gone, so there is nothing to report — but the budget still
+					// bounds it, or an agent that answers neither the cancel nor
+					// anything else would hold the exit open for ever.
+					if !time.Now().Before(drainUntil) {
+						return &exitError{code: 1, msg: ""}
+					}
+					continue
+				}
+				if time.Now().Before(drainUntil) {
 					continue
 				}
 				// The rows behind the turn that ended are not going to run: the
@@ -386,25 +447,32 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, text str
 			if gaveUp {
 				continue
 			}
-			n := eng.State().Retries
+			st := eng.State()
 			switch {
-			case n == 0 || n <= retries:
-				// The claim went through, or there is no turn to claim: whatever
-				// was refused before it, this run is not waiting now.
-				retries, retryUntil = n, time.Time{}
-			case retryUntil.IsZero():
-				retries, retryUntil = n, time.Now().Add(o.foreignBudget())
-			case time.Now().Before(retryUntil):
-				retries = n
+			case !st.Waiting:
+				// Either the claim went through or a fresh one is in flight, and a
+				// single look cannot tell the two apart. Nothing to decide, and
+				// nothing to unwind: the budget of whichever turn was waiting
+				// stands.
+			case st.Turn != claimTurn:
+				claimTurn, claimUntil = st.Turn, time.Now().Add(o.foreignBudget())
+			case time.Now().Before(claimUntil):
 			default:
 				// The agent has kept the session for its own turns for the whole
-				// budget. Stop ends the wait: the turn settles as the refusal it
-				// was, and its ending comes back through this loop. It is made on
-				// a goroutine of its own because Stop waits for the queue's
-				// removals to be delivered, and this is the goroutine that
-				// delivers them.
-				gaveUp = true
-				go func() { _ = eng.Stop(context.Background(), engine.Command{}) }()
+				// budget. GiveUp ends the wait — the turn settles as the refusal
+				// it was, with the queue left as it is — and its ending comes back
+				// through this loop. It is conditional on the turn still waiting,
+				// decided under the engine's own lock, so the claim going through
+				// between the look above and this call means the prompt is running
+				// after all: the give-up is refused, nothing is cancelled, and
+				// this run carries on reading, exactly as it did once the
+				// baseline's own Prompt call was accepted.
+				if o.beforeGiveUp != nil {
+					o.beforeGiveUp()
+				}
+				if err := eng.GiveUp(engine.Command{}, claimTurn); err == nil {
+					gaveUp = true
+				}
 			}
 		}
 	}
@@ -413,21 +481,32 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, text str
 // turnEnded is what one turn's ending means for the run: whether the chain is
 // over, and with what. streamErr is the error event that turn published, if any,
 // and gaveUp says this run stopped waiting for a claim the agent kept refusing.
-func (o *promptOpts) turnEnded(ctx context.Context, t *agent.TurnInfo, streamErr error, gaveUp, rejected bool) (bool, error) {
-	switch {
-	case gaveUp:
-		// The refusal Stop turned into an ending. A script sees the status the
-		// retry has always given it and not the raw wire refusal.
+//
+// The error a failed turn returns is the turn's OWN, from the engine: the value
+// its continuation returned (eng.TurnErr), which is what the baseline returned
+// from Prompt and what a caller matching on a sentinel needs. TurnInfo.Err is
+// text — an event may not carry an error value — so it is only the fallback for a
+// turn the engine no longer remembers.
+func (o *promptOpts) turnEnded(ctx context.Context, eng *engine.Engine, t *agent.TurnInfo, streamErr error, gaveUp, rejected bool) (bool, error) {
+	if gaveUp {
+		// The refusal the give-up turned into an ending. A script sees the status
+		// the retry has always given it and not the raw wire refusal.
 		fmt.Fprintf(o.stderr, "craze: the agent kept the session for its own turns for %s\n", o.foreignBudget())
 		return true, &exitError{code: 1, msg: ""}
-	case t.Err != "":
-		// A turn that failed returns its error, as it always has. The session's
-		// own error event carries the value; the ending carries the text, which
-		// is all there is for a refusal that published no event of any kind.
-		if streamErr != nil {
-			return true, streamErr
-		}
+	}
+	// Prompt's own error first, then the stream's: the baseline's precedence. A
+	// withdrawn prompt's ErrPromptCancelled comes back here too, which is what a
+	// signal between the claim and the turn opening has always printed.
+	if err := eng.TurnErr(t.ID); err != nil {
+		return true, err
+	}
+	if t.Err != "" {
 		return true, errors.New(t.Err)
+	}
+	if streamErr != nil {
+		return true, streamErr
+	}
+	switch {
 	case t.StopReason != stopEndTurn:
 		// The stop reason ends the chain exactly as it did before the queue
 		// existed: anything but end_turn is exit 1 and no more turns. The chain

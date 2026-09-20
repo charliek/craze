@@ -308,6 +308,12 @@ type stubSession struct {
 	turns   []stubTurn
 	answers []string
 	foreign bool
+	// refuseWhileForeign makes Begin's continuation refuse with ErrForeignTurn
+	// for as long as foreign is set, which is what a live session does with a
+	// prompt sent into a turn the agent started on its own. It is opt-in because
+	// the older tests here set foreign to mean only "the snapshot says so" and
+	// are about the drain, not about a claim being refused.
+	refuseWhileForeign bool
 	// claimed is the session's prompt slot: Begin takes it and the
 	// continuation releases it, so a second Begin while one is claimed is
 	// refused exactly as a real session refuses it.
@@ -373,13 +379,17 @@ func (s *stubSession) Start(context.Context) error { return nil }
 // prompt is recorded here whether or not the claim succeeds — a real session
 // records an attempt the same way. A Begin while the slot is claimed claims
 // nothing and its continuation refuses, which is the contract the engine's
-// admission is built on.
+// admission is built on, and with refuseWhileForeign set a claim made while the
+// agent holds the session refuses in the same way a live one does.
 func (s *stubSession) Begin(text string) func(context.Context) (agent.Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prompts = append(s.prompts, text)
 	if s.claimed {
 		return func(context.Context) (agent.Result, error) { return agent.Result{}, agent.ErrPromptInFlight }
+	}
+	if s.refuseWhileForeign && s.foreign {
+		return func(context.Context) (agent.Result, error) { return agent.Result{}, agent.ErrForeignTurn }
 	}
 	s.claimed = true
 	var turn stubTurn
@@ -546,6 +556,16 @@ func (s *stubSession) sent() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.prompts...)
+}
+
+// answered is how many permission requests the run has answered. It is the one
+// barrier a test has for "the reader has got this far through the stream": the
+// answer is recorded under the session's own lock, while everything else a reader
+// does with an event goes to a buffer only the test's own goroutine may read.
+func (s *stubSession) answered() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.answers)
 }
 
 // stubOpts is a headless promptOpts writing JSON to stdout, with the
@@ -806,6 +826,303 @@ func TestAQueuedRowWaitsOutAForeignTurnAndThenRuns(t *testing.T) {
 	}
 	if strings.Join(order, ",") != "foreign-started,foreign-ended,sent" {
 		t.Fatalf("the row must leave the queue after the foreign turn: %v\n%s", order, stdout.String())
+	}
+}
+
+// TestARunningForeignTurnGivesUpAfterTheBudget is the schedule sol's r9 review
+// found (finding 1): the agent is GENUINELY running a turn of its own, so the
+// engine — rightly — does not claim again, and nothing about the wait changes
+// after the first refusal. A client that read the wait as something that had to
+// keep moving would wait for ever; the baseline gave up after its budget and
+// exited 1, and so does this.
+func TestARunningForeignTurnGivesUpAfterTheBudget(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	s := newStubSession(t, endTurn())
+	// A live session refuses a prompt sent into the agent's own turn, and the
+	// flag never clears here: nothing ends that turn.
+	s.refuseWhileForeign = true
+	s.foreign = true
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go") }()
+	select {
+	case err := <-done:
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 1 {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run waited out a turn the agent was never going to give back")
+	}
+	if !strings.Contains(stderr.String(), "kept the session") {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		t.Fatalf("a run that never got a turn has nothing to print: %q", out)
+	}
+	// The engine claims again only when the session says the agent is done, so
+	// one claim is all there was to make.
+	if got := s.sent(); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("claims %v", got)
+	}
+}
+
+// TestAClaimThatGoesThroughAtTheDeadlineIsNotGivenUp is r9's finding 3: the run
+// decides to give up from an observation, and in the gap before it acts the agent
+// gives the session back and the claim goes through. The give-up is conditional
+// on the turn still waiting, so it is refused, the prompt that is now running is
+// not cancelled, and the run carries on exactly as it did once the baseline's own
+// Prompt call had been accepted.
+func TestAClaimThatGoesThroughAtTheDeadlineIsNotGivenUp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	var s *stubSession
+	// running is closed by the turn the re-claim starts: the barrier for "the
+	// claim went through".
+	running := make(chan struct{})
+	turn := endTurn()
+	turn.before = func() { close(running) }
+	s = newStubSession(t, turn)
+	s.refuseWhileForeign = true
+	s.foreign = true
+	o.beforeGiveUp = func() {
+		// Once only, in the gap the race lives in.
+		o.beforeGiveUp = nil
+		s.setForeign(false)
+		<-running
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a claim that went through must not be given up on: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never finished the turn its claim finally started")
+	}
+	if strings.Contains(stderr.String(), "kept the session") {
+		t.Fatalf("the run reported a wait it did not have: %q", stderr.String())
+	}
+	if got := s.sent(); len(got) != 2 {
+		t.Fatalf("one refusal and one claim that ran: %v", got)
+	}
+	var dones int
+	for _, ev := range parseJSONLines(t, stdout.String()) {
+		if ev.m["type"] == "done" {
+			dones++
+		}
+	}
+	if dones != 1 {
+		t.Fatalf("the turn must run to its end: %d done lines\n%s", dones, stdout.String())
+	}
+}
+
+// TestAnErrorFromTheAgentsOwnTurnIsNotTheRunsFailure is r9's finding 2, first
+// schedule: while craze's claim waits, the turn the AGENT is running fails and
+// says so on the stream craze is reading. That failure is not this run's — the
+// baseline threw it away with the refused attempt it arrived during — and the
+// turn that does run ends end_turn, so the run exits 0.
+func TestAnErrorFromTheAgentsOwnTurnIsNotTheRunsFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	// The wait ends because the agent's turn ends, not because the budget did.
+	o.foreignMax = time.Hour
+	o.decisions = []string{"allow-once"}
+	s := newStubSession(t, endTurn())
+	s.refuseWhileForeign = true
+	s.foreign = true
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go") }()
+	waitFor(t, "the claim to be waiting out the agent's own turn", func() bool {
+		eng := s.engine()
+		return eng != nil && eng.State().Waiting
+	})
+	s.emit(agent.Event{Type: agent.EventError, Err: errors.New("the agent's own turn failed")})
+	// A permission behind it, because answering one is the only thing a reader
+	// does with an event that a test can observe: when it has been answered, the
+	// error above has been read, and read while the claim was still waiting.
+	s.emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+		ID:   "perm-1",
+		Tool: "Shell",
+		Options: []agent.PermissionOption{
+			{OptionID: "opt-allow", Kind: "allow_once"},
+			{OptionID: "opt-reject", Kind: "reject_once"},
+		},
+	}})
+	waitFor(t, "the run to read past the agent's error", func() bool { return s.answered() == 1 })
+	s.setForeign(false)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the agent's own failure is not the run's: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never finished the turn the agent finally let through")
+	}
+}
+
+// TestAFailedTurnReturnsItsOwnErrorNotTheAgentsOwn is the other half of r9's
+// finding 2: the agent's own turn fails with one error while craze's claim waits,
+// and then craze's own turn is let through and fails with another. What the run
+// returns is its turn's error — the value its continuation returned, which the
+// engine keeps for exactly this (engine.TurnErr) — and never the one that was on
+// the stream while it was waiting.
+func TestAFailedTurnReturnsItsOwnErrorNotTheAgentsOwn(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	o.foreignMax = time.Hour
+	o.decisions = []string{"allow-once"}
+	foreign := errors.New("the agent's own turn failed")
+	own := errors.New("craze's turn failed")
+	// The turn publishes nothing: its failure is what Prompt returned, which is
+	// the half of the precedence the stream cannot show.
+	s := newStubSession(t, stubTurn{err: own})
+	s.refuseWhileForeign = true
+	s.foreign = true
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go") }()
+	waitFor(t, "the claim to be waiting out the agent's own turn", func() bool {
+		eng := s.engine()
+		return eng != nil && eng.State().Waiting
+	})
+	s.emit(agent.Event{Type: agent.EventError, Err: foreign})
+	s.emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+		ID:      "perm-1",
+		Tool:    "Shell",
+		Options: []agent.PermissionOption{{OptionID: "opt-allow", Kind: "allow_once"}},
+	}})
+	waitFor(t, "the run to read past the agent's error", func() bool { return s.answered() == 1 })
+	s.setForeign(false)
+	select {
+	case err := <-done:
+		if !errors.Is(err, own) {
+			t.Fatalf("err %v, want the failure of craze's own turn", err)
+		}
+		if errors.Is(err, foreign) {
+			t.Fatalf("the run returned the agent's own failure: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never finished the turn the agent finally let through")
+	}
+}
+
+// TestAStreamErrorFailsARunWhoseTurnSucceeded is r9's finding 2, second
+// schedule: the prompt itself succeeded and something else — a child of the
+// turn's — put an error on the stream. The baseline returned that error and
+// exited non-zero, and a run that exited 0 would tell a script the opposite of
+// what happened.
+func TestAStreamErrorFailsARunWhoseTurnSucceeded(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	boom := errors.New("a child failed")
+	s := newStubSession(t, stubTurn{
+		emit: []agent.Event{
+			{Type: agent.EventError, Err: boom},
+			{Type: agent.EventDone, StopReason: "end_turn"},
+		},
+		res: agent.Result{StopReason: "end_turn"},
+	})
+	if err := runChain(o, context.Background(), s, "go"); !errors.Is(err, boom) {
+		t.Fatalf("err %v, want the error the stream carried", err)
+	}
+}
+
+// TestASignalWhileTheDrainIsHeldEndsTheRunAtOnce is r9's finding 4: a signal
+// arrives while a row waits behind a turn the agent is running. The stop clears
+// that row, so no successor can ever arrive to end the wait — the run must end on
+// the stop and not sit out its budget, and it says nothing about a blocked queue,
+// because the queue is not blocked, it is gone.
+func TestASignalWhileTheDrainIsHeldEndsTheRunAtOnce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	// A budget nothing in this test may reach: the signal is what ends the wait.
+	o.foreignMax = time.Hour
+	var s *stubSession
+	first := endTurn()
+	first.before = func() { s.setForeign(true) }
+	s = newStubSession(t, first)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, ctx, s, "first", "follow-up") }()
+	waitFor(t, "the drain to be held with the row still queued", func() bool {
+		eng := s.engine()
+		if eng == nil {
+			return false
+		}
+		st := eng.State()
+		return st.Prompted && st.Activity == engine.ActivityIdle && len(st.Queue) == 1
+	})
+	// The cancel the stop writes is what ends the agent's own turn, as it does on
+	// a real session, and the session says so on the stream.
+	s.onCancel = func() { s.setForeign(false) }
+	cancel()
+	select {
+	case err := <-done:
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 1 {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the signal did not end the wait for a drain that was never coming")
+	}
+	if strings.Contains(stderr.String(), "still blocked") {
+		t.Fatalf("a signalled run must not report a blocked queue: %q", stderr.String())
+	}
+	var removed, sent, ended int
+	for _, ev := range parseJSONLines(t, stdout.String()) {
+		if ev.m["type"] == "foreign_turn" && ev.m["event"] == "ended" {
+			ended++
+		}
+		if ev.m["type"] != "queue" {
+			continue
+		}
+		switch ev.m["event"] {
+		case "removed":
+			removed++
+		case "sent":
+			sent++
+		}
+	}
+	if removed != 1 || sent != 0 {
+		t.Fatalf("the cleared row: %d removed, %d sent\n%s", removed, sent, stdout.String())
+	}
+	// The wait read the agent's own turn to its end, as the baseline's did: its
+	// closing bracket is on stdout and not lost to the exit.
+	if ended != 1 {
+		t.Fatalf("the agent's own turn must still be bracketed: %d ended lines\n%s", ended, stdout.String())
+	}
+}
+
+// TestSignalBeforeTheTurnOpensReturnsPromptCancelled is r9's finding 5: a signal
+// that lands between the claim and the turn opening withdraws the prompt, and the
+// session says so by returning ErrPromptCancelled. That error is what the baseline
+// returned and what craze printed; the engine turns the same fact into a synthetic
+// cancelled ending, and the run still answers its caller with the error itself.
+func TestSignalBeforeTheTurnOpensReturnsPromptCancelled(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelled := make(chan struct{})
+	s := newStubSession(t, stubTurn{
+		before: func() { cancel(); <-cancelled },
+		err:    agent.ErrPromptCancelled,
+	})
+	s.onCancel = func() { close(cancelled) }
+
+	err := runChain(o, ctx, s, "go")
+	if !errors.Is(err, agent.ErrPromptCancelled) {
+		t.Fatalf("err %v, want the withdrawn prompt's own error", err)
+	}
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		t.Fatalf("a withdrawn prompt publishes nothing: %q", out)
 	}
 }
 

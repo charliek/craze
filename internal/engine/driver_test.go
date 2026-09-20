@@ -530,9 +530,11 @@ func TestStopEndsARetriedTurnAsTheRefusalItWas(t *testing.T) {
 // in its place would be a message that run never sends and a pair of lines its
 // JSON never had.
 //
-// State.Retries is what the client bounding that wait reads, and this is the
-// whole of what it promises: it counts every refusal, it stands still while the
-// claim is not being taken again, and it is gone with the turn it was about.
+// State.Waiting is what the client bounding that wait reads, and this is the
+// whole of what it promises: it is true while the refused turn waits, it stays
+// true for as long as the agent's own turn lasts — which is the schedule where a
+// count would freeze and a client timing it would wait for ever — and it is gone
+// with the turn it was about.
 func TestADirectSubmitClaimsThroughAForeignTurnUnderTheRetryingPolicy(t *testing.T) {
 	r, ticks, returned := retryRig(t, ChainPolicy{RetryForeignTurn: true, StopOnNonEndTurn: true})
 	r.s.setForeign(true)
@@ -542,22 +544,139 @@ func TestADirectSubmitClaimsThroughAForeignTurnUnderTheRetryingPolicy(t *testing
 		t.Fatalf("a direct submit was queued behind the agent's own turn: %+v", res)
 	}
 	awaitTurn(t, returned, "turn-1")
-	if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking || st.Retries != 1 {
+	if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking || !st.Waiting {
 		t.Fatalf("a turn waiting out a foreign turn: %+v", st)
 	}
 	// The claim is not taken again while the session says the agent has it, tick
-	// or no tick, so the count stands still: the wait its client is bounding is
-	// still on, and the tick has made the retry due for the moment it clears.
+	// or no tick, and the wait is still reported as one: the tick has made the
+	// retry due for the moment the flag clears, and nothing else has changed.
 	tick(t, ticks, returned)
-	if st := r.e.State(); st.Retries != 1 {
+	if st := r.e.State(); !st.Waiting {
 		t.Fatalf("a claim was taken again during the foreign turn: %+v", st)
 	}
 	r.s.setForeign(false)
 	r.until(lastEnding)
 	r.wantPrompts("go", "go")
-	if st := r.e.State(); st.Retries != 0 {
-		t.Fatalf("Retries outlived the turn it was about: %+v", st)
+	if st := r.e.State(); st.Waiting || st.Turn != "" {
+		t.Fatalf("the wait outlived the turn it was about: %+v", st)
 	}
+}
+
+// TestGiveUpEndsAWaitingTurnAsTheRefusalItWas: the client's half of the wait.
+// The turn settles through the ordinary settlement — the synthetic refusal, the
+// error state — and nothing else of the session's is touched: no cancel is
+// written, and the queue behind it is KEPT, because a refusal reached nothing.
+func TestGiveUpEndsAWaitingTurnAsTheRefusalItWas(t *testing.T) {
+	r, _, returned := retryRig(t, ChainPolicy{RetryForeignTurn: true, StopOnNonEndTurn: true})
+	r.s.setForeign(true)
+	r.s.script(&script{refuse: agent.ErrForeignTurn})
+	r.submit("go")
+	r.queue("behind it")
+	awaitTurn(t, returned, "turn-1")
+	if st := r.e.State(); !st.Waiting {
+		t.Fatalf("the turn is not waiting: %+v", st)
+	}
+	if err := r.e.GiveUp(Command{}, "turn-1"); err != nil {
+		t.Fatalf("give up: %v", err)
+	}
+	// Not lastEnding: this ending has a row still pending, which is the point of
+	// it — a refusal reached nothing, so the chain policy leaves the queue alone.
+	got := r.until(ended("turn-1"))
+	last := got[len(got)-1].Turn
+	if last.ID != "turn-1" || !last.Synthetic || last.ErrClass != agent.EventErrForeignTurn {
+		t.Fatalf("the ending: %+v", last)
+	}
+	if last.Next != "" || last.Pending != 1 {
+		t.Fatalf("a refusal keeps its queue and starts nothing: %+v", last)
+	}
+	r.wantShapes(got,
+		`foreign running=true`,
+		`started turn-1 submit "go"`,
+		`queue queued "behind it"`,
+		`ended turn-1 stop="" next="" pending=1 synthetic class=foreign_turn`,
+	)
+	st := r.e.State()
+	if st.Activity != ActivityError || st.Turn != "" || st.Waiting || len(st.Queue) != 1 {
+		t.Fatalf("state after the give-up: %+v", st)
+	}
+	if !errors.Is(r.e.TurnErr("turn-1"), agent.ErrForeignTurn) {
+		t.Fatalf("the turn's own error: %v", r.e.TurnErr("turn-1"))
+	}
+	// No cancel was written: the session was handed one claim and nothing else.
+	r.wantPrompts("go")
+	if n := r.s.cancelsWritten(); n != 0 {
+		t.Fatalf("a give-up wrote %d cancels", n)
+	}
+}
+
+// TestGiveUpIsRefusedOnceTheClaimGoesThrough: the race finding 3 of sol's r9
+// review found. A client decides to give up from an observation, and by the time
+// it calls, the foreign turn may have ended and the claim gone through — the
+// prompt it was waiting for is running. The give-up is refused and changes
+// nothing; the turn runs to its end.
+func TestGiveUpIsRefusedOnceTheClaimGoesThrough(t *testing.T) {
+	r, ticks, returned := retryRig(t, ChainPolicy{RetryForeignTurn: true, StopOnNonEndTurn: true})
+	refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+	second := r.s.script(held())
+	r.submit("go")
+	await(t, refusal.refusing, "the claim to reach its refusal")
+	close(refusal.gate)
+	<-returned
+	// The claim is taken again and this time it runs: the turn opens and holds
+	// there, so a give-up decided a moment ago arrives against a running prompt.
+	tick(t, ticks, returned)
+	await(t, second.opened, "the re-claimed turn to open")
+	if st := r.e.State(); st.Waiting {
+		t.Fatalf("the re-claimed turn still reports a wait: %+v", st)
+	}
+	if err := r.e.GiveUp(Command{}, "turn-1"); !errors.Is(err, ErrNotAccepting) || Code(err) != "not_accepting" {
+		t.Fatalf("a give-up against a running turn: %v", err)
+	}
+	if err := r.e.GiveUp(Command{}, "turn-9"); !errors.Is(err, ErrStaleTurn) {
+		t.Fatalf("a give-up against a turn that is not current: %v", err)
+	}
+	second.release()
+	got := r.until(lastEnding)
+	if last := got[len(got)-1].Turn; last.StopReason != "end_turn" || last.Err != "" {
+		t.Fatalf("the turn the give-up did not touch: %+v", last)
+	}
+	r.wantPrompts("go", "go")
+}
+
+// TestGiveUpUnderACancelHoldWaitsForIt: a turn does not settle while a cancel is
+// on its way to the session, and a give-up is no exception — it is committed
+// (the turn is not claimed again), and the ending follows when the hold is
+// released, exactly as a stop's does.
+func TestGiveUpUnderACancelHoldWaitsForIt(t *testing.T) {
+	r, _, returned := retryRig(t, ChainPolicy{RetryForeignTurn: true, StopOnNonEndTurn: true})
+	r.s.setForeign(true)
+	r.s.script(&script{refuse: agent.ErrForeignTurn})
+	r.submit("go")
+	awaitTurn(t, returned, "turn-1")
+
+	entered, release := r.s.holdNextCancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.e.Cancel(context.Background(), Command{}, "turn-1")
+		done <- err
+	}()
+	await(t, entered, "the cancel to reach the session")
+	if err := r.e.GiveUp(Command{}, "turn-1"); err != nil {
+		t.Fatalf("give up: %v", err)
+	}
+	r.sync()
+	if st := r.e.State(); st.Turn != "turn-1" || st.Waiting {
+		t.Fatalf("the turn settled under a cancel hold, or is still waiting: %+v", st)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	got := r.until(lastEnding)
+	if last := got[len(got)-1].Turn; last.ID != "turn-1" || last.ErrClass != agent.EventErrForeignTurn {
+		t.Fatalf("the ending the released hold produced: %+v", last)
+	}
+	r.wantPrompts("go")
 }
 
 // TestAForeignTurnHoldsTheDrainAndItsEndReleasesIt: the ending of a turn with a

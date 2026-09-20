@@ -26,9 +26,9 @@ type ChainPolicy struct {
 	// turn is over, with no event for the refusal and no second started. The
 	// session's foreign-turn flag can lag the client's, so admission can pass
 	// and the prompt still be refused; `craze prompt` has always waited that
-	// out. The client owns the budget: it calls Stop when it has waited long
-	// enough, and the turn then ends as the refusal it was. The TUI leaves it
-	// false and shows the refusal.
+	// out. The client owns the budget: it reads State.Waiting and calls GiveUp
+	// when it has waited long enough, and the turn then ends as the refusal it
+	// was. The TUI leaves it false and shows the refusal.
 	RetryForeignTurn bool
 }
 
@@ -63,13 +63,11 @@ type turn struct {
 	// its client still refuses would be claimed again as fast as it could refuse.
 	retry    bool
 	retryDue bool
-	// retries counts those refusals, and is what State reports so that the
-	// client which owns the budget can see the wait it is bounding. A count is
-	// the honest answer where a flag is not: retry itself goes false for as long
-	// as a re-claim is in flight, so a client that read it would see a turn that
-	// keeps being refused as one that went through, while a count only ever
-	// grows — it grew since the last look, or the claim is through.
-	retries int
+	// givenUp says the client that owns the wait has stopped waiting (GiveUp):
+	// the turn is to settle as the refusal it was rather than be claimed again.
+	// It is what stops the settlement from parking the turn a second time, and it
+	// is per turn, because the budget is.
+	givenUp bool
 }
 
 // launch is a continuation the engine has claimed under e.mu and has still to
@@ -114,9 +112,17 @@ type Engine struct {
 	now  func() time.Time
 	opts Options
 
-	mu              sync.Mutex
-	activity        Activity
-	cur             *turn
+	mu       sync.Mutex
+	activity Activity
+	cur      *turn
+	// settled remembers what each recently settled turn's continuation returned,
+	// for the in-process client that has to hand a caller the failure itself and
+	// not a rendering of it (TurnErr). Only a failure is kept — a clean turn's
+	// answer is nil either way — and only the last settledCap of them, because a
+	// client reads endings with the outbox's lag and may ask about a turn the
+	// engine has already succeeded twice over.
+	settled         map[string]error
+	settledIDs      []string
 	turnSeq         int
 	clientSeq       int
 	queue           agent.PromptQueue
@@ -719,8 +725,8 @@ func (e *Engine) passLocked() []launch {
 }
 
 // retryLocked takes again the claim of a turn the session refused because the
-// agent was running one of its own. Stop ends the wait: the turn then settles
-// as the refusal it was.
+// agent was running one of its own. Stop and GiveUp end the wait: the turn then
+// settles as the refusal it was.
 func (e *Engine) retryLocked(t *turn) []launch {
 	if e.stopped {
 		t.retry = false
@@ -734,6 +740,62 @@ func (e *Engine) retryLocked(t *turn) []launch {
 	}
 	t.retry, t.retryDue, t.returned = false, false, false
 	return []launch{e.launchLocked(t, e.sess.Begin(t.text), false)}
+}
+
+// GiveUp ends the engine's wait on a turn whose claim the session keeps refusing
+// because the agent is running one of its own: the turn settles NOW as the
+// refusal it was, through the ordinary settlement, so the chain policy, the
+// batch's shape and the send-now handling are the same code as for any other
+// ending.
+//
+// It is the client's half of the foreign-turn wait. The engine claims again for
+// as long as the client lets it and authors no event for a refusal (§3.4); the
+// budget is the client's, and this is how it spends it. `craze prompt` is the one
+// client that has a budget: the TUI's policy never parks a refusal at all.
+//
+// It is conditional and atomic, which is the whole point of it being a command of
+// the engine's rather than a cancel the client writes:
+//
+//   - turn must name the current turn, or it is ErrStaleTurn — the client decided
+//     to give up on one turn and must not end another;
+//   - that turn must still be waiting (State.Waiting), or it is ErrNotAccepting
+//     and NOTHING changes. A client decides from an observation, and by the time
+//     it acts the claim may have gone through: the prompt is then running, and a
+//     give-up that cancelled it would kill the very turn the wait was for.
+//
+// It makes no session call and waits on nothing — a waiting turn has no
+// continuation in flight — so a client may call it from the primary's own reader.
+// A cancel in flight holds the settlement exactly as it holds every other one:
+// the give-up is committed, and the ending follows when the hold is released.
+//
+// The Command is not the ending's cause: the ending belongs to the turn and
+// carries the cause the turn was submitted with, as every other ending does.
+func (e *Engine) GiveUp(_ Command, turn string) error {
+	var next []launch
+	err := func() error {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.closed {
+			return ErrNotAccepting
+		}
+		if turn == "" || e.cur == nil || e.cur.id != turn {
+			return ErrStaleTurn
+		}
+		t := e.cur
+		if !t.retry {
+			// Running, or a claim of its own is in flight: either way this turn is
+			// not waiting for anything the client can give up on.
+			return ErrNotAccepting
+		}
+		t.givenUp, t.retry, t.retryDue = true, false, false
+		if e.cancelsInFlight > 0 {
+			return nil
+		}
+		next = e.settleLocked(t)
+		return nil
+	}()
+	e.run(next)
+	return err
 }
 
 // drainLocked starts what is waiting when nothing is current and a turn may
@@ -844,13 +906,12 @@ func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.E
 // mandatory completion: it is enqueued whether or not the outbox reports room,
 // because a turn that has ended has ended.
 func (e *Engine) settleLocked(t *turn) []launch {
-	if e.opts.Chain.RetryForeignTurn && !e.stopped && errors.Is(t.err, agent.ErrForeignTurn) {
+	if e.opts.Chain.RetryForeignTurn && !e.stopped && !t.givenUp && errors.Is(t.err, agent.ErrForeignTurn) {
 		// Not an ending: the agent has the session for a turn of its own, and
 		// this client waits that out. The turn stays current and working, and
 		// the driver is woken so that it arms its tick: nothing else may ever
 		// say the foreign turn is over.
 		t.retry = true
-		t.retries++
 		e.wake()
 		return nil
 	}
@@ -889,6 +950,7 @@ func (e *Engine) settleLocked(t *turn) []launch {
 		info.ErrClass = agent.ClassifyEventErr(t.err)
 	}
 	e.cancelled = info.StopReason == stopCancelled
+	e.rememberErrLocked(t)
 
 	clear := func() {
 		for _, qev := range e.queue.Clear() {
@@ -973,3 +1035,46 @@ const (
 	stopEndTurn   = "end_turn"
 	stopCancelled = "cancelled"
 )
+
+// settledCap is how many settled turns' failures TurnErr remembers.
+const settledCap = 16
+
+// rememberErrLocked keeps what t's continuation returned, for TurnErr. A clean
+// turn is not kept: nil is the answer either way, and the table stays the size of
+// the failures it is for.
+func (e *Engine) rememberErrLocked(t *turn) {
+	if t.err == nil {
+		return
+	}
+	if e.settled == nil {
+		e.settled = map[string]error{}
+	}
+	e.settled[t.id] = t.err
+	e.settledIDs = append(e.settledIDs, t.id)
+	if len(e.settledIDs) > settledCap {
+		delete(e.settled, e.settledIDs[0])
+		e.settledIDs = e.settledIDs[1:]
+	}
+}
+
+// TurnErr is the error the named turn's continuation returned: the value, not
+// TurnInfo.Err's rendering of it. It is nil for a turn that ended cleanly, for
+// one that has not settled, and for one the engine no longer remembers
+// (settledCap).
+//
+// It exists because an in-process client has callers of its own to answer:
+// `craze prompt` returns the failure of a turn to whatever ran it, and a caller
+// that matches on a sentinel — errors.Is, a wrapped wire error, the
+// ErrPromptCancelled a withdrawn prompt returns — needs the error and not a
+// rendering. It is deliberately NOT on the event: an event enqueued through the
+// log's outbox may not carry an Err at all (eventlog.go's Enqueue replaces one,
+// because encoding it would call arbitrary code under a caller's lock), and a
+// synthetic ending has no live error value to carry in the first place.
+//
+// So this is an in-process convenience that a socket client will not have: over a
+// socket, TurnInfo's ErrClass and Err text are the whole of what a failure is.
+func (e *Engine) TurnErr(turn string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.settled[turn]
+}
