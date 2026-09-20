@@ -505,6 +505,16 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				case err != nil:
 					return err
 				case turn != "":
+					// The wait is over, and says so at once rather than when the
+					// turn's started is read. Left standing, it would be asked
+					// again on the next poll with a deadline that has already
+					// passed — and if that turn had settled by then, its events
+					// still unread behind the poll, the engine would be asked to
+					// abandon a drain that was never held, and this run would
+					// exit on the state a finished turn left instead of on the
+					// turn's own ending. The ordered started that is on its way
+					// is what says a turn is running.
+					waiting = false
 					continue
 				case pending == 0:
 					// Nothing queued and nothing running: the rows went without
