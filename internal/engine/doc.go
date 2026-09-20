@@ -16,7 +16,4 @@
 // own tests drive the engine over tui.Stub, an ordinary Go dependency an
 // external test package (engine_test) is allowed to take on the package
 // under test.
-//
-// This file is the whole of the package for now: the driver itself lands in
-// the next commit.
 package engine
