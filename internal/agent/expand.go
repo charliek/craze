@@ -199,12 +199,26 @@ func scanPluginArgs(text string, i int) string {
 	return strings.TrimSpace(text[j:end])
 }
 
+// pluginVars is what a ${…} token in a body may stand for. Root is the entry's
+// install directory, which every provider substitutes. Skill and Session are
+// native's alone — grok-build's ${CLAUDE_SKILL_DIR} and ${CLAUDE_SESSION_ID} —
+// and are recognised only when Extras says so, because a body craze expands on
+// cursor's behalf has to reach cursor's agent as its author wrote it: cursor
+// substitutes neither, and craze filling one in would be craze inventing
+// content for another agent's content.
+type pluginVars struct {
+	Root    string
+	Skill   string
+	Session string
+	Extras  bool
+}
+
 // expandCommandBody is cursor's command expansion: $ARGUMENTS for the whole
 // argument list, $1..$99 for one of them, and — when the body asked for
 // neither and arguments were given anyway — the arguments appended under it,
 // which is how a command with no placeholder still sees them.
 func expandCommandBody(body, root, args string) string {
-	out, spent := substituteBody(body, root, strings.Fields(args))
+	out, spent := substituteBody(body, pluginVars{Root: root}, strings.Fields(args))
 	if !spent && args != "" {
 		return out + "\n\n" + args
 	}
@@ -216,7 +230,7 @@ func expandCommandBody(body, root, args string) string {
 // in the invocation line only. grok substitutes into skills; cursor does not,
 // and this is cursor's content.
 func expandSkillBody(body, root string) string {
-	out, _ := substituteBody(body, root, nil)
+	out, _ := substituteBody(body, pluginVars{Root: root}, nil)
 	return out
 }
 
@@ -230,7 +244,7 @@ func expandSkillBody(body, root string) string {
 // $ARGUMENTS first and scanning the result for $1 afterwards would substitute
 // into the user's own arguments, so an argument spelled "$2" would come out as
 // some other argument entirely.
-func substituteBody(body, root string, fields []string) (string, bool) {
+func substituteBody(body string, vars pluginVars, fields []string) (string, bool) {
 	if !strings.ContainsRune(body, '$') {
 		return body, false
 	}
@@ -240,7 +254,7 @@ func substituteBody(body, root string, fields []string) (string, bool) {
 		if body[i] != '$' {
 			continue
 		}
-		repl, end, arg := substituteToken(body, i, root, fields)
+		repl, end, arg := substituteToken(body, i, vars, fields)
 		if end == 0 {
 			continue
 		}
@@ -270,10 +284,23 @@ func substituteBody(body, root string, fields []string) (string, bool) {
 // are text, and $123 is text too — the third digit denies the boundary and the
 // backtrack to one digit denies it again. The root and $ARGUMENTS tokens carry
 // no such rule, because cursor replaces those as plain strings.
-func substituteToken(body string, i int, root string, fields []string) (string, int, bool) {
+func substituteToken(body string, i int, vars pluginVars, fields []string) (string, int, bool) {
 	for _, token := range [2]string{"${CLAUDE_PLUGIN_ROOT}", "${CURSOR_PLUGIN_ROOT}"} {
 		if strings.HasPrefix(body[i:], token) {
-			return root, i + len(token), false
+			return vars.Root, i + len(token), false
+		}
+	}
+	// Native's two extra variables, in the same pass and under the same
+	// one-pass rule: a path or an id they put into the body is never rescanned
+	// for a placeholder of its own.
+	if vars.Extras {
+		for _, v := range [2]struct{ token, value string }{
+			{"${CLAUDE_SKILL_DIR}", vars.Skill},
+			{"${CLAUDE_SESSION_ID}", vars.Session},
+		} {
+			if strings.HasPrefix(body[i:], v.token) {
+				return v.value, i + len(v.token), false
+			}
 		}
 	}
 	if fields == nil {
@@ -419,10 +446,22 @@ func escapeAttr(s string) string {
 // rather than a header because the model reads these blocks with no system
 // prompt to explain them: it has to say what it is looking at, which name
 // produced it and where the text came from, all by itself.
-const pluginBlockFormat = `The user invoked %s (the "%s" %s from the "%s" plugin, %s). Follow its instructions:` + "\n" +
+const pluginBlockFormat = `The user invoked %s (the "%s" %s %s, %s). Follow its instructions:` + "\n" +
 	`<%s name="%s" plugin="%s" args="%s">` + "\n%s\n" + `</%s>`
 
-// pluginBlock is one expansion as it goes on the wire.
+// pluginSourcePhrase is the fourth field of that sentence: where the content
+// came from, in words. Every entry a provider's own scan found belongs to a
+// plugin, so this is the whole of it for cursor; native has two sources that
+// are not plugins at all and phrases those itself (nativeSourcePhrase). The
+// phrase is the caller's rather than a switch on the id here, because an id
+// means different things to different providers — a cursor plugin really
+// called "project" is a plugin, where native's "project" never is.
+func pluginSourcePhrase(plugin string) string {
+	return `from the "` + plugin + `" plugin`
+}
+
+// pluginBlock is one expansion as it goes on the wire, for a provider whose
+// content craze scanned out of plugin roots.
 func pluginBlock(ref pluginRef) string {
 	e := ref.target.entry
 	// A skill is attached as it stands and a command spends its arguments;
@@ -434,6 +473,16 @@ func pluginBlock(ref pluginRef) string {
 	} else {
 		body = expandCommandBody(e.Body, e.Root, ref.args)
 	}
+	return pluginBlockOf(ref, kind, pluginSourcePhrase(sanitizeLine(e.Plugin)), body)
+}
+
+// pluginBlockOf is the block itself, once the caller has expanded the body its
+// provider's rules call for and said where it came from. Everything that makes
+// the bytes safe — the escaped closing tag, the ceiling, the folded attributes
+// — lives here and not in either caller, so a second provider's expansion
+// cannot arrive at a differently-escaped block.
+func pluginBlockOf(ref pluginRef, kind, source, body string) string {
+	e := ref.target.entry
 	// Capped last: escaping can only grow a body, and a ceiling something is
 	// applied after is not a ceiling.
 	body = capPluginBody(escapeClosingTag(body, kind))
@@ -445,7 +494,7 @@ func pluginBlock(ref pluginRef) string {
 		invoked += " " + args
 	}
 	return fmt.Sprintf(pluginBlockFormat,
-		invoked, name, kind, plugin, sanitizeLine(e.Path),
+		invoked, name, kind, source, sanitizeLine(e.Path),
 		kind, escapeAttr(name), escapeAttr(plugin), escapeAttr(args),
 		strings.TrimRight(body, "\n"), kind)
 }

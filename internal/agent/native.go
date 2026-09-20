@@ -102,7 +102,15 @@ type nativeSession struct {
 	// efforts are the effort levels each alias offers, from the harness's
 	// model list at Start; the effort option is rebuilt from them whenever
 	// the current model or effort changes.
-	efforts     map[string][]string
+	efforts map[string][]string
+	// plugins is every content entry the scan at Start found, hidden ones
+	// included, and snap.Plugins is the resolved row for each one that is not
+	// hidden (§3.2). Both are set once, in Start, and never change: native
+	// advertises no catalog of its own, so there is nothing that could rename
+	// a row mid-session. Keeping the entries is what makes the expansion
+	// possible at all — a row carries a name and a description, the body is
+	// here.
+	plugins     []PluginEntry
 	snap        Snapshot
 	titlePinned bool
 	claimed     bool
@@ -180,8 +188,12 @@ func (s *nativeSession) start(context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	hs, table, err := s.open()
+	hs, table, ws, err := s.open()
 	if err != nil {
+		// Nothing has been assigned yet — the scan below runs only once Open
+		// has succeeded — so a session whose harness would not open has no
+		// plugins either, and the menu of the next attempt is built from
+		// scratch.
 		s.mu.Lock()
 		s.started = false
 		s.mu.Unlock()
@@ -194,6 +206,21 @@ func (s *nativeSession) start(context.Context) error {
 		efforts[m.Alias] = m.Efforts
 		infos = append(infos, ModelInfo{ID: m.Alias, Name: sanitizeLine(m.Name)})
 	}
+	// Discovery is filesystem work — three sources, hundreds of files — and it
+	// runs out here for the reason the tables above do: s.mu is the lock a
+	// consumer's Snapshot takes, and holding it across a walk of the owner's
+	// whole .claude tree would stall every frame of the first second.
+	//
+	// ws is the workspace the harness itself opened on, not a second
+	// os.Getwd(): a session whose content came from one directory and whose
+	// tools ran in another would be a bug nobody could see.
+	entries := discoverNative(resolveNativeSources(ws, s.contentHome()), s.contentWarn())
+	// Naming runs over every entry, hidden ones included, so a visible row's
+	// spelling never depends on what is hidden; taken is nil because native
+	// advertises no commands of its own (ResolvePluginNames adds craze's
+	// builtins itself), and provisional is false because there is no catalog
+	// still to arrive that could rename a row — and therefore no catalog wait.
+	rows := visibleNativeRows(entries, ResolvePluginNames(entries, nil, false))
 
 	s.mu.Lock()
 	if s.closed {
@@ -206,6 +233,8 @@ func (s *nativeSession) start(context.Context) error {
 	s.hs = hs
 	s.table = table
 	s.efforts = efforts
+	s.plugins = entries
+	s.snap.Plugins = rows
 	s.snap.Models = infos
 	s.snap.SessionID = hs.ID()
 	s.refreshCurrentLocked()
@@ -216,30 +245,101 @@ func (s *nativeSession) start(context.Context) error {
 	return nil
 }
 
+// contentHome is the home directory this session reads the user's own Claude
+// content under: Options.ContentHome, else the process's. The option is the
+// whole of the seam — a loader that reached for HomeDir() itself would make a
+// test's isolation a matter of which file it happened to touch.
+func (s *nativeSession) contentHome() string {
+	if home := strings.TrimSpace(s.opts.ContentHome); home != "" {
+		return home
+	}
+	return HomeDir()
+}
+
+// contentWarn is where discovery's diagnostics go: Diag, falling back to
+// Stderr, exactly as the live session's plugin scan resolves it
+// (live.go's discoverPlugins). Every line it writes is craze's own — a file
+// whose name craze could never offer, a plugin id that is reserved — and none
+// is an agent's, so none belongs on the stderr lane a TUI defers (§3.7.1).
+//
+// It is also where native says what it does not honour. --plugin-dir is
+// cursor-agent's flag by another route and native reads no directory but the
+// three of §3.2, so a session handed one must say so rather than start with a
+// menu quietly missing what the user asked for (A14).
+func (s *nativeSession) contentWarn() func(string) {
+	diag := s.opts.Diag
+	if diag == nil {
+		diag = s.opts.Stderr
+	}
+	warn := func(msg string) {
+		if diag == nil {
+			return
+		}
+		fmt.Fprintln(diag, msg)
+	}
+	if len(s.opts.PluginDirs) > 0 {
+		warn("plugin dirs ignored for " + NativeProvider().Name())
+	}
+	return warn
+}
+
+// visibleNativeRows is the menu's projection of one resolved list: every row
+// but the hidden ones (§3.2). The entries behind them are kept whole — naming
+// ran over all of them, and C6's model-facing catalog lists the hidden ones —
+// so this is a filter over the rows and never over the entries.
+//
+// Because the expansion lookup is built from these rows, a hidden entry is not
+// expandable either: user-invocable: false says the user does not invoke it,
+// and a name the menu never offered that expanded anyway would be exactly the
+// surprise that setting exists to prevent.
+func visibleNativeRows(entries []PluginEntry, rows []PluginCommand) []PluginCommand {
+	hidden := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Hidden {
+			hidden[strings.ToLower(e.Plugin+":"+e.Name)] = true
+		}
+	}
+	if len(hidden) == 0 {
+		return rows
+	}
+	out := make([]PluginCommand, 0, len(rows))
+	for _, r := range rows {
+		if !hidden[strings.ToLower(r.Qualified)] {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // open resolves everything Start needs and opens the harness, returning it
-// with the model table it was opened on. Its errors are already phrased for
-// the user.
+// with the model table it was opened on and the workspace it opened on — the
+// third is returned rather than worked out again because nativeWorkspace falls
+// back to os.Getwd(), and a second call could answer differently. Its errors
+// are already phrased for the user.
 //
 // The directory is paths.NativeDir(), and the table is loaded from it after
 // tweak has run, so a test's tweak can point Home somewhere else or hand in a
 // Table outright — the frame runner isolates HOME, so a golden cannot count
 // on files under it.
-func (s *nativeSession) open() (*harness.Session, *modeltable.Table, error) {
+func (s *nativeSession) open() (*harness.Session, *modeltable.Table, string, error) {
 	if s.opts.LoadSessionID != "" {
 		// Native sessions are never indexed (plan 018 §3.4), so no row can
 		// ask for one; a hand-edited index row is refused, not silently
 		// started fresh.
-		return nil, nil, errors.New("agent: native does not support session/load yet")
+		return nil, nil, "", errors.New("agent: native does not support session/load yet")
 	}
 	if s.opts.Mode != "" {
 		// The CLI refuses --ask/--plan with an in-process provider as a usage
 		// error; this is the same refusal for any other caller, because
 		// silently ignoring a requested plan mode would be worse than failing.
-		return nil, nil, fmt.Errorf("native: mode %q is not supported: the native harness has no modes yet", s.opts.Mode)
+		return nil, nil, "", fmt.Errorf("native: mode %q is not supported: the native harness has no modes yet", s.opts.Mode)
 	}
 	ws, err := nativeWorkspace(s.opts.Workspace)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	hopts := harness.Options{
 		Home:      paths.NativeDir(),
@@ -250,15 +350,15 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, error) {
 		s.tweak(&hopts)
 	}
 	if hopts.Home == "" {
-		return nil, nil, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
+		return nil, nil, "", errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
 	}
 	if hopts.Table == nil {
 		table, err := modeltable.Load(hopts.Home)
 		if errors.Is(err, modeltable.ErrNotConfigured) {
-			return nil, nil, errNoModels
+			return nil, nil, "", errNoModels
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("native: %w", err)
+			return nil, nil, "", fmt.Errorf("native: %w", err)
 		}
 		hopts.Table = table
 	}
@@ -274,22 +374,22 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, error) {
 		// model's display name, still finds it.
 		alias, err := MatchModel(Snapshot{Models: tableModels(table)}, s.opts.Model)
 		if err != nil {
-			return nil, nil, fmt.Errorf("native: %v (models.toml has %s)", err, strings.Join(table.Aliases(), ", "))
+			return nil, nil, "", fmt.Errorf("native: %v (models.toml has %s)", err, strings.Join(table.Aliases(), ", "))
 		}
 		hopts.Model = alias
 	case hopts.Model == "":
 		alias, err := s.fundedModel(table, hopts.Getenv)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		hopts.Model = alias
 	}
 
 	hs, err := harness.Open(hopts)
 	if err != nil {
-		return nil, nil, phraseSetupError(err, table, hopts.Model)
+		return nil, nil, "", phraseSetupError(err, table, hopts.Model)
 	}
-	return hs, table, nil
+	return hs, table, hopts.Workspace, nil
 }
 
 // fundedModel is the model a session with no --model starts on: the table's
@@ -481,11 +581,36 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	s.doneEmitted = false
 	s.turnCancel = cancel
 	if !s.titlePinned && s.snap.Title == "" {
+		// The typed text, not the expansion: a session called after the whole
+		// of a command file would say nothing about what the user asked for.
+		// The journal's prompt note (Begin) keeps the typed text for the same
+		// reason; only the store records what was actually sent.
 		s.snap.Title = nativeTitle(text)
 	}
+	// The references are resolved in the same locked section as the rest of
+	// the turn's state, as the live session resolves its own: the rows and the
+	// entries they were resolved from have to be read together, or a prompt
+	// could expand a body under a name the menu means something else by.
+	refs := s.refsLocked(text)
+	sessionID := s.snap.SessionID
 	s.mu.Unlock()
 
-	res, err := hs.Run(turnCtx, text, s.sink)
+	// One string, not content blocks: the harness takes the whole user message
+	// at once (turn.go). Redacted with the session's own redactor, because Run
+	// persists and sends it unchanged.
+	sent, expanded := nativePrompt(text, refs, sessionID, hs.Redact)
+	for i := range expanded {
+		// Its own copy, not a pointer into the slice: the event outlives this
+		// loop. A publish abandoned on the turn's cancelled context stops the
+		// announcements and nothing else — the turn below still runs, returns
+		// StopCancelled at once and emits the one ending it owes.
+		cmd := expanded[i]
+		if !s.emitCtx(turnCtx, Event{Type: EventCommand, Command: &cmd}) {
+			break
+		}
+	}
+
+	res, err := hs.Run(turnCtx, sent, s.sink)
 	if errors.Is(err, harness.ErrInTurn) {
 		// Unreachable: the claim admits one continuation at a time and each
 		// Run returns before its claim is released. Said as the refusal it
@@ -519,6 +644,16 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// refsLocked is what a draft invokes, resolved against this session's own
+// content. s.mu must be held: the rows and the entries behind them are one
+// fact read twice, and the menu the user typed from is built from the same
+// rows. Native's scan, not cursor's — a reference counts only at the start of
+// a line (§3.3) — and the lookup is built from the visible rows, so a hidden
+// entry is unreachable by name as well as unlisted.
+func (s *nativeSession) refsLocked(text string) []pluginRef {
+	return nativeRefs(text, buildPluginLookup(s.plugins, s.snap.Plugins))
 }
 
 // markDone closes the turn to interjections just before its ending event goes
@@ -855,6 +990,11 @@ func (s *nativeSession) Snapshot() Snapshot {
 	out.Tools = s.toolRows()
 	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
+	// Cloned as the live session clones it (live.go): the menu reads the rows
+	// off a snapshot and the expansion lookup is built from the session's own
+	// copy, so handing out the backing array would let a consumer that sorted
+	// or filtered its rows change what a typed name resolves to.
+	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
 	out.Config = cloneConfig(s.snap.Config)
 	return out
 }
@@ -908,6 +1048,10 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 		// never a misroute, and the caller keeps its text.
 		turn = hs.SteerToken()
 	}
+	// Resolved under the same lock as the liveness above, for prompt()'s
+	// reason: the rows and their entries are one fact.
+	refs := s.refsLocked(text)
+	sessionID := s.snap.SessionID
 	s.mu.Unlock()
 	switch {
 	case !supported:
@@ -919,7 +1063,15 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 	case !live:
 		return ErrNotInTurn
 	}
-	switch err := hs.Steer(turn, text); {
+	// An interjection expands by the same rules a prompt does, so the same
+	// text does not mean two different things depending on whether the turn
+	// happened to be running when it was sent: a refused interjection comes
+	// back to the caller and is queued, and a queued row is drained through
+	// Begin, which expands it. Nothing is published for it — the steer's own
+	// EventUser comes from the turn's goroutine through the sink, which is the
+	// only ordering that keeps it ahead of the turn's ending event.
+	sent, _ := nativePrompt(text, refs, sessionID, hs.Redact)
+	switch err := hs.Steer(turn, sent); {
 	case err == nil:
 		return nil
 	case errors.Is(err, harness.ErrNotInTurn):
@@ -962,6 +1114,36 @@ func (s *nativeSession) emit(ev Event) {
 	default:
 	}
 	s.log.Publish(context.Background(), s.done, ev)
+}
+
+// emitCtx is emit under a caller's context, and it publishes exactly one kind
+// of event: the EventCommand a prompt's expansion produces, before the turn
+// has been handed to the harness. That event goes out while the turn's cancel
+// func is already registered, so a consumer that has stopped draining would
+// otherwise hold a prompt the user cancelled with Esc — where every other
+// event of a turn can only hold back the turn. The live session publishes its
+// own EventCommand for the same reason (live.go).
+//
+// It is never a terminal event's path. EventDone and EventError stay on emit,
+// because a session flushes its log's outbox before publishing one and a
+// terminal event that could be abandoned on a cancelled context would leave
+// that barrier with nothing to stand on.
+//
+// It reports whether the event reached the primary's buffer. A false answer is
+// not a reason to stop the turn: the caller runs it anyway, and a cancelled
+// context makes the harness return StopCancelled at once, which is the one
+// ending the prompt then emits.
+func (s *nativeSession) emitCtx(ctx context.Context, ev Event) bool {
+	if ev.At.IsZero() {
+		ev.At = time.Now()
+	}
+	select {
+	case <-s.done:
+		s.log.Abandoned()
+		return false
+	default:
+	}
+	return s.log.Publish(ctx, s.done, ev)
 }
 
 // emitLossy is emit for an event whose whole point is to be current: it

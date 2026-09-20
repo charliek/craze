@@ -392,6 +392,36 @@ func runWith(t *testing.T, s *Session, text string, sink func(Event)) {
 	}
 }
 
+// TestSessionRedactIsTheCallersGuard (plan 022 §3.3): Run persists and sends
+// the text it is given exactly as given — the right rule for a prompt a
+// person typed, and the wrong one for text an adapter assembled out of files
+// on disk. Session.Redact is what such a caller runs it through first.
+//
+// The control is the same turn without it: the key really does reach the
+// transcript, so the redaction below is doing something.
+func TestSessionRedactIsTheCallersGuard(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s := f.open(f.options())
+
+	if got := s.Redact("export KEY=" + canary + " # done"); strings.Contains(got, canary) {
+		t.Fatalf("Redact left the key in %q", got)
+	}
+	if got := s.Redact("nothing secret here"); got != "nothing secret here" {
+		t.Fatalf("Redact changed text holding no key: %q", got)
+	}
+
+	f.models["test/a"].push(answerWith("one"), answerWith("two"))
+	runWith(t, s, "export KEY="+canary, nil)
+	if lines := entries(transcript(t, s)); !strings.Contains(strings.Join(lines, "\n"), canary) {
+		t.Fatalf("control: Run redacted the caller's prompt after all:\n%s", strings.Join(lines, "\n"))
+	}
+	runWith(t, s, s.Redact("export KEY="+canary), nil)
+	lines := entries(transcript(t, s))
+	if strings.Count(strings.Join(lines, "\n"), canary) != 1 {
+		t.Fatalf("the redacted prompt put the key in the transcript too:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 // TestStoreErrorsAreRedacted (round-2 review): a store error names the file
 // it could not write, under the home craze was configured with, and that
 // error is what Run and Close return to the adapter, which puts it on the

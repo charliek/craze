@@ -105,10 +105,21 @@ func (f *nativeFixture) tweak(o *harness.Options) {
 }
 
 // session builds an unstarted adapter, closed when the test ends.
+//
+// ContentHome is filled here and not at each call site because from plan 022
+// C3 a native Start reads the user's own Claude content under it: left empty
+// it is HomeDir(), so every case in this package would discover whatever the
+// developer running the tests happens to have installed, and the same suite
+// would give different answers on two machines. A case that wants content
+// gives itself a home with something in it; every other case gets an empty
+// one, which is the same answer everywhere.
 func (f *nativeFixture) session(opts Options) *nativeSession {
 	f.t.Helper()
 	if opts.Workspace == "" {
 		opts.Workspace = f.t.TempDir()
+	}
+	if opts.ContentHome == "" {
+		opts.ContentHome = f.t.TempDir()
 	}
 	s := newNative(opts, f.tweak)
 	closeAtCleanup(f.t, s)
