@@ -154,6 +154,12 @@ func (s *nativeSession) Subscribe(o SubscribeOptions) (*Subscription, error) {
 }
 func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
 
+// EventLog is the session's LogOwner and Now its Clocked (plan 021 §3.3, §3.9),
+// exactly as on the live session: one log and one clock per session, whoever
+// publishes into it.
+func (s *nativeSession) EventLog() *EventLog { return s.log }
+func (s *nativeSession) Now() time.Time      { return time.Now() }
+
 // Start loads the model table, opens the harness on the requested model (or
 // the table's default) and publishes the first snapshot. It does no network
 // I/O: the first request goes out with the first prompt.
@@ -1184,4 +1190,6 @@ func noKeyText(table *modeltable.Table, alias string) string {
 var (
 	_ Session     = (*nativeSession)(nil)
 	_ EventSource = (*nativeSession)(nil)
+	_ LogOwner    = (*nativeSession)(nil)
+	_ Clocked     = (*nativeSession)(nil)
 )

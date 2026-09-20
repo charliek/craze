@@ -424,6 +424,13 @@ type Options struct {
 	// session's title can come from.
 	Title       string
 	TitlePinned bool
+	// NoPrimary builds the session's event log with no primary send
+	// (EventLogOptions.NoPrimary): nothing is ever put on Events(), so no
+	// publisher — the read loop, a handler, the log's own outbox — can be held
+	// by a reader that is not there. A caller that sets it reads the session
+	// through a subscription instead. S1b uses it in tests; from S4 on a
+	// detached host is its user (SD-33).
+	NoPrimary bool
 	// JournalDir is the session journal's directory (plan 020 §3.4), which
 	// the CLI resolves once per run (paths.JournalDir, less the opt-outs).
 	// "" means no journal, and is what every caller that does not ask for
@@ -484,4 +491,18 @@ type Session interface {
 	SetTitle(title string)
 	Snapshot() Snapshot
 	Close() error
+}
+
+// Clocked is a session that will say what time it is. It exists so that a
+// component above the seam stamps Event.At from the *session's* clock rather
+// than from one of its own (plan 021 §3.9): the Stub's clock is injected by the
+// tests that pin craze's frames, so an engine reading time.Now directly would
+// make a golden depend on the wall clock. The live and native sessions answer
+// with time.Now, the one source their own emits stamp from, so there is exactly
+// one clock per session either way.
+//
+// Like LogOwner and EventSource it is optional and found by a type assertion; a
+// session without it is read as time.Now.
+type Clocked interface {
+	Now() time.Time
 }

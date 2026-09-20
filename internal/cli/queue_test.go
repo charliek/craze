@@ -337,16 +337,13 @@ type stubTurn struct {
 	err  error
 }
 
-// logOwner is agent.LogOwner spelled ahead of time: the accessor the engine
-// that takes this driver over will refuse a session without (plan 021 §3.3).
-// Naming it here is what keeps the stub honest about publishing through a log
-// instead of a channel of its own.
-type logOwner interface{ EventLog() *agent.EventLog }
-
+// agent.LogOwner is the accessor the engine that takes this driver over refuses
+// a session without (plan 021 §3.3). Asserting it here is what keeps the stub
+// honest about publishing through a log instead of a channel of its own.
 var (
 	_ agent.Session     = (*stubSession)(nil)
 	_ agent.EventSource = (*stubSession)(nil)
-	_ logOwner          = (*stubSession)(nil)
+	_ agent.LogOwner    = (*stubSession)(nil)
 )
 
 // newStubSession builds a stub with its own event log. The log's goroutines

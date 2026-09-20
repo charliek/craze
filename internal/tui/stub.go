@@ -44,8 +44,16 @@ type Stub struct {
 	open  []stubOpen
 	calls []stubCall
 	// Clock stamps Event.At; tests inject one to drive lingers and elapsed
-	// times without sleeping.
+	// times without sleeping. It is also what the Stub answers agent.Clocked
+	// with, so a component above the seam that stamps its own events reads this
+	// clock and not the wall one (plan 021 §3.9).
 	Clock func() time.Time
+	// NoPrimary reports that this Stub's log was built with
+	// agent.EventLogOptions.NoPrimary — NewStubNoPrimary — so nothing is ever
+	// put on Events() and no publisher can be held by a reader that is not
+	// there. It is fixed at construction, because that is where the log is
+	// built; assigning it afterwards changes nothing.
+	NoPrimary bool
 
 	// Replay is the transcript Start hands back before the session is up, as
 	// a loaded session's replay does. Start emits agent.EventReplay{start},
@@ -97,10 +105,21 @@ type stubCall struct {
 	Cancelled bool
 }
 
-func NewStub() *Stub {
+// NewStub is the Stub every test and the TUI's own fallback session use.
+func NewStub() *Stub { return newStub(false) }
+
+// NewStubNoPrimary is NewStub with an event log that has no primary send
+// (agent.EventLogOptions.NoPrimary): nothing is ever put on Events(), so a test
+// can drive a session nobody reads without a publisher ever blocking. It is a
+// constructor rather than a field on the Stub because the log is built here, and
+// what a caller passes after construction would be read too late.
+func NewStubNoPrimary() *Stub { return newStub(true) }
+
+func newStub(noPrimary bool) *Stub {
 	return &Stub{
 		failConfigAt: -1,
-		log:          agent.NewEventLog(agent.EventLogOptions{}),
+		NoPrimary:    noPrimary,
+		log:          agent.NewEventLog(agent.EventLogOptions{NoPrimary: noPrimary}),
 		closed:       make(chan struct{}),
 		cancel:       make(chan struct{}, 1),
 		snap: agent.Snapshot{
@@ -311,6 +330,16 @@ func (s *Stub) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error) 
 	return s.log.Subscribe(o)
 }
 func (s *Stub) Incarnation() string { return s.log.Incarnation() }
+
+// EventLog is the Stub's agent.LogOwner (plan 021 §3.3): the log a component
+// above the seam publishes into, the same one the Stub's own emit uses, so a
+// test sees one sequence whoever produced an event.
+func (s *Stub) EventLog() *agent.EventLog { return s.log }
+
+// Now is the Stub's agent.Clocked (plan 021 §3.9): the injected Clock, falling
+// back to time.Now exactly as emit does, so a component that stamps its own
+// events stamps them from the clock the test set and the goldens stay put.
+func (s *Stub) Now() time.Time { return s.now() }
 
 // Prompt is Begin and its continuation back to back, as on the live session.
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
@@ -686,4 +715,6 @@ func (s *Stub) emit(ev agent.Event) {
 var (
 	_ agent.Session     = (*Stub)(nil)
 	_ agent.EventSource = (*Stub)(nil)
+	_ agent.LogOwner    = (*Stub)(nil)
+	_ agent.Clocked     = (*Stub)(nil)
 )

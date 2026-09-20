@@ -297,7 +297,20 @@ func (s *session) Events() <-chan Event {
 func (s *session) Subscribe(o SubscribeOptions) (*Subscription, error) { return s.log.Subscribe(o) }
 func (s *session) Incarnation() string                                 { return s.log.Incarnation() }
 
-var _ EventSource = (*session)(nil)
+// EventLog is the session's LogOwner (plan 021 §3.3): the log a component above
+// the seam publishes into, so that what it records lands in this session's one
+// sequence, ahead of or behind the session's own events by nothing but order.
+func (s *session) EventLog() *EventLog { return s.log }
+
+// Now is the session's Clocked (plan 021 §3.9): the clock emitCtx stamps At
+// from, so a caller above the seam stamps from the same one.
+func (s *session) Now() time.Time { return time.Now() }
+
+var (
+	_ EventSource = (*session)(nil)
+	_ LogOwner    = (*session)(nil)
+	_ Clocked     = (*session)(nil)
+)
 
 // Start spawns the agent and sets the session up. Its body is start; what is
 // here is the journal's half (plan 020 §3.5): a failure is noted before the
