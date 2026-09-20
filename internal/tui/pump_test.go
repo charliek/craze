@@ -87,21 +87,34 @@ type pump struct {
 	dead chan struct{}
 	wg   sync.WaitGroup
 
-	// stateMu guards the two counters pumpSettled reads. It is a leaf: nothing
-	// is held across it.
+	// stateMu guards what pumpSettled reads and the received hook. It is a leaf:
+	// nothing is held across it.
 	stateMu sync.Mutex
 	// outstanding is how many dispatched commands have not been fully accounted
 	// for: a command is outstanding from the moment it is dispatched until the
 	// message it produced has been through Update (or until it turns out to
 	// produce none, or to be a batch, whose members take over the count).
 	outstanding int
-	// reading is set while the event reader is holding an event it has taken
-	// off the stream and not yet queued.
-	reading bool
+	// afterReceive is a hook the reader calls in the window between taking an
+	// event off the stream and queueing it. Only the pump's own tests set it, to
+	// pin the reader in exactly that window.
+	afterReceive func()
 	// quietened is a one-slot wake-up: a goroutine that resolved the last
 	// outstanding command signals it, so pumpSettled can block instead of
 	// polling. One slot is enough — it is a "look again", not a queue.
 	quietened chan struct{}
+
+	// parked and resume are the rendezvous with the reader. The reader offers
+	// parked only from the top of its loop, where it holds no event — whatever
+	// it received last is already in msgs — and then waits on resume. Both are
+	// unbuffered, so taking the offer *is* the proof: pumpSettled cannot inspect
+	// the pump while an event is in the reader's hands, which no flag set after
+	// the receive could promise, because the receive and the flag are two steps.
+	// readerGone is closed when the reader has ended, so a rendezvous nobody can
+	// keep is not waited for.
+	parked     chan struct{}
+	resume     chan struct{}
+	readerGone chan struct{}
 }
 
 // pumps is one pump per test. The helpers take the model by value — it is a
@@ -126,10 +139,13 @@ func pumpFor(t *testing.T, m Model) *pump {
 		return p
 	}
 	p := &pump{
-		sess:      m.sess,
-		msgs:      make(chan pumpItem, 256),
-		dead:      make(chan struct{}),
-		quietened: make(chan struct{}, 1),
+		sess:       m.sess,
+		msgs:       make(chan pumpItem, 256),
+		dead:       make(chan struct{}),
+		quietened:  make(chan struct{}, 1),
+		parked:     make(chan struct{}),
+		resume:     make(chan struct{}),
+		readerGone: make(chan struct{}),
 	}
 	pumps[t] = p
 	pumpsMu.Unlock()
@@ -139,6 +155,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
+		defer close(p.readerGone)
 		p.read()
 	}()
 	t.Cleanup(func() {
@@ -162,6 +179,12 @@ func pumpFor(t *testing.T, m Model) *pump {
 
 // read is the single consumer of the session's event stream, which is why the
 // model's own waitEvent is skipped (pumpSkips).
+//
+// The top of the loop is the one place the reader holds nothing: whatever it
+// received last is in msgs by then. That is where it offers the rendezvous, and
+// it stays there until it is resumed — which is what lets pumpSettled inspect
+// the pump and know that an event is either still on the stream or already
+// queued, with nowhere else to be.
 func (p *pump) read() {
 	ch := p.sess.Events()
 	for {
@@ -170,16 +193,37 @@ func (p *pump) read() {
 			if !ok {
 				return
 			}
-			p.setReading(true)
-			delivered := p.deliver(pumpItem{msg: eventMsg{ev}})
-			p.setReading(false)
-			if !delivered {
+			if h := p.receivedHook(); h != nil {
+				h()
+			}
+			if !p.deliver(pumpItem{msg: eventMsg{ev}}) {
+				return
+			}
+		case p.parked <- struct{}{}:
+			select {
+			case <-p.resume:
+			case <-p.dead:
 				return
 			}
 		case <-p.dead:
 			return
 		}
 	}
+}
+
+// receivedHook is the pump's own tests' way into the window between taking an
+// event off the stream and queueing it. It is read under the lock because the
+// reader is already running when a test sets it.
+func (p *pump) receivedHook() func() {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return p.afterReceive
+}
+
+func (p *pump) setReceivedHook(h func()) {
+	p.stateMu.Lock()
+	p.afterReceive = h
+	p.stateMu.Unlock()
 }
 
 // deliver queues a message for Update, or reports that the test is over.
@@ -246,36 +290,41 @@ func (p *pump) resolved() {
 	}
 }
 
-func (p *pump) setReading(v bool) {
-	p.stateMu.Lock()
-	p.reading = v
-	p.stateMu.Unlock()
-	if !v {
-		select {
-		case p.quietened <- struct{}{}:
-		default:
-		}
-	}
-}
-
 // quiet reports that there is nothing left for the pump to do: no dispatched
-// command is owed an Update, nothing is queued, the session has published
-// nothing the reader has not passed on, and the reader is not holding an event.
+// command is owed an Update, nothing is queued and the session has published
+// nothing the reader has not passed on.
+//
+// It is only sound with the reader parked, which is why only pumpSettled calls
+// it, and only from inside the rendezvous. With the reader stopped at the top of
+// its loop there are exactly two places an event can be — still on the session's
+// stream, or already in msgs — and both are counted here. Everything that could
+// publish an event is likewise accounted for: a command's goroutine is
+// outstanding until its message has been applied, and the only other publisher
+// is the test's own goroutine, which is inside pumpSettled.
 func (p *pump) quiet() bool {
 	if len(p.msgs) != 0 || len(p.sess.Events()) != 0 {
 		return false
 	}
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
-	return p.outstanding == 0 && !p.reading
+	return p.outstanding == 0
+}
+
+// resumeReader lets a parked reader go on. The reader is waiting for it, unless
+// cleanup has already told it to stop.
+func (p *pump) resumeReader() {
+	select {
+	case p.resume <- struct{}{}:
+	case <-p.dead:
+	}
 }
 
 // pending is the quiet() terms as text, for the watchdog's message.
 func (p *pump) pending() string {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
-	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d reader holding=%v",
-		p.outstanding, len(p.msgs), len(p.sess.Events()), p.reading)
+	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d",
+		p.outstanding, len(p.msgs), len(p.sess.Events()))
 }
 
 // pumpSkips names the two commands the pump must not run, and why.
@@ -361,8 +410,13 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 // old turn's completion — so a regression in which it lands on the new turn
 // would pass.
 //
-// It is a real barrier, not a poll: the counter is signalled by the goroutines
-// that resolve a command and by the apply step below.
+// It is a real barrier, not a poll. Two things make it one. The counters are
+// signalled by the goroutines that resolve a command and by the apply step
+// below; and the state is only ever inspected with the event reader stopped at
+// a point where it holds nothing, so an event cannot be in flight in a place
+// the inspection does not look. A flag the reader set after its receive could
+// not promise that: the receive and the flag are two steps, and an event taken
+// off the stream between them is in neither channel.
 //
 // A turn held open has its prompt command outstanding on purpose, so this is
 // something a test calls where "the turn is over" is the claim, never while a
@@ -379,14 +433,34 @@ func pumpSettled(t *testing.T, m Model) Model {
 	timeout := deadline()
 	for {
 		// Anything already queued is applied first: it may be the very message
-		// the last outstanding command is waiting to have accounted for.
-		select {
-		case item := <-p.msgs:
-			m = p.apply(m, item)
-			continue
-		default:
+		// the last outstanding command is waiting to have accounted for, and it
+		// is what frees a reader — or a command — blocked on a full queue, which
+		// is how the rendezvous below is always reachable.
+		m = p.drain(m)
+
+		parked := false
+	rendezvous:
+		for {
+			select {
+			case <-p.parked:
+				parked = true
+				break rendezvous
+			case <-p.readerGone:
+				// There is no reader to stop, so there is no reader holding
+				// anything either.
+				break rendezvous
+			case item := <-p.msgs:
+				m = p.apply(m, item)
+			case <-timeout:
+				t.Fatalf("pumpSettled: the event reader never came to a stop in %s (%s)\n%s",
+					pumpWatchdog, p.pending(), plainView(m))
+			}
 		}
-		if p.quiet() {
+		quiet := p.quiet()
+		if parked {
+			p.resumeReader()
+		}
+		if quiet {
 			return m
 		}
 		select {
@@ -397,6 +471,18 @@ func pumpSettled(t *testing.T, m Model) Model {
 			t.Fatalf("pumpSettled: the pump was still busy after %s (%s)\n"+
 				"a turn held open keeps its prompt command outstanding — release it first\n%s",
 				pumpWatchdog, p.pending(), plainView(m))
+		}
+	}
+}
+
+// drain applies everything already queued, without waiting for more.
+func (p *pump) drain(m Model) Model {
+	for {
+		select {
+		case item := <-p.msgs:
+			m = p.apply(m, item)
+		default:
+			return m
 		}
 	}
 }
@@ -667,5 +753,34 @@ func TestPumpSettledWaitsForACommandThatReportsLate(t *testing.T) {
 	m = pumpSettled(t, m)
 	if got := texts(m, entryError); len(got) != 1 || got[0] != "late" {
 		t.Fatalf("the late message was not applied: %q", got)
+	}
+}
+
+// TestPumpSettledWaitsForAnEventTheReaderHasInHand is the other half, and the
+// one a flag could not hold. The reader is pinned in the window between taking
+// an event off the stream and queueing it: the session's channel is empty, the
+// message queue is empty, and no command is outstanding — so every counter says
+// "quiet" while an event is on its way to the transcript. Only a rendezvous with
+// the reader itself can tell the difference, and this is the test that it does.
+func TestPumpSettledWaitsForAnEventTheReaderHasInHand(t *testing.T) {
+	m, sess := scriptedModel(t)
+	p := pumpFor(t, m)
+	pinned, released := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.setReceivedHook(func() {
+		once.Do(func() {
+			close(pinned)
+			<-released
+		})
+	})
+
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "IN HAND"})
+	awaitBarrier(t, pinned, "the reader taking the event off the stream")
+	// Freed at a moment this test does not control, so pumpSettled has to wait
+	// for the reader and then for the event it was holding.
+	go func() { close(released) }()
+	m = pumpSettled(t, m)
+	if !strings.Contains(plainView(m), "IN HAND") {
+		t.Fatalf("pumpSettled returned before the event the reader held was applied:\n%s", plainView(m))
 	}
 }
