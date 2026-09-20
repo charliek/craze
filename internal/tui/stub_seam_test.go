@@ -61,9 +61,13 @@ func TestStubOwnsItsLogAndItsClock(t *testing.T) {
 	if !ok {
 		t.Fatal("the Stub is not an agent.Clocked")
 	}
+	// Bracketed both ways: a fallback that answered a fixed date would pass a
+	// not-earlier-than check on its own.
 	before := time.Now()
-	if got := clocked.Now(); got.Before(before) {
-		t.Fatalf("Now with no Clock injected is %v, before %v: it is not the wall clock", got, before)
+	got := clocked.Now()
+	after := time.Now()
+	if got.Before(before) || got.After(after) {
+		t.Fatalf("Now with no Clock injected is %v, outside [%v, %v]: it is not the wall clock", got, before, after)
 	}
 	fixed := time.Date(2026, 9, 20, 9, 30, 0, 0, time.UTC)
 	s.Clock = func() time.Time { return fixed }

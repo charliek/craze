@@ -132,6 +132,20 @@ func awaitCount(t *testing.T, n *atomic.Int64, want int64, what string) {
 	}
 }
 
+// waitGroupWithin waits for wg, bounded by the watchdog. It reports rather than
+// fails, because it is called from inside a hook — off the test's own goroutine,
+// where a Fatalf would stop the wrong one.
+func waitGroupWithin(t *testing.T, wg *sync.WaitGroup, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(logWatchdog):
+		t.Errorf("%s: still running after %v", what, logWatchdog)
+	}
+}
+
 // batchTexts is one batch's texts, "p<producer>-b<batch>-<index>".
 func batchTexts(producer, batch, n int) []Event {
 	evs := make([]Event, n)
@@ -861,6 +875,131 @@ func TestEventLogObserverRunsOncePerCommittedEventInSeqOrder(t *testing.T) {
 	}
 }
 
+// TestEventLogAnObserverPanicLeavesTheLogUsable: a panic in the observer is a bug
+// in craze's own code and the log does not recover it — it reaches the publisher
+// — but it never leaves the log wedged. The boundary is released by a defer in
+// every scope that holds it, so a caller that recovers finds a log that still
+// publishes, still drains its outbox, and still closes. Without that defer the
+// next publisher, the drainer and Close would all wait on a boundary nobody would
+// ever give back.
+func TestEventLogAnObserverPanicLeavesTheLogUsable(t *testing.T) {
+	for _, path := range []string{"Publish", "TryPublish"} {
+		t.Run(path, func(t *testing.T) {
+			l, w := newJournaledLog(t, EventLogOptions{})
+			var ran atomic.Int64
+			if err := l.Observe(func(ev Event) {
+				ran.Add(1)
+				if ev.Text == "poison" {
+					panic("agent test: an observer that panics")
+				}
+			}); err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			func() {
+				defer func() {
+					if r := recover(); r == nil {
+						t.Fatal("the observer's panic did not reach the publisher: the log swallowed it")
+					}
+				}()
+				if path == "Publish" {
+					l.Publish(context.Background(), nil, textEvent("poison"))
+					return
+				}
+				l.TryPublish(textEvent("poison"))
+			}()
+
+			// The event that panicked was committed — the observer runs last of
+			// all — and everything after it works: a direct publish, the outbox,
+			// and Close.
+			publishWithin(t, l, textEvent("after"))
+			l.Enqueue(textEvent("enqueued"))
+			if err := flushNow(t, l); err != nil {
+				t.Fatalf("Flush after the observer panicked: %v", err)
+			}
+			closeLog(t, l, w)
+			recs := fileRecords(t, w)
+			assertRun(t, "the journal", recs, 1, 3)
+			if texts := recordTexts(t, recs); !equalStrings(texts, []string{"poison", "after", "enqueued"}) {
+				t.Fatalf("the journal holds %v, want the panicking event and the two after it", texts)
+			}
+			if n := ran.Load(); n != 3 {
+				t.Fatalf("the observer ran %d times, want once per committed event", n)
+			}
+			settleGoroutines(t, drainerFrame, 0)
+		})
+	}
+}
+
+// TestEventLogEnqueueNeverTouchesAnEventsErr: Enqueue's promise is that nothing
+// it does under the caller's state lock runs foreign code, and Err is the one
+// field whose encoding would. An event that arrives with Err set has it replaced
+// by an inert sentinel without a single method being called on it, counted in
+// Health and in the closing diag; the caller's own value keeps its error. After
+// Close the same event is a counted drop, and the cut is read before anything is
+// encoded, so the error is not touched then either.
+func TestEventLogEnqueueNeverTouchesAnEventsErr(t *testing.T) {
+	l, w := newJournaledLog(t, EventLogOptions{})
+	keepDrained(t, l)
+	var touched atomic.Int64
+	hostile := &hostileError{touched: &touched}
+	ev := Event{Type: EventError, Text: "the turn failed", At: logTestTime, Err: hostile}
+	within(t, "Enqueue with a hostile Err", func() { l.Enqueue(ev) })
+	if err := flushNow(t, l); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if n := touched.Load(); n != 0 {
+		t.Fatalf("the enqueued event's Err was used %d times: Enqueue ran the caller's code", n)
+	}
+	if ev.Err != error(hostile) {
+		t.Fatalf("Enqueue replaced the caller's own Err with %v", ev.Err)
+	}
+	if h := l.Health(); h.OutboxErrReplaced != 1 {
+		t.Fatalf("health is %+v, want one replaced Err", h)
+	}
+	flushThrough(t, w, 1)
+	recs := fileRecords(t, w)
+	assertRun(t, "the journal", recs, 1, 1)
+	got, err := recs[0].Event()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Err == nil || got.Err.Error() != errEnqueuedErr.Error() {
+		t.Fatalf("the recorded event's Err is %v, want the inert sentinel's message", got.Err)
+	}
+	if got.Text != ev.Text {
+		t.Fatalf("the recorded event's Text is %q, want %q: only Err is replaced", got.Text, ev.Text)
+	}
+
+	closeLog(t, l, w)
+	late := Event{Type: EventError, At: logTestTime, Err: &hostileError{touched: &touched}}
+	within(t, "Enqueue with a hostile Err after Close", func() { l.Enqueue(late) })
+	if n := touched.Load(); n != 0 {
+		t.Fatalf("a dropped event's Err was used %d times: the cut is read after the encoding", n)
+	}
+	if h := l.Health(); h.DroppedAtClose != 1 || h.OutboxErrReplaced != 1 {
+		t.Fatalf("health is %+v, want the late event counted as dropped and not as replaced", h)
+	}
+	closing := assertClosingIsLast(t, fileLines(t, w))
+	if closing["outboxErrReplaced"] != float64(1) {
+		t.Fatalf("the closing diag says %v, want outboxErrReplaced 1", closing)
+	}
+}
+
+// hostileError is the canary for Enqueue's callback-free promise: every method the
+// codec could reach on an Event.Err — Error, and the chain-walking Is, As and
+// Unwrap that classification uses — counts itself instead of doing anything, so a
+// single touch is visible. It stands for the real hazard: an Error method that
+// publishes, takes the caller's own lock, blocks or panics.
+type hostileError struct{ touched *atomic.Int64 }
+
+func (e *hostileError) Error() string {
+	e.touched.Add(1)
+	return "agent test: an error whose Error must never be called"
+}
+func (e *hostileError) Is(error) bool { e.touched.Add(1); return false }
+func (e *hostileError) As(any) bool   { e.touched.Add(1); return false }
+func (e *hostileError) Unwrap() error { e.touched.Add(1); return nil }
+
 // TestEventLogASecondObserveIsAnError: the observer is one per log. A nil one is
 // refused rather than read as "unset", a second is ErrObserverSet and does not
 // replace the first, and one offered to a closed log is ErrClosed.
@@ -892,15 +1031,22 @@ func TestEventLogASecondObserveIsAnError(t *testing.T) {
 // TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose is the outbox's
 // race test: direct publishes, lossy publishes, batches enqueued under a state
 // lock, Flushes, a reader that keeps the primary moving, and a Close in the
-// middle of all of it. What must hold: every producer's events reach the
-// sequence in that producer's own order, a subscription's records are one
-// gapless run with nothing duplicated or missing, the journal records the same
-// events in the same order as the ring, and no Flush ever answers anything but
-// nil or ErrLogClosing.
+// middle of all of it.
+//
+// The middle is made exact rather than hoped for. Every producer runs its first
+// phase freely, parks on a barrier, and runs its second phase only once Close has
+// begun — released from inside Close, which then waits for them all — so the
+// accepted set is exactly phase one and the refused set is exactly phase two, and
+// Close provably overlaps the whole of the second. That makes every assertion an
+// equality: every phase-one batch is committed **whole**, every phase-one publish
+// is committed, nothing from phase two is in the record, and droppedAtClose is
+// exactly phase two's events. A drainer that committed only a batch's first
+// member, or an accepted batch it forgot, fails here.
 func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
-	const publishers, publishEach = 3, 60
-	const enqueuers, enqueueEach, batch = 3, 20, 3
-	const lossy, lossyEach = 2, 40
+	const publishers, pubFirst, pubAfter = 3, 20, 10
+	const enqueuers, enqFirst, enqAfter, batch = 3, 8, 4, 3
+	const lossy, lossyFirst, lossyAfter = 2, 15, 10
+	const afterCut = publishers*pubAfter + enqueuers*enqAfter*batch + lossy*lossyAfter
 	l, w := newJournaledLog(t, EventLogOptions{})
 	sub := mustSubscribe(t, l, SubscribeOptions{MaxItems: 4096})
 	records, delivered := collectRecords(sub)
@@ -923,48 +1069,55 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 	// A state lock the enqueuers hold across their Enqueue, as the engine and
 	// the registry will: the outbox mutex is a leaf under it.
 	var state sync.Mutex
-	started := make(chan struct{}) // every producer has published something
-	var startOnce sync.Once
-	var startWG sync.WaitGroup
-	startWG.Add(publishers + enqueuers)
-	go func() { startWG.Wait(); startOnce.Do(func() { close(started) }) }()
-
-	var flushErrs sync.Map
-	var wg sync.WaitGroup
-	for p := range publishers {
+	var atBarrier, wg sync.WaitGroup
+	release := make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) }) // a failure must strand nobody
+	// Installed before anything publishes, as every hook must be: the drainer
+	// reads l.hooks from its own goroutine. Close runs this once it has joined the
+	// drainer — the cut is behind it, the outbox is committed — so the producers'
+	// second phase runs entirely inside Close and entirely after the cut.
+	l.hooks = &logHooks{outboxDrained: func() {
+		released.Do(func() { close(release) })
+		waitGroupWithin(t, &wg, "the producers' second phase, while Close ran")
+	}}
+	// producer runs first ops, parks until Close has begun, then runs after more.
+	producer := func(first, after int, op func(i int)) {
+		atBarrier.Add(1)
 		wg.Go(func() {
-			for i := range publishEach {
-				l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("pub%d-%d", p, i)))
-				if i == 0 {
-					startWG.Done()
-				}
+			for i := range first {
+				op(i)
 			}
+			atBarrier.Done()
+			<-release
+			for i := range after {
+				op(first + i)
+			}
+		})
+	}
+	for p := range publishers {
+		producer(pubFirst, pubAfter, func(i int) {
+			l.Publish(context.Background(), nil, textEvent(fmt.Sprintf("pub%d-%d", p, i)))
 		})
 	}
 	for e := range enqueuers {
-		wg.Go(func() {
-			for b := range enqueueEach {
-				func() {
-					state.Lock()
-					defer state.Unlock()
-					l.Enqueue(batchTexts(e, b, batch)...)
-				}()
-				if b == 0 {
-					startWG.Done()
-				}
-			}
+		producer(enqFirst, enqAfter, func(b int) {
+			state.Lock()
+			defer state.Unlock()
+			l.Enqueue(batchTexts(e, b, batch)...)
 		})
 	}
 	for k := range lossy {
-		wg.Go(func() {
-			for i := range lossyEach {
-				l.TryPublish(textEvent(fmt.Sprintf("try%d-%d", k, i)))
-			}
+		producer(lossyFirst, lossyAfter, func(i int) {
+			l.TryPublish(textEvent(fmt.Sprintf("try%d-%d", k, i)))
 		})
 	}
+	// The flushers are outside the barrier on purpose, so some of them are parked
+	// on a batch when Close begins and answer from the at-close commits.
+	var flushErrs sync.Map
 	for f := range 2 {
 		wg.Go(func() {
-			for range 10 {
+			for range 12 {
 				err := l.Flush(context.Background())
 				if err != nil && !errors.Is(err, ErrLogClosing) {
 					flushErrs.Store(f, err)
@@ -974,10 +1127,11 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 		})
 	}
 
-	// Close in the middle: some publishes are refused, some batches dropped,
-	// and whatever was accepted must still be recorded whole and in order.
-	await(t, started, "every producer to publish something")
-	l.Close(context.Background())
+	// Every producer is parked with its second phase still to run; the outbox
+	// holds whatever the drainer has not reached. Close now, and let them go from
+	// inside it.
+	waitDone(t, &atBarrier)
+	within(t, "Close with every producer still working", func() { l.Close(context.Background()) })
 	waitDone(t, &wg)
 	close(stop)
 	waitDone(t, &readers)
@@ -994,31 +1148,36 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 	assertRun(t, "the ring", ring, 1, -1)
 	byseq := map[uint64]string{}
 	lastIndex := map[string]int{}
-	batchAt := map[string]uint64{}
+	type span struct{ first, members uint64 }
+	batches := map[string]*span{}
 	lastBatch := map[int]int{}
 	for i, text := range recordTexts(t, ring) {
 		seq := ring[i].Seq
 		byseq[seq] = text
 		var e, b, n int
 		if _, err := fmt.Sscanf(text, "p%d-b%d-%d", &e, &b, &n); err == nil {
+			if b >= enqFirst {
+				t.Fatalf("enqueuer %d's batch %d reached seq %d: it was enqueued after the cut", e, b, seq)
+			}
 			// A batch stays whole and contiguous under every other producer.
 			key := fmt.Sprintf("p%d-b%d", e, b)
-			switch first, seen := batchAt[key]; {
-			case !seen:
+			got := batches[key]
+			if got == nil {
 				if n != 0 {
 					t.Fatalf("enqueuer %d's batch %d starts at its event %d", e, b, n)
 				}
-				batchAt[key] = seq
+				batches[key] = &span{first: seq, members: 1}
 				if prev, ok := lastBatch[e]; ok && b != prev+1 {
 					t.Fatalf("enqueuer %d's batch %d began after its batch %d", e, b, prev)
 				}
 				lastBatch[e] = b
-			default:
-				if want := first + uint64(n); seq != want {
-					t.Fatalf("enqueuer %d's batch %d has its event %d at seq %d, want %d: something landed inside the batch",
-						e, b, n, seq, want)
-				}
+				continue
 			}
+			if want := got.first + uint64(n); seq != want {
+				t.Fatalf("enqueuer %d's batch %d has its event %d at seq %d, want %d: something landed inside the batch",
+					e, b, n, seq, want)
+			}
+			got.members++
 			continue
 		}
 		who, n := text, -1
@@ -1033,18 +1192,51 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 		}
 		lastIndex[who] = n
 	}
-	// Every producer that was running when Close came contributed: its first
-	// event or batch was accepted before the cut, and an accepted one is
-	// committed.
-	for p := range publishers {
-		if _, ok := lastIndex[fmt.Sprintf("pub%d", p)]; !ok {
-			t.Fatalf("publisher %d reached the sequence not at all", p)
-		}
+
+	// Accepted == committed, exactly. Every batch enqueued before the cut is
+	// there with every one of its members; every direct publish before the cut is
+	// there; and nothing from after it is, so what the cut refused is precisely
+	// what droppedAtClose counts.
+	if len(batches) != enqueuers*enqFirst {
+		t.Fatalf("%d batches reached the sequence, want the %d enqueued before the cut", len(batches), enqueuers*enqFirst)
 	}
 	for e := range enqueuers {
-		if _, ok := batchAt[fmt.Sprintf("p%d-b0", e)]; !ok {
-			t.Fatalf("enqueuer %d's first batch reached the sequence not at all", e)
+		for b := range enqFirst {
+			key := fmt.Sprintf("p%d-b%d", e, b)
+			got := batches[key]
+			if got == nil {
+				t.Fatalf("batch %s was accepted before the cut and never committed", key)
+			}
+			if got.members != batch {
+				t.Fatalf("batch %s committed %d of its %d events: an accepted batch was truncated", key, got.members, batch)
+			}
 		}
+	}
+	committed := map[string]bool{}
+	for _, text := range byseq {
+		committed[text] = true
+	}
+	for p := range publishers {
+		for i := range pubFirst {
+			if text := fmt.Sprintf("pub%d-%d", p, i); !committed[text] {
+				t.Fatalf("%q returned from Publish on an open log and is not in the record", text)
+			}
+		}
+		for i := pubFirst; i < pubFirst+pubAfter; i++ {
+			if text := fmt.Sprintf("pub%d-%d", p, i); committed[text] {
+				t.Fatalf("%q was published after the cutoff and reached the record", text)
+			}
+		}
+	}
+	for k := range lossy {
+		for i := lossyFirst; i < lossyFirst+lossyAfter; i++ {
+			if text := fmt.Sprintf("try%d-%d", k, i); committed[text] {
+				t.Fatalf("%q was tried after the cutoff and reached the record", text)
+			}
+		}
+	}
+	if got := l.Health().DroppedAtClose; got != afterCut {
+		t.Fatalf("droppedAtClose is %d, want the %d events every producer issued after the cut", got, afterCut)
 	}
 
 	recs := await(t, records, "the subscription's records")

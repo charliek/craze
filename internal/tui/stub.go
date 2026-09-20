@@ -47,6 +47,12 @@ type Stub struct {
 	// times without sleeping. It is also what the Stub answers agent.Clocked
 	// with, so a component above the seam that stamps its own events reads this
 	// clock and not the wall one (plan 021 §3.9).
+	//
+	// It is read unlocked, by emit and by Now, from whatever goroutine publishes
+	// or asks the time — so it must be set before the Stub is used concurrently,
+	// and never while a turn, a component above the seam or another goroutine is
+	// running. The closure it holds must itself be safe to call from several
+	// goroutines.
 	Clock func() time.Time
 	// NoPrimary reports that this Stub's log was built with
 	// agent.EventLogOptions.NoPrimary — NewStubNoPrimary — so nothing is ever
@@ -338,7 +344,9 @@ func (s *Stub) EventLog() *agent.EventLog { return s.log }
 
 // Now is the Stub's agent.Clocked (plan 021 §3.9): the injected Clock, falling
 // back to time.Now exactly as emit does, so a component that stamps its own
-// events stamps them from the clock the test set and the goldens stay put.
+// events stamps them from the clock the test set and the goldens stay put. Like
+// emit it reads Clock unlocked, so Clock must be configured before the Stub is
+// used concurrently (Clock).
 func (s *Stub) Now() time.Time { return s.now() }
 
 // Prompt is Begin and its continuation back to back, as on the live session.
