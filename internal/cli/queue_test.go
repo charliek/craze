@@ -1399,6 +1399,69 @@ func TestADrainGiveUpReadsTheEnginesOwnState(t *testing.T) {
 	}
 }
 
+// TestADrainBudgetThatEndsAsTheAgentsTurnDoesIsNotABlockedQueue is r12's finding.
+// The budget runs out in the instant the agent gives the session back: the
+// session's flag is already down, and the engine's driver — woken by that turn's
+// ending — has not made its pass yet, so nothing is current and the row is still
+// queued. The baseline saw the cleared flag and took the row before it looked at
+// its deadline again. Read as "blocked", that state printed the message, exited 1,
+// and left a follow-up unsent that the engine would have started a moment later.
+//
+// The run gives the driver one short grace, and the decision is reached twice:
+// the first look finds the flag down and nothing claimed, and must not give up;
+// by the second the ending has been published and the row's turn is running.
+func TestADrainBudgetThatEndsAsTheAgentsTurnDoesIsNotABlockedQueue(t *testing.T) {
+	var stderr bytes.Buffer
+	stdout := newBlockingWriter("")
+	o := stubOpts(&bytes.Buffer{}, &stderr)
+	o.stdout = stdout
+	claimed, held := make(chan struct{}), make(chan struct{})
+	var s *stubSession
+	first := endTurn()
+	first.before = func() { s.setForeign(true) }
+	second := endTurn()
+	second.before = func() { close(claimed); <-held }
+	s = newStubSession(t, first, second)
+	looks := 0
+	o.beforeDrainGiveUp = func() {
+		looks++
+		switch looks {
+		case 1:
+			// The flag alone, with no event: the agent's turn is over as far as
+			// the session knows, and nobody has told the engine yet.
+			s.mu.Lock()
+			s.foreign = false
+			s.mu.Unlock()
+		case 2:
+			// Now the ending is published, which is what wakes the driver, and
+			// the row's turn is running before the decision is read.
+			s.setForeign(false)
+			<-claimed
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "first", "follow-up") }()
+	waitFor(t, "the row to be reported sent", func() bool {
+		return strings.Contains(stdout.String(), `"event":"sent"`)
+	})
+	close(held)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a queue the agent had just stopped blocking was given up on: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never finished")
+	}
+	if strings.Contains(stderr.String(), "still blocked") {
+		t.Fatalf("the run called a queue blocked whose block had just ended: %q", stderr.String())
+	}
+	if got := s.sent(); strings.Join(got, ",") != "first,follow-up" {
+		t.Fatalf("prompts %v", got)
+	}
+}
+
 // TestSignalBeforeTheTurnOpensReturnsPromptCancelled is r9's finding 5: a signal
 // that lands between the claim and the turn opening withdraws the prompt, and the
 // session says so by returning ErrPromptCancelled. That error is what the baseline

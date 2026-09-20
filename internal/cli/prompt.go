@@ -354,6 +354,9 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 	if waiting {
 		drainUntil = time.Now().Add(o.foreignBudget())
 	}
+	// drainGrace says the one short extension a held drain gets has been spent:
+	// see where the budget runs out.
+	drainGrace := false
 	// claimTurn is the turn whose refused claim this run is timing, and claimUntil
 	// when it stops waiting for it. The budget is per turn, it starts at the
 	// first look that finds that turn waiting, and — this is the whole of the
@@ -465,7 +468,7 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				streamErr = nil
 				if ev.Turn.Next == "" {
 					// Rows behind it and no successor: the drain is held.
-					waiting, drainUntil = true, time.Now().Add(o.foreignBudget())
+					waiting, drainUntil, drainGrace = true, time.Now().Add(o.foreignBudget()), false
 				}
 			}
 		case <-signalled:
@@ -508,6 +511,19 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 					// a blocked queue — the same answer the baseline gave for an
 					// empty queue.
 					return o.chainOver(ctx, rejected)
+				case !st.ForeignTurn && !drainGrace:
+					// The agent's turn has ended, this instant: the session's
+					// flag is down and the engine's driver, which that ending
+					// woke, has not made its pass yet, so nothing is current and
+					// the rows are still queued. That is not a blocked queue.
+					// The baseline saw the cleared flag and took the row before
+					// it looked at its deadline again; this run gives the driver
+					// the time of two polls to do the same. Once, so a queue that
+					// really is going nowhere — an engine in its error state, a
+					// stop — still ends here with the message, at a bound.
+					drainGrace = true
+					drainUntil = time.Now().Add(2 * o.foreignPoll())
+					continue
 				}
 				// The rows behind the turn that ended are not going to run: the
 				// agent has held the session for the whole budget.
