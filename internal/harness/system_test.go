@@ -79,7 +79,7 @@ func TestSystemPromptIsFrozen(t *testing.T) {
 				// The fixture's extras hold no provider key, so the session's
 				// redactor leaves them alone and the prompt is the rendering
 				// of exactly what Open was handed.
-				want = withPromptExtras(want, testPromptExtras(), nil)
+				want = mustPrompt(t, want, testPromptExtras(), nil)
 			}
 			first := f.open(opts)
 			later := opts
@@ -165,7 +165,7 @@ func testPromptExtras() PromptExtras {
 //	go test ./internal/harness -run TestSystemPromptExtrasGolden -update
 func TestSystemPromptExtrasGolden(t *testing.T) {
 	base := systemPrompt(opencodeProfile(t), "/home/user/project", "linux")
-	got := withPromptExtras(base, testPromptExtras(), redact.New())
+	got := mustPrompt(t, base, testPromptExtras(), redact.New())
 	if *updateGolden {
 		if err := os.WriteFile(extrasGolden, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
@@ -206,14 +206,26 @@ func TestPromptExtrasKeepTheProfilesPrefix(t *testing.T) {
 		"a blank document":    {Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "\r\n \t\n"}}},
 		"unusable rows alone": {Catalog: []CatalogRow{{Name: "x", Kind: "skill", Path: "rel/SKILL.md"}, {Name: "", Path: "/abs/SKILL.md"}}},
 	} {
-		if got := withPromptExtras(base, x, redact.New()); got != base {
+		if got := mustPrompt(t, base, x, redact.New()); got != base {
 			t.Errorf("%s changed the prompt; it added:\n%s", name, strings.TrimPrefix(got, base))
 		}
 	}
 	// And with content the profile's text is still the prefix, byte for byte.
-	if got := withPromptExtras(base, testPromptExtras(), nil); !strings.HasPrefix(got, base) || got == base {
+	if got := mustPrompt(t, base, testPromptExtras(), nil); !strings.HasPrefix(got, base) || got == base {
 		t.Error("the extras did not follow the profile's text unchanged")
 	}
+}
+
+// mustPrompt is withPromptExtras where the refusal is not what is under test:
+// a key inside the profile's text or across the join with the extras refuses
+// (errProfileKey), and every case that is about the rendering has neither.
+func mustPrompt(t *testing.T, system string, x PromptExtras, red *redact.Replacer) string {
+	t.Helper()
+	got, err := withPromptExtras(system, x, red)
+	if err != nil {
+		t.Fatalf("withPromptExtras: %v", err)
+	}
+	return got
 }
 
 // extrasOf is what withPromptExtras added after a prompt: x rendered, less
@@ -221,7 +233,7 @@ func TestPromptExtrasKeepTheProfilesPrefix(t *testing.T) {
 func extrasOf(t *testing.T, x PromptExtras, red *redact.Replacer) string {
 	t.Helper()
 	const base = "profile text\n"
-	got := withPromptExtras(base, x, red)
+	got := mustPrompt(t, base, x, red)
 	if got == base {
 		return ""
 	}
@@ -521,6 +533,14 @@ func TestPromptExtrasAreRedacted(t *testing.T) {
 // the test: it asserts that the framing really does produce the key, so that a
 // renderer which stopped writing a label would not leave a case here passing
 // for the wrong reason.
+//
+// Every case asserts two things about the redacted prompt, not one. That the
+// key is gone is the obvious half. The other is that the profile's text is
+// still the prompt's byte-identical prefix (D-30), which the final pass can
+// break by rewriting bytes on the profile's side of the join — so the one
+// case whose key spans that join is refused outright instead (errProfileKey,
+// withPromptExtras), and asserting only the key's absence is what let that go
+// unnoticed.
 func TestPromptExtrasRedactAcrossTheFraming(t *testing.T) {
 	const base = "profile text\n"
 	// A document with no line boundary to cut at is cut at a rune boundary
@@ -532,6 +552,10 @@ func TestPromptExtrasRedactAcrossTheFraming(t *testing.T) {
 		name string
 		key  string
 		x    PromptExtras
+		// refused marks a key the renderer cannot redact without rewriting
+		// the profile's own text: it refuses the session rather than move the
+		// prefix every request of every session shares.
+		refused bool
 	}{
 		{
 			name: "a row's path and the Path label above it",
@@ -554,9 +578,21 @@ func TestPromptExtrasRedactAcrossTheFraming(t *testing.T) {
 			x:    PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}},
 		},
 		{
-			name: "the profile's text and the extras after it",
-			key:  "text\n\n# Project",
-			x:    PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}},
+			name:    "the profile's text and the extras after it",
+			key:     "text\n\n# Project",
+			x:       PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}},
+			refused: true,
+		},
+		{
+			name:    "a key wholly inside the profile's own text, with extras",
+			key:     "profile text",
+			x:       PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}},
+			refused: true,
+		},
+		{
+			name:    "a key wholly inside the profile's own text, with none",
+			key:     "profile text",
+			refused: true,
 		},
 		{
 			name: "the end of one section and the heading of the next",
@@ -573,11 +609,30 @@ func TestPromptExtrasRedactAcrossTheFraming(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if plain := withPromptExtras(base, tc.x, nil); !strings.Contains(plain, tc.key) {
+			plain, err := withPromptExtras(base, tc.x, nil)
+			if err != nil {
+				t.Fatalf("control: withPromptExtras with no redactor = %v", err)
+			}
+			if !strings.Contains(plain, tc.key) {
 				t.Fatalf("control: the framing did not produce the key, so redacting it proves nothing:\n%s", plain)
 			}
-			if got := withPromptExtras(base, tc.x, redact.New(tc.key)); strings.Contains(got, tc.key) {
+			got, err := withPromptExtras(base, tc.x, redact.New(tc.key))
+			if tc.refused {
+				if !errors.Is(err, errProfileKey) {
+					t.Fatalf("withPromptExtras = %q, %v; want the refusal", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("withPromptExtras: %v", err)
+			}
+			if strings.Contains(got, tc.key) {
 				t.Errorf("the key the framing assembled reached the prompt:\n%s", got)
+			}
+			// The redaction stayed on the extras' side of the join, so every
+			// request of every session still begins with the same bytes.
+			if !strings.HasPrefix(got, base) {
+				t.Errorf("the final pass rewrote the profile's text, so the prompt-cache prefix moved:\n%s", got)
 			}
 		})
 	}

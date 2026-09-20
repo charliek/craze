@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/journal"
 )
 
@@ -260,27 +263,63 @@ func TestNativeSaysWhenThePromptIsLarge(t *testing.T) {
 	}
 }
 
-// TestNativeCanaryNeverReachesThePrompt is A8 extended to everything C6 added.
-// The key is planted in the four places the prompt now reads from — an
-// instruction file, a command body, a catalog description, and the path a row
-// is listed at — and must reach none of: the wire, the transcript, the
-// journal (the prompt_sources note included), or the session's own events,
-// which are what `craze prompt --json` prints.
+// TestNativeCanaryNeverReachesThePrompt is A8 extended to everything C6 added,
+// over every field rather than over the ones a previous round happened to
+// name. The key is planted everywhere the prompt and the menu now read from —
+// text that can be redacted (an instruction file, a command body, a catalog
+// description) and identities that cannot (a row's path, a frontmatter name,
+// a plugin id) — and must reach none of: the wire, the turn's own text, the
+// transcript, craze's diagnostics, the journal (the prompt_sources note
+// included), the snapshot the slash menu draws, or the session's events.
+//
+// The assertions walk whole values through nativeLeaks rather than picking
+// fields out of them, which is the point of this round: the version that
+// checked Text, Path and Description by hand missed Plugin, Bare, Display and
+// Qualified, and those are exactly the four an identity leaks through. `craze
+// prompt --json` prints a subset of the event's fields (internal/cli's
+// commandJSON: bare, qualified, plugin, kind, path, text), so an event with
+// the key in no field at all cannot produce one; tests/cli/test_native.py
+// runs that half against the real binary.
 func TestNativeCanaryNeverReachesThePrompt(t *testing.T) {
 	f := newNativeFixture(t)
 	dir := filepath.Join(t.TempDir(), "journal")
-	s := startContent(t, f, Options{JournalDir: dir}, map[string]string{
+	base := t.TempDir()
+	wsDir := writeTree(t, filepath.Join(base, "ws"), map[string]string{
 		"CLAUDE.md":                   "The key is " + nativeCanary + ".\n",
 		".claude/commands/leak.md":    commandFile("a command", "export KEY="+nativeCanary),
 		".claude/skills/say/SKILL.md": skillDoc("say", "described as "+nativeCanary),
 		// A skill whose directory — and therefore whose name and path — is
-		// the key itself. Its row is dropped rather than redacted (§3.4).
+		// the key itself. Its entry is dropped rather than redacted (§3.4).
 		".claude/skills/" + nativeCanary + "/SKILL.md": skillDoc(nativeCanary, "named after the key"),
-	}, nil)
+		// And a command whose frontmatter name is the key while its file is
+		// called something else: the name is the identity, not the filename.
+		".claude/commands/named.md": commandDoc("names itself after the key", "named body",
+			"name: "+nativeCanary+"-cmd"),
+	})
+	gitDir(t, wsDir)
+	homeDir := writeTree(t, filepath.Join(base, "home"), nil)
+	// An enabled plugin whose *id* is the key. Nothing the user types names
+	// it — they type /deploy — so without the gate the key would ride out in
+	// the event's plugin and qualified fields for a command they asked for by
+	// another name entirely.
+	install := writeTree(t, filepath.Join(base, "plugin"), map[string]string{
+		"commands/deploy.md": commandFile("a plugin's own command", "deploy body"),
+	})
+	claudeFixture{
+		installs: map[string][]claudeInstall{nativeCanary + "@mkt": {{Scope: "user", InstallPath: install}}},
+		user:     map[string]bool{nativeCanary + "@mkt": true},
+	}.write(t, homeDir, wsDir)
+
+	s := startTrees(t, f, Options{JournalDir: dir}, wsDir, homeDir)
 	w := journalOf(t, s.log)
 	inc := s.Incarnation()
 
-	call := s.oneRequest(t, "/leak")
+	// /deploy is typed alongside the one that does expand: the user never sees
+	// the plugin id, so a suppressed entry has to be unreachable by the name
+	// they do type. The spellings that hold the key are resolved below rather
+	// than typed, because a draft carrying the key would be the user's own
+	// text and would make every assertion here pass or fail for that reason.
+	call := s.oneRequest(t, "/leak\n/deploy")
 	sent := systemText(t, call)
 	// Nothing here may pass vacuously: the instruction file and the row whose
 	// description holds the key are both in the prompt, redacted.
@@ -296,28 +335,43 @@ func TestNativeCanaryNeverReachesThePrompt(t *testing.T) {
 	if strings.Contains(firstUserText(t, call), nativeCanary) {
 		t.Fatal("the canary reached the turn's own text")
 	}
-	// The row whose path was the key is gone from the catalog and from the
-	// menu's spelling of it, with one line that does not hold the key either.
-	if strings.Contains(sent, "named after the key") {
-		t.Fatalf("a row whose path holds a key was listed:\n%s", sent)
+	// Each suppressed entry is gone from the catalog whole, not listed with a
+	// marker where its name was.
+	for _, gone := range []string{"named after the key", "names itself after the key", "a plugin's own command"} {
+		if strings.Contains(sent, gone) {
+			t.Fatalf("an entry whose identity holds a key was listed (%q):\n%s", gone, sent)
+		}
 	}
 	if strings.Contains(s.diag.String(), nativeCanary) {
 		t.Fatalf("the canary reached craze's diagnostics: %q", s.diag.String())
 	}
-	// The event stream, which is what `craze prompt --json` prints: the
-	// expansion's own announcement, and the rows a menu would draw.
-	for _, e := range ofType(drained(s), EventCommand) {
-		if strings.Contains(e.Command.Text+e.Command.Path+e.Command.Description, nativeCanary) {
-			t.Fatalf("the canary reached a command event: %+v", e.Command)
-		}
+	// One expansion, the clean one.
+	evs := drained(s)
+	cmds := ofType(evs, EventCommand)
+	if len(cmds) != 1 || cmds[0].Command.Bare != "leak" {
+		t.Fatalf("%d command events (%v), want the clean one alone", len(cmds), cmds)
 	}
-	// A menu row's description too. Its *name* is deliberately left alone
-	// (X13): it is what the user types and what the lookup is keyed by, so a
-	// redacted one would be a row that answers to nothing — which is why the
-	// catalog drops such a row rather than listing it redacted.
-	for _, r := range s.Snapshot().Plugins {
-		if strings.Contains(r.Description, nativeCanary) {
-			t.Fatalf("the canary reached a menu row's description: %+v", r)
+	// And a suppressed entry answers to neither of its spellings: the bare
+	// name its author gave it and the qualified one the menu would have drawn
+	// are both resolved against the session's own rows, and neither finds it.
+	s.mu.Lock()
+	refs := s.refsLocked("/" + nativeCanary + "-cmd\n/" + nativeCanary + ":deploy\n/user:" + nativeCanary)
+	s.mu.Unlock()
+	if len(refs) != 0 {
+		t.Fatalf("%d suppressed entries are still expandable: %+v", len(refs), refs)
+	}
+	// The whole of what a consumer can see, field by field: the events, the
+	// snapshot the slash menu is drawn from, and the requests that went out.
+	// A menu row's *name* is deliberately never redacted (X13) — it has to
+	// keep matching what the user types — which is why a row whose name would
+	// hold the key is not here at all.
+	for what, v := range map[string]any{
+		"the events":   evs,
+		"the snapshot": s.Snapshot(),
+		"the wire":     f.models["test/a"].requests(),
+	} {
+		if leaks := nativeLeaks(v, nativeCanary); len(leaks) > 0 {
+			t.Fatalf("the canary leaked into %s at %v", what, leaks)
 		}
 	}
 	for _, line := range transcriptOf(t, f) {
@@ -335,6 +389,243 @@ func TestNativeCanaryNeverReachesThePrompt(t *testing.T) {
 	} else if strings.Contains(string(raw), nativeCanary) {
 		t.Fatalf("the canary reached the journal:\n%s", raw)
 	}
+}
+
+// TestNativeLoaderDiagnosticsAreRedacted is the other half of A8's "craze's
+// diagnostics" clause, and the half that was open: the content is read before
+// harness.Open, so the loaders' own lines reach Diag before the session has a
+// redactor at all. Every one of them interpolates something off disk — an
+// import as its author wrote it, the path it resolves to, a filename craze
+// cannot offer as a name — so the lane itself is redacted (contentWarn).
+//
+// The controls matter as much as the assertion: each line has to be produced,
+// or a loader that stopped writing it would leave this passing for the wrong
+// reason.
+func TestNativeLoaderDiagnosticsAreRedacted(t *testing.T) {
+	f := newNativeFixture(t)
+	s := startContent(t, f, Options{}, map[string]string{
+		// An import that resolves outside the repository, whose reference and
+		// whose root are both written into the line.
+		"CLAUDE.md": "@/nowhere/" + nativeCanary + "/missing.md\n",
+		// A file whose *name* craze could never offer as a slash command, in
+		// a directory named after the key.
+		".claude/commands/" + nativeCanary + " bad.md": commandFile("unusable", "body"),
+	}, nil)
+
+	diag := s.diag.String()
+	for _, want := range []string{"not read", "not a usable name"} {
+		if !strings.Contains(diag, want) {
+			t.Fatalf("control: the loaders wrote no %q line, so redacting one proves nothing: %q", want, diag)
+		}
+	}
+	if strings.Contains(diag, nativeCanary) {
+		t.Fatalf("a loader diagnostic carried the key: %q", diag)
+	}
+	// Each line is one line: a path holding a newline would otherwise write a
+	// second, in craze's own voice, saying whatever the checkout chose.
+	for _, line := range strings.Split(strings.TrimSpace(diag), "\n") {
+		if strings.TrimSpace(line) == "" {
+			t.Fatalf("a diagnostic wrote a blank line: %q", diag)
+		}
+	}
+}
+
+// TestNativeDiagnosticsQuoteAName is the %q half of that: a filename may hold
+// a newline, and with %s the rest of it is a second diagnostic line in
+// craze's own voice. Every path and every name in a content diagnostic is
+// written with %q, which folds it back onto one line and escapes the control
+// bytes with it.
+func TestNativeDiagnosticsQuoteAName(t *testing.T) {
+	f := newNativeFixture(t)
+	forged := "bad\ncraze: read etc-shadow"
+	s := startContent(t, f, Options{}, map[string]string{
+		".claude/commands/" + forged + ".md": commandFile("unusable", "body"),
+	}, nil)
+
+	diag := s.diag.String()
+	if !strings.Contains(diag, "not a usable name") {
+		t.Fatalf("control: no name was refused, so quoting one proves nothing: %q", diag)
+	}
+	if strings.Contains(diag, "\ncraze: read etc-shadow") {
+		t.Fatalf("a filename's newline wrote a second diagnostic line: %q", diag)
+	}
+}
+
+// TestNativeResolvesTheKeysOnce is the third-round hazard behind the gate: a
+// session resolves the table's keys twice — here, to judge what it read off
+// disk before the prompt is frozen, and again inside harness.Open, to build
+// the redactor over what it froze — and an environment that answered
+// differently between the two would leave the gate judging one set and the
+// redactor covering another. Reading the environment once (onceGetenv) makes
+// them one set by construction.
+//
+// The environment here answers with the key the first time it is asked and
+// with another value afterwards, which is the sharpest form of the hazard:
+// the entry named after the first reading must be gone, and the session's own
+// redactor must cover that same first reading rather than the second.
+func TestNativeResolvesTheKeysOnce(t *testing.T) {
+	const second = "sk-second-reading-not-a-secret"
+	f := newNativeFixture(t)
+	reads := 0
+	f.getenv = func(name string) string {
+		if name != "NATIVE_TEST_KEY" {
+			return f.env[name]
+		}
+		reads++
+		if reads == 1 {
+			return nativeCanary
+		}
+		return second
+	}
+	s := startContent(t, f, Options{}, map[string]string{
+		".claude/skills/" + nativeCanary + "/SKILL.md": skillDoc(nativeCanary, "named after the first reading"),
+		".claude/commands/ship.md":                     commandFile("ship it", "ship body"),
+	}, nil)
+
+	// The gate judged the entry against the first reading.
+	wantDisplays(t, s.Snapshot().Plugins, "ship")
+	// And so did the harness: its redactor covers that same value, so nothing
+	// the gate let through can carry a key the redactor does not know.
+	if got := s.hs.Redact("before " + nativeCanary + " after"); strings.Contains(got, nativeCanary) {
+		t.Fatalf("the session's redactor does not cover the key the gate used: %q", got)
+	}
+	// The later readings never became keys of this session, which is the
+	// other half of "one set": the memo answered from the first one.
+	if got := s.hs.Redact("before " + second + " after"); !strings.Contains(got, second) {
+		t.Fatalf("a value the environment only offered later became a key: %q", got)
+	}
+}
+
+// TestNativeLearnsAKeyExportedAfterStart is the other half of that seal, and
+// the capability it must not cost: the memo covers the startup window and is
+// released when open() returns, so the harness reads the environment again
+// from then on. A switch to a provider whose key the environment gained since
+// Open resolves it and the session's redactor grows to cover it
+// (toolset.resolve) — which a memo held for the session's life would have
+// turned into a permanent failure.
+//
+// The control is the same switch before the key exists: it fails, so the
+// success below is the export being seen and not the model having been
+// funded all along.
+func TestNativeLearnsAKeyExportedAfterStart(t *testing.T) {
+	const exported = "sk-exported-after-start-not-a-secret"
+	f := newNativeFixture(t)
+	// Atomic rather than a write to f.env: the closure is read from the
+	// harness's goroutines as well as this one.
+	var live atomic.Bool
+	f.getenv = func(name string) string {
+		if name == "NATIVE_NOKEY_KEY" {
+			if live.Load() {
+				return exported
+			}
+			return ""
+		}
+		return f.env[name]
+	}
+	s := startContent(t, f, Options{}, nil, nil)
+
+	if err := s.SetModel(context.Background(), "nokey/d"); err == nil {
+		t.Fatal("control: a switch to the unfunded provider succeeded before its key existed")
+	}
+	live.Store(true)
+	if err := s.SetModel(context.Background(), "nokey/d"); err != nil {
+		t.Fatalf("a switch to a provider whose key was exported after Open: %v", err)
+	}
+	if got := s.Snapshot().CurrentModel; got != "nokey/d" {
+		t.Fatalf("the session is on %q, want the model it switched to", got)
+	}
+	// And the session's redactor grew to cover the key it learned, which is
+	// what reading the environment again is for.
+	if got := s.hs.Redact("before " + exported + " after"); strings.Contains(got, exported) {
+		t.Fatalf("the session did not learn the key it switched to: %q", got)
+	}
+}
+
+// TestNativeCloseDuringStartOpensNoHarness: the content is read before
+// harness.Open, which lengthened the window in which a Close finds no harness
+// under s.mu and returns while Start reads on. The reading itself is not
+// cancellable — that is left for the start/stop lifecycle — but nothing is
+// opened for a session that is already closed.
+//
+// The Close is made from inside the seam, which runs after the workspace is
+// resolved and before a byte is read, so the race is the ordering under test
+// rather than a matter of timing.
+func TestNativeCloseDuringStartOpensNoHarness(t *testing.T) {
+	f := newNativeFixture(t)
+	built := 0
+	var s *nativeSession
+	f.edit = func(o *harness.Options) {
+		o.NewModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
+			built++
+			return f.models[r.Alias], nil
+		}
+		if s != nil {
+			if err := s.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+		}
+	}
+	base := t.TempDir()
+	ws := writeTree(t, filepath.Join(base, "ws"), map[string]string{
+		".claude/commands/ship.md": commandFile("ship it", "ship body"),
+	})
+	gitDir(t, ws)
+	home := writeTree(t, filepath.Join(base, "home"), nil)
+
+	// The control first, with the same seam and nothing closed: the session
+	// opens, so the assertion below is about the Close and not about the
+	// tree.
+	control := f.session(Options{Workspace: ws, ContentHome: home})
+	if err := control.Start(context.Background()); err != nil {
+		t.Fatalf("control: Start: %v", err)
+	}
+	if built != 1 {
+		t.Fatalf("control: the harness built %d models, want one", built)
+	}
+
+	built = 0
+	s = f.session(Options{Workspace: ws, ContentHome: home})
+	err := s.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "session closed") {
+		t.Fatalf("Start = %v, want the closed refusal", err)
+	}
+	if built != 0 {
+		t.Fatal("a session closed during its own start still opened a harness")
+	}
+	if snap := s.Snapshot(); len(snap.Plugins) != 0 || snap.SessionID != "" {
+		t.Fatalf("a session closed during its own start kept state: %+v", snap)
+	}
+}
+
+// TestNativeTweakSuppliesPromptExtras is the seam's contract on the one field
+// the adapter also fills: tweak is a test's last word on harness.Options
+// (NewNative), and Options.Prompt used to be overwritten after it ran, so a
+// case could not hand in extras of its own. What the adapter read is still
+// used for the menu — the seam replaces what the model is told exists, not
+// what the user can type.
+func TestNativeTweakSuppliesPromptExtras(t *testing.T) {
+	f := newNativeFixture(t)
+	f.edit = func(o *harness.Options) {
+		o.Prompt = harness.PromptExtras{
+			Instructions: []harness.PromptDoc{{Path: "/seam/CLAUDE.md", Text: "the seam's own document\n"}},
+		}
+	}
+	s := startContent(t, f, Options{}, map[string]string{
+		"CLAUDE.md":                "the workspace's own document\n",
+		".claude/commands/ship.md": commandFile("ship it", "ship body"),
+	}, nil)
+	sent := systemText(t, s.oneRequest(t, "hi"))
+
+	if !strings.Contains(sent, "the seam's own document") {
+		t.Fatalf("the seam's extras did not reach the prompt:\n%s", sent)
+	}
+	for _, unwanted := range []string{"the workspace's own document", "- ship (command): ship it"} {
+		if strings.Contains(sent, unwanted) {
+			t.Fatalf("the adapter's own extras overwrote the seam's (%q):\n%s", unwanted, sent)
+		}
+	}
+	// The menu is still the session's own reading.
+	wantDisplays(t, s.Snapshot().Plugins, "ship")
 }
 
 // TestNativeReadsOnlyTheSeamsRoots is A14's second half. The seam is

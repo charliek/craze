@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/version"
@@ -238,6 +239,13 @@ func (s *nativeSession) forgetSteers() {
 // a scripted model (harness.Options.NewModel), its own environment, clock,
 // directory or model table. New calls it with nil tweak for any in-process
 // provider; nothing else in craze calls it.
+//
+// Whatever tweak sets is what the session opens on, Options.Prompt included:
+// a tweak that supplies its own instruction documents or catalog keeps them,
+// and only a Prompt it left empty is filled with what the adapter read off
+// disk (open). The reading still happens — the menu and the expansion lookup
+// are built from it — so the seam replaces what the model is told exists, not
+// what the user can type.
 func NewNative(opts Options, tweak func(*harness.Options)) Session {
 	return newNative(opts, tweak)
 }
@@ -403,11 +411,23 @@ func (s *nativeSession) contentHome() string {
 // whose name craze could never offer, a plugin id that is reserved — and none
 // is an agent's, so none belongs on the stderr lane a TUI defers (§3.7.1).
 //
+// craze's own voice is not the same as craze's own text. Every one of these
+// lines interpolates something read off disk — a path, an import as its author
+// wrote it, a filename craze cannot offer as a name — and any of those can
+// hold a provider key: an import of "@../sk-live-.../missing.md", a rule file
+// named after the key, a workspace under a directory that is one. So red
+// covers the whole lane, here, at the one point every content diagnostic
+// passes through. It cannot be left to the writers: they run before the
+// session exists — the prompt they feed is frozen inside harness.Open (§3.4)
+// — so there is no session redactor for them to reach, and the harness's
+// refusal of a workspace whose path holds a key comes after discovery has
+// already had the chance to print it.
+//
 // It is also where native says what it does not honour. --plugin-dir is
 // cursor-agent's flag by another route and native reads no directory but the
 // three of §3.2, so a session handed one must say so rather than start with a
 // menu quietly missing what the user asked for (A14).
-func (s *nativeSession) contentWarn() func(string) {
+func (s *nativeSession) contentWarn(red *redact.Replacer) func(string) {
 	// diagWriter rather than the fallback written out again: its own comment
 	// already names this lane, and a third spelling of "Diag, else Stderr" is
 	// a third place to miss when the lane grows a sink.
@@ -416,7 +436,7 @@ func (s *nativeSession) contentWarn() func(string) {
 		if diag == nil {
 			return
 		}
-		fmt.Fprintln(diag, msg)
+		fmt.Fprintln(diag, red.String(msg))
 	}
 	if len(s.opts.PluginDirs) > 0 {
 		warn("plugin dirs ignored for " + NativeProvider().Name())
@@ -500,6 +520,16 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	if s.tweak != nil {
 		s.tweak(&hopts)
 	}
+	// The startup window reads the environment through one sealed memo, so
+	// that the key set this adapter gates its content against and the key set
+	// harness.Open resolves for its redactor cannot be two sets. The release
+	// is deferred rather than written after Open, so that every way out of
+	// this function — a table that will not load, a model that does not
+	// resolve, a Close that landed meanwhile, or Open itself failing — leaves
+	// the session reading the real environment again (sealedGetenv).
+	getenv, release := sealedGetenv(hopts.Getenv)
+	defer release()
+	hopts.Getenv = getenv
 	if hopts.Home == "" {
 		return nil, nil, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
 	}
@@ -536,19 +566,110 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 		hopts.Model = alias
 	}
 
+	// One resolution of the keys, for all three of the things that need them:
+	// the gate that drops an entry whose identity holds one (dropKeyBearing),
+	// the redactor every content diagnostic goes through (contentWarn), and —
+	// through the memo above — the redactor Open builds for what it freezes.
+	keys := nativeTableKeys(table, hopts.Getenv)
 	content := loadNativeContent(
 		resolveNativeSources(hopts.Workspace, s.contentHome()),
 		s.opts.Compat,
-		nativeTableKeys(table, hopts.Getenv),
-		s.contentWarn(),
+		keys,
+		s.contentWarn(redact.New(keys...)),
 	)
-	hopts.Prompt = content.extras
+	// Only where the seam left it alone, so that tweak keeps its last word on
+	// every field of harness.Options (NewNative). The assignment cannot simply
+	// be moved above the tweak instead: the content is read for the workspace
+	// tweak may have changed, against the table it may have handed in, with
+	// the keys its own Getenv resolves, so there is nothing to assign until
+	// after it has run.
+	if len(hopts.Prompt.Instructions) == 0 && len(hopts.Prompt.Catalog) == 0 {
+		hopts.Prompt = content.extras
+	}
+	// What the provenance note records is what was frozen, seam or no seam.
+	content.extras = hopts.Prompt
+
+	// The last look at closed before anything is opened. A Close racing Start
+	// finds no harness under s.mu and returns (Close), while everything above
+	// — the walk of the owner's .claude tree, the documents read for the
+	// prompt — runs on; without this, a session nobody will ever use would go
+	// on to open a harness, sweep its spill directory and write a diagnostic
+	// or two. What is deliberately not done here is stopping the reading
+	// itself: the loaders take no context, so a Close during the walk still
+	// returns while it finishes. Giving them one belongs with the start/stop
+	// lifecycle the session-control work owns, not to a check on the way past.
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return nil, nil, none, fmt.Errorf("agent: session closed")
+	}
 
 	hs, err := harness.Open(hopts)
 	if err != nil {
 		return nil, nil, none, phraseSetupError(err, table, hopts.Model)
 	}
 	return hs, table, content, nil
+}
+
+// sealedGetenv is getenv sealed for the startup window: until release is
+// called, a variable is read once and every later reader is served from that
+// reading; afterwards every read goes to getenv again. It returns both halves
+// because both matter, and a reader who sees only the memo will take
+// remembering for the point.
+//
+// The seal is what one startup needs. A session resolves the table's keys
+// twice — in open(), to gate the content it read before the prompt is frozen,
+// and again inside harness.Open, to build the redactor that covers what was
+// frozen — and those two have to be the same set. A Getenv whose answer
+// changes between them, a test seam or a process setting a variable while it
+// starts, would leave the gate judging one set and the redactor covering
+// another: an entry whose name holds a key the gate did not know would be
+// listed raw in the menu and redacted to a marker in the model's catalog,
+// which is exactly the disagreement between the two projections that dropping
+// such an entry exists to prevent. Reading once makes them one set by
+// construction rather than by two calls happening to agree.
+//
+// The release is what the rest of the session needs, and it is not a detail.
+// The harness keeps this function as its own getenv for the session's whole
+// life and calls it on every switch (toolset.resolve), where reading the
+// environment again is the documented point: a session learns a key when a
+// switch makes current a model whose provider's key the environment gained
+// since Open, and the redactor grows to cover it from the next turn. A memo
+// held past startup would silently take that away — a switch that used to
+// work would fail for the rest of the session — in exchange for closing a
+// window between two calls microseconds apart. So the seal covers exactly the
+// window it was for, and nothing after it.
+//
+// The harness calls it from its own goroutines, so both halves are guarded.
+func sealedGetenv(getenv func(string) string) (read func(string) string, release func()) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	var mu sync.Mutex
+	seen := make(map[string]string) // nil once released
+	read = func(name string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		if seen == nil {
+			return getenv(name)
+		}
+		if v, ok := seen[name]; ok {
+			return v
+		}
+		v := getenv(name)
+		seen[name] = v
+		return v
+	}
+	// Idempotent, and it drops what it remembered: nothing reads the map
+	// again, and a session should not hold every key it resolved at startup
+	// for as long as it runs.
+	release = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = nil
+	}
+	return read, release
 }
 
 // fundedModel is the model a session with no --model starts on: the table's

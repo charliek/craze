@@ -563,14 +563,20 @@ type pluginParseOpts struct {
 	Warn func(string)
 }
 
-// badName is that line. The name is quoted because the interesting ones are
-// invisible — a trailing space, a non-breaking space, a colon someone meant as
-// a plugin qualifier.
+// badName is that line. Both the name and the path are quoted: the
+// interesting names are invisible — a trailing space, a non-breaking space, a
+// colon someone meant as a plugin qualifier — and a path is the checkout's
+// content like any other. A directory called "notes\ncraze: read /etc/shadow"
+// is legal on Unix, and with %s that is two diagnostic lines, the second of
+// them craze's own voice saying whatever the repository chose. %q folds it
+// back onto one line and escapes the control bytes with it, which is the rule
+// the instruction loader already writes every path by (instructions.go's
+// note).
 func (o pluginParseOpts) badName(path, name string) {
 	if o.Warn == nil {
 		return
 	}
-	o.Warn(fmt.Sprintf("skipped %s: %q is not a usable name", path, name))
+	o.Warn(fmt.Sprintf("skipped %q: %q is not a usable name", path, name))
 }
 
 // fill copies the fields only native reads. sanitizeText, not sanitizeLine:

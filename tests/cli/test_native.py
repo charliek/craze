@@ -336,6 +336,80 @@ def test_native_instructions_and_catalog_reach_the_system_prompt(
     assert CANARY not in proc.stdout and CANARY not in proc.stderr
 
 
+def test_native_never_prints_an_identity_holding_a_key(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A8's `--json` half, against the real binary.
+
+    A provider key can be embedded in an *identity* — a plugin id, a
+    frontmatter name, a directory a skill lives in — and an identity cannot be
+    redacted without breaking the thing it identifies: a marker where a name
+    was answers to nothing the user could type, and a marker where a path was
+    opens no file. So craze suppresses the whole entry (§3.4), and neither the
+    system prompt nor the `--json` stream nor the diagnostics on stderr ever
+    carries it.
+
+    The controls are the point: a clean command in the same workspace is
+    listed and expands, so a run that printed nothing at all could not pass
+    here. `/deploy` is typed although the key is nowhere in that name — the
+    user never sees a plugin's id — which is the route the event's `plugin`
+    and `qualified` fields leaked through before the gate existed.
+    """
+    fixture_server.set_ok(text_parts=["nothing leaked"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+
+    ws = tmp_path / "ws"
+    (ws / ".git").mkdir(parents=True)
+    (ws / ".claude" / "commands").mkdir(parents=True)
+    (ws / ".claude" / "commands" / "ship.md").write_text(
+        "---\ndescription: ship it\n---\nShip $ARGUMENTS.\n", encoding="utf-8"
+    )
+    # A skill whose directory, and therefore whose name and path, is the key.
+    keyed_skill = ws / ".claude" / "skills" / CANARY
+    keyed_skill.mkdir(parents=True)
+    (keyed_skill / "SKILL.md").write_text(
+        f"---\nname: {CANARY}\ndescription: named after the key\n---\nbody\n", encoding="utf-8"
+    )
+    # And an enabled plugin whose id is the key, shipping an ordinary command.
+    home = Path(os.environ["HOME"]) / ".claude"
+    install = home / "plugins" / "cache" / "keyed"
+    (install / "commands").mkdir(parents=True)
+    (install / "commands" / "deploy.md").write_text(
+        "---\ndescription: deploy it\n---\nDeploy.\n", encoding="utf-8"
+    )
+    (home / "plugins" / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {f"{CANARY}@mkt": [{"scope": "user", "installPath": str(install)}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {f"{CANARY}@mkt": True}}), encoding="utf-8"
+    )
+
+    proc = run_native(craze_bin, craze_home, ws, "/ship v2\n/deploy")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert CANARY not in proc.stdout, proc.stdout
+    assert CANARY not in proc.stderr, proc.stderr
+
+    events = parse_events(proc.stdout)
+    commands = [e for e in events if e.get("type") == "command"]
+    assert len(commands) == 1, events
+    assert commands[0]["name"] == "ship", commands[0]
+    for field in ("name", "qualified", "plugin", "kind", "path", "text"):
+        assert CANARY not in commands[0].get(field, ""), commands[0]
+
+    sent = system_text(fixture_server.requests[0])
+    assert "- ship (command): ship it" in sent, sent
+    for gone in ("named after the key", "deploy it", CANARY):
+        assert gone not in sent, (gone, sent)
+
+
 @pytest.mark.parametrize("toggle", sorted(COMPAT_MARKERS))
 def test_native_compat_toggle_removes_its_class(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture, toggle: str

@@ -153,11 +153,16 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 	// The profile's text, and the caller's extras rendered after it and
 	// redacted. With no extras this is the profile's text alone, byte for
 	// byte, and with them it still begins with it, so every session's
-	// requests share that prefix (D-30). Whatever it leaves in ts.system is
-	// covered from here on by resolve's scan for a key learned later
-	// (errFrozenKey) and by the transcript header's hash: both read this one
-	// field, and neither needed a line of its own for the extras.
-	ts.system = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red)
+	// requests share that prefix (D-30) — and a key that would have cost
+	// either of those two properties refuses the session rather than be
+	// redacted out of them (errProfileKey, withPromptExtras). Whatever it
+	// leaves in ts.system is covered from here on by resolve's scan for a key
+	// learned later (errFrozenKey) and by the transcript header's hash: both
+	// read this one field, and neither needed a line of its own for the
+	// extras.
+	if ts.system, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red); err != nil {
+		return nil, err
+	}
 
 	var keyNames []string
 	for _, prov := range table.Providers {
@@ -182,8 +187,16 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 	return ts, nil
 }
 
-// The two refusals that keep a key out of what a session freezes. Neither
+// The refusals that keep a key out of what a session freezes. None of them
 // names the key or where it matched.
+//
+// They are all one rule. A key can be redacted out of text craze is quoting —
+// a tool's description, a document, a catalog row — because a marker there
+// still says what the text was for. It cannot be redacted out of something
+// whose whole value is being exactly the bytes it is: a path that must open a
+// file, a digest that must equal another copy of itself, the prompt prefix
+// every request of every session shares. For those the answer is to refuse,
+// and to say what to do about it.
 var (
 	// errWorkspaceKey is Open's refusal of a working directory whose path
 	// holds a provider key. Redacting the path instead would put in the
@@ -197,11 +210,34 @@ var (
 	// or anywhere in the encoded tools, both frozen when it opened (D-30).
 	errFrozenKey = errors.New("harness: this model's provider key appears in text this session already sends " +
 		"with every request; start a new session, or change the key")
+
+	// errProfileKey is Open's refusal of a system prompt whose profile text a
+	// configured key is inside — wholly, or spanning the join with the extras
+	// rendered after it. withPromptExtras says why neither can be redacted.
+	errProfileKey = errors.New("harness: a configured provider key is inside the system prompt's own text, or spans " +
+		"the join between it and the instructions rendered after it; change the key, or remove that provider from the model table")
+
+	// errDigestKey is Open's refusal of a transcript header whose SHA-256 of
+	// the frozen prompt, or of the encoded tools, holds a configured key. The
+	// header records both verbatim and the adapter's prompt_sources note
+	// repeats the prompt's, which C6 requires to be the same string: redacting
+	// one copy would break that equality and leave the other, and a digest
+	// with a marker in it is not a digest.
+	errDigestKey = errors.New("harness: a configured provider key appears in one of this session's transcript-header " +
+		"digests; change the key, or remove that provider from the model table")
 )
 
 // holdsAKey reports whether text contains any of keys.
 func holdsAKey(text string, keys []string) bool {
 	return slices.ContainsFunc(keys, func(k string) bool { return strings.Contains(text, k) })
+}
+
+// holdsKey is holdsAKey over the keys this session knows of now. Under ts.mu,
+// because a switch can add to them (resolve).
+func (ts *toolset) holdsKey(text string) bool {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return holdsAKey(text, ts.keys)
 }
 
 // redactor is the session's, as it is now. It is never nil.

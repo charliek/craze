@@ -7,7 +7,6 @@ import (
 
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
-	"github.com/charliek/craze/internal/harness/redact"
 )
 
 // What a native session reads off disk before its harness opens, and what it
@@ -116,11 +115,117 @@ func loadNativeContent(src contentSources, c ClaudeCompat, keys []string, warn f
 	// false because there is no catalog still to arrive that could rename a
 	// row — and therefore no catalog wait (§3.2).
 	content.rows = ResolvePluginNames(content.entries, nil, false)
+	// The key gate, once, over the resolved list and before either projection
+	// is taken from it.
+	content.entries, content.rows = dropKeyBearing(content.entries, content.rows, keys, warn)
 	if !c.NoInstructions {
 		content.extras.Instructions = loadInstructions(src, warn)
 	}
-	content.extras.Catalog = nativeCatalog(content.entries, content.rows, keys, warn)
+	content.extras.Catalog = nativeCatalog(content.entries, content.rows)
 	return content
+}
+
+// dropKeyBearing is the one gate a provider key in an *identity* gets: the
+// entry goes, whole, from both projections of the list (§3.4, A8).
+//
+// Redaction is the answer everywhere a key sits in text craze is quoting — a
+// description, a when-to-use, a body, a document. It is no answer at all when
+// the key is what names the thing or says where it lives. X13 pins that a
+// row's Name is never redacted, because it has to keep matching what the user
+// types and what the lookup is keyed by; this is the complement of that rule
+// rather than an exception to it. A name redacted to a marker answers to
+// nothing anybody could type, a path redacted to a marker opens no file, and a
+// plugin id redacted to a marker qualifies nothing — so an entry whose
+// identity or location holds a key cannot be shown at all, in either
+// projection, and cannot be left half-shown in one of them.
+//
+// Half-shown is what made this a bug rather than a theory. The catalog dropped
+// a row whose *path* held a key and Snapshot.Plugins kept it; a plugin whose
+// *id* is a key put that id in the EventCommand of a /name the user typed
+// without ever seeing it, losslessly journaled and printed by --json; and an
+// entry whose frontmatter name is a key was redacted to a marker in the
+// catalog while the menu drew it raw — so the two projections disagreed about
+// what a row is called, which is the one thing "one resolved list" exists to
+// prevent.
+//
+// Every field either projection draws an identity or a location from is
+// tested: the entry's Plugin, Name, Path and Root, and the row's Plugin, Bare,
+// Display and Qualified. The row's three spellings are tested although they
+// are built out of the entry's two, because the join makes bytes neither of
+// them had: a key of "k:d" is in neither plugin "pack" nor name "deploy" and
+// is in the "pack:deploy" they qualify to.
+//
+// Naming is not run again over what is left. A suppressed entry may have been
+// what forced another row to its qualified spelling, and re-resolving would
+// make a visible row's name depend on the presence of a row nobody can see —
+// the same reason §3.2 runs naming over the hidden entries too.
+//
+// One line per suppressed entry, through warn, which redacts (contentWarn):
+// the name in that line usually contains the key, which is the whole point of
+// the entry going.
+func dropKeyBearing(entries []PluginEntry, rows []PluginCommand, keys []string, warn func(string)) ([]PluginEntry, []PluginCommand) {
+	if len(keys) == 0 {
+		return entries, rows
+	}
+	if warn == nil {
+		warn = func(string) {}
+	}
+	holds := func(fields ...string) bool {
+		for _, f := range fields {
+			if holdsNativeKey(f, keys) {
+				return true
+			}
+		}
+		return false
+	}
+	// Keyed by the qualified spelling, which is the one name an entry and its
+	// row always share, lowercased as every other lookup over these is.
+	drop := make(map[string]bool)
+	for _, e := range entries {
+		if holds(e.Plugin, e.Name, e.Path, e.Root, e.Plugin+":"+e.Name) {
+			drop[strings.ToLower(e.Plugin+":"+e.Name)] = true
+		}
+	}
+	for _, r := range rows {
+		if holds(r.Plugin, r.Bare, r.Display, r.Qualified) {
+			drop[strings.ToLower(r.Qualified)] = true
+		}
+	}
+	if len(drop) == 0 {
+		return entries, rows
+	}
+	keptRows := make([]PluginCommand, 0, len(rows))
+	// The name a suppressed entry is announced by: the menu's spelling where
+	// it had a row, since that is what the user would have typed, and the
+	// qualified one where it had none.
+	named := make(map[string]string, len(rows))
+	for _, r := range rows {
+		if key := strings.ToLower(r.Qualified); drop[key] {
+			named[key] = r.Display
+			continue
+		}
+		keptRows = append(keptRows, r)
+	}
+	keptEntries := make([]PluginEntry, 0, len(entries))
+	for _, e := range entries {
+		key := strings.ToLower(e.Plugin + ":" + e.Name)
+		if !drop[key] {
+			keptEntries = append(keptEntries, e)
+			continue
+		}
+		name := e.Plugin + ":" + e.Name
+		if shown, ok := named[key]; ok {
+			name = shown
+		}
+		warn(fmt.Sprintf("%q not offered: its name, its plugin id, its path or its root contains a configured provider key", name))
+	}
+	if len(keptEntries) == 0 {
+		keptEntries = nil
+	}
+	if len(keptRows) == 0 {
+		keptRows = nil
+	}
+	return keptEntries, keptRows
 }
 
 // nativeCatalog is the model's projection of that one resolved list, in the
@@ -145,24 +250,19 @@ func loadNativeContent(src contentSources, c ClaudeCompat, keys []string, warn f
 // project's chain directory, the user's own root — are not that. The renderer
 // drops a Root that is not an absolute clean path anyway, so this is about not
 // telling the model something that is true of another kind of entry.
-func nativeCatalog(entries []PluginEntry, rows []PluginCommand, keys []string, warn func(string)) []harness.CatalogRow {
+//
+// A row whose path or name holds a provider key never reaches here: the gate
+// over the resolved list (dropKeyBearing) has already taken the whole entry
+// out of both projections, which is why this walk has nothing to say about
+// keys.
+func nativeCatalog(entries []PluginEntry, rows []PluginCommand) []harness.CatalogRow {
 	if len(rows) == 0 {
 		return nil
-	}
-	if warn == nil {
-		warn = func(string) {}
 	}
 	byKey := make(map[string]PluginEntry, len(entries))
 	for _, e := range entries {
 		byKey[strings.ToLower(e.Plugin+":"+e.Name)] = e
 	}
-	// The session's own redactor does not exist yet — it is built inside Open,
-	// which is where this catalog is going — so the line below is redacted
-	// with a replacer over the same keys, which is the same class the harness
-	// builds. It is needed because a row whose *path* holds a key is usually a
-	// row whose *name* does too: a skill in a directory called after the key
-	// is named after that directory.
-	red := redact.New(keys...)
 	out := make([]harness.CatalogRow, 0, len(rows))
 	for _, r := range rows {
 		e, ok := byKey[strings.ToLower(r.Qualified)]
@@ -170,16 +270,6 @@ func nativeCatalog(entries []PluginEntry, rows []PluginCommand, keys []string, w
 		// guard is here because the alternative to skipping is a row whose
 		// path came from nowhere.
 		if !ok || e.NoModel || strings.TrimSpace(e.Description) == "" {
-			continue
-		}
-		if holdsNativeKey(e.Path, keys) {
-			// errWorkspaceKey's reasoning one level down (internal/harness's
-			// tools.go): a path with a provider key in it is not something
-			// craze can show the model. Redacting it — which is what the
-			// renderer does, because it cannot say anything — would offer a
-			// file at a path that opens nothing, so the row goes instead, and
-			// the line is here because this is the layer that can write one.
-			warn(red.String(fmt.Sprintf("%q not listed for the model: its path contains a configured provider key", r.Display)))
 			continue
 		}
 		row := harness.CatalogRow{
@@ -214,7 +304,8 @@ func nativePseudoID(id string) bool {
 // that is text rather than a name: the description, which a skill with no
 // frontmatter description takes from its own body (X13). The names are left
 // alone for redactNativeEntries' reason — a redacted name is a row that answers
-// to nothing the user could type.
+// to nothing the user could type — and a row whose name does hold a key is not
+// here to be redacted at all: it was dropped with its entry (dropKeyBearing).
 //
 // It exists because the rows are resolved before Open, which is where the
 // redactor comes from: the catalog has to carry the menu's names into the

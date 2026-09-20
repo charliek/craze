@@ -236,6 +236,17 @@ func Open(opts Options) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
+	// The header's two digests are disclosed exactly as they are: the
+	// transcript holds them, and the adapter repeats the prompt's in its
+	// prompt_sources note, which C6 requires to be the same string as the
+	// header's. So a configured key that happens to be inside one refuses the
+	// session — errWorkspaceKey's reasoning applied to the one text craze
+	// computes rather than reads, since redacting a digest would break the
+	// equality and leave something that is no longer a digest. Contrived, and
+	// closed here because it is one comparison.
+	if h := st.Header(); s.tools.holdsKey(h.SystemPromptSHA256) || s.tools.holdsKey(h.ToolsSHA256) {
+		return nil, errDigestKey
+	}
 	s.store = st
 	s.cur = m
 	s.logged = logged{model: m.id(), effort: m.effort}

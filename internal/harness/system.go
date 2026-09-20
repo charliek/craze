@@ -146,14 +146,30 @@ const (
 //
 // The price is that the budgets are measured before this pass, so a key that
 // is genuinely reconstructed across a boundary grows the result a little past
-// a ceiling, and one reconstructed across the profile's last bytes and the
-// extras' first would rewrite part of the profile's text and move the
-// prompt-cache prefix with it. Both are the right way round: a budget is a
-// cost control and a cache prefix is a saving, while a key on the wire is a
-// leak. The case is pathological in any event — a workspace holding a key is
-// refused at Open (errWorkspaceKey), and an ordinary prompt has no key in it
-// anywhere, so this pass changes not a byte.
-func withPromptExtras(system string, x PromptExtras, red *redact.Replacer) string {
+// a ceiling. That is the right way round: a budget is a cost control, while a
+// key on the wire is a leak. The case is pathological in any event — a
+// workspace holding a key is refused at Open (errWorkspaceKey), and an
+// ordinary prompt has no key in it anywhere, so this pass changes not a byte.
+//
+// # Where redaction is not the answer
+//
+// Two placements of a key cannot be redacted away, and both refuse the
+// session instead (errProfileKey). One is a key that lies wholly inside the
+// profile's own words: that text is craze's, not a caller's, so nothing about
+// the session could be changed to remove it, and rewriting it would send the
+// model a mangled description of its own tools — while returning it unchanged
+// is the one path on which a configured key goes out verbatim, since nothing
+// downstream looks at the frozen prompt again. The other is a key
+// reconstructed across the profile's last bytes and the extras' first: the
+// final pass would rewrite part of the profile's text and move with it the
+// prefix D-30 exists for, that the profile's text is byte-identical at the
+// head of every session's every request and a provider's prefix cache can hit
+// on it. That guarantee is worth more unconditional than held until a key
+// happens to straddle the join.
+//
+// One test answers both, because a key inside the profile breaks the prefix
+// too: whether the redacted whole still begins with the profile's own bytes.
+func withPromptExtras(system string, x PromptExtras, red *redact.Replacer) (string, error) {
 	var sections []string
 	if s := renderInstructions(x.Instructions, red); s != "" {
 		sections = append(sections, s)
@@ -162,11 +178,21 @@ func withPromptExtras(system string, x PromptExtras, red *redact.Replacer) strin
 		sections = append(sections, s)
 	}
 	if len(sections) == 0 {
-		return system
+		// The profile's text alone — and it is still measured, because a key
+		// inside it has no extras to be found across a boundary with and would
+		// otherwise be the one text on this path nothing ever looked at.
+		if red.String(system) != system {
+			return "", errProfileKey
+		}
+		return system, nil
 	}
 	// Each section ends in a newline and the profile's text does too, so one
 	// newline between them is the blank line that separates two blocks.
-	return red.String(system + "\n" + strings.Join(sections, "\n"))
+	out := red.String(system + "\n" + strings.Join(sections, "\n"))
+	if !strings.HasPrefix(out, system) {
+		return "", errProfileKey
+	}
+	return out, nil
 }
 
 // renderInstructions is the documents' section, or "" when none of them has

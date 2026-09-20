@@ -15,13 +15,19 @@ import (
 // the rendering internal/harness's; these are the rules that live in between.
 
 // catalogOf runs the projection over entries named the way a session names
-// them, and hands back both halves of its contract: the rows and every line it
-// wrote about one it would not list.
-func catalogOf(entries []PluginEntry, keys ...string) ([]harness.CatalogRow, []string) {
+// them. It says nothing about keys: an entry whose identity holds one is gone
+// before the projection runs (gateOf).
+func catalogOf(entries []PluginEntry) []harness.CatalogRow {
+	return nativeCatalog(entries, ResolvePluginNames(entries, nil, false))
+}
+
+// gateOf is the key gate over one resolved list: what both projections keep,
+// and what craze said about what went (dropKeyBearing).
+func gateOf(entries []PluginEntry, keys ...string) ([]PluginEntry, []PluginCommand, []string) {
 	var lines []string
-	rows := nativeCatalog(entries, ResolvePluginNames(entries, nil, false), keys,
+	kept, rows := dropKeyBearing(entries, ResolvePluginNames(entries, nil, false), keys,
 		func(msg string) { lines = append(lines, msg) })
-	return rows, lines
+	return kept, rows, lines
 }
 
 // catalogNames is the rows' names, which are the menu's names, in order.
@@ -67,9 +73,7 @@ func TestNativeCatalogIsListedByDescriptionAndNoModel(t *testing.T) {
 	noModel := described("pack", "menu-only", PluginKindSkill, "the user's alone")
 	noModel.NoModel = true
 
-	rows, lines := catalogOf([]PluginEntry{quiet, loud, noModel})
-	wantNoLines(t, lines)
-	wantCatalog(t, rows, "loud")
+	wantCatalog(t, catalogOf([]PluginEntry{quiet, loud, noModel}), "loud")
 
 	// The same three through the menu's projection, which is the other way
 	// round for two of them: disable-model-invocation leaves a row in the
@@ -88,9 +92,7 @@ func TestNativeCatalogListsHiddenEntries(t *testing.T) {
 	open := described("pack", "public", PluginKindSkill, "the one to start with")
 	entries := []PluginEntry{hidden, open}
 
-	rows, lines := catalogOf(entries)
-	wantNoLines(t, lines)
-	wantCatalog(t, rows, "internal", "public")
+	wantCatalog(t, catalogOf(entries), "internal", "public")
 	// And it is out of the menu, so the two lists really do differ.
 	wantDisplays(t, visibleNativeRows(entries, ResolvePluginNames(entries, nil, false)), "public")
 }
@@ -104,9 +106,7 @@ func TestNativeCatalogNamesAreTheMenusNames(t *testing.T) {
 		described("user", "ship", PluginKindCommand, "the user's"),
 		described("project", "alone", PluginKindCommand, "nobody else claims it"),
 	}
-	rows, lines := catalogOf(entries)
-	wantNoLines(t, lines)
-	wantCatalog(t, rows, "project:ship", "user:ship", "alone")
+	wantCatalog(t, catalogOf(entries), "project:ship", "user:ship", "alone")
 }
 
 // TestNativeCatalogRootIsPluginRowsOnly: Root is what a plugin's own file
@@ -120,8 +120,7 @@ func TestNativeCatalogRootIsPluginRowsOnly(t *testing.T) {
 		described("user", "mine", PluginKindCommand, "the user's"),
 		described("pack", "theirs", PluginKindCommand, "a plugin's"),
 	}
-	rows, lines := catalogOf(entries)
-	wantNoLines(t, lines)
+	rows := catalogOf(entries)
 	wantCatalog(t, rows, "own", "mine", "theirs")
 	for i, want := range []string{"", "", "/plugins/pack"} {
 		if rows[i].Root != want {
@@ -136,38 +135,92 @@ func TestNativeCatalogRootIsPluginRowsOnly(t *testing.T) {
 	}
 }
 
-// TestNativeCatalogDropsARowWhosePathHoldsAKey is errWorkspaceKey's reasoning
-// one level down (internal/harness's tools.go). The renderer would redact such
-// a path — it has no way to say anything — and the model would be offered a
-// file at a path that opens nothing; the adapter is the layer that can write a
-// line instead, so the row goes here.
-func TestNativeCatalogDropsARowWhosePathHoldsAKey(t *testing.T) {
-	leaky := described("user", "leaky", PluginKindSkill, "in a directory with a key in its name")
-	leaky.Path = "/home/" + nativeCanary + "/.claude/skills/leaky/SKILL.md"
+// TestNativeDropsEntriesWhoseIdentityHoldsAKey is errWorkspaceKey's reasoning
+// one level down (internal/harness's tools.go), over every field either
+// projection takes an identity or a location from. A key in a description is
+// redacted, because a marker still says what the entry is for; a key in the
+// name, the plugin id, the path or the root cannot be, because what is left
+// answers to nothing the user could type and opens no file. So the entry goes
+// from *both* projections — the catalog and the menu — and with it goes the
+// expansion, since the lookup is built from the rows.
+//
+// The last case is the join: neither the plugin id nor the name holds the key
+// and the qualified spelling they make does, which is why the row's own three
+// spellings are tested and not only the entry's two fields.
+func TestNativeDropsEntriesWhoseIdentityHoldsAKey(t *testing.T) {
 	clean := described("user", "clean", PluginKindSkill, "somewhere ordinary")
-
-	rows, lines := catalogOf([]PluginEntry{leaky, clean}, nativeCanary)
-	wantCatalog(t, rows, "clean")
-	if len(lines) != 1 || !strings.Contains(lines[0], "leaky") {
-		t.Fatalf("diagnostics %q, want one naming the row", lines)
+	for _, tc := range []struct {
+		name  string
+		entry PluginEntry
+		// shown is how the diagnostic names what went: the menu's spelling.
+		shown string
+		// key is the configured key, where the case needs one of its own.
+		key string
+	}{
+		{
+			name: "a path under a directory named after the key",
+			entry: func() PluginEntry {
+				e := described("user", "leaky", PluginKindSkill, "in a directory with a key in its name")
+				e.Path = "/home/" + nativeCanary + "/.claude/skills/leaky/SKILL.md"
+				return e
+			}(),
+			shown: "leaky",
+		},
+		{
+			name:  "a frontmatter name that is the key",
+			entry: described("user", nativeCanary, PluginKindSkill, "named after the key"),
+			shown: nativeCanary,
+		},
+		{
+			name:  "a plugin id that is the key",
+			entry: described(nativeCanary, "deploy", PluginKindCommand, "a plugin's own command"),
+			shown: "deploy",
+		},
+		{
+			name: "a plugin root under a directory named after the key",
+			entry: func() PluginEntry {
+				e := described("pack", "build", PluginKindCommand, "a plugin's own command")
+				e.Root = "/home/" + nativeCanary + "/.claude/plugins/pack"
+				return e
+			}(),
+			shown: "build",
+		},
+		{
+			name:  "a key that only the qualified spelling holds",
+			entry: described("some-plugin", "deploy-thing", PluginKindCommand, "the join makes the key"),
+			shown: "deploy-thing",
+			key:   "plugin:deploy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := nativeCanary
+			if tc.key != "" {
+				key = tc.key
+			}
+			entries, rows, lines := gateOf([]PluginEntry{tc.entry, clean}, key)
+			// Gone from the menu, gone from the catalog, and gone from the
+			// entries the expansion lookup is built from.
+			wantDisplays(t, rows, "clean")
+			wantCatalog(t, nativeCatalog(entries, rows), "clean")
+			if len(entries) != 1 || entries[0].Name != "clean" {
+				t.Fatalf("entries %+v, want the clean one alone", entries)
+			}
+			// One line, naming what went the way the menu would have. The key
+			// in it is the lane's to redact, not the gate's (contentWarn).
+			if len(lines) != 1 || !strings.Contains(lines[0], tc.shown) {
+				t.Fatalf("diagnostics %q, want one naming %q", lines, tc.shown)
+			}
+		})
 	}
-	if strings.Contains(strings.Join(lines, "\n"), nativeCanary) {
-		t.Fatalf("the diagnostic holds the key itself: %q", lines)
-	}
-	// With no keys configured there is nothing to match and both are listed:
-	// the rule is about this machine's keys, not about the shape of a path.
-	rows, lines = catalogOf([]PluginEntry{leaky, clean})
+	// With no keys configured there is nothing to match and everything is
+	// listed: the rule is about this machine's keys, not about the shape of a
+	// name or a path.
+	leaky := described("user", nativeCanary, PluginKindSkill, "named after the key")
+	entries, rows, lines := gateOf([]PluginEntry{leaky, clean})
 	wantNoLines(t, lines)
-	wantCatalog(t, rows, "leaky", "clean")
-
-	// A row whose path holds a key usually has a name that holds it too — a
-	// skill in a directory named after the key is named after the directory —
-	// so the line itself is redacted before it is written.
-	named := described("user", nativeCanary, PluginKindSkill, "named after the key")
-	rows, lines = catalogOf([]PluginEntry{named, clean}, nativeCanary)
-	wantCatalog(t, rows, "clean")
-	if len(lines) != 1 || strings.Contains(lines[0], nativeCanary) {
-		t.Fatalf("diagnostics %q, want one with the key redacted out of it", lines)
+	wantDisplays(t, rows, nativeCanary, "clean")
+	if len(entries) != 2 {
+		t.Fatalf("%d entries, want both", len(entries))
 	}
 }
 
