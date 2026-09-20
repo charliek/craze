@@ -261,6 +261,19 @@ func (s *server) strandSelfInterjection(r *promptReq) {
 // enough to outlive the turn that stranded it.
 const strandFallbackFor = 400 * time.Millisecond
 
+// idleFallbackFor is how long the fallback holds the session when the
+// interjection was stranded with no turn running at all. A client that wants
+// to act *during* that turn has to see its start event first, and it learns of
+// it by polling its own event log, so the window has to outlast a poll on a
+// loaded machine — not merely the few milliseconds the fake needs to stream
+// it. It was 50 ms, which a CI runner running two workflows at once missed:
+// the foreign turn was over before the test's next prompt, which then
+// succeeded where the test required a refusal. Nothing asserts that this turn
+// is short, and every test that waits for it to end waits on the event, so a
+// generous window costs those tests only the time they would have spent
+// polling anyway.
+const idleFallbackFor = 3 * time.Second
+
 // endTurn writes one turn's ending: the turn stops being the running one, the
 // queue broadcast says so, and turn_completed, prompt_complete and the RPC
 // reply follow in the live order. Whatever the turn merged goes with it.
@@ -430,7 +443,7 @@ func (s *server) runFallbackIfStranded() {
 	text := strings.Join(s.pendingInterjections, " ")
 	s.pendingInterjections = nil
 	s.mu.Unlock()
-	s.startFallback(text, 50*time.Millisecond)
+	s.startFallback(text, idleFallbackFor)
 }
 
 // startFallback mints the interject-fallback turn and runs it in the
