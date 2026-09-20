@@ -237,6 +237,233 @@ def test_native_mid_line_reference_is_not_expanded(
     assert user_contents(fixture_server.requests[0]) == ["cd /ship && make"]
 
 
+def system_text(request) -> str:
+    """The frozen system prompt as one request carried it.
+
+    A request leads with it, so this is what every turn of a session sends
+    ahead of anything the user wrote (plan 022 §3.4). It is read out of
+    ``RecordedRequest.body`` rather than off the process, because the whole
+    question here is what left craze.
+    """
+    for m in request.messages:
+        if m.get("role") != "system":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    raise AssertionError(f"no system message in {request.messages}")
+
+
+def write_compat_workspace(tmp_path: Path) -> Path:
+    """A workspace and a Claude home holding one of everything the prompt can
+    draw from: an instruction file, a rule, a project command, a project skill,
+    and one enabled plugin shipping a command of its own.
+
+    The home is the suite's isolated HOME (conftest.isolate_run_env), which is
+    what a native session reads the user's own content under. The workspace
+    gets a .git so the chain stops there: without one the walk climbs toward
+    the filesystem root looking for a repository, and what it found would
+    depend on where the temporary directory happened to be.
+    """
+    ws = tmp_path / "ws"
+    (ws / ".claude" / "commands").mkdir(parents=True)
+    (ws / ".claude" / "rules").mkdir(parents=True)
+    (ws / ".claude" / "skills" / "build").mkdir(parents=True)
+    (ws / ".git").mkdir()
+    (ws / "CLAUDE.md").write_text("project instructions here\n", encoding="utf-8")
+    (ws / ".claude" / "rules" / "style.md").write_text("project rule here\n", encoding="utf-8")
+    (ws / ".claude" / "commands" / "ship.md").write_text(
+        "---\ndescription: ship it\n---\nShip $ARGUMENTS.\n", encoding="utf-8"
+    )
+    (ws / ".claude" / "skills" / "build" / "SKILL.md").write_text(
+        "---\nname: build\ndescription: build the thing\n---\nbody\n", encoding="utf-8"
+    )
+
+    home = Path(os.environ["HOME"]) / ".claude"
+    install = home / "plugins" / "cache" / "pack"
+    (install / "commands").mkdir(parents=True)
+    (install / "commands" / "deploy.md").write_text(
+        "---\ndescription: deploy it\n---\nDeploy.\n", encoding="utf-8"
+    )
+    (home / "plugins").mkdir(parents=True, exist_ok=True)
+    (home / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {"pack@mkt": [{"scope": "user", "installPath": str(install)}]}}),
+        encoding="utf-8",
+    )
+    (home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"pack@mkt": True}}), encoding="utf-8"
+    )
+    return ws
+
+
+# What each class of content looks like in the prompt, for the toggle table
+# below: the marker a class is present by, and absent by.
+COMPAT_MARKERS = {
+    "instructions": "project instructions here",
+    "rules": "project rule here",
+    "skills": "- build (skill): build the thing",
+    "commands": "- ship (command): ship it",
+    "plugins": "- deploy (command): deploy it",
+}
+
+
+def test_native_instructions_and_catalog_reach_the_system_prompt(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 022 §3.4 from outside the process: what craze read off disk is in
+    the system message of the first request, under craze's own framing, with
+    the menu's names and the absolute paths that load them."""
+    fixture_server.set_ok(text_parts=["read it"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    ws = write_compat_workspace(tmp_path)
+
+    proc = run_native(craze_bin, craze_home, ws, "hi")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    sent = system_text(fixture_server.requests[0])
+    assert "# Project and user instructions" in sent, sent
+    assert f"## From: {ws / 'CLAUDE.md'}" in sent, sent
+    assert "# Skills and commands" in sent, sent
+    for marker in COMPAT_MARKERS.values():
+        assert marker in sent, (marker, sent)
+    # A row is only worth listing because the model can open it.
+    assert f"  Path: {ws / '.claude' / 'commands' / 'ship.md'}" in sent, sent
+    # Root is a plugin's alone: the project's own entries have none (§3.4).
+    assert sent.count("  Root: ") == 1, sent
+    assert CANARY not in proc.stdout and CANARY not in proc.stderr
+
+
+def test_native_never_prints_an_identity_holding_a_key(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A8's `--json` half, against the real binary.
+
+    A provider key can be embedded in an *identity* — a plugin id, a
+    frontmatter name, a directory a skill lives in — and an identity cannot be
+    redacted without breaking the thing it identifies: a marker where a name
+    was answers to nothing the user could type, and a marker where a path was
+    opens no file. So craze suppresses the whole entry (§3.4), and neither the
+    system prompt nor the `--json` stream nor the diagnostics on stderr ever
+    carries it.
+
+    The controls are the point: a clean command in the same workspace is
+    listed and expands, so a run that printed nothing at all could not pass
+    here. `/deploy` is typed although the key is nowhere in that name — the
+    user never sees a plugin's id — which is the route the event's `plugin`
+    and `qualified` fields leaked through before the gate existed.
+    """
+    fixture_server.set_ok(text_parts=["nothing leaked"])
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+
+    ws = tmp_path / "ws"
+    (ws / ".git").mkdir(parents=True)
+    (ws / ".claude" / "commands").mkdir(parents=True)
+    (ws / ".claude" / "commands" / "ship.md").write_text(
+        "---\ndescription: ship it\n---\nShip $ARGUMENTS.\n", encoding="utf-8"
+    )
+    # A skill whose directory, and therefore whose name and path, is the key.
+    keyed_skill = ws / ".claude" / "skills" / CANARY
+    keyed_skill.mkdir(parents=True)
+    (keyed_skill / "SKILL.md").write_text(
+        f"---\nname: {CANARY}\ndescription: named after the key\n---\nbody\n", encoding="utf-8"
+    )
+    # And an enabled plugin whose id is the key, shipping an ordinary command.
+    home = Path(os.environ["HOME"]) / ".claude"
+    install = home / "plugins" / "cache" / "keyed"
+    (install / "commands").mkdir(parents=True)
+    (install / "commands" / "deploy.md").write_text(
+        "---\ndescription: deploy it\n---\nDeploy.\n", encoding="utf-8"
+    )
+    (home / "plugins" / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {f"{CANARY}@mkt": [{"scope": "user", "installPath": str(install)}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {f"{CANARY}@mkt": True}}), encoding="utf-8"
+    )
+
+    proc = run_native(craze_bin, craze_home, ws, "/ship v2\n/deploy")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert CANARY not in proc.stdout, proc.stdout
+    assert CANARY not in proc.stderr, proc.stderr
+
+    events = parse_events(proc.stdout)
+    commands = [e for e in events if e.get("type") == "command"]
+    assert len(commands) == 1, events
+    assert commands[0]["name"] == "ship", commands[0]
+    for field in ("name", "qualified", "plugin", "kind", "path", "text"):
+        assert CANARY not in commands[0].get(field, ""), commands[0]
+
+    sent = system_text(fixture_server.requests[0])
+    assert "- ship (command): ship it" in sent, sent
+    for gone in ("named after the key", "deploy it", CANARY):
+        assert gone not in sent, (gone, sent)
+
+
+@pytest.mark.parametrize("toggle", sorted(COMPAT_MARKERS))
+def test_native_compat_toggle_removes_its_class(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture, toggle: str
+) -> None:
+    """A13 end to end: `[compat.claude]` in craze's own config.toml removes
+    exactly its row of §3.5's matrix from what reaches the provider, and
+    nothing else — including `instructions`, which takes the rules with it
+    because they are part of the same section, and `commands`, which does not
+    take a plugin's commands with it because `plugins` governs those.
+    """
+    fixture_server.set_ok(text_parts=["toggled"])
+    craze_home = tmp_path / "craze-home"
+    craze_home.mkdir(parents=True, exist_ok=True)
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    (craze_home / "config.toml").write_text(
+        f"[compat.claude]\n{toggle} = false\n", encoding="utf-8"
+    )
+    ws = write_compat_workspace(tmp_path)
+
+    proc = run_native(craze_bin, craze_home, ws, "hi")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    sent = system_text(fixture_server.requests[0])
+    gone = {toggle} | ({"rules"} if toggle == "instructions" else set())
+    for name, marker in COMPAT_MARKERS.items():
+        if name in gone:
+            assert marker not in sent, (name, sent)
+        else:
+            assert marker in sent, (name, sent)
+    if toggle == "instructions":
+        assert "# Project and user instructions" not in sent, sent
+
+
+def test_native_compat_non_bool_is_the_default_and_one_line(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """§3.5's one departure from craze's other config switches: a value that is
+    not a bool leaves the class on and says so, because a typo there would
+    otherwise look like craze having lost the user's own instructions."""
+    fixture_server.set_ok(text_parts=["still on"])
+    craze_home = tmp_path / "craze-home"
+    craze_home.mkdir(parents=True, exist_ok=True)
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    (craze_home / "config.toml").write_text(
+        '[compat.claude]\nskills = "no"\n', encoding="utf-8"
+    )
+    ws = write_compat_workspace(tmp_path)
+
+    proc = run_native(craze_bin, craze_home, ws, "hi")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "compat.claude.skills is not a bool" in proc.stderr, proc.stderr
+    assert COMPAT_MARKERS["skills"] in system_text(fixture_server.requests[0])
+
+
 def test_native_absent_from_help_and_unknown_provider_error(
     craze_bin: Path, tmp_path: Path
 ) -> None:

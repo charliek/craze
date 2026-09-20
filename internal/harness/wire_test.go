@@ -168,6 +168,11 @@ func TestPromptCachePrefixIsStable(t *testing.T) {
 		return llm.New(r) // the default factory, counted
 	}
 	opts.Now = time.Now // a real clock: nothing may reach the prompt
+	// With the workspace's own content in the prompt (plan 022 §3.4): the
+	// extras are rendered once, at Open, so they must not move the prefix
+	// either — the cache property is about the whole system message, not the
+	// profile's half of it.
+	opts.Prompt = testPromptExtras()
 	s := f.open(opts)
 
 	run(t, s, "What is 2+2?")
@@ -187,6 +192,11 @@ func TestPromptCachePrefixIsStable(t *testing.T) {
 	bodies := w.requests()
 	if len(bodies) != 3 {
 		t.Fatalf("the server saw %d requests, want 3", len(bodies))
+	}
+	// The extras really were on the wire, so what follows compared them: a
+	// session that dropped them would pass every check below just as well.
+	if sys := messages(t, bodies[0])[0]; !bytes.Contains(sys, []byte(catalogHeading)) || !bytes.Contains(sys, []byte(instructionsHeading)) {
+		t.Fatalf("the system message carried no extras:\n%s", sys)
 	}
 	for i := 1; i < len(bodies); i++ {
 		prev, next := messages(t, bodies[i-1]), messages(t, bodies[i])
@@ -273,6 +283,7 @@ func TestToolLoopPrefixIsStable(t *testing.T) {
 	)
 	f, opts := wireFixture(t, w)
 	opts.Now = time.Now // a real clock: nothing may reach the prompt
+	opts.Prompt = testPromptExtras()
 	s := f.open(opts)
 	f.put("a.txt", "alpha\n")
 
@@ -357,6 +368,7 @@ func TestSteerPrefixIsStable(t *testing.T) {
 			)
 			f, opts := wireFixture(t, w)
 			opts.Now = time.Now // a real clock: nothing may reach the prompt
+			opts.Prompt = testPromptExtras()
 			s := f.open(opts)
 			f.put("a.txt", "alpha\n")
 

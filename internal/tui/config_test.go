@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 // writeConfigFile points CRAZE_HOME at a fresh directory and writes body as
@@ -289,6 +291,97 @@ func TestConfigHostStatusTable(t *testing.T) {
 		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
 		if !ConfigHostStatus() {
 			t.Fatal("no config file at all should still report host status")
+		}
+	})
+}
+
+// TestConfigCompatClaudeTable is the whole of [compat.claude]'s parsing rule
+// (plan 022 §3.5, A13): every key defaults to true, only a literal false turns
+// one off, and an absent table, a partial one and a config craze cannot read
+// all leave every class on.
+//
+// The one place it parts company with the switches above is a value that is
+// not a bool: it is the default *and* a line, because a typo there silently
+// strips the user's own instructions or half their slash menu out of a session
+// rather than losing a tab title.
+func TestConfigCompatClaudeTable(t *testing.T) {
+	allOn := agent.ClaudeCompat{}
+	for _, tc := range []struct {
+		name string
+		body string
+		want agent.ClaudeCompat
+		why  []string
+	}{
+		{"absent table", "theme = \"dark\"\n", allOn, nil},
+		{"malformed file", "this is not toml [[[\n", allOn, nil},
+		{"empty table", "[compat.claude]\n", allOn, nil},
+		{"a table that is not claude's", "[compat.other]\nskills = false\n", allOn, nil},
+		{"everything on", "[compat.claude]\ninstructions = true\nrules = true\nskills = true\ncommands = true\nplugins = true\n", allOn, nil},
+		{
+			name: "everything off",
+			body: "[compat.claude]\ninstructions = false\nrules = false\nskills = false\ncommands = false\nplugins = false\n",
+			want: agent.ClaudeCompat{NoInstructions: true, NoRules: true, NoSkills: true, NoCommands: true, NoPlugins: true},
+		},
+		{
+			name: "partial",
+			body: "[compat.claude]\nskills = false\n",
+			want: agent.ClaudeCompat{NoSkills: true},
+		},
+		{
+			name: "one key at a time: instructions",
+			body: "[compat.claude]\ninstructions = false\n",
+			want: agent.ClaudeCompat{NoInstructions: true},
+		},
+		{
+			name: "one key at a time: rules",
+			body: "[compat.claude]\nrules = false\n",
+			want: agent.ClaudeCompat{NoRules: true},
+		},
+		{
+			name: "one key at a time: commands",
+			body: "[compat.claude]\ncommands = false\n",
+			want: agent.ClaudeCompat{NoCommands: true},
+		},
+		{
+			name: "one key at a time: plugins",
+			body: "[compat.claude]\nplugins = false\n",
+			want: agent.ClaudeCompat{NoPlugins: true},
+		},
+		{
+			name: "a value that is not a bool",
+			body: "[compat.claude]\nskills = \"no\"\ncommands = false\n",
+			want: agent.ClaudeCompat{NoCommands: true},
+			why:  []string{"config.toml compat.claude.skills is not a bool; leaving it on"},
+		},
+		{
+			// Two of them, and the order is the table's own rather than the
+			// map's, so one run's diagnostics are every run's.
+			name: "two values that are not bools",
+			body: "[compat.claude]\nplugins = 1\ninstructions = \"yes\"\n",
+			want: allOn,
+			why: []string{
+				"config.toml compat.claude.instructions is not a bool; leaving it on",
+				"config.toml compat.claude.plugins is not a bool; leaving it on",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			got, why := ConfigCompatClaude()
+			if got != tc.want {
+				t.Errorf("ConfigCompatClaude() = %+v, want %+v", got, tc.want)
+			}
+			if strings.Join(why, "|") != strings.Join(tc.why, "|") {
+				t.Errorf("diagnostics %q, want %q", why, tc.why)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
+		got, why := ConfigCompatClaude()
+		if got != allOn || why != nil {
+			t.Fatalf("no config file at all gave %+v and %q, want every class on and nothing said", got, why)
 		}
 	})
 }
