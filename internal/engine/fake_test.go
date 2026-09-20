@@ -336,18 +336,7 @@ func (s *fakeSession) Close() error {
 
 var errFakeUnused = errors.New("fakeSession: not part of the driver's seam")
 
-// The rest of the seam is not the driver's: the queue still on it goes when the
-// queue leaves the provider seam, and asks and settings move later.
-func (s *fakeSession) Queue(string) (agent.QueuedPrompt, error) {
-	return agent.QueuedPrompt{}, errFakeUnused
-}
-func (s *fakeSession) EditQueued(string, string) error           { return errFakeUnused }
-func (s *fakeSession) Unqueue(string) (agent.QueuedPrompt, bool) { return agent.QueuedPrompt{}, false }
-func (s *fakeSession) TakeQueued(string) (agent.QueuedPrompt, bool) {
-	return agent.QueuedPrompt{}, false
-}
-func (s *fakeSession) PopQueue() (agent.QueuedPrompt, bool)    { return agent.QueuedPrompt{}, false }
-func (s *fakeSession) ClearQueue() int                         { return 0 }
+// The rest of the seam is not the driver's yet: asks and settings move later.
 func (s *fakeSession) Interject(context.Context, string) error { return agent.ErrUnsupported }
 func (s *fakeSession) AnswerPermission(string, string) error   { return errFakeUnused }
 func (s *fakeSession) AnswerQuestion(string, map[string][]string, bool) error {

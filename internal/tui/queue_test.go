@@ -93,8 +93,8 @@ func TestEnterQueuesDuringATurnAndClearsTheDraft(t *testing.T) {
 func TestEnterOnAnIdleSessionStillSends(t *testing.T) {
 	m := sized(t)
 	m = typeEnter(t, m, "hello")
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("an idle Enter sends rather than queues: %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 0 {
+		t.Fatalf("an idle Enter sends rather than queues: %+v", got)
 	}
 	if got := texts(m, entryUser); len(got) != 1 || got[0] != "hello" {
 		t.Fatalf("user entries %q", got)
@@ -112,8 +112,8 @@ func TestQueueFullAndTooLongKeepTheDraft(t *testing.T) {
 	if m.input.Value() != "one too many" {
 		t.Fatalf("a refused message keeps the draft: %q", m.input.Value())
 	}
-	if len(m.snap.Queue) != 32 {
-		t.Fatalf("queue length %d", len(m.snap.Queue))
+	if got := queuedRows(m); len(got) != 32 {
+		t.Fatalf("queue length %d", len(got))
 	}
 	if !strings.Contains(plainView(m), "queue full") {
 		t.Fatalf("the note is missing:\n%s", plainView(m))
@@ -126,7 +126,7 @@ func TestQueueFullAndTooLongKeepTheDraft(t *testing.T) {
 	if len(m2.input.Value()) != 32<<10+1 {
 		t.Fatal("an oversized message keeps the draft")
 	}
-	if len(m2.snap.Queue) != 0 {
+	if len(queuedRows(m2)) != 0 {
 		t.Fatal("an oversized message is not queued")
 	}
 	if !strings.Contains(plainView(m2), "message too long") {
@@ -231,8 +231,8 @@ func TestBackspaceRemovesAndClampsTheSelection(t *testing.T) {
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m = tm.(Model)
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("queue %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 0 {
+		t.Fatalf("queue %+v", got)
 	}
 	if m.queueFocus {
 		t.Fatal("an emptied band returns the keyboard to the composer")
@@ -243,7 +243,7 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "one")
 	m = typeEnter(t, m, "two")
-	before := m.snap.Queue[1]
+	before := queuedRows(m)[1]
 	m.input.SetValue("a draft in progress")
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = tm.(Model)
@@ -261,7 +261,7 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	m.input.SetValue("TWO!")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	got := m.snap.Queue
+	got := queuedRows(m)
 	if len(got) != 2 || got[1].ID != before.ID || got[1].Text != "TWO!" {
 		t.Fatalf("the row keeps its id and position: %+v", got)
 	}
@@ -283,8 +283,8 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	if m.queueEdit != "" {
 		t.Fatal("esc leaves edit mode")
 	}
-	if m.snap.Queue[1].Text != "TWO!" {
-		t.Fatalf("the row is untouched: %+v", m.snap.Queue)
+	if got := queuedRows(m); got[1].Text != "TWO!" {
+		t.Fatalf("the row is untouched: %+v", got)
 	}
 	if m.input.Value() != "a draft in progress" {
 		t.Fatalf("the draft comes back: %q", m.input.Value())
@@ -845,8 +845,8 @@ func TestQueueActionClicks(t *testing.T) {
 		m, _ := queueWorking(t)
 		m = typeEnter(t, m, "PINEAPPLE")
 		m = press(t, hoverRow(t, m, 0), cancelX, 0)
-		if len(m.snap.Queue) != 0 {
-			t.Fatalf("[cancel] removes the row: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 0 {
+			t.Fatalf("[cancel] removes the row: %+v", got)
 		}
 	})
 	t.Run("edit", func(t *testing.T) {
@@ -864,8 +864,8 @@ func TestQueueActionClicks(t *testing.T) {
 		if m.confirm == nil {
 			t.Fatal("[send now] asks first")
 		}
-		if len(m.snap.Queue) != 1 {
-			t.Fatalf("the row stays until it actually goes: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 1 {
+			t.Fatalf("the row stays until it actually goes: %+v", got)
 		}
 	})
 	t.Run("row text selects", func(t *testing.T) {
@@ -876,8 +876,8 @@ func TestQueueActionClicks(t *testing.T) {
 		if !m.queueFocus || m.queueSel != 1 {
 			t.Fatalf("a click on the text selects the row: focus %v sel %d", m.queueFocus, m.queueSel)
 		}
-		if len(m.snap.Queue) != 2 {
-			t.Fatalf("nothing else happened: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 2 {
+			t.Fatalf("nothing else happened: %+v", got)
 		}
 	})
 	t.Run("a click where no strip was drawn only selects", func(t *testing.T) {
@@ -887,8 +887,8 @@ func TestQueueActionClicks(t *testing.T) {
 		m = typeEnter(t, m, "one")
 		m = typeEnter(t, m, "two")
 		m = press(t, m, cancelX, 1)
-		if len(m.snap.Queue) != 2 {
-			t.Fatalf("a button that was not drawn cannot be clicked: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 2 {
+			t.Fatalf("a button that was not drawn cannot be clicked: %+v", got)
 		}
 		if !m.queueFocus || m.queueSel != 1 {
 			t.Fatalf("the click selects the row instead: focus %v sel %d", m.queueFocus, m.queueSel)
@@ -940,8 +940,8 @@ func TestMouseModeNeverIssuedUnderNoMouse(t *testing.T) {
 	m.input.SetValue("PINEAPPLE")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
-	if len(m.snap.Queue) != 1 {
-		t.Fatalf("the queue still works: %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 1 {
+		t.Fatalf("the queue still works: %+v", got)
 	}
 	if hasMouseSequence(t, cmd, "all") || hasMouseSequence(t, cmd, "cell") {
 		t.Fatal("--no-mouse asked the terminal for no reporting; craze must not start now")
@@ -1167,7 +1167,7 @@ func TestActionStripHitTestMatchesTheDraw(t *testing.T) {
 			m = typeEnter(t, m, "PINEAPPLE")
 			tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 			m = tm.(Model)
-			row := plain(m.queueRow(0, m.snap.Queue[0], true, false))
+			row := plain(m.queueRow(0, queuedRows(m)[0], true, false))
 			if !strings.Contains(row, "[send now] [edit] [cancel]") {
 				t.Fatalf("width %d: no strip drawn: %q", width, row)
 			}

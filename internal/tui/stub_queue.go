@@ -6,86 +6,9 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
-// The Stub's queue is the real one: agent.PromptQueue is the whole of craze's
-// queue state, so the chrome tests exercise the same transactions, bounds and
-// events a live session does. Only the guards around it are the stub's own.
-
-func (s *Stub) Queue(text string) (agent.QueuedPrompt, error) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	p, ev, err := s.queue.Add(text, s.now())
-	if err != nil {
-		return agent.QueuedPrompt{}, err
-	}
-	s.emit(ev.Event())
-	return p, nil
-}
-
-func (s *Stub) EditQueued(id, text string) error {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	ev, err := s.queue.Edit(id, text)
-	if err != nil {
-		return err
-	}
-	s.emit(ev.Event())
-	return nil
-}
-
-func (s *Stub) Unqueue(id string) (agent.QueuedPrompt, bool) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	ev, ok := s.queue.Remove(id)
-	if !ok {
-		return agent.QueuedPrompt{}, false
-	}
-	s.emit(ev.Event())
-	return ev.Prompt, true
-}
-
-func (s *Stub) TakeQueued(id string) (agent.QueuedPrompt, bool) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	s.mu.Lock()
-	if s.inPrompt || s.foreign {
-		s.mu.Unlock()
-		return agent.QueuedPrompt{}, false
-	}
-	ev, ok := s.queue.Take(id)
-	s.mu.Unlock()
-	if !ok {
-		return agent.QueuedPrompt{}, false
-	}
-	s.emit(ev.Event())
-	return ev.Prompt, true
-}
-
-func (s *Stub) PopQueue() (agent.QueuedPrompt, bool) {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	s.mu.Lock()
-	if s.inPrompt || s.foreign {
-		s.mu.Unlock()
-		return agent.QueuedPrompt{}, false
-	}
-	ev, ok := s.queue.Pop()
-	s.mu.Unlock()
-	if !ok {
-		return agent.QueuedPrompt{}, false
-	}
-	s.emit(ev.Event())
-	return ev.Prompt, true
-}
-
-func (s *Stub) ClearQueue() int {
-	s.queueOp.Lock()
-	defer s.queueOp.Unlock()
-	evs := s.queue.Clear()
-	for _, ev := range evs {
-		s.emit(ev.Event())
-	}
-	return len(evs)
-}
+// The Stub's queue is the engine's, like every other session's (plan 021
+// §3.5): the Stub itself holds none, and the chrome tests that queue a row do
+// it through the engine that drives the Stub, not through any method here.
 
 // Interject follows the live guards: the provider has to have it, and there
 // has to be a turn left to merge into.

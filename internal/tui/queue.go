@@ -72,7 +72,7 @@ type strongSend struct {
 }
 
 // queueItems is the queue as the band draws it.
-func (m Model) queueItems() []agent.QueuedPrompt { return m.snap.Queue }
+func (m Model) queueItems() []agent.QueuedPrompt { return m.queue }
 
 // queueRowCap is how many rows this frame has room for.
 func (m Model) queueRowCap() int {
@@ -415,7 +415,7 @@ func (m Model) queueEditChip() string {
 	// The row's number is read now, not at edit time: a drain that sends #1
 	// while #2 is being edited makes that row #1.
 	pos := m.queueEditPos
-	for i, p := range m.snap.Queue {
+	for i, p := range m.queue {
 		if p.ID == m.queueEdit {
 			pos = i
 			break
@@ -550,7 +550,7 @@ func (m Model) handleStrongSend() (tea.Model, tea.Cmd) {
 		if m.queueEdit != "" {
 			return m, nil // the save was refused and said why
 		}
-		for _, p := range m.snap.Queue {
+		for _, p := range m.queue {
 			if p.ID == id {
 				return m.sendQueuedNow(p)
 			}

@@ -17,14 +17,14 @@ import (
 // added out here instead.
 //
 // It embeds *Stub rather than reimplementing it, so every method it does not
-// name passes straight through: Emit, the queue verbs, the setters, Snapshot,
-// Events, Prompts, CancelsSent, and anything later commits promote (the event
-// log accessor, for one). It overrides exactly two: Begin, to substitute a
-// scripted continuation, and Cancel, to fail one.
+// name passes straight through: Emit, the setters, Snapshot, Events, Prompts,
+// CancelsSent, and anything later commits promote (the event log accessor,
+// for one). It overrides exactly two: Begin, to substitute a scripted
+// continuation, and Cancel, to fail one.
 //
-// What it must not do is lie about the Stub's own turn bookkeeping, because the
-// queue guards (PopQueue and TakeQueued refuse while a turn is open), Interject
-// and Cancel are all decided from it. The decorator lives in package tui, so it
+// What it must not do is lie about the Stub's own turn bookkeeping, because
+// Interject and Cancel are both decided from it. The decorator lives in
+// package tui, so it
 // sets the same fields under the same mutex the Stub's own run does — claimed,
 // inPrompt, doneEmitted — and the claim itself is always the Stub's: Begin calls
 // through, so Prompts() records the prompt, a second Begin is refused, and a

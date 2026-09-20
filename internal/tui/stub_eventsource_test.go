@@ -81,9 +81,10 @@ func assertContiguous(t *testing.T, evs []agent.Event, from uint64) {
 }
 
 // TestStubIsAnEventSourceWithContiguousSeq: the Stub is an agent.EventSource;
-// its events are numbered 1, 2, 3, … across a prompt and a queue change; a
-// Prompt that returned has its ending already buffered; a subscription taken
-// first gets the same events in the same order; and Close ends it.
+// its events are numbered 1, 2, 3, … across a prompt and a second, unrelated
+// emit; a Prompt that returned has its ending already buffered; a
+// subscription taken first gets the same events in the same order; and Close
+// ends it.
 func TestStubIsAnEventSourceWithContiguousSeq(t *testing.T) {
 	s := NewStub()
 	t.Cleanup(func() { _ = s.Close() })
@@ -107,12 +108,10 @@ func TestStubIsAnEventSourceWithContiguousSeq(t *testing.T) {
 	if len(turn) == 0 || turn[len(turn)-1].Type != agent.EventDone {
 		t.Fatalf("after Prompt returned, the buffered events do not end in EventDone: %+v", turn)
 	}
-	if _, err := s.Queue("later"); err != nil {
-		t.Fatal(err)
-	}
+	s.SetForeignTurn(agent.ForeignTurnInfo{ID: "later", Running: true})
 	all := append(turn, stubBuffered(s)...)
-	if len(all) != len(turn)+1 || all[len(all)-1].Type != agent.EventQueue {
-		t.Fatalf("the queue change is not the one event after the turn: %+v", all)
+	if len(all) != len(turn)+1 || all[len(all)-1].Type != agent.EventForeignTurn {
+		t.Fatalf("the second emit is not the one event after the turn: %+v", all)
 	}
 	assertContiguous(t, all, 1)
 

@@ -267,6 +267,10 @@ type Model struct {
 	cards          []card
 	cardsCancelled bool
 	snap           agent.Snapshot
+	// queue is the engine's message queue, in send order: refreshSnap and
+	// refreshQueue fill it from Control.State().Queue, which is where the
+	// queue lives now that it has left the provider seam (plan 021 §3.5).
+	queue []agent.QueuedPrompt
 	// modeInFlight is a mode change of craze's own that the agent has not
 	// answered yet. The chip flips when the user asks for it and reverts only
 	// if the agent refuses, but the session's snapshot still says the old mode
@@ -2829,17 +2833,15 @@ func (m *Model) touchIndex() {
 // the snapshot and an agent-side change that went round in a circle leaves
 // nothing to compare.
 //
-// The queue is the engine's from here. It is written back over the snapshot's
-// own — the session's, which the TUI no longer touches and which leaves the
-// provider seam in a later commit — so that everything that draws the band keeps
-// reading one field and there is one place this moves again.
+// The queue is the engine's alone now (plan 021 §3.5): m.queue, not a field on
+// m.snap, is what everything that draws the band reads.
 func (m *Model) refreshSnap() {
 	if m.eng == nil {
 		return
 	}
 	st := m.eng.State()
 	m.snap = st.Snapshot
-	m.snap.Queue = st.Queue
+	m.queue = st.Queue
 	if m.modeInFlight != "" {
 		// A SetMode of craze's own is still on the wire. The snapshot answers
 		// with the mode the session is still in, which is the one the user
@@ -2878,7 +2880,7 @@ func (m *Model) refreshQueue() {
 	if m.eng == nil {
 		return
 	}
-	m.snap.Queue = m.eng.State().Queue
+	m.queue = m.eng.State().Queue
 }
 
 // View places the regions the layout decided, each forced to exactly its own

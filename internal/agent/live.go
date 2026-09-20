@@ -78,23 +78,6 @@ type session struct {
 	// subagentFinishSeq stamps records in the order they finished, which is
 	// not spawn order; the finished-record cap evicts by it.
 	subagentFinishSeq uint64
-	// queue is craze's own message queue (§3.1). queueOp orders whole
-	// transactions — the mutation and the events it produced — so the event
-	// stream can be replayed into the same queue. emitMu is taken inside
-	// queueOp and held across the transaction's emits, which happen after
-	// queueOp is released: emit blocks on a full event channel, and a reader
-	// that is waiting on something holding queueOp would wedge the session.
-	// Lock order: queueOp → emitMu → s.mu → the queue's own lock, and
-	// emitMu → the event log's publishing boundary. Every emit takes the
-	// boundary, and it is a leaf: nothing holding it takes any of these
-	// locks. It may be taken with emitMu held (queueTx) and is never taken
-	// with s.mu held, because a publisher blocked on a full primary while
-	// holding s.mu would stop Close, which needs s.mu to close done — the
-	// one thing that releases it. That was already the rule for emit
-	// (emitParked says why); the boundary makes it a lock-order rule.
-	queueOp sync.Mutex
-	emitMu  sync.Mutex
-	queue   PromptQueue
 	// doneEmitted marks that the turn is over — Prompt has returned, either
 	// way. inPrompt is still true until Prompt's defer runs, so it alone
 	// cannot say whether there is still a turn to interject into.
@@ -1015,12 +998,11 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	s.doneEmitted = true
 	s.mu.Unlock()
 	if err != nil {
-		// The error goes out first, so a consumer is already in its error
-		// state when the removals arrive and can say why the queue emptied.
+		// The error goes out first, so a consumer already in its error state
+		// by the time the engine's chain policy clears its own queue at
+		// settlement (plan 021 §3.5) — this session has none of its own any
+		// more.
 		s.emit(Event{Type: EventError, Err: err})
-		// Nothing drains from an error state, and a queue that outlived one
-		// would run behind whatever the user sends next.
-		s.clearQueueOnError()
 		return Result{}, err
 	}
 	if res.StopReason == acp.StopCancelled {
@@ -1033,8 +1015,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 // refusedBeforeWire reports an error that means the prompt never reached the
 // agent: a turn craze did not start is running, or one of craze's own still
 // is. Nothing was attempted and no queued message was lost, so the refusal is
-// the caller's to retry — it is not a turn that failed, and the queue it would
-// have drained stays exactly as it was.
+// the caller's to retry — it is not a turn that failed.
 func refusedBeforeWire(err error) bool {
 	return errors.Is(err, acp.ErrForeignTurn) || errors.Is(err, acp.ErrPromptInFlight)
 }
@@ -1123,9 +1104,6 @@ func (s *session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	// s.mu → the queue's lock is the order every queue transaction takes;
-	// reading them the other way round here would close the cycle.
-	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)

@@ -1948,8 +1948,8 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		if m.status != statusWorking {
 			t.Fatalf("status %s", m.status)
 		}
-		if len(m.snap.Queue) != 0 {
-			t.Fatalf("a builtin must never queue: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 0 {
+			t.Fatalf("a builtin must never queue: %+v", got)
 		}
 	})
 	t.Run("model", func(t *testing.T) {
@@ -1965,8 +1965,8 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("/model while working should not run a command")
 		}
-		if len(m.snap.Queue) != 0 {
-			t.Fatalf("a builtin must never queue: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 0 {
+			t.Fatalf("a builtin must never queue: %+v", got)
 		}
 	})
 }

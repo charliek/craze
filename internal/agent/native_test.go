@@ -731,43 +731,6 @@ func TestNativeTypedErrorsArePhrased(t *testing.T) {
 	}
 }
 
-// TestNativeFailureClearsTheQueue: after a failed turn's EventError, every
-// queued row is removed with its own EventQueue, in order — nothing drains
-// from an error state (live.go's clearQueueOnError).
-func TestNativeFailureClearsTheQueue(t *testing.T) {
-	f := newNativeFixture(t)
-	s := f.started(Options{})
-	for _, text := range []string{"one", "two"} {
-		if _, err := s.Queue(text); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := ofType(drained(s), EventQueue); len(got) != 2 {
-		t.Fatalf("queueing emitted %d EventQueue, want 2", len(got))
-	}
-	f.models["test/a"].push(reply(errorParts(&fantasy.ProviderError{StatusCode: 400, Message: "bad"})))
-	if _, err := s.Prompt(context.Background(), "hi"); err == nil {
-		t.Fatal("the turn did not fail")
-	}
-	evs := drained(s)
-	endings(t, evs, "")
-	var got []string
-	for _, ev := range evs {
-		switch ev.Type {
-		case EventError:
-			got = append(got, "error")
-		case EventQueue:
-			got = append(got, fmt.Sprintf("%s %s @%d", ev.QueueChange, ev.Queue.Text, ev.QueuePos))
-		}
-	}
-	if want := []string{"error", "removed one @0", "removed two @0"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("failure emitted %q, want %q", got, want)
-	}
-	if q := s.Snapshot().Queue; len(q) != 0 {
-		t.Fatalf("the queue survived the error: %+v", q)
-	}
-}
-
 // TestNativeForeignTurnIsAlwaysFalse: native drives no ACP agent, so nothing
 // it runs is ever a turn craze did not ask for. The leaf accessor and
 // Snapshot's own field agree on that (plan 021 §3.3).
@@ -899,9 +862,6 @@ func TestNativeCancelWaits(t *testing.T) {
 	// Cancel has returned, so the turn's ending is already buffered and the
 	// slot is free — no waiting on the prompt's goroutine.
 	endings(t, drained(s), "cancelled")
-	if _, ok := s.PopQueue(); ok {
-		t.Fatal("PopQueue on an empty queue")
-	}
 	s.mu.Lock()
 	busy := s.claimed || s.inPrompt
 	s.mu.Unlock()
@@ -1053,18 +1013,12 @@ func TestNativeContinuationRunsOnce(t *testing.T) {
 // TestNativeCallerContextEndingIsAFailure: a turn ended by the caller's own
 // context — its deadline or its cancel — and not by Cancel or Close is a
 // failed prompt, as on the live session: one EventError wrapping the
-// context's error, no EventDone, and the queue cleared with removals. The
-// session's own Cancel stays a clean stop that keeps the queue.
+// context's error, no EventDone. The session's own Cancel stays a clean stop.
 func TestNativeCallerContextEndingIsAFailure(t *testing.T) {
-	// setup is a started session with one queued row and a turn that holds
-	// until its context ends.
+	// setup is a started session and a turn that holds until its context ends.
 	setup := func(t *testing.T) (*nativeSession, *held) {
 		f := newNativeFixture(t)
 		s := f.started(Options{})
-		if _, err := s.Queue("queued"); err != nil {
-			t.Fatal(err)
-		}
-		drained(s)
 		h := newHeld(t)
 		f.models["test/a"].push(h.step(nil, nil))
 		return s, h
@@ -1074,24 +1028,8 @@ func TestNativeCallerContextEndingIsAFailure(t *testing.T) {
 		if !errors.Is(got.err, cause) || got.err.Error() != msg || !zeroResult(got.res) {
 			t.Fatalf("Prompt = %+v, %v; want a zero Result and %q wrapping %v", got.res, got.err, msg, cause)
 		}
-		evs := drained(s)
-		if endings(t, evs, "") != got.err {
+		if endings(t, drained(s), "") != got.err {
 			t.Fatal("the EventError does not carry the returned error")
-		}
-		var seq []string
-		for _, ev := range evs {
-			switch ev.Type {
-			case EventError:
-				seq = append(seq, "error")
-			case EventQueue:
-				seq = append(seq, fmt.Sprintf("%s %s", ev.QueueChange, ev.Queue.Text))
-			}
-		}
-		if want := []string{"error", "removed queued"}; !reflect.DeepEqual(seq, want) {
-			t.Fatalf("events %q, want %q", seq, want)
-		}
-		if q := s.Snapshot().Queue; len(q) != 0 {
-			t.Fatalf("the queue survived: %+v", q)
 		}
 	}
 
@@ -1133,61 +1071,8 @@ func TestNativeCallerContextEndingIsAFailure(t *testing.T) {
 		if got := await(t, out, "the cancelled prompt"); got.err != nil || got.res.StopReason != "cancelled" {
 			t.Fatalf("Prompt = %+v, %v; want cancelled", got.res, got.err)
 		}
-		evs := drained(s)
-		endings(t, evs, "cancelled")
-		if q := ofType(evs, EventQueue); len(q) != 0 {
-			t.Fatalf("a Cancel touched the queue: %+v", q)
-		}
-		if q := s.Snapshot().Queue; len(q) != 1 || q[0].Text != "queued" {
-			t.Fatalf("the queue after a Cancel = %+v, want the row kept", q)
-		}
+		endings(t, drained(s), "cancelled")
 	})
-}
-
-// TestNativeQueueGuardsTheClaim: TakeQueued and PopQueue refuse while a
-// prompt is claimed and not yet open, as the live session's do (Plan 017),
-// as well as while it runs; the row stays and no event is emitted. Once the
-// prompt has returned they hand the row over with its EventQueue.
-func TestNativeQueueGuardsTheClaim(t *testing.T) {
-	f := newNativeFixture(t)
-	s := f.started(Options{})
-	q, err := s.Queue("queued")
-	if err != nil {
-		t.Fatal(err)
-	}
-	drained(s)
-
-	run := s.Begin("claimed")
-	if _, ok := s.TakeQueued(q.ID); ok {
-		t.Fatal("TakeQueued took a row while a prompt was claimed")
-	}
-	if _, ok := s.PopQueue(); ok {
-		t.Fatal("PopQueue took a row while a prompt was claimed")
-	}
-	h := newHeld(t)
-	f.models["test/a"].push(h.step(nil, finishParts(fantasy.FinishReasonStop)))
-	out := make(chan outcome, 1)
-	go func() {
-		res, err := run(context.Background())
-		out <- outcome{res, err}
-	}()
-	await(t, h.reached, "the claimed turn to open")
-	if _, ok := s.PopQueue(); ok {
-		t.Fatal("PopQueue took a row while a turn was running")
-	}
-	if evs := ofType(drained(s), EventQueue); len(evs) != 0 {
-		t.Fatalf("a refused take emitted %+v", evs)
-	}
-	close(h.release)
-	await(t, out, "the claimed prompt")
-	got, ok := s.PopQueue()
-	if !ok || got.ID != q.ID {
-		t.Fatalf("PopQueue after the turn = %+v, %v", got, ok)
-	}
-	sent := ofType(drained(s), EventQueue)
-	if len(sent) != 1 || sent[0].QueueChange != QueueSent || sent[0].Queue.ID != q.ID {
-		t.Fatalf("the take emitted %+v, want one sent", sent)
-	}
 }
 
 // TestNativeCloseDuringATurn: Close cancels a live turn and waits for it —

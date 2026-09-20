@@ -3,9 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -28,8 +26,7 @@ import (
 // It deliberately leaves out the two places the stub is not production:
 // Cancel waiting for the turn (the stub's returns at once) and the error path
 // (the stub has none). The native adapter's own tests hold those, against the
-// live session's behaviour. So does the claimed-slot queue guard, which the
-// live session and the adapter have and the stub does not.
+// live session's behaviour.
 
 // contractWait bounds every wait on another goroutine; a correct run never
 // comes near it.
@@ -340,74 +337,6 @@ func TestSessionContractRefusesASecondPrompt(t *testing.T) {
 		}
 		if res, err := s.Prompt(context.Background(), "after"); err != nil || res.StopReason != "end_turn" {
 			t.Fatalf("a prompt after the turn = %+v, %v", res, err)
-		}
-	})
-}
-
-// TestSessionContractQueue: every queue mutation emits its EventQueue with
-// the row, what happened to it and the position it held; a take is refused
-// while a turn is in flight, with no event and the row kept; and once the
-// turn has returned the drain takes it.
-func TestSessionContractQueue(t *testing.T) {
-	eachImpl(t, func(t *testing.T, s contractSession) {
-		one, err := s.Queue("one")
-		if err != nil {
-			t.Fatal(err)
-		}
-		two, err := s.Queue("two")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.EditQueued(one.ID, "one, edited"); err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := s.Unqueue(two.ID); !ok {
-			t.Fatal("Unqueue lost the row")
-		}
-		if _, err := s.Queue(strings.Repeat("x", 64<<10)); !errors.Is(err, agent.ErrQueueTextTooLong) {
-			t.Fatalf("an oversized row = %v, want ErrQueueTextTooLong", err)
-		}
-
-		out := runHeld(t, s, "in flight")
-		if _, ok := s.TakeQueued(one.ID); ok {
-			t.Fatal("TakeQueued took a row while a turn was in flight")
-		}
-		if _, ok := s.PopQueue(); ok {
-			t.Fatal("PopQueue took a row while a turn was in flight")
-		}
-		cancelHeld(t, s, out)
-
-		got, ok := s.PopQueue()
-		if !ok || got.ID != one.ID || got.Text != "one, edited" {
-			t.Fatalf("PopQueue after the turn = %+v, %v", got, ok)
-		}
-		if _, err := s.Queue("three"); err != nil {
-			t.Fatal(err)
-		}
-		if n := s.ClearQueue(); n != 1 {
-			t.Fatalf("ClearQueue removed %d rows, want 1", n)
-		}
-
-		var changes []string
-		for _, ev := range buffered(s) {
-			if ev.Type == agent.EventQueue {
-				changes = append(changes, fmt.Sprintf("%s %q @%d", ev.QueueChange, ev.Queue.Text, ev.QueuePos))
-			}
-		}
-		want := []string{
-			`queued "one" @0`,
-			`queued "two" @1`,
-			`edited "one, edited" @0`,
-			`removed "two" @1`,
-			`sent "one, edited" @0`,
-			`queued "three" @0`,
-			`removed "three" @0`,
-		}
-		if !reflect.DeepEqual(changes, want) {
-			t.Fatalf("queue events:\n got %q\nwant %q", changes, want)
-		}
-		if q := s.Snapshot().Queue; len(q) != 0 {
-			t.Fatalf("the queue is not empty: %+v", q)
 		}
 	})
 }

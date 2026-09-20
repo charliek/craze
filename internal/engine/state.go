@@ -27,8 +27,9 @@ const (
 // order and reads State for where things stand.
 type State struct {
 	agent.Snapshot
-	// Queue is craze's own message queue in send order. It shadows the
-	// snapshot's, which goes when the queue leaves the provider seam.
+	// Queue is craze's own message queue in send order. The queue left the
+	// provider seam in plan 021's C6, so this is the only place it lives —
+	// nothing here shadows a field on the embedded Snapshot any more.
 	Queue    []agent.QueuedPrompt
 	Activity Activity
 	// Turn is the current turn's id, "" when none is.

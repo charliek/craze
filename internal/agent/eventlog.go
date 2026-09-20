@@ -346,10 +346,10 @@ func NewIncarnation() string {
 // boundary selects on something Close closes — closed for a publisher, the
 // outbox's cut for the drainer — so Close can always acquire it.
 //
-// The boundary is a strict leaf. A session may acquire it with its emitMu
-// held, never the reverse, and never with its s.mu held (already the emit
-// rule: emitParked). While it is held, nothing does I/O, calls into a
-// session, or writes a diagnostic; the only locks taken under it are leaves:
+// The boundary is a strict leaf. A session never acquires it with its s.mu
+// held (already the emit rule: emitParked). While it is held, nothing does
+// I/O, calls into a session, or writes a diagnostic; the only locks taken
+// under it are leaves:
 // a subscription's mu and the journal's queue mutex. Note never takes it. The
 // observer, when one is set, runs there too, under the same rules (Observe).
 //
@@ -393,10 +393,15 @@ func NewIncarnation() string {
 // thing it must never be — what is in the outbox at close is committed, not
 // dropped. Close joins it as a phase of its own instead.
 //
-// Lock order: a session's queueOp → emitMu → the in-flight region → the
-// boundary → a subscription's mu, and the boundary → the journal's queue
-// mutex and the observer; noteMu → the journal's queue mutex, and only Close
-// takes noteMu under the boundary. inflightMu guards the counter alone and is a
+// Lock order: the in-flight region → the boundary → a subscription's mu, and
+// the boundary → the journal's queue mutex and the observer; noteMu → the
+// journal's queue mutex, and only Close takes noteMu under the boundary. A
+// session's own emit never holds its s.mu across the boundary (emitParked
+// says why), and there is no queue-transaction lock left on the provider seam
+// to hold across it either: the queue and the events describing it are
+// mutated and enqueued under one mutex in internal/engine now, with no lock
+// held across a blocking send (plan 021 §3.5). inflightMu guards the counter
+// alone and is a
 // leaf below everything: it is never held across the boundary, a channel
 // operation, a hook, or any other lock. outboxMu is a second such leaf, and a
 // stricter one: it is never held across the boundary or a blocking channel

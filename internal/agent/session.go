@@ -294,8 +294,6 @@ type Snapshot struct {
 	// Provider is a value copy of the session's provider, so the UI can read
 	// what a mode id means and what the agent is called without a session.
 	Provider ProviderInfo
-	// Queue is craze's own message queue in send order, cloned.
-	Queue []QueuedPrompt
 	// ForeignTurn reports that the agent is running a turn of its own. The
 	// drain waits it out: a prompt sent now would be queued behind it.
 	ForeignTurn bool
@@ -685,30 +683,14 @@ type Session interface {
 	// call, no other lock, no clone of anything (plan 021 §3.3). It exists so
 	// a component above the seam — the engine — can read this one flag from
 	// inside its own admission check, under its own lock (e.mu), without
-	// paying for a whole Snapshot's clones (Queue, Models, Modes, Commands,
-	// Config, Todos, Tools, Subagents) just to read one bool. This and Begin
+	// paying for a whole Snapshot's clones (Models, Modes, Commands, Config,
+	// Todos, Tools, Subagents) just to read one bool. This and Begin
 	// are the two calls the engine may make under e.mu, both taking s.mu
 	// briefly and waiting on nothing: the order is e.mu → s.mu, and it
 	// cannot cycle, because the session never calls back into the engine. A
 	// session with no notion of a foreign turn (native) always answers
 	// false.
 	ForeignTurn() bool
-	// Queue appends a message to craze's own queue. It refuses a full queue
-	// or an oversized message without mutating anything, so the caller keeps
-	// the draft it tried to queue.
-	Queue(text string) (QueuedPrompt, error)
-	// EditQueued rewrites a row in place, keeping its id and position.
-	EditQueued(id, text string) error
-	// Unqueue drops a row the user cancelled.
-	Unqueue(id string) (QueuedPrompt, bool)
-	// TakeQueued removes any row so the caller can prompt it. It is a guard,
-	// not a driver: it returns false while a prompt is in flight or the agent
-	// is running a turn of its own, and it never prompts anything itself.
-	TakeQueued(id string) (QueuedPrompt, bool)
-	// PopQueue is TakeQueued of the head — the drain.
-	PopQueue() (QueuedPrompt, bool)
-	// ClearQueue empties the queue and returns how many rows went.
-	ClearQueue() int
 	// Interject merges text into the running turn without cancelling it.
 	// Only grok can: everything else returns ErrUnsupported before the wire.
 	Interject(ctx context.Context, text string) error

@@ -33,15 +33,6 @@ func interjected(evs []Event) ([]string, int) {
 	return out, last
 }
 
-// queueTexts is the session's queue in send order.
-func queueTexts(s Session) []string {
-	var out []string
-	for _, p := range s.Snapshot().Queue {
-		out = append(out, p.Text)
-	}
-	return out
-}
-
 // TestNativeInterjectRefusals: Interject is refused in the three states the
 // live session refuses in — nothing running, the turn's ending already out,
 // and a cancel in progress — and nothing is emitted for a refusal. The
@@ -133,10 +124,6 @@ func TestNativeInterjectDuringAToolStep(t *testing.T) {
 			if evs[done].Type != EventDone {
 				t.Fatalf("the last event is %+v, want EventDone", evs[done])
 			}
-			// Whatever was answered inside the turn is not queued for the next.
-			if q := queueTexts(s); len(q) != 0 {
-				t.Fatalf("the queue holds %q; an answered interjection is not re-sent", q)
-			}
 			calls := m.requests()
 			if len(calls) != 2 {
 				t.Fatalf("the model saw %d requests, want 2", len(calls))
@@ -212,43 +199,28 @@ func containsLine(lines []string, needle string) bool {
 
 // TestNativeInterjectUnansweredComesBackInTheResult (§7.12; plan 021 §3.5): an
 // interjection the turn accepted during its final step comes back in
-// Result.Unanswered, in the order it was typed, and neither cap refuses it: it is
-// accepted onto a queue already full, and text far over the size cap is accepted
-// too. The control is Queue itself, which refuses both.
+// Result.Unanswered, in the order it was typed. Interject applies no size
+// limit of its own: text far over the queue's size cap is accepted just the
+// same as an ordinary one.
 //
-// Where those steers then go is the engine's, above this seam: to the head of the
-// queue, last first, in the same locked section that decides the turn's successor,
-// so steered text is ahead of whatever was waiting behind the turn that took it.
-// The session's own queue is therefore left exactly as it was — which is the whole
-// of what changed here, and what stops two owners requeueing the same text twice.
+// Where those steers then go is the engine's, above this seam: to the head of
+// the queue, last first, in the same locked section that decides the turn's
+// successor, so steered text is ahead of whatever was waiting behind the turn
+// that took it. The session has no queue of its own any more to put them in.
 func TestNativeInterjectUnansweredComesBackInTheResult(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	h := newHeld(t)
 	f.models["test/a"].push(h.step(textParts("all done"), finishParts(fantasy.FinishReasonStop)))
 
-	for i := range queueCap {
-		if _, err := s.Queue(fmt.Sprintf("queued %02d", i)); err != nil {
-			t.Fatalf("Queue %d: %v", i, err)
-		}
-	}
-	// The control: the queue is full and the text is oversized, so Queue
-	// refuses both, which is exactly what Interject must not do.
-	if _, err := s.Queue("one too many"); !errors.Is(err, ErrQueueFull) {
-		t.Fatalf("control: Queue on a full queue = %v, want ErrQueueFull", err)
-	}
-	huge := strings.Repeat("x", queueTextCap+1)
-	if _, err := s.Queue(huge); !errors.Is(err, ErrQueueTextTooLong) && !errors.Is(err, ErrQueueFull) {
-		t.Fatalf("control: Queue of oversized text = %v, want a refusal", err)
-	}
-
 	out := startPrompt(s, "go")
 	await(t, h.reached, "the held final step")
 	// Accepted during the final text step: there is no later step to take it
 	// up, so it comes back unanswered.
+	huge := strings.Repeat("x", queueTextCap+1)
 	for _, text := range []string{nativeSteer, huge} {
 		if err := s.Interject(context.Background(), text); err != nil {
-			t.Fatalf("Interject onto a full queue: %v", err)
+			t.Fatalf("Interject: %v", err)
 		}
 	}
 	close(h.release)
@@ -259,12 +231,6 @@ func TestNativeInterjectUnansweredComesBackInTheResult(t *testing.T) {
 
 	if u := got.res.Unanswered; len(u) != 2 || u[0] != nativeSteer || u[1] != huge {
 		t.Fatalf("Unanswered holds %d texts, want both interjections in the order they were typed", len(u))
-	}
-	// The session's own queue is untouched: putting them back is not its business
-	// any more.
-	q := queueTexts(s)
-	if len(q) != queueCap || q[0] != "queued 00" {
-		t.Fatalf("the queue holds %d rows headed by %q, want the %d queued and nothing else", len(q), q[0], queueCap)
 	}
 	// Both were shown as interjections too, before the turn's EventDone.
 	texts, last := interjected(drained(s))
@@ -277,14 +243,8 @@ func TestNativeInterjectUnansweredComesBackInTheResult(t *testing.T) {
 // TestNativeInterjectReportsUnansweredOnTheErrorPathToo (§7.12; plan 021 §3.5): an
 // interjection a failed turn could not answer is reported in Result.Unanswered on
 // the error path as much as on the clean one, so the engine above the seam puts it
-// back and then clears it with the rest — which is what keeps the "queue cleared"
-// note honest when steers were all there was. The control is the same turn
+// back and then clears it with the rest. The control is the same turn
 // succeeding, where it is reported just the same.
-//
-// What the session still does with its own queue is unchanged, and is what this
-// also holds: a row queued through the session — which only `craze prompt` does now,
-// until the queue leaves the provider seam — is cleared after the EventError, one
-// removal each, so a consumer knows why the band emptied.
 func TestNativeInterjectReportsUnansweredOnTheErrorPathToo(t *testing.T) {
 	for _, fail := range []bool{true, false} {
 		t.Run(fmt.Sprintf("fail=%v", fail), func(t *testing.T) {
@@ -296,11 +256,6 @@ func TestNativeInterjectReportsUnansweredOnTheErrorPathToo(t *testing.T) {
 				after = errorParts(errors.New("upstream gone"))
 			}
 			f.models["test/a"].push(h.step(textParts("partial"), after))
-			// A row of the session's own, so the error path's clear still has
-			// something to clear and its place in the stream can be read.
-			if _, err := s.Queue("a follow-up"); err != nil {
-				t.Fatalf("Queue: %v", err)
-			}
 
 			out := startPrompt(s, "go")
 			await(t, h.reached, "the held step")
@@ -315,31 +270,20 @@ func TestNativeInterjectReportsUnansweredOnTheErrorPathToo(t *testing.T) {
 			if u := got.res.Unanswered; len(u) != 1 || u[0] != nativeSteer {
 				t.Fatalf("Unanswered = %q, want the steer the turn could not answer", u)
 			}
-
-			evs := drained(s)
 			if !fail {
-				if q := queueTexts(s); len(q) != 1 || q[0] != "a follow-up" {
-					t.Fatalf("control: the queue holds %q, want the follow-up alone", q)
-				}
 				return
 			}
-			if q := queueTexts(s); len(q) != 0 {
-				t.Fatalf("the queue survived the error: %q", q)
-			}
-			// The interjection was shown, the error came after it, and the
-			// removal after the error: a consumer knows why the row went.
+			// The interjection was shown before the error that followed it.
+			evs := drained(s)
 			_, last := interjected(evs)
-			errAt, removedAt := -1, -1
+			errAt := -1
 			for i, ev := range evs {
-				switch {
-				case ev.Type == EventError:
+				if ev.Type == EventError {
 					errAt = i
-				case ev.Type == EventQueue && ev.QueueChange == QueueRemoved && ev.Queue.Text == "a follow-up":
-					removedAt = i
 				}
 			}
-			if last < 0 || errAt < 0 || removedAt < 0 || last >= errAt || errAt >= removedAt {
-				t.Fatalf("interjection at %d, error at %d, removal at %d; want that order in %+v", last, errAt, removedAt, evs)
+			if last < 0 || errAt < 0 || last >= errAt {
+				t.Fatalf("interjection at %d, error at %d; want the interjection first in %+v", last, errAt, evs)
 			}
 		})
 	}
@@ -412,22 +356,16 @@ func TestNativeInterjectDoesNotLeakIntoTheNextTurn(t *testing.T) {
 	if u := secondRun.res.Unanswered; len(u) != 0 {
 		t.Fatalf("the second turn reported %q; the text was typed into the first", u)
 	}
-	if q := queueTexts(s); len(q) != 0 {
-		t.Fatalf("the stale interjection was queued: %q", q)
-	}
 	if containsLine(transcriptOf(t, f), nativeSteer) {
 		t.Fatal("the stale interjection was written to the second turn")
 	}
 }
 
-// TestNativeInterjectOnAClosedSession (finding 3), both halves of it: a closed
-// session refuses an interjection rather than acknowledging one it could never
-// show, and a turn Close cancelled puts nothing in the queue. A closed session's
-// events are suppressed, so a row pushed then would sit there unseen, never
-// drained and never cleared, with the user told their text had been taken. Nothing
-// pushes one now at all — the steers come back in Result.Unanswered and the engine
-// above the seam decides — which closes that window by construction; the assertion
-// stays, because what it forbids is what must stay forbidden.
+// TestNativeInterjectOnAClosedSession (finding 3): a closed session refuses an
+// interjection rather than acknowledging one it could never show. Nothing is
+// pushed anywhere for a turn Close cancelled either — the steers come back in
+// Result.Unanswered and the engine above the seam decides, and the session has
+// no queue of its own to leak into.
 //
 // The control is the same interjection on the same turn without the Close: it is
 // accepted and it does come back as the turn's unanswered steer.
@@ -456,9 +394,6 @@ func TestNativeInterjectOnAClosedSession(t *testing.T) {
 				if u := got.res.Unanswered; len(u) != 1 || u[0] != nativeSteer {
 					t.Fatalf("control: Unanswered = %q, want the interjection", u)
 				}
-				if q := queueTexts(s); len(q) != 0 {
-					t.Fatalf("control: the session queued %q itself", q)
-				}
 				return
 			}
 
@@ -471,15 +406,9 @@ func TestNativeInterjectOnAClosedSession(t *testing.T) {
 			}()
 			await(t, closed, "Close")
 			await(t, out, "the cancelled prompt")
-			if q := queueTexts(s); len(q) != 0 {
-				t.Fatalf("a closed session queued %q; nothing could ever show, drain or clear it", q)
-			}
 			// And a fresh interjection is refused rather than acknowledged.
 			if err := s.Interject(context.Background(), nativeSteer); err == nil || err.Error() != "agent: session closed" {
 				t.Fatalf("Interject after Close = %v, want the session-closed refusal", err)
-			}
-			if q := queueTexts(s); len(q) != 0 {
-				t.Fatalf("a refused interjection queued %q", q)
 			}
 		})
 	}
@@ -524,28 +453,26 @@ func TestNativeInterjectLimitIsTheQueuesOwn(t *testing.T) {
 	}
 }
 
-// TestNativeInterjectEndsAFullBurstBesideAConcurrentQueue (finding 2, and what is
-// left of it): a turn takes a full turn's worth of interjections with the event
-// channel already mostly full, while another goroutine queues a message of its own,
-// and neither the prompt nor that Queue wedges.
+// TestNativeInterjectEndsAFullBurstBesideANearlyFullChannel (finding 2, and
+// what is left of it): a turn takes a full turn's worth of interjections with
+// the event channel already mostly full, and neither the prompt nor the
+// interjections wedge.
 //
-// Half of what this used to guard is gone by construction. The wedge was queueTx
-// holding emitMu across the *requeue's* blocking sends, so an unbounded burst could
-// fill the channel from inside that lock and leave every other queue call waiting
-// behind a send only the blocked consumer could free. Nothing is requeued here any
-// more: the steers come back in Result.Unanswered, and the engine above the seam
-// puts them back — into the log's outbox, whose mutex is a leaf, with no lock held
-// across a send at all. What remains, and is still worth holding, is the EventUser
-// per accepted interjection, which the turn's own goroutine publishes with a nearly
-// full channel beside a concurrent Queue.
-//
-// The burst is one short of the cap on purpose, so the concurrent Queue has a slot
-// of its own whichever side of the turn's end it lands on. (CI caught that: two runs
-// of the same commit, one green, one "the concurrent Queue = agent: queue is full".)
+// Half of what this used to guard is gone by construction. The wedge was
+// queueTx holding emitMu across the *requeue's* blocking sends, so an
+// unbounded burst could fill the channel from inside that lock and leave
+// every other queue call waiting behind a send only the blocked consumer
+// could free (a concurrent Queue call used to be part of this test for
+// exactly that reason). Nothing is requeued here any more, and the session has
+// no queue call left to race: the steers come back in Result.Unanswered, and
+// the engine above the seam puts them back — into the log's outbox, whose
+// mutex is a leaf, with no lock held across a send at all. What remains, and
+// is still worth holding, is the EventUser per accepted interjection, which
+// the turn's own goroutine publishes with a nearly full channel.
 //
 // The control is the vacuity check: the channel really was left with a small
 // fraction of its capacity free, and the whole burst really came back.
-func TestNativeInterjectEndsAFullBurstBesideAConcurrentQueue(t *testing.T) {
+func TestNativeInterjectEndsAFullBurstBesideANearlyFullChannel(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	h := newHeld(t)
@@ -553,9 +480,9 @@ func TestNativeInterjectEndsAFullBurstBesideAConcurrentQueue(t *testing.T) {
 
 	// Nothing drains, and the channel is filled to leave exactly what one
 	// capped turn needs: an EventUser per interjection, and a handful for the
-	// turn itself and the concurrent Queue.
+	// turn itself.
 	const burst = queueCap - 1
-	headroom := 2*burst + 8
+	headroom := burst + 8
 	// Filled through the session's own emit: the primary belongs to the event
 	// log now, and the field is receive-only precisely so nothing enters the
 	// stream without a sequence number (plan 020 §3.1). Each of these has room
@@ -574,29 +501,15 @@ func TestNativeInterjectEndsAFullBurstBesideAConcurrentQueue(t *testing.T) {
 			t.Fatalf("interjection %d: %v", i+1, err)
 		}
 	}
-	// A queue call from another goroutine, racing the turn's end for queueOp and
-	// emitMu.
-	queued := make(chan error, 1)
-	go func() {
-		_, err := s.Queue("from elsewhere")
-		queued <- err
-	}()
 	close(h.release)
 	got := await(t, out, "the prompt, which must not wedge behind its own burst")
 	if got.err != nil {
 		t.Fatal(got.err)
 	}
-	if err := await(t, queued, "the concurrent Queue"); err != nil {
-		t.Fatalf("the concurrent Queue = %v", err)
-	}
 	// The control: the whole burst really came back, in order.
 	u := got.res.Unanswered
 	if len(u) != burst || u[0] != "steer 00" {
 		t.Fatalf("Unanswered holds %d texts headed by %q, want %d headed by the first interjection", len(u), u[0], burst)
-	}
-	// And the session's own queue holds only what was queued through it.
-	if q := queueTexts(s); len(q) != 1 || q[0] != "from elsewhere" {
-		t.Fatalf("the session's queue holds %q, want the concurrent Queue's row alone", q)
 	}
 }
 
@@ -667,10 +580,6 @@ func TestNativeInterjectRacesTheTurnEnd(t *testing.T) {
 		if !unanswered[text] && !containsLine(transcriptOf(t, f), text) {
 			t.Errorf("%q was accepted but is neither reported unanswered nor written", text)
 		}
-	}
-	// The session queued none of them itself.
-	if q := queueTexts(s); len(q) != 0 {
-		t.Fatalf("the session queued %q", q)
 	}
 	if len(sent) == 0 {
 		t.Fatalf("control: not one of %d interjections was accepted", senders)

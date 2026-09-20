@@ -71,15 +71,8 @@ type Stub struct {
 	// title the agent produces no longer replaces the user's.
 	titlePinned bool
 
-	// queue is craze's own message queue — the real one, so the chrome tests
-	// run against the same transactions a live session does. queueOp orders
-	// whole transactions as the live session's does; the lock order is
-	// queueOp → mu → the queue's own lock, and queueOp → the log's publishing
-	// boundary, which is never taken with mu held.
-	queueOp sync.Mutex
-	queue   agent.PromptQueue
 	// inPrompt, doneEmitted and cancelling mirror the live session's turn
-	// state, which is what the queue guards and Interject are decided from.
+	// state, which is what Interject is decided from.
 	// claimed is the live session's claim: Begin takes the prompt slot before
 	// the prompt's own goroutine opens the turn, and a Cancel in between
 	// withdraws the prompt instead of reaching the agent.
@@ -649,8 +642,6 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Tools = cloneStubTools(s.snap.Tools)
 	out.Subagents = cloneStubSubagents(s.snap.Subagents)
 	out.ForeignTurn = s.foreign
-	// mu → the queue's lock is the order every transaction takes.
-	out.Queue = s.queue.List()
 	return out
 }
 

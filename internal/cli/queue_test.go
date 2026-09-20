@@ -304,7 +304,6 @@ type stubSession struct {
 	// a reader that has gone.
 	log     *agent.EventLog
 	closed  chan struct{}
-	queue   []agent.QueuedPrompt
 	prompts []string
 	turns   []stubTurn
 	answers []string
@@ -313,9 +312,6 @@ type stubSession struct {
 	// continuation releases it, so a second Begin while one is claimed is
 	// refused exactly as a real session refuses it.
 	claimed bool
-	// nextID numbers the queue's rows. It is the queue's own counter and has
-	// nothing to do with the log's sequence numbers.
-	nextID int
 	// eng is the engine driving this session, kept so that a test can read the
 	// queue and the activity that are now the engine's (stillQueued). It is set
 	// once, before the run it belongs to starts.
@@ -479,83 +475,6 @@ func (s *stubSession) engine() *engine.Engine {
 	return s.eng
 }
 
-func (s *stubSession) Queue(text string) (agent.QueuedPrompt, error) {
-	s.mu.Lock()
-	s.nextID++
-	p := agent.QueuedPrompt{ID: fmt.Sprintf("q-%d", s.nextID), Text: text}
-	s.queue = append(s.queue, p)
-	pos := len(s.queue) - 1
-	s.mu.Unlock()
-	s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueQueued, QueuePos: pos})
-	return p, nil
-}
-
-func (s *stubSession) EditQueued(id, text string) error {
-	s.mu.Lock()
-	for i := range s.queue {
-		if s.queue[i].ID != id {
-			continue
-		}
-		s.queue[i].Text = text
-		s.queue[i].Version++
-		p := s.queue[i]
-		s.mu.Unlock()
-		s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueEdited, QueuePos: i})
-		return nil
-	}
-	s.mu.Unlock()
-	return fmt.Errorf("no queued message %q", id)
-}
-
-func (s *stubSession) Unqueue(id string) (agent.QueuedPrompt, bool) {
-	return s.take(id, agent.QueueRemoved)
-}
-
-func (s *stubSession) TakeQueued(id string) (agent.QueuedPrompt, bool) {
-	return s.take(id, agent.QueueSent)
-}
-
-func (s *stubSession) take(id string, change agent.QueueChange) (agent.QueuedPrompt, bool) {
-	s.mu.Lock()
-	for i := range s.queue {
-		if s.queue[i].ID != id {
-			continue
-		}
-		p := s.queue[i]
-		s.queue = append(s.queue[:i], s.queue[i+1:]...)
-		s.mu.Unlock()
-		s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: change, QueuePos: i})
-		return p, true
-	}
-	s.mu.Unlock()
-	return agent.QueuedPrompt{}, false
-}
-
-func (s *stubSession) PopQueue() (agent.QueuedPrompt, bool) {
-	s.mu.Lock()
-	if len(s.queue) == 0 {
-		s.mu.Unlock()
-		return agent.QueuedPrompt{}, false
-	}
-	p := s.queue[0]
-	s.queue = s.queue[1:]
-	s.mu.Unlock()
-	s.emit(agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: agent.QueueSent})
-	return p, true
-}
-
-func (s *stubSession) ClearQueue() int {
-	s.mu.Lock()
-	rows := s.queue
-	s.queue = nil
-	s.mu.Unlock()
-	for _, p := range rows {
-		row := p
-		s.emit(agent.Event{Type: agent.EventQueue, Queue: &row, QueueChange: agent.QueueRemoved})
-	}
-	return len(rows)
-}
-
 func (s *stubSession) Interject(context.Context, string) error { return agent.ErrUnsupported }
 
 func (s *stubSession) AnswerPermission(_, optionID string) error {
@@ -607,7 +526,6 @@ func (s *stubSession) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return agent.Snapshot{
-		Queue:       append([]agent.QueuedPrompt(nil), s.queue...),
 		ForeignTurn: s.foreign,
 		Subagents:   append([]agent.SubagentInfo(nil), s.subagents...),
 	}

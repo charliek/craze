@@ -22,8 +22,8 @@ import (
 // The native adapter is agent.Session over craze's own harness (plan 018
 // §3.8): no process, no wire, a model from ~/.craze/native's table. The live
 // session is its behavioural contract — the claim, the withdraw, error XOR
-// done, the queue guards, a Cancel that waits — and tui.Stub its structural
-// template. It is the first file in internal/agent to import internal/paths
+// done, a Cancel that waits — and tui.Stub its structural template. It is the
+// first file in internal/agent to import internal/paths
 // (agent.HomeDir duplicates paths.HomeDir precisely so the ACP code never had
 // to); paths imports nothing of craze's, so there is no cycle.
 
@@ -65,23 +65,14 @@ type nativeSession struct {
 	closeOnce sync.Once
 	closeDone chan struct{}
 
-	// The queue's transactions are ordered exactly as the live session's
-	// (live_queue.go): queueOp orders the mutation, emitMu is held across its
-	// emits after queueOp is released. Lock order: queueOp → emitMu → s.mu →
-	// toolMu → the queue's own lock → the harness's lock (Current, under
-	// s.mu). No lock is ever held across an emit (plan 019 §3.10), and
-	// emitMu → the event log's publishing boundary, a leaf that is never
-	// taken with s.mu held: a publish blocked on a full primary under s.mu
-	// would stop Close from closing done, which is what releases it.
-	//
 	// Interject adds no ordering: it reads the turn state under s.mu, releases
 	// it, and then hands the text to the harness's steer box, which takes a
 	// leaf lock of its own. So an interjection never waits on the turn it is
 	// meant for, even while that turn is emitting into a consumer that is slow
-	// — or that is the very goroutine interjecting.
-	queueOp sync.Mutex
-	emitMu  sync.Mutex
-	queue   PromptQueue
+	// — or that is the very goroutine interjecting. No lock is ever held
+	// across an emit (plan 019 §3.10): a publish blocked on a full primary
+	// under s.mu would stop Close from closing done, which is what releases
+	// it.
 
 	// steerMu guards steerTexts, the running turn's interjections in both of
 	// their spellings, and is a leaf: Interject takes it with nothing else
@@ -207,10 +198,9 @@ func (s *nativeSession) typedSteer(sent string) string {
 
 // typedSteers is that lookup over the whole of Result.Unanswered, and it is
 // its own function on purpose: the translation belongs to native, on the value
-// the moment Run hands it over, not to whatever is downstream of it today. The
-// caller that puts these rows in the queue is being rewritten in parallel to
-// return them from Prompt instead, and a translation done here survives that
-// where one woven into the requeue would not.
+// the moment Run hands it over, not to whatever is downstream of it today —
+// the engine, above the seam, which decides where these rows go (plan 021
+// §3.5) and must never see the wire spelling.
 //
 // nil in, nil out: a turn that answered everything allocates nothing.
 func (s *nativeSession) typedSteers(sent []string) []string {
@@ -765,14 +755,10 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// translating after the return would be handed the sent spelling back.
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
-		// state when the removals arrive and can say why the queue emptied.
+		// state by the time the engine's chain policy clears its own queue at
+		// settlement (plan 021 §3.5) — this session has none of its own any
+		// more.
 		s.emit(Event{Type: EventError, Err: failed})
-		// Nothing drains from an error state, and a queue that outlived one
-		// would run behind whatever the user sends next. This is the session's
-		// own queue, which only `craze prompt` still fills (--follow-up) until
-		// the queue leaves the provider seam; the engine's is cleared by its own
-		// chain policy.
-		s.clearQueueOnError()
 		return Result{Unanswered: unanswered}, failed
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
@@ -801,22 +787,18 @@ func (s *nativeSession) markDone() {
 	s.doneEmitted = true
 }
 
-// The turn's unanswered steers used to be pushed back onto this session's own
-// queue here (queueUnanswered, plan 019 §3.10). They are reported in
-// Result.Unanswered instead, and the engine above the seam puts them back —
-// through PushFront, last first, in the same locked section that decides the
-// turn's successor, so steered text is always ahead of whatever was waiting
-// behind the turn that took it (plan 021 §3.5).
-//
-// Two things follow from the move. The wedge this comment used to describe is
-// gone from the requeue: it was queueTx holding emitMu across a blocking
-// primary send, with a consumer that queues from its own receive on the other
-// side, and the engine holds no lock across a send at all — it enqueues into the
-// log's outbox, whose mutex is a leaf. What remains of that shape is the
-// session's own queue verbs, which only `craze prompt` still uses and which the
-// queue's move off the provider seam deletes. And the closed-session window is
-// gone with it: a row can no longer be pushed onto a queue whose events are
-// already suppressed, because nothing pushes one here.
+// The turn's unanswered steers are reported in Result.Unanswered, never
+// pushed anywhere here: the engine above the seam puts them back — through
+// PushFront, last first, in the same locked section that decides the turn's
+// successor, so steered text is always ahead of whatever was waiting behind
+// the turn that took it (plan 021 §3.5). The queue and the events describing
+// it are mutated and enqueued under one mutex in internal/engine, with no
+// lock held across a blocking send — the wedge this comment used to describe
+// (queueTx holding emitMu across a blocking primary send, with a consumer
+// that queues from its own receive on the other side) is gone with the
+// session's own queue verbs, and the closed-session window went with them: a
+// row can no longer be pushed onto a queue whose events are already
+// suppressed, because nothing pushes one here.
 
 // callerEnded says whether a turn the harness reports cancelled was ended by
 // the caller's own context — its deadline, or its cancel — rather than by
@@ -1097,9 +1079,7 @@ func (s *nativeSession) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	// s.mu → toolMu → the queue's lock is the order every transaction takes.
 	out.Tools = s.toolRows()
-	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	// Cloned as the live session clones it (live.go): the menu reads the rows
 	// off a snapshot and the expansion lookup is built from the session's own
@@ -1300,116 +1280,6 @@ func (s *nativeSession) emitLossy(ev Event) {
 	default:
 	}
 	s.log.TryPublish(ev)
-}
-
-// queueTx is the live session's queue transaction (live_queue.go): fn
-// mutates under queueOp, and its events go out after queueOp is released,
-// under emitMu, so a consumer waiting on something that holds queueOp cannot
-// wedge the session while the transactions still reach the stream whole and
-// in order.
-func (s *nativeSession) queueTx(fn func() []QueueEvent) {
-	s.queueOp.Lock()
-	s.emitMu.Lock()
-	defer s.emitMu.Unlock()
-	evs := func() []QueueEvent {
-		defer s.queueOp.Unlock()
-		return fn()
-	}()
-	for _, ev := range evs {
-		s.emit(ev.Event())
-	}
-}
-
-func (s *nativeSession) Queue(text string) (p QueuedPrompt, err error) {
-	s.queueTx(func() []QueueEvent {
-		var ev QueueEvent
-		p, ev, err = s.queue.Add(text, time.Now())
-		if err != nil {
-			return nil
-		}
-		return []QueueEvent{ev}
-	})
-	return p, err
-}
-
-func (s *nativeSession) EditQueued(id, text string) (err error) {
-	s.queueTx(func() []QueueEvent {
-		var ev QueueEvent
-		ev, err = s.queue.Edit(id, text)
-		if err != nil {
-			return nil
-		}
-		return []QueueEvent{ev}
-	})
-	return err
-}
-
-func (s *nativeSession) Unqueue(id string) (p QueuedPrompt, ok bool) {
-	s.queueTx(func() []QueueEvent {
-		var ev QueueEvent
-		ev, ok = s.queue.Remove(id)
-		if !ok {
-			return nil
-		}
-		p = ev.Prompt
-		return []QueueEvent{ev}
-	})
-	return p, ok
-}
-
-// TakeQueued hands a row to the caller to prompt, under the live session's
-// guard: refused while a prompt is claimed or in flight.
-func (s *nativeSession) TakeQueued(id string) (p QueuedPrompt, ok bool) {
-	s.queueTx(func() []QueueEvent {
-		ev, taken := s.takeGuarded(func() (QueueEvent, bool) { return s.queue.Take(id) })
-		if !taken {
-			return nil
-		}
-		p, ok = ev.Prompt, true
-		return []QueueEvent{ev}
-	})
-	return p, ok
-}
-
-// PopQueue is TakeQueued of the head, under the same guard.
-func (s *nativeSession) PopQueue() (p QueuedPrompt, ok bool) {
-	s.queueTx(func() []QueueEvent {
-		ev, taken := s.takeGuarded(s.queue.Pop)
-		if !taken {
-			return nil
-		}
-		p, ok = ev.Prompt, true
-		return []QueueEvent{ev}
-	})
-	return p, ok
-}
-
-// takeGuarded is the guard and the removal as one critical section. A claimed
-// prompt counts as in flight before its turn opens, as on the live session:
-// Begin would refuse the row's prompt then. The caller holds queueOp.
-func (s *nativeSession) takeGuarded(take func() (QueueEvent, bool)) (QueueEvent, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inPrompt || s.claimed {
-		return QueueEvent{}, false
-	}
-	return take()
-}
-
-func (s *nativeSession) ClearQueue() int {
-	n := 0
-	s.queueTx(func() []QueueEvent {
-		evs := s.queue.Clear()
-		n = len(evs)
-		return evs
-	})
-	return n
-}
-
-// clearQueueOnError empties the queue when a turn fails, as the live session
-// does: a queue that survived an error would run behind the next prompt.
-func (s *nativeSession) clearQueueOnError() {
-	s.ClearQueue()
 }
 
 // nativeError is an error the adapter phrased itself. Its text is what the
