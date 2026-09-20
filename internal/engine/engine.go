@@ -798,6 +798,58 @@ func (e *Engine) GiveUp(_ Command, turn string) error {
 	return err
 }
 
+// GiveUpDrain ends a client's wait for rows held behind a turn of the agent's
+// own, one way or the other, in one section: the driver's pass is made here and
+// now, and either a turn is current when it returns — the drain's own, or one
+// that was already running — or the engine stops admitting, so that nothing can
+// start behind a client that is about to leave.
+//
+// It exists because a client cannot decide this from outside. The drain is the
+// driver's, and the driver runs when it is woken: a client whose budget runs out
+// in the instant the agent's turn ends reads a state in which the session's flag
+// is down, nothing is current and the rows are still queued, and cannot tell a
+// queue that is about to drain from one that never will. A grace period does not
+// settle it — the scheduler owes the driver no deadline, and the flag a client
+// read a moment ago can be stale in either direction. `craze prompt` never had
+// the question, because it took the row itself, synchronously, the moment the
+// flag was down. This gives it the same thing: the session's flag is read in the
+// section that would claim, as it is for every other admission.
+//
+// turn is the current turn when the call returns, and "" means the drain is
+// abandoned: pending says how many rows that leaves queued, which is the
+// client's to report. Abandoning clears nothing and cancels nothing — the rows
+// stay where they are, as they did for a run that gave up on them — it only sets
+// the gate Stop sets, so the abandonment cannot be overtaken by the very drain it
+// gave up on. It makes no blocking call: Begin is the one thing it may call on
+// the session, under e.mu like every other claim.
+func (e *Engine) GiveUpDrain(_ Command) (turn string, pending int, err error) {
+	var next []launch
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.closed {
+			err = ErrNotAccepting
+			return
+		}
+		if e.cur == nil {
+			next = e.passLocked()
+		}
+		if e.cur != nil {
+			turn = e.cur.id
+			return
+		}
+		e.stopped = true
+		pending = e.queue.Len()
+		// A send armed and waiting for the same drain goes with it, and says so,
+		// as it does for Stop: nothing will fire it now.
+		if ev, ok := e.disarmLocked(agent.SendNowStopped, "", ""); ok {
+			e.log.Enqueue(ev)
+		}
+	}()
+	e.run(next)
+	return turn, pending, err
+}
+
 // drainLocked starts what is waiting when nothing is current and a turn may
 // start: an armed send-now first, then the head of the queue. It is the pass
 // that runs when a settlement could not start anything — a foreign turn held it

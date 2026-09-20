@@ -354,9 +354,6 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 	if waiting {
 		drainUntil = time.Now().Add(o.foreignBudget())
 	}
-	// drainGrace says the one short extension a held drain gets has been spent:
-	// see where the budget runs out.
-	drainGrace := false
 	// claimTurn is the turn whose refused claim this run is timing, and claimUntil
 	// when it stops waiting for it. The budget is per turn, it starts at the
 	// first look that finds that turn waiting, and — this is the whole of the
@@ -468,7 +465,7 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				streamErr = nil
 				if ev.Turn.Next == "" {
 					// Rows behind it and no successor: the drain is held.
-					waiting, drainUntil, drainGrace = true, time.Now().Add(o.foreignBudget()), false
+					waiting, drainUntil = true, time.Now().Add(o.foreignBudget())
 				}
 			}
 		case <-signalled:
@@ -483,47 +480,38 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				if time.Now().Before(drainUntil) {
 					continue
 				}
-				// The budget is spent, but the flag that says this run is waiting
-				// is derived from events, and events trail the engine's state: the
-				// drain may already have claimed the row's turn, with its sent and
-				// started still in the outbox. So the decision is made from the
-				// engine's own state, in one read under its mutex, and never from
-				// the flag alone.
+				// The budget is spent. Whether that means the queue is blocked is
+				// not something this run can read: the flag that says it is
+				// waiting is derived from events, which trail the engine's state;
+				// the session's foreign-turn flag can change between a look and
+				// the act that follows it; and the drain is the engine driver's,
+				// which runs when it is woken and owes nobody a deadline. A budget
+				// that ends in the instant the agent's turn does would find the
+				// flag down, nothing current and the row still queued, and a run
+				// that called that "blocked" would leave unsent a follow-up the
+				// engine was about to start. The baseline never had the question:
+				// it took the row itself, synchronously, once the flag was down.
 				//
-				// A read is enough, and a conditional engine operation (a GiveUp
-				// for the drain) would be stricter than the baseline: the baseline
-				// re-read its snapshot and then acted, so a successor claimed in
-				// the instant after that read did not stop its exit either. What
-				// this closes is the window the flag opened — a successor claimed
-				// and already current — which is a state, not an instant.
+				// So the engine decides, in one section (GiveUpDrain): it makes
+				// the driver's pass there and then, reading the session's flag
+				// where it would claim. Either a turn is current when it answers —
+				// the row's, whose started is on its way to this reader — or the
+				// drain is abandoned and nothing can start behind this run's exit.
 				if o.beforeDrainGiveUp != nil {
 					o.beforeDrainGiveUp()
 				}
-				st := eng.State()
+				turn, pending, err := eng.GiveUpDrain(engine.Command{})
 				switch {
-				case st.Turn != "":
-					// A successor is away: its started is on its way to this
-					// reader, and the wait is over whatever the clock says.
+				case err != nil:
+					return err
+				case turn != "":
 					continue
-				case len(st.Queue) == 0:
+				case pending == 0:
 					// Nothing queued and nothing running: the rows went without
 					// this run sending them, which is the end of the chain and not
 					// a blocked queue — the same answer the baseline gave for an
 					// empty queue.
 					return o.chainOver(ctx, rejected)
-				case !st.ForeignTurn && !drainGrace:
-					// The agent's turn has ended, this instant: the session's
-					// flag is down and the engine's driver, which that ending
-					// woke, has not made its pass yet, so nothing is current and
-					// the rows are still queued. That is not a blocked queue.
-					// The baseline saw the cleared flag and took the row before
-					// it looked at its deadline again; this run gives the driver
-					// the time of two polls to do the same. Once, so a queue that
-					// really is going nowhere — an engine in its error state, a
-					// stop — still ends here with the message, at a bound.
-					drainGrace = true
-					drainUntil = time.Now().Add(2 * o.foreignPoll())
-					continue
 				}
 				// The rows behind the turn that ended are not going to run: the
 				// agent has held the session for the whole budget.

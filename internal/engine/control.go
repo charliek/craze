@@ -187,8 +187,8 @@ func Code(err error) string {
 //
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
-// read to release. Submit, Disarm, GiveUp, the queue verbs, State, NewClientID
-// and Events wait on nothing: no channel, no provider call, no Publish. Start,
+// read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, State,
+// NewClientID and Events wait on nothing: no channel, no provider call, no Publish. Start,
 // Subscribe, Interject, Cancel, Stop, Sync and Close block and belong on a
 // goroutine that is not the primary's reader — a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
@@ -233,6 +233,16 @@ type Control interface {
 	// because a client decides from an observation and the claim may have gone
 	// through since.
 	GiveUp(c Command, turn string) error
+	// GiveUpDrain is GiveUp's counterpart for rows held behind a turn of the
+	// agent's own: the drain is made now, in this call, or it is abandoned for
+	// good. It answers with the turn that is current when it returns — the
+	// drain's, or one that was already running — and then nothing has been given
+	// up; or with "" and how many rows are still queued, and then the engine
+	// admits nothing further, so no row can start behind a client that is
+	// leaving. It is conditional and atomic for the same reason GiveUp is: the
+	// session's flag is read in the section that would claim, not by the client
+	// beforehand. It waits on nothing.
+	GiveUpDrain(c Command) (turn string, pending int, err error)
 
 	// The queue's verbs. None of them starts a turn, and none of them waits.
 	Queue(c Command, text string) (agent.QueuedPrompt, error)

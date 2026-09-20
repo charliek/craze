@@ -1399,53 +1399,39 @@ func TestADrainGiveUpReadsTheEnginesOwnState(t *testing.T) {
 	}
 }
 
-// TestADrainBudgetThatEndsAsTheAgentsTurnDoesIsNotABlockedQueue is r12's finding.
-// The budget runs out in the instant the agent gives the session back: the
-// session's flag is already down, and the engine's driver — woken by that turn's
-// ending — has not made its pass yet, so nothing is current and the row is still
-// queued. The baseline saw the cleared flag and took the row before it looked at
-// its deadline again. Read as "blocked", that state printed the message, exited 1,
-// and left a follow-up unsent that the engine would have started a moment later.
+// TestADrainBudgetThatEndsAsTheAgentsTurnDoesIsNotABlockedQueue: the budget runs
+// out in the instant the agent gives the session back. The session's flag is
+// already down, and the engine's driver — which that turn's ending would wake —
+// has not made its pass, so nothing is current and the row is still queued. The
+// baseline saw the cleared flag and took the row before it looked at its deadline
+// again. Read as "blocked", that state printed the message, exited 1, and left
+// unsent a follow-up the engine would have started a moment later.
 //
-// The run gives the driver one short grace, and the decision is reached twice:
-// the first look finds the flag down and nothing claimed, and must not give up;
-// by the second the ending has been published and the row's turn is running.
+// No look from outside can settle it — not a read of the engine's state, and not
+// a grace period, which the scheduler is under no obligation to honour — so the
+// run asks the engine (GiveUpDrain), which makes the driver's pass there and
+// then, reading the flag where it would claim. The schedule is exact here: the
+// flag goes down with no event at all, so nothing but that call can start the
+// row.
 func TestADrainBudgetThatEndsAsTheAgentsTurnDoesIsNotABlockedQueue(t *testing.T) {
 	var stderr bytes.Buffer
 	stdout := newBlockingWriter("")
 	o := stubOpts(&bytes.Buffer{}, &stderr)
 	o.stdout = stdout
-	claimed, held := make(chan struct{}), make(chan struct{})
 	var s *stubSession
 	first := endTurn()
 	first.before = func() { s.setForeign(true) }
-	second := endTurn()
-	second.before = func() { close(claimed); <-held }
-	s = newStubSession(t, first, second)
-	looks := 0
+	s = newStubSession(t, first, endTurn())
 	o.beforeDrainGiveUp = func() {
-		looks++
-		switch looks {
-		case 1:
-			// The flag alone, with no event: the agent's turn is over as far as
-			// the session knows, and nobody has told the engine yet.
-			s.mu.Lock()
-			s.foreign = false
-			s.mu.Unlock()
-		case 2:
-			// Now the ending is published, which is what wakes the driver, and
-			// the row's turn is running before the decision is read.
-			s.setForeign(false)
-			<-claimed
-		}
+		// The flag alone, and no event: the agent's turn is over as far as the
+		// session knows, and nobody has told the engine.
+		s.mu.Lock()
+		s.foreign = false
+		s.mu.Unlock()
 	}
 
 	done := make(chan error, 1)
 	go func() { done <- runChain(o, context.Background(), s, "first", "follow-up") }()
-	waitFor(t, "the row to be reported sent", func() bool {
-		return strings.Contains(stdout.String(), `"event":"sent"`)
-	})
-	close(held)
 	select {
 	case err := <-done:
 		if err != nil {
@@ -1459,6 +1445,18 @@ func TestADrainBudgetThatEndsAsTheAgentsTurnDoesIsNotABlockedQueue(t *testing.T)
 	}
 	if got := s.sent(); strings.Join(got, ",") != "first,follow-up" {
 		t.Fatalf("prompts %v", got)
+	}
+	var dones, sent int
+	for _, ev := range parseJSONLines(t, stdout.String()) {
+		switch {
+		case ev.m["type"] == "done":
+			dones++
+		case ev.m["type"] == "queue" && ev.m["event"] == "sent":
+			sent++
+		}
+	}
+	if dones != 2 || sent != 1 {
+		t.Fatalf("%d done and %d sent lines, want both turns and the row sent once\n%s", dones, sent, stdout.String())
 	}
 }
 
