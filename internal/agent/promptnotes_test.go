@@ -133,7 +133,17 @@ func TestPromptNotesRecordACompletedTurn(t *testing.T) {
 	if _, err := s.Prompt(t.Context(), typed); err != nil {
 		t.Fatal(err)
 	}
-	cmds := commandEvents(log.snapshot())
+	// The expansion event is emitted before the request reaches the wire, so
+	// it is in the channel by the time Prompt returns — but this log collects
+	// on a goroutine of its own, and "emitted means buffered" promises the
+	// buffer, not that the collector has drained it yet. Reading the snapshot
+	// straight after Prompt therefore found an empty list on a loaded CI
+	// runner. The wait is for the collector, not for the session.
+	var cmds []Event
+	waitUntil(t, "the expansion event to reach the collector", func() bool {
+		cmds = commandEvents(log.snapshot())
+		return len(cmds) > 0
+	})
 	if len(cmds) != 1 || !strings.Contains(cmds[0].Command.Text, "PROBE-COMMAND-EXPANDED") {
 		t.Fatalf("the prompt expanded %+v, so there is nothing for the note to be shorter than", cmds)
 	}
