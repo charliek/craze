@@ -326,6 +326,15 @@ type stubSession struct {
 	// time it runs, a signal's queue removals have been enqueued and delivered.
 	// It is the barrier a test lands a signal on.
 	onCancel func()
+	// cancelHold, when set, makes Cancel wait for it to be closed or for its own
+	// context to end, whichever comes first: an agent whose stdin is wedged, whose
+	// cancel write never lands, and whose caller is therefore bounded by nothing
+	// but the context it passed (plan 021 X16). A test that never closes it is an
+	// agent that answers nothing at all.
+	cancelHold chan struct{}
+	// cancelDone counts the cancels that have RETURNED, which is how a test sees
+	// that a call bounded only by its context did in fact come back.
+	cancelDone int
 	// onSnapshot runs once, before the first Snapshot answers, and is how a
 	// test puts an event on the stream at a moment it can name rather than one
 	// it guessed at with a sleep.
@@ -440,14 +449,34 @@ func (s *stubSession) Incarnation() string { return s.log.Incarnation() }
 // turns' own scripted result instead. It runs onCancel, which is where a test
 // learns that a signal's whole path — refuse admission, clear the queue, deliver
 // the removals — is behind it.
-func (s *stubSession) Cancel(context.Context) (agent.CancelOutcome, error) {
+func (s *stubSession) Cancel(ctx context.Context) (agent.CancelOutcome, error) {
 	s.mu.Lock()
-	hook := s.onCancel
+	hook, hold := s.onCancel, s.cancelHold
 	s.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
-	return agent.CancelOutcome{Settled: true}, nil
+	out, err := agent.CancelOutcome{Settled: true}, error(nil)
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			out, err = agent.CancelOutcome{}, ctx.Err()
+		}
+	}
+	s.mu.Lock()
+	s.cancelDone++
+	s.mu.Unlock()
+	return out, err
+}
+
+// cancelsReturned is how many cancels have come back. A cancel the stub holds
+// comes back only when the context its caller gave it ends, which is the whole
+// point of giving it one.
+func (s *stubSession) cancelsReturned() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancelDone
 }
 
 // ForeignTurn is the session contract's leaf accessor, over the same field
@@ -1097,6 +1126,276 @@ func TestASignalWhileTheDrainIsHeldEndsTheRunAtOnce(t *testing.T) {
 	// closing bracket is on stdout and not lost to the exit.
 	if ended != 1 {
 		t.Fatalf("the agent's own turn must still be bracketed: %d ended lines\n%s", ended, stdout.String())
+	}
+}
+
+// blockingWriter is stdout that stops the run mid-line: it blocks the first
+// write whose bytes contain mark, signals blocked, and goes on when release is
+// closed. It is how a test puts the CLIENT'S OWN READING at a moment it can name
+// — everything the engine and the session do while the run is inside that write
+// is state the run has not read yet, which is exactly the lag the events-versus-
+// state findings are about.
+type blockingWriter struct {
+	mark    string
+	blocked chan struct{}
+	release chan struct{}
+	hit     bool
+
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newBlockingWriter(mark string) *blockingWriter {
+	return &blockingWriter{
+		mark:    mark,
+		blocked: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+// Write blocks once, on the marked line; an empty mark blocks on nothing at all,
+// which is how a test gets a stdout it can read while the run writes. hit is read
+// and written only on the run's own goroutine, which is the only one that writes.
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	if !w.hit && w.mark != "" && strings.Contains(string(p), w.mark) {
+		w.hit = true
+		close(w.blocked)
+		<-w.release
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *blockingWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// TestASignalWithAParkedClaimAndAWedgedCancelStillExits is r11's blocker. The
+// claim is parked waiting out a turn the agent will not give back, a signal
+// arrives, and the agent never completes the cancel: it is the one schedule where
+// nothing at all is coming to this run — no ending, because no continuation is
+// running; no successor, because the stop refused admission; and no second
+// Ctrl+C, because the signal context is already cancelled.
+//
+// It ends anyway, with exit 1, because both halves are bounded now: the stop's
+// own cancel is made on a context of this run's (so a session that honours its
+// context comes back and releases the hold that stops the turn settling), and the
+// run's own wait after a signal is bounded by the same budget the baseline's
+// foreign-turn wait used.
+func TestASignalWithAParkedClaimAndAWedgedCancelStillExits(t *testing.T) {
+	var stderr bytes.Buffer
+	stdout := newBlockingWriter("")
+	o := stubOpts(&bytes.Buffer{}, &stderr)
+	o.stdout = stdout
+	s := newStubSession(t, endTurn())
+	s.refuseWhileForeign = true
+	s.foreign = true
+	// Never closed: the agent answers the cancel neither now nor later.
+	s.cancelHold = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, ctx, s, "go") }()
+	waitFor(t, "the claim to be parked waiting out the agent's own turn", func() bool {
+		eng := s.engine()
+		return eng != nil && eng.State().Waiting
+	})
+	cancel()
+	select {
+	case err := <-done:
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 1 {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("a signal with a parked claim and an unanswered cancel never ended the run")
+	}
+	// The cancel came back, which only the context the stop was given can do.
+	waitFor(t, "the stop's cancel to come back on its own context", func() bool {
+		return s.cancelsReturned() == 1
+	})
+	if strings.Contains(stderr.String(), "kept the session") {
+		t.Fatalf("a signalled run must not spend its claim budget as well: %q", stderr.String())
+	}
+	if got := s.sent(); len(got) != 1 {
+		t.Fatalf("the engine claims nothing while the agent holds the session: %v", got)
+	}
+}
+
+// TestASignalWhileTheAgentKeepsItsOwnTurnSaysSoAndExits is the other end of the
+// same bound: the stop's work is done — the row is out of the queue and the
+// cancel written — but the agent goes on running the turn of its own that was
+// holding the drain. The run waits the budget out and then says what the
+// baseline's own timer said here, and exits 1.
+func TestASignalWhileTheAgentKeepsItsOwnTurnSaysSoAndExits(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	o := stubOpts(&stdout, &stderr)
+	var s *stubSession
+	first := endTurn()
+	// The agent takes the session for itself and never gives it back, cancel or
+	// no cancel.
+	first.before = func() { s.setForeign(true) }
+	s = newStubSession(t, first)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, ctx, s, "first", "follow-up") }()
+	waitFor(t, "the drain to be held with the row still queued", func() bool {
+		eng := s.engine()
+		if eng == nil {
+			return false
+		}
+		st := eng.State()
+		return st.Prompted && st.Activity == engine.ActivityIdle && len(st.Queue) == 1
+	})
+	cancel()
+	select {
+	case err := <-done:
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 1 {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run waited past its budget for a turn the agent never ended")
+	}
+	if !strings.Contains(stderr.String(), "still running a turn of its own") {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+	var removed int
+	for _, ev := range parseJSONLines(t, stdout.String()) {
+		if ev.m["type"] == "queue" && ev.m["event"] == "removed" {
+			removed++
+		}
+	}
+	if removed != 1 {
+		t.Fatalf("the cleared row must still be reported: %d removed\n%s", removed, stdout.String())
+	}
+}
+
+// TestAStreamErrorIsScopedToTheTurnTheReaderIsOn is r11's finding 2. The engine
+// runs ahead of the reader: while the run is still writing turn one's error line,
+// turn one settles, its queued successor is claimed, and THAT claim is refused
+// and parked. The successor's state must not scope the predecessor's events — the
+// error belongs to the turn the reader is on, and the run fails with it.
+func TestAStreamErrorIsScopedToTheTurnTheReaderIsOn(t *testing.T) {
+	var stderr bytes.Buffer
+	boom := errors.New("a child failed")
+	stdout := newBlockingWriter(boom.Error())
+	o := stubOpts(&bytes.Buffer{}, &stderr)
+	o.stdout = stdout
+	// No budget in play: nothing here gives a wait up.
+	o.foreignMax = time.Hour
+	s := newStubSession(t,
+		stubTurn{
+			emit: []agent.Event{
+				{Type: agent.EventError, Err: boom},
+				{Type: agent.EventDone, StopReason: "end_turn"},
+			},
+			res: agent.Result{StopReason: "end_turn"},
+		},
+		// The successor, refused the moment it is claimed: the session's flag is
+		// clear, so the engine admits it and the continuation says no.
+		stubTurn{err: agent.ErrForeignTurn},
+	)
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go", "follow-up") }()
+	// The run is inside the write of turn one's error line.
+	select {
+	case <-stdout.blocked:
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never wrote the error line")
+	}
+	// While it is held there the engine moves on: turn one settles, the row is
+	// drained, and that claim is refused and parked.
+	waitFor(t, "the successor's claim to be parked", func() bool {
+		eng := s.engine()
+		if eng == nil {
+			return false
+		}
+		st := eng.State()
+		return st.Waiting && st.Turn == "turn-2"
+	})
+	close(stdout.release)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, boom) {
+			t.Fatalf("err %v, want the error turn one's own stream carried", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never finished")
+	}
+}
+
+// TestADrainGiveUpReadsTheEnginesOwnState is r11's finding 3. The flag that says
+// this run is waiting for a drain is derived from events, and events trail the
+// engine: by the time the budget expires the drain may already have claimed the
+// row's turn, with its own events still in the outbox. Giving up then would kill
+// a chain that was running — so the decision is made from the engine's state, and
+// the run carries on.
+func TestADrainGiveUpReadsTheEnginesOwnState(t *testing.T) {
+	var stderr bytes.Buffer
+	// A stdout this test can read while the run writes: it blocks on nothing.
+	stdout := newBlockingWriter("")
+	o := stubOpts(&bytes.Buffer{}, &stderr)
+	o.stdout = stdout
+	// claimed says the row's turn is running; held keeps it running until the test
+	// lets it finish, so the engine's state stays what the decision has to read.
+	claimed, held := make(chan struct{}), make(chan struct{})
+	var s *stubSession
+	first := endTurn()
+	first.before = func() { s.setForeign(true) }
+	second := endTurn()
+	second.before = func() { close(claimed); <-held }
+	s = newStubSession(t, first, second)
+	o.beforeDrainGiveUp = func() {
+		// Once only, in the gap between the budget expiring and the look that
+		// decides: the agent gives the session back, the engine claims the row and
+		// starts its turn, and the events saying so are still on their way to this
+		// reader — which is the whole of the schedule.
+		o.beforeDrainGiveUp = nil
+		s.setForeign(false)
+		<-claimed
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "first", "follow-up") }()
+	// The row's own line proves the run read past its decision without giving up.
+	waitFor(t, "the row to be reported sent", func() bool {
+		return strings.Contains(stdout.String(), `"event":"sent"`)
+	})
+	close(held)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a chain whose drain had already run must not be given up on: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never finished the turn the drain had already started")
+	}
+	if strings.Contains(stderr.String(), "still blocked") {
+		t.Fatalf("the run reported a queue that was already draining: %q", stderr.String())
+	}
+	if got := s.sent(); strings.Join(got, ",") != "first,follow-up" {
+		t.Fatalf("prompts %v", got)
+	}
+	var dones, sent int
+	for _, ev := range parseJSONLines(t, stdout.String()) {
+		switch {
+		case ev.m["type"] == "done":
+			dones++
+		case ev.m["type"] == "queue" && ev.m["event"] == "sent":
+			sent++
+		}
+	}
+	if dones != 2 || sent != 1 {
+		t.Fatalf("%d done and %d sent lines, want both turns and the row sent once\n%s", dones, sent, stdout.String())
 	}
 }
 
