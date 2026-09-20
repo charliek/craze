@@ -64,6 +64,18 @@ var (
 	// The adapter serializes turns itself, so it never reaches a user.
 	ErrInTurn = errors.New("harness: a turn is already running")
 
+	// ErrNotInTurn is Steer's refusal when there is no running turn to merge
+	// the text into: the session is idle, the turn has settled its steers, or
+	// the token names a turn that has since ended. Nothing is changed, so the
+	// caller still holds the text (plan 019 §3.10).
+	ErrNotInTurn = errors.New("harness: no running turn to steer")
+
+	// ErrTooManySteers is Steer's refusal once a turn has taken steerCap
+	// interjections. Every one a turn does not answer becomes a queued row, so
+	// the bound is the queue's; refusing changes nothing and leaves the text
+	// with the caller, as a full queue does (plan 019 §3.10).
+	ErrTooManySteers = errors.New("harness: too many interjections in one turn")
+
 	// ErrClosed is every call that would change the session after Close.
 	ErrClosed = errors.New("harness: session closed")
 

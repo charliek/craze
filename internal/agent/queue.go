@@ -89,6 +89,26 @@ func (q *PromptQueue) Add(text string, now time.Time) (QueuedPrompt, QueueEvent,
 	return p, QueueEvent{Prompt: p, Change: QueueQueued, Pos: len(q.items) - 1}, nil
 }
 
+// PushFront puts text at the head, ahead of everything already waiting, and
+// is the one way in that neither cap bounds. It carries text the user typed
+// into a running turn that the turn could not answer — an interjection the
+// harness accepted and no step wrote down (plan 019 §3.10) — and a cap must
+// not be the reason typed text vanishes: it has nowhere else to go, since
+// refusing here would drop it rather than hand it back. Nothing else uses it;
+// everything a user queues by hand goes through Add.
+//
+// From the head the row is an ordinary queued message: the drain takes it as
+// the next turn, an edit or a cancel reaches it, and an error clears it with
+// the rest.
+func (q *PromptQueue) PushFront(text string, now time.Time) QueueEvent {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.seq++
+	p := QueuedPrompt{ID: fmt.Sprintf("q-%d", q.seq), Text: text, QueuedAt: now}
+	q.items = append([]QueuedPrompt{p}, q.items...)
+	return QueueEvent{Prompt: p, Change: QueueQueued, Pos: 0}
+}
+
 // Edit rewrites a row in place: the id and the position are the row's
 // identity and do not move, and Version records that it changed.
 func (q *PromptQueue) Edit(id, text string) (QueueEvent, error) {

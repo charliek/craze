@@ -52,11 +52,20 @@ const maxRetries = 1
 // (plan 019 §3.5).
 const maxSteps = 200
 
-// Result is how a turn that did not fail ended. Usage is the turn's token
-// counts, every step's summed; it is zero for a cancelled turn.
+// Result is how a turn ended. StopReason and Usage — the turn's token counts,
+// every step's summed, zero for a cancelled turn — are filled in for a turn
+// that did not fail; Unanswered is filled in whatever the turn did.
 type Result struct {
 	StopReason string
 	Usage      Usage
+	// Unanswered is the text of every steer Steer accepted that no step
+	// persisted, in the order it was accepted: one the turn ended before a
+	// step could take it up, and one taken into a step whose append never
+	// happened. It is returned alongside an error too — a turn that failed
+	// still owes the user whatever they typed into it (plan 019 §3.10). A
+	// steer a step did persist is not here: the model read it, and the
+	// transcript holds it.
+	Unanswered []string
 }
 
 // Run sends text as the next user turn and blocks until the turn ends. What
@@ -76,9 +85,12 @@ type Result struct {
 //
 // It returns a Result when the model finished (end_turn, max_tokens,
 // refusal), when the harness stopped it (max_turn_requests), or when the
-// turn was cancelled — by ctx, or by Close — and an error, with a zero
-// Result, when it failed (see errors.go). A second Run while one is live is
-// ErrInTurn; a Run after Close is ErrClosed.
+// turn was cancelled — by ctx, or by Close — and an error, with a Result
+// carrying nothing but Unanswered, when it failed (see errors.go). A second
+// Run while one is live is ErrInTurn; a Run after Close is ErrClosed.
+//
+// Steer merges text into the turn while it runs; Result.Unanswered is
+// whatever it accepted that no step wrote down (steer.go).
 //
 // The turn is persisted from Fantasy's callbacks, a step at a time (plan
 // 019 §3.5, §3.6):
@@ -161,8 +173,12 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 		sink:   sink,
 		number: number,
 		calls:  calls{tools: s.tools},
+		steers: &s.steers,
 	}
 	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
+	// From here Steer is accepted, and only from here: a prompt the store
+	// refused above never became a turn, so there was nothing to steer into.
+	t.steers.begin()
 	agent := s.newAgent(m.lm, s.system, t.agentTools())
 	res, err := agent.Stream(turnCtx, t.call(text, history))
 	return t.finish(res, err)
@@ -226,8 +242,11 @@ func (s *Session) record(m model, changes []func(*store.Store) error) error {
 	return nil
 }
 
-// end releases the session after a turn and wakes a Close waiting on it.
+// end releases the session after a turn and wakes a Close waiting on it. The
+// steer box is shut here too: the turn shuts it as it finishes (settleSteers),
+// and this catches a Run that returned before it ever opened one.
 func (s *Session) end() {
+	s.steers.close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cancel(nil) // releases the turn context's resources
@@ -275,8 +294,12 @@ type turn struct {
 
 	loop doomLoop // the doom-loop guard's count, across the turn's steps (doomloop.go)
 
-	// Interject's steers, spliced into every step's messages from the one
-	// that first saw them (plan 019 §3.10), are more of this state, under mu.
+	// Interject's steers, spliced into every step's messages from the one that
+	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
+	// which has its own lock; spliced and written are this turn's, under mu.
+	steers  *steerbox
+	spliced []splice // the steers taken up, in order, each at a fixed index
+	written int      // how many of spliced an AppendStep has written
 }
 
 // redactor is the session's, as it is now — fixed for the whole turn, since
@@ -300,6 +323,7 @@ func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamC
 		ProviderOptions: t.model.effortOpts,
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(maxSteps), t.halted},
 
+		PrepareStep: t.prepareStep,
 		OnStepStart: t.stepStarted,
 		OnTextDelta: func(_, delta string) error {
 			t.mu.Lock()
@@ -453,9 +477,13 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		if results != nil {
 			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort}
 		}
-		ids, err := t.store.AppendStep(nil, entry, toolEntry)
+		// The steers no step has written yet lead the append: this is the
+		// first step that could write them, and the transcript then holds
+		// them exactly where this step's request had them.
+		ids, err := t.store.AppendStep(t.steerEntries(), entry, toolEntry)
 		switch {
 		case err == nil:
+			t.written = len(t.spliced)
 			done.Saved, done.Entries = true, ids
 		case errors.Is(err, store.ErrNoOutput): // thinking alone: nothing to persist
 		default:
@@ -491,13 +519,20 @@ func (t *turn) stepDone(step fantasy.StepResult) StepDone {
 	}
 }
 
-// finish is how Run ends once Fantasy has returned: the step a cancel or a
-// failure cut short is persisted as far as it streamed, every tool call
-// still open is settled, and the result is worked out (see Run).
-func (t *turn) finish(res *fantasy.AgentResult, err error) (Result, error) {
+// finish is how Run ends once Fantasy has returned: the turn's steers are
+// settled, the step a cancel or a failure cut short is persisted as far as it
+// streamed, every tool call still open is settled, and the result is worked
+// out (see Run).
+func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer func() { t.ended = true }()
+	// The steers are settled before anything else, and their text is put on
+	// the Result by a defer rather than by each return below: a path that
+	// forgot it would drop text the user typed. settleSteers shuts the box, so
+	// from here no accept can land in a turn that has already reported.
+	unanswered := t.settleSteers()
+	defer func() { out.Unanswered = unanswered }()
 	cancelled := t.ctx.Err() != nil
 
 	if err == nil {

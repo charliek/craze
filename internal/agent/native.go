@@ -64,6 +64,12 @@ type nativeSession struct {
 	// emits after queueOp is released. Lock order: queueOp → emitMu → s.mu →
 	// toolMu → the queue's own lock → the harness's lock (Current, under
 	// s.mu). No lock is ever held across an emit (plan 019 §3.10).
+	//
+	// Interject adds no ordering: it reads the turn state under s.mu, releases
+	// it, and then hands the text to the harness's steer box, which takes a
+	// leaf lock of its own. So an interjection never waits on the turn it is
+	// meant for, even while that turn is emitting into a consumer that is slow
+	// — or that is the very goroutine interjecting.
 	queueOp sync.Mutex
 	emitMu  sync.Mutex
 	queue   PromptQueue
@@ -93,6 +99,10 @@ type nativeSession struct {
 	claimed     bool
 	inPrompt    bool
 	cancelling  bool
+	// doneEmitted marks that the turn's ending event has gone out while the
+	// slot is still claimed, as on the live session: Interject is refused from
+	// then on, so an interjection can never follow an EventDone.
+	doneEmitted bool
 	// turnCancel cancels the open turn's context; nil until the continuation
 	// opens its turn. released is the claim's: closed when its continuation
 	// returns, which is what Cancel and Close wait on.
@@ -425,6 +435,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.inPrompt = true
+	s.doneEmitted = false
 	s.turnCancel = cancel
 	if !s.titlePinned && s.snap.Title == "" {
 		s.snap.Title = nativeTitle(text)
@@ -441,6 +452,11 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// Every row the turn left running is closed before its ending goes out,
 	// so no consumer ever sees a turn end with a call still spinning.
 	s.settleTools()
+	// Then whatever the user interjected that the turn could not answer, at
+	// the head of the queue, before the ending event: from there it is an
+	// ordinary queued row, taken by the drain after a done or a cancel and
+	// cleared with the rest after an error (plan 019 §3.10).
+	s.queueUnanswered(res.Unanswered)
 	var failed error
 	switch {
 	case err != nil:
@@ -448,6 +464,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	case res.StopReason == harness.StopCancelled:
 		failed = s.callerEnded(ctx)
 	}
+	s.markDone()
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
 		// state when the removals arrive and can say why the queue emptied.
@@ -459,6 +476,78 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// markDone closes the turn to interjections just before its ending event goes
+// out, as the live session does (live.go): from here Interject is ErrNotInTurn
+// rather than text merged into a turn that has already ended. The harness
+// refuses by then too — it settles its steers before Run returns — so this is
+// the adapter saying the same thing in its own state, and the reason the
+// refusal needs no call into the harness.
+func (s *nativeSession) markDone() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.doneEmitted = true
+}
+
+// queueUnanswered puts the turn's unanswered steers at the head of the queue,
+// first one first, through PushFront, which neither cap bounds: the text is
+// already the user's, accepted by the session, and a cap must not be the
+// reason it vanishes. Pushing back to front leaves them in the order they were
+// typed, and a consumer rebuilding the queue from the events — each an insert
+// at position 0 — lands on the same order.
+//
+// The burst is bounded by the harness, which refuses a turn more steers than
+// the queue's own cap (harness.steerCap): an unbounded one could fill a
+// consumer's event channel on its own.
+//
+// That bound does not make the underlying shape safe, and is not meant to.
+// queueTx holds emitMu across its sends, so a single blocking send can wedge:
+// with the channel nearly full, a consumer that receives one event and
+// synchronously calls Queue leaves the requeue to fill that slot and block on
+// its next send, still holding emitMu, while Queue waits for it — and the
+// consumer is the only thing that would drain. That is plan 008's queueTx
+// shape, shared by Queue, Edit, Unqueue and Clear; the cap only bounds what an
+// interjection can add to it. Nor is the ending burst bounded by the steer cap
+// alone: the error path's ClearQueue emits one removal per row, and cap-exempt
+// rows accumulate across turns. This is not something the session-control
+// plan's event log closes: its publish still blocks on the primary send
+// inside queueTx, because a queue event is lossless by contract — dropping a
+// removal would leave a row the stream never accounts for. The fix belongs to
+// the engine turn driver that owns queue admission and removal (session
+// control SD-24), so nothing deeper is attempted here.
+//
+// A closed session queues nothing. Its events are already suppressed, so a row
+// pushed now could never be shown, drained or cleared — an invisible message
+// the user was told had been accepted. Interject refuses on a closed session,
+// so the only text that reaches here is what a live turn took before Close
+// cancelled it, and that is dropped with the session.
+func (s *nativeSession) queueUnanswered(texts []string) {
+	if len(texts) == 0 {
+		return
+	}
+	now := time.Now()
+	s.queueTx(func() []QueueEvent {
+		// Not atomic with the PushFront below, and knowingly so: closed can
+		// read false, Close can then set it and close done, and the row goes
+		// in anyway — its event suppressed, but Snapshot still showing it
+		// after Close. The window is accepted. The row belongs to a session
+		// that is going away and nothing will act on it. Closing it properly
+		// means mutating the queue and publishing what describes it under one
+		// authority, which is the engine turn driver's job (session control
+		// SD-24), not an ordering boundary between publishes.
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return nil
+		}
+		evs := make([]QueueEvent, 0, len(texts))
+		for i := len(texts) - 1; i >= 0; i-- {
+			evs = append(evs, s.queue.PushFront(texts[i], now))
+		}
+		return evs
+	})
 }
 
 // callerEnded says whether a turn the harness reports cancelled was ended by
@@ -527,6 +616,14 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.toolProgress(e)
 	case harness.ToolFinished:
 		s.toolFinished(e)
+	case harness.Steered:
+		// The turn took up an interjection. The text is the caller's own,
+		// straight back out unchanged — it never went near the model or a
+		// provider, so there is nothing to sanitize, exactly as the live
+		// session emits grok's interjection broadcast. It comes from the
+		// turn's goroutine, always before the turn's ending event, so it can
+		// never follow the EventDone or EventError below.
+		s.emit(Event{Type: EventUser, Text: e.Text, Interjection: true})
 	}
 }
 
@@ -711,12 +808,72 @@ func (s *nativeSession) Snapshot() Snapshot {
 	return out
 }
 
-// Interject is deferred to H2 (plan 018 §3.4): an H1 turn has no tool step to
-// merge text into, and queueing already runs a follow-up next.
-func (s *nativeSession) Interject(context.Context, string) error { return ErrUnsupported }
+// Interject merges text into the running turn: the harness takes it up before
+// the turn's next step, the model reads it there, and the step that saw it
+// writes it to the transcript (plan 019 §3.10, D-34).
+//
+// It is refused in exactly the three states the live session refuses in
+// (live_queue.go) — no turn running, the turn's ending event already out, and
+// a cancel in progress — and on a closed session, which has no turn to merge
+// into and no consumer left to show the text to. Refusing keeps the text in
+// the caller's hands, which is where the user can see it.
+//
+// The turn the text was typed into is named, not merely counted: the token is
+// read in the same locked section that judged that turn live and handed
+// straight to the harness, so the window between releasing s.mu and the accept
+// — in which that turn can end and the next begin — refuses instead of
+// letting the next turn take the text up. Without it the text would be neither
+// written to the turn it was meant for nor returned by it, and its EventUser
+// would arrive after that turn's EventDone.
+//
+// Nothing is emitted here. The turn's own goroutine reports the steer through
+// the sink (harness.Steered), which is what makes it impossible for the
+// interjection to reach a consumer after the turn's ending event, and lets
+// Interject hold no lock while a consumer is being written to.
+func (s *nativeSession) Interject(_ context.Context, text string) error {
+	s.mu.Lock()
+	supported := s.snap.Provider.Capabilities().Interject
+	hs, closed := s.hs, s.closed
+	live := s.inPrompt && !s.doneEmitted && !s.cancelling
+	var turn harness.SteerToken
+	if hs != nil && live {
+		// Read here, with the liveness it belongs to: a token read after the
+		// lock went could already name the next turn.
+		//
+		// The adapter marks itself live a moment before the harness opens the
+		// turn's box, so a read caught in between is 0 and Steer refuses it:
+		// a false ErrNotInTurn for an interjection typed in that instant,
+		// never a misroute, and the caller keeps its text.
+		turn = hs.SteerToken()
+	}
+	s.mu.Unlock()
+	switch {
+	case !supported:
+		return ErrUnsupported
+	case closed:
+		return fmt.Errorf("agent: session closed")
+	case hs == nil:
+		return fmt.Errorf("agent: session not started")
+	case !live:
+		return ErrNotInTurn
+	}
+	switch err := hs.Steer(turn, text); {
+	case err == nil:
+		return nil
+	case errors.Is(err, harness.ErrNotInTurn):
+		return ErrNotInTurn
+	case errors.Is(err, harness.ErrTooManySteers):
+		// The turn has taken as many as the queue could hold if it answered
+		// none of them. Said in the queue's own words, because that is what
+		// the unanswered ones become.
+		return ErrQueueFull
+	default:
+		return phraseTurnError(err)
+	}
+}
 
-// The harness has no tools in H1, so nothing ever asks for permission, asks a
-// question or proposes a plan.
+// The harness has no permission gate, questions or plans in H2, so nothing
+// ever asks for one.
 
 func (s *nativeSession) AnswerPermission(string, string) error { return ErrUnsupported }
 

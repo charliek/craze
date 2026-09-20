@@ -48,6 +48,7 @@ Append-only. A reversed decision gets a new row that points at the old one.
 | D-41 | 2026-09-19 | **`grep` and `glob` run ripgrep found on `PATH`** (`exec.LookPath("rg")` once per session); no download code, no pure-Go walker. A missing `rg` is a model-facing error result pointing the model at bash's `grep`/`find`. CI installs ripgrep on both runners. Tests fail rather than skip when `CRAZE_REQUIRE_RG=1` (set in CI) and `rg` is absent. | Owner decision 3 (2026-09-19): `grep`/`glob` run ripgrep found on `PATH`; no download code, no pure-Go walker. | Plan 019 §3.9 |
 | D-42 | 2026-09-19 | **Amends D-12: no ask in H2.** The doom-loop guard counts in `OnToolCall`, so it also sees invalid and unknown-tool calls; it refuses the 3rd and 4th consecutive identical calls with a nudge (class `doom_loop`) and stops the turn after the 5th with stop reason `max_turn_requests`. It becomes an `Ask` once an approval channel exists. Read-before-edit stays prompt-only, unenforced; opencode's two description sentences claiming it is enforced are not ported. Interrupted calls are closed with opencode's own string, `Tool execution aborted` (class `aborted`). | Decision 2: no approval channel exists in H2. | Plan 019 §3.7 |
 | D-43 | 2026-09-19 | **Widens D-07.** For `length`, `error`, `content-filter`, and `unknown` finishes, Fantasy records tool calls in the step content but runs nothing; the runner now appends one error result per recorded call, class `not_executed` (wording in §3.5: for `length`, "Tool call \"<name>\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments."; the other three reasons get the same sentence with the finish reason named), persists both the assistant and tool-result lines, and ends the turn with that finish's own stop reason. With the one linked provider (openaicompat) this is a defence, not the common path, since it already suppresses incomplete tool calls before an abnormal finish; the live case this actually meets is a `ToolStarted` whose call never arrives (a `max_tokens` finish mid-call), which the adapter settles at every turn ending (§3.10). | Panel review: Fantasy skips calls on four finish reasons, not only `length` (codex); a `ToolStarted` row would otherwise dangle forever on a finish the ACP path never meets (GLM). | Plan 019 §3.5 |
+| D-44 | 2026-09-19 | **D-35's condition is met: OpenRouter stays on `openaicompat`.** Every OpenRouter reasoning model ran a multi-step tool loop, then a second call that consumed the first call's output, then a switch to another provider — all clean; the same held for Kimi K3 and DeepSeek V4 Flash on Fireworks (the `reasoning_content` rule). No `reasoning_details` replay was needed. Closes D-35's condition; amends nothing, and `providers/openrouter` is not taken. | D-35 conditioned the choice on H2 running a tool loop on the OpenRouter reasoning models; the H2 live smoke ran it. | H2 live smoke, 2026-09-19 |
 
 ### D-40 constraint table
 
@@ -68,8 +69,25 @@ the live smoke (C14):
 | calls on `length`, `error`, `content-filter`, `unknown` finishes are recorded but not run | the runner writes an error result per recorded call (D-43) | grok's salvage becomes possible |
 | history is not re-read per step | not needed until compaction | compaction mid-turn |
 
-**Result (C8, before tools switched on):** not yet run.
-**Result (C14, after the live smoke):** not yet run.
+**Result (C8, before tools switched on):** re-run in C8's commit message:
+every constraint still held and every workaround cost well under a day;
+four rows were added there (no per-step list of call ids before dispatch; a
+step whose tools were cancelled still continues; only the normalized finish
+is visible; callbacks carry only provider ids).
+
+**Result (C14, after the live smoke):** every workaround held in live use
+across 15 models and both platforms: no tool progress hook (the closure), a
+tool's Go error fatal (never returned), callbacks on tool goroutines (one
+turn mutex, serialized sink), the parallel cap, unbounded waits (every tool
+honours ctx; bash's bounds were exercised by the live cancel), the
+`OnToolCall` goroutine leak (callbacks return nil), `OnStepFinish`'s ignored
+error (the save-failure stop), the assistant message only at step end,
+`PrepareStep`'s one-step list (interject re-splices, live-verified), calls
+recorded but not run on abnormal finishes, history not re-read — including
+the four rows added in C8. **Decision unchanged: stay on `Agent.Stream`; HL
+stays unscheduled with its triggers.** The one live surprise was not a loop
+constraint at all but the schema-number encoding the smoke caught
+(`07-roadmap.md`).
 
 ## Open (not yet decided)
 

@@ -42,6 +42,8 @@ func seq(evs []Event) []string {
 			out = append(out, fmt.Sprintf("finished %s %s", e.ID, e.Result.Class))
 		case StepDone:
 			out = append(out, fmt.Sprintf("step %d %s %s saved=%v", e.Step, e.Finish, e.StopReason, e.Saved))
+		case Steered:
+			out = append(out, "steered "+e.Text)
 		case Retrying:
 			out = append(out, "retrying")
 		case Diag:
@@ -389,7 +391,7 @@ func TestSaveFailureStopsTheTurn(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, store.ErrClosed) || res != (Result{}) || n != 1 {
+			if !errors.Is(err, store.ErrClosed) || !empty(res) || n != 1 {
 				t.Fatalf("Run = %+v, %v after %d requests; want the store's error after 1", res, err, n)
 			}
 			d := of[StepDone](ev.list())
@@ -476,7 +478,7 @@ func TestBadCallIDs(t *testing.T) {
 				return
 			}
 			var pe *ProviderError
-			if !errors.Is(err, ErrBadToolCalls) || !errors.As(err, &pe) || pe.Provider != "test" || res != (Result{}) {
+			if !errors.Is(err, ErrBadToolCalls) || !errors.As(err, &pe) || pe.Provider != "test" || !empty(res) {
 				t.Fatalf("Run = %+v, %v; want ErrBadToolCalls as a provider error", res, err)
 			}
 			if exists(m1) || exists(m2) {
@@ -540,7 +542,7 @@ func TestCancelDuringATool(t *testing.T) {
 				}
 				return
 			}
-			if got.err != nil || got.res != (Result{StopReason: StopCancelled}) || n != 1 {
+			if got.err != nil || !only(got.res, StopCancelled) || n != 1 {
 				t.Fatalf("Run = %+v, %v after %d requests; want cancelled after 1", got.res, got.err, n)
 			}
 			lines := entries(transcript(t, s))

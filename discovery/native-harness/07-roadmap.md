@@ -8,7 +8,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 |---|---|---|
 | H0 | complete | Fantasy `v0.43.2` providers fit all four provider classes; `Agent.Stream` fits behind a finish-normalizing wrapper; Catwalk is not embedded |
 | H1 | complete | skeleton shipped: hidden `native` provider; 14 of 15 imported models held a clean TUI turn, multi-turn sessions and `craze prompt --json` ran on a subset (OpenRouter via `openaicompat`, D-35); no interject, no modes (D-34) |
-| H2 | in progress | tools: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38); the gate seam allowing everything (D-39); ripgrep on `PATH` (D-41); the doom-loop guard, nudge-then-stop (D-42); abnormal-finish handling (D-43); interject |
+| H2 | complete | tools shipped across PRs #33, #34, #35, #37: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38), the gate seam allowing everything (D-39), ripgrep on `PATH` (D-41), the doom-loop guard (D-42), abnormal-finish handling (D-43), and interject; live smoke completed 14 of 15 imported models on Linux and 4 of 4 on the mac-mini; D-35's condition met, `openaicompat` stays |
 | H3 | not started | approval: owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | not started | Claude compat: instruction files with imports and `paths` gating, workspace skills and commands, `craze import claude` for global instructions, user skills, and marketplace plugins |
 | H5 | not started | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
@@ -181,15 +181,120 @@ one merges (Plan 019 §5). No idle timeout: H1's follow-up list above names
 - **PR 4 — interject, smoke, record (C12–C14)**: `Steer`/`PrepareStep`
   drain turning `Capabilities.Interject` on (D-34) — with tool steps in
   place there is finally a safe point to merge steered text into history
-  between steps (C12, reviewed alone, races); the live smoke and any fix it
-  finds (C13); this docs update, recording the smoke tables and D-40's
+  between steps (C12, reviewed alone, races); the live smoke, which found
+  the schema-number bug below and was fixed before the smoke was recorded
+  clean (C13); this docs update, recording the smoke tables and D-40's
   second table re-run (C14).
 - **OpenRouter tool-loop check (D-35)**: run a multi-step tool loop on the
   OpenRouter reasoning models. If one degrades or fails without
   `reasoning_details` replay, first carry the replay in craze's own wrapper;
   the owner accepts `providers/openrouter` and its SDKs if quality needs it.
+  The live smoke met the condition clean (below); `openaicompat` stays
+  (D-44).
 - **Exit**: the agent makes a real change in the craze repo, on Linux and
   on the mac-mini, with tool cards and diffs rendering as they do for grok.
+
+**Exit result:** shipped across four PRs. PR 1 #33 (merged 0277ce7) landed
+the store's tool-step support (`AppendStep`, the pairing invariant, tail
+rollback) and the `internal/harness/tool` framework (`Tool`/`Prepared`/
+`Spec`/`Result`/`Env`, the dispatcher, the gate, profiles, truncation and
+spill files, per-path locks). PR 2 #34 (merged bc2aaab) shipped `read`/
+`write`, `edit` (differentially checked against opencode under bun: 140,000
+random cases and 9,000 execute-path cases agree), `bash`, and `grep`/`glob`
+over ripgrep, behind the `opencode` profile. PR 3 #35 (merged ad89ef9) wired
+the runner (`toolbridge.go`, per-turn state, ids, events, stop reasons,
+cancel precedence, abnormal-finish handling), the doom-loop guard, the
+adapter's tool cards and TUI golden frame, and the pytest tool-loop fixtures
+(130 CLI tests, up from 121). PR 4 #37 added interject, the schema-number
+fix the smoke found, and this docs commit; it is where the smoke ran.
+
+Live smoke (2026-09-19), Task A (read → edit → bash → report, in a scratch
+clone):
+
+Linux — 14 of 15 imported models completed the loop and really changed the
+file, in 8–35 s:
+
+| alias | result |
+|---|---|
+| `fireworks/kimi-k3` | clean, file changed |
+| `fireworks/kimi-k2p7-code` | clean, file changed |
+| `fireworks/qwen3p8-max` | clean, file changed |
+| `fireworks/deepseek-v4-flash` | clean, file changed |
+| `fireworks/deepseek-v4-pro` | 404, stale wire id — the same H1 recorded, unchanged (D-24 follow-up) |
+| `glm-5.3` | clean, file changed |
+| `glm-5.3-flash` | clean, file changed |
+| `muse-spark-1.3` | clean, file changed |
+| `muse-spark-1.3-contributor` | clean, file changed |
+| `openrouter/gemini-3.8-flash` | clean, file changed |
+| `openrouter/glm-5.3-flash` | clean, file changed |
+| `openrouter/gpt-5.6-luna` | clean, file changed |
+| `openrouter/gpt-5.6-sol` | clean, file changed |
+| `openrouter/gpt-5.6-terra` | clean, file changed |
+| `openrouter/minimax-m3` | clean, file changed |
+
+macOS (mac-mini), one model per provider class, all completed Task A and
+changed the file, with ripgrep from Homebrew:
+
+| alias | result |
+|---|---|
+| `fireworks/kimi-k3` | clean, file changed |
+| `glm-5.3` | clean, file changed |
+| `muse-spark-1.3` | clean, file changed |
+| `openrouter/gpt-5.6-terra` | clean, file changed |
+
+**D-35's condition is met** (D-44): every OpenRouter reasoning model ran a
+multi-step loop, then a second call that consumed the first call's output,
+then a switch to another provider — all clean; the same for Kimi K3 and
+DeepSeek V4 Flash on Fireworks (the `reasoning_content` rule). No
+`reasoning_details` replay was needed, so OpenRouter stays on `openaicompat`
+and `providers/openrouter` is not taken.
+
+Lifetime, live on Linux: a cancel during `sleep 321 & … wait` left neither
+the shell nor its backgrounded child alive and the turn reported
+`cancelled`; a child backgrounded past a normal exit
+(`sleep 322 >/dev/null 2>&1 &`) was gone too. On the mac-mini the same check
+was made decisive: both the shell and its backgrounded child were confirmed
+alive before the cancel (2 of 2) and neither was alive after it (0), with
+the turn reporting `cancelled`. An earlier macOS attempt was inconclusive —
+it cancelled before the command had written its pid files — and is not
+counted.
+
+No disruption: `~/.craze/config.toml` and `~/.craze/sessions.jsonl` were
+byte-identical (same MD5, still 21 rows) after about thirty native
+sessions. Secrets: every artifact was grepped for all four resolved
+provider keys and the canary — clean.
+
+**What the smoke caught:** the first live tool call failed with Fireworks'
+`Error validating JSON Schema: '9007199254740991' is not of type 'number'`.
+C8's review fix had made schema numbers `json.Number` so the header's hash
+would describe the exact literals sent, but a `json.Number` is a string
+underneath and the provider's SDK wrote it quoted. Numbers are canonicalized
+to int64/float64 once and the hash is taken of that same form: 2^53+1 still
+goes out whole, the digest still describes the wire, and a literal's
+spelling (1.0 → 1) is what was given up, along with an integer past int64,
+which rounds. The tests that marshal the schema stayed green throughout,
+because the standard library writes a `json.Number` unquoted and only the
+provider's own encoder quotes it (checked against openai-go v3.54.0) — so
+the guard is an assertion on the value handed over, that no `json.Number`
+survives canonicalization, rather than on its JSON. Nothing in the repo
+marshals through a provider SDK's encoder, which is the coverage this class
+of bug really wants.
+
+Known limitations: a refusal's text reaches the model always, but the card
+shows it only for `read` and `bash` rows — `edit`, `write`, and search rows
+show a failed row without it, because the TUI draws only their diff or
+heading (§3.10 pins `internal/tui`); a call Fantasy refuses before dispatch
+keeps Fantasy's own text on its card and the doom-loop guard still counts
+and stops the turn on the fifth; Fantasy re-sends the model's own tool-call
+arguments within a turn, so an argument the model wrote comes back to it
+unredacted while the stored copy carries the marker; `bash`'s process-
+lifetime edges (a stop between the pre-start check and launch, a syscall
+goroutine that never returns, macOS reaping the leader before the final
+group kill, a process that starts its own session escaping the kill);
+`edit`'s two edge cases (a Unicode-normalized Home path, a kept BOM tipping
+`replaceAll` over its 10 MiB cap); the dispatcher's own spill write being
+synchronous on `Run`'s path. See `05-tools-and-permissions.md` for the full
+list.
 
 ### H3 — approval
 

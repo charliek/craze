@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -123,11 +125,15 @@ func TestBridgedInfoCopiesAnyContainer(t *testing.T) {
 	}
 }
 
-// TestBridgedInfoKeepsNumbersExact (round-2 review): the canonical form must
-// not round numbers, or the tools the header hashes and the tools sent would
-// say different things. A number past float64's exact range and one written
-// 1.0 go out as they were registered; the control is the same schema decoded
-// the ordinary way, through float64, which changes both.
+// TestBridgedInfoKeepsNumbersExact (round-2 review, then the live smoke):
+// the canonical form must not round a number, or the tools the header hashes
+// and the tools sent would say different things — and it must hand Fantasy a
+// number a provider's own encoder can write. json.Number is a string
+// underneath: Fireworks rejected the first live call with 'is not of type
+// number' because the SDK wrote it as one. So a literal keeps its value, as
+// an int64 where it fits, and openTools hashes that same canonical form.
+// The control is the same schema decoded the ordinary way, through float64,
+// which loses the integer past 2^53.
 func TestBridgedInfoKeepsNumbersExact(t *testing.T) {
 	spec := tool.Spec{ID: "t", Description: "d", Required: []string{}, Kind: tool.KindRead,
 		Parameters: map[string]any{"n": map[string]any{
@@ -135,7 +141,9 @@ func TestBridgedInfoKeepsNumbersExact(t *testing.T) {
 			"maximum":    int64(9007199254740993), // 2^53 + 1
 			"multipleOf": json.Number("1.0"),
 		}}}
-	registered, err := tool.SpecsJSON([]tool.Spec{spec})
+	// What openTools hashes: the canonical form of the registered spec.
+	hashed, err := tool.SpecsJSON([]tool.Spec{{ID: spec.ID, Description: spec.Description, Required: spec.Required,
+		Parameters: canonicalSchema(spec.Parameters)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,21 +152,58 @@ func TestBridgedInfoKeepsNumbersExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(offered, registered) {
-		t.Fatalf("the tools offered are\n%s\nthe tools hashed\n%s", offered, registered)
+	if !bytes.Equal(offered, hashed) {
+		t.Fatalf("the tools offered are\n%s\nthe tools hashed\n%s", offered, hashed)
 	}
-	if !bytes.Contains(registered, []byte("9007199254740993")) || !bytes.Contains(registered, []byte("1.0")) {
-		t.Fatalf("the fixture does not carry the numbers it is about: %s", registered)
+	if !bytes.Contains(offered, []byte("9007199254740993")) {
+		t.Fatalf("2^53+1 did not survive: %s", offered)
+	}
+	// Every number is a JSON number, not a quoted one: that is what a provider
+	// validates, and what json.Number broke.
+	for _, quoted := range []string{`"9007199254740993"`, `"1"`, `"1.0"`} {
+		if bytes.Contains(offered, []byte(quoted)) {
+			t.Fatalf("a number was offered as a string (%s): %s", quoted, offered)
+		}
 	}
 
-	// The control: decoding through float64 loses both.
+	// The control: decoding through float64 loses the large integer.
 	var loose map[string]any
-	if err := json.Unmarshal([]byte(`{"maximum":9007199254740993,"multipleOf":1.0}`), &loose); err != nil {
+	if err := json.Unmarshal([]byte(`{"maximum":9007199254740993}`), &loose); err != nil {
 		t.Fatal(err)
 	}
-	if again, _ := json.Marshal(loose); string(again) == `{"maximum":9007199254740993,"multipleOf":1.0}` {
-		t.Fatal("control: a plain decode no longer changes these numbers, so UseNumber proves nothing")
+	if again, _ := json.Marshal(loose); bytes.Contains(again, []byte("9007199254740993")) {
+		t.Fatal("control: a plain decode no longer changes this number, so the canonical form proves nothing")
 	}
+
+	// The assertions above marshal with encoding/json, which writes a
+	// json.Number unquoted — which is why they stayed green through the live
+	// failure. The provider SDK's encoder quotes it instead, so the invariant
+	// has to be checked on the value handed over, not on its JSON.
+	if where := findJSONNumber(newBridged(spec, nil).Info().Parameters, "parameters"); where != "" {
+		t.Fatalf("a json.Number survived canonicalization at %s: a provider SDK writes it as a string", where)
+	}
+}
+
+// findJSONNumber returns the path of the first json.Number in a schema value,
+// or "" when there is none.
+func findJSONNumber(v any, path string) string {
+	switch v := v.(type) {
+	case map[string]any:
+		for _, k := range slices.Sorted(maps.Keys(v)) {
+			if where := findJSONNumber(v[k], path+"."+k); where != "" {
+				return where
+			}
+		}
+	case []any:
+		for i, x := range v {
+			if where := findJSONNumber(x, fmt.Sprintf("%s[%d]", path, i)); where != "" {
+				return where
+			}
+		}
+	case json.Number:
+		return path
+	}
+	return ""
 }
 
 // TestBridgedRunNeverFails: a bridged tool's Run hands Fantasy the result

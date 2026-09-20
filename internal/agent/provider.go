@@ -305,17 +305,17 @@ func GxProvider() Provider {
 // config.toml) and no listing shows it, it is never persisted as the default,
 // and its sessions are never indexed until H7 gives them a loader (§3.4).
 //
-// Effort is its one capability: interject waits for H2, where a tool step
-// gives it something to merge into, and modes for H5. The display label is
-// its own field so the UI can later say "craze" without touching the id that
-// flags and config hold.
+// Effort and interject are its capabilities: H2's tool loop gives a turn later
+// steps, and a steer merges into the next one (plan 019 §3.10, D-34). Modes
+// wait for H5. The display label is its own field so the UI can later say
+// "craze" without touching the id that flags and config hold.
 func NativeProvider() Provider {
 	return Provider{
 		name:         nativeName,
 		displayName:  nativeName,
 		hidden:       true,
 		inProcess:    true,
-		capabilities: Capabilities{Effort: true},
+		capabilities: Capabilities{Effort: true, Interject: true},
 	}
 }
 
