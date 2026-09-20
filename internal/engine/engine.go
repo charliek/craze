@@ -63,6 +63,13 @@ type turn struct {
 	// its client still refuses would be claimed again as fast as it could refuse.
 	retry    bool
 	retryDue bool
+	// retries counts those refusals, and is what State reports so that the
+	// client which owns the budget can see the wait it is bounding. A count is
+	// the honest answer where a flag is not: retry itself goes false for as long
+	// as a re-claim is in flight, so a client that read it would see a turn that
+	// keeps being refused as one that went through, while a count only ever
+	// grows — it grew since the last look, or the claim is through.
+	retries int
 }
 
 // launch is a continuation the engine has claimed under e.mu and has still to
@@ -208,7 +215,10 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 //   - SetModel, SetMode, SetConfig, SetTitle — until settings become state deltas
 //     in order behind Control.Set and Control.SetTitle (C10);
 //   - Snapshot, which the TUI reads through Control.State() already, and which a
-//     caller that has no engine state to merge may still read here.
+//     caller that has no engine state to merge may still read here;
+//   - Events, which is the log's primary and therefore the very channel
+//     Control.Events() hands out: a helper written against a session — headless
+//     craze's final sweeps — reads the same stream through either.
 //
 // The TUI additionally keeps writing the session index itself, from the snapshot
 // this hands it, until the index moves into the engine (C12). Nothing else may go
@@ -374,6 +384,28 @@ func (e *Engine) canStartLocked() bool {
 	return e.cur == nil && e.cancelsInFlight == 0 && e.refusalLocked() == nil && !e.sess.ForeignTurn()
 }
 
+// canSubmitLocked is canStartLocked for a prompt a client submitted directly,
+// and differs in one term: under a chain policy that waits a foreign-turn
+// refusal out, the session's flag is not a gate.
+//
+// The gate exists so that a client which would have to show a refusal is not
+// handed one it could have avoided (the TUI queues such a prompt instead, plan
+// 021 X22). A client whose policy is "keep the turn current and claim it again"
+// has asked for the opposite: `craze prompt` has always sent its prompt into a
+// session the agent was holding and waited the refusal out, and a queued row in
+// its place would be a message that run never sends and a pair of lines its JSON
+// never had.
+//
+// The drain keeps the gate whatever the policy: a row must not leave the queue
+// for a turn that cannot start — its sent line would precede the end of the
+// foreign turn it is waiting for — and the queue is exactly where it is safe.
+func (e *Engine) canSubmitLocked() bool {
+	if e.opts.Chain.RetryForeignTurn {
+		return e.cur == nil && e.cancelsInFlight == 0 && e.refusalLocked() == nil
+	}
+	return e.canStartLocked()
+}
+
 // Submit admits a prompt: it starts a turn now, queues the text, or — in
 // send-now mode behind a running turn — arms the send and cancels that turn.
 //
@@ -427,7 +459,7 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 		}
 		// A direct submit is what clears an error: the turn that failed said
 		// so, and only the next send retires it.
-		if e.canStartLocked() {
+		if e.canSubmitLocked() {
 			origin := agent.TurnOriginSubmit
 			if mode == SubmitSendNow {
 				origin = agent.TurnOriginSendNow
@@ -818,6 +850,7 @@ func (e *Engine) settleLocked(t *turn) []launch {
 		// the driver is woken so that it arms its tick: nothing else may ever
 		// say the foreign turn is over.
 		t.retry = true
+		t.retries++
 		e.wake()
 		return nil
 	}

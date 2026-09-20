@@ -26,12 +26,14 @@ const jsonStreamCap = 2048
 // and a dropped event still consumed its number. A reader may rely on the
 // order of two lines and never on the arithmetic between them.
 //
-// A line craze authors itself carries **no** `seq` at all: promptOpts.runLoop's
-// queue-removed line for a row taken as a signal landed, and writeErrorEvent's
-// startup failures, never passed through an event log. Their events have
+// A line craze authors itself carries **no** `seq` at all: writeErrorEvent's
+// startup failures, which never passed through an event log. Their events have
 // Seq == 0, which `omitempty` leaves out — and nothing here ever fabricates a
 // number, so an absent `seq` always means "craze said this, the session did
-// not".
+// not". A headless run has one such line left; the queue removal it used to
+// write for a row a signal caught between the queue and the wire is gone with
+// the window, because taking a row and starting its turn are one transaction in
+// the engine now (plan 021 §3.4).
 
 type jsonEvent struct {
 	Type       string              `json:"type"`

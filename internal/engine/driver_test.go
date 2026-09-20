@@ -523,6 +523,43 @@ func TestStopEndsARetriedTurnAsTheRefusalItWas(t *testing.T) {
 	}
 }
 
+// TestADirectSubmitClaimsThroughAForeignTurnUnderTheRetryingPolicy: the
+// session's flag gates the drain and not a direct submit under a policy that
+// waits a foreign-turn refusal out. `craze prompt` has always sent its prompt
+// into a session the agent was holding and waited the refusal out; a queued row
+// in its place would be a message that run never sends and a pair of lines its
+// JSON never had.
+//
+// State.Retries is what the client bounding that wait reads, and this is the
+// whole of what it promises: it counts every refusal, it stands still while the
+// claim is not being taken again, and it is gone with the turn it was about.
+func TestADirectSubmitClaimsThroughAForeignTurnUnderTheRetryingPolicy(t *testing.T) {
+	r, ticks, returned := retryRig(t, ChainPolicy{RetryForeignTurn: true, StopOnNonEndTurn: true})
+	r.s.setForeign(true)
+	r.s.script(&script{refuse: agent.ErrForeignTurn})
+	res := r.submit("go")
+	if res.Turn == "" || res.Queued != nil {
+		t.Fatalf("a direct submit was queued behind the agent's own turn: %+v", res)
+	}
+	awaitTurn(t, returned, "turn-1")
+	if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking || st.Retries != 1 {
+		t.Fatalf("a turn waiting out a foreign turn: %+v", st)
+	}
+	// The claim is not taken again while the session says the agent has it, tick
+	// or no tick, so the count stands still: the wait its client is bounding is
+	// still on, and the tick has made the retry due for the moment it clears.
+	tick(t, ticks, returned)
+	if st := r.e.State(); st.Retries != 1 {
+		t.Fatalf("a claim was taken again during the foreign turn: %+v", st)
+	}
+	r.s.setForeign(false)
+	r.until(lastEnding)
+	r.wantPrompts("go", "go")
+	if st := r.e.State(); st.Retries != 0 {
+		t.Fatalf("Retries outlived the turn it was about: %+v", st)
+	}
+}
+
 // TestAForeignTurnHoldsTheDrainAndItsEndReleasesIt: the ending of a turn with a
 // row behind it says Next is empty and Pending is one, and the drain's started
 // arrives when the agent's own turn is over. An empty queue waits for nothing.
