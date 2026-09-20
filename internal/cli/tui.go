@@ -219,6 +219,7 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		PluginDirs:  f.pluginDirs,
 		Interactive: true,
 		Provider:    &p,
+		Compat:      compatClaude(diag),
 		// The index's title and pin are seeded before Start so the composer
 		// rule shows the stored title through the replay and a /rename
 		// survives any number of --continues (§3.4).

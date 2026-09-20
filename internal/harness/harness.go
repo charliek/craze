@@ -386,6 +386,20 @@ func (s *Session) Current() (model, effort string) {
 // ID is the session id: a UUID, in the transcript's header and file name.
 func (s *Session) ID() string { return s.store.ID() }
 
+// PromptSize and PromptSHA256 describe the frozen system prompt — the
+// profile's text with Options.Prompt rendered after it — without handing it
+// out: its size in bytes, and the digest the transcript's header already
+// records for it (store.New). The adapter writes both into the journal note
+// that says which files went into the prompt (plan 022 §3.4), and it is the
+// header's own value rather than a second SHA-256 of the same string, so a
+// note and a transcript can never disagree about which prompt a session sent.
+// The text itself stays unexported: it is never stored, and a caller that
+// could read it back would be a caller that could log it.
+//
+// Both are fixed at Open and take no lock.
+func (s *Session) PromptSize() int      { return len(s.system) }
+func (s *Session) PromptSHA256() string { return s.store.Header().SystemPromptSHA256 }
+
 // Redact is the session's redactor, over text a caller is about to hand to
 // Run or Steer. Everything the harness itself writes or reports goes through
 // that redactor already, but the user's own prompt does not: Run persists it
