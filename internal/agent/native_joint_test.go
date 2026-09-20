@@ -55,20 +55,43 @@ func TestNativeToolEventsAndTheBoundaryAgreeUnderRace(t *testing.T) {
 	s := newNative(Options{}, nil)
 	closeAtCleanup(t, s)
 
-	// One reader, draining as a consumer would, recording what it saw.
+	// ONE reader, draining as a consumer would, recording what it saw. It has
+	// to be the only one: two goroutines taking from the same channel would
+	// record the two halves in whatever order they were scheduled, which says
+	// nothing about the order the log published in. So the reader also does
+	// the final drain, once stop is closed, rather than leaving it to the
+	// test's own goroutine.
 	var mu sync.Mutex
 	var seqs []uint64
 	var lossy, terminal int
+	record := func(ev Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		seqs = append(seqs, ev.Seq)
+		if ev.Type == EventTool && ev.Tool != nil && ev.Tool.Status == toolInProgress {
+			lossy++
+		}
+	}
+	stop := make(chan struct{})
 	read := make(chan struct{})
 	go func() {
 		defer close(read)
-		for ev := range s.Events() {
-			mu.Lock()
-			seqs = append(seqs, ev.Seq)
-			if ev.Type == EventTool && ev.Tool != nil && ev.Tool.Status == toolInProgress {
-				lossy++
+		for {
+			select {
+			case ev := <-s.Events():
+				record(ev)
+			case <-stop:
+				// Close has returned, so nothing more can be published; what
+				// is still buffered is the whole of what is left.
+				for {
+					select {
+					case ev := <-s.Events():
+						record(ev)
+					default:
+						return
+					}
+				}
 			}
-			mu.Unlock()
 		}
 	}()
 
@@ -97,7 +120,8 @@ func TestNativeToolEventsAndTheBoundaryAgreeUnderRace(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	drainPrimaryInto(s, &mu, &seqs)
+	close(stop)
+	<-read
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -121,22 +145,6 @@ func TestNativeToolEventsAndTheBoundaryAgreeUnderRace(t *testing.T) {
 	// sequence number was spent on an event nobody received.
 	if h := s.log.Health(); h.Omitted != 0 {
 		t.Fatalf("omitted records in a run of small events: %+v", h)
-	}
-}
-
-// drainPrimaryInto takes whatever is still buffered in the primary after
-// Close, without blocking: the channel is never closed, so a range over it
-// would wait for ever.
-func drainPrimaryInto(s *nativeSession, mu *sync.Mutex, seqs *[]uint64) {
-	for {
-		select {
-		case ev := <-s.Events():
-			mu.Lock()
-			*seqs = append(*seqs, ev.Seq)
-			mu.Unlock()
-		default:
-			return
-		}
 	}
 }
 
