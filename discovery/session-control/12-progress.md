@@ -578,6 +578,30 @@ Known limitations, none of them accidental:
   with wall-clock and should become a barrier.
 - **Note `ts` is not monotonic**; file position is the ordering contract. Any
   later reader or `craze journal` subcommand must not sort by `ts`.
+- **Two queue hazards S1a does *not* fix, and S1b's driver should.** The
+  craze-harness session raised both (found by the codex review of Plan 019's
+  interject commit) on the understanding that the ordering boundary would
+  absorb them. It does not: the boundary orders publishes against each other
+  and changes nothing about who holds which lock while publishing.
+  1. `queueTx` still takes `emitMu` and holds it across its emits, and the
+     primary send still blocks, because that is the pinned "emitted means
+     buffered" contract. So the schedule stands: with the primary nearly full,
+     a consumer receives one event and calls `Queue` synchronously; a
+     multi-event transaction fills the freed slot, blocks on its next send
+     while holding `emitMu`, and `Queue` waits for `emitMu`, so nothing drains
+     and only `Close` releases it. The error path's `ClearQueue` emits one
+     removal per row, and rows accumulate across turns because the requeue is
+     cap-exempt. `TryPublish` is not the answer: queue events are lossless by
+     contract, and a dropped removal would leave a row the stream never
+     accounts for.
+  2. The native adapter's `closed` check is not atomic with the queue
+     mutation, so `closed` can read false, `Close` can then set it, and a later
+     push leaves a row `Snapshot` still shows after `Close` while its event is
+     suppressed.
+  Both are the same shape: queue state and the events describing it are
+  mutated under one lock and published under another, so a client cannot
+  rebuild the queue from the stream across a close or a full primary. That is
+  exactly what SD-24's engine turn driver is for.
 
 No follow-up issues were filed: the list above and `04`'s table of unshipped
 `diag` kinds are the record, and each names the phase that should pick it up.
