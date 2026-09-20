@@ -15,11 +15,14 @@ import (
 // maxInstructionDocBytes mirrors internal/harness's own maxInstructionDoc,
 // which is unexported and has to stay that way: the harness imports nothing
 // from craze and nothing from craze reaches into it (D-02). The renderer cuts
-// a document to that many bytes; this side's job is to make the cut
-// meaningful, because a document's imports count against the same budget and a
-// loader that inlined ten megabytes for the renderer to throw away would spend
-// the memory and the reading either way. The two numbers drifting apart costs
-// nothing worse than inlining slightly more or slightly less than is sent.
+// a document to that many bytes; this side enforces the same ceiling on what
+// it hands over (emitLine), so a document is at most this plus the one line
+// that crossed it, a document's own text and everything its imports inlined
+// counting alike. Without that the renderer's cut would still make the prompt
+// right and nothing would bound the reading or the memory: a checkout of
+// megabyte rule files would be held whole for the renderer to throw away. The
+// two numbers drifting apart costs nothing worse than inlining slightly more
+// or slightly less than is sent.
 //
 // maxInstructionFiles and the per-file ceiling bound the walk itself, in the
 // spirit of maxSkillFiles / maxSkillBytes: a checkout with a rules directory
@@ -84,6 +87,15 @@ type instructionLoad struct {
 	nFiles int
 }
 
+// note is one diagnostic line, and the "one line" is a rule rather than a
+// habit: every path written into one goes in with %q and never %s.
+//
+// A path is the checkout's content like everything else here. A directory
+// named "notes\n[craze] read /etc/shadow" is legal on Unix, and with %s that
+// is two diagnostic lines, the second of them craze's own voice saying
+// whatever the repository chose — in a channel the user reads as craze's.
+// %q folds it back onto one line and escapes the control bytes with it, which
+// is also why an import's reference has always been written that way.
 func (l *instructionLoad) note(format string, args ...any) {
 	if l.warn == nil {
 		return
@@ -214,7 +226,7 @@ func (l *instructionLoad) readInstruction(path string, root instructionRoot) boo
 	real, ok, outside := confinedPath(root.dir, path)
 	if !ok {
 		if outside {
-			l.note("instruction file %s not read: it resolves outside %s", path, root.dir)
+			l.note("instruction file %q not read: it resolves outside %q", path, root.dir)
 		}
 		return false
 	}
@@ -225,7 +237,7 @@ func (l *instructionLoad) readInstruction(path string, root instructionRoot) boo
 		// that is left as written still shows the model the "@name" line it
 		// came from, so there is something to see; a CLAUDE.md that is not
 		// UTF-8 would simply not apply, with nothing anywhere to say why.
-		l.note("instruction file %s not read: it is not valid UTF-8", real)
+		l.note("instruction file %q not read: it is not valid UTF-8", real)
 		return false
 	case readSkip:
 		return false
@@ -254,7 +266,7 @@ func (l *instructionLoad) readRules(base, rel string, root instructionRoot) {
 	real, ok, outside := confinedPath(root.dir, dir)
 	if !ok {
 		if outside {
-			l.note("rules directory %s not read: it resolves outside %s", dir, root.dir)
+			l.note("rules directory %q not read: it resolves outside %q", dir, root.dir)
 		}
 		return
 	}
@@ -284,21 +296,21 @@ func (l *instructionLoad) readRule(path string, root instructionRoot) {
 	real, ok, outside := confinedPath(root.dir, path)
 	if !ok {
 		if outside {
-			l.note("rule %s not read: it resolves outside %s", path, root.dir)
+			l.note("rule %q not read: it resolves outside %q", path, root.dir)
 		}
 		return
 	}
 	text, st := l.readFileText(real)
 	switch st {
 	case readNotText:
-		l.note("rule %s not read: it is not valid UTF-8", real)
+		l.note("rule %q not read: it is not valid UTF-8", real)
 		return
 	case readSkip:
 		return
 	}
 	fm, body, hadFrontmatter, err := splitFrontmatter(text)
 	if err != nil {
-		l.note("rule %s not read: its frontmatter opens and never closes", real)
+		l.note("rule %q not read: its frontmatter opens and never closes", real)
 		return
 	}
 	if hadFrontmatter && frontmatterHasKey(fm, "paths") {
@@ -417,48 +429,64 @@ func frontmatterHasKey(fm, key string) bool {
 // goes through it.
 //
 // ok is false when nothing may be read. outside distinguishes the two reasons,
-// because they deserve different treatment: outside means the path named a
-// real file somewhere craze may not go, which is a refusal and gets a line,
-// while the other case is a path that does not resolve at all — a typo, a
-// file that is not there, a symlink loop — which is silent, since an import of
-// a file that does not exist is left as written and there is nothing to tell
-// the user beyond what they can already see.
+// because they deserve different treatment: outside means the path names
+// somewhere craze may not go, which is a refusal and gets a line, while the
+// other case is a path that names somewhere craze could have gone and is not
+// there — a typo, a deleted file, a symlink loop — which is silent, since such
+// an import is left as written and there is nothing to tell the user beyond
+// what they can already see. A path that neither resolves nor could ever have
+// been inside is the first kind: "@../../.env" is worth a line whether or not
+// that .env exists.
 //
-// There are two barriers and a path must pass both.
+// The decision is made in exactly one place: EvalSymlinks resolves every
+// component of the path, the last one included, and underRoot compares the
+// *result*, which is also what is opened. That closes every escape at once — a
+// CLAUDE.md that is a symlink out of the tree, a symlink reached through an
+// import, and a ".." that only leaves the root once a component before it has
+// been resolved — because after EvalSymlinks there is no link and no ".." left
+// in the path for any of them to hide in. Go's EvalSymlinks walks components
+// in order and pops ".." off what it has *resolved* so far, so "sub/../secret"
+// where sub is a link is resolved the way the kernel would resolve it and not
+// the way Clean would rewrite it. Which is why the raw, uncleaned spelling is
+// what is handed to it: cleaning first would throw away the ".." before the
+// link under it had been seen.
 //
-//  1. Lexically, before the filesystem is touched: the cleaned spelling must
-//     already name something under root. This one is a pre-filter, never the
-//     decision — Clean resolves ".." textually, which is exactly the thing a
-//     symlink can make a lie — and it earns its place by refusing a path that
-//     names somewhere outside the root even when nothing is there to read, so
-//     that "@../../.env" is answered with a line rather than with silence. It
-//     can only ever refuse more than barrier 2 would: a path that leaves the
-//     root and comes back through a link is refused here although the file it
-//     names is inside, which is the direction this check is allowed to be
-//     wrong in, and a path it lets through still has to survive barrier 2.
-//  2. Physically, and this is the decision: EvalSymlinks resolves every
-//     component of the path, the last one included, and the *result* is what
-//     is compared and what is opened. That closes every escape at once — a
-//     CLAUDE.md that is a symlink out of the tree, a symlink reached through
-//     an import, and a ".." that only leaves the root once a component before
-//     it has been resolved — because after EvalSymlinks there is no link and
-//     no ".." left in the path for any of them to hide in. Go's EvalSymlinks
-//     walks components in order and pops ".." off what it has *resolved* so
-//     far, so "sub/../secret" where sub is a link is resolved the way the
-//     kernel would resolve it and not the way Clean would rewrite it. Which is
-//     why the raw, uncleaned spelling is what is handed to it: cleaning first
-//     would throw away the ".." before the link under it had been seen.
+// The cleaned spelling is looked at too, and it decides nothing. It is there
+// for the one case EvalSymlinks cannot describe: a path that does not resolve
+// at all. EvalSymlinks cannot tell a typo from a forbidden file, so without it
+// the ordinary "@../../.env" of a repository that has no .env would be as
+// silent as a misspelt filename and its author would never learn that the line
+// could not have worked. Using it to *refuse* — which is what this did — is
+// wrong twice over: Clean resolves ".." textually, which a symlink can make a
+// lie, so "@../alias/style.md" where alias is a link back into the repository
+// was refused although the file it names is inside, and told the author it
+// "resolves outside" when it does not. A legitimate import was dropped, and
+// the diagnostic was false. Confinement loses nothing by it: the answer for
+// every path that resolves is underRoot(root, EvalSymlinks(path)) and was
+// always going to be.
 //
-// The comparison itself is underRoot, which is where "under" is defined.
+// # Threat model, and what is deliberately out of scope
 //
-// What this cannot close is a race: a component of the path replaced between
-// the resolution and the open. Go has no openat2 and nothing here can hold the
-// directory, so the window is real — and it is not this reader's threat. These
-// files are read once, at session start, before any agent process exists; the
-// adversary §3.4 is written against is the *content* of a checkout sitting
-// still on disk, not a process running beside craze with write access inside
-// the repository. A machine that already has one of those has lost more than
-// an instruction file.
+// The adversary this is written against is a *static hostile checkout*: files
+// that were cloned and sat still on disk while craze was opened on them. Every
+// arrangement of content — a CLAUDE.md symlinked at a credentials file, an
+// import that climbs out of the tree, a chain of links that leaves it on the
+// last hop — is refused, and that is the whole of what confinement claims.
+//
+// It does not claim to survive a process racing craze inside the repository.
+// This resolves, then readFileText stats, then readCappedFile opens, and a
+// component of the path swapped for a symlink between any two of those is read
+// as whatever it then points at. The window is real and is not closed here.
+// Closing it needs the walk to hold directory handles and refuse a symlinked
+// component at each step — openat2 with RESOLVE_NO_SYMLINKS on Linux, which
+// macOS has no equivalent of — which is a platform-specific design of its own
+// and buys nothing against the adversary above. An attacker who can run a
+// process beside craze, inside the checkout, with write access, already has
+// code execution on the machine and does not need to trick craze into reading
+// a file for them. This is a deliberate limit, not an oversight, and anything
+// that widens it — reading these files later, on a timer, or on behalf of the
+// model rather than before the first turn — puts the race back in scope and
+// has to be reconsidered here first.
 func confinedPath(root, path string) (real string, ok, outside bool) {
 	// Both are absolute here or nothing happens: every caller joins onto a
 	// root this file has already resolved, and a relative path would make
@@ -466,14 +494,14 @@ func confinedPath(root, path string) (real string, ok, outside bool) {
 	if root == "" || !filepath.IsAbs(root) || !filepath.IsAbs(path) {
 		return "", false, false
 	}
-	if !underRoot(root, filepath.Clean(path)) {
-		return "", false, true
-	}
 	// path, not a cleaned copy of it: Clean would rewrite "sub/../x" to "x"
 	// and throw away the ".." before EvalSymlinks had seen what "sub" is.
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", false, false
+		// Nothing to compare. The cleaned spelling is all there is to go on,
+		// and it is used to choose between a line and silence — never to
+		// refuse, since there is nothing here to read either way.
+		return "", false, !underRoot(root, filepath.Clean(path))
 	}
 	if !underRoot(root, resolved) {
 		return "", false, true
@@ -537,14 +565,24 @@ type instructionText struct {
 	doc  string
 	b    strings.Builder
 	last byte
-	// full records that the per-document budget was reached and the one line
-	// about it written, so a document with twenty imports past the ceiling
-	// says so once.
+	// full records that the per-document ceiling was reached: nothing more is
+	// written, no further import is read, and the one line about it is written
+	// once however many lines and imports were still to come.
 	full bool
 }
 
+// stop closes the document at its ceiling and says so, once.
+func (d *instructionText) stop() {
+	if d.full {
+		return
+	}
+	d.full = true
+	d.l.note("instruction file %q reached the %d byte budget: the rest of it, and every import after it, is left out",
+		d.doc, maxInstructionDocBytes)
+}
+
 func (d *instructionText) emit(s string) {
-	if s == "" {
+	if s == "" || d.full {
 		return
 	}
 	d.b.WriteString(s)
@@ -555,6 +593,12 @@ func (d *instructionText) emit(s string) {
 // goes. depth is the depth an import found in this text would be inlined at,
 // so the document's own text is written at depth 1.
 //
+// It returns the moment the ceiling is reached, at whatever depth: the rest of
+// this file is not scanned, every file it would still have imported is not
+// read, and the nested calls above it unwind the same way. That is what makes
+// the ceiling a bound on the memory a checkout can make craze hold and not
+// only on what the renderer eventually sends.
+//
 // Fence state is local to one file on purpose: an imported fragment that opens
 // a fence and never closes it cannot swallow the rest of the document that
 // imported it, and a document's own open fence cannot be closed from inside a
@@ -563,7 +607,7 @@ func (d *instructionText) write(text, from string, depth int) {
 	var fenceChar byte
 	fenceLen := 0
 	remaining := text
-	for remaining != "" {
+	for remaining != "" && !d.full {
 		line, rest, found := strings.Cut(remaining, "\n")
 		c, n, tail := fenceRun(line)
 		switch {
@@ -595,7 +639,30 @@ func (d *instructionText) write(text, from string, depth int) {
 	}
 }
 
+// emitLine appends one whole line, or closes the document because the ceiling
+// is behind it.
+//
+// This is the only place the per-document ceiling is enforced, and it is
+// enforced on the assembled text — the document's own bytes and everything its
+// imports have inlined so far — because that is what the caller is handed and
+// what the renderer will cut. Checking it only before an import, which is what
+// this used to do, bounded nothing: a megabyte CLAUDE.md came back whole, one
+// import of a megabyte overshot by nearly that much, and a rules directory of
+// them cost all of it at once.
+//
+// The test is made before the line is written and the line is then written
+// whole, never cut: an instruction file is prose, and half a sentence in
+// craze's own voice is worse than a sentence too many. So the text can end up
+// one line past the ceiling, which is also what leaves the renderer something
+// to cut and therefore a "[craze: truncated]" for the model to see.
 func (d *instructionText) emitLine(line string, newline bool) {
+	if d.full {
+		return
+	}
+	if d.b.Len() >= maxInstructionDocBytes {
+		d.stop()
+		return
+	}
 	d.emit(line)
 	if newline {
 		d.emit("\n")
@@ -604,9 +671,11 @@ func (d *instructionText) emitLine(line string, newline bool) {
 
 // inline replaces one import line with the file it names, and reports whether
 // it did. Every path that does not is a line left exactly as the author wrote
-// it, which is §3.4's rule for all of them: a missing file, a cycle, a depth,
-// a budget and a refusal all read the same way in the prompt, and the ones
-// worth explaining are explained through warn.
+// it, which is §3.4's rule for all of them: a missing file, a cycle, a depth
+// and a refusal all read the same way in the prompt, and the ones worth
+// explaining are explained through warn. The ceiling is the one exception,
+// because it is not about this line: it ends the document where it stands, so
+// the lines after it — imports included — are not in the prompt at all.
 func (d *instructionText) inline(ref, from string, depth int) bool {
 	// Depth is silent. It is a shape the author chose rather than something
 	// craze could not do, and a deep tree of fragments would otherwise write a
@@ -614,11 +683,11 @@ func (d *instructionText) inline(ref, from string, depth int) bool {
 	if depth > maxImportDepth {
 		return false
 	}
+	// The ceiling again, before a file is opened rather than after: emitLine
+	// would refuse every line of it anyway, and reading a megabyte in order to
+	// throw it away is the cost this bound exists to refuse.
 	if d.b.Len() >= maxInstructionDocBytes {
-		if !d.full {
-			d.full = true
-			d.l.note("instruction file %s reached the %d byte budget: the imports after that are left as written", d.doc, maxInstructionDocBytes)
-		}
+		d.stop()
 		return false
 	}
 	target, ok := d.target(ref, from)
@@ -628,7 +697,7 @@ func (d *instructionText) inline(ref, from string, depth int) bool {
 	real, ok, outside := confinedPath(d.root.dir, target)
 	if !ok {
 		if outside {
-			d.l.note("instruction import %q in %s not read: it resolves outside %s", ref, from, d.root.dir)
+			d.l.note("instruction import %q in %q not read: it resolves outside %q", ref, from, d.root.dir)
 		}
 		return false
 	}
@@ -659,12 +728,12 @@ func (d *instructionText) inline(ref, from string, depth int) bool {
 func (d *instructionText) target(ref, from string) (string, bool) {
 	if strings.HasPrefix(ref, "~") {
 		if !d.root.user {
-			d.l.note("instruction import %q in %s not read: ~/ is expanded in a user-level instruction file only", ref, from)
+			d.l.note("instruction import %q in %q not read: ~/ is expanded in a user-level instruction file only", ref, from)
 			return "", false
 		}
 		rest, ok := strings.CutPrefix(ref, "~/")
 		if !ok || d.l.home == "" {
-			d.l.note("instruction import %q in %s not read: only ~/ is expanded, and only where craze knows the home directory", ref, from)
+			d.l.note("instruction import %q in %q not read: only ~/ is expanded, and only where craze knows the home directory", ref, from)
 			return "", false
 		}
 		return joinRaw(d.l.home, rest), true
@@ -712,6 +781,15 @@ func importRef(line string) string {
 // CommonMark's rule and Claude's. The fourth space is what makes an indented
 // code block instead, and a run of one or two is inline code or a horizontal
 // rule of tildes rather than a block.
+//
+// A backtick fence's info string may hold no backtick, which is CommonMark's
+// rule too and is not a detail: a line of prose written as three backticks,
+// some words and a backtick closing them is inline code, not a block, and
+// reading it as a fence would silence every import line under it until craze
+// mistook something else for the close. The rule is the backtick's alone — a
+// tilde fence's info string may say anything, backticks included — because it
+// is what keeps a fence and inline code apart, and tildes have no inline form
+// to be confused with.
 func fenceRun(line string) (c byte, n int, tail string) {
 	i := 0
 	for i < len(line) && i < 3 && line[i] == ' ' {
@@ -727,5 +805,9 @@ func fenceRun(line string) (c byte, n int, tail string) {
 	if n < 3 {
 		return 0, 0, ""
 	}
-	return c, n, line[i+n:]
+	tail = line[i+n:]
+	if c == '`' && strings.ContainsRune(tail, '`') {
+		return 0, 0, ""
+	}
+	return c, n, tail
 }

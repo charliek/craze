@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -104,8 +106,28 @@ func symlink(t *testing.T, target, link string) {
 	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink: %v", err)
+	skipUnsupported(t, "symlink", os.Symlink(target, link))
+}
+
+// skipUnsupported turns exactly one kind of failure into a skip — this
+// filesystem cannot do that at all — and every other kind into a failure.
+//
+// Most of the confinement suite is built on links, and a blanket t.Skipf on
+// any error is how such a suite loses its coverage without anyone noticing: a
+// fixture bug, a permissions change or a CI image whose temporary directory
+// moved would all read as "this machine has no symlinks", and every case built
+// on one would go green having asserted nothing. A filesystem that really
+// cannot make the link answers with ENOSYS or ENOTSUP, which Go reports as
+// errors.ErrUnsupported, or with EPERM, which it reports as fs.ErrPermission;
+// nothing else here is that.
+func skipUnsupported(t *testing.T, what string, err error) {
+	t.Helper()
+	switch {
+	case err == nil:
+	case errors.Is(err, errors.ErrUnsupported), errors.Is(err, fs.ErrPermission):
+		t.Skipf("%s: this filesystem cannot: %v", what, err)
+	default:
+		t.Fatalf("%s: %v", what, err)
 	}
 }
 
@@ -282,9 +304,7 @@ func TestInstructionOneCopyPerFile(t *testing.T) {
 		// dedupe has to survive on any filesystem. A string compare passes
 		// neither. Only os.SameFile answers both.
 		f := instructionTree(t, map[string]string{"AGENTS.md": "the only copy\n"}, nil)
-		if err := os.Link(filepath.Join(f.workspace, "AGENTS.md"), filepath.Join(f.workspace, "CLAUDE.md")); err != nil {
-			t.Skipf("hard link: %v", err)
-		}
+		skipUnsupported(t, "hard link", os.Link(filepath.Join(f.workspace, "AGENTS.md"), filepath.Join(f.workspace, "CLAUDE.md")))
 		docs, lines := f.load()
 		wantNoNotes(t, lines)
 		wantDocs(t, docs, filepath.Join(f.workspace, "AGENTS.md"))
@@ -292,6 +312,34 @@ func TestInstructionOneCopyPerFile(t *testing.T) {
 			t.Fatalf("content appears %d times", n)
 		}
 	})
+}
+
+// TestInstructionSharedImportIsInlinedOnce is de-duplication across documents
+// rather than inside one: two files of the same checkout importing a third —
+// a shared style guide, which is what imports are for — put its text in the
+// prompt once, and the second document keeps the line its author wrote. The
+// model can still see which files claimed it.
+func TestInstructionSharedImportIsInlinedOnce(t *testing.T) {
+	f := instructionTree(t, map[string]string{
+		"CLAUDE.md":       "one\n@shared.md\n",
+		"CLAUDE.local.md": "two\n@shared.md\n",
+		"shared.md":       "SHARED\n",
+	}, nil)
+	docs, lines := f.load()
+	wantNoNotes(t, lines)
+	wantDocs(t, docs,
+		filepath.Join(f.workspace, "CLAUDE.md"),
+		filepath.Join(f.workspace, "CLAUDE.local.md"),
+	)
+	if n := strings.Count(allText(docs), "SHARED\n"); n != 1 {
+		t.Fatalf("the shared file is in the prompt %d times: %q", n, docTexts(docs))
+	}
+	if got, want := docTexts(docs)[0], "one\nSHARED\n"; got != want {
+		t.Fatalf("the first document is %q, want %q", got, want)
+	}
+	if got, want := docTexts(docs)[1], "two\n@shared.md\n"; got != want {
+		t.Fatalf("the second document is %q, want %q", got, want)
+	}
 }
 
 // TestInstructionImportDepth is A10's depth: a file at depth five is inlined
@@ -423,6 +471,28 @@ func TestInstructionImportGrammar(t *testing.T) {
 			claude:  "@fence.md\n@x.md\n",
 			inlined: true,
 		},
+		{
+			// The document's own fence is the other direction, and it does run
+			// to the end of the file: everything after it is code.
+			name:     "an unclosed fence in the document itself",
+			claude:   "```\n@x.md\n",
+			wantText: "```\n@x.md\n",
+		},
+		{
+			// CommonMark: a backtick fence's info string may hold no backtick,
+			// so this line is inline code in a sentence and opens nothing. A
+			// parser that took it for a fence would silence the import under it.
+			name:    "a backtick in a backtick fence's info string is not a fence",
+			claude:  "```a`` and ``b`\n@x.md\n",
+			inlined: true,
+		},
+		{
+			// A tilde fence has no inline form to be confused with, so its info
+			// string may say anything, backticks included.
+			name:     "a backtick in a tilde fence's info string is still a fence",
+			claude:   "~~~a`b\n@x.md\n~~~\n",
+			wantText: "~~~a`b\n@x.md\n~~~\n",
+		},
 	}
 
 	for _, tc := range cases {
@@ -511,14 +581,36 @@ func TestInstructionFileNotUTF8(t *testing.T) {
 	wantOneNote(t, lines, "not valid UTF-8")
 }
 
-// TestInstructionImportBudget is A10's budget: a document's imports count
-// against the per-document ceiling the renderer will cut it to, so the loader
-// stops inlining at the ceiling and leaves the rest of the import lines
-// exactly as they were written — which is a stop at a line boundary, since an
-// import line is a whole line and nothing else is ever cut.
+// fillerLine is 32 bytes, and the budget cases count in them: a document cut
+// at the ceiling may end one whole line past it and no more, so the bound the
+// loader promises is the ceiling plus the length of the line that crossed it.
+const fillerLine = "filler line to spend the budget\n"
+
+// wantBounded is that promise on one document.
+func wantBounded(t *testing.T, text string, longestLine int) {
+	t.Helper()
+	if len(text) > maxInstructionDocBytes+longestLine {
+		t.Fatalf("the document is %d bytes, past the %d-byte ceiling by more than the line that crossed it",
+			len(text), maxInstructionDocBytes)
+	}
+	if !strings.HasSuffix(text, "\n") {
+		t.Fatalf("the document does not end at a line boundary: %q", text[max(0, len(text)-40):])
+	}
+}
+
+// TestInstructionImportBudget is A10's budget, and it is a budget on what the
+// loader hands over rather than on what it bothers to inline. A document's own
+// text and everything its imports bring count against the same ceiling; the
+// text ends on the first whole line at or past it, and what would have come
+// after — the rest of the file, and every import still to be expanded — is not
+// read at all.
+//
+// The one line past the ceiling is deliberate: it leaves the renderer
+// something to cut, which is what puts "[craze: truncated]" in front of the
+// model.
 func TestInstructionImportBudget(t *testing.T) {
-	big := strings.Repeat("filler line to spend the budget\n", 600) // ~19 KiB
-	files := map[string]string{"big.md": big}
+	big := strings.Repeat(fillerLine, 600) // ~19 KiB
+	files := map[string]string{}
 	var doc strings.Builder
 	for i := 0; i < 4; i++ {
 		fmt.Fprintf(&doc, "marker %d\n@big%d.md\n", i, i)
@@ -532,35 +624,80 @@ func TestInstructionImportBudget(t *testing.T) {
 		t.Fatalf("documents %v", docPaths(docs))
 	}
 	got := docs[0].Text
-	// Two chunks fit inside 32 KiB and the rest do not.
+	// Two chunks fit inside 32 KiB; the second of them is where the ceiling
+	// falls, and nothing after it is in the document at all.
 	if !strings.Contains(got, "chunk 0\n") || !strings.Contains(got, "chunk 1\n") {
 		t.Fatalf("the first chunks were not inlined (%d bytes)", len(got))
 	}
-	if strings.Contains(got, "chunk 3\n") {
-		t.Fatalf("inlining did not stop at the budget (%d bytes)", len(got))
+	for _, gone := range []string{"chunk 2\n", "chunk 3\n", "marker 2\n", "@big2.md\n"} {
+		if strings.Contains(got, gone) {
+			t.Fatalf("%q is past the ceiling and is in the document (%d bytes)", gone, len(got))
+		}
 	}
-	if !strings.Contains(got, "@big3.md\n") {
-		t.Fatal("the import past the budget was not left as written")
-	}
-	// Nothing is ever cut mid-line: every line of the document is a whole
-	// line, and the text still ends at a line boundary.
-	if !strings.HasSuffix(got, "\n") {
-		t.Fatalf("the document does not end at a line boundary: %q", got[len(got)-40:])
-	}
+	// Nothing is ever cut mid-line: every line of the document is a whole line.
 	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
 		switch {
 		case line == "" || strings.HasPrefix(line, "marker ") || strings.HasPrefix(line, "chunk ") ||
-			strings.HasPrefix(line, "@big") || line == "filler line to spend the budget":
+			strings.HasPrefix(line, "@big") || line == strings.TrimSuffix(fillerLine, "\n"):
 		default:
 			t.Fatalf("a line was cut: %q", line)
 		}
 	}
-	// The whole document stays within a file of the ceiling: the budget is a
-	// bound on what is handed over, not a suggestion.
-	if len(got) > maxInstructionDocBytes+len(big)+1024 {
-		t.Fatalf("document is %d bytes", len(got))
+	wantBounded(t, got, len(fillerLine))
+	if len(got) <= maxInstructionDocBytes {
+		t.Fatalf("the document is %d bytes, so the renderer will not mark it truncated", len(got))
 	}
 	wantOneNote(t, lines, "byte budget")
+}
+
+// TestInstructionDocumentBudget is the half the ceiling used to miss entirely:
+// a document that imports nothing. It was checked only before an import, so a
+// megabyte CLAUDE.md came back whole and the loader's stated bound was not one.
+func TestInstructionDocumentBudget(t *testing.T) {
+	f := instructionTree(t, map[string]string{
+		"CLAUDE.md": strings.Repeat(fillerLine, 16<<10), // 512 KiB, no imports
+	}, nil)
+	docs, lines := f.load()
+	if len(docs) != 1 {
+		t.Fatalf("documents %v", docPaths(docs))
+	}
+	wantBounded(t, docs[0].Text, len(fillerLine))
+	wantOneNote(t, lines, "byte budget")
+}
+
+// TestInstructionRulesBudgetTogether is the same bound over a whole directory,
+// which is where it is paid for: maxInstructionFiles rule files of the
+// per-file ceiling are 256 MiB of text, and craze used to hold all of it until
+// the renderer threw most of it away. Every document is bounded, so the whole
+// set is bounded by the count times the bound.
+func TestInstructionRulesBudgetTogether(t *testing.T) {
+	const (
+		rules = 16
+		each  = 128 << 10 // well past the per-document ceiling, cheap to write
+	)
+	files := make(map[string]string, rules)
+	for i := range rules {
+		files[fmt.Sprintf(".claude/rules/%02d.md", i)] = strings.Repeat(fillerLine, each/len(fillerLine))
+	}
+	f := instructionTree(t, files, nil)
+	docs, lines := f.load()
+	if len(docs) != rules {
+		t.Fatalf("loaded %d documents, want %d", len(docs), rules)
+	}
+	var total int
+	for _, d := range docs {
+		wantBounded(t, d.Text, len(fillerLine))
+		total += len(d.Text)
+	}
+	if want := rules * (maxInstructionDocBytes + len(fillerLine)); total > want {
+		t.Fatalf("the rules are %d bytes together, past the %d the ceiling allows", total, want)
+	}
+	if total >= rules*each {
+		t.Fatalf("control: %d bytes retained, which is every byte on disk", total)
+	}
+	if len(lines) != rules {
+		t.Fatalf("want one line per cut document, got %d: %q", len(lines), lines)
+	}
 }
 
 // TestInstructionFileBudget bounds the walk itself: past maxInstructionFiles
@@ -789,6 +926,28 @@ func TestInstructionTilde(t *testing.T) {
 		wantOneNote(t, lines, "user-level instruction file only")
 	})
 
+	t.Run("a user root that is a link into a dotfiles checkout expands it", func(t *testing.T) {
+		// The owner's own arrangement, and the one the lexical pre-filter used
+		// to refuse: "~/" expands against the home craze was given, which spells
+		// the path through the ~/.claude symlink, while the root it is confined
+		// to is the physical dotfiles directory. Nothing lexical can reconcile
+		// those two spellings; EvalSymlinks does, and it is the only thing that
+		// decides.
+		base := t.TempDir()
+		dotfiles := writeTree(t, filepath.Join(base, "dotfiles", "claude"), map[string]string{
+			"CLAUDE.md":       "@~/.claude/shared/style.md\n",
+			"shared/style.md": "SHARED STYLE\n",
+		})
+		home := writeTree(t, filepath.Join(base, "home"), nil)
+		symlink(t, dotfiles, filepath.Join(home, ".claude"))
+
+		docs, lines := loadDocs(t, resolveNativeSources("", home))
+		wantNoNotes(t, lines)
+		if !strings.Contains(allText(docs), "SHARED STYLE") {
+			t.Fatalf("~/ through a linked user root was refused: %q", docTexts(docs))
+		}
+	})
+
 	t.Run("another user's home is not a home", func(t *testing.T) {
 		f := instructionTree(t, nil, nil)
 		writeTree(t, f.userRoot, map[string]string{"CLAUDE.md": "@~root/.ssh/id_rsa\n"})
@@ -842,6 +1001,64 @@ func TestInstructionRefusesAnAbsentPathOutside(t *testing.T) {
 		t.Fatalf("text %q, want %q", got, want)
 	}
 	wantOneNote(t, lines, "resolves outside")
+}
+
+// TestInstructionLexicallyOutsideButPhysicallyInside is the other side of
+// that, and the reason the cleaned spelling decides nothing: an import may
+// name its way out of the repository and land back inside it, and confinement
+// has no business refusing a file that is in the root it is protecting.
+//
+// A pre-filter that refused here dropped a legitimate import and, worse, said
+// it "resolves outside" when it resolves squarely inside — a diagnostic that
+// would send its author looking for a problem that is not there. The decision
+// is underRoot(root, EvalSymlinks(path)) and nothing else; the cleaned
+// spelling is only ever consulted when there is nothing to resolve.
+func TestInstructionLexicallyOutsideButPhysicallyInside(t *testing.T) {
+	f := instructionTree(t, map[string]string{
+		"shared/style.md": "SHARED STYLE\n",
+		"CLAUDE.md":       "@../alias/style.md\n",
+	}, nil)
+	// "<base>/alias" is outside the repository by every lexical reading, and
+	// is the repository's own "shared" directory.
+	symlink(t, filepath.Join(f.workspace, "shared"), filepath.Join(f.base, "alias"))
+	docs, lines := f.load()
+	wantNoNotes(t, lines)
+	if !strings.Contains(allText(docs), "SHARED STYLE") {
+		t.Fatalf("an import that resolves inside the root was refused: %q", docTexts(docs))
+	}
+}
+
+// TestInstructionDiagnosticsAreOneLine: a diagnostic is craze's own voice, and
+// a path in one is the checkout's content. A directory name may hold a newline
+// on Unix, so every path is written with %q — without it a repository could
+// add lines of its own to craze's diagnostics, in the channel the user reads
+// as craze's.
+func TestInstructionDiagnosticsAreOneLine(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "re\npo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		skipUnsupported(t, "a newline in a directory name", err)
+	}
+	gitDir(t, repo)
+	writeTree(t, repo, map[string]string{
+		// One of each shape of diagnostic: a refused import, a file that is not
+		// text, and a document cut at its ceiling.
+		"CLAUDE.md":               "@../outside/.env\n",
+		".claude/rules/big.md":    strings.Repeat(fillerLine, 2<<10),
+		".claude/rules/notext.md": "\xff\xfe",
+	})
+	_, lines := loadDocs(t, resolveNativeSources(repo, ""))
+	if len(lines) != 3 {
+		t.Fatalf("want three diagnostics, got %d: %q", len(lines), lines)
+	}
+	for _, line := range lines {
+		if strings.ContainsAny(line, "\n\r") {
+			t.Errorf("a diagnostic is more than one line: %q", line)
+		}
+		if !strings.Contains(line, `re\npo`) {
+			t.Errorf("a diagnostic did not quote the path it names: %q", line)
+		}
+	}
 }
 
 // TestUnderRoot is the containment check on its own, where the cases that

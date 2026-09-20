@@ -40,9 +40,7 @@ func TestInstructionConfinementByAnotherRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 		link := filepath.Join(base, "via-link")
-		if err := os.Symlink(real, link); err != nil {
-			t.Skipf("symlinks unsupported: %v", err)
-		}
+		skipUnsupported(t, "symlink", os.Symlink(real, link))
 		var lines []string
 		docs := loadInstructions(resolveNativeSources(link, ""), func(m string) { lines = append(lines, m) })
 		all := ""
@@ -66,9 +64,7 @@ func TestInstructionConfinementByAnotherRoute(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(filepath.Join(base, "nowhere.md"), filepath.Join(repo, "dangling.md")); err != nil {
-			t.Skipf("symlinks unsupported: %v", err)
-		}
+		skipUnsupported(t, "symlink", os.Symlink(filepath.Join(base, "nowhere.md"), filepath.Join(repo, "dangling.md")))
 		if err := os.WriteFile(filepath.Join(repo, "CLAUDE.md"), []byte("keep\n@dangling.md\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -106,12 +102,8 @@ func TestInstructionConfinementByAnotherRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 		// hop1 -> hop2 -> ../creds.md, all inside the repo until the last hop.
-		if err := os.Symlink(filepath.Join(repo, "hop2.md"), filepath.Join(repo, "hop1.md")); err != nil {
-			t.Skipf("symlinks unsupported: %v", err)
-		}
-		if err := os.Symlink(filepath.Join(base, "creds.md"), filepath.Join(repo, "hop2.md")); err != nil {
-			t.Fatal(err)
-		}
+		skipUnsupported(t, "symlink", os.Symlink(filepath.Join(repo, "hop2.md"), filepath.Join(repo, "hop1.md")))
+		skipUnsupported(t, "symlink", os.Symlink(filepath.Join(base, "creds.md"), filepath.Join(repo, "hop2.md")))
 		if err := os.WriteFile(filepath.Join(repo, "CLAUDE.md"), []byte("keep\n@hop1.md\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -142,9 +134,7 @@ func TestInstructionConfinementByAnotherRoute(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(base, "evil.md"), []byte(secret), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(filepath.Join(base, "evil.md"), filepath.Join(sub, ".claude", "rules", "a.md")); err != nil {
-			t.Skipf("symlinks unsupported: %v", err)
-		}
+		skipUnsupported(t, "symlink", os.Symlink(filepath.Join(base, "evil.md"), filepath.Join(sub, ".claude", "rules", "a.md")))
 		var lines []string
 		docs := loadInstructions(resolveNativeSources(sub, ""), func(m string) { lines = append(lines, m) })
 		all := ""

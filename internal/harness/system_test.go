@@ -483,24 +483,103 @@ func TestPromptExtrasInstructionBudget(t *testing.T) {
 // TestPromptExtrasAreRedacted: the extras are assembled out of files on disk
 // and go out with every request, so they go through the session's redactor
 // exactly as the tools' descriptions do (tools.go) — every field of them,
-// because a key can be anywhere a file can.
+// because a key can be anywhere a file can. A path is a field like any other:
+// a key can be a directory's name as easily as a line of a document.
 func TestPromptExtrasAreRedacted(t *testing.T) {
 	x := PromptExtras{
-		Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "Deploy with " + canary + ".\n"}},
+		Instructions: []PromptDoc{{
+			Path: "/w/" + canary + "/CLAUDE.md",
+			Text: "Deploy with " + canary + ".\n",
+		}},
 		Catalog: []CatalogRow{{
-			Name: "deploy", Kind: "command", Description: "Uses " + canary,
-			WhenToUse: "with " + canary, Path: "/abs/deploy.md", Root: "/abs",
+			Name: "deploy-" + canary, Kind: "command-" + canary,
+			Description: "Uses " + canary, WhenToUse: "with " + canary,
+			Path: "/abs/" + canary + "/deploy.md", Root: "/abs/" + canary,
 		}},
 	}
 	got := extrasOf(t, x, redact.New(canary))
 	if strings.Contains(got, canary) {
 		t.Errorf("the key reached the prompt:\n%s", got)
 	}
-	if n := strings.Count(got, redact.Marker); n != 3 {
-		t.Errorf("the prompt holds %d markers, want 3 (the document, the description, the when-to-use):\n%s", n, got)
+	// One per field: the document's path and its text, and the row's name,
+	// kind, description, when-to-use, path and root.
+	if n := strings.Count(got, redact.Marker); n != 8 {
+		t.Errorf("the prompt holds %d markers, want one for each of the eight fields:\n%s", n, got)
 	}
 	if !strings.Contains(extrasOf(t, x, nil), canary) {
 		t.Error("control: the key was absent without a redactor, so redacting it proves nothing")
+	}
+}
+
+// TestPromptExtrasRedactAcrossTheFraming is the hole a per-field redactor
+// leaves, and the final pass that closes it: every field is redacted alone,
+// and then the renderer writes its own labels, headings and markers between
+// them, making byte boundaries that did not exist when the redactor ran. A key
+// that only exists once the prompt is assembled is still a key on the wire.
+//
+// Each case is a key that no single field holds. The control is the point of
+// the test: it asserts that the framing really does produce the key, so that a
+// renderer which stopped writing a label would not leave a case here passing
+// for the wrong reason.
+func TestPromptExtrasRedactAcrossTheFraming(t *testing.T) {
+	const base = "profile text\n"
+	// A document with no line boundary to cut at is cut at a rune boundary
+	// instead, so the truncation marker lands against the document's own bytes
+	// — the one case where nothing in the input held a boundary at all.
+	oneLine := strings.Repeat("x", maxInstructionDoc+(1<<10))
+	row := CatalogRow{Name: "deploy", Kind: "command", Path: "/tmp/keyfile", Root: "/abs/plugin"}
+	for _, tc := range []struct {
+		name string
+		key  string
+		x    PromptExtras
+	}{
+		{
+			name: "a row's path and the Path label above it",
+			key:  "Path: /tmp/keyfile",
+			x:    PromptExtras{Catalog: []CatalogRow{row}},
+		},
+		{
+			name: "a row's name and its kind",
+			key:  "deploy (command)",
+			x:    PromptExtras{Catalog: []CatalogRow{row}},
+		},
+		{
+			name: "a row's root and the Root label above it",
+			key:  "Root: /abs/plugin",
+			x:    PromptExtras{Catalog: []CatalogRow{row}},
+		},
+		{
+			name: "a document's path and the From heading above it",
+			key:  "From: /w/CLAUDE.md",
+			x:    PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}},
+		},
+		{
+			name: "the profile's text and the extras after it",
+			key:  "text\n\n# Project",
+			x:    PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "hello\n"}}},
+		},
+		{
+			name: "the end of one section and the heading of the next",
+			key:  "END\n\n" + catalogHeading,
+			x: PromptExtras{
+				Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "END\n"}},
+				Catalog:      []CatalogRow{row},
+			},
+		},
+		{
+			name: "a document's last bytes and the truncation marker after them",
+			key:  strings.Repeat("x", 8) + strings.TrimSuffix(truncatedLine, "\n"),
+			x:    PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: oneLine}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if plain := withPromptExtras(base, tc.x, nil); !strings.Contains(plain, tc.key) {
+				t.Fatalf("control: the framing did not produce the key, so redacting it proves nothing:\n%s", plain)
+			}
+			if got := withPromptExtras(base, tc.x, redact.New(tc.key)); strings.Contains(got, tc.key) {
+				t.Errorf("the key the framing assembled reached the prompt:\n%s", got)
+			}
+		})
 	}
 }
 

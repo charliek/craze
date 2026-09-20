@@ -123,6 +123,36 @@ const (
 // dropped, and a line of a document that would forge craze's own framing is
 // escaped. Instruction text is otherwise passed through exactly as written —
 // it is the user's own file, and folding it would destroy it.
+//
+// Redaction happens twice, and both passes are needed.
+//
+// Per field, inside the renderers, because the budgets must be measured over
+// redacted text: a marker is longer than most keys, so a pass that ran only
+// at the end could be what pushes a document past a ceiling the renderer had
+// already declared it inside (X14).
+//
+// Then once more here, over the whole assembled string. Every field is
+// redacted alone, and the framing written between two of them creates byte
+// boundaries that did not exist when the redactor ran: a key whose value is
+// "Path: /tmp/keyfile" is in neither the row's path nor craze's own "Path: "
+// label, and is in the line they make together. The same holds across Name
+// and Kind, across a document's path and the "## From: " above it, across two
+// sections, across the profile's text and the extras, and — the one case with
+// no boundary at all in the input — across a cut and the truncation marker
+// appended to it, where the document never held the whole key. Redacting the
+// finished bytes closes all of them at once, and it is safe to run twice:
+// redaction is idempotent for any key that does not overlap the marker, which
+// is refused before it gets here (redact.MarkerOverlaps, modeltable).
+//
+// The price is that the budgets are measured before this pass, so a key that
+// is genuinely reconstructed across a boundary grows the result a little past
+// a ceiling, and one reconstructed across the profile's last bytes and the
+// extras' first would rewrite part of the profile's text and move the
+// prompt-cache prefix with it. Both are the right way round: a budget is a
+// cost control and a cache prefix is a saving, while a key on the wire is a
+// leak. The case is pathological in any event — a workspace holding a key is
+// refused at Open (errWorkspaceKey), and an ordinary prompt has no key in it
+// anywhere, so this pass changes not a byte.
 func withPromptExtras(system string, x PromptExtras, red *redact.Replacer) string {
 	var sections []string
 	if s := renderInstructions(x.Instructions, red); s != "" {
@@ -136,7 +166,7 @@ func withPromptExtras(system string, x PromptExtras, red *redact.Replacer) strin
 	}
 	// Each section ends in a newline and the profile's text does too, so one
 	// newline between them is the blank line that separates two blocks.
-	return system + "\n" + strings.Join(sections, "\n")
+	return red.String(system + "\n" + strings.Join(sections, "\n"))
 }
 
 // renderInstructions is the documents' section, or "" when none of them has
@@ -145,9 +175,11 @@ func withPromptExtras(system string, x PromptExtras, red *redact.Replacer) strin
 // Each document is normalised, escaped, redacted and only then measured, in
 // that order, because every one of those steps can change the length of what
 // goes out: redaction in particular grows text, so a budget checked before it
-// would not be a budget on the bytes the model sees (X14's rule). Redaction
-// is also last of the three that rewrite the text, so no later step can join
-// two fragments of a key back together.
+// would not be a budget on the bytes the model sees (X14's rule). What this
+// order cannot promise is that no later step joins two fragments of a key
+// back together — the cut's marker and craze's own framing are both written
+// after it — which is what withPromptExtras' final pass over the assembled
+// prompt is for.
 func renderInstructions(docs []PromptDoc, red *redact.Replacer) string {
 	var b strings.Builder
 	left := maxInstructionAll
