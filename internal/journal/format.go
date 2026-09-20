@@ -120,6 +120,13 @@ const (
 	// It is the only record of which files a session read, because the prompt
 	// itself is never stored.
 	DiagPromptSources = "prompt_sources"
+	// DiagAskLostDelivery is an ask whose decision never reached the agent: it
+	// was answered, and something else — a cancelled reply that won the race,
+	// a connection that went — was what the provider actually got (plan 021
+	// §3.6). It is a note and not a second ending, because the ask's outcome
+	// did not change; the fields are the ask's id, kind and outcome, and the
+	// reason the reply was lost.
+	DiagAskLostDelivery = "ask_lost_delivery"
 )
 
 // diagNoteTooLarge replaces a note that stays over MaxRecordBytes even with

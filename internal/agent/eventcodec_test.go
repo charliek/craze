@@ -513,6 +513,42 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 			ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled,
 			Err: "agent: prompt cancelled before it was sent", Synthetic: true,
 		}, At: at}},
+		{"an ask answered by a client", Event{Type: EventAsk, Cause: "tui-1/9", Ask: &AskUpdate{
+			ID: "perm-2", Kind: AskPermission, Outcome: AskAnswered, By: AskByClient,
+			OptionID: "allow-once", Label: "Allow",
+		}, At: at}},
+		{"a question skipped", Event{Type: EventAsk, Cause: "tui-1/10", Ask: &AskUpdate{
+			ID: "ask-1", Kind: AskQuestion, Outcome: AskAnswered, By: AskByClient, Skip: true,
+		}, At: at}},
+		{"a question answered, with a nil and an empty answer list", Event{Type: EventAsk, Ask: &AskUpdate{
+			ID: "ask-2", Kind: AskQuestion, Outcome: AskAnswered, By: AskByClient,
+			Answers: map[string][]string{"q1": {"opt-a"}, "q2": nil, "q3": {}},
+		}, At: at}},
+		{"a plan rejected", Event{Type: EventAsk, Ask: &AskUpdate{
+			ID: "plan-1", Kind: AskPlan, Outcome: AskAnswered, By: AskByClient,
+		}, At: at}},
+		{"an ask ended with its turn", Event{Type: EventAsk, Ask: &AskUpdate{
+			ID: "ask-3", Kind: AskQuestion, Outcome: AskTurnEnded, By: AskByTurn,
+		}, At: at}},
+		{"a permission the policy allowed, carrying the opening nobody saw", Event{Type: EventAsk, Ask: &AskUpdate{
+			ID: "perm-3", Kind: AskPermission, Outcome: AskAutomatic, By: AskByPolicy,
+			OptionID: "allow-once", Label: "Allow",
+			Body: &AskBody{Permission: &PermissionEvent{ID: "perm-3", Tool: "Edit a.go", Options: []PermissionOption{
+				{OptionID: "allow-once", Name: "Allow", Kind: "allow_once"},
+				{OptionID: "reject-once", Name: "Reject", Kind: "reject_once"},
+			}}},
+		}, At: at}},
+		{"a request the provider had already answered, carrying its question", Event{Type: EventAsk, Ask: &AskUpdate{
+			ID: "ask-4", Kind: AskQuestion, Outcome: AskCancelled, By: AskByProvider,
+			Body: &AskBody{Question: &QuestionEvent{ID: "ask-4", Title: "Question", Questions: []Question{
+				{ID: "q1", Prompt: "Pick one", Options: []Option{{ID: "opt-a", Label: "A"}}},
+			}}},
+		}, At: at}},
+		{"a plan the log had no room to raise, carrying its body", Event{Type: EventAsk, Ask: &AskUpdate{
+			ID: "plan-2", Kind: AskPlan, Outcome: AskCancelled, By: AskByUnavailable,
+			Body: &AskBody{Plan: &PlanEvent{ID: "plan-2", Name: "Refactor", Overview: "why",
+				Plan: "# Plan\n", Todos: []Todo{{ID: "t1", Content: "do it", Status: "pending"}}}},
+		}, At: at}},
 		{"a send-now armed against a row", Event{Type: EventMeta, Cause: "tui-1/14", State: &StateDelta{
 			SendNow: &SendNowState{Armed: true, Text: "this one first", FromRow: "q-4", Turn: "turn-3"},
 		}, At: at}},
@@ -609,6 +645,23 @@ func TestEventCodecPinsTheWireShape(t *testing.T) {
 			`{"type":"turn","turn":{"id":"turn-3","phase":"ended","stopReason":"cancelled","errClass":"prompt_cancelled","err":"agent: prompt cancelled before it was sent","synthetic":true}}`},
 		{Event{Type: EventMeta, Cause: "c-1/4", State: &StateDelta{SendNow: &SendNowState{Armed: true, Text: "now, please", FromRow: "q-2", Turn: "turn-3"}}},
 			`{"type":"meta","state":{"sendNow":{"armed":true,"text":"now, please","fromRow":"q-2","turn":"turn-3"}},"cause":"c-1/4"}`},
+		{Event{Type: EventAsk, Cause: "c-1/5", Ask: &AskUpdate{ID: "perm-2", Kind: AskPermission,
+			Outcome: AskAnswered, By: AskByClient, OptionID: "allow-once", Label: "Allow"}},
+			`{"type":"ask","ask":{"id":"perm-2","kind":"permission","outcome":"answered","by":"client","optionId":"allow-once","label":"Allow"},"cause":"c-1/5"}`},
+		// An ending nobody saw an opening for carries the body, in the shape
+		// the opening event itself has on the wire: a client that never got the
+		// opening reads the same fields from either.
+		{Event{Type: EventAsk, Ask: &AskUpdate{ID: "perm-3", Kind: AskPermission, Outcome: AskAutomatic, By: AskByPolicy,
+			OptionID: "yes", Label: "Yes",
+			Body: &AskBody{Permission: &PermissionEvent{ID: "perm-3", Tool: "Edit a.go",
+				Options: []PermissionOption{{OptionID: "yes", Name: "Yes", Kind: "allow_once"}}}}}},
+			`{"type":"ask","ask":{"id":"perm-3","kind":"permission","outcome":"automatic","by":"policy","optionId":"yes","label":"Yes",` +
+				`"body":{"permission":{"id":"perm-3","tool":"Edit a.go","options":[{"optionId":"yes","name":"Yes","kind":"allow_once"}]}}}}`},
+		{Event{Type: EventAsk, Ask: &AskUpdate{ID: "ask-1", Kind: AskQuestion, Outcome: AskAnswered, By: AskByClient,
+			Answers: map[string][]string{"q1": {"a"}, "q2": nil, "q3": {}}}},
+			`{"type":"ask","ask":{"id":"ask-1","kind":"question","outcome":"answered","by":"client","answers":{"q1":["a"],"q2":null,"q3":[]}}}`},
+		{Event{Type: EventAsk, Ask: &AskUpdate{ID: "plan-1", Kind: AskPlan, Outcome: AskTurnEnded, By: AskByTurn}},
+			`{"type":"ask","ask":{"id":"plan-1","kind":"plan","outcome":"turn_ended","by":"turn"}}`},
 		// A cleared section is present and empty, which is how it differs from
 		// a section the delta did not touch: {"state":{"reason":…}} with no
 		// sendNow key would be indistinguishable from an unrelated delta. Detail
