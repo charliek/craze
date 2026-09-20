@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,32 +41,26 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	m.started = true
+	// startedMsg and not m.started = true: the session was started above, and the
+	// message is how the model — and the engine it drives, whose gate opens on the
+	// same fact — learns it.
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
 
-	m.input.SetValue("one")
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("expected prompt cmd")
+	// Two whole turns against the real agent, driven through the runtime: the
+	// prompt runs where the runtime runs it, its events come back on the
+	// session's own stream, and the wait is for the reply on screen and the turn
+	// being over — not for a message this test wrote.
+	m = pumpEnter(t, m, "one")
+	if m.status != statusWorking {
+		t.Fatalf("the send was refused: status %s", m.status)
 	}
-	doneMsg := runCmd(cmd)
-	m = drainEvents(t, m, sess)
-	tm, _ = m.Update(doneMsg)
-	m = tm.(Model)
-	if !strings.Contains(plainView(m), "first reply") {
-		t.Fatalf("missing first stream chunk:\n%s", plainView(m))
-	}
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("first reply")))
+	m = pumpSettled(t, m)
 
-	m.input.SetValue("two")
-	tm, cmd = m.Update(enter())
-	m = tm.(Model)
-	doneMsg = runCmd(cmd)
-	m = drainEvents(t, m, sess)
-	tm, _ = m.Update(doneMsg)
-	m = tm.(Model)
-	if !strings.Contains(plainView(m), "second reply") {
-		t.Fatalf("missing follow-up:\n%s", plainView(m))
-	}
+	m = pumpEnter(t, m, "two")
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("second reply")))
+	m = pumpSettled(t, m)
 
 	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
@@ -107,18 +100,17 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	m.started = true
-	m.input.SetValue("hang")
-	tm, promptCmd := m.Update(enter())
+	tm, _ = m.Update(startedMsg{})
 	m = tm.(Model)
-	if m.status != statusWorking || promptCmd == nil {
+	m.input.SetValue("hang")
+	// The turn runs on the engine's own goroutine now, so Enter returns no
+	// command for the prompt: what says it is running is the status, and what
+	// waits for it is the engine's Close, which joins its continuations.
+	tm, _ = m.Update(enter())
+	m = tm.(Model)
+	if m.status != statusWorking {
 		t.Fatal("expected a working prompt")
 	}
-	promptDone := make(chan struct{})
-	go func() {
-		defer close(promptDone)
-		_ = runCmd(promptCmd)
-	}()
 
 	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
@@ -136,22 +128,26 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("quit cmd hung waiting for cancel")
 	}
-
-	select {
-	case <-promptDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("prompt did not return after quit")
-	}
+	// The quit closed the engine, which joins the turn it was running, so a quit
+	// that returned is a prompt that returned — a stronger statement than the
+	// separate wait this used to make on the prompt's own command.
 
 	if processRunning(t, bin) {
 		t.Fatal("fake-agent child still running after quit while working")
 	}
 }
 
-// TestWiredFakeAgentTurnFailDrawsOneErrorRow is #20's regression: Prompt
-// both emits EventError and returns the same error, so the TUI hears about one
-// failure twice — the eventMsg from waitEvent and the promptDoneMsg from the
-// prompt Cmd — and must draw exactly one row for it.
+// TestWiredFakeAgentTurnFailDrawsOneErrorRow is #20's regression against the real
+// wire: a turn that fails reaches the TUI as the session's own EventError and
+// then as the engine's EventTurn{ended} carrying the same failure, and exactly
+// one row is drawn for it — the event's, because a non-synthetic ending draws
+// none and only settles the status.
+//
+// It is driven through the runtime rather than hand-fed. Its old subject was the
+// delivery order of two racing endings, which no longer race: the engine settles
+// the turn once its continuation has returned, after the session has published
+// everything. pumpSettled is the barrier that makes "exactly one row" a claim
+// about a finished turn.
 func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	isolateSkillsHome(t)
 	bin := buildFakeAgent(t)
@@ -168,31 +164,23 @@ func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	}
 	// Nothing here quits, so the child is reaped by hand: a fake left running
 	// would still be in the process table when another wired test asks
-	// processRunning whether its own child was reaped.
+	// processRunning whether its own child was reaped. The pump's cleanup closes
+	// the engine, which closes this session too; both are idempotent.
 	t.Cleanup(func() { _ = sess.Close() })
 
 	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	m.started = true
-
-	m.input.SetValue("go")
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("expected prompt cmd")
-	}
-	// Prompt emits EventError before it returns, so once the Cmd has run the
-	// event is already on the channel. Event first, then promptDoneMsg: the
-	// order that used to draw the row twice.
-	doneMsg := runCmd(cmd)
-	m = drainEvents(t, m, sess)
-	tm, _ = m.Update(doneMsg)
+	tm, _ = m.Update(startedMsg{})
 	m = tm.(Model)
 
-	if m.status != statusError {
-		t.Fatalf("status %s", m.status)
+	m = pumpEnter(t, m, "go")
+	if m.status != statusWorking {
+		t.Fatalf("the send was refused: status %s", m.status)
 	}
+	m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+	m = pumpSettled(t, m)
+
 	got := texts(m, entryError)
 	if len(got) != 1 {
 		t.Fatalf("want exactly one error row, got %d: %q", len(got), got)
@@ -201,25 +189,9 @@ func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	if got[0] != want {
 		t.Fatalf("row text %q, want %q", got[0], want)
 	}
-}
-
-func drainEvents(t *testing.T, m Model, sess agent.Session) Model {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case ev := <-sess.Events():
-			tm, _ := m.Update(eventMsg{ev})
-			m = tm.(Model)
-			if ev.Type == agent.EventDone || ev.Type == agent.EventError {
-				return m
-			}
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
+	if m.err != want {
+		t.Fatalf("m.err %q, want %q", m.err, want)
 	}
-	t.Fatal("timed out draining events")
-	return m
 }
 
 // TestMain records the environment before any test rewrites HOME, so the one

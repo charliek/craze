@@ -414,9 +414,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 				m = m.openModelDialog()
 			}
 			if tc.queue {
-				if _, err := m.sess.Queue("PINEAPPLE"); err != nil {
-					t.Fatal(err)
-				}
+				enqueueRow(t, m, "PINEAPPLE")
 			}
 			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)

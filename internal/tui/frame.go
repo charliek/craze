@@ -595,14 +595,15 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		p.Kill()
 		<-done
 	}
-	// The session the program ended with is the owner's, not m's: a pre-start
+	// The engine the program ended with is the owner's, not m's: a pre-start
 	// picker has none at New, the one the picker built is the one that owns a
 	// child process, and on a recovered panic p.Run hands back no model to read
 	// it from. Read after done is received, so the program has stopped setting
-	// it. Close blocks until the child is reaped, and is safe even if Start is
-	// still in flight: it will not adopt a child into a closed session.
-	if sess := m.owner.current(); sess != nil {
-		_ = sess.Close()
+	// it. Closing the engine closes its session, and stops its driver: Close
+	// blocks until the child is reaped, and is safe even if Start is still in
+	// flight — it will not adopt a child into a closed session.
+	if eng := m.owner.current(); eng != nil {
+		_ = eng.Close()
 	}
 
 	final := bus.last()

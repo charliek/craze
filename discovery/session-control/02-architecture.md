@@ -6,7 +6,7 @@
 flowchart LR
   subgraph machine["one machine, one user"]
     subgraph hostA["session host (process)"]
-      engA["engine: session + journal + asks"] --- tuiA["TUI (optional, in-process client)"]
+      engA["engine: session + journal + asks"] --- tuiA["TUI (in-process client through S3; a socket client from S4, SD-33)"]
     end
     subgraph hostB["session host, headless"]
       engB["engine"]
@@ -24,7 +24,7 @@ flowchart LR
 
 | piece | what it is | owns |
 |---|---|---|
-| **Session host** | One OS process per session. Today's `craze` is a host with a TUI attached in-process; `craze serve` (S4) is the same host with none. | The `agent.Session`, the agent child process, the journal, pending asks, its own socket |
+| **Session host** | One OS process per session. Today's `craze` is a host with a TUI attached in-process; `craze serve` (S4) is the same host with none. From S4 the host is born detached either way, and the interactive TUI attaches over its socket too (SD-33). | The `agent.Session`, the agent child process, the journal, pending asks, its own socket |
 | **Hub** | One small per-user process at a fixed socket path, auto-spawned, exits when idle. | A roster of hosts, routing of client connections to them, spawning headless hosts. **No sessions.** |
 | **Client** | Anything speaking the protocol (`05`): the TUI, `craze attach`, the agent view, `shed-craze`, a browser. | Its own view state and drafts only |
 | **Bridge** | `craze bridge`: stdin/stdout pumped to the right local socket. | Nothing. It is the stable entry point for SSH clients (SD-05). |
@@ -74,11 +74,14 @@ through untouched.
 **Lifecycle separation comes before the hub, too (SD-28).** Today
 `requestQuit`, `finishRun`, and `SIGHUP` all close the owned session. S2
 defines transport close, closing an attached view, and explicitly stopping
-the session as three different things, keeping today's quit behavior. S4's
-detach is more than a key binding: the process must give the shell back,
-release the terminal, and keep owning its agent child, and `acp.Spawn` today
-isolates only the child's process group; startup and process-group
-preparation are prerequisites.
+the session as three different things, keeping today's quit behavior through
+S3. **S4's hosts are born detached (SD-33): a `craze serve` host never holds
+a terminal, so there is no shell for a running process to give back.** What
+`acp.Spawn` isolates today is only the child's process group; process-group
+preparation for a host that starts fully detached (`setsid`, stdio to
+`/dev/null`) is the prerequisite, and from S4 the TUI's own "detach" is
+simply closing its socket connection to a host that was never in-process,
+not turning a live TUI process into a daemon.
 
 ## Paths
 

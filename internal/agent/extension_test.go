@@ -372,7 +372,7 @@ func TestCancelAnswersBlockedQuestionOnce(t *testing.T) {
 		done <- res
 	}()
 	q := log.waitQuestion(t)
-	if err := s.Cancel(t.Context()); err != nil {
+	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	res := <-done

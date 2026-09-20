@@ -174,6 +174,30 @@ func TestEventJSON(t *testing.T) {
 	}
 }
 
+// TestEventJSONDropsEventTurn: EventTurn falls to eventJSON's default like any
+// other kind it does not know how to render, so a new engine-authored kind
+// never gains a --json line without someone deciding it should (plan 021
+// §3.9's "no line kind").
+func TestEventJSONDropsEventTurn(t *testing.T) {
+	_, ok := eventJSON(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted}})
+	if ok {
+		t.Fatal("eventJSON must not render EventTurn")
+	}
+}
+
+// TestEventJSONDropsAStateDelta: a state delta rides on an EventMeta with no
+// Text, which eventJSON already drops — only a title has anything a headless
+// caller could print — so a craze-initiated change gains no --json line either
+// (plan 021 §3.9's "no line kind").
+func TestEventJSONDropsAStateDelta(t *testing.T) {
+	_, ok := eventJSON(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{
+		SendNow: &agent.SendNowState{}, Reason: agent.SendNowWithdrawn,
+	}})
+	if ok {
+		t.Fatal("eventJSON must not render a state delta")
+	}
+}
+
 func TestDrainSkippedWhenNothingSpawned(t *testing.T) {
 	evs := make(chan agent.Event)
 	start := time.Now()

@@ -517,24 +517,25 @@ func TestNativeUnansweredInterjectionQueuesTheTypedText(t *testing.T) {
 		t.Fatalf("Interject: %v", err)
 	}
 	close(h.release)
-	if got := await(t, out, "the prompt"); got.err != nil {
+	got := await(t, out, "the prompt")
+	if got.err != nil {
 		t.Fatalf("Prompt: %v", got.err)
 	}
 	drained(s)
 
-	q := queueTexts(s)
+	// The session reports what the turn could not answer and the engine above
+	// it requeues it (plan 021 §3.5), so the typed spelling is asserted where
+	// it leaves the session: what the engine puts in its queue's row, judges by
+	// the size cap and hands back to Begin is exactly this text.
+	q := got.res.Unanswered
 	if len(q) != 1 || q[0] != "/ship v3" {
-		t.Fatalf("the queue holds %q, want exactly the typed text", q)
+		t.Fatalf("the turn gave back %q, want exactly the typed text", q)
 	}
 
-	// Drained as the TUI drains it: taken off the queue and sent through the
-	// ordinary prompt path, which expands it.
-	p, ok := s.PopQueue()
-	if !ok {
-		t.Fatal("the queued row could not be taken")
-	}
+	// Drained as the engine drains it: the row's text sent through the ordinary
+	// prompt path, which expands it.
 	m.push(answer("shipped"))
-	if got := await(t, startPrompt(s, p.Text), "the drained row"); got.err != nil {
+	if got := await(t, startPrompt(s, q[0]), "the drained row"); got.err != nil {
 		t.Fatalf("the drained prompt: %v", got.err)
 	}
 
@@ -592,7 +593,10 @@ func TestNativeCancelDuringACommandEventReturns(t *testing.T) {
 	out := startPrompt(s, "/ship")
 	await(t, inside, "the command event reaching the primary send")
 	cancelled := make(chan error, 1)
-	go func() { cancelled <- s.Cancel(context.Background()) }()
+	go func() {
+		_, err := s.Cancel(context.Background())
+		cancelled <- err
+	}()
 	await(t, abandoned, "the command event being given up")
 
 	// From here the test is the consumer again: the turn's ending still has

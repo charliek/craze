@@ -23,8 +23,8 @@ import (
 // The native adapter is agent.Session over craze's own harness (plan 018
 // §3.8): no process, no wire, a model from ~/.craze/native's table. The live
 // session is its behavioural contract — the claim, the withdraw, error XOR
-// done, the queue guards, a Cancel that waits — and tui.Stub its structural
-// template. It is the first file in internal/agent to import internal/paths
+// done, a Cancel that waits — and tui.Stub its structural template. It is the
+// first file in internal/agent to import internal/paths
 // (agent.HomeDir duplicates paths.HomeDir precisely so the ACP code never had
 // to); paths imports nothing of craze's, so there is no cycle.
 
@@ -66,23 +66,14 @@ type nativeSession struct {
 	closeOnce sync.Once
 	closeDone chan struct{}
 
-	// The queue's transactions are ordered exactly as the live session's
-	// (live_queue.go): queueOp orders the mutation, emitMu is held across its
-	// emits after queueOp is released. Lock order: queueOp → emitMu → s.mu →
-	// toolMu → the queue's own lock → the harness's lock (Current, under
-	// s.mu). No lock is ever held across an emit (plan 019 §3.10), and
-	// emitMu → the event log's publishing boundary, a leaf that is never
-	// taken with s.mu held: a publish blocked on a full primary under s.mu
-	// would stop Close from closing done, which is what releases it.
-	//
 	// Interject adds no ordering: it reads the turn state under s.mu, releases
 	// it, and then hands the text to the harness's steer box, which takes a
 	// leaf lock of its own. So an interjection never waits on the turn it is
 	// meant for, even while that turn is emitting into a consumer that is slow
-	// — or that is the very goroutine interjecting.
-	queueOp sync.Mutex
-	emitMu  sync.Mutex
-	queue   PromptQueue
+	// — or that is the very goroutine interjecting. No lock is ever held
+	// across an emit (plan 019 §3.10): a publish blocked on a full primary
+	// under s.mu would stop Close from closing done, which is what releases
+	// it.
 
 	// steerMu guards steerTexts, the running turn's interjections in both of
 	// their spellings, and is a leaf: Interject takes it with nothing else
@@ -208,10 +199,9 @@ func (s *nativeSession) typedSteer(sent string) string {
 
 // typedSteers is that lookup over the whole of Result.Unanswered, and it is
 // its own function on purpose: the translation belongs to native, on the value
-// the moment Run hands it over, not to whatever is downstream of it today. The
-// caller that puts these rows in the queue is being rewritten in parallel to
-// return them from Prompt instead, and a translation done here survives that
-// where one woven into the requeue would not.
+// the moment Run hands it over, not to whatever is downstream of it today —
+// the engine, above the seam, which decides where these rows go (plan 021
+// §3.5) and must never see the wire spelling.
 //
 // nil in, nil out: a turn that answered everything allocates nothing.
 func (s *nativeSession) typedSteers(sent []string) []string {
@@ -275,6 +265,12 @@ func (s *nativeSession) Subscribe(o SubscribeOptions) (*Subscription, error) {
 	return s.log.Subscribe(o)
 }
 func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
+
+// EventLog is the session's LogOwner and Now its Clocked (plan 021 §3.3, §3.9),
+// exactly as on the live session: one log and one clock per session, whoever
+// publishes into it.
+func (s *nativeSession) EventLog() *EventLog { return s.log }
+func (s *nativeSession) Now() time.Time      { return time.Now() }
 
 // Start loads the model table, opens the harness on the requested model (or
 // the table's default) and publishes the first snapshot. It does no network
@@ -819,8 +815,9 @@ func (s *nativeSession) claim(text string) func(context.Context) (Result, error)
 // prompt is the claim's continuation: one harness turn, ended the way the live
 // session ends one (live.go's prompt) — success, or a cancel by Cancel or
 // Close, is exactly one EventDone; failure, the caller's own context ending
-// included (callerEnded), is exactly one EventError and no EventDone,
-// followed by an EventQueue removal per queued row.
+// included (callerEnded), is exactly one EventError and no EventDone. What
+// becomes of craze's queue after either is the engine's: it settles the turn
+// above this seam, after the ending published here.
 func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct{}) (Result, error) {
 	// One release for the whole claim, whichever way it ends, and after the
 	// turn's last event: a Cancel or Close waiting on rel then finds the
@@ -908,11 +905,6 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// Every row the turn left running is closed before its ending goes out,
 	// so no consumer ever sees a turn end with a call still spinning.
 	s.settleTools()
-	// Then whatever the user interjected that the turn could not answer, at
-	// the head of the queue, before the ending event: from there it is an
-	// ordinary queued row, taken by the drain after a done or a cancel and
-	// cleared with the rest after an error (plan 019 §3.10).
-	s.queueUnanswered(unanswered)
 	var failed error
 	switch {
 	case err != nil:
@@ -921,17 +913,25 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		failed = s.callerEnded(ctx)
 	}
 	s.markDone()
+	// Whatever the user interjected that the turn could not answer is reported,
+	// not requeued: the engine above this seam owns craze's queue and puts the
+	// steers back itself, at the head, before it decides what runs next (plan
+	// 021 §3.5). It is reported on the error path too — the engine requeues and
+	// then clears, so a consumer still hears why the queue emptied — which is
+	// why unanswered, translated above as Run handed it over, is returned from
+	// both branches. It has to have been translated by now: the pairs it is
+	// read from are forgotten in this prompt's deferred release, so a caller
+	// translating after the return would be handed the sent spelling back.
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
-		// state when the removals arrive and can say why the queue emptied.
+		// state by the time the engine's chain policy clears its own queue at
+		// settlement (plan 021 §3.5) — this session has none of its own any
+		// more.
 		s.emit(Event{Type: EventError, Err: failed})
-		// Nothing drains from an error state, and a queue that outlived one
-		// would run behind whatever the user sends next.
-		s.clearQueueOnError()
-		return Result{}, failed
+		return Result{Unanswered: unanswered}, failed
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
-	return Result{StopReason: res.StopReason}, nil
+	return Result{StopReason: res.StopReason, Unanswered: unanswered}, nil
 }
 
 // refsLocked is what a draft invokes, resolved against this session's own
@@ -956,76 +956,29 @@ func (s *nativeSession) markDone() {
 	s.doneEmitted = true
 }
 
-// queueUnanswered puts the turn's unanswered steers at the head of the queue,
-// first one first, through PushFront, which neither cap bounds: the text is
-// already the user's, accepted by the session, and a cap must not be the
-// reason it vanishes. Pushing back to front leaves them in the order they were
-// typed, and a consumer rebuilding the queue from the events — each an insert
-// at position 0 — lands on the same order.
-//
-// The burst is bounded by the harness, which refuses a turn more steers than
-// the queue's own cap (harness.steerCap): an unbounded one could fill a
-// consumer's event channel on its own.
-//
-// That bound does not make the underlying shape safe, and is not meant to.
-// queueTx holds emitMu across its sends, so a single blocking send can wedge:
-// with the channel nearly full, a consumer that receives one event and
-// synchronously calls Queue leaves the requeue to fill that slot and block on
-// its next send, still holding emitMu, while Queue waits for it — and the
-// consumer is the only thing that would drain. That is plan 008's queueTx
-// shape, shared by Queue, Edit, Unqueue and Clear; the cap only bounds what an
-// interjection can add to it. Nor is the ending burst bounded by the steer cap
-// alone: the error path's ClearQueue emits one removal per row, and cap-exempt
-// rows accumulate across turns. This is not something the session-control
-// plan's event log closes: its publish still blocks on the primary send
-// inside queueTx, because a queue event is lossless by contract — dropping a
-// removal would leave a row the stream never accounts for. The fix belongs to
-// the engine turn driver that owns queue admission and removal (session
-// control SD-24), so nothing deeper is attempted here.
-//
-// A closed session queues nothing. Its events are already suppressed, so a row
-// pushed now could never be shown, drained or cleared — an invisible message
-// the user was told had been accepted. Interject refuses on a closed session,
-// so the only text that reaches here is what a live turn took before Close
-// cancelled it, and that is dropped with the session.
-func (s *nativeSession) queueUnanswered(texts []string) {
-	if len(texts) == 0 {
-		return
-	}
-	now := time.Now()
-	s.queueTx(func() []QueueEvent {
-		// Not atomic with the PushFront below, and knowingly so: closed can
-		// read false, Close can then set it and close done, and the row goes
-		// in anyway — its event suppressed, but Snapshot still showing it
-		// after Close. The window is accepted. The row belongs to a session
-		// that is going away and nothing will act on it. Closing it properly
-		// means mutating the queue and publishing what describes it under one
-		// authority, which is the engine turn driver's job (session control
-		// SD-24), not an ordering boundary between publishes.
-		s.mu.Lock()
-		closed := s.closed
-		s.mu.Unlock()
-		if closed {
-			return nil
-		}
-		evs := make([]QueueEvent, 0, len(texts))
-		for i := len(texts) - 1; i >= 0; i-- {
-			evs = append(evs, s.queue.PushFront(texts[i], now))
-		}
-		return evs
-	})
-}
+// The turn's unanswered steers are reported in Result.Unanswered, never
+// pushed anywhere here: the engine above the seam puts them back — through
+// PushFront, last first, in the same locked section that decides the turn's
+// successor, so steered text is always ahead of whatever was waiting behind
+// the turn that took it (plan 021 §3.5). The queue and the events describing
+// it are mutated and enqueued under one mutex in internal/engine, with no
+// lock held across a blocking send — the wedge this comment used to describe
+// (queueTx holding emitMu across a blocking primary send, with a consumer
+// that queues from its own receive on the other side) is gone with the
+// session's own queue verbs, and the closed-session window went with them: a
+// row can no longer be pushed onto a queue whose events are already
+// suppressed, because nothing pushes one here.
 
 // callerEnded says whether a turn the harness reports cancelled was ended by
 // the caller's own context — its deadline, or its cancel — rather than by
 // this session's Cancel or Close, and if so returns the failure it is. The
 // harness cannot tell the two apart: any end of the turn's context is a
 // clean cancel to it. The live session can, and treats the first as a failed
-// prompt (live.go's prompt: the client's error is EventError and the queue
-// is cleared), so the adapter does too; its own Cancel and Close stay the
-// user's "stop", one EventDone{cancelled} with the queue kept. A cancel of
-// ours that lands alongside the caller's counts as ours. nil when the cancel
-// was ours.
+// prompt (live.go's prompt: the client's error is EventError, which is what
+// makes the engine clear its queue), so the adapter does too; its own Cancel
+// and Close stay the user's "stop", one EventDone{cancelled}, after which the
+// engine's chain policy decides about the queue. A cancel of ours that lands
+// alongside the caller's counts as ours. nil when the cancel was ours.
 func (s *nativeSession) callerEnded(ctx context.Context) error {
 	s.mu.Lock()
 	ours := s.cancelling || s.closed
@@ -1104,11 +1057,24 @@ func (s *nativeSession) sink(ev harness.Event) {
 // answer persisted interrupted — or ctx ends; a prompt claimed and not yet
 // open withdraws when its continuation runs, and Cancel waits for that. With
 // nothing claimed it is a no-op.
-func (s *nativeSession) Cancel(ctx context.Context) error {
+//
+// Native has no wire, so CancelOutcome maps onto its own state instead (plan
+// 021 §3.7): Wrote is whether this call found a running turn's context to
+// cancel — s.turnCancel is registered in the same locked section that
+// s.cancelling is set here, so a nil turnCancel at that read means the
+// continuation has not opened its turn yet and never will reach the harness
+// for this call. Withdrew is exactly the complement: a claimed continuation
+// that has not run, or not yet opened, and is now marked cancelling — it
+// will see the mark and return ErrPromptCancelled with nothing ever sent.
+// Wrote and Withdrew are decided in that one locked read and do not change
+// with how the wait below ends; Settled is true only once rel has actually
+// closed, because that is the one signal that says the claim — and whatever
+// it was running — is over.
+func (s *nativeSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 	s.mu.Lock()
 	if s.hs == nil {
 		s.mu.Unlock()
-		return nil
+		return CancelOutcome{Settled: true}, nil
 	}
 	// The mark, the claim and the turn are read in one locked section, the
 	// one the continuation's opening also takes: a claimed prompt either sees
@@ -1117,18 +1083,21 @@ func (s *nativeSession) Cancel(ctx context.Context) error {
 	claimed, cancel, rel := s.claimed, s.turnCancel, s.released
 	s.mu.Unlock()
 	if !claimed || rel == nil {
-		return nil
+		return CancelOutcome{Settled: true}, nil
 	}
+	wrote := cancel != nil
 	if cancel != nil {
 		cancel()
 	}
+	outcome := CancelOutcome{Wrote: wrote, Withdrew: !wrote}
 	select {
 	case <-rel:
-		return nil
+		outcome.Settled = true
+		return outcome, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return outcome, ctx.Err()
 	case <-s.done:
-		return nil
+		return outcome, nil
 	}
 }
 
@@ -1279,9 +1248,7 @@ func (s *nativeSession) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	// s.mu → toolMu → the queue's lock is the order every transaction takes.
 	out.Tools = s.toolRows()
-	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	// Cloned as the live session clones it (live.go): the menu reads the rows
 	// off a snapshot and the expansion lookup is built from the session's own
@@ -1290,6 +1257,16 @@ func (s *nativeSession) Snapshot() Snapshot {
 	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
 	out.Config = cloneConfig(s.snap.Config)
 	return out
+}
+
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3). Native drives no
+// ACP agent of its own, so nothing it runs is ever a turn craze did not ask
+// for: this always answers false, taking s.mu only for the same reason
+// Snapshot does — so a reader never observes a half-written s.snap.
+func (s *nativeSession) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return false
 }
 
 // Interject merges text into the running turn: the harness takes it up before
@@ -1474,116 +1451,6 @@ func (s *nativeSession) emitLossy(ev Event) {
 	s.log.TryPublish(ev)
 }
 
-// queueTx is the live session's queue transaction (live_queue.go): fn
-// mutates under queueOp, and its events go out after queueOp is released,
-// under emitMu, so a consumer waiting on something that holds queueOp cannot
-// wedge the session while the transactions still reach the stream whole and
-// in order.
-func (s *nativeSession) queueTx(fn func() []QueueEvent) {
-	s.queueOp.Lock()
-	s.emitMu.Lock()
-	defer s.emitMu.Unlock()
-	evs := func() []QueueEvent {
-		defer s.queueOp.Unlock()
-		return fn()
-	}()
-	for _, ev := range evs {
-		s.emit(ev.Event())
-	}
-}
-
-func (s *nativeSession) Queue(text string) (p QueuedPrompt, err error) {
-	s.queueTx(func() []QueueEvent {
-		var ev QueueEvent
-		p, ev, err = s.queue.Add(text, time.Now())
-		if err != nil {
-			return nil
-		}
-		return []QueueEvent{ev}
-	})
-	return p, err
-}
-
-func (s *nativeSession) EditQueued(id, text string) (err error) {
-	s.queueTx(func() []QueueEvent {
-		var ev QueueEvent
-		ev, err = s.queue.Edit(id, text)
-		if err != nil {
-			return nil
-		}
-		return []QueueEvent{ev}
-	})
-	return err
-}
-
-func (s *nativeSession) Unqueue(id string) (p QueuedPrompt, ok bool) {
-	s.queueTx(func() []QueueEvent {
-		var ev QueueEvent
-		ev, ok = s.queue.Remove(id)
-		if !ok {
-			return nil
-		}
-		p = ev.Prompt
-		return []QueueEvent{ev}
-	})
-	return p, ok
-}
-
-// TakeQueued hands a row to the caller to prompt, under the live session's
-// guard: refused while a prompt is claimed or in flight.
-func (s *nativeSession) TakeQueued(id string) (p QueuedPrompt, ok bool) {
-	s.queueTx(func() []QueueEvent {
-		ev, taken := s.takeGuarded(func() (QueueEvent, bool) { return s.queue.Take(id) })
-		if !taken {
-			return nil
-		}
-		p, ok = ev.Prompt, true
-		return []QueueEvent{ev}
-	})
-	return p, ok
-}
-
-// PopQueue is TakeQueued of the head, under the same guard.
-func (s *nativeSession) PopQueue() (p QueuedPrompt, ok bool) {
-	s.queueTx(func() []QueueEvent {
-		ev, taken := s.takeGuarded(s.queue.Pop)
-		if !taken {
-			return nil
-		}
-		p, ok = ev.Prompt, true
-		return []QueueEvent{ev}
-	})
-	return p, ok
-}
-
-// takeGuarded is the guard and the removal as one critical section. A claimed
-// prompt counts as in flight before its turn opens, as on the live session:
-// Begin would refuse the row's prompt then. The caller holds queueOp.
-func (s *nativeSession) takeGuarded(take func() (QueueEvent, bool)) (QueueEvent, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inPrompt || s.claimed {
-		return QueueEvent{}, false
-	}
-	return take()
-}
-
-func (s *nativeSession) ClearQueue() int {
-	n := 0
-	s.queueTx(func() []QueueEvent {
-		evs := s.queue.Clear()
-		n = len(evs)
-		return evs
-	})
-	return n
-}
-
-// clearQueueOnError empties the queue when a turn fails, as the live session
-// does: a queue that survived an error would run behind the next prompt.
-func (s *nativeSession) clearQueueOnError() {
-	s.ClearQueue()
-}
-
 // nativeError is an error the adapter phrased itself. Its text is what the
 // user reads — the TUI's error line, craze prompt --json's error.message —
 // and it unwraps to the harness's typed error, so a caller can still match
@@ -1668,4 +1535,6 @@ func noKeyText(table *modeltable.Table, alias string) string {
 var (
 	_ Session     = (*nativeSession)(nil)
 	_ EventSource = (*nativeSession)(nil)
+	_ LogOwner    = (*nativeSession)(nil)
+	_ Clocked     = (*nativeSession)(nil)
 )

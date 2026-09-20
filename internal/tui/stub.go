@@ -44,8 +44,22 @@ type Stub struct {
 	open  []stubOpen
 	calls []stubCall
 	// Clock stamps Event.At; tests inject one to drive lingers and elapsed
-	// times without sleeping.
+	// times without sleeping. It is also what the Stub answers agent.Clocked
+	// with, so a component above the seam that stamps its own events reads this
+	// clock and not the wall one (plan 021 §3.9).
+	//
+	// It is read unlocked, by emit and by Now, from whatever goroutine publishes
+	// or asks the time — so it must be set before the Stub is used concurrently,
+	// and never while a turn, a component above the seam or another goroutine is
+	// running. The closure it holds must itself be safe to call from several
+	// goroutines.
 	Clock func() time.Time
+	// NoPrimary reports that this Stub's log was built with
+	// agent.EventLogOptions.NoPrimary — NewStubNoPrimary — so nothing is ever
+	// put on Events() and no publisher can be held by a reader that is not
+	// there. It is fixed at construction, because that is where the log is
+	// built; assigning it afterwards changes nothing.
+	NoPrimary bool
 
 	// Replay is the transcript Start hands back before the session is up, as
 	// a loaded session's replay does. Start emits agent.EventReplay{start},
@@ -57,15 +71,8 @@ type Stub struct {
 	// title the agent produces no longer replaces the user's.
 	titlePinned bool
 
-	// queue is craze's own message queue — the real one, so the chrome tests
-	// run against the same transactions a live session does. queueOp orders
-	// whole transactions as the live session's does; the lock order is
-	// queueOp → mu → the queue's own lock, and queueOp → the log's publishing
-	// boundary, which is never taken with mu held.
-	queueOp sync.Mutex
-	queue   agent.PromptQueue
 	// inPrompt, doneEmitted and cancelling mirror the live session's turn
-	// state, which is what the queue guards and Interject are decided from.
+	// state, which is what Interject is decided from.
 	// claimed is the live session's claim: Begin takes the prompt slot before
 	// the prompt's own goroutine opens the turn, and a Cancel in between
 	// withdraws the prompt instead of reaching the agent.
@@ -97,10 +104,21 @@ type stubCall struct {
 	Cancelled bool
 }
 
-func NewStub() *Stub {
+// NewStub is the Stub every test and the TUI's own fallback session use.
+func NewStub() *Stub { return newStub(false) }
+
+// NewStubNoPrimary is NewStub with an event log that has no primary send
+// (agent.EventLogOptions.NoPrimary): nothing is ever put on Events(), so a test
+// can drive a session nobody reads without a publisher ever blocking. It is a
+// constructor rather than a field on the Stub because the log is built here, and
+// what a caller passes after construction would be read too late.
+func NewStubNoPrimary() *Stub { return newStub(true) }
+
+func newStub(noPrimary bool) *Stub {
 	return &Stub{
 		failConfigAt: -1,
-		log:          agent.NewEventLog(agent.EventLogOptions{}),
+		NoPrimary:    noPrimary,
+		log:          agent.NewEventLog(agent.EventLogOptions{NoPrimary: noPrimary}),
 		closed:       make(chan struct{}),
 		cancel:       make(chan struct{}, 1),
 		snap: agent.Snapshot{
@@ -312,6 +330,18 @@ func (s *Stub) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error) 
 }
 func (s *Stub) Incarnation() string { return s.log.Incarnation() }
 
+// EventLog is the Stub's agent.LogOwner (plan 021 §3.3): the log a component
+// above the seam publishes into, the same one the Stub's own emit uses, so a
+// test sees one sequence whoever produced an event.
+func (s *Stub) EventLog() *agent.EventLog { return s.log }
+
+// Now is the Stub's agent.Clocked (plan 021 §3.9): the injected Clock, falling
+// back to time.Now exactly as emit does, so a component that stamps its own
+// events stamps them from the clock the test set and the goldens stay put. Like
+// emit it reads Clock unlocked, so Clock must be configured before the Stub is
+// used concurrently (Clock).
+func (s *Stub) Now() time.Time { return s.now() }
+
 // Prompt is Begin and its continuation back to back, as on the live session.
 func (s *Stub) Prompt(ctx context.Context, text string) (agent.Result, error) {
 	return s.Begin(text)(ctx)
@@ -392,6 +422,15 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		return agent.Result{}, agent.ErrPromptCancelled
 	}
 	s.mu.Lock()
+	// The hang belongs to the prompt it was armed for and is consumed by it
+	// whatever becomes of that prompt, which is why it is taken here rather than
+	// past the checks below: a cancel that reached the claim before this opening
+	// withdraws the prompt, and a flag left armed would hang the *next* one
+	// instead — a test that cancelled a hung turn and then sent again would hang
+	// or not depending on which won, which is a coin toss and not a test (plan
+	// 021 amendment X12). park is taken the same way, above.
+	hang := s.hang
+	s.hang = false
 	if s.cancelling {
 		// Cancelled since the claim, and the turn is not open: withdraw.
 		s.mu.Unlock()
@@ -404,8 +443,6 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		s.mu.Unlock()
 		return agent.Result{}, agent.ErrPromptInFlight
 	}
-	hang := s.hang
-	s.hang = false
 	s.n++
 	n := s.n
 	s.inPrompt = true
@@ -442,13 +479,24 @@ func (s *Stub) markDone() {
 	s.mu.Unlock()
 }
 
-func (s *Stub) Cancel(context.Context) error {
+// Cancel mirrors the live session's CancelOutcome (plan 021 §3.7), fired and
+// forgotten rather than waited on: the Stub's Cancel never blocks, so it can
+// only ever report what is already known at the moment it is called. Wrote is
+// exactly the condition that already drove cancelsSent — nothing claimed (a
+// foreign turn or idle), or a turn genuinely open — and Withdrew its
+// complement, a claim not yet open. Settled is true only when nothing is
+// claimed or open: an open or about-to-withdraw turn is still going, by
+// definition, the instant this returns.
+func (s *Stub) Cancel(context.Context) (agent.CancelOutcome, error) {
 	s.mu.Lock()
 	s.cancelling = true
 	// A prompt claimed and not yet open finds the mark and withdraws, or is
 	// parked where the live session aborts its wait: either way nothing
 	// reaches the agent for it. Every other cancel would.
-	if !s.claimed || s.inPrompt {
+	wrote := !s.claimed || s.inPrompt
+	withdrew := s.claimed && !s.inPrompt
+	settled := !s.claimed
+	if wrote {
 		s.cancelsSent++
 	}
 	s.mu.Unlock()
@@ -457,7 +505,7 @@ func (s *Stub) Cancel(context.Context) error {
 	case s.cancel <- struct{}{}:
 	default:
 	}
-	return nil
+	return agent.CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: settled}, nil
 }
 
 func (s *Stub) AnswerPermission(id, optionID string) error {
@@ -594,9 +642,15 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Tools = cloneStubTools(s.snap.Tools)
 	out.Subagents = cloneStubSubagents(s.snap.Subagents)
 	out.ForeignTurn = s.foreign
-	// mu → the queue's lock is the order every transaction takes.
-	out.Queue = s.queue.List()
 	return out
+}
+
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3): s.foreign under
+// s.mu alone, the same field Snapshot reports.
+func (s *Stub) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreign
 }
 
 func cloneStubSubagents(in []agent.SubagentInfo) []agent.SubagentInfo {
@@ -686,4 +740,6 @@ func (s *Stub) emit(ev agent.Event) {
 var (
 	_ agent.Session     = (*Stub)(nil)
 	_ agent.EventSource = (*Stub)(nil)
+	_ agent.LogOwner    = (*Stub)(nil)
+	_ agent.Clocked     = (*Stub)(nil)
 )

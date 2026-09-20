@@ -492,9 +492,10 @@ func TestFrameGoldenTitleRule(t *testing.T) {
 // TestFrameGoldenPlanMode is §3.3 end to end against the wire: the offer after
 // a plan-mode turn, Enter on it, and a refinement instead.
 //
-// The waits are on the placeholder rather than on <wait:idle>, because the
-// offer needs both EventDone and promptDoneMsg and those two race; waiting for
-// what the offer draws is waiting for both.
+// The waits are on the placeholder rather than on <wait:idle>, because the offer
+// needs the wire's EventDone to arm it and the engine's turn ending to make it
+// actionable, and the ending trails the state it describes; waiting for what the
+// offer draws is waiting for both.
 func TestFrameGoldenPlanMode(t *testing.T) {
 	const offered = "<wait:text:planned:><wait:text:enter implements this plan>"
 	for _, tc := range []struct {

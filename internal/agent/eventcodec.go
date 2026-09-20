@@ -25,10 +25,11 @@ import (
 // agent type reaches the wire by a line here — which the completeness test
 // (eventcodec_test.go) refuses to let anyone forget. The flat leaf types
 // (Todo, ToolDiff, PermissionOption, Option, ToolOutput, PluginCommand,
-// ForeignTurnInfo, ReplayInfo) are converted rather than copied field by
-// field: their wire twins have the same fields in the same order, so a field
-// added to one of them stops this file compiling until the twin has it too.
-// Held by pointer, they convert as pointers, and a nil one converts to nil.
+// ForeignTurnInfo, ReplayInfo, TurnInfo) are converted rather than copied
+// field by field: their wire twins have the same fields in the same order, so
+// a field added to one of them stops this file compiling until the twin has
+// it too. Held by pointer, they convert as pointers, and a nil one converts
+// to nil.
 //
 // JSON cannot carry every Go value bit for bit, so "lossless" is defined, and
 // the tests hold the codec to exactly this:
@@ -118,6 +119,16 @@ const (
 	// gone, a frame the decoder could not read, a result that was not JSON,
 	// a journal that could not be saved. The message is all there is.
 	EventErrOther EventErrClass = "other"
+	// EventErrPromptCancelled, EventErrPromptInFlight and EventErrForeignTurn
+	// are TurnInfo.ErrClass's own (plan 021 §3.4): the three endings the wire
+	// never reports as an Event.Err, because session.go's ErrPromptCancelled,
+	// ErrPromptInFlight and ErrForeignTurn are returned from Prompt, never
+	// emitted. An engine-authored Synthetic ending carries one of these so a
+	// consumer can still tell the endings apart; ClassifyEventErr is how it
+	// gets one. The strings are 05's protocol codes.
+	EventErrPromptCancelled EventErrClass = "prompt_cancelled"
+	EventErrPromptInFlight  EventErrClass = "prompt_in_flight"
+	EventErrForeignTurn     EventErrClass = "foreign_turn"
 )
 
 // eventErrSentinels pairs each class that has a sentinel with it, in the
@@ -140,6 +151,14 @@ var eventErrSentinels = []struct {
 	{EventErrEmptyStep, harness.ErrEmptyStep},
 	{EventErrEmptyPrompt, harness.ErrEmptyPrompt},
 	{EventErrHarnessClosed, harness.ErrClosed},
+	// These three never reach classifyEventErr through Event.Err — the
+	// refusals they stand for are returned from Prompt and emit nothing — so
+	// appending them here cannot change how any error that does reach it
+	// classifies today; they exist for ClassifyEventErr to answer when the
+	// engine turns one of these refusals into a TurnInfo.ErrClass instead.
+	{EventErrPromptCancelled, ErrPromptCancelled},
+	{EventErrPromptInFlight, ErrPromptInFlight},
+	{EventErrForeignTurn, ErrForeignTurn},
 }
 
 // RemoteError is an Event.Err that came back through the codec: the error's
@@ -193,6 +212,17 @@ func classifyEventErr(err error) (EventErrClass, int) {
 		}
 	}
 	return typed, code
+}
+
+// ClassifyEventErr is classifyEventErr's class alone, exported for a
+// component above the seam to call (plan 021 §3.4): the engine has no
+// Event.Err to encode when it turns a refusal — ErrPromptCancelled,
+// ErrPromptInFlight, ErrForeignTurn — into a TurnInfo's Synthetic ending, only
+// the error value itself, and this is how it gets the same class the codec
+// would have given it.
+func ClassifyEventErr(err error) EventErrClass {
+	class, _ := classifyEventErr(err)
+	return class
 }
 
 // typedEventErr is the class and code of the typed error in err's chain that
@@ -308,8 +338,11 @@ type wireEvent struct {
 	Command        *wireCommand     `json:"command,omitempty"`
 	Interjection   bool             `json:"interjection,omitempty"`
 	ForeignTurn    *wireForeignTurn `json:"foreignTurn,omitempty"`
+	Turn           *wireTurn        `json:"turn,omitempty"`
+	State          *wireState       `json:"state,omitempty"`
 	Replay         *wireReplay      `json:"replay,omitempty"`
 	Replayed       bool             `json:"replayed,omitempty"`
+	Cause          string           `json:"cause,omitempty"`
 	Err            *wireError       `json:"err,omitempty"`
 	StopReason     string           `json:"stopReason,omitempty"`
 	At             time.Time        `json:"at,omitzero"`
@@ -468,6 +501,40 @@ type wireForeignTurn struct {
 	Running bool   `json:"running,omitempty"`
 }
 
+// wireTurn is TurnInfo, field for field in the same order, so it converts by
+// a plain pointer cast like wireForeignTurn and wireReplay do.
+type wireTurn struct {
+	ID         string        `json:"id,omitempty"`
+	Phase      string        `json:"phase,omitempty"`
+	Text       string        `json:"text,omitempty"`
+	Origin     string        `json:"origin,omitempty"`
+	StopReason string        `json:"stopReason,omitempty"`
+	ErrClass   EventErrClass `json:"errClass,omitempty"`
+	Err        string        `json:"err,omitempty"`
+	Synthetic  bool          `json:"synthetic,omitempty"`
+	Next       string        `json:"next,omitempty"`
+	Pending    int           `json:"pending,omitempty"`
+}
+
+// wireState is a StateDelta. Each section is a pointer, so a section the
+// delta did not touch is absent and one it emptied is present and empty:
+// omitempty on a pointer omits only nil, which is exactly the distinction the
+// type is for.
+type wireState struct {
+	SendNow *wireSendNow `json:"sendNow,omitempty"`
+	Reason  string       `json:"reason,omitempty"`
+	Detail  string       `json:"detail,omitempty"`
+}
+
+// wireSendNow is SendNowState, field for field in the same order, so it
+// converts by a plain pointer cast like wireForeignTurn and wireTurn do.
+type wireSendNow struct {
+	Armed   bool   `json:"armed,omitempty"`
+	Text    string `json:"text,omitempty"`
+	FromRow string `json:"fromRow,omitempty"`
+	Turn    string `json:"turn,omitempty"`
+}
+
 type wireReplay struct {
 	Phase string `json:"phase,omitempty"`
 }
@@ -517,8 +584,10 @@ func toWireEvent(ev Event) wireEvent {
 		QueuePos:       ev.QueuePos,
 		Interjection:   ev.Interjection,
 		ForeignTurn:    (*wireForeignTurn)(ev.ForeignTurn),
+		Turn:           (*wireTurn)(ev.Turn),
 		Replay:         (*wireReplay)(ev.Replay),
 		Replayed:       ev.Replayed,
+		Cause:          ev.Cause,
 		StopReason:     ev.StopReason,
 		At:             ev.At.UTC(),
 	}
@@ -551,6 +620,9 @@ func toWireEvent(ev Event) wireEvent {
 	}
 	if c := ev.Command; c != nil {
 		w.Command = &wireCommand{PluginCommand: wirePluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
+	}
+	if s := ev.State; s != nil {
+		w.State = &wireState{SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail}
 	}
 	if ev.Err != nil {
 		class, code := classifyEventErr(ev.Err)
@@ -648,8 +720,10 @@ func (w *wireEvent) event() Event {
 		QueuePos:       w.QueuePos,
 		Interjection:   w.Interjection,
 		ForeignTurn:    (*ForeignTurnInfo)(w.ForeignTurn),
+		Turn:           (*TurnInfo)(w.Turn),
 		Replay:         (*ReplayInfo)(w.Replay),
 		Replayed:       w.Replayed,
+		Cause:          w.Cause,
 		StopReason:     w.StopReason,
 		At:             w.At.UTC(),
 	}
@@ -682,6 +756,9 @@ func (w *wireEvent) event() Event {
 	}
 	if c := w.Command; c != nil {
 		ev.Command = &ExpandedCommand{PluginCommand: PluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
+	}
+	if s := w.State; s != nil {
+		ev.State = &StateDelta{SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail}
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}

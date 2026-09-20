@@ -86,12 +86,15 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	m.pickedExplicit = explicit
 	m.sessProvider = p.Name()
 	if m.newSession != nil {
-		if m.sess != nil {
-			_ = m.sess.Close()
+		// The ENGINE is closed, not just the session: closing the session alone
+		// would leave the old engine's driver running and its last events
+		// unpublished, and a swap is the one place two of them could overlap.
+		if m.eng != nil {
+			_ = m.eng.Close()
 		}
 		m.setSession(m.newSession(p))
 	}
-	if m.sess == nil {
+	if m.eng == nil && m.engErr == nil {
 		m.setSession(NewStub())
 	}
 	m.refreshSnap()
@@ -104,7 +107,7 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	// The same batch Init returns, for the same reason: the session this just
 	// built may be a load, and its replay is emitted from the client's read
 	// loop while Start is still running (§3.5).
-	return m, tea.Batch(m.startCmd(), waitEvent(m.sess))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 
 func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

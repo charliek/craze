@@ -252,9 +252,11 @@ func TestNativeToolsInThePromptJSONStream(t *testing.T) {
 // TestNativeEventsAllRenderAsJSON is plan 019 §3.10's "every event the
 // native adapter can emit has a rendering in internal/cli/events.go". The
 // turn below provokes each kind the adapter has — text, thinking, tool
-// rows, the queue, a model switch, a turn that ended and one that failed —
-// and every one of them must project to a line, with the single documented
-// exception below.
+// rows, a model switch, a turn that ended and one that failed — and every one
+// of them must project to a line, with the single documented exception below.
+// EventQueue is not among them: the queue left the provider seam (plan 021
+// §3.5), so the native adapter never emits one any more, and its rendering is
+// held by TestQueueJSONCarriesTheEditedVersion and json_test.go instead.
 func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o644); err != nil {
@@ -279,9 +281,6 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	}}
 	sess := nativeJSONSession(t, model, ws)
 
-	if _, err := sess.Queue("later"); err != nil {
-		t.Fatalf("Queue: %v", err)
-	}
 	if err := sess.SetModel(context.Background(), "test/b"); err != nil {
 		t.Fatalf("SetModel: %v", err)
 	}
@@ -312,7 +311,7 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	// Without this the test would pass on a turn that emitted nothing.
 	for _, want := range []agent.EventType{
 		agent.EventText, agent.EventThought, agent.EventTool, agent.EventCommand,
-		agent.EventQueue, agent.EventMeta, agent.EventDone, agent.EventError,
+		agent.EventMeta, agent.EventDone, agent.EventError,
 	} {
 		if !seen[want] {
 			t.Fatalf("the session never emitted a %s event, so nothing checked its rendering", want)

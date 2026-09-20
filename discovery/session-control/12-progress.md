@@ -632,3 +632,71 @@ Known limitations, none of them accidental:
 
 No follow-up issues were filed: the list above and `04`'s table of unshipped
 `diag` kinds are the record, and each names the phase that should pick it up.
+
+## S1b — the engine turn driver, asks, settings, identity
+
+| | |
+|---|---|
+| Status | in progress (PR 1 of 3: the driver) |
+| Plan | `021-session-control-s1b-engine` (outside the repo, `~/.claude/plans/craze/`) |
+| Baseline | `6581e0a` |
+| Branch / PRs | three sequential PRs, each from fresh `origin/main`: `feature/plan-021-s1b-driver`, `feature/plan-021-s1b-asks`, `feature/plan-021-s1b-state` |
+| Merged | — (date and squash commits go here when all three PRs merge) |
+
+### Plan review — 2026-09-20
+
+| reviewer | result |
+|---|---|
+| Codex, `gpt-6-astra`, high effort | 27 findings (4 blocker) |
+| CodeRabbit | 25 findings (1 blocker) |
+| GLM 5.3 | 13 findings (2 blocker) |
+| `craze-harness` session | 7 findings, on the provider seam |
+
+The reviewers found the same structural holes independently: a cancel that
+lands before `Begin` claims a turn; `Close` racing what is still in the
+outbox; how far the cancel hold has to reach (every admission path, not just
+the drain); `craze prompt`'s chain rule needing to run inside settlement
+rather than after it; and delta/mutation atomicity for settings and turn
+endings (astra and CodeRabbit). Because independent reviewers kept finding
+the same holes, the plan pins the fixes rather than leaving them to the
+executor: `Submit` never calls `Session.Cancel`, and `Begin` runs under `e.mu`
+in the same section that reserves the turn; `Close` gains phases, so what is
+left in the outbox at shutdown is still committed to the ring, the journal
+and every subscription with a non-blocking primary send; the cancel hold is
+reserved in the same critical section that validates the cancel and covers
+every admission path; the chain policy runs inside the settlement
+transaction, where `craze prompt`'s rule has to see it; and a turn's
+settlement, and every settings delta, is one `Enqueue`d batch under the
+owning lock, so state order is event order. Raw reviews in
+`021-session-control-s1b-engine/panel/`.
+
+### Roadmap wording this plan departs from
+
+Per the plan's §4 last bullet, recorded here and, on merge, in `05` at C14:
+the ask registry lives below the seam, in `internal/agent` beside `EventLog`;
+the settings revision is the event's `Seq`; SD-30's shared mode / model /
+title *rows* ship as state deltas with no TUI rendering in S1b (how a remote
+client words someone else's change is S2's); command ids ship with an
+in-memory receipts table and no wire; and `NoPrimary` arrives a phase early,
+in S1b, for tests, rather than waiting for S4.
+
+### Outcome
+
+To be filled at merge.
+
+### Deviations from the plan
+
+To be filled at merge.
+
+### Live smoke
+
+To be filled at merge.
+
+### Decisions and questions touched
+
+SD-33 recorded in `08`, ahead of execution (SQ12 resolved in `10`). Further
+rows to be filled at merge.
+
+### Handoff
+
+To be filled at merge.

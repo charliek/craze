@@ -120,6 +120,32 @@ before merging.
 - `seq` on `craze prompt --json` lines (S1a), so H6's child processes are born
   speaking the sequenced schema.
 
+## Plan 021 (S1b) / harness H4 — parallel run (2026-09-20)
+
+Plan 021 (S1b: the engine turn driver, the queue, asks, settings, identity)
+and harness H4 (Claude compat: instruction files with imports and `paths`
+gating, workspace skills and commands, `craze import claude`) run in
+parallel, each in its own session and worktree. Where they meet (plan
+`021-session-control-s1b-engine.md` §2.7):
+
+| surface | this plan (S1b) | H4 | rule |
+|---|---|---|---|
+| `internal/harness/**` | one comment in `steer.go` (C6) | owns it | no conflict |
+| `internal/agent/{catalog,skills,plugins,expand}.go`, `internal/cli/import.go` | untouched | likely owns | no conflict |
+| `internal/agent/native.go` | prompt path, the queue, `Cancel`, `announceCurrent` and the setters, `Answer*` | `Start` / system-prompt assembly, the catalog it reports | H4 stays out of the ranges this plan names. **`announceCurrent` is the one shared site**: whoever lands second fills `StateDelta.Commands` / `Plugins` from what is there (C10) |
+| `agent.Session`, `agent.Event`, `agent.Snapshot` | narrowed and extended (§3) | should not change them | an H4 need here is raised with the owner first |
+| `internal/tui/slash.go` | `/rename`, `/model`, mode paths only | menu population | second lander rebases |
+| codec | new fields round-trip (the plan's A12) | any new `agent.Event` field must too (`11`, this file) | the completeness test enforces both |
+| reviewers, the mac-mini, `-race` on a shared box | | | stagger smokes; S1b's V5 runs on a quiet box |
+
+**H3 and H5 wait for Plan 021's PR 2** (`feature/plan-021-s1b-asks`, the ask
+registry and its sequenced endings). **H6, H7 and H8 wait for S1b as a
+whole** (all three PRs merged), per SD-17's original ordering, relaxed above.
+
+Every PR in Plan 021 starts from a freshly fetched `origin/main`, and the
+executor tells the `craze-harness` session when each PR opens and when it
+merges — the same discipline as the S1a / H2 integration above.
+
 ## Practical notes
 
 - This folder is on `main` from `f943472` (2026-09-19); a harness worktree

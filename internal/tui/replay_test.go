@@ -229,20 +229,20 @@ func TestSessionComesUpInEitherOrder(t *testing.T) {
 	}
 }
 
-// TestReplayLeavesTheTurnAlone: a replay is history, not a turn. Nothing may
-// bump turnSeq — a turn start retires the last turn's plan offer and its
+// TestReplayLeavesTheTurnAlone: a replay is history, not a turn. Nothing in it
+// may start one — a turn start retires the last turn's plan offer and its
 // evidence, and a replay retiring them would be the restored transcript
-// answering for a session it is not part of.
+// answering for a session it is not part of. What says no turn started is that
+// no prompt reached the session and nothing on screen says one is running.
 func TestReplayLeavesTheTurnAlone(t *testing.T) {
-	m, _ := loadedStub(t, nil)
-	seq := m.turnSeq
+	m, stub := loadedStub(t, nil)
 	m = feed(t, m, replayEvent(agent.ReplayStart))
 	for _, ev := range replayTranscript() {
 		m = feed(t, m, replayed(ev))
 	}
 	m = feed(t, m, replayEvent(agent.ReplayEnd))
-	if m.turnSeq != seq {
-		t.Fatalf("turnSeq moved from %d to %d during a replay", seq, m.turnSeq)
+	if n := turnsStarted(stub); n != 0 {
+		t.Fatalf("the replay started %d turns", n)
 	}
 	if m.status == statusWorking || m.spinnerVisible() || m.tickFast {
 		t.Fatalf("a replay started a turn: status=%v spinner=%v", m.status, m.spinnerVisible())
@@ -361,9 +361,9 @@ func TestFirstSendWritesTheFallbackTitle(t *testing.T) {
 	m = deliver(t, m, startedMsg{})
 
 	long := strings.Repeat("é", 200)
-	m, cmd := typeAndEnter(t, m, "  first line of the prompt  \n second line \n"+long)
-	if cmd == nil {
-		t.Fatal("the send was refused")
+	m = pumpEnter(t, m, "  first line of the prompt  \n second line \n"+long)
+	if m.status != statusWorking {
+		t.Fatalf("the send was refused: status %s", m.status)
 	}
 	if len(idx.rows) != 1 {
 		t.Fatalf("the first send wrote %d rows", len(idx.rows))
@@ -380,14 +380,19 @@ func TestFirstSendWritesTheFallbackTitle(t *testing.T) {
 	}
 
 	// A second send changes nothing a title rule would keep, so it does not
-	// rewrite the file.
-	m.status = statusIdle
-	m.promptEndSeq, m.streamEndSeq = m.turnSeq, m.turnSeq
-	if _, cmd := typeAndEnter(t, m, "second prompt"); cmd == nil {
-		t.Fatal("the second send was refused")
+	// rewrite the file. The first turn is waited out rather than declared over,
+	// so the second send is a send and not a queued row — which means the
+	// turn's own end has touched the row by now, so what this counts is only
+	// what the second send added.
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	written := len(idx.rows)
+	m = pumpEnter(t, m, "second prompt")
+	if m.status != statusWorking {
+		t.Fatalf("the second send was refused: status %s", m.status)
 	}
-	if len(idx.rows) != 1 {
-		t.Fatalf("the second send wrote again: %+v", idx.rows)
+	if len(idx.rows) != written {
+		t.Fatalf("the second send wrote again: %+v", idx.rows[written:])
 	}
 }
 
@@ -493,7 +498,7 @@ func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 	m.replaying, m.loading = false, false
 	m = deliver(t, m, startedMsg{})
 
-	m, _ = typeAndEnter(t, m, "the first prompt")
+	m = pumpEnter(t, m, "the first prompt")
 	if len(idx.rows) != 0 {
 		t.Fatalf("a failing index recorded %d rows", len(idx.rows))
 	}
@@ -503,12 +508,9 @@ func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 
 	// The next send finds the index working again.
 	idx.err = nil
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	m = deliver(t, m, promptDoneMsg{})
-	if m.status != statusIdle {
-		t.Fatalf("the turn did not settle: status %v", m.status)
-	}
-	m, _ = typeAndEnter(t, m, "the second prompt")
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	m = pumpEnter(t, m, "the second prompt")
 	if len(idx.rows) != 1 {
 		t.Fatalf("the retry wrote %d rows, want 1", len(idx.rows))
 	}
@@ -541,11 +543,10 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateSkillsHome(t)
 			idx := &fakeIndex{}
-			stub := NewStub()
-			t.Cleanup(func() { _ = stub.Close() })
-			def := tc.configure(stub)
+			sess := newScriptedSession()
+			def := tc.configure(sess.Stub)
 			m := New(Config{
-				Session:        stub,
+				Session:        sess,
 				Theme:          "tokyo-night",
 				Workspace:      t.TempDir(),
 				Model:          "grok",
@@ -560,18 +561,21 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 				t.Fatal("fixture: the session has no id, so nothing would be written anyway")
 			}
 
-			m, cmd := typeAndEnter(t, m, "the first prompt")
-			if cmd == nil {
-				t.Fatal("the send was refused")
-			}
+			// The turn is a real one, open and then ended cleanly, so the agent's
+			// own title lands inside it and the turn's end runs the touch: every
+			// write moment — the first send, the agent title, the turn's end,
+			// /rename — is reached, and none of them may write.
+			sc := scriptHeld()
+			m = startScripted(t, m, sess, "the first prompt", sc)
 			if !m.indexSeeded {
 				t.Fatal("a skipped write is done, not failed: the first-prompt write must not be retried")
 			}
-			m = feed(t, m,
-				agent.Event{Type: agent.EventMeta, Text: "an agent title"},
-				agent.Event{Type: agent.EventDone, StopReason: "end_turn"},
-			)
-			m = deliver(t, m, promptDoneMsg{})
+			sess.AgentTitle("an agent title")
+			sess.Emit(agent.Event{Type: agent.EventMeta, Text: "an agent title"})
+			m = pumpUntil(t, m, viewHas("an agent title"))
+			sc.Release()
+			m = pumpUntil(t, m, isIdle)
+			m = pumpSettled(t, m)
 			m = runSlash(t, m, "/rename a user title")
 			if len(idx.rows) != 0 {
 				t.Fatalf("a hidden provider's session was indexed: %+v", idx.rows)

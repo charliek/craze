@@ -38,17 +38,19 @@ type journalHeader struct {
 // built before the log (EventLogOptions.Incarnation).
 func newSessionLog(opts Options, h journalHeader) *EventLog {
 	inc := NewIncarnation()
+	o := EventLogOptions{Incarnation: inc, NoPrimary: opts.NoPrimary}
 	if opts.JournalDir == "" {
-		return NewEventLog(EventLogOptions{Incarnation: inc})
+		return NewEventLog(o)
 	}
 	w, err := newSessionJournal(opts, h, inc)
 	if err != nil {
 		if d := diagWriter(opts); d != nil {
 			fmt.Fprintf(d, "craze: %v; this session is not journaled\n", err)
 		}
-		return NewEventLog(EventLogOptions{Incarnation: inc})
+		return NewEventLog(o)
 	}
-	return NewEventLog(EventLogOptions{Incarnation: inc, Journal: w})
+	o.Journal = w
+	return NewEventLog(o)
 }
 
 // newSessionJournal builds the journal writer. It does no I/O beyond reading

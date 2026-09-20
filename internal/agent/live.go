@@ -78,23 +78,6 @@ type session struct {
 	// subagentFinishSeq stamps records in the order they finished, which is
 	// not spawn order; the finished-record cap evicts by it.
 	subagentFinishSeq uint64
-	// queue is craze's own message queue (§3.1). queueOp orders whole
-	// transactions — the mutation and the events it produced — so the event
-	// stream can be replayed into the same queue. emitMu is taken inside
-	// queueOp and held across the transaction's emits, which happen after
-	// queueOp is released: emit blocks on a full event channel, and a reader
-	// that is waiting on something holding queueOp would wedge the session.
-	// Lock order: queueOp → emitMu → s.mu → the queue's own lock, and
-	// emitMu → the event log's publishing boundary. Every emit takes the
-	// boundary, and it is a leaf: nothing holding it takes any of these
-	// locks. It may be taken with emitMu held (queueTx) and is never taken
-	// with s.mu held, because a publisher blocked on a full primary while
-	// holding s.mu would stop Close, which needs s.mu to close done — the
-	// one thing that releases it. That was already the rule for emit
-	// (emitParked says why); the boundary makes it a lock-order rule.
-	queueOp sync.Mutex
-	emitMu  sync.Mutex
-	queue   PromptQueue
 	// doneEmitted marks that the turn is over — Prompt has returned, either
 	// way. inPrompt is still true until Prompt's defer runs, so it alone
 	// cannot say whether there is still a turn to interject into.
@@ -297,7 +280,20 @@ func (s *session) Events() <-chan Event {
 func (s *session) Subscribe(o SubscribeOptions) (*Subscription, error) { return s.log.Subscribe(o) }
 func (s *session) Incarnation() string                                 { return s.log.Incarnation() }
 
-var _ EventSource = (*session)(nil)
+// EventLog is the session's LogOwner (plan 021 §3.3): the log a component above
+// the seam publishes into, so that what it records lands in this session's one
+// sequence, ahead of or behind the session's own events by nothing but order.
+func (s *session) EventLog() *EventLog { return s.log }
+
+// Now is the session's Clocked (plan 021 §3.9): the clock emitCtx stamps At
+// from, so a caller above the seam stamps from the same one.
+func (s *session) Now() time.Time { return time.Now() }
+
+var (
+	_ EventSource = (*session)(nil)
+	_ LogOwner    = (*session)(nil)
+	_ Clocked     = (*session)(nil)
+)
 
 // Start spawns the agent and sets the session up. Its body is start; what is
 // here is the journal's half (plan 020 §3.5): a failure is noted before the
@@ -1002,12 +998,11 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	s.doneEmitted = true
 	s.mu.Unlock()
 	if err != nil {
-		// The error goes out first, so a consumer is already in its error
-		// state when the removals arrive and can say why the queue emptied.
+		// The error goes out first, so a consumer already in its error state
+		// by the time the engine's chain policy clears its own queue at
+		// settlement (plan 021 §3.5) — this session has none of its own any
+		// more.
 		s.emit(Event{Type: EventError, Err: err})
-		// Nothing drains from an error state, and a queue that outlived one
-		// would run behind whatever the user sends next.
-		s.clearQueueOnError()
 		return Result{}, err
 	}
 	if res.StopReason == acp.StopCancelled {
@@ -1020,8 +1015,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 // refusedBeforeWire reports an error that means the prompt never reached the
 // agent: a turn craze did not start is running, or one of craze's own still
 // is. Nothing was attempted and no queued message was lost, so the refusal is
-// the caller's to retry — it is not a turn that failed, and the queue it would
-// have drained stays exactly as it was.
+// the caller's to retry — it is not a turn that failed.
 func refusedBeforeWire(err error) bool {
 	return errors.Is(err, acp.ErrForeignTurn) || errors.Is(err, acp.ErrPromptInFlight)
 }
@@ -1110,9 +1104,6 @@ func (s *session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	// s.mu → the queue's lock is the order every queue transaction takes;
-	// reading them the other way round here would close the cycle.
-	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Modes = append([]ModeInfo(nil), s.snap.Modes...)
 	out.Commands = append([]CommandInfo(nil), s.snap.Commands...)
@@ -1125,10 +1116,29 @@ func (s *session) Snapshot() Snapshot {
 	return out
 }
 
-func (s *session) Cancel(ctx context.Context) error {
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3): s.foreign under
+// s.mu alone, the same field Snapshot reports, with none of Snapshot's clones.
+func (s *session) ForeignTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreign
+}
+
+// Cancel maps onto CancelOutcome as follows (plan 021 §3.7): with no client at
+// all, or with nothing of craze's own claimed or running (a foreign turn or
+// idle), Settled is true and Wrote is whether the write below succeeded — the
+// no-claim path and the wireSent/wireRefused path are the two writing paths,
+// and both set Wrote from client.Cancel's own return. A catalog-wait abort, or
+// a wire that settles wireWithdrawn, is a Withdrew with nothing written and
+// nothing left to wait for, so Settled is true too. Waiting on the wire's
+// outcome or the turn's own ending can be cut short by ctx or by the session
+// closing: Settled is then false, because this call does not know what
+// finished the wait — only what it already knew before giving up, which is
+// exactly what is reported alongside the error.
+func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return nil
+		return CancelOutcome{Settled: true}, nil
 	}
 	// A prompt still waiting for the catalog has opened no turn, so nothing
 	// below would reach it: without this, Esc would return having cancelled
@@ -1160,7 +1170,7 @@ func (s *session) Cancel(ctx context.Context) error {
 	s.mu.Lock()
 	if s.abortCatalogWaitLocked() {
 		s.mu.Unlock()
-		return nil
+		return CancelOutcome{Withdrew: true, Settled: true}, nil
 	}
 	// From here until the turn ends an interjection would be stranded, which
 	// is what makes grok mint a turn of its own. The claim, the turn and the
@@ -1174,8 +1184,16 @@ func (s *session) Cancel(ctx context.Context) error {
 	if (!in && !claimed) || wire == nil {
 		// No prompt of craze's own is claimed: nothing is running, or the
 		// agent is running a turn it started itself. Either way there is no
-		// prompt of ours for the cancel to overtake, so it goes now.
-		return client.Cancel(ctx)
+		// prompt of ours for the cancel to overtake, so it goes now. Settled
+		// is true regardless of whether the write itself succeeded: craze had
+		// no turn of its own in flight either way, so there is nothing here
+		// for a later wait to resolve. Wrote is not merely "no error": the
+		// client answers nil without writing while it has no session id, which
+		// is the whole of Start before session/new returns, and a cancel then
+		// reached nobody.
+		known := client.SessionID() != ""
+		returned, err := s.writeCancel(ctx, client)
+		return CancelOutcome{Wrote: known && returned && err == nil, Settled: true}, err
 	}
 	// The prompt is claimed before its turn opens and its turn opens before
 	// its request is written, so the cancel waits for the wire to say what
@@ -1191,22 +1209,39 @@ func (s *session) Cancel(ctx context.Context) error {
 	select {
 	case <-wire.done:
 	case <-ctx.Done():
-		return ctx.Err()
+		// The write outcome is still unknown, so nothing is known: no write,
+		// no withdrawal, no settlement.
+		return CancelOutcome{}, ctx.Err()
 	case <-s.done:
-		return nil
+		// The session closed before the wire said anything. The outcome is
+		// exactly as unknown as the ctx.Done case above; "as today" is the nil
+		// error only.
+		return CancelOutcome{}, nil
 	}
+	var wrote, withdrew bool
 	switch s.outcomeOf(wire) {
 	case wireSent, wireRefused:
 		// Each Cancel writes once at most: here, or on the no-turn path above.
 		// Two racing Cancels can each write one, which the agent tolerates.
 		// A refused prompt is cancelled too: the refusal that reaches here
 		// is a foreign turn, and that turn is still running.
-		if err := client.Cancel(ctx); err != nil {
-			return err
+		returned, err := s.writeCancel(ctx, client)
+		switch {
+		case err != nil:
+			return CancelOutcome{}, err
+		case !returned:
+			// The session closed with the write still in the pipe. Nothing about
+			// it is known, which is the same answer the wire wait above gives for
+			// a close: no write, no withdrawal, no settlement, and no error.
+			return CancelOutcome{}, nil
 		}
+		wrote = true
 	default:
 		// wireFailed or wireWithdrawn: the prompt never reached the agent, so
-		// there is no turn there to stop and nothing is written.
+		// there is no turn there to stop and nothing is written. Only the
+		// latter is a withdrawal this cancel caused; wireFailed is a prompt
+		// that ended some other way before this cancel could reach it.
+		withdrew = s.outcomeOf(wire) == wireWithdrawn
 	}
 	// The wait is for the turn this cancel was for, and only that one: the
 	// release clears s.wire together with inPrompt, so a wire that is no
@@ -1219,13 +1254,77 @@ func (s *session) Cancel(ctx context.Context) error {
 	in = s.inPrompt && s.wire == wire
 	s.mu.Unlock()
 	if !in || done == nil {
-		return nil
+		// Nothing left to wait for: either this wire's outcome already says
+		// there is no turn of ours running (withdrawn, failed), or the turn
+		// it did open has already ended by this read.
+		return CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: true}, nil
 	}
 	select {
 	case <-done:
-		return nil
+		return CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: true}, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return CancelOutcome{Wrote: wrote, Withdrew: withdrew}, ctx.Err()
+	}
+}
+
+// writeCancel writes the one session/cancel a Cancel owes, and makes the
+// caller's context mean what this session has always promised it means: a bound
+// on the whole call. returned says the write itself came back, so its error is
+// the wire's own answer; false says this call gave the write up while it was
+// still in flight, and then nothing about it is known.
+//
+// The bound has to be here because it is nowhere below: Conn.Notify checks the
+// context once, *before* a synchronous write (internal/acp/conn.go), and
+// Encoder.WriteMessage then marshals, takes the encoder's mutex and writes. With
+// the agent's stdin full — an agent that has stopped reading, which is exactly
+// the state a user presses Esc in — that write blocks for as long as the pipe
+// does, past any deadline. Before the engine such a cancel stranded one
+// goroutine; now the engine holds every admission path while a cancel is in
+// flight, so a cancel that never returns is a session that never settles another
+// turn and never admits another prompt. Giving the write up is the lesser
+// failure, and the seam already promised it.
+//
+// Abandoning a write is not free, and this is exactly what it costs. The write
+// is in one of two places. Either it is inside the encoder, holding its mutex,
+// in which case every later write — a prompt's included — takes that same mutex
+// afterwards and so reaches the agent *behind* this cancel, which an agent
+// answers by dropping a cancel that names no running turn: that is the same
+// tolerance the no-turn path above has always relied on. Or it is still waiting
+// for the encoder's mutex behind some other write, and then a prompt admitted
+// after this call returns can overtake it and be the turn the cancel lands on.
+// That window is not closed here, and is not claimed to be: plan 017's rule is
+// kept by the wire wait above for the turn this cancel *was* for, while this
+// residual case is a cancel the caller was told nothing is known about — the
+// engine reports it as `unknown`, which is precisely that — and the honest
+// remedy is a second cancel, not a longer wait that wedges the session.
+//
+// The goroutine outlives the call and ends when the pipe takes the bytes or the
+// transport is closed under it, which fails the parked write. Nothing is
+// published from it and its result is dropped. The client's own completion of the
+// requests it was holding rides in it too, so on an abandoned write that can land
+// after this returns — but only for the requests held when this cancel was made
+// (acp.Client.Held, taken below before the goroutine exists), never for one a
+// later turn registered. Nothing a client can see waits on it either, because
+// the session answered its *own* parked asks before getting here (cancelWaiting,
+// above).
+func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned bool, err error) {
+	// What this cancel is a cancel of is fixed here, on the caller's goroutine,
+	// before anything is handed over. The client answers the requests it holds
+	// cancelled as the first step of its Cancel; left to gather them on the
+	// goroutine below, a write given up on its context could run late — after
+	// the caller had returned, the engine had released its hold, and a new
+	// prompt had been admitted and asked for a permission — and answer *that*
+	// request cancelled, for a turn nobody cancelled.
+	held := client.Held()
+	res := make(chan error, 1)
+	go func() { res <- client.CancelHeld(ctx, held) }()
+	select {
+	case err := <-res:
+		return true, err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-s.done:
+		return false, nil
 	}
 }
 

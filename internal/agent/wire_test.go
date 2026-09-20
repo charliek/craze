@@ -219,6 +219,31 @@ func (f failPromptWriter) Write(b []byte) (int, error) {
 	return f.w.Write(b)
 }
 
+// watchCancelWrites wraps w so that every session/cancel frame says so as it
+// goes into the pipe, and every other frame passes on untouched. It is the
+// barrier for "this cancel is committed to a write": the announcement is made
+// after Conn.Notify's one look at the context and immediately before the pipe
+// write that, with nobody reading, parks. From there the frame is going out
+// whatever the caller's context does, which is the whole point of the schedule.
+func watchCancelWrites(writing chan<- struct{}) func(io.Writer) io.Writer {
+	return func(w io.Writer) io.Writer { return cancelWriteWatcher{w: w, writing: writing} }
+}
+
+type cancelWriteWatcher struct {
+	w       io.Writer
+	writing chan<- struct{}
+}
+
+func (c cancelWriteWatcher) Write(b []byte) (int, error) {
+	if bytes.Contains(b, []byte(`"method":"session/cancel"`)) {
+		select {
+		case c.writing <- struct{}{}:
+		default:
+		}
+	}
+	return c.w.Write(b)
+}
+
 // wireSeam holds prompts at testBeforeWire, the point where a turn is open and
 // its request not yet written. Each prompt that reaches it hands over its
 // turn's wire and parks until the test lets it go, its session closes, or the
@@ -300,7 +325,7 @@ func waitCancelling(t *testing.T, s *session) {
 
 func cancelOn(ctx context.Context, s *session) <-chan error {
 	out := make(chan error, 1)
-	go func() { out <- s.Cancel(ctx) }()
+	go func() { _, err := s.Cancel(ctx); out <- err }()
 	return out
 }
 
@@ -311,6 +336,51 @@ func cancelBounded(t *testing.T, s *session) <-chan error {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	t.Cleanup(cancel)
 	return cancelOn(ctx, s)
+}
+
+// cancelOutcomeResult is a Cancel call's outcome and error together, for the
+// tests that pin CancelOutcome rather than only the error.
+type cancelOutcomeResult struct {
+	outcome CancelOutcome
+	err     error
+}
+
+// cancelOutcomeOn is cancelOn, keeping the CancelOutcome alongside the error.
+func cancelOutcomeOn(ctx context.Context, s *session) <-chan cancelOutcomeResult {
+	out := make(chan cancelOutcomeResult, 1)
+	go func() {
+		outcome, err := s.Cancel(ctx)
+		out <- cancelOutcomeResult{outcome, err}
+	}()
+	return out
+}
+
+// cancelOutcomeBounded is cancelBounded, keeping the CancelOutcome alongside
+// the error.
+func cancelOutcomeBounded(t *testing.T, s *session) <-chan cancelOutcomeResult {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	t.Cleanup(cancel)
+	return cancelOutcomeOn(ctx, s)
+}
+
+func cancelOutcomeStillWaiting(t *testing.T, cancelled <-chan cancelOutcomeResult, why string) {
+	t.Helper()
+	select {
+	case r := <-cancelled:
+		t.Fatalf("Cancel returned outcome %+v err %v %s", r.outcome, r.err, why)
+	default:
+	}
+}
+
+func cancelOutcomeReturn(t *testing.T, out <-chan cancelOutcomeResult, d time.Duration) cancelOutcomeResult {
+	t.Helper()
+	select {
+	case r := <-out:
+		return r
+	case <-time.After(d):
+		t.Fatal("Cancel never returned")
+		return cancelOutcomeResult{}
+	}
 }
 
 // openTurnByHand sets exactly the turn state Cancel reads — inPrompt, the
@@ -537,11 +607,11 @@ func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 			}
 			endTurn := openTurnByHand(t, s, tc.in, tc.claimed, wire)
 
-			cancelled := cancelBounded(t, s)
+			cancelled := cancelOutcomeBounded(t, s)
 			if tc.publish != wirePending {
 				waitCancelling(t, s)
 				p.expectNothing(t, "a cancel went out while its prompt's write was still pending")
-				cancelStillWaiting(t, cancelled, "while the wire was still pending")
+				cancelOutcomeStillWaiting(t, cancelled, "while the wire was still pending")
 				s.mu.Lock()
 				switch tc.opens {
 				case openClaimed:
@@ -558,11 +628,30 @@ func TestCancelDecidesOnTheWireOutcome(t *testing.T) {
 			}
 			p.expectNothing(t, "nothing more may be written")
 			if tc.waits {
-				cancelStillWaiting(t, cancelled, "before the turn ended")
+				cancelOutcomeStillWaiting(t, cancelled, "before the turn ended")
 				endTurn()
 			}
-			if err := cancelReturn(t, cancelled, 5*time.Second); err != nil {
-				t.Fatalf("cancel: %v", err)
+			r := cancelOutcomeReturn(t, cancelled, 5*time.Second)
+			if r.err != nil {
+				t.Fatalf("cancel: %v", r.err)
+			}
+			// CancelOutcome (plan 021 §3.7): Wrote is exactly whether this case
+			// writes to the agent at all — every writing path here succeeds, so
+			// there is no case where Cancel wrote nothing yet still fired a
+			// notification craze does not know about. Withdrew is set only when
+			// the wire this Cancel was tracking settled wireWithdrawn: wireFailed
+			// is a prompt that ended some other way, not a withdrawal this call
+			// caused. Every case here either wrote or waited for its own turn's
+			// promptDone to close (or found nothing left to wait for at all), so
+			// Settled is always true — TestCancelWaitIsBoundedByItsContext and
+			// TestCancelWaitEndsWhenTheSessionCloses hold the false cases.
+			final := tc.start
+			if tc.publish != wirePending {
+				final = tc.publish
+			}
+			want := CancelOutcome{Wrote: tc.writes, Withdrew: final == wireWithdrawn, Settled: true}
+			if r.outcome != want {
+				t.Fatalf("CancelOutcome = %+v, want %+v", r.outcome, want)
 			}
 		})
 	}
@@ -586,8 +675,14 @@ func TestCancelReportsAFailedCancelWrite(t *testing.T) {
 	t.Run("no turn", func(t *testing.T) {
 		p := newInProcess(t, acp.DialectCursor, nil)
 		_ = p.serverR.Close()
-		if err := p.s.Cancel(t.Context()); !errors.Is(err, io.ErrClosedPipe) {
+		outcome, err := p.s.Cancel(t.Context())
+		if !errors.Is(err, io.ErrClosedPipe) {
 			t.Fatalf("cancel over a closed write direction: %v", err)
+		}
+		// Nothing of craze's own was running either way, so Settled is true
+		// whether or not the write itself succeeded.
+		if want := (CancelOutcome{Settled: true}); outcome != want {
+			t.Fatalf("CancelOutcome = %+v, want %+v", outcome, want)
 		}
 	})
 	t.Run("a written prompt", func(t *testing.T) {
@@ -597,10 +692,86 @@ func TestCancelReportsAFailedCancelWrite(t *testing.T) {
 		_ = p.serverR.Close()
 		cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 		defer cancel()
-		if err := p.s.Cancel(cancelCtx); !errors.Is(err, io.ErrClosedPipe) {
+		outcome, err := p.s.Cancel(cancelCtx)
+		if !errors.Is(err, io.ErrClosedPipe) {
 			t.Fatalf("cancel over a closed write direction: %v", err)
 		}
+		// The write is known to have failed once the wire said sent, so
+		// nothing here is known: the zero CancelOutcome.
+		if outcome != (CancelOutcome{}) {
+			t.Fatalf("CancelOutcome = %+v, want the zero value", outcome)
+		}
 		// The agent's own direction still works, so the turn can end.
+		p.reply(t, req.ID, map[string]string{"stopReason": acp.StopEndTurn})
+		if err := promptReturn(t, out, "the prompt never came back"); err != nil {
+			t.Fatalf("prompt: %v", err)
+		}
+	})
+}
+
+// TestCancelIsBoundedByItsContextWhileItsWriteIsInTheAgentsPipe is the bound on
+// the write itself, which nothing below the session provides: Conn.Notify checks
+// the context once, before a synchronous write, and the write then blocks for as
+// long as the pipe does. These pipes are unbuffered and the test is their only
+// reader, so a frame nobody has asked for is a write parked in exactly the place
+// an agent that has stopped reading its stdin puts one — the state a user
+// presses Esc in.
+//
+// Both writing paths are covered, because they are two different calls: the one
+// with no turn of craze's own, and the one after the wire says the prompt was
+// sent. Neither may outlast its context, because the engine holds every
+// admission path while a cancel is in flight: a Cancel that never returned would
+// be a session that never settles another turn.
+//
+// The write is abandoned, not undone. The frame does arrive once the pipe is
+// read, which is why the outcome says nothing was *known* to have been written
+// rather than that nothing was, and why the goroutine carrying it ends here
+// instead of leaking.
+func TestCancelIsBoundedByItsContextWhileItsWriteIsInTheAgentsPipe(t *testing.T) {
+	t.Run("no turn", func(t *testing.T) {
+		writing := make(chan struct{}, 1)
+		p := newInProcess(t, acp.DialectCursor, watchCancelWrites(writing))
+		cancelCtx, cancel := context.WithCancel(t.Context())
+		cancelled := cancelOutcomeOn(cancelCtx, p.s)
+		// The write is in the pipe: nothing has asked for a frame, so nothing
+		// can have taken it. Cancelling is the only thing that ends this call.
+		await(t, writing, "the cancel's write to reach the pipe")
+		cancelOutcomeStillWaiting(t, cancelled, "with its write parked in the pipe")
+		cancel()
+		r := cancelOutcomeReturn(t, cancelled, 5*time.Second)
+		if !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("cancel whose context ended over a full pipe: %v", r.err)
+		}
+		// Settled stands — craze had no turn of its own either way — and Wrote
+		// does not: the write was given up, not seen to succeed.
+		if want := (CancelOutcome{Settled: true}); r.outcome != want {
+			t.Fatalf("CancelOutcome = %+v, want %+v", r.outcome, want)
+		}
+		// Reading it lets the abandoned write complete, which is how its
+		// goroutine ends, and shows what "not known to have been written" means.
+		p.expectCancel(t)
+	})
+	t.Run("a written prompt", func(t *testing.T) {
+		writing := make(chan struct{}, 1)
+		p := newInProcess(t, acp.DialectCursor, watchCancelWrites(writing))
+		out := promptOn(p.s, "hi")
+		req := p.expect(t, acp.MethodSessionPrompt)
+		cancelCtx, cancel := context.WithCancel(t.Context())
+		cancelled := cancelOutcomeOn(cancelCtx, p.s)
+		waitCancelling(t, p.s)
+		await(t, writing, "the cancel's write to reach the pipe")
+		cancelOutcomeStillWaiting(t, cancelled, "with its write parked in the pipe")
+		cancel()
+		r := cancelOutcomeReturn(t, cancelled, 5*time.Second)
+		if !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("cancel whose context ended over a full pipe: %v", r.err)
+		}
+		// The wire said sent, so the turn is craze's own and still running; the
+		// write is unknown. Nothing at all is known, which is the zero outcome.
+		if r.outcome != (CancelOutcome{}) {
+			t.Fatalf("CancelOutcome = %+v, want the zero value", r.outcome)
+		}
+		p.expectCancel(t)
 		p.reply(t, req.ID, map[string]string{"stopReason": acp.StopEndTurn})
 		if err := promptReturn(t, out, "the prompt never came back"); err != nil {
 			t.Fatalf("prompt: %v", err)
@@ -618,11 +789,17 @@ func TestCancelWaitIsBoundedByItsContext(t *testing.T) {
 	seam.parked(t)
 
 	cancelCtx, cancel := context.WithCancel(t.Context())
-	cancelled := cancelOn(cancelCtx, p.s)
+	cancelled := cancelOutcomeOn(cancelCtx, p.s)
 	waitCancelling(t, p.s)
 	cancel()
-	if err := cancelReturn(t, cancelled, 5*time.Second); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancel whose context ended: %v", err)
+	r := cancelOutcomeReturn(t, cancelled, 5*time.Second)
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("cancel whose context ended: %v", r.err)
+	}
+	// The wire's outcome was still unknown when the context ended: nothing is
+	// known, and CancelOutcome says so.
+	if r.outcome != (CancelOutcome{}) {
+		t.Fatalf("CancelOutcome = %+v, want the zero value", r.outcome)
 	}
 	p.expectNothing(t, "a cancel that gave up")
 
@@ -660,13 +837,19 @@ func TestCancelWaitEndsWhenTheSessionCloses(t *testing.T) {
 		t.Fatal("the prompt never reached the wire")
 	}
 
-	cancelled := cancelBounded(t, p.s)
+	cancelled := cancelOutcomeBounded(t, p.s)
 	waitCancelling(t, p.s)
 	if err := p.s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cancelReturn(t, cancelled, 5*time.Second); err != nil {
-		t.Fatalf("cancel on a closed session: %v", err)
+	r := cancelOutcomeReturn(t, cancelled, 5*time.Second)
+	if r.err != nil {
+		t.Fatalf("cancel on a closed session: %v", r.err)
+	}
+	// s.done closing is "outcome as known": the wire was still pending, so
+	// nothing was known, and the nil error must not be read as Settled.
+	if r.outcome != (CancelOutcome{}) {
+		t.Fatalf("CancelOutcome = %+v, want the zero value", r.outcome)
 	}
 	release()
 	if err := promptReturn(t, out, "the prompt never came back"); err == nil {

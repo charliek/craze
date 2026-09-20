@@ -26,6 +26,14 @@ import (
 // That is what keeps "emitted means buffered" (internal/cli/prompt.go's
 // drainBuffered) exactly true.
 //
+// Beside that path, and only for callers above the provider seam, is the outbox
+// (plan 021 §3.3): Enqueue hands over a batch and returns, and one log-owned
+// goroutine publishes it through that same commit path a moment later. It is the
+// one thing in the log that is not inline, which is why "emitted means buffered"
+// is a statement about what a *session* publishes directly, and why a primary
+// client must keep reading until it closes the session. Flush is how a caller
+// that needs the barrier back waits for it.
+//
 // A subscription resuming from further back than the ring reaches has the
 // head of its range read from the journal's own file instead (headRange), so
 // a cursor outlives an eviction for as long as the journal holds what it
@@ -44,6 +52,12 @@ const (
 	// primaryCap is the primary channel's buffer: today's events channel,
 	// unchanged, since every consumer's pacing was tuned against it.
 	primaryCap = 256
+	// defaultOutboxEvents and defaultOutboxBytes are the outbox's soft bound
+	// (plan 021 §3.3), the one OutboxRoom reports on: the same numbers as the
+	// ring's, because the outbox is the same kind of buffer of the same kind of
+	// records, and a caller over either is a caller nobody is reading.
+	defaultOutboxEvents = 4096
+	defaultOutboxBytes  = 8 << 20
 )
 
 // maxOmittedError caps an omitted record's error message. It is well under
@@ -70,6 +84,24 @@ var (
 	// produces that; it is the owner's guard against a hole ever reaching a
 	// reader silently, and seeing it is a bug.
 	errNotContiguous = errors.New("agent: event log: a subscription's records are not contiguous")
+	// ErrLogClosing is Flush's answer once Close has begun: the outbox takes no
+	// more work, so a barrier on it can no longer mean what it means. It is not
+	// ErrClosed, which ends a subscription — a caller that sees this one has
+	// simply asked for an ordering it can stop waiting for (plan 021 §3.3).
+	ErrLogClosing = errors.New("agent: event log closing")
+	// ErrObserverSet refuses a second Observe. The observer is one per log, set
+	// before the session publishes anything, because it runs inside the
+	// publishing boundary and two of them would be a fan-out with no budget.
+	ErrObserverSet = errors.New("agent: the event log already has an observer")
+	// errNilObserver refuses an observer that is nil: Observe would then read
+	// as "unset", and the second, real call would be the one refused.
+	errNilObserver = errors.New("agent: the event log's observer must not be nil")
+	// errEnqueuedErr is what Enqueue puts in place of an Err an enqueued event
+	// should never have carried (Enqueue's contract). It is a plain sentinel
+	// created here, so encoding it runs nothing but this package's own code: its
+	// Error is a constant, it wraps nothing, and it has no Is or As of its own,
+	// so the codec's classification walks it without calling anything foreign.
+	errEnqueuedErr = errors.New("agent: an enqueued event carried Err, which the outbox does not read")
 )
 
 // CursorReason is why a cursor cannot be resumed from.
@@ -233,6 +265,16 @@ type EventSource interface {
 
 var _ EventSource = (*EventLog)(nil)
 
+// LogOwner is a session that will hand its event log over: what a component
+// above the provider seam needs in order to publish into the session's own
+// sequence instead of beside it (plan 021 §3.3). Like EventSource it is optional
+// and found by a type assertion, so agent.Session itself does not change; every
+// Session in this repo implements it, and engine.New refuses a session that does
+// not — a driver that cannot record what it does is not one craze will run.
+type LogOwner interface {
+	EventLog() *EventLog
+}
+
 // journalFile is what the file leg of a resume needs of the journal: the
 // health it consults before it reads anything, the complete-record boundary
 // it takes at the cutoff, the writer's own live file, and the wait for a
@@ -272,6 +314,17 @@ type EventLogOptions struct {
 	// built the journal with (NewIncarnation), because the journal's file
 	// name and header carry it and the journal is built first.
 	Incarnation string
+	// NoPrimary drops the primary send from every publish path: nothing is ever
+	// put on Primary(), and so no publisher — not Publish, not the outbox's
+	// drainer — can be held by a reader that is not there (plan 021 §3.3).
+	// Everything else is identical: the sequence, the ring, every subscription,
+	// the journal, the observer, and what Flush and Close mean by "committed".
+	//
+	// It is what makes a session with no client possible; today the 257th
+	// unread event blocks the agent. S1b uses it in tests, S4 in earnest
+	// (SD-33), where it becomes the normal mode and a client reads through a
+	// budgeted subscription instead.
+	NoPrimary bool
 }
 
 // NewIncarnation mints a host incarnation id, a UUIDv7 (plan 020 §3.7): one
@@ -290,13 +343,15 @@ func NewIncarnation() string {
 // it across the blocking primary send is deliberate: the primary's order is
 // the sequence's order with no second queue, and a Publish that returned true
 // has its event in the primary's buffer. Every blocking point inside the
-// boundary selects on closed, so Close can always acquire it.
+// boundary selects on something Close closes — closed for a publisher, the
+// outbox's cut for the drainer — so Close can always acquire it.
 //
-// The boundary is a strict leaf. A session may acquire it with its emitMu
-// held, never the reverse, and never with its s.mu held (already the emit
-// rule: emitParked). While it is held, nothing does I/O, calls into a
-// session, or writes a diagnostic; the only locks taken under it are leaves:
-// a subscription's mu and the journal's queue mutex. Note never takes it.
+// The boundary is a strict leaf. A session never acquires it with its s.mu
+// held (already the emit rule: emitParked). While it is held, nothing does
+// I/O, calls into a session, or writes a diagnostic; the only locks taken
+// under it are leaves:
+// a subscription's mu and the journal's queue mutex. Note never takes it. The
+// observer, when one is set, runs there too, under the same rules (Observe).
 //
 // Around the boundary is the in-flight region: every Publish and TryPublish
 // enters it before the boundary and leaves it as it returns, so the closing
@@ -310,12 +365,54 @@ func NewIncarnation() string {
 // Error method, a classification over the caller's error type) ever runs
 // where Close is waiting.
 //
-// Lock order: a session's queueOp → emitMu → the in-flight region → the
-// boundary → a subscription's mu, and the boundary → the journal's queue
-// mutex; noteMu → the journal's queue mutex, and only Close takes noteMu
-// under the boundary. inflightMu guards the counter alone and is a leaf below
-// everything: it is never held across the boundary, a channel operation, a
-// hook, or any other lock.
+// Beside the boundary is the outbox (plan 021 §3.3): a FIFO of batches a caller
+// hands over with Enqueue, and one log-owned goroutine — the drainer, started
+// lazily and joined by Close — that publishes them through the ordinary commit
+// path, so an enqueued event is numbered and reaches the primary, the ring,
+// every subscription and the journal like any other. It exists because the
+// engine and the ask registry publish from goroutines that must not block,
+// often the primary's own reader, so *state order is event order* cannot be
+// bought by holding a state lock across a blocking send. The outbox mutex is a
+// strict leaf below every lock in craze: Enqueue may be called — is meant to be
+// called — with the caller's own state lock held, and while that mutex is held
+// nothing waits for the boundary, the primary, a channel or I/O. Encoding runs
+// before it is taken, on the caller's goroutine, for the same reason Publish
+// encodes before the boundary; since encoding runs the event's own code, an
+// event enqueued under a state lock must be one whose encoding cannot re-enter
+// that lock (Enqueue says what that means).
+//
+// The drainer takes the boundary once per batch and holds it across the whole
+// batch, so a batch is contiguous in Seq: no other publisher's event ever lands
+// inside one, and a caller that enqueued a transaction sees it come back as a
+// transaction. The price is the boundary held across as many blocking primary
+// sends as the batch has events — the same wedge one Publish already allows,
+// and every waiter for the boundary still escapes on its own ctx, its session's
+// done, or the cutoff. The drainer is deliberately *not* in the in-flight
+// region: it never abandons an event, so it has nothing for the closing diag to
+// count, and being refused at that region's door once closing was set is the one
+// thing it must never be — what is in the outbox at close is committed, not
+// dropped. Close joins it as a phase of its own instead.
+//
+// Lock order: the in-flight region → the boundary → a subscription's mu, and
+// the boundary → the journal's queue mutex and the observer; noteMu → the
+// journal's queue mutex, and only Close takes noteMu under the boundary. A
+// session's own emit never holds its s.mu across the boundary (emitParked
+// says why), and there is no queue-transaction lock left on the provider seam
+// to hold across it either: the queue and the events describing it are
+// mutated and enqueued under one mutex in internal/engine now, with no lock
+// held across a blocking send (plan 021 §3.5). inflightMu guards the counter
+// alone and is a
+// leaf below everything: it is never held across the boundary, a channel
+// operation, a hook, or any other lock. outboxMu is a second such leaf, and a
+// stricter one: it is never held across the boundary or a blocking channel
+// operation, and it is never taken *under* the boundary either — the drainer
+// takes it before a batch and after it, never inside, and an observer may not
+// call the log at all — so it has no order against the boundary in either
+// direction. Above the log, plan 021 §3.3 pins the callers' side of it:
+// e.mu → outboxMu, registry.mu → outboxMu, s.mu → outboxMu; and e.mu and
+// registry.mu are never held across a *blocking* call — a provider call,
+// Cancel, a continuation, Publish, Flush, file I/O — which is what leaves
+// Enqueue as the one thing a holder of a state lock may do to the log.
 type EventLog struct {
 	incarnation string
 	primary     chan Event
@@ -327,11 +424,15 @@ type EventLog struct {
 	// without a journal, so a head that has left the ring is no_journal.
 	file      journalFile
 	maxRecord int
+	// noPrimary is EventLogOptions.NoPrimary: no publish path ever sends on
+	// primary, so nothing can be held by a reader that is not there.
+	noPrimary bool
 
 	// Guarded by the boundary.
-	next uint64          // the last seq committed
-	ring recordRing      // recent records, oldest first
-	subs []*Subscription // subscriptions offered each record; a terminated one is swept lazily
+	next     uint64          // the last seq committed
+	ring     recordRing      // recent records, oldest first
+	subs     []*Subscription // subscriptions offered each record; a terminated one is swept lazily
+	observer func(Event)     // Observe's, nil when unset; runs at commit
 
 	// inflightMu guards the in-flight region's state (see above): closing,
 	// set once by Close, after which no publisher is admitted; inflight, the
@@ -361,16 +462,52 @@ type EventLog struct {
 	attempts   []openAttempt
 	attemptSeq uint64
 
+	// outboxMu guards the outbox and everything that accounts for it (see the
+	// type's comment: a strict leaf, held across nothing). outbox is the FIFO of
+	// batches; events and bytes are what is in it and not yet committed, which
+	// is what OutboxRoom reports on; enqueued and drained are the running totals
+	// Flush compares, so a Flush waits for a count rather than for an event it
+	// would have to identify; waiters are the Flushes parked on them.
+	// outboxMaxEvents and outboxMaxBytes are the soft bound — a test lowers them
+	// directly, before anything enqueues, because the bound is the log's business
+	// and no caller has a reason to choose it.
+	outboxMu        sync.Mutex
+	outbox          []outboxBatch
+	outboxEvents    int
+	outboxBytes     int
+	outboxMaxEvents int
+	outboxMaxBytes  int
+	enqueued        uint64
+	drained         uint64
+	waiters         []*flushWaiter
+	drainerStarted  bool
+	// outboxWake tells the idle drainer there is a batch (capacity 1: a
+	// collapsed pair of wake-ups is a drainer that finds both batches).
+	outboxWake chan struct{}
+	// outboxCut is closed, once, under outboxMu, by the first phase of Close: it
+	// refuses every later Enqueue, makes OutboxRoom false for good, and is what
+	// the drainer's blocking primary send escapes on so that it stops *waiting*
+	// on the primary without giving up the record.
+	outboxCut chan struct{}
+	// drainer is the one drainer goroutine, for Close to join. Wait on a
+	// WaitGroup nothing ever added to returns at once, which is a log whose
+	// drainer never started. The Add is safe against the Wait without a second
+	// lock: it happens under outboxMu and only before the cut, and the cut, also
+	// under outboxMu, happens before Close waits.
+	drainer sync.WaitGroup
+
 	// owners counts subscription owner goroutines, so Close can wait for
 	// every one of them; liveOwners is the same count, readable by tests.
 	owners     sync.WaitGroup
 	liveOwners atomic.Int64
 
 	// Health counters.
-	omitted        atomic.Int64
-	subsDropped    atomic.Int64
-	droppedAtClose atomic.Int64
-	notesDropped   atomic.Int64
+	omitted              atomic.Int64
+	subsDropped          atomic.Int64
+	droppedAtClose       atomic.Int64
+	notesDropped         atomic.Int64
+	outboxSkippedPrimary atomic.Int64
+	outboxErrReplaced    atomic.Int64
 
 	// hooks are test seams; nil in production.
 	hooks *logHooks
@@ -405,11 +542,27 @@ type logHooks struct {
 	// record with seq. A subscription keeps the hooks its log had when it
 	// was opened.
 	delivered func(seq uint64)
+	// outboxAdmitting runs in the drainer just before it waits for the boundary
+	// with a batch of events events.
+	outboxAdmitting func(events int)
+	// outboxSending runs in the drainer inside the boundary, just before it
+	// offers seq to the primary; waiting is false once the cut has been seen,
+	// which is the at-close commit — the primary is tried, never waited for.
+	outboxSending func(seq uint64, waiting bool)
+	// flushParked runs in a Flush that has parked for target, so a test knows
+	// the waiter is on the list rather than on its way to it.
+	flushParked func(target uint64)
+	// outboxDrained runs in Close once the drainer has been joined: everything
+	// the outbox held is committed and offered, and no subscription has been
+	// ended yet — the one place a test can hold Close while it reads what the
+	// at-close commits put in a subscription.
+	outboxDrained func()
 }
 
 // NewEventLog builds an event log. It starts nothing: the only goroutines a
-// log ever has are one owner per subscription and, with a journal, the
-// journal's writer, and Close ends them all.
+// log ever has are one owner per subscription, the outbox's drainer once
+// something is enqueued, and, with a journal, the journal's writer — and Close
+// ends them all.
 func NewEventLog(o EventLogOptions) *EventLog {
 	inc := o.Incarnation
 	if inc == "" {
@@ -427,10 +580,15 @@ func NewEventLog(o EventLogOptions) *EventLog {
 		idle:        make(chan struct{}),
 		journal:     o.Journal,
 		maxRecord:   maxRecord,
+		noPrimary:   o.NoPrimary,
 		ring: recordRing{
 			maxItems: orDefault(o.RingEvents, defaultRingEvents),
 			maxBytes: orDefault(o.RingBytes, defaultRingBytes),
 		},
+		outboxMaxEvents: defaultOutboxEvents,
+		outboxMaxBytes:  defaultOutboxBytes,
+		outboxWake:      make(chan struct{}, 1),
+		outboxCut:       make(chan struct{}),
 	}
 	if o.Journal != nil {
 		// Only when there is one: a nil *journal.Writer in the interface would
@@ -456,7 +614,11 @@ func (l *EventLog) Incarnation() string { return l.incarnation }
 // is never closed.
 func (l *EventLog) Primary() <-chan Event { return l.primary }
 
-// release leaves the boundary.
+// release leaves the boundary. Every scope that acquires the boundary releases
+// it through a defer, so a panic inside it — an observer's, the journal's, a
+// codec bug — unwinds with the boundary free. A boundary left held by a panic a
+// caller then recovered would poison the log for good: the next publisher, the
+// drainer and Close itself would all wait on it forever (plan 021 §3.3, Observe).
 func (l *EventLog) release() { <-l.sem }
 
 // enter joins the in-flight region, or refuses once Close has begun. It never
@@ -491,11 +653,19 @@ func (l *EventLog) leave() {
 // boundary or for the primary. A true return means the event is in the
 // primary's buffer. ctx and done may be nil.
 //
+// Under EventLogOptions.NoPrimary there is no primary send at all, so the only
+// way this blocks is waiting for the boundary, and a true return means the
+// event is committed — which is what "committed" means everywhere else too.
+//
 // The event is encoded before the boundary and before the in-flight region,
 // on the publisher's goroutine: the value is the publisher's own copy by then
 // (cloneTool and its kin), encoding is the expensive part, and it runs the
 // caller's own code (an Err's Error method), which must not run anywhere a
 // Close is waiting for it.
+//
+// The boundary is released by a defer from the moment it is acquired, so every
+// way out of the section — the abandon paths and a panic from inside a commit —
+// leaves it free (release).
 func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) bool {
 	rec := l.record(ev)
 	if !l.enter() {
@@ -518,6 +688,7 @@ func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) 
 	case <-l.closed:
 		return l.abandon(true)
 	}
+	defer l.release()
 	// A select picks at random among ready cases, so a publisher can be
 	// admitted after the cutoff or after its session began closing; the
 	// event is dropped all the same.
@@ -533,26 +704,29 @@ func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) 
 	if h := l.hooks; h != nil && h.beforePrimarySend != nil {
 		h.beforePrimarySend(seq)
 	}
-	select {
-	case l.primary <- ev:
-	case <-done:
-		return l.abandonLocked(true)
-	case <-cancelled:
-		return l.abandonLocked(false)
-	case <-l.closed:
-		return l.abandonLocked(true)
+	if !l.noPrimary {
+		select {
+		case l.primary <- ev:
+		case <-done:
+			return l.abandonLocked(true)
+		case <-cancelled:
+			return l.abandonLocked(false)
+		case <-l.closed:
+			return l.abandonLocked(true)
+		}
 	}
 	rec.Seq = seq
-	l.commitLocked(rec)
-	l.release()
+	l.commitLocked(ev, rec)
 	return true
 }
 
-// abandonLocked leaves the boundary without committing: the event is dropped
-// for everyone and its number was never taken. counted says the escape was on
-// done or the cutoff, which the closing diag reports; the count is taken
-// before the boundary is released, so a Close waiting for the boundary reads
-// it. It returns false, Publish's answer.
+// abandonLocked gives the event up from inside the boundary: it is dropped for
+// everyone and its number was never taken. counted says the escape was on done
+// or the cutoff, which the closing diag reports; the count is taken while the
+// boundary is still held, so a Close waiting for the boundary reads it. It
+// returns false, Publish's answer. The boundary itself is released by the
+// caller's defer, which is what keeps one release per acquisition however the
+// section ends.
 func (l *EventLog) abandonLocked(counted bool) bool {
 	if h := l.hooks; h != nil && h.abandoning != nil {
 		h.abandoning(true)
@@ -560,7 +734,6 @@ func (l *EventLog) abandonLocked(counted bool) bool {
 	if counted {
 		l.droppedAtClose.Add(1)
 	}
-	l.release()
 	return false
 }
 
@@ -578,7 +751,8 @@ func (l *EventLog) abandon(counted bool) bool {
 // TryPublish is Publish for an event that is lossy by contract (plan 019's
 // tool progress): it never blocks. When the boundary is held or the primary
 // is full, the event is dropped for everyone, consumes no number, and it
-// returns false.
+// returns false. Under NoPrimary there is no primary to be full, so the only
+// thing it can lose to is the boundary.
 func (l *EventLog) TryPublish(ev Event) bool {
 	rec := l.record(ev)
 	// Entering the in-flight region never waits, so this keeps its contract
@@ -597,6 +771,7 @@ func (l *EventLog) TryPublish(ev Event) bool {
 	default:
 		return false
 	}
+	defer l.release()
 	select {
 	case <-l.closed:
 		return l.abandonLocked(true)
@@ -604,14 +779,15 @@ func (l *EventLog) TryPublish(ev Event) bool {
 	}
 	seq := l.next + 1
 	ev.Seq = seq
-	select {
-	case l.primary <- ev:
-	default:
-		return l.abandonLocked(false)
+	if !l.noPrimary {
+		select {
+		case l.primary <- ev:
+		default:
+			return l.abandonLocked(false)
+		}
 	}
 	rec.Seq = seq
-	l.commitLocked(rec)
-	l.release()
+	l.commitLocked(ev, rec)
 	return true
 }
 
@@ -665,7 +841,12 @@ func omittedError(err error) string {
 // unregistered here; its owner goroutine does the rest. The notes a commit
 // owes are queued after the record, and only for a committed record, so an
 // abandoned publish leaves no orphan. The caller holds the boundary.
-func (l *EventLog) commitLocked(rec Record) {
+//
+// ev is rec's own event, with its Seq, and is what the observer is handed last
+// of all — here rather than at the three call sites, so "once per committed
+// event, in Seq order, never for an abandoned publish" is a property of the
+// commit itself and not of remembering to call it (plan 021 §3.3).
+func (l *EventLog) commitLocked(ev Event, rec Record) {
 	l.next = rec.Seq
 	l.ring.push(rec)
 	dropped := 0
@@ -698,6 +879,460 @@ func (l *EventLog) commitLocked(rec Record) {
 			}})
 		}
 	}
+	if l.observer != nil {
+		l.observer(ev)
+	}
+}
+
+// outboxBatch is one Enqueue's events, encoded, in the order they were given,
+// and their weight against the outbox's soft bound.
+type outboxBatch struct {
+	evs   []pendingEvent
+	bytes int
+}
+
+// pendingEvent is one enqueued event with the record built for it at enqueue
+// time, on the caller's goroutine — where Publish builds one too, and for the
+// same two reasons: encoding is the expensive part, and it runs the caller's own
+// code, which must not run under the log's own locks.
+type pendingEvent struct {
+	ev  Event
+	rec Record
+}
+
+// flushWaiter is one Flush parked until the drainer has committed target events
+// in all. done has capacity 1 and is written exactly once, under outboxMu,
+// before the waiter leaves the list, so an answer is never lost to a ctx that
+// ended in the same instant.
+type flushWaiter struct {
+	target uint64
+	done   chan error
+}
+
+// Enqueue appends evs to the log's outbox as one batch and returns at once: it
+// waits for nothing — not the boundary, not the primary, not a channel, not I/O
+// — and it always accepts. One log-owned goroutine publishes the batch through
+// the ordinary commit path, so every enqueued event takes a sequence number and
+// reaches the primary, the ring, every subscription and the journal exactly as a
+// published one does (plan 021 §3.3).
+//
+// It is the one thing a caller may do to the log with its own state lock held,
+// and that is the point: the engine's e.mu, the ask registry's mu and a
+// session's s.mu can each hold across the enqueue of the events that describe
+// the mutation they are making, so *state order is event order* with no lock
+// held across a blocking send.
+//
+// **What runs under your lock**, exactly: the events are encoded here, before
+// the outbox mutex is taken, and that encoding is this package's own code and
+// nothing else. Every field the codec reaches on the way to the wire is a
+// string, a number, a bool, a time, or a struct, slice or map of those
+// (eventcodec.go's wire structs hold no `any`, no json.RawMessage and no type
+// with a MarshalJSON or String of its own), so no method belonging to a caller
+// or a provider is ever invoked — with one exception, which is why there is a
+// rule about it:
+//
+//   - **An enqueued event must not carry Err.** Err is the one field whose
+//     encoding calls foreign code: Error(), and the chain-walking of the
+//     classification (Unwrap, Is, As). Under a state lock that is a loaded gun —
+//     an Error method that published, took the same lock, or blocked would wedge
+//     its own caller, and one that panicked would defeat the counted drop this
+//     promises after Close. So Enqueue never calls anything on it: an event that
+//     arrives with Err set has it replaced, in this function's own copy, by an
+//     inert sentinel of this package's (errEnqueuedErr), and the substitution is
+//     counted in Health.OutboxErrReplaced and in the closing diag. The caller's
+//     own value is untouched. Engine- and registry-authored events carry a
+//     failure as *text* in their payload for exactly this reason; an event
+//     carrying a live provider error belongs on Publish, off the lock, as today.
+//   - The events are the caller's own values from here on, as they are for
+//     Publish: immutable once enqueued, because the drainer reads them later on
+//     another goroutine. Hand over copies (cloneTool and its kin), never
+//     something still being written.
+//
+// Batches are never interleaved: the drainer holds the publishing boundary
+// across a whole batch, so one is contiguous in Seq against every other batch
+// *and* against a session's own direct Publish. A caller therefore never has to
+// reason about half a transaction.
+//
+// Enqueue does not stamp anything. Each session already stamps At (and
+// Replayed) in its own emit before it publishes, and the log will not invent a
+// second clock: the events arrive numbered by the log and timed by whoever made
+// them — the engine from the session's own clock (Clocked) at admission, plan
+// 021 §3.9. An event enqueued with a zero At is recorded with a zero At.
+//
+// It always accepts, even past the soft bound OutboxRoom reports on, because
+// what reaches it is either a mandatory completion — a turn's settlement, an
+// ask's ending, a requeue, shutdown — bounded by state rather than by a limit,
+// or a command whose caller checked OutboxRoom before it mutated anything. The
+// one thing it will not do is accept work after Close has begun: those events
+// are counted in droppedAtClose, the same counter as an emit its session gave up
+// on its own done, and dropped. They cannot be published — the drainer has been
+// told to finish — and Enqueue may neither block nor panic, so counting the drop
+// is all that is left; by then the engine has refused the command that would
+// have caused one. The cut is checked *before* anything is encoded, so a refused
+// batch costs the encoding of nothing.
+func (l *EventLog) Enqueue(evs ...Event) {
+	if len(evs) == 0 {
+		return
+	}
+	if l.outboxIsCut() {
+		// Refused before anything is encoded, so a drop after Close reads nothing
+		// on the events at all — an Err's Error method included, which is the
+		// whole point of checking here and not only under the mutex. The locked
+		// recheck below still covers a cut that lands during the encoding.
+		l.droppedAtClose.Add(int64(len(evs)))
+		return
+	}
+	b := outboxBatch{evs: make([]pendingEvent, len(evs))}
+	for i, ev := range evs {
+		if ev.Err != nil {
+			// Never read: not Error(), not Unwrap, not Is or As. ev is this
+			// loop's own copy, so the caller's event keeps its error.
+			ev.Err = errEnqueuedErr
+			l.outboxErrReplaced.Add(1)
+		}
+		rec := l.record(ev)
+		b.evs[i] = pendingEvent{ev: ev, rec: rec}
+		b.bytes += rec.size()
+	}
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	if l.outboxIsCut() {
+		l.droppedAtClose.Add(int64(len(evs)))
+		return
+	}
+	l.outbox = append(l.outbox, b)
+	l.outboxEvents += len(b.evs)
+	l.outboxBytes += b.bytes
+	l.enqueued += uint64(len(b.evs))
+	if !l.drainerStarted {
+		// Lazily, so a log nothing enqueues to has no goroutine at all, and
+		// under the same mutex as the cut, so a drainer is never started for
+		// work that will not be taken.
+		l.drainerStarted = true
+		l.drainer.Add(1)
+		go l.drain()
+	}
+	select {
+	case l.outboxWake <- struct{}{}:
+	default:
+	}
+}
+
+// OutboxRoom reports whether the outbox is under its soft bound (4096 events or
+// 8 MiB of encoded records, the ring's numbers). It is the advisory a
+// *rejectable* command consults **before it mutates anything**: a Submit, a
+// queue verb, an Answer, a Set, an ask opening. False once Close has begun.
+//
+// It is advisory in one direction only. Racing past it costs a few events over a
+// soft limit, which is why Enqueue accepts them; being refused by it costs a
+// command, which is why it is checked before the mutation rather than after. A
+// mandatory completion never consults it (Enqueue says why).
+func (l *EventLog) OutboxRoom() bool {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	if l.outboxIsCut() {
+		return false
+	}
+	return l.outboxEvents < l.outboxMaxEvents && l.outboxBytes < l.outboxMaxBytes
+}
+
+// Flush returns nil once everything enqueued before the call has been
+// committed — numbered, in the ring, offered to every subscription, queued for
+// the journal, and on the primary unless the primary refused it at close or
+// NoPrimary means there is none. It returns ctx.Err() if ctx ends first, and
+// ErrLogClosing at once if Close has already begun, because from then on the
+// outbox takes no work and the barrier can no longer mean what it means.
+//
+// A Flush already parked when Close begins is answered nil: Close's outbox phase
+// commits what is left rather than abandoning it, so a nil return always means
+// "your events are in the record" and ErrLogClosing always means "you asked too
+// late", never "we lost them". With an empty outbox it returns nil without
+// parking anything.
+//
+// It blocks exactly as a session's own emit blocks today — the drainer ahead of
+// it is waiting for the primary's reader — so it may be called only from a
+// goroutine that is **not** the primary's reader. A client that must print
+// trailing events flushes on a helper goroutine and keeps reading until it
+// returns (plan 021 §3.3, A19). A caller for which the barrier is an ordering
+// nicety rather than a precondition carries on whatever it returns.
+func (l *EventLog) Flush(ctx context.Context) error {
+	l.outboxMu.Lock()
+	if l.outboxIsCut() {
+		l.outboxMu.Unlock()
+		return ErrLogClosing
+	}
+	target := l.enqueued
+	if l.drained >= target {
+		l.outboxMu.Unlock()
+		return nil
+	}
+	w := &flushWaiter{target: target, done: make(chan error, 1)}
+	l.waiters = append(l.waiters, w)
+	l.outboxMu.Unlock()
+	if h := l.hooks; h != nil && h.flushParked != nil {
+		h.flushParked(target)
+	}
+	var cancelled <-chan struct{}
+	if ctx != nil {
+		cancelled = ctx.Done()
+	}
+	select {
+	case err := <-w.done:
+		return err
+	case <-cancelled:
+		if answered, err := l.unpark(w); answered {
+			return err
+		}
+		return ctx.Err()
+	}
+}
+
+// unpark takes w off the waiter list. It reports w's answer when the drainer
+// answered it in the very instant ctx ended: an answered waiter is no longer
+// listed, and its answer is already in its channel, so the truth is preferred to
+// the deadline.
+func (l *EventLog) unpark(w *flushWaiter) (bool, error) {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	if i := slices.Index(l.waiters, w); i >= 0 {
+		l.waiters = slices.Delete(l.waiters, i, i+1)
+		return false, nil
+	}
+	select {
+	case err := <-w.done:
+		return true, err
+	default:
+		return false, nil
+	}
+}
+
+// outboxIsCut reports whether Close has cut the outbox. It never blocks and the
+// cut is permanent, so a true answer is final and a false one is only as fresh as
+// the caller's own critical section. Under outboxMu — where Enqueue appends,
+// takeBatch empties and Flush parks — it is exact, because Close closes the
+// channel under that mutex too: no event is ever appended after the cut, and none
+// is ever left behind by a drainer that has already stopped. Enqueue also reads
+// it once *without* the mutex, purely to refuse a batch before encoding it, and
+// rechecks under the mutex before it appends.
+func (l *EventLog) outboxIsCut() bool {
+	select {
+	case <-l.outboxCut:
+		return true
+	default:
+		return false
+	}
+}
+
+// drain is the outbox's one goroutine: batches in the order they were enqueued,
+// each published whole inside the boundary, until the outbox is both cut and
+// empty. It never abandons an event — the most Close can make it do is stop
+// *waiting* for the primary (sendOutbox) — so its own exit is the proof that
+// everything accepted was recorded, which is what Close joins it for.
+//
+// It publishes with no session done channel and does not consult the admission
+// cutoff: only the log's own cut changes what it does. That is deliberate. A
+// session's Close closes its done first, before the agent's last words are
+// written and long before it closes the log (live.go's Close), and the endings
+// the ask registry enqueues from inside that teardown must reach the record all
+// the same — a done the drainer honored would drop exactly them.
+func (l *EventLog) drain() {
+	defer func() {
+		// The waiters first, then the join: a Close that has joined the drainer
+		// knows every Flush has its answer.
+		l.endWaiters()
+		l.drainer.Done()
+	}()
+	// stopped is the at-close mode, latched: once the cut has been seen the
+	// primary is only ever tried, so no later event of this or any batch can put
+	// the drainer back into a wait.
+	stopped := false
+	for {
+		b, taken, done := l.takeBatch()
+		switch {
+		case taken:
+			l.publishBatch(b, &stopped)
+			l.commitBatch(b)
+		case done:
+			return
+		default:
+			select {
+			case <-l.outboxWake:
+			case <-l.outboxCut:
+			}
+		}
+	}
+}
+
+// takeBatch removes the oldest batch. done is set when there is none and the
+// outbox has been cut, which is the drainer's only way out: nothing can be
+// enqueued after the cut, so an empty outbox under it is empty for good.
+func (l *EventLog) takeBatch() (b outboxBatch, taken, done bool) {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	if len(l.outbox) == 0 {
+		return outboxBatch{}, false, l.outboxIsCut()
+	}
+	b = l.outbox[0]
+	l.outbox = slices.Delete(l.outbox, 0, 1)
+	return b, true, false
+}
+
+// publishBatch commits a whole batch inside one hold of the boundary, so the
+// batch is contiguous in Seq (see the type's comment). It waits for the boundary
+// with no escape, which is bounded because every blocking point inside the
+// boundary selects on the cutoff: a direct publisher wedged on a full primary is
+// released by Close, and Close takes the boundary itself only after joining
+// this goroutine. The release is deferred, so a panic from inside a commit — an
+// observer's — unwinds the drainer with the boundary free rather than wedging a
+// Close that is waiting for it. The batch's accounting is the caller's
+// (commitBatch), outside the boundary and outside that unwinding.
+func (l *EventLog) publishBatch(b outboxBatch, stopped *bool) {
+	if h := l.hooks; h != nil && h.outboxAdmitting != nil {
+		h.outboxAdmitting(len(b.evs))
+	}
+	l.sem <- struct{}{}
+	defer l.release()
+	for i := range b.evs {
+		p := b.evs[i]
+		b.evs[i] = pendingEvent{} // published: the batch no longer holds it
+		seq := l.next + 1
+		p.ev.Seq, p.rec.Seq = seq, seq
+		l.sendOutbox(p.ev, seq, stopped)
+		l.commitLocked(p.ev, p.rec)
+	}
+}
+
+// sendOutbox offers ev to the primary from inside the boundary: blocking, as a
+// publisher does, until Close cuts the outbox — and from then on a try-send,
+// counted in outboxSkippedPrimary when the primary will not take it. That is the
+// whole of what "a stopped reader can neither block shutdown nor cost the
+// record" comes to: the event is committed either way, only unread. Under
+// NoPrimary there is nothing to offer it to.
+func (l *EventLog) sendOutbox(ev Event, seq uint64, stopped *bool) {
+	if l.noPrimary {
+		return
+	}
+	if h := l.hooks; h != nil && h.outboxSending != nil {
+		h.outboxSending(seq, !*stopped)
+	}
+	if !*stopped {
+		select {
+		case l.primary <- ev:
+			return
+		case <-l.outboxCut:
+			*stopped = true
+		}
+	}
+	select {
+	case l.primary <- ev:
+	default:
+		l.outboxSkippedPrimary.Add(1)
+	}
+}
+
+// commitBatch accounts for a batch the boundary has released: its weight leaves
+// the soft bound, the running total advances, and every Flush waiting for a
+// count this reaches is answered. It is the one place drained moves, and it runs
+// outside the boundary, so outboxMu keeps its independence from it.
+func (l *EventLog) commitBatch(b outboxBatch) {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	l.outboxEvents -= len(b.evs)
+	l.outboxBytes -= b.bytes
+	l.drained += uint64(len(b.evs))
+	kept := l.waiters[:0]
+	for _, w := range l.waiters {
+		if w.target <= l.drained {
+			w.done <- nil
+			continue
+		}
+		kept = append(kept, w)
+	}
+	clear(l.waiters[len(kept):])
+	l.waiters = kept
+}
+
+// endWaiters answers every Flush still parked as the drainer exits: nil for a
+// target it committed, which is every target it was ever given, and
+// ErrLogClosing for one it did not. Nothing today produces the second — the
+// at-close path commits rather than abandons — and it is here so that a change
+// which made it possible would fail a waiter rather than strand it.
+func (l *EventLog) endWaiters() {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	for _, w := range l.waiters {
+		if w.target <= l.drained {
+			w.done <- nil
+			continue
+		}
+		w.done <- ErrLogClosing
+	}
+	clear(l.waiters)
+	l.waiters = nil
+}
+
+// cutOutbox is Close's first phase: no later Enqueue is accepted, OutboxRoom is
+// false from here on, and the drainer's blocking primary send has its escape.
+// Closing the channel under outboxMu is what makes the cut one step for
+// everything that reads it under the same mutex (outboxIsCut).
+func (l *EventLog) cutOutbox() {
+	l.outboxMu.Lock()
+	defer l.outboxMu.Unlock()
+	close(l.outboxCut)
+}
+
+// Observe installs the log's one observer: a function the commit of every event
+// calls, inside the publishing boundary, after the primary send, once per
+// committed event and in Seq order, with Seq set — and never for a publish that
+// was abandoned or a TryPublish that found no room, since only a commit calls
+// it. Events the at-close path commits reach it too. A second call is
+// ErrObserverSet; a nil one is refused rather than read as "unset"; on a closed
+// log it is ErrClosed.
+//
+// It is set once, before the session publishes anything, and it runs under the
+// boundary's rules: it must not block, must not take anything but a leaf lock of
+// its own, and must not call the log or the session — it is on the path of every
+// event, and a publisher is holding the ordering boundary while it runs.
+//
+// A panic in it is a bug in craze's own code and the log does not recover it.
+// Recovering at the top of the drainer would abandon the accepted events behind
+// the one that panicked, and swallowing it in Publish would hide the bug in the
+// one place a test would have caught it; on the drainer's goroutine it takes the
+// process down, as any unrecovered goroutine panic does. What the log does
+// guarantee is that the panic leaves it *usable*: the boundary is released by a
+// defer in every scope that holds it (release), so a caller that recovers a panic
+// from its own Publish finds a log that still publishes and a Close that still
+// returns, rather than one wedged on a boundary nobody will ever give back.
+//
+// What it is for is deriving state from the sequence in the sequence's own order: the
+// engine reads foreign-turn and replay brackets and title deltas from it and
+// wakes its workers through one-slot channels. It is the seed of S1c's
+// transcript fold, which is the same hook keeping a whole model rather than a
+// handful of flags (plan 021 §3.3, SD-19).
+//
+// The event it is handed is the publisher's own value, the same one the primary
+// took: read-only, exactly as the primary's reader must treat it. Cost is one
+// nil check per commit when unset (R5, V7).
+func (l *EventLog) Observe(fn func(Event)) error {
+	if fn == nil {
+		return errNilObserver
+	}
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.closed:
+		return ErrClosed
+	}
+	defer l.release()
+	select {
+	case <-l.closed:
+		return ErrClosed
+	default:
+	}
+	if l.observer != nil {
+		return ErrObserverSet
+	}
+	l.observer = fn
+	return nil
 }
 
 // Subscribe opens a subscription: a replay of every record after o.After,
@@ -1099,37 +1734,52 @@ func (l *EventLog) endOpenAttemptsLocked(now time.Time) {
 	}
 }
 
-// Close shuts the log (plan 020 §3.5): the admission cutoff, so every later
-// Publish returns false and every later Note is counted and dropped; a
-// prompt_end for every attempt still open; a
-// closing diag counting the publishes abandoned on done or the cutoff — every
-// one that was in flight when the cutoff came included, and every emit its
-// session dropped on its own done fast path before then (Abandoned); every
-// subscription ended with ErrClosed and its owner goroutine waited for; and
-// the journal closed, waiting at most its own bound (500 ms) and at most
-// until ctx ends. It is idempotent: a second call returns once the first has
-// finished. It is safe on a log never published to.
+// Close shuts the log (plan 020 §3.5, plan 021 §3.3), in phases:
+//
+//  1. The outbox is cut (cutOutbox). OutboxRoom is false from here on, so every
+//     rejectable command above the seam refuses before it mutates anything, and
+//     an Enqueue arriving now is counted in droppedAtClose and dropped — it may
+//     neither block nor panic, and by then the engine has refused the command
+//     that would have caused one.
+//  2. The admission cutoff, as before: every later Publish returns false and
+//     every later Note is counted and dropped. It comes *before* the drainer is
+//     joined, deliberately, because it is the one thing that frees a direct
+//     publisher blocked on a full primary while holding the boundary — which is
+//     exactly what the drainer may be waiting behind. The outbox is made immune
+//     to this cutoff rather than sequenced ahead of it: the drainer's commits do
+//     not consult closed, and it is not in the in-flight region, so nothing here
+//     can turn an accepted enqueue into a dropped one.
+//  3. The drainer is joined. What was left in the outbox is committed, not
+//     abandoned: the ring, every subscription and the journal get every event,
+//     with a **non-blocking** primary send from the cut on. So a stopped reader
+//     — frame teardown stops the program before closing the session, and craze
+//     prompt's deferred Close runs on its own reader — can neither block
+//     shutdown nor cost the record. Events the primary would not take are
+//     counted in outboxSkippedPrimary, not droppedAtClose: they are recorded,
+//     only unread. Every Flush still parked is answered first (endWaiters).
+//  4. The rest, unchanged in meaning: the publishes in flight at the cutoff
+//     waited for and counted; a prompt_end for every attempt still open; the
+//     closing diag, counting the publishes abandoned on done or the cutoff —
+//     every one that was in flight when the cutoff came included, every emit its
+//     session dropped on its own done fast path (Abandoned), and every Enqueue
+//     refused in phase 1 — beside outboxSkippedPrimary; every subscription ended
+//     with ErrClosed and its owner goroutine waited for; and the journal closed,
+//     waiting at most its own bound (500 ms) and at most until ctx ends.
+//
+// Every phase is bounded with nobody reading the primary, and none of them
+// leaves a goroutine behind. It is idempotent: a second call returns once the
+// first has finished. It is safe on a log never published to, and on one whose
+// drainer never started.
 func (l *EventLog) Close(ctx context.Context) {
 	l.closeOnce.Do(func() {
+		l.cutOutbox()
 		close(l.closed)
-		l.awaitInFlight()
-		// Serialize with a Subscribe mid-registration. No publisher holds
-		// the boundary now, and Subscribe waits for nothing inside it.
-		l.sem <- struct{}{}
-		subs := l.subs
-		l.subs = nil
-		l.noteMu.Lock()
-		l.notesCut = true
-		// Every prompt attempt still open gets its prompt_end{errClass:
-		// closed} here, before closing and under the same cutoff.
-		l.endOpenAttemptsLocked(time.Now())
-		if l.journal != nil {
-			l.journal.Note(journal.DiagNote{Kind: journal.DiagClosing, Fields: map[string]any{
-				"droppedAtClose": l.droppedAtClose.Load(),
-			}})
+		l.drainer.Wait()
+		if h := l.hooks; h != nil && h.outboxDrained != nil {
+			h.outboxDrained()
 		}
-		l.noteMu.Unlock()
-		l.release()
+		l.awaitInFlight()
+		subs := l.cutoffLocked()
 		for _, s := range subs {
 			s.terminate(ErrClosed)
 		}
@@ -1143,6 +1793,40 @@ func (l *EventLog) Close(ctx context.Context) {
 		}
 		_ = l.journal.Close(ctx)
 	})
+}
+
+// cutoffLocked is Close's last act inside the boundary: it unregisters every
+// subscription and hands them back for their owner to be ended, cuts the notes
+// off, ends the prompt attempts still open, and writes the closing diag. It is a
+// function of its own so that the boundary and noteMu are both released by
+// defers — a panic in a note or an attempt leaves neither held — while keeping
+// the release exactly where it was, before the subscriptions are terminated and
+// their owners waited for.
+//
+// The closing diag's counters are a snapshot taken here. Health keeps the
+// running totals, so an Enqueue or an emit that arrives after this line is
+// counted in Health and is not in the file's diag (Health, DroppedAtClose).
+func (l *EventLog) cutoffLocked() []*Subscription {
+	// Serialize with a Subscribe mid-registration. No publisher holds the
+	// boundary now, and Subscribe waits for nothing inside it.
+	l.sem <- struct{}{}
+	defer l.release()
+	subs := l.subs
+	l.subs = nil
+	l.noteMu.Lock()
+	defer l.noteMu.Unlock()
+	l.notesCut = true
+	// Every prompt attempt still open gets its prompt_end{errClass: closed}
+	// here, before closing and under the same cutoff.
+	l.endOpenAttemptsLocked(time.Now())
+	if l.journal != nil {
+		l.journal.Note(journal.DiagNote{Kind: journal.DiagClosing, Fields: map[string]any{
+			"droppedAtClose":       l.droppedAtClose.Load(),
+			"outboxSkippedPrimary": l.outboxSkippedPrimary.Load(),
+			"outboxErrReplaced":    l.outboxErrReplaced.Load(),
+		}})
+	}
+	return subs
 }
 
 // awaitInFlight shuts the in-flight region and waits for the publishes inside
@@ -1177,11 +1861,24 @@ type EventLogHealth struct {
 	Omitted int
 	// SubscribersDropped counts subscriptions ended as slow consumers.
 	SubscribersDropped int
-	// DroppedAtClose counts publishes abandoned on done or the cutoff, and
-	// emits their session dropped on its own done fast path (Abandoned).
+	// DroppedAtClose counts publishes abandoned on done or the cutoff, emits
+	// their session dropped on its own done fast path (Abandoned), and events
+	// handed to Enqueue after Close cut the outbox. It is a running total, so it
+	// can exceed the number the journal's closing diag recorded: that one is a
+	// snapshot taken while Close held the boundary, and an emit or an Enqueue
+	// that arrives after it is counted here and nowhere else (cutoffLocked).
 	DroppedAtClose int
 	// NotesDropped counts notes refused after Close.
 	NotesDropped int
+	// OutboxSkippedPrimary counts enqueued events Close committed with a
+	// non-blocking primary send the primary did not take: recorded everywhere
+	// else, and read by nobody (plan 021 §3.3). It is not a drop.
+	OutboxSkippedPrimary int
+	// OutboxErrReplaced counts enqueued events that carried Err, which Enqueue
+	// replaced with an inert sentinel rather than call anything on it. Every one
+	// is a bug in the enqueuing code — an enqueued event carries its failure as
+	// text (Enqueue) — and the record says so in place of the message.
+	OutboxErrReplaced int
 	// Journal is the journal's health; StateOff when there is none.
 	Journal journal.Health
 }
@@ -1189,11 +1886,13 @@ type EventLogHealth struct {
 // Health is the log's health. It never takes the boundary.
 func (l *EventLog) Health() EventLogHealth {
 	return EventLogHealth{
-		Omitted:            int(l.omitted.Load()),
-		SubscribersDropped: int(l.subsDropped.Load()),
-		DroppedAtClose:     int(l.droppedAtClose.Load()),
-		NotesDropped:       int(l.notesDropped.Load()),
-		Journal:            l.journal.Health(),
+		Omitted:              int(l.omitted.Load()),
+		SubscribersDropped:   int(l.subsDropped.Load()),
+		DroppedAtClose:       int(l.droppedAtClose.Load()),
+		NotesDropped:         int(l.notesDropped.Load()),
+		OutboxSkippedPrimary: int(l.outboxSkippedPrimary.Load()),
+		OutboxErrReplaced:    int(l.outboxErrReplaced.Load()),
+		Journal:              l.journal.Health(),
 	}
 }
 

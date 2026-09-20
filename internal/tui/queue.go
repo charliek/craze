@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 )
 
 const (
@@ -56,9 +57,10 @@ type queueHover struct {
 
 func noHover() queueHover { return queueHover{row: -1} }
 
-// strongSend is a send-now waiting for the cancelled turn to settle. There is
-// only ever one: a second is refused with a note rather than queued behind
-// the first, because two turns cannot both be "the one that replaces this".
+// strongSend is a send-now waiting to be confirmed: the text, and the queued row
+// it came from if it came from one. Only the confirm line holds one — the
+// send-now it becomes is the engine's armed send, which is what knows the turn it
+// was armed against and which of the ways it can be lost this was.
 //
 // A row is held by id and stays in the queue until it actually goes, so a
 // send-now that never fires loses nothing and one that does cannot be drained
@@ -67,14 +69,10 @@ func noHover() queueHover { return queueHover{row: -1} }
 type strongSend struct {
 	text string
 	from string
-	// seq is the turn this was armed against. A turn that ended some other
-	// way — an error, a cancel that beat it — takes the armed send with it
-	// rather than firing it into whatever runs next.
-	seq int
 }
 
 // queueItems is the queue as the band draws it.
-func (m Model) queueItems() []agent.QueuedPrompt { return m.snap.Queue }
+func (m Model) queueItems() []agent.QueuedPrompt { return m.queue }
 
 // queueRowCap is how many rows this frame has room for.
 func (m Model) queueRowCap() int {
@@ -196,19 +194,14 @@ func (m *Model) note(text string) {
 
 // ---------------------------------------------------------------- the verbs
 
-// queueDraft queues the composer's text during a running turn.
-func (m Model) queueDraft(text string) (tea.Model, tea.Cmd) {
-	if _, err := m.sess.Queue(text); err != nil {
-		// The draft is untouched: a refused message is still the user's to
-		// shorten or send later.
-		m.note(queueErrNote(err))
-		return m, nil
-	}
-	m.input.SetValue("")
-	m.resetSlash()
-	m.refreshSnap()
-	return m, nil
-}
+// Enter during a running turn used to call Control.Queue from here (queueDraft).
+// It does not any more: Queue never starts a turn and never wakes the driver, so
+// choosing it from the model's own view of the session strands the row whenever
+// that view lags — the engine has settled, nothing will drain, and the row sits in
+// the band. Enter's intent is "send this when you can", which is Submit's queue
+// mode, and the engine answers with what it did. Control.Queue is for a caller
+// that means queue-ONLY, and the TUI has no such action: its band edits and
+// removes rows, it never adds one without meaning to send it.
 
 func queueErrNote(err error) string {
 	switch {
@@ -242,9 +235,16 @@ func (m Model) strongSendDraft() (tea.Model, tea.Cmd) {
 
 // interject merges the draft into the running turn. The transcript entry comes
 // from the session's broadcast, not from here: one source per entry.
+//
+// It goes through the engine, which adds nothing but the door — the refusals are
+// the session's own — and, like the session's Interject before it, it blocks and
+// is nonetheless called from Update. That wart is unchanged here; it moves with
+// the rest when the TUI becomes a socket client (plan 021 §3.2).
 func (m Model) interject(text string) (tea.Model, tea.Cmd) {
-	sess := m.sess
-	if err := sess.Interject(context.Background(), text); err != nil {
+	if m.eng == nil {
+		return m, nil
+	}
+	if err := m.eng.Interject(context.Background(), m.nextCmd(), text); err != nil {
 		m.note(interjectErrNote(err))
 		return m, nil
 	}
@@ -269,9 +269,12 @@ func interjectErrNote(err error) string {
 }
 
 // askStrongSend raises the confirm. Only one send-now can be pending: a second
-// is refused rather than queued behind the first.
+// is refused rather than queued behind the first, because two turns cannot both
+// be "the one that replaces this". The engine refuses a second arm the same way;
+// this is the fast path, and the one that keeps the confirm line from going up at
+// all.
 func (m Model) askStrongSend(text, from string) (tea.Model, tea.Cmd) {
-	if m.strong != nil || m.confirm != nil {
+	if m.confirm != nil || m.sendNowPending() {
 		m.note("send now already pending")
 		return m, nil
 	}
@@ -279,8 +282,47 @@ func (m Model) askStrongSend(text, from string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// sendNowPending reports whether a send-now is armed. It is the engine's state
+// and not the model's: the cancel that makes room for the send is the engine's,
+// so what became of the send is too.
+func (m Model) sendNowPending() bool {
+	return m.eng != nil && m.eng.State().SendNow != nil
+}
+
+// withdrawSendNow takes back an armed send-now. The text is wherever it was — the
+// composer for a draft, the queue for a row — so nothing is restored and nothing
+// is lost, and the turn that was cancelled to make room for it simply settles
+// into whatever was queued behind it.
+//
+// The note is written here, in the Update that asked, and the delta the engine
+// publishes for this same command is then this model's own echo and is skipped:
+// apply your own command's effect from its return value, skip exactly that
+// effect's echo (§3.4). Which is also why the caller says what the note is —
+// Esc owes one, Ctrl+C does not.
+func (m *Model) withdrawSendNow(note string) {
+	if m.eng == nil {
+		return
+	}
+	c := m.nextCmd()
+	if err := m.eng.Disarm(c); err != nil {
+		// Nothing was armed, or the engine is no longer admitting: either way
+		// there is nothing to say about a send that is not waiting.
+		return
+	}
+	m.disarmed = c.Cause()
+	// The arm this took back is gone, so the draft it was holding is nobody's to
+	// consume. Disarm refuses when there is nothing armed, so reaching here means
+	// the arm really was still waiting — which is what makes clearing the marker
+	// safe: an arm that had already fired would have been refused instead, leaving
+	// its started free to take the draft it went with.
+	m.armedDraft = ""
+	if note != "" {
+		m.note(note)
+	}
+}
+
 // confirmStrongSend is Enter on the confirm: the turn is cancelled and the
-// send is armed. Nothing is prompted here — the drain starts it when the
+// send is armed. Nothing is prompted here — the engine starts it when the
 // cancelled turn settles, so nothing races the one-in-flight rule.
 //
 // Nothing is taken out of the queue and nothing is taken out of the composer:
@@ -293,59 +335,22 @@ func (m Model) confirmStrongSend() (tea.Model, tea.Cmd) {
 	if pending == nil {
 		return m, nil
 	}
+	mode := engine.SubmitSendNow
 	if m.status != statusWorking {
 		// The turn it was going to replace ended while the question was on
-		// screen, so there is nothing to cancel: it is a plain send.
-		return m.fireStrongSend(*pending)
+		// screen, so there is nothing to cancel: it is a plain send. Queue mode
+		// is "start now, else queue", which is what that is — and what leaves the
+		// text queued rather than refused if a turn has started since.
+		mode = engine.SubmitQueue
 	}
-	pending.seq = m.turnSeq
-	m.strong = pending
-	return m.cancelTurn()
+	next, _, _ := m.submit(pending.text, mode, pending.from)
+	return next, nil
 }
 
 // declineStrongSend is Esc or any other key on the confirm: nothing was taken
 // from anywhere, so there is nothing to put back.
 func (m *Model) declineStrongSend() {
 	m.confirm = nil
-}
-
-// dropStrongSend disarms a send-now that will not fire. The text is wherever
-// it was — the composer for a draft, the queue for a row — so nothing is
-// restored and nothing is lost.
-func (m *Model) dropStrongSend(note string) {
-	if m.strong == nil {
-		return
-	}
-	m.strong = nil
-	if note != "" {
-		m.note(note)
-	}
-}
-
-// fireStrongSend sends what a confirmed send-now was about. A row leaves the
-// queue here and not before, so it is taken exactly once; a draft leaves the
-// composer only if it is still the text that was armed.
-func (m Model) fireStrongSend(p strongSend) (tea.Model, tea.Cmd) {
-	text := p.text
-	if p.from != "" {
-		taken, ok := m.sess.TakeQueued(p.from)
-		if !ok {
-			// The row went some other way — the drain sent it, or it was
-			// cancelled. There is nothing left to send now.
-			m.note("that message has already gone")
-			return m, nil
-		}
-		text = taken.Text
-		m.refreshSnap()
-	} else if strings.TrimSpace(m.input.Value()) == p.text {
-		// The armed text was trimmed; the draft may not have been.
-		m.input.SetValue("")
-		m.resetSlash()
-	}
-	if strings.TrimSpace(text) == "" {
-		return m, nil
-	}
-	return m.sendText(text)
 }
 
 // ------------------------------------------------------------ the edit mode
@@ -366,18 +371,23 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 	m.queueFocus = false
 }
 
-// saveQueueEdit writes the composer back into the row.
+// saveQueueEdit writes the composer back into the row. The edit is
+// unconditional — expectedVersion nil — because the TUI is the only client of its
+// engine in S1b; the check-and-edit is what a second one will pass a version to.
 func (m Model) saveQueueEdit() (tea.Model, tea.Cmd) {
 	id := m.queueEdit
 	text := strings.TrimSpace(m.input.Value())
+	if m.eng == nil {
+		return m, nil
+	}
 	if text == "" {
 		// An emptied edit is a cancel: an empty message is not a message.
-		m.sess.Unqueue(id)
+		_, _ = m.eng.Unqueue(m.nextCmd(), id)
 		m.finishQueueEdit()
 		m.refreshSnap()
 		return m, nil
 	}
-	if err := m.sess.EditQueued(id, text); err != nil {
+	if err := m.eng.EditQueued(m.nextCmd(), id, text, nil); err != nil {
 		m.note(queueErrNote(err))
 		return m, nil
 	}
@@ -405,7 +415,7 @@ func (m Model) queueEditChip() string {
 	// The row's number is read now, not at edit time: a drain that sends #1
 	// while #2 is being edited makes that row #1.
 	pos := m.queueEditPos
-	for i, p := range m.snap.Queue {
+	for i, p := range m.queue {
 		if p.ID == m.queueEdit {
 			pos = i
 			break
@@ -540,7 +550,7 @@ func (m Model) handleStrongSend() (tea.Model, tea.Cmd) {
 		if m.queueEdit != "" {
 			return m, nil // the save was refused and said why
 		}
-		for _, p := range m.snap.Queue {
+		for _, p := range m.queue {
 			if p.ID == id {
 				return m.sendQueuedNow(p)
 			}
@@ -553,20 +563,22 @@ func (m Model) handleStrongSend() (tea.Model, tea.Cmd) {
 	return m.strongSendDraft()
 }
 
-// sendQueuedNow takes a row out of the queue and asks the confirm. The row
-// leaves only once the answer is yes: a row that left and then lost its
-// confirm would simply be gone.
+// sendQueuedNow sends a queued row now, or asks the confirm when a turn is
+// running. The row leaves the queue only once it is actually sent — the engine
+// takes it in the same locked section that claims its turn — so a row that lost
+// its confirm, or one whose turn could not start, is still where it was.
 func (m Model) sendQueuedNow(p agent.QueuedPrompt) (tea.Model, tea.Cmd) {
 	if m.status != statusWorking {
 		// Nothing to cancel, so nothing to confirm: the row just goes.
-		taken, ok := m.sess.TakeQueued(p.ID)
-		if !ok {
-			return m, nil
+		next, res, _ := m.submit(p.Text, engine.SubmitQueue, p.ID)
+		if res.Turn == "" {
+			// It could not start — the agent is running a turn of its own — so
+			// the row is still queued and the band keeps the keyboard.
+			return next, nil
 		}
-		m.focusComposer()
-		m.queueFocus = false
-		m.refreshSnap()
-		return m.sendText(taken.Text)
+		next.focusComposer()
+		next.queueFocus = false
+		return next, nil
 	}
 	return m.askStrongSend(p.Text, p.ID)
 }
@@ -610,7 +622,9 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model) {
 		m.startQueueEdit(sel)
 		return true, m
 	case tea.KeyBackspace, tea.KeyDelete:
-		m.sess.Unqueue(sel.ID)
+		if m.eng != nil {
+			_, _ = m.eng.Unqueue(m.nextCmd(), sel.ID)
+		}
 		m.refreshSnap()
 		if len(m.visibleQueue()) == 0 {
 			m.focusComposer()
@@ -663,7 +677,9 @@ func (m Model) queueClick(x, row int) (tea.Model, tea.Cmd) {
 		m.startQueueEdit(p)
 		return m, nil
 	case actionCancel:
-		m.sess.Unqueue(p.ID)
+		if m.eng != nil {
+			_, _ = m.eng.Unqueue(m.nextCmd(), p.ID)
+		}
 		m.refreshSnap()
 		return m, nil
 	}

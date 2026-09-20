@@ -15,7 +15,11 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
-// queueWorking is a model with a hung turn, so Enter queues.
+// queueWorking is a model with a hung turn, so Enter queues. The engine runs the
+// turn on a goroutine of its own, so the prompt really is hung on the session —
+// there is no command a test could decline to run — and the hang belongs to that
+// prompt alone (Stub.run, plan 021 amendment X12). What is deterministic here is
+// the status: Submit claims the turn in the Update that pressed Enter.
 func queueWorking(t *testing.T) (Model, *Stub) {
 	t.Helper()
 	isolateSkillsHome(t)
@@ -31,20 +35,14 @@ func queueWorking(t *testing.T) (Model, *Stub) {
 	return m, stub
 }
 
-// queueWorkingLive is queueWorking with the prompt actually running, so the
-// session is in a turn and not only the status. Interject is decided from
-// that; tests that hand-feed a turn's endings use queueWorking instead,
-// because a hung prompt has not returned and its queue is rightly still held.
+// queueWorkingLive is queueWorking with the wait for the prompt to have opened its
+// turn on the session, which is what Interject is decided from. queueWorking says
+// only that the model is working; the two are the same setup, and this one adds the
+// handshake. A test whose subject is the turn's own state — a cancel in progress,
+// an ending already out — uses the scripted session's barriers instead.
 func queueWorkingLive(t *testing.T) (Model, *Stub) {
 	t.Helper()
-	isolateSkillsHome(t)
-	stub := NewStub()
-	stub.HangNext()
-	m := startStub(t, stub, t.TempDir(), 80, 24)
-	m.input.SetValue("go")
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	go runCmd(cmd)
+	m, stub := queueWorking(t)
 	t.Cleanup(func() { _ = stub.Close() })
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -67,14 +65,6 @@ func typeEnter(t *testing.T, m Model, text string) Model {
 	m.input.SetValue(text)
 	tm, _ := m.Update(enter())
 	return tm.(Model)
-}
-
-func queueTexts(m Model) []string {
-	out := make([]string, 0, len(m.snap.Queue))
-	for _, p := range m.snap.Queue {
-		out = append(out, p.Text)
-	}
-	return out
 }
 
 func TestEnterQueuesDuringATurnAndClearsTheDraft(t *testing.T) {
@@ -103,8 +93,8 @@ func TestEnterQueuesDuringATurnAndClearsTheDraft(t *testing.T) {
 func TestEnterOnAnIdleSessionStillSends(t *testing.T) {
 	m := sized(t)
 	m = typeEnter(t, m, "hello")
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("an idle Enter sends rather than queues: %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 0 {
+		t.Fatalf("an idle Enter sends rather than queues: %+v", got)
 	}
 	if got := texts(m, entryUser); len(got) != 1 || got[0] != "hello" {
 		t.Fatalf("user entries %q", got)
@@ -122,8 +112,8 @@ func TestQueueFullAndTooLongKeepTheDraft(t *testing.T) {
 	if m.input.Value() != "one too many" {
 		t.Fatalf("a refused message keeps the draft: %q", m.input.Value())
 	}
-	if len(m.snap.Queue) != 32 {
-		t.Fatalf("queue length %d", len(m.snap.Queue))
+	if got := queuedRows(m); len(got) != 32 {
+		t.Fatalf("queue length %d", len(got))
 	}
 	if !strings.Contains(plainView(m), "queue full") {
 		t.Fatalf("the note is missing:\n%s", plainView(m))
@@ -136,7 +126,7 @@ func TestQueueFullAndTooLongKeepTheDraft(t *testing.T) {
 	if len(m2.input.Value()) != 32<<10+1 {
 		t.Fatal("an oversized message keeps the draft")
 	}
-	if len(m2.snap.Queue) != 0 {
+	if len(queuedRows(m2)) != 0 {
 		t.Fatal("an oversized message is not queued")
 	}
 	if !strings.Contains(plainView(m2), "message too long") {
@@ -241,8 +231,8 @@ func TestBackspaceRemovesAndClampsTheSelection(t *testing.T) {
 	}
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m = tm.(Model)
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("queue %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 0 {
+		t.Fatalf("queue %+v", got)
 	}
 	if m.queueFocus {
 		t.Fatal("an emptied band returns the keyboard to the composer")
@@ -253,7 +243,7 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "one")
 	m = typeEnter(t, m, "two")
-	before := m.snap.Queue[1]
+	before := queuedRows(m)[1]
 	m.input.SetValue("a draft in progress")
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = tm.(Model)
@@ -271,7 +261,7 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	m.input.SetValue("TWO!")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	got := m.snap.Queue
+	got := queuedRows(m)
 	if len(got) != 2 || got[1].ID != before.ID || got[1].Text != "TWO!" {
 		t.Fatalf("the row keeps its id and position: %+v", got)
 	}
@@ -293,8 +283,8 @@ func TestEnterEditsInPlaceAndEscRestores(t *testing.T) {
 	if m.queueEdit != "" {
 		t.Fatal("esc leaves edit mode")
 	}
-	if m.snap.Queue[1].Text != "TWO!" {
-		t.Fatalf("the row is untouched: %+v", m.snap.Queue)
+	if got := queuedRows(m); got[1].Text != "TWO!" {
+		t.Fatalf("the row is untouched: %+v", got)
 	}
 	if m.input.Value() != "a draft in progress" {
 		t.Fatalf("the draft comes back: %q", m.input.Value())
@@ -330,22 +320,31 @@ func TestCtrlLInterjectsOnGrok(t *testing.T) {
 }
 
 func TestCtrlLRefusedAfterTheTurnIsDone(t *testing.T) {
-	// The turn is running as far as the status goes, but the session says it
-	// has nothing left to merge into — which is exactly the state that makes
-	// grok mint a turn of its own instead.
-	m, stub := queueWorking(t)
-	stub.SetProvider(agent.GrokProvider())
-	tm, _ := m.Update(refreshSnapMsg{})
-	m = tm.(Model)
+	// The turn is running as far as the status goes — its ending has gone out but
+	// the engine has not settled it, because the continuation is held short of
+	// returning — and the session says it has nothing left to merge into, which is
+	// exactly the state that makes grok mint a turn of its own instead. The
+	// barrier is the script's: it closes once the one terminal event has been
+	// published, which is also when the session stops taking interjections.
+	m, sess := scriptedModel(t)
+	sess.SetProvider(agent.GrokProvider())
+	m = deliver(t, m, refreshSnapMsg{})
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "go", sc)
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn publishing its ending")
+	if m.status != statusWorking {
+		t.Fatalf("setup: status %s, want working", m.status)
+	}
 	m.input.SetValue("BANANA")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
 	if m.input.Value() != "BANANA" {
 		t.Fatalf("a refused interjection keeps the draft: %q", m.input.Value())
 	}
 	if !strings.Contains(plainView(m), "nothing to interject into") {
 		t.Fatalf("the note is missing:\n%s", plainView(m))
 	}
+	sc.Return()
 }
 
 // TestCtrlLRefusedWhenTheAckFails: a refused ack keeps the text too.
@@ -370,7 +369,7 @@ func TestCtrlLRefusedWhenTheAckFails(t *testing.T) {
 }
 
 func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
-	m, _ := queueWorking(t)
+	m, stub := heldWorking(t)
 	m.input.SetValue("PINEAPPLE")
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
 	m = tm.(Model)
@@ -397,94 +396,137 @@ func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
 		t.Fatalf("declining cancels nothing: %s", m.status)
 	}
 
-	// Enter confirms: the turn is cancelled and nothing is sent yet.
+	// Enter confirms: the send is armed and the engine cancels the turn for it, on
+	// a goroutine of its own. Nothing is drawn and nothing has been prompted in
+	// this Update, which is the claim that matters — the row and the draft are
+	// where they were until the send actually fires.
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
 	m = tm.(Model)
-	seq := m.turnSeq
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	if m.strong == nil {
-		t.Fatal("the send is armed")
-	}
-	if cmd == nil {
-		t.Fatal("the cancel runs")
-	}
-	if m.turnSeq != seq {
-		t.Fatalf("nothing may be prompted before the cancelled turn settles: turnSeq %d", m.turnSeq)
+	m = pumpKey(t, m, enter())
+	if !m.cardsCancelled {
+		t.Fatal("an armed send-now sets the cancel mask itself, since the cancel is the engine's")
 	}
 	if got := texts(m, entryUser); len(got) != 1 {
 		t.Fatalf("no user entry until it is sent: %q", got)
 	}
-	// Both endings land; the armed send is what starts next.
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
-	m = tm.(Model)
-	if m.strong != nil {
+	// The turn ends; the armed send is what starts next.
+	m = pumpUntil(t, m, turnsDrawn(2))
+	if sendNowArmed(m) {
 		t.Fatal("the armed send fired")
 	}
-	if m.turnSeq != seq+1 {
-		t.Fatalf("exactly one turn started: turnSeq %d, was %d", m.turnSeq, seq)
-	}
+	// Nothing of either turn is left to report, so "exactly these two prompts"
+	// is a claim about a finished chain and not a snapshot of a moment in it.
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
+	assertPrompts(t, stub, "go", "PINEAPPLE")
 }
 
 func TestOnlyOneStrongSendIsPending(t *testing.T) {
-	m, _ := queueWorking(t)
-	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	if m.strong == nil {
-		t.Fatal("armed")
-	}
+	// The cancel the first arm asks for is held, so the send is still waiting when
+	// the second Ctrl+L asks: one at a time is what is being tested, not how long
+	// the first one lasts.
+	m, sess := armedSendNow(t, "PINEAPPLE")
 	m.input.SetValue("MANGO")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
 	if m.confirm != nil {
 		t.Fatal("a second send now is refused, not queued")
 	}
 	if !strings.Contains(plainView(m), "send now already pending") {
 		t.Fatalf("the note is missing:\n%s", plainView(m))
 	}
+	_ = sess
 }
 
 func TestEscWhilePendingDropsItAndRestoresTheText(t *testing.T) {
-	m, _ := queueWorking(t)
-	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if m.strong != nil {
+	m, _ := armedSendNow(t, "PINEAPPLE")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if sendNowArmed(m) {
 		t.Fatal("esc drops the pending send")
 	}
 	if m.input.Value() != "PINEAPPLE" {
 		t.Fatalf("the text comes back: %q", m.input.Value())
 	}
+	if !strings.Contains(plainView(m), "send now dropped") {
+		t.Fatalf("the note is missing:\n%s", plainView(m))
+	}
 }
 
+// armedSendNow is a model with text armed as a send-now against a running turn,
+// and the cancel that arm asked for held on arrival. The hold is what makes the
+// armed state something a test can stand in: the engine makes that cancel itself,
+// on a goroutine of its own, and it is the one thing that would end the turn and
+// fire the send. It is released at cleanup.
+func armedSendNow(t *testing.T, text string) (Model, *scriptedSession) {
+	t.Helper()
+	m, sess := scriptedModel(t)
+	m = startScripted(t, m, sess, "go", scriptHeld())
+	m.input.SetValue(text)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if m.confirm == nil {
+		t.Fatalf("setup: cursor asks first:\n%s", plainView(m))
+	}
+	release := sess.HoldNextCancel()
+	t.Cleanup(release)
+	m = pumpKey(t, m, enter())
+	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+	if !sendNowArmed(m) {
+		t.Fatalf("setup: the send-now was not armed:\n%s", plainView(m))
+	}
+	return m, sess
+}
+
+// TestCancelFailedDropsThePendingSend: the cancel a confirmed send-now asked for
+// really fails, so the send would be waiting for a turn that is not ending. The
+// text stays in the composer, the note says why, the failure itself is a
+// transcript row — and the turn is still running, because a cancel that failed
+// reached nothing.
+//
+// The cancel is the engine's now, which is what changed here and nothing else: it
+// is made on an engine goroutine, so its error reaches the model in the disarm
+// delta's Detail rather than in a message of its own. What the user sees is
+// unchanged, both halves of it; a cancel of the model's own — Esc, Ctrl+C — still
+// draws the row from its own command's report (TestEscCancelFailedDrawsTheRow).
 func TestCancelFailedDropsThePendingSend(t *testing.T) {
-	m, _ := queueWorking(t)
+	m, sess := scriptedModel(t)
+	m = startScripted(t, m, sess, "go", scriptHeld())
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	tm, _ = m.Update(cancelFailedMsg{seq: m.turnSeq, err: errors.New("nope")})
-	m = tm.(Model)
-	if m.strong != nil {
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	sess.FailNextCancel(errors.New("nope"))
+	m = pumpKey(t, m, enter())
+	m = pumpUntil(t, m, allOf(viewHas("cancel failed"), errorRows(1)))
+	if sendNowArmed(m) {
 		t.Fatal("a failed cancel drops the armed send")
 	}
 	if m.input.Value() != "PINEAPPLE" {
 		t.Fatalf("the text comes back: %q", m.input.Value())
 	}
-	if !strings.Contains(plainView(m), "cancel failed") {
-		t.Fatalf("the note is missing:\n%s", plainView(m))
+	if got := texts(m, entryError); len(got) != 1 || got[0] != "nope" {
+		t.Fatalf("the failure itself is a row too: %q", got)
+	}
+	if m.status != statusWorking {
+		t.Fatalf("the cancel reached nothing, so the turn runs on: %s", m.status)
+	}
+	if n := turnsStarted(sess); n != 1 {
+		t.Fatalf("nothing was sent: %d turns", n)
+	}
+}
+
+// TestEscCancelFailedDrawsTheRow is the other half: a cancel the model itself
+// asked for — Esc on a running turn — comes back failed, and the error is a
+// transcript row, as it always was.
+func TestEscCancelFailedDrawsTheRow(t *testing.T) {
+	m, sess := scriptedModel(t)
+	m = startScripted(t, m, sess, "go", scriptHeld())
+	sess.FailNextCancel(errors.New("nope"))
+	m = pumpEsc(t, m)
+	m = pumpUntil(t, m, errorRows(1))
+	if got := texts(m, entryError); got[0] != "nope" {
+		t.Fatalf("error rows %q, want the cancel's own failure", got)
+	}
+	if m.status != statusWorking {
+		t.Fatalf("the cancel reached nothing, so the turn runs on: %s", m.status)
 	}
 }
 
@@ -512,51 +554,57 @@ func TestCardHidesTheConfirm(t *testing.T) {
 }
 
 func TestCtrlCClearsEverythingPendingThenCancels(t *testing.T) {
-	m, _ := queueWorking(t)
-	m = typeEnter(t, m, "one")
-	m = typeEnter(t, m, "two")
+	m, sess := scriptedModel(t)
+	m = startScripted(t, m, sess, "go", scriptHeld())
+	m = pumpEnter(t, m, "one")
+	m = pumpEnter(t, m, "two")
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	if m.strong == nil || len(m.snap.Queue) != 2 {
-		t.Fatalf("set up: strong %v queue %+v", m.strong, m.snap.Queue)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	// The cancel the arm asks for is the engine's, made on a goroutine of its
+	// own, and it is what would end this turn — so it is held on arrival. That is
+	// what makes "armed, with two rows still queued" a state and not a moment.
+	release := sess.HoldNextCancel()
+	m = pumpKey(t, m, enter())
+	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+	if !sendNowArmed(m) || len(queueTexts(m)) != 2 {
+		t.Fatalf("set up: armed %v queue %q", sendNowArmed(m), queueTexts(m))
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m = tm.(Model)
 	if cmd == nil {
 		t.Fatal("ctrl+c cancels")
 	}
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("the queue is cleared: %+v", m.snap.Queue)
+	if got := queueTexts(m); len(got) != 0 {
+		t.Fatalf("the queue is cleared: %q", got)
 	}
-	if m.strong != nil || m.confirm != nil {
+	if sendNowArmed(m) || m.confirm != nil {
 		t.Fatal("the confirm and the armed send go too")
 	}
+	release()
 }
 
 func TestEscLetsTheQueueContinue(t *testing.T) {
-	m, _ := queueWorking(t)
-	m = typeEnter(t, m, "PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if len(m.snap.Queue) != 1 {
-		t.Fatalf("esc does not touch the queue: %+v", m.snap.Queue)
+	m, stub := heldWorking(t)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	// The cancel's command is held back, so the queue can be inspected in a
+	// moment when the cancelled turn provably has not ended yet.
+	m, cancel := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if got := queueTexts(m); len(got) != 1 {
+		t.Fatalf("esc does not touch the queue: %q", got)
 	}
-	seq := m.turnSeq
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
-	m = tm.(Model)
-	if m.turnSeq != seq+1 {
-		t.Fatalf("the head runs once the cancelled turn settles: turnSeq %d", m.turnSeq)
+	if n := turnsStarted(stub); n != 1 {
+		t.Fatalf("the head waits for the cancelled turn: %d turns", n)
 	}
+	m = pumpCmd(t, m, cancel)
+	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("the row left the queue: %+v", m.snap.Queue)
+	if !queueEmpty(m) {
+		t.Fatalf("the row left the queue: %q", queueTexts(m))
 	}
+	assertPrompts(t, stub, "go", "PINEAPPLE")
 }
 
 func TestClearEmptiesEverything(t *testing.T) {
@@ -565,118 +613,105 @@ func TestClearEmptiesEverything(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("/clear empties the queue: %+v", m.snap.Queue)
+	if got := queueTexts(m); len(got) != 0 {
+		t.Fatalf("/clear empties the queue: %q", got)
 	}
 }
 
-// TestFinishTurnBothEndingOrders is the drain in every shape §3.5 names.
-func TestFinishTurnBothEndingOrders(t *testing.T) {
-	for _, stop := range []string{"end_turn", stopCancelled} {
-		for _, doneFirst := range []bool{true, false} {
-			name := fmt.Sprintf("%s/done-first=%v", stop, doneFirst)
-			t.Run(name, func(t *testing.T) {
-				m, _ := queueWorking(t)
-				m = typeEnter(t, m, "PINEAPPLE")
-				seq := m.turnSeq
-				done := agent.Event{Type: agent.EventDone, StopReason: stop}
-				if doneFirst {
-					m = feed(t, m, done)
-					if m.status != statusWorking {
-						t.Fatalf("one ending is not the turn: %s", m.status)
-					}
-					tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: stop}})
-					m = tm.(Model)
-				} else {
-					tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: stop}})
-					m = tm.(Model)
-					if m.status != statusWorking {
-						t.Fatalf("one ending is not the turn: %s", m.status)
-					}
-					m = feed(t, m, done)
-				}
-				if m.turnSeq != seq+1 {
-					t.Fatalf("exactly one turn started: turnSeq %d", m.turnSeq)
-				}
-				if len(m.snap.Queue) != 0 {
-					t.Fatalf("the head went: %+v", m.snap.Queue)
-				}
-			})
-		}
+// TestEveryEndingDrainsTheNextRowExactlyOnce is the drain as a user meets it,
+// for both of the stop reasons §3.5 names and with no ending written by hand: a
+// held turn is cancelled, the first queued row runs and ends cleanly of its own
+// accord, the second row runs behind it, and each text reached the session
+// exactly once, in the order it was typed.
+func TestEveryEndingDrainsTheNextRowExactlyOnce(t *testing.T) {
+	m, stub := heldWorking(t)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	m = pumpEnter(t, m, "MANGO")
+	if got := queueTexts(m); len(got) != 2 {
+		t.Fatalf("setup: queue %q", got)
 	}
+	m = pumpEsc(t, m)
+	// The cancelled turn drains the head, and the head's own clean ending
+	// drains the row behind it.
+	m = pumpUntil(t, m, allOf(turnsReached(stub, 3), isIdle))
+	// The whole chain is over, so a late drain cannot add a fourth turn behind
+	// the assertions.
+	m = pumpSettled(t, m)
+	if !queueEmpty(m) {
+		t.Fatalf("every row went: %q", queueTexts(m))
+	}
+	if got := texts(m, entryUser); len(got) != 3 {
+		t.Fatalf("one user entry per turn: %q", got)
+	}
+	assertPrompts(t, stub, "go", "PINEAPPLE", "MANGO")
 }
 
+// TestFinishTurnBothEndingOrders is retired with the mechanism it permuted (plan
+// 021 C4). Its subject was the two-ending race — the prompt's return against the
+// stream's close, in both orders — and a turn has one ordered ending now, the
+// engine's EventTurn{ended}, which is also what decides its successor. The drain
+// it protected, for both of the stop reasons it named, is driven for real by
+// TestEveryEndingDrainsTheNextRowExactlyOnce above.
+
+// TestErroredTurnDrainsNothing: a turn that really fails — the error published
+// on the stream and then returned by the prompt, as the live session does it —
+// starts nothing behind it, and the queue goes with it.
+//
+// The clear is the chain policy's now, and it is why this test's expectation
+// moved: the rule "after an error, clear the queue" was the live and native
+// sessions' own (clearQueueOnError) and the Stub never had it, so a Stub-driven
+// turn used to leave the row sitting there. What a user sees is unchanged — the
+// removals still follow the error, and the note still says why the band emptied
+// (TestErroredTurnSaysTheQueueWasCleared).
 func TestErroredTurnDrainsNothing(t *testing.T) {
-	m, _ := queueWorking(t)
-	m = typeEnter(t, m, "PINEAPPLE")
-	seq := m.turnSeq
-	m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
-	tm, _ := m.Update(promptDoneMsg{res: agent.Result{}, err: errors.New("boom")})
-	m = tm.(Model)
-	if m.status != statusError {
-		t.Fatalf("status %s", m.status)
+	m, sess := scriptedModel(t)
+	sc := scriptFailed(errors.New("boom")).held()
+	m = startScripted(t, m, sess, "go", sc)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	started := turnsStarted(sess)
+	sc.Release()
+	m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+	// An errored turn has no idle status to wait for, so the barrier is the
+	// pump's own: everything the turn's settlement produced has been applied by
+	// the time this returns, which is what makes "nothing drained" a claim about a
+	// finished turn rather than about one still half-reported.
+	m = pumpSettled(t, m)
+	if n := turnsStarted(sess); n != started {
+		t.Fatalf("nothing drains from an error state: %d turns, was %d", n, started)
 	}
-	if m.turnSeq != seq {
-		t.Fatalf("nothing drains from an error state: turnSeq %d", m.turnSeq)
+	if !queueEmpty(m) {
+		t.Fatalf("the error took the queue with it: %q", queueTexts(m))
 	}
-	// EventError draws the row; the promptDoneMsg that follows must not draw
-	// a second one (#20).
+	// The error event draws the row; the turn's own ending carries the same
+	// failure and must not draw a second one (#20).
 	if got := len(texts(m, entryError)); got != 1 {
-		t.Fatalf("event-then-promptDone: want one error row, got %d", got)
-	}
-}
-
-// TestErroredTurnPromptDoneBeforeEventDrawsOneRow is TestErroredTurnDrainsNothing's
-// twin in the other delivery order: bubbletea does not order the eventMsg
-// from waitEvent against the promptDoneMsg from the prompt Cmd, so
-// promptDoneMsg can land first. It alone must already put the model into the
-// error state — but the row is EventError's to draw, so there must be none
-// yet until the event lands (#20).
-func TestErroredTurnPromptDoneBeforeEventDrawsOneRow(t *testing.T) {
-	m, _ := queueWorking(t)
-	m = typeEnter(t, m, "PINEAPPLE")
-	seq := m.turnSeq
-
-	// Arm a send-now and raise a confirm directly (a legitimate model state,
-	// just not one the real key flow can reach at the same time as an armed
-	// send-now) so the "dropped"/"cleared" assertions below are not vacuous.
-	m.strong = &strongSend{text: "MANGO", seq: seq}
-	m.confirm = &strongSend{text: "KIWI"}
-
-	tm, _ := m.Update(promptDoneMsg{res: agent.Result{}, err: errors.New("boom")})
-	m = tm.(Model)
-
-	if m.status != statusError {
-		t.Fatalf("promptDoneMsg alone must set the error status: got %s", m.status)
+		t.Fatalf("one failure, want one error row, got %d", got)
 	}
 	if m.err != "boom" {
-		t.Fatalf("promptDoneMsg alone must set m.err: got %q", m.err)
-	}
-	if got := len(texts(m, entryError)); got != 0 {
-		t.Fatalf("the row is the event's to draw, not promptDoneMsg's: got %d rows", got)
-	}
-	if m.strong != nil {
-		t.Fatal("the armed send-now must be dropped")
-	}
-	if m.confirm != nil {
-		t.Fatal("the confirm must be cleared")
-	}
-	if m.streamEndSeq == seq {
-		t.Fatal("the stream has not ended yet: only EventError ends it")
-	}
-
-	m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
-	if got := len(texts(m, entryError)); got != 1 {
-		t.Fatalf("promptDone-then-event: want exactly one error row, got %d", got)
-	}
-	if m.streamEndSeq != seq {
-		t.Fatalf("the event ends the stream: streamEndSeq %d want %d", m.streamEndSeq, seq)
+		t.Fatalf("m.err %q", m.err)
 	}
 }
 
+// TestErroredTurnPromptDoneBeforeEventDrawsOneRow is retired with the mechanism
+// it permuted (plan 021 C4). Its subject was the delivery order of the two
+// endings and the latch that made the orders indistinguishable, neither of which
+// exists now: the session publishes its EventError and the engine's
+// EventTurn{ended} follows it through the log, in that order, and the ending
+// draws no row precisely because the error already did. What it protected —
+// exactly one error row for one failure, the armed send-now dropped and the
+// confirm cleared — is held by TestErroredTurnDrainsNothing (one row, nothing
+// drained), TestErroredTurnDropsAnArmedSendNowSilently below, and against the
+// real wire by TestWiredFakeAgentTurnFailDrawsOneErrorRow.
+
+// The property TestErroredTurnPromptDoneBeforeEventDrawsOneRow asserted about an
+// armed send-now — that a failed turn takes it with it — is
+// TestArmedSendDroppedByAnErroredTurn's, below.
+
 // TestRefusedPromptDrawsOneRowAndEndsTheStream covers the refusals that emit
-// no event at all: promptDoneMsg is the only ending coming, so it must draw
-// the row itself and end the stream, for both refusal errors (#20).
+// no event at all: the prompt's own return is the only ending coming, so it must
+// draw the row itself and leave the turn over, for both refusal errors (#20).
+// "Over" is asserted as the user meets it — the next Enter starts a turn rather
+// than joining a queue, which a turn still in flight would have made it do.
 func TestRefusedPromptDrawsOneRowAndEndsTheStream(t *testing.T) {
 	cases := []struct {
 		name string
@@ -687,51 +722,58 @@ func TestRefusedPromptDrawsOneRowAndEndsTheStream(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, _ := queueWorking(t)
-			m = typeEnter(t, m, "PINEAPPLE")
-			seq := m.turnSeq
-
-			tm, _ := m.Update(promptDoneMsg{res: agent.Result{}, err: tc.err})
-			m = tm.(Model)
-
-			if got := len(texts(m, entryError)); got != 1 {
-				t.Fatalf("a refusal draws exactly one row: got %d", got)
+			m, sess := scriptedModel(t)
+			sess.Script(scriptRefused(tc.err))
+			m = pumpEnter(t, m, "PINEAPPLE")
+			m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+			// The refusal is the whole of the turn, and the pump's barrier says
+			// so: nothing of it is left to report before the next send.
+			m = pumpSettled(t, m)
+			if got := texts(m, entryError); len(got) != 1 {
+				t.Fatalf("a refusal draws exactly one row: %q", got)
 			}
-			if m.streamEndSeq != seq {
-				t.Fatalf("a refusal emits no event, so promptDoneMsg must end the stream: streamEndSeq %d want %d", m.streamEndSeq, seq)
+			// The user row the refused prompt drew stays: the transcript keeps
+			// what was typed (§4's recorded behaviour).
+			if got := texts(m, entryUser); len(got) != 1 || got[0] != "PINEAPPLE" {
+				t.Fatalf("user entries %q", got)
 			}
+			m = startScripted(t, m, sess, "next", scriptHeld())
+			if n := turnsStarted(sess); n != 2 {
+				t.Fatalf("the next Enter started %d turns in all, want 2", n)
+			}
+			if !queueEmpty(m) {
+				t.Fatalf("the draft was queued instead of sent: %q", queueTexts(m))
+			}
+			assertPrompts(t, sess, "PINEAPPLE", "next")
 		})
 	}
 }
 
 func TestForeignTurnHoldsTheDrainAndNotesItself(t *testing.T) {
-	m, stub := queueWorking(t)
+	m, stub := heldWorking(t)
 	stub.SetProvider(agent.GrokProvider())
-	m = typeEnter(t, m, "PINEAPPLE")
-	seq := m.turnSeq
+	m = pumpEnter(t, m, "PINEAPPLE")
+	// The agent starts a turn of its own. SetForeignTurn publishes the event
+	// itself, so the model hears about it the way it does in a real session.
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Text: "note", Running: true})
-	m = feed(t, m, agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{
-		ID: "interject-fallback-1", Text: "note", Running: true,
-	}})
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
-	if m.turnSeq != seq {
-		t.Fatalf("the drain waits out the foreign turn: turnSeq %d", m.turnSeq)
+	m = pumpEsc(t, m)
+	m = pumpUntil(t, m, allOf(isIdle, viewHas(foreignTurnNote)))
+	if n := turnsStarted(stub); n != 1 {
+		t.Fatalf("the drain waits out the foreign turn: %d turns", n)
 	}
-	if !strings.Contains(plainView(m), foreignTurnNote) {
-		t.Fatalf("the note is missing:\n%s", plainView(m))
+	if queueEmpty(m) {
+		t.Fatal("the row must stay in the band while the foreign turn holds the drain")
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: false})
-	m = feed(t, m, agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{
-		ID: "interject-fallback-1", Running: false,
-	}})
-	if m.turnSeq != seq+1 {
-		t.Fatalf("the drain re-runs when the foreign turn ends: turnSeq %d", m.turnSeq)
-	}
-	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
+	// turnsDrawn and not turnsReached: the row's turn is recorded at the session
+	// the moment the drain claims it, which is before the started that tells the
+	// model — and it is the model this asserts on.
+	m = pumpUntil(t, m, allOf(turnsDrawn(2), isIdle))
+	m = pumpSettled(t, m)
+	if got := texts(m, entryUser); got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
+	assertPrompts(t, stub, "go", "PINEAPPLE")
 }
 
 // TestHoverNeedsAButtonlessMotion: <motion:> holds the left button, which is a
@@ -803,8 +845,8 @@ func TestQueueActionClicks(t *testing.T) {
 		m, _ := queueWorking(t)
 		m = typeEnter(t, m, "PINEAPPLE")
 		m = press(t, hoverRow(t, m, 0), cancelX, 0)
-		if len(m.snap.Queue) != 0 {
-			t.Fatalf("[cancel] removes the row: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 0 {
+			t.Fatalf("[cancel] removes the row: %+v", got)
 		}
 	})
 	t.Run("edit", func(t *testing.T) {
@@ -822,8 +864,8 @@ func TestQueueActionClicks(t *testing.T) {
 		if m.confirm == nil {
 			t.Fatal("[send now] asks first")
 		}
-		if len(m.snap.Queue) != 1 {
-			t.Fatalf("the row stays until it actually goes: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 1 {
+			t.Fatalf("the row stays until it actually goes: %+v", got)
 		}
 	})
 	t.Run("row text selects", func(t *testing.T) {
@@ -834,8 +876,8 @@ func TestQueueActionClicks(t *testing.T) {
 		if !m.queueFocus || m.queueSel != 1 {
 			t.Fatalf("a click on the text selects the row: focus %v sel %d", m.queueFocus, m.queueSel)
 		}
-		if len(m.snap.Queue) != 2 {
-			t.Fatalf("nothing else happened: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 2 {
+			t.Fatalf("nothing else happened: %+v", got)
 		}
 	})
 	t.Run("a click where no strip was drawn only selects", func(t *testing.T) {
@@ -845,8 +887,8 @@ func TestQueueActionClicks(t *testing.T) {
 		m = typeEnter(t, m, "one")
 		m = typeEnter(t, m, "two")
 		m = press(t, m, cancelX, 1)
-		if len(m.snap.Queue) != 2 {
-			t.Fatalf("a button that was not drawn cannot be clicked: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 2 {
+			t.Fatalf("a button that was not drawn cannot be clicked: %+v", got)
 		}
 		if !m.queueFocus || m.queueSel != 1 {
 			t.Fatalf("the click selects the row instead: focus %v sel %d", m.queueFocus, m.queueSel)
@@ -898,8 +940,8 @@ func TestMouseModeNeverIssuedUnderNoMouse(t *testing.T) {
 	m.input.SetValue("PINEAPPLE")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
-	if len(m.snap.Queue) != 1 {
-		t.Fatalf("the queue still works: %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 1 {
+		t.Fatalf("the queue still works: %+v", got)
 	}
 	if hasMouseSequence(t, cmd, "all") || hasMouseSequence(t, cmd, "cell") {
 		t.Fatal("--no-mouse asked the terminal for no reporting; craze must not start now")
@@ -1090,19 +1132,19 @@ func TestQueueLaysOutOncePerUpdate(t *testing.T) {
 // settles, and it does not wait for an edit nobody saved. The edit ends rather
 // than writing into a row that is gone.
 func TestEditedRowSentUnderTheEditor(t *testing.T) {
-	m, _ := queueWorking(t)
-	m = typeEnter(t, m, "PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m = tm.(Model)
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
+	m, stub := heldWorking(t)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = pumpKey(t, m, enter())
 	if m.queueEdit == "" {
 		t.Fatal("edit mode is on")
 	}
 	m.input.SetValue("never saved")
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
+	// Esc in the editor ends the edit, so the turn is cancelled at the session
+	// instead — the same call Esc's command makes.
+	endHeldTurn(t, stub)
+	m = pumpUntil(t, m, turnsReached(stub, 2))
+	m = pumpSettled(t, m)
 	if m.queueEdit != "" {
 		t.Fatal("the edit ends with the row")
 	}
@@ -1125,7 +1167,7 @@ func TestActionStripHitTestMatchesTheDraw(t *testing.T) {
 			m = typeEnter(t, m, "PINEAPPLE")
 			tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 			m = tm.(Model)
-			row := plain(m.queueRow(0, m.snap.Queue[0], true, false))
+			row := plain(m.queueRow(0, queuedRows(m)[0], true, false))
 			if !strings.Contains(row, "[send now] [edit] [cancel]") {
 				t.Fatalf("width %d: no strip drawn: %q", width, row)
 			}
@@ -1152,70 +1194,75 @@ func TestActionStripHitTestMatchesTheDraw(t *testing.T) {
 // to prevent: the row leaves the queue when it actually goes, not when it is
 // confirmed, so the drain behind it cannot send it again.
 func TestSendNowOnARowSendsItExactlyOnce(t *testing.T) {
-	m, _ := queueWorking(t)
-	m = typeEnter(t, m, "PINEAPPLE")
-	m = typeEnter(t, m, "MANGO")
+	m, stub := heldWorking(t)
+	// The turn the armed send becomes is held too, so the window in which it has
+	// gone and the row behind it has not is a state the test can stand in rather
+	// than a moment it has to catch.
+	sent := stub.Script(scriptHeld())
+	m = pumpEnter(t, m, "PINEAPPLE")
+	m = pumpEnter(t, m, "MANGO")
 	// Select the first row and send it now.
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m = tm.(Model)
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m = tm.(Model)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
 	if got, _ := m.queueSelected(); got.Text != "PINEAPPLE" {
 		t.Fatalf("selected %+v", got)
 	}
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
 	if m.confirm == nil {
 		t.Fatal("send now on a row asks first")
 	}
-	if len(m.snap.Queue) != 2 {
-		t.Fatalf("the row stays until it goes: %+v", m.snap.Queue)
+	if got := queueTexts(m); len(got) != 2 {
+		t.Fatalf("the row stays until it goes: %q", got)
 	}
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	if len(m.snap.Queue) != 2 {
-		t.Fatalf("and it is still there while the cancel is in flight: %+v", m.snap.Queue)
-	}
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
-	m = tm.(Model)
-	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
+	// Confirming arms the send and takes nothing yet: the row is taken in the same
+	// locked section that claims its turn, which is what stops the drain behind it
+	// sending it a second time. That the row survives the arm is not asserted at
+	// this instant — the engine makes the cancel on a goroutine of its own, so the
+	// send may already have fired by the time this line runs — it is asserted where
+	// it is a state and not a moment: with the send's own turn open below, exactly
+	// one row has gone.
+	m = pumpKey(t, m, enter())
+	// The armed send is the second turn, and it is held there.
+	awaitBarrier(t, sent.opened, "the armed send's turn opening")
+	m = pumpUntil(t, m, turnsDrawn(2))
+	if got := texts(m, entryUser); got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
 	if got := queueTexts(m); len(got) != 1 || got[0] != "MANGO" {
 		t.Fatalf("exactly one row went: %q", got)
 	}
-	// The turn that started now settles too; the row behind it drains once.
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
+	// That turn ends; the row behind it drains once.
+	sent.Release()
+	m = pumpUntil(t, m, allOf(turnsReached(stub, 3), isIdle))
+	m = pumpSettled(t, m)
 	if got := texts(m, entryUser); len(got) != 3 || got[2] != "MANGO" {
 		t.Fatalf("user entries %q", got)
 	}
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("queue %+v", m.snap.Queue)
+	if !queueEmpty(m) {
+		t.Fatalf("queue %q", queueTexts(m))
 	}
+	// The whole point: each text reached the session exactly once.
+	assertPrompts(t, stub, "go", "PINEAPPLE", "MANGO")
 }
 
 // TestConfirmDroppedWhenTheTurnEndsFirst: the question was about a turn that
 // is over, so it is not asked of the next one.
 func TestConfirmDroppedWhenTheTurnEndsFirst(t *testing.T) {
-	m, _ := queueWorking(t)
+	m, stub := heldWorking(t)
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
 	if m.confirm == nil {
 		t.Fatal("the confirm is up")
 	}
-	seq := m.turnSeq
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
+	// The turn ends while the question is still on screen.
+	endHeldTurn(t, stub)
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.confirm != nil {
 		t.Fatal("the confirm goes with the turn it was about")
 	}
-	if m.turnSeq != seq {
-		t.Fatalf("nothing was sent: turnSeq %d", m.turnSeq)
+	if n := turnsStarted(stub); n != 1 {
+		t.Fatalf("nothing was sent: %d turns", n)
 	}
 	if m.input.Value() != "PINEAPPLE" {
 		t.Fatalf("the draft is untouched: %q", m.input.Value())
@@ -1226,31 +1273,43 @@ func TestConfirmDroppedWhenTheTurnEndsFirst(t *testing.T) {
 }
 
 // TestArmedSendDroppedByAnErroredTurn: nothing drains from an error state, so
-// an armed send must not survive to fire behind a later turn.
+// an armed send must not survive to fire behind a later turn. And nothing extra is
+// said about it — the failure is already the whole of what happened.
+//
+// The cancel the arm asks for is the engine's and is made on a goroutine of its
+// own, so it is held on arrival: that is what makes the turn end by its own failure
+// rather than by that cancel, which is the scenario. Its release afterwards is also
+// what proves a released hold cannot land on a later turn — the turn below starts
+// only once the hold is back.
 func TestArmedSendDroppedByAnErroredTurn(t *testing.T) {
-	m, _ := queueWorking(t)
+	m, sess := scriptedModel(t)
+	sc := scriptFailed(errors.New("boom")).held()
+	m = startScripted(t, m, sess, "go", sc)
 	m.input.SetValue("PINEAPPLE")
-	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
-	m = tm.(Model)
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
-	if m.strong == nil {
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	release := sess.HoldNextCancel()
+	m = pumpKey(t, m, enter())
+	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+	if !sendNowArmed(m) {
 		t.Fatal("armed")
 	}
-	m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
-	if m.strong != nil {
-		t.Fatal("an errored turn takes the armed send with it")
+	// The turn fails while the send is armed behind it: it emits the error and
+	// returns it, so by the time the error row is up the turn is over.
+	sc.Release()
+	m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+	// The hold goes back, and the settlement that was waiting for it disarms the
+	// send and clears the queue the error took with it.
+	release()
+	m = pumpUntil(t, m, func(m Model) bool { return !sendNowArmed(m) })
+	m = pumpSettled(t, m)
+	if note := m.copyNote; note != "" && note != "queue cleared" {
+		t.Fatalf("a failed turn's disarm said %q", note)
 	}
-	// A later turn settles without it firing.
-	m.status = statusIdle
-	m = typeEnter(t, m, "next")
-	seq := m.turnSeq
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
-	if m.turnSeq != seq {
-		t.Fatalf("nothing fired behind the next turn: turnSeq %d", m.turnSeq)
-	}
+	// A later turn runs and ends without the armed text ever going out.
+	m = pumpEnter(t, m, "next")
+	m = pumpUntil(t, m, allOf(turnsReached(sess, 2), isIdle))
+	m = pumpSettled(t, m)
+	assertPrompts(t, sess, "go", "next")
 }
 
 // TestEditingASecondRowKeepsTheOriginalDraft: only the first edit displaces a
@@ -1310,27 +1369,21 @@ func TestEditSurvivesTheBandBeingDegradedAway(t *testing.T) {
 	}
 }
 
-// TestErroredTurnSaysTheQueueWasCleared: the session clears the queue after
-// it has reported the error, so the status is already error when the
-// removals land and the note can say why the band emptied.
+// TestErroredTurnSaysTheQueueWasCleared: the queue is cleared after the error has
+// been reported, so the status is already error when the removals land and the
+// note can say why the band emptied. It is driven for real — a turn that fails
+// with a row queued behind it — because the clear is the engine's chain policy
+// now and its place in the settlement is what the note depends on.
 func TestErroredTurnSaysTheQueueWasCleared(t *testing.T) {
-	m, stub := queueWorking(t)
-	m = typeEnter(t, m, "PINEAPPLE")
-	m = feed(t, m, agent.Event{Type: agent.EventError, Err: errors.New("boom")})
-	if m.status != statusError {
-		t.Fatalf("status %s", m.status)
-	}
-	n := stub.ClearQueue()
-	m = feed(t, m, agent.Event{
-		Type:        agent.EventQueue,
-		Queue:       &agent.QueuedPrompt{ID: "q-1", Text: "PINEAPPLE"},
-		QueueChange: agent.QueueRemoved,
-	})
-	if n != 1 {
-		t.Fatalf("the session cleared %d rows", n)
-	}
-	if !strings.Contains(plainView(m), "queue cleared") {
-		t.Fatalf("the note is missing:\n%s", plainView(m))
+	m, sess := scriptedModel(t)
+	sc := scriptFailed(errors.New("boom")).held()
+	m = startScripted(t, m, sess, "go", sc)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	sc.Release()
+	m = pumpUntil(t, m, allOf(isErrored, viewHas("queue cleared")))
+	m = pumpSettled(t, m)
+	if !queueEmpty(m) {
+		t.Fatalf("the band still holds %q", queueTexts(m))
 	}
 }
 

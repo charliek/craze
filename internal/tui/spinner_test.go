@@ -78,28 +78,34 @@ func TestStaleTickGenerationsAreDropped(t *testing.T) {
 }
 
 func TestIdleUsesTheSlowChain(t *testing.T) {
-	m := sized(t)
+	m, sess := scriptedModel(t)
 	if !m.tickLive || m.tickFast {
 		t.Fatalf("idle runs the slow chain: live=%v fast=%v", m.tickLive, m.tickFast)
 	}
 	gen := m.tickGen
 
-	// A turn switches to the fast chain exactly once.
-	m.input.SetValue("go")
-	tm, _ := m.Update(enter())
-	m = tm.(Model)
+	// A turn switches to the fast chain exactly once. The turn is a real one,
+	// open on the session, because the chain has to follow the whole turn and not
+	// the first thing that looks like its end.
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "go", sc)
 	if !m.tickFast || m.tickGen != gen+1 {
 		t.Fatalf("working: fast=%v gen=%d", m.tickFast, m.tickGen)
 	}
-	// Both endings, because the turn is only over — and the chain only slow
-	// again — once the stream has closed as well as the prompt returned.
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
-	m = tm.(Model)
+	// The turn publishes its one ending and stops short of returning, so the turn
+	// is not over and the chain stays fast. The chunk behind it is only the marker
+	// — events arrive in the order they were published, so seeing it means the
+	// ending was applied.
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn's ending")
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "the stream closed"})
+	m = pumpUntil(t, m, viewHas("the stream closed"))
 	if !m.tickFast {
-		t.Fatalf("still working until the prompt returns: fast=%v", m.tickFast)
+		t.Fatalf("still working until the turn is over: fast=%v", m.tickFast)
 	}
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
+	sc.Return()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.tickFast || m.tickGen != gen+2 {
 		t.Fatalf("back to idle: fast=%v gen=%d", m.tickFast, m.tickGen)
 	}

@@ -62,6 +62,46 @@ linters:
             - "**/internal/harness/redact/**"
           allow:
             - $gostd
+        # The engine's own import boundary (plan 021 §3.1): it sits above the
+        # provider seam (agent.Session) and knows nothing of any one client or
+        # provider transport, so a non-test file here may import neither
+        # client package nor the ACP or harness transports. Split in two
+        # because the package's own tests need a narrower rule: engine_test
+        # drives the engine over tui.Stub, which is an ordinary Go dependency
+        # an external test package is allowed to take on the package under
+        # test, so $test files answer to a rule that allows internal/tui but
+        # still denies internal/cli, internal/acp and internal/harness.
+        engine:
+          list-mode: lax
+          files:
+            - "**/internal/engine/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the engine drives every client uniformly; a client package is exactly what it must not know about (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the engine drives every client uniformly; a client package is exactly what it must not know about (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the engine speaks to agent.Session alone; a provider transport below that seam is not its concern (plan 021 §3.1)"
+        engine-test:
+          list-mode: lax
+          files:
+            # depguard ORs several positive patterns rather than ANDing them,
+            # so "**/internal/engine/**" plus the bare $test token (which
+            # alone means "every test file in the module") would match every
+            # test file project-wide, not just this package's. One glob that
+            # is already both — under internal/engine and named _test.go — is
+            # the combination that stays inside the package.
+            - "**/internal/engine/**_test.go"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the engine's own tests drive it over tui.Stub, never a CLI client (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern, in a test either (plan 021 §3.1)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the engine speaks to agent.Session alone; a provider transport below that seam is not its concern, in a test either (plan 021 §3.1)"
   exclusions:
     presets:
       - std-error-handling

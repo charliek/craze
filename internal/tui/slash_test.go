@@ -402,7 +402,7 @@ func TestSlashAcceptInsideAQueueEdit(t *testing.T) {
 	m, stub := queueWorking(t)
 	setStubCommands(stub, "research")
 	m = typeEnter(t, m, "one")
-	id := m.snap.Queue[0].ID
+	id := queuedRows(m)[0].ID
 	m = pressKey(t, m, tea.KeyUp)
 	m = pressKey(t, m, tea.KeyEnter)
 	if m.queueEdit != id {
@@ -421,8 +421,8 @@ func TestSlashAcceptInsideAQueueEdit(t *testing.T) {
 	if m.queueEdit != "" {
 		t.Fatal("the next enter saves the edit")
 	}
-	if len(m.snap.Queue) != 1 || m.snap.Queue[0].Text != "/research" {
-		t.Fatalf("the row was not saved: %+v", m.snap.Queue)
+	if got := queuedRows(m); len(got) != 1 || got[0].Text != "/research" {
+		t.Fatalf("the row was not saved: %+v", got)
 	}
 }
 

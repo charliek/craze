@@ -575,7 +575,7 @@ func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 
 	cancelCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	if err := s.Cancel(cancelCtx); err != nil {
+	if _, err := s.Cancel(cancelCtx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1023,7 +1023,7 @@ func TestCancelDuringTheCatalogWait(t *testing.T) {
 
 	out := promptOn(s, "/probe-echo banana")
 	waitForCatalogWait(t, s)
-	if err := s.Cancel(t.Context()); err != nil {
+	if _, err := s.Cancel(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if err := promptReturn(t, out, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
@@ -1077,13 +1077,13 @@ func TestCancelDuringTheWaitLeavesTheNextPromptAlone(t *testing.T) {
 	// finding is in what Cancel does after the abort, and waiting here is what
 	// hid it.
 	cancelled := make(chan error, 1)
-	go func() { cancelled <- s.Cancel(t.Context()) }()
+	go func() { _, err := s.Cancel(t.Context()); cancelled <- err }()
 
 	if err := promptReturn(t, outA, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
 		t.Fatalf("the cancelled prompt returned %v", err)
 	}
-	// B, the moment A is out of the way — the TUI's promptDoneMsg → finishTurn
-	// → queue drain, with nothing in between.
+	// B, the moment A is out of the way — the engine's settlement and the drain
+	// it decides, with nothing in between.
 	res, err := s.Prompt(t.Context(), "still here")
 	if err != nil {
 		t.Fatal(err)
@@ -1169,7 +1169,7 @@ func TestASecondPromptDuringTheWaitIsRefused(t *testing.T) {
 			}
 
 			// A is still the cancellable one, and Esc still ends it.
-			if err := s.Cancel(t.Context()); err != nil {
+			if _, err := s.Cancel(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			if err := promptReturn(t, outA, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {

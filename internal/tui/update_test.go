@@ -54,8 +54,15 @@ func startSized(t *testing.T, ws string) Model {
 // caller, because a test that wants real skills on disk sets one up first.
 func startStub(t *testing.T, stub *Stub, ws string, cols, rows int) Model {
 	t.Helper()
+	return startSession(t, stub, ws, cols, rows)
+}
+
+// startSession is startStub for a session that is not a bare Stub — the
+// scripted decorator — so the standard config stays in one place.
+func startSession(t *testing.T, sess agent.Session, ws string, cols, rows int) Model {
+	t.Helper()
 	m := New(Config{
-		Session:   stub,
+		Session:   sess,
 		Theme:     "tokyo-night",
 		Workspace: ws,
 		Model:     "grok",
@@ -137,57 +144,38 @@ func TestEnterEmptyDoesNotSend(t *testing.T) {
 	}
 }
 
+// TestEnterSendsAndFollowUp is two whole turns driven the way a user drives
+// them: Enter, the stub answers on its own goroutine, and the model is waited
+// on until the reply is on screen and the turn is over. Nothing here says how a
+// turn ends — the status going idle is what "the turn is over" means to a user,
+// and it is the only claim the test makes about it.
 func TestEnterSendsAndFollowUp(t *testing.T) {
 	m := sized(t)
-	m.input.SetValue("hello")
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
+	stub := m.sess.(*Stub)
+	m = pumpEnter(t, m, "hello")
 	if m.status != statusWorking {
 		t.Fatalf("status %s", m.status)
-	}
-	if cmd == nil {
-		t.Fatal("expected prompt cmd")
 	}
 	if got := strings.Join(texts(m, entryUser), ""); got != "hello" {
 		t.Fatalf("user %q", got)
 	}
-	tm, cmd = m.Update(enter())
-	m = tm.(Model)
-	if cmd != nil {
-		t.Fatal("enter while working should be ignored")
+	// Enter with nothing in the composer — send() cleared it — starts nothing.
+	m = pumpKey(t, m, enter())
+	if n := turnsStarted(stub); n != 1 {
+		t.Fatalf("an empty Enter while working started %d turns", n)
 	}
 
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "echo: hello"}})
-	m = tm.(Model)
-	// A turn is over when both of its endings have landed, so the status waits
-	// for the stream as well as for the prompt.
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
-	m = tm.(Model)
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("echo: hello")))
+	// Nothing of the first turn is left to report, so the follow-up below cannot
+	// be disturbed by it.
+	m = pumpSettled(t, m)
+
+	m = pumpEnter(t, m, "again")
 	if m.status != statusWorking {
-		t.Fatalf("status %s before the prompt returned", m.status)
+		t.Fatalf("the follow-up should send: status %s", m.status)
 	}
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
-	if m.status != statusIdle {
-		t.Fatalf("status %s after done", m.status)
-	}
-	if !strings.Contains(plainView(m), "echo: hello") {
-		t.Fatalf("missing assistant text:\n%s", plainView(m))
-	}
-
-	m.input.SetValue("again")
-	tm, cmd = m.Update(enter())
-	m = tm.(Model)
-	if m.status != statusWorking || cmd == nil {
-		t.Fatal("follow-up should send")
-	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "follow-up: again"}})
-	m = tm.(Model)
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
-	if !strings.Contains(plainView(m), "follow-up: again") {
-		t.Fatalf("missing follow-up:\n%s", plainView(m))
-	}
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("follow-up: again")))
+	assertPrompts(t, stub, "hello", "again")
 }
 
 func TestCtrlDQuits(t *testing.T) {
@@ -360,6 +348,12 @@ func TestCtrlCStateMachine(t *testing.T) {
 	})
 }
 
+// TestEscCancelsWorkingTurn is Esc on a turn the agent is running: the turn
+// ends, the model goes idle, and the acknowledgement is the one note a cancel
+// leaves. The turn is a hung one, so which of the two real cancel routes the
+// scheduler takes — the hung prompt released by the cancel, or a claim the
+// cancel reaches first, which withdraws — is not fixed; both are the session's
+// own and both leave exactly this, which is the whole of what a user sees.
 func TestEscCancelsWorkingTurn(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
@@ -368,25 +362,22 @@ func TestEscCancelsWorkingTurn(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
-	m.input.SetValue("wait")
-	tm, _ = m.Update(enter())
-	m = tm.(Model)
+	m = pumpEnter(t, tm.(Model), "wait")
 	if m.status != statusWorking {
 		t.Fatal("want working")
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("expected cancel cmd")
+	m = pumpEsc(t, m)
+	m = pumpUntil(t, m, isIdle)
+	// Nothing of the turn is left to report, so "exactly one note" is a claim
+	// about a finished turn.
+	m = pumpSettled(t, m)
+	if notes := texts(m, entryNote); len(notes) != 1 || notes[0] != stopCancelled {
+		t.Fatalf("a cancel leaves exactly one note: %q", notes)
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
-	m = tm.(Model)
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "cancelled"}})
-	m = tm.(Model)
-	if m.status != statusIdle {
-		t.Fatalf("status %s", m.status)
+	if rows := texts(m, entryError); len(rows) != 0 {
+		t.Fatalf("a cancel is not an error: %q", rows)
 	}
+	assertPrompts(t, stub, "wait")
 }
 
 // TestEscDuringTheCatalogWaitSettlesTheTurn is Esc while the first prompt is
@@ -396,64 +387,31 @@ func TestEscCancelsWorkingTurn(t *testing.T) {
 // leaves: the draft where the user typed it, the note under it, no error.
 //
 // Both commands run for real — the one Enter returned, which parks, and the one
-// Esc returned, which frees it — so the promptDoneMsg fed back below is the
+// Esc returned, which frees it — so the ending the model settles on is the
 // session's own and not one written here. What this does not test is the race
 // that follows: the session-level TestCancelDuringTheWaitLeavesTheNextPromptAlone
 // owns what Cancel may still do once the freed prompt has returned.
 func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
-	parked := stub.ParkNext()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
-	m.input.SetValue("/probe-echo banana")
-	tm, send := m.Update(enter())
-	m = tm.(Model)
-	if m.status != statusWorking {
-		t.Fatal("want working")
-	}
-	// The send runs where the tea runtime runs it, on its own goroutine, so
-	// the Esc below lands while it is still parked. Starting that goroutine
-	// does not order it against the Esc, though: without the barrier the Esc
-	// can run first, and the prompt then withdraws without parking — a cancel
-	// of a claimed prompt, not of a prompt already in the wait, which is the
+	// heldTurn is the barrier: the prompt runs where the runtime runs it, and
+	// without waiting for it to reach the wait the Esc could land first — a
+	// cancel of a claimed prompt, not of a prompt already parked, which is the
 	// only thing this test is about.
-	done := make(chan tea.Msg, 1)
-	go func() { done <- runCmd(send) }()
-	select {
-	case <-parked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the prompt never parked")
-	}
+	m = heldTurn(t, tm.(Model), stub, "/probe-echo banana")
 
-	tm, esc := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if esc == nil {
-		t.Fatal("expected cancel cmd")
-	}
-	if msg := runCmd(esc); msg != nil {
-		t.Fatalf("the cancel failed: %+v", msg)
-	}
-	var msg tea.Msg
-	select {
-	case msg = <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Esc never freed the parked prompt")
-	}
-	got, ok := msg.(promptDoneMsg)
-	if !ok || !errors.Is(got.err, agent.ErrPromptCancelled) {
-		t.Fatalf("the parked prompt returned %#v", msg)
-	}
-	tm, _ = m.Update(got)
-	m = tm.(Model)
-	if m.status != statusIdle {
-		t.Fatalf("status %s", m.status)
-	}
+	m = pumpEsc(t, m)
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.err != "" {
 		t.Fatalf("a cancel is not an error: %q", m.err)
+	}
+	if rows := texts(m, entryError); len(rows) != 0 {
+		t.Fatalf("the cancel failed: %q", rows)
 	}
 	view := plainView(m)
 	if !strings.Contains(view, "/probe-echo banana") {
@@ -465,32 +423,38 @@ func TestEscDuringTheCatalogWaitSettlesTheTurn(t *testing.T) {
 }
 
 // TestEscRightAfterEnterWithdrawsTheClaimedPrompt is #18's pre-open window at
-// the TUI: Enter and then Esc in consecutive Updates, and the command Enter
-// returned — the prompt's goroutine, which the runtime may schedule late — has
-// not run yet when the cancel does. Enter claimed the turn inside Update, so
-// the cancel is this prompt's: the prompt withdraws when its command does run,
-// and the cancel reaches nothing. What is left is what every cancel leaves: the
-// row, the note, no error, and no failed cancel.
+// the TUI: Enter and then Esc in consecutive Updates, with the prompt claimed and
+// nothing on the wire when the cancel lands. Enter claims the turn inside Update
+// — the engine's Submit calls the session's Begin in the same locked section that
+// reserves it, on the caller's goroutine — so the cancel is this prompt's: the
+// prompt withdraws when its continuation goes on, and the cancel reaches nothing.
+// What is left is what every cancel leaves: the row, the note, no error, and no
+// failed cancel.
+//
+// Two barriers hold the window open, because the continuation runs on a goroutine
+// of the engine's and no command of the model's can be withheld to delay it: the
+// script's, which stops the continuation before it has looked at anything, and
+// the session's, which says the cancel has arrived.
 func TestEscRightAfterEnterWithdrawsTheClaimedPrompt(t *testing.T) {
-	isolateSkillsHome(t)
-	stub := NewStub()
-	m := startStub(t, stub, t.TempDir(), 80, 24)
-	m, prompt := typeAndEnter(t, m, "stop me")
+	m, sess := scriptedModel(t)
+	sc := scriptWithheld()
+	sess.Script(sc)
+	m = pumpEnter(t, m, "stop me")
 	if m.status != statusWorking {
 		t.Fatal("want working")
 	}
-	m, esc := press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if esc == nil {
-		t.Fatal("expected cancel cmd")
-	}
+	awaitBarrier(t, sc.claimed, "the prompt being claimed with nothing on the wire")
 
-	if msg := runCmd(esc); msg != nil {
-		t.Fatalf("the cancel failed: %+v", msg)
-	}
-	m = deliver(t, m, withdrawnPrompt(t, prompt))
-	if m.status != statusIdle {
-		t.Fatalf("status %s", m.status)
-	}
+	m = pumpEsc(t, m)
+	awaitBarrier(t, sess.Cancels(), "the cancel reaching the session")
+	// Only now does the claimed prompt's continuation go on, and it finds itself
+	// cancelled before it opened anything.
+	sc.Open()
+
+	m = pumpUntil(t, m, isIdle)
+	// The claims below are all "nothing else happened", so nothing may still be
+	// on its way when they are made.
+	m = pumpSettled(t, m)
 	if m.err != "" {
 		t.Fatalf("a cancel is not an error: %q", m.err)
 	}
@@ -501,84 +465,101 @@ func TestEscRightAfterEnterWithdrawsTheClaimedPrompt(t *testing.T) {
 	if !strings.Contains(view, "stop me") {
 		t.Fatalf("the prompt left the transcript:\n%s", view)
 	}
-	if !strings.Contains(view, stopCancelled) {
-		t.Fatalf("the cancel left no note:\n%s", view)
+	// Exactly one note, and no assistant row, is how the transcript says the
+	// withdrawn prompt emitted nothing at all: an EventDone of its own would
+	// have written a second cancelled note.
+	if notes := texts(m, entryNote); len(notes) != 1 || notes[0] != stopCancelled {
+		t.Fatalf("notes %q, want one %q", notes, stopCancelled)
 	}
-	if prompts := stub.Prompts(); len(prompts) != 1 || prompts[0] != "stop me" {
-		t.Fatalf("the stub recorded %q", prompts)
+	if got := texts(m, entryAssistant); len(got) != 0 {
+		t.Fatalf("a withdrawn prompt said %q", got)
 	}
-	if n := stub.CancelsSent(); n != 0 {
+	assertPrompts(t, sess, "stop me")
+	if n := sess.CancelsSent(); n != 0 {
 		t.Fatalf("%d cancels reached the agent for a prompt that never did", n)
-	}
-	select {
-	case ev := <-stub.Events():
-		t.Fatalf("a withdrawn prompt emitted %+v", ev)
-	default:
 	}
 }
 
-// TestEscAfterEnterDuringAForeignTurnWritesNoCancel is the corner the claim
-// accepts. The agent is running a turn of its own that the model has not heard
-// about yet — its event is still in the channel — so Enter sends rather than
-// queues, and Esc lands before the prompt's command runs. The claimed prompt
-// withdraws and the cancel writes nothing, so the foreign turn keeps running: a
-// cancel for the withdrawn prompt would stop a turn the user never started.
-// A second Esc, pressed while the turn still shows working, finds no claim by
-// the time it runs, and that cancel goes out at once. (Once the model has
-// settled, Esc does not reach the session for a foreign turn at all: the turn
-// is the agent's, as it always was.)
-func TestEscAfterEnterDuringAForeignTurnWritesNoCancel(t *testing.T) {
+// TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead is a RECORDED
+// BEHAVIOUR CHANGE, and this is what it changed to.
+//
+// The agent is running a turn of its own and the event that says so is still in
+// the channel, so the model's own mirror would let Enter send. At the baseline it
+// did: the prompt was claimed, its row drawn, the model went working, and an Esc
+// in the next Update withdrew that claim — the text was never sent
+// (TestEscAfterEnterDuringAForeignTurnWritesNoCancel, retired with this).
+//
+// It queues now, because admission is the engine's and the engine reads the
+// session's own flag in the section that would claim the turn (plan 021 §3.4: a
+// turn is admitted only with "no foreign turn reported"). The model's view may lag
+// that flag; the engine's never does. And a queued row is exactly what a foreign
+// turn the model DOES know about has always produced
+// (TestEnterDuringAForeignTurnQueues), so the two windows now agree instead of
+// behaving differently depending on which events had been delivered.
+//
+// What the user is owed is a way out, and they have the ordinary one: the row is in
+// the band, visible, and removable with the band's own verbs — asserted below —
+// and it drains by itself when the agent's turn ends.
+func TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
 	m := startStub(t, stub, t.TempDir(), 80, 24)
+	// The flag is set on the session; the event that would tell the model is still
+	// in the channel, unread, so the model's mirror still says idle.
 	stub.SetForeignTurn(agent.ForeignTurnInfo{Running: true})
-	m, prompt := typeAndEnter(t, m, "mine")
-	if m.status != statusWorking {
-		t.Fatalf("status %s: the prompt should have been sent, not queued", m.status)
+	if m.snap.ForeignTurn {
+		t.Fatal("setup: the model has already heard about the foreign turn")
 	}
-	m, first := press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, second := press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if first == nil || second == nil {
-		t.Fatal("expected two cancel cmds")
+	m = pumpEnter(t, m, "mine")
+	if m.status == statusWorking {
+		t.Fatal("nothing may be claimed into a turn the session knows is the agent's")
 	}
+	if got := queueTexts(m); len(got) != 1 || got[0] != "mine" {
+		t.Fatalf("the draft should be queued: %q", got)
+	}
+	if n := turnsStarted(stub); n != 0 {
+		t.Fatalf("%d prompts reached the session during a foreign turn", n)
+	}
+	// Visible, and the band's own Backspace takes it back: the way out Esc used to
+	// be.
+	if !strings.Contains(plainView(m), "#1 mine") {
+		t.Fatalf("the row is not on screen:\n%s", plainView(m))
+	}
+	withdrawn := pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if !withdrawn.queueFocus {
+		t.Fatalf("↑ did not reach the band:\n%s", plainView(withdrawn))
+	}
+	withdrawn = pumpKey(t, withdrawn, tea.KeyMsg{Type: tea.KeyBackspace})
+	if !queueEmpty(withdrawn) {
+		t.Fatalf("the row could not be taken back: %q", queueTexts(withdrawn))
+	}
+	// The rest of the case is the row left in place, so it is put back.
+	enqueueRow(t, m, "mine")
 
-	if msg := runCmd(first); msg != nil {
-		t.Fatalf("the first cancel failed: %+v", msg)
-	}
+	// Esc has nothing of craze's own to stop, so the agent's turn is left alone.
+	m = pumpEsc(t, m)
+	m = pumpSettled(t, m)
 	if n := stub.CancelsSent(); n != 0 {
-		t.Fatalf("the Esc for the claimed prompt wrote %d cancels", n)
+		t.Fatalf("Esc wrote %d cancels for a turn craze never started", n)
 	}
-	got := withdrawnPrompt(t, prompt)
 	if !stub.Snapshot().ForeignTurn {
 		t.Fatal("the foreign turn was stopped")
 	}
 
-	if msg := runCmd(second); msg != nil {
-		t.Fatalf("the second cancel failed: %+v", msg)
+	// It ends, and the row behind it drains.
+	stub.SetForeignTurn(agent.ForeignTurnInfo{Running: false})
+	m = pumpUntil(t, m, allOf(turnsReached(stub, 1), isIdle))
+	m = pumpSettled(t, m)
+	if m.err != "" {
+		t.Fatalf("err %q", m.err)
 	}
-	if n := stub.CancelsSent(); n != 1 {
-		t.Fatalf("the second Esc wrote %d cancels, want 1", n)
+	if !queueEmpty(m) {
+		t.Fatalf("the row did not drain: %q", queueTexts(m))
 	}
-	m = deliver(t, m, got)
-	if m.status != statusIdle || m.err != "" {
-		t.Fatalf("status %s, err %q", m.status, m.err)
+	if got := texts(m, entryUser); len(got) != 1 || got[0] != "mine" {
+		t.Fatalf("the drained row draws its own user entry: %q", got)
 	}
-	if !strings.Contains(plainView(m), stopCancelled) {
-		t.Fatalf("the cancel left no note:\n%s", plainView(m))
-	}
-}
-
-// withdrawnPrompt runs the command a send returned — the claimed prompt's
-// continuation, after the Esc that cancelled it — and returns its message,
-// which has to be the withdraw: agent.ErrPromptCancelled, and nothing else.
-func withdrawnPrompt(t *testing.T, prompt tea.Cmd) promptDoneMsg {
-	t.Helper()
-	msg := runCmd(prompt)
-	got, ok := msg.(promptDoneMsg)
-	if !ok || !errors.Is(got.err, agent.ErrPromptCancelled) {
-		t.Fatalf("the claimed prompt returned %#v", msg)
-	}
-	return got
+	assertPrompts(t, stub, "mine")
 }
 
 func TestPermissionOverlayKeys(t *testing.T) {
@@ -776,11 +757,11 @@ func TestAltEnterInsertsNewline(t *testing.T) {
 	if m.status != statusIdle {
 		t.Fatalf("alt+enter sent a prompt, status %s", m.status)
 	}
-	if cmd != nil {
-		if _, ok := cmd().(promptDoneMsg); ok {
-			t.Fatal("alt+enter must not send")
-		}
+	// The claim is taken inside Update, so a send would already be recorded.
+	if n := turnsStarted(m.sess.(*Stub)); n != 0 {
+		t.Fatalf("alt+enter started %d turns", n)
 	}
+	_ = cmd
 	if !strings.Contains(m.input.Value(), "\n") {
 		t.Fatalf("expected newline in composer, got %q", m.input.Value())
 	}
@@ -1967,8 +1948,8 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		if m.status != statusWorking {
 			t.Fatalf("status %s", m.status)
 		}
-		if len(m.snap.Queue) != 0 {
-			t.Fatalf("a builtin must never queue: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 0 {
+			t.Fatalf("a builtin must never queue: %+v", got)
 		}
 	})
 	t.Run("model", func(t *testing.T) {
@@ -1984,8 +1965,8 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 		if cmd != nil {
 			t.Fatal("/model while working should not run a command")
 		}
-		if len(m.snap.Queue) != 0 {
-			t.Fatalf("a builtin must never queue: %+v", m.snap.Queue)
+		if got := queuedRows(m); len(got) != 0 {
+			t.Fatalf("a builtin must never queue: %+v", got)
 		}
 	})
 }
@@ -2070,15 +2051,16 @@ func startTurn(t *testing.T, m Model, text string) Model {
 	return tm.(Model)
 }
 
-// planTurn is a turn that ended with a reply: the prompt, then both endings in
-// the order the live session usually produces them.
+// planTurn is a whole plan-mode turn, run for real: the stub answers every
+// prompt with assistant text, which is what earns a plan-mode turn its offer,
+// and the turn is waited out rather than ended by hand.
 func planTurn(t *testing.T, m Model) Model {
 	t.Helper()
-	m = feed(t, startTurn(t, m, "plan it"),
-		agent.Event{Type: agent.EventText, Text: "here is the plan"},
-		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	return tm.(Model)
+	m = pumpEnter(t, m, "plan it")
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("echo: plan it")))
+	// Every caller goes on to act on the offer the finished turn left, so the
+	// turn has to be completely over: nothing of it still to report.
+	return pumpSettled(t, m)
 }
 
 func planOfferModel(t *testing.T) Model {
@@ -2090,59 +2072,120 @@ func planOfferModel(t *testing.T) Model {
 	return m
 }
 
-// TestPlanOfferWaitsForBothEndings holds the ordering pin: EventDone arms the
-// offer and promptDoneMsg settles the status, and neither order may show a
-// placeholder Enter would not honour.
-func TestPlanOfferWaitsForBothEndings(t *testing.T) {
-	done := eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}}
-	settled := promptDoneMsg{res: agent.Result{StopReason: "end_turn"}}
-	for _, tc := range []struct {
-		name string
-		msgs []tea.Msg
-	}{
-		{"done first", []tea.Msg{done, settled}},
-		{"status first", []tea.Msg{settled, done}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
-			m = feed(t, m, agent.Event{Type: agent.EventText, Text: "here is the plan"})
-			var tm tea.Model
-			for i, msg := range tc.msgs {
-				tm, _ = m.Update(msg)
-				m = tm.(Model)
-				if i == 0 && m.planOffering() {
-					t.Fatal("the offer is only actionable once both endings have landed")
-				}
-			}
-			if !m.planOffering() {
-				t.Fatal("expected the offer once both endings had landed")
-			}
-			if !strings.Contains(plainView(m), planOfferPlaceholder) {
-				t.Fatalf("the placeholder is missing:\n%s", plainView(m))
-			}
-		})
+// TestPlanOfferAppearsOnlyOnceTheTurnIsOver is the user-visible half of
+// TestPlanOfferWaitsForBothEndings, driven through a real turn: while the turn
+// is working there is no placeholder to press Enter on, and once the turn is
+// over there is. The ordering pin below owns the mechanism that guarantees it;
+// this owns what the mechanism is for, which is why it survives the driver
+// moving out of the model.
+func TestPlanOfferAppearsOnlyOnceTheTurnIsOver(t *testing.T) {
+	m := intoPlanMode(t, sized(t))
+	m = pumpEnter(t, m, "plan it")
+	if m.status != statusWorking {
+		t.Fatalf("setup: status %s", m.status)
+	}
+	if m.planOffering() {
+		t.Fatal("a running turn has no finished plan to offer")
+	}
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the placeholder is drawn mid-turn:\n%s", plainView(m))
+	}
+	m = pumpUntil(t, m, allOf(isIdle, viewHas(planOfferPlaceholder)))
+	m = pumpSettled(t, m)
+	if !m.planOffering() {
+		t.Fatalf("the finished turn should offer:\n%s", plainView(m))
 	}
 }
 
-// TestPlanOfferNeedsAPlanToOffer covers the turns that leave nothing behind.
+// TestPlanOfferWaitsForBothEndings is retired with the two-ending race (plan 021
+// C4): there is one ending now, so there is no permutation of two to walk. Its
+// property has a new shape, which is what this replaces it with — the wire's
+// EventDone arms the offer and the engine's ending is what makes it actionable,
+// and in between the model is still working, so no placeholder Enter would not
+// honour is ever on screen. It is driven for real rather than hand-fed: the
+// script publishes its one terminal event and then holds the continuation short
+// of returning, which is exactly the window.
+//
+// The property is also pinned end to end by
+// TestPlanOfferAppearsOnlyOnceTheTurnIsOver.
+func TestPlanOfferTheWiresEndingArmsTheOfferAndTheTurnsEndingShowsIt(t *testing.T) {
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "plan it", sc)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn publishing its ending")
+
+	// EventDone has armed the offer; the engine has not settled the turn,
+	// because the continuation has not returned.
+	m = pumpUntil(t, m, func(m Model) bool { return m.planArmed() })
+	if m.status != statusWorking {
+		t.Fatalf("the engine has not ended the turn yet, so the model is still working: %s", m.status)
+	}
+	if m.planOffering() {
+		t.Fatal("the offer is only actionable once the turn has ended")
+	}
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the placeholder is drawn before the turn ended:\n%s", plainView(m))
+	}
+
+	sc.Return()
+	m = pumpUntil(t, m, allOf(isIdle, viewHas(planOfferPlaceholder)))
+	if !m.planOffering() {
+		t.Fatalf("the ended turn should offer:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferNeedsAPlanToOffer covers the turns that leave nothing behind:
+// each one is a real turn, held open while it says its piece and then ended the
+// way the case names — cancelled, failed, or cleanly with nothing implementable
+// in it.
 func TestPlanOfferNeedsAPlanToOffer(t *testing.T) {
 	text := agent.Event{Type: agent.EventText, Text: "here is the plan"}
-	ended := agent.Event{Type: agent.EventDone, StopReason: "end_turn"}
 	for _, tc := range []struct {
 		name string
-		evs  []agent.Event
+		// said is what the turn puts on the stream before it ends.
+		said []agent.Event
+		// fail ends the turn with an error; cancelled ends it with Esc.
+		fail      error
+		cancelled bool
 	}{
-		{"cancelled", []agent.Event{text, {Type: agent.EventDone, StopReason: "cancelled"}}},
-		{"error", []agent.Event{text, {Type: agent.EventError, Err: errors.New("boom")}, ended}},
-		{"thought only", []agent.Event{{Type: agent.EventThought, Text: "hmm"}, ended}},
-		{"tool only", []agent.Event{{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		{name: "cancelled", said: []agent.Event{text}, cancelled: true},
+		{name: "error", said: []agent.Event{text}, fail: errors.New("boom")},
+		{name: "thought only", said: []agent.Event{{Type: agent.EventThought, Text: "hmm"}}},
+		{name: "tool only", said: []agent.Event{{Type: agent.EventTool, Tool: &agent.ToolEvent{
 			ID: "sh-1", Kind: "execute", Title: "Shell", Status: "completed",
-		}}, ended}},
+		}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := feed(t, startTurn(t, intoPlanMode(t, sized(t)), "plan it"), tc.evs...)
-			tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-			m = tm.(Model)
+			m, sess := scriptedModel(t)
+			m = intoPlanMode(t, m)
+			sc := scriptHeld()
+			sc.fail = tc.fail
+			m = startScripted(t, m, sess, "plan it", sc)
+			for _, ev := range tc.said {
+				sess.Emit(ev)
+			}
+			switch {
+			case tc.cancelled:
+				m = pumpEsc(t, m)
+				m = pumpUntil(t, m, isIdle)
+			case tc.fail != nil:
+				sc.Release()
+				m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+				m = pumpSettled(t, m)
+				// A stream ending after the error must not arm an offer an
+				// errored turn cannot honour. The chunk behind it is the marker
+				// that says it was applied.
+				sess.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+				sess.Emit(agent.Event{Type: agent.EventText, Text: "after the error"})
+				m = pumpUntil(t, m, viewHas("after the error"))
+			default:
+				sc.Release()
+				m = pumpUntil(t, m, isIdle)
+				m = pumpSettled(t, m)
+			}
 			if m.planArmed() || m.planOffering() {
 				t.Fatal("this turn left no plan to implement")
 			}
@@ -2450,68 +2493,67 @@ func TestPlanImplementFailureDoesNotReviveAClearedPlan(t *testing.T) {
 	}
 }
 
-// TestPlanOfferIgnoresAnAbandonedTurnsLateEvents is the misattribution defect: a
-// cancelled turn's buffered text and its own EventDone reach craze after its
-// prompt returned, and neither may count for the turn after it. The turn is not
-// over until both of its endings have landed, so no next turn can start over the
-// events still draining and mistake them for its own.
-func TestPlanOfferIgnoresAnAbandonedTurnsLateEvents(t *testing.T) {
-	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("esc while working cancels")
+// TestPlanOfferIgnoresAnAbandonedTurnsLateEvents is retired with the window it
+// needed (plan 021 C4): the misattribution it guarded against was a prompt that
+// had returned while its stream was still open, and the engine settles a turn only
+// once its continuation has come back — after which the session has published
+// everything it was going to — so a turn's events can no longer arrive inside the
+// turn after it.
+//
+// The property it protected has a new shape, which is what this replaces it with:
+// the offer belongs to the turn that earned it, keyed to that turn, so the plan a
+// cancelled turn left on screen does not arm the turn drained behind it. That the
+// queued row does drain, exactly once, is
+// TestEveryEndingDrainsTheNextRowExactlyOnce.
+func TestPlanOfferBelongsToTheTurnThatEarnedIt(t *testing.T) {
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	// Two scripted turns, in order: the one that plans and is cancelled, and the
+	// one the drain starts behind it, which says nothing at all.
+	planning, drained := scriptHeld(), scriptHeld()
+	m = startScripted(t, m, sess, "plan it", planning)
+	sess.Script(drained)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	m = pumpUntil(t, m, viewHas("here is the plan"))
+
+	m = pumpEnter(t, m, "and now this")
+	if got := queueTexts(m); len(got) != 1 {
+		t.Fatalf("setup: the follow-up should be queued: %q", got)
 	}
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
-	m = tm.(Model)
-	if m.status != statusWorking {
-		t.Fatalf("the stream has not closed, so the turn is not over: status %s", m.status)
-	}
-	m = startTurn(t, m, "and now this")
-	if got := texts(m, entryUser); len(got) != 1 {
-		t.Fatalf("no turn may start while the last one is still draining: %q", got)
-	}
-	if len(m.snap.Queue) != 1 {
-		t.Fatalf("the draft is queued instead: %+v", m.snap.Queue)
-	}
-	// The cancelled turn's own events land now, against the turn that made them.
-	m = feed(t, m,
-		agent.Event{Type: agent.EventText, Text: "here is the plan"},
-		agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
-	if m.planArmed() {
-		t.Fatal("a cancelled turn offers nothing")
-	}
-	// Both of that turn's endings have landed, so the queued message is what
-	// starts next — and it is a turn of its own, with its own user entry.
-	if m.status != statusWorking {
-		t.Fatalf("the queue drains once the turn settles: status %s", m.status)
-	}
+	// Esc cancels the planning turn; its settlement drains the row behind it, so
+	// the model never leaves working.
+	m = pumpEsc(t, m)
+	awaitBarrier(t, drained.opened, "the drained turn opening")
+	drained.Release()
+	m = pumpUntil(t, m, allOf(isIdle, turnsReached(sess, 2)))
+	m = pumpSettled(t, m)
+
 	if got := texts(m, entryUser); len(got) != 2 {
-		t.Fatalf("the queued message is sent as a turn: %q", got)
+		t.Fatalf("one user entry per turn: %q", got)
 	}
-	if len(m.snap.Queue) != 0 {
-		t.Fatalf("the row left the queue: %+v", m.snap.Queue)
-	}
-	// The drained turn starts clean: the chunk that arrived late was not its
-	// own, so its ending has no evidence to arm an offer with.
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
 	if m.planArmed() || m.planOffering() {
-		t.Fatalf("this turn said nothing, so it left no plan:\n%s", plainView(m))
+		t.Fatalf("the drained turn said nothing, so it left no plan of its own:\n%s", plainView(m))
 	}
+	if strings.Contains(plainView(m), planOfferPlaceholder) {
+		t.Fatalf("the placeholder came back for another turn's plan:\n%s", plainView(m))
+	}
+	assertPrompts(t, sess, "plan it", "and now this")
 }
 
 // TestPlanOfferIgnoresEmptyAssistantChunks: appendStream drops an empty chunk,
 // so it is not on the screen and cannot be a plan — and the live adapter does
 // emit them for content it cannot read as text.
 func TestPlanOfferIgnoresEmptyAssistantChunks(t *testing.T) {
-	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
-	m = feed(t, m,
-		agent.Event{Type: agent.EventText, Text: ""},
-		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	sc := scriptHeld()
+	m = startScripted(t, m, sess, "plan it", sc)
+	// The log orders it ahead of the ending, so waiting for the turn to be over
+	// is waiting for the chunk to have been applied.
+	sess.Emit(agent.Event{Type: agent.EventText, Text: ""})
+	sc.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.planArmed() || m.planOffering() {
 		t.Fatal("an empty reply left nothing to implement")
 	}
@@ -2520,49 +2562,90 @@ func TestPlanOfferIgnoresEmptyAssistantChunks(t *testing.T) {
 	}
 }
 
-// TestPlanOfferRetiredByACardInEitherOrder: an action between the turn's two
-// endings kills the offer whichever ending it landed between, so the two
-// orderings stay indistinguishable.
-func TestPlanOfferSurvivesAnAnsweredCardInEitherOrder(t *testing.T) {
-	done := eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}}
-	settled := promptDoneMsg{res: agent.Result{StopReason: "end_turn"}}
-	card := eventMsg{agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+// TestPlanOfferSurvivesAnAnsweredCardInEitherOrder is retired with the two-ending
+// race it permuted (plan 021 C4). This is the same scenario driven for real: the
+// turn plans, raises a card, and ends; the card owns Enter while it is up, so
+// nothing is offered; answering it leaves the offer standing, because a live
+// plan-mode turn always produces a cursor/create_plan card before the ending that
+// arms the offer. The card-plus-offer flow is also driven against the wire by the
+// plan-mode frame goldens.
+func TestPlanOfferSurvivesAnAnsweredCard(t *testing.T) {
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	sc := scriptHeld()
+	m = startScripted(t, m, sess, "plan it", sc)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
 		ID:      "perm-1",
 		Tool:    "Shell",
 		Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
-	}}}
-	for _, tc := range []struct {
-		name string
-		msgs []tea.Msg
-	}{
-		{"done, card, status", []tea.Msg{done, card, settled}},
-		{"status, card, done", []tea.Msg{settled, card, done}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
-			m = feed(t, m, agent.Event{Type: agent.EventText, Text: "here is the plan"})
-			for _, msg := range tc.msgs {
-				tm, _ := m.Update(msg)
-				m = tm.(Model)
-			}
-			// The card owns Enter, so nothing is offered while it is up.
-			if !m.cardOpen() {
-				t.Fatal("this case needs the card still open")
-			}
-			if m.planOffering() {
-				t.Fatal("the card is up and owns Enter; the offer must not compete for it")
-			}
-			// Answering it must leave the offer standing, in either order: a
-			// live plan-mode turn always produces a cursor/create_plan card
-			// before the ending that arms the offer.
-			m, _ = press(m, runeKey('a'))
-			if m.cardOpen() {
-				t.Fatal("'a' should have answered the permission card")
-			}
-			if !m.planOffering() {
-				t.Fatal("the card was answered and the turn still earns the offer, so it must show")
-			}
-		})
+	}})
+	m = pumpUntil(t, m, hasCard)
+	sc.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+
+	// The card owns Enter, so nothing is offered while it is up.
+	if !m.cardOpen() {
+		t.Fatalf("this case needs the card still open:\n%s", plainView(m))
+	}
+	if m.planOffering() {
+		t.Fatal("the card is up and owns Enter; the offer must not compete for it")
+	}
+	m, _ = press(m, runeKey('a'))
+	if m.cardOpen() {
+		t.Fatal("'a' should have answered the permission card")
+	}
+	if !m.planOffering() {
+		t.Fatalf("the card was answered and the turn still earns the offer, so it must show:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferSurvivesACardAfterTheWiresEnding is the other order the retired
+// "either order" test walked, and the one the engine's two endings make a real
+// window rather than a message race: the wire's own done has landed — arming the
+// offer — and the engine has not settled the turn, and the card arrives in between.
+// It is raised, it owns Enter while it is up, and answering it leaves the offer
+// standing exactly as it does when the card comes first.
+func TestPlanOfferSurvivesACardAfterTheWiresEnding(t *testing.T) {
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "plan it", sc)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the wire's own ending")
+	// Between the two endings: the done has been published, the engine cannot have
+	// settled because the continuation is held short of returning.
+	m = pumpUntil(t, m, func(m Model) bool { return m.planArmed() })
+	if m.status != statusWorking {
+		t.Fatalf("the engine has not ended the turn yet: status %s", m.status)
+	}
+	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+		ID:      "perm-1",
+		Tool:    "Shell",
+		Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
+	}})
+	m = pumpUntil(t, m, hasCard)
+	if m.planOffering() {
+		t.Fatal("the card is up and owns Enter; the offer must not compete for it")
+	}
+
+	sc.Return()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	if !m.cardOpen() {
+		t.Fatalf("the card the turn's ending did not answer is still up:\n%s", plainView(m))
+	}
+	if m.planOffering() {
+		t.Fatal("still the card's Enter, even once the turn has ended")
+	}
+	m, _ = press(m, runeKey('a'))
+	if m.cardOpen() {
+		t.Fatal("'a' should have answered the permission card")
+	}
+	if !m.planOffering() {
+		t.Fatalf("the card was answered and the turn still earns the offer:\n%s", plainView(m))
 	}
 }
 
@@ -2570,23 +2653,23 @@ func TestPlanOfferSurvivesAnAnsweredCardInEitherOrder(t *testing.T) {
 // the prompt has yet to return, so Esc is still a cancel — and a cancel declines
 // the offer as surely as an Esc on the composer does.
 func TestPlanOfferEscWhileWorkingRetiresIt(t *testing.T) {
-	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
-	m = feed(t, m,
-		agent.Event{Type: agent.EventText, Text: "here is the plan"},
-		agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	if !m.planArmed() {
-		t.Fatal("EventDone arms the offer")
-	}
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	// The turn publishes its one ending — which arms the offer — and then stops
+	// short of returning, so the prompt is still out and Esc is still a cancel.
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "plan it", sc)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the turn's ending")
+	m = pumpUntil(t, m, func(m Model) bool { return m.planArmed() })
 	if m.status != statusWorking {
 		t.Fatalf("the prompt has not returned: status %s", m.status)
 	}
-	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("esc while working cancels the turn")
-	}
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: stopCancelled}})
-	m = tm.(Model)
+	m = pumpEsc(t, m)
+	sc.Return()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.planArmed() || m.planOffering() {
 		t.Fatalf("the cancel declined the offer:\n%s", plainView(m))
 	}
@@ -2601,25 +2684,27 @@ func TestPlanOfferEscWhileWorkingRetiresIt(t *testing.T) {
 // never appear in a real session — which is exactly what the live run at 120x40
 // found. The card suppresses while it is up; answering it leaves the offer.
 func TestPlanOfferSurvivesACreatePlanCard(t *testing.T) {
-	m := startTurn(t, intoPlanMode(t, sized(t)), "plan it")
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	sc := scriptHeld()
+	m = startScripted(t, m, sess, "plan it", sc)
 	// The order cursor really sends: some text, the plan card, more text, done.
-	m = feed(t, m, agent.Event{Type: agent.EventText, Text: "I'll look at main.go first."})
-	m = feed(t, m, agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "I'll look at main.go first."})
+	sess.Emit(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{
 		ID:       "plan-1",
 		Name:     "Print current time",
 		Overview: "Change main.go so it prints the current time.",
 		Plan:     "In main.go, replace the hi print with the current time.",
 	}})
-	if !m.cardOpen() {
-		t.Fatal("the create_plan card should be up")
-	}
-	m = feed(t, m, agent.Event{Type: agent.EventText, Text: "That is the whole plan."})
+	m = pumpUntil(t, m, hasCard)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "That is the whole plan."})
+	m = pumpUntil(t, m, viewHas("That is the whole plan."))
 	if m.planOffering() {
 		t.Fatal("the card is still up and owns Enter")
 	}
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	tm, _ := m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
+	sc.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if m.planOffering() {
 		t.Fatal("still unanswered, so still no offer")
 	}

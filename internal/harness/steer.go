@@ -31,12 +31,11 @@ import (
 // or returned, never both and never neither.
 
 // steerCap bounds the steers one turn may accept. Every steer a turn does not
-// answer becomes a queued row in the adapter, emitted as it goes in, so a turn
-// that could accept without limit could requeue without limit: a burst big
-// enough to fill a consumer's event channel by itself, which is what turns the
-// queue's ordinary "one blocking send under a lock" into a wedge. It is the
-// queue's own cap (agent.queueCap), restated here because the harness cannot
-// import the adapter.
+// answer is reported in Result.Unanswered and requeued by the engine, above
+// this seam, through PushFront — which no cap bounds (plan 021 §3.5) — so this
+// is what keeps one turn's own burst finite rather than the queue's capacity.
+// It is the queue's own cap (agent.queueCap), restated here because the
+// harness cannot import the adapter.
 //
 // Refusing loses nothing: the caller keeps the text, exactly as it keeps a
 // message the queue was too full to take. The rule a cap must not break is

@@ -326,7 +326,7 @@ func TestNativeToolRowsAreTerminalAtEveryTurnEnding(t *testing.T) {
 		s := f.started(Options{})
 		out := startPrompt(s, "go")
 		evs := awaitToolOutput(t, s, "ready")
-		if err := s.Cancel(context.Background()); err != nil {
+		if _, err := s.Cancel(context.Background()); err != nil {
 			t.Fatalf("Cancel: %v", err)
 		}
 		got := await(t, out, "the cancelled prompt")
