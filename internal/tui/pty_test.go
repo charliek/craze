@@ -220,6 +220,61 @@ func TestPTYCardsAnswerFromARealTerminal(t *testing.T) {
 	}
 }
 
+// TestPTYShellModeRunsAndDrawsItsOutput drives the composer's `!` from a real
+// terminal: the keys arrive as the bytes a terminal sends, the command runs in
+// a process group of its own under the program's own event loop, and its output
+// is drawn into the transcript.
+//
+// The assertion is the *lowercased* output and not the command, because a
+// needle the user typed would already be in the stream as the draft. It is also
+// one segment of one row: the head row is drawn as three styled segments, so
+// "✓ ! echo" never appears contiguously in what a terminal receives.
+func TestPTYShellModeRunsAndDrawsItsOutput(t *testing.T) {
+	isolateSkillsHome(t)
+	t.Setenv("SHELL", "/bin/sh")
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("no pty: %v", err)
+	}
+	defer func() { _ = ptmx.Close() }()
+	defer func() { _ = tty.Close() }()
+	if err := pty.Setsize(tty, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
+		t.Skipf("pty resize: %v", err)
+	}
+
+	m := New(Config{
+		Session:   NewStub(),
+		Theme:     "tokyo-night",
+		Workspace: t.TempDir(),
+		Yolo:      true,
+	})
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithInput(tty), tea.WithOutput(tty))
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Run()
+		done <- err
+	}()
+	defer func() {
+		drainPTY(ptmx)
+		p.Quit()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			p.Kill()
+		}
+	}()
+
+	if !waitPTY(t, ptmx, strings.Repeat("─", 72)+" craze ─", 5*time.Second) {
+		t.Fatal("craze never drew its composer")
+	}
+	if _, err := ptmx.Write([]byte("!echo CRAZEPTYSHELL | tr A-Z a-z\r")); err != nil {
+		t.Fatal(err)
+	}
+	if !waitPTY(t, ptmx, "crazeptyshell", 20*time.Second) {
+		t.Fatal("the command's output never reached the transcript")
+	}
+}
+
 // drainPTY keeps emptying the master once a test has finished asserting on it.
 // A test that stops reading stalls whatever is writing to the slave, and the
 // last thing bubbletea does on the way out of Program.Run is flush the final

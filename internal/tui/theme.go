@@ -26,6 +26,13 @@ const ruleMix = 30
 // row: enough to read as "this one", not enough to hide the text on it.
 const selectionMix = 25
 
+// shellMix lifts Border towards Purple for the composer's rules in shell mode.
+// It is a bigger step than ruleMix because it has to be *recognisable* and not
+// merely present: the rules are the only thing that says the next Enter runs a
+// command rather than sending a prompt, and on a dark palette a 30% lift off a
+// near-black border would read as the same line it always is.
+const shellMix = 55
+
 // paletteSpec is the hand-picked part of a theme. Every other slot is derived
 // from these eleven colours, so a new preset is one row of this table.
 type paletteSpec struct {
@@ -79,6 +86,11 @@ type Theme struct {
 	DiffAdd, DiffDel                                      lipgloss.Color
 	DiffAddBG, DiffDelBG                                  lipgloss.Color
 	LineNo, TaskRail, Selection, Rule                     lipgloss.Color
+	// Shell is the composer's two rules while the draft is a shell command, and
+	// the `!` that opens the transcript row it produces — one colour for "this
+	// is your shell, not the agent", the way UserMark means "you, here". It is
+	// derived rather than hand-picked so no preset row has to change for it.
+	Shell lipgloss.Color
 	// SelectionBG is the background the dialog cursor row (and V4's mouse
 	// selection) paints with; Selection stays a foreground slot.
 	SelectionBG                      lipgloss.Color
@@ -127,6 +139,11 @@ func (p paletteSpec) theme() Theme {
 	th.Selection = th.Accent
 	th.SelectionBG = blend(p.bg, p.accent, selectionMix)
 	th.Rule = blend(p.border, p.fg, ruleMix)
+	// Shell is the same rule leaning on Purple instead of FG. Purple is spoken
+	// for only by the plan chip, which is a two-word chip on the status row and
+	// never on screen beside the composer's rules, so the shell band is the one
+	// purple thing the eye finds.
+	th.Shell = blend(p.border, p.purple, shellMix)
 	th.ChipBypass = th.Err
 	th.ChipPrompt = th.Warn
 	th.Provider = th.Teal

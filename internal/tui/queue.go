@@ -219,6 +219,14 @@ func queueErrNote(err error) string {
 // strongSendDraft is Ctrl+L on the composer: interject where the provider can,
 // and send now — with the confirm — where it cannot.
 func (m Model) strongSendDraft() (tea.Model, tea.Cmd) {
+	if m.shellMode() {
+		// Ctrl+L is the one send that does not go through handleEnter, so shell
+		// mode has to refuse it here or a `!` draft would reach the agent by
+		// the single key that bypasses the ladder. The draft stays where it is:
+		// Enter is how a command runs, and a leading space is how the text goes
+		// to the agent instead (plan 022 §3.6).
+		return m, nil
+	}
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
 		return m, nil

@@ -44,6 +44,10 @@ const (
 	entryNote
 	entryPlan
 	entryError
+	// entryShell is the composer's `!`: a command craze ran for the user, on
+	// their own machine. It is the one kind that never came from an agent and
+	// never goes to one (plan 022 §3.6).
+	entryShell
 )
 
 // renderKey is everything outside an entry that changes how it draws. An entry
@@ -61,7 +65,11 @@ type entry struct {
 	text string
 	tool *agent.ToolEvent
 	plan *agent.PlanEvent
-	at   time.Time
+	// shell is an entryShell's own state; see shellEntry. It is a pointer so
+	// the run that finishes minutes later settles the row it opened, whatever
+	// the entry slice has done in between.
+	shell *shellEntry
+	at    time.Time
 	// end closes a thought run: the At of the first non-thought event after it.
 	end time.Time
 	// open marks a thought run that is still streaming.
@@ -473,7 +481,12 @@ func (m *Model) setViewportContent(stick bool) {
 	}
 	for i := range tr.entries {
 		e := &tr.entries[i]
-		if e.dirty || e.renderedFor != key {
+		// A shell row that is still running draws the spinner, and the cache is
+		// keyed on things that do not move while it spins, so the row is
+		// re-rendered on every rebuild until it settles. The tick is what asks
+		// for those rebuilds (handleTick), so this costs one comparison per
+		// entry rather than a walk of its own.
+		if e.dirty || e.renderedFor != key || (e.shell != nil && !e.shell.done) {
 			e.rendered = m.renderEntry(tr, e, key)
 			e.renderedFor = key
 			e.dirty = false
@@ -521,6 +534,8 @@ func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
 		return m.planRows(e.plan, key)
 	case entryError:
 		return hangingRows(e.text, "error: ", "  ", key.width, styleFG(m.theme.Err))
+	case entryShell:
+		return m.shellRows(e, key)
 	}
 	return nil
 }

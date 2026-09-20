@@ -497,6 +497,13 @@ type Model struct {
 
 	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
 	term *terminalColors
+	// shell owns the command the composer is running, if any (plan 022 §3.6).
+	// It is a shared pointer for the same reason term and owner are: the model
+	// is copied on every Update, and the quit paths — SIGTERM's especially,
+	// which reaches finishRun with the model Run *started* with — have to be
+	// able to kill a command a much later copy started. Nil only in a zero
+	// Model a test built, which every caller guards for.
+	shell *shellController
 	// owner is the session the program holds, shared by every copy the way
 	// term is; see sessionOwner. Nil only in a zero Model a test built.
 	owner *sessionOwner
@@ -642,6 +649,14 @@ func (o *sessionOwner) current() *engine.Engine {
 // refused by design — so a caller that swaps sessions closes the old engine
 // first, which is the same call that closes the old session.
 func (m *Model) setSession(s agent.Session) {
+	// A command belongs to the session it was run from — its workspace is that
+	// session's — so a session change ends it, and waits: the picker's next
+	// session must not come up with the last one's `sleep 300` still going.
+	// Nothing can be running on the paths that reach here today (the pickers
+	// run before the session is ready, and shell mode is refused until it is),
+	// so the wait is free; it is here because the next assignment site will not
+	// be so lucky.
+	m.shell.shutdown()
 	m.eng, m.sess, m.engErr = nil, nil, nil
 	m.client, m.cmdSeq = "", 0
 	m.owner.set(nil)
@@ -718,6 +733,7 @@ func New(cfg Config) Model {
 		// `craze frame` or by any direct caller writes no OSC at all.
 		term:  newTerminalColors(io.Discard),
 		owner: &sessionOwner{},
+		shell: newShellController(),
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
@@ -894,6 +910,11 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// this also covers a final that is not a Model. The terminal gets its own
 	// colours back on every exit path — before the engine's Close, which may block.
 	m.term.reset()
+	// The same reasoning, and the same shared pointer: this is the only place
+	// SIGTERM, SIGHUP and a recovered panic reach, and none of them ran
+	// requestQuit. A quit craze asked for has already done this, and a second
+	// shutdown with nothing running is a no-op.
+	m.shell.shutdown()
 	// Before the engine's Close for the same reason: the release is bounded, and the
 	// session's close is not. On a quit craze asked for, requestQuit has
 	// already done both in this order and the hub's Close is idempotent; on
@@ -1146,6 +1167,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshSnapMsg:
 		m.refreshSnap()
+		return m, nil
+
+	case shellDoneMsg:
+		// The command is over; the row it opened says how it went.
+		m.finishShell(msg)
 		return m, nil
 
 	case cancelFailedMsg:
@@ -1548,6 +1574,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlD:
 		return m.requestQuit()
 	case tea.KeyCtrlC:
+		// A running command outranks the whole Ctrl+C state machine, and is the
+		// only way to stop one while a card has the keyboard (a card takes Esc
+		// before the ladder below ever sees it). One press, one kill: it does
+		// not quit, it does not cancel the agent's turn, and it does not arm
+		// the double-press window — the user stopped the thing they started,
+		// and nothing else about the session changed (plan 022 §3.6).
+		if m.shellRunning() {
+			m.killShell()
+			return m, nil
+		}
 		return m.handleCtrlC()
 	}
 	m.ctrlCDeadline = time.Time{}
@@ -1628,6 +1664,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.Type == tea.KeyEsc {
+		// The ladder's first rung: Esc stops the command the composer is
+		// running. Everything that takes Esc *earlier* — a card, a dialog, the
+		// confirm line, the sub-agent view, the two focus bands — keeps its
+		// meaning, because a layer that owns the keyboard owns this key too;
+		// under one of those, Ctrl+C is how a command is killed.
+		if m.shellRunning() {
+			m.killShell()
+			return m, nil
+		}
+		// With nothing running, Esc in shell mode clears the draft — leaving
+		// the mode is leaving the draft, there being nothing else to it. It
+		// returns here rather than falling through, so a `!` in the composer
+		// can never be the key that cancels the agent's turn below.
+		if m.shellMode() {
+			m.input.SetValue("")
+			m.resetSlash()
+			return m, nil
+		}
 		if m.queueEdit != "" {
 			m.cancelQueueEdit()
 			return m, nil
@@ -1875,6 +1929,16 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 	if m.cardOpen() || !m.sessionReady() {
 		return m, nil
+	}
+	// Shell mode sits behind that gate rather than in front of it: two of its
+	// three refusals — a card on screen, a session still restoring, the draft
+	// kept in both — are exactly what the gate already is. It sits in front of
+	// the builtins because `!` is not a slash and parseSlashLine found nothing
+	// above, and in front of send() because the draft is not going to the
+	// agent. A command is allowed to run while the agent is working: it is the
+	// user's own shell and it needs nothing of the session but its workspace.
+	if m.shellMode() {
+		return m.runShellDraft()
 	}
 	// A builtin never queues: it is craze's own, it does not need the agent,
 	// and holding it until the turn ends would be surprising. The ones that
@@ -2301,7 +2365,14 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	eng := m.eng
 	h := m.host
+	sh := m.shell
 	return m, func() tea.Msg {
+		// The user's command goes first and craze waits for it: this is the
+		// quit Ctrl+D, /exit and the second Ctrl+C all reach, and nothing the
+		// composer started may outlive the program that started it. The wait is
+		// bounded twice over (shellController.shutdown), so a command that will
+		// not die delays the quit by seconds rather than blocking it.
+		sh.shutdown()
 		closeHost(h)
 		if eng != nil {
 			_ = eng.Close()
