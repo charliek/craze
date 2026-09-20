@@ -38,8 +38,26 @@ const (
 // marketplace. Kind is PluginKindCommand or PluginKindSkill. Path is the
 // markdown file, Root the plugin's install directory (what
 // ${CLAUDE_PLUGIN_ROOT} means).
+//
+// The last three are read off the frontmatter under the native parse option
+// only (§3.2) and are the zero value for every provider that loads its own
+// content: cursor's rows are what cursor's loader would offer, and a field
+// cursor never fills cannot change one.
 type PluginEntry struct {
 	Plugin, Name, Description, Body, Path, Root, Kind string
+	// WhenToUse is the frontmatter's when-to-use, the sentence that says when
+	// an entry applies rather than what it is. The model's catalog draws it
+	// under the description; the menu has no room for it.
+	WhenToUse string
+	// Hidden is user-invocable: false. The entry still takes part in naming, so
+	// a visible row's spelling does not depend on what is hidden, and it is
+	// still offered to the model; it is the menu and the typed /name that leave
+	// it out.
+	Hidden bool
+	// NoModel is disable-model-invocation: true, which is the opposite
+	// projection — the entry stays in the menu for the user and is kept out of
+	// the model's catalog.
+	NoModel bool
 }
 
 // PluginScan is where a provider's plugin content comes from. The zero value
@@ -73,12 +91,27 @@ func DiscoverPlugins(scan PluginScan, workspace, home string, dirs []string) []P
 // not an error). The exported signature is pinned and carries no writer, so the
 // session passes its own sink through here instead.
 func discoverPlugins(scan PluginScan, workspace, home string, dirs []string, warn func(string)) []PluginEntry {
-	d := &pluginDiscovery{
+	d := newPluginDiscovery(workspace, home, warn)
+	d.scanSources(scan, dirs)
+	return d.out
+}
+
+// newPluginDiscovery starts one scan. It is separate from the source loop below
+// because native's discovery (native_content.go) reads its own two sources on
+// the same run before handing it the plugin sources: one budget, one dedupe and
+// one entry list across all three is the whole point.
+func newPluginDiscovery(workspace, home string, warn func(string)) *pluginDiscovery {
+	return &pluginDiscovery{
 		workspace: absOrSelf(workspace),
 		home:      strings.TrimSpace(home),
 		warn:      warn,
 		seen:      make(map[string]struct{}),
 	}
+}
+
+// scanSources runs the sources a PluginScan asks for, in the order that decides
+// who wins a qualified key.
+func (d *pluginDiscovery) scanSources(scan PluginScan, dirs []string) {
 	if scan.Dirs {
 		d.scanDirs(dirs)
 	}
@@ -88,7 +121,6 @@ func discoverPlugins(scan PluginScan, workspace, home string, dirs []string, war
 	if scan.ClaudePlugins {
 		d.scanClaudePlugins()
 	}
-	return d.out
 }
 
 // pluginDiscovery is one run of the scan: the budget, the qualified-key dedupe
@@ -98,9 +130,15 @@ type pluginDiscovery struct {
 	workspace string
 	home      string
 	warn      func(string)
-	seen      map[string]struct{}
-	nFiles    int
-	out       []PluginEntry
+	// skipID, when set, vetoes a plugin id before its root is read, and is
+	// where the veto writes its own line. Native reserves "project" and "user"
+	// for the pseudo plugins its workspace and user content go under (§3.2): a
+	// real plugin shipping either id would otherwise take entries under a
+	// spelling the menu and the expansion path already mean something else by.
+	skipID func(id string) bool
+	seen   map[string]struct{}
+	nFiles int
+	out    []PluginEntry
 }
 
 func (d *pluginDiscovery) note(format string, args ...any) {
@@ -115,17 +153,25 @@ func (d *pluginDiscovery) note(format string, args ...any) {
 // or through a --plugin-dir and a cache — contributes its entries once, and a
 // command beats a skill of the same name because rootEntries offers it first.
 func (d *pluginDiscovery) addPlugin(id, root string) {
-	if !pluginIDOK(id) {
+	if !pluginIDOK(id) || (d.skipID != nil && d.skipID(id)) {
 		return
 	}
 	for _, e := range d.rootEntries(id, root) {
-		key := strings.ToLower(e.Plugin + ":" + e.Name)
-		if _, ok := d.seen[key]; ok {
-			continue
-		}
-		d.seen[key] = struct{}{}
-		d.out = append(d.out, e)
+		d.addEntry(e)
 	}
+}
+
+// addEntry is that dedupe on its own, for the sources that name their entries
+// themselves rather than reading a plugin root: native's project and user
+// content arrives entry by entry and has to land in the same list, under the
+// same key, as the plugins scanned after it.
+func (d *pluginDiscovery) addEntry(e PluginEntry) {
+	key := strings.ToLower(e.Plugin + ":" + e.Name)
+	if _, ok := d.seen[key]; ok {
+		return
+	}
+	d.seen[key] = struct{}{}
+	d.out = append(d.out, e)
 }
 
 // scanDirs is source 1: the directories the user named, in the order given.
@@ -464,17 +510,58 @@ func (d *pluginDiscovery) rootEntries(id, root string) []PluginEntry {
 	for _, name := range pluginMarkdownFiles(commands) {
 		path := filepath.Join(commands, name)
 		if data, ok := d.readFile(path); ok {
-			add(parsePluginCommand(path, data))
+			add(parsePluginCommand(path, data, pluginParseOpts{}))
 		}
 	}
 	skills := pluginSubdir(root, "skills")
 	for _, dir := range childDirs(skills) {
 		path := filepath.Join(skills, dir, "SKILL.md")
 		if data, ok := d.readFile(path); ok {
-			add(parsePluginSkill(path, data))
+			add(parsePluginSkill(path, data, pluginParseOpts{}))
 		}
 	}
 	return out
+}
+
+// pluginParseOpts is the whole difference between the two readings of one entry
+// file. The zero value is what every provider that loads its own content gets,
+// and it has to stay exactly what it was: cursor's rows are craze's promise
+// about what cursor's loader would offer, so a skill its frontmatter hides is
+// dropped here as cursor drops it, and a name craze cannot offer goes without a
+// word because cursor says nothing either.
+type pluginParseOpts struct {
+	// Native fills PluginEntry's three extra fields and keeps a hidden entry
+	// rather than dropping it: native's menu and its model-facing catalog are
+	// two projections of one list (§3.2), and only the list's owner can decide
+	// which of them an entry belongs in.
+	Native bool
+	// Warn, when set, takes one line for each file refused for its name. It is
+	// native's alone: a project whose skill directory is called "my skill"
+	// would otherwise wonder why the menu is short.
+	Warn func(string)
+}
+
+// badName is that line. The name is quoted because the interesting ones are
+// invisible — a trailing space, a non-breaking space, a colon someone meant as
+// a plugin qualifier.
+func (o pluginParseOpts) badName(path, name string) {
+	if o.Warn == nil {
+		return
+	}
+	o.Warn(fmt.Sprintf("skipped %s: %q is not a usable name", path, name))
+}
+
+// fill copies the fields only native reads. sanitizeText, not sanitizeLine:
+// when-to-use is written as a literal block often enough that folding it here
+// would lose the author's line breaks, and the one place that cannot take a
+// newline — the prompt's catalog — folds every field itself.
+func (o pluginParseOpts) fill(e *PluginEntry, meta frontmatter) {
+	if !o.Native {
+		return
+	}
+	e.WhenToUse = sanitizeText(strings.TrimSpace(meta.WhenToUse))
+	e.Hidden = !meta.Invocable
+	e.NoModel = !meta.ModelInvocable
 }
 
 // pluginSubdir is a directory of the conventional layout, or "" when the plugin
@@ -528,7 +615,7 @@ func (d *pluginDiscovery) readFile(path string) ([]byte, bool) {
 // loader does: the frontmatter name wins and the file stem is the fallback, the
 // description is the frontmatter's alone, and the content is the body after the
 // frontmatter. argument-hint is deliberately not read (§4).
-func parsePluginCommand(path string, data []byte) (PluginEntry, bool) {
+func parsePluginCommand(path string, data []byte, opts pluginParseOpts) (PluginEntry, bool) {
 	text := strings.TrimPrefix(string(data), "\ufeff")
 	fm, body, _, err := splitFrontmatter(text)
 	if err != nil {
@@ -536,25 +623,29 @@ func parsePluginCommand(path string, data []byte) (PluginEntry, bool) {
 	}
 	// A file with no frontmatter has an empty block, which reads as no keys at
 	// all, so the fallbacks below are the whole of its identity.
-	name, desc, _ := parseFrontmatterLines(fm)
-	if name = strings.TrimSpace(name); name == "" {
+	meta := parseFrontmatterLines(fm)
+	name := strings.TrimSpace(meta.Name)
+	if name == "" {
 		base := filepath.Base(path)
 		name = strings.TrimSuffix(base, filepath.Ext(base))
 	}
 	if !pluginNameOK(name) {
+		opts.badName(path, name)
 		return PluginEntry{}, false
 	}
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return PluginEntry{}, false
 	}
-	return PluginEntry{
+	e := PluginEntry{
 		Name:        name,
-		Description: sanitizeText(desc),
+		Description: sanitizeText(meta.Description),
 		Body:        body,
 		Path:        path,
 		Kind:        PluginKindCommand,
-	}, true
+	}
+	opts.fill(&e, meta)
+	return e, true
 }
 
 // parsePluginSkill reads a plugin's skills/<dir>/SKILL.md. It is deliberately
@@ -568,23 +659,30 @@ func parsePluginCommand(path string, data []byte) (PluginEntry, bool) {
 // (lowercased, whitespace runs folded to "-") and then has to pass the strict
 // identifier class, because a name the prompt scanner could never match is a
 // menu row that does nothing.
-func parsePluginSkill(path string, data []byte) (PluginEntry, bool) {
+func parsePluginSkill(path string, data []byte, opts pluginParseOpts) (PluginEntry, bool) {
 	text := strings.TrimPrefix(string(data), "\ufeff")
 	fm, body, _, err := splitFrontmatter(text)
 	if err != nil {
 		return PluginEntry{}, false
 	}
-	name, desc, invocable := parseFrontmatterLines(fm)
-	if !invocable {
+	meta := parseFrontmatterLines(fm)
+	// Cursor's loader drops a skill its frontmatter hides, so craze drops it
+	// too and the menu matches what cursor would offer. Native keeps it as a
+	// Hidden entry instead: it stays out of the menu there as well, but it
+	// takes part in naming and it is still listed to the model (§3.2).
+	if !meta.Invocable && !opts.Native {
 		return PluginEntry{}, false
 	}
-	if name = strings.TrimSpace(name); name == "" {
+	name := strings.TrimSpace(meta.Name)
+	if name == "" {
 		name = filepath.Base(filepath.Dir(path))
 	}
 	name = normalizePluginName(name)
 	if !pluginNameOK(name) {
+		opts.badName(path, name)
 		return PluginEntry{}, false
 	}
+	desc := meta.Description
 	if strings.TrimSpace(desc) == "" {
 		desc = skillHeadingDescription(body)
 	}
@@ -592,13 +690,15 @@ func parsePluginSkill(path string, data []byte) (PluginEntry, bool) {
 	if whole == "" {
 		return PluginEntry{}, false
 	}
-	return PluginEntry{
+	e := PluginEntry{
 		Name:        name,
 		Description: sanitizeText(strings.TrimSpace(desc)),
 		Body:        whole,
 		Path:        path,
 		Kind:        PluginKindSkill,
-	}, true
+	}
+	opts.fill(&e, meta)
+	return e, true
 }
 
 // skillHeadingDescription is the description a plugin skill gets when its
