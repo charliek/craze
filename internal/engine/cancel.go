@@ -92,7 +92,7 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, cause string) (string,
 		}
 		// An armed send goes with them: nothing may be admitted after a stop, so
 		// the turn it was waiting for will settle into nothing at all.
-		if ev, ok := e.disarmLocked(agent.SendNowStopped, cause); ok {
+		if ev, ok := e.disarmLocked(agent.SendNowStopped, cause, ""); ok {
 			batch = append(batch, ev)
 		}
 		// A mandatory completion: the rows are gone whether or not the outbox
@@ -165,7 +165,12 @@ func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelEr
 			// that pass could fire into a turn this cancel did not stop. The
 			// text stays where it was, which is what the TUI's own
 			// cancelFailedMsg has always done with it.
-			if ev, ok := e.disarmLocked(agent.SendNowCancelFailed, cause); ok {
+			//
+			// The delta carries the failure itself, as text. This is the one
+			// cancel a client did not make and cannot see the error of — the
+			// engine makes it for an arm, on a goroutine of its own — so a client
+			// that has always shown that failure has nowhere else to read it.
+			if ev, ok := e.disarmLocked(agent.SendNowCancelFailed, cause, err.Error()); ok {
 				e.log.Enqueue(ev)
 			}
 		}

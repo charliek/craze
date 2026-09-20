@@ -124,12 +124,13 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	m.replaying = true
 	m.loading = true
 	if m.loadSession != nil {
-		if m.sess != nil {
-			_ = m.sess.Close()
+		// The engine, not the session: see confirmProvider.
+		if m.eng != nil {
+			_ = m.eng.Close()
 		}
 		m.setSession(m.loadSession(p, row))
 	}
-	if m.sess == nil {
+	if m.eng == nil && m.engErr == nil {
 		m.setSession(NewStub())
 	}
 	m.refreshSnap()
@@ -139,7 +140,7 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	if m.model == "" {
 		m.model = "default"
 	}
-	return m, tea.Batch(m.startCmd(), waitEvent(m.sess))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 
 func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

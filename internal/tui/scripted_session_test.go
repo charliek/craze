@@ -47,9 +47,27 @@ type scriptedSession struct {
 	mu        sync.Mutex
 	scripts   []*scriptedTurn
 	cancelErr error
+	// cancels closes on the first Cancel the session is given, so a test can
+	// order a cancel it did not make itself — the engine makes them now, on
+	// goroutines of its own — against a continuation it is holding.
+	cancels     chan struct{}
+	cancelsOnce sync.Once
+	// cancelHold, when non-nil, makes the next Cancel wait before it does
+	// anything. It is what keeps a turn alive across the arm of a send-now: the
+	// cancel the engine makes for the arm is the one thing that would otherwise
+	// end that turn at once, on a goroutine no test can hold back.
+	cancelHold chan struct{}
 }
 
-func newScriptedSession() *scriptedSession { return &scriptedSession{Stub: NewStub()} }
+func newScriptedSession() *scriptedSession {
+	return &scriptedSession{Stub: NewStub(), cancels: make(chan struct{})}
+}
+
+// Cancels closes once the session has been handed a Cancel. It is the barrier
+// for the one window a cancel's own command used to pin from the test's
+// goroutine: the model no longer cancels anything itself, so "the cancel has
+// reached the session" is something only the session can say.
+func (s *scriptedSession) Cancels() <-chan struct{} { return s.cancels }
 
 // Script queues a script for the next prompt and hands it back, so the test can
 // wait on its barriers. Prompts with no script left fall straight through to the
@@ -69,6 +87,29 @@ func (s *scriptedSession) FailNextCancel(err error) {
 	s.mu.Lock()
 	s.cancelErr = err
 	s.mu.Unlock()
+}
+
+// HoldNextCancel makes the next Cancel stop on arrival, before it touches the
+// turn, and answers with the func that lets it go on. Cancels() closes first, so
+// a test knows the cancel is there and held; the turn it was for keeps running
+// until then, which is how a test stands in the window between an arm and its
+// cancel, or lets that turn end some way other than by the cancel. The release is
+// idempotent, and closing the session frees a held cancel too.
+func (s *scriptedSession) HoldNextCancel() func() {
+	hold := make(chan struct{})
+	var once sync.Once
+	s.mu.Lock()
+	s.cancelHold = hold
+	s.mu.Unlock()
+	return func() { once.Do(func() { close(hold) }) }
+}
+
+func (s *scriptedSession) takeCancelHold() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hold := s.cancelHold
+	s.cancelHold = nil
+	return hold
 }
 
 func (s *scriptedSession) takeScript() *scriptedTurn {
@@ -120,6 +161,16 @@ func (s *scriptedSession) Cancel(ctx context.Context) (agent.CancelOutcome, erro
 	err := s.cancelErr
 	s.cancelErr = nil
 	s.mu.Unlock()
+	// Before the Stub's own Cancel, and before a failure is returned: the barrier
+	// says a cancel arrived, not what became of it.
+	s.cancelsOnce.Do(func() { close(s.cancels) })
+	if hold := s.takeCancelHold(); hold != nil {
+		select {
+		case <-hold:
+		case <-s.closed:
+		case <-ctx.Done():
+		}
+	}
 	if err != nil {
 		return agent.CancelOutcome{}, err
 	}
@@ -134,6 +185,16 @@ var (
 // scriptedTurn is one prompt's answer. Every field is set before the script is
 // queued; nothing writes it afterwards.
 type scriptedTurn struct {
+	// claimed and openWhen are the window before the turn is open: claimed closes
+	// as the continuation is entered, before it has looked at anything, and it
+	// then waits on openWhen. The prompt is claimed and nothing is on the wire,
+	// which is what a cancel landing right after Enter has to find — it marks the
+	// claim, and the continuation then withdraws. The engine runs the continuation
+	// on a goroutine of its own, so a test cannot hold it back by not running a
+	// command any more; this is where it holds it instead.
+	claimed  chan struct{}
+	openWhen chan struct{}
+	openOnce sync.Once
 	// opened closes once the continuation has opened the turn. It is the
 	// handshake a test waits on before it emits into the turn or cancels it:
 	// without it a cancel could reach a claim that has not opened yet and the
@@ -180,6 +241,25 @@ func scriptFailed(err error) *scriptedTurn {
 	return &scriptedTurn{opened: make(chan struct{}), fail: err}
 }
 
+// scriptWithheld is a turn held before it opens: claimed, nothing on the wire,
+// and going nowhere until Open. Released, it opens and ends cleanly; cancelled
+// while it waits, it withdraws with nothing ever sent.
+func scriptWithheld() *scriptedTurn {
+	return &scriptedTurn{
+		claimed:  make(chan struct{}),
+		openWhen: make(chan struct{}),
+		opened:   make(chan struct{}),
+	}
+}
+
+// Open lets a withheld continuation go on to its opening. It is idempotent.
+func (sc *scriptedTurn) Open() {
+	if sc.openWhen == nil {
+		return
+	}
+	sc.openOnce.Do(func() { close(sc.openWhen) })
+}
+
 // scriptRefused is a prompt the session never accepts: no turn, no event, and
 // the claim released.
 func scriptRefused(err error) *scriptedTurn { return &scriptedTurn{refuse: err} }
@@ -224,6 +304,16 @@ func (sc *scriptedTurn) Return() {
 // run is the continuation. It keeps the Stub's turn state honest at every step,
 // because that is what the queue guards, Interject and Cancel read.
 func (sc *scriptedTurn) run(ctx context.Context, s *Stub) (agent.Result, error) {
+	if sc.claimed != nil {
+		// Claimed and not open: the prompt is the session's, nothing has reached
+		// the agent, and a cancel arriving now is this prompt's.
+		close(sc.claimed)
+		select {
+		case <-sc.openWhen:
+		case <-s.closed:
+		case <-ctx.Done():
+		}
+	}
 	if sc.refuse != nil {
 		// Nothing opened, so nothing to close: only the claim is given back,
 		// the way the Stub's own withdraw path gives it back.

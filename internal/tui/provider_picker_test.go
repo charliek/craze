@@ -24,16 +24,19 @@ func pickerFactory(t *testing.T) func(agent.Provider) agent.Session {
 	}
 }
 
-// assertOwned fails unless m.sess and the owner every copy of m shares hold
-// the same session. The exit tails close the owner's, so a session assigned
-// around setSession is one that no exit path would close.
+// assertOwned fails unless m.eng and the owner every copy of m shares hold the
+// same engine, and that engine wraps m.sess. The exit tails close the owner's,
+// so a session assigned around setSession is one that no exit path would close.
 func assertOwned(t *testing.T, m Model) {
 	t.Helper()
 	if m.owner == nil {
 		t.Fatal("the model has no session owner")
 	}
-	if got := m.owner.current(); got != m.sess {
-		t.Fatalf("the owner holds %T %p, m.sess is %T %p", got, got, m.sess, m.sess)
+	if got := m.owner.current(); got != m.eng {
+		t.Fatalf("the owner holds %T %p, m.eng is %T %p", got, got, m.eng, m.eng)
+	}
+	if m.eng != nil && m.eng.Session() != m.sess {
+		t.Fatalf("the engine wraps %T %p, m.sess is %T %p", m.eng.Session(), m.eng.Session(), m.sess, m.sess)
 	}
 }
 
@@ -164,7 +167,7 @@ func TestProviderPickerEnterStartsSelected(t *testing.T) {
 	// The copy from before the swap still has no session of its own, and
 	// reaches the new one through the owner it shares: that copy is the one
 	// Run holds, and all it has after a recovered panic.
-	if before.sess != nil || before.owner.current() != m.sess {
+	if before.sess != nil || before.owner.current() != m.eng {
 		t.Fatal("the pre-swap copy does not see the picked session through its owner")
 	}
 	msg := runCmd(cmd)

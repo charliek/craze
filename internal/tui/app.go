@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
 )
@@ -156,8 +157,29 @@ type Model struct {
 	vp    viewport.Model
 	input textarea.Model
 
-	// sess is assigned only through setSession, which records it in owner too.
-	sess   agent.Session
+	// eng is the engine the model drives its session through: admission, the
+	// message queue and its verbs, send-now, cancel (plan 021 §3.4). sess is the
+	// engine's own session — the raw provider seam — kept only for the three
+	// things that have not moved behind engine.Control yet: the card answers
+	// (AnswerPermission / AnswerQuestion / AnswerPlan, until C8b), the setters
+	// (SetModel / SetMode / SetConfig / SetTitle, until C10), and nothing else.
+	// writeIndex stays in the model until C12, reading the snapshot the engine's
+	// State already gives it. Engine.Session's own comment carries the same list.
+	// Both are assigned only in setSession, which records the engine in owner too.
+	eng  *engine.Engine
+	sess agent.Session
+	// client is this model's client id on eng, minted once per engine, and
+	// cmdSeq numbers its commands from 1, so every mutating command it sends
+	// names itself and the events it caused can be told from another client's
+	// (§3.2). Receipts do not exist until later; this is what makes Event.Cause
+	// mean something.
+	client string
+	cmdSeq int
+	// engErr is what wrapping the session in an engine came back with. It is
+	// unreachable in practice — every session owns an event log and no path
+	// wraps one twice — and is carried rather than panicked on, so it fails the
+	// way a session that would not start fails: startCmd reports it.
+	engErr error
 	cwd    string
 	model  string
 	yolo   bool
@@ -342,11 +364,12 @@ type Model struct {
 	queueEdit    string
 	queueEditPos int
 	editDraft    string
-	// confirm is the send-now waiting for an answer; strong is the one that
-	// was confirmed and is waiting for the cancelled turn to settle. There is
-	// at most one of each, and never two at once.
+	// confirm is the send-now waiting for an answer. The confirm line is
+	// client-local UI: nothing is taken from anywhere and the engine has not
+	// heard of it. The send-now it turns into, on the other hand, is the
+	// engine's armed send (State().SendNow), because the cancel that makes room
+	// for it is the engine's.
 	confirm *strongSend
-	strong  *strongSend
 	// mouseAll records which motion mode the terminal is in, so the queue
 	// going 0 → 1 rows and back issues exactly one transition each way.
 	mouseAll bool
@@ -370,14 +393,23 @@ type Model struct {
 	sawAssistantSeq int
 	planOfferSeq    int
 	planDeadSeq     int
-	// promptEndSeq and streamEndSeq are the turn whose Prompt returned and the
-	// turn whose event stream closed. The two race, so a turn is only over —
-	// and the status only idle — once both have landed for the same turn. That
-	// is also what keeps the next turn from starting while this one's buffered
-	// events are still draining, which is what would let a late chunk count as
-	// the next turn's evidence.
-	promptEndSeq int
-	streamEndSeq int
+	// turnID is the engine turn turnSeq names: what the model is looking at, and
+	// what a cancel is asked against, so a cancel delayed across a queue
+	// transition is refused as stale rather than stopping the turn the user did
+	// not mean (§3.7).
+	turnID string
+	// ownTurn is the one turn id the model skips the started event for: the one
+	// Submit handed it back synchronously, whose row, working status and
+	// turnStart the Update that pressed Enter has already applied. Echo
+	// suppression is per effect, so every other started — a drained row, an
+	// armed send firing, another client's prompt — draws its row (§3.4).
+	ownTurn string
+	// disarmed is the Disarm command whose effect the model has already applied,
+	// for the same reason: Esc writes its own note in the Update that pressed
+	// it, and the delta the engine publishes for that same command is then this
+	// model's own echo. A withdrawn delta from any other command is somebody
+	// else's Disarm and is worded for the user.
+	disarmed string
 
 	tickGen     int
 	tickLive    bool
@@ -437,12 +469,24 @@ func (m Model) now() time.Time {
 }
 
 type eventMsg struct{ ev agent.Event }
-type startedMsg struct{}
-type promptDoneMsg struct {
-	res agent.Result
+
+// startedMsg says the session is up: the start command's Start has returned.
+// errMsg is that command's other answer, and the only error that reaches craze's
+// exit status.
+//
+// Both name the engine they are for. A start command outlives the model copy that
+// made it — a picker's choice closes one engine and builds another in the same
+// Update, with the old command still in flight — and neither message may then
+// speak for the engine that replaced the one it was about: a stale startedMsg
+// would open the new engine's gate before its own Start had returned, and a stale
+// errMsg would fail a session that is starting perfectly well. A nil eng means
+// "whichever engine the model holds", which is what a test injecting either
+// message by hand intends.
+type startedMsg struct{ eng *engine.Engine }
+type errMsg struct {
 	err error
+	eng *engine.Engine
 }
-type errMsg struct{ err error }
 type actionErrMsg struct{ err error }
 
 // revertModeMsg is SetMode coming back refused, or never coming back inside
@@ -496,40 +540,80 @@ type planImplementFailedMsg struct {
 	err  error
 }
 
-// sessionOwner is the one record of which session the program holds. Model.sess
-// is a plain field, so every copy bubbletea makes carries its own, and the
-// session a picker builds lives only in the copies made after it. On a quit
-// that is harmless: p.Run hands back the last model. On a recovered Update or
-// View panic it hands back nil, and the model Run started with still holds
-// whatever New gave it — often nothing — so the agent the picker spawned would
-// never be closed and its process group never signalled. Model carries the
-// owner as a pointer, allocated in New, so every copy shares it, and the exit
-// tails close what it holds rather than what some copy remembers.
+// sessionOwner is the one record of which engine — and so which session — the
+// program holds. Model.eng is a plain field, so every copy bubbletea makes
+// carries its own, and the session a picker builds lives only in the copies made
+// after it. On a quit that is harmless: p.Run hands back the last model. On a
+// recovered Update or View panic it hands back nil, and the model Run started
+// with still holds whatever New gave it — often nothing — so the agent the
+// picker spawned would never be closed and its process group never signalled.
+// Model carries the owner as a pointer, allocated in New, so every copy shares
+// it, and the exit tails close what it holds rather than what some copy
+// remembers.
+//
+// It holds the ENGINE and not the session (plan 021 §3.1): closing the engine
+// closes the session, and closing only the session would leave the engine's
+// driver goroutine running and its last events unpublished.
 type sessionOwner struct {
-	mu   sync.Mutex
-	sess agent.Session
+	mu  sync.Mutex
+	eng *engine.Engine
 }
 
-func (o *sessionOwner) set(s agent.Session) {
+func (o *sessionOwner) set(e *engine.Engine) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.sess = s
+	o.eng = e
 }
 
-// current is the session last set. The lock is released before it returns, so
+// current is the engine last set. The lock is released before it returns, so
 // a caller never holds it across Close, which blocks until the agent is reaped.
-func (o *sessionOwner) current() agent.Session {
+func (o *sessionOwner) current() *engine.Engine {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.sess
+	return o.eng
 }
 
-// setSession is the only way the model's session is assigned: it writes
-// m.sess and the owner together, so the two can never name different
-// sessions and a new assignment site cannot forget the owner.
+// setSession is the only way the model's session is assigned: it wraps s in the
+// engine that drives it and writes m.eng, m.sess and the owner together, so the
+// three can never name different sessions and a new assignment site cannot
+// forget either the engine or the owner.
+//
+// The engine is built here rather than in tui.Config because Config.Session
+// stays an agent.Session: internal/cli hands the TUI a provider session, the
+// pickers build one when a row or a provider is chosen, and every one of those
+// paths lands here. Exactly one engine ever wraps one session — a second is
+// refused by design — so a caller that swaps sessions closes the old engine
+// first, which is the same call that closes the old session.
 func (m *Model) setSession(s agent.Session) {
-	m.sess = s
-	m.owner.set(s)
+	m.eng, m.sess, m.engErr = nil, nil, nil
+	m.client, m.cmdSeq = "", 0
+	m.owner.set(nil)
+	if s == nil {
+		return
+	}
+	// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind
+	// it carries on, and a prompt the session refuses is shown as the refusal it
+	// is rather than waited out (engine.ChainPolicy).
+	eng, err := engine.New(s, engine.Options{})
+	if err != nil {
+		m.engErr = err
+		m.sess = s
+		return
+	}
+	m.eng, m.sess = eng, eng.Session()
+	m.client = eng.NewClientID()
+	m.owner.set(eng)
+}
+
+// nextCmd is the model's next command id. Every mutating engine call carries
+// one, so the events it causes name their cause and the model can tell its own
+// effects' echoes from another client's change (§3.2).
+func (m *Model) nextCmd() engine.Command {
+	if m.client == "" {
+		return engine.Command{}
+	}
+	m.cmdSeq++
+	return engine.Command{Client: m.client, ID: fmt.Sprintf("%d", m.cmdSeq)}
 }
 
 func New(cfg Config) Model {
@@ -580,11 +664,9 @@ func New(cfg Config) Model {
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
-		// Turn 1 is the session before the first prompt, and it is over before
-		// it starts: nothing is in flight, so both of its endings have landed.
-		turnSeq:      1,
-		promptEndSeq: 1,
-		streamEndSeq: 1,
+		// Turn 1 is the session before the first prompt: every event has an
+		// identity from the start, and no engine turn carries it.
+		turnSeq: 1,
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
@@ -651,7 +733,7 @@ func Run(cfg Config) (bool, error) {
 	// below runs, and the agent, in a process group of its own, is never
 	// signalled. bubbletea turns SIGTERM into a QuitMsg; p.Quit sends that
 	// same message, so SIGHUP lands on precisely the SIGTERM path. No agent
-	// exists before this registration: sess.Start runs only from inside the
+	// exists before this registration: the session's Start runs only from inside the
 	// event loop.
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -753,21 +835,24 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// Unconditional, and immediately after the title clear: the controller is
 	// a pointer m and fm share, reset is a no-op unless a set was written, and
 	// this also covers a final that is not a Model. The terminal gets its own
-	// colours back on every exit path — before sess.Close, which may block.
+	// colours back on every exit path — before the engine's Close, which may block.
 	m.term.reset()
-	// Before sess.Close for the same reason: the release is bounded, and the
+	// Before the engine's Close for the same reason: the release is bounded, and the
 	// session's close is not. On a quit craze asked for, requestQuit has
 	// already done both in this order and the hub's Close is idempotent; on
 	// SIGTERM, SIGHUP or a recovered panic this is the first and only release.
 	closeHost(h)
-	// The owner and not m.sess: m is the model Run started with, and a session
+	// The owner and not m.eng: m is the model Run started with, and a session
 	// a picker built after it lives only in later copies — which a recovered
 	// panic does not hand back. Every copy shares the owner, so it names the
-	// session the program ended with on every exit path. A zero Model has none.
+	// engine the program ended with on every exit path. A zero Model has none.
+	// Closing the engine closes its session — and stops its driver first, so
+	// nothing is left running behind the program — and answers with what the
+	// session's own Close said.
 	var agentExited bool
 	if m.owner != nil {
-		if sess := m.owner.current(); sess != nil {
-			agentExited = errors.Is(sess.Close(), agent.ErrAgentExited)
+		if eng := m.owner.current(); eng != nil {
+			agentExited = errors.Is(eng.Close(), agent.ErrAgentExited)
 		}
 	}
 	failed := startErr != nil || agentExited || !started
@@ -781,32 +866,42 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 // session/load result would never be read and Start would never return (§2.2).
 //
 // Applying events before started is safe because nothing in applyEvent depends
-// on m.started: finishTurn is a no-op unless the status is working,
-// drainSettledTurn finds an empty queue, cancelTurn is a no-op with no cards
-// and no running turn, refreshSnap is idempotent, and the only card-producing
-// events — permission, question and plan — are requests an agent makes of a
-// live turn and never appear in a replay (§2.1).
+// on m.started: the engine authors no turn event before it is started, cancelTurn
+// is a no-op with no cards and no running turn, refreshSnap is idempotent, and
+// the only card-producing events — permission, question and plan — are requests
+// an agent makes of a live turn and never appear in a replay (§2.1).
 func (m Model) Init() tea.Cmd {
 	if m.picking() {
 		return nil
 	}
-	return tea.Batch(m.startCmd(), waitEvent(m.sess))
+	return tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 
+// startCmd starts the session through the engine, whose gate opens on it: until
+// it has returned the engine admits no command at all.
 func (m Model) startCmd() tea.Cmd {
-	sess := m.sess
-	if sess == nil {
+	// Neither of these names an engine: there is none to name, and the failure is
+	// this model's however its copies move on.
+	if err := m.engErr; err != nil {
+		return func() tea.Msg { return errMsg{err: err} }
+	}
+	eng := m.eng
+	if eng == nil {
 		return func() tea.Msg {
-			return errMsg{fmt.Errorf("craze: no session")}
+			return errMsg{err: fmt.Errorf("craze: no session")}
 		}
 	}
 	return func() tea.Msg {
-		if err := sess.Start(context.Background()); err != nil {
-			return errMsg{err}
+		if err := eng.Start(context.Background()); err != nil {
+			return errMsg{err: err, eng: eng}
 		}
-		return startedMsg{}
+		return startedMsg{eng: eng}
 	}
 }
+
+// staleFor reports that a start command's message is about an engine the model no
+// longer holds — one a picker closed and replaced — so nothing it says applies.
+func (m Model) staleFor(eng *engine.Engine) bool { return eng != nil && eng != m.eng }
 
 // Update runs the handler and then lays the frame out exactly once, from the
 // state the handler left behind, and keeps the single tick chain alive.
@@ -876,6 +971,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// for a loaded one the replay may still be draining, in which case
 		// EventReplay{end} runs the tail instead. The event reader is not
 		// re-armed here — Init armed it, and eventMsg re-arms it after that.
+		//
+		// The engine is told too. startCmd's own Start has already opened its
+		// gate in the ordinary run; this is the same fact arriving by the route
+		// the model actually learns it on, and saying it twice changes nothing.
+		if m.staleFor(msg.eng) {
+			return m, nil
+		}
+		if m.eng != nil {
+			m.eng.Started(nil)
+		}
 		m.started = true
 		m.branch = m.git.branch()
 		m.refreshSnap()
@@ -902,7 +1007,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		// errMsg is only ever startCmd's: the session never came up. The TUI
 		// stays on screen so the error is readable, but craze must not exit 0
-		// afterwards, so the failure rides out on the final model.
+		// afterwards, so the failure rides out on the final model. The engine
+		// hears the same thing, and admits nothing from here.
+		if m.staleFor(msg.eng) {
+			return m, nil
+		}
+		if m.eng != nil {
+			m.eng.Started(msg.err)
+		}
 		m.status = statusError
 		m.err = msg.err.Error()
 		m.startErr = msg.err
@@ -970,11 +1082,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case cancelFailedMsg:
-		// The turn it belonged to may already be over; only the armed send
-		// that was waiting on this cancel is affected.
-		if msg.seq == m.turnSeq {
-			m.dropStrongSend("cancel failed")
-		}
+		// The error is this model's to show. A send-now that was waiting on
+		// this cancel is the engine's, and it disarms it in the section that
+		// releases the cancel's hold, with the cancel_failed reason the delta
+		// carries — so the note arrives on that event and not from here.
 		m.addError(msg.err.Error())
 		return m, nil
 
@@ -1036,59 +1147,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 
 	case eventMsg:
+		// Every ending is one event now, the engine's EventTurn{ended}, and
+		// everything a settled turn left to do — the drain, an armed send-now,
+		// the queue the chain policy clears — is the engine's own decision,
+		// arriving as the events it authored. There is nothing left for the
+		// model to settle here but the reader it re-arms.
 		m.applyEvent(msg.ev)
-		// One transition settles the turn and starts whatever it left to do.
-		// A foreign turn ending is the other moment the drain can run: the
-		// turn it was blocked on is over and craze's own already settled.
-		next, cmd := m.finishTurn()
-		if ev := msg.ev; ev.Type == agent.EventForeignTurn && ev.ForeignTurn != nil && !ev.ForeignTurn.Running {
-			next, cmd = next.drainSettledTurn()
-		}
-		return next, tea.Batch(cmd, waitEvent(next.sess))
-
-	case promptDoneMsg:
-		// The stream is closed by EventDone, which shares the event channel with
-		// the chunks; this message races them and would split a run in two.
-		m.promptEndSeq = m.turnSeq
-		if errors.Is(msg.err, agent.ErrPromptCancelled) {
-			// Esc landed before the prompt's turn opened: while it was still
-			// waiting for the catalog, or right after Enter, before the Cmd
-			// that runs it had got that far. Nothing ran and nothing failed,
-			// so this is not an error state: it is the ending a cancelled turn
-			// has, and the transcript owes the row it already drew the same
-			// note — Esc leaves nothing else behind. No event of any kind is
-			// coming, so the stream ends here.
-			m.streamEndSeq = m.turnSeq
-			m.cancelled = true
-			m.addNote(stopCancelled)
-			return m.finishTurn()
-		}
-		if msg.err != nil {
-			// A prompt the session never accepted emits no events at all, so
-			// its stream is over too — waiting for an ending that cannot come
-			// would leave the turn unfinishable — and this is the only place
-			// its row can be drawn. Any other failure was emitted as
-			// EventError, whose handler draws the row, so drawing it here too
-			// would draw it twice. The emit happens before Prompt returns, but
-			// that does not order the two messages: the eventMsg and this one
-			// come back from different Cmds, so this one can arrive first,
-			// and it must then already put the model in its error state. The
-			// assignments below are the handler's own, so repeating them is
-			// harmless either way round.
-			refused := errors.Is(msg.err, agent.ErrPromptInFlight) || errors.Is(msg.err, agent.ErrForeignTurn)
-			if refused {
-				m.streamEndSeq = m.turnSeq
-			}
-			m.status = statusError
-			m.err = msg.err.Error()
-			if refused {
-				m.addError(m.err)
-			}
-			m.dropStrongSend("")
-			m.confirm = nil
-			return m, nil
-		}
-		return m.finishTurn()
+		return m, waitEvent(m.eng)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -1513,10 +1578,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.slashSel, m.slashTop = 0, 0
 			return m, nil
 		}
-		if m.strong != nil {
-			// The cancel is still in flight; dropping the send-now here is
+		if m.sendNowPending() {
+			// The cancel is still in flight; taking the send-now back here is
 			// what takes the text back before it turns into a turn.
-			m.dropStrongSend("send now dropped")
+			m.withdrawSendNow("send now dropped")
 			return m, nil
 		}
 		if m.status == statusWorking {
@@ -1692,15 +1757,17 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 
 // clearPending empties everything the queue band is holding. The strong send's
 // text does not come back here: Ctrl+C means stop, and a draft reappearing
-// under the cursor would be one more thing to undo.
+// under the cursor would be one more thing to undo. It says nothing about the
+// send-now it took back either — Ctrl+C is already the whole answer — which is
+// why the withdrawal is applied here with no note and its own delta skipped.
 func (m *Model) clearPending() {
 	m.confirm = nil
-	m.strong = nil
+	m.withdrawSendNow("")
 	if m.queueEdit != "" {
 		m.cancelQueueEdit()
 	}
-	if m.sess != nil {
-		m.sess.ClearQueue()
+	if m.eng != nil {
+		_, _ = m.eng.ClearQueue(m.nextCmd())
 	}
 	m.queueFocus = false
 	m.queueHov = noHover()
@@ -1802,10 +1869,77 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	if !m.sessionReady() {
 		// The composer refuses Enter before the gate opens, and so does the
-		// queue drain and the plan offer: a prompt into a session that is
-		// still restoring would race the replay it is reading.
+		// plan offer: a prompt into a session that is still restoring would
+		// race the replay it is reading.
 		return m, nil
 	}
+	next, _, _ := m.submit(text, engine.SubmitQueue, "")
+	return next, nil
+}
+
+// submit hands one prompt to the engine and applies what it answered. It is the
+// one place the model does: a plain send, the plan offer's implement prompt, a
+// row's send now, and a confirmed send-now all come through here, so the echo
+// rule has one synchronous half to match.
+//
+// Exactly one thing happened, and the model applies exactly that one:
+//
+//   - a turn started, so the row is drawn, the status goes working and the turn
+//     is stamped in this very Update — which is what a frame capture right after
+//     Enter sees — and that turn id is the one started event the model will skip;
+//   - a send-now was armed, so nothing is drawn and nothing leaves the queue or
+//     the composer, but the cancel mask goes up here: the cancel that makes room
+//     for the send is the engine's own now, so cancelTurn is not the one setting
+//     it (§3.4);
+//   - the text was queued, or the row it named is still queued, so the band is
+//     all that changed;
+//   - or it was refused, which is one line for the user. Every one of these
+//     refusals was unreachable before the engine — Begin could not refuse a
+//     prompt the model had already gated — so what matters is that a prompt which
+//     went nowhere says so.
+//
+// It waits on nothing: Submit is one locked section in the engine and calls
+// nothing that blocks.
+func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Model, engine.SubmitResult, error) {
+	if m.eng == nil {
+		return m, engine.SubmitResult{}, nil
+	}
+	if fromRow != "" {
+		// The engine sends the row's own text, so the row the model draws is
+		// read from the band it is looking at rather than from whatever the
+		// caller remembered. In S1b there is one client, so the two are the same
+		// text; a second client editing a row between the read and the submit is
+		// S2's problem, with a receipt to answer it.
+		if row, ok := m.queuedRow(fromRow); ok {
+			text = row.Text
+		}
+	}
+	res, err := m.eng.Submit(m.nextCmd(), text, mode, fromRow)
+	switch {
+	case err != nil:
+		m.note(submitErrNote(err))
+	case res.Turn != "":
+		m.beginTurn(res.Turn, text)
+		m.ownTurn = res.Turn
+		if fromRow == "" {
+			m.clearMatchingDraft(text)
+		}
+	case res.Armed:
+		m.maskCards()
+	case res.Queued != nil && fromRow == "":
+		m.clearMatchingDraft(text)
+	}
+	m.refreshQueue()
+	return m, res, err
+}
+
+// beginTurn is what one turn starting does to the model's view of the session,
+// whether the model learned of it from Submit's own answer or from the started
+// event the engine published — a drained row, an armed send firing, another
+// client's prompt. One place, so the two can never drift: a drained row draws
+// its user block and seeds the index exactly as a typed one does, because until
+// the index moves into the engine this is where a first prompt is recorded.
+func (m *Model) beginTurn(id, text string) {
 	m.addUser(text)
 	if !m.indexSeeded {
 		// The first prompt is the first thing worth showing in a picker, so
@@ -1826,84 +1960,56 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	m.prompted = true
 	// The new turn's identity is the one thing that retires the last one: its
 	// evidence, its offer and the kill that retired it all belong to a number
-	// this turn no longer has.
+	// this turn no longer has. turnSeq stays the model's own count — the plan
+	// offer is client-local UI — and turnID is the engine turn it names.
 	m.turnSeq++
-	// The turn is claimed here, in the Update that says working, and not on
-	// the Cmd's goroutine: an Esc that Update handles before that goroutine
-	// runs then cancels this prompt — which withdraws without reaching the
-	// agent — instead of finding no turn and writing its cancel ahead of it.
-	run := m.sess.Begin(text)
-	return m, func() tea.Msg {
-		res, err := run(context.Background())
-		return promptDoneMsg{res, err}
-	}
+	m.turnID = id
 }
 
-// turnSettled reports whether the turn that was started has finished both ways:
-// the prompt has returned and the stream has closed. They race, so the status
-// waits for both — and so does the next turn, which is what stops one turn's
-// buffered chunks arriving inside the next one.
-func (m Model) turnSettled() bool {
-	return m.promptEndSeq == m.turnSeq && m.streamEndSeq == m.turnSeq
+// maskCards drops the cards a cancel has answered and retires the plan offer:
+// what cancelTurn does synchronously, and what an armed send-now owes as well,
+// because the cancel it asked for is made by the engine and answers every
+// request the session was holding just the same.
+func (m *Model) maskCards() {
+	m.cards = nil
+	m.cardsCancelled = true
+	m.retirePlanOffer()
 }
 
-// finishTurn is the one place a turn's ending is acted on. It fires on the
-// unsettled → settled transition only — both endings in for the same turn,
-// and the status still working — and then, in order: a confirmed send-now
-// starts, or the drain waits out a turn the agent is running of its own, or
-// one queued message goes. An error state stands: the turn that failed said
-// so, the session has already cleared the queue, and only the next send
-// clears the status.
-func (m Model) finishTurn() (Model, tea.Cmd) {
-	if m.status != statusWorking || !m.turnSettled() {
-		return m, nil
+// clearMatchingDraft takes the composer's text away if it is still the text that
+// went. The text was trimmed on its way out and the draft may not have been, and a
+// draft the user has changed since is theirs to keep — which is the rule a
+// send-now has always followed, whether it fired at once or after a cancel.
+func (m *Model) clearMatchingDraft(text string) {
+	if strings.TrimSpace(m.input.Value()) != text {
+		return
 	}
-	m.status = statusIdle
-	if m.confirm != nil {
-		// The question was "cancel the running turn and send?" and the turn
-		// answered it first. Nothing was taken from anywhere, so the draft
-		// and the row are both still where they were.
-		m.confirm = nil
-		m.note("the turn ended first")
-	}
-	return m.drainSettledTurn()
+	m.input.SetValue("")
+	m.resetSlash()
 }
 
-// drainSettledTurn starts what a settled turn left behind. It is separate from
-// finishTurn because a foreign turn ending re-opens the same decision long
-// after the status went idle.
-func (m Model) drainSettledTurn() (Model, tea.Cmd) {
-	if m.status != statusIdle || !m.turnSettled() || m.sess == nil {
-		return m, nil
-	}
-	if m.snap.ForeignTurn {
-		// The agent is talking on its own; nothing can be sent into that,
-		// the armed send-now included. Everything re-runs when it stops.
-		return m, nil
-	}
-	if p := m.strong; p != nil {
-		m.strong = nil
-		if p.seq != 0 && p.seq != m.turnSeq {
-			// It was armed against a turn that is no longer the one that
-			// just ended, so it is not this turn's business.
-			m.note("send now dropped")
-		} else {
-			tm, cmd := m.fireStrongSend(*p)
-			next := tm.(Model)
-			if next.status == statusWorking {
-				return next, cmd
-			}
-			// The row it named was already gone; fall through to the drain.
-			m = next
+// queuedRow is the queued row id names, from the band the model is looking at.
+func (m Model) queuedRow(id string) (agent.QueuedPrompt, bool) {
+	for _, p := range m.queueItems() {
+		if p.ID == id {
+			return p, true
 		}
 	}
-	next, ok := m.sess.PopQueue()
-	if !ok {
-		return m, nil
+	return agent.QueuedPrompt{}, false
+}
+
+// submitErrNote is a refused Submit as one line.
+func submitErrNote(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, engine.ErrNotAccepting):
+		return "not ready to send yet"
+	case errors.Is(err, engine.ErrAlreadyPending):
+		return "send now already pending"
+	default:
+		return queueErrNote(err)
 	}
-	m.refreshSnap()
-	tm, cmd := m.sendText(next.Text)
-	return tm.(Model), cmd
 }
 
 // planArmed is the offer as state: it belongs to the turn that earned it, so a
@@ -2013,60 +2119,75 @@ var modeCallTimeout = 15 * time.Second
 // request the session is still holding — permission, question and plan alike —
 // with that kind's cancelled outcome, exactly once each, so the UI must not
 // answer them itself and race it.
+//
+// The cancel names the turn the model is displaying, and the engine refuses it
+// as stale if that turn is no longer the current one — which is what the seq
+// check on cancelFailedMsg used to mean, decided by the one component that knows
+// what is running rather than by a counter the model kept. That is also what
+// makes the model's own view being behind harmless here: if the engine has moved
+// on — a settlement drained a row whose started the model has not applied yet —
+// the id names a turn that is over and the cancel is refused, rather than landing
+// on the turn the user did not mean.
+//
+// With no turn of craze's own — cards on screen and nothing working — it names
+// none: the agent may be holding a request that arrived between turns, and the
+// cancel is what answers it.
 func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	cards := len(m.cards)
 	working := m.status == statusWorking
 	if cards == 0 && !working {
 		return m, nil
 	}
-	m.cards = nil
-	m.cardsCancelled = true
-	// A cancelled turn offers nothing, whichever of its two endings the cancel
-	// beat: the kill is recorded against the turn, so the EventDone still on
-	// its way cannot arm what Esc just declined.
-	m.retirePlanOffer()
-	sess := m.sess
-	seq := m.turnSeq
+	m.maskCards()
+	eng := m.eng
+	if eng == nil {
+		return m, nil
+	}
+	turn := ""
+	if working {
+		turn = m.turnID
+	}
+	c := m.nextCmd()
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := sess.Cancel(ctx); err != nil {
-			return cancelFailedMsg{seq: seq, err: err}
+		if _, err := eng.Cancel(ctx, c, turn); err != nil {
+			if errors.Is(err, engine.ErrStaleTurn) {
+				// The turn this was for is already over; there is nothing to
+				// report and nothing failed.
+				return nil
+			}
+			return cancelFailedMsg{err: err}
 		}
 		return nil
 	}
 }
 
-// cancelFailedMsg says the cancel never reached the agent. A send-now armed
-// behind it would wait for a turn that is not ending, so the text goes back
-// to the composer instead.
-type cancelFailedMsg struct {
-	seq int
-	err error
-}
+// cancelFailedMsg says the cancel never reached the agent.
+type cancelFailedMsg struct{ err error }
 
-// requestQuit closes the session, which answers every card still queued with
-// its cancelled outcome on the way out. The queue is left alone: the model is
-// on its way out with it, and clearing it would only restart the tick chain.
+// requestQuit closes the engine, which closes the session — answering every card
+// still queued with its cancelled outcome on the way out — and stops the driver
+// with it. The queue is left alone: the model is on its way out with it, and
+// clearing it would only restart the tick chain.
 //
 // The host is released first, exactly as finishRun orders it (plan 015 §3.2):
-// sess.Close may block, and a pane that is never released stays showing
-// craze's last state. It also means the cancelled cards the close produces are
-// never reported, since a closed hub ignores Publish.
+// the close may block, and a pane that is never released stays showing craze's
+// last state. It also means the cancelled cards the close produces are never
+// reported, since a closed hub ignores Publish.
 //
-// finishRun closes the owner's session again once p.Run returns, and that is
-// this same session: setSession writes both. The second Close serialises
-// behind this one — the live session's closeOnce runs the close once and every
-// other caller waits on closeDone — so it returns when the first does and
-// cannot deadlock.
+// finishRun closes the owner's engine again once p.Run returns, and that is this
+// same engine: setSession writes both. The second Close serialises behind this
+// one — Engine.Close runs once and answers every later caller with the same
+// error — so it returns when the first does and cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
-	sess := m.sess
+	eng := m.eng
 	h := m.host
 	return m, func() tea.Msg {
 		closeHost(h)
-		if sess != nil {
-			_ = sess.Close()
+		if eng != nil {
+			_ = eng.Close()
 		}
 		return tea.Quit()
 	}
@@ -2132,10 +2253,22 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.addCommandLine(ev.Command)
 		return
 	case agent.EventQueue:
-		// The band draws from the snapshot; nothing else has to happen.
+		// The band draws from the engine's queue, which refreshSnap re-reads;
+		// nothing else has to happen.
 		m.refreshSnap()
 		if ev.QueueChange == agent.QueueRemoved && m.status == statusError {
 			m.note("queue cleared")
+		}
+		return
+	case agent.EventTurn:
+		if ev.Turn == nil {
+			return
+		}
+		switch ev.Turn.Phase {
+		case agent.TurnStarted:
+			m.applyTurnStarted(ev)
+		case agent.TurnEnded:
+			m.applyTurnEnded(ev.Turn)
 		}
 		return
 	case agent.EventForeignTurn:
@@ -2196,9 +2329,28 @@ func (m *Model) applyEvent(ev agent.Event) {
 			}
 		}
 	case agent.EventDone:
+		// The wire's own ending. It orders the transcript — which is why it, and
+		// not the turn's ending, is what decides whether the turn left a plan
+		// behind — but it no longer settles the status: the engine's
+		// EventTurn{ended} is the one ordered ending, and it knows whether
+		// anything succeeds this turn. Going idle here would show the idle
+		// between a cancelled turn and the row queued behind it that the old
+		// code never showed (§3.4, A7).
+		//
+		// It carries no turn id, and needs none, because it cannot be late the
+		// way an engine event can. It is the session's own and is published from
+		// inside the continuation, before that continuation returns; the engine
+		// settles a turn only once it HAS returned, and a turn only becomes
+		// current either in that settlement's batch or through a Submit the
+		// engine admits after it. So every route by which the model could be on
+		// a later turn passes through an event the log ordered behind this one:
+		// a done or an error for turn N is always applied while N is still the
+		// turn on screen. Same for EventError below. (What this does still do is
+		// what it did at the baseline: a turn the agent ran on its own ends here
+		// too, and its reply can arm a plan offer. Unchanged, and not this
+		// commit's to fix.)
 		m.breakStream()
 		m.cardsCancelled = false
-		m.streamEndSeq = m.turnSeq
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
 		m.branch = m.git.branch()
@@ -2209,31 +2361,37 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.cancelled = true
 			m.addNote(stopCancelled)
 		}
-		// EventDone, not promptDoneMsg, is what orders the transcript, so it is
-		// also what decides whether the turn left a plan behind.
 		if m.planEarnsOffer(ev.StopReason) {
 			m.planOfferSeq = m.turnSeq
 		}
 		// A turn ended, so this session is the newest thing in the workspace.
 		m.touchIndex()
 	case agent.EventError:
-		// The error is the prompt's other ending: Prompt emits it and returns,
-		// so no EventDone follows it.
-		m.streamEndSeq = m.turnSeq
+		// The session's own failure, and the one place its row is drawn: the
+		// turn's ending follows and only settles the status, which this has
+		// already said — as it always did, without waiting for the other ending.
+		// Like EventDone it cannot arrive under a later turn; see there.
 		m.status = statusError
-		// Nothing drains from an error state, so an armed send would sit
-		// there and fire behind whatever the user sends next.
-		m.dropStrongSend("")
 		m.confirm = nil
 		if ev.Err != nil {
 			m.err = ev.Err.Error()
 			m.addError(m.err)
 		}
 	case agent.EventMeta:
+		if ev.State != nil {
+			// A state delta: the engine's, or the session's own. The send-now
+			// section is the whole of what S1b reads from one, and what it writes
+			// for it is what the model wrote for the same event before the engine
+			// existed — the toasts, and the one error row a failed cancel has
+			// always left. A settings delta draws nothing at all (§3.8).
+			m.applySendNowDelta(ev)
+		}
 		if ev.Mode != "" {
 			// Any mode update at all retires the offer, even one that names the
 			// mode craze already thought it was in: the agent may have gone
 			// plan → ask → plan, and comparing snapshots cannot see the trip.
+			// Only an agent-initiated update fills Mode; a craze-initiated
+			// change carries its payload in State alone (§3.8).
 			m.retirePlanOffer()
 		}
 		m.refreshSnap()
@@ -2244,6 +2402,181 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// pinned, so this only ever carries a title craze may keep.
 			m.writeIndex(ev.Text, sessions.TitleKindAgent)
 		}
+	}
+}
+
+// applyTurnStarted is a turn the engine started, as an event. The echo rule is
+// per effect: the one started the model skips is the turn Submit handed it back
+// synchronously, because that Update has already drawn the row, gone working and
+// stamped the turn. Every other one — a drained row, an armed send-now firing,
+// another client's prompt — is a turn the model has applied nothing for yet, so
+// it draws its row like any other (§3.4; panel CodeRabbit 13, astra 18).
+//
+// The id is matched rather than a flag consumed, and ownTurn can hold at most one
+// id, so no started can be skipped for the wrong turn and none can leave ownTurn
+// standing. Two arguments, both about the engine:
+//
+//   - The started of the turn Submit reserved is enqueued in the same locked
+//     section that reserved it, and the log delivers in order, so it arrives
+//     before the started of any turn reserved after it. The first started the
+//     model sees once ownTurn is set is therefore ownTurn's.
+//   - Only one can be outstanding: a synchronous Submit leaves the model working,
+//     and nothing submits from working — Enter queues, and an armed send-now
+//     returns no turn at all.
+//
+// The one case that leaves ownTurn set for good is an engine closed between the
+// reserve and the publish, where the enqueue is dropped with everything else at
+// the cut. The program is quitting; nothing reads it again.
+func (m *Model) applyTurnStarted(ev agent.Event) {
+	if id := ev.Turn.ID; id != "" && id == m.ownTurn {
+		m.ownTurn = ""
+		return
+	}
+	m.beginTurn(ev.Turn.ID, ev.Turn.Text)
+	if ev.Turn.Origin == agent.TurnOriginSendNow {
+		// A send-now that fired takes the draft it was armed from with it, if
+		// the composer still holds it — which is the one thing Cause is for
+		// here: informative, never the reason an effect is applied or skipped.
+		m.clearMatchingDraft(ev.Turn.Text)
+	}
+}
+
+// applyTurnEnded is the turn's one ordered ending, and the whole of what settles
+// the status. The endings the wire never produced arrive here as synthetic ones,
+// and each writes exactly what the message that used to carry it wrote: a
+// cancelled prompt its note, a refused prompt its one error row, and a turn that
+// failed nothing at all, because the session's own EventError has already drawn
+// that row.
+//
+// The status goes idle only with an empty Next. With a successor — a queued row
+// the settlement drained, an armed send-now firing — the model stays working, so
+// a cancelled turn with something behind it never shows an idle, and the host hub
+// never publishes one (A7).
+//
+// # What settles, and what is only recorded
+//
+// An engine event trails the state it describes, so an ending can arrive after the
+// model has started another turn. It is reachable: a turn that failed puts the
+// model in its error state from the session's own EventError, which is published
+// before the continuation returns and therefore before the engine can settle —
+// and a direct Submit is admitted from an error state, so Enter in that window
+// starts the next turn synchronously, with the ending of the one before it still
+// in the log's outbox.
+//
+// So everything that settles the model — the status, m.err, cancelled, and the
+// confirm with its note — applies only to the turn the model is displaying
+// (m.turnID). Settling on a stale ending would put an error, or an idle, under a
+// turn that is running: the host hub would publish Failed or Idle for work in
+// flight, a <wait:idle> could match a state the old code never showed, and the
+// next Enter would be routed by a status that is two turns out of date.
+//
+// The ROWS are the other half, and they are written whichever turn is current,
+// because they are facts about the turn that ended and the transcript is a record:
+// a late cancelled note, or a late refusal's one error row, landing under the next
+// user block is the honest account of a late fact. That is also exactly what the
+// baseline did — promptDoneMsg carried no turn at all and drew both rows
+// unconditionally (app.go at 6581e0a) — so nothing a user sees moves here.
+func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
+	// current is "this is the ending of the turn on screen". An id the model has
+	// never seen is not it, and neither is "" — before any turn there is nothing
+	// to settle.
+	current := t.ID != "" && t.ID == m.turnID
+	failed := t.Err != ""
+	switch {
+	case t.Synthetic && !failed:
+		// Cancelled before the prompt's turn opened: while it was still waiting
+		// for the agent's first command catalog, or right after Enter. Nothing
+		// ran and nothing failed, so this is not an error state: it is the ending
+		// a cancelled turn has, and the transcript owes the row it already drew
+		// the same note — Esc leaves nothing else behind.
+		m.addNote(stopCancelled)
+	case t.Synthetic:
+		// A prompt the session refused emits no event of any kind, so this is
+		// the only place its row can be drawn.
+		m.addError(t.Err)
+	}
+	if !current {
+		return
+	}
+	if t.Synthetic && !failed {
+		// Part of the settlement and not of the row: it is what tells the idle
+		// that follows Esc from the idle that follows an answer, so it belongs to
+		// the turn the model is on.
+		m.cancelled = true
+	}
+	if failed {
+		m.status = statusError
+		m.err = t.Err
+		m.confirm = nil
+		return
+	}
+	if m.confirm != nil {
+		// The question was "cancel the running turn and send?" and the turn
+		// answered it first. Nothing was taken from anywhere, so the draft
+		// and the row are both still where they were.
+		m.confirm = nil
+		m.note("the turn ended first")
+	}
+	if t.Next == "" {
+		m.status = statusIdle
+	}
+}
+
+// applySendNowDelta is the engine's armed send-now changing, written exactly as
+// the model has always written it: the toast for each way a send can be lost, and
+// — for the one that is a failure — the error row beside it, in the order
+// cancelFailedMsg produced the two. Nothing else in S1b reads a state delta, and
+// no settings delta draws anything at all.
+//
+// An arm is not reported here: the model applied it from Submit's own answer, and
+// the delta that says a send is armed carries no reason because nothing was lost.
+// Every way one can be lost does, and each is its own sentence, because each is a
+// different thing to tell the user.
+//
+// None of it is keyed to a turn, and none of it needs to be. A delta is about the
+// armed send, of which there is one at a time, and what it writes is a note and —
+// for the failure — a row: nothing here settles any state, so a delta that arrives
+// late says something true about a send that is gone rather than contradicting
+// the one that replaced it. Whether a send is armed *now* is read from the engine
+// (sendNowPending), never from these events.
+func (m *Model) applySendNowDelta(ev agent.Event) {
+	sn := ev.State.SendNow
+	if sn == nil || sn.Armed {
+		return
+	}
+	switch ev.State.Reason {
+	case agent.SendNowWithdrawn:
+		if ev.Cause != "" && ev.Cause == m.disarmed {
+			// This model's own Disarm, whose note it wrote in the Update that
+			// asked for it. Anything else is somebody else taking it back.
+			m.disarmed = ""
+			return
+		}
+		m.note("send now dropped")
+	case agent.SendNowOtherTurn:
+		// It was armed against a turn that is no longer the one that just
+		// ended, so it was not that turn's business.
+		m.note("send now dropped")
+	case agent.SendNowRowGone:
+		// The row it named went some other way — the drain sent it, or it was
+		// cancelled — so there was nothing left to send now.
+		m.note("that message has already gone")
+	case agent.SendNowCancelFailed:
+		// The cancel never reached the agent, so the turn it would have
+		// replaced is still running. The text is where it was.
+		//
+		// Both halves of what cancelFailedMsg wrote, in its order: the note, and
+		// then the failure as a transcript row. That cancel was the engine's —
+		// the arm asked for it and the engine made it — so the delta's Detail is
+		// where its error reaches this model, and a cancel of the model's own
+		// still draws the row from its own command's report.
+		m.note("cancel failed")
+		if ev.State.Detail != "" {
+			m.addError(ev.State.Detail)
+		}
+	case agent.SendNowTurnFailed, agent.SendNowStopped, agent.SendNowClosing:
+		// Silent, as they always were: the failure, the stop or the quit is
+		// already the whole of what the user is being told.
 	}
 }
 
@@ -2396,15 +2729,24 @@ func (m *Model) touchIndex() {
 	_ = m.writeIndex("", sessions.TitleKindNone)
 }
 
-// refreshSnap re-reads the session's snapshot. It draws no conclusions from
-// what changed: a mode change is reported by the event that carries it, because
-// applyMode has already written the user's own change into the snapshot and an
-// agent-side change that went round in a circle leaves nothing to compare.
+// refreshSnap re-reads the session's state through the engine, which embeds the
+// session's own snapshot and merges its own fields into it. It draws no
+// conclusions from what changed: a mode change is reported by the event that
+// carries it, because applyMode has already written the user's own change into
+// the snapshot and an agent-side change that went round in a circle leaves
+// nothing to compare.
+//
+// The queue is the engine's from here. It is written back over the snapshot's
+// own — the session's, which the TUI no longer touches and which leaves the
+// provider seam in a later commit — so that everything that draws the band keeps
+// reading one field and there is one place this moves again.
 func (m *Model) refreshSnap() {
-	if m.sess == nil {
+	if m.eng == nil {
 		return
 	}
-	m.snap = m.sess.Snapshot()
+	st := m.eng.State()
+	m.snap = st.Snapshot
+	m.snap.Queue = st.Queue
 	if m.modeInFlight != "" {
 		// A SetMode of craze's own is still on the wire. The snapshot answers
 		// with the mode the session is still in, which is the one the user
@@ -2427,6 +2769,23 @@ func (m *Model) refreshSnap() {
 			m.noteAgentStart(s.ID)
 		}
 	}
+}
+
+// refreshQueue re-reads the message queue alone. It is what a submit owes: the
+// band changed — a row taken, or a row queued — and nothing else the model mirrors
+// did.
+//
+// The rest of the snapshot is deliberately left alone, and refreshSnap is not what
+// runs here. The turn this same Update just started is already running on the
+// engine's goroutine, and a session that names itself from the prompt (native's
+// own title) writes that while the Update is still in progress: re-reading the
+// whole snapshot here would show a change this Update has no business showing, and
+// which frame it first appeared in would be a race.
+func (m *Model) refreshQueue() {
+	if m.eng == nil {
+		return
+	}
+	m.snap.Queue = m.eng.State().Queue
 }
 
 // View places the regions the layout decided, each forced to exactly its own
@@ -2474,12 +2833,17 @@ func workspaceName(cwd string) string {
 	return base
 }
 
-func waitEvent(sess agent.Session) tea.Cmd {
-	if sess == nil {
+// waitEvent reads the engine's primary — the session's own, unchanged: the
+// engine publishes into the same log, so one stream carries the agent's events
+// and the engine's alike. A primary client keeps reading until it closes the
+// engine, because the log's outbox may still be publishing after a turn's
+// ending.
+func waitEvent(eng *engine.Engine) tea.Cmd {
+	if eng == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		ev, ok := <-sess.Events()
+		ev, ok := <-eng.Events()
 		if !ok {
 			return nil
 		}

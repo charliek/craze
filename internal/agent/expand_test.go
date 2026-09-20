@@ -1082,8 +1082,8 @@ func TestCancelDuringTheWaitLeavesTheNextPromptAlone(t *testing.T) {
 	if err := promptReturn(t, outA, "the cancel never reached the wait"); !errors.Is(err, ErrPromptCancelled) {
 		t.Fatalf("the cancelled prompt returned %v", err)
 	}
-	// B, the moment A is out of the way — the TUI's promptDoneMsg → finishTurn
-	// → queue drain, with nothing in between.
+	// B, the moment A is out of the way — the engine's settlement and the drain
+	// it decides, with nothing in between.
 	res, err := s.Prompt(t.Context(), "still here")
 	if err != nil {
 		t.Fatal(err)

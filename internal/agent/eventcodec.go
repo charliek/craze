@@ -523,6 +523,7 @@ type wireTurn struct {
 type wireState struct {
 	SendNow *wireSendNow `json:"sendNow,omitempty"`
 	Reason  string       `json:"reason,omitempty"`
+	Detail  string       `json:"detail,omitempty"`
 }
 
 // wireSendNow is SendNowState, field for field in the same order, so it
@@ -621,7 +622,7 @@ func toWireEvent(ev Event) wireEvent {
 		w.Command = &wireCommand{PluginCommand: wirePluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
 	}
 	if s := ev.State; s != nil {
-		w.State = &wireState{SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason}
+		w.State = &wireState{SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail}
 	}
 	if ev.Err != nil {
 		class, code := classifyEventErr(ev.Err)
@@ -757,7 +758,7 @@ func (w *wireEvent) event() Event {
 		ev.Command = &ExpandedCommand{PluginCommand: PluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
 	}
 	if s := w.State; s != nil {
-		ev.State = &StateDelta{SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason}
+		ev.State = &StateDelta{SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail}
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}

@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 )
 
 // The pump is a miniature of the bubbletea runtime, and it is what lets a
@@ -27,10 +28,11 @@ import (
 // ending: it starts a turn for real, the stub answers it on its own goroutine,
 // and the test waits for a predicate over the model.
 //
-// That is deliberately indifferent to *how* a turn ends. Today the ending
-// arrives as a promptDoneMsg from the prompt's Cmd; after the driver moves into
-// internal/engine it arrives as an event on the session's stream. Both are "a
-// message the pump feeds back", so the tests do not have to know which.
+// That is deliberately indifferent to *how* a turn ends, which is why the
+// driver moving into internal/engine changed the helpers here and almost none
+// of the tests: the ending used to arrive as a message from the prompt's own
+// Cmd, and now it is an EventTurn on the session's stream. Both are "a message
+// the pump feeds back", so the tests do not have to know which.
 //
 // Three rules keep it honest:
 //
@@ -76,7 +78,11 @@ type pumpItem struct {
 // the single reader of the session's event stream, and the bookkeeping that
 // stops any of it outliving the test.
 type pump struct {
-	sess agent.Session
+	// ctrl is the engine the model drives its session through, which is also
+	// where the one event stream comes from: the engine publishes into the
+	// session's own log, so the reader below sees the agent's events and the
+	// engine's in one order.
+	ctrl *engine.Engine
 	// msgs carries every message bound for Update, from the event reader and
 	// from the commands alike, in the order they were produced. Buffered so a
 	// command that has finished never holds its goroutine open waiting for the
@@ -139,7 +145,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 		return p
 	}
 	p := &pump{
-		sess:       m.sess,
+		ctrl:       m.eng,
 		msgs:       make(chan pumpItem, 256),
 		dead:       make(chan struct{}),
 		quietened:  make(chan struct{}, 1),
@@ -149,7 +155,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 	}
 	pumps[t] = p
 	pumpsMu.Unlock()
-	if p.sess == nil {
+	if p.ctrl == nil {
 		t.Fatal("pump: the model has no session to drive")
 	}
 	p.wg.Add(1)
@@ -168,10 +174,11 @@ func pumpFor(t *testing.T, m Model) *pump {
 		// because in a real run the program exits instead — so the reader has
 		// to be told, not starved.
 		close(p.dead)
-		// Then the session, which releases a prompt still parked or hung inside
-		// the stub, and reaps a real agent. Then the join, which is the
-		// assertion that nothing the pump started outlives the test.
-		_ = p.sess.Close()
+		// Then the engine, which closes the session — releasing a prompt still
+		// parked or hung inside the stub, and reaping a real agent — and joins
+		// its own goroutines. Then the join, which is the assertion that nothing
+		// the pump started outlives the test.
+		_ = p.ctrl.Close()
 		p.wg.Wait()
 	})
 	return p
@@ -186,7 +193,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 // the pump and know that an event is either still on the stream or already
 // queued, with nowhere else to be.
 func (p *pump) read() {
-	ch := p.sess.Events()
+	ch := p.ctrl.Events()
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -302,12 +309,47 @@ func (p *pump) resolved() {
 // outstanding until its message has been applied, and the only other publisher
 // is the test's own goroutine, which is inside pumpSettled.
 func (p *pump) quiet() bool {
-	if len(p.msgs) != 0 || len(p.sess.Events()) != 0 {
+	if len(p.msgs) != 0 || len(p.ctrl.Events()) != 0 {
 		return false
 	}
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 	return p.outstanding == 0
+}
+
+// sync runs the engine's own barrier on a goroutine of its own and answers with
+// what it came to.
+//
+// It has to be a goroutine, and it has to be one the reader is not: an engine
+// event is published by the log's outbox, so it trails the state it describes,
+// and Sync is what waits for the outbox to have delivered. The outbox delivers by
+// sending on the primary, which only the reader drains — so a Sync called from
+// the reader with the primary full would be waiting for a slot only it can free
+// (plan 021 amendment X14). Here the pump's reader is still reading while this
+// waits, which is exactly the shape the contract asks for.
+//
+// A closing log answers ErrLogClosing rather than waiting, which is not a
+// failure: everything enqueued is committed by the close itself.
+func (p *pump) sync() <-chan error {
+	out := make(chan error, 1)
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		// Cleanup closes dead before it closes the engine, so a Sync waiting on
+		// a primary nobody will read again gives up rather than outliving the
+		// test.
+		go func() {
+			select {
+			case <-p.dead:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		out <- p.ctrl.Sync(ctx)
+	}()
+	return out
 }
 
 // resumeReader lets a parked reader go on. The reader is waiting for it, unless
@@ -324,7 +366,7 @@ func (p *pump) pending() string {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d",
-		p.outstanding, len(p.msgs), len(p.sess.Events()))
+		p.outstanding, len(p.msgs), len(p.ctrl.Events()))
 }
 
 // pumpSkips names the two commands the pump must not run, and why.
@@ -423,10 +465,12 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 // turn is held. Called then, the watchdog fails the test and says what is
 // outstanding rather than hanging.
 //
-// After the driver moves into internal/engine the prompt no longer runs in a
-// tea.Cmd at all, and this degenerates to "the queue is empty and no command is
-// outstanding" — which is still exactly the right claim, because the turn's
-// ending is then one of the messages the queue carries.
+// The driver is the engine's now, so a turn's ending is not a command's report at
+// all: it is an event the log's outbox publishes, and an engine event trails the
+// state it describes (plan 021 R2). "No command outstanding and both queues
+// empty" can therefore be true a moment before the ending is published, which is
+// why every pass runs the engine's own Sync first — on a goroutine, while this
+// one keeps reading — and only then asks whether the pump is quiet.
 func pumpSettled(t *testing.T, m Model) Model {
 	t.Helper()
 	p := pumpFor(t, m)
@@ -437,6 +481,28 @@ func pumpSettled(t *testing.T, m Model) Model {
 		// is what frees a reader — or a command — blocked on a full queue, which
 		// is how the rendezvous below is always reachable.
 		m = p.drain(m)
+
+		// The outbox barrier, before the reader is stopped: everything the engine
+		// had enqueued by now is in the primary's buffer when this returns, so
+		// the rendezvous below can see it. Messages keep being applied while it
+		// waits — the reader is what frees the primary.
+		synced := p.sync()
+	settling:
+		for {
+			select {
+			case err := <-synced:
+				if err != nil && !errors.Is(err, agent.ErrLogClosing) && !errors.Is(err, agent.ErrClosed) &&
+					!errors.Is(err, context.Canceled) {
+					t.Fatalf("pumpSettled: the engine's Sync came back with %v", err)
+				}
+				break settling
+			case item := <-p.msgs:
+				m = p.apply(m, item)
+			case <-timeout:
+				t.Fatalf("pumpSettled: the engine's outbox was not delivered in %s (%s)\n%s",
+					pumpWatchdog, p.pending(), plainView(m))
+			}
+		}
 
 		parked := false
 	rendezvous:
@@ -514,12 +580,6 @@ func pumpApply(t *testing.T, m Model, msg tea.Msg) Model {
 func pumpKey(t *testing.T, m Model, k tea.KeyMsg) Model {
 	t.Helper()
 	return pumpApply(t, m, k)
-}
-
-// pumpMsg is pumpApply for a message that is not a key.
-func pumpMsg(t *testing.T, m Model, msg tea.Msg) Model {
-	t.Helper()
-	return pumpApply(t, m, msg)
 }
 
 // pumpCmd dispatches a command the test is holding rather than one an Update
@@ -642,6 +702,17 @@ func turnsReached(stub promptSource, n int) func(Model) bool {
 	return func(Model) bool { return len(stub.Prompts()) == n }
 }
 
+// turnsDrawn is how many turns the model has drawn a user block for, which is the
+// barrier for "the model has applied that turn's start". Counting the prompts the
+// session was given is not: the engine claims a turn — which is where the prompt is
+// recorded — a few statements before it enqueues the started that tells a client
+// about it, so turnsReached can be true with nothing drawn yet. Use this wherever
+// the next assertion is about the model rather than about the session, and
+// turnsReached where "these texts reached the agent" is the claim.
+func turnsDrawn(n int) func(Model) bool {
+	return func(m Model) bool { return len(texts(m, entryUser)) == n }
+}
+
 // queueEmpty reads the band, which is what the user sees of the queue.
 func queueEmpty(m Model) bool { return len(queueTexts(m)) == 0 }
 
@@ -672,12 +743,45 @@ func allOf(preds ...func(Model) bool) func(Model) bool {
 // of a hundred assertions. Anything that *is* on screen is asserted from the
 // frame instead.
 
+// enqueueRow puts a row in the band without pressing the keys for it, and
+// unqueueRow takes one out. Both go through the engine, because from C4 there is
+// one queue owner per caller: the Stub keeps a queue of its own until the queue
+// leaves the provider seam, but nothing the TUI draws comes from it.
+func enqueueRow(t *testing.T, m Model, text string) {
+	t.Helper()
+	if m.eng == nil {
+		t.Fatal("the model has no engine to queue through")
+	}
+	if _, err := m.eng.Queue(engine.Command{}, text); err != nil {
+		t.Fatalf("queueing %q: %v", text, err)
+	}
+}
+
+func unqueueRow(t *testing.T, m Model, id string) {
+	t.Helper()
+	if m.eng == nil {
+		t.Fatal("the model has no engine to unqueue through")
+	}
+	if _, err := m.eng.Unqueue(engine.Command{}, id); err != nil {
+		t.Fatalf("unqueueing %q: %v", id, err)
+	}
+}
+
+// queuedRows is craze's message queue, in send order: the engine's, which is the
+// one authority on it now.
+func queuedRows(m Model) []agent.QueuedPrompt {
+	if m.eng == nil {
+		return nil
+	}
+	return m.eng.State().Queue
+}
+
 // queueTexts is the queued messages, in order. The band draws them, but a test
-// that wants to name them needs the list: today it is Snapshot.Queue, which
-// moves onto the engine's state when the queue leaves the provider seam.
+// that wants to name them needs the list.
 func queueTexts(m Model) []string {
-	out := make([]string, 0, len(m.snap.Queue))
-	for _, p := range m.snap.Queue {
+	rows := queuedRows(m)
+	out := make([]string, 0, len(rows))
+	for _, p := range rows {
 		out = append(out, p.Text)
 	}
 	return out
@@ -686,8 +790,9 @@ func queueTexts(m Model) []string {
 // queueIDs is the same list by id. Ids are not drawn — they are what a verb
 // names a row by — so there is nothing on screen to read them from.
 func queueIDs(m Model) []string {
-	out := make([]string, 0, len(m.snap.Queue))
-	for _, p := range m.snap.Queue {
+	rows := queuedRows(m)
+	out := make([]string, 0, len(rows))
+	for _, p := range rows {
 		out = append(out, p.ID)
 	}
 	return out
@@ -696,9 +801,8 @@ func queueIDs(m Model) []string {
 // sendNowArmed is a confirmed send-now waiting for the cancelled turn to
 // settle. Nothing is drawn for it — that is the point of it: the row stays in
 // the band and the draft stays in the composer until it fires — so the state
-// itself is the only witness. Today it is the model's own field; it becomes
-// the engine's armed send.
-func sendNowArmed(m Model) bool { return m.strong != nil }
+// itself is the only witness, and the state is the engine's.
+func sendNowArmed(m Model) bool { return m.sendNowPending() }
 
 // turnsStarted is how many prompts the session was given, which is the number
 // of turns that were really started, in order, with their text.
@@ -721,8 +825,12 @@ func TestPumpSkipsTheTickChainAndTheEventReader(t *testing.T) {
 		t.Fatalf("the tick chain is not recognised: %q", cmdFuncName(tick))
 	}
 	stub := NewStub()
-	t.Cleanup(func() { _ = stub.Close() })
-	reader := waitEvent(stub)
+	eng, err := engine.New(stub, engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	reader := waitEvent(eng)
 	if reader == nil {
 		t.Fatal("waitEvent must return a command for a live session")
 	}

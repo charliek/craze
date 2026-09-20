@@ -196,27 +196,69 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	return e, nil
 }
 
-// Session is the session the engine wraps: the raw provider seam, for what has
-// not moved behind Control yet.
+// Session is the session the engine wraps: the raw provider seam, held by a
+// client only for what has not moved behind Control yet. Everything else goes
+// through Control, so that one component decides what runs and two clients cannot
+// contradict each other.
+//
+// What is still reached through here, and what takes each away:
+//
+//   - AnswerPermission, AnswerQuestion, AnswerPlan — until the ask registry gives
+//     Control its Answer and Asks (plan 021 C8b);
+//   - SetModel, SetMode, SetConfig, SetTitle — until settings become state deltas
+//     in order behind Control.Set and Control.SetTitle (C10);
+//   - Snapshot, which the TUI reads through Control.State() already, and which a
+//     caller that has no engine state to merge may still read here.
+//
+// The TUI additionally keeps writing the session index itself, from the snapshot
+// this hands it, until the index moves into the engine (C12). Nothing else may go
+// around Control: no Begin, no Cancel, no queue verb, no Interject.
 func (e *Engine) Session() agent.Session { return e.sess }
 
 // Start starts the session. Until it returns the engine refuses every
 // command; afterwards it is idle, or failed with StartFailed set.
 func (e *Engine) Start(ctx context.Context) error {
 	err := e.sess.Start(ctx)
+	e.Started(err)
+	return err
+}
+
+// Started opens the gate: the session is up, and commands are admitted from
+// here. err is what starting came to; a failure leaves the engine in its error
+// state with StartFailed set, exactly as a failed Start does. It waits on
+// nothing.
+//
+// Start calls it with whatever sess.Start returned, and it is exported because
+// starting is not always the engine's own call — a client can learn that the
+// session is up another way and has to be able to say so. The TUI is one: its
+// start command calls Start on a goroutine of bubbletea's and reports back as a
+// message, and the model that handles that message is where the session being up
+// becomes true for everything the model then admits. So in an ordinary run BOTH
+// reach here, and the two properties that makes necessary are:
+//
+//   - It is idempotent. The gate only ever opens, and only from
+//     ActivityStarting, so a second call is a no-op whatever the engine is doing
+//     by then: a working turn is not put back to idle, and a start that failed is
+//     not talked out of its error state by a later Started(nil).
+//   - It never reopens a gate that has closed. Close is checked here; Stop sets
+//     stopped, which refusalLocked reads whatever the activity is; and a client
+//     that has moved on to another engine must not reach this one at all, which
+//     is the caller's to get right — the TUI names the engine on the message its
+//     start command reports with, and ignores one for an engine it no longer
+//     holds (app.go's startedMsg and staleFor).
+func (e *Engine) Started(err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed {
-		return err
+	if e.closed || e.activity != ActivityStarting {
+		return
 	}
 	if err != nil {
 		e.activity = ActivityError
 		e.startFailed = true
 		e.err = err.Error()
-		return err
+		return
 	}
 	e.activity = ActivityIdle
-	return nil
 }
 
 // Events is the session's primary subscription.
@@ -262,7 +304,7 @@ func (e *Engine) Close() error {
 		// An armed send will never fire now, and the record says so before the
 		// log stops taking work: a mandatory completion, like every other
 		// ending shutdown authors.
-		if ev, ok := e.disarmLocked(agent.SendNowClosing, ""); ok {
+		if ev, ok := e.disarmLocked(agent.SendNowClosing, "", ""); ok {
 			e.log.Enqueue(ev)
 		}
 		e.mu.Unlock()
@@ -733,7 +775,7 @@ func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.E
 			}
 			return &l, before, nil
 		}
-		if ev, ok := e.disarmLocked(agent.SendNowRowGone, ""); ok {
+		if ev, ok := e.disarmLocked(agent.SendNowRowGone, "", ""); ok {
 			disarm = append(disarm, ev)
 		}
 	}
@@ -839,7 +881,7 @@ func (e *Engine) settleLocked(t *turn) []launch {
 			reason = agent.SendNowTurnFailed
 		}
 		if reason != "" {
-			if ev, ok := e.disarmLocked(reason, ""); ok {
+			if ev, ok := e.disarmLocked(reason, "", ""); ok {
 				disarm = append(disarm, ev)
 			}
 		}

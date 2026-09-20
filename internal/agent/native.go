@@ -501,11 +501,6 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// Every row the turn left running is closed before its ending goes out,
 	// so no consumer ever sees a turn end with a call still spinning.
 	s.settleTools()
-	// Then whatever the user interjected that the turn could not answer, at
-	// the head of the queue, before the ending event: from there it is an
-	// ordinary queued row, taken by the drain after a done or a cancel and
-	// cleared with the rest after an error (plan 019 §3.10).
-	s.queueUnanswered(res.Unanswered)
 	var failed error
 	switch {
 	case err != nil:
@@ -514,17 +509,27 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		failed = s.callerEnded(ctx)
 	}
 	s.markDone()
+	// Whatever the user interjected that the turn could not answer is reported,
+	// not requeued: the engine above this seam owns craze's queue and puts the
+	// steers back itself, at the head, before it decides what runs next (plan
+	// 021 §3.5). It is reported on the error path too — the engine requeues and
+	// then clears, so a consumer still hears why the queue emptied — which is
+	// why unanswered is read out here and not inside either branch.
+	unanswered := res.Unanswered
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
 		// state when the removals arrive and can say why the queue emptied.
 		s.emit(Event{Type: EventError, Err: failed})
 		// Nothing drains from an error state, and a queue that outlived one
-		// would run behind whatever the user sends next.
+		// would run behind whatever the user sends next. This is the session's
+		// own queue, which only `craze prompt` still fills (--follow-up) until
+		// the queue leaves the provider seam; the engine's is cleared by its own
+		// chain policy.
 		s.clearQueueOnError()
-		return Result{}, failed
+		return Result{Unanswered: unanswered}, failed
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
-	return Result{StopReason: res.StopReason}, nil
+	return Result{StopReason: res.StopReason, Unanswered: unanswered}, nil
 }
 
 // markDone closes the turn to interjections just before its ending event goes
@@ -539,65 +544,22 @@ func (s *nativeSession) markDone() {
 	s.doneEmitted = true
 }
 
-// queueUnanswered puts the turn's unanswered steers at the head of the queue,
-// first one first, through PushFront, which neither cap bounds: the text is
-// already the user's, accepted by the session, and a cap must not be the
-// reason it vanishes. Pushing back to front leaves them in the order they were
-// typed, and a consumer rebuilding the queue from the events — each an insert
-// at position 0 — lands on the same order.
+// The turn's unanswered steers used to be pushed back onto this session's own
+// queue here (queueUnanswered, plan 019 §3.10). They are reported in
+// Result.Unanswered instead, and the engine above the seam puts them back —
+// through PushFront, last first, in the same locked section that decides the
+// turn's successor, so steered text is always ahead of whatever was waiting
+// behind the turn that took it (plan 021 §3.5).
 //
-// The burst is bounded by the harness, which refuses a turn more steers than
-// the queue's own cap (harness.steerCap): an unbounded one could fill a
-// consumer's event channel on its own.
-//
-// That bound does not make the underlying shape safe, and is not meant to.
-// queueTx holds emitMu across its sends, so a single blocking send can wedge:
-// with the channel nearly full, a consumer that receives one event and
-// synchronously calls Queue leaves the requeue to fill that slot and block on
-// its next send, still holding emitMu, while Queue waits for it — and the
-// consumer is the only thing that would drain. That is plan 008's queueTx
-// shape, shared by Queue, Edit, Unqueue and Clear; the cap only bounds what an
-// interjection can add to it. Nor is the ending burst bounded by the steer cap
-// alone: the error path's ClearQueue emits one removal per row, and cap-exempt
-// rows accumulate across turns. This is not something the session-control
-// plan's event log closes: its publish still blocks on the primary send
-// inside queueTx, because a queue event is lossless by contract — dropping a
-// removal would leave a row the stream never accounts for. The fix belongs to
-// the engine turn driver that owns queue admission and removal (session
-// control SD-24), so nothing deeper is attempted here.
-//
-// A closed session queues nothing. Its events are already suppressed, so a row
-// pushed now could never be shown, drained or cleared — an invisible message
-// the user was told had been accepted. Interject refuses on a closed session,
-// so the only text that reaches here is what a live turn took before Close
-// cancelled it, and that is dropped with the session.
-func (s *nativeSession) queueUnanswered(texts []string) {
-	if len(texts) == 0 {
-		return
-	}
-	now := time.Now()
-	s.queueTx(func() []QueueEvent {
-		// Not atomic with the PushFront below, and knowingly so: closed can
-		// read false, Close can then set it and close done, and the row goes
-		// in anyway — its event suppressed, but Snapshot still showing it
-		// after Close. The window is accepted. The row belongs to a session
-		// that is going away and nothing will act on it. Closing it properly
-		// means mutating the queue and publishing what describes it under one
-		// authority, which is the engine turn driver's job (session control
-		// SD-24), not an ordering boundary between publishes.
-		s.mu.Lock()
-		closed := s.closed
-		s.mu.Unlock()
-		if closed {
-			return nil
-		}
-		evs := make([]QueueEvent, 0, len(texts))
-		for i := len(texts) - 1; i >= 0; i-- {
-			evs = append(evs, s.queue.PushFront(texts[i], now))
-		}
-		return evs
-	})
-}
+// Two things follow from the move. The wedge this comment used to describe is
+// gone from the requeue: it was queueTx holding emitMu across a blocking
+// primary send, with a consumer that queues from its own receive on the other
+// side, and the engine holds no lock across a send at all — it enqueues into the
+// log's outbox, whose mutex is a leaf. What remains of that shape is the
+// session's own queue verbs, which only `craze prompt` still uses and which the
+// queue's move off the provider seam deletes. And the closed-session window is
+// gone with it: a row can no longer be pushed onto a queue whose events are
+// already suppressed, because nothing pushes one here.
 
 // callerEnded says whether a turn the harness reports cancelled was ended by
 // the caller's own context — its deadline, or its cancel — rather than by

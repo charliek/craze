@@ -457,30 +457,30 @@ func TestToolRowsClampToWidth(t *testing.T) {
 	}
 }
 
-// TestPromptDoneDoesNotSplitAStreamRun pins the ordering fix: the prompt reply
-// is delivered by its own goroutine and can overtake the chunks it belongs to,
-// so only EventDone may close a run.
-//
-// It stays hand-fed, because its subject is that overtaking: the test has to put
-// the prompt's reply between two chunks, and nothing a user can do decides where
-// it lands. What it protects — a turn's chunks coalesce into one run and the
-// next turn's are a run of their own — is driven by TestCoalesceStreamChunks and
-// by TestEnterSendsAndFollowUp.
-func TestPromptDoneDoesNotSplitAStreamRun(t *testing.T) {
+// TestPromptDoneDoesNotSplitAStreamRun is retired with the message it was about
+// (plan 021 C4). A prompt's return is no longer a message at all: the engine runs
+// the continuation and publishes one ordered ending into the same log as the
+// chunks, so nothing can overtake them and there is no overtaking to pin. That
+// EventDone alone closes a run is asserted just below
+// (TestOnlyTheWiresEndingClosesAStreamRun); the property both were for — a turn's
+// chunks coalesce into one run and the next turn's are a run of their own — is
+// driven by TestCoalesceStreamChunks and by TestEnterSendsAndFollowUp.
+
+// TestOnlyTheWiresEndingClosesAStreamRun: the engine's own ending for a turn does
+// not break a run, because it is not what orders the transcript — the wire's
+// EventDone is, and it closes the run as it always did.
+func TestOnlyTheWiresEndingClosesAStreamRun(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "a"}})
-	m = tm.(Model)
-	tm, _ = m.Update(promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
-	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "b"}})
-	m = tm.(Model)
+	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "a"})
+	m = feed(t, m, agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+		ID: "turn-1", Phase: agent.TurnEnded, StopReason: "end_turn",
+	}})
+	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "b"})
 	if got := texts(m, entryThought); len(got) != 1 || got[0] != "ab" {
-		t.Fatalf("the prompt reply split the run: %q", got)
+		t.Fatalf("the turn's ending split the run: %q", got)
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
-	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "c"}})
-	m = tm.(Model)
+	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "c"})
 	if got := texts(m, entryThought); len(got) != 2 {
 		t.Fatalf("EventDone must close the run: %q", got)
 	}

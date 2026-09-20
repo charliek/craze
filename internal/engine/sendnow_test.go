@@ -203,8 +203,19 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 	wantDisarm := func(t *testing.T, r *rig, reason string) {
 		t.Helper()
 		got := r.until(disarmed)
-		if last := got[len(got)-1]; last.State.Reason != reason {
+		last := got[len(got)-1]
+		if last.State.Reason != reason {
 			t.Fatalf("the disarm's reason is %q, want %q\n%s", last.State.Reason, reason, describe(r.seen))
+		}
+		// Detail is the failure behind a reason that has one, and today that is
+		// the cancel that failed alone: every other reason is a fact about the
+		// send, not an error, and a detail on one would be a client drawing an
+		// error row for something that did not fail.
+		if reason == agent.SendNowCancelFailed && last.State.Detail == "" {
+			t.Fatalf("a failed cancel's disarm carried no detail\n%s", describe(r.seen))
+		}
+		if reason != agent.SendNowCancelFailed && last.State.Detail != "" {
+			t.Fatalf("the disarm's reason %q carried the detail %q", reason, last.State.Detail)
 		}
 		if st := r.e.State(); st.SendNow != nil {
 			t.Fatalf("something is still armed: %+v", st.SendNow)
@@ -279,6 +290,12 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 			// stays where it was — the row in the queue, a draft in the client's
 			// composer — as the TUI's cancelFailedMsg has always left it.
 			wantDisarm(t, r, agent.SendNowCancelFailed)
+			// And the delta carries the failure itself, as text. This is the one
+			// cancel a client did not make, so a client that draws that failure —
+			// as the TUI's cancelFailedMsg always has — can read it nowhere else.
+			if got := r.seen[len(r.seen)-1].State.Detail; got != tc.err.Error() {
+				t.Fatalf("the disarm's detail is %q, want the failure %q", got, tc.err)
+			}
 			wantRowUntouched(t, r, row)
 			if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking {
 				t.Fatalf("the turn the failed cancel left running: %+v", st)

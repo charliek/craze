@@ -184,6 +184,17 @@ type StateDelta struct {
 	// of the ways an armed send can be lost this was, from the SendNow*
 	// constants below.
 	Reason string
+	// Detail is the failure behind a Reason that has one, as text, and "" for
+	// every Reason that does not. Today that is SendNowCancelFailed alone: the
+	// cancel an armed send-now asked for is made by the engine rather than by
+	// the client, so the error it came back with reaches the client here or
+	// nowhere — and a client that has always drawn that failure as a transcript
+	// row still can.
+	//
+	// It is text and never an error value, for the reason TurnInfo.Err is: an
+	// event enqueued through the log's outbox is immutable once accepted and is
+	// encoded without calling anything on it (eventlog.go's Enqueue).
+	Detail string
 }
 
 // SendNowState is the send-now section of a StateDelta: what the engine has

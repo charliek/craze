@@ -103,10 +103,12 @@ func (e *Engine) armLocked(c Command, text, fromRow string) (SubmitResult, strin
 
 // cancelArmed makes the cancel an armed send-now asked for, on a goroutine of
 // the engine's own — Submit waits on nothing — with the hold already taken by
-// the section that armed. The result is not returned anywhere: the client has
+// the section that armed. No result is returned to the caller: the client has
 // its Armed already, and what became of the send reaches it as the started that
 // fires it or the delta that disarms it. A cancel that failed disarms inside
-// cancelHeld, in the section that releases the hold.
+// cancelHeld, in the section that releases the hold, and the delta carries the
+// failure's text — this is the one cancel a client did not make itself, so that
+// delta is the only place its error can reach one.
 func (e *Engine) cancelArmed(turn, cause string) {
 	defer e.wg.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), armedCancelTimeout)
@@ -134,7 +136,7 @@ func (e *Engine) Disarm(c Command) error {
 	if e.armed == nil {
 		return ErrNotAccepting
 	}
-	ev, _ := e.disarmLocked(agent.SendNowWithdrawn, c.Cause())
+	ev, _ := e.disarmLocked(agent.SendNowWithdrawn, c.Cause(), "")
 	e.log.Enqueue(ev)
 	return nil
 }
@@ -147,10 +149,13 @@ func (e *Engine) Disarm(c Command) error {
 // cause is the command that caused the disarm where one did — Disarm, a failed
 // Cancel, Stop — and "" where none did, as at a settlement or at Close; the
 // delta then names the command that armed the send, which is the only one in
-// the picture. The event is returned rather than enqueued so that a caller
-// composing a batch can place it where that batch wants it: a settlement puts
-// it between the turn's ending and its successor's started.
-func (e *Engine) disarmLocked(reason, cause string) (agent.Event, bool) {
+// the picture. detail is the failure behind the reason where the reason has one
+// (a cancel that failed), as text and never an error value, because an enqueued
+// event is encoded without anything being called on it. The event is returned
+// rather than enqueued so that a caller composing a batch can place it where
+// that batch wants it: a settlement puts it between the turn's ending and its
+// successor's started.
+func (e *Engine) disarmLocked(reason, cause, detail string) (agent.Event, bool) {
 	a := e.armed
 	if a == nil {
 		return agent.Event{}, false
@@ -160,6 +165,6 @@ func (e *Engine) disarmLocked(reason, cause string) (agent.Event, bool) {
 		cause = a.cause
 	}
 	return e.stamp(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{
-		SendNow: &agent.SendNowState{}, Reason: reason,
+		SendNow: &agent.SendNowState{}, Reason: reason, Detail: detail,
 	}}, cause), true
 }

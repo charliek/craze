@@ -73,18 +73,27 @@ func TestEmptiedBandGivesTheKeyboardBackForGood(t *testing.T) {
 
 // TestArmedSendNowWaitsOutAForeignTurn: a confirmed row is not "already gone"
 // because the agent is talking on its own; it fires when that stops.
+//
+// The cancel the arm asks for is held until the foreign turn has started, because
+// the send fires at the settlement of the turn that cancel ends: released any
+// earlier, there would be no foreign turn to wait out.
 func TestArmedSendNowWaitsOutAForeignTurn(t *testing.T) {
 	m, stub := heldWorking(t)
 	stub.SetProvider(agent.GrokProvider())
 	m = pumpEnter(t, m, "PINEAPPLE")
 	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
 	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	release := stub.HoldNextCancel()
 	m = pumpKey(t, m, enter())
+	awaitBarrier(t, stub.Cancels(), "the arm's cancel reaching the session")
 	if !sendNowArmed(m) {
 		t.Fatal("setup: the send is armed")
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Text: "note", Running: true})
+	m = pumpUntil(t, m, viewHas(foreignTurnNote))
+	release()
 	m = pumpUntil(t, m, allOf(isIdle, viewHas(foreignTurnNote)))
+	m = pumpSettled(t, m)
 	if !sendNowArmed(m) {
 		t.Fatal("the armed send must wait, not be dropped")
 	}
@@ -95,7 +104,7 @@ func TestArmedSendNowWaitsOutAForeignTurn(t *testing.T) {
 		t.Fatalf("nothing may start under a foreign turn: %d turns", n)
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: false})
-	m = pumpUntil(t, m, turnsReached(stub, 2))
+	m = pumpUntil(t, m, turnsDrawn(2))
 	m = pumpSettled(t, m)
 	if sendNowArmed(m) {
 		t.Fatal("the armed send fires when the foreign turn ends")
@@ -231,7 +240,7 @@ func TestBuiltinsRefusedDuringAForeignTurn(t *testing.T) {
 // TestEditChipFollowsTheRow: the chip numbers the row as it is now, not as it
 // was when the edit began.
 func TestEditChipFollowsTheRow(t *testing.T) {
-	m, stub := queueWorking(t)
+	m, _ := queueWorking(t)
 	m = typeEnter(t, m, "one")
 	m = typeEnter(t, m, "two")
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
@@ -242,7 +251,9 @@ func TestEditChipFollowsTheRow(t *testing.T) {
 		t.Fatalf("setup:\n%s", plainView(m))
 	}
 	first := queueIDs(m)[0]
-	stub.Unqueue(first)
+	// Removed behind the model's back, as another client would: the row goes from
+	// the queue the band draws, which is the engine's.
+	unqueueRow(t, m, first)
 	tm, _ = m.Update(refreshSnapMsg{})
 	m = tm.(Model)
 	if v := plainView(m); !strings.Contains(v, "editing #1") {

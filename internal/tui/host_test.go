@@ -343,7 +343,7 @@ func TestHostStatusLoadedSessionWaitsForReplay(t *testing.T) {
 // the session being ready.
 func TestHostStatusStartFailure(t *testing.T) {
 	m, _, rec := hostModel(t, false)
-	_ = deliver(t, m, errMsg{errors.New("authentication failed: no key\nsee cursor-agent login")})
+	_ = deliver(t, m, errMsg{err: errors.New("authentication failed: no key\nsee cursor-agent login")})
 	assertStatuses(t, rec, hostStatus(host.Failed, host.DetailStartFailed, "authentication failed: no key"))
 }
 
@@ -667,9 +667,10 @@ func TestRecoveredPanicClosesThePickedSession(t *testing.T) {
 	assertOrder(t, log, "term reset", "host close", "sess close picked")
 }
 
-// beginPanics is a session whose Begin panics. sendText calls Begin inside
-// Update, where it claims the turn, so a prompt typed at it is an Update panic
-// with no hook in production code. closes counts Close calls from any copy.
+// beginPanics is a session whose Begin panics. The engine's Submit calls Begin
+// inside the Update that pressed Enter, in the locked section that claims the turn,
+// so a prompt typed at it is an Update panic with no hook in production code.
+// closes counts Close calls from any copy.
 type beginPanics struct {
 	*Stub
 	closes *atomic.Int32
@@ -853,4 +854,63 @@ func TestRunErrAfterHangup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHostStatusNoIdleAcrossACancelledTurnWithAQueuedRow is A7's TUI half. A
+// cancelled turn whose settlement drains the row queued behind it must never
+// report an idle: roost and herdr would show a pane that had stopped and started
+// again — a "finished" notification for work that had not finished. The whole
+// sequence a host hears is one Working, and then the Idle the last turn's own
+// ending publishes.
+//
+// It is the engine's Next that makes it so: an ending with a successor leaves the
+// model working, and the successor's started is what it goes on working for.
+func TestHostStatusNoIdleAcrossACancelledTurnWithAQueuedRow(t *testing.T) {
+	m, sess, rec := startedScriptedHostModel(t)
+	first, drained := scriptHeld(), scriptHeld()
+	m = startScripted(t, m, sess, "go", first)
+	sess.Script(drained)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	if got := queueTexts(m); len(got) != 1 {
+		t.Fatalf("setup: the follow-up should be queued: %q", got)
+	}
+	m = pumpEsc(t, m)
+	awaitBarrier(t, drained.opened, "the drained turn opening")
+	drained.Release()
+	m = pumpUntil(t, m, allOf(isIdle, turnsReached(sess, 2)))
+	_ = pumpSettled(t, m)
+	assertStatuses(t, rec, workingStatus(), idleStatus(host.DetailStop))
+}
+
+// TestHostStatusNoIdleBeforeAFiredSendNow is the other half of A7: the turn a
+// send-now cancelled settles straight into that send, so a host hears one Working
+// across both turns and one Idle at the end of the second.
+//
+// The cancel the arm asked for is held until the arm is in place, so the armed
+// state is a state and not a moment; the send's own turn is held too, so the window
+// in which it is running is one the test can stand in.
+func TestHostStatusNoIdleBeforeAFiredSendNow(t *testing.T) {
+	m, sess, rec := startedScriptedHostModel(t)
+	first, sent := scriptHeld(), scriptHeld()
+	m = startScripted(t, m, sess, "go", first)
+	sess.Script(sent)
+	m.input.SetValue("PINEAPPLE")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	release := sess.HoldNextCancel()
+	m = pumpKey(t, m, enter())
+	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+	if !sendNowArmed(m) {
+		t.Fatalf("setup: the send-now was not armed:\n%s", plainView(m))
+	}
+	release()
+	awaitBarrier(t, sent.opened, "the armed send's turn opening")
+	m = pumpUntil(t, m, turnsDrawn(2))
+	if m.status != statusWorking {
+		t.Fatalf("the fired send is a running turn: %s", m.status)
+	}
+	sent.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	assertStatuses(t, rec, workingStatus(), idleStatus(host.DetailStop))
+	assertPrompts(t, sess, "go", "PINEAPPLE")
 }

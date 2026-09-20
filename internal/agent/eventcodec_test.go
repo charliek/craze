@@ -516,8 +516,11 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 		{"a send-now armed against a row", Event{Type: EventMeta, Cause: "tui-1/14", State: &StateDelta{
 			SendNow: &SendNowState{Armed: true, Text: "this one first", FromRow: "q-4", Turn: "turn-3"},
 		}, At: at}},
-		{"a send-now disarmed", Event{Type: EventMeta, Cause: "tui-1/14", State: &StateDelta{
-			SendNow: &SendNowState{}, Reason: SendNowCancelFailed,
+		{"a send-now disarmed, with the failure behind it", Event{Type: EventMeta, Cause: "tui-1/14", State: &StateDelta{
+			SendNow: &SendNowState{}, Reason: SendNowCancelFailed, Detail: "acp: connection closed",
+		}, At: at}},
+		{"a send-now disarmed for a reason with no failure behind it", Event{Type: EventMeta, State: &StateDelta{
+			SendNow: &SendNowState{}, Reason: SendNowRowGone,
 		}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
@@ -608,9 +611,12 @@ func TestEventCodecPinsTheWireShape(t *testing.T) {
 			`{"type":"meta","state":{"sendNow":{"armed":true,"text":"now, please","fromRow":"q-2","turn":"turn-3"}},"cause":"c-1/4"}`},
 		// A cleared section is present and empty, which is how it differs from
 		// a section the delta did not touch: {"state":{"reason":…}} with no
-		// sendNow key would be indistinguishable from an unrelated delta.
+		// sendNow key would be indistinguishable from an unrelated delta. Detail
+		// is absent for a reason that has no failure behind it.
 		{Event{Type: EventMeta, State: &StateDelta{SendNow: &SendNowState{}, Reason: SendNowRowGone}},
 			`{"type":"meta","state":{"sendNow":{},"reason":"row_gone"}}`},
+		{Event{Type: EventMeta, State: &StateDelta{SendNow: &SendNowState{}, Reason: SendNowCancelFailed, Detail: "acp: connection closed"}},
+			`{"type":"meta","state":{"sendNow":{},"reason":"cancel_failed","detail":"acp: connection closed"}}`},
 	} {
 		got, err := EncodeEvent(tc.ev)
 		if err != nil {

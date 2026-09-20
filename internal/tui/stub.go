@@ -429,6 +429,15 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		return agent.Result{}, agent.ErrPromptCancelled
 	}
 	s.mu.Lock()
+	// The hang belongs to the prompt it was armed for and is consumed by it
+	// whatever becomes of that prompt, which is why it is taken here rather than
+	// past the checks below: a cancel that reached the claim before this opening
+	// withdraws the prompt, and a flag left armed would hang the *next* one
+	// instead — a test that cancelled a hung turn and then sent again would hang
+	// or not depending on which won, which is a coin toss and not a test (plan
+	// 021 amendment X12). park is taken the same way, above.
+	hang := s.hang
+	s.hang = false
 	if s.cancelling {
 		// Cancelled since the claim, and the turn is not open: withdraw.
 		s.mu.Unlock()
@@ -441,8 +450,6 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		s.mu.Unlock()
 		return agent.Result{}, agent.ErrPromptInFlight
 	}
-	hang := s.hang
-	s.hang = false
 	s.n++
 	n := s.n
 	s.inPrompt = true
