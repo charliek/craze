@@ -1323,13 +1323,23 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 // The goroutine outlives the call and ends when the pipe takes the bytes or the
 // transport is closed under it, which fails the parked write. Nothing is
 // published from it and its result is dropped. The client's own completion of the
-// requests it is holding rides in it too (acp.Client.Cancel), so on an abandoned
-// write that can land after this returns; nothing a client can see waits on it,
-// because the session answered its *own* parked asks before getting here
-// (cancelWaiting, above).
+// requests it was holding rides in it too, so on an abandoned write that can land
+// after this returns — but only for the requests held when this cancel was made
+// (acp.Client.Held, taken below before the goroutine exists), never for one a
+// later turn registered. Nothing a client can see waits on it either, because
+// the session answered its *own* parked asks before getting here (cancelWaiting,
+// above).
 func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned bool, err error) {
+	// What this cancel is a cancel of is fixed here, on the caller's goroutine,
+	// before anything is handed over. The client answers the requests it holds
+	// cancelled as the first step of its Cancel; left to gather them on the
+	// goroutine below, a write given up on its context could run late — after
+	// the caller had returned, the engine had released its hold, and a new
+	// prompt had been admitted and asked for a permission — and answer *that*
+	// request cancelled, for a turn nobody cancelled.
+	held := client.Held()
 	res := make(chan error, 1)
-	go func() { res <- client.Cancel(ctx) }()
+	go func() { res <- client.CancelHeld(ctx, held) }()
 	select {
 	case err := <-res:
 		return true, err

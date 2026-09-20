@@ -453,6 +453,59 @@ func TestCancelAnswersRequestsWhoseHandlerHasNotRunYet(t *testing.T) {
 	}
 }
 
+// A cancel is a cancel of what was held when it was made. A caller that bounds
+// its cancel makes it on another goroutine and can give it up; the turn can then
+// end, another begin, and that turn ask for a permission, all before the
+// abandoned cancel has run. It must answer only the requests it was made for:
+// Held is taken when the cancel is made, and CancelHeld, however late, leaves a
+// request registered afterwards alone.
+func TestALateCancelLeavesALaterTurnsRequestAlone(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("sess-1")
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+		<-gate
+		return AskDecision{Skip: true}
+	})
+	params := json.RawMessage(`{"toolCallId":"t","questions":[{"id":"q1","prompt":"?","options":[{"id":"opt-a","label":"A"}]}]}`)
+	ask := func(id int) {
+		raw, err := json.Marshal(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.client.onRequest(&Message{JSONRPC: jsonrpcVersion, ID: raw, Method: MethodCursorAskQuestion, Params: params})
+	}
+
+	ask(1)
+	held := p.client.Held()
+	// The cancel is given up here, and the next turn's request arrives before it
+	// runs.
+	ask(2)
+	go func() { _ = p.client.CancelHeld(t.Context(), held) }()
+
+	reply := p.readWithin(t, 3*time.Second, "the held request's cancelled reply")
+	if string(reply.ID) != "1" || string(reply.Result) != `{"outcome":{"outcome":"cancelled"}}` {
+		t.Fatalf("reply %s = %s, want request 1 cancelled", reply.ID, reply.Result)
+	}
+	// The next frame is the cancel notification itself: nothing was written for
+	// request 2, which is still held and still the next turn's to answer.
+	note := p.readWithin(t, 3*time.Second, "session/cancel")
+	if note.Method != MethodSessionCancel {
+		t.Fatalf("the frame after the reply is %q (id %s), want %s", note.Method, note.ID, MethodSessionCancel)
+	}
+	// Request 1 was answered on the wire, above. Request 2 is still registered
+	// and still unanswered: its handler is parked at the gate, and nothing but
+	// its own turn's cancel or its own answer may end it.
+	p.client.incomingMu.Lock()
+	second := p.client.incoming["2"]
+	answered := second != nil && second.replied
+	p.client.incomingMu.Unlock()
+	if second == nil || answered {
+		t.Fatalf("request 2 after a late cancel: held %v, answered %v — a cancel answers only what it was made for", second != nil, answered)
+	}
+}
+
 // The other half of the window above: the handler goroutine the runtime never
 // scheduled eventually wakes up, and by then the request it was dispatched for
 // can be answered already — or its whole turn can be over and another one

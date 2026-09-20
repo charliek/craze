@@ -543,7 +543,43 @@ func (c *Client) SetConfig(ctx context.Context, configID, value string) error {
 // that old turn would then end the new one. Close is the only path that
 // fails a waiter outright.
 func (c *Client) Cancel(ctx context.Context) error {
-	c.completeIncomingCancelled()
+	return c.CancelHeld(ctx, c.Held())
+}
+
+// HeldRequests is the set of requests a client was holding at one moment: what
+// a cancel made at that moment is a cancel of. It is opaque, and good for one
+// CancelHeld.
+type HeldRequests struct{ reqs []*pendingReq }
+
+// Held snapshots the requests the client holds now. It takes incomingMu briefly
+// and waits on nothing else, so a caller may take it on a goroutine that must
+// not block.
+//
+// It exists for a caller that makes its cancel on another goroutine so as to
+// bound it (the session's Cancel: a write into an agent that has stopped
+// reading blocks for as long as the pipe does). Such a caller can give the
+// cancel up and carry on, and a prompt can then be admitted while the abandoned
+// cancel has yet to run; a cancel that gathered the held requests only then
+// would answer the *next* turn's permission request cancelled, for a turn
+// nobody cancelled. Taking the snapshot on the caller's goroutine, before it
+// hands the rest over, fixes what the cancel is a cancel of at the moment it
+// was made.
+func (c *Client) Held() HeldRequests {
+	c.incomingMu.Lock()
+	defer c.incomingMu.Unlock()
+	reqs := make([]*pendingReq, 0, len(c.incoming))
+	for _, in := range c.incoming {
+		reqs = append(reqs, in)
+	}
+	return HeldRequests{reqs: reqs}
+}
+
+// CancelHeld is Cancel for a snapshot already taken: it answers exactly those
+// requests cancelled — one that has been answered meanwhile is left alone, as
+// ever — and tells the agent to stop the turn. Both steps write, and so both can
+// block.
+func (c *Client) CancelHeld(ctx context.Context, held HeldRequests) error {
+	c.completeCancelled(held.reqs)
 	sid := c.SessionID()
 	if sid == "" {
 		return nil
@@ -1124,12 +1160,12 @@ func (c *Client) dropIncoming(key string) {
 // completeIncomingCancelled answers every blocking request exactly once, with
 // the cancelled decision its own kind understands.
 func (c *Client) completeIncomingCancelled() {
-	c.incomingMu.Lock()
-	pending := make([]*pendingReq, 0, len(c.incoming))
-	for _, in := range c.incoming {
-		pending = append(pending, in)
-	}
-	c.incomingMu.Unlock()
+	c.completeCancelled(c.Held().reqs)
+}
+
+// completeCancelled answers pending cancelled. A request already answered is
+// left alone: replyIncoming answers each one once.
+func (c *Client) completeCancelled(pending []*pendingReq) {
 	d := c.Dialect()
 	for _, in := range pending {
 		if in.decide != nil {
