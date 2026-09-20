@@ -381,10 +381,14 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		await(t, armEntered, "the arm's cancel reaching the session")
 
 		clientEntered, clientRelease := r.s.holdNextCancel()
-		cancelled := make(chan error, 1)
+		type answer struct {
+			res CancelResult
+			err error
+		}
+		cancelled := make(chan answer, 1)
 		go func() {
-			_, err := r.e.Cancel(context.Background(), Command{}, "turn-1")
-			cancelled <- err
+			res, err := r.e.Cancel(context.Background(), Command{}, "turn-1")
+			cancelled <- answer{res, err}
 		}()
 		await(t, clientEntered, "the client's cancel reaching the session")
 
@@ -394,18 +398,22 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		r.s.cancelErr = boom
 		r.s.mu.Unlock()
 		clientRelease()
+		var got answer
 		select {
-		case err := <-cancelled:
-			if !errors.Is(err, boom) {
-				t.Fatalf("the client's cancel answered %v, want the failure", err)
+		case got = <-cancelled:
+			if !errors.Is(got.err, boom) {
+				t.Fatalf("the client's cancel answered %v, want the failure", got.err)
 			}
 		case <-time.After(watchdog):
 			t.Fatalf("the client's cancel never returned in %s", watchdog)
 		}
-		// Its disarm says what was lost and nothing more: the error is already in
-		// the client's own hands, and a detail here would be the same failure told
-		// twice.
-		wantDisarm(t, r, agent.SendNowCancelFailed, "")
+		// The failure rides on the disarm the cancel owed anyway, so what was lost
+		// and why arrive together and in one order — and the caller is told, so it
+		// does not word the same failure a second time from the error it also has.
+		if !got.res.Reported {
+			t.Fatal("the cancel's answer does not say its failure was published")
+		}
+		wantDisarm(t, r, agent.SendNowCancelFailed, boom.Error())
 		wantRowUntouched(t, r, row)
 		armRelease()
 		turn.release()

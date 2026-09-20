@@ -108,9 +108,9 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, cause string) (string,
 // the events this path can author.
 //
 // own says the engine made this cancel for an arm of its own (cancelArmed) rather
-// than for a client that called Cancel or Stop. It decides who reports a failure:
-// a client's cancel answers that client with its error, and the engine's own has
-// no caller to answer, so its failure is reported as an event or not at all.
+// than for a client that called Cancel or Stop. It decides who reports a failure
+// the engine owed no event for: the engine's own cancel has no caller to answer,
+// so its failure is reported as an event or not at all.
 func (e *Engine) cancelHeld(ctx context.Context, id, cause string, own bool) (res CancelResult, err error) {
 	var out agent.CancelOutcome
 	// The hold is given back however this ends. A hook or a session double that
@@ -130,9 +130,9 @@ func (e *Engine) cancelHeld(ctx context.Context, id, cause string, own bool) (re
 		h.afterSessionCancel(id)
 	}
 	released = true
-	settled := e.releaseHold(id, cause, out, err, own)
+	settled, reported := e.releaseHold(id, cause, out, err, own)
 
-	res = CancelResult{Turn: id, Outcome: CancelRequested}
+	res = CancelResult{Turn: id, Outcome: CancelRequested, Reported: reported}
 	switch {
 	case err != nil:
 		// The call gave up: its context ended, or the write failed. Whether a
@@ -154,31 +154,34 @@ var errCancelAbandoned = errors.New("engine: the cancel did not complete")
 // where a turn that came back meanwhile settles. cancelErr is what the
 // session's cancel came to, nil when none was made, and own says whose cancel it
 // was (cancelHeld). It reports whether the turn the hold was taken against is
-// over.
+// over, and whether a failure was published as an event.
 //
-// # One owner per failure
+// # One owner per failure, and one moment
 //
-// A cancel that failed is reported exactly once, by whoever asked for it. A
-// client's Cancel or Stop answers that client with the error, so a delta this
-// path publishes for it carries the reason and no Detail: two reports of one
-// failure would draw the same row twice. The engine's own cancel — the one an arm
-// asks for — has nobody to answer, so it is reported here or nowhere, and it is
-// reported whether or not the arm is still standing: a client that took its send
-// back in the meantime is not a reason to swallow a cancel that did not reach the
-// agent, and the turn it failed to stop is still running.
-func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelErr error, own bool) bool {
+// A cancel that failed is told once. Which teller depends on whether this path
+// owed an event anyway:
+//
+//   - It disarmed a send-now. The delta that says so is going out regardless, so
+//     the failure rides on it, in Detail — and the caller is told, through
+//     CancelResult.Reported, that it has been published. A client that words a
+//     failure from a delta then words this one exactly once, from the delta, and
+//     in the delta's own order: what was lost, then why. Returning the error as
+//     well and leaving the client to draw it would put the two in whichever order
+//     bubbletea happened to deliver them, and the baseline's order was fixed.
+//   - It disarmed nothing and the cancel was the ENGINE's, made for an arm the
+//     client had already taken back. Nobody is waiting on that error, so it is
+//     published as a delta that touches no section at all — a reason and a
+//     failure, which is what a StateDelta with a Reason and no section means.
+//   - It disarmed nothing and the cancel was a CLIENT's. The client has the error
+//     in its hand; nothing is published, and nothing would add anything.
+func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelErr error, own bool) (bool, bool) {
 	var next []launch
-	settled := false
+	settled, reported := false, false
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.cancelsInFlight--
 		if err := cancelErr; err != nil {
-			// The failure behind the reason, for the engine's own cancel alone.
-			detail := ""
-			if own {
-				detail = err.Error()
-			}
 			switch armed := e.armed != nil && e.armed.turn == id; {
 			case armed:
 				// The cancel never reached the agent, so the turn a send was armed
@@ -187,19 +190,18 @@ func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelEr
 				// before the pass that release allows: a send left armed through
 				// that pass could fire into a turn this cancel did not stop. The
 				// text stays where it was, which is what the TUI's own
-				// cancelFailedMsg has always done with it.
-				if ev, ok := e.disarmLocked(agent.SendNowCancelFailed, cause, detail); ok {
+				// cancelFailedMsg has always done with it — and the failure goes
+				// out on the same event, so both halves of what that message wrote
+				// arrive together and in its order.
+				if ev, ok := e.disarmLocked(agent.SendNowCancelFailed, cause, err.Error()); ok {
 					e.log.Enqueue(ev)
+					reported = true
 				}
 			case own:
-				// Nothing armed any more — the client took its send back while
-				// this cancel was still on its way — but the cancel is still the
-				// engine's, and it still failed. The delta touches no section: it
-				// carries the reason and the failure alone, which is what a
-				// StateDelta with a Reason and no section means.
 				e.log.Enqueue(e.stamp(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{
-					Reason: agent.SendNowCancelFailed, Detail: detail,
+					Reason: agent.SendNowCancelFailed, Detail: err.Error(),
 				}}, cause))
+				reported = true
 			}
 		}
 		next = e.passLocked()
@@ -210,5 +212,5 @@ func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelEr
 		settled = id == "" && out.Settled || id != "" && (e.cur == nil || e.cur.id != id)
 	}()
 	e.run(next)
-	return settled
+	return settled, reported
 }

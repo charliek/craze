@@ -96,6 +96,18 @@ type CancelResult struct {
 	// Turn is the engine turn the cancel was held against, "" when it was
 	// accepted with no turn of craze's own running.
 	Turn string
+	// Reported says the failure this result accompanies — the error returned
+	// beside it — has ALSO been published, as a state delta carrying the reason
+	// cancel_failed and the failure in Detail. It is set only when this cancel
+	// disarmed a send-now, because that is the one case where the engine owed an
+	// event anyway: the delta says what was lost, and a client that words a
+	// failure from a delta would otherwise word this one twice, once from the
+	// delta and once from the error here — in whichever order the two reached it.
+	//
+	// A client that draws failures from deltas must not draw this one again. A
+	// client that does not (`craze prompt` exits on it) may ignore the field: the
+	// error is returned either way.
+	Reported bool
 }
 
 // The refusals the engine adds to the session's own (agent.ErrQueueFull,

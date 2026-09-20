@@ -498,6 +498,16 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 // event cannot be in flight in a place the inspection does not look; and when the
 // pump is quiet but the engine is not settled there is nothing to poll — the next
 // message IS the turn's ending, so the loop blocks on it.
+//
+// One thing the first pass cannot see, which is why every pass is confirmed by a
+// second (pumpQuiet). The engine settles under its own lock: it clears the current
+// turn and enqueues that turn's whole batch in the same section. A Sync that
+// returned BEFORE that section ran covered none of it, so the pass that then finds
+// the engine settled — it is, the section has run — can find both channels empty
+// too, because the log's outbox has not put the batch on the primary yet. The
+// second pass's Sync is causally after the enqueue, since the state that made the
+// first pass accept it was written in the same section, so it waits for exactly
+// that batch.
 func pumpSettled(t *testing.T, m Model) Model {
 	t.Helper()
 	return pumpQuiet(t, m, "pumpSettled", (*pump).settled)
@@ -513,11 +523,22 @@ func pumpDrained(t *testing.T, m Model) Model {
 }
 
 // pumpQuiet is the shared loop: apply, the outbox barrier, the reader rendezvous,
-// and then the caller's own extra condition on the engine.
+// and then the caller's own extra condition on the engine — confirmed twice.
+//
+// Twice, because one pass cannot see an enqueue that happened after its own Sync
+// had captured what to wait for. The engine writes the state a pass reads and
+// enqueues the events that state implies in the SAME locked section, so a pass that
+// accepts the state proves the enqueue has happened — and the next pass's Sync,
+// which starts after that acceptance, is therefore a barrier for exactly those
+// events. Two consecutive accepting passes are the smallest thing that cannot be
+// fooled; anything the second pass turns up resets the count.
 func pumpQuiet(t *testing.T, m Model, what string, done func(*pump) bool) Model {
 	t.Helper()
 	p := pumpFor(t, m)
 	timeout := deadline()
+	// confirmations counts consecutive passes that found nothing left to do.
+	confirmations := 0
+	const confirmationsNeeded = 2
 	for {
 		// Anything already queued is applied first: it may be the very message
 		// the last outstanding command is waiting to have accounted for, and it
@@ -572,8 +593,16 @@ func pumpQuiet(t *testing.T, m Model, what string, done func(*pump) bool) Model 
 			p.resumeReader()
 		}
 		if quiet {
-			return m
+			confirmations++
+			if confirmations >= confirmationsNeeded {
+				return m
+			}
+			// Straight round for another Sync and another rendezvous: that Sync
+			// begins after this pass accepted the engine's state, so it waits for
+			// whatever the section that wrote that state enqueued.
+			continue
 		}
+		confirmations = 0
 		select {
 		case item := <-p.msgs:
 			m = p.apply(m, item)
@@ -965,5 +994,45 @@ func TestPumpSettledWaitsForAnEventTheReaderHasInHand(t *testing.T) {
 	m = pumpSettled(t, m)
 	if !strings.Contains(plainView(m), "IN HAND") {
 		t.Fatalf("pumpSettled returned before the event the reader held was applied:\n%s", plainView(m))
+	}
+}
+
+// TestPumpSettledWaitsForASettlementItsFirstSyncDidNotCover is the third window,
+// and the one that needs the confirming second pass. The turn publishes its own
+// ending and then stops short of returning, so the engine has not settled; it is
+// released at a moment this test does not control, so the settlement — which clears
+// the current turn and enqueues the turn's batch in one locked section — can land
+// after pumpSettled's first Sync has already captured what to wait for. The pass
+// that then reads the engine finds it settled and both channels empty, because the
+// outbox has not put the batch on the primary yet.
+//
+// The window cannot be pinned with a barrier, because it lives between the engine's
+// enqueue and the log's own drainer publishing — and the drainer has no test seam
+// reachable from here (its hooks are internal/agent's). So it is driven repeatedly
+// instead, which is what TestAFiredSendNowsPredecessorNamesItAsItsSuccessor does for
+// the same kind of reason. Measured with the confirming pass removed: two of five
+// runs of these twenty rounds failed, three rounds at once in one of them.
+// Each round is a subtest because a pump belongs to a *testing.T: rounds sharing
+// one would share the first round's event reader, and every later session's events
+// would go unread.
+func TestPumpSettledWaitsForASettlementItsFirstSyncDidNotCover(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprintf("round %d", i), func(t *testing.T) {
+			m, sess := scriptedModel(t)
+			sc := scriptHeld().endsThenWaits()
+			m = startScripted(t, m, sess, "go", sc)
+			sc.Release()
+			awaitBarrier(t, sc.ended, "the wire's own ending")
+			// The turn has published its ending and is held short of returning, so
+			// the engine has not settled it and the model is still working. Released
+			// at a moment this test does not control, so the settlement lands
+			// wherever it lands relative to pumpSettled's own first Sync.
+			go sc.Return()
+			m = pumpSettled(t, m)
+			if m.status != statusIdle {
+				t.Fatalf("pumpSettled returned with the model still %s, so the "+
+					"settlement it said was over had not been applied:\n%s", m.status, plainView(m))
+			}
+		})
 	}
 }

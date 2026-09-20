@@ -646,11 +646,14 @@ func TestAnEnginesFailedCancelIsReportedWithNoArmLeft(t *testing.T) {
 	_ = pumpSettled(t, m)
 }
 
-// TestAFailedClientCancelDrawsItsRowExactlyOnce is finding 4(b), the other side.
-// A cancel the model asked for answers the model with its error, and that is the
-// one report: the disarm delta it also causes carries the reason — so the toast
-// still says what was lost — and no detail, because a second report would draw the
-// same failure twice.
+// TestAFailedClientCancelDrawsItsRowExactlyOnce is finding 4(b), the other side,
+// and the order the whole arrangement exists for. A cancel the model asked for
+// fails while it disarms a send: the failure rides on that disarm, so the note and
+// the row arrive on ONE event and in the order the message this replaced wrote them
+// — what was lost, then why. The cancel's own error still comes back to the
+// command, and the command draws nothing for it, because CancelResult.Reported says
+// it has been published; drawing it there too would put the two in whichever order
+// bubbletea delivered them, with the row sometimes first and no note at all.
 func TestAFailedClientCancelDrawsItsRowExactlyOnce(t *testing.T) {
 	m, sess := scriptedModel(t)
 	held := scriptHeld()
@@ -671,10 +674,13 @@ func TestAFailedClientCancelDrawsItsRowExactlyOnce(t *testing.T) {
 	}
 
 	release()
-	m = pumpUntil(t, m, allOf(errorRows(1), viewHas("cancel failed")))
-	m = pumpSettled(t, m)
-	if got := texts(m, entryError); len(got) != 1 || got[0] != "nope" {
-		t.Fatalf("one failed cancel, one error row: %q", got)
+	// One Update carries both, so the first sight of the row is a sight of the
+	// note: the note cannot arrive after the row, and there is no window in which
+	// the row stands alone. With the failure returned to the command as well, the
+	// row could be drawn a whole Update before the note.
+	m = pumpUntil(t, m, errorRows(1))
+	if !strings.Contains(plainView(m), "cancel failed") {
+		t.Fatalf("the row was drawn before its note:\n%s", plainView(m))
 	}
 	if sendNowArmed(m) {
 		t.Fatal("the failed cancel left the send armed")
@@ -682,6 +688,195 @@ func TestAFailedClientCancelDrawsItsRowExactlyOnce(t *testing.T) {
 	if m.input.Value() != "PINEAPPLE" {
 		t.Fatalf("the send's text stays where it was: %q", m.input.Value())
 	}
+	held.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	if got := texts(m, entryError); len(got) != 1 || got[0] != "nope" {
+		t.Fatalf("one failed cancel, one error row: %q", got)
+	}
+}
+
+// TestEveryFailedCancelDrawsExactlyOneRow walks the combinations the two tests
+// above are the interesting corners of: whose cancel it was, and whether an arm was
+// there to disarm. Exactly one error row, every time, and never two.
+func TestEveryFailedCancelDrawsExactlyOneRow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arrange runs with the turn open and the next cancel held and failing; it
+		// arranges the arm (or does not) and answers the release.
+		arrange func(t *testing.T, m Model, sess *scriptedSession) (Model, func())
+	}{
+		{
+			name: "a client's cancel with no arm at all",
+			arrange: func(t *testing.T, m Model, sess *scriptedSession) (Model, func()) {
+				t.Helper()
+				release := sess.HoldNextCancel()
+				sess.FailNextCancel(errors.New("nope"))
+				return pumpEsc(t, m), release
+			},
+		},
+		{
+			name: "a client's cancel with an arm to disarm",
+			arrange: func(t *testing.T, m Model, sess *scriptedSession) (Model, func()) {
+				t.Helper()
+				release := sess.HoldNextCancel()
+				sess.FailNextCancel(errors.New("nope"))
+				m = pumpEsc(t, m)
+				awaitBarrier(t, sess.Cancels(), "the client's cancel reaching the session")
+				m.input.SetValue("PINEAPPLE")
+				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				return pumpKey(t, m, enter()), release
+			},
+		},
+		{
+			name: "the engine's own cancel with its arm still standing",
+			arrange: func(t *testing.T, m Model, sess *scriptedSession) (Model, func()) {
+				t.Helper()
+				m.input.SetValue("PINEAPPLE")
+				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				release := sess.HoldNextCancel()
+				sess.FailNextCancel(errors.New("nope"))
+				return pumpKey(t, m, enter()), release
+			},
+		},
+		{
+			name: "the engine's own cancel with the arm taken back first",
+			arrange: func(t *testing.T, m Model, sess *scriptedSession) (Model, func()) {
+				t.Helper()
+				m.input.SetValue("PINEAPPLE")
+				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				release := sess.HoldNextCancel()
+				sess.FailNextCancel(errors.New("nope"))
+				m = pumpKey(t, m, enter())
+				awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+				return pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc}), release
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, sess := scriptedModel(t)
+			held := scriptHeld()
+			m = startScripted(t, m, sess, "go", held)
+			m, release := tc.arrange(t, m, sess)
+			release()
+
+			m = pumpUntil(t, m, errorRows(1))
+			m = pumpDrained(t, m)
+			if got := texts(m, entryError); len(got) != 1 || got[0] != "nope" {
+				t.Fatalf("one failed cancel, want one error row: %q", got)
+			}
+			if sendNowArmed(m) {
+				t.Fatal("a failed cancel left a send armed")
+			}
+			held.Release()
+			m = pumpUntil(t, m, isIdle)
+			m = pumpSettled(t, m)
+			if got := texts(m, entryError); len(got) != 1 {
+				t.Fatalf("a second row arrived once the turn ended: %q", got)
+			}
+		})
+	}
+}
+
+// TestALateSendNowStartedDoesNotTakeANewerDraft is the review's finding 1. A
+// send-now armed from the composer is identified by the command that armed it, not
+// by a flag, because two of them can be in flight as far as the model is concerned:
+// the first fires and its started is still undelivered when the second is armed from
+// a newer draft. A flag would be consumed by that late event — which keeps the newer
+// draft, because the texts differ — and the newer send would then fire with nothing
+// left to say the composer was its, leaving the text to be sent a second time.
+//
+// The other-client variant is the same schedule with somebody else's arm, and it is
+// covered by the same match: a cause this model never issued is not this model's
+// composer's business.
+func TestALateSendNowStartedDoesNotTakeANewerDraft(t *testing.T) {
+	m, sess, _, first := finishedInTheEngine(t)
+	second := sess.Script(scriptHeld())
+
+	// B is confirmed as a send-now in the window where the engine is already idle,
+	// so it starts at once: the pending successor, with its started still to come.
+	m.input.SetValue("B")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, enter())
+	if m.input.Value() != "" {
+		t.Fatalf("setup: B was accepted, so the draft went: %q", m.input.Value())
+	}
+	awaitBarrier(t, first.opened, "B's turn opening")
+
+	// C, armed against B while B's own started is still undelivered. It is a real
+	// arm — B is running — so the model holds a second draft-arm marker. The cancel
+	// that arm asks for is held, which is what keeps B running while the schedule
+	// is set up: released, it would end B and fire C at once.
+	m.input.SetValue("C")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	if m.confirm == nil {
+		t.Fatalf("setup: no confirm for C:\n%s", plainView(m))
+	}
+	release := sess.HoldNextCancel()
+	m = pumpKey(t, m, enter())
+	awaitBarrier(t, sess.Cancels(), "C's arm asking for its cancel")
+	if !sendNowArmed(m) {
+		t.Fatalf("setup: C was not armed:\n%s", plainView(m))
+	}
+	if m.input.Value() != "C" {
+		t.Fatalf("setup: arming takes nothing from the composer: %q", m.input.Value())
+	}
+
+	// Now B's late started is delivered. It draws B and leaves C alone — the texts
+	// differ — and it must not consume C's marker either.
+	m = pumpUntil(t, m, turnsDrawn(2))
+	if got := texts(m, entryUser); got[1] != "B" {
+		t.Fatalf("user entries %q", got)
+	}
+	if m.input.Value() != "C" {
+		t.Fatalf("B's started took C's draft: %q", m.input.Value())
+	}
+
+	// C fires when B settles, and takes its own draft with it: the composer is
+	// empty, so there is nothing left to send twice.
+	release()
+	awaitBarrier(t, second.opened, "C's turn opening")
+	m = pumpUntil(t, m, turnsDrawn(3))
+	if got := texts(m, entryUser); got[2] != "C" {
+		t.Fatalf("user entries %q", got)
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("C fired and left its own draft in the composer: %q", m.input.Value())
+	}
+	second.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	assertPrompts(t, sess, "A", "B", "C")
+}
+
+// TestAnotherClientsSendNowLeavesThisComposerAlone is the same rule from the other
+// side, and the one text equality alone can never get right: a send-now this model
+// did not arm fires with exactly the text this model is holding as a draft, and the
+// draft stays. Only the command that armed it says whose composer a send came from.
+func TestAnotherClientsSendNowLeavesThisComposerAlone(t *testing.T) {
+	m, sess := scriptedModel(t)
+	first, sent := scriptHeld(), scriptHeld()
+	m = startScripted(t, m, sess, "go", first)
+	sess.Script(sent)
+	// A second client on the same engine, arming a send-now of its own — which the
+	// model's composer happens to be holding the text of.
+	other := m.eng.NewClientID()
+	m.input.SetValue("PINEAPPLE")
+	if _, err := m.eng.Submit(engine.Command{Client: other, ID: "1"}, "PINEAPPLE", engine.SubmitSendNow, ""); err != nil {
+		t.Fatalf("the other client's send-now: %v", err)
+	}
+
+	awaitBarrier(t, sent.opened, "the other client's send firing")
+	m = pumpUntil(t, m, turnsDrawn(2))
+	if got := texts(m, entryUser); got[1] != "PINEAPPLE" {
+		t.Fatalf("user entries %q", got)
+	}
+	if m.input.Value() != "PINEAPPLE" {
+		t.Fatalf("another client's send-now took this composer's draft: %q", m.input.Value())
+	}
+	sent.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 }
 
 // TestSendingAQueuedRowKeepsAnIdenticalDraft is finding 5: a send-now that came

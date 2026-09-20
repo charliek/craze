@@ -310,8 +310,12 @@ func (m *Model) withdrawSendNow(note string) {
 		return
 	}
 	m.disarmed = c.Cause()
-	// The arm is gone, so nothing of this client's is waiting to take its draft.
-	m.armedDraft = false
+	// The arm this took back is gone, so the draft it was holding is nobody's to
+	// consume. Disarm refuses when there is nothing armed, so reaching here means
+	// the arm really was still waiting — which is what makes clearing the marker
+	// safe: an arm that had already fired would have been refused instead, leaving
+	// its started free to take the draft it went with.
+	m.armedDraft = ""
 	if note != "" {
 		m.note(note)
 	}

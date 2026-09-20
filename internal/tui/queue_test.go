@@ -765,9 +765,12 @@ func TestForeignTurnHoldsTheDrainAndNotesItself(t *testing.T) {
 		t.Fatal("the row must stay in the band while the foreign turn holds the drain")
 	}
 	stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: false})
-	m = pumpUntil(t, m, allOf(turnsReached(stub, 2), isIdle))
+	// turnsDrawn and not turnsReached: the row's turn is recorded at the session
+	// the moment the drain claims it, which is before the started that tells the
+	// model — and it is the model this asserts on.
+	m = pumpUntil(t, m, allOf(turnsDrawn(2), isIdle))
 	m = pumpSettled(t, m)
-	if got := texts(m, entryUser); len(got) != 2 || got[1] != "PINEAPPLE" {
+	if got := texts(m, entryUser); got[1] != "PINEAPPLE" {
 		t.Fatalf("user entries %q", got)
 	}
 	assertPrompts(t, stub, "go", "PINEAPPLE")

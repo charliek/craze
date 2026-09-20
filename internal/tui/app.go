@@ -418,12 +418,23 @@ type Model struct {
 	// model has accepted is still to start", the ids arrive in order, and each
 	// ending in between finds it set and stays working; the last one clears it.
 	nextTurn string
-	// armedDraft says the send-now this client armed came from its composer
-	// rather than from a queued row, so firing it takes that draft with it.
-	// Without it, a row-sourced send would clear an unrelated draft that happened
-	// to hold the same text — and another client's send-now would clear this
-	// client's composer, which is never right.
-	armedDraft bool
+	// armedDraft names the command that armed a send-now from THIS client's
+	// composer — the Cause of the Submit that answered Armed with no row — and is
+	// "" when nothing of the sort is waiting. Firing that send takes the draft
+	// with it; nothing else may.
+	//
+	// It is the command and not a flag because a flag says draft-versus-row and
+	// not WHICH arm, and arms can overlap in what the model has applied: a send
+	// armed from a draft can fire, and a second be armed from a newer draft,
+	// before the first's started is delivered. A flag cleared by that late event
+	// would leave the newer draft to be sent twice. The command's own id cannot be
+	// mistaken for another's, this client's or another client's.
+	//
+	// Exactly one event ever carries an arm's cause — the started that fires it,
+	// or the delta that retires it — so the marker is consumed by the started it
+	// names and by nothing else. A marker whose arm was retired instead is inert:
+	// no started can ever carry that cause again.
+	armedDraft string
 	// disarmed is the Disarm command whose effect the model has already applied,
 	// for the same reason: Esc writes its own note in the Update that pressed
 	// it, and the delta the engine publishes for that same command is then this
@@ -1939,7 +1950,8 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 			text = row.Text
 		}
 	}
-	res, err := m.eng.Submit(m.nextCmd(), text, mode, fromRow)
+	c := m.nextCmd()
+	res, err := m.eng.Submit(c, text, mode, fromRow)
 	switch {
 	case err != nil:
 		m.note(submitErrNote(err))
@@ -1966,7 +1978,13 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 		}
 	case res.Armed:
 		m.maskCards()
-		m.armedDraft = fromRow == ""
+		if fromRow == "" {
+			// The arm holds this composer's draft, and this command is what will
+			// name it when it fires. A row-sourced arm holds nothing of the
+			// composer's, so it leaves the marker alone rather than clearing it: an
+			// older draft arm of this client's may still be on its way to firing.
+			m.armedDraft = c.Cause()
+		}
 	case res.Queued != nil && fromRow == "":
 		m.clearMatchingDraft(text)
 	}
@@ -2192,19 +2210,30 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if _, err := eng.Cancel(ctx, c, turn); err != nil {
-			if errors.Is(err, engine.ErrStaleTurn) {
-				// The turn this was for is already over; there is nothing to
-				// report and nothing failed.
-				return nil
-			}
-			return cancelFailedMsg{err: err}
+		res, err := eng.Cancel(ctx, c, turn)
+		if err == nil {
+			return nil
 		}
-		return nil
+		switch {
+		case errors.Is(err, engine.ErrStaleTurn):
+			// The turn this was for is already over; there is nothing to
+			// report and nothing failed.
+			return nil
+		case res.Reported:
+			// The failure has been published as a state delta — this cancel
+			// disarmed a send-now, so an event was going out for it anyway — and
+			// that delta carries both halves of what this message used to write,
+			// in order: the note, then the row. Reporting it again from here would
+			// draw the row twice, and in whichever order the two arrived.
+			return nil
+		}
+		return cancelFailedMsg{err: err}
 	}
 }
 
-// cancelFailedMsg says the cancel never reached the agent.
+// cancelFailedMsg says the cancel never reached the agent, and is the model's own
+// report of it: it is returned only where the engine published nothing for the
+// failure (engine.CancelResult.Reported).
 type cancelFailedMsg struct{ err error }
 
 // requestQuit closes the engine, which closes the session — answering every card
@@ -2483,17 +2512,16 @@ func (m *Model) applyTurnStarted(ev agent.Event) {
 		}
 	}
 	m.beginTurn(ev.Turn.ID, ev.Turn.Text)
-	if ev.Turn.Origin == agent.TurnOriginSendNow && m.armedDraft {
-		// A send-now that fired takes the draft it was armed from with it, if the
-		// composer still holds it. Only a send THIS client armed from its
-		// composer: a row-sourced send never held the draft, and another client's
-		// send-now has no business in this composer at all — text equality and a
-		// send_now origin do not make it ours.
+	if ev.Turn.Origin == agent.TurnOriginSendNow && ev.Cause != "" && ev.Cause == m.armedDraft {
+		// The send-now this client armed from its composer, firing: it takes that
+		// draft with it if the composer still holds it, and the marker goes with
+		// it. Matched on the arming command and not on the origin, because a
+		// send_now started is only this composer's business when it is the arm this
+		// composer's own Submit made — a row-sourced send never held the draft, and
+		// another client's send-now, or an older arm of this client's whose event is
+		// only now arriving, must not take a draft accepted since.
+		m.armedDraft = ""
 		m.clearMatchingDraft(ev.Turn.Text)
-	}
-	if ev.Turn.Origin == agent.TurnOriginSendNow {
-		// Fired: whatever it was armed from, it is not armed any more.
-		m.armedDraft = false
 	}
 }
 
@@ -2600,12 +2628,17 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 // row: nothing here settles any state, so a delta that arrives late says something
 // true about a send that is gone rather than contradicting the one that replaced
 // it. Whether a send is armed *now* is read from the engine (sendNowPending),
-// never from these events.
+// never from these events — and which arm a draft belongs to is armedDraft's, which
+// this deliberately leaves alone.
 func (m *Model) applyStateDelta(ev agent.Event) {
 	st := ev.State
-	// The note: what was lost, which only a cleared send-now section can say.
+	// The note: what was lost, which only a cleared send-now section can say. It
+	// does not touch armedDraft: this delta names the command that caused the
+	// DISARM, not the one that armed what it retired, so clearing the marker from
+	// here would be clearing whatever is armed NOW on the strength of an event
+	// about something older. The marker needs no clearing — only the started that
+	// names it can consume it, and a retired arm never produces one.
 	if sn := st.SendNow; sn != nil && !sn.Armed {
-		m.armedDraft = false
 		switch st.Reason {
 		case agent.SendNowWithdrawn:
 			if ev.Cause != "" && ev.Cause == m.disarmed {

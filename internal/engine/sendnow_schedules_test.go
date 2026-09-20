@@ -80,13 +80,17 @@ func TestAnArmedRowGoesExactlyOnce(t *testing.T) {
 	})
 
 	t.Run("the send fires first", func(t *testing.T) {
-		r, returned := newRigReturning(t, Options{})
+		r := newRig(t, Options{})
 		turn, row := armOnARow(t, r, "the row")
 		turn.release()
-		// The settlement runs in the pass the continuation's return allows, so
-		// once it has come back the row has been taken: everything below is a
-		// verb arriving too late, which is the other order.
-		awaitTurn(t, returned, "turn-1")
+		// The settlement is what takes the row, and it runs only once the
+		// continuation has returned AND the arm's own cancel has given its hold
+		// back — two goroutines, in no fixed order, because a cancel the session
+		// writes without acting on takes its hold back whenever it gets there. A
+		// continuation that has merely come back therefore settles nothing, so the
+		// barrier is the send's own started: everything below it is a verb arriving
+		// too late, which is the other order.
+		r.until(started("turn-2"))
 		if _, err := r.e.Unqueue(Command{}, row.ID); !errors.Is(err, ErrUnknownRow) {
 			t.Fatalf("unqueue of a row the send took: %v", err)
 		}
