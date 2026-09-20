@@ -379,10 +379,10 @@ func (s *nativeSession) contentHome() string {
 // three of §3.2, so a session handed one must say so rather than start with a
 // menu quietly missing what the user asked for (A14).
 func (s *nativeSession) contentWarn() func(string) {
-	diag := s.opts.Diag
-	if diag == nil {
-		diag = s.opts.Stderr
-	}
+	// diagWriter rather than the fallback written out again: its own comment
+	// already names this lane, and a third spelling of "Diag, else Stderr" is
+	// a third place to miss when the lane grows a sink.
+	diag := diagWriter(s.opts)
 	warn := func(msg string) {
 		if diag == nil {
 			return
@@ -714,12 +714,12 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// at once (turn.go). Redacted with the session's own redactor, because Run
 	// persists and sends it unchanged.
 	sent, expanded := nativePrompt(text, refs, sessionID, hs.Redact)
-	for i := range expanded {
+	for _, cmd := range expanded {
 		// Its own copy, not a pointer into the slice: the event outlives this
-		// loop. A publish abandoned on the turn's cancelled context stops the
-		// announcements and nothing else — the turn below still runs, returns
-		// StopCancelled at once and emits the one ending it owes.
-		cmd := expanded[i]
+		// loop, and the range variable is per-iteration. A publish abandoned on
+		// the turn's cancelled context stops the announcements and nothing else
+		// — the turn below still runs, returns StopCancelled at once and emits
+		// the one ending it owes.
 		if !s.emitCtx(turnCtx, Event{Type: EventCommand, Command: &cmd}) {
 			break
 		}
@@ -1207,14 +1207,15 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 	// through the sink before Steer has even returned here.
 	s.rememberSteer(sent, text)
 	err := hs.Steer(turn, sent)
-	if err != nil {
-		// Refused: nothing will ever be echoed or returned for it, so the
-		// pairing goes rather than sit out the turn.
-		s.dropSteer(sent)
-	}
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
+	}
+	// Refused: nothing will ever be echoed or returned for it, so the pairing
+	// goes rather than sit out the turn. Everything below is one error's
+	// phrasing, which is why the steer is tested once rather than again per
+	// case.
+	s.dropSteer(sent)
+	switch {
 	case errors.Is(err, harness.ErrNotInTurn):
 		return ErrNotInTurn
 	case errors.Is(err, harness.ErrTooManySteers):
@@ -1240,30 +1241,22 @@ func (s *nativeSession) AnswerPlan(string, bool) error { return ErrUnsupported }
 
 // emit delivers ev unless the session is closing, exactly as the live
 // session's emitCtx does with no caller context: a reader that stopped
-// draining can hold a turn back, but never Close. Delivery is the event log's
-// Publish, on this goroutine, so an emit that returned has its event in
-// Events()'s buffer; Publish reads ev before it waits, so the payload must be
-// the caller's own. s.mu is never held here.
-func (s *nativeSession) emit(ev Event) {
-	if ev.At.IsZero() {
-		ev.At = time.Now()
-	}
-	select {
-	case <-s.done:
-		s.log.Abandoned()
-		return
-	default:
-	}
-	s.log.Publish(context.Background(), s.done, ev)
-}
+// draining can hold a turn back, but never Close. It is emitCtx with the
+// background context and the answer thrown away, the shape live.go's own emit
+// has, so that the two can never drift on what "delivered" means.
+func (s *nativeSession) emit(ev Event) { s.emitCtx(context.Background(), ev) }
 
 // emitCtx is emit under a caller's context, and it publishes exactly one kind
-// of event: the EventCommand a prompt's expansion produces, before the turn
-// has been handed to the harness. That event goes out while the turn's cancel
-// func is already registered, so a consumer that has stopped draining would
-// otherwise hold a prompt the user cancelled with Esc — where every other
-// event of a turn can only hold back the turn. The live session publishes its
-// own EventCommand for the same reason (live.go).
+// of event with one: the EventCommand a prompt's expansion produces, before
+// the turn has been handed to the harness. That event goes out while the
+// turn's cancel func is already registered, so a consumer that has stopped
+// draining would otherwise hold a prompt the user cancelled with Esc — where
+// every other event of a turn can only hold back the turn. The live session
+// publishes its own EventCommand for the same reason (live.go).
+//
+// Delivery is the event log's Publish, on this goroutine, so a call that
+// returned true has its event in Events()'s buffer; Publish reads ev before it
+// waits, so the payload must be the caller's own. s.mu is never held here.
 //
 // It is never a terminal event's path. EventDone and EventError stay on emit,
 // because a session flushes its log's outbox before publishing one and a

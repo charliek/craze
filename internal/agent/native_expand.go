@@ -34,29 +34,12 @@ const nativeBlockSep = "\n\n"
 // separate lines.
 //
 // Everything else is cursor's, deliberately: the name class and the argument
-// rule are scanPluginName's and scanPluginArgs', so a name means the same
-// thing wherever it is typed, and the first reference to an entry wins so one
-// body is never sent twice.
+// rule are scanPluginName's and scanPluginArgs', and what becomes of a name
+// once it is found is collectPluginRefs' — so a name means the same thing
+// wherever it is typed, and the first reference to an entry still wins, one
+// body never sent twice.
 func nativeRefs(text string, lookup map[string]pluginTarget) []pluginRef {
-	if text == "" || len(lookup) == 0 {
-		return nil
-	}
-	var out []pluginRef
-	used := make(map[string]bool, maxPluginBlocks)
-	eachNativeName(text, func(name string, end int) bool {
-		target, ok := lookup[strings.ToLower(name)]
-		if !ok {
-			return true
-		}
-		key := strings.ToLower(target.cmd.Qualified)
-		if used[key] {
-			return true
-		}
-		used[key] = true
-		out = append(out, pluginRef{target: target, typed: name, args: scanPluginArgs(text, end)})
-		return len(out) < maxPluginBlocks
-	})
-	return out
+	return collectPluginRefs(text, lookup, eachNativeName)
 }
 
 // eachNativeName walks the /name tokens that begin a line and hands each to

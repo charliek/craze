@@ -83,17 +83,29 @@ func buildPluginLookup(entries []PluginEntry, cmds []PluginCommand) map[string]p
 // and a second run, which is craze's qualified spelling and something cursor's
 // name class can never hold — and the rest of that line as the arguments.
 //
+// cursor attaches once per match, where collectPluginRefs keeps only the first
+// reference to an entry; that is the deliberate difference.
+func pluginRefs(text string, lookup map[string]pluginTarget) []pluginRef {
+	return collectPluginRefs(text, lookup, eachPluginName)
+}
+
+// collectPluginRefs is everything a reference scan does once a walker has said
+// where a /name may appear: resolve it against the lookup, take the arguments
+// that followed it, and stop at maxPluginBlocks. Only the walk differs between
+// a provider and native — cursor's names may sit anywhere after whitespace,
+// native's only at the start of a line — so this half is written once, and what
+// a reference means once it has been found cannot drift between the two.
+//
 // A name that resolves to nothing is left alone: it is the agent's own command,
 // or it is prose. The first reference to an entry wins and later ones are
-// dropped, so one body is never sent twice; cursor attaches once per match,
-// which is the deliberate difference.
-func pluginRefs(text string, lookup map[string]pluginTarget) []pluginRef {
+// dropped, so one body is never sent twice.
+func collectPluginRefs(text string, lookup map[string]pluginTarget, each func(string, func(name string, end int) bool)) []pluginRef {
 	if text == "" || len(lookup) == 0 {
 		return nil
 	}
 	var out []pluginRef
 	used := make(map[string]bool, maxPluginBlocks)
-	eachPluginName(text, func(name string, end int) bool {
+	each(text, func(name string, end int) bool {
 		target, ok := lookup[strings.ToLower(name)]
 		if !ok {
 			return true
