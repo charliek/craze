@@ -252,10 +252,15 @@ func (m Model) interject(text string) (tea.Model, tea.Cmd) {
 	if m.eng == nil {
 		return m, nil
 	}
-	if err := m.eng.Interject(context.Background(), m.nextCmd(), text); err != nil {
+	// The composer's own text, so it carries the pending shell context exactly
+	// as a send does — and clears it only once the turn has taken it. A
+	// refusal keeps both, because the draft is still in the composer and the
+	// output is still what it is about (plan 022 §3.6).
+	if err := m.eng.Interject(context.Background(), m.nextCmd(), m.withShellContext(text)); err != nil {
 		m.note(interjectErrNote(err))
 		return m, nil
 	}
+	m.dropShellContext()
 	m.input.SetValue("")
 	m.resetSlash()
 	return m, nil
@@ -351,6 +356,15 @@ func (m Model) confirmStrongSend() (tea.Model, tea.Cmd) {
 		// text queued rather than refused if a turn has started since.
 		mode = engine.SubmitQueue
 	}
+	if pending.from == "" {
+		// The composer's own draft, taking the long way round through the
+		// confirm: it carries the shell context as its plain send would, and
+		// the context is read now rather than when the question went up,
+		// because a command that finished while it was up is context for this
+		// message too (plan 022 §3.6).
+		next, _, _ := m.submitOwn(pending.text, mode)
+		return next, nil
+	}
 	next, _, _ := m.submit(pending.text, mode, pending.from)
 	return next, nil
 }
@@ -365,6 +379,12 @@ func (m *Model) declineStrongSend() {
 
 // startQueueEdit loads a row into the composer. The row keeps its id and its
 // position: an edit is not a cancel plus a re-queue.
+//
+// What is loaded is the message, not the shell context in front of it: the
+// composer is where text is written, and a block the user would have to scroll
+// past — and could delete, or corrupt — is not text they wrote. It is held
+// aside here and put back by saveQueueEdit, so the row keeps the output it was
+// queued with whatever the edit does to the message (plan 022 §3.6).
 func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 	if m.queueEdit == "" {
 		// Only the first edit displaces a draft. Moving from one row to
@@ -373,7 +393,9 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 	}
 	m.queueEdit = p.ID
 	m.queueEditPos = m.queueSel
-	m.input.SetValue(p.Text)
+	block, text := agent.SplitShellContext(p.Text)
+	m.queueEditCtx = block
+	m.input.SetValue(text)
 	m.resetSlash()
 	m.focusComposer()
 	m.queueFocus = false
@@ -389,13 +411,15 @@ func (m Model) saveQueueEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if text == "" {
-		// An emptied edit is a cancel: an empty message is not a message.
+		// An emptied edit is a cancel: an empty message is not a message. The
+		// shell context goes with it — it was context for the message that is
+		// no longer being sent, not a message of its own.
 		_, _ = m.eng.Unqueue(m.nextCmd(), id)
 		m.finishQueueEdit()
 		m.refreshSnap()
 		return m, nil
 	}
-	if err := m.eng.EditQueued(m.nextCmd(), id, text, nil); err != nil {
+	if err := m.eng.EditQueued(m.nextCmd(), id, m.queueEditCtx+text, nil); err != nil {
 		m.note(queueErrNote(err))
 		return m, nil
 	}
@@ -404,9 +428,12 @@ func (m Model) saveQueueEdit() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// finishQueueEdit leaves edit mode and puts the draft back.
+// finishQueueEdit leaves edit mode and puts the draft back. The row's shell
+// context is let go here rather than in either caller, so a save and a cancel
+// cannot leave a block behind for the next row to be edited to inherit.
 func (m *Model) finishQueueEdit() {
 	m.queueEdit = ""
+	m.queueEditCtx = ""
 	m.input.SetValue(m.editDraft)
 	m.editDraft = ""
 	m.resetSlash()
@@ -480,7 +507,11 @@ func (m Model) queueRow(i int, p agent.QueuedPrompt, selected, hovered bool) str
 	avail := m.width - prefix - 1 - actionsW
 	text := ""
 	if avail >= 1 {
-		text = clampWidth(sanitizeLine(p.Text), avail)
+		// The message the row is, not the shell context queued in front of it:
+		// a band of rows all reading "<shell_context>" would say nothing about
+		// what is waiting to be sent (plan 022 §3.6).
+		_, shown := agent.SplitShellContext(p.Text)
+		text = clampWidth(sanitizeLine(shown), avail)
 	}
 	segs := []seg{gutter, {num, styleFG(m.theme.ToolKind)}}
 	used := prefix

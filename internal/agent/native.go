@@ -1018,7 +1018,13 @@ func (s *nativeSession) callerEnded(ctx context.Context) error {
 // nativeTitle is the title a native session carries until /rename: the first
 // line of its first prompt, on one line and capped, as the TUI derives an
 // index title.
+//
+// A shell context block in front of that prompt is not the prompt: a session
+// called "<shell_context>" would say nothing about what the user asked for,
+// which is the same reason the title is taken before the expansion above
+// (§3.6).
 func nativeTitle(prompt string) string {
+	_, prompt = SplitShellContext(prompt)
 	first, _, _ := strings.Cut(prompt, "\n")
 	title := sanitizeLine(first)
 	n := 0

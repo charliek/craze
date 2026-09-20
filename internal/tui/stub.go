@@ -91,8 +91,11 @@ type Stub struct {
 	// stays recorded, as its row stays in the transcript. cancelsSent counts
 	// the cancels the live session would have written to the agent: every
 	// Cancel but one that a claimed, unopened prompt withdraws for.
-	prompts     []string
-	cancelsSent int
+	prompts []string
+	// interjections is every text handed to Interject, in order; see
+	// Interjections in stub_queue.go.
+	interjections []string
+	cancelsSent   int
 }
 
 // stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close

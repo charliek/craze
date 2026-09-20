@@ -87,8 +87,11 @@ func (m Model) runShellDraft() (tea.Model, tea.Cmd) {
 // is settled by the shellDoneMsg the runner sends on its way out.
 func (m Model) killShell() { m.shell.cancel() }
 
-// finishShell settles the row one command left behind.
+// finishShell settles the row one command left behind, and keeps what it
+// printed for the next message the user sends (shell_context.go): the command
+// was run to be asked about, and the asking is the message after it.
 func (m *Model) finishShell(msg shellDoneMsg) {
+	m.keepShellResult(msg.cmd, msg.res)
 	t := &m.main
 	for i := len(t.entries) - 1; i >= 0; i-- {
 		e := &t.entries[i]

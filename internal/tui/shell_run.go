@@ -338,9 +338,10 @@ func shellExitCode(err error) int {
 	}
 }
 
-// shellOutput is the command's output as the transcript and, from C9, the agent
-// will see it: sanitised the way agent text is at ingestion, and led by a note
-// where the ring dropped the head.
+// shellOutput is the command's output as the transcript and the agent both see
+// it — the row draws this string and the shell context block carries it
+// (shell_context.go) — sanitised the way agent text is at ingestion, and led by
+// a note where the ring dropped the head.
 func shellOutput(r *shellRing) string {
 	raw, dropped := r.text()
 	out := sanitizeShellOutput(raw)

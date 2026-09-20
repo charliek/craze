@@ -99,7 +99,16 @@ func pluginRefs(text string, lookup map[string]pluginTarget) []pluginRef {
 // A name that resolves to nothing is left alone: it is the agent's own command,
 // or it is prose. The first reference to an entry wins and later ones are
 // dropped, so one body is never sent twice.
+//
+// A shell context block in front of the text is not scanned. What is inside it
+// is a command's output, not something the user invoked: `!cat plan.md` whose
+// output holds a /flows:gauntlet line must expand nothing, on every provider,
+// or reading a file would be enough to run a command with it (§3.6). Stripping
+// it here rather than in each caller is what makes that true for cursor's scan
+// and native's alike; the block itself still goes on the wire, because the
+// model is owed the output it is about to be asked about.
 func collectPluginRefs(text string, lookup map[string]pluginTarget, each func(string, func(name string, end int) bool)) []pluginRef {
+	_, text = SplitShellContext(text)
 	if text == "" || len(lookup) == 0 {
 		return nil
 	}
@@ -128,7 +137,13 @@ func collectPluginRefs(text string, lookup map[string]pluginTarget, each func(st
 // the draft holds a name the rename could rescue. An unknown slash such as
 // /nope answers true too: craze cannot tell one the catalog will never explain
 // from one it is about to, and the wait is bounded either way.
+//
+// A shell context block is skipped here too, for collectPluginRefs' reason and
+// one of its own: a /name inside a command's output will never be expanded, so
+// holding the prompt back for a catalog that could resolve it would be a delay
+// bought for nothing.
 func hasUnresolvedSlash(text string, lookup map[string]pluginTarget) bool {
+	_, text = SplitShellContext(text)
 	unresolved := false
 	eachPluginName(text, func(name string, _ int) bool {
 		if _, ok := lookup[strings.ToLower(name)]; ok {

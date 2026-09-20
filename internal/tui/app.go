@@ -386,10 +386,13 @@ type Model struct {
 	queueHov   queueHover
 	// queueEdit is the row being edited in place, "" when none.
 	// queueEditPos is its position, for the chip; editDraft is the composer
-	// the edit displaced and Esc puts back.
+	// the edit displaced and Esc puts back. queueEditCtx is the shell context
+	// that row was queued with, held out of the composer for the length of the
+	// edit and put back in front of whatever is saved (plan 022 §3.6).
 	queueEdit    string
 	queueEditPos int
 	editDraft    string
+	queueEditCtx string
 	// confirm is the send-now waiting for an answer. The confirm line is
 	// client-local UI: nothing is taken from anywhere and the engine has not
 	// heard of it. The send-now it turns into, on the other hand, is the
@@ -504,6 +507,13 @@ type Model struct {
 	// able to kill a command a much later copy started. Nil only in a zero
 	// Model a test built, which every caller guards for.
 	shell *shellController
+	// shellCtx is what the commands that have finished will tell the agent
+	// with the next message this composer sends (shell_context.go). An
+	// ordinary copied field and not state on the controller beside it,
+	// because it belongs to the message being written rather than to the
+	// process that produced it: it is read and cleared in Update, on the one
+	// goroutine, exactly as the draft it will lead is.
+	shellCtx []agent.ShellResult
 	// owner is the session the program holds, shared by every copy the way
 	// term is; see sessionOwner. Nil only in a zero Model a test built.
 	owner *sessionOwner
@@ -657,6 +667,10 @@ func (m *Model) setSession(s agent.Session) {
 	// so the wait is free; it is here because the next assignment site will not
 	// be so lucky.
 	m.shell.shutdown()
+	// What the last session's commands printed is not context for the next
+	// one's first message: a different agent, and usually a different
+	// workspace, being told about a `git status` nobody ran there (§3.6).
+	m.dropShellContext()
 	m.eng, m.sess, m.engErr = nil, nil, nil
 	m.client, m.cmdSeq = "", 0
 	m.owner.set(nil)
@@ -1991,21 +2005,44 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
-	return m.sendText(text)
+	if !m.sessionReady() {
+		// The composer refuses Enter before the gate opens: a prompt into a
+		// session that is still restoring would race the replay it is reading.
+		return m, nil
+	}
+	next, _, _ := m.submitOwn(text, engine.SubmitQueue)
+	return next, nil
 }
 
-// sendText starts a turn with text that is already decided. It is what the
-// composer's own send and the plan offer have in common: the plan offer never
-// touches the draft, so the two differ only in where the text came from.
+// sendText starts a turn with text of craze's own: today the plan offer's
+// implement prompt, which never touched the draft.
+//
+// It carries no shell context. The block belongs to the message the user wrote
+// — it is their command's output, in front of their question about it — and the
+// offer's prompt is craze's sentence, sent by pressing Enter on an empty
+// composer. Attaching it here would spend the context on a message that never
+// asked for it (§3.6).
 func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	if !m.sessionReady() {
-		// The composer refuses Enter before the gate opens, and so does the
-		// plan offer: a prompt into a session that is still restoring would
-		// race the replay it is reading.
+		// The plan offer refuses for the composer's reason, above.
 		return m, nil
 	}
 	next, _, _ := m.submit(text, engine.SubmitQueue, "")
 	return next, nil
+}
+
+// submitOwn is submit for the text this composer is holding: the draft's send,
+// whether it starts a turn or becomes a queued row, and the confirm's send-now
+// of that same draft. It is the one submission that carries the pending shell
+// context, and it is what clears it — only once the text was accepted, so a
+// refusal leaves the block with the draft it belongs to, for the send that
+// follows.
+func (m Model) submitOwn(text string, mode engine.SubmitMode) (Model, engine.SubmitResult, error) {
+	next, res, err := m.submit(m.withShellContext(text), mode, "")
+	if shellContextTaken(res, err) {
+		next.dropShellContext()
+	}
+	return next, res, err
 }
 
 // submit hands one prompt to the engine and applies what it answered. It is the
@@ -2150,7 +2187,12 @@ func (m *Model) maskCards() {
 // went. The text was trimmed on its way out and the draft may not have been, and a
 // draft the user has changed since is theirs to keep — which is the rule a
 // send-now has always followed, whether it fired at once or after a cancel.
+//
+// The comparison is against what was typed: the shell context craze put in
+// front of it was never in the composer, so a draft matched against the whole
+// sent string would never match and would sit there after its own send (§3.6).
 func (m *Model) clearMatchingDraft(text string) {
+	_, text = agent.SplitShellContext(text)
 	if strings.TrimSpace(m.input.Value()) != text {
 		return
 	}
@@ -3068,7 +3110,14 @@ const titleRuneCap = 120
 // fallbackTitle is the title a session carries until the agent names it or the
 // user renames it: the first line of the first prompt. It is not a pin — an
 // agent title replaces it, and /rename replaces either (§3.6).
+//
+// The prompt's shell context is not part of that first line. A picker row
+// reading "<shell_context>" would name every session that opened with a
+// command the same thing, and none of them by what was asked; the strip is
+// here rather than at the call site so that a second caller cannot forget it
+// (plan 022 §3.6, and nativeTitle for the native session's own copy).
 func fallbackTitle(prompt string) string {
+	_, prompt = agent.SplitShellContext(prompt)
 	first, _, _ := strings.Cut(prompt, "\n")
 	return capRunes(sanitizeLine(first), titleRuneCap)
 }
