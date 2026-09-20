@@ -197,25 +197,24 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		r.until(armedNow)
 		return turn, row
 	}
-	// wantDisarm reads to the disarm delta and checks its reason and that
-	// nothing is armed any more. Each case then says for itself where the text
-	// it was holding ended up.
-	wantDisarm := func(t *testing.T, r *rig, reason string) {
+	// wantDisarm reads to the disarm delta and checks its reason, the failure
+	// behind it, and that nothing is armed any more. Each case then says for
+	// itself where the text it was holding ended up.
+	//
+	// detail is what the delta must carry: the failure for a cancel the ENGINE
+	// made, whose error reaches a client here or nowhere, and "" for everything
+	// else — every other reason is a fact about the send rather than an error, and
+	// a cancel a client asked for is answered with its error directly, so a detail
+	// there too would be one failure reported twice.
+	wantDisarm := func(t *testing.T, r *rig, reason, detail string) {
 		t.Helper()
 		got := r.until(disarmed)
 		last := got[len(got)-1]
 		if last.State.Reason != reason {
 			t.Fatalf("the disarm's reason is %q, want %q\n%s", last.State.Reason, reason, describe(r.seen))
 		}
-		// Detail is the failure behind a reason that has one, and today that is
-		// the cancel that failed alone: every other reason is a fact about the
-		// send, not an error, and a detail on one would be a client drawing an
-		// error row for something that did not fail.
-		if reason == agent.SendNowCancelFailed && last.State.Detail == "" {
-			t.Fatalf("a failed cancel's disarm carried no detail\n%s", describe(r.seen))
-		}
-		if reason != agent.SendNowCancelFailed && last.State.Detail != "" {
-			t.Fatalf("the disarm's reason %q carried the detail %q", reason, last.State.Detail)
+		if last.State.Detail != detail {
+			t.Fatalf("the disarm's detail is %q, want %q\n%s", last.State.Detail, detail, describe(r.seen))
 		}
 		if st := r.e.State(); st.SendNow != nil {
 			t.Fatalf("something is still armed: %+v", st.SendNow)
@@ -250,7 +249,7 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		if err := r.e.Disarm(disarmCmd); err != nil {
 			t.Fatalf("disarm: %v", err)
 		}
-		wantDisarm(t, r, agent.SendNowWithdrawn)
+		wantDisarm(t, r, agent.SendNowWithdrawn, "")
 		if got := r.seen[len(r.seen)-1]; got.Cause != disarmCmd.Cause() {
 			t.Fatalf("the disarm's delta names %q, want the command that withdrew it", got.Cause)
 		}
@@ -289,13 +288,10 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 			// waiting for an ending that is not coming: it goes, and the text
 			// stays where it was — the row in the queue, a draft in the client's
 			// composer — as the TUI's cancelFailedMsg has always left it.
-			wantDisarm(t, r, agent.SendNowCancelFailed)
-			// And the delta carries the failure itself, as text. This is the one
+			// The delta carries the failure itself, as text. This is the one
 			// cancel a client did not make, so a client that draws that failure —
 			// as the TUI's cancelFailedMsg always has — can read it nowhere else.
-			if got := r.seen[len(r.seen)-1].State.Detail; got != tc.err.Error() {
-				t.Fatalf("the disarm's detail is %q, want the failure %q", got, tc.err)
-			}
+			wantDisarm(t, r, agent.SendNowCancelFailed, tc.err.Error())
 			wantRowUntouched(t, r, row)
 			if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking {
 				t.Fatalf("the turn the failed cancel left running: %+v", st)
@@ -313,6 +309,108 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 			r.wantPrompts("one", "the row")
 		})
 	}
+
+	// The engine's own cancel is reported whether or not the arm it was made for
+	// is still standing. A client that takes its send back does not make the
+	// cancel's failure somebody else's news: it did not reach the agent, the turn
+	// it was for is still running, and nobody is waiting on an error the engine
+	// discarded. With no section to ride on, the delta carries the reason and the
+	// failure alone.
+	t.Run("the cancel it issued failed after the send was taken back", func(t *testing.T) {
+		r := newRig(t, Options{})
+		turn := r.s.script(held())
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+		row := r.queue("the row")
+		boom := errors.New("the pipe is gone")
+		entered, release := r.s.holdNextCancel()
+		r.s.mu.Lock()
+		r.s.cancelErr = boom
+		r.s.mu.Unlock()
+		r.sendNow(row.Text, row.ID)
+		r.until(armedNow)
+		await(t, entered, "the arm's cancel reaching the session")
+
+		// Taken back while that cancel is still held, so there is no send-now
+		// section left for its failure to be reported beside.
+		if err := r.e.Disarm(Command{}); err != nil {
+			t.Fatalf("disarm: %v", err)
+		}
+		r.until(disarmed)
+		release()
+
+		got := r.until(func(ev agent.Event) bool {
+			return ev.Type == agent.EventMeta && ev.State != nil && ev.State.Detail != ""
+		})
+		last := got[len(got)-1]
+		if last.State.SendNow != nil {
+			t.Fatalf("the report touched the send-now section: %+v", last.State.SendNow)
+		}
+		if last.State.Reason != agent.SendNowCancelFailed || last.State.Detail != boom.Error() {
+			t.Fatalf("the report is reason %q detail %q, want cancel_failed and the failure",
+				last.State.Reason, last.State.Detail)
+		}
+		// The turn the cancel never stopped is still running, and the row is where
+		// it was.
+		if st := r.e.State(); st.Turn != "turn-1" || st.Activity != ActivityWorking {
+			t.Fatalf("the turn the failed cancel left running: %+v", st)
+		}
+		wantRowUntouched(t, r, row)
+		turn.release()
+		r.until(lastEnding)
+		r.wantPrompts("one", "the row")
+	})
+
+	// A cancel a CLIENT made answers that client with its error, so the disarm it
+	// causes carries the reason and no detail: two reports of one failure would
+	// draw the same row twice.
+	t.Run("a client's failed cancel reports its failure once", func(t *testing.T) {
+		r := newRig(t, Options{})
+		turn := r.s.script(held())
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+		row := r.queue("the row")
+		r.ignoreCancels()
+
+		// Two cancels against the same turn, each held at the session's door so
+		// that which of them the failure lands on is the test's choice and not a
+		// race: the engine's own, for the arm, and the client's.
+		armEntered, armRelease := r.s.holdNextCancel()
+		r.sendNow(row.Text, row.ID)
+		r.until(armedNow)
+		await(t, armEntered, "the arm's cancel reaching the session")
+
+		clientEntered, clientRelease := r.s.holdNextCancel()
+		cancelled := make(chan error, 1)
+		go func() {
+			_, err := r.e.Cancel(context.Background(), Command{}, "turn-1")
+			cancelled <- err
+		}()
+		await(t, clientEntered, "the client's cancel reaching the session")
+
+		// The client's is the one that fails, and it is released first.
+		boom := errors.New("the pipe is gone")
+		r.s.mu.Lock()
+		r.s.cancelErr = boom
+		r.s.mu.Unlock()
+		clientRelease()
+		select {
+		case err := <-cancelled:
+			if !errors.Is(err, boom) {
+				t.Fatalf("the client's cancel answered %v, want the failure", err)
+			}
+		case <-time.After(watchdog):
+			t.Fatalf("the client's cancel never returned in %s", watchdog)
+		}
+		// Its disarm says what was lost and nothing more: the error is already in
+		// the client's own hands, and a detail here would be the same failure told
+		// twice.
+		wantDisarm(t, r, agent.SendNowCancelFailed, "")
+		wantRowUntouched(t, r, row)
+		armRelease()
+		turn.release()
+		r.until(lastEnding)
+	})
 
 	t.Run("the turn it was armed against failed", func(t *testing.T) {
 		r := newRig(t, Options{})
@@ -377,7 +475,7 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		}
 		await(t, second.opened, "the second turn to open")
 		second.release()
-		wantDisarm(t, r, agent.SendNowOtherTurn)
+		wantDisarm(t, r, agent.SendNowOtherTurn, "")
 		// The armed text never went anywhere: it is still the client's, in the
 		// composer it was typed in.
 		r.wantPrompts("one", "direct")
@@ -426,7 +524,7 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 		}
 		r.sync()
 		turn.release()
-		wantDisarm(t, r, agent.SendNowRowGone)
+		wantDisarm(t, r, agent.SendNowRowGone, "")
 		// The text is where the clear left it: gone, by the client's own command,
 		// with a removal event for it. Nothing was sent in its place either — the
 		// queue the send would have fallen through to is empty too.

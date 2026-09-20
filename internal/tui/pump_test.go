@@ -102,9 +102,10 @@ type pump struct {
 	// produce none, or to be a batch, whose members take over the count).
 	outstanding int
 	// afterReceive is a hook the reader calls in the window between taking an
-	// event off the stream and queueing it. Only the pump's own tests set it, to
-	// pin the reader in exactly that window.
-	afterReceive func()
+	// event off the stream and queueing it, with the event it took. The pump's own
+	// tests set it to pin the reader in exactly that window; pumpAwaitEvent sets
+	// it to watch for one event going by without applying it.
+	afterReceive func(agent.Event)
 	// quietened is a one-slot wake-up: a goroutine that resolved the last
 	// outstanding command signals it, so pumpSettled can block instead of
 	// polling. One slot is enough — it is a "look again", not a queue.
@@ -201,7 +202,7 @@ func (p *pump) read() {
 				return
 			}
 			if h := p.receivedHook(); h != nil {
-				h()
+				h(ev)
 			}
 			if !p.deliver(pumpItem{msg: eventMsg{ev}}) {
 				return
@@ -218,16 +219,18 @@ func (p *pump) read() {
 	}
 }
 
-// receivedHook is the pump's own tests' way into the window between taking an
-// event off the stream and queueing it. It is read under the lock because the
+// receivedHook is the window between taking an event off the stream and queueing
+// it: the pump's own tests pin the reader there, and a test that has to stand in
+// the window where the engine has moved on and the model has not heard watches for
+// the event that says so (pumpAwaitEvent). It is read under the lock because the
 // reader is already running when a test sets it.
-func (p *pump) receivedHook() func() {
+func (p *pump) receivedHook() func(agent.Event) {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 	return p.afterReceive
 }
 
-func (p *pump) setReceivedHook(h func()) {
+func (p *pump) setReceivedHook(h func(agent.Event)) {
 	p.stateMu.Lock()
 	p.afterReceive = h
 	p.stateMu.Unlock()
@@ -317,6 +320,30 @@ func (p *pump) quiet() bool {
 	return p.outstanding == 0
 }
 
+// settled is the engine's own fact, and the difference between "everything that
+// has happened has been applied" and "the chain is over". Channel emptiness cannot
+// say the second: a continuation that has not returned yet has nothing in either
+// channel and no command outstanding — before the driver moved into the engine its
+// prompt was a tracked command, and that is what accounted for it.
+//
+// So the engine is asked instead: no turn is current, which means no ending is
+// still to come, and nothing it holds is about to start one.
+func (p *pump) settled() bool {
+	st := p.ctrl.State()
+	if st.Turn != "" {
+		return false
+	}
+	if st.Activity != engine.ActivityIdle || st.ForeignTurn {
+		// An error state, a stop, a close, or a turn the agent is running of its
+		// own: nothing drains, so a row that is queued stays queued and this is as
+		// finished as the chain gets.
+		return true
+	}
+	// Idle and admitting: a queued row or an armed send is a turn about to start,
+	// and its started is still to come.
+	return len(st.Queue) == 0 && st.SendNow == nil
+}
+
 // sync runs the engine's own barrier on a goroutine of its own and answers with
 // what it came to.
 //
@@ -361,12 +388,15 @@ func (p *pump) resumeReader() {
 	}
 }
 
-// pending is the quiet() terms as text, for the watchdog's message.
+// pending is the quiet() and settled() terms as text, for the watchdog's message.
 func (p *pump) pending() string {
+	st := p.ctrl.State()
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
-	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d",
-		p.outstanding, len(p.msgs), len(p.ctrl.Events()))
+	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d "+
+		"engine turn=%q activity=%s queued rows=%d armed=%v foreign=%v",
+		p.outstanding, len(p.msgs), len(p.ctrl.Events()),
+		st.Turn, st.Activity, len(st.Queue), st.SendNow != nil, st.ForeignTurn)
 }
 
 // pumpSkips names the two commands the pump must not run, and why.
@@ -444,34 +474,47 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 	}
 }
 
-// pumpSettled returns once nothing the pump dispatched is still owed an Update
-// and nothing is queued. It is the barrier for the claim "that turn is
-// completely over": stopping on a predicate can return the moment the state the
-// predicate names is reached, with the command that ran the turn still to
-// report, and a test that then started another turn would never have applied the
-// old turn's completion — so a regression in which it lands on the new turn
-// would pass.
+// pumpSettled is the barrier for the claim "that chain is completely over": it
+// returns once nothing the pump dispatched is still owed an Update, nothing is
+// queued, the engine's outbox has been delivered, AND the engine itself says it has
+// no turn running and nothing about to start one.
 //
-// It is a real barrier, not a poll. Two things make it one. The counters are
-// signalled by the goroutines that resolve a command and by the apply step
-// below; and the state is only ever inspected with the event reader stopped at
-// a point where it holds nothing, so an event cannot be in flight in a place
-// the inspection does not look. A flag the reader set after its receive could
-// not promise that: the receive and the flag are two steps, and an event taken
-// off the stream between them is in neither channel.
+// The last term is the one channel emptiness cannot supply. A continuation that
+// has not returned has nothing in either channel and no command outstanding, so
+// "quiet" alone can be true while a turn is still running and its ending, its
+// requeues and its successor are all still to come — and before the driver moved
+// into the engine, the prompt was a tracked command, which is what used to account
+// for it. A test whose next line starts another turn, or says "nothing else
+// happened", needs the engine's own fact.
 //
-// A turn held open has its prompt command outstanding on purpose, so this is
-// something a test calls where "the turn is over" is the claim, never while a
-// turn is held. Called then, the watchdog fails the test and says what is
-// outstanding rather than hanging.
+// A turn a test is deliberately holding open is therefore not something to call
+// this on: it fails loudly on the watchdog and prints what the engine is doing,
+// exactly as an outstanding command used to. pumpDrained is the weaker barrier for
+// that case — everything that HAS happened has been applied.
 //
-// The driver is the engine's now, so a turn's ending is not a command's report at
-// all: it is an event the log's outbox publishes, and an engine event trails the
-// state it describes (plan 021 R2). "No command outstanding and both queues
-// empty" can therefore be true a moment before the ending is published, which is
-// why every pass runs the engine's own Sync first — on a goroutine, while this
-// one keeps reading — and only then asks whether the pump is quiet.
+// It is a real barrier, not a poll. The counters are signalled by the goroutines
+// that resolve a command and by the apply step below; the state is only ever
+// inspected with the event reader stopped at a point where it holds nothing, so an
+// event cannot be in flight in a place the inspection does not look; and when the
+// pump is quiet but the engine is not settled there is nothing to poll — the next
+// message IS the turn's ending, so the loop blocks on it.
 func pumpSettled(t *testing.T, m Model) Model {
+	t.Helper()
+	return pumpQuiet(t, m, "pumpSettled", (*pump).settled)
+}
+
+// pumpDrained is pumpSettled without the engine's completion term: everything that
+// has happened has been applied, and nothing says the chain is over. It is what a
+// test calls while it is deliberately holding a turn open — where the claim is
+// "this event has landed and nothing else has" rather than "the work is finished".
+func pumpDrained(t *testing.T, m Model) Model {
+	t.Helper()
+	return pumpQuiet(t, m, "pumpDrained", func(*pump) bool { return true })
+}
+
+// pumpQuiet is the shared loop: apply, the outbox barrier, the reader rendezvous,
+// and then the caller's own extra condition on the engine.
+func pumpQuiet(t *testing.T, m Model, what string, done func(*pump) bool) Model {
 	t.Helper()
 	p := pumpFor(t, m)
 	timeout := deadline()
@@ -493,14 +536,14 @@ func pumpSettled(t *testing.T, m Model) Model {
 			case err := <-synced:
 				if err != nil && !errors.Is(err, agent.ErrLogClosing) && !errors.Is(err, agent.ErrClosed) &&
 					!errors.Is(err, context.Canceled) {
-					t.Fatalf("pumpSettled: the engine's Sync came back with %v", err)
+					t.Fatalf("%s: the engine's Sync came back with %v", what, err)
 				}
 				break settling
 			case item := <-p.msgs:
 				m = p.apply(m, item)
 			case <-timeout:
-				t.Fatalf("pumpSettled: the engine's outbox was not delivered in %s (%s)\n%s",
-					pumpWatchdog, p.pending(), plainView(m))
+				t.Fatalf("%s: the engine's outbox was not delivered in %s (%s)\n%s",
+					what, pumpWatchdog, p.pending(), plainView(m))
 			}
 		}
 
@@ -518,11 +561,13 @@ func pumpSettled(t *testing.T, m Model) Model {
 			case item := <-p.msgs:
 				m = p.apply(m, item)
 			case <-timeout:
-				t.Fatalf("pumpSettled: the event reader never came to a stop in %s (%s)\n%s",
-					pumpWatchdog, p.pending(), plainView(m))
+				t.Fatalf("%s: the event reader never came to a stop in %s (%s)\n%s",
+					what, pumpWatchdog, p.pending(), plainView(m))
 			}
 		}
-		quiet := p.quiet()
+		// Both terms are read with the reader parked, so neither can be answered
+		// from a moment an event was in flight somewhere this does not look.
+		quiet := p.quiet() && done(p)
 		if parked {
 			p.resumeReader()
 		}
@@ -534,9 +579,9 @@ func pumpSettled(t *testing.T, m Model) Model {
 			m = p.apply(m, item)
 		case <-p.quietened:
 		case <-timeout:
-			t.Fatalf("pumpSettled: the pump was still busy after %s (%s)\n"+
-				"a turn held open keeps its prompt command outstanding — release it first\n%s",
-				pumpWatchdog, p.pending(), plainView(m))
+			t.Fatalf("%s: still not finished after %s (%s)\n"+
+				"a turn the test is holding open never finishes — release it first, or use pumpDrained\n%s",
+				what, pumpWatchdog, p.pending(), plainView(m))
 		}
 	}
 }
@@ -609,6 +654,36 @@ func pumpEnter(t *testing.T, m Model, text string) Model {
 func pumpEsc(t *testing.T, m Model) Model {
 	t.Helper()
 	return pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+}
+
+// pumpAwaitEvent arms a barrier that closes once the reader has taken an event
+// pred accepts off the stream — WITHOUT applying it. The message waits in the
+// pump's queue until the test pumps for it, so this is how a test stands in the
+// window the engine's events trailing their state opens up: the engine has moved
+// on, and the model has not heard a thing.
+//
+// It is a barrier and not a poll: the reader closes the channel from inside its own
+// receive. Only one is armed at a time, which is all any test here needs.
+func pumpAwaitEvent(t *testing.T, m Model, pred func(agent.Event) bool) <-chan struct{} {
+	t.Helper()
+	p := pumpFor(t, m)
+	seen := make(chan struct{})
+	var once sync.Once
+	p.setReceivedHook(func(ev agent.Event) {
+		if pred(ev) {
+			once.Do(func() { close(seen) })
+		}
+	})
+	return seen
+}
+
+// turnEnded matches the engine's ending for one turn, which is the event that says
+// the engine has settled it: it is enqueued by the settlement itself.
+func turnEnded(id string) func(agent.Event) bool {
+	return func(ev agent.Event) bool {
+		return ev.Type == agent.EventTurn && ev.Turn != nil &&
+			ev.Turn.Phase == agent.TurnEnded && ev.Turn.ID == id
+	}
 }
 
 // awaitBarrier blocks on a handshake the Stub hands out, under the same
@@ -875,7 +950,7 @@ func TestPumpSettledWaitsForAnEventTheReaderHasInHand(t *testing.T) {
 	p := pumpFor(t, m)
 	pinned, released := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	p.setReceivedHook(func() {
+	p.setReceivedHook(func(agent.Event) {
 		once.Do(func() {
 			close(pinned)
 			<-released

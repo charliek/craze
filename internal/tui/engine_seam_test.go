@@ -456,7 +456,10 @@ func TestALateEndingDoesNotErrorTheTurnThatFollowedIt(t *testing.T) {
 	awaitBarrier(t, second.opened, "the second turn opening")
 
 	// Now the late ending lands, along with everything else the settlement made.
-	m = pumpSettled(t, m)
+	// pumpDrained and not pumpSettled: turn two is deliberately held open, so the
+	// chain is not over and the claim is only that everything in flight has been
+	// applied.
+	m = pumpDrained(t, m)
 	if m.status != statusWorking {
 		t.Fatalf("the failed turn's late ending errored the turn after it: status %s err %q", m.status, m.err)
 	}
@@ -474,6 +477,244 @@ func TestALateEndingDoesNotErrorTheTurnThatFollowedIt(t *testing.T) {
 		t.Fatalf("m.err %q after a clean second turn", m.err)
 	}
 	assertPrompts(t, sess, "one", "two")
+}
+
+// --------------------------------------------- the successor the model must wait for
+
+// finishedInTheEngine is the window every case below stands in: the engine has
+// finished the turn on screen and published its ending, and the model has applied
+// none of it — it is still working on that turn, with its whole stream still in the
+// pump's queue. It is the window an engine event's trailing opens, and the one the
+// model's own view cannot see.
+//
+// It answers with the model, the session, the host recorder, and the script of the
+// turn that comes next.
+func finishedInTheEngine(t *testing.T) (Model, *scriptedSession, *recHost, *scriptedTurn) {
+	t.Helper()
+	m, sess, rec := startedScriptedHostModel(t)
+	a, b := scriptHeld(), scriptHeld()
+	m = startScripted(t, m, sess, "A", a)
+	sess.Script(b)
+	// Armed before A is released: the barrier is the reader taking A's ending off
+	// the stream, which happens only once the engine has settled A.
+	ended := pumpAwaitEvent(t, m, turnEnded(m.turnID))
+	a.Release()
+	awaitBarrier(t, ended, "the engine settling A")
+	// Nothing has been applied: the model is still showing A.
+	if m.status != statusWorking {
+		t.Fatalf("setup: the model should still be displaying A as working: %s", m.status)
+	}
+	if got := texts(m, entryUser); len(got) != 1 || got[0] != "A" {
+		t.Fatalf("setup: user entries %q", got)
+	}
+	return m, sess, rec, b
+}
+
+// TestASuccessorStartedBehindTheDisplayedTurnIsNotAppliedEarly is the review's
+// findings 1 and 2, which are one defect: a turn Submit starts while the model is
+// still displaying another one as working must not be applied in that Update.
+// Applying it drew its row ahead of everything the turn before it still owed, and
+// then drew that turn's row a second time when its own started arrived — and left
+// the model idle with `ownTurn` naming the wrong turn, so the running turn's ending
+// could settle nothing at all.
+//
+// Both ways in are covered, because the fix is one rule for both: a send-now
+// confirmed in the window (the engine is idle, so Submit starts at once instead of
+// arming), and plain Enter — which used to call Queue from here, on an engine that
+// had already gone idle, so nothing started it and nothing ever would.
+func TestASuccessorStartedBehindTheDisplayedTurnIsNotAppliedEarly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// start submits B in the window, however the user got there.
+		start func(t *testing.T, m Model) Model
+	}{
+		{
+			name: "a confirmed send-now",
+			start: func(t *testing.T, m Model) Model {
+				t.Helper()
+				m.input.SetValue("B")
+				m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+				if m.confirm == nil {
+					t.Fatalf("cursor asks first:\n%s", plainView(m))
+				}
+				return pumpKey(t, m, enter())
+			},
+		},
+		{
+			name: "plain Enter",
+			start: func(t *testing.T, m Model) Model {
+				t.Helper()
+				return pumpEnter(t, m, "B")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, sess, rec, b := finishedInTheEngine(t)
+
+			m = tc.start(t, m)
+			// In this Update: B was accepted — the draft has gone — and nothing
+			// about it is on screen. The model is still A's.
+			if m.input.Value() != "" {
+				t.Fatalf("the accepted text left the composer: %q", m.input.Value())
+			}
+			if got := texts(m, entryUser); len(got) != 1 {
+				t.Fatalf("B's row was drawn ahead of A's events: %q", got)
+			}
+			if m.status != statusWorking {
+				t.Fatalf("status %s, want the displayed turn still working", m.status)
+			}
+			// And it really started, rather than being queued where nothing would
+			// ever drain it: the engine was idle, so Submit's queue mode started it.
+			if !queueEmpty(m) {
+				t.Fatalf("B was left in the band, where nothing will drain it: %q", queueTexts(m))
+			}
+			awaitBarrier(t, b.opened, "B's turn opening")
+
+			// Now everything is delivered, in order. A's row is not drawn twice,
+			// B's is drawn once, and the model never leaves working.
+			m = pumpUntil(t, m, turnsDrawn(2))
+			if got := texts(m, entryUser); got[0] != "A" || got[1] != "B" {
+				t.Fatalf("user entries %q, want one each in order", got)
+			}
+			if m.status != statusWorking {
+				t.Fatalf("status %s while B runs", m.status)
+			}
+			b.Release()
+			m = pumpUntil(t, m, isIdle)
+			m = pumpSettled(t, m)
+			if got := texts(m, entryUser); len(got) != 2 {
+				t.Fatalf("one row per turn: %q", got)
+			}
+			// The host heard one Working across both turns and one Idle at the end:
+			// never an idle with work in flight.
+			assertStatuses(t, rec, workingStatus(), idleStatus(host.DetailStop))
+			assertPrompts(t, sess, "A", "B")
+
+			// The control, and the ordinary case frame captures depend on: from an
+			// idle model, Enter draws its row in its own Update.
+			m = pumpEnter(t, m, "C")
+			if got := texts(m, entryUser); len(got) != 3 || got[2] != "C" {
+				t.Fatalf("an idle Enter draws its row in its own Update: %q", got)
+			}
+			if m.status != statusWorking {
+				t.Fatalf("an idle Enter goes working in its own Update: %s", m.status)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------- one owner per failed cancel
+
+// TestAnEnginesFailedCancelIsReportedWithNoArmLeft is the review's finding 4(a).
+// The cancel an arm asks for is the engine's own, so nobody is waiting on its
+// error; if the client takes the send back before that cancel comes back, there is
+// no send-now section left for the failure to ride on — and the failure still
+// happened, and the turn it did not stop is still running. The engine reports it as
+// a delta with no section at all, and the model draws the row it has always drawn.
+func TestAnEnginesFailedCancelIsReportedWithNoArmLeft(t *testing.T) {
+	m, sess := scriptedModel(t)
+	held := scriptHeld()
+	m = startScripted(t, m, sess, "go", held)
+	m.input.SetValue("PINEAPPLE")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	release := sess.HoldNextCancel()
+	sess.FailNextCancel(errors.New("nope"))
+	m = pumpKey(t, m, enter())
+	awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+	if !sendNowArmed(m) {
+		t.Fatalf("setup: nothing armed:\n%s", plainView(m))
+	}
+
+	// Esc takes the send back while its cancel is still on its way.
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if sendNowArmed(m) {
+		t.Fatal("Esc did not take the send back")
+	}
+	release()
+
+	m = pumpUntil(t, m, errorRows(1))
+	if got := texts(m, entryError); got[0] != "nope" {
+		t.Fatalf("error rows %q, want the cancel's own failure", got)
+	}
+	// The turn the cancel failed to stop is still running, which is the other half
+	// of why the failure had to be reported at all.
+	if m.status != statusWorking {
+		t.Fatalf("status %s: a cancel that reached nothing leaves the turn running", m.status)
+	}
+	held.Release()
+	m = pumpUntil(t, m, isIdle)
+	_ = pumpSettled(t, m)
+}
+
+// TestAFailedClientCancelDrawsItsRowExactlyOnce is finding 4(b), the other side.
+// A cancel the model asked for answers the model with its error, and that is the
+// one report: the disarm delta it also causes carries the reason — so the toast
+// still says what was lost — and no detail, because a second report would draw the
+// same failure twice.
+func TestAFailedClientCancelDrawsItsRowExactlyOnce(t *testing.T) {
+	m, sess := scriptedModel(t)
+	held := scriptHeld()
+	m = startScripted(t, m, sess, "go", held)
+	// Esc's own cancel, held on arrival and armed to fail.
+	release := sess.HoldNextCancel()
+	sess.FailNextCancel(errors.New("nope"))
+	m = pumpEsc(t, m)
+	awaitBarrier(t, sess.Cancels(), "Esc's cancel reaching the session")
+
+	// A send-now armed against the same turn, so the failed cancel has a send to
+	// disarm as well as a caller to answer.
+	m.input.SetValue("PINEAPPLE")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, enter())
+	if !sendNowArmed(m) {
+		t.Fatalf("setup: nothing armed:\n%s", plainView(m))
+	}
+
+	release()
+	m = pumpUntil(t, m, allOf(errorRows(1), viewHas("cancel failed")))
+	m = pumpSettled(t, m)
+	if got := texts(m, entryError); len(got) != 1 || got[0] != "nope" {
+		t.Fatalf("one failed cancel, one error row: %q", got)
+	}
+	if sendNowArmed(m) {
+		t.Fatal("the failed cancel left the send armed")
+	}
+	if m.input.Value() != "PINEAPPLE" {
+		t.Fatalf("the send's text stays where it was: %q", m.input.Value())
+	}
+}
+
+// TestSendingAQueuedRowKeepsAnIdenticalDraft is finding 5: a send-now that came
+// from a queued row never held the composer, so it must not take a draft that
+// happens to read the same. Text equality and a send_now origin do not make a
+// started event this composer's business — another client's would match too.
+func TestSendingAQueuedRowKeepsAnIdenticalDraft(t *testing.T) {
+	m, sess := scriptedModel(t)
+	first, sent := scriptHeld(), scriptHeld()
+	m = startScripted(t, m, sess, "go", first)
+	sess.Script(sent)
+	m = pumpEnter(t, m, "PINEAPPLE")
+	if got := queueTexts(m); len(got) != 1 {
+		t.Fatalf("setup: the row should be queued: %q", got)
+	}
+	// An independent draft that reads exactly like the queued row.
+	m.input.SetValue("PINEAPPLE")
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if !m.queueFocus {
+		t.Fatalf("setup: ↑ did not reach the band:\n%s", plainView(m))
+	}
+	m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = pumpKey(t, m, enter())
+
+	awaitBarrier(t, sent.opened, "the row's turn opening")
+	m = pumpUntil(t, m, turnsDrawn(2))
+	if m.input.Value() != "PINEAPPLE" {
+		t.Fatalf("a row-sourced send took an unrelated draft: %q", m.input.Value())
+	}
+	sent.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	assertPrompts(t, sess, "go", "PINEAPPLE")
 }
 
 // ------------------------------------------------------------- the echo rule
@@ -603,8 +844,11 @@ func TestSendNowDeltasBecomeTheNotesTheyAlwaysWere(t *testing.T) {
 			t.Fatalf("Esc says it in its own Update:\n%s", plainView(m))
 		}
 		// The delta for that same Disarm is this model's own echo: it changes
-		// nothing, and the note simply lingers as it always did.
-		m = pumpSettled(t, m)
+		// nothing, and the note simply lingers as it always did. pumpDrained and
+		// not pumpSettled: the turn the send was armed against is deliberately
+		// still running — its cancel is held — so the chain is not over and the
+		// claim here is only that the delta has landed.
+		m = pumpDrained(t, m)
 		if sendNowArmed(m) {
 			t.Fatal("the send is still armed")
 		}

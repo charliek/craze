@@ -180,16 +180,21 @@ type StateDelta struct {
 	// not touch it, Armed true for a send just armed, and a value with Armed
 	// false for one that is gone, with Reason saying why.
 	SendNow *SendNowState
-	// Reason belongs to the SendNow section and is set only beside it: which
-	// of the ways an armed send can be lost this was, from the SendNow*
-	// constants below.
+	// Reason names what happened, from the SendNow* constants below. It usually
+	// stands beside the section it is about — a send-now that was lost — but it
+	// may stand alone, with every section nil: that is a delta whose news is the
+	// event itself and not a change to any state a client mirrors. The one such
+	// delta today is a cancel the engine made for an armed send-now that failed
+	// after the client had already taken that send back: nothing about the
+	// send-now changed (it was gone), and the failure is still the client's to
+	// hear. A client reads each section it knows, and the reason and its detail,
+	// independently.
 	Reason string
 	// Detail is the failure behind a Reason that has one, as text, and "" for
-	// every Reason that does not. Today that is SendNowCancelFailed alone: the
-	// cancel an armed send-now asked for is made by the engine rather than by
-	// the client, so the error it came back with reaches the client here or
-	// nowhere — and a client that has always drawn that failure as a transcript
-	// row still can.
+	// every Reason that does not. Today that is SendNowCancelFailed alone, and
+	// only for the cancel the ENGINE made: a cancel a client asked for answers
+	// that client with its error directly, so a detail here too would be the same
+	// failure reported twice. The engine's own has no caller to answer.
 	//
 	// It is text and never an error value, for the reason TurnInfo.Err is: an
 	// event enqueued through the log's outbox is immutable once accepted and is

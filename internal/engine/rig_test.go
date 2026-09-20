@@ -152,6 +152,10 @@ func shape(ev agent.Event) string {
 	case agent.EventMeta:
 		s := sendNowDelta(ev)
 		switch {
+		case s == nil && ev.State != nil && ev.State.Reason != "":
+			// A reason with no section at all: the engine's own cancel failing
+			// after the send it was for had already been taken back.
+			return "reported " + ev.State.Reason
 		case s == nil:
 			return "meta"
 		case s.Armed:

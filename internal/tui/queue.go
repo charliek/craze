@@ -194,24 +194,14 @@ func (m *Model) note(text string) {
 
 // ---------------------------------------------------------------- the verbs
 
-// queueDraft queues the composer's text during a running turn. It is a queue
-// verb and never a second admission path: the engine's Queue starts no turn,
-// however idle it turns out to be by the time it runs.
-func (m Model) queueDraft(text string) (tea.Model, tea.Cmd) {
-	if m.eng == nil {
-		return m, nil
-	}
-	if _, err := m.eng.Queue(m.nextCmd(), text); err != nil {
-		// The draft is untouched: a refused message is still the user's to
-		// shorten or send later.
-		m.note(queueErrNote(err))
-		return m, nil
-	}
-	m.input.SetValue("")
-	m.resetSlash()
-	m.refreshSnap()
-	return m, nil
-}
+// Enter during a running turn used to call Control.Queue from here (queueDraft).
+// It does not any more: Queue never starts a turn and never wakes the driver, so
+// choosing it from the model's own view of the session strands the row whenever
+// that view lags — the engine has settled, nothing will drain, and the row sits in
+// the band. Enter's intent is "send this when you can", which is Submit's queue
+// mode, and the engine answers with what it did. Control.Queue is for a caller
+// that means queue-ONLY, and the TUI has no such action: its band edits and
+// removes rows, it never adds one without meaning to send it.
 
 func queueErrNote(err error) string {
 	switch {
@@ -320,6 +310,8 @@ func (m *Model) withdrawSendNow(note string) {
 		return
 	}
 	m.disarmed = c.Cause()
+	// The arm is gone, so nothing of this client's is waiting to take its draft.
+	m.armedDraft = false
 	if note != "" {
 		m.note(note)
 	}

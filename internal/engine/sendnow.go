@@ -113,7 +113,9 @@ func (e *Engine) cancelArmed(turn, cause string) {
 	defer e.wg.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), armedCancelTimeout)
 	defer cancel()
-	_, _ = e.cancelHeld(ctx, turn, cause)
+	// own: there is no caller to answer, so cancelHeld reports a failure as an
+	// event instead — and does so whether or not the arm is still standing.
+	_, _ = e.cancelHeld(ctx, turn, cause, true)
 }
 
 // Disarm takes back an armed send-now. The text is wherever it was — a client's

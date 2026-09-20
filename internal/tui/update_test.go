@@ -480,17 +480,26 @@ func TestEscRightAfterEnterWithdrawsTheClaimedPrompt(t *testing.T) {
 	}
 }
 
-// TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead is the corner the
-// claim used to accept, closed. The agent is running a turn of its own and the
-// event that says so is still in the channel, so the model's own mirror would let
-// Enter send — and it used to, claiming a prompt the session then refused, with an
-// Esc in the next Update having to be careful not to stop the agent's turn on its
-// behalf (the old TestEscAfterEnterDuringAForeignTurnWritesNoCancel).
+// TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead is a RECORDED
+// BEHAVIOUR CHANGE, and this is what it changed to.
 //
-// Admission is the engine's now and it reads the session's own flag inside the
-// section that would claim the turn, so nothing is claimed at all: the text is
-// queued, Esc has no turn of craze's own to cancel and writes nothing, and the row
-// drains when the agent's turn ends.
+// The agent is running a turn of its own and the event that says so is still in
+// the channel, so the model's own mirror would let Enter send. At the baseline it
+// did: the prompt was claimed, its row drawn, the model went working, and an Esc
+// in the next Update withdrew that claim — the text was never sent
+// (TestEscAfterEnterDuringAForeignTurnWritesNoCancel, retired with this).
+//
+// It queues now, because admission is the engine's and the engine reads the
+// session's own flag in the section that would claim the turn (plan 021 §3.4: a
+// turn is admitted only with "no foreign turn reported"). The model's view may lag
+// that flag; the engine's never does. And a queued row is exactly what a foreign
+// turn the model DOES know about has always produced
+// (TestEnterDuringAForeignTurnQueues), so the two windows now agree instead of
+// behaving differently depending on which events had been delivered.
+//
+// What the user is owed is a way out, and they have the ordinary one: the row is in
+// the band, visible, and removable with the band's own verbs — asserted below —
+// and it drains by itself when the agent's turn ends.
 func TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
@@ -511,6 +520,21 @@ func TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead(t *testing.T) {
 	if n := turnsStarted(stub); n != 0 {
 		t.Fatalf("%d prompts reached the session during a foreign turn", n)
 	}
+	// Visible, and the band's own Backspace takes it back: the way out Esc used to
+	// be.
+	if !strings.Contains(plainView(m), "#1 mine") {
+		t.Fatalf("the row is not on screen:\n%s", plainView(m))
+	}
+	withdrawn := pumpKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if !withdrawn.queueFocus {
+		t.Fatalf("↑ did not reach the band:\n%s", plainView(withdrawn))
+	}
+	withdrawn = pumpKey(t, withdrawn, tea.KeyMsg{Type: tea.KeyBackspace})
+	if !queueEmpty(withdrawn) {
+		t.Fatalf("the row could not be taken back: %q", queueTexts(withdrawn))
+	}
+	// The rest of the case is the row left in place, so it is put back.
+	enqueueRow(t, m, "mine")
 
 	// Esc has nothing of craze's own to stop, so the agent's turn is left alone.
 	m = pumpEsc(t, m)
@@ -2574,6 +2598,54 @@ func TestPlanOfferSurvivesAnAnsweredCard(t *testing.T) {
 	}
 	if !m.planOffering() {
 		t.Fatalf("the card was answered and the turn still earns the offer, so it must show:\n%s", plainView(m))
+	}
+}
+
+// TestPlanOfferSurvivesACardAfterTheWiresEnding is the other order the retired
+// "either order" test walked, and the one the engine's two endings make a real
+// window rather than a message race: the wire's own done has landed — arming the
+// offer — and the engine has not settled the turn, and the card arrives in between.
+// It is raised, it owns Enter while it is up, and answering it leaves the offer
+// standing exactly as it does when the card comes first.
+func TestPlanOfferSurvivesACardAfterTheWiresEnding(t *testing.T) {
+	m, sess := scriptedModel(t)
+	m = intoPlanMode(t, m)
+	sc := scriptHeld().endsThenWaits()
+	m = startScripted(t, m, sess, "plan it", sc)
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "here is the plan"})
+	sc.Release()
+	awaitBarrier(t, sc.ended, "the wire's own ending")
+	// Between the two endings: the done has been published, the engine cannot have
+	// settled because the continuation is held short of returning.
+	m = pumpUntil(t, m, func(m Model) bool { return m.planArmed() })
+	if m.status != statusWorking {
+		t.Fatalf("the engine has not ended the turn yet: status %s", m.status)
+	}
+	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+		ID:      "perm-1",
+		Tool:    "Shell",
+		Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
+	}})
+	m = pumpUntil(t, m, hasCard)
+	if m.planOffering() {
+		t.Fatal("the card is up and owns Enter; the offer must not compete for it")
+	}
+
+	sc.Return()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	if !m.cardOpen() {
+		t.Fatalf("the card the turn's ending did not answer is still up:\n%s", plainView(m))
+	}
+	if m.planOffering() {
+		t.Fatal("still the card's Enter, even once the turn has ended")
+	}
+	m, _ = press(m, runeKey('a'))
+	if m.cardOpen() {
+		t.Fatal("'a' should have answered the permission card")
+	}
+	if !m.planOffering() {
+		t.Fatalf("the card was answered and the turn still earns the offer:\n%s", plainView(m))
 	}
 }
 

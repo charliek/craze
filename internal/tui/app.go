@@ -404,6 +404,26 @@ type Model struct {
 	// suppression is per effect, so every other started — a drained row, an
 	// armed send firing, another client's prompt — draws its row (§3.4).
 	ownTurn string
+	// nextTurn is a turn Submit started while the model was still displaying
+	// another one as working: the engine had finished that turn and the model had
+	// not heard yet, because an engine event trails the state it describes. Such
+	// a turn is NOT applied in the Update that asked for it — doing so would draw
+	// its row ahead of the events of the turn before it, and then draw that
+	// turn's row a second time when its own started arrived. It is recorded here
+	// instead, and then behaves exactly as a queued row the engine drained: the
+	// displayed turn's ending keeps the model working because a successor is
+	// coming, and the row is drawn when its own started arrives, in order.
+	//
+	// One id is enough even for two of them. It means "at least one turn the
+	// model has accepted is still to start", the ids arrive in order, and each
+	// ending in between finds it set and stays working; the last one clears it.
+	nextTurn string
+	// armedDraft says the send-now this client armed came from its composer
+	// rather than from a queued row, so firing it takes that draft with it.
+	// Without it, a row-sourced send would clear an unrelated draft that happened
+	// to hold the same text — and another client's send-now would clear this
+	// client's composer, which is never right.
+	armedDraft bool
 	// disarmed is the Disarm command whose effect the model has already applied,
 	// for the same reason: Esc writes its own note in the Update that pressed
 	// it, and the delta the engine publishes for that same command is then this
@@ -1821,16 +1841,14 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		return m.runBuiltin(name, args)
 	}
-	// A running turn queues; so does a turn the agent is running on its own
-	// (grok's interject fallback): a prompt sent into it would be refused,
-	// and the queue drains the moment it ends.
-	if m.status == statusWorking || m.snap.ForeignTurn {
-		text := strings.TrimSpace(m.input.Value())
-		if text == "" {
-			return m, nil
-		}
-		return m.queueDraft(text)
-	}
+	// One admission, whatever the model happens to be showing: "send this, and
+	// queue it if it cannot go now". The engine decides which, in the section
+	// that would claim the turn, and it is the only thing that knows — the
+	// model's view of a running turn, or of a turn the agent started on its own,
+	// lags the engine by however long an event takes to be delivered. Deciding
+	// here instead is how a follow-up got stranded: the model thought a turn was
+	// running and called Queue, which starts nothing and wakes nothing, on an
+	// engine that had already gone idle.
 	return m.send()
 }
 
@@ -1853,13 +1871,15 @@ func (m Model) cycleMode() (tea.Model, tea.Cmd) {
 	return m.applyMode(id)
 }
 
+// send is Enter on the composer: the draft goes, as a turn if the engine can
+// start one and as a queued row if it cannot. The composer is cleared by the
+// submit, and only if the text was accepted — a refusal leaves it for the user to
+// shorten or send later, which is what a full queue has always done.
 func (m Model) send() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
 		return m, nil
 	}
-	m.input.SetValue("")
-	m.resetSlash()
 	return m.sendText(text)
 }
 
@@ -1884,9 +1904,14 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 //
 // Exactly one thing happened, and the model applies exactly that one:
 //
-//   - a turn started, so the row is drawn, the status goes working and the turn
-//     is stamped in this very Update — which is what a frame capture right after
-//     Enter sees — and that turn id is the one started event the model will skip;
+//   - a turn started while the model had nothing running, so the row is drawn,
+//     the status goes working and the turn is stamped in this very Update — which
+//     is what a frame capture right after Enter sees — and that turn id is the one
+//     started event the model will skip;
+//   - a turn started while the model was still displaying another one as working:
+//     nothing is drawn, and the turn is recorded as the pending successor
+//     (nextTurn), which is what stops the model drawing it ahead of the events of
+//     the turn before it. The text is accepted either way, so the draft goes;
 //   - a send-now was armed, so nothing is drawn and nothing leaves the queue or
 //     the composer, but the cancel mask goes up here: the cancel that makes room
 //     for the send is the engine's own now, so cancelTurn is not the one setting
@@ -1919,13 +1944,29 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 	case err != nil:
 		m.note(submitErrNote(err))
 	case res.Turn != "":
-		m.beginTurn(res.Turn, text)
-		m.ownTurn = res.Turn
+		if m.status == statusWorking {
+			// The engine had finished the turn on screen and the model has not
+			// applied its ending yet. Record the successor and draw nothing: its
+			// row is the started event's, in order behind everything the turn
+			// before it still owes.
+			m.nextTurn = res.Turn
+			if mode == engine.SubmitSendNow {
+				// A send-now confirmed in this window started at once instead of
+				// arming, so there is no cancel — but the cards of the turn it
+				// was meant to replace go, as they did when this window took the
+				// cancelTurn branch.
+				m.maskCards()
+			}
+		} else {
+			m.beginTurn(res.Turn, text)
+			m.ownTurn = res.Turn
+		}
 		if fromRow == "" {
 			m.clearMatchingDraft(text)
 		}
 	case res.Armed:
 		m.maskCards()
+		m.armedDraft = fromRow == ""
 	case res.Queued != nil && fromRow == "":
 		m.clearMatchingDraft(text)
 	}
@@ -2384,7 +2425,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// for it is what the model wrote for the same event before the engine
 			// existed — the toasts, and the one error row a failed cancel has
 			// always left. A settings delta draws nothing at all (§3.8).
-			m.applySendNowDelta(ev)
+			m.applyStateDelta(ev)
 		}
 		if ev.Mode != "" {
 			// Any mode update at all retires the offer, even one that names the
@@ -2420,24 +2461,39 @@ func (m *Model) applyEvent(ev agent.Event) {
 //     section that reserved it, and the log delivers in order, so it arrives
 //     before the started of any turn reserved after it. The first started the
 //     model sees once ownTurn is set is therefore ownTurn's.
-//   - Only one can be outstanding: a synchronous Submit leaves the model working,
-//     and nothing submits from working — Enter queues, and an armed send-now
-//     returns no turn at all.
+//   - Only one can be outstanding: a synchronous apply happens only when the
+//     model is not already displaying a working turn, and it leaves it working,
+//     so the next Submit either queues, arms, or is recorded as the pending
+//     successor — none of which touches ownTurn.
 //
 // The one case that leaves ownTurn set for good is an engine closed between the
 // reserve and the publish, where the enqueue is dropped with everything else at
 // the cut. The program is quitting; nothing reads it again.
 func (m *Model) applyTurnStarted(ev agent.Event) {
-	if id := ev.Turn.ID; id != "" && id == m.ownTurn {
-		m.ownTurn = ""
-		return
+	if id := ev.Turn.ID; id != "" {
+		if id == m.ownTurn {
+			m.ownTurn = ""
+			return
+		}
+		if id == m.nextTurn {
+			// The pending successor, arriving in its place. Nothing was applied
+			// for it, so it is drawn like any other started; what the marker did
+			// was keep the model working until this moment.
+			m.nextTurn = ""
+		}
 	}
 	m.beginTurn(ev.Turn.ID, ev.Turn.Text)
-	if ev.Turn.Origin == agent.TurnOriginSendNow {
-		// A send-now that fired takes the draft it was armed from with it, if
-		// the composer still holds it — which is the one thing Cause is for
-		// here: informative, never the reason an effect is applied or skipped.
+	if ev.Turn.Origin == agent.TurnOriginSendNow && m.armedDraft {
+		// A send-now that fired takes the draft it was armed from with it, if the
+		// composer still holds it. Only a send THIS client armed from its
+		// composer: a row-sourced send never held the draft, and another client's
+		// send-now has no business in this composer at all — text equality and a
+		// send_now origin do not make it ours.
 		m.clearMatchingDraft(ev.Turn.Text)
+	}
+	if ev.Turn.Origin == agent.TurnOriginSendNow {
+		// Fired: whatever it was armed from, it is not armed any more.
+		m.armedDraft = false
 	}
 }
 
@@ -2448,10 +2504,11 @@ func (m *Model) applyTurnStarted(ev agent.Event) {
 // failed nothing at all, because the session's own EventError has already drawn
 // that row.
 //
-// The status goes idle only with an empty Next. With a successor — a queued row
-// the settlement drained, an armed send-now firing — the model stays working, so
-// a cancelled turn with something behind it never shows an idle, and the host hub
-// never publishes one (A7).
+// The status goes idle only with an empty Next AND no pending successor of the
+// model's own. With a successor — a queued row the settlement drained, an armed
+// send-now firing, or a turn Submit started while this one was still on screen
+// (nextTurn) — the model stays working, so nothing with work in flight behind it
+// ever shows an idle, and the host hub never publishes one (A7).
 //
 // # What settles, and what is only recorded
 //
@@ -2517,66 +2574,69 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 		m.confirm = nil
 		m.note("the turn ended first")
 	}
-	if t.Next == "" {
+	if t.Next == "" && m.nextTurn == "" {
 		m.status = statusIdle
 	}
 }
 
-// applySendNowDelta is the engine's armed send-now changing, written exactly as
-// the model has always written it: the toast for each way a send can be lost, and
-// — for the one that is a failure — the error row beside it, in the order
-// cancelFailedMsg produced the two. Nothing else in S1b reads a state delta, and
-// no settings delta draws anything at all.
+// applyStateDelta is a state delta, written exactly as the model has always
+// written the same news: the toast for each way an armed send-now can be lost,
+// and — for a reason that is a failure — the error row beside it, in the order
+// cancelFailedMsg produced the two. The send-now section is the whole of what S1b
+// reads; no settings delta draws anything at all.
+//
+// The two halves are read independently, because a reason can stand without a
+// section (agent.StateDelta): the note belongs to the send-now section, since it
+// says what was lost, and the row belongs to the failure, since that happened
+// whether or not a send was still there to lose. That is the shape of the one
+// delta that carries a reason and no section — a cancel the engine made for an arm
+// the client had already taken back, which still failed and still owes its row.
 //
 // An arm is not reported here: the model applied it from Submit's own answer, and
 // the delta that says a send is armed carries no reason because nothing was lost.
-// Every way one can be lost does, and each is its own sentence, because each is a
-// different thing to tell the user.
 //
 // None of it is keyed to a turn, and none of it needs to be. A delta is about the
-// armed send, of which there is one at a time, and what it writes is a note and —
-// for the failure — a row: nothing here settles any state, so a delta that arrives
-// late says something true about a send that is gone rather than contradicting
-// the one that replaced it. Whether a send is armed *now* is read from the engine
-// (sendNowPending), never from these events.
-func (m *Model) applySendNowDelta(ev agent.Event) {
-	sn := ev.State.SendNow
-	if sn == nil || sn.Armed {
-		return
+// armed send, of which there is one at a time, and what it writes is a note and a
+// row: nothing here settles any state, so a delta that arrives late says something
+// true about a send that is gone rather than contradicting the one that replaced
+// it. Whether a send is armed *now* is read from the engine (sendNowPending),
+// never from these events.
+func (m *Model) applyStateDelta(ev agent.Event) {
+	st := ev.State
+	// The note: what was lost, which only a cleared send-now section can say.
+	if sn := st.SendNow; sn != nil && !sn.Armed {
+		m.armedDraft = false
+		switch st.Reason {
+		case agent.SendNowWithdrawn:
+			if ev.Cause != "" && ev.Cause == m.disarmed {
+				// This model's own Disarm, whose note it wrote in the Update that
+				// asked for it. Anything else is somebody else taking it back.
+				m.disarmed = ""
+			} else {
+				m.note("send now dropped")
+			}
+		case agent.SendNowOtherTurn:
+			// It was armed against a turn that is no longer the one that just
+			// ended, so it was not that turn's business.
+			m.note("send now dropped")
+		case agent.SendNowRowGone:
+			// The row it named went some other way — the drain sent it, or it was
+			// cancelled — so there was nothing left to send now.
+			m.note("that message has already gone")
+		case agent.SendNowCancelFailed:
+			// The cancel never reached the agent, so the turn it would have
+			// replaced is still running. The text is where it was.
+			m.note("cancel failed")
+		case agent.SendNowTurnFailed, agent.SendNowStopped, agent.SendNowClosing:
+			// Silent, as they always were: the failure, the stop or the quit is
+			// already the whole of what the user is being told.
+		}
 	}
-	switch ev.State.Reason {
-	case agent.SendNowWithdrawn:
-		if ev.Cause != "" && ev.Cause == m.disarmed {
-			// This model's own Disarm, whose note it wrote in the Update that
-			// asked for it. Anything else is somebody else taking it back.
-			m.disarmed = ""
-			return
-		}
-		m.note("send now dropped")
-	case agent.SendNowOtherTurn:
-		// It was armed against a turn that is no longer the one that just
-		// ended, so it was not that turn's business.
-		m.note("send now dropped")
-	case agent.SendNowRowGone:
-		// The row it named went some other way — the drain sent it, or it was
-		// cancelled — so there was nothing left to send now.
-		m.note("that message has already gone")
-	case agent.SendNowCancelFailed:
-		// The cancel never reached the agent, so the turn it would have
-		// replaced is still running. The text is where it was.
-		//
-		// Both halves of what cancelFailedMsg wrote, in its order: the note, and
-		// then the failure as a transcript row. That cancel was the engine's —
-		// the arm asked for it and the engine made it — so the delta's Detail is
-		// where its error reaches this model, and a cancel of the model's own
-		// still draws the row from its own command's report.
-		m.note("cancel failed")
-		if ev.State.Detail != "" {
-			m.addError(ev.State.Detail)
-		}
-	case agent.SendNowTurnFailed, agent.SendNowStopped, agent.SendNowClosing:
-		// Silent, as they always were: the failure, the stop or the quit is
-		// already the whole of what the user is being told.
+	// The row: the failure behind the reason, which the engine fills only for a
+	// cancel it made itself. A cancel this model asked for answers it directly,
+	// and drawing the row from both would draw one failure twice.
+	if st.Detail != "" {
+		m.addError(st.Detail)
 	}
 }
 
