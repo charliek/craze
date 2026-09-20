@@ -25,12 +25,12 @@ import (
 // With no turn of craze's own the cancel is still accepted, and written at
 // once: the agent may be running a turn it started itself, or holding an ask
 // that arrived between turns, and the engine cannot yet see either.
-func (e *Engine) Cancel(ctx context.Context, _ Command, turn string) (CancelResult, error) {
-	id, err := e.holdCancel(turn, false)
+func (e *Engine) Cancel(ctx context.Context, c Command, turn string) (CancelResult, error) {
+	id, err := e.holdCancel(turn, false, c.Cause())
 	if err != nil {
 		return CancelResult{}, err
 	}
-	return e.cancelHeld(ctx, id)
+	return e.cancelHeld(ctx, id, c.Cause())
 }
 
 // Stop refuses every later admission, clears the queue, and cancels what is
@@ -45,20 +45,28 @@ func (e *Engine) Cancel(ctx context.Context, _ Command, turn string) (CancelResu
 // ahead of the turn's done. Stop blocks already, and is never called from the
 // primary's reader. A log that is closing has nothing left to order: the
 // cancel goes ahead.
-func (e *Engine) Stop(ctx context.Context, _ Command) error {
-	id, err := e.holdCancel("", true)
+func (e *Engine) Stop(ctx context.Context, c Command) error {
+	id, err := e.holdCancel("", true, c.Cause())
 	if err != nil {
 		return err
 	}
 	_ = e.log.Flush(ctx)
-	_, err = e.cancelHeld(ctx, id)
+	_, err = e.cancelHeld(ctx, id, c.Cause())
 	return err
 }
 
 // holdCancel validates a cancel and takes its hold, in one section.
-func (e *Engine) holdCancel(turn string, stop bool) (string, error) {
+func (e *Engine) holdCancel(turn string, stop bool, cause string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.holdCancelLocked(turn, stop, cause)
+}
+
+// holdCancelLocked is holdCancel's section, for a caller that already holds
+// e.mu and has to take the hold atomically with something else of its own —
+// arming a send-now, which must not let anything be admitted between the arm
+// and the cancel it asks for.
+func (e *Engine) holdCancelLocked(turn string, stop bool, cause string) (string, error) {
 	if e.closed {
 		return "", ErrNotAccepting
 	}
@@ -75,6 +83,11 @@ func (e *Engine) holdCancel(turn string, stop bool) (string, error) {
 		for _, qev := range e.queue.Clear() {
 			batch = append(batch, e.stamp(qev.Event(), ""))
 		}
+		// An armed send goes with them: nothing may be admitted after a stop, so
+		// the turn it was waiting for will settle into nothing at all.
+		if ev, ok := e.disarmLocked(agent.SendNowStopped, cause); ok {
+			batch = append(batch, ev)
+		}
 		// A mandatory completion: the rows are gone whether or not the outbox
 		// reports room.
 		e.log.Enqueue(batch...)
@@ -84,8 +97,10 @@ func (e *Engine) holdCancel(turn string, stop bool) (string, error) {
 }
 
 // cancelHeld makes the session's cancel for a hold already taken, releases the
-// hold, and lets the driver pass.
-func (e *Engine) cancelHeld(ctx context.Context, id string) (CancelResult, error) {
+// hold, and lets the driver pass. cause is the command the cancel came from, for
+// the one event this path can author: the delta for a send-now the failure of
+// this cancel disarms.
+func (e *Engine) cancelHeld(ctx context.Context, id, cause string) (CancelResult, error) {
 	if h := e.hooks; h != nil && h.beforeSessionCancel != nil {
 		h.beforeSessionCancel(id)
 	}
@@ -99,6 +114,18 @@ func (e *Engine) cancelHeld(ctx context.Context, id string) (CancelResult, error
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.cancelsInFlight--
+		if err != nil && e.armed != nil && e.armed.turn == id {
+			// The cancel never reached the agent, so the turn a send was armed
+			// against is still running and its settlement is not coming. The
+			// send disarms here, in the section that releases the hold and
+			// before the pass that release allows: a send left armed through
+			// that pass could fire into a turn this cancel did not stop. The
+			// text stays where it was, which is what the TUI's own
+			// cancelFailedMsg has always done with it.
+			if ev, ok := e.disarmLocked(agent.SendNowCancelFailed, cause); ok {
+				e.log.Enqueue(ev)
+			}
+		}
 		next = e.passLocked()
 		// Settled is the engine's own fact, read after the pass the release
 		// allowed: the turn the cancel was held against is no longer current.

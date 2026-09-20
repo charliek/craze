@@ -157,6 +157,78 @@ const (
 	TurnOriginSendNow = "send_now"
 )
 
+// StateDelta is Event.State: the sections of the session's shared state that
+// one event changed, each carried in full (plan 021 §3.8). It is how a client
+// that folds the stream learns a change it did not make, and why an EventMeta
+// need never again mean nothing but "call Snapshot()".
+//
+// Every section is a pointer, and nil means "this event did not touch that
+// section" — not "that section is now empty". A section that has become empty
+// is a non-nil value saying so, which is the only way one event can say
+// "cleared" and another "unchanged" in the same field. Sections are added as
+// the phase reaches them: the send-now section ships with send-now itself, and
+// Title, Mode, Model, Config, Commands, Plugins and IndexErr arrive with the
+// settings deltas, each as one more field beside these.
+//
+// A craze-initiated change carries its payload here and nowhere else:
+// Event.Mode and Event.Text stay empty on it, because they are what an
+// *agent*-initiated update fills and a client reads them as exactly that — one
+// retires a plan offer, the other writes the index and prints a title line
+// (plan 021 correction 20).
+type StateDelta struct {
+	// SendNow is the engine's armed send-now, in full: nil when this event did
+	// not touch it, Armed true for a send just armed, and a value with Armed
+	// false for one that is gone, with Reason saying why.
+	SendNow *SendNowState
+	// Reason belongs to the SendNow section and is set only beside it: which
+	// of the ways an armed send can be lost this was, from the SendNow*
+	// constants below.
+	Reason string
+}
+
+// SendNowState is the send-now section of a StateDelta: what the engine has
+// armed, or — with Armed false — that it has nothing armed any more. The text
+// is carried because an armed send is text the client has not consumed
+// anywhere else: nothing leaves a queue or a composer until it fires, so this
+// is the only record that it was ever waiting.
+type SendNowState struct {
+	// Armed says a send-now is waiting for the turn it cancelled to settle.
+	Armed bool
+	// Text is what will be sent, and FromRow the queued row it will be
+	// re-taken from, "" for text a client is holding itself.
+	Text    string
+	FromRow string
+	// Turn is the turn it was armed against: the one whose settlement fires
+	// it.
+	Turn string
+}
+
+// Why an armed send-now was lost, on StateDelta.Reason. Each is a distinct
+// path, because a client turns them into distinct words for the user: today's
+// TUI notes for a withdrawn send, a cancel that failed and a row that had
+// already gone are three different sentences.
+const (
+	// SendNowWithdrawn: a client took it back (engine.Control.Disarm).
+	SendNowWithdrawn = "withdrawn"
+	// SendNowCancelFailed: the cancel that was to make room for it never
+	// reached the agent, so the turn it would have replaced is still running.
+	SendNowCancelFailed = "cancel_failed"
+	// SendNowTurnFailed: the turn it was armed against ended in an error.
+	// Nothing runs from an error state, and the queue is cleared with it.
+	SendNowTurnFailed = "turn_failed"
+	// SendNowOtherTurn: the turn that settled was not the one it was armed
+	// against, so it is no longer that turn's business.
+	SendNowOtherTurn = "other_turn"
+	// SendNowRowGone: the queued row it named had already left the queue when
+	// it came to fire, so there was nothing left to send.
+	SendNowRowGone = "row_gone"
+	// SendNowStopped: the engine was stopped, which refuses every later
+	// admission.
+	SendNowStopped = "stopped"
+	// SendNowClosing: the session is closing.
+	SendNowClosing = "closing"
+)
+
 const (
 	SubagentChangeSpawned  = "spawned"
 	SubagentChangeProgress = "progress"
@@ -304,6 +376,11 @@ type Event struct {
 	Replayed bool
 	// Turn is set on EventTurn: one phase of one engine-driven turn.
 	Turn *TurnInfo
+	// State is set on an EventMeta the engine or the session authored to say
+	// which sections of the shared state changed, each in full (plan 021
+	// §3.8). It is what makes a meta event carry its news rather than mean
+	// "re-read the snapshot".
+	State *StateDelta
 	// Cause is the Command (client/id, plan 021 §3.2) that caused an
 	// engine-authored event, "" when none: an EventTurn, an EventAsk ending,
 	// a settings delta the engine itself enqueued. It lets a client that

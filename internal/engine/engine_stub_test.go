@@ -115,6 +115,57 @@ func TestTheStubRunsAChainThroughTheEngine(t *testing.T) {
 	}
 }
 
+// TestASendNowOnTheStubFiresWhenTheCancelledTurnSettles is the path a golden
+// will take: Ctrl+L on a provider that cannot interject arms the send, the
+// engine cancels the parked prompt — which withdraws, so the Stub says nothing
+// at all about it — and the settlement fires the send as the successor, ahead of
+// the row that was already queued.
+func TestASendNowOnTheStubFiresWhenTheCancelledTurnSettles(t *testing.T) {
+	stub, e, sub := newStubEngine(t)
+	parked := stub.ParkNext()
+	if _, err := e.Submit(engine.Command{}, "one", engine.SubmitQueue, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Queue(engine.Command{}, "queued"); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	select {
+	case <-parked:
+	case <-time.After(watchdog):
+		t.Fatal("the prompt never parked")
+	}
+	res, err := e.Submit(engine.Command{}, "now", engine.SubmitSendNow, "")
+	if err != nil || !res.Armed {
+		t.Fatalf("arming a send-now on the Stub: %+v, %v", res, err)
+	}
+	var ends, starts []string
+	for _, ev := range readUntil(t, sub, chainOver) {
+		if ev.Type != agent.EventTurn {
+			continue
+		}
+		switch ev.Turn.Phase {
+		case agent.TurnStarted:
+			starts = append(starts, ev.Turn.ID+":"+ev.Turn.Origin+":"+ev.Turn.Text)
+		case agent.TurnEnded:
+			ends = append(ends, ev.Turn.ID+":"+ev.Turn.StopReason+"→"+ev.Turn.Next)
+		}
+	}
+	// turn-1 was withdrawn by the cancel the arm asked for and names the armed
+	// send as its successor; the armed send goes before the queued row.
+	if got := strings.Join(ends, " "); got != "turn-1:cancelled→turn-2 turn-2:end_turn→turn-3 turn-3:end_turn→" {
+		t.Fatalf("endings %q", got)
+	}
+	if got := strings.Join(starts, " "); got != "turn-1:submit:one turn-2:send_now:now turn-3:drain:queued" {
+		t.Fatalf("the starts: %q", got)
+	}
+	if got := stub.Prompts(); strings.Join(got, "|") != "one|now|queued" {
+		t.Fatalf("the Stub was handed %q", got)
+	}
+	if st := e.State(); st.SendNow != nil || len(st.Queue) != 0 {
+		t.Fatalf("state after the send fired: %+v", st)
+	}
+}
+
 // TestEngineEventsCarryTheStubsClock: engine-authored events are stamped from
 // the session's clock, not the wall's, so a golden that shows a time shows the
 // injected one.

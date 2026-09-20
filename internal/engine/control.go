@@ -62,9 +62,12 @@ type SubmitResult struct {
 	// skip: every other started — a drained row, its own included, or an armed
 	// send firing — arrives only as an event.
 	Turn string
-	// Queued is the row the prompt became.
+	// Queued is the row the prompt became, or — for a submit that named a row
+	// which cannot start yet — that row, unchanged and still waiting.
 	Queued *agent.QueuedPrompt
-	// Armed reports that a send-now was armed against the running turn.
+	// Armed reports that a send-now was armed against the running turn: nothing
+	// has left the queue or the composer, and the send fires, or disarms with a
+	// reason, when that turn settles.
 	Armed bool
 }
 
@@ -113,6 +116,11 @@ var (
 	// ErrStaleVersion refuses a queue edit conditioned on a version the row
 	// no longer has.
 	ErrStaleVersion = errors.New("engine: the queued message changed")
+	// ErrUnknownRow answers a queued row id the queue does not hold: one the
+	// drain already sent, one another client removed, or one that never
+	// existed. It is its own code and not bad_request, because a client's
+	// answer to it is to re-read the queue rather than to fix its call.
+	ErrUnknownRow = errors.New("engine: no such queued message")
 	// ErrUnavailable refuses a command before it mutates anything because the
 	// event log's outbox has no room for the events it would cause.
 	ErrUnavailable = errors.New("engine: the event log is backed up")
@@ -138,6 +146,8 @@ func Code(err error) string {
 		return "stale_turn"
 	case errors.Is(err, ErrStaleVersion):
 		return "stale_version"
+	case errors.Is(err, ErrUnknownRow):
+		return "unknown_row"
 	case errors.Is(err, ErrBadRequest):
 		return "bad_request"
 	case errors.Is(err, ErrUnknownCommand):
@@ -165,11 +175,15 @@ func Code(err error) string {
 //
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
-// read to release. Submit, State, NewClientID, Events and Subscribe wait on
-// nothing: no channel, no provider call, no Publish. Start, Interject, Cancel,
-// Stop, Sync and Close block and belong on a goroutine that is not the
-// primary's reader — a tea.Cmd. Interject is the one exception in use today:
-// the TUI calls it from Update, as it always has.
+// read to release. Submit, Disarm, the queue verbs, State, NewClientID, Events
+// and Subscribe wait on nothing: no channel, no provider call, no Publish.
+// Start, Interject, Cancel, Stop, Sync and Close block and belong on a
+// goroutine that is not the primary's reader — a tea.Cmd. Interject is the one
+// exception in use today: the TUI calls it from Update, as it always has.
+//
+// A send-now is the one command whose provider call the engine makes for the
+// caller: Submit arms it and returns at once, and the cancel that makes room
+// for it is made on a goroutine of the engine's own.
 //
 // A command's effects are events, and events are published by the log's
 // outbox, so a command returning does not mean its events have been
@@ -187,11 +201,22 @@ type Control interface {
 	NewClientID() string
 
 	Submit(c Command, text string, mode SubmitMode, fromRow string) (SubmitResult, error)
+	// Disarm takes back an armed send-now, leaving its text where it was.
+	Disarm(c Command) error
 	Interject(ctx context.Context, c Command, text string) error
 	Cancel(ctx context.Context, c Command, turn string) (CancelResult, error)
 	// Stop refuses every later admission, clears the queue, and cancels what
 	// is running. It is what a signal does to `craze prompt`.
 	Stop(ctx context.Context, c Command) error
+
+	// The queue's verbs. None of them starts a turn, and none of them waits.
+	Queue(c Command, text string) (agent.QueuedPrompt, error)
+	// EditQueued rewrites a row in place. expectedVersion is the
+	// check-and-edit: nil is unconditional, and a version the row no longer
+	// has is ErrStaleVersion.
+	EditQueued(c Command, id, text string, expectedVersion *int) error
+	Unqueue(c Command, id string) (agent.QueuedPrompt, error)
+	ClearQueue(c Command) (int, error)
 
 	// Sync returns once every event enqueued before the call has been
 	// delivered: it is in the primary's buffer, or committed when there is no

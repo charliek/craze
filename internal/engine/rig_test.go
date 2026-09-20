@@ -104,6 +104,25 @@ func lastEnding(ev agent.Event) bool {
 	return ended("")(ev) && ev.Turn.Next == "" && ev.Turn.Pending == 0
 }
 
+// sendNowDelta is a state delta that reports the send-now section, and armedNow
+// / disarmed are its two halves: a send just armed, and one that is gone.
+func sendNowDelta(ev agent.Event) *agent.SendNowState {
+	if ev.Type != agent.EventMeta || ev.State == nil {
+		return nil
+	}
+	return ev.State.SendNow
+}
+
+func armedNow(ev agent.Event) bool {
+	s := sendNowDelta(ev)
+	return s != nil && s.Armed
+}
+
+func disarmed(ev agent.Event) bool {
+	s := sendNowDelta(ev)
+	return s != nil && !s.Armed
+}
+
 // shape is one event as a test compares it: enough to pin order and meaning,
 // nothing a clock or a counter decides.
 func shape(ev agent.Event) string {
@@ -123,6 +142,16 @@ func shape(ev agent.Event) string {
 		return s
 	case agent.EventQueue:
 		return fmt.Sprintf("queue %s %q", ev.QueueChange, ev.Queue.Text)
+	case agent.EventMeta:
+		s := sendNowDelta(ev)
+		switch {
+		case s == nil:
+			return "meta"
+		case s.Armed:
+			return fmt.Sprintf("armed %q from=%q turn=%s", s.Text, s.FromRow, s.Turn)
+		default:
+			return "disarmed " + ev.State.Reason
+		}
 	case agent.EventText:
 		return fmt.Sprintf("text %q", ev.Text)
 	case agent.EventDone:
@@ -133,6 +162,12 @@ func shape(ev agent.Event) string {
 		return fmt.Sprintf("foreign running=%v", ev.ForeignTurn.Running)
 	}
 	return string(ev.Type)
+}
+
+// armedShape is shape's spelling of the delta that arms a send-now, for a test
+// that has to name the row id the engine minted.
+func armedShape(text, from, turn string) string {
+	return fmt.Sprintf("armed %q from=%q turn=%s", text, from, turn)
 }
 
 func shapes(evs []agent.Event) []string {
@@ -165,6 +200,54 @@ func (r *rig) submit(text string) SubmitResult {
 		r.t.Fatalf("submit %q: %v", text, err)
 	}
 	return res
+}
+
+// queue puts a row at the back, through the verb a client uses.
+func (r *rig) queue(text string) agent.QueuedPrompt {
+	r.t.Helper()
+	row, err := r.e.Queue(Command{}, text)
+	if err != nil {
+		r.t.Fatalf("queue %q: %v", text, err)
+	}
+	return row
+}
+
+// sendNow arms or fires a send-now, and fails the test if the engine refused
+// it: a test about a refusal calls Submit itself.
+func (r *rig) sendNow(text, from string) SubmitResult {
+	r.t.Helper()
+	res, err := r.e.Submit(Command{}, text, SubmitSendNow, from)
+	if err != nil {
+		r.t.Fatalf("send now %q from %q: %v", text, from, err)
+	}
+	return res
+}
+
+// rows is the queue as State reports it, in send order.
+func (r *rig) rows() []string {
+	r.t.Helper()
+	var out []string
+	for _, row := range r.e.State().Queue {
+		out = append(out, row.Text)
+	}
+	return out
+}
+
+func (r *rig) wantRows(want ...string) {
+	r.t.Helper()
+	if got := r.rows(); strings.Join(got, "|") != strings.Join(want, "|") {
+		r.t.Fatalf("the queue holds %q, want %q", got, want)
+	}
+}
+
+// ignoreCancels makes the session take a cancel and write it without the turn
+// acting on it: an agent that has been told and has not stopped yet. It is what
+// lets a test do something else — disarm, stop, close — between a send-now's
+// cancel and the settlement that would have fired it.
+func (r *rig) ignoreCancels() {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	r.s.ignoreCancel = true
 }
 
 func (r *rig) wantPrompts(want ...string) {

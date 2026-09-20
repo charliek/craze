@@ -513,6 +513,12 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 			ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled,
 			Err: "agent: prompt cancelled before it was sent", Synthetic: true,
 		}, At: at}},
+		{"a send-now armed against a row", Event{Type: EventMeta, Cause: "tui-1/14", State: &StateDelta{
+			SendNow: &SendNowState{Armed: true, Text: "this one first", FromRow: "q-4", Turn: "turn-3"},
+		}, At: at}},
+		{"a send-now disarmed", Event{Type: EventMeta, Cause: "tui-1/14", State: &StateDelta{
+			SendNow: &SendNowState{}, Reason: SendNowCancelFailed,
+		}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
 	for _, tc := range cases {
@@ -598,6 +604,13 @@ func TestEventCodecPinsTheWireShape(t *testing.T) {
 			`{"type":"turn","turn":{"id":"turn-3","phase":"started","text":"go","origin":"submit"},"cause":"cli-1/7"}`},
 		{Event{Type: EventTurn, Turn: &TurnInfo{ID: "turn-3", Phase: TurnEnded, StopReason: "cancelled", ErrClass: EventErrPromptCancelled, Err: "agent: prompt cancelled before it was sent", Synthetic: true}},
 			`{"type":"turn","turn":{"id":"turn-3","phase":"ended","stopReason":"cancelled","errClass":"prompt_cancelled","err":"agent: prompt cancelled before it was sent","synthetic":true}}`},
+		{Event{Type: EventMeta, Cause: "c-1/4", State: &StateDelta{SendNow: &SendNowState{Armed: true, Text: "now, please", FromRow: "q-2", Turn: "turn-3"}}},
+			`{"type":"meta","state":{"sendNow":{"armed":true,"text":"now, please","fromRow":"q-2","turn":"turn-3"}},"cause":"c-1/4"}`},
+		// A cleared section is present and empty, which is how it differs from
+		// a section the delta did not touch: {"state":{"reason":…}} with no
+		// sendNow key would be indistinguishable from an unrelated delta.
+		{Event{Type: EventMeta, State: &StateDelta{SendNow: &SendNowState{}, Reason: SendNowRowGone}},
+			`{"type":"meta","state":{"sendNow":{},"reason":"row_gone"}}`},
 	} {
 		got, err := EncodeEvent(tc.ev)
 		if err != nil {

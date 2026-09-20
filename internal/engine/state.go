@@ -33,6 +33,10 @@ type State struct {
 	Activity Activity
 	// Turn is the current turn's id, "" when none is.
 	Turn string
+	// SendNow is the armed send-now, nil when nothing is armed. Nothing it
+	// names has been consumed: the row it points at is still in Queue and a
+	// draft is still in the client's composer.
+	SendNow *ArmedSend
 	// Err is the failure an Activity of error stands on.
 	Err string
 	// Cancelled says the last turn to settle ended cancelled, and Prompted
@@ -61,6 +65,9 @@ func (e *Engine) State() State {
 	}
 	if e.cur != nil {
 		st.Turn = e.cur.id
+	}
+	if a := e.armed; a != nil {
+		st.SendNow = &ArmedSend{Text: a.text, FromRow: a.from, Turn: a.turn, Cause: a.cause}
 	}
 	st.Err = e.err
 	st.Cancelled = e.cancelled

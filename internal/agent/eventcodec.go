@@ -339,6 +339,7 @@ type wireEvent struct {
 	Interjection   bool             `json:"interjection,omitempty"`
 	ForeignTurn    *wireForeignTurn `json:"foreignTurn,omitempty"`
 	Turn           *wireTurn        `json:"turn,omitempty"`
+	State          *wireState       `json:"state,omitempty"`
 	Replay         *wireReplay      `json:"replay,omitempty"`
 	Replayed       bool             `json:"replayed,omitempty"`
 	Cause          string           `json:"cause,omitempty"`
@@ -515,6 +516,24 @@ type wireTurn struct {
 	Pending    int           `json:"pending,omitempty"`
 }
 
+// wireState is a StateDelta. Each section is a pointer, so a section the
+// delta did not touch is absent and one it emptied is present and empty:
+// omitempty on a pointer omits only nil, which is exactly the distinction the
+// type is for.
+type wireState struct {
+	SendNow *wireSendNow `json:"sendNow,omitempty"`
+	Reason  string       `json:"reason,omitempty"`
+}
+
+// wireSendNow is SendNowState, field for field in the same order, so it
+// converts by a plain pointer cast like wireForeignTurn and wireTurn do.
+type wireSendNow struct {
+	Armed   bool   `json:"armed,omitempty"`
+	Text    string `json:"text,omitempty"`
+	FromRow string `json:"fromRow,omitempty"`
+	Turn    string `json:"turn,omitempty"`
+}
+
 type wireReplay struct {
 	Phase string `json:"phase,omitempty"`
 }
@@ -600,6 +619,9 @@ func toWireEvent(ev Event) wireEvent {
 	}
 	if c := ev.Command; c != nil {
 		w.Command = &wireCommand{PluginCommand: wirePluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
+	}
+	if s := ev.State; s != nil {
+		w.State = &wireState{SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason}
 	}
 	if ev.Err != nil {
 		class, code := classifyEventErr(ev.Err)
@@ -733,6 +755,9 @@ func (w *wireEvent) event() Event {
 	}
 	if c := w.Command; c != nil {
 		ev.Command = &ExpandedCommand{PluginCommand: PluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
+	}
+	if s := w.State; s != nil {
+		ev.State = &StateDelta{SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason}
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}
