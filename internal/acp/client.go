@@ -57,9 +57,9 @@ type Client struct {
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
 	turn            int
-	permHandler     func(turn int, req PermissionRequest) PermissionDecision
-	askHandler      func(turn int, req AskQuestionRequest) AskDecision
-	planHandler     func(turn int, req CreatePlanRequest) PlanDecision
+	permHandler     func(a Arrival, req PermissionRequest) PermissionDecision
+	askHandler      func(a Arrival, req AskQuestionRequest) AskDecision
+	planHandler     func(a Arrival, req CreatePlanRequest) PlanDecision
 	todosHandler    func(UpdateTodosRequest) []TodoItem
 	taskHandler     func(TaskRequest)
 	earlyHandler    func(EarlyAnswer)
@@ -81,14 +81,19 @@ type Client struct {
 // pendingReq is one blocking agent→client request. decide carries the kind's
 // own decision type (PermissionDecision, AskDecision, PlanDecision); replied
 // makes sure cancel, close and the handler between them answer exactly once.
-// turn is the turn the read loop registered it in, and params is the request as
-// it was decoded, kept for the path that answers one without ever running its
-// handler (EarlyAnswer). Both are written before the request is published to
-// c.incoming and never afterwards.
+// turn and inTurn are the request's Arrival as the read loop recorded it, and
+// params is the request as it was decoded, kept for the path that answers one
+// without ever running its handler (EarlyAnswer). All three are written before
+// the request is published to c.incoming and never afterwards.
 type pendingReq struct {
-	id      json.RawMessage
-	method  string
-	turn    int
+	id     json.RawMessage
+	method string
+	turn   int
+	// inTurn says a prompt of craze's own was in flight when this request was
+	// registered. It is read in the same c.mu section as turn, because the two
+	// change together and only together do they say which turn — if any — this
+	// request belongs to (Arrival).
+	inTurn  bool
 	params  RequestParams
 	decide  chan any
 	replied bool
@@ -107,6 +112,10 @@ const (
 	repliedByStale   = string(EarlyStaleTurn)
 	repliedByHandler = "handler"
 )
+
+// arrival is the request's Arrival: both halves of "which turn did this come
+// from", as the read loop recorded them.
+func (in *pendingReq) arrival() Arrival { return Arrival{Turn: in.turn, InTurn: in.inTurn} }
 
 type promptResult struct {
 	res PromptResult
@@ -161,9 +170,10 @@ func (c *Client) PromptInFlight() bool {
 }
 
 // SetPermissionHandler installs a session/request_permission handler. Every
-// blocking handler is handed the turn its request arrived in, so anything it
+// blocking handler is handed its request's Arrival — the turn counter it came
+// in on and whether a prompt of craze's own was running then — so anything it
 // puts on screen can be dropped once that turn is over (see TurnLive).
-func (c *Client) SetPermissionHandler(h func(turn int, req PermissionRequest) PermissionDecision) {
+func (c *Client) SetPermissionHandler(h func(a Arrival, req PermissionRequest) PermissionDecision) {
 	c.mu.Lock()
 	c.permHandler = h
 	c.mu.Unlock()
@@ -171,7 +181,7 @@ func (c *Client) SetPermissionHandler(h func(turn int, req PermissionRequest) Pe
 
 // SetAskHandler installs a cursor/ask_question handler. Without one the client
 // auto-answers with each question's first option.
-func (c *Client) SetAskHandler(h func(turn int, req AskQuestionRequest) AskDecision) {
+func (c *Client) SetAskHandler(h func(a Arrival, req AskQuestionRequest) AskDecision) {
 	c.mu.Lock()
 	c.askHandler = h
 	c.mu.Unlock()
@@ -179,7 +189,7 @@ func (c *Client) SetAskHandler(h func(turn int, req AskQuestionRequest) AskDecis
 
 // SetPlanHandler installs a cursor/create_plan handler. Without one the client
 // auto-accepts.
-func (c *Client) SetPlanHandler(h func(turn int, req CreatePlanRequest) PlanDecision) {
+func (c *Client) SetPlanHandler(h func(a Arrival, req CreatePlanRequest) PlanDecision) {
 	c.mu.Lock()
 	c.planHandler = h
 	c.mu.Unlock()
@@ -798,13 +808,18 @@ func (c *Client) dispatch(msg *Message, params RequestParams, run func(*pendingR
 	go c.runIncoming(in, run)
 }
 
-// register records a blocking request on the read loop, stamped with the turn
-// it arrived in and carrying its decoded parameters.
+// register records a blocking request on the read loop, stamped with the
+// Arrival it came in on and carrying its decoded parameters.
+//
+// Both halves of the arrival are read in ONE c.mu section, the same section
+// PromptBlocks changes them both in, because a request registered a moment
+// apart from a prompt starting or ending belongs to a different turn and only
+// the pair says which (Arrival).
 func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
 	c.mu.Lock()
-	turn := c.turn
+	turn, inTurn := c.turn, c.inPrompt
 	c.mu.Unlock()
-	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, params: params, decide: make(chan any, 1)}
+	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, inTurn: inTurn, params: params, decide: make(chan any, 1)}
 	key := idKey(msg.ID)
 	c.incomingMu.Lock()
 	c.incoming[key] = in
@@ -854,7 +869,7 @@ func (c *Client) reportEarlyAnswer(in *pendingReq, disp ReplyDisposition) {
 	case ReplyLostClosed:
 		reason = EarlyClosed
 	}
-	h(EarlyAnswer{Reason: reason, Turn: in.turn, Params: in.params})
+	h(EarlyAnswer{Reason: reason, Turn: in.turn, InTurn: in.inTurn, Params: in.params})
 }
 
 // liveIncoming reports whether a registered request still deserves its handler:
@@ -1151,7 +1166,7 @@ func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {
 	h := c.permHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.finishPermission(in, req, h(in.turn, req))
+		c.finishPermission(in, req, h(in.arrival(), req))
 		return
 	}
 	select {
@@ -1197,7 +1212,7 @@ func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
 	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		dec := h(in.turn, req)
+		dec := h(in.arrival(), req)
 		disp := c.replyIncoming(in, askOutcome(d, req, dec))
 		if dec.Replied != nil {
 			dec.Replied(disp)
@@ -1218,7 +1233,7 @@ func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
 	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		dec := h(in.turn, req)
+		dec := h(in.arrival(), req)
 		disp := c.replyIncoming(in, planOutcome(d, dec))
 		if dec.Replied != nil {
 			dec.Replied(disp)

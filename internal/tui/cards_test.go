@@ -20,11 +20,14 @@ func sizedCards(t *testing.T) (Model, *Stub) {
 	return startStub(t, stub, t.TempDir(), 80, 24), stub
 }
 
-// cardEvent announces a blocking request to the stub and then delivers it to
-// the model, which is the order the live session does it in.
+// cardEvent opens the blocking request in the session's ask registry — which
+// is what Stub.Emit does with a card event, adopting the test's own id — and
+// then delivers that event to the model, which is the order the live session
+// does it in. These tests do not pump the primary into the model, so the
+// opening the registry publishes goes into the log and the model is fed here.
 func cardEvent(t *testing.T, m Model, stub *Stub, ev agent.Event) Model {
 	t.Helper()
-	stub.noteOpen(ev)
+	stub.Emit(ev)
 	tm, _ := m.Update(eventMsg{ev})
 	return tm.(Model)
 }
@@ -518,11 +521,67 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 		t.Fatalf("a ghost card is on screen:\n%s", plainView(m))
 	}
 
-	// The next turn takes cards again.
+	// The mask is keyed to the turn that was cancelled and is NOT taken down by
+	// the session's own ending (panel: astra 10). That event is published
+	// directly and can overtake an opening of the cancelled turn still in the
+	// outbox, so a card arriving after it is still one nobody could answer.
+	cancelled := m.turnID
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
-	m = cardEvent(t, tm.(Model), stub, agent.Event{Type: agent.EventQuestion, Question: late})
+	second := stubQuestion()
+	second.ID = "ask-3"
+	m = cardEvent(t, tm.(Model), stub, agent.Event{Type: agent.EventQuestion, Question: second})
+	if m.cardOpen() {
+		t.Fatalf("a done took the mask down: %+v", m.cards)
+	}
+
+	// The engine's ending for that turn does take it down: the session ends the
+	// turn for the registry and waits for the outbox before it publishes its
+	// own ending, and this event is enqueued after that, so everything the
+	// cancelled turn could still raise has been delivered by now.
+	tm, _ = m.Update(endedEvent(cancelled, func(*agent.TurnInfo) {}))
+	m = tm.(Model)
+	if m.cardMask != "" {
+		t.Fatalf("the turn's ending should clear its own mask, got %q", m.cardMask)
+	}
+	third := stubQuestion()
+	third.ID = "ask-4"
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: third})
 	if !m.cardOpen() {
-		t.Fatal("a card after the turn ended is a real card again")
+		t.Fatal("a card after the cancelled turn has ended is a real card again")
+	}
+}
+
+// The other half of astra 10: a mask can neither leak onto the next turn nor
+// outlive it. A successor start clears it, so an opening of the NEW turn raises
+// its card even though the ending of the cancelled one never arrived.
+func TestTheCancelMaskDoesNotLeakOntoTheNextTurn(t *testing.T) {
+	m, stub := sizedCards(t)
+	stub.HangNext()
+	m.input.SetValue("one")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	cancelled := m.turnID
+
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	runCmd(cmd)
+	if m.cardMask != cancelled {
+		t.Fatalf("the mask is keyed to the cancelled turn, got %q want %q", m.cardMask, cancelled)
+	}
+
+	// A successor starts — a drained row, another client's prompt — and with it
+	// the mask goes: its openings are nobody's cancel.
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+		ID: "turn-99", Phase: agent.TurnStarted, Text: "two", Origin: agent.TurnOriginDrain,
+	}}})
+	m = tm.(Model)
+	if m.cardMask != "" {
+		t.Fatalf("the mask leaked onto the next turn: %q", m.cardMask)
+	}
+	next := stubQuestion()
+	next.ID = "ask-9"
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: next})
+	if !m.cardOpen() {
+		t.Fatal("the next turn's card is a real card")
 	}
 }
 

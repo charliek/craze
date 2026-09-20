@@ -109,6 +109,12 @@ type launch struct {
 type Engine struct {
 	sess agent.Session
 	log  *agent.EventLog
+	// asks is the session's ask registry: the engine holds it so that a client
+	// can list and answer through Control without reaching around to the seam.
+	// It has a mutex of its own, and **e.mu and registry.mu are never nested, in
+	// either order** (plan 021 §3.6): every method here that touches it does so
+	// with e.mu released.
+	asks *agent.AskRegistry
 	now  func() time.Time
 	opts Options
 
@@ -170,9 +176,10 @@ type hooks struct {
 }
 
 // New builds the engine for sess. The session must own an event log
-// (agent.LogOwner), because the engine publishes through it and observes it;
-// New installs the log's single observer, so a second engine on one session is
-// refused with agent.ErrObserverSet. It is called before sess.Start.
+// (agent.LogOwner), because the engine publishes through it and observes it,
+// and an ask registry (agent.AskSource), because a client answers asks through
+// Control; New installs the log's single observer, so a second engine on one
+// session is refused with agent.ErrObserverSet. It is called before sess.Start.
 func New(sess agent.Session, opts Options) (*Engine, error) {
 	return newEngine(sess, opts, nil)
 }
@@ -184,9 +191,14 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if !ok || owner.EventLog() == nil {
 		return nil, fmt.Errorf("engine: %T has no event log", sess)
 	}
+	src, ok := sess.(agent.AskSource)
+	if !ok || src.Asks() == nil {
+		return nil, fmt.Errorf("engine: %T has no ask registry", sess)
+	}
 	e := &Engine{
 		sess:     sess,
 		log:      owner.EventLog(),
+		asks:     src.Asks(),
 		now:      time.Now,
 		opts:     opts,
 		activity: ActivityStarting,
@@ -216,8 +228,6 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 //
 // What is still reached through here, and what takes each away:
 //
-//   - AnswerPermission, AnswerQuestion, AnswerPlan — until the ask registry gives
-//     Control its Answer and Asks (plan 021 C8b);
 //   - SetModel, SetMode, SetConfig, SetTitle — until settings become state deltas
 //     in order behind Control.Set and Control.SetTitle (C10);
 //   - Snapshot, which the TUI reads through Control.State() already, and which a
@@ -295,6 +305,31 @@ func (e *Engine) NewClientID() string {
 
 // Sync returns once every event enqueued before the call has been delivered.
 func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx) }
+
+// Asks is every ask the session is holding, in the order they were opened. It
+// waits on nothing and takes no lock of the engine's: the registry is its own
+// authority, and e.mu is never held across a call into it.
+func (e *Engine) Asks() []agent.AskRecord { return e.asks.Asks() }
+
+// Answer answers one ask, and is the whole of what a client does with a card.
+// It validates and claims in one step: an answer that does not fit is
+// agent.ErrBadAnswer and **leaves the ask open**, so a client that
+// mis-addressed one call has not left the agent waiting for an Esc; a second
+// valid answer is agent.ErrAlreadyResolved; an id this incarnation never issued
+// is agent.ErrUnknownAsk.
+//
+// The engine adds no gate of its own. An ask may be answered while the agent is
+// running a turn of its own, while a cancel is in flight, while the engine is
+// replaying — whenever the agent is waiting on one, which is the only condition
+// that matters — and the command's cause travels onto the ending, so the client
+// that answered can skip its own echo.
+//
+// It waits on nothing: one registry section and an enqueue, both of which are
+// bounded, so a client may call it from the primary's own reader.
+func (e *Engine) Answer(c Command, id string, a agent.AskAnswer) error {
+	_, err := e.asks.Answer(c.Cause(), id, a)
+	return err
+}
 
 // Interject merges text into the running turn. It is the session's own verb
 // and its own refusals: the engine adds nothing but the door.

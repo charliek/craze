@@ -16,7 +16,11 @@ type Stub struct {
 	// log is the live session's event log, the same code: emit publishes
 	// into it and Events is its primary, so the goldens run on numbered
 	// events exactly as a real session produces them.
-	log    *agent.EventLog
+	log *agent.EventLog
+	// asks is the Stub's ask registry — the same component the live session
+	// parks its blocking requests in, so a card a test emits is opened,
+	// answered and ended by the code every golden runs on (plan 021 §3.6).
+	asks   *agent.AskRegistry
 	closed chan struct{}
 	cancel chan struct{}
 	hang   bool
@@ -37,12 +41,10 @@ type Stub struct {
 	failConfigAt int
 	configCalls  int
 	snap         agent.Snapshot
-	// open are the blocking requests the stub has announced and is still
-	// waiting on, in arrival order, and calls is every answer it received.
-	// Together they are how a test holds §3.11's "every card answers exactly
-	// once": an id can only be answered while it is open.
-	open  []stubOpen
-	calls []stubCall
+	// token is the running turn's registry token, the no-turn token between
+	// turns: what a card the test emits now is parked against, and therefore
+	// what a cancel or that turn's end takes away.
+	token agent.TurnToken
 	// Clock stamps Event.At; tests inject one to drive lingers and elapsed
 	// times without sleeping. It is also what the Stub answers agent.Clocked
 	// with, so a component above the seam that stamps its own events reads this
@@ -90,10 +92,10 @@ type Stub struct {
 	cancelsSent int
 }
 
-type stubOpen struct{ id, method string }
-
 // stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close
-// produced for a request nobody answered.
+// produced for a request nobody answered. It is a projection of the registry's
+// own terminal records (Calls), kept in this shape because it is what every
+// card test reads.
 type stubCall struct {
 	Method    string // permission | question | plan
 	ID        string
@@ -115,7 +117,7 @@ func NewStub() *Stub { return newStub(false) }
 func NewStubNoPrimary() *Stub { return newStub(true) }
 
 func newStub(noPrimary bool) *Stub {
-	return &Stub{
+	s := &Stub{
 		failConfigAt: -1,
 		NoPrimary:    noPrimary,
 		log:          agent.NewEventLog(agent.EventLogOptions{NoPrimary: noPrimary}),
@@ -172,6 +174,10 @@ func newStub(noPrimary bool) *Stub {
 			},
 		},
 	}
+	// Beside the log, stamped from the Stub's own clock, so an ask's record
+	// carries the time a test injected and not the wall's.
+	s.asks = agent.NewAskRegistry(s.log, s.now)
+	return s
 }
 
 func (s *Stub) HangNext() {
@@ -262,7 +268,64 @@ func (s *Stub) AgentTitle(title string) {
 }
 
 // Emit publishes an event as the live session would, stamped with Clock.
-func (s *Stub) Emit(ev agent.Event) { s.emit(ev) }
+//
+// An event that opens a blocking request — a permission, or a question or plan
+// that is not already auto-answered — is routed through the ask registry
+// instead of published directly, exactly as the live session's handlers route
+// one: the registry publishes the opening, and the ask can then be answered,
+// cancelled or ended with its turn like any other (plan 021 §3.6). The test's
+// own id is **adopted**, because some forty test sites choose their ids and
+// read them back, and the flush before this returns keeps "emitted means
+// buffered" true for a test that emits and then looks.
+//
+// It is called from test goroutines and from a turn's own continuation, never
+// from the primary's reader, which is what makes the flush safe.
+func (s *Stub) Emit(ev agent.Event) {
+	req, ok := stubAskRequest(ev)
+	if !ok {
+		s.emit(ev)
+		return
+	}
+	s.mu.Lock()
+	token := s.token
+	s.mu.Unlock()
+	// A refused open — the turn ended or was cancelled, the session closed —
+	// still writes its one self-contained ending, which is the answer to "what
+	// became of this card"; there is nothing here to hand it to.
+	if _, err := s.asks.Open(context.Background(), token, req); err != nil {
+		return
+	}
+	_ = s.log.Flush(context.Background())
+}
+
+// stubAskRequest is the ask an event opens, and whether it opens one at all. An
+// Auto question or plan is a request craze has already answered: it carries no
+// card and opens nothing, exactly as the live session's automatic path does not
+// park one.
+func stubAskRequest(ev agent.Event) (agent.AskRequest, bool) {
+	switch {
+	case ev.Permission != nil:
+		return agent.AskRequest{
+			ID:   ev.Permission.ID,
+			Kind: agent.AskPermission,
+			Body: agent.AskBody{Permission: ev.Permission},
+		}, true
+	case ev.Question != nil && !ev.Question.Auto:
+		return agent.AskRequest{
+			ID:   ev.Question.ID,
+			Kind: agent.AskQuestion,
+			Body: agent.AskBody{Question: ev.Question},
+		}, true
+	case ev.Plan != nil && !ev.Plan.Auto:
+		return agent.AskRequest{
+			ID:   ev.Plan.ID,
+			Kind: agent.AskPlan,
+			Body: agent.AskBody{Plan: ev.Plan},
+		}, true
+	default:
+		return agent.AskRequest{}, false
+	}
+}
 
 func (s *Stub) FailNextSetMode() {
 	s.mu.Lock()
@@ -392,6 +455,7 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		s.cancelling = false
 		if opened {
 			s.inPrompt = false
+			s.token = agent.TurnToken{}
 		}
 		s.mu.Unlock()
 	}()
@@ -421,6 +485,11 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		}
 		return agent.Result{}, agent.ErrPromptCancelled
 	}
+	// The registry's name for this turn, minted before the section that opens
+	// it — the registry is never called with s.mu held — and ended on every
+	// return path, the withdrawals included (endAskTurn is idempotent).
+	token := s.beginAskTurn()
+	defer s.asks.EndTurn(token)
 	s.mu.Lock()
 	// The hang belongs to the prompt it was armed for and is consumed by it
 	// whatever becomes of that prompt, which is why it is taken here rather than
@@ -446,6 +515,7 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 	s.n++
 	n := s.n
 	s.inPrompt = true
+	s.token = token
 	opened = true
 	s.doneEmitted = false
 	s.mu.Unlock()
@@ -457,6 +527,7 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 		case <-ctx.Done():
 		}
 		s.markDone()
+		s.endAskTurn(token)
 		s.emit(agent.Event{Type: agent.EventDone, StopReason: "cancelled"})
 		return agent.Result{StopReason: "cancelled"}, nil
 	}
@@ -467,6 +538,7 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 	}
 	s.emit(agent.Event{Type: agent.EventText, Text: reply})
 	s.markDone()
+	s.endAskTurn(token)
 	s.emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
 	return agent.Result{StopReason: "end_turn"}, nil
 }
@@ -477,6 +549,31 @@ func (s *Stub) markDone() {
 	s.mu.Lock()
 	s.doneEmitted = true
 	s.mu.Unlock()
+}
+
+// beginAskTurn mints the registry token this turn's asks park against. It is
+// called with s.mu released, before the section that opens the turn, and the
+// Stub's own run and the scripted decorator both go through it.
+func (s *Stub) beginAskTurn() agent.TurnToken { return s.asks.BeginTurn() }
+
+// endAskTurn ends the turn for the registry and then waits for the outbox, so
+// every ask that turn still held has ended — and every opening still in flight
+// has been delivered — before the caller publishes the turn's terminal event
+// (plan 021 §3.6). It is idempotent, and safe on a closing log, where the flush
+// returns at once.
+//
+// It takes the turn's token down with it, so a card emitted after the ending
+// belongs to no turn of craze's own and is raised like any other between-turns
+// request — which is what the live session does with one, since a request that
+// reaches it then carries no turn membership (acp.Arrival).
+func (s *Stub) endAskTurn(token agent.TurnToken) {
+	s.mu.Lock()
+	if s.token == token {
+		s.token = agent.TurnToken{}
+	}
+	s.mu.Unlock()
+	s.asks.EndTurn(token)
+	_ = s.log.Flush(context.Background())
 }
 
 // Cancel mirrors the live session's CancelOutcome (plan 021 §3.7), fired and
@@ -499,8 +596,12 @@ func (s *Stub) Cancel(context.Context) (agent.CancelOutcome, error) {
 	if wrote {
 		s.cancelsSent++
 	}
+	token := s.token
 	s.mu.Unlock()
-	s.cancelOpen()
+	// Every open ask is answered cancelled and the running turn is marked, as
+	// the live session's Cancel does: with s.mu released, because s.mu and the
+	// registry's are never nested.
+	s.asks.CancelTurn(token)
 	select {
 	case s.cancel <- struct{}{}:
 	default:
@@ -508,74 +609,39 @@ func (s *Stub) Cancel(context.Context) (agent.CancelOutcome, error) {
 	return agent.CancelOutcome{Wrote: wrote, Withdrew: withdrew, Settled: settled}, nil
 }
 
-func (s *Stub) AnswerPermission(id, optionID string) error {
-	return s.answer(stubCall{Method: "permission", ID: id, Option: optionID, Cancelled: optionID == ""})
-}
+// Asks is the Stub's agent.AskSource (plan 021 §3.6): the registry a client
+// above the seam lists and answers through engine.Control, the same one the
+// live session has.
+func (s *Stub) Asks() *agent.AskRegistry { return s.asks }
 
-func (s *Stub) AnswerQuestion(id string, answers map[string][]string, skip bool) error {
-	return s.answer(stubCall{Method: "question", ID: id, Answers: answers, Skip: skip})
-}
-
-func (s *Stub) AnswerPlan(id string, accept bool) error {
-	return s.answer(stubCall{Method: "plan", ID: id, Accept: accept})
-}
-
-// Calls is every answer the stub has taken, in order.
+// Calls is every answer the stub has taken, in the order the asks were
+// resolved: each of the registry's terminal records as the answer that produced
+// it, plus the cancelled outcome a Cancel or a Close produced for a request
+// nobody answered. It is rebuilt from the registry rather than kept beside it,
+// so there is exactly one account of what became of a card.
 func (s *Stub) Calls() []stubCall {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]stubCall(nil), s.calls...)
+	resolved := s.asks.Resolved()
+	out := make([]stubCall, 0, len(resolved))
+	for _, rec := range resolved {
+		out = append(out, stubCallOf(rec))
+	}
+	return out
 }
 
-// answer records one answer. An id that is not waiting is an error, exactly as
-// the live session reports one, which is what makes a second answer to the
-// same card visible instead of silent.
-func (s *Stub) answer(c stubCall) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, o := range s.open {
-		if o.id != c.ID {
-			continue
-		}
-		if o.method != c.Method {
-			break
-		}
-		s.open = append(s.open[:i], s.open[i+1:]...)
-		s.calls = append(s.calls, c)
-		return nil
+// stubCallOf is one terminal record as a stubCall. Anything but an answer —
+// cancelled, ended with its turn, closing, and the permission the policy could
+// not answer — is Cancelled, which is what the agent was told in each case.
+func stubCallOf(rec agent.AskRecord) stubCall {
+	c := stubCall{ID: rec.ID, Method: string(rec.Kind)}
+	if rec.Outcome != agent.AskAnswered {
+		c.Cancelled = true
+		return c
 	}
-	return fmt.Errorf("stub: unknown %s request %q", c.Method, c.ID)
-}
-
-// cancelOpen answers every request still waiting with its cancelled outcome,
-// which is what the live session's Cancel and Close both do.
-func (s *Stub) cancelOpen() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, o := range s.open {
-		s.calls = append(s.calls, stubCall{Method: o.method, ID: o.id, Cancelled: true})
-	}
-	s.open = nil
-}
-
-// noteOpen registers a blocking request the stub has just announced, the way
-// the live session parks one before emitting its event.
-func (s *Stub) noteOpen(ev agent.Event) {
-	var id, method string
-	switch {
-	case ev.Permission != nil:
-		id, method = ev.Permission.ID, "permission"
-	case ev.Question != nil && !ev.Question.Auto:
-		id, method = ev.Question.ID, "question"
-	case ev.Plan != nil && !ev.Plan.Auto:
-		id, method = ev.Plan.ID, "plan"
-	}
-	if id == "" {
-		return
-	}
-	s.mu.Lock()
-	s.open = append(s.open, stubOpen{id: id, method: method})
-	s.mu.Unlock()
+	c.Option = rec.Answer.OptionID
+	c.Answers = rec.Answer.Answers
+	c.Skip = rec.Answer.Skip
+	c.Accept = rec.Answer.Accept
+	return c
 }
 
 func (s *Stub) SetModel(_ context.Context, id string) error {
@@ -700,7 +766,9 @@ func cloneStubTools(in []agent.ToolEvent) []agent.ToolEvent {
 // does: the log last, and with mu released, because its boundary is never
 // taken under mu. It is idempotent; the log's Close is too.
 func (s *Stub) Close() error {
-	s.cancelOpen()
+	// Every parked ask ends as closing, before the log's own close, so those
+	// endings are in the record (plan 021 §3.3's close phases).
+	s.asks.Close()
 	s.mu.Lock()
 	select {
 	case <-s.closed:
@@ -727,7 +795,6 @@ func (s *Stub) emit(ev agent.Event) {
 	if ev.At.IsZero() {
 		ev.At = s.now()
 	}
-	s.noteOpen(ev)
 	select {
 	case <-s.closed:
 		s.log.Abandoned()
@@ -742,4 +809,5 @@ var (
 	_ agent.EventSource = (*Stub)(nil)
 	_ agent.LogOwner    = (*Stub)(nil)
 	_ agent.Clocked     = (*Stub)(nil)
+	_ agent.AskSource   = (*Stub)(nil)
 )

@@ -86,7 +86,10 @@ func (e *Engine) armLocked(c Command, text, fromRow string) (SubmitResult, strin
 			return SubmitResult{}, "", fmt.Errorf("%w: %s", ErrUnknownRow, fromRow)
 		}
 	}
-	id, err := e.holdCancelLocked(t.id, false, c.Cause())
+	// The turn to cancel is named, so the no-turn gate above cannot fire and
+	// the ask count is never consulted: it is not read here, which is what keeps
+	// e.mu and the registry's mutex from ever being nested.
+	id, err := e.holdCancelLocked(t.id, false, 0, c.Cause())
 	if err != nil {
 		return SubmitResult{}, "", err
 	}

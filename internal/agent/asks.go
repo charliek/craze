@@ -787,10 +787,17 @@ func (r *AskRegistry) Answer(cause, id string, a AskAnswer) (AskRecord, error) {
 //
 // An id the registry no longer holds a record for still writes the note: the
 // diagnostic is the point, and a record evicted 256 asks later is not.
-func (r *AskRegistry) Report(id string, rep AskReport) {
+func (r *AskRegistry) Report(id string, rep AskReport) { r.report(nil, id, rep) }
+
+// report is Report against a known entry, or — with a nil one — against
+// whatever entry that id names now.
+func (r *AskRegistry) report(e *askEntry, id string, rep AskReport) {
 	r.mu.Lock()
 	kind, outcome := AskKind(""), AskOutcome("")
-	if e := r.entryLocked(id); e != nil {
+	if e == nil {
+		e = r.entryLocked(id)
+	}
+	if e != nil {
 		if rep.Consumed {
 			e.rec.Consumed = true
 		}
@@ -812,6 +819,23 @@ func (r *AskRegistry) Report(id string, rep AskReport) {
 		"outcome": string(outcome),
 		"reason":  rep.Lost,
 	}})
+}
+
+// Resolved is every terminal record the registry still keeps (keptAsks),
+// **oldest ending first**: the order the asks were resolved in, whatever order
+// they were opened in. It is what a session rebuilds "every answer I was given,
+// in order" from — tui.Stub's Calls() — without keeping a second list beside
+// the registry's own. Every record is a copy.
+func (r *AskRegistry) Resolved() []AskRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]AskRecord, 0, len(r.doneIDs))
+	for _, id := range r.doneIDs {
+		if e := r.done[id]; e != nil {
+			out = append(out, e.rec.clone())
+		}
+	}
+	return out
 }
 
 // Asks is every open ask, in the order they were opened: what asks.list
@@ -886,6 +910,16 @@ func (a *Ask) Wait() AskRecord {
 	a.e.rec.Consumed = true
 	return a.e.rec.clone()
 }
+
+// Report is Registry.Report bound to this ask and not to its id, which is what
+// a provider's delivery report has to be: a reply that comes back long after
+// the ask was resolved must not land on whatever holds that id now. Only an
+// adopted id can be opened twice (tui.Stub's tests choose their own), and then
+// an id lookup would mark the wrong ask delivered or journal the wrong kind.
+//
+// The note it writes is the same one, for the same reason: a lost delivery is
+// one journal diag note, never a second ending, and it changes no outcome.
+func (a *Ask) Report(rep AskReport) { a.r.report(a.e, a.id, rep) }
 
 // cancelByCall resolves the ask its asking call gave up on. An ask that has
 // been resolved in the meantime keeps the ending it has: whatever ended it

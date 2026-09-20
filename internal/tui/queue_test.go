@@ -403,7 +403,7 @@ func TestCtrlLOnCursorConfirmsThenSendsAfterSettle(t *testing.T) {
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
 	m = tm.(Model)
 	m = pumpKey(t, m, enter())
-	if !m.cardsCancelled {
+	if m.cardMask == "" {
 		t.Fatal("an armed send-now sets the cancel mask itself, since the cancel is the engine's")
 	}
 	if got := texts(m, entryUser); len(got) != 1 {

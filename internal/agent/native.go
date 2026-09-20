@@ -58,6 +58,9 @@ type nativeSession struct {
 	// past the log's numbering.
 	log    *EventLog
 	events <-chan Event
+	// asks is this session's ask registry, built beside the log as on every
+	// session and empty: nothing in the harness opens an ask yet (Asks).
+	asks *AskRegistry
 	// done is closed first by Close, so no emit — the harness's sink
 	// included, which runs on Fantasy's callbacks — can block on a reader
 	// that has gone.
@@ -255,6 +258,12 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// Whatever provider the caller named, this session is the native one, and
 	// every snapshot — one taken before Start included — says so.
 	s.snap.Provider = NativeProvider().Info()
+	// Beside the log, as on every session, and empty: nothing in the harness
+	// opens an ask yet. It exists so that a client above the seam holds one
+	// surface whatever the provider is — Control.Asks answers with nothing here
+	// rather than with "unsupported" — and so that a Gate's Ask has somewhere to
+	// go when H3 gives it one, through this adapter and nowhere else.
+	s.asks = NewAskRegistry(log, s.Now)
 	return s
 }
 
@@ -271,6 +280,10 @@ func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
 // publishes into it.
 func (s *nativeSession) EventLog() *EventLog { return s.log }
 func (s *nativeSession) Now() time.Time      { return time.Now() }
+
+// Asks is the session's AskSource (plan 021 §3.6): an empty registry, because
+// the harness has no permission gate, questions or plans yet.
+func (s *nativeSession) Asks() *AskRegistry { return s.asks }
 
 // Start loads the model table, opens the harness on the requested model (or
 // the table's default) and publishes the first snapshot. It does no network
@@ -922,6 +935,12 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// both branches. It has to have been translated by now: the pairs it is
 	// read from are forgotten in this prompt's deferred release, so a caller
 	// translating after the return would be handed the sent spelling back.
+	// Every session waits for the outbox before it publishes a turn's terminal
+	// event (plan 021 §3.6), so anything enqueued while the turn ran is in the
+	// record ahead of it. Native has no asks yet, so today this only orders what
+	// a component above the seam enqueued; it is here because the rule is "every
+	// session", not "every session that has asks".
+	_ = s.log.Flush(context.Background())
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
 		// state by the time the engine's chain policy clears its own queue at
@@ -1129,6 +1148,9 @@ func (s *nativeSession) Close() error {
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
 		s.mu.Unlock()
+		// Before the log's close, as on the live session: the registry is empty
+		// here, and closing it is what keeps the two sessions one shape.
+		s.asks.Close()
 		live := in && cancel != nil && rel != nil
 		if live {
 			cancel()
@@ -1372,17 +1394,6 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 		return phraseTurnError(err)
 	}
 }
-
-// The harness has no permission gate, questions or plans in H2, so nothing
-// ever asks for one.
-
-func (s *nativeSession) AnswerPermission(string, string) error { return ErrUnsupported }
-
-func (s *nativeSession) AnswerQuestion(string, map[string][]string, bool) error {
-	return ErrUnsupported
-}
-
-func (s *nativeSession) AnswerPlan(string, bool) error { return ErrUnsupported }
 
 // emit delivers ev unless the session is closing, exactly as the live
 // session's emitCtx does with no caller context: a reader that stopped

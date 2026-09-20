@@ -158,10 +158,9 @@ type Model struct {
 	input textarea.Model
 
 	// eng is the engine the model drives its session through: admission, the
-	// message queue and its verbs, send-now, cancel (plan 021 §3.4). sess is the
-	// engine's own session — the raw provider seam — kept only for the three
-	// things that have not moved behind engine.Control yet: the card answers
-	// (AnswerPermission / AnswerQuestion / AnswerPlan, until C8b), the setters
+	// message queue and its verbs, send-now, cancel, and the asks (plan 021
+	// §3.4, §3.6). sess is the engine's own session — the raw provider seam —
+	// kept only for what has not moved behind engine.Control yet: the setters
 	// (SetModel / SetMode / SetConfig / SetTitle, until C10), and nothing else.
 	// writeIndex stays in the model until C12, reading the snapshot the engine's
 	// State already gives it. Engine.Session's own comment carries the same list.
@@ -261,12 +260,24 @@ type Model struct {
 	// cards is the blocking-request queue (§3.11): permission, question and
 	// plan requests in arrival order. Only the head is drawn.
 	//
-	// cardsCancelled holds from a cancel until the turn ends: the session has
-	// answered everything it was holding and will not park another request for
-	// this turn, so a card event still in flight must not raise a card.
-	cards          []card
-	cardsCancelled bool
-	snap           agent.Snapshot
+	// cardMask is the turn whose card openings are masked: a cancel answered
+	// every request the session was holding, so an opening still in flight for
+	// that turn must not raise a card nobody can answer. It is **keyed to the
+	// engine turn id** rather than to a flag reset on any ending (plan 021,
+	// panel astra 10): it cannot leak onto the next turn, because beginTurn
+	// clears it, and it cannot outlive its own, because that turn's ending —
+	// which the log orders behind every opening and ending of the turn —
+	// clears it too. A cancel with no turn of craze's own masks nothing: there
+	// would be nothing to clear it, and an opening in flight at that Esc is
+	// followed by its own cancelled ending, which removes the card.
+	//
+	// askEchoes are the causes of answers this model sent whose endings it has
+	// not seen yet: their effect was applied in the Update that asked for them,
+	// so the events are its own echoes (applyAskEnded).
+	cards     []card
+	cardMask  string
+	askEchoes []string
+	snap      agent.Snapshot
 	// queue is the engine's message queue, in send order: refreshSnap and
 	// refreshQueue fill it from Control.State().Queue, which is where the
 	// queue lives now that it has left the provider seam (plan 021 §3.5).
@@ -2016,7 +2027,8 @@ func (m *Model) beginTurn(id, text string) {
 		m.indexSeeded = m.writeIndex(fallbackTitle(text), sessions.TitleKindFallback)
 	}
 	m.status = statusWorking
-	m.cardsCancelled = false
+	// A new turn: whatever a cancel masked belonged to the turn before it.
+	m.cardMask = ""
 	m.turnStart = m.now()
 	m.err = ""
 	m.cancelled = false
@@ -2033,9 +2045,16 @@ func (m *Model) beginTurn(id, text string) {
 // what cancelTurn does synchronously, and what an armed send-now owes as well,
 // because the cancel it asked for is made by the engine and answers every
 // request the session was holding just the same.
+//
+// The mask itself is set only when there is a turn of craze's own to key it to
+// (cardMask). With none — cards on screen and nothing working — the cards on
+// screen still go, and an opening that was already in flight is removed by the
+// cancelled ending that the registry enqueued right behind it.
 func (m *Model) maskCards() {
 	m.cards = nil
-	m.cardsCancelled = true
+	if m.status == statusWorking {
+		m.cardMask = m.turnID
+	}
 	m.retirePlanOffer()
 }
 
@@ -2387,9 +2406,17 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if ev.Question != nil && !ev.Question.Auto {
 			if m.showAsk() {
 				m.pushCard(card{kind: cardQuestion, ask: ev.Question})
-			} else if m.sess != nil {
-				_ = m.sess.AnswerQuestion(ev.Question.ID, nil, true)
+			} else {
+				// The config hides questions: it is skipped where it stands,
+				// with no card and — as it always has — no row. The ending it
+				// causes names this command and is skipped with the rest of
+				// this model's own echoes.
+				m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
 			}
+		}
+	case agent.EventAsk:
+		if ev.Ask != nil {
+			m.applyAskEnded(ev.Cause, ev.Ask)
 		}
 	case agent.EventPlan:
 		if ev.Plan != nil && !ev.Plan.Auto {
@@ -2398,8 +2425,8 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.addPlan(ev.Plan)
 			if m.showPlan() {
 				m.pushCard(card{kind: cardPlan, plan: ev.Plan})
-			} else if m.sess != nil {
-				_ = m.sess.AnswerPlan(ev.Plan.ID, false)
+			} else {
+				m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
 			}
 		}
 	case agent.EventDone:
@@ -2424,7 +2451,11 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// too, and its reply can arm a plan offer. Unchanged, and not this
 		// commit's to fix.)
 		m.breakStream()
-		m.cardsCancelled = false
+		// The cancel mask is NOT cleared here. It belongs to a turn, and it is
+		// the engine's ending for that turn that says every opening and ending
+		// of it has been delivered — this event is the session's own and can
+		// overtake an opening still in the outbox (panel: astra 10).
+		//
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
 		m.branch = m.git.branch()
@@ -2476,6 +2507,114 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// pinned, so this only ever carries a title craze may keep.
 			m.writeIndex(ev.Text, sessions.TitleKindAgent)
 		}
+	}
+}
+
+// answerHidden answers an ask the config never shows a card for — a question or
+// a plan hidden by the provider's own settings — where it arrives, with no card
+// and no row, exactly as the model has always answered those. A failure is
+// dropped for the same reason the row is: the user asked not to be shown this
+// request at all.
+func (m *Model) answerHidden(id string, a agent.AskAnswer) {
+	if m.eng == nil {
+		return
+	}
+	cmd := m.nextCmd()
+	if err := m.eng.Answer(cmd, id, a); err == nil {
+		m.noteAskEcho(cmd.Cause())
+	}
+}
+
+// noteAskEcho records that the ending caused by cause is this model's own: its
+// effect was applied in the Update that asked for it, so the event is an echo.
+// The slice is copied rather than written through, because every Model copy
+// shares it.
+func (m *Model) noteAskEcho(cause string) {
+	if cause == "" {
+		return
+	}
+	m.askEchoes = append(append([]string(nil), m.askEchoes...), cause)
+}
+
+// takeAskEcho reports whether cause is one of this model's own answers, and
+// takes it off the list if it is. One entry per answer, removed by the one
+// ending that answer causes: a cause that matched can never match twice.
+func (m *Model) takeAskEcho(cause string) bool {
+	if cause == "" {
+		return false
+	}
+	for i, c := range m.askEchoes {
+		if c != cause {
+			continue
+		}
+		next := append([]string(nil), m.askEchoes[:i]...)
+		m.askEchoes = append(next, m.askEchoes[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// applyAskEnded is one ask's ending. Every way an ask can end carries one now,
+// so this is where a card the model did not answer itself goes away — another
+// client's answer, a cancel, the turn it belonged to ending underneath it, the
+// session closing — and where the row that answer earned is written.
+//
+// What it writes is exactly what the local path writes for the same outcome, so
+// a question answered from a phone reads in this transcript as one answered
+// here: the question notes for an answer, the skipped note for a skip, the
+// verb for a plan. And exactly as little: nothing for a permission (a permission
+// answer has never written a row), nothing for a cancel, a turn's end, a close
+// or an automatic resolution, and nothing for an ask this model never raised a
+// card for — the hidden paths, a card the cancel mask dropped, and an ending
+// that carries its own Body, which by definition never had an opening.
+func (m *Model) applyAskEnded(cause string, u *agent.AskUpdate) {
+	if m.takeAskEcho(cause) {
+		// This model's own answer, applied in the Update that sent it.
+		return
+	}
+	c, ok := m.removeCard(u.ID)
+	if !ok || u.Outcome != agent.AskAnswered {
+		return
+	}
+	switch {
+	case c.kind == cardQuestion && u.Skip:
+		m.addNote(skipNote(c.ask))
+	case c.kind == cardQuestion:
+		m.addAnswerNotes(c.ask, u.Answers)
+	case c.kind == cardPlan:
+		m.addNote(planNote(c.plan, u.Accepted))
+	}
+}
+
+// removeCard takes the card for one ask out of the queue, wherever it is in it,
+// and answers with it. The queue is copied rather than written through, because
+// every Model copy shares the slice.
+func (m *Model) removeCard(id string) (card, bool) {
+	if id == "" {
+		return card{}, false
+	}
+	for i, c := range m.cards {
+		if cardAskID(c) != id {
+			continue
+		}
+		next := append([]card(nil), m.cards[:i]...)
+		m.cards = append(next, m.cards[i+1:]...)
+		return c, true
+	}
+	return card{}, false
+}
+
+// cardAskID is the ask id a card answers.
+func cardAskID(c card) string {
+	switch {
+	case c.perm != nil:
+		return c.perm.ID
+	case c.ask != nil:
+		return c.ask.ID
+	case c.plan != nil:
+		return c.plan.ID
+	default:
+		return ""
 	}
 }
 
@@ -2566,6 +2705,15 @@ func (m *Model) applyTurnStarted(ev agent.Event) {
 // baseline did — promptDoneMsg carried no turn at all and drew both rows
 // unconditionally (app.go at 6581e0a) — so nothing a user sees moves here.
 func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
+	if t.ID != "" && t.ID == m.cardMask {
+		// The masked turn is over, and its ending is ordered behind every
+		// opening and every ask ending that turn produced — the session ends
+		// the turn for the registry and waits for the outbox before it
+		// publishes its own ending, and this event is enqueued after that. So
+		// there is nothing left to mask, and a request that arrives now belongs
+		// to no turn this cancel touched.
+		m.cardMask = ""
+	}
 	// current is "this is the ending of the turn on screen". An id the model has
 	// never seen is not it, and neither is "" — before any turn there is nothing
 	// to settle.

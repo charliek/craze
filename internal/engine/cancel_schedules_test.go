@@ -53,9 +53,12 @@ func TestOverlappingCancelsEachHoldTheirOwn(t *testing.T) {
 
 // TestASubmitUnderACancelWithNoTurnQueues: a cancel with no turn of craze's own
 // holds admission like any other — it is on its way to the agent, and a prompt
-// started now could be what it lands on.
+// started now could be what it lands on. Such a cancel is accepted only when
+// there is something for it to do (§3.7), which here is an ask the agent is
+// waiting on.
 func TestASubmitUnderACancelWithNoTurnQueues(t *testing.T) {
 	r := newRig(t, Options{})
+	r.s.openAsk(t)
 	entered, release := r.s.holdNextCancel()
 	done := make(chan error, 1)
 	go func() {

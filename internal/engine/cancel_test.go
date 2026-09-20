@@ -184,14 +184,51 @@ func TestCancelOutcomes(t *testing.T) {
 		r.submit("two")
 		r.until(lastEnding)
 	})
-	t.Run("no turn of craze's own", func(t *testing.T) {
+	// A cancel with nothing of craze's own running is refused unless there is
+	// something for it to do — an ask the agent is waiting on, or a turn the
+	// agent started itself (§3.7, 05's gate table). PR 1 accepted every such
+	// cancel because the engine could not yet see an ask; C8b tightens it.
+	t.Run("no turn and nothing to cancel", func(t *testing.T) {
 		r := newRig(t, Options{})
+		got, err := r.e.Cancel(context.Background(), Command{}, "")
+		if !errors.Is(err, ErrNotAccepting) {
+			t.Fatalf("cancel answered %+v, %v", got, err)
+		}
+		if n := r.s.cancelsWritten(); n != 0 {
+			t.Fatalf("nothing to cancel writes nothing: %d written", n)
+		}
+	})
+	t.Run("no turn of craze's own, but the agent has one", func(t *testing.T) {
+		r := newRig(t, Options{})
+		r.s.setForeign(true)
 		got, err := r.e.Cancel(context.Background(), Command{}, "")
 		if err != nil || got.Outcome != CancelSettled || got.Turn != "" {
 			t.Fatalf("cancel answered %+v, %v", got, err)
 		}
 		if n := r.s.cancelsWritten(); n != 1 {
 			t.Fatalf("a cancel with no turn is written at once: %d written", n)
+		}
+	})
+	t.Run("no turn of craze's own, but an ask is pending", func(t *testing.T) {
+		r := newRig(t, Options{})
+		r.s.openAsk(t)
+		got, err := r.e.Cancel(context.Background(), Command{}, "")
+		if err != nil || got.Outcome != CancelSettled || got.Turn != "" {
+			t.Fatalf("cancel answered %+v, %v", got, err)
+		}
+		if n := r.s.cancelsWritten(); n != 1 {
+			t.Fatalf("a cancel with a pending ask is written at once: %d written", n)
+		}
+	})
+	// Stop is not gated: a client that is leaving is not asking for a turn to
+	// end, it is saying nothing more may start.
+	t.Run("stop with nothing running", func(t *testing.T) {
+		r := newRig(t, Options{})
+		if err := r.e.Stop(context.Background(), Command{}); err != nil {
+			t.Fatalf("stop answered %v", err)
+		}
+		if n := r.s.cancelsWritten(); n != 1 {
+			t.Fatalf("stop writes its cancel: %d written", n)
 		}
 	})
 }

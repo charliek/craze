@@ -304,6 +304,12 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 			// EventMeta, which tells the TUI to re-read the snapshot and
 			// has nothing a headless caller could print (eventJSON's
 			// EventMeta case). Any other bare event is a missing rendering.
+		case ev.Type == agent.EventTurn, ev.Type == agent.EventAsk:
+			// The engine's turn events and the registry's ask endings fall to
+			// eventJSON's default on purpose: `--json` gains no line kind in
+			// S1b (plan 021 §3.9). Whether an ask ending should ever be printed
+			// is a `--json` contract addition, and it is decided when H3 first
+			// makes the native adapter emit one.
 		default:
 			t.Fatalf("no rendering for the %s event the adapter emitted: %+v", ev.Type, ev)
 		}

@@ -517,6 +517,30 @@ type RequestParams struct {
 	Plan       *CreatePlanRequest
 }
 
+// Arrival is when a blocking agent request reached craze, captured on the read
+// loop in the one critical section that registers it, and handed to whoever
+// answers it — a handler, or the early-answer hook.
+//
+// Both fields are needed and neither implies the other, because the counter
+// alone cannot tell a retired turn's request from one that belongs to no turn
+// at all. PromptBlocks bumps Turn when it accepts a prompt and clears InTurn
+// when that prompt returns, without touching the counter: so a request
+// registered *during* turn 1 whose handler goroutine the runtime delayed past
+// the end of turn 1, and a request registered *between* turns after turn 1
+// finished, both carry Turn == 1 and both pass TurnLive. Only InTurn tells them
+// apart, and they deserve opposite answers — the first belongs to a turn that
+// is over, the second to no turn of craze's own and may still be answered.
+type Arrival struct {
+	// Turn is the client's turn counter at the moment the request was
+	// registered: what TurnLive compares against, and what decides whether a
+	// later prompt has since made this request stale.
+	Turn int
+	// InTurn says a prompt of craze's own was in flight when the request was
+	// registered, so the request belongs to that turn. False means it arrived
+	// between craze's turns, or during a turn the agent started itself.
+	InTurn bool
+}
+
 // EarlyAnswerReason says why a blocking request was answered before any handler
 // of the client's ran.
 type EarlyAnswerReason string
@@ -543,11 +567,18 @@ const (
 type EarlyAnswer struct {
 	// Reason is who answered it: see the EarlyAnswerReason constants.
 	Reason EarlyAnswerReason
-	// Turn is the turn the request arrived in (Client.TurnLive).
-	Turn int
+	// Turn is the turn the request arrived in (Client.TurnLive), and InTurn
+	// whether a prompt of craze's own was running then: together they are the
+	// request's Arrival, spelled out here so that a caller reading Turn alone
+	// keeps compiling.
+	Turn   int
+	InTurn bool
 	// Params is the request itself, as decoded.
 	Params RequestParams
 }
+
+// Arrival is the request's arrival as one value.
+func (a EarlyAnswer) Arrival() Arrival { return Arrival{Turn: a.Turn, InTurn: a.InTurn} }
 
 // TodoItem is one entry of a cursor/update_todos list, and of a plan's todos.
 type TodoItem struct {

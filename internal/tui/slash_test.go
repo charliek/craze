@@ -488,14 +488,14 @@ func TestEscUnderARunningTurnHidesThenCancels(t *testing.T) {
 		t.Fatal("fixture: the menu should be up mid-message")
 	}
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd != nil || m.cardsCancelled {
+	if cmd != nil || m.cardMask != "" {
 		t.Fatal("the first esc hides the menu and nothing else")
 	}
 	if m.status != statusWorking {
 		t.Fatalf("the turn is still running: %v", m.status)
 	}
 	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd == nil || !m.cardsCancelled {
+	if cmd == nil || m.cardMask == "" {
 		t.Fatal("the second esc cancels the turn")
 	}
 }
@@ -656,7 +656,7 @@ func TestZeroGrantedRowsInterceptsNothing(t *testing.T) {
 	if m.slashHideKey != "" {
 		t.Fatalf("esc recorded a hide for an invisible band: %q", m.slashHideKey)
 	}
-	if cmd == nil || !m.cardsCancelled {
+	if cmd == nil || m.cardMask == "" {
 		t.Fatal("esc should have cancelled the turn")
 	}
 }

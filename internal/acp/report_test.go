@@ -110,6 +110,60 @@ func TestEarlyAnswerByCancelCarriesTheRequest(t *testing.T) {
 	p.noReply(t)
 }
 
+// The two histories the turn counter alone cannot tell apart, and the flag that
+// does (Arrival; plan 021, panel r16 finding 3). A request registered while a
+// prompt of craze's own is in flight belongs to that turn; one registered after
+// the prompt has returned belongs to no turn — and PromptBlocks clears inPrompt
+// without moving the counter, so BOTH carry turn 1 and both pass TurnLive.
+//
+// The prompt's accepted hook is the barrier: it runs after the turn has been
+// opened and before a byte goes out, which is exactly the window an in-turn
+// request arrives in.
+func TestArrivalRecordsTurnMembershipNotJustTheCounter(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	var req PermissionRequest
+	if err := json.Unmarshal([]byte(reportPermParams), &req); err != nil {
+		t.Fatal(err)
+	}
+	register := func(id string) *pendingReq {
+		return p.client.register(&Message{
+			JSONRPC: jsonrpcVersion,
+			ID:      json.RawMessage(id),
+			Method:  MethodRequestPermission,
+			Params:  json.RawMessage(reportPermParams),
+		}, RequestParams{Permission: &req})
+	}
+
+	var during *pendingReq
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.client.PromptBlocks(t.Context(),
+			[]ContentBlock{{Type: "text", Text: "go"}},
+			func() { during = register(`21`) }, nil)
+		done <- err
+	}()
+	prompt := p.readWithin(t, 3*time.Second, "the prompt")
+	p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: prompt.ID, Result: json.RawMessage(`{"stopReason":"end_turn"}`)})
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	after := register(`22`)
+
+	if during.turn != after.turn {
+		t.Fatalf("the counter is meant to be the same: %d and %d", during.turn, after.turn)
+	}
+	if !p.client.TurnLive(during.turn) || !p.client.TurnLive(after.turn) {
+		t.Fatal("both are still the client's turn; the counter cannot separate them")
+	}
+	if !during.arrival().InTurn {
+		t.Fatal("a request registered inside the prompt belongs to that turn")
+	}
+	if after.arrival().InTurn {
+		t.Fatal("a request registered after the prompt returned belongs to no turn")
+	}
+}
+
 // Close answers what the client is still blocked on before it takes the agent
 // down. That is the same silence, and a different reason: a request answered on
 // the way out was never the user's to answer.
@@ -202,7 +256,7 @@ func TestEarlyAnswerByStaleTurnIsReported(t *testing.T) {
 func TestNoEarlyAnswerWhenTheHandlerRan(t *testing.T) {
 	p := newRawPipe(t)
 	early := watchEarly(p.client)
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
 	p.send(t, 1, MethodCursorAskQuestion, reportAskParams)
 	// The handler's own reply is the barrier: runIncoming took the live path.
 	if got := string(p.readWithin(t, 3*time.Second, "the handler's reply").Result); got != `{"outcome":{"outcome":"skipped"}}` {
@@ -262,17 +316,17 @@ func TestDispatchRegistersTheDecodedRequest(t *testing.T) {
 			t.Cleanup(func() { close(release) })
 			// Exactly one of these runs, and it parks: the request is then
 			// registered, its handler is running, and neither has finished.
-			p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+			p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 				close(entered)
 				<-release
 				return PermissionDecision{Cancelled: true}
 			})
-			p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+			p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 				close(entered)
 				<-release
 				return AskDecision{Cancelled: true}
 			})
-			p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision {
+			p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
 				close(entered)
 				<-release
 				return PlanDecision{Cancelled: true}
@@ -299,7 +353,7 @@ func TestDispatchRegistersTheDecodedRequest(t *testing.T) {
 func TestReplyDispositionDelivered(t *testing.T) {
 	p := newRawPipe(t)
 	disp := make(chan ReplyDisposition, 4)
-	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		return PermissionDecision{OptionID: "yes", Replied: func(d ReplyDisposition) { disp <- d }}
 	})
 	p.send(t, 1, MethodRequestPermission, reportPermParams)
@@ -316,7 +370,7 @@ func TestReplyDispositionDelivered(t *testing.T) {
 func TestReplyDispositionCancelledDecisionIsDelivered(t *testing.T) {
 	p := newRawPipe(t)
 	disp := make(chan ReplyDisposition, 4)
-	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		return PermissionDecision{Cancelled: true, Replied: func(d ReplyDisposition) { disp <- d }}
 	})
 	p.send(t, 1, MethodRequestPermission, reportPermParams)
@@ -334,7 +388,7 @@ func TestReplyDispositionCancelledDecisionIsDelivered(t *testing.T) {
 func TestReplyDispositionInvalidOption(t *testing.T) {
 	p := newRawPipe(t)
 	disp := make(chan ReplyDisposition, 4)
-	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		return PermissionDecision{OptionID: "never-offered", Replied: func(d ReplyDisposition) { disp <- d }}
 	})
 	p.send(t, 1, MethodRequestPermission, reportPermParams)
@@ -355,7 +409,7 @@ func TestReplyLostToACancelBetweenTheDecisionAndTheReply(t *testing.T) {
 	took := make(chan struct{})
 	release := make(chan struct{})
 	disp := make(chan ReplyDisposition, 4)
-	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		dec := PermissionDecision{OptionID: "yes", Replied: func(d ReplyDisposition) { disp <- d }}
 		close(took)
 		<-release
@@ -389,7 +443,7 @@ func TestReplyLostToACloseBetweenTheDecisionAndTheReply(t *testing.T) {
 	took := make(chan struct{})
 	release := make(chan struct{})
 	disp := make(chan ReplyDisposition, 4)
-	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision {
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
 		dec := PlanDecision{Accept: true, Replied: func(d ReplyDisposition) { disp <- d }}
 		close(took)
 		<-release
@@ -420,7 +474,7 @@ func TestReplyDispositionWriteFailed(t *testing.T) {
 	took := make(chan struct{})
 	release := make(chan struct{})
 	disp := make(chan ReplyDisposition, 4)
-	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision {
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
 		dec := PlanDecision{Accept: true, Replied: func(d ReplyDisposition) { disp <- d }}
 		close(took)
 		<-release
@@ -444,9 +498,9 @@ func TestReplyDispositionWriteFailed(t *testing.T) {
 // written and nothing is called.
 func TestNilRepliedIsSafe(t *testing.T) {
 	p := newRawPipe(t)
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
-	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision { return PlanDecision{Accept: true} })
-	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision { return PlanDecision{Accept: true} })
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		return PermissionDecision{OptionID: "yes"}
 	})
 	p.send(t, 1, MethodCursorAskQuestion, reportAskParams)

@@ -278,15 +278,15 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 		enteredMu.Unlock()
 		<-release
 	}
-	p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		block()
 		return PermissionDecision{OptionID: "yes"}
 	})
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 		block()
 		return AskDecision{Answers: map[string][]string{"q1": {"opt-a"}}}
 	})
-	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision {
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
 		block()
 		return PlanDecision{Accept: true}
 	})
@@ -343,7 +343,7 @@ func TestCancelAnswersEveryBlockingKindOnce(t *testing.T) {
 func TestTwoQueuedQuestionsAnsweredIndependently(t *testing.T) {
 	p := newRawPipe(t)
 	gate := make(chan struct{})
-	p.client.SetAskHandler(func(_ int, req AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(_ Arrival, req AskQuestionRequest) AskDecision {
 		<-gate
 		return AskDecision{Answers: map[string][]string{req.Questions[0].ID: {req.Questions[0].Options[0].ID}}}
 	})
@@ -370,7 +370,7 @@ func TestTwoQueuedQuestionsAnsweredIndependently(t *testing.T) {
 
 func TestAskOutcomeDropsOptionIDsNotOffered(t *testing.T) {
 	p := newRawPipe(t)
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 		return AskDecision{Answers: map[string][]string{"q1": {"invented"}}}
 	})
 	p.send(t, 1, MethodCursorAskQuestion, `{"toolCallId":"t1","questions":[{"id":"q1","prompt":"?","options":[{"id":"opt-a","label":"A"}]}]}`)
@@ -383,8 +383,8 @@ func TestAskOutcomeDropsOptionIDsNotOffered(t *testing.T) {
 
 func TestAskSkipAndPlanRejectOutcomes(t *testing.T) {
 	p := newRawPipe(t)
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
-	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision { return PlanDecision{} })
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision { return PlanDecision{} })
 	p.send(t, 1, MethodCursorAskQuestion, `{"toolCallId":"t1","questions":[{"id":"q1","prompt":"?","options":[]}]}`)
 	if got := string(p.read(t).Result); got != `{"outcome":{"outcome":"skipped"}}` {
 		t.Fatalf("skip reply %s", got)
@@ -424,7 +424,7 @@ func TestCancelAnswersRequestsWhoseHandlerHasNotRunYet(t *testing.T) {
 	p := newRawPipe(t)
 	gate := make(chan struct{})
 	t.Cleanup(func() { close(gate) })
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 		<-gate
 		return AskDecision{Skip: true}
 	})
@@ -464,7 +464,7 @@ func TestALateCancelLeavesALaterTurnsRequestAlone(t *testing.T) {
 	p.setSession("sess-1")
 	gate := make(chan struct{})
 	t.Cleanup(func() { close(gate) })
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 		<-gate
 		return AskDecision{Skip: true}
 	})
@@ -622,12 +622,12 @@ func TestNullParamsRejected(t *testing.T) {
 			called := false
 			p.client.SetTodosHandler(func(UpdateTodosRequest) []TodoItem { called = true; return nil })
 			p.client.SetTaskHandler(func(TaskRequest) { called = true })
-			p.client.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+			p.client.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 				called = true
 				return PermissionDecision{Cancelled: true}
 			})
-			p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { called = true; return AskDecision{} })
-			p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision { called = true; return PlanDecision{} })
+			p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { called = true; return AskDecision{} })
+			p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision { called = true; return PlanDecision{} })
 
 			p.send(t, 9, tc.method, tc.params)
 			msg := p.readWithin(t, 3*time.Second, "InvalidParams reply")

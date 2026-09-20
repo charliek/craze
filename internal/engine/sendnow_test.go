@@ -700,6 +700,9 @@ func TestASendNowsCancelGoesThroughTheHold(t *testing.T) {
 // what a send-now promises.
 func TestAnImmediateSendNowUnderACancelHoldIsRefused(t *testing.T) {
 	r := newRig(t, Options{})
+	// A cancel with no turn of craze's own is accepted only when there is
+	// something for it to do (§3.7); an ask the agent is waiting on is one.
+	r.s.openAsk(t)
 	entered, release := r.s.holdNextCancel()
 	done := make(chan error, 1)
 	go func() {

@@ -23,11 +23,25 @@ import (
 // released and the driver passes again: a turn that came back meanwhile
 // settles then, with its successor decided in the same step.
 //
-// With no turn of craze's own the cancel is still accepted, and written at
-// once: the agent may be running a turn it started itself, or holding an ask
-// that arrived between turns, and the engine cannot yet see either.
+// With no turn of craze's own the cancel is accepted only when there is
+// something for it to do: an ask the agent is waiting on, or a turn the agent
+// started itself (§3.7, 05's gate table). Otherwise it is ErrNotAccepting and
+// nothing is written — which is what stops an Esc with nothing running from
+// putting a session/cancel on the wire.
+//
+// The pending-ask count is read BEFORE e.mu is taken, because the engine's
+// mutex and the registry's are never nested in either direction. The residual
+// window is both ways and harmless, and it is exactly what PR 1 did:
+//
+//   - an ask opened between the read and the lock makes this refuse a cancel
+//     that would now have been accepted — the user presses Esc a second time
+//     and it is accepted, because by then the ask is in the count;
+//   - an ask resolved in between makes this accept a cancel that has nothing
+//     left to cancel, which writes one session/cancel the agent drops as
+//     naming no turn — the no-turn path's long-standing behaviour.
 func (e *Engine) Cancel(ctx context.Context, c Command, turn string) (CancelResult, error) {
-	id, err := e.holdCancel(turn, false, c.Cause())
+	asks := len(e.asks.Asks())
+	id, err := e.holdCancel(turn, false, asks, c.Cause())
 	if err != nil {
 		return CancelResult{}, err
 	}
@@ -50,7 +64,9 @@ func (e *Engine) Cancel(ctx context.Context, c Command, turn string) (CancelResu
 // not keep the order it exists to keep. The engine stays stopped and its queue
 // stays cleared either way, and the hold is given back.
 func (e *Engine) Stop(ctx context.Context, c Command) error {
-	id, err := e.holdCancel("", true, c.Cause())
+	// Always accepted, whatever is or is not running: a client that is shutting
+	// down is not asking for a turn to end, it is saying nothing more may start.
+	id, err := e.holdCancel("", true, 0, c.Cause())
 	if err != nil {
 		return err
 	}
@@ -63,17 +79,21 @@ func (e *Engine) Stop(ctx context.Context, c Command) error {
 }
 
 // holdCancel validates a cancel and takes its hold, in one section.
-func (e *Engine) holdCancel(turn string, stop bool, cause string) (string, error) {
+func (e *Engine) holdCancel(turn string, stop bool, asks int, cause string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.holdCancelLocked(turn, stop, cause)
+	return e.holdCancelLocked(turn, stop, asks, cause)
 }
 
 // holdCancelLocked is holdCancel's section, for a caller that already holds
 // e.mu and has to take the hold atomically with something else of its own —
 // arming a send-now, which must not let anything be admitted between the arm
 // and the cancel it asks for.
-func (e *Engine) holdCancelLocked(turn string, stop bool, cause string) (string, error) {
+//
+// asks is how many asks were pending when the caller looked, read outside e.mu
+// (Cancel). It is consulted only for a cancel with no turn of craze's own, and
+// never for a stop.
+func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string) (string, error) {
 	if e.closed {
 		return "", ErrNotAccepting
 	}
@@ -83,6 +103,12 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, cause string) (string,
 	}
 	if turn != "" && turn != id {
 		return "", ErrStaleTurn
+	}
+	if !stop && id == "" && asks == 0 && !e.sess.ForeignTurn() {
+		// Nothing of craze's own is running, the agent is holding no ask and is
+		// running no turn of its own: there is nothing to cancel, and a cancel
+		// written now could only reach whatever starts next.
+		return "", ErrNotAccepting
 	}
 	if stop && !e.stopped {
 		e.stopped = true

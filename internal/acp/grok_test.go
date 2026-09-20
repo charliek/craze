@@ -44,7 +44,7 @@ func TestGrokAskDirectAndWrapped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newRawPipeDialect(t, DialectGrok)
 			var got AskQuestionRequest
-			p.client.SetAskHandler(func(_ int, req AskQuestionRequest) AskDecision {
+			p.client.SetAskHandler(func(_ Arrival, req AskQuestionRequest) AskDecision {
 				got = req
 				return AskDecision{Answers: map[string][]string{"Pick one": {"B"}, "Pick any": {"Y"}}}
 			})
@@ -72,7 +72,7 @@ func TestGrokAskDirectAndWrapped(t *testing.T) {
 
 func TestGrokAskSkipAndHeadlessAuto(t *testing.T) {
 	p := newRawPipeDialect(t, DialectGrok)
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
 	p.send(t, 1, MethodGrokAskUserQuestion, grokAskParams)
 	if got := string(p.read(t).Result); got != `{"outcome":"skip_interview"}` {
 		t.Fatalf("skip %s", got)
@@ -115,7 +115,7 @@ func TestGrokPlanDirectAndWrapped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newRawPipeDialect(t, DialectGrok)
 			var got CreatePlanRequest
-			p.client.SetPlanHandler(func(_ int, req CreatePlanRequest) PlanDecision {
+			p.client.SetPlanHandler(func(_ Arrival, req CreatePlanRequest) PlanDecision {
 				got = req
 				return PlanDecision{Accept: true}
 			})
@@ -133,7 +133,7 @@ func TestGrokPlanDirectAndWrapped(t *testing.T) {
 
 func TestGrokPlanEmptyAndRejectAndCancel(t *testing.T) {
 	p := newRawPipeDialect(t, DialectGrok)
-	p.client.SetPlanHandler(func(_ int, req CreatePlanRequest) PlanDecision {
+	p.client.SetPlanHandler(func(_ Arrival, req CreatePlanRequest) PlanDecision {
 		if req.PlanText() != GrokEmptyPlanMarkdown {
 			t.Errorf("empty plan %q", req.PlanText())
 		}
@@ -145,7 +145,7 @@ func TestGrokPlanEmptyAndRejectAndCancel(t *testing.T) {
 	}
 
 	p2 := newRawPipeDialect(t, DialectGrok)
-	p2.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision { return PlanDecision{Cancelled: true} })
+	p2.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision { return PlanDecision{Cancelled: true} })
 	p2.send(t, 2, MethodGrokExitPlanMode, grokPlanParams)
 	if got := string(p2.read(t).Result); got != `{"outcome":"cancelled"}` {
 		t.Fatalf("cancel %s", got)
@@ -155,11 +155,11 @@ func TestGrokPlanEmptyAndRejectAndCancel(t *testing.T) {
 func TestGrokCompleteIncomingCancelledIsFlat(t *testing.T) {
 	p := newRawPipeDialect(t, DialectGrok)
 	gate := make(chan struct{})
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 		<-gate
 		return AskDecision{Answers: map[string][]string{"Pick one": {"A"}}}
 	})
-	p.client.SetPlanHandler(func(int, CreatePlanRequest) PlanDecision {
+	p.client.SetPlanHandler(func(Arrival, CreatePlanRequest) PlanDecision {
 		<-gate
 		return PlanDecision{Accept: true}
 	})

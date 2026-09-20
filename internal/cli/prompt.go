@@ -163,10 +163,26 @@ func (o *promptOpts) run() (retErr error) {
 	defer stop()
 
 	prov := resolved.Provider
+	// What Force and the absence of a frontend used to derive, spelled out
+	// (plan 021 §3.6): headless craze answers permissions itself when --force
+	// is on and parks them for --permission-decision otherwise, and it always
+	// answers questions with their first option and accepts plans. Saying so
+	// explicitly is what separates policy from frontend presence — a headless
+	// host that parks asks for a phone to answer is the same code with a
+	// different policy.
+	approval := &agent.ApprovalPolicy{
+		Permission: agent.ApprovalAsk,
+		Question:   agent.ApprovalFirstOption,
+		Plan:       agent.ApprovalAccept,
+	}
+	if o.force {
+		approval.Permission = agent.ApprovalAllow
+	}
 	sess := agent.New(agent.Options{
 		Binary:     o.agentBin,
 		Workspace:  ws,
 		Force:      o.force,
+		Approval:   approval,
 		Model:      o.model,
 		Mode:       o.mode(),
 		Stderr:     o.stderr,
@@ -854,16 +870,26 @@ func hasRunningSubagent(snap agent.Snapshot) bool {
 	return false
 }
 
-func (o *promptOpts) answerPermission(sess agent.Session, perm *agent.PermissionEvent, queue *[]string) (bool, error) {
+// answerPermission answers one permission request from --permission-decision,
+// through the engine: the asks are the engine's now, and `craze prompt` is a
+// client of it like any other.
+//
+// With no decision left the request is cancelled — deliberately, and now
+// explicitly (agent.AskAnswer{Cancel: true}, where the empty option id used to
+// carry that meaning) — and the run counts it as a rejection.
+func (o *promptOpts) answerPermission(_ agent.Session, perm *agent.PermissionEvent, queue *[]string) (bool, error) {
 	id, rejected, rest, perr := pickPermission(perm.Options, *queue)
 	*queue = rest
+	answer := agent.AskAnswer{OptionID: id}
 	if perr != nil {
-		if err := sess.AnswerPermission(perm.ID, ""); err != nil {
-			return true, err
-		}
-		return true, nil
+		answer, rejected = agent.AskAnswer{Cancel: true}, true
 	}
-	if err := sess.AnswerPermission(perm.ID, id); err != nil {
+	if o.eng == nil {
+		// No engine: a test driving the sweep over a session alone. There is
+		// nothing to answer through, and the request is nobody's to take.
+		return rejected, nil
+	}
+	if err := o.eng.Answer(engine.Command{}, perm.ID, answer); err != nil {
 		return rejected, err
 	}
 	return rejected, nil

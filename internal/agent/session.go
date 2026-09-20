@@ -561,6 +561,42 @@ type PlanEvent struct {
 	Accepted bool
 }
 
+// AskLabel is one ask as a status line names it: `permission <tool>`,
+// `question`, `plan <name>`. It is the header the TUI's own card draws
+// (internal/tui's permissionView and planCardView), and therefore what a host
+// publishes as the reason a session is blocked (host.Derive's CardLabel).
+//
+// It lives here because both readers need it and neither may import the other:
+// the engine merges it into State.HeadAsk so a session with no TUI publishes
+// the same label, and the TUI derives it from the card it is drawing. A
+// question's own `1/2` counter is deliberately left out — a host shows one
+// reason, not the card's progress through it — and nothing here sanitises,
+// because both callers sanitise what they render.
+func AskLabel(kind AskKind, body AskBody) string {
+	switch kind {
+	case AskQuestion:
+		return "question"
+	case AskPlan:
+		name := ""
+		if body.Plan != nil {
+			name = body.Plan.Name
+		}
+		if strings.TrimSpace(name) == "" {
+			name = "plan"
+		}
+		return "plan " + name
+	default:
+		tool := ""
+		if body.Permission != nil {
+			tool = body.Permission.Tool
+		}
+		return "permission " + tool
+	}
+}
+
+// Label is this ask's AskLabel.
+func (r AskRecord) Label() string { return AskLabel(r.Kind, r.Body) }
+
 type Result struct {
 	StopReason string
 	// Unanswered is text the turn accepted mid-run and could not answer, in
@@ -719,9 +755,6 @@ type Session interface {
 	// Interject merges text into the running turn without cancelling it.
 	// Only grok can: everything else returns ErrUnsupported before the wire.
 	Interject(ctx context.Context, text string) error
-	AnswerPermission(id, optionID string) error
-	AnswerQuestion(id string, answers map[string][]string, skip bool) error
-	AnswerPlan(id string, accept bool) error
 	SetModel(ctx context.Context, modelID string) error
 	SetMode(ctx context.Context, modeID string) error
 	SetConfig(ctx context.Context, id, value string) error

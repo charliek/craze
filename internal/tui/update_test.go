@@ -2581,21 +2581,24 @@ func TestPlanOfferSurvivesAnAnsweredCard(t *testing.T) {
 		Options: []agent.PermissionOption{{OptionID: "ok", Name: "Allow once", Kind: "allow_once"}},
 	}})
 	m = pumpUntil(t, m, hasCard)
-	sc.Release()
-	m = pumpUntil(t, m, isIdle)
-	m = pumpSettled(t, m)
 
-	// The card owns Enter, so nothing is offered while it is up.
-	if !m.cardOpen() {
-		t.Fatalf("this case needs the card still open:\n%s", plainView(m))
-	}
+	// The card is answered while its own turn is still running, which is the
+	// only order the wire produces — cursor blocks on the request and ends the
+	// turn once it has its answer — and, since plan 021 §4, the only order
+	// there is: a card whose turn ended is removed with the turn (the ask
+	// registry ends it), so a card cannot be left standing to be answered
+	// afterwards. The offer-hidden-behind-a-card case has its own test, where
+	// the card belongs to no turn: TestPlanOfferSurvivesACardAfterTheWiresEnding.
 	if m.planOffering() {
-		t.Fatal("the card is up and owns Enter; the offer must not compete for it")
+		t.Fatal("the turn has not ended; there is nothing to offer yet")
 	}
 	m, _ = press(m, runeKey('a'))
 	if m.cardOpen() {
 		t.Fatal("'a' should have answered the permission card")
 	}
+	sc.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if !m.planOffering() {
 		t.Fatalf("the card was answered and the turn still earns the offer, so it must show:\n%s", plainView(m))
 	}
@@ -2702,16 +2705,16 @@ func TestPlanOfferSurvivesACreatePlanCard(t *testing.T) {
 	if m.planOffering() {
 		t.Fatal("the card is still up and owns Enter")
 	}
-	sc.Release()
-	m = pumpUntil(t, m, isIdle)
-	m = pumpSettled(t, m)
-	if m.planOffering() {
-		t.Fatal("still unanswered, so still no offer")
-	}
+	// Answered while its own turn is still running, which is the order cursor
+	// sends and, since plan 021 §4, the only one there is: a card whose turn
+	// ended is removed with it.
 	m, _ = press(m, runeKey('a'))
 	if m.cardOpen() {
 		t.Fatal("'a' should have accepted the plan card")
 	}
+	sc.Release()
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	if !m.planOffering() {
 		t.Fatal("the plan was accepted and the turn earned the offer, so it must show")
 	}

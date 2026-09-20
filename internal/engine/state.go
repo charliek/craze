@@ -63,16 +63,46 @@ type State struct {
 	// that has seen nothing yet.
 	Cancelled bool
 	Prompted  bool
+	// PendingAsks is how many blocking requests the agent is waiting on, and
+	// HeadAsk is the first of them — the one a client would show. Both are read
+	// from the registry, **outside e.mu**, because the engine's mutex and the
+	// registry's are never nested in either direction (plan 021 §3.6); like the
+	// snapshot, they are a read of another authority and not a cut through the
+	// event stream.
+	//
+	// An ask overlays every activity: a session blocked on one may be idle,
+	// working, or watching a turn the agent started itself, and 05's gate table
+	// reads it from here rather than from Activity.
+	PendingAsks int
+	HeadAsk     HeadAsk
 	// StartFailed says Start returned an error; Err carries it.
 	StartFailed bool
 	// Incarnation is the log's id: the scope of turn ids and sequence numbers.
 	Incarnation string
 }
 
+// HeadAsk is the ask at the head of the queue of open ones, as a status line
+// names it. The zero value — an empty Kind — means nothing is pending.
+//
+// Label is agent.AskLabel: `permission <tool>`, `question`, `plan <name>`, the
+// same text the TUI's own card draws, so a host with no TUI publishes the same
+// reason a TUI would (host.Derive's CardLabel).
+type HeadAsk struct {
+	ID    string
+	Kind  agent.AskKind
+	Label string
+}
+
 // State reads the session's snapshot outside e.mu — it copies a good deal, and
-// takes the session's lock — and merges the engine's fields in under it.
+// takes the session's lock — and merges the engine's fields in under it. The
+// registry is read outside e.mu for the same reason, and because the two
+// mutexes are never nested.
 func (e *Engine) State() State {
 	st := State{Snapshot: e.sess.Snapshot(), Incarnation: e.log.Incarnation()}
+	if asks := e.asks.Asks(); len(asks) > 0 {
+		st.PendingAsks = len(asks)
+		st.HeadAsk = HeadAsk{ID: asks[0].ID, Kind: asks[0].Kind, Label: asks[0].Label()}
+	}
 	replaying := e.isReplaying()
 	e.mu.Lock()
 	defer e.mu.Unlock()
