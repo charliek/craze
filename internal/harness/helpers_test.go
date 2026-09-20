@@ -3,11 +3,13 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -111,6 +113,9 @@ func newFixture(t *testing.T, baseURL string) *fixture {
 	write(modeltable.ProvidersFile, fmt.Sprintf(providersTOML, baseURL), 0o600)
 	write(modeltable.ModelsFile, modelsTOML, 0o644)
 	f := &fixture{t: t, home: home, workspace: filepath.Join(t.TempDir(), "project"), models: map[string]*scripted{}}
+	if err := os.MkdirAll(f.workspace, 0o755); err != nil { // the tools work in it
+		t.Fatal(err)
+	}
 	f.table = f.load()
 	for alias, m := range f.table.Models {
 		f.models[alias] = &scripted{provider: m.Provider, wire: m.WireModel}
@@ -426,7 +431,9 @@ func entries(tr *store.Transcript) []string {
 	return out
 }
 
-// messageText is a message's parts in order, reasoning as "(thinking: …)".
+// messageText is a message's parts in order, reasoning as "(thinking: …)",
+// a tool call as "[call <id> <tool> <input>]", and a result as
+// "[result <id>: <text>]" or, for an error result, "[error <id>: <text>]".
 func messageText(m fantasy.Message) string {
 	var parts []string
 	for _, p := range m.Content {
@@ -434,11 +441,133 @@ func messageText(m fantasy.Message) string {
 			parts = append(parts, "(thinking: "+r.Text+")")
 		} else if t, ok := fantasy.AsMessagePart[fantasy.TextPart](p); ok {
 			parts = append(parts, t.Text)
+		} else if c, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](p); ok {
+			parts = append(parts, fmt.Sprintf("[call %s %s %s]", c.ToolCallID, c.ToolName, c.Input))
+		} else if r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p); ok {
+			text, isErr := outputText(r.Output)
+			kind := "result"
+			if isErr {
+				kind = "error"
+			}
+			parts = append(parts, fmt.Sprintf("[%s %s: %s]", kind, r.ToolCallID, text))
 		} else {
 			parts = append(parts, "<"+string(p.GetType())+">")
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// plain is evs with what differs from run to run made fixed: a StepDone's
+// time to first token is zeroed and its entry ids, which are random, each
+// become "id"; a ToolCalled's and a ToolFinished's times are zeroed.
+func plain(evs []Event) []Event {
+	out := make([]Event, len(evs))
+	for i, ev := range evs {
+		switch e := ev.(type) {
+		case StepDone:
+			e.TimeToFirstToken = 0
+			if e.Entries != nil {
+				e.Entries = slices.Repeat([]string{"id"}, len(e.Entries))
+			}
+			ev = e
+		case ToolCalled:
+			e.At = time.Time{}
+			ev = e
+		case ToolFinished:
+			e.At, e.Duration = time.Time{}, 0
+			ev = e
+		}
+		out[i] = ev
+	}
+	return out
+}
+
+// done is the StepDone plain makes of a test/a step: finish is what the
+// step finished with, stop its stop reason, and entries how many entries
+// it wrote (0: none, Saved false).
+func done(step int, finish fantasy.FinishReason, stop string, entries int) StepDone {
+	d := StepDone{
+		Step: step, Provider: "test", Model: "test/a", WireModel: "wire-a",
+		Finish: string(finish), FinishRaw: string(finish), StopReason: stop,
+		Usage: Usage{Input: 10, Output: 5, CacheRead: 4},
+	}
+	if entries > 0 {
+		d.Saved, d.Entries = true, slices.Repeat([]string{"id"}, entries)
+	}
+	return d
+}
+
+// callParts streams one tool call the way the OpenAI-compatible provider
+// does: the input's start, its arguments in one delta, its end, and the
+// complete call.
+func callParts(id, name, input string) []fantasy.StreamPart {
+	return []fantasy.StreamPart{
+		{Type: fantasy.StreamPartTypeToolInputStart, ID: id, ToolCallName: name},
+		{Type: fantasy.StreamPartTypeToolInputDelta, ID: id, Delta: input},
+		{Type: fantasy.StreamPartTypeToolInputEnd, ID: id},
+		{Type: fantasy.StreamPartTypeToolCall, ID: id, ToolCallName: name, ToolCallInput: input},
+	}
+}
+
+// bareCall is a tool call with no input parts before it: the call alone, as
+// a provider that does not stream arguments sends it.
+func bareCall(id, name, input string) []fantasy.StreamPart {
+	return []fantasy.StreamPart{{Type: fantasy.StreamPartTypeToolCall, ID: id, ToolCallName: name, ToolCallInput: input}}
+}
+
+// callStep is a step that calls tools and finishes "tool-calls".
+func callStep(calls ...[]fantasy.StreamPart) step {
+	return reply(cat(calls...), finish(fantasy.FinishReasonToolCalls))
+}
+
+// input marshals a tool call's arguments.
+func input(t *testing.T, args map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// of returns the events of type T, in order.
+func of[T Event](evs []Event) []T {
+	var out []T
+	for _, ev := range evs {
+		if e, ok := ev.(T); ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// requestText is everything in a request a model reads, as one string: the
+// system prompt, the tools it is offered, and every message — text,
+// thinking, tool-call arguments and tool results alike.
+//
+// withCallArgs excludes an assistant message's tool-call arguments when it
+// is false: those are the model's own output, which Fantasy replays inside
+// the turn exactly as the model sent it (see redactCalls), so a test that
+// plants a key in a call's arguments leaves them out. Everything craze put
+// in the request is in it either way.
+func requestText(c fantasy.Call, withCallArgs bool) string {
+	var b strings.Builder
+	for _, tl := range c.Tools {
+		fmt.Fprintf(&b, "%+v\n", tl)
+	}
+	for _, m := range c.Prompt {
+		for _, p := range m.Content {
+			if cp, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](p); ok {
+				b.WriteString(cp.ToolName + " " + cp.ToolCallID + "\n")
+				if withCallArgs {
+					b.WriteString(cp.Input + "\n")
+				}
+				continue
+			}
+			b.WriteString(messageText(fantasy.Message{Role: m.Role, Content: []fantasy.MessagePart{p}}) + "\n")
+		}
+	}
+	return b.String()
 }
 
 // promptOf summarizes a request's messages, role and text, one line each.

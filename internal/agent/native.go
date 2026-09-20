@@ -68,13 +68,23 @@ type nativeSession struct {
 	// The queue's transactions are ordered exactly as the live session's
 	// (live_queue.go): queueOp orders the mutation, emitMu is held across its
 	// emits after queueOp is released. Lock order: queueOp → emitMu → s.mu →
-	// the queue's own lock → the harness's lock (Current, under s.mu), and
+	// toolMu → the queue's own lock → the harness's lock (Current, under
+	// s.mu). No lock is ever held across an emit (plan 019 §3.10), and
 	// emitMu → the event log's publishing boundary, a leaf that is never
 	// taken with s.mu held: a publish blocked on a full primary under s.mu
 	// would stop Close from closing done, which is what releases it.
 	queueOp sync.Mutex
 	emitMu  sync.Mutex
 	queue   PromptQueue
+
+	// toolMu guards the tool rows, which are merged from the harness's tool
+	// events on Fantasy's tool goroutines as well as on its stream one
+	// (native_tools.go). It is its own lock, not s.mu: the sink runs inside
+	// the harness's turn, and nothing it touches may reach back into the
+	// harness.
+	toolMu    sync.Mutex
+	tools     map[string]ToolEvent
+	toolOrder []string
 
 	mu      sync.Mutex
 	started bool
@@ -471,6 +481,9 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		// would be, with no event, rather than as a failed turn.
 		return Result{}, ErrPromptInFlight
 	}
+	// Every row the turn left running is closed before its ending goes out,
+	// so no consumer ever sees a turn end with a call still spinning.
+	s.settleTools()
 	var failed error
 	switch {
 	case err != nil:
@@ -530,10 +543,15 @@ func nativeTitle(prompt string) string {
 
 // sink is the harness's event sink: the model's text and thinking become
 // the session's events, sanitized, because unsanitized model output is a
-// terminal-escape path into the TUI. StepDone and Retrying have no agent
-// event in H1 and are dropped: usage goes to the transcript only, and the
-// harness allows one silent retry (plan 018 §3.8). It runs synchronously on
-// Fantasy's callbacks, which is why emit gives up once Close has begun.
+// terminal-escape path into the TUI, and its tool events become the rows
+// native_tools.go merges. StepDone, Retrying and Diag have no agent event
+// and are dropped: usage goes to the transcript only, the harness allows
+// one silent retry (plan 018 §3.8), and a Diag is for the journal and for
+// diagnosis, not for a consumer (plan 019 §3.5). ToolProgress never blocks
+// here, since the harness drops a snapshot rather than wait on it.
+//
+// It runs synchronously on Fantasy's callbacks — the tool ones on tool
+// goroutines — which is why emit gives up once Close has begun.
 func (s *nativeSession) sink(ev harness.Event) {
 	switch e := ev.(type) {
 	case harness.TextDelta:
@@ -544,6 +562,14 @@ func (s *nativeSession) sink(ev harness.Event) {
 		if t := sanitizeText(e.Text); t != "" {
 			s.emit(Event{Type: EventThought, Text: t})
 		}
+	case harness.ToolStarted:
+		s.toolStarted(e)
+	case harness.ToolCalled:
+		s.toolCalled(e)
+	case harness.ToolProgress:
+		s.toolProgress(e)
+	case harness.ToolFinished:
+		s.toolFinished(e)
 	}
 }
 
@@ -582,11 +608,17 @@ func (s *nativeSession) Cancel(ctx context.Context) error {
 }
 
 // Close ends the session: the event signal closes first, so no emit can
-// block on a reader that has gone; a live turn is cancelled and waited for —
-// its partial answer is persisted interrupted, as for Cancel — and then the
-// harness, and with it the transcript, is closed. A prompt claimed and not
-// yet open is not waited for (its continuation may be due on the caller's own
-// goroutine); it finds the session closed when it runs and sends nothing.
+// block on a reader that has gone; a live turn is cancelled, the harness —
+// and with it the transcript — is closed, which waits for the turn (its
+// partial answer is persisted interrupted, as for Cancel), and then the
+// turn's continuation is waited for. A prompt claimed and not yet open is not
+// waited for (its continuation may be due on the caller's own goroutine); it
+// finds the session closed when it runs and sends nothing.
+//
+// The harness's Close is what waits for the turn, not the turn's own
+// cancel: it tells a running tool the session is closing, so a command is
+// killed at once rather than given the grace an ordinary cancel gets, and
+// Close returns within about 3 s even while one runs (plan 019 §7.7).
 //
 // It is safe before Start and idempotent, and it returns nil: there is no
 // agent process whose exit ErrAgentExited could report. A failure to close
@@ -603,15 +635,26 @@ func (s *nativeSession) Close() error {
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
 		s.mu.Unlock()
-		if in && cancel != nil && rel != nil {
+		live := in && cancel != nil && rel != nil
+		if live {
 			cancel()
-			<-rel
 		}
 		if hs != nil {
 			if err := hs.Close(); err != nil {
 				s.note(sanitizeLine(err.Error()))
 			}
 		}
+		if live {
+			<-rel
+		}
+		// The turn's own ending settled its rows; this settles the rows of
+		// a claim that never opened one. Nothing is published — done is
+		// closed, so every emit is a no-op by now — but a Snapshot taken
+		// after Close must not show a call still running (plan 019 §3.10).
+		s.settleTools()
+		// Last, after every teardown that can still emit: the log's close
+		// cuts admission, ends every subscription and closes the journal
+		// (plan 020 §3.5).
 		s.log.Close(context.Background())
 	})
 	<-s.closeDone
@@ -711,7 +754,8 @@ func (s *nativeSession) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
-	// s.mu → the queue's lock is the order every queue transaction takes.
+	// s.mu → toolMu → the queue's lock is the order every transaction takes.
+	out.Tools = s.toolRows()
 	out.Queue = s.queue.List()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	out.Config = cloneConfig(s.snap.Config)
@@ -756,6 +800,32 @@ func (s *nativeSession) emit(ev Event) {
 	default:
 	}
 	s.log.Publish(context.Background(), s.done, ev)
+}
+
+// emitLossy is emit for an event whose whole point is to be current: it
+// gives the event up rather than wait for a reader. Only a tool's progress
+// goes out this way, and only because the harness requires it — a sink that
+// may block must deliver a ToolProgress without blocking or drop it (plan
+// 019 §3.5) — and because the next snapshot repeats the whole output
+// anyway, so a drop costs a frame and nothing else.
+//
+// It publishes through the log's TryPublish, which is that contract written
+// into the ordering boundary (plan 020 §3.1): the event is dropped for
+// everyone at once — the primary, every subscription and the journal — and
+// consumes no sequence number, so a dropped progress frame can never leave a
+// hole a reconnecting client would have to reason about. Sending on the
+// channel directly would have bypassed the numbering entirely.
+func (s *nativeSession) emitLossy(ev Event) {
+	if ev.At.IsZero() {
+		ev.At = time.Now()
+	}
+	select {
+	case <-s.done:
+		s.log.Abandoned()
+		return
+	default:
+	}
+	s.log.TryPublish(ev)
 }
 
 // queueTx is the live session's queue transaction (live_queue.go): fn
@@ -915,7 +985,7 @@ func phraseTurnError(err error) error {
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
 	case errors.Is(err, harness.ErrContextTooLarge):
-		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window%s; start a new session",
+		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window%s; start a new session (compaction arrives with H7)",
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)

@@ -1,18 +1,22 @@
 // Package harness is craze's native agent harness: a Session holds one
 // conversation with a model from the harness's own model table and runs it a
 // turn at a time on Fantasy's agent loop (plan 018 §3.7). A turn streams its
-// text and thinking to a sink as they arrive, is written to the session's
-// transcript from Fantasy's callbacks (package store), and ends in a stop
-// reason or in one of a small set of errors the adapter can phrase
-// (errors.go).
+// text, thinking and tool calls to a sink as they happen, is written to the
+// session's transcript a step at a time from Fantasy's callbacks (package
+// store), and ends in a stop reason or in one of a small set of errors the
+// adapter can phrase (errors.go).
 //
-// H1 gives the model no tools, so a turn is one model step, and the system
-// prompt says so (system.go).
+// The model has tools (plan 019): the session's tool profile — opencode's
+// read, write, edit, bash, grep and glob, and the system prompt written for
+// them — is chosen when it opens, and a turn runs as many steps as the model
+// needs, running the calls of each through the tool framework
+// (internal/harness/tool), up to a limit. toolbridge.go is the one file that
+// adapts the framework to Fantasy; tools.go builds a session's tools.
 //
 // The harness imports nothing from the rest of craze but internal/atomicfile
-// (through modeltable): its directory, workspace, model table and craze's
-// version all come in through Options, from the native adapter in
-// internal/agent (plan 018 §3.1).
+// (through modeltable and the tools): its directory, workspace, model table
+// and craze's version all come in through Options, from the native adapter
+// in internal/agent (plan 018 §3.1).
 //
 // # Models and effort
 //
@@ -40,7 +44,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -78,6 +81,9 @@ type Options struct {
 	// Version is craze's version, recorded in the transcript's header. It is
 	// passed in so the harness does not import craze's version package.
 	Version string
+
+	// tools are the tool set's test seams (tools.go); zero is production.
+	tools toolSeams
 }
 
 // ModelInfo is one model-table entry as a model picker shows it.
@@ -91,10 +97,15 @@ type ModelInfo struct {
 
 // Session is one conversation. See the package comment.
 type Session struct {
-	system   string // the frozen system prompt
+	system   string // the frozen system prompt, the tool profile's
 	store    *store.Store
+	tools    *toolset // fixed at Open
 	getenv   func(string) string
 	newModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
+	// newAgent builds a turn's agent: the model, the system prompt and the
+	// session's tools. It is fantasy.NewAgent (defaultAgent); a test may
+	// replace it before the first Run.
+	newAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
 
 	closeOnce sync.Once
 	closeErr  error
@@ -105,8 +116,18 @@ type Session struct {
 	logged  logged // what the transcript was last told the model and effort are
 	closed  bool
 	running bool
-	cancel  context.CancelFunc // the live turn's; nil when idle
-	done    chan struct{}      // closed when the live turn has returned
+	turns   int                     // turns begun, which number their tool calls' ids
+	cancel  context.CancelCauseFunc // the live turn's; nil when idle
+	done    chan struct{}           // closed when the live turn has returned
+}
+
+// defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,
+// one retry, and the session's tools in the profile's order.
+func defaultAgent(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
+	return fantasy.NewAgent(lm,
+		fantasy.WithSystemPrompt(system),
+		fantasy.WithMaxRetries(maxRetries),
+		fantasy.WithTools(tools...))
 }
 
 // model is a built model and the effort a turn sends it: everything a turn
@@ -133,11 +154,16 @@ type logged struct {
 	effort string
 }
 
-// Open starts a session: it resolves and builds the starting model, and
-// builds the system prompt. It does no I/O — the transcript appears with the
-// first turn that produces output — so a session closed before that leaves
-// nothing behind. A starting model whose provider has no key is ErrNoAPIKey;
-// the caller decides whether to fall back to another model (plan 018 §3.8).
+// Open starts a session: it resolves and builds the starting model, and from
+// it the session's tools (tools.go) — the profile, and with it the system
+// prompt, which the transcript's header records, and the redactor over every
+// key the table knows of. It writes nothing — the transcript appears with
+// the first turn that produces output — so a session closed before that
+// leaves nothing behind; it only sweeps old spill files. A starting model
+// whose provider has no key is ErrNoAPIKey; the caller decides whether to
+// fall back to another model (plan 018 §3.8). A key anywhere in the table,
+// used or not, that is too short to redact from tool output fails it
+// (modeltable.ErrKeyTooShort, plan 019 §3.8).
 func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
@@ -145,6 +171,7 @@ func Open(opts Options) (*Session, error) {
 	s := &Session{
 		getenv:   opts.Getenv,
 		newModel: opts.NewModel,
+		newAgent: defaultAgent,
 		table:    opts.Table,
 	}
 	if s.getenv == nil {
@@ -153,7 +180,6 @@ func Open(opts Options) (*Session, error) {
 	if s.newModel == nil {
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return llm.New(r) }
 	}
-	s.system = systemPrompt(filepath.Clean(opts.Workspace), runtime.GOOS)
 
 	alias := opts.Model
 	if alias == "" {
@@ -170,15 +196,24 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), opts.Table, s.getenv, m.r, opts.tools); err != nil {
+		return nil, err
+	}
+	s.system = s.tools.system
 	st, err := store.New(store.Options{
-		Home:         opts.Home,
+		Home: opts.Home,
+		// The real working directory: the header records it and the prompt
+		// names it, and openTools has refused one whose path holds a provider
+		// key (errWorkspaceKey), so neither can carry one.
 		Workspace:    opts.Workspace,
 		CrazeVersion: opts.Version,
 		SystemPrompt: s.system,
+		ToolProfile:  s.tools.profile,
+		Tools:        s.tools.wire,
 		Now:          opts.Now,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("harness: %w", err)
+		return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
 	s.store = st
 	s.cur = m
@@ -229,6 +264,17 @@ func carriedEffort(current string, r modeltable.Resolved) string {
 // current model in place. A turn already running finishes on its own model.
 // Switching to the current alias rebuilds its client from the table, which
 // is how a turn picks up a key that was just exported.
+//
+// A model whose tool profile is not the session's is refused with
+// ErrProfileMismatch: the tools and the system prompt were fixed at Open
+// (plan 019 §3.1).
+//
+// A switch is also where a session learns a provider key: the table is
+// re-read for keys the environment gained since Open, and a redactor over
+// them is prepared for the next turn to use (toolset.resolve, and begin,
+// which takes it up). A key that cannot be redacted, or that is already
+// inside what this session sends with every request, refuses the switch and
+// leaves the model in place.
 func (s *Session) SetModel(alias string) error {
 	s.mu.Lock()
 	table, closed := s.table, s.closed
@@ -240,6 +286,16 @@ func (s *Session) SetModel(alias string) error {
 	// calling Current must never wait on it.
 	m, err := s.build(table, alias)
 	if err != nil {
+		return err
+	}
+	if err := s.tools.check(m.r); err != nil {
+		return err
+	}
+	// Outside the lock, like the build: it reads the environment. It only
+	// resolves; the next turn takes the redactor up (begin), so a turn
+	// already running keeps the one it has redacted its steps with, and a
+	// switch that fails below leaves nothing installed either.
+	if err := s.tools.resolve(table, s.getenv); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -316,6 +372,12 @@ func (s *Session) ID() string { return s.store.ID() }
 // for the first and returns its result. Every Run, SetModel and SetEffort
 // after it is ErrClosed. Close must not be called from inside Run's sink,
 // which runs on the turn it would wait for.
+//
+// The cancel says the session is closing (tool.ErrClosing), and Close also
+// closes the tools' closing channel, which reaches a call whose turn was
+// already cancelled for another reason: either way a running command is
+// killed at once, not given its grace, so Close returns within the tools'
+// close bound — about 3 s — even after a cancel (plan 019 §3.9, §7.7).
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -323,11 +385,14 @@ func (s *Session) Close() error {
 		cancel, done := s.cancel, s.done
 		s.mu.Unlock()
 		if cancel != nil {
-			cancel()
+			cancel(errClosing)
+		}
+		s.tools.close()
+		if cancel != nil {
 			<-done
 		}
 		if err := s.store.Close(); err != nil {
-			s.closeErr = fmt.Errorf("harness: %w", err)
+			s.closeErr = fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}
 	})
 	return s.closeErr

@@ -15,10 +15,11 @@ import (
 
 // The errors a Session returns, stable so the adapter can phrase each one
 // for the user without reading provider text (plan 018 §3.7). A failed turn's
-// error matches at most one of ErrEmptyStep, ErrAuth, ErrModelNotFound and
-// ErrContextTooLarge; any turn failure from the provider is also a
-// *ProviderError, which carries the HTTP status and the provider's own
-// message, cleaned.
+// error matches at most one of ErrEmptyStep, ErrAuth, ErrModelNotFound,
+// ErrContextTooLarge and ErrBadToolCalls; any turn failure from the provider
+// is also a *ProviderError, which carries the HTTP status and the provider's
+// own message, cleaned. A tool's failure is never a turn's: it goes to the
+// model as an error result.
 var (
 	// ErrNoAPIKey is modeltable's: the model's provider has no key, neither
 	// in the environment nor inline. Open and SetModel return it, naming the
@@ -42,8 +43,22 @@ var (
 	ErrModelNotFound = errors.New("harness: the provider does not know the model")
 
 	// ErrContextTooLarge is a provider saying the request is longer than the
-	// model's context window. H1 has no compaction, so it ends the turn.
-	ErrContextTooLarge = errors.New("harness: the conversation is longer than the model's context window")
+	// model's context window. There is no compaction until H7, so every
+	// later turn would fail the same way: the session is done, and a
+	// ProviderError of this kind says so, naming the model (plan 019 §3.5).
+	ErrContextTooLarge = errors.New("harness: the conversation no longer fits the model's context window; start a new session (compaction arrives with H7)")
+
+	// ErrBadToolCalls is a provider fault: a step's tool calls had an empty
+	// or a repeated call id, so their results could not be paired with them
+	// — in the next request or in the transcript. Nothing in the step ran,
+	// the step was not persisted, and the turn ended (plan 019 §3.5). A
+	// ProviderError of this kind carries no status.
+	ErrBadToolCalls = errors.New("harness: the provider sent tool calls with missing or repeated ids")
+
+	// ErrProfileMismatch is SetModel's refusal of a model whose tool profile
+	// is not the session's: a session's tools and system prompt are fixed
+	// when it opens (plan 019 §3.1, Seam 2).
+	ErrProfileMismatch = errors.New("harness: this model uses a different tool profile; start a new session")
 
 	// ErrInTurn is Run's refusal while another Run is live on the session.
 	// The adapter serializes turns itself, so it never reaches a user.
@@ -64,9 +79,10 @@ var (
 const maxMessageBytes = 300
 
 // ProviderError is a turn that failed at or on the way to the provider: an
-// HTTP error, an error event in the stream, or a connection that failed. Its
-// Unwrap is ErrAuth, ErrModelNotFound or ErrContextTooLarge when the failure
-// is one of those, else nil.
+// HTTP error, an error event in the stream, a connection that failed, or a
+// response the harness could not use. Its Unwrap is ErrAuth,
+// ErrModelNotFound, ErrContextTooLarge or ErrBadToolCalls when the failure is
+// one of those, else nil.
 //
 // Message is the provider's own text, already scrubbed of the key by
 // package llm, then cut down to one line of at most maxMessageBytes with
@@ -83,7 +99,10 @@ type ProviderError struct {
 
 func (e *ProviderError) Error() string {
 	head := "harness: provider error"
-	if e.kind != nil {
+	switch {
+	case e.kind == ErrContextTooLarge:
+		head = fmt.Sprintf("harness: the conversation no longer fits model %q's context window; start a new session (compaction arrives with H7)", e.Model)
+	case e.kind != nil:
 		head = e.kind.Error()
 	}
 	status := ""
@@ -140,6 +159,18 @@ func classify(err error, m store.Model) error {
 	}
 	pe.Message = oneLine(pe.Message, maxMessageBytes)
 	return pe
+}
+
+// badToolCalls is the error a turn ends with when a step's tool calls had an
+// empty or repeated provider id: a provider fault, classified like any
+// other, with no status.
+func badToolCalls(m store.Model) error {
+	return &ProviderError{
+		Provider: m.Provider,
+		Model:    m.Alias,
+		Message:  "a tool call in the response had an empty or repeated id, so none of the response's tool calls was run",
+		kind:     ErrBadToolCalls,
+	}
 }
 
 // kindOf is the sentinel a provider failure matches, or nil. Authentication

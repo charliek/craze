@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -109,3 +110,19 @@ def without_seq(events: list[dict], subject: dict | list[dict]) -> dict | list[d
 def host_env_names(env: Mapping[str, str]) -> list[str]:
     """Every herdr and roost variable in env: the hosts craze may report to."""
     return [name for name in env if name.startswith(("HERDR_", "ROOST_"))]
+
+
+def require_rg() -> None:
+    """The repo's rule for a test that needs ripgrep (plan 019 §3.9, D-41).
+
+    The native harness's grep and glob run the rg found on PATH, so a laptop
+    without it still passes by skipping. In CI that skip would be a quiet
+    pass on a runner that lost rg, so the `cli` job sets CRAZE_REQUIRE_RG=1
+    and the skip becomes a failure -- the same pair internal/tui's
+    requireFrameRG and internal/harness/tool/opencode's own tests use.
+    """
+    if shutil.which("rg"):
+        return
+    if os.environ.get("CRAZE_REQUIRE_RG") == "1":
+        pytest.fail("CRAZE_REQUIRE_RG=1, and ripgrep (rg) is not on PATH")
+    pytest.skip("ripgrep (rg) is not on PATH (set CRAZE_REQUIRE_RG=1 to fail instead)")

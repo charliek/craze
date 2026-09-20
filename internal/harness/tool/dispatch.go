@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/harness/redact"
@@ -48,7 +49,13 @@ type Dispatcher struct {
 	tools map[string]registered
 	names []string // tool ids in profile order, for the unknown-tool text
 	gate  Gate
-	env   Env
+	// env is the session's, with Progress and Redactor left out: both are
+	// set per call, Progress from the caller and Redactor from red.
+	env Env
+	// red is the session's redactor, swappable: a session learns a provider's
+	// key when it switches to that provider's model, and every call from then
+	// on must redact it (SetRedactor).
+	red atomic.Pointer[redact.Replacer]
 
 	// interval is the progress throttle's; tests replace it.
 	interval time.Duration
@@ -97,8 +104,32 @@ func NewDispatcher(o Options) (*Dispatcher, error) {
 	if d.env.Locks == nil {
 		d.env.Locks = &PathLocks{}
 	}
-	d.env.Progress = nil // set per call
+	d.red.Store(o.Env.Redactor)
+	d.env.Progress, d.env.Redactor = nil, nil // set per call, from red
 	return d, nil
+}
+
+// SetRedactor makes r the redactor of every call prepared or run from now
+// on. r must redact everything the one before it did — a session only ever
+// learns more keys — and, like every Replacer, must not be changed after it
+// is handed over. It is safe to call while calls run.
+//
+// A call already running keeps the Env it was given, so what it redacts as
+// it goes — a command's live output, and the spill file written from it —
+// still uses the redactor of when it started; its result does not, since the
+// dispatcher redacts that when the call returns. A call that began before
+// the session knew a key belongs to that earlier state (plan 019 §3.8).
+func (d *Dispatcher) SetRedactor(r *redact.Replacer) { d.red.Store(r) }
+
+// redactor is the current one.
+func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
+
+// callEnv is the Env one call gets: the session's, with this call's
+// progress and the redactor of the moment.
+func (d *Dispatcher) callEnv(progress Progress) Env {
+	env := d.env
+	env.Progress, env.Redactor = progress, d.redactor()
+	return env
 }
 
 // Prepare parses a call and holds it for Run. It returns the call's Request,
@@ -158,9 +189,7 @@ func (d *Dispatcher) prepare(t Tool, c Call) (p Prepared, req Request, fail Resu
 				fmt.Sprintf("tool %q panicked while preparing the call: %v", c.Tool, r))
 		}
 	}()
-	env := d.env
-	env.Progress = func(string) {}
-	p, err := t.Prepare(env, c)
+	p, err := t.Prepare(d.callEnv(func(string) {}), c)
 	if err == nil && p == nil {
 		err = errors.New("internal error: the tool prepared nothing")
 	}
@@ -231,7 +260,7 @@ func (d *Dispatcher) Run(ctx context.Context, id string, progress Progress) Resu
 	}
 	res = d.redactResult(res)
 	if !res.IsError && e.spec.Truncate != None {
-		res.Text, res.Trunc = truncate(d.env.Home, id, res.Text, e.spec.Truncate, limits{MaxLines, MaxBytes}, d.env.Redactor)
+		res.Text, res.Trunc = truncate(d.env.Home, id, res.Text, e.spec.Truncate, limits{MaxLines, MaxBytes}, d.redactor())
 	}
 	return res
 }
@@ -248,11 +277,9 @@ func (d *Dispatcher) outcome(ctx context.Context, e *entry, progress Progress) R
 	if fail := d.check(ctx, e.req); fail.IsError {
 		return fail
 	}
-	pg := &progressGate{deliver: progress, redactor: d.env.Redactor, now: time.Now, interval: d.interval}
+	pg := &progressGate{deliver: progress, redactor: d.redactor(), now: time.Now, interval: d.interval}
 	defer pg.close()
-	env := d.env
-	env.Progress = pg.send
-	return d.run(ctx, e, env)
+	return d.run(ctx, e, d.callEnv(pg.send))
 }
 
 // check asks the gate and returns the result for a call it does not allow,
@@ -307,7 +334,7 @@ func errorResult(class ErrorClass, text string) Result {
 // copy shares nothing with r, so an event holding it cannot see a tool's
 // later changes to its own slices.
 func (d *Dispatcher) redactRequest(r Request) Request {
-	red := d.env.Redactor
+	red := d.redactor()
 	r.CallID = red.String(r.CallID)
 	r.Tool = red.String(r.Tool)
 	r.Title = red.String(r.Title)
@@ -332,7 +359,7 @@ func (d *Dispatcher) redactRequest(r Request) Request {
 // (plan 019 §3.8), the spill path of a tool that truncated itself included:
 // it is built from the harness's home, which is text like any other.
 func (d *Dispatcher) redactResult(r Result) Result {
-	red := d.env.Redactor
+	red := d.redactor()
 	r.Text = red.String(r.Text)
 	r.Content = red.String(r.Content)
 	r.Trunc.Spill = red.String(r.Trunc.Spill)

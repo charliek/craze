@@ -29,13 +29,13 @@ const CredentialsFile = "providers.toml"
 
 // Profile returns the opencode profile with a fresh set of its tools. A
 // session builds its own, so grep and glob share one ripgrep, and look for
-// rg on PATH once per session.
-//
-// Its System func is nil: the system prompt the profile will carry arrives
-// with the runner that sends it (plan 019 §3.6), and until then
-// tool.Registry refuses to register the profile, so no session can be
-// opened on half of it.
+// rg on PATH once per session. Its System func is the system prompt written
+// for these tools (System).
 func Profile() (tool.Profile, error) {
+	system, err := systemFunc()
+	if err != nil {
+		return tool.Profile{}, fmt.Errorf("opencode: %w", err)
+	}
 	rg := newRipgrep()
 	// The tools in the order the model is offered them: opencode's registry
 	// order (tool/registry.ts:229-246). The order is part of every request's
@@ -48,7 +48,7 @@ func Profile() (tool.Profile, error) {
 		newEdit,
 		newWrite,
 	}
-	p := tool.Profile{Name: Name}
+	p := tool.Profile{Name: Name, System: system}
 	for _, build := range builders {
 		t, err := build()
 		if err != nil {
@@ -61,6 +61,32 @@ func Profile() (tool.Profile, error) {
 
 //go:embed descriptions/*.txt
 var descriptions embed.FS
+
+// systemText is the profile's system prompt: opencode's
+// session/prompt/default.txt reduced to what is true of craze, with the
+// environment block H1's prompt had (NOTICE lists every edit). Its two
+// placeholders are the only things that vary, and neither varies within a
+// session, so every request in one starts with the same bytes (D-30).
+//
+//go:embed system.txt
+var systemText string
+
+// systemFunc returns the profile's System func. The template is checked
+// here, once: Render fails only on the template's own placeholders, never on
+// a value (values are inserted as they are), so a template that renders now
+// renders for every session.
+func systemFunc() (func(tool.SystemEnv) string, error) {
+	vars := func(env tool.SystemEnv) map[string]string {
+		return map[string]string{"workspace": env.Workspace, "os": env.OS}
+	}
+	if _, err := tool.Render(systemText, vars(tool.SystemEnv{})); err != nil {
+		return nil, fmt.Errorf("system prompt: %w", err)
+	}
+	return func(env tool.SystemEnv) string {
+		s, _ := tool.Render(systemText, vars(env)) // checked above
+		return s
+	}, nil
+}
 
 // description returns the named tool's description, rendered with vars. The
 // file's text is kept exactly, final newline included, as opencode sends it.
