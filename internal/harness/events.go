@@ -12,7 +12,7 @@ import (
 //
 //   - the answer: TextDelta, ThoughtDelta;
 //   - tool calls: ToolStarted, ToolCalled, ToolProgress, ToolFinished;
-//   - the turn's course: StepDone, Retrying, Diag.
+//   - the turn's course: StepDone, Steered, Retrying, Diag.
 //
 // Every field is a plain value that survives a JSON round trip, so a
 // journal can record exactly what the sink was handed (plan 019 §3.5). Text
@@ -128,6 +128,17 @@ type StepDone struct {
 	SaveError        string
 }
 
+// Steered reports a steer the turn accepted (Session.Steer): text the user
+// interjected into the running turn. It is emitted when a step takes the steer
+// up, and, for one no step reached, as the turn settles — always by the turn's
+// own goroutine and always before Run returns, so nothing an adapter shows for
+// an interjection can follow the turn's ending event.
+//
+// Text is the caller's own, unchanged: it never went near the model or a
+// provider. A Steered says the turn took the text, not that it was persisted;
+// Result.Unanswered says which ones were not.
+type Steered struct{ Text string }
+
 // Retrying reports that the step failed before producing any output and will
 // be sent again after Delay (at most once a step: the runner allows one
 // retry). Attempt counts the retries of this step, from 1; Reason is the
@@ -178,6 +189,7 @@ func (ToolCalled) isEvent()   {}
 func (ToolProgress) isEvent() {}
 func (ToolFinished) isEvent() {}
 func (StepDone) isEvent()     {}
+func (Steered) isEvent()      {}
 func (Retrying) isEvent()     {}
 func (Diag) isEvent()         {}
 

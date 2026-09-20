@@ -58,6 +58,10 @@ var contractImpls = []struct {
 // signal.
 func openStub(t *testing.T) contractSession {
 	s := tui.NewStub()
+	// The stub carries no provider of its own, so it advertises no
+	// capability; grok's is the ACP provider that can interject, which is the
+	// contract the native adapter now shares (plan 019 §3.10).
+	s.SetProvider(agent.GrokProvider())
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +405,61 @@ func TestSessionContractQueue(t *testing.T) {
 		}
 		if q := s.Snapshot().Queue; len(q) != 0 {
 			t.Fatalf("the queue is not empty: %+v", q)
+		}
+	})
+}
+
+// TestSessionContractInterject (plan 019 §3.10, §7.12): both sessions
+// advertise interject, both refuse it with ErrNotInTurn — emitting nothing —
+// when there is no running turn to merge into, and both take one while a turn
+// is in flight and show it exactly once as EventUser{Interjection}, before the
+// turn's ending event and never after it.
+//
+// What the two do with text the turn could not answer is not shared: only the
+// native adapter has a turn that can fail to take it up, and its own tests
+// hold that (the head of the queue).
+func TestSessionContractInterject(t *testing.T) {
+	eachImpl(t, func(t *testing.T, s contractSession) {
+		if !s.Snapshot().Provider.Capabilities().Interject {
+			t.Fatal("the session does not advertise Interject, so the cases below say nothing")
+		}
+		if err := s.Interject(context.Background(), "while idle"); !errors.Is(err, agent.ErrNotInTurn) {
+			t.Fatalf("Interject while idle = %v, want ErrNotInTurn", err)
+		}
+		if evs := buffered(s); len(evs) != 0 {
+			t.Fatalf("a refused interjection emitted %+v", evs)
+		}
+
+		out := runHeld(t, s, "in flight")
+		if err := s.Interject(context.Background(), "mid-turn"); err != nil {
+			t.Fatalf("Interject during a turn = %v, want it accepted", err)
+		}
+		o := cancelHeld(t, s, out)
+		if o.err != nil || o.res.StopReason != "cancelled" {
+			t.Fatalf("the held prompt = %+v, %v; want cancelled", o.res, o.err)
+		}
+		if err := s.Interject(context.Background(), "after the turn"); !errors.Is(err, agent.ErrNotInTurn) {
+			t.Fatalf("Interject after the turn = %v, want ErrNotInTurn", err)
+		}
+
+		evs := buffered(s)
+		shown, last, end := -1, "", -1
+		for i, ev := range evs {
+			switch {
+			case ev.Type == agent.EventUser && ev.Interjection:
+				if shown >= 0 {
+					t.Fatalf("the interjection was shown twice: %+v", evs)
+				}
+				shown, last = i, ev.Text
+			case ev.Type == agent.EventDone, ev.Type == agent.EventError:
+				end = i
+			}
+		}
+		if shown < 0 || last != "mid-turn" {
+			t.Fatalf("the accepted interjection was shown as %q at %d: %+v", last, shown, evs)
+		}
+		if end < 0 || shown > end {
+			t.Fatalf("the interjection at %d followed the turn's ending at %d: %+v", shown, end, evs)
 		}
 	})
 }

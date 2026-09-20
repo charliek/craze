@@ -157,6 +157,54 @@ func TestQueueListIsACloneInSendOrder(t *testing.T) {
 	}
 }
 
+// TestQueuePushFrontIsExemptFromBothCaps: PushFront puts a row at the head of
+// a queue that is already full, with text far over the size cap, and gives it
+// an ordinary id, the position it landed at, and an ordinary row's behaviour —
+// Edit, Remove and Pop all reach it. The control is Add, which refuses both.
+func TestQueuePushFrontIsExemptFromBothCaps(t *testing.T) {
+	var q PromptQueue
+	now := time.Now()
+	for i := range queueCap {
+		if _, _, err := q.Add(strings.Repeat("a", i+1), now); err != nil {
+			t.Fatalf("Add %d: %v", i, err)
+		}
+	}
+	huge := strings.Repeat("x", queueTextCap+1)
+	// The control: neither cap lets Add through.
+	if _, _, err := q.Add("one more", now); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("control: Add on a full queue = %v, want ErrQueueFull", err)
+	}
+	if _, _, err := q.Add(huge, now); !errors.Is(err, ErrQueueTextTooLong) && !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("control: Add of oversized text = %v, want a refusal", err)
+	}
+
+	ev := q.PushFront(huge, now)
+	if ev.Change != QueueQueued || ev.Pos != 0 || ev.Prompt.Text != huge || ev.Prompt.ID == "" {
+		t.Fatalf("PushFront event %+v", ev)
+	}
+	second := q.PushFront("ahead of it", now)
+	if q.Len() != queueCap+2 {
+		t.Fatalf("the queue holds %d rows, want %d", q.Len(), queueCap+2)
+	}
+	list := q.List()
+	if list[0].Text != "ahead of it" || list[1].Text != huge || list[2].Text != "a" {
+		t.Fatalf("queue order %q, %q, %q", list[0].Text, list[1].Text, list[2].Text)
+	}
+	if second.Prompt.ID == ev.Prompt.ID {
+		t.Fatal("PushFront must mint a distinct id")
+	}
+	// From the head it is an ordinary row.
+	if _, err := q.Edit(ev.Prompt.ID, "edited"); err != nil {
+		t.Fatalf("Edit of a pushed row: %v", err)
+	}
+	if _, ok := q.Remove(second.Prompt.ID); !ok {
+		t.Fatal("Remove of a pushed row")
+	}
+	if popped, ok := q.Pop(); !ok || popped.Prompt.Text != "edited" {
+		t.Fatalf("Pop = %+v, %v; want the edited pushed row", popped, ok)
+	}
+}
+
 func TestQueueEventCarriesItsPosition(t *testing.T) {
 	ev := QueueEvent{Prompt: QueuedPrompt{ID: "q-2", Text: "hi", Version: 3}, Change: QueueEdited, Pos: 1}
 	got := ev.Event()

@@ -325,6 +325,97 @@ func TestToolLoopPrefixIsStable(t *testing.T) {
 	}
 }
 
+// TestSteerPrefixIsStable extends the property above to an interjection (plan
+// 019 §3.6, §3.10): a steer accepted while a turn's first step streams sits at
+// one index from the step that takes it up onwards — the step after it, and
+// the next turn's replay of the transcript — and every request still begins
+// with the whole of the request before it, byte for byte, so the provider's
+// prefix cache keeps hitting across an interjection.
+//
+// That is the reason the runner rebuilds the step's messages from its splices
+// every step instead of appending in place: Fantasy composes a step's input
+// from initialPrompt + responseMessages and applies PrepareStep's list to that
+// one step (agent.go:943-970), so an appended steer would vanish at the next
+// step and move the prefix under the cache. The control is the same run with
+// no Steer at all: the steer's bytes are in no request, and each request is
+// one message shorter.
+func TestSteerPrefixIsStable(t *testing.T) {
+	// The index the steer lands at: the system prompt, the turn's prompt, and
+	// the first tool step's assistant message and its results are ahead of it.
+	const at = 4
+	for _, steer := range []bool{true, false} {
+		t.Run(fmt.Sprintf("steer=%v", steer), func(t *testing.T) {
+			read := `{"filePath":"a.txt"}`
+			// Two tool steps and an answer, then a second turn that replays
+			// the lot: the steer must be at the same index in the last three
+			// requests.
+			w := newWire(t,
+				sseReply(toolCallChunk("call_1", "read", read), finishChunk("tool_calls", true)),
+				sseReply(toolCallChunk("call_2", "read", read), finishChunk("tool_calls", true)),
+				sseReply(textChunk("It says alpha."), finishChunk("stop", true)),
+				sseReply(textChunk("You're welcome."), finishChunk("stop", true)),
+			)
+			f, opts := wireFixture(t, w)
+			opts.Now = time.Now // a real clock: nothing may reach the prompt
+			s := f.open(opts)
+			f.put("a.txt", "alpha\n")
+
+			// The steer is accepted from inside the sink, once the first step's
+			// tool call has been announced: the turn is live, its first
+			// request is already on the wire, and the second has not been
+			// built. Steer takes no lock the turn holds, so calling it from
+			// there is safe, and this is the test that says so.
+			var sent atomic.Bool
+			_, err := s.Run(context.Background(), "What does a.txt say?", func(ev Event) {
+				if _, ok := ev.(ToolCalled); !ok || !steer || !sent.CompareAndSwap(false, true) {
+					return
+				}
+				if err := sendSteer(s, steerText); err != nil {
+					t.Errorf("Steer from the sink: %v", err)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sent.Load() != steer {
+				t.Fatalf("the steer was sent = %v, want %v", sent.Load(), steer)
+			}
+			run(t, s, "Thanks.")
+
+			bodies := w.requests()
+			if len(bodies) != 4 {
+				t.Fatalf("the server saw %d requests, want 4", len(bodies))
+			}
+			grow := []int{2, 2, 2} // each step's assistant message and results, then the answer and the next prompt
+			if steer {
+				grow[0] = 3 // and the steer, the first time it goes out
+			}
+			for i := 1; i < len(bodies); i++ {
+				prev, next := messages(t, bodies[i-1]), messages(t, bodies[i])
+				if k := prefixBreak(prev, next); k >= 0 {
+					t.Fatalf("request %d does not begin with request %d: message %d differs\n%s\n%s",
+						i+1, i, k, prev[k], next[min(k, len(next)-1)])
+				}
+				if len(next) != len(prev)+grow[i-1] {
+					t.Fatalf("request %d has %d messages, want request %d's %d plus %d", i+1, len(next), i, len(prev), grow[i-1])
+				}
+			}
+			// The steer is at one index in every request from the step that
+			// took it up on, the next turn's replay included, and in no other
+			// message of any of them. The control has it in none at all.
+			for i, body := range bodies {
+				msgs := messages(t, body)
+				want := steer && i > 0
+				for k, m := range msgs {
+					if holds := bytes.Contains(m, []byte(steerText)); holds != (want && k == at) {
+						t.Fatalf("request %d's message %d holds the steer = %v, want %v:\n%s", i+1, k, holds, want && k == at, m)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestWireErrors maps each provider failure onto the harness's errors, and
 // checks that no key reaches a returned error or an emitted event even when
 // the provider echoes it back.
@@ -371,7 +462,7 @@ func TestWireErrors(t *testing.T) {
 			s := f.open(opts)
 			var ev events
 			res, err := s.Run(context.Background(), "hi", ev.sink)
-			if res != (Result{}) {
+			if !empty(res) {
 				t.Errorf("a failed turn returned %+v, want a zero Result", res)
 			}
 			var pe *ProviderError
@@ -431,7 +522,7 @@ func TestWireEmptyStep(t *testing.T) {
 	s := f.open(opts)
 	res, err := s.Run(context.Background(), "hi", nil)
 	var pe *ProviderError
-	if !errors.Is(err, ErrEmptyStep) || errors.As(err, &pe) || res != (Result{}) {
+	if !errors.Is(err, ErrEmptyStep) || errors.As(err, &pe) || !empty(res) {
 		t.Fatalf("Run = %+v, %#v; want a zero Result and ErrEmptyStep", res, err)
 	}
 	noTranscript(t, s)

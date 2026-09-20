@@ -344,6 +344,22 @@ type outcome struct {
 	err error
 }
 
+// sendSteer is Steer with the session's own token, which is how the adapter calls
+// it: the token is read and used with nothing happening in between. A test
+// that needs the two halves apart takes the token itself.
+func sendSteer(s *Session, text string) error { return s.Steer(s.SteerToken(), text) }
+
+// empty reports whether a Result carries nothing at all, which is what a
+// failed turn returns — no stop reason, no usage and no unanswered steer.
+// Result holds a slice since C12, so it cannot be compared with ==.
+func empty(res Result) bool { return only(res, "") }
+
+// only reports whether res says stop and nothing else: no usage, and no
+// unanswered steer. It is what a cancelled turn returns.
+func only(res Result, stop string) bool {
+	return res.StopReason == stop && res.Usage == (Usage{}) && len(res.Unanswered) == 0
+}
+
 // start runs a turn on its own goroutine.
 func start(ctx context.Context, s *Session, text string, sink func(Event)) <-chan outcome {
 	out := make(chan outcome, 1)

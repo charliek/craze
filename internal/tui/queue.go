@@ -259,6 +259,10 @@ func interjectErrNote(err error) string {
 		return "nothing to interject into"
 	case errors.Is(err, agent.ErrUnsupported):
 		return "this agent cannot interject"
+	case errors.Is(err, agent.ErrQueueFull):
+		// The turn has taken as many interjections as the queue could hold if
+		// it answered none of them; the draft stays in the composer.
+		return "too many interjections in this turn"
 	default:
 		return "interject failed"
 	}

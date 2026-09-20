@@ -178,6 +178,14 @@ func (m *scriptedModel) callCount() int {
 	return len(m.calls)
 }
 
+// requests is every call the model has been sent, cloned: a test that reads
+// them while a turn may still be running must not touch the slice itself.
+func (m *scriptedModel) requests() []fantasy.Call {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]fantasy.Call(nil), m.calls...)
+}
+
 func (m *scriptedModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -399,8 +407,8 @@ func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 	if !p.Hidden() || !p.InProcess() || p.DisplayName() != "native" {
 		t.Fatalf("native is hidden=%v inProcess=%v label %q", p.Hidden(), p.InProcess(), p.DisplayName())
 	}
-	if got := p.Capabilities(); got != (Capabilities{Effort: true}) {
-		t.Fatalf("Capabilities = %+v, want Effort alone", got)
+	if got := p.Capabilities(); got != (Capabilities{Effort: true, Interject: true}) {
+		t.Fatalf("Capabilities = %+v, want effort and interject alone", got)
 	}
 	if slices.Contains(ProviderNames(), "native") {
 		t.Fatalf("ProviderNames lists native: %q", ProviderNames())
@@ -1384,13 +1392,14 @@ func TestNativeSetConfig(t *testing.T) {
 	}
 }
 
-// TestNativeUnsupported: what H1 does not have says so before anything runs.
+// TestNativeUnsupported: what the harness does not have says so before
+// anything runs. Interject is not here since C12: it is supported, and is
+// refused with ErrNotInTurn while the session is idle (TestNativeInterject).
 func TestNativeUnsupported(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	for name, err := range map[string]error{
 		"SetMode":          s.SetMode(context.Background(), "plan"),
-		"Interject":        s.Interject(context.Background(), "hey"),
 		"AnswerPermission": s.AnswerPermission("p", "allow"),
 		"AnswerQuestion":   s.AnswerQuestion("q", nil, true),
 		"AnswerPlan":       s.AnswerPlan("p", true),
