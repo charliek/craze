@@ -502,8 +502,18 @@ func TestNativeInterjectLimitIsTheQueuesOwn(t *testing.T) {
 // turn's own few, well inside a 256-deep channel. An unbounded interjector
 // would need hundreds of slots and would wedge here.
 //
+// The burst is one short of the cap on purpose. PushFront is exempt from
+// queueCap (a requeue has nowhere else to put the text), so a full cap's
+// worth of requeued rows leaves an ordinary Queue refusing with
+// ErrQueueFull — and whether it does would then depend on which side of the
+// requeue it lands on, which is the race this test creates. Leaving one
+// ordinary slot free makes the concurrent Queue succeed in either order,
+// while the burst it races is the same size in event terms. (CI caught this:
+// two runs of the same commit, one green, one "the concurrent Queue = agent:
+// queue is full".)
+//
 // The control is the vacuity check: the channel really was left with a small
-// fraction of its capacity free, and a full cap's worth really was requeued.
+// fraction of its capacity free, and the whole burst really was requeued.
 func TestNativeInterjectRequeueDoesNotWedgeAConcurrentQueue(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -513,7 +523,8 @@ func TestNativeInterjectRequeueDoesNotWedgeAConcurrentQueue(t *testing.T) {
 	// Nothing drains, and the channel is filled to leave exactly what one
 	// capped turn needs: an EventUser and an EventQueue per interjection, and
 	// a handful for the turn itself and the concurrent Queue.
-	headroom := 2*queueCap + 8
+	const burst = queueCap - 1
+	headroom := 2*burst + 8
 	for len(s.events) < cap(s.events)-headroom {
 		s.events <- Event{Type: EventText, Text: "filler"}
 	}
@@ -523,7 +534,7 @@ func TestNativeInterjectRequeueDoesNotWedgeAConcurrentQueue(t *testing.T) {
 
 	out := startPrompt(s, "go")
 	await(t, h.reached, "the held step")
-	for i := range queueCap {
+	for i := range burst {
 		if err := s.Interject(context.Background(), fmt.Sprintf("steer %02d", i)); err != nil {
 			t.Fatalf("interjection %d: %v", i+1, err)
 		}
@@ -542,10 +553,10 @@ func TestNativeInterjectRequeueDoesNotWedgeAConcurrentQueue(t *testing.T) {
 	if err := await(t, queued, "the concurrent Queue"); err != nil {
 		t.Fatalf("the concurrent Queue = %v", err)
 	}
-	// The control: a full cap's worth really was requeued, at the head.
+	// The control: the whole burst really was requeued, at the head.
 	q := queueTexts(s)
-	if len(q) != queueCap+1 || q[0] != "steer 00" {
-		t.Fatalf("the queue holds %d rows headed by %q, want %d headed by the first interjection", len(q), q[0], queueCap+1)
+	if len(q) != burst+1 || q[0] != "steer 00" {
+		t.Fatalf("the queue holds %d rows headed by %q, want %d headed by the first interjection", len(q), q[0], burst+1)
 	}
 }
 
