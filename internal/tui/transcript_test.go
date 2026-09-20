@@ -460,6 +460,12 @@ func TestToolRowsClampToWidth(t *testing.T) {
 // TestPromptDoneDoesNotSplitAStreamRun pins the ordering fix: the prompt reply
 // is delivered by its own goroutine and can overtake the chunks it belongs to,
 // so only EventDone may close a run.
+//
+// It stays hand-fed, because its subject is that overtaking: the test has to put
+// the prompt's reply between two chunks, and nothing a user can do decides where
+// it lands. What it protects — a turn's chunks coalesce into one run and the
+// next turn's are a run of their own — is driven by TestCoalesceStreamChunks and
+// by TestEnterSendsAndFollowUp.
 func TestPromptDoneDoesNotSplitAStreamRun(t *testing.T) {
 	m := sized(t)
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "a"}})

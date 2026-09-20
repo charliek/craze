@@ -387,14 +387,16 @@ func TestChildEventsWhileViewingMainDoNotTouchMainState(t *testing.T) {
 	}
 }
 
+// TestParentDoneWhileChildRunsKeepsRowAndFastTick: the parent turn is over, so
+// nothing keeps the row or the chain except the child that is still running.
+// The turn is a real one, run to its end, so "over" means what it means to a
+// user rather than a pair of ending marks set by the test.
 func TestParentDoneWhileChildRunsKeepsRowAndFastTick(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
-	m.status = statusWorking
-	m.promptEndSeq = m.turnSeq
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
-	m = tm.(Model)
+	m = pumpEnter(t, m, "spawn one")
+	m = pumpUntil(t, m, isIdle)
 	if len(m.visibleAgents()) == 0 {
 		t.Fatal("a running child must keep its row after parent done")
 	}

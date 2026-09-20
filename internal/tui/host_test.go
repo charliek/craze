@@ -41,9 +41,17 @@ func hostModel(t *testing.T, loading bool) (Model, *Stub, *recHost) {
 	isolateSkillsHome(t)
 	stub := NewStub()
 	t.Cleanup(func() { _ = stub.Close() })
+	m, rec := hostModelWith(t, stub, loading)
+	return m, stub, rec
+}
+
+// hostModelWith is hostModel's body for a session the caller built, so the
+// scripted decorator gets the same config the bare Stub does.
+func hostModelWith(t *testing.T, sess agent.Session, loading bool) (Model, *recHost) {
+	t.Helper()
 	rec := &recHost{}
 	m := New(Config{
-		Session:   stub,
+		Session:   sess,
 		Theme:     "tokyo-night",
 		Workspace: t.TempDir(),
 		Model:     "grok",
@@ -53,7 +61,7 @@ func hostModel(t *testing.T, loading bool) (Model, *Stub, *recHost) {
 		Host:      rec,
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	return tm.(Model), stub, rec
+	return tm.(Model), rec
 }
 
 // startedHostModel is hostModel with the session up, and the recorder emptied
@@ -65,6 +73,27 @@ func startedHostModel(t *testing.T) (Model, *Stub, *recHost) {
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 	rec.statuses = nil
 	return m, stub, rec
+}
+
+// scriptedHostModel is a sized, unstarted host model over a scripted session,
+// so a case can drive the endings the Stub alone cannot produce.
+func scriptedHostModel(t *testing.T) (Model, *scriptedSession, *recHost) {
+	t.Helper()
+	isolateSkillsHome(t)
+	s := newScriptedSession()
+	m, rec := hostModelWith(t, s, false)
+	return m, s, rec
+}
+
+// startedScriptedHostModel is scriptedHostModel with the session up and the
+// ready status consumed, as startedHostModel does for the bare Stub.
+func startedScriptedHostModel(t *testing.T) (Model, *scriptedSession, *recHost) {
+	t.Helper()
+	m, s, rec := scriptedHostModel(t)
+	m = deliver(t, m, startedMsg{})
+	assertStatuses(t, rec, idleStatus(host.DetailReady))
+	rec.statuses = nil
+	return m, s, rec
 }
 
 // hostStatus is a status as the stub session carries it: its session id, the
@@ -115,13 +144,6 @@ func send(t *testing.T, m Model, text string) Model {
 	return m
 }
 
-// endTurn delivers both of a turn's endings, EventDone first.
-func endTurn(t *testing.T, m Model, stop string) Model {
-	t.Helper()
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: stop})
-	return deliver(t, m, promptDoneMsg{res: agent.Result{StopReason: stop}})
-}
-
 // ------------------------------------------------------------------ cases
 
 // TestHostStatusNothingBeforeTheSessionIsUp: a model that has only been built
@@ -139,13 +161,15 @@ func TestHostStatusNothingBeforeTheSessionIsUp(t *testing.T) {
 // Blocked(permission_prompt), Working, Idle(stop), carrying the provider from
 // Config.Provider and the session's id and model.
 func TestHostStatusPermissionTurn(t *testing.T) {
-	m, stub, rec := hostModel(t, false)
+	m, sess, rec := scriptedHostModel(t)
 	if len(rec.statuses) != 0 {
 		t.Fatalf("published before the session was up: %s", fmtStatuses(rec.statuses))
 	}
 	m = deliver(t, m, startedMsg{})
-	m = send(t, m, "run it")
-	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(false)})
+	sc := scriptHeld()
+	m = startScripted(t, m, sess, "run it", sc)
+	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(false)})
+	m = pumpUntil(t, m, hasCard)
 	blocked := hostStatus(host.Blocked, host.DetailPermissionPrompt, "permission Shell")
 	if !strings.Contains(plainView(m), blocked.Message) {
 		t.Fatalf("the message is not the header the card draws, %q:\n%s", blocked.Message, plainView(m))
@@ -155,11 +179,16 @@ func TestHostStatusPermissionTurn(t *testing.T) {
 		t.Fatal("setup: the answer did not close the card")
 	}
 	// The stream ending alone does not settle the turn, so it publishes nothing.
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	// The chunk behind it is the marker: the log orders them, so seeing it means
+	// the ending was applied.
+	sess.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	sess.Emit(agent.Event{Type: agent.EventText, Text: "after the ending"})
+	m = pumpUntil(t, m, viewHas("after the ending"))
 	if n := len(rec.statuses); n != 4 {
 		t.Fatalf("EventDone alone published: %s", fmtStatuses(rec.statuses))
 	}
-	_ = deliver(t, m, promptDoneMsg{res: agent.Result{StopReason: "end_turn"}})
+	sc.Release()
+	_ = pumpUntil(t, m, isIdle)
 
 	assertStatuses(t, rec,
 		idleStatus(host.DetailReady),
@@ -168,6 +197,9 @@ func TestHostStatusPermissionTurn(t *testing.T) {
 		workingStatus(),
 		idleStatus(host.DetailStop),
 	)
+	if got := sess.Calls(); len(got) != 1 || got[0].Option != "opt-once" {
+		t.Fatalf("the card was answered %+v", got)
+	}
 }
 
 // TestHostStatusQuestionAndPlanCards: the other two cards block with the
@@ -210,11 +242,12 @@ func TestHostStatusErrorThenNextPrompt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, _, rec := startedHostModel(t)
-			m = send(t, m, "go")
-			m = feed(t, m, agent.Event{Type: agent.EventError, Err: tc.err})
-			m = deliver(t, m, promptDoneMsg{err: tc.err})
-			_ = send(t, m, "again")
+			m, sess, rec := startedScriptedHostModel(t)
+			sess.Script(scriptFailed(tc.err))
+			m = pumpEnter(t, m, "go")
+			m = pumpUntil(t, m, allOf(isErrored, errorRows(1)))
+			// The next turn is held, so Working is the last thing published.
+			_ = startScripted(t, m, sess, "again", scriptHeld())
 			failed := hostStatus(host.Failed, host.DetailError, tc.want)
 			assertStatuses(t, rec, workingStatus(), failed, workingStatus())
 			if w := ansi.StringWidth(failed.Message); w > 200 {
@@ -224,9 +257,13 @@ func TestHostStatusErrorThenNextPrompt(t *testing.T) {
 	}
 
 	t.Run("no text", func(t *testing.T) {
-		m, _, rec := startedHostModel(t)
-		m = send(t, m, "go")
-		_ = feed(t, m, agent.Event{Type: agent.EventError})
+		// An error event with nothing to say, published into a turn that is
+		// still held: the status is the event's, and the held turn publishes
+		// nothing more.
+		m, sess, rec := startedScriptedHostModel(t)
+		m = startScripted(t, m, sess, "go", scriptHeld())
+		sess.Emit(agent.Event{Type: agent.EventError})
+		_ = pumpUntil(t, m, isErrored)
 		assertStatuses(t, rec, workingStatus(), hostStatus(host.Failed, host.DetailError, "turn failed"))
 	})
 }
@@ -234,29 +271,41 @@ func TestHostStatusErrorThenNextPrompt(t *testing.T) {
 // TestHostStatusCancelEndings is D4's first half: both of a cancelled turn's
 // endings publish Idle(cancelled), and the next send clears it, so the turn
 // after is an ordinary stop.
+//
+// The two cases are the two cancel endings themselves. The first is a turn on
+// the wire that the cancel stops: it publishes EventDone{cancelled} and returns
+// cancelled. The second is a prompt that never opened a turn, so its only
+// ending is agent.ErrPromptCancelled, which is what ParkNext produces.
 func TestHostStatusCancelEndings(t *testing.T) {
 	t.Run("EventDone cancelled", func(t *testing.T) {
-		m, _, rec := startedHostModel(t)
-		m = send(t, m, "go")
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
-		m = endTurn(t, m, stopCancelled)
-		m = send(t, m, "again")
-		_ = endTurn(t, m, "end_turn")
+		m, sess, rec := startedScriptedHostModel(t)
+		m = startScripted(t, m, sess, "go", scriptHeld())
+		m = pumpEsc(t, m)
+		m = pumpUntil(t, m, isIdle)
+		// The next turn is not scripted, so the Stub answers it and ends it.
+		m = pumpEnter(t, m, "again")
+		_ = pumpUntil(t, m, allOf(isIdle, viewHas("echo: again")))
 		assertStatuses(t, rec,
 			workingStatus(), idleStatus(host.DetailCancelled),
 			workingStatus(), idleStatus(host.DetailStop),
 		)
+		assertPrompts(t, sess, "go", "again")
 	})
 	t.Run("ErrPromptCancelled", func(t *testing.T) {
-		m, _, rec := startedHostModel(t)
-		m = send(t, m, "go")
-		m = deliver(t, m, promptDoneMsg{err: agent.ErrPromptCancelled})
-		m = send(t, m, "again")
-		_ = endTurn(t, m, "end_turn")
+		m, stub, rec := startedHostModel(t)
+		m = heldTurn(t, m, stub, "go")
+		m = pumpEsc(t, m)
+		m = pumpUntil(t, m, isIdle)
+		// The next turn is not held, so the stub answers it and ends it. The
+		// parked prompt opened no turn, so this is the session's first: its
+		// reply is the "echo" one.
+		m = pumpEnter(t, m, "again")
+		_ = pumpUntil(t, m, allOf(isIdle, viewHas("echo: again")))
 		assertStatuses(t, rec,
 			workingStatus(), idleStatus(host.DetailCancelled),
 			workingStatus(), idleStatus(host.DetailStop),
 		)
+		assertPrompts(t, stub, "go", "again")
 	})
 }
 

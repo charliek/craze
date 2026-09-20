@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,30 +43,18 @@ func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
 	m = tm.(Model)
 	m.started = true
 
-	m.input.SetValue("one")
-	tm, cmd := m.Update(enter())
-	m = tm.(Model)
-	if cmd == nil {
-		t.Fatal("expected prompt cmd")
+	// Two whole turns against the real agent, driven through the runtime: the
+	// prompt runs where the runtime runs it, its events come back on the
+	// session's own stream, and the wait is for the reply on screen and the turn
+	// being over — not for a message this test wrote.
+	m = pumpEnter(t, m, "one")
+	if m.status != statusWorking {
+		t.Fatalf("the send was refused: status %s", m.status)
 	}
-	doneMsg := runCmd(cmd)
-	m = drainEvents(t, m, sess)
-	tm, _ = m.Update(doneMsg)
-	m = tm.(Model)
-	if !strings.Contains(plainView(m), "first reply") {
-		t.Fatalf("missing first stream chunk:\n%s", plainView(m))
-	}
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("first reply")))
 
-	m.input.SetValue("two")
-	tm, cmd = m.Update(enter())
-	m = tm.(Model)
-	doneMsg = runCmd(cmd)
-	m = drainEvents(t, m, sess)
-	tm, _ = m.Update(doneMsg)
-	m = tm.(Model)
-	if !strings.Contains(plainView(m), "second reply") {
-		t.Fatalf("missing follow-up:\n%s", plainView(m))
-	}
+	m = pumpEnter(t, m, "two")
+	m = pumpUntil(t, m, allOf(isIdle, viewHas("second reply")))
 
 	tm, qcmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	m = tm.(Model)
@@ -152,6 +139,11 @@ func TestWiredQuitWhileWorkingReapsChild(t *testing.T) {
 // both emits EventError and returns the same error, so the TUI hears about one
 // failure twice — the eventMsg from waitEvent and the promptDoneMsg from the
 // prompt Cmd — and must draw exactly one row for it.
+//
+// It stays hand-fed. Its subject is the delivery order of those two endings, and
+// an errored turn has no "the turn is over" a test can wait for the way an
+// ordinary one has its idle status: nothing on screen changes when the second
+// ending lands, so a pumped wait could return before it had.
 func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	isolateSkillsHome(t)
 	bin := buildFakeAgent(t)
