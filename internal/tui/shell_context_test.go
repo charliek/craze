@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -329,6 +330,52 @@ func TestShellContextIsDropped(t *testing.T) {
 			t.Fatalf("the new session inherited %d results", len(m.shellCtx))
 		}
 	})
+}
+
+// TestShellContextIsDroppedByASessionChangeThatKilledTheCommand is the other
+// half of A18, and the one a drop alone cannot cover: the command the session
+// change killed is still dying while that Update returns, so its result lands
+// in a *later* one — after the context was cleared. Nothing it printed may be
+// put back by that message, or the last session's `git status` would lead the
+// next session's first prompt, in another workspace, to another agent.
+//
+// So the message is delivered here, deliberately and late. A test that only
+// changed sessions would pass against the bug.
+func TestShellContextIsDroppedByASessionChangeThatKilledTheCommand(t *testing.T) {
+	m, marker, done := runningShell(t, sized(t))
+	// Something already finished, to prove the two halves are both covered: this
+	// one is dropped outright, the running one is disowned.
+	m = plantShellResult(m, "ls", "a\n")
+
+	next := NewStub()
+	t.Cleanup(func() { _ = next.Close() })
+	m.setSession(next)
+	if !waitMarker(t, marker, false, 15*time.Second) {
+		t.Fatal("the session change left the old session's command running")
+	}
+
+	// The run's own message, produced after the session changed, applied as
+	// bubbletea would apply it.
+	msg := <-done
+	tm, _ := m.Update(msg)
+	m = tm.(Model)
+	if len(m.shellCtx) != 0 {
+		t.Fatalf("the killed command put %d results back as context for the new session", len(m.shellCtx))
+	}
+	if got := m.withShellContext("hello"); got != "hello" {
+		t.Fatalf("the next message carries a block:\n%s", got)
+	}
+	// The row it opened still settles: it belongs to the transcript the user
+	// watched it open in, and only the context crossed a boundary.
+	if rows := shellRowsDrawn(m); len(rows) != 1 || !strings.Contains(rows[0], "killed") {
+		t.Fatalf("rows %q, want the killed row still there", rows)
+	}
+	// And the new session's own commands are kept, so the guard names the runs
+	// it disowned and not every run after them.
+	m = runShellThrough(t, m, "!echo CRAZE_AFTER")
+	if len(m.shellCtx) != 1 || !strings.Contains(m.shellCtx[0].Output, "CRAZE_AFTER") {
+		t.Fatalf("the new session's own command was disowned too: %+v", m.shellCtx)
+	}
 }
 
 // TestQueueEditKeepsTheShellContext: the composer holds the message being

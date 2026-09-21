@@ -660,16 +660,25 @@ func (o *sessionOwner) current() *engine.Engine {
 // first, which is the same call that closes the old session.
 func (m *Model) setSession(s agent.Session) {
 	// A command belongs to the session it was run from — its workspace is that
-	// session's — so a session change ends it, and waits: the picker's next
-	// session must not come up with the last one's `sleep 300` still going.
-	// Nothing can be running on the paths that reach here today (the pickers
-	// run before the session is ready, and shell mode is refused until it is),
-	// so the wait is free; it is here because the next assignment site will not
-	// be so lucky.
-	m.shell.shutdown()
+	// session's — so a session change ends it. It does not *wait* for it: this
+	// runs inside Update, on the one goroutine bubbletea draws from, and a
+	// teardown bounded in seconds (shellController.shutdown) would be that many
+	// seconds of frozen frame for a user who only picked a session. The kill
+	// starts here and finishes on the run's own goroutine, which is what ends
+	// every command anyway: it sends the group its last SIGKILL before it
+	// returns, whatever stopped it, and the row settles when the shellDoneMsg
+	// lands, exactly as it does for Esc. Nothing can be running on the paths
+	// that reach here today — the pickers run before the session is ready, and
+	// shell mode is refused until it is — so this is the guarantee the next
+	// assignment site inherits rather than one being used now.
+	m.shell.cancel()
 	// What the last session's commands printed is not context for the next
 	// one's first message: a different agent, and usually a different
-	// workspace, being told about a `git status` nobody ran there (§3.6).
+	// workspace, being told about a `git status` nobody ran there (§3.6). Two
+	// halves, because a command outlives this Update: what has already finished
+	// is dropped, and the run still dying is disowned, so the result that lands
+	// after this cannot put itself back (shellController.disown).
+	m.shell.disown()
 	m.dropShellContext()
 	m.eng, m.sess, m.engErr = nil, nil, nil
 	m.client, m.cmdSeq = "", 0

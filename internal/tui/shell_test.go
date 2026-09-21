@@ -36,7 +36,10 @@ func runningShell(t *testing.T, m Model) (Model, string, chan tea.Msg) {
 		done <- runCmd(cmd)
 		close(done)
 	}()
-	if !waitMarker(t, marker, true, 10*time.Second) {
+	// The grandchild the script starts, not the shell craze started: waiting for
+	// the deepest of them is what makes "the marker is gone" below mean the
+	// whole group and not only the process craze holds a pid for.
+	if !waitMarker(t, leafMarker(marker), true, 10*time.Second) {
 		t.Fatal("the command never started")
 	}
 	ctl := m.shell
@@ -499,11 +502,18 @@ func TestShellEveryQuitPathKillsTheCommand(t *testing.T) {
 		<-done
 	})
 
-	t.Run("SIGTERM's exit tail", func(t *testing.T) {
+	t.Run("the exit tail, which SIGTERM, SIGHUP and a panic all reach", func(t *testing.T) {
 		// bubbletea turns SIGTERM (and SIGHUP, and a recovered panic) into a
 		// stop that runs no Update at all: finishRun is the only code that
 		// sees it, and it holds the model Run *started* with, which is why the
 		// controller is a shared pointer.
+		//
+		// What this covers is the tail itself — called here as Run calls it,
+		// with a nil final and the model Run began with — and not bubbletea's
+		// routing into it, which no test in this package can drive: Run writes
+		// to os.Stdout, so there is no program to signal. The routing is Run's
+		// own two lines around p.Run (see finishRun's comment), and the name
+		// says as much so a green run is not read as more than it is.
 		m, marker, done := runningShell(t, sized(t))
 		finishRun(io.Discard, nil, m, nil)
 		if markerAlive(t, marker) {
@@ -513,10 +523,14 @@ func TestShellEveryQuitPathKillsTheCommand(t *testing.T) {
 	})
 
 	t.Run("a session change", func(t *testing.T) {
+		// The one path that does not wait: setSession runs inside Update, so
+		// it starts the kill and hands the waiting to the run's own goroutine.
+		// The command still dies — that is the whole assertion — it just dies
+		// after the frame was drawn rather than before it.
 		m, marker, done := runningShell(t, sized(t))
 		m.setSession(NewStub())
-		if markerAlive(t, marker) {
-			t.Fatal("the new session came up with the old one's command running")
+		if !waitMarker(t, marker, false, 15*time.Second) {
+			t.Fatal("the new session left the old one's command running")
 		}
 		<-done
 	})
@@ -546,6 +560,45 @@ func TestShellEveryQuitPathKillsTheCommand(t *testing.T) {
 		}
 		<-done
 	})
+}
+
+// TestShellGlyphNamesHowItEnded pins each mark to the ending it stands for.
+//
+// The one worth a test of its own is the killed row: a signalled leader has no
+// exit status and reports -1, so asking "did it exit non-zero?" before "how did
+// it end?" would draw the user's own Esc as a failure and leave shellGlyph's
+// cancelled arm unreachable.
+func TestShellGlyphNamesHowItEnded(t *testing.T) {
+	m := sized(t)
+	completed, _ := m.statusGlyph("completed")
+	failed, _ := m.statusGlyph("failed")
+	cancelled, _ := m.statusGlyph("cancelled")
+	for _, tc := range []struct {
+		name  string
+		entry shellEntry
+		want  string
+	}{
+		{"still running", shellEntry{}, m.spinnerGlyph()},
+		{"a clean exit", shellEntry{done: true}, completed},
+		{"a non-zero exit", shellEntry{done: true, exit: 7}, failed},
+		{"killed", shellEntry{done: true, exit: -1, why: shellKilled}, cancelled},
+		{"timed out", shellEntry{done: true, exit: -1, why: shellTimedOut}, cancelled},
+		{"would not stop", shellEntry{done: true, exit: -1, why: shellAbandoned}, failed},
+		{"never started", shellEntry{done: true, start: io.EOF}, failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := tc.entry
+			if got, _ := m.shellGlyph(&e); got != tc.want {
+				t.Fatalf("glyph %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// The suffixes are the row's other half and they are unchanged: a killed
+	// command says so in words, dimmed, beside the cancelled mark.
+	killed := shellEntry{done: true, exit: -1, why: shellKilled}
+	if got, _ := m.shellSuffix(&killed); got != "killed" {
+		t.Fatalf("suffix %q, want \"killed\"", got)
+	}
 }
 
 // TestShellRowShowsTheCommandThenItsOutput is the transcript half: the command

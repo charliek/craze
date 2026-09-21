@@ -289,8 +289,16 @@ space is trimmed on the way out, so ` !important` reaches the agent as
 
 A command is killed with SIGTERM to its whole process group, SIGKILL three
 seconds later, and it is killed on every way out of craze — `Ctrl+D`, `/exit`,
-a double `Ctrl+C`, SIGTERM, and a session change. A child that detaches itself
-with `setsid` escapes the group and survives; nothing else does.
+a double `Ctrl+C`, SIGTERM, and a session change.
+
+!!! warning "What can outlive craze"
+    A command that deliberately detaches itself — `setsid`, `disown`, or a
+    daemon that puts itself in a session of its own — leaves the process group
+    craze kills, and craze cannot reach it afterwards: it can outlive the
+    command and craze with it, and is yours to stop. Everything else the
+    command started is killed when the command ends and again when craze
+    exits, whether it is still writing output (`server &`) or not
+    (`server >/dev/null 2>&1 &`).
 
 Enter is refused, and the draft kept, while a card is open, while a session is
 still starting or restoring, and while another command is running — one at a

@@ -90,8 +90,15 @@ func (m Model) killShell() { m.shell.cancel() }
 // finishShell settles the row one command left behind, and keeps what it
 // printed for the next message the user sends (shell_context.go): the command
 // was run to be asked about, and the asking is the message after it.
+//
+// Unless the run has been disowned, which is a session change: the row is still
+// settled — it is in the transcript the user watched it open in — but what it
+// printed is not context for a message to some other agent, in some other
+// workspace (shellController.disown).
 func (m *Model) finishShell(msg shellDoneMsg) {
-	m.keepShellResult(msg.cmd, msg.res)
+	if m.shell.keepsContext(msg.gen) {
+		m.keepShellResult(msg.cmd, msg.res)
+	}
 	t := &m.main
 	for i := len(t.entries) - 1; i >= 0; i-- {
 		e := &t.entries[i]
@@ -165,14 +172,24 @@ func (m Model) shellSuffix(s *shellEntry) (string, lipgloss.Style) {
 
 // shellGlyph is the row's status mark: the spinner while it runs, and then the
 // same three marks a tool row settles into.
+//
+// How it ended is asked before what it exited with, and that order is the whole
+// of it: a signalled leader has no exit status and reports -1, so asking about
+// the code first would draw every command the user stopped as one that failed,
+// and leave this arm unreachable. Esc is not a failure — it is the user
+// changing their mind, and the suffix beside the mark says "killed" in words.
+// A command SIGKILL could not end is the exception: nothing about "would not
+// stop" is cancelled.
 func (m Model) shellGlyph(s *shellEntry) (string, lipgloss.Style) {
 	switch {
 	case !s.done:
 		return m.spinnerGlyph(), styleFG(m.theme.Accent)
-	case s.start != nil, s.why == shellAbandoned, s.exit != 0:
+	case s.start != nil, s.why == shellAbandoned:
 		return m.statusGlyph("failed")
 	case s.why != shellExited:
 		return m.statusGlyph("cancelled")
+	case s.exit != 0:
+		return m.statusGlyph("failed")
 	}
 	return m.statusGlyph("completed")
 }
