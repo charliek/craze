@@ -940,7 +940,14 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// record ahead of it. Native has no asks yet, so today this only orders what
 	// a component above the seam enqueued; it is here because the rule is "every
 	// session", not "every session that has asks".
-	_ = s.log.Flush(context.Background())
+	//
+	// It is bounded by s.done, as every emit below it is: Close closes done and
+	// then waits for this continuation (rel) BEFORE it closes the log, and with
+	// the primary full and its reader stopped only the log's close frees the
+	// drainer this barrier waits on — so a flush that did not escape here would
+	// be a Close waiting for a goroutine waiting for that same Close (review
+	// r17, finding 1).
+	_ = s.log.Flush(context.Background(), s.done)
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
 		// state by the time the engine's chain policy clears its own queue at

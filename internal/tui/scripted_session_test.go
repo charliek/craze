@@ -322,17 +322,25 @@ func (sc *scriptedTurn) run(ctx context.Context, s *Stub) (agent.Result, error) 
 		s.mu.Unlock()
 		return agent.Result{}, sc.refuse
 	}
+	// The registry's name for this turn, as the Stub's own run mints it: OUTSIDE
+	// s.mu, because s.mu and the registry's are never nested (plan 021 §3.3),
+	// and before the locked section that installs it — which is the window a
+	// cancel can land in, and the one this decorator has to be able to reproduce.
+	// A token nothing is ever parked against costs one number and resolves
+	// nothing.
+	token := s.beginAskTurn()
 	s.mu.Lock()
 	if s.cancelling {
-		// Cancelled between the claim and here: withdraw, as the Stub does.
+		// Cancelled between the claim and here: withdraw, as the Stub does. The
+		// deferred EndTurn below never runs for this path, so the token is
+		// retired here: an ask can no longer reach it.
 		s.claimed, s.cancelling = false, false
 		s.mu.Unlock()
+		s.asks.EndTurn(token)
 		return agent.Result{}, agent.ErrPromptCancelled
 	}
-	// The registry's name for this turn, as the Stub's own run mints it: a card
-	// a test emits while this turn runs is parked against it, and the turn's
-	// end — or a cancel — takes exactly those away.
-	token := s.beginAskTurn()
+	// A card a test emits while this turn runs is parked against it, and the
+	// turn's end — or a cancel — takes exactly those away.
 	s.inPrompt = true
 	s.token = token
 	s.doneEmitted = false

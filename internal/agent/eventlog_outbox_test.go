@@ -37,7 +37,7 @@ func outboxState(l *EventLog) (events int, bytes int, enqueued, drained uint64, 
 // — and hands back its answer.
 func flushIn(l *EventLog, ctx context.Context) <-chan error {
 	out := make(chan error, 1)
-	go func() { out <- l.Flush(ctx) }()
+	go func() { out <- l.Flush(ctx, nil) }()
 	return out
 }
 
@@ -45,7 +45,7 @@ func flushIn(l *EventLog, ctx context.Context) <-chan error {
 func flushNow(t *testing.T, l *EventLog) error {
 	t.Helper()
 	var err error
-	within(t, "Flush", func() { err = l.Flush(context.Background()) })
+	within(t, "Flush", func() { err = l.Flush(context.Background(), nil) })
 	return err
 }
 
@@ -496,7 +496,7 @@ func TestEventLogFlushAtCloseAnswersTheParkedAndRefusesTheLate(t *testing.T) {
 	if err := await(t, flushed, "the parked Flush"); err != nil {
 		t.Fatalf("the parked Flush returned %v, want nil: its target was committed by the at-close path", err)
 	}
-	if err := l.Flush(context.Background()); !errors.Is(err, ErrLogClosing) {
+	if err := l.Flush(context.Background(), nil); !errors.Is(err, ErrLogClosing) {
 		t.Fatalf("a Flush after Close returned %v, want ErrLogClosing", err)
 	}
 	if l.OutboxRoom() {
@@ -1118,7 +1118,7 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 	for f := range 2 {
 		wg.Go(func() {
 			for range 12 {
-				err := l.Flush(context.Background())
+				err := l.Flush(context.Background(), nil)
 				if err != nil && !errors.Is(err, ErrLogClosing) {
 					flushErrs.Store(f, err)
 					return

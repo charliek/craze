@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -539,6 +540,32 @@ type Arrival struct {
 	// registered, so the request belongs to that turn. False means it arrived
 	// between craze's turns, or during a turn the agent started itself.
 	InTurn bool
+	// Call is this request's own lifetime, as a context: it ends the moment
+	// something other than this handler answers the request — a Cancel, a
+	// CancelHeld, a Close, the stale-turn reply — and again when the handler
+	// returns. It is what a handler hands to whatever parks a decision on its
+	// behalf, so an ask nobody can answer any more resolves at once instead of
+	// waiting for a turn's end that may never come (plan 021 §3.6; review r17,
+	// finding 3).
+	//
+	// Nothing about the wire changes with it: the client answers each request
+	// exactly once, as it always did, and this only tells the handler that the
+	// answer was not its own.
+	//
+	// It is nil on an Arrival built by hand — a test calling a handler
+	// directly, or EarlyAnswer.Arrival, where the request is answered already —
+	// and a caller treats nil as "no signal of its own".
+	Call context.Context
+}
+
+// Ended reports whether a.Call has ended: the request has been answered by
+// something other than its handler, so anything the handler is still deciding
+// is moot. An Arrival with no context of its own is never ended.
+func (a Arrival) Ended() bool {
+	if a.Call == nil {
+		return false
+	}
+	return a.Call.Err() != nil
 }
 
 // EarlyAnswerReason says why a blocking request was answered before any handler

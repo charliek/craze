@@ -89,6 +89,14 @@ var (
 	// ErrClosed, which ends a subscription — a caller that sees this one has
 	// simply asked for an ordering it can stop waiting for (plan 021 §3.3).
 	ErrLogClosing = errors.New("agent: event log closing")
+	// ErrFlushGaveUp is Flush's answer when the done channel its caller passed
+	// closed first: the session that wanted the ordering is shutting down, so
+	// the barrier is abandoned exactly as a Publish from the same goroutine is
+	// abandoned (Publish). The events themselves are not lost — the log's own
+	// Close commits what the outbox still holds — and every caller that passes a
+	// done treats the barrier as an ordering nicety, so this is a fact about the
+	// wait and not about the record (review r17, finding 1).
+	ErrFlushGaveUp = errors.New("agent: the flush was given up: its session is closing")
 	// ErrObserverSet refuses a second Observe. The observer is one per log, set
 	// before the session publishes anything, because it runs inside the
 	// publishing boundary and two of them would be a fan-out with no budget.
@@ -1039,9 +1047,10 @@ func (l *EventLog) OutboxRoom() bool {
 // Flush returns nil once everything enqueued before the call has been
 // committed — numbered, in the ring, offered to every subscription, queued for
 // the journal, and on the primary unless the primary refused it at close or
-// NoPrimary means there is none. It returns ctx.Err() if ctx ends first, and
-// ErrLogClosing at once if Close has already begun, because from then on the
-// outbox takes no work and the barrier can no longer mean what it means.
+// NoPrimary means there is none. It returns ctx.Err() if ctx ends first,
+// ErrFlushGaveUp if done closes first, and ErrLogClosing at once if Close has
+// already begun, because from then on the outbox takes no work and the barrier
+// can no longer mean what it means.
 //
 // A Flush already parked when Close begins is answered nil: Close's outbox phase
 // commits what is left rather than abandoning it, so a nil return always means
@@ -1055,7 +1064,17 @@ func (l *EventLog) OutboxRoom() bool {
 // trailing events flushes on a helper goroutine and keeps reading until it
 // returns (plan 021 §3.3, A19). A caller for which the barrier is an ordering
 // nicety rather than a precondition carries on whatever it returns.
-func (l *EventLog) Flush(ctx context.Context) error {
+//
+// **done is the session's own, exactly as it is on Publish**, and ctx and done
+// may both be nil. A session flushing on one of its own goroutines passes it, so
+// the barrier ends when the session closes — which is what keeps a Close that
+// waits for such a goroutine before it closes the log from waiting for ever:
+// with the primary full and its reader gone, only the log's own Close frees the
+// drainer, and only that goroutine's return lets Close reach it (review r17,
+// finding 1; native.go's prompt and Close are the pair the reviewer traced).
+// A caller with no session — the engine's own workers — passes nil, because the
+// log outlives nothing there and its Close is what frees them.
+func (l *EventLog) Flush(ctx context.Context, done <-chan struct{}) error {
 	l.outboxMu.Lock()
 	if l.outboxIsCut() {
 		l.outboxMu.Unlock()
@@ -1084,6 +1103,11 @@ func (l *EventLog) Flush(ctx context.Context) error {
 			return err
 		}
 		return ctx.Err()
+	case <-done:
+		if answered, err := l.unpark(w); answered {
+			return err
+		}
+		return ErrFlushGaveUp
 	}
 }
 

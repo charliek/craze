@@ -70,7 +70,7 @@ func (e *Engine) Stop(ctx context.Context, c Command) error {
 	if err != nil {
 		return err
 	}
-	if err := e.log.Flush(ctx); err != nil && !errors.Is(err, agent.ErrLogClosing) {
+	if err := e.log.Flush(ctx, nil); err != nil && !errors.Is(err, agent.ErrLogClosing) {
 		e.releaseHold(id, c.Cause(), agent.CancelOutcome{}, nil, false)
 		return err
 	}

@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/charliek/craze/internal/acp"
@@ -182,32 +185,102 @@ func TestEarlyAnsweredRequestsBecomeOneSelfContainedEnding(t *testing.T) {
 	}
 }
 
-// An answer the client accepted whose reply lost to ACP's own cancelled reply
-// (panel astra 13). The ask was answered and stays answered — one ending, and
-// no second one — and the record carries both facts: the answer, and that the
-// agent never heard it. The reply's own disposition comes from internal/acp
-// (C8a); this is the session wiring it to the record.
+// An answer the user gave, ACCEPTED by the registry, whose reply then lost the
+// race to ACP's own cancelled one (panel astra 13). The ask was answered and
+// stays answered — one ending, and no second one — and the record carries both
+// facts: the answer, and that the agent never heard it. Exactly one journal
+// note says so.
+//
+// Everything here is the real path: a real agent asking a real permission, the
+// session's own handler parked on it, the answer through the registry, and the
+// client's own reply machinery deciding what became of the decision. The
+// schedule is driven by barriers:
+//
+//   - the handler flushes the outbox before it hands its decision back
+//     (§3.6's second barrier), so a full primary parks it exactly between "the
+//     user's answer is in" and "the reply is written" — which is the window the
+//     race lives in;
+//   - the cancel is made with a context that has already ended, so the client
+//     answers the request it is holding cancelled and writes no session/cancel:
+//     the agent's turn is left alone, and nothing else can end the ask.
 func TestAnAnsweredAskWhoseReplyWasLostSaysSo(t *testing.T) {
-	s := newAskSession(t, Options{Interactive: true})
-	log := collect(t, s)
-	token := beginTurn(s)
-	a := openAsk(t, s, token, AskPermission)
-	// The option the body offers, so the answer validates.
-	s.asks.Report(a.ID(), AskReport{}) // no-op, and proves reporting nothing changes nothing
-	if err := answerAsk(s, a.ID(), AskAnswer{Cancel: true}); err != nil {
+	dir := filepath.Join(t.TempDir(), "journal")
+	opts := liveJournalOptions(t, "permission", dir)
+	opts.Force = false // the permission must park, not be answered by policy
+	s := newTestSession(t, opts)
+	w := journalOf(t, s.log)
+	// Set before Start, so nothing is publishing while the field is written.
+	parked := make(chan uint64, 4)
+	s.log.hooks = &logHooks{flushParked: func(target uint64) { parked <- target }}
+	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	askReported(a)(acp.ReplyDisposition{Lost: acp.ReplyLostCancelled})
-	rec, ok := s.asks.Record(a.ID())
-	if !ok {
-		t.Fatal("the record is gone")
+	prompt := make(chan error, 1)
+	go func() {
+		_, err := s.Prompt(t.Context(), "go")
+		prompt <- err
+	}()
+
+	// The card is up and its handler is parked on the ask.
+	ev := waitEventType(t, s, EventPermission)
+	id := ev.Permission.ID
+	held := s.clientRef().Held()
+
+	// From here nobody reads the primary, so the handler's flush after Wait has
+	// something to park on.
+	fillPrimary(t, s.log)
+	if err := answerAsk(s, id, AskAnswer{OptionID: "opt-once"}); err != nil {
+		t.Fatal(err)
 	}
-	if rec.Outcome != AskCancelled || rec.Delivered || rec.Lost != acp.ReplyLostCancelled {
-		t.Fatalf("record %+v", rec)
+	await(t, parked, "the handler's flush before it replies")
+
+	// ACP answers the request cancelled while the handler is still holding the
+	// user's decision. The dead context keeps the cancel off the wire.
+	dead, stop := context.WithCancel(t.Context())
+	stop()
+	if err := s.clientRef().CancelHeld(dead, held); err == nil {
+		t.Fatal("the cancel's own notification must not have been written")
 	}
-	// waitAsk fails on a second ending, which is the property: a lost delivery
-	// is one journal note and never another EventAsk.
-	if u := log.waitAsk(t, a.ID()); u.Outcome != AskCancelled {
-		t.Fatalf("ending %+v", u)
+
+	// The backlog drains, the flush returns, and the handler's reply is the one
+	// that loses.
+	keepDrained(t, s.log)
+	waitFor(t, "the lost delivery to be recorded", func() bool {
+		rec, ok := s.asks.Record(id)
+		return ok && rec.Lost != ""
+	})
+	rec, _ := s.asks.Record(id)
+	if rec.Outcome != AskAnswered || rec.By != AskByClient || rec.Answer.OptionID != "opt-once" {
+		t.Fatalf("record %+v, want the user's accepted answer", rec)
+	}
+	if rec.Delivered || rec.Lost != acp.ReplyLostCancelled {
+		t.Fatalf("record %+v, want a delivery lost to the cancelled reply", rec)
+	}
+	if !rec.Consumed {
+		t.Fatalf("record %+v, want the decision taken by the waiting handler", rec)
+	}
+	if err := <-prompt; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("the prompt returned %v", err)
+	}
+
+	// One ending in the record, and exactly one diag note beside it: a lost
+	// delivery is a note, never a second ending and never a changed outcome.
+	closeJournaled(t, s, w)
+	lines := assertOneJournal(t, dir, w, s.Incarnation())
+	notes := diags(lines, "ask_lost_delivery")
+	if len(notes) != 1 {
+		t.Fatalf("%d ask_lost_delivery notes, want exactly one", len(notes))
+	}
+	if notes[0]["id"] != id || notes[0]["reason"] != acp.ReplyLostCancelled || notes[0]["outcome"] != string(AskAnswered) {
+		t.Fatalf("the note is %v, want the ask, its outcome and why the reply was lost", notes[0])
+	}
+	endings := 0
+	for _, line := range lines {
+		if line["type"] == "event" && line["eventType"] == string(EventAsk) {
+			endings++
+		}
+	}
+	if endings != 1 {
+		t.Fatalf("%d endings in the journal, want the one the answer wrote", endings)
 	}
 }

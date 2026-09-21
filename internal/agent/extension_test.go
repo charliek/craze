@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -46,22 +47,50 @@ func (e *eventLog) waitQuestion(t *testing.T) *QuestionEvent {
 
 // waitAsk is the one ending an ask gets, and it fails if there are two: "every
 // ask ends exactly once" is the property, not "an ending arrives".
+//
+// The count is taken **after a barrier and off the record**, never at the first
+// sighting (review r17): a second ending already enqueued behind the first would
+// otherwise escape a check that stopped the moment it saw one, and this
+// collector's own list is only as fresh as its goroutine. So the caller joins
+// its producers — its handler has answered, its prompt has returned — this
+// flushes everything enqueued before now, and then it counts what the log has
+// committed. With no log to consult it falls back to the collector's list,
+// which is what a session that is not a LogOwner can offer.
 func (e *eventLog) waitAsk(t *testing.T, id string) *AskUpdate {
 	t.Helper()
-	var found *AskUpdate
-	waitFor(t, "the ending of "+id, func() bool {
-		found = nil
-		for _, ev := range e.snapshot() {
-			if ev.Type == EventAsk && ev.Ask != nil && ev.Ask.ID == id {
-				if found != nil {
-					t.Fatalf("%s ended twice: %+v then %+v", id, found, ev.Ask)
-				}
-				found = ev.Ask
-			}
+	waitFor(t, "the ending of "+id, func() bool { return len(e.askEndings(id)) > 0 })
+	if e.log == nil {
+		got := e.askEndings(id)
+		if len(got) != 1 {
+			t.Fatalf("%s ended %d times: %+v", id, len(got), got)
 		}
-		return found != nil
-	})
-	return found
+		return got[0]
+	}
+	if err := e.log.Flush(context.Background(), nil); err != nil && !errors.Is(err, ErrLogClosing) {
+		t.Fatalf("flushing before counting %s's endings: %v", id, err)
+	}
+	got := askEndingsInLog(t, e.log, id)
+	if len(got) != 1 {
+		t.Fatalf("%s ended %d times, want exactly once: %+v", id, len(got), got)
+	}
+	return got[0]
+}
+
+// askEndingsInLog is every ending for id the log has committed, whichever
+// goroutine produced it and whether or not a collector has caught up with it.
+func askEndingsInLog(t *testing.T, l *EventLog, id string) []*AskUpdate {
+	t.Helper()
+	var out []*AskUpdate
+	for _, rec := range ringRecords(t, l) {
+		ev, err := rec.Event()
+		if err != nil {
+			t.Fatalf("decoding record %d: %v", rec.Seq, err)
+		}
+		if ev.Type == EventAsk && ev.Ask != nil && ev.Ask.ID == id {
+			out = append(out, ev.Ask)
+		}
+	}
+	return out
 }
 
 // askEndings is every ending for id that has been published so far.
@@ -841,6 +870,173 @@ func TestArrivalTellsARetiredTurnFromNoTurn(t *testing.T) {
 			t.Fatalf("a between-turns request must be answerable: %+v", dec)
 		}
 	})
+}
+
+// Review r17, finding 2: the window between a successor's state being installed
+// and ACP's counter moving. Turn 1 returns, so the client clears its in-flight
+// flag without touching the counter; turn 2 then installs s.inPrompt and its
+// registry token and pauses just short of client.PromptBlocks, which is what
+// bumps the counter. A delayed handler for a request of turn 1 is looking at a
+// counter that still says 1 and a session that says a prompt is in flight — and
+// counter equality alone would hand it turn 2's token, so the old request would
+// raise a card answered into the successor's lifecycle.
+//
+// testBeforeWire is exactly that pause, and holdBeforeWire parks the prompt in
+// it: no clock decides when the window is open.
+func TestARetiredTurnsRequestNeverTakesTheSuccessorsToken(t *testing.T) {
+	s := startScriptOpts(t, "echo", Options{Interactive: true})
+	log := collect(t, s)
+	if _, err := s.Prompt(t.Context(), "one"); err != nil {
+		t.Fatal(err)
+	}
+
+	seam := holdBeforeWire(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Prompt(t.Context(), "two")
+		done <- err
+	}()
+	seam.parked(t)
+
+	// The window, asserted rather than assumed: the successor's token is
+	// installed, and ACP still calls turn 1 the live one.
+	s.mu.Lock()
+	inPrompt, successor := s.inPrompt, s.token
+	s.mu.Unlock()
+	if !inPrompt || successor.NoTurn() {
+		t.Fatalf("the successor's state is not installed yet: inPrompt=%v token=%v", inPrompt, successor)
+	}
+	if !s.clientRef().TurnLive(1) {
+		t.Fatal("the fixture needs ACP's counter still at turn 1")
+	}
+
+	// A handler of turn 1, scheduled at last — inside the window. It runs on a
+	// goroutine of its own so that a version which parked it against the
+	// successor fails with a message rather than hanging the package.
+	handled := make(chan acp.AskDecision, 1)
+	go func() { handled <- s.onAskQuestion(acp.Arrival{Turn: 1, InTurn: true}, askReq()) }()
+	if dec := await(t, handled, "the retired turn's handler"); !dec.Cancelled {
+		t.Fatalf("a retired turn's request must be cancelled: %+v", dec)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventQuestion {
+			t.Fatalf("a retired turn's request raised a card against the successor: %+v", ev.Question)
+		}
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("it parked against the successor's turn: %+v", left)
+	}
+	// One self-contained ending, under a hidden id: nobody was shown it.
+	if u := log.waitAsk(t, "ask-x1"); u.Outcome != AskTurnEnded || u.Body == nil {
+		t.Fatalf("ending %+v", u)
+	}
+
+	seam.letOne(t)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review r17, finding 3: a request ACP has already answered must not leave an
+// ask parked behind it. The handler passed the client's liveness check and then
+// paused; a cancel answered its request where it lay; it resumes and parks a
+// card the agent is no longer waiting on, which no turn's end would ever take
+// away because it belongs to no turn.
+//
+// The request's own context is the signal (acp.Arrival.Call), and these two
+// tests are its two sides: the signal arriving while the ask is parked, and the
+// signal already up when the handler reaches the registry.
+func TestAnAskWhoseRequestIsAnsweredElsewhereEndsAtOnce(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	beginTurn(s)
+	ctx, answered := context.WithCancel(t.Context())
+	defer answered()
+
+	done := make(chan acp.AskDecision, 1)
+	go func() { done <- s.onAskQuestion(acp.Arrival{InTurn: true, Call: ctx}, askReq()) }()
+	// The card is up and the handler is parked on it: that is the barrier.
+	ev := log.waitType(t, EventQuestion)
+
+	// ACP answers the request itself — a Cancel, a CancelHeld, a close — and
+	// ends its context in the same section that records who replied.
+	answered()
+
+	if dec := await(t, done, "the handler to come back"); !dec.Cancelled {
+		t.Fatalf("the handler must answer cancelled: %+v", dec)
+	}
+	if u := log.waitAsk(t, ev.Question.ID); u.Outcome != AskCancelled || u.By != AskByCall {
+		t.Fatalf("ending %+v, want cancelled by the call", u)
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("a request nobody is waiting on was left parked: %+v", left)
+	}
+}
+
+func TestARequestAlreadyAnsweredRaisesNoCardAtAll(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	beginTurn(s)
+	ctx, answered := context.WithCancel(t.Context())
+	answered()
+
+	// On a goroutine of its own, bounded: a version that parked it anyway would
+	// otherwise hang the package rather than fail with a message.
+	handled := make(chan acp.AskDecision, 1)
+	go func() { handled <- s.onAskQuestion(acp.Arrival{InTurn: true, Call: ctx}, askReq()) }()
+	if dec := await(t, handled, "the handler to come back"); !dec.Cancelled {
+		t.Fatalf("the handler must answer cancelled: %+v", dec)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventQuestion {
+			t.Fatalf("a request ACP had already answered raised a card: %+v", ev.Question)
+		}
+	}
+	// A hidden id and the body with it: the record says what was asked, and no
+	// card a user might have seen is renumbered by it.
+	u := log.waitAsk(t, "ask-x1")
+	if u.Outcome != AskCancelled || u.By != AskByCall || u.Body == nil {
+		t.Fatalf("ending %+v, want one self-contained cancelled-by-call ending", u)
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("it parked anyway: %+v", left)
+	}
+}
+
+// The window the translated cancellation test lost (review r17): a cancel
+// landing between admission and delivery. Open succeeded — the ask is parked
+// and its opening enqueued — and the cancel lands before a consumer has seen
+// either. What the consumer then sees is the opening and its cancelled ending,
+// in that order, so a card raised by the first is removed by the second
+// (internal/tui's TestCardEventAfterACancelIsDropped is that half).
+func TestACancelBetweenAdmissionAndDeliveryEndsTheAskInOrder(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	token := beginTurn(s)
+	a := openAsk(t, s, token, AskQuestion)
+	s.asks.CancelTurn(token)
+
+	if rec := a.Wait(); rec.Outcome != AskCancelled || rec.By != AskByCancel {
+		t.Fatalf("record %+v, want cancelled by the cancel", rec)
+	}
+	u := log.waitAsk(t, a.ID())
+	if u.Outcome != AskCancelled || u.By != AskByCancel {
+		t.Fatalf("ending %+v", u)
+	}
+	// The opening was published — it was admitted — and it is ahead of the
+	// ending that takes it away.
+	var order []string
+	for _, ev := range log.snapshot() {
+		switch {
+		case ev.Type == EventQuestion && ev.Question.ID == a.ID():
+			order = append(order, "opening")
+		case ev.Type == EventAsk && ev.Ask.ID == a.ID():
+			order = append(order, "ending")
+		}
+	}
+	if len(order) != 2 || order[0] != "opening" || order[1] != "ending" {
+		t.Fatalf("the consumer saw %v, want the opening then its cancelled ending", order)
+	}
 }
 
 // An ask opened between turns survives a whole turn: no turn's end may take

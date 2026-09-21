@@ -102,11 +102,11 @@ func (m Model) headCard() (card, bool) {
 // with it, or the preview would survive underneath the card.
 //
 // A card event that was already on its way when the turn was cancelled is
-// dropped: Cancel answered every request the session was holding and the
-// session refuses to park another one for this turn, so a card for it would be
-// one nobody could answer.
+// dropped: Cancel answered every request the session was holding, so a card for
+// it would be one nobody could answer. **What decides that is the ask itself,
+// not the mask alone** (maskCards).
 func (m *Model) pushCard(c card) {
-	if m.cardMask != "" && m.cardMask == m.turnID {
+	if m.maskDrops(c) {
 		return
 	}
 	m.breakStream()
@@ -139,6 +139,37 @@ func (m *Model) pushCard(c card) {
 	*m = m.closeDialog(true)
 }
 
+// maskDrops reports whether the cancel mask swallows this opening. The mask
+// being up is not enough: an opening is dropped only when **its ask is no
+// longer open**, read synchronously from the registry through the engine
+// (Control.Asks, which waits on nothing).
+//
+// The registry's state leads its events, and an ask only ever goes open →
+// resolved, so the two answers are both final. "Not open now" means the ending
+// is already in the FIFO behind this opening and the card would be removed a
+// moment later anyway — that is the flash the mask exists to prevent. "Open
+// now" means the agent is really waiting on it: it belongs to no turn this
+// cancel touched, and dropping it would strand the provider on a card nobody
+// can ever raise again (review r17, finding 4).
+//
+// With no engine, or a card with no ask id, there is nothing to consult and
+// the mask drops it, which is what it did for everything before.
+func (m Model) maskDrops(c card) bool {
+	if !m.cardMasking {
+		return false
+	}
+	id := cardAskID(c)
+	if m.eng == nil || id == "" {
+		return true
+	}
+	for _, rec := range m.eng.Asks() {
+		if rec.ID == id {
+			return false
+		}
+	}
+	return true
+}
+
 // setHead replaces the visible card. The queue is copied rather than written
 // through, because every Model copy shares the slice.
 func (m *Model) setHead(c card) {
@@ -169,25 +200,44 @@ func (m *Model) popCard() (card, bool) {
 // in that window would claim it and send the agent `cancelled` for something
 // the user had already answered.
 //
-// An answer that does not fit leaves the ask open (agent.ErrBadAnswer), and the
-// card is popped before the answer is sent, so it is **put back at the head**:
-// otherwise the agent would wait for an Esc because craze mis-addressed one
-// call. Every other failure is the error row it has always been — the ask is
-// gone either way, so there is no card to restore.
+// The card is popped before the answer is sent, so **every refusal that leaves
+// the ask unanswered puts it back at the head**; otherwise the agent waits for
+// an Esc because craze mis-addressed one call, or because the log was busy for a
+// moment:
+//
+//   - agent.ErrBadAnswer: the answer does not fit, and the ask is still open.
+//     The card comes back and the error says why, so the user can press again.
+//   - agent.ErrAskUnavailable: the outbox is over its bound, so Answer refused
+//     **before it mutated anything** (§3.3's rejectable admissions). The ask is
+//     untouched and no second opening is ever published for it, so nothing but
+//     this would raise the card again (review r17, finding 5). Same treatment,
+//     same row: pressing again is exactly the retry it asks for.
+//   - agent.ErrAlreadyResolved: another client answered it first and that
+//     ending is already queued. The card was on screen, so the model has not
+//     applied it yet: the card goes back with **no error row**, and the winner's
+//     ending removes it and writes the winner's answer through the ordinary path
+//     (applyAskEnded) — where before the row was lost altogether and an error the
+//     user could do nothing about was written instead (review r17, finding 7).
+//
+// Every other failure is the error row it has always been — the ask is gone
+// either way, so there is no card to restore.
 func (m *Model) answerCard(popped card, id string, a agent.AskAnswer) bool {
 	if m.eng == nil {
 		return false
 	}
 	cmd := m.nextCmd()
 	err := m.eng.Answer(cmd, id, a)
-	if err == nil {
+	switch {
+	case err == nil:
 		// The ending this answer causes names this command, and its effect —
 		// the card gone, the note written — has been applied here. The echo is
 		// skipped when it arrives (applyAskEnded).
 		m.noteAskEcho(cmd.Cause())
 		return true
-	}
-	if errors.Is(err, agent.ErrBadAnswer) {
+	case errors.Is(err, agent.ErrAlreadyResolved):
+		m.raiseCard(popped)
+		return false
+	case errors.Is(err, agent.ErrBadAnswer), errors.Is(err, agent.ErrAskUnavailable):
 		m.raiseCard(popped)
 	}
 	m.addError(err.Error())

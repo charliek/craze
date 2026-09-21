@@ -364,6 +364,112 @@ func TestDispatchRegistersTheDecodedRequest(t *testing.T) {
 	}
 }
 
+// Review r17, finding 3: every arrival carries the request's own lifetime, and
+// a reply written by anything but that request's handler ends it — in the same
+// incomingMu section that records who answered. A handler still deciding, or
+// already parked on a decision it will never get to give, learns at once.
+//
+// The handler parks, so nothing about the reply can be mistaken for the
+// handler's own, and the wire is unchanged: the cancelled reply below is the
+// same byte for byte as it has always been.
+func TestAnArrivalsContextEndsWhenSomethingElseAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer func(t *testing.T, p *rawPipe)
+	}{
+		{"a cancel", func(t *testing.T, p *rawPipe) {
+			t.Helper()
+			done := make(chan error, 1)
+			go func() { done <- p.client.Cancel(t.Context()) }()
+			if got := string(p.readWithin(t, 3*time.Second, "the cancel's reply").Result); got != cancelledReply {
+				t.Fatalf("the cancel replied %s", got)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a close", func(t *testing.T, p *rawPipe) {
+			t.Helper()
+			done := make(chan error, 1)
+			go func() { done <- p.client.Close() }()
+			if got := string(p.readWithin(t, 3*time.Second, "the close's cancelled reply").Result); got != cancelledReply {
+				t.Fatalf("close replied %s", got)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipe(t)
+			arrived := make(chan Arrival, 1)
+			release := make(chan struct{})
+			p.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+				arrived <- a
+				<-release
+				return PermissionDecision{Cancelled: true}
+			})
+			p.send(t, 1, MethodRequestPermission, reportPermParams)
+			var a Arrival
+			select {
+			case a = <-arrived:
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for the handler to start")
+			}
+			defer close(release)
+
+			if a.Call == nil {
+				t.Fatal("an arrival off the read loop carries the request's own context")
+			}
+			if a.Ended() {
+				t.Fatal("the request is live: nothing has answered it")
+			}
+			tc.answer(t, p)
+			select {
+			case <-a.Call.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("the request was answered and its context did not end")
+			}
+			if !a.Ended() {
+				t.Fatal("Ended must say what the context says")
+			}
+		})
+	}
+}
+
+// The other side of the same rule: a handler's OWN reply does not end its
+// request's context. The Replied hook runs inside the request's goroutine,
+// right after that reply, and a decision that reached the agent must not read
+// back there as one something else answered.
+func TestAHandlersOwnReplyDoesNotEndItsArrival(t *testing.T) {
+	p := newRawPipe(t)
+	type seen struct {
+		disp  ReplyDisposition
+		ended bool
+	}
+	got := make(chan seen, 4)
+	p.client.SetPermissionHandler(func(a Arrival, _ PermissionRequest) PermissionDecision {
+		return PermissionDecision{OptionID: "yes", Replied: func(d ReplyDisposition) {
+			got <- seen{disp: d, ended: a.Ended()}
+		}}
+	})
+	p.send(t, 1, MethodRequestPermission, reportPermParams)
+	if reply := string(p.readWithin(t, 3*time.Second, "the handler's reply").Result); reply != `{"outcome":{"outcome":"selected","optionId":"yes"}}` {
+		t.Fatalf("reply %s", reply)
+	}
+	requestsDone(t, p)
+	if len(got) != 1 {
+		t.Fatalf("Replied ran %d times, want exactly once", len(got))
+	}
+	s := <-got
+	if !s.disp.Delivered || s.disp.Lost != "" {
+		t.Fatalf("disposition %+v, want delivered", s.disp)
+	}
+	if s.ended {
+		t.Fatal("the handler's own reply ended its request's context")
+	}
+}
+
 // The ordinary case: the handler's decision is the reply the agent gets, and
 // its Replied hook says so.
 func TestReplyDispositionDelivered(t *testing.T) {

@@ -101,6 +101,14 @@ type pendingReq struct {
 	// one of the repliedBy constants. It is what tells a cancel's answer from a
 	// close's, for the early-answer reason and for a lost reply's Lost alike.
 	repliedBy string
+	// ctx is the request's own lifetime and gone ends it (Arrival.Call). It is
+	// ended in the same incomingMu section that records a reply written by
+	// anything but this request's handler, and again by runIncoming when the
+	// handler returns. A handler hands it to whatever parks its decision, so a
+	// request the client has already answered cannot leave an ask parked behind
+	// it (review r17, finding 3).
+	ctx  context.Context
+	gone context.CancelFunc
 }
 
 // Who answered a blocking request, on pendingReq.repliedBy. The first three
@@ -114,8 +122,10 @@ const (
 )
 
 // arrival is the request's Arrival: both halves of "which turn did this come
-// from", as the read loop recorded them.
-func (in *pendingReq) arrival() Arrival { return Arrival{Turn: in.turn, InTurn: in.inTurn} }
+// from", as the read loop recorded them, and the request's own lifetime.
+func (in *pendingReq) arrival() Arrival {
+	return Arrival{Turn: in.turn, InTurn: in.inTurn, Call: in.ctx}
+}
 
 type promptResult struct {
 	res PromptResult
@@ -815,11 +825,17 @@ func (c *Client) dispatch(msg *Message, params RequestParams, run func(*pendingR
 // PromptBlocks changes them both in, because a request registered a moment
 // apart from a prompt starting or ending belongs to a different turn and only
 // the pair says which (Arrival).
+//
+// The request's own context is made here, before it is published to c.incoming,
+// so whatever answers it first — a cancel racing the handler's very first
+// instruction included — finds something to end (Arrival.Call). It is a child
+// of Background and costs no goroutine; runIncoming ends it on every path.
 func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
 	c.mu.Lock()
 	turn, inTurn := c.turn, c.inPrompt
 	c.mu.Unlock()
 	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, inTurn: inTurn, params: params, decide: make(chan any, 1)}
+	in.ctx, in.gone = context.WithCancel(context.Background())
 	key := idKey(msg.ID)
 	c.incomingMu.Lock()
 	c.incoming[key] = in
@@ -839,6 +855,11 @@ func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
 // Nothing above the client would otherwise hear that such a request existed, so
 // this is also where the early-answer handler is told about it.
 func (c *Client) runIncoming(in *pendingReq, run func(*pendingReq)) {
+	// The request's own context ends with its goroutine, whichever way that
+	// goes: the handler has returned by then, so nothing it parked is waiting
+	// on this any more, and a context nobody ends is a leak of the little the
+	// cancel tree holds (Arrival.Call).
+	defer in.gone()
 	defer c.dropIncoming(idKey(in.id))
 	if !c.liveIncoming(in) {
 		disp := c.replyIncomingBy(in, cancelledResult(c.Dialect(), in.method), repliedByStale)
@@ -887,10 +908,36 @@ func (c *Client) liveIncoming(in *pendingReq) bool {
 // TurnLive reports whether turn is still the one the client is running. A
 // blocking request is handed the turn it arrived in, so its handler can ask
 // this before it publishes anything for a turn that has since ended.
+//
+// It says nothing about whether a prompt is in flight, which is why it cannot
+// decide who owns the turn a caller has installed state for: see TurnActive.
 func (c *Client) TurnLive(turn int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return turn == c.turn
+}
+
+// TurnActive reports whether turn is the one the client is running **and a
+// prompt of craze's own is in flight for it**. Both halves are read in one
+// c.mu section, the same section PromptBlocks changes them both in, because
+// separately they cannot identify the owner of a turn's state (review r17,
+// finding 2).
+//
+// The schedule that needs it: turn N returns, so c.inPrompt is cleared while
+// the counter stays at N; the session then installs turn N+1's state —
+// s.inPrompt and the registry token — and only *afterwards* enters
+// PromptBlocks, which bumps the counter to N+1. In that window a delayed
+// handler for a request of turn N sees a counter that still says N and a
+// session that says "a prompt is in flight", and TurnLive alone would hand it
+// N+1's token: the old request would raise a card against the successor's
+// lifecycle. Requiring an active prompt closes it, because the session installs
+// its token before c.inPrompt can become true for that turn and clears it only
+// after c.inPrompt is false again — so "turn N is active" is true only while
+// the installed token is N's.
+func (c *Client) TurnActive(turn int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inPrompt && turn == c.turn
 }
 
 func (c *Client) onNotify(msg *Message) {
@@ -1257,6 +1304,13 @@ func (c *Client) replyIncoming(in *pendingReq, result any) ReplyDisposition {
 // replyIncomingBy is replyIncoming naming who is answering, which is recorded
 // with the answer itself so that whatever loses this race can be told why.
 //
+// **A reply written by anything but the request's own handler ends the
+// request's context**, in the same section that records who answered, so a
+// handler still deciding — or already parked on a decision — learns at once
+// that the answer was not going to be its own (Arrival.Call; review r17,
+// finding 3). Ending it is a leaf operation: it closes a channel under the
+// context's own mutex and calls nothing of this package's.
+//
 // The write error is still dropped, as it always was — there is nobody to hand
 // it to and nothing to do about it — but it is no longer silent: a caller that
 // wants to know learns that its decision never left.
@@ -1269,6 +1323,9 @@ func (c *Client) replyIncomingBy(in *pendingReq, result any, by string) ReplyDis
 	}
 	in.replied = true
 	in.repliedBy = by
+	if by != repliedByHandler && in.gone != nil {
+		in.gone()
+	}
 	c.incomingMu.Unlock()
 	if err := c.conn.Reply(in.id, result); err != nil {
 		return ReplyDisposition{Lost: ReplyLostWriteFailed}

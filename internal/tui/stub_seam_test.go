@@ -79,7 +79,7 @@ func TestStubOwnsItsLogAndItsClock(t *testing.T) {
 	// One sequence, whoever published: the Stub's emit, then the log's outbox.
 	s.Emit(agent.Event{Type: agent.EventText, Text: "from the stub"})
 	log.Enqueue(agent.Event{Type: agent.EventText, Text: "from above the seam", At: fixed})
-	if err := log.Flush(context.Background()); err != nil {
+	if err := log.Flush(context.Background(), nil); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
 	evs := stubBuffered(s)

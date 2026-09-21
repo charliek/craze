@@ -260,24 +260,33 @@ type Model struct {
 	// cards is the blocking-request queue (§3.11): permission, question and
 	// plan requests in arrival order. Only the head is drawn.
 	//
-	// cardMask is the turn whose card openings are masked: a cancel answered
-	// every request the session was holding, so an opening still in flight for
-	// that turn must not raise a card nobody can answer. It is **keyed to the
-	// engine turn id** rather than to a flag reset on any ending (plan 021,
-	// panel astra 10): it cannot leak onto the next turn, because beginTurn
-	// clears it, and it cannot outlive its own, because that turn's ending —
-	// which the log orders behind every opening and ending of the turn —
-	// clears it too. A cancel with no turn of craze's own masks nothing: there
-	// would be nothing to clear it, and an opening in flight at that Esc is
-	// followed by its own cancelled ending, which removes the card.
+	// cardMasking says the cancel mask is up: a cancel answered every request
+	// the session was holding, so an opening still in flight must not raise a
+	// card for an ask that cancel has already ended. What it drops is decided
+	// per opening, against the registry (maskDrops) — a live ask is never
+	// swallowed, whatever the mask says — which is what lets the mask cover a
+	// cancel with no turn of craze's own too, and so removes the card flash an
+	// opening in flight at that Esc used to leave (review r17, finding 4).
+	//
+	// cardMask is the turn it is **keyed to** for clearing, the engine turn id
+	// (plan 021, panel astra 10): it cannot leak onto the next turn, because
+	// beginTurn clears it, and it cannot outlive its own, because that turn's
+	// ending — which the log orders behind every opening and ending of the turn
+	// — clears it too. A cancel with no turn of craze's own keys it to the empty
+	// turn id, and then the next beginTurn is what clears it.
 	//
 	// askEchoes are the causes of answers this model sent whose endings it has
 	// not seen yet: their effect was applied in the Update that asked for them,
 	// so the events are its own echoes (applyAskEnded).
-	cards     []card
-	cardMask  string
-	askEchoes []string
-	snap      agent.Snapshot
+	//
+	// hiddenRetry are answers to asks the config shows no card for that the
+	// engine refused for want of room (answerHidden).
+	cards       []card
+	cardMask    string
+	cardMasking bool
+	askEchoes   []string
+	hiddenRetry []hiddenAnswer
+	snap        agent.Snapshot
 	// queue is the engine's message queue, in send order: refreshSnap and
 	// refreshQueue fill it from Control.State().Queue, which is where the
 	// queue lives now that it has left the provider seam (plan 021 §3.5).
@@ -2028,7 +2037,7 @@ func (m *Model) beginTurn(id, text string) {
 	}
 	m.status = statusWorking
 	// A new turn: whatever a cancel masked belonged to the turn before it.
-	m.cardMask = ""
+	m.cardMask, m.cardMasking = "", false
 	m.turnStart = m.now()
 	m.err = ""
 	m.cancelled = false
@@ -2046,12 +2055,15 @@ func (m *Model) beginTurn(id, text string) {
 // because the cancel it asked for is made by the engine and answers every
 // request the session was holding just the same.
 //
-// The mask itself is set only when there is a turn of craze's own to key it to
-// (cardMask). With none — cards on screen and nothing working — the cards on
-// screen still go, and an opening that was already in flight is removed by the
-// cancelled ending that the registry enqueued right behind it.
+// The mask goes up for a cancel with no turn of craze's own too, keyed to the
+// empty turn id and cleared by the next beginTurn. That is safe now that the
+// mask cannot swallow a live ask (maskDrops), and it is what stops an opening
+// already in flight at that Esc from flashing a card up for the one Update
+// before its own cancelled ending removes it — which the host's publications
+// and a <wait:card> could both see (review r17, finding 4).
 func (m *Model) maskCards() {
 	m.cards = nil
+	m.cardMask, m.cardMasking = "", true
 	if m.status == statusWorking {
 		m.cardMask = m.turnID
 	}
@@ -2287,6 +2299,11 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
+	// An event means the log is moving, which is the only thing a hidden answer
+	// the outbox had no room for is waiting on (retryHidden). It runs before the
+	// event is applied, so a hidden ask answered here is not counted twice by an
+	// answerHidden this same event causes.
+	m.retryHidden()
 	if ev.Type == agent.EventSubagent {
 		m.applySubagentEvent(ev)
 		return
@@ -2510,18 +2527,52 @@ func (m *Model) applyEvent(ev agent.Event) {
 	}
 }
 
+// hiddenAnswer is one answer to a hidden ask that has still to be taken
+// (hiddenRetry).
+type hiddenAnswer struct {
+	id string
+	a  agent.AskAnswer
+}
+
 // answerHidden answers an ask the config never shows a card for — a question or
 // a plan hidden by the provider's own settings — where it arrives, with no card
 // and no row, exactly as the model has always answered those. A failure is
 // dropped for the same reason the row is: the user asked not to be shown this
 // request at all.
+//
+// With ONE exception: agent.ErrAskUnavailable is the log's outbox refusing for
+// want of room, before it mutated anything, so the ask is still open and the
+// provider is still waiting — and no card will ever raise it, because this is
+// the path that has none (review r17, finding 5). The answer is kept and tried
+// again the next time the model applies an event (retryHidden). It is bounded by
+// the number of hidden asks open at once, and it needs no timer: events are what
+// drain the outbox's pressure in the first place.
 func (m *Model) answerHidden(id string, a agent.AskAnswer) {
 	if m.eng == nil {
 		return
 	}
 	cmd := m.nextCmd()
-	if err := m.eng.Answer(cmd, id, a); err == nil {
+	switch err := m.eng.Answer(cmd, id, a); {
+	case err == nil:
 		m.noteAskEcho(cmd.Cause())
+	case errors.Is(err, agent.ErrAskUnavailable):
+		m.hiddenRetry = append(append([]hiddenAnswer(nil), m.hiddenRetry...), hiddenAnswer{id: id, a: a})
+	}
+}
+
+// retryHidden re-sends the hidden answers the outbox had no room for. Each one
+// is either taken, refused for good — the ask was resolved some other way in the
+// meantime — or kept for the next event by answerHidden itself. The list is
+// taken first, so one that is kept is appended to an empty list rather than
+// walked twice.
+func (m *Model) retryHidden() {
+	if len(m.hiddenRetry) == 0 {
+		return
+	}
+	pending := m.hiddenRetry
+	m.hiddenRetry = nil
+	for _, h := range pending {
+		m.answerHidden(h.id, h.a)
 	}
 }
 
@@ -2712,7 +2763,7 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 		// publishes its own ending, and this event is enqueued after that. So
 		// there is nothing left to mask, and a request that arrives now belongs
 		// to no turn this cancel touched.
-		m.cardMask = ""
+		m.cardMask, m.cardMasking = "", false
 	}
 	// current is "this is the ending of the turn on screen". An id the model has
 	// never seen is not it, and neither is "" — before any turn there is nothing

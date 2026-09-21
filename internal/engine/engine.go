@@ -304,7 +304,7 @@ func (e *Engine) NewClientID() string {
 }
 
 // Sync returns once every event enqueued before the call has been delivered.
-func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx) }
+func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) }
 
 // Asks is every ask the session is holding, in the order they were opened. It
 // waits on nothing and takes no lock of the engine's: the registry is its own
@@ -671,7 +671,10 @@ func (e *Engine) runTurn(l launch) {
 	}()
 	defer e.wg.Done()
 	if l.barrier {
-		_ = e.log.Flush(context.Background())
+		// No done of the engine's own: the engine's workers are joined by
+		// Close only *after* the session has closed, and closing the session
+		// closes the log, which is what frees this barrier (agent.EventLog.Flush).
+		_ = e.log.Flush(context.Background(), nil)
 	}
 	res, err := l.run(context.Background())
 	var next []launch

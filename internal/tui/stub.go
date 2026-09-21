@@ -295,7 +295,11 @@ func (s *Stub) Emit(ev agent.Event) {
 	if _, err := s.asks.Open(context.Background(), token, req); err != nil {
 		return
 	}
-	_ = s.log.Flush(context.Background())
+	// Bounded by the Stub's own close, like every other flush a session makes on
+	// its own goroutines (agent.EventLog.Flush): a test that emits while another
+	// goroutine closes the Stub gets the flush's semantics it had, and cannot be
+	// left waiting for a barrier the close is on its way to freeing.
+	_ = s.log.Flush(context.Background(), s.closed)
 }
 
 // stubAskRequest is the ask an event opens, and whether it opens one at all. An
@@ -560,7 +564,8 @@ func (s *Stub) beginAskTurn() agent.TurnToken { return s.asks.BeginTurn() }
 // every ask that turn still held has ended — and every opening still in flight
 // has been delivered — before the caller publishes the turn's terminal event
 // (plan 021 §3.6). It is idempotent, and safe on a closing log, where the flush
-// returns at once.
+// returns at once; the flush is bounded by the Stub's close as the live
+// session's is bounded by its done (review r17, finding 1).
 //
 // It takes the turn's token down with it, so a card emitted after the ending
 // belongs to no turn of craze's own and is raised like any other between-turns
@@ -573,7 +578,7 @@ func (s *Stub) endAskTurn(token agent.TurnToken) {
 	}
 	s.mu.Unlock()
 	s.asks.EndTurn(token)
-	_ = s.log.Flush(context.Background())
+	_ = s.log.Flush(context.Background(), s.closed)
 }
 
 // Cancel mirrors the live session's CancelOutcome (plan 021 §3.7), fired and
