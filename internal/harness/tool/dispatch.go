@@ -56,6 +56,8 @@ type Dispatcher struct {
 	// key when it switches to that provider's model, and every call from then
 	// on must redact it (SetRedactor).
 	red atomic.Pointer[redact.Replacer]
+	// planPath is Env.PlanPath, set once the session knows it (SetPlanPath).
+	planPath atomic.Pointer[string]
 
 	// interval is the progress throttle's; tests replace it.
 	interval time.Duration
@@ -121,6 +123,12 @@ func NewDispatcher(o Options) (*Dispatcher, error) {
 // the session knew a key belongs to that earlier state (plan 019 §3.8).
 func (d *Dispatcher) SetRedactor(r *redact.Replacer) { d.red.Store(r) }
 
+// SetPlanPath makes path the plan file every call prepared or run from now on
+// is told of (Env.PlanPath). The session calls it once, in Open, as soon as its
+// transcript — whose sibling the plan file is — has a name, which is after the
+// dispatcher is built.
+func (d *Dispatcher) SetPlanPath(path string) { d.planPath.Store(&path) }
+
 // redactor is the current one.
 func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 
@@ -129,6 +137,9 @@ func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 func (d *Dispatcher) callEnv(progress Progress) Env {
 	env := d.env
 	env.Progress, env.Redactor = progress, d.redactor()
+	if p := d.planPath.Load(); p != nil {
+		env.PlanPath = *p
+	}
 	return env
 }
 

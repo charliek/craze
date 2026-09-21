@@ -161,6 +161,10 @@ func (t *turn) toolCall(tc fantasy.ToolCallContent) error {
 	return nil
 }
 
+// planApprovedVeto answers a call that would have run after the person
+// approved the plan, in the same step (runTool).
+const planApprovedVeto = "Not executed: the plan was approved and the turn ended."
+
 // runTool is every bridged tool's Run, on Fantasy's tool goroutines. The
 // dispatcher runs the call under the id OnToolCall prepared it with; a call
 // of a bad step, or one the guard refused, is released unrun. It never
@@ -170,6 +174,20 @@ func (t *turn) runTool(ctx context.Context, call fantasy.ToolCall) fantasy.ToolR
 	c, bad := t.byCallID[call.ID], t.bad
 	var veto *tool.Result
 	if c != nil {
+		// A plan approved earlier in this step refuses every call that starts
+		// after it, so [exit_plan_mode, write(plan)] cannot change a plan the
+		// person has just approved (plan 023 §3.4). "Starts after" is decided
+		// here, under the lock planWasApproved takes: exit_plan_mode is not
+		// Parallel, so Fantasy runs it on the goroutine that dispatches the
+		// step's calls (agent.go:1675-1704), and everything after it in the
+		// step reaches this line only once it has returned. A call already
+		// past this line is joined as usual; a Parallel one dispatched before
+		// it whose goroutine has not got this far is refused as well, which is
+		// as true of it — it did not run, and nothing will read its result.
+		// The guard's own veto, when there is one, stands.
+		if t.planApproved && c.veto == nil {
+			c.veto = &tool.Result{Text: planApprovedVeto, IsError: true, Class: tool.ClassNotExecuted}
+		}
 		veto = c.veto
 	}
 	t.mu.Unlock()

@@ -50,7 +50,10 @@ type toolset struct {
 	// through the dispatcher's fixed Env.Todos; a turn attaches to it for its
 	// own life (turn.go's Run) so Write's one emit lands on the running
 	// turn's sink.
-	todos   *sessionTodos
+	todos *sessionTodos
+	// asker is the caller's asker under the session's watch (asker.go), or
+	// nil when the session was opened with none.
+	asker   *watchedAsker
 	profile string      // the profile's name, which the header records
 	specs   []tool.Spec // the profile's tools' specs, in the order the model is offered them
 	byID    map[string]tool.Spec
@@ -114,7 +117,7 @@ type toolset struct {
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
-func openTools(home, workspace, mode string, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -193,19 +196,23 @@ func openTools(home, workspace, mode string, table *modeltable.Table, getenv fun
 	// is still the inner gate's to judge, which is how H3's evaluator will
 	// slot in underneath (plan 023 §3.1).
 	ts.modeGate = tool.NewModeGate(mode, seams.gate)
-	ts.d, err = tool.NewDispatcher(tool.Options{
-		Tools: p.Tools,
-		Gate:  ts.modeGate,
-		Env: tool.Env{
-			Workspace: workspace,
-			Home:      home,
-			Redactor:  red,
-			Environ:   tool.ChildEnviron(os.Environ(), keyNames),
-			Locks:     &tool.PathLocks{},
-			Closing:   ts.closing,
-			Todos:     ts.todos,
-		},
-	})
+	env := tool.Env{
+		Workspace: workspace,
+		Home:      home,
+		Redactor:  red,
+		Environ:   tool.ChildEnviron(os.Environ(), keyNames),
+		Locks:     &tool.PathLocks{},
+		Closing:   ts.closing,
+		Todos:     ts.todos,
+	}
+	// The caller's asker is wrapped, so the session sees a plan approved
+	// (asker.go). With none, Env.Asker stays a nil interface — not a wrapper
+	// around nothing — which is what the ask tools test for.
+	if asker != nil {
+		ts.asker = &watchedAsker{inner: asker}
+		env.Asker = ts.asker
+	}
+	ts.d, err = tool.NewDispatcher(tool.Options{Tools: p.Tools, Gate: ts.modeGate, Env: env})
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
@@ -288,6 +295,7 @@ func (ts *toolset) adoptPlanPath(path string) error {
 		return errPlanPathKey
 	}
 	ts.planPath = path
+	ts.d.SetPlanPath(path) // what exit_plan_mode reads (tool.Env.PlanPath)
 	return nil
 }
 

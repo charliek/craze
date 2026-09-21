@@ -1,5 +1,5 @@
 # The opencode profile's tools as a model is offered them (Profile.ToolsJSON).
-# tools_sha256: 367251bf360b2f847cd3b52d20cae63da07d3f2ece8cbbcbd84f40d4252c076e
+# tools_sha256: 491540070947b504e73932c1936bf77a729ec6654e8038d52107ab62020f2653
 
 === tool: bash
 --- description
@@ -254,4 +254,131 @@ Usage:
     "content",
     "filePath"
   ]
+}
+
+=== tool: todo_write
+--- description
+Claude Code calls this tool `TodoWrite`.
+
+Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.
+
+Use for any task with 3+ steps. Skip for trivial single-step work.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "merge": {
+      "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id and status. When false, the provided todos replace the existing list.",
+      "type": "boolean"
+    },
+    "todos": {
+      "description": "The todo items to write.",
+      "items": {
+        "properties": {
+          "content": {
+            "description": "The description of the todo item",
+            "type": "string"
+          },
+          "id": {
+            "description": "Unique identifier for the todo item",
+            "type": "string"
+          },
+          "status": {
+            "description": "The status of the todo item: pending, in_progress, completed, or cancelled",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "todos"
+  ]
+}
+
+=== tool: ask_user_question
+--- description
+Claude Code calls this tool `AskUserQuestion`.
+
+Ask the user one or more multiple-choice questions.
+
+- Put your recommended option first and append "(Recommended)" to its label.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "questions": {
+      "description": "The questions to ask, each with its own options.",
+      "items": {
+        "properties": {
+          "header": {
+            "description": "Optional. A very short label for the question.",
+            "type": "string"
+          },
+          "multi_select": {
+            "description": "Let the user pick more than one option (default false).",
+            "type": "boolean"
+          },
+          "options": {
+            "description": "The choices for this question.",
+            "items": {
+              "properties": {
+                "description": {
+                  "description": "What picking this option means or implies.",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Option text shown to the user. A few words at most.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "question": {
+            "description": "The question to ask, phrased as a full question.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "options"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "questions"
+  ]
+}
+
+=== tool: exit_plan_mode
+--- description
+Claude Code calls this tool `ExitPlanMode`.
+
+Exit plan mode and present your plan to the user.
+
+Use this after you have finished writing your plan to the plan file in plan mode.
+--- parameters
+{
+  "type": "object",
+  "properties": {},
+  "required": []
 }

@@ -78,16 +78,33 @@ func strPtr(s string) *string                      { return &s }
 func statusPtr(s tool.TodoStatus) *tool.TodoStatus { return &s }
 func boolPtr(b bool) *bool                         { return &b }
 
-// TestTodoWriteAbsentFromProfile (plan 023 §5, C3): the tool is built and
-// tested, but Profile does not offer it — C4 registers all three of D-53's
-// tools together, and moves specs.golden and the pytest tool list once.
-func TestTodoWriteAbsentFromProfile(t *testing.T) {
+// TestAliasesOpenTheDescriptions is A10 (plan 023 §7, D-53): each of the three
+// tools ported from grok-build opens its description with the name Claude Code
+// gives it, so content written for Claude finds the tool with no translation.
+func TestAliasesOpenTheDescriptions(t *testing.T) {
 	p, err := Profile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := names(p); slices.Contains(got, "todo_write") {
-		t.Fatalf("Profile's tools = %q, want no todo_write yet", got)
+	want := map[string]string{
+		"todo_write":        "Claude Code calls this tool `TodoWrite`.",
+		"ask_user_question": "Claude Code calls this tool `AskUserQuestion`.",
+		"exit_plan_mode":    "Claude Code calls this tool `ExitPlanMode`.",
+	}
+	seen := 0
+	for _, tl := range p.Tools {
+		s := tl.Spec()
+		alias, ok := want[s.ID]
+		if !ok {
+			continue
+		}
+		seen++
+		if first, _, _ := strings.Cut(s.Description, "\n"); first != alias {
+			t.Errorf("%s's description opens %q, want %q", s.ID, first, alias)
+		}
+	}
+	if seen != len(want) {
+		t.Fatalf("Profile offers %d of the three tools: %q", seen, names(p))
 	}
 }
 

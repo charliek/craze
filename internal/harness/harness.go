@@ -97,6 +97,11 @@ type Options struct {
 	// session opened in plan mode creates its plan file and tells the model
 	// at its first step (reminders.go, plan 023 §3.1).
 	Mode string
+	// Asker is how the session's tools reach a person: ask_user_question and
+	// exit_plan_mode block on it (tool.Asker, plan 023 §3.4). The adapter in
+	// internal/agent hands in one over craze's ask registry; nil is nobody to
+	// ask, and both tools then answer at once that nobody answered.
+	Asker Asker
 	// NewModel builds a model's client; nil is llm.New. It is the test seam:
 	// a test hands in a scripted fantasy.LanguageModel.
 	NewModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
@@ -249,7 +254,7 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, opts.Asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

@@ -230,3 +230,56 @@ Smaller differences found porting grep and glob:
 | glob reads `rg --files` a line at a time, so a name with a newline in it splits into two paths, and a file in a directory named "x\n.." reads as "../secret", joined onto the search's parent: a path outside the search, never searched | glob passes --null and splits rg's output on NUL, the one byte a name cannot hold. Every path rg prints, glob's and grep's (whose JSON escapes a newline and so could not split), must lie strictly under the directory searched once cleaned and joined, or the search fails: "Invalid ripgrep output: "<path>" is not a path under <dir>" | a path above the search must never be shown as found in it; rg never prints one, so one means its output cannot be trusted, and failing says so where dropping it would hide it |
 | each path, or each file's header, is shown as it is, one a line | a path holding a control character (a newline, a tab, a carriage return) is shown Go-quoted: "/w/x\n../secret"                                  | otherwise a newline in a name reads as two paths, one of them outside the search |
 | grep's card title is the pattern; glob's is the directory searched, relative to the worktree | both: the pattern, then " in <path>" when the call names a path, relative to the workspace                                           | one line that says what was searched for, and where; not model-facing |
+
+
+Tools ported from grok-build
+----------------------------
+
+Three tools in this profile are not opencode's. todo_write, ask_user_question
+and exit_plan_mode take their ids, their parameter names, their model-facing
+descriptions and most of their result phrasing from grok-build (plan 023
+section 3.4, D-53):
+
+    ../grok-build (the owner's local checkout)
+    commit 66fe38c2e7b155769f72536e9d7a8c1ce1c8be77 (2026-09-07)
+    crates/codegen/xai-grok-tools/src/implementations/grok_build/
+    Copyright 2023-2026 SpaceXAI
+
+grok-build is distributed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0); its LICENSE file is the
+license's standard text. No source code is copied: what is ported is the
+tools' contract and the wording below.
+
+| craze                                | grok-build (under the directory above)        |
+|--------------------------------------|-----------------------------------------------|
+| descriptions/todo_write.txt          | todo/mod.rs, description_template             |
+| descriptions/ask_user_question.txt   | ask_user_question/mod.rs, description_template |
+| descriptions/exit_plan_mode.txt      | exit_plan_mode/mod.rs, description_template   |
+
+Edits to those descriptions:
+
+  - each opens with one sentence of craze's own naming the tool as Claude Code
+    does ("Claude Code calls this tool `TodoWrite`."), so content written for
+    Claude Code finds it (D-53);
+  - todo_write keeps the template's first two paragraphs;
+  - ask_user_question drops the sentence promising an automatic "Other"
+    choice: craze's card offers the options and nothing else.
+
+Result texts taken from grok-build: a question nobody answered
+(ask_user_question/format.rs:22-34) and a plan the person wants revised
+(the no-feedback sentence of xai-grok-shell's tool_calls.rs:317-326). A
+question's answer is opencode's sentence (question.ts:33-46).
+
+Deliberate differences in behaviour:
+
+| grok-build                                                        | craze                                                                                          | why |
+|-------------------------------------------------------------------|------------------------------------------------------------------------------------------------|-----|
+| approving a plan leaves plan mode and the turn goes on to implement it ("Implement the plan in plan.md.") | approving ends the turn, the mode is unchanged, and the result says so; craze's own "implement" offer follows | D-51 |
+| a revised plan can carry the person's feedback; a plan can be abandoned | reject carries none, and there is no abandon: the feedback is the person's next message | craze's ask registry answers a plan with accept or reject |
+| an empty plan file exits plan mode: "Plan mode exit approved. No plan content was found" | nobody is asked and nothing changes: the result names the plan file and says to write the plan first | the mode is the person's to change (D-49) |
+| a question times out after 30 minutes                             | no timeout                                                                                     | D-52 |
+| every question gets a free-text "Other" choice; an option may carry a preview | options only, no preview; Claude Code's optional header is accepted                  | what craze's card shows |
+| any number of questions and options                               | at most 8 questions of at most 12 options, and 64 KiB of arguments; an option needs a label and a question at least one option | the card is one screen, and an options-only question with none cannot be answered |
+| todo_write returns no id with an item                             | each item carries its id                                                                       | the model needs it to patch a row |
+| the list and an id are unbounded                                  | 64 items of 200 bytes, a 64-byte id, 256 KiB and 256 updates a call                            | the list rides in every event |
+| exit_plan_mode requires enter_plan_mode                           | there is no enter_plan_mode: the person enters plan mode                                       | plan 023 section 4 |

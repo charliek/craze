@@ -1,0 +1,5 @@
+Claude Code calls this tool `ExitPlanMode`.
+
+Exit plan mode and present your plan to the user.
+
+Use this after you have finished writing your plan to the plan file in plan mode.

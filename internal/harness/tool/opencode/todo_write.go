@@ -14,10 +14,6 @@ import (
 // and the plan tool among them — never opencode's, whose own todowrite
 // carries no id field at all in either direction: craze's schema and result
 // both do (below), since the model needs it back to update the right row.
-//
-// It is built here, and tested directly, but C3 does not add it to Profile's
-// builders: C4 registers all three of D-53's tools in the one commit that
-// moves specs.golden and the pytest tool list.
 func newTodoWrite() (tool.Tool, error) {
 	desc, err := description("todo_write", nil)
 	if err != nil {

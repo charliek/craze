@@ -184,6 +184,11 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	// fixed reference at the start rather than looked up each time.
 	release := s.tools.todos.attach(t.emitLocked)
 	defer release()
+	// And the session's asker tells this turn, and no other, of a plan the
+	// person approved (asker.go).
+	if s.tools.asker != nil {
+		defer s.tools.asker.attach(t.planWasApproved)()
+	}
 	// From here Steer is accepted, and only from here: a prompt the store
 	// refused above never became a turn, so there was nothing to steer into.
 	t.steers.begin()
@@ -324,6 +329,12 @@ type turn struct {
 
 	loop doomLoop // the doom-loop guard's count, across the turn's steps (doomloop.go)
 
+	// planApproved is set when the person approved the plan exit_plan_mode
+	// presented (planWasApproved): the turn ends with that step, as end_turn,
+	// and every call of the step that has not started by then is refused
+	// (plan 023 §3.4, D-51).
+	planApproved bool
+
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
 	// which has its own lock; spliced and written are this turn's, under mu.
@@ -441,10 +452,27 @@ func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamC
 // The guard's step ends with tool results the model never gets to read, so
 // finish turns its tool_use into max_turn_requests, as it does for the step
 // limit.
+//
+// An approved plan stops the turn here too (plan 023 §3.4): Fantasy joins
+// every tool of the step, builds the step and runs OnStepFinish before it
+// asks this, so by now the approval is recorded, the step — exit_plan_mode's
+// call and its result — is persisted, and the only thing left to prevent is
+// the next request. It is not done through a result's StopTurn, which the
+// dispatcher clears on anything a tool returns and which would leave the
+// step's tool_use to be read as a turn that ran out of requests.
 func (t *turn) halted([]fantasy.StepResult) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.ctx.Err() != nil
+	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil
+}
+
+// planWasApproved records that the person approved the plan. The session's
+// asker calls it, on the tool goroutine that asked, before exit_plan_mode has
+// its answer (asker.go).
+func (t *turn) planWasApproved() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.planApproved = true
 }
 
 // stepStarted opens step n (from 0): its number, its clock, and an empty
@@ -634,6 +662,14 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 				return Result{StopReason: StopCancelled}, nil
 			}
 			stop = StopMaxTurnRequests
+			// Unless what stopped it was the person approving the plan: that
+			// turn is finished, not cut off, and `craze prompt` exits non-zero
+			// on anything but end_turn. The transcript's step keeps its own
+			// tool_use. A cancel (above), a save failure and unusable ids
+			// (earlier) and the doom-loop guard all outrank it (plan 023 §3.4).
+			if t.planApproved && !t.loop.stopped {
+				stop = StopEndTurn
+			}
 		}
 		var total Usage
 		if res != nil {

@@ -673,10 +673,20 @@ def test_native_tool_loop_read_grep_edit_bash(
     assert (ws / "notes.txt").read_text(encoding="utf-8") == "beta\n"
 
     # The wire's own view of the same loop. The first request offers the
-    # profile's six tools in its registry order (opencode.Profile), and the
+    # profile's nine tools in its registry order (opencode.Profile), and the
     # last one carries every call's result back, each tied to its call id.
     first, last = fixture_server.requests[0], fixture_server.requests[-1]
-    assert first.tool_names == ["bash", "read", "glob", "grep", "edit", "write"], first.tool_names
+    assert first.tool_names == [
+        "bash",
+        "read",
+        "glob",
+        "grep",
+        "edit",
+        "write",
+        "todo_write",
+        "ask_user_question",
+        "exit_plan_mode",
+    ], first.tool_names
     results = {m["tool_call_id"]: m["content"] for m in last.messages if m.get("role") == "tool"}
     assert set(results) == {"read", "grep", "edit", "bash"}, sorted(results)
     assert "alpha" in results["read"], results["read"]

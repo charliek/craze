@@ -38,11 +38,14 @@ const (
 	// kind verbatim, and --json does too, so this is its own kind rather than
 	// KindOther, which would read "other" on both.
 	KindTodo Kind = "todo"
+	// KindAsk is a call that blocks on the person: ask_user_question and
+	// exit_plan_mode (plan 023 §3.4). Its own kind for the same reason.
+	KindAsk Kind = "ask"
 )
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo:
+	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo, KindAsk:
 		return true
 	}
 	return false
@@ -270,6 +273,14 @@ type Env struct {
 	// no caller wired one (a harness test, or a build with no todos) —
 	// todo_write then returns a tool_error result rather than panic.
 	Todos TodoStore
+	// Asker is how a call reaches the person (asker.go, plan 023 §3.4). nil
+	// when the session was opened with none: ask_user_question and
+	// exit_plan_mode then answer at once that nobody answered.
+	Asker Asker
+	// PlanPath is the session's plan file, absolute: what exit_plan_mode
+	// reads. The dispatcher sets it per call (SetPlanPath), since a session
+	// learns it only once its transcript is named. "" is no plan file.
+	PlanPath string
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken
