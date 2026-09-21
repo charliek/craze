@@ -274,9 +274,11 @@ it.
     nothing first and the agent has no say in it: shell mode runs what **you**
     typed, and nothing an agent said can put a command in the composer.
 
-To send a message that begins with `!`, start it with a space: the leading
-space is trimmed on the way out, so ` !important` reaches the agent as
-`!important`.
+To send a message that begins with `!`, type a single space before it. A
+draft whose first character is a space is not shell mode, and that space is
+trimmed on the way out, so a draft of space followed by `!important` reaches
+the agent as `!important` — the space is how you say which of the two you
+meant, and it never travels.
 
 ### Keys
 
