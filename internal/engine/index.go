@@ -588,22 +588,36 @@ func (w *indexWriter) touch(cause string) {
 	w.write(cause, "", sessions.TitleKindNone)
 }
 
-// seed is Submit's own first-prompt seed: the opportunity is admitted like
-// every other, and this caller makes the write when the admission claims the
-// attempt for it (§3.2's documented exception, file I/O on a client's
-// goroutine). It reports whether it wrote a row, so a caller composing a pass
-// knows whether a touch beside it is still owed.
+// admitSeed is the ADMISSION half of Submit's own first-prompt seed: the
+// opportunity goes into the one slot like every other, and this caller is told
+// whether the admission CLAIMED the attempt for it, in which case it owes the
+// write (writeSeed — §3.2's documented exception, file I/O on a client's
+// goroutine).
 //
-// It writes nothing at all when a row is already named, and nothing when
-// another attempt is in flight — the opportunity is simply retained, and the
-// caller returns at once rather than waiting for somebody else's write.
+// Nothing is claimed when a row is already named, and nothing when another
+// attempt is in flight — the opportunity is simply retained, and this caller
+// returns at once rather than waiting for somebody else's write.
+//
+// The two halves are separate because the caller has something to do BETWEEN
+// them: Submit launches the turn there (engine.go's runOwn, r31 finding 1). A
+// turn is counted by e.wg before it is launched and gives that count back when
+// it ends, so an opportunity admitted after the launch can arrive after Close
+// has passed e.wg.Wait() and looked at the slot — and then nothing is left to
+// write it. Admitting first is what makes "every turn has made its seed
+// opportunity visible before it can end" true.
 //
 // cause is the command that started the turn, "" when the drain took it.
-func (w *indexWriter) seed(cause, prompt string) bool {
+func (w *indexWriter) admitSeed(cause, prompt string) bool {
 	w.mu.Lock()
-	claimed := w.admitSeedLocked(cause, prompt, true)
-	w.mu.Unlock()
-	if !claimed {
+	defer w.mu.Unlock()
+	return w.admitSeedLocked(cause, prompt, true)
+}
+
+// seed is admitSeed and the write a claim owes, one after the other, for a
+// caller with nothing to do in between. It reports whether it wrote a row, so a
+// caller composing a pass knows whether a touch beside it is still owed.
+func (w *indexWriter) seed(cause, prompt string) bool {
+	if !w.admitSeed(cause, prompt) {
 		return false
 	}
 	return w.writeSeed(cause, prompt)
@@ -627,30 +641,42 @@ func (w *indexWriter) seed(cause, prompt string) bool {
 // The completion is closed LAST, after the result is recorded and the retained
 // opportunity is back in the slot, so a worker exit that waits on it (finish)
 // finds everything this attempt owes already there.
-func (w *indexWriter) writeSeed(cause, prompt string) bool {
-	ok := w.write(cause, fallbackTitle(prompt), sessions.TitleKindFallback)
-
-	w.mu.Lock()
-	w.seeding = false
-	done := w.seedDone
-	w.seedDone = nil
-	retry := false
-	if ok {
-		// A row, named by the first prompt: a retained opportunity is a RETRY
-		// and nothing more, so it is discarded rather than written as a second,
-		// later fallback title.
-		w.seeded = true
-		w.seedNext, w.seedText, w.seedCause = false, "", ""
-	} else {
-		retry = w.seedNext
-	}
-	w.mu.Unlock()
-	if retry {
-		w.kick()
-	}
-	if done != nil {
-		close(done)
-	}
+//
+// All of that bookkeeping is a DEFER keyed on ok, so it runs on the way out of
+// a PANIC too (r31 finding 3): sessions.Store.Upsert, the snapshot, the hidden
+// predicate, the title fold and the report callback are all somebody else's
+// code, and one of them blowing up under a caller that recovers — Submit's
+// own — used to leave seeding true and seedDone open for good. Every later turn
+// was then retained behind an attempt that had already unwound, and the
+// worker's exit waited out its whole bound on a channel nothing would ever
+// close. A panic is a failure like any other here: nothing was written, so the
+// opportunity retained behind it is handed on exactly as a failed write hands
+// it on, and the panic goes on unwinding.
+func (w *indexWriter) writeSeed(cause, prompt string) (ok bool) {
+	defer func() {
+		w.mu.Lock()
+		w.seeding = false
+		done := w.seedDone
+		w.seedDone = nil
+		retry := false
+		if ok {
+			// A row, named by the first prompt: a retained opportunity is a RETRY
+			// and nothing more, so it is discarded rather than written as a second,
+			// later fallback title.
+			w.seeded = true
+			w.seedNext, w.seedText, w.seedCause = false, "", ""
+		} else {
+			retry = w.seedNext
+		}
+		w.mu.Unlock()
+		if retry {
+			w.kick()
+		}
+		if done != nil {
+			close(done)
+		}
+	}()
+	ok = w.write(cause, fallbackTitle(prompt), sessions.TitleKindFallback)
 	return ok
 }
 

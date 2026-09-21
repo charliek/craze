@@ -223,6 +223,13 @@ type hooks struct {
 	// is neither queued nor claimed, and the only place a test can force the
 	// schedules of r27 finding 3.
 	beforeRunSet func()
+	// beforeInlineSeed runs on a Submit's OWN goroutine, after that submit's
+	// turn has been launched and before the claimed index write it may still
+	// owe (runOwn): the window in which the turn can run, end and give its e.wg
+	// count back while its caller has not reached the write, which is the
+	// schedule r31 finding 1 is about. It is named the turn so a test can hold
+	// one submit and let the others through.
+	beforeInlineSeed func(turn string)
 	// receipts are the command-id table's own seams (receipts.go): its clock,
 	// and the barriers a duplicate's schedule turns on. Like the rest of these
 	// they are in place before the table exists and never assigned afterwards.
@@ -448,6 +455,31 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 // still holds — and joins the engine's goroutines, the cancel an armed send-now
 // asked for included. It is idempotent.
 //
+// # The turn that is running when it is called
+//
+// It gets its ending here, in the section that refuses admission, and that is
+// the ONE ending it gets. Without it a quit mid-turn left a turn with a started
+// and no ended in the record — the live smoke's finding A1, on every provider —
+// and a client folding the stream saw a turn that never closes. The stream is a
+// complete record (SD-30): a turn that has ended says so, whatever ended it,
+// and shutdown already authors the endings nothing else will (an armed send's
+// disarm below, every parked ask's `closing`).
+//
+// It is authored HERE and not left to the settlement because the settlement is
+// not coming: closed is set in this same section, and the driver's pass returns
+// at once for a closed engine (passLocked), so the continuation that comes back
+// afterwards runs no pass, emits nothing and touches nothing a client can see.
+// Clearing e.cur is what makes that final: the turn is no longer current for
+// State, for a cancel's release, or for anything that looks. One mutex, two
+// outcomes — a settlement that got there first found e.cur and left none behind,
+// and this one finds nothing to end — so there is exactly one ending either way.
+//
+// The ending is synthetic (the wire produced nothing), stopped `closing` — the
+// word the ask registry and the send-now's own disarm already use for this —
+// with no successor and the queue's own length as Pending: Close is not Stop, so
+// the rows stay where they are and nothing is said about them. It is enqueued
+// before the session's close, so the log's own close phases commit it.
+//
 // The index worker is joined too, but its join is bounded where the others are
 // not: a row is written through a file lock that nothing can interrupt, so the
 // worker abandons a write still in flight rather than make a quit wait for
@@ -468,12 +500,25 @@ func (e *Engine) Close() error {
 		e.mu.Lock()
 		e.closed = true
 		e.activity = ActivityClosing
+		var batch []agent.Event
+		if t := e.cur; t != nil {
+			// The turn that was running has ended, and this is the only place
+			// left that can say so (the doc comment above). It carries the
+			// turn's own cause, as every other ending does.
+			e.cur = nil
+			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+				ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
+				StopReason: stopClosing, Pending: e.queue.Len(),
+			}}, t.cause))
+		}
 		// An armed send will never fire now, and the record says so before the
 		// log stops taking work: a mandatory completion, like every other
-		// ending shutdown authors.
+		// ending shutdown authors. It follows the ending, where a settlement
+		// puts it too (settleLocked's batch).
 		if ev, ok := e.disarmLocked(agent.SendNowClosing, "", ""); ok {
-			e.log.Enqueue(ev)
+			batch = append(batch, ev)
 		}
+		e.log.Enqueue(batch...)
 		e.mu.Unlock()
 		e.closeErr = e.sess.Close()
 		close(e.done)
@@ -840,6 +885,13 @@ func (e *Engine) stamp(ev agent.Event, cause string) agent.Event {
 // seed inline (runOwn). A seed is claimed once and once only, so a turn that
 // posts one after another path has already written it does nothing.
 //
+// The post comes BEFORE the launch, for the reason runOwn's admission does
+// (r31 finding 1): a turn gives its e.wg count back when it ends, so an
+// opportunity that only arrives after the launch can arrive after Close has
+// passed e.wg.Wait() and the worker's exit has looked at the slot — and then
+// nothing is left to write it. Posting is a merge and a non-blocking kick and
+// waits on nothing, so the turn loses nothing by it.
+//
 // The turn's CAUSE goes with the text. A turn the engine started still has one
 // where a client's command asked for it — the send-now that was armed, the
 // submit whose claim is being taken again — and a seed of that turn that fails
@@ -847,8 +899,10 @@ func (e *Engine) stamp(ev agent.Event, cause string) agent.Event {
 // (r29 finding 4). Only a drain's is empty: nobody asked for that turn now.
 func (e *Engine) run(ls []launch) {
 	for _, l := range ls {
-		go e.runTurn(l)
 		e.idx.post(indexWork{seed: true, seedText: l.t.text, seedCause: l.t.cause})
+	}
+	for _, l := range ls {
+		go e.runTurn(l)
 	}
 }
 
@@ -856,12 +910,35 @@ func (e *Engine) run(ls []launch) {
 // I/O on THIS goroutine — §3.2's one documented exception to "waits on
 // nothing", and exactly where the TUI wrote it — rather than the worker's, so
 // it sits inside the command's receipt and its failure names the command.
+//
+// The three steps are in this order, and the order is the whole of r31 finding
+// 1: the opportunity is ADMITTED (and claimed, when no other attempt is in
+// flight), then the turn is launched, then the claimed write is made. Every
+// turn e.wg counts has therefore made its seed opportunity visible to the
+// worker's exit before it can end, so Close can no longer pass e.wg.Wait() with
+// a seed that is about to be retained behind a failing one — which left a
+// session that had run two prompts with no index row at all, its retry kicking
+// a worker that had already gone.
+//
+// A claim this caller holds is never written by anyone else in the meantime:
+// the slot is empty while the attempt is in flight, so the worker's exit finds
+// nothing to claim and waits for this attempt through seedDone instead
+// (indexWriter.finish), and one engine still runs one Upsert at a time.
 func (e *Engine) runOwn(ls []launch, cause string) {
+	claimed := make([]bool, len(ls))
+	for i, l := range ls {
+		claimed[i] = e.idx.admitSeed(cause, l.t.text)
+	}
 	for _, l := range ls {
 		go e.runTurn(l)
 	}
-	for _, l := range ls {
-		e.idx.seed(cause, l.t.text)
+	for i, l := range ls {
+		if h := e.hooks; h != nil && h.beforeInlineSeed != nil {
+			h.beforeInlineSeed(l.t.id)
+		}
+		if claimed[i] {
+			e.idx.writeSeed(cause, l.t.text)
+		}
 	}
 }
 
@@ -1350,6 +1427,12 @@ func (e *Engine) settleLocked(t *turn) []launch {
 const (
 	stopEndTurn   = "end_turn"
 	stopCancelled = "cancelled"
+	// stopClosing is the ending Close authors for the turn that was running
+	// when it was called. It is the word the rest of shutdown already uses for
+	// the same fact — agent.AskClosing for a parked ask, agent.SendNowClosing
+	// for an armed send — so a client that folds the stream reads one vocabulary
+	// for "the session went away under this".
+	stopClosing = "closing"
 )
 
 // settledCap is how many settled turns' failures TurnErr remembers.

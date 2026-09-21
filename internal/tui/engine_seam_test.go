@@ -391,6 +391,28 @@ func TestTheCurrentTurnsEndingStillSettles(t *testing.T) {
 		assertStatuses(t, rec, idleStatus(host.DetailCancelled))
 	})
 
+	// The engine's Close authors an ending for the turn that was running, so the
+	// stream stays a complete record (r31 finding 5). It is synthetic and it did
+	// not fail, which until now meant exactly one thing to the model — a cancel —
+	// and the model reads the stop reason rather than draw "cancelled" under the
+	// last thing on the screen for a session that simply went away. It reaches
+	// Update at all only because requestQuit closes the engine on a command's
+	// goroutine while the reader is still pumping.
+	t.Run("the ending a close authors idles it without calling it a cancel", func(t *testing.T) {
+		m, _, rec, _ := twoTurnsDeep(t)
+		notes := len(texts(m, entryNote))
+		m = deliver(t, m, endedEvent(m.turnID, func(t *agent.TurnInfo) {
+			t.Synthetic, t.StopReason = true, "closing"
+		}))
+		if m.status != statusIdle || m.cancelled {
+			t.Fatalf("status %s cancelled %v, want an idle that did not follow a cancel", m.status, m.cancelled)
+		}
+		if got := len(texts(m, entryNote)) - notes; got != 0 {
+			t.Fatalf("the close's ending wrote %d notes: %q", got, texts(m, entryNote))
+		}
+		assertStatuses(t, rec, idleStatus(host.DetailStop))
+	})
+
 	t.Run("a failed ending errors it", func(t *testing.T) {
 		m, _, rec, _ := twoTurnsDeep(t)
 		m = deliver(t, m, endedEvent(m.turnID, func(t *agent.TurnInfo) {

@@ -781,6 +781,18 @@ func withBlockingReceiptErr(ctx context.Context, rt *receiptTable, c Command, ha
 // owner's entry is untouched. Callers only reach it for a reservation that is
 // still running — withBlockingReceipt replays a completed one directly,
 // never through here (r26 finding 3).
+//
+// A wait that ends on the DUPLICATE's own context is ErrCommandInProgress
+// wrapping that context's error (r31 finding 2), never the bare context error.
+// This invocation ran nothing, mutated nothing and stored nothing, and the
+// owner's reservation is still open: the instruction that fits is
+// in_progress's — "resend THE SAME id" — where a bare context error classifies
+// `aborted`, which tells a client the opposite (its command may already have
+// happened; use a NEW id if it still wants it), and a new id here would layer a
+// second Interject or Set on top of the one the owner is still executing.
+// classify matches ErrCommandInProgress ahead of its context case, so the code
+// is in_progress, and the wrap keeps errors.Is(err, context.Canceled /
+// DeadlineExceeded) true for a caller that matches on those.
 func waitReceipt[T any](ctx context.Context, r *receipt) (T, error) {
 	var zero T
 	var done <-chan struct{}
@@ -791,6 +803,6 @@ func waitReceipt[T any](ctx context.Context, r *receipt) (T, error) {
 	case <-r.done:
 		return replayReceipt[T](r)
 	case <-done:
-		return zero, ctx.Err()
+		return zero, fmt.Errorf("%w: %w", ErrCommandInProgress, ctx.Err())
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -353,11 +354,51 @@ func TestEngineStateDerivesTheSameHostStatusAsTheTUIsMirror(t *testing.T) {
 	})
 }
 
-// TestInputFromStateReadsEveryFieldDeriveDoes is the guard on the helper above:
-// if host.Input grows a field, this fails until inputFromState fills it from
-// State — which is exactly the moment to find out whether State can (plan 021
-// §3.2 says it must).
+// inputFieldsMapped names every field of host.Input that inputFromState decides
+// about — today, every one of them, each filled from engine.State. It is the
+// list the structural half of the test below holds against the struct itself.
+//
+// It is a maintained list and not a derivation, deliberately: the point is that
+// somebody has to come here and write the new field's name down, which is the
+// moment to ask whether State carries what Derive will read (plan 021 §3.2 says
+// it must), and to fill it in inputFromState.
+var inputFieldsMapped = []string{
+	"Ready", "StartFailed", "Working", "Errored", "Err",
+	"Card", "CardLabel", "ForeignTurn", "Cancelled", "NoTurnYet",
+	"SessionID", "Provider", "Model",
+}
+
+// TestInputFromStateReadsEveryFieldDeriveDoes is the guard on the helper above,
+// in two halves.
+//
+// STRUCTURAL: every field host.Input declares is one inputFromState has been
+// decided about. The behavioural half alone could not catch a new field — a
+// field that Derive reads and that BOTH hostInput and inputFromState leave
+// zero-valued makes the two Inputs equal and the comparison pass (r31 finding
+// 4) — and neither could a scenario that simply never populates it.
+//
+// BEHAVIOURAL: for a blocked, working session the two Inputs are equal field for
+// field, which is what says the mapping is the same mapping and not just the
+// same shape.
 func TestInputFromStateReadsEveryFieldDeriveDoes(t *testing.T) {
+	mapped := map[string]bool{}
+	for _, name := range inputFieldsMapped {
+		mapped[name] = true
+	}
+	tp := reflect.TypeOf(host.Input{})
+	for i := 0; i < tp.NumField(); i++ {
+		if name := tp.Field(i).Name; !mapped[name] {
+			t.Errorf("host.Input.%s is new: fill it in inputFromState from engine.State (and in Model.hostInput), then name it in inputFieldsMapped", name)
+		}
+		delete(mapped, tp.Field(i).Name)
+	}
+	for name := range mapped {
+		t.Errorf("inputFieldsMapped names %q, which host.Input no longer declares", name)
+	}
+	if t.Failed() {
+		return
+	}
+
 	m, sess := parityModel(t)
 	sc := scriptHeld()
 	m = startScripted(t, m, sess, "go", sc)

@@ -34,6 +34,10 @@ type fakeIndex struct {
 	// failCall fails one numbered call and no other: the TRANSIENT failure the
 	// retry rules are about, where err fails every call.
 	failCall map[int]error
+	// panicCall PANICS in one numbered call: a store — or anything else the
+	// write calls into — blowing up under a caller that recovers, which is a
+	// different exit from the write than an error is (r31 finding 3).
+	panicCall map[int]bool
 	// live is how many Upserts are inside this double right now, and peak the
 	// most there have ever been: "one engine never runs two of these at once"
 	// is a claim about the worker that only counting can check.
@@ -52,10 +56,11 @@ type fakeIndex struct {
 
 func newFakeIndex() *fakeIndex {
 	return &fakeIndex{
-		failCall: map[int]error{},
-		entered:  make(chan struct{}),
-		release:  make(chan struct{}),
-		wrote:    make(chan struct{}, 64),
+		failCall:  map[int]error{},
+		panicCall: map[int]bool{},
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		wrote:     make(chan struct{}, 64),
 	}
 }
 
@@ -80,6 +85,14 @@ func (f *fakeIndex) Upsert(row sessions.Row) error {
 		<-f.release
 	}
 	f.mu.Lock()
+	boom := f.panicCall[n]
+	f.mu.Unlock()
+	if boom {
+		// After the park, so a test can hold the write open and let it blow up
+		// at the moment its schedule wants.
+		panic("fakeIndex: the store blew up in Upsert")
+	}
+	f.mu.Lock()
 	err := f.err
 	if e, ok := f.failCall[n]; ok {
 		err = e
@@ -101,6 +114,13 @@ func (f *fakeIndex) failAt(n int, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failCall[n] = err
+}
+
+// panicAt makes the n-th call, and only it, PANIC inside Upsert.
+func (f *fakeIndex) panicAt(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.panicCall[n] = true
 }
 
 // peakLive is the most Upserts this double has ever held at one time.
@@ -209,7 +229,14 @@ func (f *fakeIndex) waitFor(t *testing.T, n int, have func() int, what string) {
 // shares, with a provider the hidden predicate accepts.
 func indexed(t *testing.T, idx Index, craze string) *rig {
 	t.Helper()
-	return newRig(t, Options{
+	return indexedHooked(t, idx, craze, nil)
+}
+
+// indexedHooked is indexed with the engine's own seams in place, which is the
+// only way the goroutines that read them may be given any (newRigHooked).
+func indexedHooked(t *testing.T, idx Index, craze string, h *hooks) *rig {
+	t.Helper()
+	return newRigHooked(t, Options{
 		CrazeSessionID: craze,
 		Index: IndexOptions{
 			Store:     idx,
@@ -218,7 +245,7 @@ func indexed(t *testing.T, idx Index, craze string) *rig {
 			Hidden:    func(p string) bool { return p == "native" },
 			TitleLine: func(s string) string { return strings.TrimSpace(s) },
 		},
-	})
+	}, agent.EventLogOptions{NoPrimary: true}, h)
 }
 
 // writerOn is the index worker ALONE, with no engine above it: the unit whose
@@ -601,6 +628,164 @@ func TestClosingWaitsForAnInlineSeedThatOwesARetry(t *testing.T) {
 	}
 	if n := idx.seeds(); n != 1 {
 		t.Fatalf("%d first-prompt rows: %+v", n, idx.all())
+	}
+}
+
+// submitting runs one Submit on a goroutine of its own and answers with the
+// barrier that closes when it has returned: the shape every schedule here needs,
+// because a Submit whose seed is parked in Upsert does not come back.
+func submitting(t *testing.T, r *rig, text string) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := r.e.Submit(Command{}, text, SubmitQueue, ""); err != nil {
+			t.Errorf("submit %q: %v", text, err)
+		}
+	}()
+	return done
+}
+
+// TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd is r31 finding 1. A turn is
+// counted by e.wg before it is launched and gives that count back when it ends,
+// so an opportunity ADMITTED after the launch can arrive after Close has passed
+// e.wg.Wait() and the worker's exit has looked at the slot — and then there is
+// nobody left to write it: the retry a failing attempt hands back kicks a worker
+// that has already gone, and a session that ran two prompts has no index row at
+// all.
+//
+// The schedule is FORCED with a seam of the engine's own (beforeInlineSeed),
+// which holds B's caller in exactly that window: A's seed is parked in Upsert, B
+// is submitted and its turn runs and ENDS while its caller sits between the
+// launch and the write it does not own, Close begins, and only then does A fail.
+// B's row exists by the time Close returns, which it can only do if B's
+// opportunity was in the slot before B's turn ended.
+func TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	boom := errors.New("craze: not saving the session: permission denied")
+	// Transient: A's write fails, and the retry the exit makes for it lands.
+	idx.failAt(1, boom)
+
+	atHook, letGo := make(chan struct{}), make(chan struct{})
+	r := indexedHooked(t, idx, "018f-the-thread", &hooks{beforeInlineSeed: func(turn string) {
+		if turn != "turn-2" {
+			return
+		}
+		close(atHook)
+		<-letGo
+	}})
+	// The bound is not what this is about (TestCloseAbandonsALastWriteNothingCanInterrupt
+	// is), and beforeFinish is what makes this the SHUTDOWN's schedule rather
+	// than a race with an ordinary pass. Both are written here and never again,
+	// and the worker reads them only after the stop this test signals later.
+	r.e.idx.closeWait = watchdog
+	finishing := make(chan struct{})
+	r.e.idx.beforeFinish = func() { close(finishing) }
+
+	first := submitting(t, r, "the first prompt")
+	await(t, entered, "A's seed to park in Upsert")
+	// A's turn ends while its caller is still inside that write.
+	r.until(lastEnding)
+
+	second := submitting(t, r, "the second prompt")
+	await(t, atHook, "B's caller to reach the window between its launch and its write")
+	// B's turn ends — and gives its e.wg count back — with its caller parked.
+	r.until(lastEnding)
+	if n := idx.tries(); n != 1 {
+		t.Fatalf("%d writes with A's still parked, want only A's", n)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	await(t, finishing, "the worker's exit to begin with A's seed still in flight")
+	close(letGo)
+	await(t, second, "B's Submit to return")
+	release()
+	await(t, first, "A's Submit to return once its write is let go")
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close never returned with B's seed owed")
+	}
+
+	row := idx.seedRow(t)
+	if got, want := row, wrote("018f-the-thread", "the second prompt", sessions.TitleKindFallback); got != want {
+		t.Fatalf("the exit wrote %+v, want %+v", got, want)
+	}
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows: %+v", n, idx.all())
+	}
+}
+
+// TestASeedWhoseWriteBlowsUpStillHandsOnWhatItOwed is r31 finding 3. The seed's
+// bookkeeping — seeding, the retained opportunity's kick, and the close of
+// seedDone — is a defer, so an Upsert (or a snapshot, a hidden predicate, a
+// title fold, a report callback) that PANICS under a caller which recovers
+// leaves the retry state exactly as a failed write would.
+//
+// Without it seeding stayed true and seedDone stayed open for ever: every later
+// turn was retained behind an attempt that had already unwound, and the worker's
+// exit waited out its whole bound on a channel nothing would close — which is
+// what this test would do to the watchdog if the defer went away.
+func TestASeedWhoseWriteBlowsUpStillHandsOnWhatItOwed(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	idx.panicAt(1)
+	r := indexed(t, idx, "018f-the-thread")
+	r.e.idx.closeWait = watchdog
+	finishing := make(chan struct{})
+	r.e.idx.beforeFinish = func() { close(finishing) }
+
+	panicked := make(chan struct{})
+	go func() {
+		defer close(panicked)
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Error("A's Submit returned although its Upsert panicked")
+			}
+		}()
+		if _, err := r.e.Submit(Command{}, "the first prompt", SubmitQueue, ""); err != nil {
+			t.Errorf("submit A: %v", err)
+		}
+	}()
+	await(t, entered, "A's seed to park in Upsert")
+	r.until(lastEnding)
+
+	second := submitting(t, r, "the second prompt")
+	await(t, second, "B's Submit to return while A's seed is parked")
+	r.until(lastEnding)
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	await(t, finishing, "the worker's exit to begin with A's seed still in flight")
+	release()
+	await(t, panicked, "A's Submit to unwind once its write is let go")
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close waited out its bound on a seedDone the panic never closed")
+	}
+
+	// The next turn's opportunity was handed on and written, and no attempt is
+	// left in flight for ever.
+	row := idx.seedRow(t)
+	if got, want := row, wrote("018f-the-thread", "the second prompt", sessions.TitleKindFallback); got != want {
+		t.Fatalf("the exit wrote %+v, want %+v", got, want)
+	}
+	r.e.idx.mu.Lock()
+	seeding, done := r.e.idx.seeding, r.e.idx.seedDone
+	r.e.idx.mu.Unlock()
+	if seeding || done != nil {
+		t.Fatalf("the panic left seeding=%v seedDone=%v: the retry state was not restored", seeding, done != nil)
 	}
 }
 

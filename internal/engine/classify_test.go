@@ -36,6 +36,15 @@ func classifyTable() []classifyCase {
 		{"ErrNotAccepting", ErrNotAccepting, "not_accepting", true},
 		{"agent.ErrNotInTurn", agent.ErrNotInTurn, "not_accepting", true},
 		{"ErrCommandInProgress", ErrCommandInProgress, "in_progress", true},
+		// A DUPLICATE of a blocking command whose own wait timed out against an
+		// owner that is still running (waitReceipt, r31 finding 2). It wraps the
+		// context's error too, so this row is also what pins the case ORDER:
+		// ErrCommandInProgress is matched ahead of the generic context case
+		// below, which would otherwise call this `aborted` — "the command may
+		// already have happened, use a new id" — when nothing ran at all and the
+		// same id is exactly what to resend.
+		{"a duplicate's own timeout against an open reservation",
+			fmt.Errorf("%w: %w", ErrCommandInProgress, context.DeadlineExceeded), "in_progress", true},
 		{"ErrAlreadyPending", ErrAlreadyPending, "already_submitted", false},
 		{"ErrStaleTurn", ErrStaleTurn, "stale_turn", false},
 		{"ErrStaleVersion", ErrStaleVersion, "stale_version", false},

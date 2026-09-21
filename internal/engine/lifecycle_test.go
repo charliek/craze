@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,6 +132,94 @@ func TestCloseEndsTheTurnAndJoinsEverything(t *testing.T) {
 	if st := r.e.State(); st.Activity != ActivityClosing {
 		t.Fatalf("activity after Close: %s", st.Activity)
 	}
+}
+
+// TestCloseEndsTheTurnOnTheRecord is the live smoke's finding A1: a quit while
+// a turn was running left that turn with a started and no ended — on every
+// provider — and V3's first invariant ("every turn has exactly one started and
+// one ended") did not hold for the journals it wrote. The stream is meant to be
+// a complete record (SD-30).
+//
+// The settlement is not what was missing it: closed is set in the same locked
+// section that refuses admission, and the driver's pass returns at once for a
+// closed engine, so the continuation that comes back afterwards authors nothing
+// at all. So Close authors the ending itself, there, before the session's close
+// cuts the log — and because the whole decision is one section under e.mu, a
+// settlement that got in first left no current turn for this to find, and this
+// leaves no current turn for a settlement to find. Exactly one ending, whichever
+// order the two arrive in.
+//
+// Every case below reads the PRIMARY (rig.committed), which is the reader that
+// survives a close, and each reads it once, after Close has returned — which is
+// after e.wg.Wait(), so the turn's own continuation has already come back and
+// had whatever chance it had to author a second ending.
+func TestCloseEndsTheTurnOnTheRecord(t *testing.T) {
+	t.Run("a turn that was still running", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		turn := r.s.script(held())
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		got := turnRecord(r.committed())
+		want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=0 synthetic`}
+		if strings.Join(got, " | ") != strings.Join(want, " | ") {
+			t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+		// And State agrees with the stream it just wrote: the turn is over.
+		if st := r.e.State(); st.Turn != "" || st.Activity != ActivityClosing {
+			t.Fatalf("state after the close: %+v", st)
+		}
+	})
+
+	t.Run("the rows behind it are counted and left where they are", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		turn := r.s.script(held())
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+		r.queue("two")
+		r.queue("three")
+
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		got := turnRecord(r.committed())
+		want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=2 synthetic`}
+		if strings.Join(got, " | ") != strings.Join(want, " | ") {
+			t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+		// Close is not Stop: nothing is removed and nothing is said about the
+		// rows, so Pending is the honest count of what is still there.
+		r.wantRows("two", "three")
+		r.wantPrompts("one")
+	})
+
+	t.Run("a turn that settled just before the close", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		r.submit("one")
+		r.until(lastEnding)
+
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		got := turnRecord(r.committed())
+		want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="end_turn" next="" pending=0`}
+		if strings.Join(got, " | ") != strings.Join(want, " | ") {
+			t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+	})
+
+	t.Run("no turn at all", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		if got := turnRecord(r.committed()); len(got) != 0 {
+			t.Fatalf("closing an idle engine wrote %q", got)
+		}
+	})
 }
 
 // TestCloseRacingSubmits: a claim is counted in the section that makes it, under

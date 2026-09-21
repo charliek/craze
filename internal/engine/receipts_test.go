@@ -342,12 +342,22 @@ func TestADuplicateOfABlockingCommandWaitsForTheFirst(t *testing.T) {
 	}()
 	await(t, entered, "the first cancel to reach the session")
 
-	// A duplicate whose own context has already ended returns that error at
-	// once, without touching the first's reservation.
+	// A duplicate whose own context has already ended returns at once, without
+	// touching the first's reservation — and what it returns is
+	// ErrCommandInProgress wrapping that context's error (r31 finding 2). This
+	// invocation ran nothing and the owner's reservation is still open, so the
+	// instruction is in_progress's "resend THE SAME id"; a bare context error
+	// would code `aborted`, which says the opposite — that the command may
+	// already have happened and a NEW id is what another attempt needs — and a
+	// new id here would layer a second cancel on top of the one still running.
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := r.e.Cancel(expired, c, "turn-1"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("a duplicate whose own ctx ended: %v, want context.Canceled", err)
+	_, err := r.e.Cancel(expired, c, "turn-1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a duplicate whose own ctx ended: %v, want the context error still matchable", err)
+	}
+	if !errors.Is(err, ErrCommandInProgress) || Code(err) != "in_progress" {
+		t.Fatalf("a duplicate whose own ctx ended: %v (%s), want ErrCommandInProgress coded in_progress", err, Code(err))
 	}
 	awaitHook(t, found, 1, "duplicates to find the open reservation")
 	if st := r.e.State(); st.Turn != "turn-1" {

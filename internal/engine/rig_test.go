@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -347,6 +348,42 @@ func await(t *testing.T, ch <-chan struct{}, what string) {
 	case <-time.After(watchdog):
 		t.Fatalf("still waiting for %s after %s", what, watchdog)
 	}
+}
+
+// committed is everything the log has put on the PRIMARY since the last call,
+// with Sync as the barrier. It is the one reader that survives a close: the
+// primary is never closed and keeps what was committed to it, where a
+// subscription's owner stops delivering the instant the log ends (its send
+// selects on the subscription's kill). A rig that uses it is built with a
+// primary — newRigOn with the zero EventLogOptions — and nothing else reads it.
+func (r *rig) committed() []agent.Event {
+	r.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), watchdog)
+	defer cancel()
+	if err := r.e.Sync(ctx); err != nil && !errors.Is(err, agent.ErrLogClosing) && !errors.Is(err, agent.ErrClosed) {
+		r.t.Fatalf("sync: %v", err)
+	}
+	var evs []agent.Event
+	for {
+		select {
+		case ev := <-r.e.Events():
+			evs = append(evs, ev)
+		default:
+			return evs
+		}
+	}
+}
+
+// turnRecord is every turn event among evs, in order, as shape spells them:
+// what a client folding the stream would make of the turns alone.
+func turnRecord(evs []agent.Event) []string {
+	var out []string
+	for _, ev := range evs {
+		if ev.Type == agent.EventTurn && ev.Turn != nil {
+			out = append(out, shape(ev))
+		}
+	}
+	return out
 }
 
 // sync is Sync with the watchdog, for a test that has to know the engine's

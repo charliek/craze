@@ -3033,15 +3033,22 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 	// to settle.
 	current := t.ID != "" && t.ID == m.turnID
 	failed := t.Err != ""
+	// cancelled is the synthetic ending the model has a word for. The engine
+	// authors one other kind that is synthetic and did not fail — the ending it
+	// gives the turn that was running when the session closed (engine's Close,
+	// stop reason "closing") — and that one is not a cancel: it reaches Update
+	// only while craze is already quitting, and a "cancelled" note under it
+	// would be the wrong word for the last thing on the screen.
+	cancelled := t.Synthetic && !failed && t.StopReason == stopCancelled
 	switch {
-	case t.Synthetic && !failed:
+	case cancelled:
 		// Cancelled before the prompt's turn opened: while it was still waiting
 		// for the agent's first command catalog, or right after Enter. Nothing
 		// ran and nothing failed, so this is not an error state: it is the ending
 		// a cancelled turn has, and the transcript owes the row it already drew
 		// the same note — Esc leaves nothing else behind.
 		m.addNote(stopCancelled)
-	case t.Synthetic:
+	case t.Synthetic && failed:
 		// A prompt the session refused emits no event of any kind, so this is
 		// the only place its row can be drawn.
 		m.addError(t.Err)
@@ -3049,7 +3056,7 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 	if !current {
 		return
 	}
-	if t.Synthetic && !failed {
+	if cancelled {
 		// Part of the settlement and not of the row: it is what tells the idle
 		// that follows Esc from the idle that follows an answer, so it belongs to
 		// the turn the model is on.
