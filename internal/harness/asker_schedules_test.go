@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +24,11 @@ import (
 type heldTool struct {
 	started chan string   // receives each call's title as it starts running
 	release chan struct{} // closed to let every call return
+	once    sync.Once
 }
+
+// letGo releases every held call, once.
+func (h *heldTool) letGo() { h.once.Do(func() { close(h.release) }) }
 
 func (h *heldTool) Spec() tool.Spec {
 	return tool.Spec{
@@ -72,6 +77,9 @@ func heldSession(t *testing.T, asker tool.Asker) (*heldTool, *Session, *scripted
 		return &reg, reg.Register(p)
 	}
 	s := f.open(opts)
+	// Registered after the session's own cleanup, so it runs before it: Close
+	// waits for the turn, and the turn for every held call.
+	t.Cleanup(h.letGo)
 	if err := os.WriteFile(planPathOf(s), []byte("# The plan\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -122,10 +130,10 @@ func TestAnApprovalJoinsTheCallsAlreadyRunning(t *testing.T) {
 					t.Fatalf("Run returned %+v, %v with a call still running", got.res, got.err)
 				case <-time.After(100 * time.Millisecond):
 				}
-				close(h.release)
+				h.letGo()
 			} else {
 				// The sixth waits for a slot and holds the plan behind it.
-				close(h.release)
+				h.letGo()
 				await(t, a.asked, "the plan to be presented")
 				a.plan <- tool.PlanApproved
 			}
@@ -154,6 +162,51 @@ func TestAnApprovalJoinsTheCallsAlreadyRunning(t *testing.T) {
 				t.Fatalf("%d prepared calls leaked", p)
 			}
 		})
+	}
+}
+
+// The rule itself, with no scheduler in it: a call the model placed before the
+// asking one runs even if it had not started when the approval landed — it may
+// still be waiting for its goroutine, or for one of Fantasy's five slots — and
+// a call placed after it is refused. The turn's state is set up by hand so
+// that the one schedule a real turn cannot be made to produce on demand, a
+// dispatched call that has not reached runTool, is simply stated.
+func TestTheVetoIsDecidedByPlace(t *testing.T) {
+	waiting := &toolCall{order: 1}                // placed first, not yet running
+	running := &toolCall{order: 2, running: true} // a Parallel call still running
+	asking := &toolCall{order: 3, running: true}  // exit_plan_mode, blocked on the person
+	after := &toolCall{order: 4}                  // placed after it
+	tn := &turn{calls: calls{list: []*toolCall{waiting, running, asking, after}}}
+
+	for _, c := range tn.list {
+		if tn.refusedByApproval(c) {
+			t.Fatalf("call %d is refused before any approval", c.order)
+		}
+	}
+	tn.planWasApproved()
+	if tn.approvedAt != asking.order {
+		t.Fatalf("the asking call's place = %d, want %d: the last of the calls running", tn.approvedAt, asking.order)
+	}
+	for _, c := range []*toolCall{waiting, running, asking} {
+		if tn.refusedByApproval(c) {
+			t.Errorf("call %d, placed at or before the asking call, is refused", c.order)
+		}
+	}
+	if !tn.refusedByApproval(after) {
+		t.Error("the call placed after the asking one is not refused")
+	}
+	// A second approval in the step cannot move the place.
+	asking.running = false
+	tn.planWasApproved()
+	if tn.approvedAt != asking.order {
+		t.Fatalf("a second approval moved the place to %d", tn.approvedAt)
+	}
+	// With no call running — not reachable, since the asking call is always
+	// one — everything is refused: the safe default.
+	none := &turn{calls: calls{list: []*toolCall{{order: 1}}}}
+	none.planWasApproved()
+	if !none.refusedByApproval(none.list[0]) {
+		t.Error("an approval that found no asking call refused nothing")
 	}
 }
 

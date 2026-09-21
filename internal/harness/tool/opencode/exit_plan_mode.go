@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"strings"
+	"syscall"
 
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -112,6 +114,13 @@ func (c *exitPlanCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	return unanswered(ctx, env, PlanUnansweredText)
 }
 
+// hardLinked reports whether the file info describes has more than one name.
+// Where the platform does not say, it has one.
+func hardLinked(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && info.Mode().IsRegular() && st.Nlink > 1
+}
+
 // readPlan reads the plan file the way the file tools read a file (file.go):
 // under craze's path lock, so a write still landing is over; through openFile,
 // which does not block on a FIFO; and only if what it opened is a regular file
@@ -148,6 +157,14 @@ func readPlan(ctx context.Context, env tool.Env, path string) (string, error) {
 		// never seen — so it is refused as every file tool refuses it, on the
 		// descriptor that was opened.
 		return "", fail(tool.ClassToolError, credentialsText)
+	case hardLinked(info):
+		// The check above compares against the key file as it is NOW, and that
+		// can be replaced — a rotation writes a new inode — between this open
+		// and that stat, leaving the old inode, keys and all, reachable only
+		// through a plan path hard-linked to it. The plan file is craze's own
+		// and craze never links it, so a second name for it is refused
+		// outright: that needs no second file to compare against.
+		return "", fail(tool.ClassToolError, "The plan file has more than one name (a hard link) and will not be read: "+path)
 	case !info.Mode().IsRegular():
 		return "", fail(tool.ClassToolError, "The plan file is not a regular file: "+path)
 	case info.Size() > maxPlanBytes:

@@ -323,6 +323,14 @@ func TestExitPlanModeReadsOnlyAPlan(t *testing.T) {
 		"a symlink to a device": {func(t *testing.T, plan string) {
 			must(t, os.Symlink("/dev/zero", plan))
 		}, tool.ClassToolError},
+		// A second name for the plan's inode, whatever the other name is: the
+		// key file replaced since (a rotation) is no longer there to compare
+		// against, so the link count is what is refused.
+		"a hard link": {func(t *testing.T, plan string) {
+			other := filepath.Join(filepath.Dir(plan), "was-the-key-file")
+			must(t, os.WriteFile(other, []byte("api_key = \"sk-rotated-away\"\n"), 0o600))
+			must(t, os.Link(other, plan))
+		}, tool.ClassToolError},
 		"oversized": {func(t *testing.T, plan string) {
 			must(t, os.WriteFile(plan, []byte(strings.Repeat("x", maxPlanBytes+1)), 0o600))
 		}, tool.ClassOutputLimit},
@@ -394,43 +402,53 @@ func TestExitPlanModeRefusesTheCredentialsFile(t *testing.T) {
 }
 
 // The plan is read under craze's path lock, which a write still landing
-// holds: a reader started behind it waits, as the write tool's own call does
-// (TestWriteTakesThePathLock), and a cancel is what gets it back. The asker
-// here answers at once, so a reader that took no lock would have returned the
-// person's answer instead of waiting.
+// holds. The barrier is the lock's own count: a reader that has reached the
+// lock is a second holder, which a reader that takes no lock never becomes —
+// it would present the half-written plan and return instead. The write then
+// finishes, lets go, and the plan presented is the whole one.
 func TestExitPlanModeWaitsForThePathLock(t *testing.T) {
 	a := &stubAsker{outcome: tool.PlanRejected}
 	f, plan := askFixture(t, a, nil)
-	must(t, os.WriteFile(plan, []byte("# plan"), 0o600))
+	must(t, os.WriteFile(plan, []byte("# half a plan"), 0o600))
 	real, err := realPath(plan)
 	must(t, err)
 	unlock, err := f.env.Locks.Lock(context.Background(), real)
 	must(t, err)
 	defer unlock()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan tool.Result, 1)
 	go func() {
-		_, res := f.callCtx(t, ctx, "exit_plan_mode", map[string]any{})
+		_, res := f.call(t, "exit_plan_mode", map[string]any{})
 		done <- res
 	}()
-	select {
-	case res := <-done:
-		t.Fatalf("exit_plan_mode did not wait for the lock: %+v", res)
-	case <-time.After(100 * time.Millisecond):
+	deadline := time.Now().Add(10 * time.Second)
+	for f.env.Locks.Holders(real) != 2 {
+		select {
+		case res := <-done:
+			t.Fatalf("exit_plan_mode did not wait for the lock: %+v", res)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exit_plan_mode never reached the path lock")
+		}
+		time.Sleep(time.Millisecond)
 	}
-	cancel()
+	if n := len(a.plans); n != 0 {
+		t.Fatalf("the plan was presented %d times from behind a held lock", n)
+	}
+	must(t, os.WriteFile(plan, []byte("# the whole plan"), 0o600))
+	unlock()
+
 	select {
 	case res := <-done:
-		if !res.IsError || res.Class != tool.ClassAborted {
-			t.Fatalf("result = %+v, want aborted", res)
+		if res.IsError || res.Text != PlanRejectedText {
+			t.Fatalf("result = %+v", res)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("a cancelled exit_plan_mode kept waiting")
+		t.Fatal("exit_plan_mode kept waiting after the lock was free")
 	}
-	if len(a.plans) != 0 {
-		t.Fatalf("the plan was presented from behind a held lock: %+v", a.plans)
+	if len(a.plans) != 1 || a.plans[0].Text != "# the whole plan" {
+		t.Fatalf("the person was shown %+v", a.plans)
 	}
 }
 

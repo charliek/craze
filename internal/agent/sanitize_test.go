@@ -45,7 +45,14 @@ func TestSanitizeTextDropsC1AndBidi(t *testing.T) {
 		{"c1 at the end", "ok" + c1CSI, "ok"},
 		{"bidi override", "a" + bidiRLO + "b", "ab"},
 		{"bidi isolates", bidiLRI + "path" + bidiPDI, "path"},
-		{"bidi mark", "a" + bidiRLM + "b", "ab"},
+		// A mark reorders nothing on its own; right-to-left text needs it.
+		{"keeps a bidi mark", bidiRLM + "سلام!", bidiRLM + "سلام!"},
+		// A bare or malformed introducer costs only itself: the sequence ends
+		// at the first byte its grammar does not allow, and the text survives.
+		{"C1 CSI before non-ASCII text", c1CSI + "日本語 hello", "日本語 hello"},
+		{"ESC [ before non-ASCII text", "\x1b[" + "日本語 hello", "日本語 hello"},
+		{"ESC before an emoji sequence", "\x1b" + "👩‍💻 ok", "👩‍💻 ok"},
+		{"a well-formed CSI still goes whole", "a\x1b[1;31mb" + c1CSI + "0mc", "abc"},
 		// U+00A0 is the code point just past the C1 block: ordinary text, and
 		// a boundary the range check has to get right.
 		{"keeps no-break space", "a" + nbsp + "b", "a" + nbsp + "b"},

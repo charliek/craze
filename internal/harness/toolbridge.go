@@ -172,6 +172,13 @@ func (t *turn) toolCall(tc fantasy.ToolCallContent) error {
 // approved the plan, in the same step (runTool).
 const planApprovedVeto = "Not executed: the plan was approved and the turn ended."
 
+// refusedByApproval reports whether c is refused because the person approved
+// the plan: the plan was approved, and the model placed c after the call that
+// asked (planWasApproved fixes that place). mu is held.
+func (t *turn) refusedByApproval(c *toolCall) bool {
+	return t.planApproved && c.order > t.approvedAt
+}
+
 // runTool is every bridged tool's Run, on Fantasy's tool goroutines. The
 // dispatcher runs the call under the id OnToolCall prepared it with; a call
 // of a bad step, or one the guard refused, is released unrun. It never
@@ -192,7 +199,7 @@ func (t *turn) runTool(ctx context.Context, call fantasy.ToolCall) fantasy.ToolR
 		// of Fantasy's five slots, when the approval lands, and that call is
 		// the model's own reading before it asked: it runs. The guard's own
 		// veto, when there is one, stands.
-		if t.planApproved && c.order > t.approvedAt && c.veto == nil {
+		if t.refusedByApproval(c) && c.veto == nil {
 			c.veto = &tool.Result{Text: planApprovedVeto, IsError: true, Class: tool.ClassNotExecuted}
 		}
 		veto = c.veto

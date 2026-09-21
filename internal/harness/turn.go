@@ -331,7 +331,7 @@ type turn struct {
 
 	// planApproved is set when the person approved the plan exit_plan_mode
 	// presented (planWasApproved): the turn ends with that step, as end_turn,
-	// and every call of the step that has not started by then is refused
+	// and every call the model placed after the asking one in the step is refused
 	// (plan 023 §3.4, D-51).
 	planApproved bool
 	approvedAt   int // the asking call's place in its step (toolCall.order)

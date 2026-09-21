@@ -69,6 +69,19 @@ func (l *PathLocks) Lock(ctx context.Context, path string) (unlock func(), err e
 	}, nil
 }
 
+// Holders reports how many calls hold path's lock or are waiting for it: 0 for
+// a path nobody has asked for. It is a read for diagnosis and for tests, which
+// use it as a barrier — "the second call has reached the lock" is a count of
+// two, which no amount of waiting can tell from "has not started yet".
+func (l *PathLocks) Holders(path string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if pl := l.paths[filepath.Clean(path)]; pl != nil {
+		return pl.refs
+	}
+	return 0
+}
+
 // release drops one reference and forgets the entry with its last.
 func (l *PathLocks) release(path string, pl *pathLock) {
 	l.mu.Lock()

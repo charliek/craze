@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,7 +32,12 @@ type parkedAsker struct {
 	deaf        bool
 	deafOutcome tool.PlanOutcome // what a deaf ask decides once it is let go
 	release     chan struct{}    // closed to let a deaf ask go
-	returned    chan struct{}    // closed as a deaf PresentPlan returns
+	// clock orders two boundaries against each other: a deaf PresentPlan
+	// stamps returnedAt as it returns, and a test stamps the moment Run
+	// returned, on the goroutine that called it. A channel closed here would
+	// only say the asker had returned by the time the test looked.
+	clock      atomic.Int64
+	returnedAt atomic.Int64
 
 	mu    sync.Mutex
 	plans int
@@ -40,11 +46,10 @@ type parkedAsker struct {
 
 func newParkedAsker() *parkedAsker {
 	return &parkedAsker{
-		asked:    make(chan string, 8),
-		plan:     make(chan tool.PlanOutcome, 8),
-		answer:   make(chan tool.Answers, 8),
-		release:  make(chan struct{}),
-		returned: make(chan struct{}),
+		asked:   make(chan string, 8),
+		plan:    make(chan tool.PlanOutcome, 8),
+		answer:  make(chan tool.Answers, 8),
+		release: make(chan struct{}),
 	}
 }
 
@@ -74,7 +79,7 @@ func (a *parkedAsker) PresentPlan(ctx context.Context, p tool.PlanOffer) (tool.P
 	a.asked <- p.Text
 	if a.deaf {
 		<-a.release
-		close(a.returned)
+		a.returnedAt.Store(a.clock.Add(1))
 		return a.deafOutcome, nil
 	}
 	select {
@@ -278,30 +283,43 @@ func TestACancelJoinsABlockedAsk(t *testing.T) {
 
 // A tool that will not return holds the turn — Fantasy joins every tool
 // goroutine, and nothing times an ask out (D-52) — and the turn ends only
-// once it has. The join is what is asserted: the asker's return is recorded
-// at its own boundary, and Run must not complete before it.
+// once it has. The join is what is asserted, at the two boundaries
+// themselves: the asker stamps its own return and the goroutine that called
+// Run stamps Run's, on one clock, and the first must come before the second.
+// The asker is held for a moment after the cancel, so a Run that returned on
+// the cancel has stamped — it stamps on the line after Run returns, on its own
+// goroutine — long before the asker is let go; what the test goroutine is
+// doing meanwhile does not enter into it. Correct code cannot fail this.
 func TestATurnWaitsForAToolThatWillNotReturn(t *testing.T) {
 	a := newParkedAsker()
 	a.deaf = true
 	_, s, m := planSession(t, a)
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(a.release) }) }
+	t.Cleanup(letGo) // an early failure must not strand the asker
 	m.push(callStep(callParts("c1", "exit_plan_mode", "{}")), answerWith("never requested"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	out := start(ctx, s, "go", nil)
+	type ran struct {
+		outcome
+		at int64
+	}
+	out := make(chan ran, 1)
+	go func() {
+		res, err := s.Run(ctx, "go", nil)
+		out <- ran{outcome{res, err}, a.clock.Add(1)}
+	}()
 	await(t, a.asked, "the plan to be presented")
 	cancel()
-	// A bounded look, which can only ever fail a Run that did not wait.
 	select {
 	case got := <-out:
 		t.Fatalf("Run returned %+v, %v while its tool was still running", got.res, got.err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(a.release)
+	letGo()
 	got := await(t, out, "the turn, once its tool let go")
-	select {
-	case <-a.returned:
-	default:
-		t.Fatal("Run completed before the tool it was joining had returned")
+	if asker := a.returnedAt.Load(); asker == 0 || asker > got.at {
+		t.Fatalf("Run returned at %d and the tool it was joining at %d: Run did not wait", got.at, asker)
 	}
 	if got.err != nil || got.res.StopReason != StopCancelled {
 		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)

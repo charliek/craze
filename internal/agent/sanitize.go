@@ -27,14 +27,17 @@ func isZeroWidth(r rune) bool {
 // (plan 023 X14).
 func isC1(r rune) bool { return r >= 0x80 && r <= 0x9f }
 
-// isBidi reports whether r is one of Unicode's bidirectional formatting
-// controls: the embeddings and overrides (U+202A–U+202E), the isolates
-// (U+2066–U+2069) and the two marks (U+200E, U+200F). They take no cells and
-// reorder what is drawn after them, so a label, a path or a todo carrying one
-// can be read as something other than what it says (plan 023 X14).
+// isBidi reports whether r is one of Unicode's bidirectional embeddings and
+// overrides (U+202A–U+202E) or isolates (U+2066–U+2069). They take no cells
+// and reorder what is drawn after them, so a label, a path or a todo carrying
+// one can be read as something other than what it says (plan 023 X14).
+//
+// The two marks, LRM and RLM (U+200E, U+200F), are deliberately not here. A
+// mark reorders nothing on its own: it is how right-to-left text gives its
+// punctuation a direction, and dropping it would garble Arabic and Hebrew the
+// way dropping ZWNJ would garble Persian.
 func isBidi(r rune) bool {
-	return r == 0x200e || r == 0x200f ||
-		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
+	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // isDropped reports whether r is a rune sanitizeText removes. A C1 control
@@ -145,26 +148,41 @@ func skipEscape(s string, i int) int {
 		return i
 	}
 	switch s[i] {
-	case '[': // CSI: parameters then a final byte in 0x40..0x7e
-		i++
-		for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
-			i++
-		}
-		if i < len(s) {
-			i++
-		}
-		return i
+	case '[': // CSI
+		return skipCSI(s, i+1)
 	case ']', 'P', 'X', '^', '_': // OSC, DCS, SOS, PM, APC: run to BEL or ST
 		return skipToST(s, i+1)
 	default: // ESC + optional intermediates (0x20..0x2f) + one final byte
 		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
 			i++
 		}
-		if i < len(s) {
+		// The final byte is ASCII (0x30..0x7e). Anything else — the first byte
+		// of a multibyte rune above all — is not part of the sequence: taking
+		// one byte of it would leave the rest as invalid UTF-8.
+		if i < len(s) && s[i] >= 0x30 && s[i] <= 0x7e {
 			i++
 		}
 		return i
 	}
+}
+
+// skipCSI returns the index just past a CSI sequence's body starting at i,
+// by its grammar (ECMA-48 5.4): parameter bytes 0x30..0x3f, intermediate bytes
+// 0x20..0x2f, one final byte 0x40..0x7e. It stops at the first byte that does
+// not fit and leaves it to the caller's loop, so a bare or malformed
+// introducer costs only itself: "CSI 日本語 hello" keeps every word, where
+// scanning on for any final byte would have eaten through to the "h".
+func skipCSI(s string, i int) int {
+	for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+		i++
+	}
+	for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+		i++
+	}
+	if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+		i++
+	}
+	return i
 }
 
 // skipC1Escape returns the index just past the C1 control r at i — two bytes
@@ -176,14 +194,8 @@ func skipEscape(s string, i int) int {
 func skipC1Escape(s string, i int, r rune) int {
 	i += 2 // the control itself: every C1 rune is two bytes in UTF-8
 	switch r {
-	case 0x9b: // CSI: parameters then a final byte in 0x40..0x7e
-		for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
-			i++
-		}
-		if i < len(s) {
-			i++
-		}
-		return i
+	case 0x9b: // CSI
+		return skipCSI(s, i)
 	case 0x90, 0x98, 0x9d, 0x9e, 0x9f: // DCS, SOS, OSC, PM, APC: run to BEL or ST
 		return skipToST(s, i)
 	default:

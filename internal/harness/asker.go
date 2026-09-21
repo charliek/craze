@@ -54,7 +54,7 @@ func (w *watchedAsker) AskQuestion(ctx context.Context, questions []tool.Questio
 
 // PresentPlan is the inner asker's, and marks the running turn before it
 // returns an approval: by the time the tool has its answer the turn already
-// knows, so every call of the step that starts after this one is refused
+// knows, so every call the model placed after this one in the step is refused
 // (runTool) and no step follows it (halted).
 func (w *watchedAsker) PresentPlan(ctx context.Context, plan tool.PlanOffer) (tool.PlanOutcome, error) {
 	out, err := w.inner.PresentPlan(ctx, plan)
