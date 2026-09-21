@@ -185,6 +185,18 @@ func TestEarlyAnsweredRequestsBecomeOneSelfContainedEnding(t *testing.T) {
 	}
 }
 
+// awaitFlushPast takes flushParked notifications off parked until one is waiting
+// for a target past after, so a flush that parked before the test enqueued the
+// event it cares about cannot stand in for the one that is waiting for it.
+func awaitFlushPast(t *testing.T, parked <-chan uint64, after uint64, what string) {
+	t.Helper()
+	for {
+		if target := await(t, parked, what); target > after {
+			return
+		}
+	}
+}
+
 // An answer the user gave, ACCEPTED by the registry, whose reply then lost the
 // race to ACP's own cancelled one (panel astra 13). The ask was answered and
 // stays answered — one ending, and no second one — and the record carries both
@@ -229,10 +241,18 @@ func TestAnAnsweredAskWhoseReplyWasLostSaysSo(t *testing.T) {
 	// From here nobody reads the primary, so the handler's flush after Wait has
 	// something to park on.
 	fillPrimary(t, s.log)
+	// Every flush the handler makes notifies the same hook, and the opening's own
+	// — decideAsk flushes before it parks on the decision — is indistinguishable
+	// from this one unless the targets are compared (review r19, finding 3).
+	// Taking that one leaves the cancel below racing a handler that has not so
+	// much as taken the answer yet, which is the barrier this test claims to
+	// have. The answer enqueues the ask's ending, so the flush that carries the
+	// decision is waiting for a target past everything enqueued before it.
+	_, _, enqueued, _, _ := outboxState(s.log)
 	if err := answerAsk(s, id, AskAnswer{OptionID: "opt-once"}); err != nil {
 		t.Fatal(err)
 	}
-	await(t, parked, "the handler's flush before it replies")
+	awaitFlushPast(t, parked, enqueued, "the handler's flush before it replies")
 
 	// ACP answers the request cancelled while the handler is still holding the
 	// user's decision. The dead context keeps the cancel off the wire.

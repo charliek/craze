@@ -523,7 +523,8 @@ func TestAnAnswerRefusedForRoomKeepsTheCard(t *testing.T) {
 // The hidden half of finding 5: a question the config shows no card for is
 // answered where it stands, so a refusal for room there is a provider parked
 // with nothing on screen to retry it. The answer is kept and retried on the
-// next event the model applies.
+// next event the model applies — the fast path; the beat below is what carries
+// the retry when no event ever follows.
 func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := NewStub()
@@ -560,6 +561,72 @@ func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 	m = tm.(Model)
 	if len(m.hiddenRetry) != 0 {
 		t.Fatalf("the retry is spent once taken: %+v", m.hiddenRetry)
+	}
+	calls := stub.Calls()
+	if len(calls) != 1 || calls[0].ID != "ask-1" || !calls[0].Skip {
+		t.Fatalf("the hidden question is skipped, once: %+v", calls)
+	}
+	if open := stub.Asks().Asks(); len(open) != 0 {
+		t.Fatalf("the provider is still parked: %+v", open)
+	}
+}
+
+// Finding 1 of review r19: the event-driven retry is only the fast path, and
+// the schedule that has no fast path is the one the reviewer traced. The final
+// batch's LAST event is what gives the outbox its room back, so the retry that
+// event carries runs before the room is there and is refused — and then the
+// drainer goes idle and no event ever follows. Nothing here delivers one: the
+// answer's own beat is the only thing that can take it, and there is exactly
+// one of those in flight at a time and none once the list is empty.
+func TestAHiddenAnswerRefusedForRoomIsRetriedByItsOwnBeat(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	stub.SetProvider(plantHidden(t))
+	m := startStub(t, stub, t.TempDir(), 80, 24)
+	if m.showAsk() {
+		t.Fatal("the fixture needs a provider whose questions are hidden")
+	}
+	if cmd := m.armHiddenRetry(); cmd != nil {
+		t.Fatal("a beat was armed with nothing waiting for room")
+	}
+
+	ev := agent.Event{Type: agent.EventQuestion, Question: stubQuestion()}
+	stub.Emit(ev)
+	release := saturate(t, stub)
+
+	tm, _ := m.Update(eventMsg{ev})
+	m = tm.(Model)
+	if len(m.hiddenRetry) != 1 || !m.hiddenRetryLive {
+		t.Fatalf("a refusal for room must keep the answer and arm its beat: %+v live=%v",
+			m.hiddenRetry, m.hiddenRetryLive)
+	}
+	// Arming is the only place a beat is made, so this is "never more than one
+	// in flight" said in full.
+	if cmd := m.armHiddenRetry(); cmd != nil {
+		t.Fatal("a second beat was armed while one was still in flight")
+	}
+
+	// A beat while the log is still backed up: refused again, kept again, and
+	// the next beat is armed by the same one-in-flight rule.
+	tm, _ = m.Update(hiddenRetryMsg{})
+	m = tm.(Model)
+	if len(m.hiddenRetry) != 1 || !m.hiddenRetryLive {
+		t.Fatalf("a beat refused for room must keep going: %+v live=%v", m.hiddenRetry, m.hiddenRetryLive)
+	}
+	if got := len(stub.Calls()); got != 0 {
+		t.Fatalf("a refusal for room resolved something: %+v", stub.Calls())
+	}
+
+	// The backlog drains, with no event left for the model to apply. The beat
+	// alone takes the answer.
+	release()
+	tm, _ = m.Update(hiddenRetryMsg{})
+	m = tm.(Model)
+	if len(m.hiddenRetry) != 0 || m.hiddenRetryLive {
+		t.Fatalf("the retry is spent once taken: %+v live=%v", m.hiddenRetry, m.hiddenRetryLive)
+	}
+	if cmd := m.armHiddenRetry(); cmd != nil {
+		t.Fatal("a beat was armed with nothing left waiting for room")
 	}
 	calls := stub.Calls()
 	if len(calls) != 1 || calls[0].ID != "ask-1" || !calls[0].Skip {

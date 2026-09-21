@@ -280,13 +280,15 @@ type Model struct {
 	// so the events are its own echoes (applyAskEnded).
 	//
 	// hiddenRetry are answers to asks the config shows no card for that the
-	// engine refused for want of room (answerHidden).
-	cards       []card
-	cardMask    string
-	cardMasking bool
-	askEchoes   []string
-	hiddenRetry []hiddenAnswer
-	snap        agent.Snapshot
+	// engine refused for want of room (answerHidden), and hiddenRetryLive says
+	// the one beat they are waiting on is in flight (armHiddenRetry).
+	cards           []card
+	cardMask        string
+	cardMasking     bool
+	askEchoes       []string
+	hiddenRetry     []hiddenAnswer
+	hiddenRetryLive bool
+	snap            agent.Snapshot
 	// queue is the engine's message queue, in send order: refreshSnap and
 	// refreshQueue fill it from Control.State().Queue, which is where the
 	// queue lives now that it has left the provider seam (plan 021 §3.5).
@@ -981,6 +983,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if mouse := next.queueMouseCmd(); mouse != nil {
 		cmd = tea.Batch(cmd, mouse)
 	}
+	// A hidden answer the outbox refused for room is retried from here for the
+	// same reason: it is the one place every transition passes through, and the
+	// retry must not depend on another event ever arriving (armHiddenRetry).
+	if retry := next.armHiddenRetry(); retry != nil {
+		cmd = tea.Batch(cmd, retry)
+	}
 	// The tick chain is batched last, so a test can run the handler's own
 	// command without waiting out a timer.
 	if tick := next.armTick(); tick != nil {
@@ -1018,6 +1026,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.handleTick(msg)
+		return m, nil
+
+	case hiddenRetryMsg:
+		m.handleHiddenRetry()
 		return m, nil
 
 	case startedMsg:
@@ -2299,9 +2311,10 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
-	// An event means the log is moving, which is the only thing a hidden answer
-	// the outbox had no room for is waiting on (retryHidden). It runs before the
-	// event is applied, so a hidden ask answered here is not counted twice by an
+	// An event means the log is moving, which is what a hidden answer the outbox
+	// had no room for is waiting on (retryHidden) — the fast path, ahead of the
+	// beat that guarantees the retry (armHiddenRetry). It runs before the event
+	// is applied, so a hidden ask answered here is not counted twice by an
 	// answerHidden this same event causes.
 	m.retryHidden()
 	if ev.Type == agent.EventSubagent {
@@ -2544,9 +2557,9 @@ type hiddenAnswer struct {
 // want of room, before it mutated anything, so the ask is still open and the
 // provider is still waiting — and no card will ever raise it, because this is
 // the path that has none (review r17, finding 5). The answer is kept and tried
-// again the next time the model applies an event (retryHidden). It is bounded by
-// the number of hidden asks open at once, and it needs no timer: events are what
-// drain the outbox's pressure in the first place.
+// again, by the next event the model applies and by a beat of its own until one
+// of them takes it (retryHidden, armHiddenRetry). It is bounded by the number of
+// hidden asks open at once.
 func (m *Model) answerHidden(id string, a agent.AskAnswer) {
 	if m.eng == nil {
 		return
@@ -2562,9 +2575,9 @@ func (m *Model) answerHidden(id string, a agent.AskAnswer) {
 
 // retryHidden re-sends the hidden answers the outbox had no room for. Each one
 // is either taken, refused for good — the ask was resolved some other way in the
-// meantime — or kept for the next event by answerHidden itself. The list is
-// taken first, so one that is kept is appended to an empty list rather than
-// walked twice.
+// meantime, agent.ErrAlreadyResolved among them — or kept for the next try by
+// answerHidden itself. The list is taken first, so one that is kept is appended
+// to an empty list rather than walked twice.
 func (m *Model) retryHidden() {
 	if len(m.hiddenRetry) == 0 {
 		return
@@ -2574,6 +2587,44 @@ func (m *Model) retryHidden() {
 	for _, h := range pending {
 		m.answerHidden(h.id, h.a)
 	}
+}
+
+// hiddenRetryEvery is how long a hidden answer refused for room waits before it
+// is tried again. It is the spinner's own beat, which is short enough that the
+// provider's wait is not felt and long enough to leave the drainer room to move.
+const hiddenRetryEvery = 250 * time.Millisecond
+
+// hiddenRetryMsg is one beat of the hidden-answer retry timer. It carries no
+// generation, unlike the tick chain's tickMsg: armHiddenRetry never abandons a
+// beat for a faster one, so there is no second chain a stale beat could belong
+// to — and a beat that somehow arrived twice would only run retryHidden against
+// an empty list. Control.Answer validates and claims atomically on every try, so
+// a retry is a retry and never a second answer.
+type hiddenRetryMsg struct{}
+
+// armHiddenRetry keeps exactly one retry beat in flight while an answer to a
+// hidden ask is still waiting for room, and none when nothing is.
+//
+// It belongs to Update, not to applyEvent, because the schedule the retry has to
+// survive is the one where no further event ever arrives (review r19, finding
+// 1): the final batch's LAST event is what gives the outbox its room back, so
+// the retry that event carries runs before commitBatch and is refused, the
+// drainer goes idle, and nothing is left to try again. The hidden ask would stay
+// open for ever with the provider waiting on it.
+func (m *Model) armHiddenRetry() tea.Cmd {
+	if len(m.hiddenRetry) == 0 || m.hiddenRetryLive {
+		return nil
+	}
+	m.hiddenRetryLive = true
+	return tea.Tick(hiddenRetryEvery, func(time.Time) tea.Msg { return hiddenRetryMsg{} })
+}
+
+// handleHiddenRetry spends one beat on the answers still waiting for room.
+// Update arms the next one only if something was refused for room again, so a
+// list that empties — taken, or ended by somebody else — stops the timer.
+func (m *Model) handleHiddenRetry() {
+	m.hiddenRetryLive = false
+	m.retryHidden()
 }
 
 // noteAskEcho records that the ending caused by cause is this model's own: its
