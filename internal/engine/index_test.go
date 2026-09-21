@@ -929,18 +929,20 @@ func TestARetriedClaimsFailedSeedNamesItsCommandToo(t *testing.T) {
 	}
 }
 
-// TestATurnThatEndsBeforeItsSeedLandsWritesNoTouch pins the window seededTurn
+// TestATurnEndingBeforeItsSeedWritesTheSeedFirst pins the window seededTurn
 // closes for the tests that count writes, and what happens inside it. CI found
 // it: a test that expected "seed, then touch" saw one row. The schedule is
 // FORCED with beforeInlineSeed: the submitter is held between the launch and
-// its write, the turn runs and ends, and only then is the seed written. Nothing
-// is written before the seed — a touch never conjures a row — and the seed still
-// creates it, later than the turn's end, so the row's recency is not older than
-// a touch would have made it. Whether a touch FOLLOWS is the worker's timing and
-// both answers are right: a worker that took the touch before the seed landed
-// found no row and dropped it (one row, what CI saw); one that woke after it
-// writes it (two).
-func TestATurnThatEndsBeforeItsSeedLandsWritesNoTouch(t *testing.T) {
+// its write, the turn runs and ends, and only then is the seed written. No
+// write can precede the seed — a touch never conjures a row — and the seed still
+// creates the row. Whether a touch FOLLOWS is the worker's timing, which this
+// test does not force (r.sync flushes the event log, not the index worker): a
+// worker that took the touch before the seed landed found no row and dropped it
+// (one row, what CI saw); one that woke after it writes it (two). Here the seed
+// is written after the turn's end, so the dropped touch costs no recency. The
+// narrower case — a touch taken while the seed is INSIDE Upsert, which keeps the
+// seed's slightly earlier timestamp — is recorded in `12` for S2, not fixed.
+func TestATurnEndingBeforeItsSeedWritesTheSeedFirst(t *testing.T) {
 	idx := newFakeIndex()
 	atHook, letGo := make(chan struct{}), make(chan struct{})
 	r := indexedHooked(t, idx, "", &hooks{beforeInlineSeed: func(string) {
@@ -1298,8 +1300,7 @@ func TestAStalledIndexWriteBlocksNoControlMethod(t *testing.T) {
 	entered, release := idx.parkAt(2)
 	t.Cleanup(release)
 	r := indexed(t, idx, "")
-	r.submit("a prompt")
-	r.until(lastEnding)
+	seededTurn(t, r, idx, "a prompt")
 	await(t, entered, "the turn's touch to park in Upsert")
 
 	done := make(chan struct{})

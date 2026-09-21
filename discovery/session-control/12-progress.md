@@ -1050,12 +1050,24 @@ whether that golden may move.
 **What S2 must do.** Call `Control.Sync` before replying to a command, because
 in-process a response is no longer ordered after the events its own command
 caused by the call simply returning (§4, and `05` below) — that promise now
-needs `Sync` plus a connection-local barrier: the reply is queued to the
-connection's one outbound writer only after every record up to the sequence
-number `Sync` committed through has been queued to that same writer. `Sync`
-only commits the events and offers them to the subscription, and a serialized
-writer alone does not help while the forwarding goroutine is still unscheduled
-(`05`). Call `Subscribe` off the primary's own reader goroutine: it
+needs `Sync` plus a connection-local barrier that `Control` does not offer yet
+(`Sync` returns no sequence number): S2 adds either a `Sync` that returns the
+sequence it committed through, or a barrier acknowledged by the forwarding
+goroutine, so that the reply reaches the connection's one outbound writer only
+behind every record `Sync` committed. `Sync` alone only commits the events and
+offers them to the subscription, and a serialized writer alone does not help
+while the forwarding goroutine is still unscheduled (`05`). **The index, for a
+client that is not the TUI:** `Close` waits (inside its 500 ms bound) for an
+inline first-prompt seed still writing on a client's goroutine only when a
+retry is retained behind it; a LONE inline seed in flight at `Close` is not
+waited for. No client can reach that today — the TUI's `Update` is inside that
+very `Submit`, so its quit cannot be processed until it returns, and `craze
+prompt` has no index — but a socket server's handler goroutines can, so S2
+either counts an active seed as owed in the worker's exit or keeps the index
+write off connection goroutines. Related and also recorded, not fixed: an
+end-of-turn touch taken while that seed is still INSIDE `Upsert` finds no row
+and is dropped, so the row keeps the seed's timestamp, taken a few
+milliseconds before the turn's end. Call `Subscribe` off the primary's own reader goroutine: it
 blocks inside the log's publishing boundary (X14). Mint a client id per
 connection (`Control.NewClientID`), bind it to that connection, and add
 release-on-disconnect — no client is ever retired from the receipts table

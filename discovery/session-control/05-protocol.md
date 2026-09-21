@@ -107,10 +107,13 @@ is asynchronous and bounded, and records a gap when saturated). `Sync` alone
 does not put those events on a socket's wire ahead of the reply, and neither
 does a single serialized writer by itself: the goroutine forwarding the
 subscription can still be unscheduled when the handler queues its reply.
-**S2's server needs a connection-local barrier**: call `Sync`, note the
-sequence number it committed through, and queue the reply to the connection's
-one outbound writer only after every record up to that number has been queued
-to (or written by) that same writer. That is what makes "ordered after its
+**S2's server needs a connection-local barrier**, which `Control` does not
+offer yet: `Sync(ctx) error` returns no sequence number. S2 adds one of two
+things — a `Sync` that returns the sequence it committed through, so the reply
+is queued to the connection's one outbound writer only after every record up
+to that number has been queued to that same writer; or a barrier through the
+forwarding goroutine itself, acknowledged once it has drained every
+subscription record present when `Sync` returned. That is what makes "ordered after its
 events" true for a socket client without it ever calling `Sync` itself
 (session control S1b, plan §4).
 
