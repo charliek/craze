@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/charliek/craze/internal/agent"
@@ -150,16 +151,20 @@ type setAnswer struct {
 // # What a context that ends buys, and what it does not
 //
 // A Set whose ctx ends while it is still WAITING ITS TURN changed nothing and
-// is told so with the context's error. Two goroutines can find that out — the
-// caller, which takes it out of the queue itself (dropSet), and the worker,
-// which checks the request's context in the very section that DEQUEUES it
-// (takeSet) and answers a dead one there without running it. They take the same
-// lock, so exactly one of them has the request and exactly one answer is ever
-// sent; what the pair rules out is the schedule the other order allowed, where
-// the worker dequeued a request whose caller had already given up and asked the
-// provider for a change nobody was waiting for (r23 finding 1). A context that
-// ends in the gap AFTER the dequeue is checked once more, in the section that
-// claims the request (runSet), and answered there in the same way.
+// is told so with the context's error, wrapped in errNotRun so classify
+// (control.go) can tell "not run" from every other refusal a Set can be
+// stored with (r28 finding 1): its code is unavailable and it is never
+// stored, so a resend of the same id is a genuine attempt rather than a
+// replayed cancellation. Two goroutines can find that out — the caller, which
+// takes it out of the queue itself (dropSet), and the worker, which checks
+// the request's context in the very section that DEQUEUES it (takeSet) and
+// answers a dead one there without running it. They take the same lock, so
+// exactly one of them has the request and exactly one answer is ever sent;
+// what the pair rules out is the schedule the other order allowed, where the
+// worker dequeued a request whose caller had already given up and asked the
+// provider for a change nobody was waiting for (r23 finding 1). A context
+// that ends in the gap AFTER the dequeue is checked once more, in the section
+// that claims the request (runSet), and answered there in the same way.
 //
 // Once the worker has CLAIMED it, this call is bounded by its context again,
 // honestly: it waits for the worker's answer OR for its own context, whichever
@@ -208,8 +213,10 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 			}
 			if e.dropSet(r) {
 				// Still waiting its turn, and now out of the queue: nothing was
-				// asked of the provider and nothing changed.
-				return SetResult{}, ctx.Err()
+				// asked of the provider and nothing changed. Wrapped in errNotRun
+				// so classify (control.go) sees "not run" and this id is never
+				// stored (r28 finding 1) — errors.Is(err, ctx.Err()) still holds.
+				return SetResult{}, notRun(ctx.Err())
 			}
 			// The worker has it, and what that means is decided by the claim:
 			//
@@ -306,7 +313,9 @@ func (e *Engine) takeSet() (*setReq, bool) {
 		r := e.sets[0]
 		e.sets = e.sets[1:]
 		if err := r.ctxErr(); err != nil {
-			r.reply <- setAnswer{err: err}
+			// Nothing ran: wrapped in errNotRun for the same reason the
+			// caller-side dropSet path is (r28 finding 1).
+			r.reply <- setAnswer{err: notRun(err)}
 			continue
 		}
 		return r, true
@@ -323,6 +332,26 @@ func setOutcomeUnknown(ctxErr error) error {
 		return ErrSetOutcomeUnknown
 	}
 	return fmt.Errorf("%w: %w", ErrSetOutcomeUnknown, ctxErr)
+}
+
+// errNotRun marks a Set answered WITHOUT running because its own ctx was
+// already dead when takeSet or runSet looked (r28 finding 1): the caller's
+// dropSet-succeeded path in Set, takeSet's dead-ctx dequeue and runSet's own
+// re-check are the three places this fires, and all three wrap it around the
+// SAME fact — nothing was asked of the provider and nothing changed. It puts
+// that answer in the same classification as a gate refusal (classify,
+// control.go): NEVER STORED, code "unavailable", so a resend of the same id
+// is a genuine attempt rather than a replayed cancellation — which is what
+// r23's TestASetRefusedAfterTheDequeueIsNeverClaimed and the renamed
+// TestACancelledSetRunsOnAResend now assert.
+var errNotRun = errors.New("engine: this Set did not run")
+
+// notRun wraps ctxErr with errNotRun, so errors.Is(err, ctxErr) still holds
+// for a caller that matches on the plain context error AND classify sees
+// "not run" for a caller that matches on the code. ctxErr is never nil at any
+// of its three call sites — each is already behind a check that it is done.
+func notRun(ctxErr error) error {
+	return fmt.Errorf("%w: %w", errNotRun, ctxErr)
 }
 
 // serveSets is the settings worker: one goroutine, one request at a time, in
@@ -374,16 +403,17 @@ func (e *Engine) serveSets() {
 //     turn comes, and because this is the last moment at which nothing has
 //     changed yet: ErrUnavailable;
 //   - the request's own context, re-read because it can have ended between
-//     takeSet and this section: the plain context error, and nothing run (r23's
-//     rule).
+//     takeSet and this section: the context error, wrapped in errNotRun, and
+//     nothing run (r23's rule).
 //
 // The two GATE refusals are preferred to the context error when both are true,
 // which is takeSet's own precedence for a closed engine — it answers everything
-// queued with ErrNotAccepting whatever those requests' contexts say — and it is
-// the answer that serves the caller better: a gate refusal is forgotten by the
-// receipts table, so the command id stays retryable and a resend made once the
-// door reopens is a genuine attempt, where a stored context error would be
-// replayed for ever (receipts.go, "What is stored, and what is left retryable").
+// queued with ErrNotAccepting whatever those requests' contexts say. Either
+// way the id stays retryable: a gate refusal is forgotten by the receipts
+// table, and so — since r28 finding 1 — is errNotRun, so a resend made once
+// the door reopens (or simply resent at once, for a dead-ctx answer) is a
+// genuine attempt rather than a replay of an answer that says nothing ran
+// (receipts.go, "What is stored, and what is left retryable").
 //
 // # The flush
 //
@@ -413,7 +443,9 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		return SetResult{}, ErrUnavailable
 	case ctxErr != nil:
 		e.mu.Unlock()
-		return SetResult{}, ctxErr
+		// Nothing ran: wrapped in errNotRun for the same reason takeSet's own
+		// dead-ctx branch is (r28 finding 1).
+		return SetResult{}, notRun(ctxErr)
 	}
 	// Nothing left that could refuse it: the claim is made here, in the section
 	// that established that, and the lock released before the provider is asked.

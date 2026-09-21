@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -162,29 +161,35 @@ import (
 // included — so a resend gets back exactly what the first call got, a
 // refusal included, with one exception: a GATE refusal — the engine simply
 // not admitting anything at all right now, whatever the command — is never
-// stored. gateRefusal names the four sentinels this covers: ErrNotAccepting
-// (closed, stopped, still starting, replaying, or — Cancel's specific
-// spelling of it — nothing of craze's own for a no-turn cancel to act on),
-// ErrUnavailable, agent.ErrSetUnavailable and agent.ErrAskUnavailable (the
-// same "the log's outbox has no room" fact, spelled once per seam). None of
-// these is an answer about the command's own arguments or a resource it
-// named; each is a fact about the engine's door being shut for a moment, and
-// a client that retries the SAME id once that door reopens wants a genuine
-// attempt, not a cached echo of finding it shut. So a command that hits one
-// has its reservation FORGOTTEN — removed from the table, in the same locked
-// section that publishes the refusal to anyone already waiting on it — which
-// leaves the id exactly as unseen as it was before the attempt, for the next
-// call to attempt fresh.
+// stored. gateRefusal (derived from classify, control.go, per r28 finding 1)
+// names the sentinels this covers: ErrNotAccepting (closed, stopped, still
+// starting, replaying, or — Cancel's specific spelling of it — nothing of
+// craze's own for a no-turn cancel to act on) and agent.ErrNotInTurn (an
+// Interject with no turn to merge into — the same fact, spelled at the other
+// seam); ErrUnavailable, agent.ErrSetUnavailable and agent.ErrAskUnavailable
+// (the log's outbox has no room, spelled once per seam); and errNotRun
+// (settings.go) — a Set answered without running because its own ctx was
+// already dead when takeSet or runSet looked, so nothing was asked of the
+// provider either. None of these is an answer about the command's own
+// arguments or a resource it named; each is a fact about the engine's door
+// being shut, or nothing having run, for a moment, and a client that retries
+// the SAME id once that passes wants a genuine attempt, not a cached echo. So
+// a command that hits one has its reservation FORGOTTEN — removed from the
+// table, in the same locked section that publishes the refusal to anyone
+// already waiting on it — which leaves the id exactly as unseen as it was
+// before the attempt, for the next call to attempt fresh.
 //
 // Every other refusal a command reaches only after being hashed and
 // reserved — ErrStaleTurn, ErrBadAnswer, ErrAlreadyResolved, ErrUnknownAsk,
 // ErrStaleVersion, ErrAlreadyPending, ErrUnknownRow, agent.ErrQueueFull,
-// agent.ErrQueueTextTooLong, agent.ErrForeignTurn, … — is a genuine, stable
-// answer about THIS request or the specific resource it named (a turn id, a
-// row id, an ask id, the one send-now slot), and is stored like any other
-// result: a resend must be able to replay it exactly, refusal included,
-// rather than have a later, unrelated change in engine state quietly turn
-// yesterday's "that row is gone" into today's silent success.
+// agent.ErrQueueTextTooLong, agent.ErrForeignTurn, an unclassified
+// provider/RPC error ("failed", classify's own default), … — is a genuine,
+// stable answer about THIS request or the specific resource it named (a turn
+// id, a row id, an ask id, the one send-now slot), or about the command
+// having run and failed, and is stored like any other result: a resend must
+// be able to replay it exactly, refusal included, rather than have a later,
+// unrelated change in engine state quietly turn yesterday's "that row is
+// gone" into today's silent success.
 //
 // Request malformation that a method rejects before it even computes a
 // payload hash — a bad SubmitMode, Setting.validate — never reaches the
@@ -514,13 +519,18 @@ func (rt *receiptTable) markEvictedLocked(key receiptKey) {
 }
 
 // gateRefusal reports whether err is a refusal about the engine simply not
-// admitting anything right now — the log's outbox has no room, or the door is
-// shut for a reason that has nothing to do with this command's own arguments
-// — rather than an answer about the specific command: see the package doc's
-// "What is stored, and what is left retryable".
+// admitting anything right now — the log's outbox has no room, the door is
+// shut for a reason that has nothing to do with this command's own
+// arguments, or a Set never reached the provider at all because its ctx was
+// already dead — rather than an answer about the specific command: see the
+// package doc's "What is stored, and what is left retryable".
+//
+// It is DERIVED from classify (control.go), the one table Code is also built
+// from, so the two can never again disagree about one error the way r28
+// finding 1 found them disagreeing over agent.ErrNotInTurn and a Set's dead
+// ctx: a gate refusal is exactly the errors classify marks !stored.
 func gateRefusal(err error) bool {
-	return errors.Is(err, ErrNotAccepting) || errors.Is(err, ErrUnavailable) ||
-		errors.Is(err, agent.ErrSetUnavailable) || errors.Is(err, agent.ErrAskUnavailable)
+	return err != nil && !classify(err).stored
 }
 
 // receiptHash is one command's payload hash: its method name, so that no two

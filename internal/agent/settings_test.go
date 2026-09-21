@@ -1031,11 +1031,13 @@ func wantTheInstallKeptTheUpdate(t *testing.T, s *session, title string) {
 	}
 }
 
-// TestAFirstModelOptionDoesNotUndoASetModel is r27 finding 2, over an agent
-// that really does introduce its model option late: `modellate` advertises none
-// at session/new and sends its first config list only once session/set_model
-// has been answered — still carrying the value the option held BEFORE that
-// set_model.
+// TestAFirstModelOptionDoesNotUndoASetModel is r27 finding 2 and r28 finding
+// 3, over an agent that really does introduce its model option late:
+// `modellate` advertises none at session/new, and its first config list —
+// still carrying the value the option held BEFORE session/set_model — is
+// delivered by THIS TEST, synchronously, once SetModel has already returned,
+// rather than raced over the wire (r28 finding 3's own fix; see
+// cmd/craze-fake-agent/server.go's modellate case and main.go's doc for why).
 //
 // The first-appearance rule of r25 finding 3 exists because a session that
 // starts without a model option has to learn its model from the update that
@@ -1043,7 +1045,26 @@ func wantTheInstallKeptTheUpdate(t *testing.T, s *session, title string) {
 // compare against, a first report that is merely STALE looked exactly like a
 // change, and adopting it put the model back where the setter had moved it
 // from. A direct set_model made with no option advertised now leaves a marker
-// that first report consumes and derives nothing from.
+// that first report consumes and derives nothing from, when the report's
+// value is one the marker actually names.
+//
+// # Why the schedule has to be forced
+//
+// SetModel's own locked mutation — and the marker it arms — run on the
+// CALLER's goroutine, synchronously, before the call returns: that part is
+// never racy. What is racy on a real wire is which goroutine reaches its own
+// work first when the agent's first config list follows right behind
+// session/set_model's reply: the response is delivered to a BUFFERED channel,
+// so the read loop is free to move straight on to the next frame and call
+// onUpdate before the caller's goroutine — which still has to be scheduled,
+// return through client.SetModel, and take s.mu — gets there. On that
+// schedule the notification is judged with NO marker armed yet (was == nil,
+// stale == false because the map is still empty), agrees with the
+// not-yet-moved CurrentModel (so no delta either), and the setter's own
+// unconditional mutation lands afterwards regardless — so the test's own
+// assertions passed whether or not the marker logic was there at all. Calling
+// onUpdate here, after SetModel has already returned, rules that schedule
+// OUT and forces the one that actually exercises the marker.
 func TestAFirstModelOptionDoesNotUndoASetModel(t *testing.T) {
 	s := startScript(t, "modellate", false)
 	settle(t, s)
@@ -1056,21 +1077,31 @@ func TestAFirstModelOptionDoesNotUndoASetModel(t *testing.T) {
 	if _, err := s.SetModel(t.Context(), "c-1/1", "composer"); err != nil {
 		t.Fatalf("SetModel: %v", err)
 	}
-	waitFor(t, "the agent's first config list", func() bool {
-		return ModelConfigOption(s.Snapshot()) != nil
-	})
+	// The marker is armed with the value CurrentModel held before this set —
+	// the whole point of forcing the schedule is to check this BEFORE
+	// delivering the option, not to infer it from the outcome.
+	if !s.modelBeforeSet["default"] || len(s.modelBeforeSet) != 1 {
+		t.Fatalf("the marker after SetModel is %v, want {default}", s.modelBeforeSet)
+	}
+	_ = s.log.Flush(context.Background(), s.done)
+	drainBuffered(s) // SetModel's own delta, not what this test is about.
+	s.onUpdate(modelConfigNotification("default"))
+	ev := oneBufferedEvent(t, s)
+	if ev.State.Model != nil {
+		t.Fatalf("the first appearance carried the model section: %+v", ev.State)
+	}
+	if ev.State.Config == nil {
+		t.Fatalf("the first appearance did not carry the config section: %+v", ev.State)
+	}
+	if s.modelBeforeSet != nil {
+		t.Fatalf("the marker survived the option's first appearance: %v", s.modelBeforeSet)
+	}
 	snap := s.Snapshot()
 	if opt := ModelConfigOption(snap); opt.Current != "default" {
 		t.Fatalf("the first list carried %q, so there was nothing stale to adopt", opt.Current)
 	}
 	if snap.CurrentModel != "composer" {
 		t.Fatalf("the option's first appearance put the model back to %q", snap.CurrentModel)
-	}
-	_ = s.log.Flush(context.Background(), s.done)
-	for _, ev := range drainBuffered(s) {
-		if ev.Type == EventMeta && ev.State != nil && ev.State.Config != nil && ev.State.Model != nil {
-			t.Fatalf("the first appearance carried the model section: %+v", ev.State)
-		}
 	}
 	// The marker is spent, and an option that agrees with the model still says
 	// nothing: nothing changed.
@@ -1081,7 +1112,12 @@ func TestAFirstModelOptionDoesNotUndoASetModel(t *testing.T) {
 	if got := s.Snapshot().CurrentModel; got != "composer" {
 		t.Fatalf("the model moved to %q on an update that changed nothing", got)
 	}
-	// And a report that really MOVES the option is a change like any other.
+	// And a report that really MOVES the option is a change like any other —
+	// even carrying "default", the very value the marker suppressed above: the
+	// marker's whole life was that one first appearance, and a genuine return
+	// to the pre-set value much later is indistinguishable from another stale
+	// report and is NOT suppressed a second time (r28 finding 2's documented
+	// residual).
 	s.onUpdate(modelConfigNotification("default"))
 	if ev := oneBufferedEvent(t, s); ev.State.Model == nil || *ev.State.Model != "default" {
 		t.Fatalf("a real change of the option carried %+v", ev.State)
@@ -1089,6 +1125,84 @@ func TestAFirstModelOptionDoesNotUndoASetModel(t *testing.T) {
 	if got := s.Snapshot().CurrentModel; got != "default" {
 		t.Fatalf("a real change of the option left the model on %q", got)
 	}
+}
+
+// TestAFirstModelOptionCarryingAThirdValueIsARealChange is r28 finding 2's
+// "ANY OTHER value" arm: the marker suppresses only a value the agent could
+// honestly have held before craze's own set (or leaves alone a value that
+// already equals the current model, a no-op by the surrounding "only a
+// change speaks" rule) — it never again suppresses the model outright the
+// way the pre-fix marker did for every value on the option's first
+// appearance, regardless of what it carried.
+func TestAFirstModelOptionCarryingAThirdValueIsARealChange(t *testing.T) {
+	s := startScript(t, "modellate", false)
+	settle(t, s)
+	if _, err := s.SetModel(t.Context(), "c-1/1", "composer"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	_ = s.log.Flush(context.Background(), s.done)
+	drainBuffered(s) // SetModel's own delta, not what this test is about.
+	// Neither "default" (the pre-set value the marker names) nor "composer"
+	// (the current model): a value the marker must not touch.
+	s.onUpdate(modelConfigNotification("opus"))
+	ev := oneBufferedEvent(t, s)
+	if ev.State.Model == nil || *ev.State.Model != "opus" || ev.State.Config == nil {
+		t.Fatalf("a third value on the first appearance carried %+v, want both sections", ev.State)
+	}
+	if got := s.Snapshot().CurrentModel; got != "opus" {
+		t.Fatalf("a third value on the first appearance left the model on %q", got)
+	}
+	if s.modelBeforeSet != nil {
+		t.Fatalf("the marker survived the option's first appearance: %v", s.modelBeforeSet)
+	}
+}
+
+// TestTwoSetModelsBeforeTheOptionAppearsKeepBothPreSetValues is r28 finding
+// 2's own worked example: two direct set_models made before the model option
+// ever appears leave a stale first report free to carry EITHER value the
+// model held before one of them — never just the most recent — because a
+// stale report can only echo what the agent held before a set it has not yet
+// processed, and with two sets in flight that could honestly be either
+// earlier value. modelBeforeSet is the SET of pre-set values since the
+// marker was last empty, not a single latest one, for exactly this reason.
+func TestTwoSetModelsBeforeTheOptionAppearsKeepBothPreSetValues(t *testing.T) {
+	newTwoSets := func(t *testing.T) *session {
+		t.Helper()
+		s := startScript(t, "modellate", false)
+		settle(t, s)
+		if _, err := s.SetModel(t.Context(), "c-1/1", "composer"); err != nil {
+			t.Fatalf("first SetModel: %v", err)
+		}
+		if _, err := s.SetModel(t.Context(), "c-1/2", "opus"); err != nil {
+			t.Fatalf("second SetModel: %v", err)
+		}
+		if !s.modelBeforeSet["default"] || !s.modelBeforeSet["composer"] || len(s.modelBeforeSet) != 2 {
+			t.Fatalf("the marker after two sets is %v, want {default, composer}", s.modelBeforeSet)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		drainBuffered(s) // both SetModels' own deltas, not what this test is about.
+		return s
+	}
+	t.Run("the value before the FIRST set is still suppressed", func(t *testing.T) {
+		s := newTwoSets(t)
+		s.onUpdate(modelConfigNotification("default"))
+		if ev := oneBufferedEvent(t, s); ev.State.Model != nil {
+			t.Fatalf("a pre-set value from before the first set carried the model section: %+v", ev.State)
+		}
+		if got := s.Snapshot().CurrentModel; got != "opus" {
+			t.Fatalf("a suppressed first appearance moved the model to %q", got)
+		}
+	})
+	t.Run("the value before the SECOND set is also suppressed", func(t *testing.T) {
+		s := newTwoSets(t)
+		s.onUpdate(modelConfigNotification("composer"))
+		if ev := oneBufferedEvent(t, s); ev.State.Model != nil {
+			t.Fatalf("a pre-set value from before the second set carried the model section: %+v", ev.State)
+		}
+		if got := s.Snapshot().CurrentModel; got != "opus" {
+			t.Fatalf("a suppressed first appearance moved the model to %q", got)
+		}
+	})
 }
 
 // TestSetTitleRefusedForRoomChangesNothing: SetTitle is the one settings verb

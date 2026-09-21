@@ -54,10 +54,13 @@ Flags:
           modelconfig-refuse same, and session/set_model is answered -32601: the
                       whole of that agent, so a client's
                       set_model → set_config fallback runs for real
-          modellate   echo with no model option at session/new; the agent's FIRST
-                      config list arrives only after session/set_model has been
-                      answered, and still carries the model value it held before
-                      that set_model
+          modellate   echo with no model option at session/new and no
+                      session/set_model follow-up of its own: the shape of an
+                      agent whose FIRST config list arrives only after
+                      session/set_model has been answered, still carrying the
+                      model value it held before that set_model, is delivered
+                      by the test itself (r28 finding 3), so the schedule that
+                      exercises it is forced rather than raced on the wire
           preinstall  modelconfig, but a current_mode_update, a session_info_update
                       and a moved config list are sent BEFORE session/new is
                       answered, so every one of them is dispatched ahead of the

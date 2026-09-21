@@ -57,13 +57,15 @@ import (
 //     in flight. Unreachable in process, so the TUI has, and needs, no
 //     handling for it.
 //   - unavailable (ErrUnavailable and its sibling gate sentinels,
-//     agent.ErrSetUnavailable / agent.ErrAskUnavailable) or not_accepting
-//     (ErrNotAccepting): a GATE refusal — the engine simply not admitting
-//     anything at all right now, this command's own arguments aside — and
-//     NEVER STORED: nothing ran, and the id is exactly as unseen as before
-//     the attempt. Resend the same id, or send a new one; either gets a
-//     genuine first attempt once the gate reopens rather than a cached echo
-//     of finding it shut.
+//     agent.ErrSetUnavailable / agent.ErrAskUnavailable, and errNotRun for a
+//     Set answered without running because its own ctx was already dead) or
+//     not_accepting (ErrNotAccepting, and agent.ErrNotInTurn — an Interject
+//     with no turn to merge into): a GATE refusal — the engine simply not
+//     admitting anything at all right now, this command's own arguments
+//     aside — and NEVER STORED: nothing ran, and the id is exactly as unseen
+//     as before the attempt. Resend the same id, or send a new one; either
+//     gets a genuine first attempt once the gate reopens rather than a cached
+//     echo of finding it shut.
 //   - aborted (ErrCommandAborted, and ErrSetOutcomeUnknown for the one Set
 //     whose own outcome a context ending after the settings worker's claim
 //     leaves honestly unknown): a STORED answer whose outcome the engine
@@ -73,11 +75,22 @@ import (
 //     it. Re-read state (or, for a Set, watch the stream for the change's
 //     own delta) before deciding anything else; send a NEW id if the command
 //     is still wanted.
+//   - failed: every error craze does not classify by its own sentinel — a
+//     provider/RPC refusal of a Set, an Interject the agent refused, a Cancel
+//     that failed — reached this way because the command DID run and its
+//     failure is what it ran into: a STORED, stable answer, exactly like the
+//     named refusals below, and never a reason to retry the same id. Send a
+//     NEW id for another attempt.
 //   - anything else: the command's own stored, stable answer — a success, or
 //     a refusal about THIS request or the specific resource it named (a
 //     stale turn, a bad answer, a stale queue version, an unknown row, a
 //     full queue, an already-pending send, a foreign turn, …) — replayed
 //     exactly as the first call got it.
+//
+// classify (below) is the one table Code and gateRefusal (receipts.go) both
+// consult for these two questions — the code, and whether the answer is
+// stored — so the two can never again say different things about the same
+// error (r28 finding 1).
 type Command struct {
 	// Client is an id NewClientID minted, unique in the incarnation.
 	Client string
@@ -257,65 +270,108 @@ var (
 	ErrCommandAborted = errors.New("engine: the command's outcome is unknown")
 )
 
-// Code is err's protocol error code, the closed set 05-protocol.md lists, and
-// "" for nil. An error the engine does not know is "unavailable": a client
-// can only retry it.
-func Code(err error) string {
+// classification is one error's place in the closed set: the protocol code a
+// client matches on (05-protocol.md), and whether the receipts table STORES
+// the answer. classify is the ONE table Code and gateRefusal (receipts.go)
+// both consult — neither decides either question on its own — so they cannot
+// drift apart again the way r28 finding 1 found them: Code said not_accepting
+// for agent.ErrNotInTurn while gateRefusal did not know it, and a command
+// whose docs promise "never stored" was stored anyway.
+//
+// The invariant this exists to hold, over the WHOLE set: stored is false if
+// and only if code is one of unavailable, not_accepting or in_progress — the
+// three codes Command's own doc promises are never stored. Nothing here
+// decides that per case; it falls out of which three codes appear with
+// stored: false below, and classify_test.go asserts it holds for every
+// sentinel this switch names.
+type classification struct {
+	code   string
+	stored bool
+}
+
+func classify(err error) classification {
 	switch {
 	case err == nil:
-		return ""
+		return classification{code: ""}
 	case errors.Is(err, ErrIndexWrite):
 		// First among the sentinels, because this one WRAPS a failure from
 		// outside craze — a file error, whatever the filesystem said — and
-		// nothing below may be allowed to answer for it.
-		return "index_write"
+		// nothing below may be allowed to answer for it. STORED: the rename
+		// happened, and a resend must replay that fact rather than attempt a
+		// second rename (ErrIndexWrite's own doc, C12).
+		return classification{code: "index_write", stored: true}
 	case errors.Is(err, ErrNotAccepting), errors.Is(err, agent.ErrNotInTurn):
-		return "not_accepting"
+		// agent.ErrNotInTurn is an Interject with no turn: a GATE refusal
+		// exactly like ErrNotAccepting's — the engine has nothing to act on
+		// right now, whatever this command's own arguments are — so it is
+		// NEVER STORED (r28 finding 1).
+		return classification{code: "not_accepting"}
 	case errors.Is(err, ErrCommandInProgress):
-		return "in_progress"
+		// Never stored, but by a different mechanism: a duplicate that finds
+		// this reservation open is answered before finish is ever called, so
+		// gateRefusal is never actually consulted for it in production — it is
+		// classified false here anyway, for the one table's sake.
+		return classification{code: "in_progress"}
 	case errors.Is(err, ErrAlreadyPending):
-		return "already_submitted"
+		return classification{code: "already_submitted", stored: true}
 	case errors.Is(err, ErrStaleTurn):
-		return "stale_turn"
+		return classification{code: "stale_turn", stored: true}
 	case errors.Is(err, ErrStaleVersion):
-		return "stale_version"
+		return classification{code: "stale_version", stored: true}
 	case errors.Is(err, ErrUnknownRow):
-		return "unknown_row"
+		return classification{code: "unknown_row", stored: true}
 	case errors.Is(err, agent.ErrBadAnswer):
-		return "bad_request"
+		return classification{code: "bad_request", stored: true}
 	case errors.Is(err, agent.ErrAlreadyResolved):
-		return "already_resolved"
+		return classification{code: "already_resolved", stored: true}
 	case errors.Is(err, agent.ErrUnknownAsk):
-		return "unknown_ask"
+		return classification{code: "unknown_ask", stored: true}
 	case errors.Is(err, ErrCommandAborted), errors.Is(err, ErrSetOutcomeUnknown):
 		// Both are STORED answers whose outcome the engine cannot itself vouch
 		// for — a panic's, or a Set the worker had already claimed when its
 		// caller's context ended — spelled out rather than left to the
 		// default so a client can tell them from an ordinary "unavailable, try
 		// again" without matching text: see Command's own doc for the policy.
-		return "aborted"
+		return classification{code: "aborted", stored: true}
+	case errors.Is(err, errNotRun):
+		// A Set answered WITHOUT running because its ctx was already dead when
+		// takeSet or runSet looked (settings.go): nothing happened, so — like
+		// every other gate refusal — it is NEVER STORED, and unavailable is
+		// its code because a client can only retry it (r28 finding 1).
+		return classification{code: "unavailable"}
 	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
-		return "unavailable"
+		return classification{code: "unavailable"}
 	case errors.Is(err, ErrBadRequest):
-		return "bad_request"
+		return classification{code: "bad_request", stored: true}
 	case errors.Is(err, ErrUnknownCommand):
-		return "unknown_command"
+		return classification{code: "unknown_command", stored: true}
 	case errors.Is(err, agent.ErrQueueFull):
-		return "queue_full"
+		return classification{code: "queue_full", stored: true}
 	case errors.Is(err, agent.ErrQueueTextTooLong):
-		return "text_too_long"
+		return classification{code: "text_too_long", stored: true}
 	case errors.Is(err, agent.ErrPromptInFlight):
-		return "prompt_in_flight"
+		return classification{code: "prompt_in_flight", stored: true}
 	case errors.Is(err, agent.ErrForeignTurn):
-		return "foreign_turn"
+		return classification{code: "foreign_turn", stored: true}
 	case errors.Is(err, agent.ErrPromptCancelled):
-		return "prompt_cancelled"
+		return classification{code: "prompt_cancelled", stored: true}
 	case errors.Is(err, agent.ErrUnsupported):
-		return "unsupported"
+		return classification{code: "unsupported", stored: true}
 	default:
-		return "unavailable"
+		// Every error the switch above does not name is a command that RAN
+		// and failed — a provider/RPC refusal of a Set, an Interject the
+		// agent refused, a Cancel that failed — never a gate refusal (r28
+		// finding 1). "failed" says so: STORED, because the command already
+		// ran, and never "unavailable", which the docs promise a client is
+		// never told about a command that actually happened.
+		return classification{code: "failed", stored: true}
 	}
 }
+
+// Code is err's protocol error code, the closed set 05-protocol.md lists, and
+// "" for nil. An error the engine does not know is "failed": the command ran
+// and this is its stored, stable answer, never a reason to retry the same id.
+func Code(err error) string { return classify(err).code }
 
 // Control is the surface a client drives a session through: the TUI and
 // `craze prompt` hold one now, and the socket server and its clients will

@@ -168,14 +168,26 @@ type session struct {
 	// both are dead once the install has run.
 	agentWrote     agentSections
 	installPending bool
-	// modelSetNoOption records that a direct session/set_model succeeded while
-	// the session advertised NO model-category config option. The option's
-	// FIRST appearance then consumes the marker and does not derive
-	// CurrentModel from that first report, because a first report can carry
-	// the value the option had BEFORE the set_model and would otherwise roll
-	// the model back — the first-appearance rule's own version of the stale
-	// re-list (onUpdate's config arm, r27 finding 2). Guarded by s.mu.
-	modelSetNoOption bool
+	// modelBeforeSet records, for every direct session/set_model that has
+	// succeeded since the model option last appeared (or since the session
+	// started), the value CurrentModel held immediately BEFORE that set: the
+	// set of values a stale first report could honestly be carrying. nil/empty
+	// means no set_model is waiting on the option to appear.
+	//
+	// The option's FIRST appearance then consumes the whole marker — nil is
+	// assigned back whatever it decides — and does not derive CurrentModel
+	// from that report when the report's value is IN this set: a first report
+	// can carry the value the option had before any one of the set_models made
+	// while it did not exist, and adopting it would roll the model back to
+	// whichever of those it happened to remember (the first-appearance rule's
+	// own version of the stale re-list, onUpdate's config arm, r27 finding 2 /
+	// r28 finding 2). A value that equals the CURRENT model is already a
+	// no-op by the surrounding "only a change speaks" rule, and any other
+	// value is a real change: two set_models racing the option's appearance
+	// leave a stale report free to name EITHER earlier value, never a third
+	// one, which is what makes the set — not the single latest value — the
+	// right thing to suppress against. Guarded by s.mu.
+	modelBeforeSet map[string]bool
 	// beforeSetSection is a test barrier, nil in every build but a test's: it
 	// runs on a setter's own goroutine after the provider has taken the change
 	// and before the locked section that mutates the snapshot and enqueues its
@@ -563,14 +575,16 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		if loading {
 			modelID := s.opts.Model
 			s.mu.Lock()
+			before := s.snap.CurrentModel
 			s.snap.CurrentModel = modelID
 			// The same marker, for the same reason: grok and gx return no config
 			// options at all on a load, so the option's first appearance after a
 			// resume is exactly the report that must not undo --model.
-			s.noteDirectModelSetLocked(s.snap.Config)
+			s.noteDirectModelSetLocked(s.snap.Config, before)
 			s.enqueueDeltaLocked("", Event{}, &StateDelta{Model: &modelID})
 			s.mu.Unlock()
 		} else {
+			before := snap.CurrentModel
 			snap.CurrentModel = s.opts.Model
 			// --model IS a direct session/set_model, and the first appearance of
 			// a model option carrying the value the agent had BEFORE it would
@@ -578,7 +592,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			// option to compare against is the one session/new advertised, since
 			// the snapshot holding it has not been installed yet.
 			s.mu.Lock()
-			s.noteDirectModelSetLocked(snap.Config)
+			s.noteDirectModelSetLocked(snap.Config, before)
 			s.mu.Unlock()
 		}
 	}
@@ -671,14 +685,24 @@ func (s *session) markAgentWroteLocked(set *bool) {
 	}
 }
 
-// noteDirectModelSetLocked records whether a direct session/set_model that has
-// just succeeded was made while cfg advertised NO model-category option: the
-// marker onUpdate's config arm consumes on that option's first appearance (r27
-// finding 2). It is set rather than or-ed, because a set_model made while the
-// option DOES exist needs no marker — the stale re-list rule already covers it
-// (the config arm's "or the previous option's value differs"). s.mu is held.
-func (s *session) noteDirectModelSetLocked(cfg []ConfigOption) {
-	s.modelSetNoOption = ModelConfigOptionIn(cfg) == nil
+// noteDirectModelSetLocked records that a direct session/set_model has just
+// succeeded, made while CurrentModel held before (its value immediately
+// before this set), by adding before to modelBeforeSet — UNLESS cfg already
+// advertises a model-category option, in which case no marker is needed or
+// wanted: the stale re-list rule already covers a report from an option that
+// exists (onUpdate's config arm, "or the previous option's value differs"),
+// and any marker armed by an EARLIER set_model, made before the option
+// existed, is cleared rather than left to outlive an appearance it was never
+// for. s.mu is held.
+func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
+	if ModelConfigOptionIn(cfg) != nil {
+		s.modelBeforeSet = nil
+		return
+	}
+	if s.modelBeforeSet == nil {
+		s.modelBeforeSet = map[string]bool{}
+	}
+	s.modelBeforeSet[before] = true
 }
 
 // installDeltaLocked is one delta carrying every section of the snapshot, in
@@ -1347,11 +1371,12 @@ func (s *session) SetModel(ctx context.Context, cause, modelID string) (SetOutco
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	before := s.snap.CurrentModel
 	s.snap.CurrentModel = modelID
 	// With no model-category option advertised, the option's FIRST appearance
 	// would otherwise be free to write its own value over this one (r27 finding
 	// 2); the marker is what makes that first report say nothing.
-	s.noteDirectModelSetLocked(s.snap.Config)
+	s.noteDirectModelSetLocked(s.snap.Config, before)
 	// The confirmed value is read out of the very section that wrote it: ACP
 	// answers session/set_model with nothing, so what the session is now at is
 	// what it just stored, and a later Snapshot() read could only be somebody
@@ -2352,19 +2377,24 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		// it held BEFORE the set_model, and "no previous option" alone would
 		// adopt it and roll the model back. The marker a direct set_model leaves
 		// (noteDirectModelSetLocked) closes it — the first appearance consumes
-		// the marker and derives nothing from that first report, while a later
-		// report that really does MOVE the option's value is a change like any
-		// other and moves the model again.
+		// the marker and derives nothing from a report whose value is one the
+		// agent could honestly have held before one of craze's own sets, while a
+		// value that is NEITHER a pre-set value nor the current model is a real
+		// change like any other and moves the model again (r28 finding 2: the
+		// marker is value-blind no longer — it used to suppress EVERY value on
+		// the option's first appearance, not merely a stale one, which left
+		// CurrentModel stuck on a value the agent had since moved past).
 		was := ModelConfigOptionIn(s.snap.Config)
 		now := ModelConfigOptionIn(cfg)
 		s.snap.Config = cfg
 		s.markAgentWroteLocked(&s.agentWrote.config)
 		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
-		stale := was == nil && now != nil && s.modelSetNoOption
+		stale := was == nil && now != nil && s.modelBeforeSet[now.Current]
 		if now != nil {
 			// The marker's whole life is "until the option appears", whether or
-			// not this appearance had anything to say about the model.
-			s.modelSetNoOption = false
+			// not this appearance had anything to say about the model: it is
+			// consumed in full, not merely the one value it happened to match.
+			s.modelBeforeSet = nil
 		}
 		if now != nil && now.Current != "" && !stale &&
 			now.Current != s.snap.CurrentModel && (was == nil || was.Current != now.Current) {

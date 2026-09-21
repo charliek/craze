@@ -442,21 +442,17 @@ func (s *server) onRequest(msg *acp.Message) {
 			return
 		}
 		s.reply(msg.ID, map[string]any{})
-		if s.script == "modellate" {
-			// The agent introduces its model option only AFTER session/set_model
-			// has been answered, and the list it sends still carries the value
-			// the option held BEFORE that set_model. That is the first-appearance
-			// schedule of r27 finding 2, on the wire: a client that reads a first
-			// report as authoritative puts the model back where it was.
-			s.mu.Lock()
-			s.config = modelConfigOptions()
-			cfg := s.config
-			s.mu.Unlock()
-			s.update(fakeSessionID, map[string]any{
-				"sessionUpdate": acp.UpdateConfigOption,
-				"configOptions": cfg,
-			})
-		}
+		// `modellate` otherwise advertises no model option at all — its first
+		// list, carrying the value the option held BEFORE session/set_model,
+		// is exactly the r27 finding 2 schedule, and it is
+		// TestAFirstModelOptionDoesNotUndoASetModel that sends it, synchronously
+		// and only once the caller's own SetModel has returned, rather than this
+		// server racing its own reply against the client's read loop: the
+		// buffered response channel lets the read loop move straight on to the
+		// next frame, and on this wire that update would usually reach onUpdate
+		// before the caller's own goroutine reaches its locked mutation — a
+		// schedule the test needs to rule OUT, not hope for, to prove the marker
+		// itself works (r28 finding 3).
 	case acp.MethodSessionSetMode:
 		var p acp.SetModeParams
 		_ = json.Unmarshal(msg.Params, &p)

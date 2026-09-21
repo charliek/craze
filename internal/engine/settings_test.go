@@ -320,37 +320,45 @@ func TestASetCancelledWhileQueuedIsAnsweredByTheWorkerWithoutRunning(t *testing.
 	}
 }
 
-// TestACancelledSetIsReplayedAsACancellationNotASuccess is finding 1 meeting
-// C11's receipts hook. A Set whose context is already dead is answered with
-// that context's error without reaching the provider — by the caller or by the
-// worker, whichever gets to it — and the hook stores exactly that answer.
+// TestACancelledSetRunsOnAResend is r28 finding 1, over r23 finding 1's own
+// schedule: a Set whose context is already dead is answered with that
+// context's error, wrapped in errNotRun, WITHOUT reaching the provider — by
+// the caller or by the worker, whichever gets to it (settings.go's dead-ctx
+// branches) — and NOTHING RAN, so the id is exactly as unseen as before the
+// attempt (classify, control.go).
 //
-// So a resend of the same id and the same payload replays the cancellation: it
-// is never a success the caller would read as "the change landed", and never a
-// second execution. A duplicate parked on the reservation is released by the
-// same store (receipts.go's receipt.done), so nothing is stranded either.
-// context.Canceled is not one of the gate refusals the table forgets, and that
-// is right: it is an answer about THIS request, not about the engine's door.
-func TestACancelledSetIsReplayedAsACancellationNotASuccess(t *testing.T) {
+// So a resend of the same id with a live context is a genuine FIRST attempt —
+// it runs, and its answer is the change it actually made — never a replay of
+// the cancellation, and never a second execution of anything: the first
+// attempt executed nothing at all. Before r28's fix this was stored like an
+// ordinary refusal and every resend replayed the plain cancellation for ever,
+// which this test's old name and body asserted; the fix is the exact
+// opposite, and the rename says so.
+func TestACancelledSetRunsOnAResend(t *testing.T) {
 	r := newRig(t, Options{})
 	c := Command{Client: r.e.NewClientID(), ID: "7"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := r.e.Set(ctx, c, modeSetting("plan")); !errors.Is(err, context.Canceled) {
-		t.Fatalf("a Set made with a dead context: %v", err)
-	}
-	res, err := r.e.Set(context.Background(), c, modeSetting("plan"))
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("the resend answered %+v, %v; want the cancellation replayed", res, err)
-	}
-	if res.Rev != 0 || res.Value != "" {
-		t.Fatalf("the resend answered %+v, which a client would read as a change that landed", res)
+	if _, err := r.e.Set(ctx, c, modeSetting("plan")); !errors.Is(err, context.Canceled) || Code(err) != "unavailable" {
+		t.Fatalf("a Set made with a dead context: %v (%s), want context.Canceled coded unavailable", err, Code(err))
 	}
 	if n := r.s.setCalls(); n != 0 {
 		t.Fatalf("%d settings reached the provider for a cancelled command", n)
 	}
-	if got := r.e.State().CurrentMode; got == "plan" {
-		t.Fatal("a cancelled Set changed the session")
+	// Nothing ran, so the id was forgotten: this resend is a genuine attempt,
+	// not a replay.
+	res, err := r.e.Set(context.Background(), c, modeSetting("plan"))
+	if err != nil {
+		t.Fatalf("the resend with a live context: %v, want it to run", err)
+	}
+	if res.Rev == 0 || res.Value != "plan" {
+		t.Fatalf("the resend answered %+v, want the change it actually made", res)
+	}
+	if n := r.s.setCalls(); n != 1 {
+		t.Fatalf("%d settings reached the provider, want exactly the resend's", n)
+	}
+	if got := r.e.State().CurrentMode; got != "plan" {
+		t.Fatalf("the resend's change did not land: %q", got)
 	}
 }
 
