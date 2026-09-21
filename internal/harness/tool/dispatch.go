@@ -145,6 +145,7 @@ func (d *Dispatcher) callEnv(progress Progress) Env {
 func (d *Dispatcher) Prepare(c Call) (req Request, res Result, ok bool) {
 	req = Request{ID: c.ID, CallID: c.CallID, Tool: c.Tool, Input: c.Input}
 	e := &entry{}
+	var targets []string // the gate's copy alone carries them; see Request
 	t, known := d.tools[c.Tool]
 	switch {
 	case !validID(c.ID):
@@ -160,9 +161,15 @@ func (d *Dispatcher) Prepare(c Call) (req Request, res Result, ok bool) {
 		var tr Request
 		e.prepared, tr, e.failed = d.prepare(t.tool, c)
 		req.Title, req.Paths, req.Command, req.Workdir = tr.Title, tr.Paths, tr.Command, tr.Workdir
+		targets = tr.Targets
 	}
 	req = d.redactRequest(req)
 	e.req = req
+	// The gate is the one consumer of Targets, and it gets them as the tool
+	// resolved them: a gate deciding where a call may write cannot be shown
+	// text a redactor has rewritten, and req — the copy the announcing event
+	// carries — has none (plan 023 §3.1).
+	e.req.Targets = targets
 
 	d.mu.Lock()
 	if old, dup := d.pending[c.ID]; dup {
@@ -330,11 +337,13 @@ func errorResult(class ErrorClass, text string) Result {
 	return Result{Text: text, IsError: true, Class: class}
 }
 
-// redactRequest returns a copy of r with every text field redacted. The
-// copy shares nothing with r, so an event holding it cannot see a tool's
-// later changes to its own slices.
+// redactRequest returns a copy of r with every text field redacted, and
+// without its Targets, which nothing outward may see (see Request). The copy
+// shares nothing with r, so an event holding it cannot see a tool's later
+// changes to its own slices.
 func (d *Dispatcher) redactRequest(r Request) Request {
 	red := d.redactor()
+	r.Targets = nil
 	r.CallID = red.String(r.CallID)
 	r.Tool = red.String(r.Tool)
 	r.Title = red.String(r.Title)

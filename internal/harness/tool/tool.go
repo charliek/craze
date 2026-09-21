@@ -151,8 +151,19 @@ type Request struct {
 	ReadOnly bool
 	Title    string   // the relative path, the command, the pattern: a card's one line
 	Paths    []string // resolved absolute paths the call touches
-	Command  string   // execute: the raw command
-	Workdir  string   // execute: the resolved directory it runs in
+	// Targets are the paths an edit-kind call will really write to: absolute,
+	// and resolved through RealPath, so a relative spelling, a symlink, a
+	// dangling one and a file that does not exist yet all normalize to what
+	// the eventual open lands on. Prepare fills it for the tools that write;
+	// a gate enforcing where a call may write judges this and never Paths,
+	// which is cleaned but not resolved and is redacted for the card.
+	//
+	// It is the one field of a Request that is not redacted, and it never
+	// leaves the dispatcher: the copy handed to the gate carries it and the
+	// copy returned for an event does not (plan 023 §3.1).
+	Targets []string
+	Command string // execute: the raw command
+	Workdir string // execute: the resolved directory it runs in
 	// Input is the call's raw arguments; it may not be valid JSON, so a
 	// consumer that marshals a Request must not assume it is.
 	Input json.RawMessage

@@ -252,6 +252,74 @@ func TestWriteThroughASymlink(t *testing.T) {
 	}
 }
 
+// TestEditKindTargets is what the mode gate judges (plan 023 §3.1): write and
+// edit both name, in Request.Targets, the file their call will really land
+// on — relative spellings joined to the workspace, symlinks followed, a
+// dangling one followed to where its target would be, and a file that does
+// not exist resolved as far as its directory does. Paths, the card's field,
+// keeps the path as the call named it: the control that the two mean
+// different things.
+func TestEditKindTargets(t *testing.T) {
+	f := newFixture(t)
+	put(t, f.path("real/target.txt"), "old")
+	must(t, os.Symlink(filepath.Join("real", "target.txt"), f.path("link.txt")))
+	must(t, os.Symlink(filepath.Join("real", "later.txt"), f.path("dangling.txt")))
+	real := func(name string) string {
+		t.Helper()
+		resolved, err := filepath.EvalSymlinks(f.path(name)) // macOS's /var is a link
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolved
+	}
+
+	for _, tc := range []struct{ name, spelled, want string }{
+		{"a relative path", "real/target.txt", real("real/target.txt")},
+		{"an absolute path", f.path("real/target.txt"), real("real/target.txt")},
+		{"a symlink", "link.txt", real("real/target.txt")},
+		{"a dangling symlink", "dangling.txt", filepath.Join(real("real"), "later.txt")},
+		{"a file that is not there yet", "nested/deep/new.txt", filepath.Join(real("."), "nested/deep/new.txt")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for name, args := range map[string]map[string]any{
+				"write": {"filePath": tc.spelled, "content": "x"},
+				"edit":  {"filePath": tc.spelled, "oldString": "a", "newString": "b"},
+			} {
+				req := prepareOnly(t, name, f.env, args)
+				if len(req.Targets) != 1 || req.Targets[0] != tc.want {
+					t.Errorf("%s: Targets = %q, want [%q]", name, req.Targets, tc.want)
+				}
+				if len(req.Paths) != 1 || req.Paths[0] != f.env.Resolve(tc.spelled) {
+					t.Errorf("control: %s: Paths = %q, want the path as named", name, req.Paths)
+				}
+			}
+		})
+	}
+}
+
+// prepareOnly is the Request a tool's own Prepare builds, before the
+// dispatcher redacts it and drops its Targets. Nothing runs.
+func prepareOnly(t *testing.T, name string, env tool.Env, args map[string]any) tool.Request {
+	t.Helper()
+	build := newWrite
+	if name == "edit" {
+		build = newEdit
+	}
+	tl, err := build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := tl.Prepare(env, tool.Call{ID: "t1.1.1", Tool: name, Input: raw})
+	if err != nil {
+		t.Fatalf("%s.Prepare: %v", name, err)
+	}
+	return p.Request()
+}
+
 // TestWriteRefusesAnExternalChange: a file changed between the tool's read
 // and its rename — by an editor, a formatter, anyone outside craze's lock —
 // is left as they made it, and the call fails. A new file that appears in

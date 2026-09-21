@@ -279,6 +279,19 @@ func (s *Store) AppendEffortChange(effort string) error {
 	return s.holdChange(Entry{Type: TypeEffortChange, MessageEntry: MessageEntry{Effort: effort}})
 }
 
+// AppendModeChange records a switch to mode (agent, plan, ask), written ahead
+// of the next turn that produces output, and replacing an unwritten mode
+// change — the same holding rule as the other two. The caller hands one over
+// at the step boundary where the model is told about the mode, so the entry
+// lands where the change became visible in the conversation rather than at
+// the turn's start (plan 023 §3.1).
+func (s *Store) AppendModeChange(mode string) error {
+	if mode == "" {
+		return errors.New("store: a mode change needs a mode")
+	}
+	return s.holdChange(Entry{Type: TypeModeChange, Mode: mode})
+}
+
 func (s *Store) holdChange(e Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

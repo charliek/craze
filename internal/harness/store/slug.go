@@ -3,6 +3,10 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -55,4 +59,37 @@ const fileStampLayout = "20060102T150405Z"
 // <home>/sessions/<slug>/<UTC stamp>_<session id>.jsonl (plan 018 §3.2).
 func sessionPath(home, cwd, id string, started time.Time) string {
 	return filepath.Join(home, "sessions", Slug(cwd), started.UTC().Format(fileStampLayout)+"_"+id+".jsonl")
+}
+
+// PlanPath is where a session's plan file lives: the transcript's sibling,
+// <UTC stamp>_<session id>.plan.md (plan 023 §3.2). It is under the harness
+// home rather than in the workspace, so plan mode leaves nothing in the
+// repository and the file tools' confinement never sees it; the model is told
+// the absolute path in every plan-mode reminder.
+func PlanPath(sessionPath string) string {
+	return strings.TrimSuffix(sessionPath, ".jsonl") + ".plan.md"
+}
+
+// CreatePlanFile creates path empty when nothing is there, with the
+// transcript's own permissions — 0600 under 0700 directories, since a plan is
+// written from the user's work — and does nothing at all when the file
+// exists: it is never truncated, and craze never deletes it. The harness
+// calls it when plan mode is first entered in a session, so that the model,
+// the plan tool and the reminder all name a file that is there (plan 023
+// §3.2).
+func CreatePlanFile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	switch {
+	case errors.Is(err, fs.ErrExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("store: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	return nil
 }

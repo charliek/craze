@@ -41,6 +41,11 @@ type toolSeams struct {
 // toolset is one session's tools, fixed from Open to Close.
 type toolset struct {
 	registry *tool.Registry
+	// modeGate is the session's gate: the mode's rules over the gate the
+	// session would otherwise have used (plan 023 §3.1). Open hands it the
+	// plan file's path, which is known only once the store has named the
+	// transcript; the modes box (reminders.go) owns it from then on.
+	modeGate *tool.ModeGate
 	profile  string      // the profile's name, which the header records
 	specs    []tool.Spec // the profile's tools' specs, in the order the model is offered them
 	byID     map[string]tool.Spec
@@ -86,7 +91,8 @@ type toolset struct {
 //   - before any of that, a refusal of a workspace whose path holds a
 //     provider key (errWorkspaceKey): the prompt names the working directory
 //     and the header records it, and neither can hold a key;
-//   - the dispatcher, with the session's Env: the workspace and home, the
+//   - the dispatcher, with the mode's gate over the session's own (plan 023
+//     §3.1) and with the session's Env: the workspace and home, the
 //     redactor, a path-lock table, the closing channel, and the environment
 //     a command gets — the user's, less every env_keys variable of every
 //     provider and every OPENAI_* (never nil: bash refuses to run on a nil
@@ -94,7 +100,7 @@ type toolset struct {
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
-func openTools(home, workspace string, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
+func openTools(home, workspace, mode string, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -168,9 +174,14 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 	for _, prov := range table.Providers {
 		keyNames = append(keyNames, prov.EnvKeys...)
 	}
+	// The session's mode wraps the gate it would otherwise use — the test
+	// seam's, or AllowAll — rather than replacing it: a call the mode allows
+	// is still the inner gate's to judge, which is how H3's evaluator will
+	// slot in underneath (plan 023 §3.1).
+	ts.modeGate = tool.NewModeGate(mode, seams.gate)
 	ts.d, err = tool.NewDispatcher(tool.Options{
 		Tools: p.Tools,
-		Gate:  seams.gate,
+		Gate:  ts.modeGate,
 		Env: tool.Env{
 			Workspace: workspace,
 			Home:      home,

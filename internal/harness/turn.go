@@ -167,13 +167,15 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	}
 
 	t := &turn{
-		ctx:    turnCtx,
-		store:  s.store,
-		model:  m,
-		sink:   sink,
-		number: number,
-		calls:  calls{tools: s.tools},
-		steers: &s.steers,
+		ctx:     turnCtx,
+		store:   s.store,
+		model:   m,
+		sink:    sink,
+		number:  number,
+		calls:   calls{tools: s.tools},
+		steers:  &s.steers,
+		modes:   s.modes,
+		logMode: s.recordMode,
 	}
 	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
 	// From here Steer is accepted, and only from here: a prompt the store
@@ -238,7 +240,28 @@ func (s *Session) record(m model, changes []func(*store.Store) error) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.logged = logged{model: m.id(), effort: m.effort}
+	// The mode is left alone: it is recorded at the step boundary that tells
+	// the model about it, which is not this one (recordMode).
+	s.logged.model, s.logged.effort = m.id(), m.effort
+	return nil
+}
+
+// recordMode hands the store a mode_change when mode is not what the
+// transcript was last told, and marks it told once the store has taken it.
+// The turn calls it at each step boundary that announces a mode, so the entry
+// is held with that step's output and lands where the change became visible
+// in the conversation (plan 023 §3.1). A store that refuses it stays untold,
+// as a refused model change does.
+func (s *Session) recordMode(mode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logged.mode == mode {
+		return nil
+	}
+	if err := s.store.AppendModeChange(mode); err != nil {
+		return fmt.Errorf("harness: %w", s.tools.redactErr(err))
+	}
+	s.logged.mode = mode
 	return nil
 }
 
@@ -300,6 +323,17 @@ type turn struct {
 	steers  *steerbox
 	spliced []splice // the steers taken up, in order, each at a fixed index
 	written int      // how many of spliced an AppendStep has written
+
+	// The mode's reminders (reminders.go, plan 023 §3.3): modes is the
+	// session's box, which has its own lock; the rest is this turn's, under
+	// mu. reminders is a collection of its own — never spliced, never
+	// persisted, never emitted — and pending is the one composed for the step
+	// about to go out, committed when its request does.
+	modes      *modes
+	logMode    func(mode string) error
+	reminders  []reminder
+	pending    pendingReminder
+	hasPending bool
 }
 
 // redactor is the session's, as it is now — fixed for the whole turn, since
@@ -386,13 +420,16 @@ func (t *turn) halted([]fantasy.StepResult) bool {
 }
 
 // stepStarted opens step n (from 0): its number, its clock, and an empty
-// set of tool calls.
+// set of tool calls. The step's request goes out next, so this is also where
+// the reminder prepareStep composed for it becomes something the model has
+// read (reminderSent).
 func (t *turn) stepStarted(n int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.step = n + 1
 	t.stepStart, t.firstToken, t.retries = time.Now(), 0, 0
 	t.resetCalls(true)
+	t.reminderSent()
 	return nil
 }
 

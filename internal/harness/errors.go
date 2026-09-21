@@ -60,6 +60,11 @@ var (
 	// when it opens (plan 019 §3.1, Seam 2).
 	ErrProfileMismatch = errors.New("harness: this model uses a different tool profile; start a new session")
 
+	// ErrUnknownMode is SetMode's and Open's refusal of a mode that is not
+	// "agent" (or ""), "plan" or "ask": the adapter resolves the user's word
+	// to one of those three first (plan 023 §3.1). Nothing is changed.
+	ErrUnknownMode = errors.New("harness: unknown mode")
+
 	// ErrInTurn is Run's refusal while another Run is live on the session.
 	// The adapter serializes turns itself, so it never reaches a user.
 	ErrInTurn = errors.New("harness: a turn is already running")
