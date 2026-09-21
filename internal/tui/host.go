@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/host"
 )
 
@@ -67,18 +68,19 @@ func (m Model) hostInput() host.Input {
 // card itself draws — `permission <tool>` (permissionView), `question`, and
 // `plan <name>` (planCardView). The question card's own `question 1/2` counter
 // is left out: a host shows one reason, not the card's progress through it.
+//
+// The label comes from agent.AskLabel, which is also what the engine merges
+// into State.HeadAsk (plan 021 §3.2): one derivation, so a host driven by a
+// session with no TUI at all publishes the same reason this one does. The
+// caller sanitises it (hostMessage), as it sanitises every other message.
 func hostCard(c card) (host.Card, string) {
 	switch c.kind {
 	case cardPermission:
-		tool := ""
-		if c.perm != nil {
-			tool = c.perm.Tool
-		}
-		return host.PermissionCard, "permission " + sanitizeLine(tool)
+		return host.PermissionCard, agent.AskLabel(agent.AskPermission, agent.AskBody{Permission: c.perm})
 	case cardQuestion:
-		return host.QuestionCard, "question"
+		return host.QuestionCard, agent.AskLabel(agent.AskQuestion, agent.AskBody{Question: c.ask})
 	case cardPlan:
-		return host.PlanCard, "plan " + planName(c.plan)
+		return host.PlanCard, agent.AskLabel(agent.AskPlan, agent.AskBody{Plan: c.plan})
 	}
 	return host.NoCard, ""
 }

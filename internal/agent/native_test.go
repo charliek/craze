@@ -1355,14 +1355,18 @@ func TestNativeUnsupported(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	for name, err := range map[string]error{
-		"SetMode":          s.SetMode(context.Background(), "plan"),
-		"AnswerPermission": s.AnswerPermission("p", "allow"),
-		"AnswerQuestion":   s.AnswerQuestion("q", nil, true),
-		"AnswerPlan":       s.AnswerPlan("p", true),
+		"SetMode": s.SetMode(context.Background(), "plan"),
 	} {
 		if !errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s = %v, want ErrUnsupported", name, err)
 		}
+	}
+	// The three Answer* verbs left the seam with plan 021's C8b: a client
+	// answers through the ask registry, and native's is empty because nothing
+	// in the harness opens an ask yet. That is a session with no asks rather
+	// than one that refuses them, which is what a Gate's Ask will fill.
+	if left := s.Asks().Asks(); len(left) != 0 {
+		t.Fatalf("native has asks: %+v", left)
 	}
 	if evs := drained(s); len(evs) != 0 {
 		t.Fatalf("unsupported calls emitted %+v", evs)

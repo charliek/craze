@@ -18,6 +18,25 @@ import (
 	"github.com/charliek/craze/internal/journal"
 )
 
+// session is the ACP-backed provider session.
+//
+// # Locks
+//
+// s.mu guards the fields below it and is never held across anything that
+// blocks: a provider call, a publish, a flush, a wait. Two components below the
+// seam have locks of their own and the order between them is fixed (plan 021
+// §3.3):
+//
+//   - s.mu → the client's own mutex, for the one leaf read turnActiveLocked
+//     makes. The client never calls back into the session under its own lock.
+//   - registry.mu → the log's outbox mutex, which is a strict leaf. Every ask
+//     event is enqueued in the registry section that changed the ask, so the
+//     order of the registry's events is the order of its state.
+//   - **s.mu and registry.mu are never nested, in either direction.** The
+//     session calls BeginTurn, CancelTurn, EndTurn, Open, Automatic,
+//     AnsweredEarly and Report with s.mu released — each takes a value read
+//     under s.mu a moment earlier — and the registry calls nothing but its log
+//     and its clock, so it can never reach back.
 type session struct {
 	opts   Options
 	client *acp.Client
@@ -27,6 +46,17 @@ type session struct {
 	// a few tests read it by name.
 	log    *EventLog
 	events <-chan Event
+	// asks is every blocking request this session parks, answers and ends
+	// (asks.go). It is built beside the log, because every ending it writes is
+	// an event in this session's one sequence.
+	asks *AskRegistry
+	// askCtx is the context every ask this session opens is watched on: it ends
+	// when the session closes, which is the only cancellation an ACP handler has
+	// of its own. Closing resolves every parked ask as closing before this fires
+	// (Close), so it is the backstop and not the mechanism; a harness Gate's Ask
+	// will bring a real per-call context.
+	askCtx  context.Context
+	askStop context.CancelFunc
 	// tee is the agent child's stderr on its way to opts.Stderr, copied into
 	// the journal a line at a time (stderr.go). nil without a journal, and
 	// then the child writes straight to opts.Stderr as it always did.
@@ -54,20 +84,20 @@ type session struct {
 	// wire is the claimed prompt's wire outcome, set by Begin with the claim
 	// and cleared when the claim ends: what Cancel waits on so that its
 	// session/cancel can never reach the agent ahead of the prompt it stops.
-	wire    *turnWire
-	waiting map[string]pendingAsk
-	seq     map[string]int
-	// turn counts prompts; cancelledTurn records the one a cancel was issued
-	// for, so a request that arrives while the turn is being cancelled is
-	// answered instead of parked. Which turn a *card* belongs to is the client's
-	// turn, not this one: only the client knows when a request arrived, and a
-	// handler goroutine can start long after that (see park).
-	turn          int
-	cancelledTurn int
-	snap          Snapshot
-	sessionID     string
-	tools         map[string]ToolEvent
-	toolOrder     []string
+	wire *turnWire
+	// turn counts prompts, and token is the registry's name for the one that is
+	// open: every ask this turn raises is parked against it, and the turn's end
+	// — or a cancel — resolves exactly those. It is the no-turn token whenever
+	// no prompt of craze's own has an open turn, which is what a request that
+	// arrived between turns or during a turn the agent started itself parks
+	// against. Both are written in the section that opens the turn and cleared
+	// in the one that releases the claim.
+	turn      int
+	token     TurnToken
+	snap      Snapshot
+	sessionID string
+	tools     map[string]ToolEvent
+	toolOrder []string
 	// taskReceipts holds cursor/task receipts whose tool_call has not landed
 	// yet; it is bounded and cleared at turn end so an unmatched receipt can
 	// never leak or attach itself to a later tool with a reused id.
@@ -199,23 +229,6 @@ var testAfterBinaryResolved func()
 // tests can set it; nothing in craze writes it.
 var testBeforeWire func(s *session)
 
-// pendingAsk is one blocking request the UI still owes an answer to. kind is
-// askPermission, askQuestion or askPlan; decide carries that kind's own
-// acp decision type. turn is the client turn the request arrived in, which is
-// what keeps a card out of a later turn.
-type pendingAsk struct {
-	kind    string
-	turn    int
-	options []acp.PermissionOption
-	decide  chan any
-}
-
-const (
-	askPermission = "perm"
-	askQuestion   = "ask"
-	askPlan       = "plan"
-)
-
 func New(opts Options) Session {
 	if opts.Provider != nil && opts.Provider.InProcess() {
 		return newNative(opts, nil)
@@ -228,8 +241,6 @@ func newSession(opts Options) *session {
 		opts:      opts,
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
-		waiting:   make(map[string]pendingAsk),
-		seq:       make(map[string]int),
 		tools:     make(map[string]ToolEvent),
 
 		commandsApplied: make(chan struct{}),
@@ -246,6 +257,9 @@ func newSession(opts Options) *session {
 	// name resolves to is Start's to settle (the session note).
 	s.log = newSessionLog(s.opts, journalHeader{provider: s.provider().Name(), binary: s.opts.Binary})
 	s.events = s.log.Primary()
+	// Beside the log, and stamped from the same clock its own emits use.
+	s.asks = NewAskRegistry(s.log, s.Now)
+	s.askCtx, s.askStop = context.WithCancel(context.Background())
 	// The tee is the child's lane alone. Options.Stderr stays what it was, so
 	// craze's own notes about the session — which fall back to it when Diag is
 	// unset — are still craze's and are never journaled as the agent's words.
@@ -289,10 +303,15 @@ func (s *session) EventLog() *EventLog { return s.log }
 // from, so a caller above the seam stamps from the same one.
 func (s *session) Now() time.Time { return time.Now() }
 
+// Asks is the session's AskSource (plan 021 §3.6): the registry a client above
+// the seam lists and answers through engine.Control.
+func (s *session) Asks() *AskRegistry { return s.asks }
+
 var (
 	_ EventSource = (*session)(nil)
 	_ LogOwner    = (*session)(nil)
 	_ Clocked     = (*session)(nil)
+	_ AskSource   = (*session)(nil)
 )
 
 // Start spawns the agent and sets the session up. Its body is start; what is
@@ -399,6 +418,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	client.SetPlanHandler(s.onCreatePlan)
 	client.SetTodosHandler(s.onUpdateTodos)
 	client.SetTaskHandler(s.onTaskReceipt)
+	client.SetEarlyAnswerHandler(s.onEarlyAnswer)
 	client.SetInterjectionHandler(func(n acp.InterjectionNotification) {
 		s.onInterjection(interjectionText{Text: n.Text})
 	})
@@ -872,6 +892,9 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		s.cancelling = false
 		if done != nil {
 			s.inPrompt = false
+			// The turn is no longer the one an ask can be parked against: a
+			// request that arrives now belongs to no turn of craze's own.
+			s.token = TurnToken{}
 			s.clearTaskReceiptsLocked()
 			close(done)
 		}
@@ -886,6 +909,20 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	if err != nil {
 		return Result{}, err
 	}
+	// The registry's name for this turn, minted before the section that opens
+	// it — the registry is never called with s.mu held — and ended on every
+	// return path, this prompt's refusals and withdrawals included. A token
+	// nothing was ever parked against costs one number and resolves nothing;
+	// leaving one open would leave an ask that arrives late parked against a
+	// turn that is over. EndTurn is idempotent, so the paths below that end it
+	// before their terminal event (endAskTurn) leave this a no-op.
+	//
+	// It is minted before s.mu and installed under it, in one section with the
+	// cancel check, so a Cancel in between marks the turn *this prompt is
+	// withdrawing from* — never this one, which no ask can have reached yet
+	// because nothing knows its token.
+	token := s.asks.BeginTurn()
+	defer s.asks.EndTurn(token)
 	s.mu.Lock()
 	if s.clearCatalogWaitLocked(abort) {
 		// Cancelled while waiting. Nothing was opened, nothing was sent and
@@ -918,6 +955,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	prevTurn, prevDone := s.turn, s.doneEmitted
 	s.inPrompt = true
 	s.turn++
+	s.token = token
 	// A new turn: it has not ended, so an interjection is live again. No
 	// cancel has been asked for it either — the withdraw above says so.
 	s.doneEmitted = false
@@ -979,12 +1017,10 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		// the caller is the whole of it — an error event here would show up on
 		// a run that goes on to succeed.
 		s.mu.Lock()
-		if s.cancelledTurn != s.turn {
-			// A cancel that landed on this number has already spent it: giving
-			// it back would leave the marker pointing at the turn after this
-			// one, which nobody cancelled.
-			s.turn = prevTurn
-		}
+		s.turn = prevTurn
+		// No turn of craze's own opened, so nothing may be parked against this
+		// token from here; the deferred EndTurn retires it.
+		s.token = TurnToken{}
 		s.doneEmitted = prevDone
 		s.mu.Unlock()
 		return Result{}, err
@@ -997,6 +1033,11 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	s.mu.Lock()
 	s.doneEmitted = true
 	s.mu.Unlock()
+	// Before the terminal event, whichever it is: every ask this turn still
+	// holds ends now, and the outbox is drained, so a late opening and every
+	// turn_ended ending are in the record ahead of the ending that says the turn
+	// is over (plan 021 §3.6).
+	s.endAskTurn(token)
 	if err != nil {
 		// The error goes out first, so a consumer already in its error state
 		// by the time the engine's chain policy clears its own queue at
@@ -1010,6 +1051,21 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	}
 	s.emit(Event{Type: EventDone, StopReason: res.StopReason})
 	return Result{StopReason: res.StopReason}, nil
+}
+
+// endAskTurn ends token for the registry and then waits for the outbox, so
+// everything that ending produced — and any opening still in flight behind it —
+// is delivered before the caller publishes the turn's own terminal event. The
+// flush is an ordering nicety and never a condition: a log that is closing has
+// nothing left to order and returns at once, and a session that is closing
+// abandons the wait (flushAsks).
+//
+// It waits for the outbox, not for handler goroutines: one that has not reached
+// the registry yet writes its ending after this turn's terminal event, which is
+// known and recorded rather than fixed (decideAsk).
+func (s *session) endAskTurn(token TurnToken) {
+	s.asks.EndTurn(token)
+	s.flushAsks()
 }
 
 // refusedBeforeWire reports an error that means the prompt never reached the
@@ -1179,8 +1235,15 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 	// opening sets the turn, and the claim's release clears all three.
 	s.cancelling = true
 	in, claimed, wire := s.inPrompt, s.claimed, s.wire
+	token := s.token
 	s.mu.Unlock()
-	s.cancelWaiting()
+	// Every ask the session is holding is answered cancelled, of whatever turn,
+	// and the turn this cancel is for is marked so that a request arriving while
+	// it is in flight is refused rather than parked — the baseline's drain and
+	// its cancelled-turn mark, in one atomic registry call. With no turn of
+	// craze's own the token is the no-turn one: every open ask is still
+	// answered, and nothing is marked, because there is no turn to mark.
+	s.asks.CancelTurn(token)
 	if (!in && !claimed) || wire == nil {
 		// No prompt of craze's own is claimed: nothing is running, or the
 		// agent is running a turn it started itself. Either way there is no
@@ -1305,8 +1368,8 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 // after this returns — but only for the requests held when this cancel was made
 // (acp.Client.Held, taken below before the goroutine exists), never for one a
 // later turn registered. Nothing a client can see waits on it either, because
-// the session answered its *own* parked asks before getting here (cancelWaiting,
-// above).
+// the session answered its *own* parked asks before getting here (Cancel's
+// CancelTurn, above).
 func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned bool, err error) {
 	// What this cancel is a cancel of is fixed here, on the caller's goroutine,
 	// before anything is handed over. The client answers the requests it holds
@@ -1326,102 +1389,6 @@ func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned
 	case <-s.done:
 		return false, nil
 	}
-}
-
-// cancelWaiting answers every blocking request of every kind, exactly once:
-// the map is swapped out under the lock so a concurrent Answer* finds nothing.
-func (s *session) cancelWaiting() {
-	s.mu.Lock()
-	s.cancelledTurn = s.turn
-	pending := s.waiting
-	s.waiting = make(map[string]pendingAsk)
-	s.mu.Unlock()
-	for _, p := range pending {
-		p.answer(cancelledFor(p.kind))
-	}
-}
-
-func cancelledFor(kind string) any {
-	switch kind {
-	case askQuestion:
-		return acp.AskDecision{Cancelled: true}
-	case askPlan:
-		return acp.PlanDecision{Cancelled: true}
-	default:
-		return acp.PermissionDecision{Cancelled: true}
-	}
-}
-
-// answer never blocks: the channel is buffered and each pendingAsk is taken
-// out of the map before it is answered, so at most one value is ever sent.
-func (p pendingAsk) answer(v any) {
-	select {
-	case p.decide <- v:
-	default:
-	}
-}
-
-// take removes a waiting request of the expected kind.
-func (s *session) take(id, kind string) (pendingAsk, error) {
-	s.mu.Lock()
-	p, ok := s.waiting[id]
-	if ok && p.kind == kind {
-		delete(s.waiting, id)
-	}
-	s.mu.Unlock()
-	if !ok || p.kind != kind {
-		return pendingAsk{}, fmt.Errorf("agent: unknown %s request %q", kind, id)
-	}
-	return p, nil
-}
-
-func (s *session) AnswerPermission(id, optionID string) error {
-	p, err := s.take(id, askPermission)
-	if err != nil {
-		return fmt.Errorf("agent: unknown permission request %q", id)
-	}
-	if optionID == "" {
-		p.answer(acp.PermissionDecision{Cancelled: true})
-		return nil
-	}
-	found := false
-	for _, o := range p.options {
-		if o.OptionID == optionID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		p.answer(acp.PermissionDecision{Cancelled: true})
-		return fmt.Errorf("agent: optionId %q is not in the permission request", optionID)
-	}
-	p.answer(acp.PermissionDecision{OptionID: optionID})
-	return nil
-}
-
-// AnswerQuestion answers a cursor/ask_question card. Option ids that the
-// request did not offer are dropped when the reply is built.
-func (s *session) AnswerQuestion(id string, answers map[string][]string, skip bool) error {
-	p, err := s.take(id, askQuestion)
-	if err != nil {
-		return err
-	}
-	if skip {
-		p.answer(acp.AskDecision{Skip: true})
-		return nil
-	}
-	p.answer(acp.AskDecision{Answers: answers})
-	return nil
-}
-
-// AnswerPlan accepts or rejects a cursor/create_plan card.
-func (s *session) AnswerPlan(id string, accept bool) error {
-	p, err := s.take(id, askPlan)
-	if err != nil {
-		return err
-	}
-	p.answer(acp.PlanDecision{Accept: accept})
-	return nil
 }
 
 // Close reaps the child exactly once; later callers block until that reap has
@@ -1446,6 +1413,18 @@ func (s *session) Close() error {
 		close(s.done)
 		client := s.client
 		s.mu.Unlock()
+		// Before the client is torn down and well before the log is closed:
+		// every parked ask ends as closing, and those endings are committed by
+		// the log's own close phases rather than dropped (plan 021 §3.3, X4).
+		// The handlers they wake then reply to the agent, exactly as falling
+		// through on s.done used to.
+		//
+		// It is also what keeps the outcome "closing" rather than "cancelled by
+		// call" now that each parked ask watches its own request's context
+		// (decideAsk): those contexts are ended by the client's own close
+		// below, which is strictly after this.
+		s.asks.Close()
+		s.askStop()
 		if client != nil {
 			s.closeErr = client.Close()
 		}
@@ -1459,63 +1438,67 @@ func (s *session) Close() error {
 	return s.closeErr
 }
 
-func (s *session) onPermission(turn int, req acp.PermissionRequest) acp.PermissionDecision {
-	if s.opts.Force {
-		id, ok := acp.PickYoloAllow(req.Options)
-		if !ok {
-			return acp.PermissionDecision{Cancelled: true}
+// The three blocking requests an agent can make all take the same path (plan
+// 021 §3.6), on the handler goroutine ACP gave them, which may block:
+//
+//  1. craze's approval policy (ApprovalPolicy). A resolution it can make itself
+//     is written as one Automatic record — the Auto opening a question or a plan
+//     has always published, plus its ending — and answered without ever parking.
+//  2. the turn the request belongs to (askToken). A request from a turn that is
+//     over raises no card at all: it is one self-contained ending with the body,
+//     so the record says what was asked without anyone being shown a question
+//     nobody could answer.
+//  3. the registry: open, flush, wait, flush, answer (decideAsk).
+//
+// The flushes are the causal barriers. The one after an opening delivers the
+// card before the handler blocks; the one before the decision goes back to the
+// agent keeps the ask's ending ahead of whatever the agent writes once it has
+// its answer — which is what makes an automatic question's line still precede
+// the text that follows it. A flush that fails
+// is an ordering nicety lost, never a reason to change the decision.
+func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.PermissionDecision {
+	ask := AskRequest{Kind: AskPermission, Body: AskBody{Permission: permissionBody(req)}}
+	token, live := s.askToken(a)
+	if EffectiveApproval(s.opts).Permission == ApprovalAllow {
+		// Force. An option that allows it, or — when the request offers none —
+		// the cancel today's PickYoloAllow miss produced, now with a record
+		// saying policy did it (§2.3's "none at all" row).
+		ans := AskAnswer{Cancel: true}
+		if id, ok := acp.PickYoloAllow(req.Options); ok {
+			ans = AskAnswer{OptionID: id}
 		}
-		return acp.PermissionDecision{OptionID: id}
+		rec := s.automaticAsk(token, ask, ans)
+		dec := permissionDecision(rec)
+		dec.Replied = s.reportedBy(rec.ID)
+		return dec
 	}
-	id, ch, ok := s.park(askPermission, turn, pendingAsk{options: req.Options})
-	if !ok {
-		return acp.PermissionDecision{Cancelled: true}
+	if !live {
+		return permissionDecision(s.staleAsk(ask))
 	}
-
-	opts := make([]PermissionOption, 0, len(req.Options))
-	for _, o := range req.Options {
-		opts = append(opts, PermissionOption{
-			OptionID: o.OptionID,
-			Name:     sanitizeText(o.Name),
-			Kind:     o.Kind,
-		})
-	}
-	if !s.emitParked(id, Event{
-		Type: EventPermission,
-		Permission: &PermissionEvent{
-			ID:      id,
-			Tool:    sanitizeText(req.ToolCall.Title),
-			Options: opts,
-		},
-	}) {
-		return acp.PermissionDecision{Cancelled: true}
-	}
-	return awaitDecision(s, ch, acp.PermissionDecision{Cancelled: true})
+	rec, replied := s.decideAsk(a, token, ask)
+	dec := permissionDecision(rec)
+	dec.Replied = replied
+	return dec
 }
 
-// onAskQuestion blocks on the UI when Interactive, and otherwise answers with
-// each question's first option and reports what it sent.
-func (s *session) onAskQuestion(turn int, req acp.AskQuestionRequest) acp.AskDecision {
-	ev := &QuestionEvent{
-		Title:     sanitizeText(req.Title),
-		Questions: questionsFromRequest(req),
+// onAskQuestion parks a question under policy ask, and otherwise answers it
+// with each question's first option and reports what it sent.
+func (s *session) onAskQuestion(a acp.Arrival, req acp.AskQuestionRequest) acp.AskDecision {
+	ask := AskRequest{Kind: AskQuestion, Body: AskBody{Question: questionBody(req)}}
+	token, live := s.askToken(a)
+	if EffectiveApproval(s.opts).Question == ApprovalFirstOption {
+		rec := s.automaticAsk(token, ask, AskAnswer{Answers: acp.AskAutoAnswers(req)})
+		dec := askDecision(rec)
+		dec.Replied = s.reportedBy(rec.ID)
+		return dec
 	}
-	if !s.opts.Interactive {
-		ev.ID = s.nextID(askQuestion)
-		ev.Auto = true
-		ev.Answers = acp.AskAutoAnswers(req)
-		s.emit(Event{Type: EventQuestion, Question: ev})
-		return acp.AskDecision{Answers: ev.Answers}
+	if !live {
+		return askDecision(s.staleAsk(ask))
 	}
-	id, ch, ok := s.park(askQuestion, turn, pendingAsk{})
-	if !ok {
-		return acp.AskDecision{Cancelled: true}
-	}
-	ev.ID = id
-	if !s.emitParked(id, Event{Type: EventQuestion, Question: ev}) {
-		return acp.AskDecision{Cancelled: true}
-	}
-	return awaitDecision(s, ch, acp.AskDecision{Cancelled: true})
+	rec, replied := s.decideAsk(a, token, ask)
+	dec := askDecision(rec)
+	dec.Replied = replied
+	return dec
 }
 
 func questionsFromRequest(req acp.AskQuestionRequest) []Question {
@@ -1541,118 +1524,302 @@ func questionsFromRequest(req acp.AskQuestionRequest) []Question {
 	return out
 }
 
-// onCreatePlan mirrors onAskQuestion: block when Interactive, accept and
-// report otherwise.
-func (s *session) onCreatePlan(turn int, req acp.CreatePlanRequest) acp.PlanDecision {
-	ev := &PlanEvent{
+// onCreatePlan mirrors onAskQuestion: park under policy ask, accept and report
+// otherwise.
+func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.PlanDecision {
+	ask := AskRequest{Kind: AskPlan, Body: AskBody{Plan: planBody(req)}}
+	token, live := s.askToken(a)
+	if EffectiveApproval(s.opts).Plan == ApprovalAccept {
+		rec := s.automaticAsk(token, ask, AskAnswer{Accept: true})
+		dec := planDecision(rec)
+		dec.Replied = s.reportedBy(rec.ID)
+		return dec
+	}
+	if !live {
+		return planDecision(s.staleAsk(ask))
+	}
+	rec, replied := s.decideAsk(a, token, ask)
+	dec := planDecision(rec)
+	dec.Replied = replied
+	return dec
+}
+
+// onEarlyAnswer is ACP reporting a blocking request it answered before any
+// handler of craze's ever ran: a cancel or a close that got there first, or a
+// turn that had gone stale (plan 021 §3.6). No handler runs
+// for it, so nothing parks and — without this — the agent's question would
+// leave no trace at all (§2.3's last-but-two row). It becomes one
+// self-contained ending, with the body and no opening, so the record says what
+// was asked without a card ever being raised for a request nobody can answer.
+//
+// NOT CLOSED, deliberately: this runs on the request's
+// own handler goroutine, and Close joins no such goroutine. One that has not
+// run by the time the session answers its request and closes the log writes
+// nothing at all — the enqueue below is refused at the cut — so that request
+// leaves ZERO published endings. Closing it needs requests accounted for at
+// registration and their recording completed before the log's cutoff, which
+// would mean joining goroutines that may be parked on a decision: the deadlock
+// the close phases exist to avoid.
+func (s *session) onEarlyAnswer(e acp.EarlyAnswer) {
+	req, ok := earlyAskRequest(e.Params)
+	if !ok {
+		return
+	}
+	outcome := AskCancelled
+	switch e.Reason {
+	case acp.EarlyStaleTurn:
+		outcome = AskTurnEnded
+	case acp.EarlyClosed:
+		outcome = AskClosing
+	}
+	// The token is only the record's: the ask is resolved as it is minted, so
+	// no turn's lifecycle can reach it. A request that belonged to no turn of
+	// craze's own says so.
+	token, _ := s.askToken(e.Arrival())
+	s.asks.AnsweredEarly(token, req, outcome, AskByProvider)
+}
+
+// earlyAskRequest is one early-answered request as the registry takes it. The
+// bodies are built by the same three functions the handlers use, so what an
+// early ending records is exactly what the card would have shown.
+func earlyAskRequest(p acp.RequestParams) (AskRequest, bool) {
+	switch {
+	case p.Permission != nil:
+		return AskRequest{Kind: AskPermission, Body: AskBody{Permission: permissionBody(*p.Permission)}}, true
+	case p.Ask != nil:
+		return AskRequest{Kind: AskQuestion, Body: AskBody{Question: questionBody(*p.Ask)}}, true
+	case p.Plan != nil:
+		return AskRequest{Kind: AskPlan, Body: AskBody{Plan: planBody(*p.Plan)}}, true
+	default:
+		return AskRequest{}, false
+	}
+}
+
+// askToken is the registry token a blocking request parks against, and whether
+// it may be parked at all. It is the whole of "which turn does this belong to",
+// and it needs both halves of the request's Arrival (acp.Arrival): ACP's
+// counter alone cannot tell a retired turn's request from one that belongs to
+// no turn, because a prompt returning clears inTurn without moving the counter.
+func (s *session) askToken(a acp.Arrival) (TurnToken, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !a.InTurn {
+		// It arrived between craze's turns, or during a turn the agent started
+		// itself. It belongs to no turn of craze's own, so no turn's end may
+		// take it away: it parks on the no-turn token and ends by an answer, a
+		// cancel, or the close.
+		return TurnToken{}, true
+	}
+	if s.inPrompt && s.turnActiveLocked(a.Turn) {
+		// The client says this exact turn is the one it is running and that its
+		// prompt is still in flight, so s.token — installed before that prompt
+		// entered the client and cleared only after it came back — is that
+		// turn's own and not its successor's (turnActiveLocked).
+		return s.token, true
+	}
+	// It belonged to a turn of craze's own and that turn is over: either a
+	// later prompt has been accepted (the counter moved on), or this one has
+	// returned (no prompt is in flight), or the next one is installed and not
+	// yet on the wire (the counter still says this turn, but the prompt that
+	// held it has ended). A card for it would be answered into whatever is
+	// running now, so there is no card — only the record.
+	return TurnToken{}, false
+}
+
+// decideAsk is the whole of a handler's parked path: open, flush, wait, flush.
+// It answers with the record the handler replies from and the Replied hook that
+// records what became of that reply.
+//
+// **The ask is opened against the request's own context** (acp.Arrival.Call),
+// not against something session-wide: the client ends it the moment anything
+// else answers the request — a Cancel, a CancelHeld, a Close — so an ask whose
+// request has already been answered resolves as cancelled by the call at once,
+// rather than sitting on screen with the agent no longer listening. A handler
+// called directly, by a test or by anything else with no
+// context of its own, falls back to the session's, which is the backstop it
+// always was.
+//
+// A signal already up **before** the open raises no card at all: the request is
+// gone, so there is nothing to show anyone, and what it is owed is the same
+// self-contained record an early answer gets — cancelled, by the call, with the
+// body. That keeps the two sides of the window saying the same thing: the
+// ending is "cancelled by call" whether the signal arrived a moment before the
+// insert or a moment after it, and only the card differs.
+//
+// The only error Open has is an adopted id already in use, and nothing here
+// adopts one, so the zero record it falls back to is unreachable — and reads as
+// the cancelled decision anyway (permissionDecision and its two siblings answer
+// an outcome they do not know with a cancel). A lifecycle refusal — the turn
+// ended or was cancelled between the
+// token being read and the insert, the session closed, the outbox full — comes
+// back as an ask that is already resolved, and Wait answers with that ending
+// like any other. That check is the registry's own, atomic with the insert,
+// which is what closes the window the baseline's two-step park-then-publish
+// left open.
+//
+// NOT CLOSED, deliberately: a handler that captured
+// this turn's token and lost the race to EndTurn has its refused Open's
+// self-contained ending enqueued AFTER the turn's EventDone, so a consumer sees
+// one ending for a request it was never shown arrive past the end of the turn.
+// The ending is in the record and nothing is lost; only its position is odd.
+// Closing it needs the terminal flush to join handler goroutines that may be
+// parked on a decision, which is the deadlock the close phases exist to avoid.
+func (s *session) decideAsk(a acp.Arrival, token TurnToken, req AskRequest) (AskRecord, func(acp.ReplyDisposition)) {
+	ctx := s.askCall(a)
+	if ctx.Err() != nil {
+		rec := s.asks.AnsweredEarly(token, req, AskCancelled, AskByCall)
+		s.flushAsks()
+		return rec, s.reportedBy(rec.ID)
+	}
+	parked, err := s.asks.Open(ctx, token, req)
+	if err != nil {
+		return AskRecord{}, nil
+	}
+	s.flushAsks()
+	rec := parked.Wait()
+	s.flushAsks()
+	return rec, askReported(parked)
+}
+
+// askCall is the context an ask opened for a is watched on: the request's own,
+// and the session's when the arrival carries none (decideAsk). The session's is
+// the backstop it has always been — Close resolves every parked ask before it
+// fires — and a future harness Gate's Ask brings a real per-call context of its
+// own through the same argument.
+func (s *session) askCall(a acp.Arrival) context.Context {
+	if a.Call != nil {
+		return a.Call
+	}
+	return s.askCtx
+}
+
+// automaticAsk records a resolution craze's own policy made and waits for the
+// outbox, so the opening and its ending are both in the record before the text
+// the agent writes once it has been answered.
+func (s *session) automaticAsk(token TurnToken, req AskRequest, a AskAnswer) AskRecord {
+	rec := s.asks.Automatic(token, req, a)
+	s.flushAsks()
+	return rec
+}
+
+// staleAsk records a request whose own turn is over, as one self-contained
+// ending with no opening, and waits for the outbox for the same reason every
+// other handler path does.
+func (s *session) staleAsk(req AskRequest) AskRecord {
+	rec := s.asks.AnsweredEarly(TurnToken{}, req, AskTurnEnded, AskByTurn)
+	s.flushAsks()
+	return rec
+}
+
+// flushAsks waits for everything the registry has enqueued so far. It runs on a
+// provider handler goroutine or on the prompt's, never the primary's reader, and
+// blocks exactly as an emit from the same goroutine blocks today — **the
+// session's own done is what ends it**, as it ends an emit (emitCtx), so a
+// Close that waits for one of those goroutines can never be waiting for a
+// barrier only its own last phase could free.
+func (s *session) flushAsks() { _ = s.log.Flush(context.Background(), s.done) }
+
+// askReported is the Replied hook for a parked ask: what became of the reply
+// carrying its decision, recorded against THIS ask and not against its id,
+// because a reply that comes back late must not land on whatever holds that id
+// now (Ask.Report).
+func askReported(a *Ask) func(acp.ReplyDisposition) {
+	return func(d acp.ReplyDisposition) { a.Report(askReport(d)) }
+}
+
+// reportedBy is askReported for a record with no handle: an automatic
+// resolution, whose id was minted and is never reused.
+func (s *session) reportedBy(id string) func(acp.ReplyDisposition) {
+	return func(d acp.ReplyDisposition) { s.asks.Report(id, askReport(d)) }
+}
+
+// askReport is one ACP disposition as the registry records it. Both hooks read
+// it the same way, so what a reply's fate means is said once.
+func askReport(d acp.ReplyDisposition) AskReport {
+	return AskReport{Delivered: d.Delivered, Lost: d.Lost}
+}
+
+// permissionBody, questionBody and planBody are the three openings, built once
+// and shared by the handlers and by the early-answer path, so a request that
+// never raised a card is recorded exactly as one that did. The id is the
+// registry's to fill in.
+func permissionBody(req acp.PermissionRequest) *PermissionEvent {
+	opts := make([]PermissionOption, 0, len(req.Options))
+	for _, o := range req.Options {
+		opts = append(opts, PermissionOption{
+			OptionID: o.OptionID,
+			Name:     sanitizeText(o.Name),
+			Kind:     o.Kind,
+		})
+	}
+	return &PermissionEvent{Tool: sanitizeText(req.ToolCall.Title), Options: opts}
+}
+
+func questionBody(req acp.AskQuestionRequest) *QuestionEvent {
+	return &QuestionEvent{Title: sanitizeText(req.Title), Questions: questionsFromRequest(req)}
+}
+
+func planBody(req acp.CreatePlanRequest) *PlanEvent {
+	return &PlanEvent{
 		Name:     sanitizeText(req.DisplayName()),
 		Overview: sanitizeText(req.Overview),
 		Plan:     sanitizeText(req.PlanText()),
 		Todos:    todosFromWire(req.Todos),
 	}
-	if !s.opts.Interactive {
-		ev.ID = s.nextID(askPlan)
-		ev.Auto = true
-		ev.Accepted = true
-		s.emit(Event{Type: EventPlan, Plan: ev})
-		return acp.PlanDecision{Accept: true}
-	}
-	id, ch, ok := s.park(askPlan, turn, pendingAsk{})
-	if !ok {
-		return acp.PlanDecision{Cancelled: true}
-	}
-	ev.ID = id
-	if !s.emitParked(id, Event{Type: EventPlan, Plan: ev}) {
-		return acp.PlanDecision{Cancelled: true}
-	}
-	return awaitDecision(s, ch, acp.PlanDecision{Cancelled: true})
 }
 
-// park registers a blocking request and returns its craze-local id (perm-N,
-// ask-N, plan-N — never a JSON-RPC id or a toolCallId) and decision channel.
-// turn is the turn the request arrived in, handed to the handler by the client.
+// permissionDecision, askDecision and planDecision are one ask's record as the
+// decision the agent is waiting for. Only an answer and an automatic
+// resolution decide anything; every other ending — cancelled, its turn's end,
+// the close — is the cancelled outcome, which is what the agent was always told
+// then.
+func permissionDecision(rec AskRecord) acp.PermissionDecision {
+	switch rec.Outcome {
+	case AskAnswered, AskAutomatic:
+		return acp.PermissionDecision{OptionID: rec.Answer.OptionID}
+	default:
+		return acp.PermissionDecision{Cancelled: true}
+	}
+}
+
+func askDecision(rec AskRecord) acp.AskDecision {
+	switch rec.Outcome {
+	case AskAnswered, AskAutomatic:
+		if rec.Answer.Skip {
+			return acp.AskDecision{Skip: true}
+		}
+		return acp.AskDecision{Answers: rec.Answer.Answers}
+	default:
+		return acp.AskDecision{Cancelled: true}
+	}
+}
+
+func planDecision(rec AskRecord) acp.PlanDecision {
+	switch rec.Outcome {
+	case AskAnswered, AskAutomatic:
+		return acp.PlanDecision{Accept: rec.Answer.Accept}
+	default:
+		return acp.PlanDecision{Cancelled: true}
+	}
+}
+
+// turnActiveLocked reports whether the turn a request arrived in is the one the
+// client is running *with a prompt of craze's own still in flight for it*;
+// callers hold s.mu. With no client — before Start, and in the unit tests —
+// there is one turn and it is turn 0. The lock order is session then client:
+// the client answers this without taking any lock the session holds, and it
+// never calls back into the session under its own.
 //
-// It refuses once the request's own turn is over, the current turn has been
-// cancelled, or the session closed. The turn check is what a handler goroutine
-// the runtime delayed past the end of its turn runs into: cancelWaiting only
-// drains what is already in the map, so without it a late request would park
-// into the turn now running and raise a card for a plan that turn never made —
-// and without the cancelled-turn check a request arriving while a cancel is in
-// flight would park forever and leave the agent waiting on a reply that never
-// comes.
-func (s *session) park(kind string, turn int, p pendingAsk) (string, chan any, bool) {
-	ch := make(chan any, 1)
-	p.kind = kind
-	p.turn = turn
-	p.decide = ch
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || !s.turnLiveLocked(turn) || (s.turn > 0 && s.cancelledTurn == s.turn) {
-		return "", nil, false
-	}
-	s.seq[kind]++
-	id := fmt.Sprintf("%s-%d", kind, s.seq[kind])
-	s.waiting[id] = p
-	return id, ch, true
-}
-
-// emitParked publishes a card event only while its request is still parked and
-// still belongs to the turn it arrived in. A cancel that landed between the
-// park and the emit has already answered the request and taken it out of
-// waiting, so emitting anyway would raise a card for a request nobody can
-// answer any more; a turn that ended in that same window would put the card in
-// front of the next turn, which is not the turn that asked for it. The waiting
-// check takes the same lock cancelWaiting does; it cannot be held across the
-// emit, because emit blocks on the event channel and the reader of that channel
-// is the goroutine that answers cards.
-func (s *session) emitParked(id string, ev Event) bool {
-	s.mu.Lock()
-	p, live := s.waiting[id]
-	if live && !s.turnLiveLocked(p.turn) {
-		// Nobody will ever answer it now, so it does not stay in the map: the
-		// handler replies cancelled on its way out instead.
-		delete(s.waiting, id)
-		live = false
-	}
-	s.mu.Unlock()
-	if !live {
-		return false
-	}
-	s.emit(ev)
-	return true
-}
-
-// turnLiveLocked reports whether the turn a request arrived in is still the one
-// the client is running; callers hold s.mu. With no client — before Start, and
-// in the unit tests — there is one turn and it is turn 0. The lock order is
-// session then client: the client answers this without taking any lock the
-// session holds, and it never calls back into the session under its own.
-func (s *session) turnLiveLocked(turn int) bool {
+// It is one atomic ACP check and not a counter comparison, because counter
+// equality alone cannot say whose token s.token is (acp.Client.TurnActive):
+// between one prompt returning and the next entering
+// PromptBlocks the counter still names the old turn while the session already
+// holds the new one's.
+func (s *session) turnActiveLocked(turn int) bool {
 	if s.client == nil {
 		return turn == 0
 	}
-	return s.client.TurnLive(turn)
-}
-
-func (s *session) nextID(kind string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq[kind]++
-	return fmt.Sprintf("%s-%d", kind, s.seq[kind])
-}
-
-// awaitDecision blocks for the UI's answer, falling back to onClose once the
-// session is closing or if another kind's decision arrived.
-func awaitDecision[T any](s *session, ch chan any, onClose T) T {
-	select {
-	case v := <-ch:
-		if d, ok := v.(T); ok {
-			return d
-		}
-		return onClose
-	case <-s.done:
-		return onClose
-	}
+	return s.client.TurnActive(turn)
 }
 
 // onUpdateTodos merges the request into Snapshot.Todos and returns the merged

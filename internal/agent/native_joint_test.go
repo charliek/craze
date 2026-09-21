@@ -252,6 +252,46 @@ func TestNativeCloseEndsATurnFullOfToolPublishers(t *testing.T) {
 	}
 }
 
+// TestNativeCloseReturnsWithATurnsFlushBlockedOnTheOutbox is review r17's
+// finding 1, as the reviewer scheduled it: the primary is full and its reader
+// has stopped, an event of a component above the seam is still in the outbox
+// with the drainer blocked on its send, and a turn ends — reaching the flush
+// every session owes before its terminal event (plan 021 §3.6).
+//
+// Only the log's own Close frees that drainer, and Close waits for the turn's
+// continuation (rel) BEFORE it closes the log, so a flush that could not escape
+// would be a Close waiting on a goroutine waiting on that same Close. It escapes
+// on the session's done, exactly as the terminal emit behind it does, so Close
+// returns.
+func TestNativeCloseReturnsWithATurnsFlushBlockedOnTheOutbox(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.session(Options{})
+	// Set before Start, so nothing is publishing while the field is written.
+	parked := make(chan uint64, 1)
+	var once sync.Once
+	s.log.hooks = &logHooks{flushParked: func(target uint64) { once.Do(func() { parked <- target }) }}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	fillPrimary(t, s.log)
+	// One event from above the seam, stuck: the drainer is inside the boundary
+	// offering it to a primary nobody will read again.
+	s.log.Enqueue(textEvent("from above the seam"))
+
+	// No step is queued, so the model fails the moment it is asked: the turn
+	// publishes nothing and goes straight to the flush it owes.
+	out := startPrompt(s, "go")
+	if target := await(t, parked, "the turn's flush to park on the outbox"); target == 0 {
+		t.Fatal("the flush parked for nothing")
+	}
+
+	within(t, "Close", func() { _ = s.Close() })
+	if got := await(t, out, "the prompt"); got.err == nil {
+		t.Fatalf("the prompt returned %+v, want the failure its model gave it", got.res)
+	}
+}
+
 // TestNativeInterjectIsJournaledWhateverBecameOfIt is R7's interject leg,
 // reachable now that H2's PR 4 gave the native session a real Interject.
 // Whatever the turn state does with the text — takes it, refuses it, or has

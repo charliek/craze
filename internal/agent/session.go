@@ -86,6 +86,13 @@ const (
 	// withdrawn before it was sent, and a prompt the session refused. No
 	// session emits it: the engine, above this seam, is its one author.
 	EventTurn EventType = "turn"
+	// EventAsk is one ask's ending (plan 021 §3.6): a permission, question or
+	// plan answered, cancelled, ended with its turn, closed, or decided by
+	// craze's own approval policy. The openings keep the three kinds they
+	// always had (EventPermission, EventQuestion, EventPlan); this is the
+	// ending every one of them now gets, from the ask registry
+	// (AskRegistry, asks.go), which is its one author.
+	EventAsk EventType = "ask"
 )
 
 // ReplayInfo is one end of the session/load replay bracket.
@@ -390,6 +397,11 @@ type Event struct {
 	Replayed bool
 	// Turn is set on EventTurn: one phase of one engine-driven turn.
 	Turn *TurnInfo
+	// Ask is set on EventAsk: how one ask ended (plan 021 §3.6). It carries
+	// the opening itself when no opening was ever published — a permission
+	// craze's policy allowed, a request the provider had already answered, one
+	// the log had no room to raise — so such an ending is self-contained.
+	Ask *AskUpdate
 	// State is set on an EventMeta the engine or the session authored to say
 	// which sections of the shared state changed, each in full (plan 021
 	// §3.8). It is what makes a meta event carry its news rather than mean
@@ -549,6 +561,42 @@ type PlanEvent struct {
 	Accepted bool
 }
 
+// AskLabel is one ask as a status line names it: `permission <tool>`,
+// `question`, `plan <name>`. It is the header the TUI's own card draws
+// (internal/tui's permissionView and planCardView), and therefore what a host
+// publishes as the reason a session is blocked (host.Derive's CardLabel).
+//
+// It lives here because both readers need it and neither may import the other:
+// the engine merges it into State.HeadAsk so a session with no TUI publishes
+// the same label, and the TUI derives it from the card it is drawing. A
+// question's own `1/2` counter is deliberately left out — a host shows one
+// reason, not the card's progress through it — and nothing here sanitises,
+// because both callers sanitise what they render.
+func AskLabel(kind AskKind, body AskBody) string {
+	switch kind {
+	case AskQuestion:
+		return "question"
+	case AskPlan:
+		name := ""
+		if body.Plan != nil {
+			name = body.Plan.Name
+		}
+		if strings.TrimSpace(name) == "" {
+			name = "plan"
+		}
+		return "plan " + name
+	default:
+		tool := ""
+		if body.Permission != nil {
+			tool = body.Permission.Tool
+		}
+		return "permission " + tool
+	}
+}
+
+// Label is this ask's AskLabel.
+func (r AskRecord) Label() string { return AskLabel(r.Kind, r.Body) }
+
 type Result struct {
 	StopReason string
 	// Unanswered is text the turn accepted mid-run and could not answer, in
@@ -587,6 +635,13 @@ type Options struct {
 	// UI can answer them; headless callers leave it false and craze
 	// auto-answers.
 	Interactive bool
+	// Approval is what the session does with each kind of ask (plan 021 §3.6,
+	// SD-26): park it for whoever is attached, or answer it itself. nil — what
+	// every caller that has not been given one passes — derives exactly
+	// today's behaviour from Force and Interactive, so approval policy and
+	// frontend presence stop being the same fact without any caller changing
+	// what it does (EffectiveApproval, asks.go).
+	Approval *ApprovalPolicy
 	// LoadSessionID resumes an existing agent session by id — session/load
 	// instead of session/new. The agent replays the whole transcript before
 	// the call returns, bracketed by EventReplay; a load that fails fails
@@ -700,9 +755,6 @@ type Session interface {
 	// Interject merges text into the running turn without cancelling it.
 	// Only grok can: everything else returns ErrUnsupported before the wire.
 	Interject(ctx context.Context, text string) error
-	AnswerPermission(id, optionID string) error
-	AnswerQuestion(id string, answers map[string][]string, skip bool) error
-	AnswerPlan(id string, accept bool) error
 	SetModel(ctx context.Context, modelID string) error
 	SetMode(ctx context.Context, modeID string) error
 	SetConfig(ctx context.Context, id, value string) error

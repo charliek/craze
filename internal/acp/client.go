@@ -57,11 +57,12 @@ type Client struct {
 	// records the turn it arrived in, so a handler that starts late can tell
 	// that the turn it belongs to is over.
 	turn            int
-	permHandler     func(turn int, req PermissionRequest) PermissionDecision
-	askHandler      func(turn int, req AskQuestionRequest) AskDecision
-	planHandler     func(turn int, req CreatePlanRequest) PlanDecision
+	permHandler     func(a Arrival, req PermissionRequest) PermissionDecision
+	askHandler      func(a Arrival, req AskQuestionRequest) AskDecision
+	planHandler     func(a Arrival, req CreatePlanRequest) PlanDecision
 	todosHandler    func(UpdateTodosRequest) []TodoItem
 	taskHandler     func(TaskRequest)
+	earlyHandler    func(EarlyAnswer)
 	onUpdate        func(SessionNotification)
 	subagentHandler func(SubagentNotification)
 	pendingUpdates  []SessionNotification
@@ -80,13 +81,50 @@ type Client struct {
 // pendingReq is one blocking agent→client request. decide carries the kind's
 // own decision type (PermissionDecision, AskDecision, PlanDecision); replied
 // makes sure cancel, close and the handler between them answer exactly once.
-// turn is the turn the read loop registered it in.
+// turn and inTurn are the request's Arrival as the read loop recorded it, and
+// params is the request as it was decoded, kept for the path that answers one
+// without ever running its handler (EarlyAnswer). All three are written before
+// the request is published to c.incoming and never afterwards.
 type pendingReq struct {
-	id      json.RawMessage
-	method  string
-	turn    int
+	id     json.RawMessage
+	method string
+	turn   int
+	// inTurn says a prompt of craze's own was in flight when this request was
+	// registered. It is read in the same c.mu section as turn, because the two
+	// change together and only together do they say which turn — if any — this
+	// request belongs to (Arrival).
+	inTurn  bool
+	params  RequestParams
 	decide  chan any
 	replied bool
+	// repliedBy is who wrote the reply, under incomingMu with replied itself:
+	// one of the repliedBy constants. It is what tells a cancel's answer from a
+	// close's, for the early-answer reason and for a lost reply's Lost alike.
+	repliedBy string
+	// ctx is the request's own lifetime and gone ends it (Arrival.Call). It is
+	// ended in the same incomingMu section that records a reply written by
+	// anything but this request's handler, and again by runIncoming when the
+	// handler returns. A handler hands it to whatever parks its decision, so a
+	// request the client has already answered cannot leave an ask parked behind
+	// it.
+	ctx  context.Context
+	gone context.CancelFunc
+}
+
+// Who answered a blocking request, on pendingReq.repliedBy. The first three
+// spell the ReplyLost / EarlyAnswerReason value they become when another
+// reply loses to them.
+const (
+	repliedByCancel  = ReplyLostCancelled
+	repliedByClose   = ReplyLostClosed
+	repliedByStale   = string(EarlyStaleTurn)
+	repliedByHandler = "handler"
+)
+
+// arrival is the request's Arrival: both halves of "which turn did this come
+// from", as the read loop recorded them, and the request's own lifetime.
+func (in *pendingReq) arrival() Arrival {
+	return Arrival{Turn: in.turn, InTurn: in.inTurn, Call: in.ctx}
 }
 
 type promptResult struct {
@@ -142,9 +180,10 @@ func (c *Client) PromptInFlight() bool {
 }
 
 // SetPermissionHandler installs a session/request_permission handler. Every
-// blocking handler is handed the turn its request arrived in, so anything it
+// blocking handler is handed its request's Arrival — the turn counter it came
+// in on and whether a prompt of craze's own was running then — so anything it
 // puts on screen can be dropped once that turn is over (see TurnLive).
-func (c *Client) SetPermissionHandler(h func(turn int, req PermissionRequest) PermissionDecision) {
+func (c *Client) SetPermissionHandler(h func(a Arrival, req PermissionRequest) PermissionDecision) {
 	c.mu.Lock()
 	c.permHandler = h
 	c.mu.Unlock()
@@ -152,7 +191,7 @@ func (c *Client) SetPermissionHandler(h func(turn int, req PermissionRequest) Pe
 
 // SetAskHandler installs a cursor/ask_question handler. Without one the client
 // auto-answers with each question's first option.
-func (c *Client) SetAskHandler(h func(turn int, req AskQuestionRequest) AskDecision) {
+func (c *Client) SetAskHandler(h func(a Arrival, req AskQuestionRequest) AskDecision) {
 	c.mu.Lock()
 	c.askHandler = h
 	c.mu.Unlock()
@@ -160,9 +199,24 @@ func (c *Client) SetAskHandler(h func(turn int, req AskQuestionRequest) AskDecis
 
 // SetPlanHandler installs a cursor/create_plan handler. Without one the client
 // auto-accepts.
-func (c *Client) SetPlanHandler(h func(turn int, req CreatePlanRequest) PlanDecision) {
+func (c *Client) SetPlanHandler(h func(a Arrival, req CreatePlanRequest) PlanDecision) {
 	c.mu.Lock()
 	c.planHandler = h
+	c.mu.Unlock()
+}
+
+// SetEarlyAnswerHandler installs the handler for a blocking request the client
+// answered before any handler of its own ran — a cancel or a close that got
+// there first, or a turn that was over by the time the handler goroutine was
+// scheduled. Without one nothing changes: those requests are answered exactly
+// as they always were and nobody is told.
+//
+// It runs on the request's own handler goroutine, never the read loop, after
+// the client's reply has been written or skipped and with no client lock held,
+// exactly once per such request and never for a request whose handler ran.
+func (c *Client) SetEarlyAnswerHandler(h func(EarlyAnswer)) {
+	c.mu.Lock()
+	c.earlyHandler = h
 	c.mu.Unlock()
 }
 
@@ -579,7 +633,7 @@ func (c *Client) Held() HeldRequests {
 // ever — and tells the agent to stop the turn. Both steps write, and so both can
 // block.
 func (c *Client) CancelHeld(ctx context.Context, held HeldRequests) error {
-	c.completeCancelled(held.reqs)
+	c.completeCancelled(held.reqs, repliedByCancel)
 	sid := c.SessionID()
 	if sid == "" {
 		return nil
@@ -692,7 +746,7 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid permission request")
 			return
 		}
-		c.dispatch(msg, func(in *pendingReq) { c.handlePermission(in, req) })
+		c.dispatch(msg, RequestParams{Permission: &req}, func(in *pendingReq) { c.handlePermission(in, req) })
 	case MethodCursorAskQuestion:
 		if d == DialectGrok {
 			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -703,7 +757,7 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid cursor/ask_question params")
 			return
 		}
-		c.dispatch(msg, func(in *pendingReq) { c.handleAskQuestion(in, req) })
+		c.dispatch(msg, RequestParams{Ask: &req}, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodCursorCreatePlan:
 		if d == DialectGrok {
 			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -714,7 +768,7 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid cursor/create_plan params")
 			return
 		}
-		c.dispatch(msg, func(in *pendingReq) { c.handleCreatePlan(in, req) })
+		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
 	case MethodGrokAskUserQuestion, MethodGrokAskUserQuestionWrapped:
 		if d != DialectGrok {
 			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -725,7 +779,7 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid x.ai/ask_user_question params")
 			return
 		}
-		c.dispatch(msg, func(in *pendingReq) { c.handleAskQuestion(in, req) })
+		c.dispatch(msg, RequestParams{Ask: &req}, func(in *pendingReq) { c.handleAskQuestion(in, req) })
 	case MethodGrokExitPlanMode, MethodGrokExitPlanModeWrapped:
 		if d != DialectGrok {
 			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -736,7 +790,7 @@ func (c *Client) onRequest(msg *Message) {
 			c.replyInvalidParams(msg.ID, "invalid x.ai/exit_plan_mode params")
 			return
 		}
-		c.dispatch(msg, func(in *pendingReq) { c.handleCreatePlan(in, req) })
+		c.dispatch(msg, RequestParams{Plan: &req}, func(in *pendingReq) { c.handleCreatePlan(in, req) })
 	case MethodCursorUpdateTodos:
 		if d == DialectGrok {
 			_ = c.conn.ReplyErr(msg.ID, MethodNotFound(msg.Method))
@@ -754,20 +808,34 @@ func (c *Client) onRequest(msg *Message) {
 	}
 }
 
-// dispatch registers a blocking request, then runs its handler off the read
-// loop so the connection keeps draining while the user decides.
-func (c *Client) dispatch(msg *Message, run func(*pendingReq)) {
-	in := c.register(msg)
+// dispatch registers a blocking request with the parameters just decoded from
+// it, then runs its handler off the read loop so the connection keeps draining
+// while the user decides. The typed request is registered rather than left to
+// the run closure alone, because the early-answer path never calls that closure
+// and still has to say what was asked.
+func (c *Client) dispatch(msg *Message, params RequestParams, run func(*pendingReq)) {
+	in := c.register(msg, params)
 	go c.runIncoming(in, run)
 }
 
-// register records a blocking request on the read loop, stamped with the turn
-// it arrived in.
-func (c *Client) register(msg *Message) *pendingReq {
+// register records a blocking request on the read loop, stamped with the
+// Arrival it came in on and carrying its decoded parameters.
+//
+// Both halves of the arrival are read in ONE c.mu section, the same section
+// PromptBlocks changes them both in, because a request registered a moment
+// apart from a prompt starting or ending belongs to a different turn and only
+// the pair says which (Arrival).
+//
+// The request's own context is made here, before it is published to c.incoming,
+// so whatever answers it first — a cancel racing the handler's very first
+// instruction included — finds something to end (Arrival.Call). It is a child
+// of Background and costs no goroutine; runIncoming ends it on every path.
+func (c *Client) register(msg *Message, params RequestParams) *pendingReq {
 	c.mu.Lock()
-	turn := c.turn
+	turn, inTurn := c.turn, c.inPrompt
 	c.mu.Unlock()
-	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, decide: make(chan any, 1)}
+	in := &pendingReq{id: msg.ID, method: msg.Method, turn: turn, inTurn: inTurn, params: params, decide: make(chan any, 1)}
+	in.ctx, in.gone = context.WithCancel(context.Background())
 	key := idKey(msg.ID)
 	c.incomingMu.Lock()
 	c.incoming[key] = in
@@ -783,13 +851,46 @@ func (c *Client) register(msg *Message) *pendingReq {
 // into the turn now running. The request is answered cancelled instead — for an
 // already-answered one that is a no-op, and for the rest it is the reply the
 // agent is still waiting for.
+//
+// Nothing above the client would otherwise hear that such a request existed, so
+// this is also where the early-answer handler is told about it.
 func (c *Client) runIncoming(in *pendingReq, run func(*pendingReq)) {
+	// The request's own context ends with its goroutine, whichever way that
+	// goes: the handler has returned by then, so nothing it parked is waiting
+	// on this any more, and a context nobody ends is a leak of the little the
+	// cancel tree holds (Arrival.Call).
+	defer in.gone()
 	defer c.dropIncoming(idKey(in.id))
 	if !c.liveIncoming(in) {
-		c.replyIncoming(in, cancelledResult(c.Dialect(), in.method))
+		disp := c.replyIncomingBy(in, cancelledResult(c.Dialect(), in.method), repliedByStale)
+		c.reportEarlyAnswer(in, disp)
 		return
 	}
 	run(in)
+}
+
+// reportEarlyAnswer hands the early-answer handler one request answered before
+// any handler of the client's ran. The reason is read off the reply that was
+// actually written: a cancel's or a close's answer that got there first says so
+// through the disposition, and anything else — this path's own cancelled reply,
+// or a write that failed — means nothing had answered it and the stale turn is
+// why its handler never ran. The handler is read under c.mu and called without
+// it, on this request's own handler goroutine.
+func (c *Client) reportEarlyAnswer(in *pendingReq, disp ReplyDisposition) {
+	c.mu.Lock()
+	h := c.earlyHandler
+	c.mu.Unlock()
+	if h == nil {
+		return
+	}
+	reason := EarlyStaleTurn
+	switch disp.Lost {
+	case ReplyLostCancelled:
+		reason = EarlyCancelled
+	case ReplyLostClosed:
+		reason = EarlyClosed
+	}
+	h(EarlyAnswer{Reason: reason, Turn: in.turn, InTurn: in.inTurn, Params: in.params})
 }
 
 // liveIncoming reports whether a registered request still deserves its handler:
@@ -807,10 +908,35 @@ func (c *Client) liveIncoming(in *pendingReq) bool {
 // TurnLive reports whether turn is still the one the client is running. A
 // blocking request is handed the turn it arrived in, so its handler can ask
 // this before it publishes anything for a turn that has since ended.
+//
+// It says nothing about whether a prompt is in flight, which is why it cannot
+// decide who owns the turn a caller has installed state for: see TurnActive.
 func (c *Client) TurnLive(turn int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return turn == c.turn
+}
+
+// TurnActive reports whether turn is the one the client is running **and a
+// prompt of craze's own is in flight for it**. Both halves are read in one
+// c.mu section, the same section PromptBlocks changes them both in, because
+// separately they cannot identify the owner of a turn's state.
+//
+// The schedule that needs it: turn N returns, so c.inPrompt is cleared while
+// the counter stays at N; the session then installs turn N+1's state —
+// s.inPrompt and the registry token — and only *afterwards* enters
+// PromptBlocks, which bumps the counter to N+1. In that window a delayed
+// handler for a request of turn N sees a counter that still says N and a
+// session that says "a prompt is in flight", and TurnLive alone would hand it
+// N+1's token: the old request would raise a card against the successor's
+// lifecycle. Requiring an active prompt closes it, because the session installs
+// its token before c.inPrompt can become true for that turn and clears it only
+// after c.inPrompt is false again — so "turn N is active" is true only while
+// the installed token is N's.
+func (c *Client) TurnActive(turn int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inPrompt && turn == c.turn
 }
 
 func (c *Client) onNotify(msg *Message) {
@@ -1086,7 +1212,7 @@ func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {
 	h := c.permHandler
 	c.mu.Unlock()
 	if h != nil {
-		c.finishPermission(in, req, h(in.turn, req))
+		c.finishPermission(in, req, h(in.arrival(), req))
 		return
 	}
 	select {
@@ -1099,11 +1225,31 @@ func (c *Client) handlePermission(in *pendingReq, req PermissionRequest) {
 }
 
 func (c *Client) finishPermission(in *pendingReq, req PermissionRequest, dec PermissionDecision) {
-	if dec.Cancelled || !optionIDInRequest(req.Options, dec.OptionID) {
-		c.replyIncoming(in, cancelledOutcome())
-		return
+	disp := c.replyPermission(in, req, dec)
+	if dec.Replied != nil {
+		dec.Replied(disp)
 	}
-	c.replyIncoming(in, selectedOutcome(dec.OptionID))
+}
+
+// replyPermission writes the one reply a permission decision earns and reports
+// what became of the decision, which is not always what became of the reply: a
+// deliberate cancel is delivered as the cancelled outcome, and that is delivery
+// of that decision, while an option id the request never offered is replaced by
+// the same outcome, and that is the decision being lost. A reply that never
+// reached the agent at all says so instead — it is the more immediate truth,
+// and the option id stopped mattering the moment nobody heard it.
+func (c *Client) replyPermission(in *pendingReq, req PermissionRequest, dec PermissionDecision) ReplyDisposition {
+	if dec.Cancelled {
+		return c.replyIncoming(in, cancelledOutcome())
+	}
+	if !optionIDInRequest(req.Options, dec.OptionID) {
+		disp := c.replyIncoming(in, cancelledOutcome())
+		if disp.Delivered {
+			return ReplyDisposition{Lost: ReplyLostInvalidOption}
+		}
+		return disp
+	}
+	return c.replyIncoming(in, selectedOutcome(dec.OptionID))
 }
 
 func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
@@ -1112,7 +1258,11 @@ func (c *Client) handleAskQuestion(in *pendingReq, req AskQuestionRequest) {
 	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		c.replyIncoming(in, askOutcome(d, req, h(in.turn, req)))
+		dec := h(in.arrival(), req)
+		disp := c.replyIncoming(in, askOutcome(d, req, dec))
+		if dec.Replied != nil {
+			dec.Replied(disp)
+		}
 		return
 	}
 	select {
@@ -1129,7 +1279,11 @@ func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
 	d := c.dialect
 	c.mu.Unlock()
 	if h != nil {
-		c.replyIncoming(in, planOutcome(d, h(in.turn, req)))
+		dec := h(in.arrival(), req)
+		disp := c.replyIncoming(in, planOutcome(d, dec))
+		if dec.Replied != nil {
+			dec.Replied(disp)
+		}
 		return
 	}
 	select {
@@ -1140,15 +1294,42 @@ func (c *Client) handleCreatePlan(in *pendingReq, req CreatePlanRequest) {
 	}
 }
 
-func (c *Client) replyIncoming(in *pendingReq, result any) {
+// replyIncoming answers a blocking request on behalf of its handler, and says
+// what became of that reply.
+func (c *Client) replyIncoming(in *pendingReq, result any) ReplyDisposition {
+	return c.replyIncomingBy(in, result, repliedByHandler)
+}
+
+// replyIncomingBy is replyIncoming naming who is answering, which is recorded
+// with the answer itself so that whatever loses this race can be told why.
+//
+// **A reply written by anything but the request's own handler ends the
+// request's context**, in the same section that records who answered, so a
+// handler still deciding — or already parked on a decision — learns at once
+// that the answer was not going to be its own (Arrival.Call). Ending it is a
+// leaf operation: it closes a channel under the context's own mutex and calls
+// nothing of this package's.
+//
+// The write error is still dropped, as it always was — there is nobody to hand
+// it to and nothing to do about it — but it is no longer silent: a caller that
+// wants to know learns that its decision never left.
+func (c *Client) replyIncomingBy(in *pendingReq, result any, by string) ReplyDisposition {
 	c.incomingMu.Lock()
 	if in.replied {
+		lost := in.repliedBy
 		c.incomingMu.Unlock()
-		return
+		return ReplyDisposition{Lost: lost}
 	}
 	in.replied = true
+	in.repliedBy = by
+	if by != repliedByHandler && in.gone != nil {
+		in.gone()
+	}
 	c.incomingMu.Unlock()
-	_ = c.conn.Reply(in.id, result)
+	if err := c.conn.Reply(in.id, result); err != nil {
+		return ReplyDisposition{Lost: ReplyLostWriteFailed}
+	}
+	return ReplyDisposition{Delivered: true}
 }
 
 func (c *Client) dropIncoming(key string) {
@@ -1158,14 +1339,17 @@ func (c *Client) dropIncoming(key string) {
 }
 
 // completeIncomingCancelled answers every blocking request exactly once, with
-// the cancelled decision its own kind understands.
+// the cancelled decision its own kind understands. It is Close's, and answers
+// as the close it is.
 func (c *Client) completeIncomingCancelled() {
-	c.completeCancelled(c.Held().reqs)
+	c.completeCancelled(c.Held().reqs, repliedByClose)
 }
 
-// completeCancelled answers pending cancelled. A request already answered is
-// left alone: replyIncoming answers each one once.
-func (c *Client) completeCancelled(pending []*pendingReq) {
+// completeCancelled answers pending cancelled, recording by as who answered so
+// that a handler whose own reply arrives too late can be told which of the two
+// it lost to. A request already answered is left alone: replyIncomingBy answers
+// each one once.
+func (c *Client) completeCancelled(pending []*pendingReq, by string) {
 	d := c.Dialect()
 	for _, in := range pending {
 		if in.decide != nil {
@@ -1174,7 +1358,7 @@ func (c *Client) completeCancelled(pending []*pendingReq) {
 			default:
 			}
 		}
-		c.replyIncoming(in, cancelledResult(d, in.method))
+		c.replyIncomingBy(in, cancelledResult(d, in.method), by)
 	}
 }
 

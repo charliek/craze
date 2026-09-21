@@ -322,19 +322,34 @@ func (sc *scriptedTurn) run(ctx context.Context, s *Stub) (agent.Result, error) 
 		s.mu.Unlock()
 		return agent.Result{}, sc.refuse
 	}
+	// The registry's name for this turn, as the Stub's own run mints it: OUTSIDE
+	// s.mu, because s.mu and the registry's are never nested (plan 021 §3.3),
+	// and before the locked section that installs it — which is the window a
+	// cancel can land in, and the one this decorator has to be able to reproduce.
+	// A token nothing is ever parked against costs one number and resolves
+	// nothing.
+	token := s.beginAskTurn()
 	s.mu.Lock()
 	if s.cancelling {
-		// Cancelled between the claim and here: withdraw, as the Stub does.
+		// Cancelled between the claim and here: withdraw, as the Stub does. The
+		// deferred EndTurn below never runs for this path, so the token is
+		// retired here: an ask can no longer reach it.
 		s.claimed, s.cancelling = false, false
 		s.mu.Unlock()
+		s.asks.EndTurn(token)
 		return agent.Result{}, agent.ErrPromptCancelled
 	}
+	// A card a test emits while this turn runs is parked against it, and the
+	// turn's end — or a cancel — takes exactly those away.
 	s.inPrompt = true
+	s.token = token
 	s.doneEmitted = false
 	s.mu.Unlock()
 	defer func() {
+		s.asks.EndTurn(token)
 		s.mu.Lock()
 		s.claimed, s.cancelling, s.inPrompt = false, false, false
+		s.token = agent.TurnToken{}
 		s.mu.Unlock()
 	}()
 	if sc.opened != nil {
@@ -357,24 +372,27 @@ func (sc *scriptedTurn) run(ctx context.Context, s *Stub) (agent.Result, error) 
 	}
 	switch {
 	case cancelled:
-		sc.end(ctx, s, agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
+		sc.end(ctx, s, token, agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
 		return agent.Result{StopReason: stopCancelled}, nil
 	case sc.fail != nil:
-		sc.end(ctx, s, agent.Event{Type: agent.EventError, Err: sc.fail})
+		sc.end(ctx, s, token, agent.Event{Type: agent.EventError, Err: sc.fail})
 		return agent.Result{}, sc.fail
 	default:
 		stop := sc.stop
 		if stop == "" {
 			stop = "end_turn"
 		}
-		sc.end(ctx, s, agent.Event{Type: agent.EventDone, StopReason: stop})
+		sc.end(ctx, s, token, agent.Event{Type: agent.EventDone, StopReason: stop})
 		return agent.Result{StopReason: stop}, nil
 	}
 }
 
 // end publishes the turn's one terminal event and, when the script asked for it,
-// holds the continuation there — after the ending, before the return.
-func (sc *scriptedTurn) end(ctx context.Context, s *Stub, ev agent.Event) {
+// holds the continuation there — after the ending, before the return. The turn
+// ends for the registry first, so a card it still held ends before the turn's
+// own ending says the turn is over (plan 021 §3.6).
+func (sc *scriptedTurn) end(ctx context.Context, s *Stub, token agent.TurnToken, ev agent.Event) {
+	s.endAskTurn(token)
 	s.markDone()
 	s.Emit(ev)
 	if sc.ended != nil {

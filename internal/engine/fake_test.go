@@ -24,6 +24,7 @@ import (
 // Every wait in it is a barrier a test closes. Nothing here sleeps.
 type fakeSession struct {
 	log  *agent.EventLog
+	asks *agent.AskRegistry
 	done chan struct{}
 
 	mu         sync.Mutex
@@ -100,8 +101,10 @@ func (sc *script) release() { sc.once.Do(func() { close(sc.hold) }) }
 
 func newFake(t *testing.T, o agent.EventLogOptions) *fakeSession {
 	t.Helper()
+	log := agent.NewEventLog(o)
 	s := &fakeSession{
-		log:       agent.NewEventLog(o),
+		log:       log,
+		asks:      agent.NewAskRegistry(log, nil),
 		done:      make(chan struct{}),
 		cancelSig: make(chan struct{}, 1),
 		clock:     func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
@@ -338,18 +341,34 @@ var errFakeUnused = errors.New("fakeSession: not part of the driver's seam")
 
 // The rest of the seam is not the driver's yet: asks and settings move later.
 func (s *fakeSession) Interject(context.Context, string) error { return agent.ErrUnsupported }
-func (s *fakeSession) AnswerPermission(string, string) error   { return errFakeUnused }
-func (s *fakeSession) AnswerQuestion(string, map[string][]string, bool) error {
-	return errFakeUnused
+
+// Asks is the session's agent.AskSource, which the engine refuses a session
+// without (plan 021 §3.6). The driver's schedules are about turns, so it is
+// empty unless a test parks one with openAsk.
+func (s *fakeSession) Asks() *agent.AskRegistry { return s.asks }
+
+// openAsk parks one ask against no turn, which is what makes a cancel with no
+// turn of craze's own something the engine accepts (§3.7).
+func (s *fakeSession) openAsk(t *testing.T) *agent.Ask {
+	t.Helper()
+	a, err := s.asks.Open(context.Background(), agent.TurnToken{}, agent.AskRequest{
+		Kind: agent.AskPermission,
+		Body: agent.AskBody{Permission: &agent.PermissionEvent{Tool: "Shell"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
-func (s *fakeSession) AnswerPlan(string, bool) error                   { return errFakeUnused }
+
 func (s *fakeSession) SetModel(context.Context, string) error          { return errFakeUnused }
 func (s *fakeSession) SetMode(context.Context, string) error           { return errFakeUnused }
 func (s *fakeSession) SetConfig(context.Context, string, string) error { return errFakeUnused }
 func (s *fakeSession) SetTitle(string)                                 {}
 
 var (
-	_ agent.Session  = (*fakeSession)(nil)
-	_ agent.LogOwner = (*fakeSession)(nil)
-	_ agent.Clocked  = (*fakeSession)(nil)
+	_ agent.Session   = (*fakeSession)(nil)
+	_ agent.LogOwner  = (*fakeSession)(nil)
+	_ agent.Clocked   = (*fakeSession)(nil)
+	_ agent.AskSource = (*fakeSession)(nil)
 )

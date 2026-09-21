@@ -234,7 +234,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 		c := spawnScript(t, "permission")
 		up := attachUpdates(c)
 		var used string
-		c.SetPermissionHandler(func(_ int, req PermissionRequest) PermissionDecision {
+		c.SetPermissionHandler(func(_ Arrival, req PermissionRequest) PermissionDecision {
 			id, ok := PickKind(req.Options, KindAllowOnce)
 			if !ok {
 				t.Error("no allow_once in request")
@@ -262,7 +262,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 	t.Run("reject", func(t *testing.T) {
 		c := spawnScript(t, "permission")
 		up := attachUpdates(c)
-		c.SetPermissionHandler(func(_ int, req PermissionRequest) PermissionDecision {
+		c.SetPermissionHandler(func(_ Arrival, req PermissionRequest) PermissionDecision {
 			id, ok := PickKind(req.Options, KindRejectOnce)
 			if !ok {
 				t.Error("no reject_once")
@@ -286,7 +286,7 @@ func TestPermissionAllowAndReject(t *testing.T) {
 
 func TestPermissionNeverInventsOptionID(t *testing.T) {
 	c := spawnScript(t, "permission")
-	c.SetPermissionHandler(func(int, PermissionRequest) PermissionDecision {
+	c.SetPermissionHandler(func(Arrival, PermissionRequest) PermissionDecision {
 		return PermissionDecision{OptionID: "invented-not-in-request"}
 	})
 	handshake(t, c)
@@ -560,7 +560,7 @@ func TestPermissionRepliesUseRequestOptionID(t *testing.T) {
 	})
 	srv.Start()
 
-	client.SetPermissionHandler(func(_ int, req PermissionRequest) PermissionDecision {
+	client.SetPermissionHandler(func(_ Arrival, req PermissionRequest) PermissionDecision {
 		id, ok := PickYoloAllow(req.Options)
 		if !ok {
 			return PermissionDecision{Cancelled: true}
@@ -1644,7 +1644,7 @@ func TestCloseDoesNotWaitToAnswerOnAWedgedStdin(t *testing.T) {
 	p.setSession("s1")
 	asked := make(chan struct{}, 1)
 	release := make(chan struct{})
-	p.client.SetAskHandler(func(int, AskQuestionRequest) AskDecision {
+	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision {
 		asked <- struct{}{}
 		<-release
 		return AskDecision{Skip: true}

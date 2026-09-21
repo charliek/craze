@@ -79,6 +79,12 @@ func startScript(t *testing.T, script string, force bool) *session {
 func collect(t *testing.T, s Session) *eventLog {
 	t.Helper()
 	log := &eventLog{}
+	// The session's own log, when it has one: what the exactly-once check of
+	// waitAsk counts, because this collector only ever knows what its goroutine
+	// has got round to appending.
+	if owner, ok := s.(LogOwner); ok {
+		log.log = owner.EventLog()
+	}
 	ctx := t.Context()
 	go func() {
 		for {
@@ -97,6 +103,10 @@ func collect(t *testing.T, s Session) *eventLog {
 }
 
 type eventLog struct {
+	// log is the session's own event log, when collect could find one: the
+	// record itself, as against this collector's view of it.
+	log *EventLog
+
 	mu   sync.Mutex
 	list []Event
 }
@@ -268,7 +278,7 @@ func TestPromptModePermissionAllowAndReject(t *testing.T) {
 		if ev.Permission == nil || len(ev.Permission.Options) == 0 {
 			t.Fatal("missing permission options")
 		}
-		if err := s.AnswerPermission(ev.Permission.ID, "opt-once"); err != nil {
+		if err := answerAsk(s, ev.Permission.ID, AskAnswer{OptionID: "opt-once"}); err != nil {
 			t.Fatal(err)
 		}
 		if err := <-errCh; err != nil {
@@ -286,7 +296,7 @@ func TestPromptModePermissionAllowAndReject(t *testing.T) {
 			errCh <- err
 		}()
 		ev := log.waitType(t, EventPermission)
-		if err := s.AnswerPermission(ev.Permission.ID, "opt-reject"); err != nil {
+		if err := answerAsk(s, ev.Permission.ID, AskAnswer{OptionID: "opt-reject"}); err != nil {
 			t.Fatal(err)
 		}
 		if err := <-errCh; err != nil {

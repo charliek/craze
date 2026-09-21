@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -396,6 +397,9 @@ type PermissionRequest struct {
 type PermissionDecision struct {
 	Cancelled bool
 	OptionID  string
+	// Replied, when set, is called exactly once with what became of the reply
+	// this decision asked for: see ReplyDisposition.
+	Replied func(ReplyDisposition)
 }
 
 type AskQuestionRequest struct {
@@ -422,6 +426,9 @@ type AskDecision struct {
 	Cancelled bool
 	Skip      bool
 	Answers   map[string][]string
+	// Replied, when set, is called exactly once with what became of the reply
+	// this decision asked for: see ReplyDisposition.
+	Replied func(ReplyDisposition)
 }
 
 // CreatePlanRequest is parsed leniently: cursor sends name or title, and plan
@@ -464,7 +471,140 @@ func (r CreatePlanRequest) PlanText() string {
 type PlanDecision struct {
 	Cancelled bool
 	Accept    bool
+	// Replied, when set, is called exactly once with what became of the reply
+	// this decision asked for: see ReplyDisposition.
+	Replied func(ReplyDisposition)
 }
+
+// ReplyDisposition is what became of one reply to a blocking agent request.
+// The client answers each request exactly once, and the cancelled answer a
+// cancel or a close writes while a handler is still deciding can win that race,
+// so a handler that took a decision has no way of its own to know whether the
+// agent ever heard it (plan 021 §3.6). Each decision type
+// carries an optional Replied hook that is handed one of these.
+type ReplyDisposition struct {
+	// Delivered says this reply was the one written to the agent, and the
+	// write returned no error.
+	Delivered bool
+	// Lost says why the decision never reached the agent, and is empty when it
+	// did. The reasons are the ReplyLost constants.
+	Lost string
+}
+
+// Why a decision never reached the agent, on ReplyDisposition.Lost.
+const (
+	// ReplyLostCancelled: a Cancel or CancelHeld had already answered the
+	// request cancelled.
+	ReplyLostCancelled = "cancelled"
+	// ReplyLostClosed: Close had already answered the request cancelled.
+	ReplyLostClosed = "closed"
+	// ReplyLostWriteFailed: this reply was the one to write and the write
+	// failed. The error itself is dropped, exactly as it always has been; only
+	// the fact is reported.
+	ReplyLostWriteFailed = "write_failed"
+	// ReplyLostInvalidOption: the decision named an option the request never
+	// offered, so the client replaced it with the cancelled outcome. The reply
+	// reached the agent; the decision did not.
+	ReplyLostInvalidOption = "invalid_option"
+)
+
+// RequestParams is one blocking agent request as it was decoded: exactly one
+// field is set, and the method it arrived on says which. It travels with the
+// registered request so a path that answers one without ever running its
+// handler can still say what was asked (EarlyAnswer).
+type RequestParams struct {
+	Permission *PermissionRequest
+	Ask        *AskQuestionRequest
+	Plan       *CreatePlanRequest
+}
+
+// Arrival is when a blocking agent request reached craze, captured on the read
+// loop in the one critical section that registers it, and handed to whoever
+// answers it — a handler, or the early-answer hook.
+//
+// Both fields are needed and neither implies the other, because the counter
+// alone cannot tell a retired turn's request from one that belongs to no turn
+// at all. PromptBlocks bumps Turn when it accepts a prompt and clears InTurn
+// when that prompt returns, without touching the counter: so a request
+// registered *during* turn 1 whose handler goroutine the runtime delayed past
+// the end of turn 1, and a request registered *between* turns after turn 1
+// finished, both carry Turn == 1 and both pass TurnLive. Only InTurn tells them
+// apart, and they deserve opposite answers — the first belongs to a turn that
+// is over, the second to no turn of craze's own and may still be answered.
+type Arrival struct {
+	// Turn is the client's turn counter at the moment the request was
+	// registered: what TurnLive compares against, and what decides whether a
+	// later prompt has since made this request stale.
+	Turn int
+	// InTurn says a prompt of craze's own was in flight when the request was
+	// registered, so the request belongs to that turn. False means it arrived
+	// between craze's turns, or during a turn the agent started itself.
+	InTurn bool
+	// Call is this request's own lifetime, as a context: it ends the moment
+	// something other than this handler answers the request — a Cancel, a
+	// CancelHeld, a Close, the stale-turn reply — and again when the handler
+	// returns. It is what a handler hands to whatever parks a decision on its
+	// behalf, so an ask nobody can answer any more resolves at once instead of
+	// waiting for a turn's end that may never come (plan 021 §3.6).
+	//
+	// Nothing about the wire changes with it: the client answers each request
+	// exactly once, as it always did, and this only tells the handler that the
+	// answer was not its own.
+	//
+	// It is nil on an Arrival built by hand — a test calling a handler
+	// directly, or EarlyAnswer.Arrival, where the request is answered already —
+	// and a caller treats nil as "no signal of its own".
+	Call context.Context
+}
+
+// Ended reports whether a.Call has ended: the request has been answered by
+// something other than its handler, so anything the handler is still deciding
+// is moot. An Arrival with no context of its own is never ended.
+func (a Arrival) Ended() bool {
+	if a.Call == nil {
+		return false
+	}
+	return a.Call.Err() != nil
+}
+
+// EarlyAnswerReason says why a blocking request was answered before any handler
+// of the client's ran.
+type EarlyAnswerReason string
+
+const (
+	// EarlyCancelled: a Cancel or CancelHeld answered it where it lay.
+	EarlyCancelled EarlyAnswerReason = "cancelled"
+	// EarlyClosed: Close answered it on the way down.
+	EarlyClosed EarlyAnswerReason = "closed"
+	// EarlyStaleTurn: nothing had answered it, but the turn it arrived in was
+	// over by the time its handler goroutine ran, so the client answered it
+	// cancelled itself rather than let a card be raised for a turn that has
+	// ended.
+	EarlyStaleTurn EarlyAnswerReason = "stale_turn"
+)
+
+// EarlyAnswer is one blocking request the client answered by itself, before any
+// handler ran. Nothing above the client sees such a request otherwise — no
+// handler runs, so nothing parks and nothing is published — and the agent's
+// question then leaves no trace at all (plan 021 §2.3, §3.6).
+// The decoded parameters travel with it so the session can write one
+// self-contained record of what was asked and what became of it, without ever
+// raising a card nobody could answer.
+type EarlyAnswer struct {
+	// Reason is who answered it: see the EarlyAnswerReason constants.
+	Reason EarlyAnswerReason
+	// Turn is the turn the request arrived in (Client.TurnLive), and InTurn
+	// whether a prompt of craze's own was running then: together they are the
+	// request's Arrival, spelled out here so that a caller reading Turn alone
+	// keeps compiling.
+	Turn   int
+	InTurn bool
+	// Params is the request itself, as decoded.
+	Params RequestParams
+}
+
+// Arrival is the request's arrival as one value.
+func (a EarlyAnswer) Arrival() Arrival { return Arrival{Turn: a.Turn, InTurn: a.InTurn} }
 
 // TodoItem is one entry of a cursor/update_todos list, and of a plan's todos.
 type TodoItem struct {

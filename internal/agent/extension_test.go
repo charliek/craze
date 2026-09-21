@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -41,6 +43,65 @@ func (e *eventLog) waitQuestion(t *testing.T) *QuestionEvent {
 	t.Helper()
 	ev := e.waitType(t, EventQuestion)
 	return ev.Question
+}
+
+// waitAsk is the one ending an ask gets, and it fails if there are two: "every
+// ask ends exactly once" is the property, not "an ending arrives".
+//
+// The count is taken **after a barrier and off the record**, never at the first
+// sighting (review r17): a second ending already enqueued behind the first would
+// otherwise escape a check that stopped the moment it saw one, and this
+// collector's own list is only as fresh as its goroutine. So the caller joins
+// its producers — its handler has answered, its prompt has returned — this
+// flushes everything enqueued before now, and then it counts what the log has
+// committed. With no log to consult it falls back to the collector's list,
+// which is what a session that is not a LogOwner can offer.
+func (e *eventLog) waitAsk(t *testing.T, id string) *AskUpdate {
+	t.Helper()
+	waitFor(t, "the ending of "+id, func() bool { return len(e.askEndings(id)) > 0 })
+	if e.log == nil {
+		got := e.askEndings(id)
+		if len(got) != 1 {
+			t.Fatalf("%s ended %d times: %+v", id, len(got), got)
+		}
+		return got[0]
+	}
+	if err := e.log.Flush(context.Background(), nil); err != nil && !errors.Is(err, ErrLogClosing) {
+		t.Fatalf("flushing before counting %s's endings: %v", id, err)
+	}
+	got := askEndingsInLog(t, e.log, id)
+	if len(got) != 1 {
+		t.Fatalf("%s ended %d times, want exactly once: %+v", id, len(got), got)
+	}
+	return got[0]
+}
+
+// askEndingsInLog is every ending for id the log has committed, whichever
+// goroutine produced it and whether or not a collector has caught up with it.
+func askEndingsInLog(t *testing.T, l *EventLog, id string) []*AskUpdate {
+	t.Helper()
+	var out []*AskUpdate
+	for _, rec := range ringRecords(t, l) {
+		ev, err := rec.Event()
+		if err != nil {
+			t.Fatalf("decoding record %d: %v", rec.Seq, err)
+		}
+		if ev.Type == EventAsk && ev.Ask != nil && ev.Ask.ID == id {
+			out = append(out, ev.Ask)
+		}
+	}
+	return out
+}
+
+// askEndings is every ending for id that has been published so far.
+func (e *eventLog) askEndings(id string) []*AskUpdate {
+	var out []*AskUpdate
+	for _, ev := range e.snapshot() {
+		if ev.Type == EventAsk && ev.Ask != nil && ev.Ask.ID == id {
+			out = append(out, ev.Ask)
+		}
+	}
+	return out
 }
 
 func TestTodosBothEnvelopes(t *testing.T) {
@@ -299,6 +360,30 @@ func TestHeadlessAutoAnswersLogged(t *testing.T) {
 	})
 }
 
+// answerAsk is how a client answers now: through the registry, with the
+// command that caused it (plan 021 §3.6). The tests below go straight to the
+// registry rather than through engine.Control, because internal/agent cannot
+// import the engine and Control.Answer is this call and nothing else.
+func answerAsk(s *session, id string, a AskAnswer) error {
+	_, err := s.asks.Answer("", id, a)
+	return err
+}
+
+// newAskSession is newSession with the Close every test that parks an ask owes
+// it: the registry publishes through the log's outbox, and only the log's Close
+// joins the goroutine that drains it.
+func newAskSession(t *testing.T, opts Options) *session {
+	t.Helper()
+	s := newSession(opts)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// inTurn is the Arrival of a request that reached craze inside a turn of its
+// own. With no client of its own a session reads "there is one turn and it is
+// turn 0" (turnLiveLocked), which is what a handler called directly is.
+func inTurn() acp.Arrival { return acp.Arrival{InTurn: true} }
+
 func TestInteractiveQuestionAnswered(t *testing.T) {
 	s := startScriptOpts(t, "ask", Options{Force: true, Interactive: true})
 	log := collect(t, s)
@@ -311,15 +396,19 @@ func TestInteractiveQuestionAnswered(t *testing.T) {
 	if q.Auto || q.ID != "ask-1" {
 		t.Fatalf("question %+v", q)
 	}
-	if err := s.AnswerQuestion(q.ID, map[string][]string{"q1": {"opt-b"}, "q2": {"opt-y", "opt-z"}}, false); err != nil {
+	if err := answerAsk(s, q.ID, AskAnswer{Answers: map[string][]string{"q1": {"opt-b"}, "q2": {"opt-y", "opt-z"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	log.waitTexts(t, "asked:answered:q1=opt-b;q2=opt-y,opt-z")
-	if err := s.AnswerQuestion(q.ID, nil, false); err == nil {
-		t.Fatal("answering twice must fail")
+	if err := answerAsk(s, q.ID, AskAnswer{Skip: true}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("answering twice must fail with ErrAlreadyResolved, got %v", err)
+	}
+	// One ending, and it is the answer.
+	if u := log.waitAsk(t, q.ID); u.Outcome != AskAnswered || u.By != AskByClient {
+		t.Fatalf("ending %+v", u)
 	}
 }
 
@@ -335,15 +424,18 @@ func TestInteractivePlanRejected(t *testing.T) {
 	if ev.Plan.Auto || ev.Plan.ID != "plan-1" {
 		t.Fatalf("plan %+v", ev.Plan)
 	}
-	if err := s.AnswerPlan(ev.Plan.ID, false); err != nil {
+	if err := answerAsk(s, ev.Plan.ID, AskAnswer{Reject: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	log.waitTexts(t, "planned:rejected")
-	if err := s.AnswerPlan(ev.Plan.ID, true); err == nil {
-		t.Fatal("answering twice must fail")
+	if err := answerAsk(s, ev.Plan.ID, AskAnswer{Accept: true}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("answering twice must fail with ErrAlreadyResolved, got %v", err)
+	}
+	if u := log.waitAsk(t, ev.Plan.ID); u.Outcome != AskAnswered || u.Accepted {
+		t.Fatalf("ending %+v", u)
 	}
 }
 
@@ -352,14 +444,22 @@ func TestAnswerWrongKindRejected(t *testing.T) {
 	log := collect(t, s)
 	go func() { _, _ = s.Prompt(t.Context(), "q") }()
 	q := log.waitQuestion(t)
-	if err := s.AnswerPlan(q.ID, true); err == nil {
-		t.Fatal("a question id must not answer a plan")
+	if err := answerAsk(s, q.ID, AskAnswer{Accept: true}); !errors.Is(err, ErrBadAnswer) {
+		t.Fatalf("a question id must not answer a plan, got %v", err)
 	}
-	if err := s.AnswerPermission(q.ID, "opt-a"); err == nil {
-		t.Fatal("a question id must not answer a permission")
+	if err := answerAsk(s, q.ID, AskAnswer{OptionID: "opt-a"}); !errors.Is(err, ErrBadAnswer) {
+		t.Fatalf("a question id must not answer a permission, got %v", err)
 	}
-	if err := s.AnswerQuestion(q.ID, map[string][]string{"q1": {"opt-a"}}, true); err != nil {
+	// Both were refused with nothing emitted and the ask still open, which is
+	// what the valid answer below proves: today's AnswerPermission cancelled
+	// the request before it validated (plan 021 §4's first recorded change).
+	if err := answerAsk(s, q.ID, AskAnswer{Skip: true}); err != nil {
 		t.Fatal(err)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventAsk && ev.Ask.ID == q.ID && ev.Ask.Outcome != AskAnswered {
+			t.Fatalf("a refused answer ended the ask: %+v", ev.Ask)
+		}
 	}
 }
 
@@ -379,8 +479,11 @@ func TestCancelAnswersBlockedQuestionOnce(t *testing.T) {
 	if res.StopReason != "cancelled" {
 		t.Fatalf("stop %q", res.StopReason)
 	}
-	if err := s.AnswerQuestion(q.ID, nil, false); err == nil {
-		t.Fatal("cancel must have consumed the pending question")
+	if err := answerAsk(s, q.ID, AskAnswer{Skip: true}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("cancel must have consumed the pending question, got %v", err)
+	}
+	if u := log.waitAsk(t, q.ID); u.Outcome != AskCancelled || u.By != AskByCancel {
+		t.Fatalf("ending %+v", u)
 	}
 }
 
@@ -414,47 +517,46 @@ func acpTask(id, model, agentID string, ms int) acp.TaskRequest {
 }
 
 func TestCancelWaitingAnswersEachKindWithItsOwnDecision(t *testing.T) {
-	s := newSession(Options{})
-	permID, permCh, okPerm := s.park(askPermission, 0, pendingAsk{})
-	askID, askCh, okAsk := s.park(askQuestion, 0, pendingAsk{})
-	planID, planCh, okPlan := s.park(askPlan, 0, pendingAsk{})
-	if !okPerm || !okAsk || !okPlan {
-		t.Fatal("park refused outside a cancelled turn")
+	s := newAskSession(t, Options{})
+	token := beginTurn(s)
+	perm := openAsk(t, s, token, AskPermission)
+	ask := openAsk(t, s, token, AskQuestion)
+	plan := openAsk(t, s, token, AskPlan)
+	if perm.ID() != "perm-1" || ask.ID() != "ask-1" || plan.ID() != "plan-1" {
+		t.Fatalf("ids %q %q %q", perm.ID(), ask.ID(), plan.ID())
 	}
-	if permID != "perm-1" || askID != "ask-1" || planID != "plan-1" {
-		t.Fatalf("ids %q %q %q", permID, askID, planID)
+	s.asks.CancelTurn(token)
+	// Each waiter wakes with its own kind's cancelled decision, which is what
+	// the three decision builders make of a cancelled record.
+	if d := permissionDecision(perm.Wait()); !d.Cancelled {
+		t.Fatalf("permission decision %+v", d)
 	}
-	s.cancelWaiting()
-	if d, ok := (<-permCh).(acp.PermissionDecision); !ok || !d.Cancelled {
-		t.Fatalf("permission decision %v %T", ok, d)
+	if d := askDecision(ask.Wait()); !d.Cancelled {
+		t.Fatalf("question decision %+v", d)
 	}
-	if d, ok := (<-askCh).(acp.AskDecision); !ok || !d.Cancelled {
-		t.Fatalf("question decision %v %T", ok, d)
+	if d := planDecision(plan.Wait()); !d.Cancelled {
+		t.Fatalf("plan decision %+v", d)
 	}
-	if d, ok := (<-planCh).(acp.PlanDecision); !ok || !d.Cancelled {
-		t.Fatalf("plan decision %v %T", ok, d)
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("%d requests still waiting: %+v", len(left), left)
 	}
-	s.mu.Lock()
-	left := len(s.waiting)
-	s.mu.Unlock()
-	if left != 0 {
-		t.Fatalf("%d requests still waiting", left)
-	}
-	if err := s.AnswerPermission(permID, ""); err == nil {
-		t.Fatal("cancel must consume the pending permission")
+	if err := answerAsk(s, perm.ID(), AskAnswer{Cancel: true}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("cancel must consume the pending permission, got %v", err)
 	}
 }
 
 // A second local id per kind keeps its own counter, never a JSON-RPC id.
 func TestLocalIDsAreNumberedPerKind(t *testing.T) {
-	s := newSession(Options{})
-	s.park(askQuestion, 0, pendingAsk{})
-	id, _, _ := s.park(askQuestion, 0, pendingAsk{})
-	if id != "ask-2" {
+	s := newAskSession(t, Options{})
+	token := beginTurn(s)
+	openAsk(t, s, token, AskQuestion)
+	if id := openAsk(t, s, token, AskQuestion).ID(); id != "ask-2" {
 		t.Fatalf("id %q", id)
 	}
-	if got := s.nextID(askPlan); got != "plan-1" {
-		t.Fatalf("id %q", got)
+	// An automatic resolution spends a number of its kind's counter too, as
+	// nextID did for the headless path.
+	if got := s.asks.Automatic(token, AskRequest{Kind: AskPlan, Body: AskBody{Plan: &PlanEvent{}}}, AskAnswer{Accept: true}); got.ID != "plan-1" {
+		t.Fatalf("id %q", got.ID)
 	}
 }
 
@@ -487,12 +589,53 @@ func TestIdenticalOutputAndDiffNotReEmitted(t *testing.T) {
 	}
 }
 
-// beginTurn opens a turn without spawning an agent, so the cancel-window
-// tests can drive park() directly.
-func beginTurn(s *session) {
+// beginTurn opens a turn without spawning an agent: the registry's token and
+// the session bookkeeping prompt() sets around it, so a handler called with an
+// inTurn Arrival parks against this turn exactly as a real one would.
+func beginTurn(s *session) TurnToken {
+	token := s.asks.BeginTurn()
 	s.mu.Lock()
 	s.turn++
+	s.token = token
+	s.inPrompt = true
 	s.mu.Unlock()
+	return token
+}
+
+// endTurn is beginTurn's counterpart: the turn is over for the registry and
+// for the session, as the deferred release leaves it.
+func endTurn(s *session, token TurnToken) {
+	s.mu.Lock()
+	s.inPrompt = false
+	s.token = TurnToken{}
+	s.mu.Unlock()
+	s.asks.EndTurn(token)
+}
+
+// askBody is one ask's opening, minimal but of the right kind.
+func askBody(kind AskKind) AskBody {
+	switch kind {
+	case AskQuestion:
+		return AskBody{Question: &QuestionEvent{Title: "Question"}}
+	case AskPlan:
+		return AskBody{Plan: &PlanEvent{Name: "Plan"}}
+	default:
+		return AskBody{Permission: &PermissionEvent{Tool: "Shell"}}
+	}
+}
+
+// openAsk parks one ask of kind against token and fails if it was refused: a
+// test that means to park has to know that it did.
+func openAsk(t *testing.T, s *session, token TurnToken, kind AskKind) *Ask {
+	t.Helper()
+	a, err := s.asks.Open(s.askCtx, token, AskRequest{Kind: kind, Body: askBody(kind)})
+	if err != nil {
+		t.Fatalf("open %s: %v", kind, err)
+	}
+	if rec := a.Record(); rec.Status != AskOpen {
+		t.Fatalf("open %s was refused: %+v", kind, rec)
+	}
+	return a
 }
 
 func askReq() acp.AskQuestionRequest {
@@ -514,19 +657,19 @@ func TestHandlerArrivingAfterCancelDoesNotPark(t *testing.T) {
 		name string
 		run  func(s *session) bool
 	}{
-		{"question", func(s *session) bool { return s.onAskQuestion(0, askReq()).Cancelled }},
-		{"plan", func(s *session) bool { return s.onCreatePlan(0, acp.CreatePlanRequest{Name: "P"}).Cancelled }},
+		{"question", func(s *session) bool { return s.onAskQuestion(inTurn(), askReq()).Cancelled }},
+		{"plan", func(s *session) bool { return s.onCreatePlan(inTurn(), acp.CreatePlanRequest{Name: "P"}).Cancelled }},
 		{"permission", func(s *session) bool {
-			return s.onPermission(0, acp.PermissionRequest{
+			return s.onPermission(inTurn(), acp.PermissionRequest{
 				Options: []acp.PermissionOption{{OptionID: "yes", Kind: acp.KindAllowOnce}},
 			}).Cancelled
 		}},
 	}
 	for _, k := range kinds {
 		t.Run(k.name, func(t *testing.T) {
-			s := newSession(Options{Interactive: true})
-			beginTurn(s)
-			s.cancelWaiting()
+			s := newAskSession(t, Options{Interactive: true})
+			token := beginTurn(s)
+			s.asks.CancelTurn(token)
 			done := make(chan bool, 1)
 			go func() { done <- k.run(s) }()
 			select {
@@ -537,69 +680,75 @@ func TestHandlerArrivingAfterCancelDoesNotPark(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("handler parked into a cancelled turn")
 			}
-			s.mu.Lock()
-			waiting := len(s.waiting)
-			s.mu.Unlock()
-			if waiting != 0 {
-				t.Fatalf("%d requests parked after cancel", waiting)
+			if left := s.asks.Asks(); len(left) != 0 {
+				t.Fatalf("%d requests parked after cancel: %+v", len(left), left)
 			}
 		})
 	}
 }
 
-// A cancel can land after a request parked and before its card event was
-// published. It has already answered the request and taken it out of waiting,
-// so publishing anyway would put a card on screen that nobody could answer:
-// every pick on it would come back as an unknown request.
+// A request that reaches the registry once its turn has been cancelled raises
+// no card at all: the opening it would have published is never written, and the
+// one self-contained ending — with the body, so the record still says what was
+// asked — is the whole of what it leaves behind. Before the registry this was
+// two steps (park, then emitParked) with a window between them; the check and
+// the insert are one section now, so the window is gone rather than guarded.
 func TestCancelledRequestRaisesNoCard(t *testing.T) {
-	for _, kind := range []string{askPermission, askQuestion, askPlan} {
-		t.Run(kind, func(t *testing.T) {
-			s := newSession(Options{Interactive: true})
-			beginTurn(s)
-			id, _, ok := s.park(kind, 0, pendingAsk{})
-			if !ok {
-				t.Fatal("park refused")
+	for _, kind := range []AskKind{AskPermission, AskQuestion, AskPlan} {
+		t.Run(string(kind), func(t *testing.T) {
+			s := newAskSession(t, Options{Interactive: true})
+			log := collect(t, s)
+			token := beginTurn(s)
+			s.asks.CancelTurn(token)
+
+			a, err := s.asks.Open(s.askCtx, token, AskRequest{Kind: kind, Body: askBody(kind)})
+			if err != nil {
+				t.Fatal(err)
 			}
-			// The whole window, forced open.
-			s.cancelWaiting()
-			if s.emitParked(id, Event{Type: EventQuestion, Question: &QuestionEvent{ID: id}}) {
-				t.Fatal("a request a cancel already answered must not raise a card")
+			rec := a.Wait()
+			if rec.Outcome != AskCancelled || rec.By != AskByCancel {
+				t.Fatalf("a request a cancel already answered must not park: %+v", rec)
 			}
-			select {
-			case ev := <-s.events:
-				t.Fatalf("a cancelled request published %+v", ev)
-			default:
+			u := log.waitAsk(t, rec.ID)
+			if u.Body == nil {
+				t.Fatalf("a refused open owes a self-contained ending: %+v", u)
+			}
+			for _, ev := range log.snapshot() {
+				if ev.Type == EventPermission || ev.Type == EventQuestion || ev.Type == EventPlan {
+					t.Fatalf("a cancelled request published a card: %+v", ev)
+				}
 			}
 
-			// A request that is still parked does publish, so the guard is not
-			// simply "never emit".
-			beginTurn(s)
-			live, _, ok := s.park(kind, 0, pendingAsk{})
-			if !ok {
-				t.Fatal("park refused in a fresh turn")
-			}
-			if !s.emitParked(live, Event{Type: EventQuestion, Question: &QuestionEvent{ID: live}}) {
-				t.Fatal("a live request must publish its card")
-			}
-			select {
-			case <-s.events:
-			default:
-				t.Fatal("nothing was published for a live request")
+			// A request in a fresh turn does park and does publish its card, so
+			// the guard is not simply "never open".
+			next := beginTurn(s)
+			live := openAsk(t, s, next, kind)
+			waitFor(t, "the live card", func() bool {
+				for _, ev := range log.snapshot() {
+					switch ev.Type {
+					case EventPermission:
+						return ev.Permission.ID == live.ID()
+					case EventQuestion:
+						return ev.Question.ID == live.ID()
+					case EventPlan:
+						return ev.Plan.ID == live.ID()
+					}
+				}
+				return false
+			})
+			if got := log.askEndings(live.ID()); len(got) != 0 {
+				t.Fatalf("a live card is not ended: %+v", got)
 			}
 		})
 	}
 }
 
-// A new turn clears the cancel, so the next request parks normally.
+// A new turn is a new token, so the next request parks normally.
 func TestNextTurnParksAgain(t *testing.T) {
-	s := newSession(Options{Interactive: true})
-	beginTurn(s)
-	s.cancelWaiting()
-	beginTurn(s)
-	id, ch, ok := s.park(askQuestion, 0, pendingAsk{})
-	if !ok || id == "" || ch == nil {
-		t.Fatal("park refused in a fresh turn")
-	}
+	s := newAskSession(t, Options{Interactive: true})
+	token := beginTurn(s)
+	s.asks.CancelTurn(token)
+	openAsk(t, s, beginTurn(s), AskQuestion)
 }
 
 // A card belongs to the turn that asked for it. A handler goroutine the runtime
@@ -621,17 +770,13 @@ func TestCardFromAnEndedTurnIsNeverPublished(t *testing.T) {
 	}
 
 	// Turn 0 is the session before that prompt: over, and not the turn running.
-	if _, _, ok := s.park(askPlan, 0, pendingAsk{}); ok {
-		t.Fatal("park must refuse a request whose turn is over")
-	}
-	if dec := s.onCreatePlan(0, acp.CreatePlanRequest{Name: "stale"}); !dec.Cancelled {
+	// It carries InTurn, because that is what a request of a turn looks like,
+	// and the counter is what says the turn has gone.
+	if dec := s.onCreatePlan(acp.Arrival{Turn: 0, InTurn: true}, acp.CreatePlanRequest{Name: "stale"}); !dec.Cancelled {
 		t.Fatal("a handler from an ended turn must answer cancelled")
 	}
-	s.mu.Lock()
-	waiting := len(s.waiting)
-	s.mu.Unlock()
-	if waiting != 0 {
-		t.Fatalf("%d requests parked for an ended turn", waiting)
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("%d requests parked for an ended turn", len(left))
 	}
 	for _, ev := range log.snapshot() {
 		if ev.Type == EventPlan {
@@ -639,39 +784,310 @@ func TestCardFromAnEndedTurnIsNeverPublished(t *testing.T) {
 		}
 	}
 
-	// The turn the prompt above ran in still is the client's turn, so its own
-	// card does publish: the guard is not "never publish".
+	// A request the client's counter still calls turn 1, but which arrived
+	// between craze's turns — the prompt above has returned — belongs to no turn
+	// of craze's own: it parks, publishes its card and is answerable. That is the
+	// guard not being "never publish", and it is the distinction ACP's counter
+	// alone cannot make (acp.Arrival).
 	done := make(chan acp.PlanDecision, 1)
-	go func() { done <- s.onCreatePlan(1, acp.CreatePlanRequest{Name: "live"}) }()
+	go func() {
+		done <- s.onCreatePlan(acp.Arrival{Turn: 1}, acp.CreatePlanRequest{Name: "live"})
+	}()
 	ev := log.waitType(t, EventPlan)
 	if ev.Plan == nil || ev.Plan.Name != "live" {
 		t.Fatalf("published %+v", ev.Plan)
 	}
-	if err := s.AnswerPlan(ev.Plan.ID, false); err != nil {
+	if err := answerAsk(s, ev.Plan.ID, AskAnswer{Reject: true}); err != nil {
 		t.Fatal(err)
 	}
 	if dec := <-done; dec.Cancelled {
-		t.Fatal("a card of the running turn was answered as cancelled")
+		t.Fatal("a card of a live request was answered as cancelled")
 	}
 
-	// The narrow window: parked while the turn was live, emitted after the next
-	// turn had started.
-	id, _, ok := s.park(askPlan, 1, pendingAsk{})
-	if !ok {
-		t.Fatal("park refused for the running turn")
+	// The window the two-step park/emit had: a handler goroutine of turn 1 that
+	// the runtime did not schedule until turn 1 was over. Its Arrival says it
+	// belonged to a turn, and no turn of craze's is open, so it raises no card
+	// at all — and the one ending it owes carries the body.
+	before := len(log.askEndings(""))
+	_ = before
+	if dec := s.onCreatePlan(acp.Arrival{Turn: 1, InTurn: true}, acp.CreatePlanRequest{Name: "late"}); !dec.Cancelled {
+		t.Fatal("a handler whose own turn has ended must answer cancelled")
 	}
-	if _, err := s.Prompt(t.Context(), "two"); err != nil {
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventPlan && ev.Plan.Name == "late" {
+			t.Fatalf("a card whose turn ended must not publish: %+v", ev.Plan)
+		}
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("a request nobody can answer was left parked: %+v", left)
+	}
+}
+
+// Both histories ACP's turn counter cannot tell apart, and the opposite answers
+// they deserve (acp.Arrival; panel r16 finding 3). The counter is the same in
+// each: a prompt returning clears the client's in-turn flag without moving it.
+func TestArrivalTellsARetiredTurnFromNoTurn(t *testing.T) {
+	t.Run("registered during the turn, handled after it", func(t *testing.T) {
+		s := startScriptOpts(t, "echo", Options{Interactive: true})
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "one"); err != nil {
+			t.Fatal(err)
+		}
+		dec := s.onAskQuestion(acp.Arrival{Turn: 1, InTurn: true}, askReq())
+		if !dec.Cancelled {
+			t.Fatalf("a retired turn's request must be cancelled: %+v", dec)
+		}
+		for _, ev := range log.snapshot() {
+			if ev.Type == EventQuestion {
+				t.Fatalf("a retired turn's request raised a card: %+v", ev.Question)
+			}
+		}
+		// A hidden id: no card was raised for it, and at the baseline such a
+		// request never reached the session's counter at all, so it must not
+		// spend the number the next visible question would have had (review
+		// r17, finding 8).
+		u := log.waitAsk(t, "ask-x1")
+		if u.Outcome != AskTurnEnded || u.Body == nil {
+			t.Fatalf("ending %+v", u)
+		}
+	})
+	t.Run("registered between turns", func(t *testing.T) {
+		s := startScriptOpts(t, "echo", Options{Interactive: true})
+		log := collect(t, s)
+		if _, err := s.Prompt(t.Context(), "one"); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan acp.AskDecision, 1)
+		go func() { done <- s.onAskQuestion(acp.Arrival{Turn: 1}, askReq()) }()
+		ev := log.waitType(t, EventQuestion)
+		if ev.Question == nil || ev.Question.ID != "ask-1" {
+			t.Fatalf("published %+v", ev.Question)
+		}
+		if err := answerAsk(s, "ask-1", AskAnswer{Answers: map[string][]string{"q1": {"opt-a"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if dec := <-done; dec.Cancelled {
+			t.Fatalf("a between-turns request must be answerable: %+v", dec)
+		}
+	})
+}
+
+// Review r17, finding 2: the window between a successor's state being installed
+// and ACP's counter moving. Turn 1 returns, so the client clears its in-flight
+// flag without touching the counter; turn 2 then installs s.inPrompt and its
+// registry token and pauses just short of client.PromptBlocks, which is what
+// bumps the counter. A delayed handler for a request of turn 1 is looking at a
+// counter that still says 1 and a session that says a prompt is in flight — and
+// counter equality alone would hand it turn 2's token, so the old request would
+// raise a card answered into the successor's lifecycle.
+//
+// testBeforeWire is exactly that pause, and holdBeforeWire parks the prompt in
+// it: no clock decides when the window is open.
+func TestARetiredTurnsRequestNeverTakesTheSuccessorsToken(t *testing.T) {
+	s := startScriptOpts(t, "echo", Options{Interactive: true})
+	log := collect(t, s)
+	if _, err := s.Prompt(t.Context(), "one"); err != nil {
 		t.Fatal(err)
 	}
-	if s.emitParked(id, Event{Type: EventPlan, Plan: &PlanEvent{ID: id, Name: "late"}}) {
-		t.Fatal("a card whose turn ended before the emit must not publish")
-	}
+
+	seam := holdBeforeWire(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Prompt(t.Context(), "two")
+		done <- err
+	}()
+	seam.parked(t)
+
+	// The window, asserted rather than assumed: the successor's token is
+	// installed, and ACP still calls turn 1 the live one.
 	s.mu.Lock()
-	_, held := s.waiting[id]
+	inPrompt, successor := s.inPrompt, s.token
 	s.mu.Unlock()
-	if held {
-		t.Fatal("a request nobody can answer was left parked")
+	if !inPrompt || successor.NoTurn() {
+		t.Fatalf("the successor's state is not installed yet: inPrompt=%v token=%v", inPrompt, successor)
 	}
+	if !s.clientRef().TurnLive(1) {
+		t.Fatal("the fixture needs ACP's counter still at turn 1")
+	}
+
+	// A handler of turn 1, scheduled at last — inside the window. It runs on a
+	// goroutine of its own so that a version which parked it against the
+	// successor fails with a message rather than hanging the package.
+	handled := make(chan acp.AskDecision, 1)
+	go func() { handled <- s.onAskQuestion(acp.Arrival{Turn: 1, InTurn: true}, askReq()) }()
+	if dec := await(t, handled, "the retired turn's handler"); !dec.Cancelled {
+		t.Fatalf("a retired turn's request must be cancelled: %+v", dec)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventQuestion {
+			t.Fatalf("a retired turn's request raised a card against the successor: %+v", ev.Question)
+		}
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("it parked against the successor's turn: %+v", left)
+	}
+	// One self-contained ending, under a hidden id: nobody was shown it.
+	if u := log.waitAsk(t, "ask-x1"); u.Outcome != AskTurnEnded || u.Body == nil {
+		t.Fatalf("ending %+v", u)
+	}
+
+	seam.letOne(t)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review r17, finding 3: a request ACP has already answered must not leave an
+// ask parked behind it. The handler passed the client's liveness check and then
+// paused; a cancel answered its request where it lay; it resumes and parks a
+// card the agent is no longer waiting on, which no turn's end would ever take
+// away because it belongs to no turn.
+//
+// The request's own context is the signal (acp.Arrival.Call), and these two
+// tests are its two sides: the signal arriving while the ask is parked, and the
+// signal already up when the handler reaches the registry.
+func TestAnAskWhoseRequestIsAnsweredElsewhereEndsAtOnce(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	beginTurn(s)
+	ctx, answered := context.WithCancel(t.Context())
+	defer answered()
+
+	done := make(chan acp.AskDecision, 1)
+	go func() { done <- s.onAskQuestion(acp.Arrival{InTurn: true, Call: ctx}, askReq()) }()
+	// The card is up and the handler is parked on it: that is the barrier.
+	ev := log.waitType(t, EventQuestion)
+
+	// ACP answers the request itself — a Cancel, a CancelHeld, a close — and
+	// ends its context in the same section that records who replied.
+	answered()
+
+	if dec := await(t, done, "the handler to come back"); !dec.Cancelled {
+		t.Fatalf("the handler must answer cancelled: %+v", dec)
+	}
+	if u := log.waitAsk(t, ev.Question.ID); u.Outcome != AskCancelled || u.By != AskByCall {
+		t.Fatalf("ending %+v, want cancelled by the call", u)
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("a request nobody is waiting on was left parked: %+v", left)
+	}
+}
+
+func TestARequestAlreadyAnsweredRaisesNoCardAtAll(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	beginTurn(s)
+	ctx, answered := context.WithCancel(t.Context())
+	answered()
+
+	// On a goroutine of its own, bounded: a version that parked it anyway would
+	// otherwise hang the package rather than fail with a message.
+	handled := make(chan acp.AskDecision, 1)
+	go func() { handled <- s.onAskQuestion(acp.Arrival{InTurn: true, Call: ctx}, askReq()) }()
+	if dec := await(t, handled, "the handler to come back"); !dec.Cancelled {
+		t.Fatalf("the handler must answer cancelled: %+v", dec)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.Type == EventQuestion {
+			t.Fatalf("a request ACP had already answered raised a card: %+v", ev.Question)
+		}
+	}
+	// A hidden id and the body with it: the record says what was asked, and no
+	// card a user might have seen is renumbered by it.
+	u := log.waitAsk(t, "ask-x1")
+	if u.Outcome != AskCancelled || u.By != AskByCall || u.Body == nil {
+		t.Fatalf("ending %+v, want one self-contained cancelled-by-call ending", u)
+	}
+	if left := s.asks.Asks(); len(left) != 0 {
+		t.Fatalf("it parked anyway: %+v", left)
+	}
+}
+
+// The window the translated cancellation test lost (review r17): a cancel
+// landing between admission and delivery. Open succeeded — the ask is parked
+// and its opening enqueued — and the cancel lands before a consumer has seen
+// either. What the consumer then sees is the opening and its cancelled ending,
+// in that order, so a card raised by the first is removed by the second
+// (internal/tui's TestCardEventAfterACancelIsDropped is that half).
+func TestACancelBetweenAdmissionAndDeliveryEndsTheAskInOrder(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	token := beginTurn(s)
+	a := openAsk(t, s, token, AskQuestion)
+	s.asks.CancelTurn(token)
+
+	if rec := a.Wait(); rec.Outcome != AskCancelled || rec.By != AskByCancel {
+		t.Fatalf("record %+v, want cancelled by the cancel", rec)
+	}
+	u := log.waitAsk(t, a.ID())
+	if u.Outcome != AskCancelled || u.By != AskByCancel {
+		t.Fatalf("ending %+v", u)
+	}
+	// The opening was published — it was admitted — and it is ahead of the
+	// ending that takes it away.
+	var order []string
+	for _, ev := range log.snapshot() {
+		switch {
+		case ev.Type == EventQuestion && ev.Question.ID == a.ID():
+			order = append(order, "opening")
+		case ev.Type == EventAsk && ev.Ask.ID == a.ID():
+			order = append(order, "ending")
+		}
+	}
+	if len(order) != 2 || order[0] != "opening" || order[1] != "ending" {
+		t.Fatalf("the consumer saw %v, want the opening then its cancelled ending", order)
+	}
+}
+
+// An ask opened between turns survives a whole turn: no turn's end may take
+// away what belongs to no turn (A-X4).
+func TestAskBetweenTurnsSurvivesATurn(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	a, err := s.asks.Open(s.askCtx, TurnToken{}, AskRequest{Kind: AskQuestion, Body: askBody(AskQuestion)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := beginTurn(s)
+	endTurn(s, token)
+	if got := log.askEndings(a.ID()); len(got) != 0 {
+		t.Fatalf("a turn ended an ask that belonged to no turn: %+v", got)
+	}
+	if err := answerAsk(s, a.ID(), AskAnswer{Skip: true}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := a.Wait(); rec.Outcome != AskAnswered {
+		t.Fatalf("record %+v", rec)
+	}
+}
+
+// A turn that ends with an ask still open ends that ask, and the ending is in
+// the record before the turn's own terminal event (§3.6's flush barrier).
+func TestTurnEndingEndsItsOpenAsk(t *testing.T) {
+	s := newAskSession(t, Options{Interactive: true})
+	log := collect(t, s)
+	token := beginTurn(s)
+	a := openAsk(t, s, token, AskPlan)
+	s.endAskTurn(token)
+	s.emit(Event{Type: EventDone, StopReason: "end_turn"})
+	rec := a.Wait()
+	if rec.Outcome != AskTurnEnded || rec.By != AskByTurn {
+		t.Fatalf("record %+v", rec)
+	}
+	log.waitType(t, EventDone)
+	seen := false
+	for _, ev := range log.snapshot() {
+		switch {
+		case ev.Type == EventAsk && ev.Ask.ID == a.ID():
+			seen = true
+		case ev.Type == EventDone:
+			if !seen {
+				t.Fatal("the turn's done overtook the ask's ending")
+			}
+			return
+		}
+	}
+	t.Fatal("no EventDone")
 }
 
 func TestParkRefusedAfterClose(t *testing.T) {
@@ -679,8 +1095,12 @@ func TestParkRefusedAfterClose(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := s.park(askQuestion, 0, pendingAsk{}); ok {
-		t.Fatal("park must refuse on a closed session")
+	a, err := s.asks.Open(s.askCtx, TurnToken{}, AskRequest{Kind: AskQuestion, Body: askBody(AskQuestion)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := a.Wait(); rec.Status != AskResolved || rec.Outcome != AskClosing {
+		t.Fatalf("open must be refused on a closed session: %+v", rec)
 	}
 }
 

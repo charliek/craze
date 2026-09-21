@@ -302,11 +302,15 @@ type stubSession struct {
 	// live session's order: Close closes the signal first, so an emit blocked
 	// on a primary nobody is reading gives its event up instead of waiting for
 	// a reader that has gone.
-	log     *agent.EventLog
+	log *agent.EventLog
+	// asks is the session's ask registry, as on every session: a permission
+	// event this stub emits is opened in it with the id the test chose, so the
+	// run can answer it through engine.Control exactly as it answers a live
+	// one (plan 021 §3.6).
+	asks    *agent.AskRegistry
 	closed  chan struct{}
 	prompts []string
 	turns   []stubTurn
-	answers []string
 	foreign bool
 	// refuseWhileForeign makes Begin's continuation refuse with ErrForeignTurn
 	// for as long as foreign is set, which is what a live session does with a
@@ -366,6 +370,7 @@ var (
 	_ agent.Session     = (*stubSession)(nil)
 	_ agent.EventSource = (*stubSession)(nil)
 	_ agent.LogOwner    = (*stubSession)(nil)
+	_ agent.AskSource   = (*stubSession)(nil)
 )
 
 // newStubSession builds a stub with its own event log. The log's goroutines
@@ -373,8 +378,10 @@ var (
 // test did or failed to do.
 func newStubSession(t *testing.T, turns ...stubTurn) *stubSession {
 	t.Helper()
+	log := agent.NewEventLog(agent.EventLogOptions{})
 	s := &stubSession{
-		log:    agent.NewEventLog(agent.EventLogOptions{}),
+		log:    log,
+		asks:   agent.NewAskRegistry(log, nil),
 		closed: make(chan struct{}),
 		turns:  turns,
 	}
@@ -516,18 +523,13 @@ func (s *stubSession) engine() *engine.Engine {
 
 func (s *stubSession) Interject(context.Context, string) error { return agent.ErrUnsupported }
 
-func (s *stubSession) AnswerPermission(_, optionID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.answers = append(s.answers, optionID)
-	return nil
-}
+// Asks is the session's agent.AskSource, which the engine refuses a session
+// without (plan 021 §3.6).
+func (s *stubSession) Asks() *agent.AskRegistry { return s.asks }
 
-func (s *stubSession) AnswerQuestion(string, map[string][]string, bool) error { return nil }
-func (s *stubSession) AnswerPlan(string, bool) error                          { return nil }
-func (s *stubSession) SetModel(context.Context, string) error                 { return nil }
-func (s *stubSession) SetMode(context.Context, string) error                  { return nil }
-func (s *stubSession) SetConfig(context.Context, string, string) error        { return nil }
+func (s *stubSession) SetModel(context.Context, string) error          { return nil }
+func (s *stubSession) SetMode(context.Context, string) error           { return nil }
+func (s *stubSession) SetConfig(context.Context, string, string) error { return nil }
 
 // Close is the live session's order: the done signal first, so an emit blocked
 // on a full primary gives its event up, then the log, which joins its own
@@ -574,7 +576,18 @@ func (s *stubSession) Snapshot() agent.Snapshot {
 // goroutine, so an emit that returned has its event in the primary's buffer —
 // and blocking there once that buffer is full, which is the wedge
 // TestTurnKeepsReadingWhileThePromptReturns is about.
+// emit publishes ev, routing a permission opening through the ask registry
+// with the test's own id adopted, exactly as tui.Stub does: the opening is the
+// registry's to publish, and the ask is then answerable through the engine.
 func (s *stubSession) emit(ev agent.Event) {
+	if ev.Type == agent.EventPermission && ev.Permission != nil {
+		_, _ = s.asks.Open(context.Background(), agent.TurnToken{}, agent.AskRequest{
+			ID:   ev.Permission.ID,
+			Kind: agent.AskPermission,
+			Body: agent.AskBody{Permission: ev.Permission},
+		})
+		return
+	}
 	s.log.Publish(context.Background(), s.closed, ev)
 }
 
@@ -591,10 +604,18 @@ func (s *stubSession) sent() []string {
 // barrier a test has for "the reader has got this far through the stream": the
 // answer is recorded under the session's own lock, while everything else a reader
 // does with an event goes to a buffer only the test's own goroutine may read.
-func (s *stubSession) answered() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.answers)
+func (s *stubSession) answered() int { return len(s.answers()) }
+
+// answers is the option id of every ask this session has answered, in the
+// order they were resolved — what AnswerPermission used to record, read back
+// off the registry the asks live in now. A cancelled ask names no option, which
+// is what the deliberate cancel has always been.
+func (s *stubSession) answers() []string {
+	var out []string
+	for _, rec := range s.asks.Resolved() {
+		out = append(out, rec.Answer.OptionID)
+	}
+	return out
 }
 
 // stubOpts is a headless promptOpts writing JSON to stdout, with the
@@ -1678,6 +1699,14 @@ func TestSubagentDrainAnswersPermissions(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := stubOpts(&stdout, &stderr)
 	s := newStubSession(t)
+	// The answer goes through the engine now — the asks are its to hold and its
+	// to answer (plan 021 §3.6) — so the run needs the one it would have built.
+	eng, err := stubEngine(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	o.eng = eng
 	s.subagents = []agent.SubagentInfo{{ID: "sub-1", Status: agent.SubagentCompleted}}
 	// The request has to arrive once the drain is the only reader left: an
 	// event already buffered would be answered by the flush ahead of it and
@@ -1695,14 +1724,12 @@ func TestSubagentDrainAnswersPermissions(t *testing.T) {
 		}})
 	}
 	decisions := []string{"reject-once"}
-	err := o.finishRun(s, &decisions, nil)
+	err = o.finishRun(s, &decisions, nil)
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 1 {
 		t.Fatalf("a refusal during the drain must fail the run: %v", err)
 	}
-	s.mu.Lock()
-	answers := append([]string(nil), s.answers...)
-	s.mu.Unlock()
+	answers := s.answers()
 	if len(answers) != 1 || answers[0] != "opt-reject" {
 		t.Fatalf("the drain must answer the request: %v", answers)
 	}

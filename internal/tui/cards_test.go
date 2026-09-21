@@ -4,12 +4,43 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
 )
+
+// awaitStubEvent reads the Stub's primary until an event of typ arrives. It is
+// how a card test joins the Stub's own turn goroutine without polling: the Stub
+// publishes its terminal event only after it has ended the turn for the
+// registry (Stub.endAskTurn), so receiving one is proof that it has.
+func awaitStubEvent(t *testing.T, stub *Stub, typ agent.EventType) agent.Event {
+	t.Helper()
+	evs := stubEventsUntil(t, stub, typ)
+	return evs[len(evs)-1]
+}
+
+// stubEventsUntil is awaitStubEvent keeping everything it read, in order: what
+// a test asserting on the ORDER the log committed things in needs, and what it
+// then feeds the model.
+func stubEventsUntil(t *testing.T, stub *Stub, typ agent.EventType) []agent.Event {
+	t.Helper()
+	var out []agent.Event
+	deadline := time.After(stubEventWait)
+	for {
+		select {
+		case ev := <-stub.Events():
+			out = append(out, ev)
+			if ev.Type == typ {
+				return out
+			}
+		case <-deadline:
+			t.Fatalf("the Stub published no %s within %v (got %d events)", typ, stubEventWait, len(out))
+		}
+	}
+}
 
 // sizedCards is sized(t) with the stub kept, so a test can read back every
 // answer the UI sent.
@@ -20,11 +51,14 @@ func sizedCards(t *testing.T) (Model, *Stub) {
 	return startStub(t, stub, t.TempDir(), 80, 24), stub
 }
 
-// cardEvent announces a blocking request to the stub and then delivers it to
-// the model, which is the order the live session does it in.
+// cardEvent opens the blocking request in the session's ask registry — which
+// is what Stub.Emit does with a card event, adopting the test's own id — and
+// then delivers that event to the model, which is the order the live session
+// does it in. These tests do not pump the primary into the model, so the
+// opening the registry publishes goes into the log and the model is fed here.
 func cardEvent(t *testing.T, m Model, stub *Stub, ev agent.Event) Model {
 	t.Helper()
-	stub.noteOpen(ev)
+	stub.Emit(ev)
 	tm, _ := m.Update(eventMsg{ev})
 	return tm.(Model)
 }
@@ -496,8 +530,15 @@ func TestAnswerReachesTheSessionBeforeACancelCanClaimIt(t *testing.T) {
 
 // TestCardEventAfterACancelIsDropped is the other half: a card event already
 // on its way when the turn was cancelled must not raise a card, because the
-// session answered that request on the way out and will not park another one
-// for this turn.
+// cancel answered that request on the way out.
+//
+// "Already on its way" is the whole schedule, and it is spelled out rather than
+// implied: each opening is routed through the registry BEFORE the cancel — so
+// the cancel resolves it, and its ending is behind the opening in the log's FIFO
+// — and delivered to the model afterwards. That is what the mask is for and what
+// it may drop (maskDrops); an ask that is still OPEN when its opening arrives is
+// a live card and has a test of its own
+// (TestALiveNoTurnCardIsRaisedThroughTheCancelMask).
 func TestCardEventAfterACancelIsDropped(t *testing.T) {
 	m, stub := sizedCards(t)
 	stub.HangNext()
@@ -505,12 +546,27 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 	tm, _ := m.Update(enter())
 	m = cardEvent(t, tm.(Model), stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 
+	// Three more openings of the running turn, in flight: opened in the
+	// registry, not yet applied to the model.
+	inFlight := make([]agent.Event, 3)
+	for i := range inFlight {
+		q := stubQuestion()
+		q.ID = fmt.Sprintf("ask-%d", i+2)
+		inFlight[i] = agent.Event{Type: agent.EventQuestion, Question: q}
+		stub.Emit(inFlight[i])
+	}
+
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
 	runCmd(cmd)
+	// The cancel answered every one of them where it lay — CancelTurn runs
+	// inside Stub.Cancel, so this is settled by the time the command returns —
+	// and they are what the mask is about.
+	if open := stub.Asks().Asks(); len(open) != 0 {
+		t.Fatalf("the cancel left %+v open: the schedule needs every opening answered", open)
+	}
 
-	late := stubQuestion()
-	late.ID = "ask-2"
-	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: late})
+	tm, _ = m.Update(eventMsg{inFlight[0]})
+	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatalf("an event from a cancelled turn raised a card: %+v", m.cards)
 	}
@@ -518,11 +574,166 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 		t.Fatalf("a ghost card is on screen:\n%s", plainView(m))
 	}
 
-	// The next turn takes cards again.
+	// The mask is keyed to the turn that was cancelled and is NOT taken down by
+	// the session's own ending (panel: astra 10). That event is published
+	// directly and can overtake an opening of the cancelled turn still in the
+	// outbox, so a card arriving after it is still one nobody could answer.
+	cancelled := m.turnID
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
-	m = cardEvent(t, tm.(Model), stub, agent.Event{Type: agent.EventQuestion, Question: late})
+	tm, _ = tm.(Model).Update(eventMsg{inFlight[1]})
+	m = tm.(Model)
+	if m.cardOpen() {
+		t.Fatalf("a done took the mask down: %+v", m.cards)
+	}
+
+	// The engine's ending for that turn does take it down: the session ends the
+	// turn for the registry and waits for the outbox before it publishes its
+	// own ending, and this event is enqueued after that, so everything the
+	// cancelled turn could still raise has been delivered by now.
+	tm, _ = m.Update(endedEvent(cancelled, func(*agent.TurnInfo) {}))
+	m = tm.(Model)
+	if m.cardMask != "" || m.cardMasking {
+		t.Fatalf("the turn's ending should clear its own mask, got %q (up: %v)", m.cardMask, m.cardMasking)
+	}
+	third := stubQuestion()
+	third.ID = "ask-5"
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: third})
 	if !m.cardOpen() {
-		t.Fatal("a card after the turn ended is a real card again")
+		t.Fatal("a card after the cancelled turn has ended is a real card again")
+	}
+}
+
+// Finding 4 of review r17: the mask must never swallow a LIVE ask. A request
+// that arrives after the cancel but before the TUI has applied the turn's
+// ending belongs to no turn of craze's own — the session parks it on the no-turn
+// token, the registry holds it and the agent is waiting on it — so its card has
+// to go up, mask or no mask. The old rule dropped it for good: nothing publishes
+// a second opening, so the agent waited for ever on a card nobody would ever
+// see.
+func TestALiveNoTurnCardIsRaisedThroughTheCancelMask(t *testing.T) {
+	m, stub := sizedCards(t)
+	hung := stub.HangNext()
+	m.input.SetValue("go")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	cancelled := m.turnID
+
+	// The turn has to be OPEN before the cancel, because this test goes on to
+	// wait for its cancelled ending: a cancel that beats the opening withdraws
+	// the prompt instead, and a withdrawn prompt publishes no done at all.
+	select {
+	case <-hung:
+	case <-time.After(stubEventWait):
+		t.Fatalf("the hung turn did not open within %v", stubEventWait)
+	}
+
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	runCmd(cmd)
+	if !m.cardMasking || m.cardMask != cancelled {
+		t.Fatalf("the mask is up and keyed to %q, got %q (up: %v)", cancelled, m.cardMask, m.cardMasking)
+	}
+
+	// The Stub's own terminal event is the barrier: it publishes one only after
+	// it has ended the turn for the registry (endAskTurn), so seeing it is
+	// seeing that a request arriving now belongs to no turn of craze's own. The
+	// engine's ending for the turn has still not reached the model.
+	awaitStubEvent(t, stub, agent.EventDone)
+	live := stubQuestion()
+	live.ID = "ask-2"
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: live})
+	if open := stub.Asks().Asks(); len(open) != 1 || open[0].ID != "ask-2" {
+		t.Fatalf("the fixture needs one live ask, got %+v", open)
+	}
+	if !m.cardOpen() {
+		t.Fatal("the mask swallowed a live ask: nothing would ever raise it again")
+	}
+	if !strings.Contains(plainView(m), "question 1/2") {
+		t.Fatalf("the live card is not on screen:\n%s", plainView(m))
+	}
+}
+
+// The no-turn flash the reviewer noted under "Untested schedules" (r17): a
+// cancel with no turn of craze's own answers every open ask, and an opening
+// already in flight at that Esc used to put its card up for one Update before
+// its own cancelled ending took it away again — long enough for the host's
+// publications and a <wait:card> to see it. The mask covers that cancel now,
+// keyed to the empty turn id, and because it can no longer swallow a live ask
+// it can stay up until the next turn begins.
+func TestANoTurnCancelMasksTheOpeningItAnswered(t *testing.T) {
+	m, stub := sizedCards(t)
+	// A plan card that belongs to no turn of craze's own: nothing is working.
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPlan, Plan: stubPlanEvent()})
+	// A second opening behind it, in flight: through the registry now,
+	// delivered to the model after the cancel.
+	inFlight := stubQuestion()
+	inFlight.ID = "ask-1"
+	opening := agent.Event{Type: agent.EventQuestion, Question: inFlight}
+	stub.Emit(opening)
+
+	// Esc on the plan card cancels: with no turn of craze's own the engine
+	// accepts it because an ask is pending (X9), and it answers every one.
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	runCmd(cmd)
+	if m.status == statusWorking {
+		t.Fatal("the fixture needs a cancel with no turn of craze's own")
+	}
+	if !m.cardMasking || m.cardMask != "" {
+		t.Fatalf("a no-turn cancel masks, keyed to no turn: %q (up: %v)", m.cardMask, m.cardMasking)
+	}
+	if open := stub.Asks().Asks(); len(open) != 0 {
+		t.Fatalf("the cancel left %+v open", open)
+	}
+
+	tm, _ := m.Update(eventMsg{opening})
+	m = tm.(Model)
+	if m.cardOpen() {
+		t.Fatalf("an opening the cancel had already answered flashed a card up: %+v", m.cards)
+	}
+
+	// The mask stays up — nothing but a new turn clears this one — and a LIVE
+	// request that arrives under it is still raised.
+	live := stubQuestion()
+	live.ID = "ask-2"
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: live})
+	if !m.cardMasking {
+		t.Fatal("a no-turn mask has no turn ending to clear it")
+	}
+	if !m.cardOpen() {
+		t.Fatal("a live ask under a never-cleared mask must still be raised")
+	}
+}
+
+// The other half of astra 10: a mask can neither leak onto the next turn nor
+// outlive it. A successor start clears it, so an opening of the NEW turn raises
+// its card even though the ending of the cancelled one never arrived.
+func TestTheCancelMaskDoesNotLeakOntoTheNextTurn(t *testing.T) {
+	m, stub := sizedCards(t)
+	stub.HangNext()
+	m.input.SetValue("one")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	cancelled := m.turnID
+
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	runCmd(cmd)
+	if m.cardMask != cancelled {
+		t.Fatalf("the mask is keyed to the cancelled turn, got %q want %q", m.cardMask, cancelled)
+	}
+
+	// A successor starts — a drained row, another client's prompt — and with it
+	// the mask goes: its openings are nobody's cancel.
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+		ID: "turn-99", Phase: agent.TurnStarted, Text: "two", Origin: agent.TurnOriginDrain,
+	}}})
+	m = tm.(Model)
+	if m.cardMask != "" {
+		t.Fatalf("the mask leaked onto the next turn: %q", m.cardMask)
+	}
+	next := stubQuestion()
+	next.ID = "ask-9"
+	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: next})
+	if !m.cardOpen() {
+		t.Fatal("the next turn's card is a real card")
 	}
 }
 

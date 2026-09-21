@@ -158,10 +158,9 @@ type Model struct {
 	input textarea.Model
 
 	// eng is the engine the model drives its session through: admission, the
-	// message queue and its verbs, send-now, cancel (plan 021 §3.4). sess is the
-	// engine's own session — the raw provider seam — kept only for the three
-	// things that have not moved behind engine.Control yet: the card answers
-	// (AnswerPermission / AnswerQuestion / AnswerPlan, until C8b), the setters
+	// message queue and its verbs, send-now, cancel, and the asks (plan 021
+	// §3.4, §3.6). sess is the engine's own session — the raw provider seam —
+	// kept only for what has not moved behind engine.Control yet: the setters
 	// (SetModel / SetMode / SetConfig / SetTitle, until C10), and nothing else.
 	// writeIndex stays in the model until C12, reading the snapshot the engine's
 	// State already gives it. Engine.Session's own comment carries the same list.
@@ -261,12 +260,35 @@ type Model struct {
 	// cards is the blocking-request queue (§3.11): permission, question and
 	// plan requests in arrival order. Only the head is drawn.
 	//
-	// cardsCancelled holds from a cancel until the turn ends: the session has
-	// answered everything it was holding and will not park another request for
-	// this turn, so a card event still in flight must not raise a card.
-	cards          []card
-	cardsCancelled bool
-	snap           agent.Snapshot
+	// cardMasking says the cancel mask is up: a cancel answered every request
+	// the session was holding, so an opening still in flight must not raise a
+	// card for an ask that cancel has already ended. What it drops is decided
+	// per opening, against the registry (maskDrops) — a live ask is never
+	// swallowed, whatever the mask says — which is what lets the mask cover a
+	// cancel with no turn of craze's own too, and so removes the card flash an
+	// opening in flight at that Esc used to leave.
+	//
+	// cardMask is the turn it is **keyed to** for clearing, the engine turn id
+	// (plan 021, panel astra 10): it cannot leak onto the next turn, because
+	// beginTurn clears it, and it cannot outlive its own, because that turn's
+	// ending — which the log orders behind every opening and ending of the turn
+	// — clears it too. A cancel with no turn of craze's own keys it to the empty
+	// turn id, and then the next beginTurn is what clears it.
+	//
+	// askEchoes are the causes of answers this model sent whose endings it has
+	// not seen yet: their effect was applied in the Update that asked for them,
+	// so the events are its own echoes (applyAskEnded).
+	//
+	// hiddenRetry are answers to asks the config shows no card for that the
+	// engine refused for want of room (answerHidden), and hiddenRetryLive says
+	// the one beat they are waiting on is in flight (armHiddenRetry).
+	cards           []card
+	cardMask        string
+	cardMasking     bool
+	askEchoes       []string
+	hiddenRetry     []hiddenAnswer
+	hiddenRetryLive bool
+	snap            agent.Snapshot
 	// queue is the engine's message queue, in send order: refreshSnap and
 	// refreshQueue fill it from Control.State().Queue, which is where the
 	// queue lives now that it has left the provider seam (plan 021 §3.5).
@@ -961,6 +983,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if mouse := next.queueMouseCmd(); mouse != nil {
 		cmd = tea.Batch(cmd, mouse)
 	}
+	// A hidden answer the outbox refused for room is retried from here for the
+	// same reason: it is the one place every transition passes through, and the
+	// retry must not depend on another event ever arriving (armHiddenRetry).
+	if retry := next.armHiddenRetry(); retry != nil {
+		cmd = tea.Batch(cmd, retry)
+	}
 	// The tick chain is batched last, so a test can run the handler's own
 	// command without waiting out a timer.
 	if tick := next.armTick(); tick != nil {
@@ -998,6 +1026,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.handleTick(msg)
+		return m, nil
+
+	case hiddenRetryMsg:
+		m.handleHiddenRetry()
 		return m, nil
 
 	case startedMsg:
@@ -2016,7 +2048,8 @@ func (m *Model) beginTurn(id, text string) {
 		m.indexSeeded = m.writeIndex(fallbackTitle(text), sessions.TitleKindFallback)
 	}
 	m.status = statusWorking
-	m.cardsCancelled = false
+	// A new turn: whatever a cancel masked belonged to the turn before it.
+	m.cardMask, m.cardMasking = "", false
 	m.turnStart = m.now()
 	m.err = ""
 	m.cancelled = false
@@ -2033,9 +2066,19 @@ func (m *Model) beginTurn(id, text string) {
 // what cancelTurn does synchronously, and what an armed send-now owes as well,
 // because the cancel it asked for is made by the engine and answers every
 // request the session was holding just the same.
+//
+// The mask goes up for a cancel with no turn of craze's own too, keyed to the
+// empty turn id and cleared by the next beginTurn. That is safe now that the
+// mask cannot swallow a live ask (maskDrops), and it is what stops an opening
+// already in flight at that Esc from flashing a card up for the one Update
+// before its own cancelled ending removes it — which the host's publications
+// and a <wait:card> could both see.
 func (m *Model) maskCards() {
 	m.cards = nil
-	m.cardsCancelled = true
+	m.cardMask, m.cardMasking = "", true
+	if m.status == statusWorking {
+		m.cardMask = m.turnID
+	}
 	m.retirePlanOffer()
 }
 
@@ -2268,6 +2311,12 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
+	// An event means the log is moving, which is what a hidden answer the outbox
+	// had no room for is waiting on (retryHidden) — the fast path, ahead of the
+	// beat that guarantees the retry (armHiddenRetry). It runs before the event
+	// is applied, so a hidden ask answered here is not counted twice by an
+	// answerHidden this same event causes.
+	m.retryHidden()
 	if ev.Type == agent.EventSubagent {
 		m.applySubagentEvent(ev)
 		return
@@ -2387,9 +2436,17 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if ev.Question != nil && !ev.Question.Auto {
 			if m.showAsk() {
 				m.pushCard(card{kind: cardQuestion, ask: ev.Question})
-			} else if m.sess != nil {
-				_ = m.sess.AnswerQuestion(ev.Question.ID, nil, true)
+			} else {
+				// The config hides questions: it is skipped where it stands,
+				// with no card and — as it always has — no row. The ending it
+				// causes names this command and is skipped with the rest of
+				// this model's own echoes.
+				m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
 			}
+		}
+	case agent.EventAsk:
+		if ev.Ask != nil {
+			m.applyAskEnded(ev.Cause, ev.Ask)
 		}
 	case agent.EventPlan:
 		if ev.Plan != nil && !ev.Plan.Auto {
@@ -2398,8 +2455,8 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.addPlan(ev.Plan)
 			if m.showPlan() {
 				m.pushCard(card{kind: cardPlan, plan: ev.Plan})
-			} else if m.sess != nil {
-				_ = m.sess.AnswerPlan(ev.Plan.ID, false)
+			} else {
+				m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
 			}
 		}
 	case agent.EventDone:
@@ -2424,7 +2481,11 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// too, and its reply can arm a plan offer. Unchanged, and not this
 		// commit's to fix.)
 		m.breakStream()
-		m.cardsCancelled = false
+		// The cancel mask is NOT cleared here. It belongs to a turn, and it is
+		// the engine's ending for that turn that says every opening and ending
+		// of it has been delivered — this event is the session's own and can
+		// overtake an opening still in the outbox.
+		//
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
 		m.branch = m.git.branch()
@@ -2479,12 +2540,192 @@ func (m *Model) applyEvent(ev agent.Event) {
 	}
 }
 
+// hiddenAnswer is one answer to a hidden ask that has still to be taken
+// (hiddenRetry).
+type hiddenAnswer struct {
+	id string
+	a  agent.AskAnswer
+}
+
+// answerHidden answers an ask the config never shows a card for — a question or
+// a plan hidden by the provider's own settings — where it arrives, with no card
+// and no row, exactly as the model has always answered those. A failure is
+// dropped for the same reason the row is: the user asked not to be shown this
+// request at all.
+//
+// With ONE exception: agent.ErrAskUnavailable is the log's outbox refusing for
+// want of room, before it mutated anything, so the ask is still open and the
+// provider is still waiting — and no card will ever raise it, because this is
+// the path that has none. The answer is kept and tried
+// again, by the next event the model applies and by a beat of its own until one
+// of them takes it (retryHidden, armHiddenRetry). It is bounded by the number of
+// hidden asks open at once.
+func (m *Model) answerHidden(id string, a agent.AskAnswer) {
+	if m.eng == nil {
+		return
+	}
+	cmd := m.nextCmd()
+	switch err := m.eng.Answer(cmd, id, a); {
+	case err == nil:
+		m.noteAskEcho(cmd.Cause())
+	case errors.Is(err, agent.ErrAskUnavailable):
+		m.hiddenRetry = append(append([]hiddenAnswer(nil), m.hiddenRetry...), hiddenAnswer{id: id, a: a})
+	}
+}
+
+// retryHidden re-sends the hidden answers the outbox had no room for. Each one
+// is either taken, refused for good — the ask was resolved some other way in the
+// meantime, agent.ErrAlreadyResolved among them — or kept for the next try by
+// answerHidden itself. The list is taken first, so one that is kept is appended
+// to an empty list rather than walked twice.
+func (m *Model) retryHidden() {
+	if len(m.hiddenRetry) == 0 {
+		return
+	}
+	pending := m.hiddenRetry
+	m.hiddenRetry = nil
+	for _, h := range pending {
+		m.answerHidden(h.id, h.a)
+	}
+}
+
+// hiddenRetryEvery is how long a hidden answer refused for room waits before it
+// is tried again. It is the spinner's own beat, which is short enough that the
+// provider's wait is not felt and long enough to leave the drainer room to move.
+const hiddenRetryEvery = 250 * time.Millisecond
+
+// hiddenRetryMsg is one beat of the hidden-answer retry timer. It carries no
+// generation, unlike the tick chain's tickMsg: armHiddenRetry never abandons a
+// beat for a faster one, so there is no second chain a stale beat could belong
+// to — and a beat that somehow arrived twice would only run retryHidden against
+// an empty list. Control.Answer validates and claims atomically on every try, so
+// a retry is a retry and never a second answer.
+type hiddenRetryMsg struct{}
+
+// armHiddenRetry keeps exactly one retry beat in flight while an answer to a
+// hidden ask is still waiting for room, and none when nothing is.
+//
+// It belongs to Update, not to applyEvent, because the schedule the retry has to
+// survive is the one where no further event ever arrives: the final batch's
+// LAST event is what gives the outbox its room back, so
+// the retry that event carries runs before commitBatch and is refused, the
+// drainer goes idle, and nothing is left to try again. The hidden ask would stay
+// open for ever with the provider waiting on it.
+func (m *Model) armHiddenRetry() tea.Cmd {
+	if len(m.hiddenRetry) == 0 || m.hiddenRetryLive {
+		return nil
+	}
+	m.hiddenRetryLive = true
+	return tea.Tick(hiddenRetryEvery, func(time.Time) tea.Msg { return hiddenRetryMsg{} })
+}
+
+// handleHiddenRetry spends one beat on the answers still waiting for room.
+// Update arms the next one only if something was refused for room again, so a
+// list that empties — taken, or ended by somebody else — stops the timer.
+func (m *Model) handleHiddenRetry() {
+	m.hiddenRetryLive = false
+	m.retryHidden()
+}
+
+// noteAskEcho records that the ending caused by cause is this model's own: its
+// effect was applied in the Update that asked for it, so the event is an echo.
+// The slice is copied rather than written through, because every Model copy
+// shares it.
+func (m *Model) noteAskEcho(cause string) {
+	if cause == "" {
+		return
+	}
+	m.askEchoes = append(append([]string(nil), m.askEchoes...), cause)
+}
+
+// takeAskEcho reports whether cause is one of this model's own answers, and
+// takes it off the list if it is. One entry per answer, removed by the one
+// ending that answer causes: a cause that matched can never match twice.
+func (m *Model) takeAskEcho(cause string) bool {
+	if cause == "" {
+		return false
+	}
+	for i, c := range m.askEchoes {
+		if c != cause {
+			continue
+		}
+		next := append([]string(nil), m.askEchoes[:i]...)
+		m.askEchoes = append(next, m.askEchoes[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// applyAskEnded is one ask's ending. Every way an ask can end carries one now,
+// so this is where a card the model did not answer itself goes away — another
+// client's answer, a cancel, the turn it belonged to ending underneath it, the
+// session closing — and where the row that answer earned is written.
+//
+// What it writes is exactly what the local path writes for the same outcome, so
+// a question answered from a phone reads in this transcript as one answered
+// here: the question notes for an answer, the skipped note for a skip, the
+// verb for a plan. And exactly as little: nothing for a permission (a permission
+// answer has never written a row), nothing for a cancel, a turn's end, a close
+// or an automatic resolution, and nothing for an ask this model never raised a
+// card for — the hidden paths, a card the cancel mask dropped, and an ending
+// that carries its own Body, which by definition never had an opening.
+func (m *Model) applyAskEnded(cause string, u *agent.AskUpdate) {
+	if m.takeAskEcho(cause) {
+		// This model's own answer, applied in the Update that sent it.
+		return
+	}
+	c, ok := m.removeCard(u.ID)
+	if !ok || u.Outcome != agent.AskAnswered {
+		return
+	}
+	switch {
+	case c.kind == cardQuestion && u.Skip:
+		m.addNote(skipNote(c.ask))
+	case c.kind == cardQuestion:
+		m.addAnswerNotes(c.ask, u.Answers)
+	case c.kind == cardPlan:
+		m.addNote(planNote(c.plan, u.Accepted))
+	}
+}
+
+// removeCard takes the card for one ask out of the queue, wherever it is in it,
+// and answers with it. The queue is copied rather than written through, because
+// every Model copy shares the slice.
+func (m *Model) removeCard(id string) (card, bool) {
+	if id == "" {
+		return card{}, false
+	}
+	for i, c := range m.cards {
+		if cardAskID(c) != id {
+			continue
+		}
+		next := append([]card(nil), m.cards[:i]...)
+		m.cards = append(next, m.cards[i+1:]...)
+		return c, true
+	}
+	return card{}, false
+}
+
+// cardAskID is the ask id a card answers.
+func cardAskID(c card) string {
+	switch {
+	case c.perm != nil:
+		return c.perm.ID
+	case c.ask != nil:
+		return c.ask.ID
+	case c.plan != nil:
+		return c.plan.ID
+	default:
+		return ""
+	}
+}
+
 // applyTurnStarted is a turn the engine started, as an event. The echo rule is
 // per effect: the one started the model skips is the turn Submit handed it back
 // synchronously, because that Update has already drawn the row, gone working and
 // stamped the turn. Every other one — a drained row, an armed send-now firing,
 // another client's prompt — is a turn the model has applied nothing for yet, so
-// it draws its row like any other (§3.4; panel CodeRabbit 13, astra 18).
+// it draws its row like any other (§3.4).
 //
 // The id is matched rather than a flag consumed, and ownTurn can hold at most one
 // id, so no started can be skipped for the wrong turn and none can leave ownTurn
@@ -2566,6 +2807,15 @@ func (m *Model) applyTurnStarted(ev agent.Event) {
 // baseline did — promptDoneMsg carried no turn at all and drew both rows
 // unconditionally (app.go at 6581e0a) — so nothing a user sees moves here.
 func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
+	if t.ID != "" && t.ID == m.cardMask {
+		// The masked turn is over, and its ending is ordered behind every
+		// opening and every ask ending that turn produced — the session ends
+		// the turn for the registry and waits for the outbox before it
+		// publishes its own ending, and this event is enqueued after that. So
+		// there is nothing left to mask, and a request that arrives now belongs
+		// to no turn this cancel touched.
+		m.cardMask, m.cardMasking = "", false
+	}
 	// current is "this is the ending of the turn on screen". An id the model has
 	// never seen is not it, and neither is "" — before any turn there is nothing
 	// to settle.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -101,11 +102,11 @@ func (m Model) headCard() (card, bool) {
 // with it, or the preview would survive underneath the card.
 //
 // A card event that was already on its way when the turn was cancelled is
-// dropped: Cancel answered every request the session was holding and the
-// session refuses to park another one for this turn, so a card for it would be
-// one nobody could answer.
+// dropped: Cancel answered every request the session was holding, so a card for
+// it would be one nobody could answer. **What decides that is the ask itself,
+// not the mask alone** (maskCards).
 func (m *Model) pushCard(c card) {
-	if m.cardsCancelled {
+	if m.maskDrops(c) {
 		return
 	}
 	m.breakStream()
@@ -138,6 +139,33 @@ func (m *Model) pushCard(c card) {
 	*m = m.closeDialog(true)
 }
 
+// maskDrops reports whether the cancel mask swallows this opening. The mask
+// being up is not enough: an opening is dropped only when **its ask is no
+// longer open**, read synchronously from the registry through the engine
+// (Control.Ask, which waits on nothing).
+//
+// The registry's state leads its events, and an ask only ever goes open →
+// resolved, so the two answers are both final. "Not open now" means the ending
+// is already in the FIFO behind this opening and the card would be removed a
+// moment later anyway — that is the flash the mask exists to prevent. "Open
+// now" means the agent is really waiting on it: it belongs to no turn this
+// cancel touched, and dropping it would strand the provider on a card nobody
+// can ever raise again.
+//
+// With no engine, or a card with no ask id, there is nothing to consult and
+// the mask drops it, which is what it did for everything before.
+func (m Model) maskDrops(c card) bool {
+	if !m.cardMasking {
+		return false
+	}
+	id := cardAskID(c)
+	if m.eng == nil || id == "" {
+		return true
+	}
+	rec, known := m.eng.Ask(id)
+	return !known || rec.Status != agent.AskOpen
+}
+
 // setHead replaces the visible card. The queue is copied rather than written
 // through, because every Model copy shares the slice.
 func (m *Model) setHead(c card) {
@@ -158,22 +186,65 @@ func (m *Model) popCard() (card, bool) {
 	return c, true
 }
 
-// answerCard sends one answer in the same Update that popped the card, and
-// reports whether the session took it.
+// answerCard answers one ask in the same Update that popped its card, and
+// reports whether the answer was taken.
 //
-// This is deliberately not a tea.Cmd. Answer* is a hand-off to the handler
-// goroutine that is parked on the request — a map delete under the session
-// lock and a send on a buffered channel, never an RPC — so it cannot block the
-// UI. Doing it later would leave a window in which the card is gone from the
-// queue but the request is still in the session's waiting map, and a cancel
-// arriving in that window would claim the request and send cursor `cancelled`
-// for something the user had already answered.
-func (m *Model) answerCard(fn func() error) bool {
-	if err := fn(); err != nil {
-		m.addError(err.Error())
+// This is deliberately not a tea.Cmd. Control.Answer validates and claims the
+// ask in one registry section and enqueues its ending — it waits on nothing,
+// so it cannot block the UI. Doing it later would leave a window in which the
+// card is gone from the queue but the ask is still open, and a cancel arriving
+// in that window would claim it and send the agent `cancelled` for something
+// the user had already answered.
+//
+// The card is popped before the answer is sent, so **every refusal that leaves
+// the ask unanswered puts it back at the head**; otherwise the agent waits for
+// an Esc because craze mis-addressed one call, or because the log was busy for a
+// moment:
+//
+//   - agent.ErrBadAnswer: the answer does not fit, and the ask is still open.
+//     The card comes back and the error says why, so the user can press again.
+//   - agent.ErrAskUnavailable: the outbox is over its bound, so Answer refused
+//     **before it mutated anything** (§3.3's rejectable admissions). The ask is
+//     untouched and no second opening is ever published for it, so nothing but
+//     this would raise the card again. Same treatment,
+//     same row: pressing again is exactly the retry it asks for.
+//   - agent.ErrAlreadyResolved: another client answered it first and that
+//     ending is already queued. The card was on screen, so the model has not
+//     applied it yet: the card goes back with **no error row**, and the winner's
+//     ending removes it and writes the winner's answer through the ordinary path
+//     (applyAskEnded) — where before the row was lost altogether and an error the
+//     user could do nothing about was written instead.
+//
+// Every other failure is the error row it has always been — the ask is gone
+// either way, so there is no card to restore.
+func (m *Model) answerCard(popped card, id string, a agent.AskAnswer) bool {
+	if m.eng == nil {
 		return false
 	}
-	return true
+	cmd := m.nextCmd()
+	err := m.eng.Answer(cmd, id, a)
+	switch {
+	case err == nil:
+		// The ending this answer causes names this command, and its effect —
+		// the card gone, the note written — has been applied here. The echo is
+		// skipped when it arrives (applyAskEnded).
+		m.noteAskEcho(cmd.Cause())
+		return true
+	case errors.Is(err, agent.ErrAlreadyResolved):
+		m.raiseCard(popped)
+		return false
+	case errors.Is(err, agent.ErrBadAnswer), errors.Is(err, agent.ErrAskUnavailable):
+		m.raiseCard(popped)
+	}
+	m.addError(err.Error())
+	return false
+}
+
+// raiseCard puts a card back at the head of the queue, where it was before it
+// was popped. It is not pushCard: nothing about the rest of the UI changed, and
+// the card was already through all of that when it first arrived.
+func (m *Model) raiseCard(c card) {
+	m.cards = append([]card{c}, m.cards...)
 }
 
 // ------------------------------------------------------------------- keys
@@ -219,14 +290,22 @@ func (m Model) handlePermissionKey(c card, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	return m.answerPermission(kind)
 }
 
-// answerPermission picks by option kind, using the request's own optionId.
+// answerPermission picks by option kind, using the request's own optionId. A
+// kind the request never offered is the explicit cancel — the empty option id
+// that used to mean one — because an empty id is not an option and must not be
+// able to cancel a request by accident (agent.AskAnswer). Only the offered
+// kinds are bound, so this is unreachable from the keyboard; it is what the
+// answer means if it ever is reached.
 func (m Model) answerPermission(kind string) (tea.Model, tea.Cmd) {
 	c, ok := m.popCard()
 	if !ok || c.perm == nil {
 		return m, nil
 	}
-	id, _ := agent.OptionIDForKind(c.perm.Options, kind)
-	m.answerCard(func() error { return m.sess.AnswerPermission(c.perm.ID, id) })
+	a := agent.AskAnswer{Cancel: true}
+	if id, offered := agent.OptionIDForKind(c.perm.Options, kind); offered {
+		a = agent.AskAnswer{OptionID: id}
+	}
+	m.answerCard(c, c.perm.ID, a)
 	return m, nil
 }
 
@@ -312,13 +391,23 @@ func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	}
 	// The notes follow the answer the session took, so the transcript cannot
 	// claim a question was answered when the reply never reached the agent.
-	if !m.answerCard(func() error { return m.sess.AnswerQuestion(c.ask.ID, answers, false) }) {
+	if !m.answerCard(c, c.ask.ID, agent.AskAnswer{Answers: answers}) {
 		return m, nil
 	}
-	for _, qq := range c.ask.Questions {
+	m.addAnswerNotes(c.ask, answers)
+	return m, nil
+}
+
+// addAnswerNotes is one note per question, naming what was picked. It is what
+// an answered question writes wherever the answer came from: this client's own
+// keypress, or another client's, which reaches the model as an EventAsk.
+func (m *Model) addAnswerNotes(ev *agent.QuestionEvent, answers map[string][]string) {
+	if ev == nil {
+		return
+	}
+	for _, qq := range ev.Questions {
 		m.addNote("? " + sanitizeLine(qq.Prompt) + " → " + answerLabels(qq, answers[qq.ID]))
 	}
-	return m, nil
 }
 
 // skipQuestion is Esc: the whole request is skipped, not just this question.
@@ -327,11 +416,16 @@ func (m Model) skipQuestion() (tea.Model, tea.Cmd) {
 	if !ok || c.ask == nil {
 		return m, nil
 	}
-	if !m.answerCard(func() error { return m.sess.AnswerQuestion(c.ask.ID, nil, true) }) {
+	if !m.answerCard(c, c.ask.ID, agent.AskAnswer{Skip: true}) {
 		return m, nil
 	}
-	m.addNote("? " + questionTitle(c.ask) + " → skipped")
+	m.addNote(skipNote(c.ask))
 	return m, nil
+}
+
+// skipNote is what a skipped question writes, wherever the skip came from.
+func skipNote(ev *agent.QuestionEvent) string {
+	return "? " + questionTitle(ev) + " → skipped"
 }
 
 // answerLabels names what was picked, for the transcript note.
@@ -385,15 +479,20 @@ func (m Model) answerPlan(accept bool) (tea.Model, tea.Cmd) {
 	if !ok || c.plan == nil {
 		return m, nil
 	}
-	if !m.answerCard(func() error { return m.sess.AnswerPlan(c.plan.ID, accept) }) {
+	if !m.answerCard(c, c.plan.ID, agent.AskAnswer{Accept: accept, Reject: !accept}) {
 		return m, nil
 	}
+	m.addNote(planNote(c.plan, accept))
+	return m, nil
+}
+
+// planNote is what an answered plan writes, wherever the answer came from.
+func planNote(p *agent.PlanEvent, accept bool) string {
 	verb := "rejected"
 	if accept {
 		verb = "accepted"
 	}
-	m.addNote("plan " + planName(c.plan) + " → " + verb)
-	return m, nil
+	return "plan " + planName(p) + " → " + verb
 }
 
 func planName(p *agent.PlanEvent) string {

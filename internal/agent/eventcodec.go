@@ -339,6 +339,7 @@ type wireEvent struct {
 	Interjection   bool             `json:"interjection,omitempty"`
 	ForeignTurn    *wireForeignTurn `json:"foreignTurn,omitempty"`
 	Turn           *wireTurn        `json:"turn,omitempty"`
+	Ask            *wireAsk         `json:"ask,omitempty"`
 	State          *wireState       `json:"state,omitempty"`
 	Replay         *wireReplay      `json:"replay,omitempty"`
 	Replayed       bool             `json:"replayed,omitempty"`
@@ -516,6 +517,31 @@ type wireTurn struct {
 	Pending    int           `json:"pending,omitempty"`
 }
 
+// wireAsk is an AskUpdate. Its Body is the one part that is not a plain field
+// copy: it holds the three opening payloads, each in the shape its own opening
+// event already has on the wire, so an ending that carries its body and the
+// opening it stands in for read the same.
+type wireAsk struct {
+	ID       string              `json:"id,omitempty"`
+	Kind     AskKind             `json:"kind,omitempty"`
+	Outcome  AskOutcome          `json:"outcome,omitempty"`
+	By       string              `json:"by,omitempty"`
+	OptionID string              `json:"optionId,omitempty"`
+	Answers  map[string][]string `json:"answers,omitempty"`
+	Skip     bool                `json:"skip,omitempty"`
+	Accepted bool                `json:"accepted,omitempty"`
+	Label    string              `json:"label,omitempty"`
+	Body     *wireAskBody        `json:"body,omitempty"`
+}
+
+// wireAskBody is an AskBody: exactly one of the three is set on an ask craze
+// made, and each keeps the shape its opening event has.
+type wireAskBody struct {
+	Permission *wirePermission `json:"permission,omitempty"`
+	Question   *wireQuestionEv `json:"question,omitempty"`
+	Plan       *wirePlan       `json:"plan,omitempty"`
+}
+
 // wireState is a StateDelta. Each section is a pointer, so a section the
 // delta did not touch is absent and one it emptied is present and empty:
 // omitempty on a pointer omits only nil, which is exactly the distinction the
@@ -594,22 +620,27 @@ func toWireEvent(ev Event) wireEvent {
 	if ev.Tool != nil {
 		w.Tool = toWireTool(ev.Tool)
 	}
-	if p := ev.Permission; p != nil {
-		w.Permission = &wirePermission{ID: p.ID, Tool: p.Tool,
-			Options: convertSlice(p.Options, func(o PermissionOption) wirePermissionOption { return wirePermissionOption(o) })}
-	}
-	if q := ev.Question; q != nil {
-		w.Question = toWireQuestionEv(q)
-	}
-	if p := ev.Plan; p != nil {
-		w.Plan = &wirePlan{
-			ID:       p.ID,
-			Name:     p.Name,
-			Overview: p.Overview,
-			Plan:     p.Plan,
-			Todos:    convertSlice(p.Todos, toWireTodo),
-			Auto:     p.Auto,
-			Accepted: p.Accepted,
+	w.Permission = toWirePermission(ev.Permission)
+	w.Question = toWireQuestionEv(ev.Question)
+	w.Plan = toWirePlan(ev.Plan)
+	if a := ev.Ask; a != nil {
+		w.Ask = &wireAsk{
+			ID:       a.ID,
+			Kind:     a.Kind,
+			Outcome:  a.Outcome,
+			By:       a.By,
+			OptionID: a.OptionID,
+			Answers:  a.Answers,
+			Skip:     a.Skip,
+			Accepted: a.Accepted,
+			Label:    a.Label,
+		}
+		if b := a.Body; b != nil {
+			w.Ask.Body = &wireAskBody{
+				Permission: toWirePermission(b.Permission),
+				Question:   toWireQuestionEv(b.Question),
+				Plan:       toWirePlan(b.Plan),
+			}
 		}
 	}
 	if a := ev.Subagent; a != nil {
@@ -629,6 +660,33 @@ func toWireEvent(ev Event) wireEvent {
 		w.Err = &wireError{Message: ev.Err.Error(), Class: class, Code: code}
 	}
 	return w
+}
+
+// toWirePermission is a PermissionEvent on the wire, nil for nil: the same
+// mapping for an opening's payload and for the copy an ask's ending carries
+// when no opening was published.
+func toWirePermission(p *PermissionEvent) *wirePermission {
+	if p == nil {
+		return nil
+	}
+	return &wirePermission{ID: p.ID, Tool: p.Tool,
+		Options: convertSlice(p.Options, func(o PermissionOption) wirePermissionOption { return wirePermissionOption(o) })}
+}
+
+// toWirePlan is a PlanEvent on the wire, nil for nil.
+func toWirePlan(p *PlanEvent) *wirePlan {
+	if p == nil {
+		return nil
+	}
+	return &wirePlan{
+		ID:       p.ID,
+		Name:     p.Name,
+		Overview: p.Overview,
+		Plan:     p.Plan,
+		Todos:    convertSlice(p.Todos, toWireTodo),
+		Auto:     p.Auto,
+		Accepted: p.Accepted,
+	}
 }
 
 // toWireTool shares the tool's string slices and its output with the wire
@@ -666,6 +724,9 @@ func toWireTool(t *ToolEvent) *wireTool {
 }
 
 func toWireQuestionEv(q *QuestionEvent) *wireQuestionEv {
+	if q == nil {
+		return nil
+	}
 	return &wireQuestionEv{
 		ID:    q.ID,
 		Title: q.Title,
@@ -730,22 +791,29 @@ func (w *wireEvent) event() Event {
 	if w.Tool != nil {
 		ev.Tool = w.Tool.tool()
 	}
-	if p := w.Permission; p != nil {
-		ev.Permission = &PermissionEvent{ID: p.ID, Tool: p.Tool,
-			Options: convertSlice(p.Options, func(o wirePermissionOption) PermissionOption { return PermissionOption(o) })}
-	}
-	if q := w.Question; q != nil {
-		ev.Question = q.question()
-	}
-	if p := w.Plan; p != nil {
-		ev.Plan = &PlanEvent{
-			ID:       p.ID,
-			Name:     p.Name,
-			Overview: p.Overview,
-			Plan:     p.Plan,
-			Todos:    convertSlice(p.Todos, eventTodo),
-			Auto:     p.Auto,
-			Accepted: p.Accepted,
+	ev.Permission = w.Permission.permission()
+	ev.Question = w.Question.question()
+	ev.Plan = w.Plan.plan()
+	if a := w.Ask; a != nil {
+		ev.Ask = &AskUpdate{
+			ID:       a.ID,
+			Kind:     a.Kind,
+			Outcome:  a.Outcome,
+			By:       a.By,
+			OptionID: a.OptionID,
+			Skip:     a.Skip,
+			Accepted: a.Accepted,
+			Label:    a.Label,
+		}
+		if len(a.Answers) > 0 {
+			ev.Ask.Answers = a.Answers
+		}
+		if b := a.Body; b != nil {
+			ev.Ask.Body = &AskBody{
+				Permission: b.Permission.permission(),
+				Question:   b.Question.question(),
+				Plan:       b.Plan.plan(),
+			}
 		}
 	}
 	if a := w.Subagent; a != nil {
@@ -797,10 +865,38 @@ func (w *wireTool) tool() *ToolEvent {
 	return t
 }
 
+// permission is a wirePermission back as a PermissionEvent, nil for nil.
+func (w *wirePermission) permission() *PermissionEvent {
+	if w == nil {
+		return nil
+	}
+	return &PermissionEvent{ID: w.ID, Tool: w.Tool,
+		Options: convertSlice(w.Options, func(o wirePermissionOption) PermissionOption { return PermissionOption(o) })}
+}
+
+// plan is a wirePlan back as a PlanEvent, nil for nil.
+func (w *wirePlan) plan() *PlanEvent {
+	if w == nil {
+		return nil
+	}
+	return &PlanEvent{
+		ID:       w.ID,
+		Name:     w.Name,
+		Overview: w.Overview,
+		Plan:     w.Plan,
+		Todos:    convertSlice(w.Todos, eventTodo),
+		Auto:     w.Auto,
+		Accepted: w.Accepted,
+	}
+}
+
 // question is the one decode that keeps a nil apart from an empty slice: the
 // values of Answers come back as they were written, null as nil and [] as
 // empty. The map itself follows the collection rule.
 func (w *wireQuestionEv) question() *QuestionEvent {
+	if w == nil {
+		return nil
+	}
 	q := &QuestionEvent{
 		ID:    w.ID,
 		Title: w.Title,
