@@ -150,6 +150,14 @@ blocks them from this file's side. `11`'s two shipped rows above — the
 settings seam (H5's `SetMode`) and the session index (H7) — are what those
 phases build on, as built rather than as planned.
 
+**Two rows of the session-control backlog are the harness's** (`13`): SF-30 —
+no live agent has ever raised a permission card, so the first harness phase
+that lets native ask for one (H3) re-runs S1b's `--no-force` smoke leg, the
+only live proof the ask registry's permission path will get; and SF-32 — a
+native ask parked at `Close` commonly ends `cancelled`, by `call`, where an ACP
+session's ends `closing`, which H5's plan records as an owner follow-up with a
+cheap adapter-only shape.
+
 Every PR in Plan 021 started from a freshly fetched `origin/main`, and the
 executor told the `craze-harness` session when each PR opened and when it
 merged — the same discipline as the S1a / H2 integration above.

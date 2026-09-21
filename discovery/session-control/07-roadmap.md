@@ -42,7 +42,9 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   PRs — the driver, the asks, state and identity.**
 - **S1c** — next. The render-free transcript model folded inside the
   boundary; bounded snapshots; in-process attach with snapshot + cursor; the
-  convergence check per event kind.
+  convergence check per event kind. Its inputs from S1b are `13`'s SF-01 to
+  SF-05 (native's unpublished title, the TUI's `refreshSnap` mirror, `m.sess`,
+  the Stub's adopted ask ids, the snapshot byte bound).
 
 - Size: L, about 4–5k lines plus test churn (raised after the panel: S1b is a
   driver, not a field move). S1b and S1c are the risk.
@@ -91,7 +93,8 @@ three PRs from fresh `origin/main` — `feature/plan-021-s1b-driver` (#41,
 `fdaaa6d`), `feature/plan-021-s1b-asks` (#42, `db7686e`),
 `feature/plan-021-s1b-state` (#46). All seven exit clauses met, each
 against a named test; the criterion-by-criterion table, the execution
-amendments X1–X56, the live smoke record, and V2/V3/V5/V6/V7 are in `12`. No
+amendments X1–X59, the live smoke record, and V2/V3/V5/V6/V7 are in `12`; what
+it found and did not do is the backlog in `13`. No
 golden moved and no `testdata/` file changed except additions;
 `craze prompt --json` is byte-identical apart from `seq` (V2: 103/103 SAME at
 the tip). One defect was found live and fixed before the tip: quitting while a
@@ -108,6 +111,13 @@ Detail in `05`. The protocol package, schema, socket server in the host,
 which is also the best test client), the fake host, published reference docs.
 
 - Size: M, about 3k lines.
+- Owed by S1b and taken here (`13`, SF-10 to SF-19): a connection-local barrier
+  so a reply is ordered after its events (`Control.Sync` returns no sequence
+  number); a client id minted per connection, bound to it and released on
+  disconnect; the gate table's remaining rows and the retry policy by code in
+  the schema; index writes kept off connection goroutines; the TUI's engine
+  calls moved onto `tea.Cmd`s; how a remote client words another client's
+  settings change.
 - Settled in S2 even though they pay off later (`02`, `05`): the runtime
   namespace (short, absolute, validated, lifetime locks, identity-checked
   unlink, peer checks both ways); transport close vs view close vs
@@ -215,3 +225,5 @@ server · IDE-like desktop shell.
   agents, recorded as an **Exit result** here.
 - Update `08` when a phase changes a decision; update the table above and the
   README status table when a phase merges.
+- A phase is not complete until everything it found and did not do is a row in
+  `13`, and every `13` row it closed is deleted.
