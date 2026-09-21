@@ -406,8 +406,8 @@ func TestAClaimedSetWhoseContextEndsSaysTheOutcomeIsUnknown(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("the sentinel dropped its context's error: %v", err)
 		}
-		if got := Code(err); got != "unavailable" {
-			t.Fatalf("the code is %q", got)
+		if got := Code(err); got != "aborted" {
+			t.Fatalf("the code is %q, want \"aborted\": a STORED answer whose outcome the engine cannot vouch for, same as ErrCommandAborted's (r26 finding 1)", got)
 		}
 
 		// The receipt keeps the answer the caller was GIVEN, not the success the

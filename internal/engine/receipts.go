@@ -67,21 +67,22 @@ import (
 // What a duplicate gets depends on what it finds:
 //
 //   - A COMPLETED entry is replayed — exactly what the first call returned,
-//     its error included — with no wait at all.
+//     its error included — with no wait at all, WHATEVER the duplicate's own
+//     ctx: it is answered, never raced against that ctx ending.
 //   - An OPEN reservation of a BLOCKING command (Cancel, Stop, Set, Interject)
 //     is waited on: the duplicate parks on the reservation's done channel,
 //     honouring its own ctx, and disturbs nothing if its ctx loses the race —
 //     the owner's entry is untouched and finishes exactly as it would have.
 //   - An OPEN reservation of a SYNCHRONOUS command (Submit, Disarm, GiveUp,
 //     GiveUpDrain, the queue verbs, Answer, SetTitle: the Control methods
-//     documented as "wait on nothing") is ErrUnavailable at once — "that
-//     command is still running; ask again" — and never a wait, because "a
-//     duplicate of a synchronous command never waits" is kept literally. It
-//     stores nothing and changes nothing, so the id stays exactly as it was
-//     and the client may resend it. In-process this is unreachable for a
-//     single client — the TUI makes all fourteen calls from its one Update
-//     goroutine — and it exists for S2's socket, where two connections of one
-//     client can be in flight at once.
+//     documented as "wait on nothing") is ErrCommandInProgress at once —
+//     "this id is reserved and its command is still running; resend the SAME
+//     id" — and never a wait, because "a duplicate of a synchronous command
+//     never waits" is kept literally. It stores nothing and changes nothing,
+//     so the id stays exactly as it was and the client may resend it.
+//     In-process this is unreachable for a single client — the TUI makes all
+//     fourteen calls from its one Update goroutine — and it exists for S2's
+//     socket, where two connections of one client can be in flight at once.
 //
 // Either way, a resend whose payload hash does not match the reservation's is
 // ErrBadRequest immediately, on any goroutine that finds the mismatch, never
@@ -136,16 +137,24 @@ import (
 // client's old ids executable again, which is the one thing this table exists
 // to prevent.
 //
-// What is bounded instead is the CLIENTS themselves (maxClients). Past that
-// bound newClient keeps minting — a client is never refused an identity — and
-// the OLDEST client is RETIRED: every command it sends from then on is
-// ErrUnknownCommand, for good, whatever its id and whether or not the table
-// ever saw it. A retired client is told honestly that this engine can no
-// longer say anything about its numbering; it is never silently told "unseen"
-// and never run a second time. In this in-process phase nothing comes near the
-// bound — the TUI mints exactly one client for its own life, and craze prompt
-// mints none, every call it makes carrying the zero Command — and it is a
-// defensive bound for S2's socket clients.
+// No CLIENT is ever retired: a minted client's mark lives as long as the
+// engine, however many clients are minted after it. Retiring a live identity
+// would refuse a client's OWN commands while it is still attached — the
+// TUI's, in particular, since it mints exactly one client for its own life
+// and would have every Submit answered ErrUnknownCommand for good the moment
+// enough other clients existed, whatever their own ids or whether the table
+// ever saw them. The cost is one counter per minted client, and in this
+// in-process phase nothing comes near a size where that cost matters — the
+// TUI mints one client for its own life and craze prompt mints none, every
+// call it makes carrying the zero Command.
+//
+// S2, which will mint a client PER CONNECTION rather than once per engine,
+// must add its own lifecycle on top of this rather than reuse it unchanged:
+// an explicit release when a connection disconnects, and retirement — if S2
+// wants one at all — only of a RELEASED client, never one merely idle, and it
+// must bind a server-minted client id to its own connection rather than trust
+// a client-supplied "c-N", which is predictable and would let one connection
+// claim another's identity (r26 finding 2).
 //
 // # What is stored, and what is left retryable
 //
@@ -193,13 +202,12 @@ import (
 
 // receiptCap and receiptAge are the table's bound: the last 1024 results or
 // 10 minutes, whichever is less (plan 021 §3.8) — whichever bound an entry
-// crosses first evicts it. RetryHorizon reports both. maxClients bounds the
-// clients the table keeps marks for; see the package doc above ("Bound and
-// eviction") for what passing it does.
+// crosses first evicts it. RetryHorizon reports both. No bound applies to the
+// CLIENTS the table keeps marks for; see the package doc above ("Bound and
+// eviction") for why (r26 finding 2).
 const (
 	receiptCap = 1024
 	receiptAge = 10 * time.Minute
-	maxClients = 4096
 )
 
 // RetryHorizon is the receipts table's bound, as State advertises it: within
@@ -247,11 +255,10 @@ type receipt struct {
 	at time.Time
 }
 
-// receiptClient is one minted client: when it was minted, and the highest id
-// of its the table has evicted.
+// receiptClient is one minted client: the highest id of its the table has
+// evicted. No client is ever retired (r26 finding 2), so this is the entirety
+// of what a live client costs the table to keep.
 type receiptClient struct {
-	// seq is the client's mint order, which is what retirement is decided by.
-	seq uint64
 	// mark is the highest id of this client's the table has evicted — 0 until
 	// one is. Everything at or below it is unknowable, for good.
 	mark uint64
@@ -284,14 +291,14 @@ type receiptTable struct {
 	order []receiptKey // COMPLETED entries, in completion order (oldest first)
 	byKey map[receiptKey]*receipt
 
-	clients      map[string]*receiptClient
-	clientOrder  []string // mint order, oldest first, for the maxClients bound
-	clientSeq    uint64
-	retiredBelow uint64 // every client minted at or below this seq is retired
+	// clients holds one entry for every client newClient has ever minted, for
+	// as long as the engine lives: no client is ever retired (r26 finding 2).
+	// clientSeq is the mint counter clientName spells.
+	clients   map[string]*receiptClient
+	clientSeq uint64
 
-	maxClients int
-	cap        int
-	age        time.Duration
+	cap int
+	age time.Duration
 }
 
 // newReceiptTable builds an empty table. h is nil outside tests, and the
@@ -299,11 +306,10 @@ type receiptTable struct {
 // never the session's event clock (which a test freezes and a golden pins).
 func newReceiptTable(h *receiptHooks) *receiptTable {
 	rt := &receiptTable{
-		byKey:      map[receiptKey]*receipt{},
-		clients:    map[string]*receiptClient{},
-		maxClients: maxClients,
-		cap:        receiptCap,
-		age:        receiptAge,
+		byKey:   map[receiptKey]*receipt{},
+		clients: map[string]*receiptClient{},
+		cap:     receiptCap,
+		age:     receiptAge,
 	}
 	if h != nil {
 		rt.hooks = *h
@@ -323,57 +329,28 @@ func (rt *receiptTable) horizon() RetryHorizon {
 }
 
 // newClient mints a client id unique in this table's life (Engine.NewClientID)
-// and starts keeping marks for it. Past maxClients the oldest client is
-// retired — see the package doc's "Bound and eviction" — and minting itself
-// never fails.
+// and starts keeping a mark for it, for as long as the engine lives: minting
+// never fails and no client is ever retired (the package doc's "Bound and
+// eviction", r26 finding 2).
 func (rt *receiptTable) newClient() string {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.clientSeq++
 	name := clientName(rt.clientSeq)
-	rt.clients[name] = &receiptClient{seq: rt.clientSeq}
-	rt.clientOrder = append(rt.clientOrder, name)
-	for len(rt.clientOrder) > rt.maxClients {
-		oldest := rt.clientOrder[0]
-		rt.clientOrder = rt.clientOrder[1:]
-		if st, ok := rt.clients[oldest]; ok {
-			delete(rt.clients, oldest)
-			if st.seq > rt.retiredBelow {
-				rt.retiredBelow = st.seq
-			}
-		}
-	}
+	rt.clients[name] = &receiptClient{}
 	return name
 }
 
-// clientName is how a minted client is spelled, and mintedSeq reads that
-// spelling back: it is the table's own format, and the only place a client id
-// is parsed. Reading it back is what lets a retired client be recognised for
-// good without keeping a record of every client ever minted — the one thing a
-// bound on clients must not need.
+// clientName is how a minted client is spelled: the table's own format, and
+// the only place a client id is built.
 func clientName(seq uint64) string { return "c-" + strconv.FormatUint(seq, 10) }
 
-func mintedSeq(name string) (uint64, bool) {
-	rest, ok := strings.CutPrefix(name, "c-")
-	if !ok {
-		return 0, false
-	}
-	n, err := strconv.ParseUint(rest, 10, 64)
-	if err != nil || n == 0 || rest != strconv.FormatUint(n, 10) {
-		return 0, false
-	}
-	return n, true
-}
-
 // clientLocked is the client half of a command's identity: the live client's
-// own record, ErrUnknownCommand for one this table has retired, and
-// ErrBadRequest for one it never minted.
+// own record, or ErrBadRequest for one this table never minted. No client is
+// ever retired, so a name this table did mint always has one.
 func (rt *receiptTable) clientLocked(name string) (*receiptClient, error) {
 	if st, ok := rt.clients[name]; ok {
 		return st, nil
-	}
-	if seq, ok := mintedSeq(name); ok && seq <= rt.retiredBelow {
-		return nil, fmt.Errorf("%w: client %s has been retired", ErrUnknownCommand, name)
 	}
 	return nil, fmt.Errorf("%w: client %q was not minted by this engine", ErrBadRequest, name)
 }
@@ -419,17 +396,21 @@ func (rt *receiptTable) admit(key receiptKey, hash string) (found *receipt, mine
 }
 
 // finish completes a reservation whose command returned: the result is
-// published and done closed in one locked section, and the entry is kept — or,
-// for a gate refusal, forgotten, so the id goes back to being unseen (the
-// package doc's "What is stored").
-func (rt *receiptTable) finish(key receiptKey, r *receipt, result any, err error) {
+// published and done closed in one locked section, and the entry is kept —
+// or, for a gate refusal, forgotten, so the id goes back to being unseen (the
+// package doc's "What is stored"). It reports whether the refusal was a gate
+// one, so the CALLER can invoke afterForget itself, after marking its own
+// reservation complete — publication (this method) and the post-publication
+// test hook are two different things on purpose: a Goexit or a panic from
+// afterForget must never find the reservation still open by the caller's own
+// bookkeeping, or its deferred abort would close r.done a second time (r26
+// finding 4).
+func (rt *receiptTable) finish(key receiptKey, r *receipt, result any, err error) (gateRefused bool) {
 	refused := gateRefusal(err)
 	rt.mu.Lock()
 	rt.publishLocked(key, r, result, err, !refused)
 	rt.mu.Unlock()
-	if refused && rt.hooks.afterForget != nil {
-		rt.hooks.afterForget()
-	}
+	return refused
 }
 
 // abort completes a reservation whose command did not return at all — a panic
@@ -690,7 +671,10 @@ func withSyncReceipt[T any](rt *receiptTable, c Command, hash string, run func()
 			// Never a wait: this method is one a client may call from the
 			// primary's own reader, and the answer has to come back now. It is
 			// retryable and nothing is stored, so the id is exactly as it was.
-			return zero, fmt.Errorf("%w: command %s is still running", ErrUnavailable, key)
+			// ErrCommandInProgress — never ErrUnavailable — because "resend the
+			// SAME id" is a different instruction from a gate refusal's "same id
+			// or a new one, nothing ran" (Command's own doc, r26 finding 1).
+			return zero, fmt.Errorf("%w: command %s is still running", ErrCommandInProgress, key)
 		}
 		return replayReceipt[T](r)
 	}
@@ -704,8 +688,15 @@ func withSyncReceipt[T any](rt *receiptTable, c Command, hash string, run func()
 		}
 	}()
 	res, rerr := run()
-	rt.finish(key, r, cloneReceiptResult(res), rerr)
+	refused := rt.finish(key, r, cloneReceiptResult(res), rerr)
+	// completed is set the instant publication is done, BEFORE the
+	// post-publication test hook runs: a Goexit or panic from afterForget must
+	// find the reservation already resolved, or this defer would call abort
+	// and close r.done a second time (r26 finding 4).
 	completed = true
+	if refused && rt.hooks.afterForget != nil {
+		rt.hooks.afterForget()
+	}
 	return res, rerr
 }
 
@@ -736,7 +727,16 @@ func withBlockingReceipt[T any](ctx context.Context, rt *receiptTable, c Command
 		return zero, err
 	}
 	if !mine {
-		if running && rt.hooks.foundOpen != nil {
+		if !running {
+			// A COMPLETED entry replays AT ONCE, whatever the duplicate's own
+			// ctx: waitReceipt's select is for an OPEN reservation only, never a
+			// completed one — r.done and a duplicate's own already-canceled ctx
+			// both being closed would otherwise let select nondeterministically
+			// hand back context.Canceled instead of the stored result (r26
+			// finding 3).
+			return replayReceipt[T](r)
+		}
+		if rt.hooks.foundOpen != nil {
 			rt.hooks.foundOpen()
 		}
 		return waitReceipt[T](ctx, r)
@@ -748,8 +748,14 @@ func withBlockingReceipt[T any](ctx context.Context, rt *receiptTable, c Command
 		}
 	}()
 	res, rerr := run()
-	rt.finish(key, r, cloneReceiptResult(res), rerr)
+	refused := rt.finish(key, r, cloneReceiptResult(res), rerr)
+	// See withSyncReceipt's identical comment: completed is set BEFORE
+	// afterForget runs, so a Goexit or panic from that hook cannot make this
+	// defer double-close r.done (r26 finding 4).
 	completed = true
+	if refused && rt.hooks.afterForget != nil {
+		rt.hooks.afterForget()
+	}
 	return res, rerr
 }
 
@@ -760,8 +766,11 @@ func withBlockingReceiptErr(ctx context.Context, rt *receiptTable, c Command, ha
 	return err
 }
 
-// waitReceipt is a blocking command's duplicate, parked on r.done with its
-// own ctx: whichever ends the wait first, the owner's entry is untouched.
+// waitReceipt is a blocking command's duplicate against an OPEN reservation,
+// parked on r.done with its own ctx: whichever ends the wait first, the
+// owner's entry is untouched. Callers only reach it for a reservation that is
+// still running — withBlockingReceipt replays a completed one directly,
+// never through here (r26 finding 3).
 func waitReceipt[T any](ctx context.Context, r *receipt) (T, error) {
 	var zero T
 	var done <-chan struct{}

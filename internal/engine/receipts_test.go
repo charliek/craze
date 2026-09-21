@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -391,6 +392,32 @@ func TestADuplicateOfABlockingCommandWaitsForTheFirst(t *testing.T) {
 	r.until(lastEnding)
 }
 
+// A COMPLETED blocking receipt replays AT ONCE, whatever the duplicate's own
+// ctx: withBlockingReceipt only calls waitReceipt for an OPEN reservation,
+// never a completed one, so a duplicate whose ctx has ALREADY ended cannot
+// race context.Canceled against the stored result in waitReceipt's select
+// (before this fix, both r.done and ctx.Done() would be closed, and Go's
+// select would nondeterministically return either one). Two hundred
+// iterations, so a flake would not survive one lucky run (r26 finding 3).
+func TestACompletedBlockingReceiptReplaysWhateverTheDuplicatesCtx(t *testing.T) {
+	rt := newReceiptTable(nil)
+	c := Command{Client: rt.newClient(), ID: "1"}
+	hash := receiptHash("Cancel", "turn-1")
+	want, err := withBlockingReceipt(context.Background(), rt, c, hash, okRun("cancelled"))
+	if err != nil || want != "cancelled" {
+		t.Fatalf("the first call: %q, %v", want, err)
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 200; i++ {
+		got, err := withBlockingReceipt(expired, rt, c, hash, neverRun(t, "the resend"))
+		if err != nil || got != "cancelled" {
+			t.Fatalf("iteration %d: %q, %v; want the stored result despite an already-canceled ctx", i, got, err)
+		}
+	}
+}
+
 // A duplicate of a synchronous command never blocks, even called from the
 // one goroutine that would otherwise have to drain a full primary to unblock
 // anything (readerOn's own doc names this hazard): it is answered from the
@@ -433,12 +460,15 @@ func TestADuplicateOfASynchronousCommandNeverBlocksWithTheOutboxFull(t *testing.
 }
 
 // A duplicate of a synchronous command that finds the first still RUNNING is
-// refused at once — "in progress, ask again" — and never waits, which is what
-// keeps "waits on nothing" true once C12 puts an index write inside SetTitle
-// and Submit (r24 finding 5). Two things are proven while the first is parked
-// inside the session: the duplicate comes straight back with ErrUnavailable,
-// and the table's mutex is free, so another client's command — an Answer, on
-// the goroutine that would be the primary's reader — completes meanwhile.
+// refused at once — ErrCommandInProgress, "resend the SAME id" — and never
+// waits, which is what keeps "waits on nothing" true once C12 puts an index
+// write inside SetTitle and Submit (r24 finding 5). Its code is "in_progress",
+// distinct from a gate refusal's "unavailable" without matching text, because
+// the two mean different things a client must tell apart (r26 finding 1). Two
+// things are proven while the first is parked inside the session: the
+// duplicate comes straight back with ErrCommandInProgress, and the table's
+// mutex is free, so another client's command — an Answer, on the goroutine
+// that would be the primary's reader — completes meanwhile.
 func TestASyncDuplicateOfARunningCommandIsRefusedNotBlocked(t *testing.T) {
 	found := make(chan struct{}, 4)
 	r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true},
@@ -455,8 +485,8 @@ func TestASyncDuplicateOfARunningCommandIsRefusedNotBlocked(t *testing.T) {
 	go func() { dup <- r.e.SetTitle(a, "renamed") }()
 	select {
 	case err := <-dup:
-		if !errors.Is(err, ErrUnavailable) || Code(err) != "unavailable" {
-			t.Fatalf("a duplicate of a running synchronous command: %v (%s), want ErrUnavailable", err, Code(err))
+		if !errors.Is(err, ErrCommandInProgress) || Code(err) != "in_progress" {
+			t.Fatalf("a duplicate of a running synchronous command: %v (%s), want ErrCommandInProgress", err, Code(err))
 		}
 	case <-time.After(watchdog):
 		t.Fatal("a duplicate of a running synchronous command waited for it")
@@ -749,7 +779,7 @@ func TestAnOwnersPanicCompletesItsReservation(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			select {
 			case err := <-dups:
-				if !errors.Is(err, ErrCommandAborted) || Code(err) != "unavailable" {
+				if !errors.Is(err, ErrCommandAborted) || Code(err) != "aborted" {
 					t.Fatalf("a parked duplicate: %v (%s), want ErrCommandAborted", err, Code(err))
 				}
 			case <-time.After(watchdog):
@@ -781,6 +811,98 @@ func TestAnOwnersPanicCompletesItsReservation(t *testing.T) {
 			t.Fatalf("the resend after a panic: %v, want ErrCommandAborted", err)
 		}
 	})
+}
+
+// runtime.Goexit from the command itself — a t.Fatal inside a hook, in
+// production terms — unwinds through the deferred completion exactly as a
+// panic does: the reservation is completed as ErrCommandAborted, and the
+// goroutine's own defer must not also try to close r.done a second time
+// (finish already did, for a return; here abort does, for the Goexit).
+// Double-closing a channel panics, which — unrecovered, in this untracked
+// goroutine — would crash the whole test binary, so the test's silence on
+// that point is itself part of what it proves (r26 finding 4, hunt item A).
+func TestGoexitFromRunCompletesItsReservationAsAborted(t *testing.T) {
+	t.Run("a blocking command", func(t *testing.T) {
+		rt := newReceiptTable(nil)
+		c := Command{Client: rt.newClient(), ID: "1"}
+		hash := receiptHash("Cancel", "turn-1")
+		unwound := make(chan struct{})
+		go func() {
+			defer close(unwound)
+			_, _ = withBlockingReceipt(context.Background(), rt, c, hash, func() (string, error) {
+				runtime.Goexit()
+				return "unreachable", nil
+			})
+		}()
+		select {
+		case <-unwound:
+		case <-time.After(watchdog):
+			t.Fatal("the Goexit never unwound the goroutine")
+		}
+		if _, err := withBlockingReceipt(context.Background(), rt, c, hash, neverRun(t, "the resend")); !errors.Is(err, ErrCommandAborted) {
+			t.Fatalf("the resend after a Goexit: %v, want ErrCommandAborted", err)
+		}
+	})
+
+	t.Run("a synchronous command", func(t *testing.T) {
+		rt := newReceiptTable(nil)
+		c := Command{Client: rt.newClient(), ID: "1"}
+		hash := receiptHash("SetTitle", "renamed")
+		unwound := make(chan struct{})
+		go func() {
+			defer close(unwound)
+			_, _ = withSyncReceipt(rt, c, hash, func() (string, error) {
+				runtime.Goexit()
+				return "unreachable", nil
+			})
+		}()
+		select {
+		case <-unwound:
+		case <-time.After(watchdog):
+			t.Fatal("the Goexit never unwound the goroutine")
+		}
+		if _, err := withSyncReceipt(rt, c, hash, neverRun(t, "the resend")); !errors.Is(err, ErrCommandAborted) {
+			t.Fatalf("the resend after a Goexit: %v, want ErrCommandAborted", err)
+		}
+	})
+}
+
+// A panic from afterForget, AFTER publication, must not re-run the deferred
+// abort: the reservation is already completed and its done channel already
+// closed by finish/publishLocked, so if completed were still false when
+// afterForget panicked, the defer would call abort and close r.done a second
+// time — a second panic ("close of closed channel") that would MASK
+// afterForget's own, which is exactly what the recovered value below checks
+// for (r26 finding 4).
+func TestAPanicFromAfterForgetAfterPublicationDoesNotDoubleClose(t *testing.T) {
+	rt := newReceiptTable(&receiptHooks{
+		afterForget: func() { panic("afterForget panics") },
+	})
+	c := Command{Client: rt.newClient(), ID: "1"}
+	hash := receiptHash("Cancel", "turn-1")
+
+	func() {
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				t.Fatal("afterForget's own panic did not reach the caller")
+			}
+			if msg, ok := rec.(string); !ok || msg != "afterForget panics" {
+				t.Fatalf("recovered %v, want afterForget's own panic unmasked (a double-close would mask it)", rec)
+			}
+		}()
+		_, _ = withBlockingReceipt(context.Background(), rt, c, hash, func() (string, error) {
+			return "", ErrNotAccepting // a gate refusal: afterForget runs
+		})
+	}()
+
+	// The id was forgotten by the gate refusal, and nothing double-closed it,
+	// so a fresh attempt executes exactly once: proof the entry was published
+	// and released cleanly whatever afterForget did afterwards.
+	got, err := withBlockingReceipt(context.Background(), rt, c, hash, okRun("cancelled"))
+	if err != nil || got != "cancelled" {
+		t.Fatalf("the fresh attempt after afterForget panicked: %q, %v", got, err)
+	}
 }
 
 // A gate refusal hands the id back, and the next caller gets a genuine
@@ -952,12 +1074,20 @@ func TestOutOfOrderIDsKeepTheirOwnAnswers(t *testing.T) {
 }
 
 // A client's high-water mark is never silently forgotten, however many
-// clients are minted after it: forgetting one would make that client's old ids
-// look unseen and run a second time, which is the one thing this table exists
-// to prevent. Past the bound on clients the OLDEST is retired instead — its
-// commands are refused for good, and minting keeps working (r24 finding 1).
+// clients are minted after it: forgetting one would make that client's old
+// ids look unseen and run a second time, which is the one thing this table
+// exists to prevent. No client is EVER retired (r26 finding 2, closing r24
+// finding 1's own gap): the FIRST client minted stays exactly as answerable
+// after 5,000 later clients as before them — its own unseen ids still
+// execute, its evicted ids still stay ErrUnknownCommand rather than running
+// again, and an open reservation of its still finds its duplicate rather than
+// being torn out from under it. The reviewer's own schedule proves the last
+// of those: c-1 holds an OPEN blocking reservation while all 5,000 clients
+// are minted around it, and its duplicate — arriving only once they all
+// exist — still waits and gets the owner's result.
 func TestNoMarkIsEverLostHoweverManyClientsAreMinted(t *testing.T) {
-	rt := newReceiptTable(nil)
+	found := make(chan struct{}, 4)
+	rt := newReceiptTable(&receiptHooks{foundOpen: func() { found <- struct{}{} }})
 	rt.cap = 1 // one result at a time, so a mark can be set in two commands
 	hash := receiptHash("SetTitle", "t")
 	cmd := func(client string, id uint64) Command {
@@ -976,8 +1106,26 @@ func TestNoMarkIsEverLostHoweverManyClientsAreMinted(t *testing.T) {
 	first := rt.newClient()
 	mark(first)
 
-	// A client minted late enough to survive the bound, so what is proven for
-	// it is the MARK's survival and not retirement's.
+	// c-1 (first) holds an open blocking reservation, under a THIRD id of its
+	// own, for the whole of the 5,000-client mint below.
+	blockHash := receiptHash("Cancel", "turn-1")
+	held := Command{Client: first, ID: "3"}
+	reserved, release := make(chan struct{}), make(chan struct{})
+	ownerRes, ownerErr := make(chan string, 1), make(chan error, 1)
+	go func() {
+		res, err := withBlockingReceipt(context.Background(), rt, held, blockHash, func() (string, error) {
+			close(reserved)
+			<-release
+			return "cancelled", nil
+		})
+		ownerRes <- res
+		ownerErr <- err
+	}()
+	await(t, reserved, "c-1's own reservation")
+
+	// A client minted late enough to survive any bound a smaller table would
+	// have had, so what is proven for it is the MARK's survival, same as
+	// r24's own version of this test proved.
 	var late string
 	for i := 0; i < 5000; i++ {
 		if i == 2500 {
@@ -988,23 +1136,49 @@ func TestNoMarkIsEverLostHoweverManyClientsAreMinted(t *testing.T) {
 		rt.newClient()
 	}
 
+	// A duplicate arriving only now — after all 5,000 later clients exist —
+	// still finds c-1's reservation open and waits on it, rather than being
+	// told the id is unknown because its client was torn out from under it.
+	dupRes, dupErr := make(chan string, 1), make(chan error, 1)
+	go func() {
+		res, err := withBlockingReceipt(context.Background(), rt, held, blockHash, neverRun(t, "the duplicate"))
+		dupRes <- res
+		dupErr <- err
+	}()
+	awaitHook(t, found, 1, "the duplicate to find c-1's still-open reservation")
+	close(release)
+
+	if err := <-ownerErr; err != nil {
+		t.Fatalf("c-1's own reservation: %v", err)
+	}
+	select {
+	case got := <-dupRes:
+		if err := <-dupErr; err != nil {
+			t.Fatalf("the duplicate: %v", err)
+		}
+		if got != "cancelled" {
+			t.Fatalf("the duplicate got %q, want the owner's %q", got, "cancelled")
+		}
+	case <-time.After(watchdog):
+		t.Fatal("the duplicate never returned")
+	}
+
 	for _, c := range []Command{cmd(first, 1), cmd(late, 1)} {
 		if _, err := withSyncReceipt(rt, c, hash, neverRun(t, "an evicted id after 5,000 clients")); !errors.Is(err, ErrUnknownCommand) {
 			t.Fatalf("%s: %v, want ErrUnknownCommand", c.Cause(), err)
 		}
 	}
-	// The retired client is refused for good, whatever it sends: an id it
-	// never used is as unknowable as one it did.
-	if _, err := withSyncReceipt(rt, cmd(first, 4242), hash, neverRun(t, "a retired client's unseen id")); !errors.Is(err, ErrUnknownCommand) {
-		t.Fatalf("a retired client's unseen id: %v, want ErrUnknownCommand", err)
+	// The FIRST client minted is never retired: its own never-seen ids still
+	// execute after 5,000 later clients, exactly as the late client's do.
+	if got, err := withSyncReceipt(rt, cmd(first, 4242), hash, okRun("fresh")); err != nil || got != "fresh" {
+		t.Fatalf("the first client's unseen id: %q, %v; want it to execute, not ErrUnknownCommand", got, err)
 	}
-	// The late client is not retired: its own unseen ids still execute.
 	if got, err := withSyncReceipt(rt, cmd(late, 4242), hash, okRun("fresh")); err != nil || got != "fresh" {
 		t.Fatalf("a live client's unseen id: %q, %v; want it to execute", got, err)
 	}
-	// And minting never stops working, bound or no bound.
+	// And minting never stops working, whatever the count.
 	if id := rt.newClient(); id == "" || id == first {
-		t.Fatalf("NewClientID past the bound minted %q", id)
+		t.Fatalf("NewClientID minted %q", id)
 	}
 }
 
