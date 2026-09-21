@@ -2,6 +2,8 @@ package tool
 
 import (
 	"context"
+	"os"
+	"strings"
 	"sync/atomic"
 )
 
@@ -144,9 +146,39 @@ func (g *ModeGate) onlyThePlan(targets []string) bool {
 		return false
 	}
 	for _, t := range targets {
-		if t != plan {
+		if !isThePlan(t, plan) {
 			return false
 		}
 	}
 	return true
+}
+
+// isThePlan reports whether target, a path RealPath resolved, names the plan
+// file, which RealPath resolved too: equal strings, which is the answer on a
+// case-sensitive file system, or one file under two spellings of one name.
+//
+// On a case-insensitive file system (macOS's APFS, by default) a file has many
+// spellings and a resolved path keeps the one it was given, so an edit of the
+// plan file named <dir>/X.PLAN.MD would otherwise be refused as another file —
+// the same reason the credentials check spells its comparison out
+// (opencode/file.go:107-130). os.SameFile is what asks the file system whether
+// the two spellings are one file; EqualFold is what keeps a hard link at
+// another name out of it, since two names for one inode are one file to
+// os.SameFile and only a case-equivalent spelling is the plan file under
+// another name. Both must hold, and a target that does not exist can only be
+// the plan file by its string (plan 023 §3.1).
+func isThePlan(target, plan string) bool {
+	if target == plan {
+		return true
+	}
+	// Before the two stats, so a call the mode refuses anyway does no I/O.
+	if !strings.EqualFold(target, plan) {
+		return false
+	}
+	ti, err := os.Stat(target)
+	if err != nil {
+		return false
+	}
+	pi, err := os.Stat(plan)
+	return err == nil && os.SameFile(ti, pi)
 }

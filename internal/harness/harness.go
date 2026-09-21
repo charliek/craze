@@ -190,10 +190,10 @@ func (m model) id() store.Model {
 // change entry for (held or written). A turn that runs on anything else
 // first appends a change entry.
 //
-// Model and effort are compared when a turn begins; the mode is compared at
-// every step boundary that tells the model about it, so a switch made
-// mid-turn is recorded where it became visible rather than at the next turn's
-// start (plan 023 §3.1). It starts at agent: a session opened in another mode
+// Model and effort are compared when a turn begins; the mode is compared as
+// the step whose request announced it is appended, so a switch made mid-turn
+// is recorded where it became visible rather than at the next turn's start
+// (plan 023 §3.1). It starts at agent: a session opened in another mode
 // records the switch to it, since the header carries no mode.
 type logged struct {
 	model  store.Model
@@ -286,7 +286,17 @@ func Open(opts Options) (*Session, error) {
 	// the store has named the transcript; the gate learns it here and nowhere
 	// else. A session that opens in plan mode creates the file at once, so the
 	// reminder, the gate and the model all mean one path that is there.
-	s.modes = newModes(mode, store.PlanPath(st.Path()), s.tools.modeGate)
+	//
+	// The path itself goes to the model verbatim in every plan-mode reminder
+	// (§3.3), so a configured key inside it refuses the session the way the
+	// working directory's does (errPlanPathKey): redacting it would leave the
+	// model a path that opens nothing. A key the session learns later is
+	// refused with the switch that brought it (toolset.resolve).
+	plan := store.PlanPath(st.Path())
+	if err := s.tools.adoptPlanPath(plan); err != nil {
+		return nil, err
+	}
+	s.modes = newModes(mode, plan, s.tools.modeGate)
 	if mode == modePlan {
 		if err := store.CreatePlanFile(s.modes.planPath); err != nil {
 			return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))

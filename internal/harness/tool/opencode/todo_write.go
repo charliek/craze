@@ -61,20 +61,42 @@ func newTodoWrite() (tool.Tool, error) {
 	}}, nil
 }
 
+// What one call may be, before any of it is decoded (plan 023 §3.4).
+// The store's caps bound the list a call leaves behind, not the work of
+// getting there: without these, a request of a million duplicate
+// {"id":"x"} objects would be decoded into a million raw messages, copied into
+// a million updates and indexed by a map sized for them, all to leave one item
+// in the list — and none of that work is interruptible.
+const (
+	// maxTodoInputBytes is the largest raw argument object todo_write reads.
+	// It is checked first, against the bytes Fantasy handed over, so nothing
+	// larger is ever decoded. Well past any real call: the whole list at its
+	// caps is about 64 × (64 + 200) bytes of ids and contents.
+	maxTodoInputBytes = 256 << 10
+	// maxTodoUpdates is how many entries the todos array may have. Four times
+	// TodoCap, so a call that rewrites the whole list, even one that repeats
+	// every id, is comfortably inside it.
+	maxTodoUpdates = 4 * tool.TodoCap
+)
+
 type todoWriteTool struct{ spec tool.Spec }
 
 func (w *todoWriteTool) Spec() tool.Spec { return w.spec }
 
-// Prepare shapes and validates one call: the merge flag, tri-state so the
-// store can tell "omitted" from "explicitly false" (its auto-upgrade needs
-// the difference); and each update's id (required, non-empty) and status (one
-// of the four, when given). Content is taken as sent, unexamined — the store
-// is where a value is finally kept, truncated or replaced by the id, since
-// only it knows whether an id is new or already in the list. Duplicate ids
-// within the call are not rejected here either: the store resolves them
-// (last one wins), which is a semantics only it can apply consistently with
-// merge and replace both.
+// Prepare shapes and validates one call: its size, before anything is decoded
+// (maxTodoInputBytes, maxTodoUpdates); the merge flag, tri-state so the store
+// can tell "omitted" from "explicitly false" (its auto-upgrade needs the
+// difference); and each update's id (required, non-empty, at most
+// tool.TodoIDBytes) and status (one of the four, when given). Content is taken
+// as sent, unexamined — the store is where a value is finally kept, truncated
+// or replaced by the id, since only it knows whether an id is new or already
+// in the list. Duplicate ids within the call are not rejected here either: the
+// store resolves them (last one wins), which is a semantics only it can apply
+// consistently with merge and replace both.
 func (w *todoWriteTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
+	if len(c.Input) > maxTodoInputBytes {
+		return nil, fmt.Errorf("the arguments are %d bytes, larger than the %d this tool reads; send fewer todo items", len(c.Input), maxTodoInputBytes)
+	}
 	a, err := parseArgs(c.Input)
 	if err != nil {
 		return nil, err
@@ -90,6 +112,9 @@ func (w *todoWriteTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) 
 	raw, _, err := a.array("todos", true)
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > maxTodoUpdates {
+		return nil, fmt.Errorf("todos has %d items, more than the %d this tool takes in one call; the list itself holds %d", len(raw), maxTodoUpdates, tool.TodoCap)
 	}
 	updates := make([]tool.TodoUpdate, len(raw))
 	for i, r := range raw {
@@ -118,13 +143,20 @@ func parseTodoUpdate(raw json.RawMessage) (tool.TodoUpdate, error) {
 	if strings.TrimSpace(id) == "" {
 		return tool.TodoUpdate{}, fmt.Errorf("id must not be empty")
 	}
+	// Refused rather than cut: an id is what a later call names a row by, and
+	// two ids truncated to the same prefix would be one row (tool.TodoIDBytes).
+	if len(id) > tool.TodoIDBytes {
+		return tool.TodoUpdate{}, fmt.Errorf("id is %d bytes, longer than the %d an id may be", len(id), tool.TodoIDBytes)
+	}
 	u := tool.TodoUpdate{ID: id}
-	if content, ok, err := a.str("content", false); err != nil {
+	// content and status take grok-build's Option semantics: an explicit null
+	// is the field left out, not a wrong type (strOrNull).
+	if content, ok, err := a.strOrNull("content"); err != nil {
 		return tool.TodoUpdate{}, err
 	} else if ok {
 		u.Content = &content
 	}
-	if s, ok, err := a.str("status", false); err != nil {
+	if s, ok, err := a.strOrNull("status"); err != nil {
 		return tool.TodoUpdate{}, err
 	} else if ok {
 		st := tool.TodoStatus(s)
@@ -169,13 +201,24 @@ func todoTitle(updates []tool.TodoUpdate) string {
 // this package depends on something outside it that may not be there.
 func (c *todoWriteCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil {
-		return tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted}
+		return aborted()
 	}
 	if env.Todos == nil {
 		return tool.Result{Text: "The todo list is not available in this session.", IsError: true, Class: tool.ClassToolError}
 	}
-	list, dropped := env.Todos.Write(c.merge, c.updates)
+	// The store checks ctx once more, with its own lock held: two calls of a
+	// step run at once, and the one that waited must not change a list the
+	// user has already stopped (tool.TodoStore).
+	list, dropped, ok := env.Todos.Write(ctx, c.merge, c.updates)
+	if !ok {
+		return aborted()
+	}
 	return tool.Result{Text: todoResultText(list, dropped)}
+}
+
+// aborted is what every tool answers a cancelled call with.
+func aborted() tool.Result {
+	return tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted}
 }
 
 // wireTodo is one item of the result's JSON, camelCase like every other

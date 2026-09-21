@@ -253,11 +253,12 @@ func (s *Session) record(m model, changes []func(*store.Store) error) error {
 }
 
 // recordMode hands the store a mode_change when mode is not what the
-// transcript was last told, and marks it told once the store has taken it.
-// The turn calls it at each step boundary that announces a mode, so the entry
-// is held with that step's output and lands where the change became visible
-// in the conversation (plan 023 §3.1). A store that refuses it stays untold,
-// as a refused model change does.
+// transcript was last told, and marks it held once the store has taken it —
+// held or written, which is what logged means for the model and the effort
+// too. The turn calls it as it appends the step whose request announced the
+// mode, so the entry is held with that step's output and lands where the
+// change became visible in the conversation (plan 023 §3.1). A store that
+// refuses it stays untold, as a refused model change does.
 func (s *Session) recordMode(mode string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,12 +335,22 @@ type turn struct {
 	// session's box, which has its own lock; the rest is this turn's, under
 	// mu. reminders is a collection of its own — never spliced, never
 	// persisted, never emitted — and pending is the one composed for the step
-	// about to go out, committed when its request does.
+	// about to go out.
+	//
+	// carried and sent are the two halves of announcing a mode. carried is the
+	// mode this turn's reminders already speak for, from the moment one is
+	// composed: every later request of the turn carries it, so the turn never
+	// composes it twice. sent is that mode once a request carrying it has
+	// really gone out, and it is what the step that persists output records —
+	// in the transcript (modeChangeHeld) and as what the model has been told
+	// (modeHeard).
 	modes      *modes
 	logMode    func(mode string) error
 	reminders  []reminder
 	pending    pendingReminder
 	hasPending bool
+	carried    string
+	sent       string
 }
 
 // redactor is the session's, as it is now — fixed for the whole turn, since
@@ -438,8 +449,9 @@ func (t *turn) halted([]fantasy.StepResult) bool {
 
 // stepStarted opens step n (from 0): its number, its clock, and an empty
 // set of tool calls. The step's request goes out next, so this is also where
-// the reminder prepareStep composed for it becomes something the model has
-// read (reminderSent).
+// the reminder prepareStep composed for it becomes one the model will read
+// (reminderSent) — for a turn whose context is still live, since Fantasy
+// opens a step whether or not the request can be sent.
 func (t *turn) stepStarted(n int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -531,6 +543,11 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		if results != nil {
 			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort}
 		}
+		// The mode this step's request announced is handed over first, so the
+		// store writes the mode_change ahead of this step's own entries
+		// (reminders.go), and it is only ever handed over for a step there is
+		// something to append with.
+		t.modeChangeHeld()
 		// The steers no step has written yet lead the append: this is the
 		// first step that could write them, and the transcript then holds
 		// them exactly where this step's request had them.
@@ -539,6 +556,9 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		case err == nil:
 			t.written = len(t.spliced)
 			done.Saved, done.Entries = true, ids
+			// The conversation now holds the step the model read the notice
+			// in, so the mode is told for good (plan 023 §3.3).
+			t.modeHeard()
 		case errors.Is(err, store.ErrNoOutput): // thinking alone: nothing to persist
 		default:
 			if t.saveErr == nil {

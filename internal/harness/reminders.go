@@ -30,7 +30,10 @@ import (
 // last. A mode it has not been told about produces a transition notice at the
 // next step boundary — the step the request goes out on, whether that is the
 // turn's first or its fifth — and, in plan and ask mode, every later turn
-// opens with the mode's standing reminder. Plan mode's alternates between a
+// opens with the mode's standing reminder. "Told" means told in a step whose
+// output the transcript kept: a reminder is not persisted, so a notice sent in
+// a turn that failed, was cancelled or only thought is a notice the next
+// turn's history says nothing about, and it goes out again (§3.3). Plan mode's alternates between a
 // full text and a sparse one, as grok-build's does, and both name the plan
 // file: history is rebuilt from a store that omits reminders, so a sparse one
 // that named no path would leave the model without it (panel correction 8).
@@ -121,8 +124,14 @@ type modes struct {
 
 	mu    sync.Mutex
 	mode  string // the mode now: what the gate judges by
-	told  string // the mode the model has been told about
+	told  string // the mode the model has been told about, durably (heard)
 	turns int    // plan reminders already sent, for the full/sparse alternation
+	// gen counts the resets: every set bumps it, and a reminder carries the
+	// one it was composed at. Equality of turns alone cannot tell a reset from
+	// no reset — a set puts turns back to 0, so a reminder composed at 0 and a
+	// reset to 0 compare equal — and a stale commit would then advance the
+	// counter the reset meant to hold at the full text (plan 023 §3.3).
+	gen int
 }
 
 // newModes starts a session in mode, with plan the path of its plan file. The
@@ -151,16 +160,17 @@ func (m *modes) current() string {
 func (m *modes) set(mode string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.mode, m.turns = mode, 0
+	m.mode, m.turns, m.gen = mode, 0, m.gen+1
 	m.gate.SetMode(mode)
 }
 
 // pendingReminder is one composed reminder: the text, the mode it speaks for,
-// and what committing it means once the request carrying it has gone out.
+// the reset generation it was composed at, and whether the alternation
+// advances once the request carrying it has gone out.
 type pendingReminder struct {
 	text   string
 	mode   string
-	parity int  // the alternation counter it was composed at
+	gen    int  // the reset generation it was composed at (see modes.gen)
 	counts bool // a plan-mode reminder: the alternation advances with it
 }
 
@@ -170,26 +180,35 @@ type pendingReminder struct {
 // standing reminder. Agent mode with nothing to announce composes nothing, so
 // an agent-mode session's requests are the bytes they have always been.
 //
+// carried is the mode this turn's own requests already announce, "" when it
+// has announced none. It stands in for told within the turn: told is recorded
+// only once a step of the turn has persisted output (§3.3, heard), and until
+// then the notice already in t.reminders is in every request of this turn, so
+// composing it a second time would say the same thing twice.
+//
 // It reads the mode under the lock and composes outside it (the plan file's
 // state is a stat): a switch that lands in between is simply the next
-// boundary's transition, since commit records the mode this text spoke for
-// and not whatever the mode is by then.
-func (m *modes) reminderFor(step int) (pendingReminder, bool) {
+// boundary's transition, since what is recorded is the mode this text spoke
+// for and not whatever the mode is by then.
+func (m *modes) reminderFor(step int, carried string) (pendingReminder, bool) {
 	m.mu.Lock()
-	mode, told, parity := m.mode, m.told, m.turns
+	mode, told, parity, gen := m.mode, m.told, m.turns, m.gen
 	m.mu.Unlock()
+	if carried != "" {
+		told = carried
+	}
 
 	switch {
 	case mode != told:
-		return pendingReminder{text: m.transition(mode, told), mode: mode, parity: parity, counts: mode == modePlan}, true
+		return pendingReminder{text: m.transition(mode, told), mode: mode, gen: gen, counts: mode == modePlan}, true
 	case step > 0:
 		// Nothing has changed since the last boundary, and the turn's own
 		// reminder is already in every request of it.
 		return pendingReminder{}, false
 	case mode == modePlan:
-		return pendingReminder{text: m.planText(parity), mode: mode, parity: parity, counts: true}, true
+		return pendingReminder{text: m.planText(parity), mode: mode, gen: gen, counts: true}, true
 	case mode == modeAsk:
-		return pendingReminder{text: askReminder, mode: mode, parity: parity}, true
+		return pendingReminder{text: askReminder, mode: mode, gen: gen}, true
 	}
 	return pendingReminder{}, false
 }
@@ -234,17 +253,40 @@ func (m *modes) planText(parity int) string {
 	return fmt.Sprintf(planReminderFull, fmt.Sprintf(line, m.planPath))
 }
 
-// commit records that the request carrying r has gone out: the model has now
-// been told about r's mode, and a plan reminder it read advances the
-// alternation — but only if nothing reset it meanwhile, since a SetMode since
-// the compose wants the full text next.
-func (m *modes) commit(r pendingReminder) {
+// sent records that the request carrying r has gone out, which is all one
+// request can settle: a plan reminder the model read advances the alternation
+// — but only if nothing reset it meanwhile, since a SetMode since the compose
+// wants the full text next, and its generation is how that is told from a
+// counter that happens to have come back round to the same number.
+//
+// It deliberately does not record told. A request that went out can still end
+// in nothing the conversation keeps — a failure, a cancel, a step that only
+// thought — and the next turn's history, rebuilt from a transcript with no
+// reminders in it, would then leave the model with a mode it was told about
+// in a turn that left no trace (plan 023 §3.3). heard is that half.
+func (m *modes) sent(r pendingReminder) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.told = r.mode
-	if r.counts && m.turns == r.parity {
+	if r.counts && m.gen == r.gen {
 		m.turns++
 	}
+}
+
+// heard records that a step whose request carried the notice for mode has
+// persisted output: from here the conversation itself holds that step, so the
+// model has been told about the mode and no later turn announces it again
+// (plan 023 §3.3).
+func (m *modes) heard(mode string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.told = mode
+}
+
+// toldMode is the mode the model has been told of for good (heard).
+func (m *modes) toldMode() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.told
 }
 
 // planHasContent reports whether the plan file holds anything. A file that
@@ -270,33 +312,74 @@ type reminder struct {
 // transition notice, which never moves or replaces one sent earlier. mu is
 // held.
 func (t *turn) remind(step int, base []fantasy.Message) {
-	r, ok := t.modes.reminderFor(step)
+	r, ok := t.modes.reminderFor(step, t.carried)
 	if !ok {
 		return
 	}
 	t.reminders = append(t.reminders, reminder{at: len(base), msg: reminderMessage(r.text)})
 	t.pending, t.hasPending = r, true
+	t.carried = r.mode
 }
 
-// reminderSent is called as the step's request goes out (stepStarted), which
-// is the one moment a reminder becomes something the model has read: before
-// it, a turn withdrawn or cancelled leaves the mode still to be announced and
-// the alternation where it was. It is also where the mode reaches the
-// transcript, so a mode_change entry sits at the boundary the change became
-// visible in the conversation and is held, like a model change, until a step
-// produces output (plan 023 §3.1). mu is held.
+// reminderSent is called as the step's request goes out (stepStarted): the
+// alternation advances here, because that is a fact about requests, and the
+// mode this turn has announced is remembered for the step that persists
+// output (modeChangeHeld, modeHeard).
+//
+// It does nothing for a turn whose context is already done. Fantasy calls
+// OnStepStart before it attempts the stream, cancelled or not
+// (agent.go:1004-1006), so without this a cancel landing between the compose
+// and the request would spend a notice on a request that never went out — and
+// §3.3 says a withdrawn or cancelled turn keeps its parity. mu is held.
 func (t *turn) reminderSent() {
-	if !t.hasPending {
+	if !t.hasPending || t.ctx.Err() != nil {
 		return
 	}
 	r := t.pending
 	t.pending, t.hasPending = pendingReminder{}, false
-	t.modes.commit(r)
+	t.sent = r.mode
+	t.modes.sent(r)
+}
+
+// modeChangeHeld hands the store the mode_change for the notice a request of
+// this turn has carried, from stepFinished and just before that step's own
+// append: the store writes held changes ahead of everything else in the batch,
+// so the entry still leads the step's output and sits where the change became
+// visible in the conversation (plan 023 §3.1). A step that persists nothing
+// leaves it held, for the next step or turn that does, exactly as a model
+// change is held.
+//
+// A step whose request announced nothing hands over the mode the model was
+// last told of for good, which is nearly always what the transcript already
+// says and then costs nothing (recordMode). The case it is for: a change held
+// by a turn that persisted nothing, and the user back in the old mode before
+// any output. Nothing announces that, so without this the stale entry would be
+// written with this step and the transcript would name a mode the
+// conversation never entered; the hand-over replaces it, as a model switched
+// and switched back is replaced at the next turn's start. mu is held.
+func (t *turn) modeChangeHeld() {
+	mode := t.sent
+	if mode == "" {
+		mode = t.modes.toldMode()
+	}
 	// A store that cannot hold the change cannot hold the step either; the
 	// turn stops before another request, as a failed append does.
-	if err := t.logMode(r.mode); err != nil && t.saveErr == nil {
+	if err := t.logMode(mode); err != nil && t.saveErr == nil {
 		t.saveErr = err
 	}
+}
+
+// modeHeard records that the step just appended carried the notice and its
+// output is in the transcript: the model has been told about the mode for
+// good. A turn that fails before output, returns only reasoning or is
+// cancelled never reaches here, and the next turn composes the transition
+// again (plan 023 §3.3). mu is held.
+func (t *turn) modeHeard() {
+	if t.sent == "" {
+		return
+	}
+	t.modes.heard(t.sent)
+	t.sent = ""
 }
 
 // reminderMessage is one reminder as the model reads it: a user message

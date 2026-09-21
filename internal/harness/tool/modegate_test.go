@@ -86,12 +86,22 @@ func target(t *testing.T, path string) []string {
 	return []string{real}
 }
 
-// TestModeGate is A1: every kind against every mode against every shape a
-// target can take. Plan mode admits an edit of the plan file however it is
-// spelled and nothing else; ask mode admits only what is read-only;
-// exit_plan_mode is refused by name wherever there is no plan to present; and
-// everything that is not refused reaches the inner gate, which is what a
-// later evaluator will be.
+// TestModeGate is A1 at the gate itself: the three modes against the kinds and
+// the target shapes that decide a call. Plan mode admits an edit whose targets
+// are all the plan file, spelled outright or reached through a symlink, and
+// refuses another file, a file that is not there, a dangling link, an
+// unresolved relative spelling, no target at all, and the plan file among
+// others; reads, searches and commands go inward in plan mode, nothing that is
+// not read-only does in ask mode, and exit_plan_mode is refused by name
+// wherever there is no plan to present. Everything not refused reaches the
+// inner gate, which is what a later evaluator will be.
+//
+// The shapes it does not judge are judged next door: a case-equivalent
+// spelling and a hard link in TestModeGateCaseEquivalentPlanPaths, and what a
+// tool's own Prepare resolves — a relative spelling, a directory symlink, a
+// path through "..", one that will not resolve, and an edit tool that names no
+// target — through the dispatcher in TestModeGateThroughTheDispatcher and,
+// with the production write tool, in opencode's TestPlanModeThroughTheGate.
 func TestModeGate(t *testing.T) {
 	f := newPlanFixture(t)
 	rejected := planEditRejected(mustReal(t, f.plan))
@@ -184,6 +194,151 @@ func mustReal(t *testing.T, path string) string {
 		t.Fatalf("resolving %s: %v", path, err)
 	}
 	return real
+}
+
+// TestModeGateCaseEquivalentPlanPaths: a target that is the plan file under a
+// spelling that differs only in case is the plan file, where the file system
+// says so — on macOS's APFS a resolved path keeps the spelling it was given,
+// so string equality alone would refuse an edit of the plan file itself. A
+// hard link to it at another name is not the plan file anywhere: os.SameFile
+// is true of it, which is why the comparison asks EqualFold as well.
+func TestModeGateCaseEquivalentPlanPaths(t *testing.T) {
+	f := newPlanFixture(t)
+	g := NewModeGate(ModePlan, nil) // nil inner is AllowAll
+	g.SetPlanPath(f.plan)
+	edit := func(path string) Decision {
+		t.Helper()
+		dec, err := g.Check(context.Background(), Request{Tool: "write", Kind: KindEdit, Targets: target(t, path)})
+		if err != nil {
+			t.Fatalf("Check(%s): %v", path, err)
+		}
+		return dec
+	}
+
+	// One inode, two names: refused, whatever the file system.
+	hard := filepath.Join(filepath.Dir(f.other), "hard-link.md")
+	if err := os.Link(f.plan, hard); err != nil {
+		t.Skipf("this file system has no hard links, so the negative half cannot run: %v", err)
+	}
+	if d, ok := edit(hard).(Deny); !ok || !strings.Contains(d.Reason, "the only editable file") {
+		t.Fatalf("a hard link to the plan file = %#v, want the plan-mode refusal", edit(hard))
+	}
+
+	// The same file, spelled in another case.
+	dir := filepath.Dir(f.plan)
+	upper := filepath.Join(dir, strings.ToUpper(filepath.Base(f.plan)))
+	if !caseInsensitive(t, dir) {
+		t.Skip("this file system is case-sensitive: the upper-cased spelling is another file, which the gate already refuses")
+	}
+	if _, ok := edit(upper).(Allow); !ok {
+		t.Fatalf("the plan file spelled %q = %#v, want Allow", filepath.Base(upper), edit(upper))
+	}
+}
+
+// caseInsensitive reports whether dir's file system has one file under many
+// spellings: it writes a name and stats the upper-cased one.
+func caseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "case-probe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(probe)
+	_, err := os.Stat(filepath.Join(dir, "CASE-PROBE"))
+	return err == nil
+}
+
+// TestModeGateThroughTheDispatcher is the same gate where a call really meets
+// it: Prepare resolves the target the way the file tools do (RealPath over the
+// workspace-resolved path, opencode/file.go:89-99), the dispatcher hands the
+// gate that copy, and Run either refuses or runs the tool. It covers the
+// spellings a model actually sends — relative, through a directory symlink,
+// through ".." — a path that will not resolve at all, and an edit-kind tool
+// that names Paths and no Targets, which nothing can judge and plan mode
+// therefore refuses.
+func TestModeGateThroughTheDispatcher(t *testing.T) {
+	env := testEnv(t)
+	plan := filepath.Join(env.Home, "20260921T120000Z_s.plan.md")
+	if err := os.WriteFile(plan, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.Workspace, "a.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(env.Workspace, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A directory symlink onto the harness home, and a pair of links that
+	// point at each other: RealPath resolves the first and cannot resolve the
+	// second, which then falls back to the path as spelled (plan 023 §3.1,
+	// amendment X4).
+	if err := os.Symlink(env.Home, filepath.Join(env.Workspace, "home-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(env.Workspace, "loop-b"), filepath.Join(env.Workspace, "loop-a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(env.Workspace, "loop-a"), filepath.Join(env.Workspace, "loop-b")); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(env.Workspace, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, path string
+		pathsOnly  bool
+		allowed    bool
+	}{
+		{name: "the plan file, absolute", path: plan, allowed: true},
+		{name: "the plan file, spelled relative to the workspace", path: rel, allowed: true},
+		{name: "the plan file through a directory symlink", path: filepath.Join("home-link", filepath.Base(plan)), allowed: true},
+		{name: "the plan file through ..", path: filepath.Join("sub", "..", rel), allowed: true},
+		{name: "a file in the workspace", path: "a.txt"},
+		{name: "a path that will not resolve", path: "loop-a"},
+		{name: "an edit tool that names no target", path: plan, pathsOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := newFake("write", nil)
+			writer.spec.Kind, writer.spec.ReadOnly = KindEdit, false
+			writer.req = func(in fakeInput, env Env) Request {
+				abs := env.Resolve(in.Path)
+				if tc.pathsOnly {
+					// A tool that says where it will write only in the field
+					// the event text carries, which the gate may not judge by.
+					return Request{Title: in.Text, Paths: []string{abs}}
+				}
+				return Request{Title: in.Text, Paths: []string{abs}, Targets: []string{targetOf(abs)}}
+			}
+			g := NewModeGate(ModePlan, nil)
+			g.SetPlanPath(plan)
+			d := newDispatcher(t, env, g, writer)
+
+			if _, _, ok := d.Prepare(Call{ID: "t1.1.1", Tool: "write", Input: input(t, fakeInput{Text: "hi", Path: tc.path})}); !ok {
+				t.Fatal("Prepare refused the call")
+			}
+			res := d.Run(context.Background(), "t1.1.1", nil)
+			switch {
+			case tc.allowed && (res.IsError || writer.runs.Load() != 1):
+				t.Fatalf("Run = %+v after %d runs, want the edit to run", res, writer.runs.Load())
+			case !tc.allowed && (!res.IsError || res.Class != ClassDenied || !strings.Contains(res.Text, "the only editable file")):
+				t.Fatalf("Run = %+v, want the plan-mode refusal", res)
+			case !tc.allowed && writer.runs.Load() != 0:
+				t.Fatal("a refused call ran anyway")
+			}
+		})
+	}
+}
+
+// targetOf is what an edit-kind tool puts in Request.Targets: the file the
+// call will really land on, or the path as it was spelled when nothing can
+// resolve it (opencode/file.go:89-99).
+func targetOf(abs string) string {
+	if real, err := RealPath(abs); err == nil {
+		return real
+	}
+	return abs
 }
 
 // The inner gate keeps the last word on everything the mode allows: its

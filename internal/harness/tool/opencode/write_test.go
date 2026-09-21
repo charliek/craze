@@ -320,6 +320,74 @@ func prepareOnly(t *testing.T, name string, env tool.Env, args map[string]any) t
 	return p.Request()
 }
 
+// TestPlanModeThroughTheGate is plan mode where the model actually meets it:
+// the production write tool, prepared and run through the dispatcher with the
+// session's mode gate over it (plan 023 §3.1). The plan file is the one file
+// an edit may touch, however the call spells it — absolute, relative to the
+// workspace, through a directory symlink, through ".." — because the tool
+// resolves its target the same way the gate resolved the plan path. Nothing
+// else is: a workspace file and a path that will not resolve at all are
+// refused with grok-build's text, and neither reaches the disk.
+func TestPlanModeThroughTheGate(t *testing.T) {
+	f := newFixture(t)
+	plan := filepath.Join(f.env.Home, "20260921T120000Z_s.plan.md")
+	put(t, plan, "# plan\n")
+	g := tool.NewModeGate(tool.ModePlan, nil) // nil inner is AllowAll, as a session's is today
+	g.SetPlanPath(plan)
+	p, err := Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := tool.NewDispatcher(tool.Options{Tools: p.Tools, Gate: g, Env: f.env})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.d = d // every f.call from here goes through the mode's gate
+
+	// A directory symlink onto the harness home, and two links that point at
+	// each other, which nothing can resolve: the tool then names the path as
+	// it was spelled, and the gate refuses that (amendment X4).
+	must(t, os.Symlink(f.env.Home, f.path("home-link")))
+	must(t, os.Symlink(f.path("loop-b"), f.path("loop-a")))
+	must(t, os.Symlink(f.path("loop-a"), f.path("loop-b")))
+	must(t, os.MkdirAll(f.path("sub"), 0o700))
+	put(t, f.path("a.txt"), "alpha\n")
+	rel, err := filepath.Rel(f.env.Workspace, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, path string
+		allowed    bool
+	}{
+		{name: "the plan file, absolute", path: plan, allowed: true},
+		{name: "the plan file, relative to the workspace", path: rel, allowed: true},
+		{name: "the plan file through a directory symlink", path: filepath.Join("home-link", filepath.Base(plan)), allowed: true},
+		{name: "the plan file through ..", path: filepath.Join("sub", "..", rel), allowed: true},
+		{name: "a file in the workspace", path: "a.txt"},
+		{name: "a path that will not resolve", path: "loop-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := "## " + tc.name + "\n"
+			_, res := f.call(t, "write", map[string]any{"filePath": tc.path, "content": content})
+			if tc.allowed {
+				ok(t, res)
+				if got := load(t, plan); got != content {
+					t.Fatalf("the plan file holds %q, want %q", got, content)
+				}
+				return
+			}
+			if !res.IsError || res.Class != tool.ClassDenied || !strings.Contains(res.Text, "the only editable file") {
+				t.Fatalf("result = {IsError:%v Class:%q Text:%q}, want the plan-mode refusal", res.IsError, res.Class, res.Text)
+			}
+			if got := load(t, f.path("a.txt")); got != "alpha\n" {
+				t.Fatalf("the refused write changed a.txt: %q", got)
+			}
+		})
+	}
+}
+
 // TestWriteRefusesAnExternalChange: a file changed between the tool's read
 // and its rename — by an editor, a formatter, anyone outside craze's lock —
 // is left as they made it, and the call fails. A new file that appears in

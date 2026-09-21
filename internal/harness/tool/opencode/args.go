@@ -19,7 +19,8 @@ const maxSafeInteger = 1<<53 - 1
 // §3.1), so the type, sign and range checks opencode's schemas make happen
 // here, in Prepare. Like opencode's schemas, an unknown field is ignored and
 // nothing is coerced: a number sent as a string, or null for an optional
-// field, is refused.
+// field, is refused — except where a tool asks for grok-build's Option
+// semantics instead, which read an explicit null as an omission (strOrNull).
 type args map[string]json.RawMessage
 
 func parseArgs(in json.RawMessage) (args, error) {
@@ -48,6 +49,19 @@ func (a args) str(name string, required bool) (s string, ok bool, err error) {
 		return "", false, fmt.Errorf("%s must be a string: %v", name, err)
 	}
 	return s, true, nil
+}
+
+// strOrNull is str for an optional field whose JSON null means "not given",
+// which is what serde's Option<String> does for the fields grok-build's
+// todo_write leaves out (todo/mod.rs) and what its own regression case relies
+// on: a model that sends content:null with a status is changing the status and
+// nothing else, and refusing it would wipe the row's content or fail the call.
+// Every other wrong type is still refused, by str.
+func (a args) strOrNull(name string) (s string, ok bool, err error) {
+	if raw, present := a[name]; present && jsonType(raw) == "null" {
+		return "", false, nil
+	}
+	return a.str(name, false)
 }
 
 // boolean returns the optional boolean field name, which must be a JSON true

@@ -24,6 +24,9 @@ type stubTodoStore struct {
 	calls   []stubCall
 	list    []tool.Todo
 	dropped int
+	// refuse makes Write answer as the real store does when the context is
+	// done by the time it holds its lock: nothing changed, nothing emitted.
+	refuse bool
 }
 
 type stubCall struct {
@@ -31,11 +34,14 @@ type stubCall struct {
 	updates []tool.TodoUpdate
 }
 
-func (s *stubTodoStore) Write(merge *bool, updates []tool.TodoUpdate) ([]tool.Todo, int) {
+func (s *stubTodoStore) Write(_ context.Context, merge *bool, updates []tool.TodoUpdate) ([]tool.Todo, int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.refuse {
+		return nil, 0, false
+	}
 	s.calls = append(s.calls, stubCall{merge, updates})
-	return s.list, s.dropped
+	return s.list, s.dropped, true
 }
 
 func (s *stubTodoStore) last() stubCall {
@@ -254,16 +260,18 @@ func TestTodoWriteResultText(t *testing.T) {
 		f := newTodoFixture(t, store)
 		_, res := f.call(t, "todo_write", `{"todos":[{"id":"1"}]}`)
 		text := ok(t, res)
-		var got []map[string]string
+		// Decoded into the result's own shape and compared field by field:
+		// every id, every content and every status, in order.
+		var got []wireTodo
 		if err := json.Unmarshal([]byte(text), &got); err != nil {
 			t.Fatalf("result is not JSON: %v\n%s", err, text)
 		}
-		want := []map[string]string{
-			{"id": "1", "content": "buy milk", "status": "pending"},
-			{"id": "2", "content": "walk the dog", "status": "completed"},
+		want := []wireTodo{
+			{ID: "1", Content: "buy milk", Status: "pending"},
+			{ID: "2", Content: "walk the dog", Status: "completed"},
 		}
-		if len(got) != len(want) || got[0]["id"] != want[0]["id"] || got[1]["status"] != want[1]["status"] {
-			t.Fatalf("result = %s, want the two items rendered with id, content, status", text)
+		if !slices.Equal(got, want) {
+			t.Fatalf("result = %+v, want %+v\n%s", got, want, text)
 		}
 		if !strings.HasPrefix(text, "[\n  {\n") {
 			t.Errorf("result is not pretty-printed like JSON.stringify(_, null, 2):\n%s", text)
@@ -323,15 +331,115 @@ func TestTodoWriteTitle(t *testing.T) {
 }
 
 // TestTodoWriteAborted: a cancelled context is aborted before the store is
-// ever asked, like every other tool.
+// ever asked, like every other tool — and a store that refuses the write
+// because the cancel landed while it waited for its own lock is aborted too,
+// rather than reported as an empty list (tool.TodoStore).
 func TestTodoWriteAborted(t *testing.T) {
+	t.Run("cancelled before Run", func(t *testing.T) {
+		store := &stubTodoStore{}
+		f := newTodoFixture(t, store)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, res := f.callCtx(t, ctx, "todo_write", `{"todos":[{"id":"1"}]}`)
+		failed(t, res, tool.ClassAborted, tool.AbortedText)
+		if len(store.calls) != 0 {
+			t.Fatalf("the store was called on an aborted context: %+v", store.calls)
+		}
+	})
+
+	t.Run("cancelled while the store waited", func(t *testing.T) {
+		f := newTodoFixture(t, &stubTodoStore{refuse: true})
+		_, res := f.call(t, "todo_write", `{"todos":[{"id":"1"}]}`)
+		failed(t, res, tool.ClassAborted, tool.AbortedText)
+	})
+}
+
+// TestTodoWriteBoundsTheRequest: the store's caps bound the list a
+// call leaves behind, not the work of getting there, so the tool refuses an
+// argument object too large to read and a todos array too long to shape,
+// before either is decoded into a million anything. An id is refused rather
+// than truncated: it is the key a later call names a row by.
+func TestTodoWriteBoundsTheRequest(t *testing.T) {
 	store := &stubTodoStore{}
 	f := newTodoFixture(t, store)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, res := f.callCtx(t, ctx, "todo_write", `{"todos":[{"id":"1"}]}`)
-	failed(t, res, tool.ClassAborted, tool.AbortedText)
+
+	// One flood past every bound at once, as a model looping on todo_write
+	// would send it: far past the byte bound, so nothing is decoded.
+	flood := `{"todos":[` + strings.TrimSuffix(strings.Repeat(`{"id":"x"},`, 40000), ",") + `]}`
+	if len(flood) <= maxTodoInputBytes {
+		t.Fatalf("the flood is %d bytes, not past the %d bound", len(flood), maxTodoInputBytes)
+	}
+	_, res := f.call(t, "todo_write", flood)
+	if !res.IsError || res.Class != tool.ClassInvalidInput || !strings.Contains(res.Text, "262144") {
+		t.Fatalf("result = %+v, want invalid_input naming the byte bound", res)
+	}
+
+	// Inside the byte bound, past the item bound.
+	many := `{"todos":[` + strings.TrimSuffix(strings.Repeat(`{"id":"x"},`, maxTodoUpdates+1), ",") + `]}`
+	if len(many) > maxTodoInputBytes {
+		t.Fatalf("the over-long array is %d bytes, past the byte bound, so it proves nothing about the item bound", len(many))
+	}
+	_, res = f.call(t, "todo_write", many)
+	if !res.IsError || res.Class != tool.ClassInvalidInput || !strings.Contains(res.Text, "todos has 257 items") {
+		t.Fatalf("result = %+v, want invalid_input naming the item bound", res)
+	}
+
+	// An id past its own bound, and the control one byte under it.
+	long := strings.Repeat("i", tool.TodoIDBytes+1)
+	_, res = f.call(t, "todo_write", map[string]any{"todos": []any{map[string]any{"id": long}}})
+	if !res.IsError || res.Class != tool.ClassInvalidInput || !strings.Contains(res.Text, "todos[0]") || !strings.Contains(res.Text, "64") {
+		t.Fatalf("result = %+v, want invalid_input naming the id bound", res)
+	}
 	if len(store.calls) != 0 {
-		t.Fatalf("the store was called on an aborted context: %+v", store.calls)
+		t.Fatalf("a refused call reached the store: %+v", store.calls)
+	}
+	_, res = f.call(t, "todo_write", map[string]any{"todos": []any{map[string]any{"id": long[:tool.TodoIDBytes]}}})
+	ok(t, res)
+	if got := store.last().updates; len(got) != 1 || got[0].ID != long[:tool.TodoIDBytes] {
+		t.Fatalf("control: an id of exactly %d bytes did not reach the store: %+v", tool.TodoIDBytes, got)
+	}
+}
+
+// TestTodoWriteNullIsOmitted: an explicit content:null or
+// status:null is the field left out, as serde's Option<T> reads it for
+// grok-build's own todo_write — a model that sends content:null with a status
+// is changing the status and nothing else. Any other wrong type is still
+// refused.
+//
+// This is the parsing half of grok-build's regression case (todo/mod.rs:
+// 334-348): the update that leaves here — an existing id, no content, a
+// status — is exactly what makes the store auto-upgrade an explicit
+// merge:false into a merge and keep the row's content, which is the half
+// internal/harness's TestSessionTodosAutoUpgrade pins.
+func TestTodoWriteNullIsOmitted(t *testing.T) {
+	store := &stubTodoStore{}
+	f := newTodoFixture(t, store)
+
+	_, res := f.call(t, "todo_write", `{"merge":false,"todos":[{"id":"x","content":null,"status":"completed"}]}`)
+	ok(t, res)
+	call := store.last()
+	if call.merge == nil || *call.merge {
+		t.Fatalf("merge = %v, want an explicit false", call.merge)
+	}
+	want := []tool.TodoUpdate{{ID: "x", Status: statusPtr(tool.TodoCompleted)}}
+	if len(call.updates) != 1 || call.updates[0].ID != want[0].ID ||
+		!strEq(call.updates[0].Content, want[0].Content) || !statusEq(call.updates[0].Status, want[0].Status) {
+		t.Fatalf("update = %s, want %s", describeUpdate(call.updates[0]), describeUpdate(want[0]))
+	}
+
+	// status:null is the same, and an id may not be null: it is required.
+	_, res = f.call(t, "todo_write", `{"todos":[{"id":"x","content":"a","status":null}]}`)
+	ok(t, res)
+	if u := store.last().updates[0]; u.Status != nil || !strEq(u.Content, strPtr("a")) {
+		t.Fatalf("update = %s, want the content alone", describeUpdate(u))
+	}
+	_, res = f.call(t, "todo_write", `{"todos":[{"id":null}]}`)
+	if !res.IsError || res.Class != tool.ClassInvalidInput || !strings.Contains(res.Text, "todos[0]") {
+		t.Fatalf("result = %+v, want invalid_input: id is required", res)
+	}
+	// The control: a wrong type that is not null is still refused.
+	_, res = f.call(t, "todo_write", `{"todos":[{"id":"x","status":7}]}`)
+	if !res.IsError || res.Class != tool.ClassInvalidInput {
+		t.Fatalf("result = %+v, want invalid_input for a numeric status", res)
 	}
 }

@@ -17,6 +17,18 @@ import (
 func str(s string) *string                      { return &s }
 func status(s tool.TodoStatus) *tool.TodoStatus { return &s }
 
+// writeTodos is Write with a live context, for every test here that has
+// nothing to interrupt: it fails the test if the store reported a cancelled
+// one, which only TestSessionTodosCancelledBehindTheLock arranges.
+func writeTodos(t *testing.T, b *sessionTodos, merge *bool, updates []tool.TodoUpdate) ([]tool.Todo, int) {
+	t.Helper()
+	list, dropped, ok := b.Write(context.Background(), merge, updates)
+	if !ok {
+		t.Fatal("Write reported a cancelled context, which this test never arranges")
+	}
+	return list, dropped
+}
+
 func todoItem(id, content string, status tool.TodoStatus) tool.Todo {
 	return tool.Todo{ID: id, Content: content, Status: status}
 }
@@ -38,7 +50,7 @@ func equalTodos(t *testing.T, got, want []tool.Todo) {
 // (plan 023 §3.4).
 func TestSessionTodosMergeDefault(t *testing.T) {
 	b := newSessionTodos()
-	list, dropped := b.Write(nil, []tool.TodoUpdate{
+	list, dropped := writeTodos(t, b, nil, []tool.TodoUpdate{
 		{ID: "1", Content: str("explore"), Status: status(tool.TodoInProgress)},
 		{ID: "2", Content: str("write tests")},
 	})
@@ -53,7 +65,7 @@ func TestSessionTodosMergeDefault(t *testing.T) {
 	// A merge that only flips status keeps the content; a merge that names an
 	// id the list does not have creates it, with the id as content (no
 	// content was given).
-	list, dropped = b.Write(nil, []tool.TodoUpdate{
+	list, dropped = writeTodos(t, b, nil, []tool.TodoUpdate{
 		{ID: "1", Status: status(tool.TodoCompleted)},
 		{ID: "3"},
 	})
@@ -71,10 +83,10 @@ func TestSessionTodosMergeDefault(t *testing.T) {
 // the call alone.
 func TestSessionTodosReplace(t *testing.T) {
 	b := newSessionTodos()
-	b.Write(nil, []tool.TodoUpdate{{ID: "old", Content: str("stale"), Status: status(tool.TodoCompleted)}})
+	writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "old", Content: str("stale"), Status: status(tool.TodoCompleted)}})
 
 	replace := false
-	list, dropped := b.Write(&replace, []tool.TodoUpdate{
+	list, dropped := writeTodos(t, b, &replace, []tool.TodoUpdate{
 		{ID: "new", Content: str("fresh")},
 		{ID: "bare"}, // no content: falls back to the id; no status: pending
 	})
@@ -91,16 +103,21 @@ func TestSessionTodosReplace(t *testing.T) {
 // 334-348) — an explicit merge:false is still a merge when every update
 // names an existing id and carries no content; it is a real replace the
 // moment either condition fails.
+//
+// "Carries no content" includes the spelling the model actually sends,
+// content:null, which todo_write parses to the same nil Content as an omitted
+// field: that is the other half of this case, pinned next door in opencode's
+// TestTodoWriteNullIsOmitted, since the tool package may not import this one.
 func TestSessionTodosAutoUpgrade(t *testing.T) {
 	replace := false
 
 	t.Run("applies: every update is a status-only existing id", func(t *testing.T) {
 		b := newSessionTodos()
-		b.Write(nil, []tool.TodoUpdate{
+		writeTodos(t, b, nil, []tool.TodoUpdate{
 			{ID: "1", Content: str("explore codebase"), Status: status(tool.TodoInProgress)},
 			{ID: "2", Content: str("review tools"), Status: status(tool.TodoPending)},
 		})
-		list, _ := b.Write(&replace, []tool.TodoUpdate{
+		list, _ := writeTodos(t, b, &replace, []tool.TodoUpdate{
 			{ID: "1", Status: status(tool.TodoCompleted)},
 			{ID: "2", Status: status(tool.TodoCompleted)},
 		})
@@ -112,8 +129,8 @@ func TestSessionTodosAutoUpgrade(t *testing.T) {
 
 	t.Run("does not apply: one update carries content", func(t *testing.T) {
 		b := newSessionTodos()
-		b.Write(nil, []tool.TodoUpdate{{ID: "1", Content: str("explore"), Status: status(tool.TodoInProgress)}})
-		list, _ := b.Write(&replace, []tool.TodoUpdate{
+		writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "1", Content: str("explore"), Status: status(tool.TodoInProgress)}})
+		list, _ := writeTodos(t, b, &replace, []tool.TodoUpdate{
 			{ID: "1", Content: str("explore, reworded"), Status: status(tool.TodoCompleted)},
 		})
 		// A real replace: the list is exactly the call, nothing more.
@@ -122,8 +139,8 @@ func TestSessionTodosAutoUpgrade(t *testing.T) {
 
 	t.Run("does not apply: one update names an unknown id", func(t *testing.T) {
 		b := newSessionTodos()
-		b.Write(nil, []tool.TodoUpdate{{ID: "1", Content: str("explore"), Status: status(tool.TodoInProgress)}})
-		list, _ := b.Write(&replace, []tool.TodoUpdate{
+		writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "1", Content: str("explore"), Status: status(tool.TodoInProgress)}})
+		list, _ := writeTodos(t, b, &replace, []tool.TodoUpdate{
 			{ID: "1", Status: status(tool.TodoCompleted)},
 			{ID: "unknown", Status: status(tool.TodoPending)},
 		})
@@ -138,7 +155,7 @@ func TestSessionTodosAutoUpgrade(t *testing.T) {
 
 	t.Run("does not apply: the list is empty", func(t *testing.T) {
 		b := newSessionTodos()
-		list, _ := b.Write(&replace, []tool.TodoUpdate{{ID: "1", Status: status(tool.TodoCompleted)}})
+		list, _ := writeTodos(t, b, &replace, []tool.TodoUpdate{{ID: "1", Status: status(tool.TodoCompleted)}})
 		equalTodos(t, list, []tool.Todo{todoItem("1", "1", tool.TodoCompleted)})
 	})
 }
@@ -148,7 +165,7 @@ func TestSessionTodosAutoUpgrade(t *testing.T) {
 func TestSessionTodosDuplicateIDsLastWins(t *testing.T) {
 	b := newSessionTodos()
 	replace := false
-	list, dropped := b.Write(&replace, []tool.TodoUpdate{
+	list, dropped := writeTodos(t, b, &replace, []tool.TodoUpdate{
 		{ID: "1", Content: str("first")},
 		{ID: "2", Content: str("middle")},
 		{ID: "1", Content: str("last")}, // repeats "1": wins, but stays first
@@ -173,7 +190,7 @@ func TestSessionTodosCap(t *testing.T) {
 		updates[i] = tool.TodoUpdate{ID: id, Content: str(id)}
 	}
 	replace := false
-	list, dropped := b.Write(&replace, updates)
+	list, dropped := writeTodos(t, b, &replace, updates)
 	if len(list) != tool.TodoCap {
 		t.Fatalf("len(list) = %d, want %d", len(list), tool.TodoCap)
 	}
@@ -195,30 +212,111 @@ func TestSessionTodosContentTruncation(t *testing.T) {
 	cases := []struct {
 		name    string
 		content string
+		want    string // exactly what is kept, prefix and all
+		bytes   int
 	}{
-		{"two-byte runes straddling the boundary", strings.Repeat("é", 150)},            // 300 bytes
-		{"a four-byte emoji straddling the boundary", strings.Repeat("a", 197) + "🎉🎉🎉"}, // 197 + 12 bytes
-		{"already within the cap", strings.Repeat("x", 50)},
+		{
+			// 300 bytes of two-byte runes. Byte 197, where the cut would go,
+			// is a continuation byte, so the cut steps back to 196: 98 whole
+			// runes and the ellipsis, 199 bytes.
+			name: "two-byte runes straddling the boundary", content: strings.Repeat("é", 150),
+			want: strings.Repeat("é", 98) + "…", bytes: 199,
+		},
+		{
+			// 209 bytes, with the first emoji starting exactly at byte 197:
+			// the cut lands on a rune start and nothing steps back, so this is
+			// the boundary case that fills the cap exactly.
+			name: "a four-byte emoji straddling the boundary", content: strings.Repeat("a", 197) + "🎉🎉🎉",
+			want: strings.Repeat("a", 197) + "…", bytes: tool.TodoContentBytes,
+		},
+		{
+			name: "already within the cap", content: strings.Repeat("x", 50),
+			want: strings.Repeat("x", 50), bytes: 50,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newSessionTodos()
-			list, _ := b.Write(nil, []tool.TodoUpdate{{ID: "1", Content: str(tc.content)}})
+			list, _ := writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "1", Content: str(tc.content)}})
 			got := list[0].Content
-			if len(got) > tool.TodoContentBytes {
-				t.Fatalf("content is %d bytes, want at most %d: %q", len(got), tool.TodoContentBytes, got)
-			}
-			if !utf8.ValidString(got) {
+			switch {
+			case got != tc.want:
+				t.Fatalf("content = %q (%d bytes), want %q (%d)", got, len(got), tc.want, len(tc.want))
+			case len(got) != tc.bytes || len(got) > tool.TodoContentBytes:
+				t.Fatalf("content is %d bytes, want %d and at most %d", len(got), tc.bytes, tool.TodoContentBytes)
+			case !utf8.ValidString(got):
 				t.Fatalf("content is not valid UTF-8: %q", got)
 			}
-			if len(tc.content) <= tool.TodoContentBytes {
-				if got != tc.content {
-					t.Fatalf("content = %q, want it untouched: %q", got, tc.content)
-				}
-			} else if !strings.HasSuffix(got, "…") {
-				t.Fatalf("content = %q, want it to end in the ellipsis", got)
-			}
 		})
+	}
+}
+
+// TestSessionTodosCancelledBehindTheLock: todo_write is Parallel,
+// so a second call of the same step can pass the tool's own check and then
+// wait behind the first call's critical section — the mutation and the one
+// event that follows it. A call cancelled in that window changes nothing,
+// emits nothing and says so, and the tool answers the model with the aborted
+// result.
+//
+// The first write is parked inside its emit, which runs with the store's lock
+// held, so the second write is waiting for a lock it cannot have. Whichever
+// way the two goroutines interleave once it is released, the answer is the
+// same: the assertions do not depend on the parking, only on the cancel
+// landing before the second write can mutate.
+func TestSessionTodosCancelledBehindTheLock(t *testing.T) {
+	b := newSessionTodos()
+	writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "1", Content: str("first")}})
+
+	var once sync.Once
+	held, release := make(chan struct{}), make(chan struct{})
+	var events int
+	var mu sync.Mutex
+	detach := b.attach(func(Event) {
+		mu.Lock()
+		events++
+		mu.Unlock()
+		once.Do(func() { close(held) })
+		<-release
+	})
+	defer detach()
+
+	parked := make(chan struct{})
+	go func() {
+		defer close(parked)
+		b.Write(context.Background(), nil, []tool.TodoUpdate{{ID: "2", Content: str("second")}})
+	}()
+	<-held // the lock is held, inside that write's emit
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	var list []tool.Todo
+	var dropped int
+	var ok bool
+	go func() {
+		defer close(done)
+		list, dropped, ok = b.Write(ctx, nil, []tool.TodoUpdate{{ID: "3", Content: str("never")}})
+	}()
+	close(release)
+	<-parked
+	<-done
+
+	if ok || list != nil || dropped != 0 {
+		t.Fatalf("the cancelled write returned %+v, %d, %v; want nothing and false", list, dropped, ok)
+	}
+	// Nothing of it is in the list, and it published no event of its own.
+	after, _ := writeTodos(t, b, nil, nil)
+	equalTodos(t, after, []tool.Todo{
+		todoItem("1", "first", tool.TodoPending),
+		todoItem("2", "second", tool.TodoPending),
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	// The sink was attached after the first item was seeded, so the events are
+	// the parked write's and the empty one just above — not the cancelled
+	// write's, which published nothing.
+	if events != 2 {
+		t.Fatalf("the sink saw %d events, want 2: the cancelled write emitted one", events)
 	}
 }
 
@@ -227,7 +325,7 @@ func TestSessionTodosContentTruncation(t *testing.T) {
 // happens, only the event is skipped.
 func TestSessionTodosNilEmitIsSafe(t *testing.T) {
 	b := newSessionTodos()
-	list, _ := b.Write(nil, []tool.TodoUpdate{{ID: "1", Content: str("a")}})
+	list, _ := writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "1", Content: str("a")}})
 	equalTodos(t, list, []tool.Todo{todoItem("1", "a", tool.TodoPending)})
 }
 
@@ -263,9 +361,11 @@ func TestSessionTodosOrderedEventsUnderParallelWrites(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := fmt.Sprintf("t%d", i)
-			list, dropped := b.Write(nil, []tool.TodoUpdate{{ID: id, Content: str(id)}})
-			if dropped != 0 {
-				t.Errorf("goroutine %d: dropped = %d, want 0", i, dropped)
+			// Not writeTodos: this is another goroutine, where a t.Fatal is not
+			// allowed.
+			list, dropped, ok := b.Write(context.Background(), nil, []tool.TodoUpdate{{ID: id, Content: str(id)}})
+			if dropped != 0 || !ok {
+				t.Errorf("goroutine %d: dropped = %d, ok = %v; want 0, true", i, dropped, ok)
 			}
 			returned[i] = list
 		}(i)
@@ -346,12 +446,15 @@ type echoTodoCall string
 
 func (c echoTodoCall) Request() tool.Request { return tool.Request{Title: string(c)} }
 
-func (c echoTodoCall) Run(_ context.Context, env tool.Env) tool.Result {
+func (c echoTodoCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Todos == nil {
 		return tool.Result{Text: "no store", IsError: true, Class: tool.ClassToolError}
 	}
 	content := string(c)
-	list, _ := env.Todos.Write(nil, []tool.TodoUpdate{{ID: content, Content: &content}})
+	list, _, ok := env.Todos.Write(ctx, nil, []tool.TodoUpdate{{ID: content, Content: &content}})
+	if !ok {
+		return tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted}
+	}
 	b, _ := json.Marshal(list)
 	return tool.Result{Text: string(b)}
 }

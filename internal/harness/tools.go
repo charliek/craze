@@ -58,6 +58,15 @@ type toolset struct {
 	system  string // the frozen system prompt
 	d       *tool.Dispatcher
 
+	// planPath is the session's plan file, which every plan-mode reminder
+	// hands the model verbatim (reminders.go). It is held here for one reason:
+	// it is a third text this session sends unredacted, beside the system
+	// prompt and the tools, so resolve scans it for a key learned later
+	// (errFrozenKey) as it scans those. Fixed by adoptPlanPath in Open, before
+	// the session is handed out, and read under mu like the keys it is
+	// compared against.
+	planPath string
+
 	// keys are every provider key the session knows, sorted, and red is the
 	// redactor over them, which the turn and the dispatcher read. A session
 	// learns a key when a switch to another provider's model resolves one
@@ -222,9 +231,18 @@ var (
 	errWorkspaceKey = errors.New("harness: the working directory's path contains a configured provider key; " +
 		"start craze from another directory, or change the key")
 
+	// errPlanPathKey is errWorkspaceKey's twin for the session's plan file:
+	// Open's refusal of a harness home whose plan path holds a provider key.
+	// Every plan-mode reminder hands the model that path so it can write the
+	// plan there (§3.3), and a redacted path is one the model cannot open, so
+	// the answer is the working directory's — refuse, and say what to do.
+	errPlanPathKey = errors.New("harness: the plan file's path contains a configured provider key; " +
+		"move the craze directory, or change the key")
+
 	// errFrozenKey is resolve's refusal of a switch whose provider key is in
-	// what this session already sends with every request: the system prompt,
-	// or anywhere in the encoded tools, both frozen when it opened (D-30).
+	// what this session already sends unredacted: the system prompt, anywhere
+	// in the encoded tools — both frozen when it opened (D-30) — or the plan
+	// file's path, fixed at Open and named in every plan-mode reminder.
 	errFrozenKey = errors.New("harness: this model's provider key appears in text this session already sends " +
 		"with every request; start a new session, or change the key")
 
@@ -255,6 +273,22 @@ func (ts *toolset) holdsKey(text string) bool {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return holdsAKey(text, ts.keys)
+}
+
+// adoptPlanPath fixes the session's plan file and refuses a path that holds a
+// provider key (errPlanPathKey). Open calls it once, as soon as the store has
+// named the transcript the plan file is a sibling of and before the session is
+// handed out; from then on the path is only read, by resolve, against keys a
+// switch learns later. One critical section, so the check and the path that
+// was checked cannot be two different things.
+func (ts *toolset) adoptPlanPath(path string) error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if holdsAKey(path, ts.keys) {
+		return errPlanPathKey
+	}
+	ts.planPath = path
+	return nil
 }
 
 // redactor is the session's, as it is now. It is never nil.
@@ -292,10 +326,10 @@ func (ts *toolset) widest() *redact.Replacer {
 //
 // It prepares nothing and refuses when a key cannot be redacted at all
 // (modeltable.Keys' floor), and when a new one turns out to be inside what
-// this session already sends with every request — the system prompt, the
-// working directory it names among it, or anywhere in the encoded tools —
-// which it cannot rewrite (errFrozenKey). Both refuse the switch that asked
-// for it.
+// this session sends unredacted — the system prompt, the working directory it
+// names among it, anywhere in the encoded tools, or the plan file's path,
+// which every plan-mode reminder hands the model — none of which it can
+// rewrite (errFrozenKey). Both refuse the switch that asked for it.
 //
 // It never installs: a turn already running must keep the redactor it
 // redacted its earlier steps with, or a step persisted later would be
@@ -321,8 +355,13 @@ func (ts *toolset) resolve(table *modeltable.Table, getenv func(string) string) 
 		return nil
 	}
 	// The whole tools payload, not the descriptions alone: a tool's name, a
-	// parameter's name and a schema's own strings all go out with it.
-	if holdsAKey(ts.system, added) || holdsAKey(string(ts.wire), added) {
+	// parameter's name and a schema's own strings all go out with it. The plan
+	// path is the third: it reaches the model verbatim in every plan-mode
+	// reminder and cannot be redacted without becoming a path that opens
+	// nothing, so a key found inside it refuses the switch exactly as one
+	// inside the working directory does — that one through the prompt, which
+	// names it (plan 023 §3.3).
+	if holdsAKey(ts.system, added) || holdsAKey(string(ts.wire), added) || holdsAKey(ts.planPath, added) {
 		return errFrozenKey
 	}
 	ts.keys = append(ts.keys, added...)

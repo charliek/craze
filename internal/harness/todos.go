@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"sync"
 	"unicode/utf8"
 
@@ -70,11 +71,25 @@ func (b *sessionTodos) attach(emit func(Event)) (release func()) {
 
 // Write is tool.TodoStore's one method (plan 023 §3.4). See the type's doc
 // above for the locking and ordering guarantee.
-func (b *sessionTodos) Write(merge *bool, updates []tool.TodoUpdate) (list []tool.Todo, dropped int) {
+//
+// ctx is checked again here, with the lock held and before anything changes:
+// todo_write is Parallel, so a second call of the same step can pass the
+// tool's own check and then wait behind the first one's critical section, and
+// a call cancelled in that window must leave the list and the sink alone. The
+// wait itself is not made cancellable — that would need a lock this file
+// cannot also hold across the emit, which is what orders the events — and it
+// does not need to be: the only thing held across is the mutation and one call
+// to the running turn's sink, and a sink that blocks has already stopped the
+// whole turn (turn.go's single-caller contract), so nothing this cancel could
+// do would free it.
+func (b *sessionTodos) Write(ctx context.Context, merge *bool, updates []tool.TodoUpdate) (list []tool.Todo, dropped int, ok bool) {
 	updates = dedupUpdates(updates)
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil, 0, false
+	}
 
 	useMerge := merge == nil || *merge
 	if !useMerge && autoUpgrade(b.items, updates) {
@@ -94,7 +109,7 @@ func (b *sessionTodos) Write(merge *bool, updates []tool.TodoUpdate) (list []too
 	if b.emit != nil {
 		b.emit(Todos{Items: cloneTodos(b.items)})
 	}
-	return list, dropped
+	return list, dropped, true
 }
 
 // dedupUpdates keeps one entry per id from updates: the last occurrence's

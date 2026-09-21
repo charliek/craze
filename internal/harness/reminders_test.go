@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -142,6 +143,14 @@ func TestSetModeLifecycle(t *testing.T) {
 	if got := await(t, out, "the turn to end"); got.err != nil {
 		t.Fatal(got.err)
 	}
+	// A8: the switch landed while the final response was streaming, so no step
+	// boundary followed it. The model was never told, and the step's output is
+	// not labelled with the mode the session is now in — a change that never
+	// precedes an output step is not recorded (plan 023 §3.1).
+	equal(t, "transcript", entries(transcript(t, s)), []string{
+		"user test/a high: hi",
+		"assistant test/a high end_turn: thinking it over",
+	})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -230,12 +239,15 @@ func TestAgentModeSendsNoReminder(t *testing.T) {
 
 // TestAskModeReminder: ask mode says its rule every turn, and leaving it for
 // agent mode says so once. A plan-to-ask switch announces ask's restrictions
-// rather than plan's exit — ask is where the model now is.
+// rather than plan's exit — ask is where the model now is — and the plan turn
+// before it is completed, so the transition really is plan to ask: a switch
+// with no request in between would leave the model still on ask and prove
+// nothing about the pair.
 func TestAskModeReminder(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	s := f.open(modeOptions(f, "ask"))
 	a := f.models["test/a"]
-	a.push(answerWith("one"), answerWith("two"), answerWith("three"), answerWith("four"))
+	a.push(answerWith("one"), answerWith("two"), answerWith("three"), answerWith("four"), answerWith("five"))
 
 	run(t, s, "what does it do?")
 	run(t, s, "and this?")
@@ -246,14 +258,21 @@ func TestAskModeReminder(t *testing.T) {
 		}
 	}
 
+	// A whole turn in plan mode: the model is told about plan, and the
+	// transcript holds the step that told it.
 	if err := s.SetMode("plan"); err != nil {
 		t.Fatal(err)
 	}
+	run(t, s, "plan it instead")
+	if text, _ := reminderIn(t, a, 2); !strings.Contains(text, "Plan mode is active") {
+		t.Fatalf("entering plan mode told the model %q", text)
+	}
+
 	if err := s.SetMode("ask"); err != nil {
 		t.Fatal(err)
 	}
 	run(t, s, "read-only again")
-	if text, _ := reminderIn(t, a, 2); !strings.Contains(text, "Ask mode is active") || strings.Contains(text, "exited plan mode") {
+	if text, _ := reminderIn(t, a, 3); !strings.Contains(text, "Ask mode is active") || strings.Contains(text, "exited plan mode") {
 		t.Fatalf("plan to ask told the model %q, want ask's own text", text)
 	}
 
@@ -261,7 +280,7 @@ func TestAskModeReminder(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, s, "now do it")
-	if text, _ := reminderIn(t, a, 3); !strings.Contains(text, "You have exited ask mode") {
+	if text, _ := reminderIn(t, a, 4); !strings.Contains(text, "You have exited ask mode") {
 		t.Fatalf("leaving ask mode told the model %q", text)
 	}
 }
@@ -512,8 +531,6 @@ func TestModeChangeWithoutAnOutputStep(t *testing.T) {
 // the same turn is the control: it is reported, persisted and returned, and
 // it keeps its own index.
 func TestRemindersAreNotTheConversation(t *testing.T) {
-	const canaryText = "<" + reminderTag + ">"
-
 	t.Run("the success path", func(t *testing.T) {
 		f := newFixture(t, "http://127.0.0.1:1/v1")
 		s := f.open(modeOptions(f, "plan"))
@@ -544,7 +561,7 @@ func TestRemindersAreNotTheConversation(t *testing.T) {
 		if line := requestLine(t, a, 1, 5); line != "user: "+steerText {
 			t.Fatalf("the steer is at %q, want index 5 after the reminder", line)
 		}
-		noReminder(t, s, ev.list(), got.res, canaryText)
+		noReminder(t, s, ev.list(), got.res, true)
 		// The control: the steer, which is the conversation, is everywhere.
 		if !strings.Contains(strings.Join(entries(transcript(t, s)), "\n"), steerText) {
 			t.Fatal("control: the steer is not in the transcript")
@@ -570,7 +587,9 @@ func TestRemindersAreNotTheConversation(t *testing.T) {
 		if text, _ := reminderIn(t, a, 0); !strings.Contains(text, "Ask mode is active") {
 			t.Fatalf("the model read %q", text)
 		}
-		noReminder(t, s, ev.list(), got.res, canaryText)
+		// The partial answer is persisted, interrupted, so there is a
+		// transcript for the assertion to be about.
+		noReminder(t, s, ev.list(), got.res, true)
 	})
 
 	t.Run("a step that cannot be saved", func(t *testing.T) {
@@ -592,29 +611,264 @@ func TestRemindersAreNotTheConversation(t *testing.T) {
 			t.Fatalf("the model read %q", text)
 		}
 		noTranscript(t, s)
-		noReminder(t, s, ev.list(), res, canaryText)
+		noReminder(t, s, ev.list(), res, false)
 	})
 }
 
-// noReminder fails the test if needle is anywhere craze keeps or reports: the
-// transcript's raw bytes, any event the sink was handed, or the Result.
-func noReminder(t *testing.T, s *Session, evs []Event, res Result, needle string) {
+// reminderCanaries are what a reminder would leave behind wherever it must not
+// be. The wrapper's tag is the bare word, not "<system-reminder>": both the
+// store and Fantasy's TextPart marshal with encoding/json, which writes the
+// angle brackets as \u003c and \u003e, so a search for the bracketed form
+// passes straight over a reminder that was persisted as a user message. The
+// rest are a phrase of each text craze composes, which no prompt or answer in
+// these tests says.
+var reminderCanaries = []string{
+	reminderTag,
+	"Plan mode is active", "Plan mode is still active", "Returning to Plan Mode",
+	"Ask mode is active", "You have exited",
+}
+
+// noReminder fails the test if any of those is anywhere craze keeps or
+// reports: the transcript's raw bytes, its decoded entries, any event the sink
+// was handed, or the Result. persisted says this path wrote output, and the
+// transcript is required to hold something — an assertion over a file that is
+// not there proves nothing at all.
+func noReminder(t *testing.T, s *Session, evs []Event, res Result, persisted bool) {
 	t.Helper()
-	if data, err := os.ReadFile(s.store.Path()); err == nil && strings.Contains(string(data), needle) {
-		t.Fatalf("the transcript holds a reminder:\n%s", data)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	data, err := os.ReadFile(s.store.Path())
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist) && !persisted:
+	default:
+		t.Fatalf("reading the transcript: %v", err)
+	}
+	var decoded []string
+	if len(data) > 0 {
+		decoded = entries(transcript(t, s))
+	}
+	if persisted && len(decoded) == 0 {
+		t.Fatal("this path persists output, but the transcript holds nothing")
+	}
+	for _, needle := range reminderCanaries {
+		if strings.Contains(string(data), needle) {
+			t.Fatalf("the transcript's bytes hold %q:\n%s", needle, data)
+		}
+		for _, line := range decoded {
+			if strings.Contains(line, needle) {
+				t.Fatalf("a transcript entry holds %q: %s", needle, line)
+			}
+		}
+		if found := leaks(evs, needle); len(found) > 0 {
+			t.Fatalf("a reminder reached an event at %v (%q)", found, needle)
+		}
+		if found := leaks(res, needle); len(found) > 0 {
+			t.Fatalf("a reminder reached the Result at %v (%q)", found, needle)
+		}
+		for _, text := range res.Unanswered {
+			if strings.Contains(text, needle) {
+				t.Fatalf("Unanswered holds %q", text)
+			}
+		}
+	}
+}
+
+// A turn that persists nothing leaves the notice for the next one (plan 023
+// §3.3): reminders are never written down, so a mode announced in a turn whose
+// step only thought is a mode the next turn's history — rebuilt from the
+// transcript — says nothing about. The mode_change lands with the step that
+// finally writes something, and there is exactly one of it.
+func TestATransitionNoticeSurvivesATurnThatPersistsNothing(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s := f.open(f.options())
+	a := f.models["test/a"]
+	if err := s.SetMode("plan"); err != nil {
 		t.Fatal(err)
 	}
-	if found := leaks(evs, needle); len(found) > 0 {
-		t.Fatalf("a reminder reached an event at %v", found)
+	a.push(reply(reasoningParts("just thinking"), finish(fantasy.FinishReasonStop)), answerWith("planned"))
+
+	if res := run(t, s, "plan it"); res.StopReason != StopEndTurn {
+		t.Fatalf("the thinking turn = %+v", res)
 	}
-	if found := leaks(res, needle); len(found) > 0 {
-		t.Fatalf("a reminder reached the Result at %v", found)
+	if text, _ := reminderIn(t, a, 0); !strings.Contains(text, "Plan mode is active") {
+		t.Fatalf("the first turn read %q", text)
 	}
-	for _, text := range res.Unanswered {
-		if strings.Contains(text, needle) {
-			t.Fatalf("Unanswered holds %q", text)
+	noTranscript(t, s)
+
+	run(t, s, "again")
+	if text, _ := reminderIn(t, a, 1); !strings.Contains(text, "Plan mode is active") {
+		t.Fatalf("the second turn read %q; a notice no step persisted must go out again", text)
+	}
+	equal(t, "transcript", entries(transcript(t, s)), []string{
+		"mode_change plan",
+		"user test/a high: again",
+		"assistant test/a high end_turn: planned",
+	})
+}
+
+// A change held by a turn that persisted nothing, and the user back in the old
+// mode before any output: nothing announces that, and the held entry must not
+// be written with the next step, naming a mode the conversation never entered
+// (plan 023 §3.1).
+func TestAHeldModeChangeDoesNotOutliveASwitchBack(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s := f.open(f.options())
+	a := f.models["test/a"]
+	if err := s.SetMode("plan"); err != nil {
+		t.Fatal(err)
+	}
+	a.push(reply(reasoningParts("just thinking"), finish(fantasy.FinishReasonStop)), answerWith("done"))
+
+	run(t, s, "plan it")
+	noTranscript(t, s)
+	if err := s.SetMode("agent"); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, s, "never mind")
+	for _, e := range entries(transcript(t, s)) {
+		if strings.HasPrefix(e, "mode_change plan") {
+			t.Fatalf("the transcript says %q, a mode no output was ever produced in", e)
 		}
+	}
+}
+
+// The same for a cancelled turn, whose partial answer is persisted:
+// interrupted output is not the step that announced the mode finishing, so
+// the model is told again and the mode_change sits with the turn that does
+// finish (plan 023 §3.3).
+func TestATransitionNoticeSurvivesACancelledTurn(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s := f.open(modeOptions(f, "ask"))
+	a := f.models["test/a"]
+	g := newGate()
+	a.push(g.hold(openText("partial"), finishText()), answerWith("it says alpha"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := start(ctx, s, "ask away", nil)
+	await(t, g.reached, "the first step")
+	cancel()
+	if got := await(t, out, "the cancelled turn"); got.res.StopReason != StopCancelled {
+		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+	}
+	if text, _ := reminderIn(t, a, 0); !strings.Contains(text, "Ask mode is active") {
+		t.Fatalf("the cancelled turn read %q", text)
+	}
+
+	run(t, s, "and again")
+	if text, _ := reminderIn(t, a, 1); !strings.Contains(text, "Ask mode is active") {
+		t.Fatalf("the next turn read %q; the notice must go out again", text)
+	}
+	equal(t, "transcript", entries(transcript(t, s)), []string{
+		"user test/a high: ask away",
+		"assistant test/a high cancelled interrupted: partial",
+		"mode_change ask",
+		"user test/a high: and again",
+		"assistant test/a high end_turn: it says alpha",
+	})
+}
+
+// A retried step carries one reminder and settles it once. Fantasy prepares
+// and starts a step outside its retry closure (agent.go:1036-1056), so the
+// replayed attempt re-sends the request the first attempt built: the same
+// reminder, no second one, and one advance of the alternation.
+func TestAReminderUnderARetriedStep(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s := f.open(modeOptions(f, "plan"))
+	a := f.models["test/a"]
+	busy := &fantasy.ProviderError{Message: "overloaded", StatusCode: 503, ResponseHeaders: map[string]string{"retry-after-ms": "1"}}
+	a.push(reply(errorPart(busy)), answerWith("planned"), answerWith("again"))
+
+	run(t, s, "plan it")
+	first, second := remindersIn(t, a, 0), remindersIn(t, a, 1)
+	if len(first) != 1 || len(second) != 1 || first[0] != second[0] {
+		t.Fatalf("the attempt and its retry carried %v and %v", first, second)
+	}
+	if !strings.Contains(first[0], "Plan mode is active") {
+		t.Fatalf("the retried step's reminder is %q", first[0])
+	}
+
+	// One commit: the next turn reads the sparse variant, not the full one a
+	// second advance would have skipped past.
+	run(t, s, "and on")
+	if text, _ := reminderIn(t, a, 2); !strings.Contains(text, "Plan mode is still active") {
+		t.Fatalf("after the retried turn the reminder is %q, want the sparse variant", text)
+	}
+	equal(t, "transcript", entries(transcript(t, s)), []string{
+		"mode_change plan",
+		"user test/a high: plan it",
+		"assistant test/a high end_turn: planned",
+		"user test/a high: and on",
+		"assistant test/a high end_turn: again",
+	})
+}
+
+// A cancel that lands between the compose and the request settles nothing.
+// Fantasy calls OnStepStart before it attempts the stream, cancelled or not
+// (agent.go:1004-1006), and §3.3 says a turn withdrawn or cancelled before its
+// first request keeps its parity: the alternation stays where it was, no
+// mode_change is handed over, and the next turn composes the same text again.
+//
+// The window is between two callbacks of one step, so it is driven here
+// rather than through Run.
+func TestACancelBeforeTheRequestSettlesNothing(t *testing.T) {
+	m := newModes(modePlan, filepath.Join(t.TempDir(), "s.plan.md"), tool.NewModeGate(modePlan, nil))
+	// The model has been told nothing yet, so what is composed is the notice
+	// for plan mode, and agent is the mode it was last told of for good.
+	ctx, cancel := context.WithCancel(context.Background())
+	var logged []string
+	tn := &turn{ctx: ctx, modes: m, logMode: func(mode string) error {
+		logged = append(logged, mode)
+		return nil
+	}}
+
+	tn.remind(0, nil)
+	if !tn.hasPending {
+		t.Fatal("no reminder was composed")
+	}
+	cancel()
+	if err := tn.stepStarted(0); err != nil {
+		t.Fatal(err)
+	}
+	tn.modeChangeHeld()
+	switch {
+	case tn.sent != "":
+		t.Fatalf("the cancelled step recorded %q as sent", tn.sent)
+	case slices.Contains(logged, modePlan):
+		// What a step with nothing sent hands over is the mode already told
+		// (modeChangeHeld), never the one its unsent notice spoke for.
+		t.Fatalf("the cancelled step handed the store %v", logged)
+	case m.turns != 0:
+		t.Fatalf("the alternation advanced to %d", m.turns)
+	}
+	if r, ok := m.reminderFor(0, ""); !ok || !strings.Contains(r.text, "Plan mode is active") {
+		t.Fatalf("the next turn would read %q (%v), want the full text again", r.text, ok)
+	}
+}
+
+// A SetMode between the compose and the request restarts the alternation, and
+// the stale reminder must not advance it past the full text the reset asked
+// for. The counters alone cannot tell that apart — a reset puts the counter
+// back to the 0 the reminder was composed at — so the reset generation does.
+func TestAResetBetweenComposeAndSendKeepsTheFullText(t *testing.T) {
+	m := newModes(modePlan, filepath.Join(t.TempDir(), "s.plan.md"), tool.NewModeGate(modePlan, nil))
+	m.heard(modePlan)
+
+	r, ok := m.reminderFor(0, "")
+	if !ok || !strings.Contains(r.text, "Plan mode is active") {
+		t.Fatalf("composed %q (%v), want the full text", r.text, ok)
+	}
+	m.set(modePlan) // the user enters plan mode again while the request is built
+	m.sent(r)
+	if next, _ := m.reminderFor(0, ""); !strings.Contains(next.text, "Plan mode is active") {
+		t.Fatalf("after the reset the model reads %q, want the full text again", next.text)
+	}
+
+	// The control: with nothing in between, the alternation does advance.
+	fresh, _ := m.reminderFor(0, "")
+	m.sent(fresh)
+	if next, _ := m.reminderFor(0, ""); !strings.Contains(next.text, "Plan mode is still active") {
+		t.Fatalf("the alternation did not advance: %q", next.text)
 	}
 }
 
