@@ -196,8 +196,12 @@ func newStub(noPrimary bool) *Stub {
 func (s *Stub) HangNext() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hang = true
-	s.hung = make(chan struct{})
+	// Armed already: the same next prompt, so the same barrier. A second channel
+	// would strand whoever holds the first.
+	if !s.hang {
+		s.hang = true
+		s.hung = make(chan struct{})
+	}
 	return s.hung
 }
 
