@@ -210,6 +210,55 @@ func TestWorkspaceWithAKeyIsRefused(t *testing.T) {
 	}
 }
 
+// TestPlanPathWithAKeyIsRefused is TestWorkspaceWithAKeyIsRefused's twin for
+// the plan file (plan 023 §3.3). Every plan-mode reminder hands the model the
+// plan file's absolute path so it can write the plan there, unredacted —
+// redacting it would hand the model a path that opens nothing — and the path
+// comes from the harness home a user configured. So a home whose plan path
+// would hold a provider key refuses to open, saying so without naming the key.
+//
+// The control is the same home one character different: it opens, and the
+// reminder names the real path.
+func TestPlanPathWithAKeyIsRefused(t *testing.T) {
+	for _, planted := range []bool{true, false} {
+		t.Run(fmt.Sprintf("planted=%v", planted), func(t *testing.T) {
+			dir := canary
+			if !planted {
+				// One byte different, so the key is not in it at all.
+				dir = canary[:len(canary)-1] + "X"
+			}
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			home := filepath.Join(t.TempDir(), dir, "native")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			opts := modeOptions(f, "plan")
+			opts.Home = home // the table is already loaded; only the files the session writes move
+			s, err := Open(opts)
+			if planted {
+				if err == nil {
+					s.Close()
+					t.Fatal("a home whose plan path holds a key opened")
+				}
+				if !errors.Is(err, errPlanPathKey) || strings.Contains(err.Error(), canary) {
+					t.Fatalf("Open = %v; want the refusal, naming no key", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("control: Open = %v", err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			f.models["test/a"].push(answerWith("planned"))
+			run(t, s, "plan it")
+			text, _ := reminderIn(t, f.models["test/a"], 0)
+			if !strings.Contains(text, planPathOf(s)) || !strings.Contains(text, home) {
+				t.Errorf("control: the reminder does not name the real plan path: %q", text)
+			}
+		})
+	}
+}
+
 // keyEnv is the fixture's environment with one variable replaced, for a case
 // that plants a key of its own: testEnv is shared by every test in the
 // package and must not be written to.
@@ -453,6 +502,11 @@ func TestSwitchLearnsAKeyForTheNextTurn(t *testing.T) {
 		"unredactable":  "k3y-x7",
 		"in the prompt": f.workspace, // the prompt names the working directory
 		"in the tools":  `"required":["filePath"]`,
+		// Every plan-mode reminder hands the model the plan file's path, which
+		// is fixed at Open and cannot be redacted and still be a path (plan 023
+		// §3.3): a switch that would make it hold a key is refused like one
+		// that would put a key in the prompt.
+		"in the plan path": planPathOf(s),
 		// A sentence of bash's own description, taken as it is written rather
 		// than rebuilt from the machine: the directory it names is chosen at
 		// runtime (os.TempDir()'s spelling differs per platform, and a
@@ -571,33 +625,25 @@ func TestRedactCoversAKeyTheSwitchJustLearned(t *testing.T) {
 // it could not write, under the home craze was configured with, and that
 // error is what Run and Close return to the adapter, which puts it on the
 // screen. Its text is redacted — while it still unwraps to what it was, so
-// callers can still match store.ErrClosed. The control is the same error
-// before redaction: it does name the path the key is in.
+// callers can still match store.ErrClosed.
+//
+// The two halves are apart because no live session's store error can hold a
+// key any more: a home whose plan path would hold one refuses to open
+// (errPlanPathKey, plan 023 §3.3 — the plan file's path is handed to the
+// model), and a key learned later that is inside it refuses the switch
+// (errFrozenKey), and the plan path holds everything the transcript's path
+// does. So the first half is a live failure reaching Run over a clean home,
+// and the second is the redaction itself, over a store built directly on a
+// home craze would now refuse. The redaction is defence, and it is what Run
+// and Close still put every store error through.
 func TestStoreErrorsAreRedacted(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
-	// A home whose path holds a key: craze is configured with it, so nothing
-	// refuses it, and every store error names it.
-	home := filepath.Join(f.home, canary)
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{modeltable.ProvidersFile, modeltable.ModelsFile} {
-		b, err := os.ReadFile(filepath.Join(f.home, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(home, name), b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	// A file where the transcript's directory has to go: every save fails,
 	// with an error naming the path it could not make.
-	if err := os.WriteFile(filepath.Join(home, "sessions"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, "sessions"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts := f.options()
-	opts.Home = home
-	s := f.open(opts)
+	s := f.open(f.options())
 	f.models["test/a"].push(answerWith("lost"))
 
 	_, err := s.Run(context.Background(), "hi", nil)
@@ -605,12 +651,25 @@ func TestStoreErrorsAreRedacted(t *testing.T) {
 	if err == nil || !errors.As(err, &pe) {
 		t.Fatalf("Run = %v, want the store's failure, still unwrapping to it", err)
 	}
-	if strings.Contains(err.Error(), canary) || !strings.Contains(err.Error(), redact.Marker) ||
-		!strings.Contains(err.Error(), "sessions") {
+	if !strings.Contains(err.Error(), "sessions") {
 		t.Errorf("the error returned to the caller reads %q", err)
 	}
 
-	// The control: the same store, written to directly, does name the key.
+	// A home whose path holds a key, which Open refuses and a store built
+	// straight over it does not: its errors name the key.
+	home := filepath.Join(f.home, canary)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "sessions"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if bad, err := Open(func() Options { o := f.options(); o.Home = home; return o }()); err == nil {
+		bad.Close()
+		t.Fatal("control: a home whose plan path holds a key opened, so the rest proves less than it says")
+	} else if !errors.Is(err, errPlanPathKey) {
+		t.Fatalf("control: Open over the keyed home = %v, want errPlanPathKey", err)
+	}
 	st, serr := store.New(store.Options{Home: home, Workspace: f.workspace})
 	if serr != nil {
 		t.Fatal(serr)

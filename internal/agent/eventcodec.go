@@ -433,8 +433,9 @@ type wireQuestion struct {
 }
 
 type wireOption struct {
-	ID    string `json:"id,omitempty"`
-	Label string `json:"label,omitempty"`
+	ID          string `json:"id,omitempty"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 type wirePlan struct {

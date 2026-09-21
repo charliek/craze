@@ -673,10 +673,20 @@ def test_native_tool_loop_read_grep_edit_bash(
     assert (ws / "notes.txt").read_text(encoding="utf-8") == "beta\n"
 
     # The wire's own view of the same loop. The first request offers the
-    # profile's six tools in its registry order (opencode.Profile), and the
+    # profile's nine tools in its registry order (opencode.Profile), and the
     # last one carries every call's result back, each tied to its call id.
     first, last = fixture_server.requests[0], fixture_server.requests[-1]
-    assert first.tool_names == ["bash", "read", "glob", "grep", "edit", "write"], first.tool_names
+    assert first.tool_names == [
+        "bash",
+        "read",
+        "glob",
+        "grep",
+        "edit",
+        "write",
+        "todo_write",
+        "ask_user_question",
+        "exit_plan_mode",
+    ], first.tool_names
     results = {m["tool_call_id"]: m["content"] for m in last.messages if m.get("role") == "tool"}
     assert set(results) == {"read", "grep", "edit", "bash"}, sorted(results)
     assert "alpha" in results["read"], results["read"]
@@ -713,6 +723,88 @@ def test_native_tool_loop_without_rg_is_still_a_loop(
         ("read", "completed"),
         ("bash", "completed"),
     ], rows
+
+
+def test_native_question_is_auto_answered_and_reaches_the_model(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A question from the harness's ask_user_question, through the whole
+    headless path (plan 023 §3.4, A6).
+
+    `craze prompt` answers questions itself with each question's first option
+    -- one policy across providers, not a consequence of having no frontend
+    (plan 021 §3.6) -- so no card is ever raised: the registry writes the Auto
+    opening carrying the answer it sent, and the stream prints it as a
+    `question` line. What the model gets back is the *label*, not the option id
+    the card would have answered with: the seam answers by index and the tool
+    words it for the model (tool.Answers).
+
+    The todo list rides along in the same turn, since it is the other H5 tool a
+    headless run reaches: it prints as a `todos` line with the harness's own
+    statuses. exit_plan_mode is not here -- the gate refuses it by name outside
+    plan mode, and no mode can be entered on native until plan 023's PR 2.
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    fixture_server.set_script(
+        [
+            call_step(
+                "todo_write",
+                {"todos": [{"id": "1", "content": "ask the user", "status": "in_progress"}]},
+            ),
+            call_step(
+                "ask_user_question",
+                {
+                    "questions": [
+                        {
+                            "question": "Which shall it be?",
+                            "header": "pick one",
+                            "options": [
+                                {"label": "alpha", "description": "the first"},
+                                {"label": "beta"},
+                            ],
+                        }
+                    ]
+                },
+            ),
+            answer("went with alpha"),
+        ]
+    )
+
+    proc = run_native(craze_bin, craze_home, ws, "ask me", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert joined(events, "text") == "went with alpha"
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    assert CANARY not in proc.stdout and CANARY not in proc.stderr
+
+    questions = [e for e in events if e["type"] == "question"]
+    assert len(questions) == 1, questions
+    q = questions[0]
+    assert q["id"] == "ask-1" and q["title"] == "pick one", q
+    # Answered by craze itself, with the first option, and said so in the
+    # opening -- which is exactly what cursor's headless questions print.
+    assert q["auto"] is True and q["answers"] == {"q1": ["o1"]}, q
+
+    todos = [e for e in events if e["type"] == "todos"]
+    assert len(todos) == 1, todos
+    assert todos[0]["todos"] == [
+        {"id": "1", "content": "ask the user", "status": "in_progress"}
+    ], todos[0]
+
+    # The wire's own view: the last request carries both results, and the
+    # answer is the label the model wrote, not the id it was answered by.
+    assert len(fixture_server.requests) == 3, len(fixture_server.requests)
+    results = {
+        m["tool_call_id"]: m["content"]
+        for m in fixture_server.requests[-1].messages
+        if m.get("role") == "tool"
+    }
+    assert set(results) == {"todo_write", "ask_user_question"}, sorted(results)
+    assert '"Which shall it be?"="alpha"' in results["ask_user_question"], results["ask_user_question"]
+    assert "o1" not in results["ask_user_question"], results["ask_user_question"]
+    assert "ask the user" in results["todo_write"], results["todo_write"]
 
 
 def test_sse_fixture_interleaves_parallel_calls() -> None:

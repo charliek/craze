@@ -34,11 +34,18 @@ const (
 	KindEdit    Kind = "edit"
 	KindExecute Kind = "execute"
 	KindSearch  Kind = "search"
+	// KindTodo is todo_write (plan 023 §3.4): the TUI's generic row prints a
+	// kind verbatim, and --json does too, so this is its own kind rather than
+	// KindOther, which would read "other" on both.
+	KindTodo Kind = "todo"
+	// KindAsk is a call that blocks on the person: ask_user_question and
+	// exit_plan_mode (plan 023 §3.4). Its own kind for the same reason.
+	KindAsk Kind = "ask"
 )
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindRead, KindEdit, KindExecute, KindSearch:
+	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo, KindAsk:
 		return true
 	}
 	return false
@@ -151,8 +158,19 @@ type Request struct {
 	ReadOnly bool
 	Title    string   // the relative path, the command, the pattern: a card's one line
 	Paths    []string // resolved absolute paths the call touches
-	Command  string   // execute: the raw command
-	Workdir  string   // execute: the resolved directory it runs in
+	// Targets are the paths an edit-kind call will really write to: absolute,
+	// and resolved through RealPath, so a relative spelling, a symlink, a
+	// dangling one and a file that does not exist yet all normalize to what
+	// the eventual open lands on. Prepare fills it for the tools that write;
+	// a gate enforcing where a call may write judges this and never Paths,
+	// which is cleaned but not resolved and is redacted for the card.
+	//
+	// It is the one field of a Request that is not redacted, and it never
+	// leaves the dispatcher: the copy handed to the gate carries it and the
+	// copy returned for an event does not (plan 023 §3.1).
+	Targets []string
+	Command string // execute: the raw command
+	Workdir string // execute: the resolved directory it runs in
 	// Input is the call's raw arguments; it may not be valid JSON, so a
 	// consumer that marshals a Request must not assume it is.
 	Input json.RawMessage
@@ -248,6 +266,21 @@ type Env struct {
 	// ctx cancelled with ErrClosing means the same (SessionClosing). nil
 	// never closes.
 	Closing <-chan struct{}
+	// Todos is the harness's todo list, reached only by todo_write
+	// (plan 023 §3.4): a narrow seam of pure data, since this package may
+	// not import internal/harness, which owns the concrete store and
+	// publishes the harness.Event{Todos} that follows every write. nil when
+	// no caller wired one (a harness test, or a build with no todos) —
+	// todo_write then returns a tool_error result rather than panic.
+	Todos TodoStore
+	// Asker is how a call reaches the person (asker.go, plan 023 §3.4). nil
+	// when the session was opened with none: ask_user_question and
+	// exit_plan_mode then answer at once that nobody answered.
+	Asker Asker
+	// PlanPath is the session's plan file, absolute: what exit_plan_mode
+	// reads. The dispatcher sets it per call (SetPlanPath), since a session
+	// learns it only once its transcript is named. "" is no plan file.
+	PlanPath string
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken

@@ -439,7 +439,10 @@ func endings(t *testing.T, evs []Event, stop string) error {
 
 // TestNativeProviderIsRegisteredHidden: the native provider resolves by id
 // and is listed nowhere (plan 018 §3.4), is in-process, shows its label, and
-// has exactly the one capability H1 gives it.
+// has exactly the capabilities the harness backs today. Modes is the one H5
+// leaves off in this PR: SetMode is still ErrUnsupported and open() still
+// refuses a mode, so the chip, the three slash commands and Shift+Tab must
+// stay hidden (plan 023 §5's interim).
 func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 	p, err := ProviderByName("native")
 	if err != nil {
@@ -448,8 +451,9 @@ func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 	if !p.Hidden() || !p.InProcess() || p.DisplayName() != "native" {
 		t.Fatalf("native is hidden=%v inProcess=%v label %q", p.Hidden(), p.InProcess(), p.DisplayName())
 	}
-	if got := p.Capabilities(); got != (Capabilities{Effort: true, Interject: true}) {
-		t.Fatalf("Capabilities = %+v, want effort and interject alone", got)
+	want := Capabilities{Effort: true, Interject: true, Todos: true, AskCards: true, PlanCards: true}
+	if got := p.Capabilities(); got != want {
+		t.Fatalf("Capabilities = %+v, want %+v", got, want)
 	}
 	if slices.Contains(ProviderNames(), "native") {
 		t.Fatalf("ProviderNames lists native: %q", ProviderNames())

@@ -21,6 +21,7 @@ const (
 	TypeMessage      = "message"
 	TypeModelChange  = "model_change"
 	TypeEffortChange = "effort_change"
+	TypeModeChange   = "mode_change"
 )
 
 // timeLayout is every timestamp's format: UTC with milliseconds, as pi (and
@@ -84,15 +85,19 @@ type MessageEntry struct {
 }
 
 // Entry is one line after the header, as written or read back. Type selects
-// which of the embedded MessageEntry's fields mean anything: all of them for
-// a message, Model for a model_change, Effort for an effort_change, none for
-// a type from a newer craze, which is kept only so the parent chain through
-// it stays whole.
+// which of the fields mean anything: the embedded MessageEntry for a message,
+// its Model for a model_change, its Effort for an effort_change, Mode for a
+// mode_change, none for a type from a newer craze, which is kept only so the
+// parent chain through it stays whole.
 type Entry struct {
 	Type      string
 	ID        string // 8 hex chars, unique within the file
 	ParentID  string // "" for a root entry (JSON null)
 	Timestamp time.Time
+	// Mode is the mode a mode_change switched to (plan 023 §3.1). It is on
+	// the Entry rather than on MessageEntry because no message carries one:
+	// the mode is a fact about the turn's rules, not about what was sent.
+	Mode string
 	MessageEntry
 }
 
@@ -132,6 +137,14 @@ type modelChangeLine struct {
 type effortChangeLine struct {
 	envelope
 	Effort string `json:"effort"`
+}
+
+// modeChangeLine is a switch to another mode (agent, plan, ask). The header
+// carries no mode, so a session that opened in one records the switch to it
+// like any other (plan 023 §3.1).
+type modeChangeLine struct {
+	envelope
+	Mode string `json:"mode"`
 }
 
 // Header is the file's first line. The system prompt is never stored, only
@@ -237,6 +250,8 @@ func encodeEntry(e Entry) ([]byte, error) {
 		})
 	case TypeEffortChange:
 		return json.Marshal(effortChangeLine{envelope: env, Effort: e.Effort})
+	case TypeModeChange:
+		return json.Marshal(modeChangeLine{envelope: env, Mode: e.Mode})
 	default:
 		return nil, fmt.Errorf("store: cannot write entry type %q", e.Type)
 	}
@@ -295,6 +310,12 @@ func decodeEntry(line []byte) (Entry, error) {
 			return Entry{}, err
 		}
 		e.Effort = ec.Effort
+	case TypeModeChange:
+		var mc modeChangeLine
+		if err := json.Unmarshal(line, &mc); err != nil {
+			return Entry{}, err
+		}
+		e.Mode = mc.Mode
 	}
 	return e, nil
 }

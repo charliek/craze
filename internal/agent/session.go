@@ -586,10 +586,14 @@ type PermissionEvent struct {
 	Options []PermissionOption
 }
 
-// Option is one answer choice of a question.
+// Option is one answer choice of a question. Description is what picking it
+// means, when the request said (plan 023 §3.4): the native harness's
+// ask_user_question offers one per option, and cursor's questions carry none,
+// so it is empty for every ACP provider.
 type Option struct {
-	ID    string
-	Label string
+	ID          string
+	Label       string
+	Description string
 }
 
 type Question struct {

@@ -12,7 +12,8 @@ import (
 //
 //   - the answer: TextDelta, ThoughtDelta;
 //   - tool calls: ToolStarted, ToolCalled, ToolProgress, ToolFinished;
-//   - the turn's course: StepDone, Steered, Retrying, Diag.
+//   - the turn's course: StepDone, Steered, Retrying, Diag;
+//   - the harness's own state, projected: Todos.
 //
 // Every field is a plain value that survives a JSON round trip, so a
 // journal can record exactly what the sink was handed (plan 019 §3.5). Text
@@ -149,6 +150,16 @@ type Retrying struct {
 	Reason  string
 }
 
+// Todos reports the harness's todo list, in full, after a todo_write call
+// (plan 023 §3.4): never a delta, so an adapter that only ever applies the
+// latest one received cannot drift from the store even if two calls'
+// events somehow reached it apart — and, since sessionTodos.Write (todos.go)
+// makes the mutation and this emit one critical section, they never do:
+// the events a session emits arrive in exactly the order Write produced the
+// lists. Items is a copy the store made for this event alone. Not persisted
+// in the transcript (H7 may add it).
+type Todos struct{ Items []tool.Todo }
+
 // Diag reports what has no other event: results the runner wrote for calls
 // that never ran, a save that failed, a step refused for its call ids, a
 // doom-loop nudge and the stop that follows it.
@@ -192,6 +203,7 @@ func (StepDone) isEvent()     {}
 func (Steered) isEvent()      {}
 func (Retrying) isEvent()     {}
 func (Diag) isEvent()         {}
+func (Todos) isEvent()        {}
 
 // Usage is a step's or a turn's token counts: input, output, reasoning, and
 // the prompt-cache reads and writes, which show whether a provider's prefix

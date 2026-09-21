@@ -18,3 +18,9 @@ decision that closed it.
 | Q9 | Compaction trigger: `context − 16k reserve` (pi) or 85 % of window (grok)? Tail to keep: 20k tokens (pi) or `clamp(usable×0.25, 2k, 15k)` (opencode)? | pi's numbers. | H7 |
 | Q10 | When does the provider become visible (D-16)? After H7? After H8? | After H7 passes its smoke on both platforms. | — |
 | Q11 | ChatGPT-plan auth: port gx's token minting, or crush's oauth package, or skip for good? | Skip until asked. | — |
+
+H5 (Plan 023, 2026-09-21) leaves three items as follow-ups rather than
+questions for now, each recorded in the plan's §4/§9: free-text "Other"
+answers on the question card, a model-initiated `enter_plan_mode` tool, and
+a system-prompt sentence nudging the model to write todos — R2's smoke
+measures whether a model writes them unprompted with none.

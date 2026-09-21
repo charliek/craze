@@ -530,6 +530,53 @@ func TestChangeWaitsForOutput(t *testing.T) {
 	}
 }
 
+// A mode change is held and written like the other two (plan 023 §3.1): one
+// before a turn that produces nothing leaves no lone line in the file, a
+// second replaces the first, and the one that is written reads back with its
+// mode. The turn's own message entries carry no mode: the entry is the only
+// record of it.
+func TestModeChangeWaitsForOutput(t *testing.T) {
+	opts := testOptions(t)
+	var log writeLog
+	opts.openFile = log.opener()
+	s := newStore(t, opts)
+	turn(t, s, "first", "one", kimi)
+
+	if err := s.AppendModeChange("plan"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(log.all()); n != 1 {
+		t.Fatalf("a mode change alone made %d writes, want 1 (the first turn)", n)
+	}
+	if err := s.AppendModeChange("ask"); err != nil {
+		t.Fatal(err)
+	}
+	turn(t, s, "second", "two", kimi)
+
+	got := fileTypes(t, s.Path())
+	want := []string{"session", "message", "message", "mode_change", "message", "message"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("line types = %v, want %v", got, want)
+	}
+	tr, err := Load(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change := tr.Entries[2]; change.Type != TypeModeChange || change.Mode != "ask" {
+		t.Fatalf("the written mode_change is %+v, want the later switch to ask", change)
+	}
+	// It is not in the history: a mode is a fact about the turn's rules, and
+	// the model reads it as a reminder the harness composes (plan 023 §3.3).
+	if msgs := messageTexts(tr.Context(kimi)); !reflect.DeepEqual(msgs, []string{
+		"user: first", "assistant: one", "user: second", "assistant: two",
+	}) {
+		t.Fatalf("the mode change reached the context: %q", msgs)
+	}
+	if err := s.AppendModeChange(""); err == nil {
+		t.Fatal("AppendModeChange took an empty mode")
+	}
+}
+
 func TestEffortChangeKeepsEmptyEffort(t *testing.T) {
 	opts := testOptions(t)
 	s := newStore(t, opts)

@@ -167,15 +167,28 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	}
 
 	t := &turn{
-		ctx:    turnCtx,
-		store:  s.store,
-		model:  m,
-		sink:   sink,
-		number: number,
-		calls:  calls{tools: s.tools},
-		steers: &s.steers,
+		ctx:     turnCtx,
+		store:   s.store,
+		model:   m,
+		sink:    sink,
+		number:  number,
+		calls:   calls{tools: s.tools},
+		steers:  &s.steers,
+		modes:   s.modes,
+		logMode: s.recordMode,
 	}
 	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
+	// The session's todo store reaches this turn's sink only through here
+	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
+	// once Run returns, the same way modes and the steer box are handed a
+	// fixed reference at the start rather than looked up each time.
+	release := s.tools.todos.attach(t.emitLocked)
+	defer release()
+	// And the session's asker tells this turn, and no other, of a plan the
+	// person approved (asker.go).
+	if s.tools.asker != nil {
+		defer s.tools.asker.attach(t.planWasApproved)()
+	}
 	// From here Steer is accepted, and only from here: a prompt the store
 	// refused above never became a turn, so there was nothing to steer into.
 	t.steers.begin()
@@ -238,7 +251,29 @@ func (s *Session) record(m model, changes []func(*store.Store) error) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.logged = logged{model: m.id(), effort: m.effort}
+	// The mode is left alone: it is recorded at the step boundary that tells
+	// the model about it, which is not this one (recordMode).
+	s.logged.model, s.logged.effort = m.id(), m.effort
+	return nil
+}
+
+// recordMode hands the store a mode_change when mode is not what the
+// transcript was last told, and marks it held once the store has taken it —
+// held or written, which is what logged means for the model and the effort
+// too. The turn calls it as it appends the step whose request announced the
+// mode, so the entry is held with that step's output and lands where the
+// change became visible in the conversation (plan 023 §3.1). A store that
+// refuses it stays untold, as a refused model change does.
+func (s *Session) recordMode(mode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logged.mode == mode {
+		return nil
+	}
+	if err := s.store.AppendModeChange(mode); err != nil {
+		return fmt.Errorf("harness: %w", s.tools.redactErr(err))
+	}
+	s.logged.mode = mode
 	return nil
 }
 
@@ -294,12 +329,40 @@ type turn struct {
 
 	loop doomLoop // the doom-loop guard's count, across the turn's steps (doomloop.go)
 
+	// planApproved is set when the person approved the plan exit_plan_mode
+	// presented (planWasApproved): the turn ends with that step, as end_turn,
+	// and every call the model placed after the asking one in the step is refused
+	// (plan 023 §3.4, D-51).
+	planApproved bool
+	approvedAt   int // the asking call's place in its step (toolCall.order)
+
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
 	// which has its own lock; spliced and written are this turn's, under mu.
 	steers  *steerbox
 	spliced []splice // the steers taken up, in order, each at a fixed index
 	written int      // how many of spliced an AppendStep has written
+
+	// The mode's reminders (reminders.go, plan 023 §3.3): modes is the
+	// session's box, which has its own lock; the rest is this turn's, under
+	// mu. reminders is a collection of its own — never spliced, never
+	// persisted, never emitted — and pending is the one composed for the step
+	// about to go out.
+	//
+	// carried and sent are the two halves of announcing a mode. carried is the
+	// mode this turn's reminders already speak for, from the moment one is
+	// composed: every later request of the turn carries it, so the turn never
+	// composes it twice. sent is that mode once a request carrying it has
+	// really gone out, and it is what the step that persists output records —
+	// in the transcript (modeChangeHeld) and as what the model has been told
+	// (modeHeard).
+	modes      *modes
+	logMode    func(mode string) error
+	reminders  []reminder
+	pending    pendingReminder
+	hasPending bool
+	carried    string
+	sent       string
 }
 
 // redactor is the session's, as it is now — fixed for the whole turn, since
@@ -312,6 +375,17 @@ func (t *turn) emit(ev Event) {
 	if !t.ended {
 		t.sink(ev)
 	}
+}
+
+// emitLocked is emit for a caller outside toolbridge.go's callbacks that
+// does not already hold mu: the session's todo store (todos.go), whose own
+// lock wraps a call to this one so that a mutation and its event are one
+// critical section from the store's side too (plan 023 §3.4). It takes and
+// releases mu itself, so a caller must not already hold it.
+func (t *turn) emitLocked(ev Event) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.emit(ev)
 }
 
 // call is the turn's request. MaxOutputTokens, effort and retries are per
@@ -379,20 +453,55 @@ func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamC
 // The guard's step ends with tool results the model never gets to read, so
 // finish turns its tool_use into max_turn_requests, as it does for the step
 // limit.
+//
+// An approved plan stops the turn here too (plan 023 §3.4): Fantasy joins
+// every tool of the step, builds the step and runs OnStepFinish before it
+// asks this, so by now the approval is recorded, the step — exit_plan_mode's
+// call and its result — is persisted, and the only thing left to prevent is
+// the next request. It is not done through a result's StopTurn, which the
+// dispatcher clears on anything a tool returns and which would leave the
+// step's tool_use to be read as a turn that ran out of requests.
 func (t *turn) halted([]fantasy.StepResult) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.ctx.Err() != nil
+	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil
+}
+
+// planWasApproved records that the person approved the plan. The session's
+// asker calls it, on the tool goroutine that asked, before exit_plan_mode has
+// its answer (asker.go).
+//
+// It also fixes which call asked, as a place in the step: the last of the
+// calls running now. The asking call is one of them, and it is not Parallel,
+// so Fantasy dispatches nothing after it until it returns — whatever else is
+// running was placed before it. Every call placed after it is refused
+// (runTool).
+func (t *turn) planWasApproved() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.planApproved {
+		return
+	}
+	t.planApproved = true
+	for _, c := range t.list {
+		if c.running && c.order > t.approvedAt {
+			t.approvedAt = c.order
+		}
+	}
 }
 
 // stepStarted opens step n (from 0): its number, its clock, and an empty
-// set of tool calls.
+// set of tool calls. The step's request goes out next, so this is also where
+// the reminder prepareStep composed for it becomes one the model will read
+// (reminderSent) — for a turn whose context is still live, since Fantasy
+// opens a step whether or not the request can be sent.
 func (t *turn) stepStarted(n int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.step = n + 1
 	t.stepStart, t.firstToken, t.retries = time.Now(), 0, 0
 	t.resetCalls(true)
+	t.reminderSent()
 	return nil
 }
 
@@ -477,6 +586,11 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		if results != nil {
 			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort}
 		}
+		// The mode this step's request announced is handed over first, so the
+		// store writes the mode_change ahead of this step's own entries
+		// (reminders.go), and it is only ever handed over for a step there is
+		// something to append with.
+		t.modeChangeHeld()
 		// The steers no step has written yet lead the append: this is the
 		// first step that could write them, and the transcript then holds
 		// them exactly where this step's request had them.
@@ -485,6 +599,9 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		case err == nil:
 			t.written = len(t.spliced)
 			done.Saved, done.Entries = true, ids
+			// The conversation now holds the step the model read the notice
+			// in, so the mode is told for good (plan 023 §3.3).
+			t.modeHeard()
 		case errors.Is(err, store.ErrNoOutput): // thinking alone: nothing to persist
 		default:
 			if t.saveErr == nil {
@@ -560,6 +677,14 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 				return Result{StopReason: StopCancelled}, nil
 			}
 			stop = StopMaxTurnRequests
+			// Unless what stopped it was the person approving the plan: that
+			// turn is finished, not cut off, and `craze prompt` exits non-zero
+			// on anything but end_turn. The transcript's step keeps its own
+			// tool_use. A cancel (above), a save failure and unusable ids
+			// (earlier) and the doom-loop guard all outrank it (plan 023 §3.4).
+			if t.planApproved && !t.loop.stopped {
+				stop = StopEndTurn
+			}
 		}
 		var total Usage
 		if res != nil {

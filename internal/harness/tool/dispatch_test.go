@@ -377,6 +377,44 @@ func TestDispatcherRedactsEveryOutwardField(t *testing.T) {
 	}
 }
 
+// TestDispatcherKeepsTargetsForTheGateAlone is Targets' provenance (plan 023
+// §3.1): the gate is handed them exactly as the tool resolved them, because a
+// gate deciding where a call may write cannot be shown a rewritten path,
+// while the Request the dispatcher returns — the one the announcing event
+// carries — has none at all. Paths is the control: it is redacted, and it
+// does go out.
+func TestDispatcherKeepsTargetsForTheGateAlone(t *testing.T) {
+	env := testEnv(t, keyA)
+	secret := filepath.Join(env.Workspace, keyA, "notes.md")
+	f := newFake("write", nil)
+	f.spec.Kind, f.spec.ReadOnly = KindEdit, false
+	f.req = func(in fakeInput, _ Env) Request {
+		return Request{Title: in.Text, Paths: []string{secret}, Targets: []string{secret}}
+	}
+	var gateSaw Request
+	gate := GateFunc(func(_ context.Context, r Request) (Decision, error) { gateSaw = r; return Allow{}, nil })
+	d := newDispatcher(t, env, gate, f)
+
+	req, _, ok := d.Prepare(Call{ID: "t1.1.1", Tool: "write", Input: input(t, fakeInput{Text: "hi"})})
+	if !ok {
+		t.Fatal("Prepare refused the call")
+	}
+	if req.Targets != nil {
+		t.Fatalf("the announced Request carries Targets %q", req.Targets)
+	}
+	if len(req.Paths) != 1 || strings.Contains(req.Paths[0], keyA) {
+		t.Fatalf("control: Paths = %q, want one redacted path", req.Paths)
+	}
+
+	d.Run(context.Background(), "t1.1.1", nil)
+	if len(gateSaw.Targets) != 1 || gateSaw.Targets[0] != secret {
+		t.Fatalf("the gate saw Targets %q, want the path the tool resolved", gateSaw.Targets)
+	}
+	if len(gateSaw.Paths) != 1 || strings.Contains(gateSaw.Paths[0], keyA) {
+		t.Fatalf("the gate's Paths = %q, want the redacted copy", gateSaw.Paths)
+	}
+}
+
 // TestDispatcherTruncates runs a long result through each Direction. Head
 // and Tail cut the text and spill the whole of it, redacted, to a private
 // file named from the call's id; None leaves text and Trunc as the tool set

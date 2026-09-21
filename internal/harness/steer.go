@@ -176,42 +176,57 @@ type splice struct {
 
 // prepareStep is the turn's PrepareStep. Before every step after the first it
 // takes up whatever Steer has accepted — only while the turn's context is
-// live, since a step that will not be sent can answer nothing — and hands the
-// step an input with every steer this turn has taken up re-inserted at its own
-// index.
+// live, since a step that will not be sent can answer nothing — and it
+// composes the step's mode reminder, if the mode calls for one (reminders.go);
+// then it hands the step an input with every steer and every reminder
+// re-inserted at its own index.
 //
-// The first step is skipped: its input is the prompt Run was called with, and
-// a steer accepted before it has a whole turn ahead of it to be taken up in.
+// The steers are skipped at the first step: its input is the prompt Run was
+// called with, and a steer accepted before it has a whole turn ahead of it to
+// be taken up in. The reminder is not, and this is why prepareStep no longer
+// returns at once there: Fantasy builds the turn's list once, as system +
+// Messages + Prompt, and keeps it across the steps (agent.go:1279-1284, 943),
+// so a reminder appended to Messages would land ahead of the prompt and one
+// spliced from the second step on would move the prefix under the cache
+// (panel correction 7). A turn in agent mode with nothing to announce
+// composes none, and its requests are the bytes they have always been.
 func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
-	if o.StepNumber == 0 {
-		return ctx, fantasy.PrepareStepResult{}, nil
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.ctx.Err() == nil {
-		for _, text := range t.steers.take() {
-			t.spliced = append(t.spliced, splice{text: text, at: len(o.Messages), msg: fantasy.NewUserMessage(text)})
-			// The turn's goroutine is the only one that reports a steer, and
-			// it reports every one it accepted before the turn's own ending
-			// (see finish): nothing shown for an interjection can follow the
-			// turn's end, and no lock of the caller's is held to do it.
-			t.emit(Steered{Text: text})
+		if o.StepNumber > 0 {
+			for _, text := range t.steers.take() {
+				t.spliced = append(t.spliced, splice{text: text, at: len(o.Messages), msg: fantasy.NewUserMessage(text)})
+				// The turn's goroutine is the only one that reports a steer, and
+				// it reports every one it accepted before the turn's own ending
+				// (see finish): nothing shown for an interjection can follow the
+				// turn's end, and no lock of the caller's is held to do it.
+				t.emit(Steered{Text: text})
+			}
 		}
+		t.remind(o.StepNumber, o.Messages)
 	}
-	if len(t.spliced) == 0 {
+	if len(t.spliced) == 0 && len(t.reminders) == 0 {
 		return ctx, fantasy.PrepareStepResult{}, nil
 	}
 	return ctx, fantasy.PrepareStepResult{Messages: t.spliceInto(o.Messages)}, nil
 }
 
-// spliceInto is base with every steer re-inserted at the index it was recorded
-// at, in the order they were taken up; base — Fantasy's own slice — is never
-// written to. The indices are non-decreasing, because base only ever grows at
-// its end, so one pass places them all. mu is held.
+// spliceInto is base with every steer and every reminder re-inserted at the
+// index it was recorded at, in the order they were taken up; base — Fantasy's
+// own slice — is never written to. The indices of each collection are
+// non-decreasing, because base only ever grows at its end, so one pass places
+// them all; where a reminder and a steer share an index the reminder comes
+// first, since it was placed there first (the turn's own reminder sits right
+// after the prompt, before any steer). mu is held.
 func (t *turn) spliceInto(base []fantasy.Message) []fantasy.Message {
-	out := make([]fantasy.Message, 0, len(base)+len(t.spliced))
-	next := 0
+	out := make([]fantasy.Message, 0, len(base)+len(t.spliced)+len(t.reminders))
+	rem, next := 0, 0
 	for i := 0; i <= len(base); i++ {
+		for rem < len(t.reminders) && t.reminders[rem].at <= i {
+			out = append(out, t.reminders[rem].msg)
+			rem++
+		}
 		for next < len(t.spliced) && t.spliced[next].at <= i {
 			out = append(out, t.spliced[next].msg)
 			next++
@@ -220,8 +235,11 @@ func (t *turn) spliceInto(base []fantasy.Message) []fantasy.Message {
 			out = append(out, base[i])
 		}
 	}
-	// An index past the end cannot happen today (base grows); a steer would
-	// still go out rather than be silently dropped from the request.
+	// An index past the end cannot happen today (base grows); a steer or a
+	// reminder would still go out rather than be silently dropped.
+	for ; rem < len(t.reminders); rem++ {
+		out = append(out, t.reminders[rem].msg)
+	}
 	for ; next < len(t.spliced); next++ {
 		out = append(out, t.spliced[next].msg)
 	}

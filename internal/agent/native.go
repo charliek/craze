@@ -59,7 +59,8 @@ type nativeSession struct {
 	log    *EventLog
 	events <-chan Event
 	// asks is this session's ask registry, built beside the log as on every
-	// session and empty: nothing in the harness opens an ask yet (Asks).
+	// session. The harness's ask_user_question and exit_plan_mode open against
+	// it, through the asker in native_asks.go (plan 023 §3.4).
 	asks *AskRegistry
 	// done is closed first by Close, so no emit — the harness's sink
 	// included, which runs on Fantasy's callbacks — can block on a reader
@@ -102,6 +103,13 @@ type nativeSession struct {
 	tools     map[string]ToolEvent
 	toolOrder []string
 
+	// s.mu is held across exactly one ask-registry call: the non-blocking
+	// CancelTurn in Cancel, which has to be atomic with the read of the turn
+	// it is cancelling (plan 023 §3.5). Every registry call that can block or
+	// flush — Open's Wait, Flush — stays strictly outside it, and so do
+	// BeginTurn and EndTurn. Plan 021 words the cross-provider rule as "never
+	// for live or the Stub; native holds s.mu across the non-blocking
+	// CancelTurn only".
 	mu      sync.Mutex
 	started bool
 	closed  bool
@@ -132,9 +140,20 @@ type nativeSession struct {
 	doneEmitted bool
 	// turnCancel cancels the open turn's context; nil until the continuation
 	// opens its turn. released is the claim's: closed when its continuation
-	// returns, which is what Cancel and Close wait on.
+	// returns, which is what Cancel and Close wait on. turnToken is the
+	// registry's name for that same turn (plan 023 §3.5), installed in the
+	// very section that registers turnCancel so that a Cancel reads the two
+	// together and an ask can never be opened against a turn that has gone.
 	turnCancel context.CancelFunc
+	turnToken  TurnToken
 	released   chan struct{}
+	// cancelSeam runs inside Cancel's critical section, with s.mu held, the
+	// turn's context already cancelled and the registry call still to come.
+	// **It is a test seam: nil in production**, set only by a test in this
+	// package and only under s.mu. It exists because "the read of the turn
+	// and CancelTurn are ONE critical section" (plan 023 §3.5) is a fact
+	// about a window, and a window can only be pinned from inside it.
+	cancelSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -264,11 +283,11 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 	// Whatever provider the caller named, this session is the native one, and
 	// every snapshot — one taken before Start included — says so.
 	s.snap.Provider = NativeProvider().Info()
-	// Beside the log, as on every session, and empty: nothing in the harness
-	// opens an ask yet. It exists so that a client above the seam holds one
-	// surface whatever the provider is — Control.Asks answers with nothing here
-	// rather than with "unsupported" — and so that a Gate's Ask has somewhere to
-	// go when H3 gives it one, through this adapter and nowhere else.
+	// Beside the log, as on every session. It exists so that a client above the
+	// seam holds one surface whatever the provider is, and it is what the
+	// harness's two blocking tools open against, through the asker this session
+	// hands in at Open (native_asks.go); a Gate's Ask reaches it the same way
+	// when H3 gives it one, through this adapter and nowhere else.
 	s.asks = NewAskRegistry(log, s.Now)
 	return s
 }
@@ -287,8 +306,9 @@ func (s *nativeSession) Incarnation() string { return s.log.Incarnation() }
 func (s *nativeSession) EventLog() *EventLog { return s.log }
 func (s *nativeSession) Now() time.Time      { return time.Now() }
 
-// Asks is the session's AskSource (plan 021 §3.6): an empty registry, because
-// the harness has no permission gate, questions or plans yet.
+// Asks is the session's AskSource (plan 021 §3.6): the registry the harness's
+// ask_user_question and exit_plan_mode park on (plan 023 §3.4). It holds no
+// permission yet — the gate is still AllowAll (D-39).
 func (s *nativeSession) Asks() *AskRegistry { return s.asks }
 
 // Start loads the model table, opens the harness on the requested model (or
@@ -622,6 +642,13 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	}
 	// What the provenance note records is what was frozen, seam or no seam.
 	content.extras = hopts.Prompt
+	// How the harness's two blocking tools reach a person: this session's own
+	// registry, behind tool.Asker (plan 023 §3.4). Left to the seam's last word
+	// like Prompt above, so a harness test that hands in an asker of its own
+	// keeps it; in every real build tweak is nil and this is the asker.
+	if hopts.Asker == nil {
+		hopts.Asker = nativeAsker{s: s}
+	}
 
 	// The last look at closed before anything is opened. A Close racing Start
 	// finds no harness under s.mu and returns (Close), while everything above
@@ -857,16 +884,28 @@ func (s *nativeSession) claim(text string) func(context.Context) (Result, error)
 // becomes of craze's queue after either is the engine's: it settles the turn
 // above this seam, after the ending published here.
 func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct{}) (Result, error) {
+	// The registry's name for this turn, minted before the locked section that
+	// installs it, as live mints its own (live.go's prompt): token minting and
+	// retirement stay outside s.mu, which is held across one registry call and
+	// only one (the struct's comment, plan 023 §3.5). A token nothing was ever
+	// opened against costs one number and resolves nothing.
+	tok := s.asks.BeginTurn()
 	// One release for the whole claim, whichever way it ends, and after the
 	// turn's last event: a Cancel or Close waiting on rel then finds the
 	// ending already emitted and the slot free. The turn's steer pairings go
 	// with it, before s.mu is taken rather than under it, so steerMu stays a
 	// leaf with no lock ordering of its own.
 	defer func() {
+		// The turn's token is retired here for every way out that did not
+		// retire it already: a withdrawal, a closed session, a refusal, a turn
+		// that failed. The ordinary path retires it before its terminal event
+		// (below), and a second EndTurn on a retired token is a no-op. Outside
+		// s.mu and before close(rel), as live does it.
+		s.asks.EndTurn(tok)
 		s.forgetSteers()
 		s.mu.Lock()
 		s.claimed, s.inPrompt, s.cancelling = false, false, false
-		s.turnCancel = nil
+		s.turnCancel, s.turnToken = nil, TurnToken{}
 		if s.released == rel {
 			s.released = nil
 		}
@@ -891,13 +930,15 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		return Result{}, fmt.Errorf("agent: session not started")
 	}
 	// The turn opens in the same locked section that checked for a cancel,
-	// and registers its cancel func there, so a Cancel either marked the
-	// claim above or finds the turn here: never neither.
+	// and registers its cancel func and its ask token there, so a Cancel
+	// either marked the claim above or finds the turn here: never neither,
+	// and never one of the two without the other.
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.inPrompt = true
 	s.doneEmitted = false
 	s.turnCancel = cancel
+	s.turnToken = tok
 	if !s.titlePinned && s.snap.Title == "" {
 		// The typed text, not the expansion: a session called after the whole
 		// of a command file would say nothing about what the user asked for.
@@ -975,17 +1016,21 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// both branches. It has to have been translated by now: the pairs it is
 	// read from are forgotten in this prompt's deferred release, so a caller
 	// translating after the return would be handed the sent spelling back.
-	// Every session waits for the outbox before it publishes a turn's terminal
-	// event (plan 021 §3.6), so anything enqueued while the turn ran is in the
-	// record ahead of it. Native has no asks yet, so today this only orders what
-	// a component above the seam enqueued; it is here because the rule is "every
-	// session", not "every session that has asks".
+	// The turn's token is retired first and the outbox waited for second, both
+	// before the terminal event, which is live's endAskTurn in the same order
+	// (live.go:1056-1067) and outside s.mu. Retiring resolves every ask still
+	// parked against this turn as turn_ended without touching any tool's
+	// context (asks.go's EndTurn) — the tool has already returned by here,
+	// since Fantasy joins it before Run returns — and the flush then puts those
+	// endings, and any opening still behind them, in the record ahead of the
+	// EventDone (plan 021 §3.6, plan 023 §3.5).
 	//
 	// It is bounded by s.done, as every emit below it is: Close closes done and
 	// then waits for this continuation (rel) BEFORE it closes the log, and with
 	// the primary full and its reader stopped only the log's close frees the
 	// drainer this barrier waits on — so a flush that did not escape here would
 	// be a Close waiting for a goroutine waiting for that same Close.
+	s.asks.EndTurn(tok)
 	_ = s.log.Flush(context.Background(), s.done)
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error
@@ -1079,8 +1124,9 @@ func nativeTitle(prompt string) string {
 
 // sink is the harness's event sink: the model's text and thinking become
 // the session's events, sanitized, because unsanitized model output is a
-// terminal-escape path into the TUI, and its tool events become the rows
-// native_tools.go merges. StepDone, Retrying and Diag have no agent event
+// terminal-escape path into the TUI, its tool events become the rows
+// native_tools.go merges, and its todo list becomes the snapshot's and one
+// EventTodos (native_asks.go). StepDone, Retrying and Diag have no agent event
 // and are dropped: usage goes to the transcript only, the harness allows
 // one silent retry (plan 018 §3.8), and a Diag is for the journal and for
 // diagnosis, not for a consumer (plan 019 §3.5). ToolProgress never blocks
@@ -1106,6 +1152,8 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.toolProgress(e)
 	case harness.ToolFinished:
 		s.toolFinished(e)
+	case harness.Todos:
+		s.applyTodos(e)
 	case harness.Steered:
 		// The turn took up an interjection. What the harness echoes is what
 		// craze sent it, which since §3.3 is the expansion — so the row is the
@@ -1152,14 +1200,38 @@ func (s *nativeSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 	// the mark and withdraws or has already registered its cancel func here.
 	s.cancelling = true
 	claimed, cancel, rel := s.claimed, s.turnCancel, s.released
+	if cancel != nil {
+		// The turn's context first, its asks second, both in this one
+		// critical section — the one place native calls the registry with s.mu
+		// held (plan 023 §3.5; the struct's comment says so too).
+		//
+		// The order is the point. The woken waiter sees a context that is
+		// already done, so the tool answers aborted and the turn's own halted
+		// check sees t.ctx.Err() before Fantasy can start a step on an ask
+		// that has just been answered.
+		//
+		// The one section is the point as well: CancelTurn drains EVERY open
+		// ask, whatever turn it belongs to (asks.go's CancelTurn), so a cancel
+		// that read the turn here and called the registry after releasing the
+		// lock could answer the NEXT turn's card. Reading and cancelling
+		// together is what makes "still the current turn" true by
+		// construction. It is safe to hold s.mu across: the registry's mutex
+		// is a leaf that is never held across anything that blocks, and the
+		// one lock it takes under its own is the log's outbox, whose Enqueue
+		// never waits (asks.go's "Locks").
+		cancel()
+		// Nil in production; a test's barrier inside the window (the struct's
+		// field says why).
+		if s.cancelSeam != nil {
+			s.cancelSeam()
+		}
+		s.asks.CancelTurn(s.turnToken)
+	}
 	s.mu.Unlock()
 	if !claimed || rel == nil {
 		return CancelOutcome{Settled: true}, nil
 	}
 	wrote := cancel != nil
-	if cancel != nil {
-		cancel()
-	}
 	outcome := CancelOutcome{Wrote: wrote, Withdrew: !wrote}
 	select {
 	case <-rel:
@@ -1200,13 +1272,30 @@ func (s *nativeSession) Close() error {
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
 		s.mu.Unlock()
-		// Before the log's close, as on the live session: the registry is empty
-		// here, and closing it is what keeps the two sessions one shape.
-		s.asks.Close()
+		// The close order, in the one place it is decided (plan 023 §3.5, X10):
+		// the turn's context, then the registry, then the harness, then the
+		// log. The registry closing before the log is Plan 021's only
+		// requirement; what puts the turn's context ahead of it is that a
+		// parked ask answered `closing` while its tool's context was still
+		// live would let the tool answer the model with an ordinary result,
+		// and a request could go out for a closing session before the turn's
+		// halted check saw t.ctx.Err(). The tools carry a belt for the same
+		// window — they read `closing` and `cancelled` alike as aborted while
+		// Env.Closing is closed (opencode's askStopped) — and this is the
+		// brace.
+		//
+		// What it costs is that a native ask parked at Close ends `cancelled,
+		// by call` where a live one ends `closing`: the tool's context is the
+		// first thing to end, so Ask.Wait's own watch usually wins the race
+		// with the registry's close. Nothing branches on the difference —
+		// neither the engine nor the TUI reads an ask's outcome for any of the
+		// three kinds — and the guarantee Plan 021 makes for ACP sessions is
+		// untouched.
 		live := in && cancel != nil && rel != nil
 		if live {
 			cancel()
 		}
+		s.asks.Close()
 		if hs != nil {
 			if err := hs.Close(); err != nil {
 				s.note(sanitizeLine(err.Error()))
@@ -1380,6 +1469,11 @@ func (s *nativeSession) Snapshot() Snapshot {
 	// or filtered its rows change what a typed name resolves to.
 	out.Plugins = append([]PluginCommand(nil), s.snap.Plugins...)
 	out.Config = cloneConfig(s.snap.Config)
+	// Cloned for the same reason, and for one of its own: the list the tasks
+	// panel draws is replaced whole by every todo_write (applyTodos), and a
+	// consumer that sorted or filtered the array it was handed would be
+	// changing what the next Snapshot answers with (live.go does the same).
+	out.Todos = append([]Todo(nil), s.snap.Todos...)
 	return out
 }
 

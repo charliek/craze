@@ -1,0 +1,5 @@
+Claude Code calls this tool `TodoWrite`.
+
+Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.
+
+Use for any task with 3+ steps. Skip for trivial single-step work.

@@ -46,6 +46,9 @@ type calls struct {
 	byCallID map[string]*toolCall // announced calls by provider id; the first, for a repeated one
 	n        int                  // the step's calls numbered so far
 	bad      bool                 // an announced call's provider id was empty or repeated
+	// announcedN counts the step's announced calls, which is the order
+	// Fantasy dispatches them in (toolCall.order).
+	announcedN int
 }
 
 // toolCall is one call the turn has reported. id is the harness's; callID
@@ -55,6 +58,8 @@ type toolCall struct {
 	name       string
 	input      string    // the raw arguments, once announced
 	called     bool      // OnToolCall announced it (ToolCalled)
+	order      int       // its place among the step's announced calls, from 1: the order Fantasy dispatches them in
+	running    bool      // the dispatcher is running it now (runTool)
 	at         time.Time // when it was announced
 	// veto, when set, is the result that stands in for running the call:
 	// the seam the doom-loop guard (plan 019 §3.7) refuses a call through.
@@ -68,7 +73,7 @@ type toolCall struct {
 // attempt of the same one, which keeps numbering from where the failed
 // attempt left off so no id is used twice. mu is held.
 func (t *turn) resetCalls(newStep bool) {
-	t.list, t.byCallID, t.bad = nil, map[string]*toolCall{}, false
+	t.list, t.byCallID, t.bad, t.announcedN = nil, map[string]*toolCall{}, false, 0
 	if newStep {
 		t.n = 0
 	}
@@ -133,6 +138,8 @@ func (t *turn) toolCall(tc fantasy.ToolCallContent) error {
 	}
 	c := t.match(tc.ToolCallID, tc.ToolName, false, taken)
 	c.called, c.name, c.input = true, tc.ToolName, tc.Input
+	t.announcedN++
+	c.order = t.announcedN
 	if _, dup := t.byCallID[tc.ToolCallID]; dup || tc.ToolCallID == "" {
 		t.bad = true
 	} else {
@@ -161,6 +168,17 @@ func (t *turn) toolCall(tc fantasy.ToolCallContent) error {
 	return nil
 }
 
+// planApprovedVeto answers a call that would have run after the person
+// approved the plan, in the same step (runTool).
+const planApprovedVeto = "Not executed: the plan was approved and the turn ended."
+
+// refusedByApproval reports whether c is refused because the person approved
+// the plan: the plan was approved, and the model placed c after the call that
+// asked (planWasApproved fixes that place). mu is held.
+func (t *turn) refusedByApproval(c *toolCall) bool {
+	return t.planApproved && c.order > t.approvedAt
+}
+
 // runTool is every bridged tool's Run, on Fantasy's tool goroutines. The
 // dispatcher runs the call under the id OnToolCall prepared it with; a call
 // of a bad step, or one the guard refused, is released unrun. It never
@@ -170,7 +188,22 @@ func (t *turn) runTool(ctx context.Context, call fantasy.ToolCall) fantasy.ToolR
 	c, bad := t.byCallID[call.ID], t.bad
 	var veto *tool.Result
 	if c != nil {
+		// A plan approved in this step refuses every call the model placed
+		// after the one that asked, so [exit_plan_mode, write(plan)] cannot
+		// change a plan the person has just approved (plan 023 §3.4). It is the
+		// call's place in the step that decides, not when its goroutine got
+		// here: exit_plan_mode is not Parallel, so Fantasy runs it on the
+		// goroutine that dispatches the step's calls (agent.go:1675-1704) and
+		// nothing after it starts until it has returned — but a Parallel call
+		// placed before it may still be waiting for its goroutine, or for one
+		// of Fantasy's five slots, when the approval lands, and that call is
+		// the model's own reading before it asked: it runs. The guard's own
+		// veto, when there is one, stands.
+		if t.refusedByApproval(c) && c.veto == nil {
+			c.veto = &tool.Result{Text: planApprovedVeto, IsError: true, Class: tool.ClassNotExecuted}
+		}
 		veto = c.veto
+		c.running = veto == nil && !bad
 	}
 	t.mu.Unlock()
 
@@ -189,7 +222,7 @@ func (t *turn) runTool(ctx context.Context, call fantasy.ToolCall) fantasy.ToolR
 		res = t.tools.d.Run(ctx, c.id, func(snapshot string) { t.progress(c, snapshot) })
 	}
 	t.mu.Lock()
-	c.res = &res
+	c.res, c.running = &res, false
 	t.mu.Unlock()
 	return toResponse(res, c.id)
 }

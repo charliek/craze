@@ -11,7 +11,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H2 | complete | tools shipped across PRs #33, #34, #35, #37: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38), the gate seam allowing everything (D-39), ripgrep on `PATH` (D-41), the doom-loop guard (D-42), abnormal-finish handling (D-43), and interject; live smoke completed 14 of 15 imported models on Linux and 4 of 4 on the mac-mini; D-35's condition met, `openaicompat` stays |
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
-| H5 | next, unblocked | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
+| H5 | in progress | modes: plan mode in the dispatcher, exit-plan and question tools, todos; Plan 023 planned and panel-reviewed 2026-09-21, PR 1 next |
 | H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
@@ -462,6 +462,20 @@ this phase was gated on — has merged as `db7686e`.
   `exit_plan_mode` and `ask_user_question` tools; `todo_write`.
 - **Exit**: a plan-mode round trip with the plan card and accept →
   implement; a question card answered; todos in the tasks panel.
+
+**Planned (Plan 023, 2026-09-21):** FINAL after panel review. Two PRs, both
+auto-merged: PR 1 (`feature/plan-023-h5-harness`) is the harness side and
+the asker seam — the mode gate, the plan file, reminders, `todo_write`,
+`ask_user_question`, `exit_plan_mode`, and native opening asks and carrying
+todos; PR 2 (`feature/plan-023-h5-modes`) switches modes on in the adapter,
+the CLI, and the TUI, and starts only once Plan 021's PR 3 is on
+`origin/main`. The three tools keep grok-build's ids
+(`ask_user_question`, `exit_plan_mode`, `todo_write`), each description
+opening with its Claude Code name as an alias. Decisions: D-49 (a mode is
+a gate over a canonical target, the toolset stays fixed), D-50 (the plan
+file, read by the tool, never argued), D-51 (approving ends the turn
+through a typed handoff; the TUI's offer implements), D-52 (no ask
+timeout), D-53 (the tool ids and their Claude-name aliases).
 
 ### H6 — sub-agents
 

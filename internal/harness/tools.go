@@ -41,12 +41,34 @@ type toolSeams struct {
 // toolset is one session's tools, fixed from Open to Close.
 type toolset struct {
 	registry *tool.Registry
-	profile  string      // the profile's name, which the header records
-	specs    []tool.Spec // the profile's tools' specs, in the order the model is offered them
-	byID     map[string]tool.Spec
-	wire     []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash
-	system   string // the frozen system prompt
-	d        *tool.Dispatcher
+	// modeGate is the session's gate: the mode's rules over the gate the
+	// session would otherwise have used (plan 023 §3.1). Open hands it the
+	// plan file's path, which is known only once the store has named the
+	// transcript; the modes box (reminders.go) owns it from then on.
+	modeGate *tool.ModeGate
+	// todos is the session's todo list (todos.go, plan 023 §3.4), reached
+	// through the dispatcher's fixed Env.Todos; a turn attaches to it for its
+	// own life (turn.go's Run) so Write's one emit lands on the running
+	// turn's sink.
+	todos *sessionTodos
+	// asker is the caller's asker under the session's watch (asker.go), or
+	// nil when the session was opened with none.
+	asker   *watchedAsker
+	profile string      // the profile's name, which the header records
+	specs   []tool.Spec // the profile's tools' specs, in the order the model is offered them
+	byID    map[string]tool.Spec
+	wire    []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash
+	system  string // the frozen system prompt
+	d       *tool.Dispatcher
+
+	// planPath is the session's plan file, which every plan-mode reminder
+	// hands the model verbatim (reminders.go). It is held here for one reason:
+	// it is a third text this session sends unredacted, beside the system
+	// prompt and the tools, so resolve scans it for a key learned later
+	// (errFrozenKey) as it scans those. Fixed by adoptPlanPath in Open, before
+	// the session is handed out, and read under mu like the keys it is
+	// compared against.
+	planPath string
 
 	// keys are every provider key the session knows, sorted, and red is the
 	// redactor over them, which the turn and the dispatcher read. A session
@@ -86,7 +108,8 @@ type toolset struct {
 //   - before any of that, a refusal of a workspace whose path holds a
 //     provider key (errWorkspaceKey): the prompt names the working directory
 //     and the header records it, and neither can hold a key;
-//   - the dispatcher, with the session's Env: the workspace and home, the
+//   - the dispatcher, with the mode's gate over the session's own (plan 023
+//     §3.1) and with the session's Env: the workspace and home, the
 //     redactor, a path-lock table, the closing channel, and the environment
 //     a command gets — the user's, less every env_keys variable of every
 //     provider and every OPENAI_* (never nil: bash refuses to run on a nil
@@ -94,7 +117,7 @@ type toolset struct {
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
-func openTools(home, workspace string, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -103,7 +126,7 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 	for i, k := range keys {
 		vals[i] = k.Reveal()
 	}
-	ts := &toolset{keys: vals, closing: make(chan struct{})}
+	ts := &toolset{keys: vals, closing: make(chan struct{}), todos: newSessionTodos()}
 	slices.Sort(ts.keys)
 	ts.red.Store(redact.New(ts.keys...))
 	if holdsAKey(workspace, ts.keys) {
@@ -168,18 +191,28 @@ func openTools(home, workspace string, table *modeltable.Table, getenv func(stri
 	for _, prov := range table.Providers {
 		keyNames = append(keyNames, prov.EnvKeys...)
 	}
-	ts.d, err = tool.NewDispatcher(tool.Options{
-		Tools: p.Tools,
-		Gate:  seams.gate,
-		Env: tool.Env{
-			Workspace: workspace,
-			Home:      home,
-			Redactor:  red,
-			Environ:   tool.ChildEnviron(os.Environ(), keyNames),
-			Locks:     &tool.PathLocks{},
-			Closing:   ts.closing,
-		},
-	})
+	// The session's mode wraps the gate it would otherwise use — the test
+	// seam's, or AllowAll — rather than replacing it: a call the mode allows
+	// is still the inner gate's to judge, which is how H3's evaluator will
+	// slot in underneath (plan 023 §3.1).
+	ts.modeGate = tool.NewModeGate(mode, seams.gate)
+	env := tool.Env{
+		Workspace: workspace,
+		Home:      home,
+		Redactor:  red,
+		Environ:   tool.ChildEnviron(os.Environ(), keyNames),
+		Locks:     &tool.PathLocks{},
+		Closing:   ts.closing,
+		Todos:     ts.todos,
+	}
+	// The caller's asker is wrapped, so the session sees a plan approved
+	// (asker.go). With none, Env.Asker stays a nil interface — not a wrapper
+	// around nothing — which is what the ask tools test for.
+	if asker != nil {
+		ts.asker = &watchedAsker{inner: asker}
+		env.Asker = ts.asker
+	}
+	ts.d, err = tool.NewDispatcher(tool.Options{Tools: p.Tools, Gate: ts.modeGate, Env: env})
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
@@ -205,9 +238,18 @@ var (
 	errWorkspaceKey = errors.New("harness: the working directory's path contains a configured provider key; " +
 		"start craze from another directory, or change the key")
 
+	// errPlanPathKey is errWorkspaceKey's twin for the session's plan file:
+	// Open's refusal of a harness home whose plan path holds a provider key.
+	// Every plan-mode reminder hands the model that path so it can write the
+	// plan there (§3.3), and a redacted path is one the model cannot open, so
+	// the answer is the working directory's — refuse, and say what to do.
+	errPlanPathKey = errors.New("harness: the plan file's path contains a configured provider key; " +
+		"move the craze directory, or change the key")
+
 	// errFrozenKey is resolve's refusal of a switch whose provider key is in
-	// what this session already sends with every request: the system prompt,
-	// or anywhere in the encoded tools, both frozen when it opened (D-30).
+	// what this session already sends unredacted: the system prompt, anywhere
+	// in the encoded tools — both frozen when it opened (D-30) — or the plan
+	// file's path, fixed at Open and named in every plan-mode reminder.
 	errFrozenKey = errors.New("harness: this model's provider key appears in text this session already sends " +
 		"with every request; start a new session, or change the key")
 
@@ -238,6 +280,23 @@ func (ts *toolset) holdsKey(text string) bool {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return holdsAKey(text, ts.keys)
+}
+
+// adoptPlanPath fixes the session's plan file and refuses a path that holds a
+// provider key (errPlanPathKey). Open calls it once, as soon as the store has
+// named the transcript the plan file is a sibling of and before the session is
+// handed out; from then on the path is only read, by resolve, against keys a
+// switch learns later. One critical section, so the check and the path that
+// was checked cannot be two different things.
+func (ts *toolset) adoptPlanPath(path string) error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if holdsAKey(path, ts.keys) {
+		return errPlanPathKey
+	}
+	ts.planPath = path
+	ts.d.SetPlanPath(path) // what exit_plan_mode reads (tool.Env.PlanPath)
+	return nil
 }
 
 // redactor is the session's, as it is now. It is never nil.
@@ -275,10 +334,10 @@ func (ts *toolset) widest() *redact.Replacer {
 //
 // It prepares nothing and refuses when a key cannot be redacted at all
 // (modeltable.Keys' floor), and when a new one turns out to be inside what
-// this session already sends with every request — the system prompt, the
-// working directory it names among it, or anywhere in the encoded tools —
-// which it cannot rewrite (errFrozenKey). Both refuse the switch that asked
-// for it.
+// this session sends unredacted — the system prompt, the working directory it
+// names among it, anywhere in the encoded tools, or the plan file's path,
+// which every plan-mode reminder hands the model — none of which it can
+// rewrite (errFrozenKey). Both refuse the switch that asked for it.
 //
 // It never installs: a turn already running must keep the redactor it
 // redacted its earlier steps with, or a step persisted later would be
@@ -304,8 +363,13 @@ func (ts *toolset) resolve(table *modeltable.Table, getenv func(string) string) 
 		return nil
 	}
 	// The whole tools payload, not the descriptions alone: a tool's name, a
-	// parameter's name and a schema's own strings all go out with it.
-	if holdsAKey(ts.system, added) || holdsAKey(string(ts.wire), added) {
+	// parameter's name and a schema's own strings all go out with it. The plan
+	// path is the third: it reaches the model verbatim in every plan-mode
+	// reminder and cannot be redacted without becoming a path that opens
+	// nothing, so a key found inside it refuses the switch exactly as one
+	// inside the working directory does — that one through the prompt, which
+	// names it (plan 023 §3.3).
+	if holdsAKey(ts.system, added) || holdsAKey(string(ts.wire), added) || holdsAKey(ts.planPath, added) {
 		return errFrozenKey
 	}
 	ts.keys = append(ts.keys, added...)
