@@ -142,7 +142,7 @@ func (m *Model) pushCard(c card) {
 // maskDrops reports whether the cancel mask swallows this opening. The mask
 // being up is not enough: an opening is dropped only when **its ask is no
 // longer open**, read synchronously from the registry through the engine
-// (Control.Asks, which waits on nothing).
+// (Control.Ask, which waits on nothing).
 //
 // The registry's state leads its events, and an ask only ever goes open →
 // resolved, so the two answers are both final. "Not open now" means the ending
@@ -150,7 +150,7 @@ func (m *Model) pushCard(c card) {
 // moment later anyway — that is the flash the mask exists to prevent. "Open
 // now" means the agent is really waiting on it: it belongs to no turn this
 // cancel touched, and dropping it would strand the provider on a card nobody
-// can ever raise again (review r17, finding 4).
+// can ever raise again.
 //
 // With no engine, or a card with no ask id, there is nothing to consult and
 // the mask drops it, which is what it did for everything before.
@@ -162,12 +162,8 @@ func (m Model) maskDrops(c card) bool {
 	if m.eng == nil || id == "" {
 		return true
 	}
-	for _, rec := range m.eng.Asks() {
-		if rec.ID == id {
-			return false
-		}
-	}
-	return true
+	rec, known := m.eng.Ask(id)
+	return !known || rec.Status != agent.AskOpen
 }
 
 // setHead replaces the visible card. The queue is copied rather than written
@@ -210,14 +206,14 @@ func (m *Model) popCard() (card, bool) {
 //   - agent.ErrAskUnavailable: the outbox is over its bound, so Answer refused
 //     **before it mutated anything** (§3.3's rejectable admissions). The ask is
 //     untouched and no second opening is ever published for it, so nothing but
-//     this would raise the card again (review r17, finding 5). Same treatment,
+//     this would raise the card again. Same treatment,
 //     same row: pressing again is exactly the retry it asks for.
 //   - agent.ErrAlreadyResolved: another client answered it first and that
 //     ending is already queued. The card was on screen, so the model has not
 //     applied it yet: the card goes back with **no error row**, and the winner's
 //     ending removes it and writes the winner's answer through the ordinary path
 //     (applyAskEnded) — where before the row was lost altogether and an error the
-//     user could do nothing about was written instead (review r17, finding 7).
+//     user could do nothing about was written instead.
 //
 // Every other failure is the error row it has always been — the ask is gone
 // either way, so there is no card to restore.

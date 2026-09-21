@@ -945,8 +945,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// then waits for this continuation (rel) BEFORE it closes the log, and with
 	// the primary full and its reader stopped only the log's close frees the
 	// drainer this barrier waits on — so a flush that did not escape here would
-	// be a Close waiting for a goroutine waiting for that same Close (review
-	// r17, finding 1).
+	// be a Close waiting for a goroutine waiting for that same Close.
 	_ = s.log.Flush(context.Background(), s.done)
 	if failed != nil {
 		// The error goes out first, so a consumer is already in its error

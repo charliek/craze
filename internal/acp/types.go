@@ -480,7 +480,7 @@ type PlanDecision struct {
 // The client answers each request exactly once, and the cancelled answer a
 // cancel or a close writes while a handler is still deciding can win that race,
 // so a handler that took a decision has no way of its own to know whether the
-// agent ever heard it (plan 021 §3.6; panel: astra 13). Each decision type
+// agent ever heard it (plan 021 §3.6). Each decision type
 // carries an optional Replied hook that is handed one of these.
 type ReplyDisposition struct {
 	// Delivered says this reply was the one written to the agent, and the
@@ -545,8 +545,7 @@ type Arrival struct {
 	// CancelHeld, a Close, the stale-turn reply — and again when the handler
 	// returns. It is what a handler hands to whatever parks a decision on its
 	// behalf, so an ask nobody can answer any more resolves at once instead of
-	// waiting for a turn's end that may never come (plan 021 §3.6; review r17,
-	// finding 3).
+	// waiting for a turn's end that may never come (plan 021 §3.6).
 	//
 	// Nothing about the wire changes with it: the client answers each request
 	// exactly once, as it always did, and this only tells the handler that the
@@ -587,7 +586,7 @@ const (
 // EarlyAnswer is one blocking request the client answered by itself, before any
 // handler ran. Nothing above the client sees such a request otherwise — no
 // handler runs, so nothing parks and nothing is published — and the agent's
-// question then leaves no trace at all (plan 021 §2.3, §3.6; panel: astra 12).
+// question then leaves no trace at all (plan 021 §2.3, §3.6).
 // The decoded parameters travel with it so the session can write one
 // self-contained record of what was asked and what became of it, without ever
 // raising a card nobody could answer.

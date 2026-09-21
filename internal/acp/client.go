@@ -106,7 +106,7 @@ type pendingReq struct {
 	// anything but this request's handler, and again by runIncoming when the
 	// handler returns. A handler hands it to whatever parks its decision, so a
 	// request the client has already answered cannot leave an ask parked behind
-	// it (review r17, finding 3).
+	// it.
 	ctx  context.Context
 	gone context.CancelFunc
 }
@@ -920,8 +920,7 @@ func (c *Client) TurnLive(turn int) bool {
 // TurnActive reports whether turn is the one the client is running **and a
 // prompt of craze's own is in flight for it**. Both halves are read in one
 // c.mu section, the same section PromptBlocks changes them both in, because
-// separately they cannot identify the owner of a turn's state (review r17,
-// finding 2).
+// separately they cannot identify the owner of a turn's state.
 //
 // The schedule that needs it: turn N returns, so c.inPrompt is cleared while
 // the counter stays at N; the session then installs turn N+1's state —
@@ -1307,9 +1306,9 @@ func (c *Client) replyIncoming(in *pendingReq, result any) ReplyDisposition {
 // **A reply written by anything but the request's own handler ends the
 // request's context**, in the same section that records who answered, so a
 // handler still deciding — or already parked on a decision — learns at once
-// that the answer was not going to be its own (Arrival.Call; review r17,
-// finding 3). Ending it is a leaf operation: it closes a channel under the
-// context's own mutex and calls nothing of this package's.
+// that the answer was not going to be its own (Arrival.Call). Ending it is a
+// leaf operation: it closes a channel under the context's own mutex and calls
+// nothing of this package's.
 //
 // The write error is still dropped, as it always was — there is nobody to hand
 // it to and nothing to do about it — but it is no longer silent: a caller that

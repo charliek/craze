@@ -266,7 +266,7 @@ type Model struct {
 	// per opening, against the registry (maskDrops) — a live ask is never
 	// swallowed, whatever the mask says — which is what lets the mask cover a
 	// cancel with no turn of craze's own too, and so removes the card flash an
-	// opening in flight at that Esc used to leave (review r17, finding 4).
+	// opening in flight at that Esc used to leave.
 	//
 	// cardMask is the turn it is **keyed to** for clearing, the engine turn id
 	// (plan 021, panel astra 10): it cannot leak onto the next turn, because
@@ -2072,7 +2072,7 @@ func (m *Model) beginTurn(id, text string) {
 // mask cannot swallow a live ask (maskDrops), and it is what stops an opening
 // already in flight at that Esc from flashing a card up for the one Update
 // before its own cancelled ending removes it — which the host's publications
-// and a <wait:card> could both see (review r17, finding 4).
+// and a <wait:card> could both see.
 func (m *Model) maskCards() {
 	m.cards = nil
 	m.cardMask, m.cardMasking = "", true
@@ -2484,7 +2484,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// The cancel mask is NOT cleared here. It belongs to a turn, and it is
 		// the engine's ending for that turn that says every opening and ending
 		// of it has been delivered — this event is the session's own and can
-		// overtake an opening still in the outbox (panel: astra 10).
+		// overtake an opening still in the outbox.
 		//
 		// The turn is over, so this is the one moment the branch can have
 		// changed under craze. No polling, no resize hook.
@@ -2556,7 +2556,7 @@ type hiddenAnswer struct {
 // With ONE exception: agent.ErrAskUnavailable is the log's outbox refusing for
 // want of room, before it mutated anything, so the ask is still open and the
 // provider is still waiting — and no card will ever raise it, because this is
-// the path that has none (review r17, finding 5). The answer is kept and tried
+// the path that has none. The answer is kept and tried
 // again, by the next event the model applies and by a beat of its own until one
 // of them takes it (retryHidden, armHiddenRetry). It is bounded by the number of
 // hidden asks open at once.
@@ -2606,8 +2606,8 @@ type hiddenRetryMsg struct{}
 // hidden ask is still waiting for room, and none when nothing is.
 //
 // It belongs to Update, not to applyEvent, because the schedule the retry has to
-// survive is the one where no further event ever arrives (review r19, finding
-// 1): the final batch's LAST event is what gives the outbox its room back, so
+// survive is the one where no further event ever arrives: the final batch's
+// LAST event is what gives the outbox its room back, so
 // the retry that event carries runs before commitBatch and is refused, the
 // drainer goes idle, and nothing is left to try again. The hidden ask would stay
 // open for ever with the provider waiting on it.
@@ -2725,7 +2725,7 @@ func cardAskID(c card) string {
 // synchronously, because that Update has already drawn the row, gone working and
 // stamped the turn. Every other one — a drained row, an armed send-now firing,
 // another client's prompt — is a turn the model has applied nothing for yet, so
-// it draws its row like any other (§3.4; panel CodeRabbit 13, astra 18).
+// it draws its row like any other (§3.4).
 //
 // The id is matched rather than a flag consumed, and ownTurn can hold at most one
 // id, so no started can be skipped for the wrong turn and none can leave ownTurn

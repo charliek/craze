@@ -621,9 +621,7 @@ func toWireEvent(ev Event) wireEvent {
 		w.Tool = toWireTool(ev.Tool)
 	}
 	w.Permission = toWirePermission(ev.Permission)
-	if q := ev.Question; q != nil {
-		w.Question = toWireQuestionEv(q)
-	}
+	w.Question = toWireQuestionEv(ev.Question)
 	w.Plan = toWirePlan(ev.Plan)
 	if a := ev.Ask; a != nil {
 		w.Ask = &wireAsk{
@@ -638,9 +636,10 @@ func toWireEvent(ev Event) wireEvent {
 			Label:    a.Label,
 		}
 		if b := a.Body; b != nil {
-			w.Ask.Body = &wireAskBody{Permission: toWirePermission(b.Permission), Plan: toWirePlan(b.Plan)}
-			if b.Question != nil {
-				w.Ask.Body.Question = toWireQuestionEv(b.Question)
+			w.Ask.Body = &wireAskBody{
+				Permission: toWirePermission(b.Permission),
+				Question:   toWireQuestionEv(b.Question),
+				Plan:       toWirePlan(b.Plan),
 			}
 		}
 	}
@@ -725,6 +724,9 @@ func toWireTool(t *ToolEvent) *wireTool {
 }
 
 func toWireQuestionEv(q *QuestionEvent) *wireQuestionEv {
+	if q == nil {
+		return nil
+	}
 	return &wireQuestionEv{
 		ID:    q.ID,
 		Title: q.Title,
@@ -790,9 +792,7 @@ func (w *wireEvent) event() Event {
 		ev.Tool = w.Tool.tool()
 	}
 	ev.Permission = w.Permission.permission()
-	if q := w.Question; q != nil {
-		ev.Question = q.question()
-	}
+	ev.Question = w.Question.question()
 	ev.Plan = w.Plan.plan()
 	if a := w.Ask; a != nil {
 		ev.Ask = &AskUpdate{
@@ -809,9 +809,10 @@ func (w *wireEvent) event() Event {
 			ev.Ask.Answers = a.Answers
 		}
 		if b := a.Body; b != nil {
-			ev.Ask.Body = &AskBody{Permission: b.Permission.permission(), Plan: b.Plan.plan()}
-			if b.Question != nil {
-				ev.Ask.Body.Question = b.Question.question()
+			ev.Ask.Body = &AskBody{
+				Permission: b.Permission.permission(),
+				Question:   b.Question.question(),
+				Plan:       b.Plan.plan(),
 			}
 		}
 	}
@@ -893,6 +894,9 @@ func (w *wirePlan) plan() *PlanEvent {
 // values of Answers come back as they were written, null as nil and [] as
 // empty. The map itself follows the collection rule.
 func (w *wireQuestionEv) question() *QuestionEvent {
+	if w == nil {
+		return nil
+	}
 	q := &QuestionEvent{
 		ID:    w.ID,
 		Title: w.Title,

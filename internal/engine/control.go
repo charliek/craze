@@ -196,10 +196,10 @@ func Code(err error) string {
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
-// Answer, State,
-// NewClientID and Events wait on nothing: no channel, no provider call, no Publish. Start,
-// Subscribe, Interject, Cancel, Stop, Sync and Close block and belong on a
-// goroutine that is not the primary's reader — a tea.Cmd. Subscribe is among
+// Ask, Answer, State, NewClientID and Events wait on nothing: no channel, no
+// provider call, no Publish. Start, Subscribe, Interject, Cancel, Stop, Sync
+// and Close block and belong on a goroutine that is not the primary's reader —
+// a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
@@ -253,10 +253,11 @@ type Control interface {
 	// beforehand. It waits on nothing.
 	GiveUpDrain(c Command) (turn string, pending int, err error)
 
-	// The asks the session is holding, and the one verb that answers them.
-	// Neither waits, and neither is gated on the engine's activity: an agent
-	// blocked on a question is waiting whatever else is going on.
+	// The asks the session is holding, one of them by id, and the one verb that
+	// answers them. None waits, and none is gated on the engine's activity: an
+	// agent blocked on a question is waiting whatever else is going on.
 	Asks() []agent.AskRecord
+	Ask(id string) (agent.AskRecord, bool)
 	Answer(c Command, id string, a agent.AskAnswer) error
 
 	// The queue's verbs. None of them starts a turn, and none of them waits.

@@ -311,6 +311,13 @@ func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) 
 // authority, and e.mu is never held across a call into it.
 func (e *Engine) Asks() []agent.AskRecord { return e.asks.Asks() }
 
+// Ask is one ask by id, open or resolved, for as long as the registry keeps its
+// record. It is Asks for a client that wants one ask and not the list — asking
+// whether an id is still open costs a map lookup here, where listing costs a
+// copy of every open request. It waits on nothing, for the same reason Asks
+// does.
+func (e *Engine) Ask(id string) (agent.AskRecord, bool) { return e.asks.Record(id) }
+
 // Answer answers one ask, and is the whole of what a client does with a card.
 // It validates and claims in one step: an answer that does not fit is
 // agent.ErrBadAnswer and **leaves the ask open**, so a client that

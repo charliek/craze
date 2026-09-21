@@ -17,7 +17,7 @@ import (
 
 // The event log is where a session's events are numbered, kept and fanned
 // out (plan 020 §3.1–3.2). Each session's emit keeps its own stamping (At,
-// Replayed, the stub's noteOpen) and its own done fast-path, and then calls
+// Replayed) and its own done fast-path, and then calls
 // Publish where it used to send on its events channel; Events() returns
 // Primary(). What Publish adds is a sequence number, a ring of recent records
 // a resuming subscriber can replay from, any number of subscriptions beside
@@ -95,7 +95,7 @@ var (
 	// abandoned (Publish). The events themselves are not lost — the log's own
 	// Close commits what the outbox still holds — and every caller that passes a
 	// done treats the barrier as an ordering nicety, so this is a fact about the
-	// wait and not about the record (review r17, finding 1).
+	// wait and not about the record.
 	ErrFlushGaveUp = errors.New("agent: the flush was given up: its session is closing")
 	// ErrObserverSet refuses a second Observe. The observer is one per log, set
 	// before the session publishes anything, because it runs inside the
@@ -355,7 +355,7 @@ func NewIncarnation() string {
 // outbox's cut for the drainer — so Close can always acquire it.
 //
 // The boundary is a strict leaf. A session never acquires it with its s.mu
-// held (already the emit rule: emitParked). While it is held, nothing does
+// held (already the emit rule: emitCtx). While it is held, nothing does
 // I/O, calls into a session, or writes a diagnostic; the only locks taken
 // under it are leaves:
 // a subscription's mu and the journal's queue mutex. Note never takes it. The
@@ -404,8 +404,8 @@ func NewIncarnation() string {
 // Lock order: the in-flight region → the boundary → a subscription's mu, and
 // the boundary → the journal's queue mutex and the observer; noteMu → the
 // journal's queue mutex, and only Close takes noteMu under the boundary. A
-// session's own emit never holds its s.mu across the boundary (emitParked
-// says why), and there is no queue-transaction lock left on the provider seam
+// session's own emit never holds its s.mu across the boundary (emitCtx says
+// why), and there is no queue-transaction lock left on the provider seam
 // to hold across it either: the queue and the events describing it are
 // mutated and enqueued under one mutex in internal/engine now, with no lock
 // held across a blocking send (plan 021 §3.5). inflightMu guards the counter
@@ -1070,8 +1070,8 @@ func (l *EventLog) OutboxRoom() bool {
 // the barrier ends when the session closes — which is what keeps a Close that
 // waits for such a goroutine before it closes the log from waiting for ever:
 // with the primary full and its reader gone, only the log's own Close frees the
-// drainer, and only that goroutine's return lets Close reach it (review r17,
-// finding 1; native.go's prompt and Close are the pair the reviewer traced).
+// drainer, and only that goroutine's return lets Close reach it (native.go's
+// prompt and Close are one such pair).
 // A caller with no session — the engine's own workers — passes nil, because the
 // log outlives nothing there and its Close is what frees them.
 func (l *EventLog) Flush(ctx context.Context, done <-chan struct{}) error {

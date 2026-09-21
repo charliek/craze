@@ -565,7 +565,7 @@ func (s *Stub) beginAskTurn() agent.TurnToken { return s.asks.BeginTurn() }
 // has been delivered — before the caller publishes the turn's terminal event
 // (plan 021 §3.6). It is idempotent, and safe on a closing log, where the flush
 // returns at once; the flush is bounded by the Stub's close as the live
-// session's is bounded by its done (review r17, finding 1).
+// session's is bounded by its done.
 //
 // It takes the turn's token down with it, so a card emitted after the ending
 // belongs to no turn of craze's own and is raised like any other between-turns

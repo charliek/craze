@@ -354,7 +354,6 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 		return fmt.Errorf("craze: %w", err)
 	}
 
-	sess := eng.Session()
 	// rejected is a permission any reader refused, which counts towards the exit
 	// status exactly as one refused inside a turn does. curTurn is the turn THIS
 	// READER has seen start and not yet seen end: the engine's state runs ahead of
@@ -434,7 +433,7 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				// it while this reads: the session went away mid-chain.
 				return &exitError{code: 1, msg: ""}
 			}
-			r, err := o.consume(sess, ev, decisions)
+			r, err := o.consume(ev, decisions)
 			rejected = rejected || r
 			if err != nil {
 				return err
@@ -674,7 +673,7 @@ func (o *promptOpts) syncEvents(sess agent.Session, queue *[]string) (bool, erro
 			if !ok {
 				return rejected, nil
 			}
-			r, err := o.consume(sess, ev, queue)
+			r, err := o.consume(ev, queue)
 			rejected = rejected || r
 			if err != nil {
 				// Left to finish on its own: waiting for it here, with nothing
@@ -700,7 +699,7 @@ func (o *promptOpts) flushEvents(sess agent.Session, queue *[]string) (bool, err
 			if !ok {
 				return rejected, nil
 			}
-			r, err := o.consume(sess, ev, queue)
+			r, err := o.consume(ev, queue)
 			rejected = rejected || r
 			if err != nil {
 				return rejected, err
@@ -715,14 +714,14 @@ func (o *promptOpts) flushEvents(sess agent.Session, queue *[]string) (bool, err
 // it, and answer it if it is a permission request. A request that arrives
 // outside a turn craze prompted — during a foreign turn, or between turns —
 // is still the agent waiting on an answer, so every reader goes through here.
-func (o *promptOpts) consume(sess agent.Session, ev agent.Event, queue *[]string) (bool, error) {
+func (o *promptOpts) consume(ev agent.Event, queue *[]string) (bool, error) {
 	if err := o.writeEvent(ev); err != nil {
 		return false, err
 	}
 	if ev.Type != agent.EventPermission || ev.Permission == nil {
 		return false, nil
 	}
-	return o.answerPermission(sess, ev.Permission, queue)
+	return o.answerPermission(ev.Permission, queue)
 }
 
 func (o *promptOpts) mode() string {
@@ -772,7 +771,7 @@ func (o *promptOpts) writeEvent(ev agent.Event) error {
 func (o *promptOpts) drainSubagents(sess agent.Session, queue *[]string) (bool, error) {
 	rejected := false
 	err := drainSubagentEvents(sess.Events(), sess.Snapshot, func(ev agent.Event) error {
-		r, err := o.consume(sess, ev, queue)
+		r, err := o.consume(ev, queue)
 		rejected = rejected || r
 		return err
 	})
@@ -877,7 +876,7 @@ func hasRunningSubagent(snap agent.Snapshot) bool {
 // With no decision left the request is cancelled — deliberately, and now
 // explicitly (agent.AskAnswer{Cancel: true}, where the empty option id used to
 // carry that meaning) — and the run counts it as a rejection.
-func (o *promptOpts) answerPermission(_ agent.Session, perm *agent.PermissionEvent, queue *[]string) (bool, error) {
+func (o *promptOpts) answerPermission(perm *agent.PermissionEvent, queue *[]string) (bool, error) {
 	id, rejected, rest, perr := pickPermission(perm.Options, *queue)
 	*queue = rest
 	answer := agent.AskAnswer{OptionID: id}

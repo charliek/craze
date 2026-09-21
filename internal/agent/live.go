@@ -27,7 +27,7 @@ import (
 // seam have locks of their own and the order between them is fixed (plan 021
 // §3.3):
 //
-//   - s.mu → the client's own mutex, for the one leaf read turnLiveLocked
+//   - s.mu → the client's own mutex, for the one leaf read turnActiveLocked
 //     makes. The client never calls back into the session under its own lock.
 //   - registry.mu → the log's outbox mutex, which is a strict leaf. Every ask
 //     event is enqueued in the registry section that changed the ask, so the
@@ -1062,7 +1062,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 //
 // It waits for the outbox, not for handler goroutines: one that has not reached
 // the registry yet writes its ending after this turn's terminal event, which is
-// review r17's finding 6 and is recorded rather than fixed (decideAsk).
+// known and recorded rather than fixed (decideAsk).
 func (s *session) endAskTurn(token TurnToken) {
 	s.asks.EndTurn(token)
 	s.flushAsks()
@@ -1239,8 +1239,8 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 	s.mu.Unlock()
 	// Every ask the session is holding is answered cancelled, of whatever turn,
 	// and the turn this cancel is for is marked so that a request arriving while
-	// it is in flight is refused rather than parked — today's cancelWaiting and
-	// its cancelledTurn mark, in one atomic registry call. With no turn of
+	// it is in flight is refused rather than parked — the baseline's drain and
+	// its cancelled-turn mark, in one atomic registry call. With no turn of
 	// craze's own the token is the no-turn one: every open ask is still
 	// answered, and nothing is marked, because there is no turn to mark.
 	s.asks.CancelTurn(token)
@@ -1368,8 +1368,8 @@ func (s *session) Cancel(ctx context.Context) (CancelOutcome, error) {
 // after this returns — but only for the requests held when this cancel was made
 // (acp.Client.Held, taken below before the goroutine exists), never for one a
 // later turn registered. Nothing a client can see waits on it either, because
-// the session answered its *own* parked asks before getting here (cancelWaiting,
-// above).
+// the session answered its *own* parked asks before getting here (Cancel's
+// CancelTurn, above).
 func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned bool, err error) {
 	// What this cancel is a cancel of is fixed here, on the caller's goroutine,
 	// before anything is handed over. The client answers the requests it holds
@@ -1454,7 +1454,7 @@ func (s *session) Close() error {
 // card before the handler blocks; the one before the decision goes back to the
 // agent keeps the ask's ending ahead of whatever the agent writes once it has
 // its answer — which is what makes an automatic question's line still precede
-// the text that follows it (panel: astra 9, CodeRabbit 11). A flush that fails
+// the text that follows it. A flush that fails
 // is an ordering nicety lost, never a reason to change the decision.
 func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.PermissionDecision {
 	ask := AskRequest{Kind: AskPermission, Body: AskBody{Permission: permissionBody(req)}}
@@ -1475,10 +1475,7 @@ func (s *session) onPermission(a acp.Arrival, req acp.PermissionRequest) acp.Per
 	if !live {
 		return permissionDecision(s.staleAsk(ask))
 	}
-	rec, replied, ok := s.decideAsk(a, token, ask)
-	if !ok {
-		return acp.PermissionDecision{Cancelled: true}
-	}
+	rec, replied := s.decideAsk(a, token, ask)
 	dec := permissionDecision(rec)
 	dec.Replied = replied
 	return dec
@@ -1498,10 +1495,7 @@ func (s *session) onAskQuestion(a acp.Arrival, req acp.AskQuestionRequest) acp.A
 	if !live {
 		return askDecision(s.staleAsk(ask))
 	}
-	rec, replied, ok := s.decideAsk(a, token, ask)
-	if !ok {
-		return acp.AskDecision{Cancelled: true}
-	}
+	rec, replied := s.decideAsk(a, token, ask)
 	dec := askDecision(rec)
 	dec.Replied = replied
 	return dec
@@ -1544,10 +1538,7 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 	if !live {
 		return planDecision(s.staleAsk(ask))
 	}
-	rec, replied, ok := s.decideAsk(a, token, ask)
-	if !ok {
-		return acp.PlanDecision{Cancelled: true}
-	}
+	rec, replied := s.decideAsk(a, token, ask)
 	dec := planDecision(rec)
 	dec.Replied = replied
 	return dec
@@ -1555,13 +1546,13 @@ func (s *session) onCreatePlan(a acp.Arrival, req acp.CreatePlanRequest) acp.Pla
 
 // onEarlyAnswer is ACP reporting a blocking request it answered before any
 // handler of craze's ever ran: a cancel or a close that got there first, or a
-// turn that had gone stale (plan 021 §3.6; panel: astra 12). No handler runs
+// turn that had gone stale (plan 021 §3.6). No handler runs
 // for it, so nothing parks and — without this — the agent's question would
 // leave no trace at all (§2.3's last-but-two row). It becomes one
 // self-contained ending, with the body and no opening, so the record says what
 // was asked without a card ever being raised for a request nobody can answer.
 //
-// NOT CLOSED, deliberately (review r17, finding 6): this runs on the request's
+// NOT CLOSED, deliberately: this runs on the request's
 // own handler goroutine, and Close joins no such goroutine. One that has not
 // run by the time the session answers its request and closes the log writes
 // nothing at all — the enqueue below is refused at the cut — so that request
@@ -1636,16 +1627,15 @@ func (s *session) askToken(a acp.Arrival) (TurnToken, bool) {
 }
 
 // decideAsk is the whole of a handler's parked path: open, flush, wait, flush.
-// It answers with the record the handler replies from, the Replied hook that
-// records what became of that reply, and false for the one case that has no
-// record at all.
+// It answers with the record the handler replies from and the Replied hook that
+// records what became of that reply.
 //
 // **The ask is opened against the request's own context** (acp.Arrival.Call),
 // not against something session-wide: the client ends it the moment anything
 // else answers the request — a Cancel, a CancelHeld, a Close — so an ask whose
 // request has already been answered resolves as cancelled by the call at once,
-// rather than sitting on screen with the agent no longer listening (review r17,
-// finding 3). A handler called directly, by a test or by anything else with no
+// rather than sitting on screen with the agent no longer listening. A handler
+// called directly, by a test or by anything else with no
 // context of its own, falls back to the session's, which is the backstop it
 // always was.
 //
@@ -1657,34 +1647,38 @@ func (s *session) askToken(a acp.Arrival) (TurnToken, bool) {
 // insert or a moment after it, and only the card differs.
 //
 // The only error Open has is an adopted id already in use, and nothing here
-// adopts one; a lifecycle refusal — the turn ended or was cancelled between the
+// adopts one, so the zero record it falls back to is unreachable — and reads as
+// the cancelled decision anyway (permissionDecision and its two siblings answer
+// an outcome they do not know with a cancel). A lifecycle refusal — the turn
+// ended or was cancelled between the
 // token being read and the insert, the session closed, the outbox full — comes
 // back as an ask that is already resolved, and Wait answers with that ending
 // like any other. That check is the registry's own, atomic with the insert,
-// which is what closes the window park and emitParked needed two steps for.
+// which is what closes the window the baseline's two-step park-then-publish
+// left open.
 //
-// NOT CLOSED, deliberately (review r17, finding 6): a handler that captured
+// NOT CLOSED, deliberately: a handler that captured
 // this turn's token and lost the race to EndTurn has its refused Open's
 // self-contained ending enqueued AFTER the turn's EventDone, so a consumer sees
 // one ending for a request it was never shown arrive past the end of the turn.
 // The ending is in the record and nothing is lost; only its position is odd.
 // Closing it needs the terminal flush to join handler goroutines that may be
 // parked on a decision, which is the deadlock the close phases exist to avoid.
-func (s *session) decideAsk(a acp.Arrival, token TurnToken, req AskRequest) (AskRecord, func(acp.ReplyDisposition), bool) {
+func (s *session) decideAsk(a acp.Arrival, token TurnToken, req AskRequest) (AskRecord, func(acp.ReplyDisposition)) {
 	ctx := s.askCall(a)
 	if ctx.Err() != nil {
 		rec := s.asks.AnsweredEarly(token, req, AskCancelled, AskByCall)
 		s.flushAsks()
-		return rec, s.reportedBy(rec.ID), true
+		return rec, s.reportedBy(rec.ID)
 	}
 	parked, err := s.asks.Open(ctx, token, req)
 	if err != nil {
-		return AskRecord{}, nil, false
+		return AskRecord{}, nil
 	}
 	s.flushAsks()
 	rec := parked.Wait()
 	s.flushAsks()
-	return rec, askReported(parked), true
+	return rec, askReported(parked)
 }
 
 // askCall is the context an ask opened for a is watched on: the request's own,
@@ -1722,7 +1716,7 @@ func (s *session) staleAsk(req AskRequest) AskRecord {
 // blocks exactly as an emit from the same goroutine blocks today — **the
 // session's own done is what ends it**, as it ends an emit (emitCtx), so a
 // Close that waits for one of those goroutines can never be waiting for a
-// barrier only its own last phase could free (review r17, finding 1).
+// barrier only its own last phase could free.
 func (s *session) flushAsks() { _ = s.log.Flush(context.Background(), s.done) }
 
 // askReported is the Replied hook for a parked ask: what became of the reply
@@ -1730,17 +1724,19 @@ func (s *session) flushAsks() { _ = s.log.Flush(context.Background(), s.done) }
 // because a reply that comes back late must not land on whatever holds that id
 // now (Ask.Report).
 func askReported(a *Ask) func(acp.ReplyDisposition) {
-	return func(d acp.ReplyDisposition) {
-		a.Report(AskReport{Delivered: d.Delivered, Lost: d.Lost})
-	}
+	return func(d acp.ReplyDisposition) { a.Report(askReport(d)) }
 }
 
 // reportedBy is askReported for a record with no handle: an automatic
 // resolution, whose id was minted and is never reused.
 func (s *session) reportedBy(id string) func(acp.ReplyDisposition) {
-	return func(d acp.ReplyDisposition) {
-		s.asks.Report(id, AskReport{Delivered: d.Delivered, Lost: d.Lost})
-	}
+	return func(d acp.ReplyDisposition) { s.asks.Report(id, askReport(d)) }
+}
+
+// askReport is one ACP disposition as the registry records it. Both hooks read
+// it the same way, so what a reply's fate means is said once.
+func askReport(d acp.ReplyDisposition) AskReport {
+	return AskReport{Delivered: d.Delivered, Lost: d.Lost}
 }
 
 // permissionBody, questionBody and planBody are the three openings, built once
@@ -1815,8 +1811,8 @@ func planDecision(rec AskRecord) acp.PlanDecision {
 // never calls back into the session under its own.
 //
 // It is one atomic ACP check and not a counter comparison, because counter
-// equality alone cannot say whose token s.token is (acp.Client.TurnActive,
-// review r17 finding 2): between one prompt returning and the next entering
+// equality alone cannot say whose token s.token is (acp.Client.TurnActive):
+// between one prompt returning and the next entering
 // PromptBlocks the counter still names the old turn while the session already
 // holds the new one's.
 func (s *session) turnActiveLocked(turn int) bool {
