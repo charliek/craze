@@ -691,6 +691,19 @@ func TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd(t *testing.T) {
 
 	second := submitting(t, r, "the second prompt")
 	await(t, atHook, "B's caller to reach the window between its launch and its write")
+	// r32 finding 1's own fix: while B's caller is still parked at the hook —
+	// before its turn has had any chance to end and give e.wg's count back —
+	// the opportunity is ALREADY sitting in the index writer's one slot. This
+	// is what makes the schedule below deterministic rather than a race the
+	// regressed ordering could still win: admission is proven to have
+	// preceded the launch, not merely inferred from what the exit produced.
+	r.e.idx.mu.Lock()
+	gotNext, gotText, gotCause := r.e.idx.seedNext, r.e.idx.seedText, r.e.idx.seedCause
+	r.e.idx.mu.Unlock()
+	if !gotNext || gotText != "the second prompt" || gotCause != "" {
+		t.Fatalf("B's seed opportunity while its caller sits at the hook: retained=%v text=%q cause=%q, want retained %q",
+			gotNext, gotText, gotCause, "the second prompt")
+	}
 	// B's turn ends — and gives its e.wg count back — with its caller parked.
 	r.until(lastEnding)
 	if n := idx.tries(); n != 1 {
