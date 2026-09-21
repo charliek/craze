@@ -98,6 +98,9 @@ type script struct {
 	once   sync.Once
 	// unanswered is what the turn reports it accepted and could not answer.
 	unanswered []string
+	// ask, when set, is a blocking request this turn opens against its own
+	// registry token, as a live session's permission handler does.
+	ask *askScript
 	// silent makes the turn publish nothing at all — no chunk, no ending — and
 	// report its result by returning alone. A publish takes the log's publishing
 	// boundary, which the outbox's drainer holds while it waits for room in the
@@ -106,6 +109,36 @@ type script struct {
 	// its bound therefore needs a turn that says nothing; no real session is
 	// silent, and nothing but those tests uses it.
 	silent bool
+}
+
+// askScript is the blocking request a turn parks: opened closes as it goes into
+// the registry, and wait holds the turn there until the ask is resolved — which
+// is what a handler blocked on a decision does to the turn behind it. A turn
+// that does not wait goes on to its ending with the ask still open, which is the
+// turn_ended row of plan 021's A-X4 matrix.
+type askScript struct {
+	opened chan struct{}
+	wait   bool
+}
+
+// asking gives sc a permission request its turn opens once the turn is open;
+// wait says the turn waits for the decision before it goes any further.
+func asking(sc *script, wait bool) *script {
+	sc.ask = &askScript{opened: make(chan struct{}), wait: wait}
+	return sc
+}
+
+// askRequest is what a scripted turn parks, with options a provider really
+// offers, so that an answer names an option id and one that does not fit is a
+// bad answer rather than a cancel.
+func askRequest() agent.AskRequest {
+	return agent.AskRequest{Kind: agent.AskPermission, Body: agent.AskBody{Permission: &agent.PermissionEvent{
+		Tool: "Shell",
+		Options: []agent.PermissionOption{
+			{OptionID: "allow-once", Name: "Allow", Kind: "allow_once"},
+			{OptionID: "reject-once", Name: "Reject", Kind: "reject_once"},
+		},
+	}}}
 }
 
 // silently makes a script's turn end without publishing anything.
@@ -205,6 +238,13 @@ func (s *fakeSession) run(ctx context.Context, text string, sc *script) (agent.R
 		}
 		return agent.Result{}, sc.refuse
 	}
+	// The registry's name for this turn, minted before the section that opens
+	// it — the registry is never called with s.mu held — and ended before the
+	// terminal event, as every session does (plan 021 §3.6, X40). The deferred
+	// call covers the paths with no terminal event at all: a withdrawal, and a
+	// turn the session is closing under.
+	token := s.asks.BeginTurn()
+	defer s.asks.EndTurn(token)
 	s.mu.Lock()
 	if s.cancelling {
 		s.mu.Unlock()
@@ -214,6 +254,20 @@ func (s *fakeSession) run(ctx context.Context, text string, sc *script) (agent.R
 	s.mu.Unlock()
 	if sc.opened != nil {
 		close(sc.opened)
+	}
+	if sc.ask != nil {
+		// A blocking request of this turn's own, opened where a live session's
+		// handler opens one: inside the turn, against the turn's token. A turn
+		// that waits is one whose agent cannot go on until the decision comes
+		// back; one that does not is a turn that ends with the ask still open.
+		a, err := s.asks.Open(context.Background(), token, askRequest())
+		if err != nil {
+			panic("fakeSession: Open: " + err.Error())
+		}
+		close(sc.ask.opened)
+		if sc.ask.wait {
+			a.Wait()
+		}
 	}
 	cancelled := false
 	if sc.hold != nil {
@@ -232,12 +286,18 @@ func (s *fakeSession) run(ctx context.Context, text string, sc *script) (agent.R
 	if sc.silent {
 		emit = func(agent.Event) {}
 	}
+	// The turn ends for the registry before its terminal event, so an ask it
+	// still held has ended — and that ending has been delivered — before the
+	// event that says the turn is over (plan 021 §3.6).
+	endAsks := func() { s.endTurnForAsks(token, sc.ask != nil) }
 	switch {
 	case cancelled:
+		endAsks()
 		emit(agent.Event{Type: agent.EventDone, StopReason: stopCancelled})
 		res.StopReason = stopCancelled
 		return res, nil
 	case sc.fail != nil:
+		endAsks()
 		emit(agent.Event{Type: agent.EventError, Err: sc.fail})
 		return res, sc.fail
 	}
@@ -250,9 +310,25 @@ func (s *fakeSession) run(ctx context.Context, text string, sc *script) (agent.R
 	if stop == "" {
 		stop = stopEndTurn
 	}
+	endAsks()
 	emit(agent.Event{Type: agent.EventDone, StopReason: stop})
 	res.StopReason = stop
 	return res, nil
+}
+
+// endTurnForAsks ends the turn for the registry and, for a turn that opened an
+// ask, waits for the outbox as well: the registry enqueues its events, where the
+// session's own emit publishes inline, so without the flush a turn's ending
+// could overtake the ask ending that belongs in front of it (plan 021 §3.6).
+//
+// The flush is skipped for a turn with no ask of its own. It would otherwise
+// park behind an outbox that the tests which deliberately wedge the primary are
+// holding, and there is nothing of the registry's to wait for.
+func (s *fakeSession) endTurnForAsks(token agent.TurnToken, flush bool) {
+	s.asks.EndTurn(token)
+	if flush {
+		_ = s.log.Flush(context.Background(), s.done)
+	}
 }
 
 func (s *fakeSession) Events() <-chan agent.Event { return s.log.Primary() }
@@ -415,6 +491,10 @@ func (s *fakeSession) Close() error {
 		s.closed = true
 		s.mu.Unlock()
 		close(s.done)
+		// Every parked ask ends as closing, before the log's own close, so those
+		// endings are in the record and no waiter is left behind (plan 021 X40's
+		// order: done, then the registry, then the log).
+		s.asks.Close()
 		s.log.Close(context.Background())
 	})
 	return nil
