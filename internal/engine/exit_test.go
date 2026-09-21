@@ -237,8 +237,26 @@ func TestASessionWithNoClientRunsEveryTurnAndParksAnAskUntilItIsAnswered(t *test
 		}
 	}
 	first.release()
+	// All four, in whatever order their goroutines report: a turn's hook runs
+	// after its settlement has already launched the successor, so an instant
+	// successor can report before the turn that started it. The ORDER the turns
+	// ran in is what the session was handed, asserted just below.
+	came := map[string]bool{}
+	for range 4 {
+		select {
+		case id := <-returned:
+			if came[id] {
+				t.Fatalf("%s came back twice", id)
+			}
+			came[id] = true
+		case <-time.After(watchdog):
+			t.Fatalf("only %v came back in %s", came, watchdog)
+		}
+	}
 	for i := 1; i <= 4; i++ {
-		awaitTurn(t, returned, fmt.Sprintf("turn-%d", i))
+		if id := fmt.Sprintf("turn-%d", i); !came[id] {
+			t.Fatalf("%s never came back: %v", id, came)
+		}
 	}
 	if got := s.prompts(); strings.Join(got, "|") != "one|two|three|four" {
 		t.Fatalf("the session was handed %q, want every row in queue order", got)
