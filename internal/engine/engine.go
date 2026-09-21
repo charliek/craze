@@ -134,7 +134,6 @@ type Engine struct {
 	settled         map[string]error
 	settledIDs      []string
 	turnSeq         int
-	clientSeq       int
 	queue           agent.PromptQueue
 	armed           *armedSend
 	cancelsInFlight int
@@ -149,8 +148,11 @@ type Engine struct {
 	replaying bool
 
 	// receipts is the command-id table (receipts.go): one table for the whole
-	// engine, shared by every client, with its own mutex — never nested with
-	// e.mu or registry.mu, in either order (its package doc says why).
+	// engine, shared by every client, with its own mutex — a LEAF. It is never
+	// held while e.mu, s.mu or registry.mu is taken (a command runs with it
+	// released), and never taken while one of those is held, so it adds no edge
+	// to the order above and cannot cycle. It mints the client ids too
+	// (NewClientID), which is why the engine keeps no client counter of its own.
 	receipts *receiptTable
 
 	// sets is the settings worker's FIFO: every Control.Set joins it under e.mu
@@ -194,6 +196,10 @@ type hooks struct {
 	// retryTick, when set, stands in for the driver's timer: a refused claim is
 	// taken again when the test sends on it, and at no other time.
 	retryTick <-chan time.Time
+	// receipts are the command-id table's own seams (receipts.go): its clock,
+	// and the barriers a duplicate's schedule turns on. Like the rest of these
+	// they are in place before the table exists and never assigned afterwards.
+	receipts *receiptHooks
 }
 
 // New builds the engine for sess. The session must own an event log
@@ -235,9 +241,15 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if c, ok := sess.(agent.Clocked); ok {
 		e.now = c.Now
 	}
-	// Built after e.now is resolved, so the table's clock is the same one the
-	// rest of the engine reads, whatever the session is (plan 021 §3.9).
-	e.receipts = newReceiptTable(e.now)
+	// The receipts table keeps a clock of its OWN (time.Now, or a test's
+	// through these hooks) rather than the session's: how long a command id
+	// stays answerable is real elapsed time, and the session's clock is an
+	// event clock that a Stub freezes and a golden pins (r24 finding 6).
+	var rh *receiptHooks
+	if h != nil {
+		rh = h.receipts
+	}
+	e.receipts = newReceiptTable(rh)
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
@@ -322,13 +334,12 @@ func (e *Engine) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error
 	return e.log.Subscribe(o)
 }
 
-// NewClientID mints a client id unique in the incarnation.
-func (e *Engine) NewClientID() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.clientSeq++
-	return fmt.Sprintf("c-%d", e.clientSeq)
-}
+// NewClientID mints a client id unique in the incarnation. The receipts table
+// mints it, because the table is what has to recognise it afterwards: a
+// command naming a client this engine never minted is ErrBadRequest, which is
+// what keeps a per-client high-water mark meaningful (receipts.go's
+// "Identity"). It waits on nothing — the table's mutex is a leaf.
+func (e *Engine) NewClientID() string { return e.receipts.newClient() }
 
 // Sync returns once every event enqueued before the call has been delivered.
 func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) }
@@ -363,9 +374,9 @@ func (e *Engine) Ask(id string) (agent.AskRecord, bool) { return e.asks.Record(i
 //
 // Its receipt is recorded without ever taking e.mu: Answer does not touch it
 // today (X40) and must not start now, so its entry hook (withSyncReceipt)
-// holds only the table's own mutex across the whole call — never nested with
-// registry.mu the other way around, because nothing else ever takes the
-// table's mutex while holding registry.mu (receipts.go's package doc).
+// takes the table's mutex twice, briefly, with the registry section between
+// them and no lock of the engine's anywhere — and nothing else ever takes the
+// table's mutex while holding registry.mu either (receipts.go's package doc).
 func (e *Engine) Answer(c Command, id string, a agent.AskAnswer) error {
 	hash := receiptHash("Answer", id, answerSpelling(a))
 	return withSyncReceiptErr(e.receipts, c, hash, func() error {

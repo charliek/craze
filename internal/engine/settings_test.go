@@ -24,7 +24,7 @@ func modeSetting(id string) Setting { return Setting{Kind: SettingMode, Value: i
 // those for nobody (correction 20, A20).
 func TestSetAnswersWithTheValueAndItsRevision(t *testing.T) {
 	r := newRig(t, Options{})
-	res, err := r.e.Set(context.Background(), Command{Client: "c-1", ID: "4"}, modeSetting("plan"))
+	res, err := r.e.Set(context.Background(), Command{Client: r.e.NewClientID(), ID: "4"}, modeSetting("plan"))
 	if err != nil {
 		t.Fatalf("set: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestASetCancelledWhileQueuedIsAnsweredByTheWorkerWithoutRunning(t *testing.
 // is right: it is an answer about THIS request, not about the engine's door.
 func TestACancelledSetIsReplayedAsACancellationNotASuccess(t *testing.T) {
 	r := newRig(t, Options{})
-	c := Command{Client: "c-1", ID: "7"}
+	c := Command{Client: r.e.NewClientID(), ID: "7"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := r.e.Set(ctx, c, modeSetting("plan")); !errors.Is(err, context.Canceled) {
@@ -468,7 +468,8 @@ func TestSetTitleWaitsOnNothingWithAFullPrimary(t *testing.T) {
 		}
 	}
 	done := make(chan error, 1)
-	go func() { done <- e.SetTitle(Command{Client: "c-1", ID: "9"}, "renamed") }()
+	title := Command{Client: e.NewClientID(), ID: "9"}
+	go func() { done <- e.SetTitle(title, "renamed") }()
 	select {
 	case err := <-done:
 		if err != nil {

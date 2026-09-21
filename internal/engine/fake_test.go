@@ -46,6 +46,11 @@ type fakeSession struct {
 	// ignoreCancel makes a cancel of an open turn a write the turn does not
 	// act on: an agent that has been told and has not stopped yet.
 	ignoreCancel bool
+	// titleEntered, when set, is closed by the next SetTitle as it is entered,
+	// which then waits for titleRelease: the barrier at the one synchronous
+	// command whose work is outside e.mu, and where C12 will put file I/O.
+	titleEntered chan struct{}
+	titleRelease chan struct{}
 	beginPanic   bool
 	startErr     error
 	clock        func() time.Time
@@ -529,7 +534,32 @@ func (s *fakeSession) setsWithoutATicket() {
 // session closes under it: the shape of a real client whose transport has gone.
 var errSessionClosed = errors.New("fake: session closed")
 
+// holdNextTitle arms the barrier at SetTitle's entry: entered closes as the
+// next SetTitle is entered, and that SetTitle then waits for release. It is
+// held BEFORE the session's own mutex is taken, because what it stands in for
+// is C12's index write — file I/O on the caller's goroutine, outside every
+// lock but the receipts table's reservation.
+func (s *fakeSession) holdNextTitle() (entered <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, r := make(chan struct{}), make(chan struct{})
+	s.titleEntered, s.titleRelease = e, r
+	var once sync.Once
+	return e, func() { once.Do(func() { close(r) }) }
+}
+
 func (s *fakeSession) SetTitle(cause, title string) error {
+	s.mu.Lock()
+	entered, release := s.titleEntered, s.titleRelease
+	s.titleEntered, s.titleRelease = nil, nil
+	s.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		select {
+		case <-release:
+		case <-s.done:
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.log.OutboxRoom() {

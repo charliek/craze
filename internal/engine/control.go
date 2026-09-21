@@ -27,10 +27,26 @@ import (
 // payload hash (the method plus its arguments) and, once the command has
 // run, answers a matching resend with exactly what the first call returned —
 // a refusal included — never a second execution. A mismatched resend (the
-// same id, a different payload) is ErrBadRequest. An id at or below its
-// client's evicted high-water mark is ErrUnknownCommand: recognisably
-// expired, never a fresh (and very different) command running under a
-// number that used to mean something else.
+// same id, a different payload) is ErrBadRequest, and so is a Client this
+// engine never minted. An id at or below its client's evicted high-water mark
+// is ErrUnknownCommand: recognisably expired, never a fresh (and very
+// different) command running under a number that used to mean something else.
+//
+// A resend that arrives while the first call is STILL RUNNING is answered
+// according to what that command does. A blocking one (Cancel, Stop, Set,
+// Interject) is waited for, and the resend gets its result. A synchronous one
+// — every method documented below as waiting on nothing — is never waited for:
+// the resend is told ErrUnavailable ("that command is still running"), at
+// once, having changed nothing, and may simply ask again. That is what keeps
+// "a duplicate of a synchronous command never waits" literally true even when
+// the command itself stalls, which the index write inside Submit and SetTitle
+// can. One client cannot reach it in process — the TUI makes every call from
+// its one Update goroutine — and a socket client with two connections in
+// flight can.
+//
+// A command that PANICS is not retryable under the same id: its outcome is
+// unknown (it may already have mutated state), so ErrCommandAborted is stored
+// and replayed for that id, and another attempt needs a new one.
 //
 // One refusal is never stored: a GATE refusal — the engine simply not
 // admitting anything at all right now (ErrNotAccepting, ErrUnavailable, and
@@ -167,6 +183,13 @@ var (
 	ErrBadRequest = errors.New("engine: bad request")
 	// ErrUnknownCommand answers a command id outside the retry horizon.
 	ErrUnknownCommand = errors.New("engine: that command id has expired")
+	// ErrCommandAborted answers a command id whose call did not return at all:
+	// it panicked on the way through. Whether it changed anything is not
+	// knowable, so the id is answered with this for as long as the table keeps
+	// it — never re-executed — and a client that wants another attempt sends a
+	// new id. Its code is "unavailable", the closed set's word for "you can
+	// only try again", because 05 has no code for a craze bug.
+	ErrCommandAborted = errors.New("engine: the command's outcome is unknown")
 )
 
 // Code is err's protocol error code, the closed set 05-protocol.md lists, and
@@ -192,7 +215,8 @@ func Code(err error) string {
 		return "already_resolved"
 	case errors.Is(err, agent.ErrUnknownAsk):
 		return "unknown_ask"
-	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
+	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable),
+		errors.Is(err, ErrCommandAborted):
 		return "unavailable"
 	case errors.Is(err, ErrBadRequest):
 		return "bad_request"

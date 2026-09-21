@@ -114,13 +114,30 @@ func TestTheAgentsOwnUpdatesCarryTheirSectionAndAreBufferedWhenTheyReturn(t *tes
 // and can otherwise land after Start has returned.
 func settle(t *testing.T, s *session) {
 	t.Helper()
+	awaitCatalog(t, s)
+	_ = s.log.Flush(context.Background(), s.done)
+	drainBuffered(s)
+}
+
+// awaitCatalog is settle's barrier without its draining, for a case that reads
+// the events rather than discarding them: the catalog is advertised on the read
+// loop right after session/new's reply, so it can land after Start has
+// returned, and a fold drained before it — compared with a snapshot read after
+// it — would differ on the commands section alone.
+//
+// The snapshot read is half the barrier. commandsApplied is closed in the
+// middle of the section that applies the catalog, BEFORE that section enqueues
+// the delta saying so (live.go's UpdateAvailableCommands), so a flush made on
+// waking from the channel alone can still miss that delta. Taking the
+// session's own lock once here is what waits for the section to end.
+func awaitCatalog(t *testing.T, s *session) {
+	t.Helper()
 	select {
 	case <-s.commandsApplied:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the agent never advertised its commands")
 	}
-	_ = s.log.Flush(context.Background(), s.done)
-	drainBuffered(s)
+	_ = s.Snapshot()
 }
 
 // oneBufferedEvent is the single event the site just driven left in the
@@ -711,11 +728,13 @@ func wantFoldMatchesSnapshot(t *testing.T, evs []Event, snap Snapshot) {
 func TestStartAndLoadFoldToTheSnapshot(t *testing.T) {
 	t.Run("a new session", func(t *testing.T) {
 		s := startScript(t, "echo", false)
+		awaitCatalog(t, s)
 		_ = s.log.Flush(context.Background(), s.done)
 		wantFoldMatchesSnapshot(t, drainBuffered(s), s.Snapshot())
 	})
 	t.Run("a new session with --mode and --model", func(t *testing.T) {
 		s := startScriptOpts(t, "echo", Options{Mode: "plan", Model: "gpt-5"})
+		awaitCatalog(t, s)
 		_ = s.log.Flush(context.Background(), s.done)
 		evs := drainBuffered(s)
 		wantFoldMatchesSnapshot(t, evs, s.Snapshot())
