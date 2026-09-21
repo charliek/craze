@@ -597,17 +597,30 @@ func TestEventDoneTouchesTheRow(t *testing.T) {
 		t.Fatalf("EventDone created a row out of nothing: %+v", idx.all())
 	}
 
-	// A real turn: the send creates the row and the turn's own ending touches
-	// it. The creation was Submit's own; the touch is the worker's.
+	// Real turns: the first send creates the row, and a turn's own ending
+	// touches it. The creation is Submit's own; the touch is the worker's.
+	//
+	// Two turns, because the FIRST turn's touch is not owed: Submit launches the
+	// turn before it writes the seed, so a turn that ends at once can have its
+	// touch taken while there is still no row — and a touch never conjures one
+	// (CI found a test that counted on it). By the second turn's end the row
+	// exists, so that touch always lands.
 	m = pumpEnter(t, m, "hello")
 	m = pumpUntil(t, m, isIdle)
 	m = pumpSettled(t, m)
+	waitRows(t, idx, 1)
+	m = pumpEnter(t, m, "again")
+	m = pumpUntil(t, m, isIdle)
+	_ = pumpSettled(t, m)
 	waitRows(t, idx, 2)
-	if n := idx.count(); n != 2 {
-		t.Fatalf("rows %+v, want the creation and the touch", idx.all())
+	rows := idx.all()
+	if n := idx.seeds(); n != 1 || rows[0].Title != "hello" {
+		t.Fatalf("rows %+v, want one creation, first", rows)
 	}
-	if got := idx.last(); got.TitleKind != sessions.TitleKindNone || got.Title != "" {
-		t.Fatalf("the touch carried a title: %+v", got)
+	for _, got := range rows[1:] {
+		if got.TitleKind != sessions.TitleKindNone || got.Title != "" {
+			t.Fatalf("a turn's end wrote %+v, want a touch: %+v", got, rows)
+		}
 	}
 }
 

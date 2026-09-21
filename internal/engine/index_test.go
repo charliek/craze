@@ -445,7 +445,10 @@ func TestADrainedFirstPromptIsSeededByTheWorker(t *testing.T) {
 	r.queue("the drained row")
 	idx.setErr(nil)
 	turn.release()
-	awaitTurn(t, returned, "turn-1")
+	// Either turn's report will do: a turn's hook runs after its settlement has
+	// launched the successor, so the drained turn-2 can report before turn-1 —
+	// and its report already proves turn-1 settled. The write is the barrier.
+	awaitTurn(t, returned, "")
 	idx.waitRows(t, 1)
 	row := idx.seedRow(t)
 	if row.Title != "the drained row" {
@@ -646,7 +649,7 @@ func submitting(t *testing.T, r *rig, text string) <-chan struct{} {
 	return done
 }
 
-// TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd is r31 finding 1. A turn is
+// TestASeedOpportunityIsRetainedByThePreWriteHook is r31 finding 1. A turn is
 // counted by e.wg before it is launched and gives that count back when it ends,
 // so an opportunity ADMITTED after the launch can arrive after Close has passed
 // e.wg.Wait() and the worker's exit has looked at the slot — and then there is
@@ -654,13 +657,15 @@ func submitting(t *testing.T, r *rig, text string) <-chan struct{} {
 // that has already gone, and a session that ran two prompts has no index row at
 // all.
 //
-// The schedule is FORCED with a seam of the engine's own (beforeInlineSeed),
-// which holds B's caller in exactly that window: A's seed is parked in Upsert, B
-// is submitted and its turn runs and ENDS while its caller sits between the
-// launch and the write it does not own, Close begins, and only then does A fail.
-// B's row exists by the time Close returns, which it can only do if B's
-// opportunity was in the slot before B's turn ended.
-func TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd(t *testing.T) {
+// What this test forces, with a seam of the engine's own (beforeInlineSeed,
+// which runs AFTER the launch, so B's turn may already have ended when it fires):
+// B's caller is held before its write with A's seed parked in Upsert, and at
+// that hook B's opportunity is ALREADY retained; B's turn ends, Close begins,
+// and only then does A fail. B's row exists by the time Close returns. That
+// rejects the old launch→hook→admit order every time. That admission precedes
+// the LAUNCH is runOwn's construction (admit, then `go e.runTurn`), which no
+// hook here can observe.
+func TestASeedOpportunityIsRetainedByThePreWriteHook(t *testing.T) {
 	idx := newFakeIndex()
 	entered, release := idx.parkAt(1)
 	t.Cleanup(release)
@@ -691,16 +696,10 @@ func TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd(t *testing.T) {
 
 	second := submitting(t, r, "the second prompt")
 	await(t, atHook, "B's caller to reach the window between its launch and its write")
-	// r32 finding 1's own fix: while B's caller is still parked at the hook —
-	// before its turn has had any chance to end and give e.wg's count back —
-	// the opportunity is ALREADY retained in the index writer's one slot. That
-	// is what this direct inspection proves: the opportunity is visible while
-	// the turn is still free to end, which deterministically rejects the
-	// regressed launch→hook→seed order (a wrong implementation that admitted
-	// after the launch could let this read race and sometimes lose). It does
-	// not prove admission preceded the launch on its own terms — that ordering
-	// is by construction in runOwn (admit, then `go e.runTurn`), not forced by
-	// this test.
+	// While B's caller is parked at the hook, the opportunity is ALREADY
+	// retained in the index writer's one slot. That is all this inspection
+	// proves, and it deterministically rejects an implementation that admits
+	// only after the hook. B's turn may or may not have ended by now.
 	r.e.idx.mu.Lock()
 	gotNext, gotText, gotCause := r.e.idx.seedNext, r.e.idx.seedText, r.e.idx.seedCause
 	r.e.idx.mu.Unlock()
@@ -930,14 +929,75 @@ func TestARetriedClaimsFailedSeedNamesItsCommandToo(t *testing.T) {
 	}
 }
 
+// TestATurnThatEndsBeforeItsSeedLandsWritesNoTouch pins the window seededTurn
+// closes for the tests that count writes, and what happens inside it. CI found
+// it: a test that expected "seed, then touch" saw one row. The schedule is
+// FORCED with beforeInlineSeed: the submitter is held between the launch and
+// its write, the turn runs and ends, and only then is the seed written. Nothing
+// is written before the seed — a touch never conjures a row — and the seed still
+// creates it, later than the turn's end, so the row's recency is not older than
+// a touch would have made it. Whether a touch FOLLOWS is the worker's timing and
+// both answers are right: a worker that took the touch before the seed landed
+// found no row and dropped it (one row, what CI saw); one that woke after it
+// writes it (two).
+func TestATurnThatEndsBeforeItsSeedLandsWritesNoTouch(t *testing.T) {
+	idx := newFakeIndex()
+	atHook, letGo := make(chan struct{}), make(chan struct{})
+	r := indexedHooked(t, idx, "", &hooks{beforeInlineSeed: func(string) {
+		close(atHook)
+		<-letGo
+	}})
+	done := submitting(t, r, "a prompt")
+	await(t, atHook, "the submitter to reach the window between its launch and its write")
+	r.until(lastEnding)
+	r.sync()
+	if n := idx.tries(); n != 0 {
+		t.Fatalf("%d index writes before the seed: a touch with no row writes nothing", n)
+	}
+	close(letGo)
+	await(t, done, "the submit to return")
+	idx.waitRows(t, 1)
+	if err := r.e.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	rows := idx.all()
+	if got := rows[0]; got.TitleKind != sessions.TitleKindFallback || got.Title != "a prompt" {
+		t.Fatalf("the first write was %+v, want the first prompt's fallback row", got)
+	}
+	switch len(rows) {
+	case 1:
+	case 2:
+		if got := rows[1]; got.TitleKind != sessions.TitleKindNone || got.Title != "" {
+			t.Fatalf("the write after the seed was %+v, want a touch", got)
+		}
+	default:
+		t.Fatalf("%d rows, want the seed and at most one touch: %+v", len(rows), rows)
+	}
+}
+
+// seededTurn runs one turn whose seed is on the record before the turn can end.
+// A submit admits its seed, launches the turn and only then writes the seed, so
+// a turn that ends at once can reach its end-of-turn touch while there is still
+// no row — and a touch with no row writes nothing, by design. That is harmless
+// (the seed's own later write carries the newer UpdatedAt) but it makes "seed,
+// then touch" a race for a test that counts writes. Holding the turn until the
+// seed has landed makes it the order.
+func seededTurn(t *testing.T, r *rig, idx *fakeIndex, text string) {
+	t.Helper()
+	turn := r.s.script(held())
+	r.submit(text)
+	idx.waitRows(t, 1)
+	turn.release()
+	r.until(lastEnding)
+}
+
 // TestTheAgentTitleAndTheTurnEndAreWorkerWrites: neither has a caller — an
 // observer may not do I/O — so both go to the worker, and the row they write
 // carries the same durable id every other write does.
 func TestTheAgentTitleAndTheTurnEndAreWorkerWrites(t *testing.T) {
 	idx := newFakeIndex()
 	r := indexed(t, idx, "")
-	r.submit("a prompt")
-	r.until(lastEnding)
+	seededTurn(t, r, idx, "a prompt")
 	// The turn's own ending touched the row: the seed, then the touch.
 	idx.waitRows(t, 2)
 	if got := idx.last(); got.TitleKind != sessions.TitleKindNone || got.Title != "" {
@@ -1204,8 +1264,7 @@ func TestLatestWinsNeverLosesATitleBehindATouch(t *testing.T) {
 	// after the turn had ended would be racing the worker for that write.
 	entered, release := idx.parkAt(2)
 	r := indexed(t, idx, "")
-	r.submit("a prompt")
-	r.until(lastEnding)
+	seededTurn(t, r, idx, "a prompt")
 	await(t, entered, "the turn's touch to park")
 
 	// Both of these are merged while the worker is held inside that write: a
@@ -1281,8 +1340,7 @@ func TestAStalledIndexWriteBlocksNoControlMethod(t *testing.T) {
 func TestCloseJoinsTheIndexWorker(t *testing.T) {
 	idx := newFakeIndex()
 	r := indexed(t, idx, "")
-	r.submit("a prompt")
-	r.until(lastEnding)
+	seededTurn(t, r, idx, "a prompt")
 	idx.waitRows(t, 2)
 	if err := r.e.Close(); err != nil {
 		t.Fatalf("close: %v", err)

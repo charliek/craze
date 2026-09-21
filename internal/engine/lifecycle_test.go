@@ -470,8 +470,8 @@ func TestCloseRightAfterSettlementEndsTheSuccessorOnce(t *testing.T) {
 	turnA := r.s.script(held())
 	// turn-2's script is held too, and this test never releases it: nothing but
 	// Close's own session-close (which fires s.done) can ever move it past its
-	// own opening, so whatever Close does to it while it is current and
-	// un-run is exactly what this test is about.
+	// own opening, so whatever Close does to it while it is current and held
+	// is exactly what this test is about.
 	r.s.script(held())
 
 	r.submit("one")
@@ -501,7 +501,7 @@ func TestCloseRightAfterSettlementEndsTheSuccessorOnce(t *testing.T) {
 		t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(trec, "\n  "), strings.Join(want, "\n  "))
 	}
 	if st := r.e.State(); st.Turn != "" || st.Activity != ActivityClosing {
-		t.Fatalf("state after closing on a reserved-but-unrun successor: %+v", st)
+		t.Fatalf("state after closing on a held successor: %+v", st)
 	}
 }
 

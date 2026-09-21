@@ -1050,10 +1050,12 @@ whether that golden may move.
 **What S2 must do.** Call `Control.Sync` before replying to a command, because
 in-process a response is no longer ordered after the events its own command
 caused by the call simply returning (§4, and `05` below) — that promise now
-needs `Sync`, plus a single serialized outbound writer per connection (or an
-explicit subscription-delivery barrier), since `Sync` only commits the events
-to the subscription and does not itself order a socket's write of them ahead
-of the reply's own write. Call `Subscribe` off the primary's own reader goroutine: it
+needs `Sync` plus a connection-local barrier: the reply is queued to the
+connection's one outbound writer only after every record up to the sequence
+number `Sync` committed through has been queued to that same writer. `Sync`
+only commits the events and offers them to the subscription, and a serialized
+writer alone does not help while the forwarding goroutine is still unscheduled
+(`05`). Call `Subscribe` off the primary's own reader goroutine: it
 blocks inside the log's publishing boundary (X14). Mint a client id per
 connection (`Control.NewClientID`), bind it to that connection, and add
 release-on-disconnect — no client is ever retired from the receipts table

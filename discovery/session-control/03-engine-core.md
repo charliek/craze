@@ -318,7 +318,8 @@ say so, and it is a mandatory completion like every other ending; disarm any
 armed send-now, carrying the same cause; `Enqueue` that one batch. Release
 `e.mu`. Then, outside any lock: `sess.Close()` — which resolves every parked
 ask (`closing` for an ACP session and the Stub; native cancels its turn context
-first, so an ask parked there ends `cancelled`, by `call` — Plan 023 §3.5, and
+first, so an ask parked there commonly ends `cancelled`, by `call`, and
+`closing` only when the registry's close wins that race — Plan 023 §3.5, and
 `05`) and closes the log last, so what the outbox still holds is
 committed to the ring, the journal and every subscription with a
 **non-blocking** primary send, never lost to a stopped reader; `close(e.done)`;

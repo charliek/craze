@@ -48,7 +48,7 @@ and more.
 | `session.cancel` | `{turnId?}` request/response: `rejected` (`not_accepting`, or the named turn is no longer current), `requested`, `settled`, or `unknown` after a timeout past the write |
 | `session.queue.*` | edit, remove, clear; mirrors `engine.Control`'s queue verbs (the queue left `agent.Session` in S1b) |
 | `asks.list` / `asks.get` / `asks.answer` | by id; answer carries the exact offered `optionId`, or question answers, or a plan outcome. First **valid** answer wins; an invalid one is `bad_request` and leaves the ask open. `asks.get` is `Control.Ask(id)`, waiting on nothing. An id whose opening was never published has the hidden spelling `perm-xN` / `ask-xN` / `plan-xN`, from a counter of its own, so it can never renumber a visible one: a refused open, a request the provider answered before any handler ran, an automatic PERMISSION resolution, and an automatic question/plan fallback that cannot publish (a bad or cancelling automatic answer). An automatic question/plan answer that itself publishes its `Auto` opening keeps a visible id |
-| `session.set` | model, mode, config go through `Control.Set` and are applied in the engine's order, answered and broadcast with the confirmed value and a revision: `{value, rev}`, where `rev` is the delta's own `seq` — the same number the broadcast `event` notification carries — and may be `0` when the revision could not be learned (the change still happened; the delta carries it). Title is a separate call, `Control.SetTitle`: it waits on nothing, bypasses the settings worker, and returns only an error — its delta, not its reply, is how a client learns the title |
+| `session.set` | model, mode, config go through `Control.Set` and are applied in the engine's order, answered and broadcast with the confirmed value and a revision: `{value, rev}`, where `rev` is the delta's own `seq` — the same number the broadcast `event` notification carries — and may be `0` when no committed revision is available: the change was made, but its delta could not be confirmed committed (a flush that gave up) or was never committed at all (a `Set` that lost the race to the session closing), so a client must not wait for a matching event. Title is a separate call, `Control.SetTitle`: it waits on nothing, bypasses the settings worker, and returns only an error — its delta, not its reply, is how a client learns the title |
 | `session.stop` | explicitly end the session and its host. Distinct from closing a connection or a view (SD-28); defined in S2 |
 | `session.create` | hub only (S4): spawn a headless host |
 
@@ -101,15 +101,18 @@ consequence of the call simply returning: a command's effects are published
 through the log's outbox, so the call returning does not mean its events have
 been delivered (`engine.Control`'s own doc). `engine.Control.Sync` is how an
 in-process caller gets that ordering back — it returns once everything
-enqueued before the call is committed (numbered, in the ring/journal, offered
-to every subscription). `Sync` alone does not put those events on a socket's
-wire ahead of the reply: that also needs a single serialized outbound writer
-per connection, or an explicit subscription-delivery barrier, so that what
-`Sync` has already offered the subscription is actually written before the
-reply is. **S2's server must provide both** — call `Sync` before it replies to
-a command, and serialize (or barrier) that connection's outbound writes — to
-make "ordered after its events" true for a socket client without it ever
-calling `Sync` itself (session control S1b, plan §4).
+enqueued before the call is committed (numbered, in the ring, offered to every
+subscription, and handed to the journal if one is attached — whose own append
+is asynchronous and bounded, and records a gap when saturated). `Sync` alone
+does not put those events on a socket's wire ahead of the reply, and neither
+does a single serialized writer by itself: the goroutine forwarding the
+subscription can still be unscheduled when the handler queues its reply.
+**S2's server needs a connection-local barrier**: call `Sync`, note the
+sequence number it committed through, and queue the reply to the connection's
+one outbound writer only after every record up to that number has been queued
+to (or written by) that same writer. That is what makes "ordered after its
+events" true for a socket client without it ever calling `Sync` itself
+(session control S1b, plan §4).
 
 Replay and live use the same per-event representation; nothing is coalesced
 in the log (SD-18). Unlike gx, **ask transitions are sequenced events in the
