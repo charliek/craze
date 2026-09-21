@@ -16,9 +16,9 @@ four-tools-then-`ls` plan and its multi-edit shape.
 | `bash` | execute | no | `command`, `timeout?` (ms), `workdir?`; `/bin/bash -c`, else `sh -c`; `Setsid` (new session, no controlling terminal); stdin `/dev/null`; stdout/stderr merged; default timeout 120 s, cap 600 s (a larger request is clamped and the result says so); everything left in the command's session is killed when it returns; a non-zero exit is **not** an error result — the model reads the code; live output streams through a harness-owned progress channel, throttled to 100 ms, lossy; tail kept at 2000 lines / 50 KiB by the tool itself, full output spilled once it passes 50 KiB; `exit code: N` added to `<shell_metadata>` on a non-zero exit; known limitations: a stop landing between the pre-start check and launch taking the started command kills it without the TERM grace, a goroutine stuck in a syscall that never returns leaks until it returns (bounded memory), macOS reaps the leader before the final group kill (the same window `internal/acp/spawn.go` accepts), and a process that starts its own session or process group escapes the kill |
 | `grep` | search | yes | `pattern`, `path?`, `include?`; ripgrep (`PATH`), `--hidden`, `.gitignore` respected, 100 matches, grouped by file as `  Line n: text` |
 | `glob` | search | yes | `pattern`, `path?`; ripgrep `--files --glob`, no `--hidden`, 100 results, ripgrep's own order |
-| `todo_write` | other | — | H5; replaces the list; feeds `EventTodos` |
-| `ask_user_question` | other | — | H5; feeds `EventQuestion`; 30-minute timeout returns "unanswered" |
-| `exit_plan_mode` | other | — | H5; reads the plan from the plan file, never from arguments; outcome approved / cancelled / abandoned, unknown → cancelled |
+| `todo_write` | todo | yes | H5, planned; harness-owned list; `merge` (default true) patches by id, an explicit `merge:false` replaces unless the auto-upgrade applies; caps at 64 items × 200 bytes, UTF-8-truncated; every write feeds one full-list `EventTodos` |
+| `ask_user_question` | ask | no | H5, planned; blocks on the person; feeds `EventQuestion`; no timeout (D-52) — cancelled, closed, or turn-ended returns grok-build's unanswered text as a non-error result |
+| `exit_plan_mode` | ask | no | H5, planned; blocks on the person; reads the plan from the plan file through the file tools' guarded open, never from arguments; approve ends the turn (D-51), reject continues plan mode with no feedback channel, Esc cancels the turn with the mode unchanged; empty or missing file → `EmptyPlan`, no ask |
 | `agent` | think | — | H6; see below |
 
 Dropped from the earlier plan: **no `ls` tool** (`read` lists directories)
@@ -90,7 +90,8 @@ Three seams carry the tuning and per-model work the owner expects (D-38):
 ## Kind metadata
 
 Each tool call carries the vocabulary craze's cards already read from grok:
-`kind` (read, edit, execute, search, think, other), `read_only`, and a
+`kind` (read, edit, execute, search, think, other, ask, todo — the last two
+added in H5, Plan 023 §3.4), `read_only`, and a
 canonical input projection (`path`, `command`, `pattern`, `cwd`, …); bulky
 edit bodies stay in `RawInput`, capped at 512 B. `ToolEvent.Kind`, `Title`,
 `Locations`, `Output`, and `Diffs` are filled from this in the adapter,
@@ -179,19 +180,67 @@ event, the transcript, or a spill file **verbatim and by accident**:
 
 ## Modes
 
-Modes are **rulesets plus prompt reminders**, never separate loops.
+Modes are **rulesets plus prompt reminders**, never separate loops and
+never a different toolset (D-49): the tool list stays fixed from `Open` to
+`Close`, and every tool stays advertised in every mode. Enforcement is in
+the **dispatcher** only, so it survives yolo: `tool.ModeGate` wraps
+`AllowAll` (H3 later wraps its evaluator the same way).
 
-| mode | tools | extra |
+| mode | what the gate does | extra |
 |---|---|---|
-| implement | all | — |
-| plan | read, glob, grep, bash; `edit`/`write` only to the plan file; no `agent` | plan reminder appended as a synthetic user part; `exit_plan_mode` available |
-| ask | read-only set | ask reminder |
+| agent | everything reaches `inner` | — |
+| plan | an edit-kind call is allowed only when its canonical `Targets` is non-empty and every entry equals the plan file's canonical path; otherwise denied. `bash`, `read`, `grep`, `glob` all reach `inner` — the dispatcher cannot see inside a shell, so the reminder carries the rule (owner decision 3). `exit_plan_mode` is available | plan reminder, full or sparse, appended as a synthetic user part |
+| ask | anything not `ReadOnly` is denied | ask reminder; `exit_plan_mode` denied by name |
 
-Plan mode is enforced in the **dispatcher** (any edit-kind call outside the
-plan file is rejected with a model-facing message), so it survives yolo.
-The plan file is `~/.craze/native/sessions/<cwd-slug>/<id>.plan.md`. Leaving plan
-mode by accepting the plan sends the provider's implement prompt exactly as
-craze does for cursor and grok.
+In every mode but plan, `exit_plan_mode` is denied by `Request.Tool` — it
+is `ReadOnly` and would otherwise run anywhere and answer `EmptyPlan`.
+`ask_user_question` and `todo_write` are allowed in every mode. The
+rejection texts are verbatim:
+
+- plan, a denied edit: "Rejected: file edits are not allowed in plan mode -
+  the only editable file is the plan file (`<path>`)."
+- ask, a denied non-read-only call: "Rejected: ask mode is read-only - no
+  edits, writes, or shell commands."
+- any mode but plan, `exit_plan_mode`: "Plan mode has been disabled. Do not
+  call exit_plan_mode again unless the user explicitly asks to re-enter
+  plan mode."
+- ask reminder text: "Ask mode is active: answer from what you can read. Do
+  not edit or write files, and do not run shell commands — every such call
+  is denied."
+
+**`Request.Targets`** is the canonical, unredacted enforcement target — set
+by `Prepare` for edit-kind tools, absolutised against the workspace, and
+resolved through the same walk `file.go:86` uses (the longest existing
+prefix through symlink resolution, the missing tail appended cleaned), so a
+missing target, a dangling symlink, and an alternative spelling all
+normalise the same way the eventual open will. It is separate from
+`Paths`, which is cleaned but not symlink-resolved and is redacted before
+the gate sees it, staying event-facing only. An edit-kind call with no
+`Targets` is denied. The remaining race between the check and the open is
+stated on `ModeGate` and accepted, as H4 accepted its confinement TOCTOU.
+
+**Reminders** are synthetic user parts, inserted by `prepareStep` from step
+0, never stored, never emitted as an event, and never rendered by the TUI;
+full and sparse variants alternate per turn, and every plan reminder — full
+and sparse alike — carries the plan file's absolute path, because history
+is rebuilt from the store, which omits reminders. A turn's reminder is in
+every request of that turn but not in the next turn's history, so a plan-
+or ask-mode turn's first request diverges from the previous turn right
+after the previous prompt and the provider re-reads it uncached — stated
+and measured (H5 R3), not fixed; a one-byte variant marker on the stored
+user entry is the follow-up if it matters.
+
+The plan file is the transcript's sibling,
+`<home>/sessions/<slug>/<stamp>_<id>.plan.md` — the only writable path in
+plan mode. `exit_plan_mode` reads it through the file tools' guarded open
+(non-blocking, regular file only, bounded at 256 KiB), never from an
+argument. **No ask timeout** (D-52): a cancelled, closed, or turn-ended ask
+returns grok-build's unanswered text as a non-error result. Approving the
+plan **ends the turn** through a typed handoff, not `StopTurn` (D-51); the
+TUI's existing "implement" offer then switches to agent mode and sends the
+provider's implement prompt exactly as craze does for cursor and grok.
+Rejecting continues the turn in plan mode with no feedback channel — the
+user's feedback is their next message.
 
 ## Sub-agents (H6)
 
