@@ -404,10 +404,13 @@ type Model struct {
 	queueHov   queueHover
 	// queueEdit is the row being edited in place, "" when none.
 	// queueEditPos is its position, for the chip; editDraft is the composer
-	// the edit displaced and Esc puts back.
+	// the edit displaced and Esc puts back. queueEditCtx is the shell context
+	// that row was queued with, held out of the composer for the length of the
+	// edit and put back in front of whatever is saved (plan 022 §3.6).
 	queueEdit    string
 	queueEditPos int
 	editDraft    string
+	queueEditCtx string
 	// confirm is the send-now waiting for an answer. The confirm line is
 	// client-local UI: nothing is taken from anywhere and the engine has not
 	// heard of it. The send-now it turns into, on the other hand, is the
@@ -515,6 +518,20 @@ type Model struct {
 
 	// term themes the terminal itself, via the OSC 10/11 pair; see terminal.go.
 	term *terminalColors
+	// shell owns the command the composer is running, if any (plan 022 §3.6).
+	// It is a shared pointer for the same reason term and owner are: the model
+	// is copied on every Update, and the quit paths — SIGTERM's especially,
+	// which reaches finishRun with the model Run *started* with — have to be
+	// able to kill a command a much later copy started. Nil only in a zero
+	// Model a test built, which every caller guards for.
+	shell *shellController
+	// shellCtx is what the commands that have finished will tell the agent
+	// with the next message this composer sends (shell_context.go). An
+	// ordinary copied field and not state on the controller beside it,
+	// because it belongs to the message being written rather than to the
+	// process that produced it: it is read and cleared in Update, on the one
+	// goroutine, exactly as the draft it will lead is.
+	shellCtx []agent.ShellResult
 	// owner is the session the program holds, shared by every copy the way
 	// term is; see sessionOwner. Nil only in a zero Model a test built.
 	owner *sessionOwner
@@ -693,6 +710,27 @@ func (o *sessionOwner) current() *engine.Engine {
 // refused by design — so a caller that swaps sessions closes the old engine
 // first, which is the same call that closes the old session.
 func (m *Model) setSession(s agent.Session) {
+	// A command belongs to the session it was run from — its workspace is that
+	// session's — so a session change ends it. It does not *wait* for it: this
+	// runs inside Update, on the one goroutine bubbletea draws from, and a
+	// teardown bounded in seconds (shellController.shutdown) would be that many
+	// seconds of frozen frame for a user who only picked a session. The kill
+	// starts here and finishes on the run's own goroutine, which is what ends
+	// every command anyway: it sends the group its last SIGKILL before it
+	// returns, whatever stopped it, and the row settles when the shellDoneMsg
+	// lands, exactly as it does for Esc. Nothing can be running on the paths
+	// that reach here today — the pickers run before the session is ready, and
+	// shell mode is refused until it is — so this is the guarantee the next
+	// assignment site inherits rather than one being used now.
+	m.shell.cancel()
+	// What the last session's commands printed is not context for the next
+	// one's first message: a different agent, and usually a different
+	// workspace, being told about a `git status` nobody ran there (§3.6). Two
+	// halves, because a command outlives this Update: what has already finished
+	// is dropped, and the run still dying is disowned, so the result that lands
+	// after this cannot put itself back (shellController.disown).
+	m.shell.disown()
+	m.dropShellContext()
 	m.eng, m.sess, m.engErr = nil, nil, nil
 	m.client, m.cmdSeq = "", 0
 	m.owner.set(nil)
@@ -781,6 +819,7 @@ func New(cfg Config) Model {
 		// `craze frame` or by any direct caller writes no OSC at all.
 		term:  newTerminalColors(io.Discard),
 		owner: &sessionOwner{},
+		shell: newShellController(),
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		loading:   cfg.Loading,
@@ -957,6 +996,11 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// this also covers a final that is not a Model. The terminal gets its own
 	// colours back on every exit path — before the engine's Close, which may block.
 	m.term.reset()
+	// The same reasoning, and the same shared pointer: this is the only place
+	// SIGTERM, SIGHUP and a recovered panic reach, and none of them ran
+	// requestQuit. A quit craze asked for has already done this, and a second
+	// shutdown with nothing running is a no-op.
+	m.shell.shutdown()
 	// Before the engine's Close for the same reason: the release is bounded, and the
 	// session's close is not. On a quit craze asked for, requestQuit has
 	// already done both in this order and the hub's Close is idempotent; on
@@ -1217,6 +1261,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshSnapMsg:
 		m.refreshSnap()
+		return m, nil
+
+	case shellDoneMsg:
+		// The command is over; the row it opened says how it went.
+		m.finishShell(msg)
 		return m, nil
 
 	case cancelFailedMsg:
@@ -1619,6 +1668,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlD:
 		return m.requestQuit()
 	case tea.KeyCtrlC:
+		// A running command outranks the whole Ctrl+C state machine, and is the
+		// only way to stop one while a card has the keyboard (a card takes Esc
+		// before the ladder below ever sees it). One press, one kill: it does
+		// not quit, it does not cancel the agent's turn, and it does not arm
+		// the double-press window — the user stopped the thing they started,
+		// and nothing else about the session changed (plan 022 §3.6).
+		if m.shellRunning() {
+			m.killShell()
+			return m, nil
+		}
 		return m.handleCtrlC()
 	}
 	m.ctrlCDeadline = time.Time{}
@@ -1699,6 +1758,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.Type == tea.KeyEsc {
+		// The ladder's first rung: Esc stops the command the composer is
+		// running. Everything that takes Esc *earlier* — a card, a dialog, the
+		// confirm line, the sub-agent view, the two focus bands — keeps its
+		// meaning, because a layer that owns the keyboard owns this key too;
+		// under one of those, Ctrl+C is how a command is killed.
+		if m.shellRunning() {
+			m.killShell()
+			return m, nil
+		}
+		// With nothing running, Esc in shell mode clears the draft — leaving
+		// the mode is leaving the draft, there being nothing else to it. It
+		// returns here rather than falling through, so a `!` in the composer
+		// can never be the key that cancels the agent's turn below.
+		if m.shellMode() {
+			m.input.SetValue("")
+			m.resetSlash()
+			return m, nil
+		}
 		if m.queueEdit != "" {
 			m.cancelQueueEdit()
 			return m, nil
@@ -1947,6 +2024,16 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.cardOpen() || !m.sessionReady() {
 		return m, nil
 	}
+	// Shell mode sits behind that gate rather than in front of it: two of its
+	// three refusals — a card on screen, a session still restoring, the draft
+	// kept in both — are exactly what the gate already is. It sits in front of
+	// the builtins because `!` is not a slash and parseSlashLine found nothing
+	// above, and in front of send() because the draft is not going to the
+	// agent. A command is allowed to run while the agent is working: it is the
+	// user's own shell and it needs nothing of the session but its workspace.
+	if m.shellMode() {
+		return m.runShellDraft()
+	}
 	// A builtin never queues: it is craze's own, it does not need the agent,
 	// and holding it until the turn ends would be surprising. The ones that
 	// do need the agent keep today's refusal.
@@ -1998,21 +2085,44 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
-	return m.sendText(text)
+	if !m.sessionReady() {
+		// The composer refuses Enter before the gate opens: a prompt into a
+		// session that is still restoring would race the replay it is reading.
+		return m, nil
+	}
+	next, _, _ := m.submitOwn(text, engine.SubmitQueue)
+	return next, nil
 }
 
-// sendText starts a turn with text that is already decided. It is what the
-// composer's own send and the plan offer have in common: the plan offer never
-// touches the draft, so the two differ only in where the text came from.
+// sendText starts a turn with text of craze's own: today the plan offer's
+// implement prompt, which never touched the draft.
+//
+// It carries no shell context. The block belongs to the message the user wrote
+// — it is their command's output, in front of their question about it — and the
+// offer's prompt is craze's sentence, sent by pressing Enter on an empty
+// composer. Attaching it here would spend the context on a message that never
+// asked for it (§3.6).
 func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 	if !m.sessionReady() {
-		// The composer refuses Enter before the gate opens, and so does the
-		// plan offer: a prompt into a session that is still restoring would
-		// race the replay it is reading.
+		// The plan offer refuses for the composer's reason, above.
 		return m, nil
 	}
 	next, _, _ := m.submit(text, engine.SubmitQueue, "")
 	return next, nil
+}
+
+// submitOwn is submit for the text this composer is holding: the draft's send,
+// whether it starts a turn or becomes a queued row, and the confirm's send-now
+// of that same draft. It is the one submission that carries the pending shell
+// context, and it is what clears it — only once the text was accepted, so a
+// refusal leaves the block with the draft it belongs to, for the send that
+// follows.
+func (m Model) submitOwn(text string, mode engine.SubmitMode) (Model, engine.SubmitResult, error) {
+	next, res, err := m.submit(m.withShellContext(text), mode, "")
+	if shellContextTaken(res, err) {
+		next.dropShellContext()
+	}
+	return next, res, err
 }
 
 // submit hands one prompt to the engine and applies what it answered. It is the
@@ -2157,7 +2267,12 @@ func (m *Model) maskCards() {
 // went. The text was trimmed on its way out and the draft may not have been, and a
 // draft the user has changed since is theirs to keep — which is the rule a
 // send-now has always followed, whether it fired at once or after a cancel.
+//
+// The comparison is against what was typed: the shell context craze put in
+// front of it was never in the composer, so a draft matched against the whole
+// sent string would never match and would sit there after its own send (§3.6).
 func (m *Model) clearMatchingDraft(text string) {
+	_, text = agent.SplitShellContext(text)
 	if strings.TrimSpace(m.input.Value()) != text {
 		return
 	}
@@ -2372,7 +2487,14 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	m.quitting = true
 	eng := m.eng
 	h := m.host
+	sh := m.shell
 	return m, func() tea.Msg {
+		// The user's command goes first and craze waits for it: this is the
+		// quit Ctrl+D, /exit and the second Ctrl+C all reach, and nothing the
+		// composer started may outlive the program that started it. The wait is
+		// bounded twice over (shellController.shutdown), so a command that will
+		// not die delays the quit by seconds rather than blocking it.
+		sh.shutdown()
 		closeHost(h)
 		if eng != nil {
 			_ = eng.Close()
@@ -3084,7 +3206,14 @@ const titleRuneCap = 120
 // fallbackTitle is the title a session carries until the agent names it or the
 // user renames it: the first line of the first prompt. It is not a pin — an
 // agent title replaces it, and /rename replaces either (§3.6).
+//
+// The prompt's shell context is not part of that first line. A picker row
+// reading "<shell_context>" would name every session that opened with a
+// command the same thing, and none of them by what was asked; the strip is
+// here rather than at the call site so that a second caller cannot forget it
+// (plan 022 §3.6, and nativeTitle for the native session's own copy).
 func fallbackTitle(prompt string) string {
+	_, prompt = agent.SplitShellContext(prompt)
 	first, _, _ := strings.Cut(prompt, "\n")
 	return capRunes(sanitizeLine(first), titleRuneCap)
 }

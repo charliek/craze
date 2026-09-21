@@ -334,6 +334,20 @@ func (m Model) composerRule(top bool) string {
 	width := max(1, m.width)
 	style := styleFG(m.theme.Rule)
 	title := m.composerTitle()
+	if m.shellMode() && m.viewing == "" {
+		// The whole visible change, and it costs the layout nothing: both rules
+		// take the shell colour and the top one says what Enter and Esc do
+		// instead of naming the session. The two are mutually exclusive with
+		// the queue-edit chip below — a row being edited is never shell mode —
+		// so the order of these two branches decides nothing.
+		//
+		// The sub-agent view borrows this rule for the bottom of its own band
+		// (subagentComposerView), where the draft is not on screen and Enter
+		// belongs to the view: the mode is still the mode, but its colour has
+		// nothing to say about a band that is not the composer.
+		style = styleFG(m.theme.Shell)
+		title = clampWidth(shellRuleTitle, max(0, width-4))
+	}
 	if chip := m.queueEditChip(); top && chip != "" {
 		// The rule drops a title it cannot fit beside its margins, and at
 		// the 40-column minimum the whole chip is wider than the rule. A

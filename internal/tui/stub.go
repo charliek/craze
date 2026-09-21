@@ -91,8 +91,11 @@ type Stub struct {
 	// stays recorded, as its row stays in the transcript. cancelsSent counts
 	// the cancels the live session would have written to the agent: every
 	// Cancel but one that a claimed, unopened prompt withdraws for.
-	prompts     []string
-	cancelsSent int
+	prompts []string
+	// interjections is every text handed to Interject, in order; see
+	// Interjections in stub_queue.go.
+	interjections []string
+	cancelsSent   int
 }
 
 // stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close
@@ -481,6 +484,20 @@ func (s *Stub) CancelsSent() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cancelsSent
+}
+
+// InTurn reports that a claimed prompt has opened its turn — run's own
+// bookkeeping, which happens on the driver's goroutine some moment after Begin
+// returned the continuation.
+//
+// It is the barrier a test needs before it asks what a cancel did: a cancel
+// that lands on a claim whose turn is not open yet withdraws the prompt and
+// writes nothing to the agent, and one that lands a moment later writes
+// (Cancel). Which of the two a test gets is otherwise a coin toss.
+func (s *Stub) InTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inPrompt
 }
 
 // run is Begin's continuation. Like the live session's, it withdraws — no

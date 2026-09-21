@@ -528,8 +528,22 @@ func TestNativeInterjectEndsAFullBurstBesideANearlyFullChannel(t *testing.T) {
 // and each is either answered inside the turn or reported unanswered — nothing
 // an interjection said it took goes missing. The control is the accepted count,
 // which must not be zero.
+//
+// The senders go in two waves, because a wave that has been started is not a
+// wave that has run. Starting a goroutine only makes it runnable, so with one
+// P none of these ran before the test goroutine next blocked — which it did on
+// the prompt, after releasing the held step. The turn therefore ended before a
+// single Interject had been made, every one of them was refused, and the
+// control failed on the scheduler rather than on the adapter (it did so 3 runs
+// in 3 under -cpu=1). The first wave is awaited while the turn is provably
+// held, so what the control counts is a fact and not a scheduling accident;
+// the second is parked on a gun and let go in the same instant as the step, so
+// that its calls are made into a turn that is ending however many Ps there
+// are. Nothing below asserts which of the two a given sender's outcome came
+// from: the invariants hold for every interleaving, which is the point.
 func TestNativeInterjectRacesTheTurnEnd(t *testing.T) {
 	const senders = 24
+	const landed = senders / 2 // the awaited wave; the rest race the ending
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	h := newHeld(t)
@@ -538,27 +552,47 @@ func TestNativeInterjectRacesTheTurnEnd(t *testing.T) {
 	out := startPrompt(s, "go")
 	await(t, h.reached, "the held step")
 	accepted := make(chan string, senders)
-	done := make(chan struct{})
-	for i := range senders {
+	// Buffered, so a sender's life is exactly its Interject call: the test
+	// takes the first wave's signals before the turn is released and the
+	// second's after it has ended.
+	done := make(chan struct{}, senders)
+	send := func(i int) {
+		text := fmt.Sprintf("steer %02d", i)
+		err := s.Interject(context.Background(), text)
+		switch {
+		case err == nil:
+			accepted <- text
+		case errors.Is(err, ErrNotInTurn):
+		default:
+			t.Errorf("Interject(%q) = %v, want nil or ErrNotInTurn", text, err)
+		}
+		done <- struct{}{}
+	}
+	for i := range landed {
+		go send(i)
+	}
+	for range landed {
+		await(t, done, "an interjection into the held turn")
+	}
+	gun := make(chan struct{})
+	parked := make(chan struct{}, senders-landed)
+	for i := landed; i < senders; i++ {
 		go func() {
-			text := fmt.Sprintf("steer %02d", i)
-			err := s.Interject(context.Background(), text)
-			switch {
-			case err == nil:
-				accepted <- text
-			case errors.Is(err, ErrNotInTurn):
-			default:
-				t.Errorf("Interject(%q) = %v, want nil or ErrNotInTurn", text, err)
-			}
-			done <- struct{}{}
+			parked <- struct{}{}
+			<-gun
+			send(i)
 		}()
 	}
+	for range senders - landed {
+		await(t, parked, "a sender to reach the gun")
+	}
+	close(gun)
 	close(h.release)
 	run := await(t, out, "the prompt")
 	if run.err != nil {
 		t.Fatalf("the prompt failed: %v", run.err)
 	}
-	for range senders {
+	for range senders - landed {
 		await(t, done, "an interjecting goroutine")
 	}
 	close(accepted)
@@ -590,7 +624,7 @@ func TestNativeInterjectRacesTheTurnEnd(t *testing.T) {
 			t.Errorf("%q was accepted but is neither reported unanswered nor written", text)
 		}
 	}
-	if len(sent) == 0 {
-		t.Fatalf("control: not one of %d interjections was accepted", senders)
+	if len(sent) < landed {
+		t.Fatalf("control: %d interjections were accepted, want at least the %d the held turn was sent", len(sent), landed)
 	}
 }

@@ -197,6 +197,21 @@ What H4 does not do, as built, beyond the "Not built" list above:
   skipped with a diagnostic line instead. This is cursor's existing,
   tested behaviour and stays as is rather than being made symmetric,
   since changing it risks cursor's own results.
+- **A command that deliberately detaches itself can outlive craze.**
+  `setsid`, `disown`, or a daemon that puts itself in a session of its own
+  leaves the process group craze kills, and craze cannot reach it
+  afterwards. Everything else the shell command started is killed when the
+  command ends and again when craze exits.
+- **The pid-reuse hold is Linux-only.** The shell leader is kept unreaped
+  (`waitid` with `WNOWAIT`) until after its group has been sent its last
+  signal, so that signal cannot land on a stranger's group given the same
+  pid in between. Where that wait is unavailable — macOS, or a Linux
+  `waitid` that fails — the leader is reaped first and the signal follows,
+  leaving the window `internal/acp/spawn.go`'s group shutdown and opencode
+  already accept, narrowed by the group having to be empty first (a live
+  member keeps the pid taken).
+- **Shell mode is not a terminal.** No PTY, no interactive programs, no job
+  control, no history.
 
 ## Explicit non-goals
 

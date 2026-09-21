@@ -130,11 +130,11 @@ off.
 
 | Key | Action |
 |---|---|
-| `Enter` | with the slash menu open on a token that is not already typed out in full, accept the highlighted row; otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
+| `Enter` | with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; hide the slash menu for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
-| `Ctrl+C` | cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
+| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
@@ -247,6 +247,110 @@ ending from the fallback's.
 !!! note
     `Ctrl+G` is BEL. Some terminals flash or beep when it is pressed. `/theme`
     opens the same picker without the BEL.
+
+## Shell mode
+
+A draft whose first character is `!` is a command for your own shell, not a
+message for the agent. There is no toggle: the mode is the draft. The
+composer's two rules take the shell colour and the top one reads
+
+```text
+shell · enter run · esc clear
+```
+
+in place of the session title, and the slash menu stays shut — `!ls /usr` must
+not offer `/usr`. Delete the `!` and everything is as it was.
+
+`Enter` runs the whole draft after the `!`, so a multi-line paste is one
+script, and the draft clears as it does on a send. The command runs through
+`$SHELL -c` (`/bin/sh -c` when `$SHELL` is not an absolute path craze can
+execute), in the session's workspace, with craze's own environment, its stdin
+on `/dev/null`, and in a process group of its own so nothing it starts outlives
+it.
+
+!!! warning
+    A command runs locally, immediately, with your own rights — the same thing
+    would have happened had you typed it into your own shell. craze asks
+    nothing first and the agent has no say in it: shell mode runs what **you**
+    typed, and nothing an agent said can put a command in the composer.
+
+To send a message that begins with `!`, type a single space before it. A
+draft whose first character is a space is not shell mode, and that space is
+trimmed on the way out, so a draft of space followed by `!important` reaches
+the agent as `!important` — the space is how you say which of the two you
+meant, and it never travels.
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `Enter` | run the draft |
+| `Esc` | kill the running command; with none running, clear the draft (it never cancels the agent's turn) |
+| `Ctrl+C` | kill the running command — one press, one kill: it does not quit, does not cancel the turn, and does not arm the quit window. It is the way to kill one while a card has the keyboard |
+| `Ctrl+L` | refused in shell mode: `Enter` is how a command runs |
+
+A command is killed with SIGTERM to its whole process group, SIGKILL three
+seconds later, and it is killed on every way out of craze — `Ctrl+D`, `/exit`,
+a double `Ctrl+C`, SIGTERM, and a session change.
+
+!!! warning "What can outlive craze"
+    A command that deliberately detaches itself — `setsid`, `disown`, or a
+    daemon that puts itself in a session of its own — leaves the process group
+    craze kills, and craze cannot reach it afterwards: it can outlive the
+    command and craze with it, and is yours to stop. Everything else the
+    command started is killed when the command ends and again when craze
+    exits, whether it is still writing output (`server &`) or not
+    (`server >/dev/null 2>&1 &`).
+
+Enter is refused, and the draft kept, while a card is open, while a session is
+still starting or restoring, and while another command is running — one at a
+time. A bare `!` does nothing. It is **allowed while the agent is working**: it
+is your shell, and it needs nothing of the session but its workspace.
+
+Shell mode is the composer's alone. A queued message, an edited queued row, the
+plan offer's `Enter`, a replayed prompt and a send-now all go to the agent as
+text however they start, and `craze prompt '!x'` sends `!x` as a prompt.
+
+### The transcript row
+
+A command writes one row, `! <cmd>`, with the spinner while it runs. When it
+finishes the row carries its output, dimmed and collapsed past 20 lines under
+the usual `Ctrl+O`, and the right-hand end says how it ended when it was not a
+clean exit: `exit 2`, `killed`, `timed out after 120s`.
+
+| Limit | Value |
+|---|---|
+| Output kept | 16 KiB, from the **tail** — an earlier head is replaced by `[craze: output truncated]` |
+| Time | 120 s, then the group is killed (`timed out after 120s`) |
+| Carried to the agent | the last 3 commands, 16 KiB of output together |
+
+Shell mode is not a terminal: no pty, no interactive programs, no job control
+and no history. A command that wants to be answered reads EOF; one that wants a
+terminal should be run in one.
+
+### What the agent is told
+
+Each finished command is kept, and the command and its output travel with the
+**next message you send** — a sent message, a message you queue, or an
+interjection. They go once, in front of your text, and are gone: craze sends
+nothing when a command finishes, and a session you quit without writing another
+message never mentions any of it.
+
+```text
+!git status --short          ← runs locally, output on screen
+what changed?                ← this message carries both to the agent
+```
+
+The `Enter` that accepts the plan offer sends craze's own sentence and carries
+nothing. The context is cleared only once the message was **accepted**: a
+message refused for length keeps the draft *and* the output for the next
+attempt — and the attached output counts against the queue's 32 KiB per-message
+limit. `/clear` and a session change drop it.
+
+What is attached is never drawn: your transcript row, the queue band, the queue
+editor and the session title show the message you typed, not the block that
+went with it. A `/name` inside a command's output is output and nothing else —
+`!cat plan.md` on a file full of slash commands expands none of them.
 
 ## Sub-agent view
 

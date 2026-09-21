@@ -44,13 +44,23 @@ func queueWorkingLive(t *testing.T) (Model, *Stub) {
 	t.Helper()
 	m, stub := queueWorking(t)
 	t.Cleanup(func() { _ = stub.Close() })
+	awaitStubTurn(t, stub)
+	return m, stub
+}
+
+// awaitStubTurn waits for the Stub's prompt to have opened its turn, which is
+// the state Interject is decided from. It polls rather than pumping: the flag
+// is set on the turn's own goroutine and no message announces it, so a pump
+// could go quiet with the turn a microsecond from opening.
+func awaitStubTurn(t *testing.T, stub *Stub) {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		stub.mu.Lock()
 		in := stub.inPrompt
 		stub.mu.Unlock()
 		if in {
-			return m, stub
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the stub never entered its turn")
