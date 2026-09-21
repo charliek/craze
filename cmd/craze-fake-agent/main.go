@@ -54,6 +54,14 @@ Flags:
           modelconfig-refuse same, and session/set_model is answered -32601: the
                       whole of that agent, so a client's
                       set_model → set_config fallback runs for real
+          modellate   echo with no model option at session/new; the agent's FIRST
+                      config list arrives only after session/set_model has been
+                      answered, and still carries the model value it held before
+                      that set_model
+          preinstall  modelconfig, but a current_mode_update, a session_info_update
+                      and a moved config list are sent BEFORE session/new is
+                      answered, so every one of them is dispatched ahead of the
+                      snapshot that reply carries — and contradicts it
           permission  request allow_once / reject_once and wait for the client
           ask         emit cursor/ask_question then finish the turn
           plan        emit cursor/create_plan then finish the turn
@@ -139,7 +147,8 @@ func main() {
 		}
 	}
 	switch script {
-	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse", "permission", "ask", "plan",
+	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
+		"modellate", "preinstall", "permission", "ask", "plan",
 		"hang", "hang-ack", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail",

@@ -468,6 +468,247 @@ func TestAClaimedSetWhoseContextEndsSaysTheOutcomeIsUnknown(t *testing.T) {
 	})
 }
 
+// TestASetRefusedAfterTheDequeueIsNeverClaimed is r27 finding 3. Taking a
+// request out of the queue is not yet a promise that it will run: the worker
+// still has to find the engine admitting and the outbox with room, and each of
+// those can have changed while the request waited. Closing `claimed` at the
+// dequeue made the promise anyway, so a caller whose context ended in that gap
+// was told ErrSetOutcomeUnknown — and the receipts table STORED it — for a
+// change the worker then refused without asking the provider anything at all.
+// A resend of that id replayed "outcome unknown" for ever, where a refusal
+// about the engine's door is forgotten and leaves the id retryable.
+//
+// Two barriers force the schedule. The worker is parked in exactly that gap;
+// the caller is parked between its context ending and its own dequeue attempt,
+// so the refusal is in place before the caller decides anything, and it then
+// has to WAIT for the worker rather than answer itself. In every case here the
+// provider is never reached and the answer is the plain refusal — never the
+// sentinel.
+func TestASetRefusedAfterTheDequeueIsNeverClaimed(t *testing.T) {
+	t.Run("the outbox went over its bound", func(t *testing.T) {
+		park, parked, release := parkTheWorkerOnce()
+		waitHere, callerParked, releaseCaller := parkTheCallerOnce()
+		t.Cleanup(release)
+		t.Cleanup(releaseCaller)
+		// A primary nobody reads, so the outbox can really be saturated, and no
+		// rig subscription yet, so nothing drains it behind the test's back.
+		s := newFake(t, agent.EventLogOptions{})
+		e, err := newEngine(s, Options{}, &hooks{beforeRunSet: park})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = e.Close() })
+		e.beforeDropSet = waitHere
+		if err := e.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		c := Command{Client: e.NewClientID(), ID: "1"}
+		answered := make(chan error, 1)
+		go func() {
+			_, err := e.Set(ctx, c, modeSetting("plan"))
+			answered <- err
+		}()
+		await(t, parked, "the worker to take the request out of the queue")
+		cancel()
+		await(t, callerParked, "the caller to reach its barrier with a dead context")
+		saturate(t, e)
+		releaseCaller()
+		release()
+
+		err = awaitErr(t, answered, "the refused Set")
+		if !errors.Is(err, ErrUnavailable) || Code(err) != "unavailable" {
+			t.Fatalf("a Set refused for room after its caller gave up: %v (%s)", err, Code(err))
+		}
+		if errors.Is(err, ErrSetOutcomeUnknown) {
+			t.Fatalf("a request that never reached the provider was told its outcome is unknown: %v", err)
+		}
+		if n := s.setCalls(); n != 0 {
+			t.Fatalf("%d settings reached the provider", n)
+		}
+		// The id is left exactly as unseen as it was before the attempt.
+		e.receipts.mu.Lock()
+		_, reserved := e.receipts.byKey[receiptKey{client: c.Client, id: 1}]
+		stored := len(e.receipts.order)
+		e.receipts.mu.Unlock()
+		if reserved || stored != 0 {
+			t.Fatalf("the refusal kept a receipt (reserved=%v, stored=%d): a resend would replay it instead of trying again", reserved, stored)
+		}
+
+		// And a resend of the SAME id, once room returns, is a genuine attempt.
+		readerOn(t, s, e)
+		waitFor(t, func() bool { return e.log.OutboxRoom() })
+		res, err := e.Set(context.Background(), c, modeSetting("plan"))
+		if err != nil {
+			t.Fatalf("the resend once room returned: %v", err)
+		}
+		if res.Value != "plan" {
+			t.Fatalf("the resend answered %+v", res)
+		}
+		if n := s.setCalls(); n != 1 {
+			t.Fatalf("%d settings reached the provider, want the resend alone", n)
+		}
+	})
+	t.Run("the engine was stopped", func(t *testing.T) {
+		park, parked, release := parkTheWorkerOnce()
+		waitHere, callerParked, releaseCaller := parkTheCallerOnce()
+		t.Cleanup(release)
+		t.Cleanup(releaseCaller)
+		r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, &hooks{beforeRunSet: park})
+		r.e.beforeDropSet = waitHere
+		ctx, cancel := context.WithCancel(context.Background())
+		answered := make(chan error, 1)
+		go func() {
+			_, err := r.e.Set(ctx, Command{}, modeSetting("plan"))
+			answered <- err
+		}()
+		await(t, parked, "the worker to take the request out of the queue")
+		cancel()
+		await(t, callerParked, "the caller to reach its barrier with a dead context")
+		if err := r.e.Stop(context.Background(), Command{}); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		releaseCaller()
+		release()
+
+		err := awaitErr(t, answered, "the refused Set")
+		if !errors.Is(err, ErrNotAccepting) || errors.Is(err, ErrSetOutcomeUnknown) {
+			t.Fatalf("a Set refused by a stopped engine after its caller gave up: %v", err)
+		}
+		if n := r.s.setCalls(); n != 0 {
+			t.Fatalf("%d settings reached the provider", n)
+		}
+	})
+	t.Run("the engine was closed", func(t *testing.T) {
+		park, parked, release := parkTheWorkerOnce()
+		waitHere, callerParked, releaseCaller := parkTheCallerOnce()
+		t.Cleanup(release)
+		t.Cleanup(releaseCaller)
+		r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, &hooks{beforeRunSet: park})
+		r.e.beforeDropSet = waitHere
+		ctx, cancel := context.WithCancel(context.Background())
+		answered := make(chan error, 1)
+		go func() {
+			_, err := r.e.Set(ctx, Command{}, modeSetting("plan"))
+			answered <- err
+		}()
+		await(t, parked, "the worker to take the request out of the queue")
+		cancel()
+		await(t, callerParked, "the caller to reach its barrier with a dead context")
+		// Close joins the worker, which is parked at the barrier: it can only be
+		// made from another goroutine, and the shut door is what the worker finds
+		// when the barrier lets it go.
+		closed := make(chan error, 1)
+		go func() { closed <- r.e.Close() }()
+		waitFor(t, func() bool {
+			r.e.mu.Lock()
+			defer r.e.mu.Unlock()
+			return r.e.closed
+		})
+		releaseCaller()
+		release()
+
+		err := awaitErr(t, answered, "the refused Set")
+		if !errors.Is(err, ErrNotAccepting) || errors.Is(err, ErrSetOutcomeUnknown) {
+			t.Fatalf("a Set refused by a closing engine after its caller gave up: %v", err)
+		}
+		if n := r.s.setCalls(); n != 0 {
+			t.Fatalf("%d settings reached the provider", n)
+		}
+		if err := awaitErr(t, closed, "Close"); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	})
+	// The same-instant case, forced rather than hoped for: the caller's context
+	// has ended AND the worker's answer is already in the reply channel AND the
+	// request is claimed. A reply is strictly more informative than the sentinel
+	// and equally true, so it wins — whichever arm of the select wakes.
+	t.Run("a reply ready in the same instant is preferred", func(t *testing.T) {
+		// The barrier here is the SECOND request reaching the worker: the worker
+		// sends the first's answer before it takes the next one, so this is proof
+		// the first's reply is buffered and its claim closed.
+		second := make(chan struct{})
+		taken := 0
+		r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, &hooks{beforeRunSet: func() {
+			taken++
+			if taken == 2 {
+				close(second)
+			}
+		}})
+		release := r.s.holdNextSetsIgnoringCtx()
+		t.Cleanup(release)
+		parked, held := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		r.e.beforeDropSet = func() {
+			once.Do(func() { close(parked) })
+			<-held
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		answered := make(chan setAnswer, 1)
+		go func() {
+			res, err := r.e.Set(ctx, Command{}, modeSetting("plan"))
+			answered <- setAnswer{res: res, err: err}
+		}()
+		waitFor(t, func() bool { return r.heldSets() })
+		go func() { _, _ = r.e.Set(context.Background(), Command{}, modeSetting("agent")) }()
+		waitFor(t, func() bool { return r.queuedSets() == 1 })
+
+		cancel()
+		await(t, parked, "the caller to reach its barrier with a dead context")
+		release()
+		await(t, second, "the worker to move on to the next request")
+		close(held)
+
+		got := <-answered
+		if got.err != nil {
+			t.Fatalf("a claimed Set whose reply was ready: %v", got.err)
+		}
+		if got.res.Value != "plan" {
+			t.Fatalf("the answer is %+v, want the reply the worker had already sent", got.res)
+		}
+		// Rev is not asserted: the flush that learns it is made on the request's
+		// own context, which ended here, so this change stands with Rev 0 — the
+		// documented case (runSet, TestASetWhoseRevisionCouldNotBeLearnedStillSucceeded).
+		// What is being pinned is that the caller got the ANSWER and not the
+		// sentinel.
+	})
+}
+
+// parkTheWorkerOnce is the beforeRunSet barrier the cases above share: the
+// FIRST request the settings worker takes is parked in the gap where it is
+// neither queued nor claimed, and every request after it goes straight through.
+// The flag needs no lock — beforeRunSet is only ever called on the worker's one
+// goroutine — and release is idempotent, so a t.Cleanup cannot double-close it.
+func parkTheWorkerOnce() (hook func(), parked chan struct{}, release func()) {
+	parked, held := make(chan struct{}), make(chan struct{})
+	first := true
+	hook = func() {
+		if !first {
+			return
+		}
+		first = false
+		close(parked)
+		<-held
+	}
+	return hook, parked, sync.OnceFunc(func() { close(held) })
+}
+
+// parkTheCallerOnce is the beforeDropSet barrier beside it: a Set whose context
+// has ended is parked between that context ending and its own dequeue attempt,
+// so a case can put the refusal in place while the caller is provably there and
+// has decided nothing yet. Release is idempotent, for the same reason.
+func parkTheCallerOnce() (hook func(), parked chan struct{}, release func()) {
+	parked, held := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	hook = func() {
+		once.Do(func() { close(parked) })
+		<-held
+	}
+	return hook, parked, sync.OnceFunc(func() { close(held) })
+}
+
 // awaitErr is one goroutine's error, with the watchdog.
 func awaitErr(t *testing.T, ch <-chan error, what string) error {
 	t.Helper()

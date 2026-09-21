@@ -196,6 +196,12 @@ type hooks struct {
 	// retryTick, when set, stands in for the driver's timer: a refused claim is
 	// taken again when the test sends on it, and at no other time.
 	retryTick <-chan time.Time
+	// beforeRunSet runs on the settings worker's own goroutine between taking a
+	// request out of the queue (takeSet) and the locked section that decides
+	// whether to run it and claims it (runSet) — the one gap in which a request
+	// is neither queued nor claimed, and the only place a test can force the
+	// schedules of r27 finding 3.
+	beforeRunSet func()
 	// receipts are the command-id table's own seams (receipts.go): its clock,
 	// and the barriers a duplicate's schedule turns on. Like the rest of these
 	// they are in place before the table exists and never assigned afterwards.

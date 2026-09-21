@@ -76,13 +76,16 @@ type setReq struct {
 	c     Command
 	s     Setting
 	reply chan setAnswer
-	// claimed is closed by the worker in the very section that takes this
-	// request out of the queue TO RUN IT (takeSet) — and never for one it
-	// answers there without running, nor for one a closing engine refuses. It
-	// is what tells a caller whose context has ended which of those two
-	// happened: an unclaimed request changed nothing and is owed the plain
-	// context error, while a claimed one is at the provider and can only be
-	// answered honestly with ErrSetOutcomeUnknown.
+	// claimed is closed by the worker in the one locked section that has
+	// established that this request WILL be put to the provider (runSet) —
+	// never for one answered without running it, whether by takeSet's own
+	// dead-context check or by runSet's re-check of the context, the engine's
+	// refusal and the outbox's room. It means "the provider is about to be
+	// asked", and nothing weaker: a caller whose context has ended reads it as
+	// the difference between a request that changed nothing — owed the plain
+	// context error or the plain refusal, both of which leave its command id
+	// retryable — and one at the provider, which can only be answered honestly
+	// with ErrSetOutcomeUnknown (r27 finding 3).
 	claimed chan struct{}
 }
 
@@ -136,9 +139,11 @@ type setAnswer struct {
 //     click mid-turn, and a setting is not a prompt.
 //   - When the log's outbox has no room for the delta the change would
 //     publish: ErrUnavailable, checked in the worker immediately **before** the
-//     provider is asked, because that is the last moment at which nothing has
-//     changed yet. A Set that waited in the queue is judged by the room there
-//     is when its turn comes.
+//     provider is asked and in the same locked section that claims the request,
+//     because that is the last moment at which nothing has changed yet. A Set
+//     that waited in the queue is judged by the room there is when its turn
+//     comes, and one refused there is refused having run nothing at all, so its
+//     command id stays retryable (runSet, r27 finding 3).
 //   - A refusal from the provider is returned as it came, with nothing mutated
 //     and no event published.
 //
@@ -147,12 +152,14 @@ type setAnswer struct {
 // A Set whose ctx ends while it is still WAITING ITS TURN changed nothing and
 // is told so with the context's error. Two goroutines can find that out — the
 // caller, which takes it out of the queue itself (dropSet), and the worker,
-// which checks the request's context in the very section that CLAIMS it
+// which checks the request's context in the very section that DEQUEUES it
 // (takeSet) and answers a dead one there without running it. They take the same
 // lock, so exactly one of them has the request and exactly one answer is ever
 // sent; what the pair rules out is the schedule the other order allowed, where
 // the worker dequeued a request whose caller had already given up and asked the
-// provider for a change nobody was waiting for (r23 finding 1).
+// provider for a change nobody was waiting for (r23 finding 1). A context that
+// ends in the gap AFTER the dequeue is checked once more, in the section that
+// claims the request (runSet), and answered there in the same way.
 //
 // Once the worker has CLAIMED it, this call is bounded by its context again,
 // honestly: it waits for the worker's answer OR for its own context, whichever
@@ -206,11 +213,13 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 			}
 			// The worker has it, and what that means is decided by the claim:
 			//
-			//   - claimed is still open: the worker either found this same dead
-			//     context in the section that would have claimed the request and
-			//     answered it WITHOUT running it, or the engine closed under it.
-			//     Nothing was asked of the provider, and the answer — the plain
-			//     context error, or ErrNotAccepting — is already on its way.
+			//   - claimed is still open: the worker has not yet decided to run
+			//     the request, and the answer on its way is one of the three that
+			//     mean nothing was asked of the provider — the plain context
+			//     error, ErrNotAccepting or ErrUnavailable. The wait is bounded:
+			//     between takeSet and the locked section that decides (runSet)
+			//     the worker does nothing that can block, so one of these two
+			//     channels is always about to be ready.
 			//   - claimed is closed: the request is at the provider. This call's
 			//     own deadline has passed and it says so, with the one answer
 			//     that is true (ErrSetOutcomeUnknown).
@@ -271,12 +280,18 @@ func (e *Engine) dropSet(r *setReq) bool {
 //
 // A request whose context has ended is answered here too, with that context's
 // error and WITHOUT being run: the check is in the same locked section that
-// claims it, which is what makes it airtight. A caller that gives up races
-// dropSet against this claim, and whichever wins, the request is out of the
-// queue exactly once and answered exactly once — and the provider is never
-// asked for a change whose caller had already gone (r23 finding 1). The
-// answers are sent under e.mu, which is safe because every reply channel is
+// takes it out of the queue, which is what makes it airtight. A caller that
+// gives up races dropSet against this dequeue, and whichever wins, the request
+// is out of the queue exactly once and answered exactly once — and the provider
+// is never asked for a change whose caller had already gone (r23 finding 1).
+// The answers are sent under e.mu, which is safe because every reply channel is
 // buffered for the one answer it will ever carry.
+//
+// It does NOT claim the request. Taking it out of the queue is not yet a
+// promise that it will run — runSet still has to find the engine admitting and
+// the outbox with room — and claiming it here made that promise for requests
+// that were then refused without running, which left a stored "outcome unknown"
+// where a retryable refusal belonged (r27 finding 3). The claim is runSet's.
 func (e *Engine) takeSet() (*setReq, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -294,11 +309,6 @@ func (e *Engine) takeSet() (*setReq, bool) {
 			r.reply <- setAnswer{err: err}
 			continue
 		}
-		// The claim, told to the caller in the same locked section that makes
-		// it: from here this request WILL be put to the provider, so a caller
-		// whose context ends can no longer say the change did not happen
-		// (setReq.claimed).
-		close(r.claimed)
 		return r, true
 	}
 	return nil, false
@@ -346,8 +356,36 @@ func (e *Engine) serveSets() {
 }
 
 // runSet is one settings change, start to finish, on the worker's goroutine:
-// the room for its delta, the provider, then the barrier that learns the
-// delta's revision.
+// the last word on whether it runs at all, the claim, the provider, then the
+// barrier that learns the delta's revision.
+//
+// # The claim
+//
+// Everything that can still refuse this request without running it is decided
+// in ONE locked section, and only then is the request claimed (setReq.claimed).
+// That is what makes the claim mean "the provider is about to be asked" and
+// nothing weaker, so ErrSetOutcomeUnknown is never stored for a change that
+// provably did not happen (r27 finding 3). Three things can refuse it:
+//
+//   - the engine's gate, which Close or Stop can have shut since this request
+//     was queued: ErrNotAccepting;
+//   - the log's outbox, which is checked HERE and not at queueing time, because
+//     a Set that waited in the queue is judged by the room there is when its
+//     turn comes, and because this is the last moment at which nothing has
+//     changed yet: ErrUnavailable;
+//   - the request's own context, re-read because it can have ended between
+//     takeSet and this section: the plain context error, and nothing run (r23's
+//     rule).
+//
+// The two GATE refusals are preferred to the context error when both are true,
+// which is takeSet's own precedence for a closed engine — it answers everything
+// queued with ErrNotAccepting whatever those requests' contexts say — and it is
+// the answer that serves the caller better: a gate refusal is forgotten by the
+// receipts table, so the command id stays retryable and a resend made once the
+// door reopens is a genuine attempt, where a stored context error would be
+// replayed for ever (receipts.go, "What is stored, and what is left retryable").
+//
+// # The flush
 //
 // The flush is what makes Rev answerable at all — the delta's number is
 // assigned by the log's drainer, on another goroutine — and it is not a
@@ -356,16 +394,31 @@ func (e *Engine) serveSets() {
 // an error. It passes no session done channel, as every flush of the engine's
 // does: the session's own close closes the log, which is what frees it.
 func (e *Engine) runSet(r *setReq) (SetResult, error) {
+	if h := e.hooks; h != nil && h.beforeRunSet != nil {
+		// A test barrier, nil in every other build: it parks the worker in the
+		// one gap where a request is neither queued nor claimed, which is the
+		// whole of what r27 finding 3 is about.
+		h.beforeRunSet()
+	}
 	e.mu.Lock()
 	refused := e.refusalLocked()
 	room := e.log.OutboxRoom()
-	e.mu.Unlock()
-	if refused != nil {
+	ctxErr := r.ctxErr()
+	switch {
+	case refused != nil:
+		e.mu.Unlock()
 		return SetResult{}, refused
-	}
-	if !room {
+	case !room:
+		e.mu.Unlock()
 		return SetResult{}, ErrUnavailable
+	case ctxErr != nil:
+		e.mu.Unlock()
+		return SetResult{}, ctxErr
 	}
+	// Nothing left that could refuse it: the claim is made here, in the section
+	// that established that, and the lock released before the provider is asked.
+	close(r.claimed)
+	e.mu.Unlock()
 	var (
 		out agent.SetOutcome
 		err error

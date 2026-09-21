@@ -113,16 +113,43 @@ func defaultConfigOptions() []map[string]any {
 	}
 }
 
-// modelConfigScript names the two scripts that advertise the model option, and
+// modelConfigScript names the scripts that advertise the model option, and
 // refusesSetModel the one of them that is the whole of such an agent: it
 // answers session/set_model with -32601, the live wire for a method an agent
 // does not implement, so a client's set_model → set_config fallback runs end to
 // end instead of being simulated (r25 finding 3).
 func modelConfigScript(script string) bool {
-	return script == "modelconfig" || script == "modelconfig-refuse"
+	return script == "modelconfig" || script == "modelconfig-refuse" || script == "preinstall"
 }
 
 func refusesSetModel(script string) bool { return script == "modelconfig-refuse" }
+
+// preinstallTitle is the title the `preinstall` script sends before it answers
+// session/new, named here because the test reads it back.
+const preinstallTitle = "named before the reply"
+
+// preinstallUpdates are the three settings updates `preinstall` sends BEFORE it
+// answers session/new: a mode, a title and its whole option list with the model
+// moved. craze's ACP client has no session id yet, so it buffers them and
+// dispatches them inside NewSession — on Start's own goroutine, before the
+// snapshot that reply carries is installed. Every one of them contradicts that
+// snapshot on purpose (r27 finding 1).
+func (s *server) preinstallUpdates() {
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateCurrentMode,
+		CurrentModeID: "plan",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateSessionInfo,
+		"title":         preinstallTitle,
+	})
+	cfg := modelConfigOptions()
+	cfg[len(cfg)-1]["currentValue"] = "composer"
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateConfigOption,
+		"configOptions": cfg,
+	})
+}
 
 // modelConfigOptions is defaultConfigOptions plus the option a provider that
 // has no session/set_model keeps its MODEL in: category "model", whose values
@@ -349,6 +376,9 @@ func (s *server) onRequest(msg *acp.Message) {
 		if planExitScript(s.script) {
 			currentMode = "plan"
 		}
+		if s.script == "preinstall" {
+			s.preinstallUpdates()
+		}
 		s.reply(msg.ID, map[string]any{
 			"sessionId": fakeSessionID,
 			"modes": map[string]any{
@@ -412,6 +442,21 @@ func (s *server) onRequest(msg *acp.Message) {
 			return
 		}
 		s.reply(msg.ID, map[string]any{})
+		if s.script == "modellate" {
+			// The agent introduces its model option only AFTER session/set_model
+			// has been answered, and the list it sends still carries the value
+			// the option held BEFORE that set_model. That is the first-appearance
+			// schedule of r27 finding 2, on the wire: a client that reads a first
+			// report as authoritative puts the model back where it was.
+			s.mu.Lock()
+			s.config = modelConfigOptions()
+			cfg := s.config
+			s.mu.Unlock()
+			s.update(fakeSessionID, map[string]any{
+				"sessionUpdate": acp.UpdateConfigOption,
+				"configOptions": cfg,
+			})
+		}
 	case acp.MethodSessionSetMode:
 		var p acp.SetModeParams
 		_ = json.Unmarshal(msg.Params, &p)

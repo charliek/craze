@@ -957,6 +957,140 @@ func TestStartReturnsWithThePrimaryFullAndNobodyReading(t *testing.T) {
 	})
 }
 
+// TestAnUpdateAppliedBeforeTheInstallSurvivesIt is r27 finding 1. session/new's
+// reply installs the session id in the ACP client, and from that instant the
+// read loop dispatches live updates to onUpdate — while Start is still on its
+// way to the section that installs the snapshot that reply carried. An update
+// that lands in that window is NEWER than the response, and the install used to
+// assign the response over it: the snapshot rolled back, and the install delta
+// contradicted the delta the update had already enqueued, so a client folding
+// the stream ended on the older value for good.
+//
+// Both halves of the window are here. "After the reply" is the read loop's
+// version, forced with the session's install barrier rather than sampled;
+// "before the reply" is the other half, where the agent speaks first and the
+// ACP client flushes its buffer inside NewSession, on Start's own goroutine
+// (acp's flushSessionUpdates). In each case the update contradicts the response
+// on three sections at once, and Snapshot() and the fold must both end on the
+// update's values.
+func TestAnUpdateAppliedBeforeTheInstallSurvivesIt(t *testing.T) {
+	t.Run("after session/new's reply", func(t *testing.T) {
+		s := newTestSession(t, Options{
+			Binary:    fakeAgentPath(t),
+			ExtraArgs: []string{"-script=modelconfig"},
+			Workspace: t.TempDir(),
+			Stderr:    io.Discard,
+		})
+		// The barrier stands exactly where the read loop's update would land:
+		// after the reply, before the install. Driving onUpdate from it is the
+		// read loop's own call, on a goroutine the install cannot outrun.
+		s.beforeInstall = func() {
+			s.onUpdate(currentModeNotification("plan"))
+			s.onUpdate(modelConfigNotification("composer"))
+			s.onUpdate(sessionInfoNotification("named before the install"))
+		}
+		if err := s.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		wantTheInstallKeptTheUpdate(t, s, "named before the install")
+	})
+	t.Run("before session/new's reply", func(t *testing.T) {
+		s := startScript(t, "preinstall", false)
+		wantTheInstallKeptTheUpdate(t, s, "named before the reply")
+	})
+}
+
+// wantTheInstallKeptTheUpdate is the assertion both halves share: the mode, the
+// title, the model and the config option the update moved all survive the
+// install — in Snapshot(), and in the fold a client builds from the deltas,
+// which is the half the finding is really about.
+func wantTheInstallKeptTheUpdate(t *testing.T, s *session, title string) {
+	t.Helper()
+	awaitCatalog(t, s)
+	_ = s.log.Flush(context.Background(), s.done)
+	evs := drainBuffered(s)
+	snap := s.Snapshot()
+	if snap.CurrentMode != "plan" {
+		t.Fatalf("the install put the mode back to %q", snap.CurrentMode)
+	}
+	if snap.Title != title {
+		t.Fatalf("the install left the title %q, want %q", snap.Title, title)
+	}
+	if snap.CurrentModel != "composer" {
+		t.Fatalf("the install put the model back to %q", snap.CurrentModel)
+	}
+	if opt := ModelConfigOption(snap); opt == nil || opt.Current != "composer" {
+		t.Fatalf("the install put the config option back: %+v", snap.Config)
+	}
+	// State order is event order: the install delta is the LAST word and it
+	// agrees with the update rather than undoing it.
+	wantFoldMatchesSnapshot(t, evs, snap)
+	if got := foldDeltas(evs); got.Mode != "plan" || got.Title != title || got.Model != "composer" {
+		t.Fatalf("a client folding the stream ends on mode %q, title %q, model %q\n%s",
+			got.Mode, got.Title, got.Model, formatEvents(evs))
+	}
+}
+
+// TestAFirstModelOptionDoesNotUndoASetModel is r27 finding 2, over an agent
+// that really does introduce its model option late: `modellate` advertises none
+// at session/new and sends its first config list only once session/set_model
+// has been answered — still carrying the value the option held BEFORE that
+// set_model.
+//
+// The first-appearance rule of r25 finding 3 exists because a session that
+// starts without a model option has to learn its model from the update that
+// introduces one. This is that rule's blind spot: with no previous option to
+// compare against, a first report that is merely STALE looked exactly like a
+// change, and adopting it put the model back where the setter had moved it
+// from. A direct set_model made with no option advertised now leaves a marker
+// that first report consumes and derives nothing from.
+func TestAFirstModelOptionDoesNotUndoASetModel(t *testing.T) {
+	s := startScript(t, "modellate", false)
+	settle(t, s)
+	if ModelConfigOption(s.Snapshot()) != nil {
+		t.Fatal("the session already advertises a model option, so nothing is introduced here")
+	}
+	if got := s.Snapshot().CurrentModel; got != "default" {
+		t.Fatalf("the session started on %q", got)
+	}
+	if _, err := s.SetModel(t.Context(), "c-1/1", "composer"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	waitFor(t, "the agent's first config list", func() bool {
+		return ModelConfigOption(s.Snapshot()) != nil
+	})
+	snap := s.Snapshot()
+	if opt := ModelConfigOption(snap); opt.Current != "default" {
+		t.Fatalf("the first list carried %q, so there was nothing stale to adopt", opt.Current)
+	}
+	if snap.CurrentModel != "composer" {
+		t.Fatalf("the option's first appearance put the model back to %q", snap.CurrentModel)
+	}
+	_ = s.log.Flush(context.Background(), s.done)
+	for _, ev := range drainBuffered(s) {
+		if ev.Type == EventMeta && ev.State != nil && ev.State.Config != nil && ev.State.Model != nil {
+			t.Fatalf("the first appearance carried the model section: %+v", ev.State)
+		}
+	}
+	// The marker is spent, and an option that agrees with the model still says
+	// nothing: nothing changed.
+	s.onUpdate(modelConfigNotification("composer"))
+	if ev := oneBufferedEvent(t, s); ev.State.Model != nil {
+		t.Fatalf("an option that agrees with the model carried the model section: %+v", ev.State)
+	}
+	if got := s.Snapshot().CurrentModel; got != "composer" {
+		t.Fatalf("the model moved to %q on an update that changed nothing", got)
+	}
+	// And a report that really MOVES the option is a change like any other.
+	s.onUpdate(modelConfigNotification("default"))
+	if ev := oneBufferedEvent(t, s); ev.State.Model == nil || *ev.State.Model != "default" {
+		t.Fatalf("a real change of the option carried %+v", ev.State)
+	}
+	if got := s.Snapshot().CurrentModel; got != "default" {
+		t.Fatalf("a real change of the option left the model on %q", got)
+	}
+}
+
 // TestSetTitleRefusedForRoomChangesNothing: SetTitle is the one settings verb
 // with no provider behind it, so its check for room in the log is atomic with
 // its mutation and it can honestly refuse — with nothing renamed and nothing
