@@ -14,13 +14,17 @@ import (
 // Force: the permission is answered by policy, no opening is ever published —
 // so a forced `craze prompt --json` run gains no permission line — and the one
 // ending carries the body, which is what makes the record self-contained.
+//
+// Its id is a hidden one (asks.go's hiddenMark): the baseline's Force path
+// never called nextID, so an id a user never sees must not spend the number the
+// next visible card would have had (review r17, finding 8).
 func TestForcedPermissionIsOneAutomaticEndingWithNoOpening(t *testing.T) {
 	s := startScriptOpts(t, "permission", Options{Force: true})
 	log := collect(t, s)
 	if _, err := s.Prompt(t.Context(), "go"); err != nil {
 		t.Fatal(err)
 	}
-	u := log.waitAsk(t, "perm-1")
+	u := log.waitAsk(t, "perm-x1")
 	if u.Outcome != AskAutomatic || u.By != AskByPolicy {
 		t.Fatalf("ending %+v", u)
 	}
@@ -49,7 +53,7 @@ func TestForcedPermissionWithNoAllowOptionIsCancelledByPolicy(t *testing.T) {
 	if !dec.Cancelled {
 		t.Fatalf("decision %+v", dec)
 	}
-	u := log.waitAsk(t, "perm-1")
+	u := log.waitAsk(t, "perm-x1")
 	if u.Outcome != AskCancelled || u.By != AskByPolicy || u.Body == nil {
 		t.Fatalf("ending %+v", u)
 	}
@@ -100,11 +104,46 @@ func TestAnAutomaticAnswerIsRecordedBeforeTheAgentsNextOutput(t *testing.T) {
 	}
 }
 
+// A cursor/ask_question carrying no questions at all, answered by policy. The
+// agent gets the accepted reply with empty answers it always got, and the Auto
+// question line it always had is still published: the registry's "the zero
+// AskAnswer is never valid" rule briefly turned this into cancelled-by-policy,
+// which nothing in plan 021 licenses (asks.go's validateAnswer).
+func TestAnAutomaticQuestionWithNoQuestionsIsAnsweredNotCancelled(t *testing.T) {
+	// No Force and not Interactive is the policy `craze prompt` runs under:
+	// questions are answered with each question's first option.
+	s := newAskSession(t, Options{})
+	if p := EffectiveApproval(s.opts); p.Question != ApprovalFirstOption {
+		t.Fatalf("the policy is %+v, want first_option for a question", p)
+	}
+	log := collect(t, s)
+
+	dec := s.onAskQuestion(inTurn(), acp.AskQuestionRequest{ToolCallID: "t1"})
+
+	if dec.Cancelled {
+		t.Fatalf("decision %+v, want the accepted reply an empty question always got", dec)
+	}
+	if len(dec.Answers) != 0 || dec.Skip {
+		t.Fatalf("decision %+v, want empty answers and no skip", dec)
+	}
+	// The line is still the Auto question with no answers, and its ending is
+	// automatic rather than a cancel.
+	q := log.waitQuestion(t)
+	if !q.Auto || len(q.Questions) != 0 || len(q.Answers) != 0 {
+		t.Fatalf("the opening is %+v, want the Auto shape with nothing in it", q)
+	}
+	u := log.waitAsk(t, q.ID)
+	if u.Outcome != AskAutomatic || u.By != AskByPolicy {
+		t.Fatalf("ending %+v, want automatic by policy", u)
+	}
+}
+
 // A request ACP answered before any handler of craze's ran — a cancel or a
 // close that got there first, or a turn that had gone stale. No handler runs,
 // so nothing parks and, before this, the agent's question left no trace at all
 // (§2.3, panel astra 12). Each becomes one self-contained ending, with the
-// body and no opening.
+// body and no opening — and a hidden id, because a request no card was ever
+// raised for must not renumber the cards that are (review r17, finding 8).
 func TestEarlyAnsweredRequestsBecomeOneSelfContainedEnding(t *testing.T) {
 	for _, tc := range []struct {
 		reason  acp.EarlyAnswerReason
@@ -124,7 +163,7 @@ func TestEarlyAnsweredRequestsBecomeOneSelfContainedEnding(t *testing.T) {
 					Options:  []acp.PermissionOption{{OptionID: "yes", Kind: acp.KindAllowOnce}},
 				}},
 			})
-			u := log.waitAsk(t, "perm-1")
+			u := log.waitAsk(t, "perm-x1")
 			if u.Outcome != tc.outcome || u.By != AskByProvider {
 				t.Fatalf("ending %+v", u)
 			}

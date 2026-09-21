@@ -35,17 +35,26 @@ func oneEarlyAnswer(t *testing.T, early chan EarlyAnswer) EarlyAnswer {
 	return <-early
 }
 
-// oneDisposition is the single Replied call a handler goroutine made. The
-// goroutine dropping its request from the incoming map is the barrier for "it
-// has finished" — dropIncoming is runIncoming's deferred last act, after the
-// reply and after Replied — so once the map is empty the count is final.
-func oneDisposition(t *testing.T, p *rawPipe, disp chan ReplyDisposition) ReplyDisposition {
+// requestsDone is the barrier for "every request goroutine has finished".
+// dropIncoming is runIncoming's deferred last act — after the reply, after
+// Replied and after any early-answer hook — so once the incoming map is empty
+// nothing else can run for those requests and a count of what they did is
+// final. A reply read off the wire is NOT that barrier: the goroutine that
+// wrote it can still be between the write and its own return.
+func requestsDone(t *testing.T, p *rawPipe) {
 	t.Helper()
 	waitUntil(t, func() bool {
 		p.client.incomingMu.Lock()
 		defer p.client.incomingMu.Unlock()
 		return len(p.client.incoming) == 0
 	})
+}
+
+// oneDisposition is the single Replied call a handler goroutine made, counted
+// once its request goroutine has finished.
+func oneDisposition(t *testing.T, p *rawPipe, disp chan ReplyDisposition) ReplyDisposition {
+	t.Helper()
+	requestsDone(t, p)
 	if len(disp) != 1 {
 		t.Fatalf("Replied ran %d times, want exactly once", len(disp))
 	}
@@ -253,15 +262,22 @@ func TestEarlyAnswerByStaleTurnIsReported(t *testing.T) {
 // The hook is for the requests nobody else can see. A request whose handler ran
 // is the session's own business, and reporting it too would give it two
 // endings.
+//
+// The reply proves runIncoming took the live path; the request goroutine
+// FINISHING is what makes "and it reported nothing" an assertion rather than a
+// coin toss (review r16, finding 7). Reading the reply and counting at once
+// would pass against an implementation that reported early after its handler
+// returned, because the goroutine can still be between the write and its own
+// return.
 func TestNoEarlyAnswerWhenTheHandlerRan(t *testing.T) {
 	p := newRawPipe(t)
 	early := watchEarly(p.client)
 	p.client.SetAskHandler(func(Arrival, AskQuestionRequest) AskDecision { return AskDecision{Skip: true} })
 	p.send(t, 1, MethodCursorAskQuestion, reportAskParams)
-	// The handler's own reply is the barrier: runIncoming took the live path.
 	if got := string(p.readWithin(t, 3*time.Second, "the handler's reply").Result); got != `{"outcome":{"outcome":"skipped"}}` {
 		t.Fatalf("the handler replied %s", got)
 	}
+	requestsDone(t, p)
 	if n := len(early); n != 0 {
 		t.Fatalf("the early-answer handler ran %d times for a request its handler answered", n)
 	}

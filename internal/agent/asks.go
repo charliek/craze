@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/journal"
@@ -74,16 +75,33 @@ const (
 	// is; only the choice between "cancelled" and "turn_ended" is lost, and
 	// only for a handler goroutine delayed past keptTurns turns.
 	keptTurns = 64
+	// hiddenMark separates the two id namespaces every kind has.
+	//
+	// An ask whose opening **is** published takes the next VISIBLE number —
+	// perm-7, ask-7, plan-7 — which is the id a user, a golden and `craze
+	// prompt --json` see. An ask whose opening is **never** published takes the
+	// next HIDDEN number, spelled perm-x7, from a counter of its own.
+	//
+	// The split is what keeps `--json` byte-identical to the baseline's apart
+	// from seq (review r17, finding 8): the baseline spent a visible number
+	// exactly when it published an opening — live.go's park called nextID only
+	// after it had decided to park, and its Force path never called nextID at
+	// all — so a request nobody was ever shown must not renumber the ones they
+	// were. A question delayed until ACP called it stale would otherwise
+	// consume ask-1 in an EventAsk that --json drops, and print the next
+	// ordinary question as ask-2 where the baseline printed ask-1.
+	hiddenMark = "x"
 )
 
 var (
 	// ErrBadAnswer is an answer that does not fit its ask: an option the
 	// request never offered, an empty permission answer that does not say it
 	// cancels, a question answer naming a question or an option the request
-	// does not have, a plan answered with neither accept nor reject, or any
-	// answer carrying another kind's fields. Nothing is emitted and the ask
-	// stays open, so the agent is not left waiting for an Esc because a client
-	// mis-addressed one call (05: bad_request).
+	// does not have, an empty answer to a question that did ask something, a
+	// plan answered with neither accept nor reject, or any answer carrying
+	// another kind's fields. Nothing is emitted and the ask stays open, so the
+	// agent is not left waiting for an Esc because a client mis-addressed one
+	// call (05: bad_request).
 	ErrBadAnswer = errors.New("agent: that answer does not fit the ask")
 	// ErrAlreadyResolved answers an ask that already has an ending: answered,
 	// cancelled, ended with its turn or closed — and an id whose terminal
@@ -105,7 +123,8 @@ var (
 	// holds. It is a caller's own bug — a test emitting two cards with one id —
 	// and it is refused rather than allowed to steal the first ask's answers:
 	// nothing is minted, nothing is enqueued, and the ask holding that id is
-	// untouched.
+	// untouched. An id whose ask has ENDED is free again, which is what lets
+	// tui.Stub's tests raise a second card with the id the first one had.
 	ErrAskIDInUse = errors.New("agent: that ask id is already open")
 )
 
@@ -275,13 +294,21 @@ func orAsk(a Approval) Approval {
 // the registry mints them itself (BeginTurn), so no session can hand it a
 // counter it reuses, and no two turns can ever be the same token.
 //
+// **A nonzero token carries the identity of the registry that minted it**, so
+// one session's turn can never name another's: two registries both mint turn 1,
+// and without that identity `B.EndTurn(tokenFromA)` would end B's own turn-1
+// asks and `B.Open(ctx, tokenFromA, …)` would park against A's live state
+// (review r16, finding 4). A foreign token is refused rather than looked up.
+//
 // **The zero value is the no-turn token**, and it is what a request that
 // belongs to no turn of craze's own is opened against: one that arrived between
 // turns, or during a turn the agent started itself. Such an ask ends by an
 // answer, a cancel, its asking call's context or the close — never by EndTurn,
 // which is what "turn_ended applies only to asks opened against a token whose
-// EndTurn has been notified" means (§3.6).
-type TurnToken struct{ n uint64 }
+// EndTurn has been notified" means (§3.6). It belongs to no registry in
+// particular: every registry reads it as its own no-turn token, which is what
+// makes it the token a caller with no turn of its own passes.
+type TurnToken struct{ reg, n uint64 }
 
 // NoTurn reports whether t is the no-turn token.
 func (t TurnToken) NoTurn() bool { return t.n == 0 }
@@ -375,11 +402,18 @@ type AskRequest struct {
 	// ID adopts a caller-chosen id in place of minting one. It exists for
 	// tui.Stub, whose tests emit card events with ids of their own at some
 	// forty sites (plan item 22): the Stub routes the opening through the
-	// registry and the test's id survives. An adopted id spends no counter,
-	// and one that does not spell "<kind>-N" is only known for as long as its
-	// record is kept — past the eviction bound an answer naming it is
+	// registry and the test's id survives.
+	//
+	// An adopted id spends no counter of its own, but one that spells an id
+	// this registry could have minted — "perm-7", "perm-x7" — takes that
+	// number out of its counter, so no later mint can reproduce it
+	// (accountForLocked). An id that spells neither is only known for as long
+	// as its record is kept: past the eviction bound an answer naming it is
 	// ErrUnknownAsk rather than ErrAlreadyResolved, because nothing is left to
 	// say it was ever issued.
+	//
+	// An id an OPEN ask already holds is ErrAskIDInUse; one whose ask has
+	// ended may be adopted again.
 	ID string
 }
 
@@ -392,13 +426,16 @@ type AskRequest struct {
 //     (internal/cli/prompt.go's --permission-decision, and the TUI's Esc).
 //   - question: Answers maps each question's id to option ids it offered — the
 //     invented "OK" option's empty id included, since that is a real offered
-//     option (live.go's questionsFromRequest) — or Skip skips the lot.
+//     option (live.go's questionsFromRequest) — or Skip skips the lot. A
+//     question that asks nothing takes no answers at all.
 //   - plan: exactly one of Accept and Reject.
 //
-// The zero AskAnswer is not a valid answer to anything, which is deliberate: a
-// plan's reject is the explicit Reject and not the absence of Accept, so a
-// client that sends an empty answer gets ErrBadAnswer instead of silently
-// rejecting the plan it meant to accept.
+// The zero AskAnswer is not a valid answer to anything but a question that
+// asks nothing, which is deliberate: a plan's reject is the explicit Reject and
+// not the absence of Accept, so a client that sends an empty answer gets
+// ErrBadAnswer instead of silently rejecting the plan it meant to accept. A
+// question with no questions of its own is the one ask an empty answer really
+// answers — there is nothing else anyone could say about it.
 type AskAnswer struct {
 	OptionID string
 	Cancel   bool
@@ -516,18 +553,33 @@ type askEntry struct {
 // turnState is what the registry knows about one minted turn token.
 type turnState struct{ cancelled, ended bool }
 
+// askRegistries numbers the registries built in this process, so every turn
+// token can carry which one minted it (TurnToken). It is only ever compared,
+// never published: the ids a client sees are the ask ids and the incarnation.
+// It starts at one, so zero is no registry and the zero token is foreign to
+// none.
+var askRegistries atomic.Uint64
+
 // AskRegistry is one session's asks (plan 021 §3.6). One is built beside the
 // session's event log, and the session, the provider's handlers and the
 // clients above the seam all meet here.
 type AskRegistry struct {
 	log *EventLog
 	now func() time.Time
+	// id is this registry's identity, immutable and set at construction. Every
+	// nonzero token it mints carries it, and a token carrying another's is
+	// refused (foreign).
+	id uint64
 
-	mu    sync.Mutex
-	seq   map[AskKind]int
-	open  map[string]*askEntry
-	order []string
-	done  map[string]*askEntry
+	mu sync.Mutex
+	// seq and hiddenSeq are a kind's two id counters (hiddenMark): seq numbers
+	// the asks whose opening is published, hiddenSeq the ones nobody is ever
+	// shown.
+	seq       map[AskKind]int
+	hiddenSeq map[AskKind]int
+	open      map[string]*askEntry
+	order     []string
+	done      map[string]*askEntry
 	// doneIDs is the eviction order of the terminal records, oldest first.
 	doneIDs []string
 	turnSeq uint64
@@ -551,13 +603,23 @@ func NewAskRegistry(log *EventLog, now func() time.Time) *AskRegistry {
 		now = time.Now
 	}
 	return &AskRegistry{
-		log:   log,
-		now:   now,
-		seq:   map[AskKind]int{},
-		open:  map[string]*askEntry{},
-		done:  map[string]*askEntry{},
-		turns: map[uint64]*turnState{},
+		log:       log,
+		now:       now,
+		id:        askRegistries.Add(1),
+		seq:       map[AskKind]int{},
+		hiddenSeq: map[AskKind]int{},
+		open:      map[string]*askEntry{},
+		done:      map[string]*askEntry{},
+		turns:     map[uint64]*turnState{},
 	}
+}
+
+// foreign reports whether token was minted by a different registry. The zero
+// value is every registry's no-turn token and is never foreign; anything else
+// carrying another registry's identity names a turn this one has never heard of
+// and never will (review r16, finding 4).
+func (r *AskRegistry) foreign(token TurnToken) bool {
+	return !token.NoTurn() && token.reg != r.id
 }
 
 // BeginTurn mints the token for a turn that is starting. The session calls it
@@ -568,7 +630,7 @@ func (r *AskRegistry) BeginTurn() TurnToken {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.turnSeq++
-	t := TurnToken{n: r.turnSeq}
+	t := TurnToken{reg: r.id, n: r.turnSeq}
 	r.turns[t.n] = &turnState{}
 	return t
 }
@@ -583,7 +645,16 @@ func (r *AskRegistry) BeginTurn() TurnToken {
 // A cancel with no turn of craze's own — the no-turn token — still answers
 // every open ask; it marks nothing, so nothing is refused afterwards. A later
 // BeginTurn is a new token either way, so the next turn parks normally.
+//
+// **A foreign token does nothing at all**, neither marking a turn nor draining
+// this registry's asks (review r16, finding 4). "Cancel everything" is what the
+// no-turn token asks for, deliberately and in this registry's own name; a token
+// another session minted says nothing about this session, and taking it as the
+// stronger meaning would let one session's cancel answer another's cards.
 func (r *AskRegistry) CancelTurn(token TurnToken) {
+	if r.foreign(token) {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.markLocked(token, true)
@@ -595,9 +666,12 @@ func (r *AskRegistry) CancelTurn(token TurnToken) {
 // its turn finishes.
 //
 // EndTurn on the no-turn token does nothing at all. Asks opened between turns
-// are exactly the ones no turn's ending may take away.
+// are exactly the ones no turn's ending may take away. Neither does one on a
+// foreign token: another registry's turn ending is not this registry's, and
+// token equality alone would end whichever of its own turns happened to carry
+// the same number (review r16, finding 4).
 func (r *AskRegistry) EndTurn(token TurnToken) {
-	if token.NoTurn() {
+	if token.NoTurn() || r.foreign(token) {
 		return
 	}
 	r.mu.Lock()
@@ -636,7 +710,9 @@ func (r *AskRegistry) Close() {
 // **A refused Open still mints an id and writes exactly one self-contained
 // ending** — an EventAsk carrying the body, with no opening before it — and
 // answers with an ask that is already resolved, so its caller reads the outcome
-// through the same Wait as any other. It is refused when the registry has
+// through the same Wait as any other. Its id comes from the **hidden** counter
+// (hiddenMark), because nobody is ever shown its opening and a refusal must not
+// renumber the cards that are shown. It is refused when the registry has
 // closed (closing), when the turn was cancelled (cancelled, by cancel) or has
 // ended (turn_ended), and when the log's outbox has no room to raise it
 // (cancelled, by unavailable — the provider sees a cancel). The ending itself
@@ -652,14 +728,16 @@ func (r *AskRegistry) Open(ctx context.Context, token TurnToken, req AskRequest)
 	body := req.Body.clone()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if req.ID != "" {
-		if _, open := r.open[req.ID]; open {
-			return nil, fmt.Errorf("%w: %s", ErrAskIDInUse, req.ID)
-		}
+	// Whether the opening will be published is decided first, in this same
+	// section, because it is also what decides which of the kind's two counters
+	// the id comes from (hiddenMark).
+	outcome, by, refused := r.refusalLocked(token)
+	id, err := r.reserveLocked(req.Kind, req.ID, refused)
+	if err != nil {
+		return nil, err
 	}
-	id := r.mintLocked(req)
 	setBodyID(req.Kind, body, id)
-	if outcome, by, refused := r.refusalLocked(token); refused {
+	if refused {
 		e := r.newEntryLocked(id, req.Kind, token, body)
 		r.retireLocked(e, outcome, by, "", AskAnswer{}, "")
 		return &Ask{r: r, id: id, ctx: ctx, e: e}, nil
@@ -678,31 +756,50 @@ func (r *AskRegistry) Open(ctx context.Context, token TurnToken, req AskRequest)
 //
 //   - a question or a plan writes the Auto opening today's headless path
 //     already writes — answers or accepted filled in — **and** one automatic
-//     ending, as one batch, so nothing can land between them;
+//     ending, as one batch, so nothing can land between them. That opening is
+//     published, so its id is a VISIBLE one (hiddenMark), exactly as the
+//     baseline's nextID gave the headless path;
 //   - a permission writes no opening at all and one automatic ending carrying
 //     the body, so a forced `craze prompt --json` run gains no permission line;
+//     its id is a hidden one, because the baseline's Force path spent no
+//     number at all;
 //   - a permission the policy could not answer — Force with no allow option
 //     offered — is cancelled, by policy, with the body. Pass AskAnswer{Cancel:
 //     true}, or any answer that does not fit the request: a policy that cannot
-//     answer its own ask is a cancel.
+//     answer its own ask is a cancel. A question or a plan that degrades this
+//     way publishes no opening either, and so is hidden too.
 //
 // It is a mandatory completion: the decision has been made and the provider is
 // about to be told it, so the record is written whatever the outbox holds
 // (§3.3's list of rejectable admissions has Open, not this).
+//
+// It adopts req.ID like Open, and unlike Open it has no error to refuse one
+// with. An adopted id an OPEN ask already holds is therefore **minted over**:
+// the record is written under a freshly minted id, the caller replies from the
+// record it is handed — which carries the id the registry actually used — and
+// the open ask keeps its id, its answers and its waiters. Refusing instead
+// would lose the one record a decision already taken is owed, and adopting
+// anyway is exactly the overwrite finding 1 is about.
 func (r *AskRegistry) Automatic(token TurnToken, req AskRequest, a AskAnswer) AskRecord {
 	body := req.Body.clone()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id := r.mintLocked(req)
-	setBodyID(req.Kind, body, id)
-	e := r.newEntryLocked(id, req.Kind, token, body)
-	ans, label, err := validateAnswer(req.Kind, body, a)
+	ans, label, bad := validateAnswer(req.Kind, body, a)
 	outcome, by := AskAutomatic, AskByPolicy
-	if err != nil || ans.Cancel {
+	if bad != nil || ans.Cancel {
 		outcome, ans, label = AskCancelled, AskAnswer{Cancel: true}, ""
 	}
+	// Whether the Auto opening is published decides the id's namespace, and it
+	// is decided here, in the section that publishes it.
+	publishes := req.Kind != AskPermission && outcome == AskAutomatic
+	id, err := r.reserveLocked(req.Kind, req.ID, !publishes)
+	if err != nil {
+		id = r.mintLocked(req.Kind, !publishes)
+	}
+	setBodyID(req.Kind, body, id)
+	e := r.newEntryLocked(id, req.Kind, token, body)
 	var batch []Event
-	if req.Kind != AskPermission && outcome == AskAutomatic {
+	if publishes {
 		e.published = true
 		batch = append(batch, r.opening(req.Kind, body, true, ans))
 	}
@@ -722,8 +819,11 @@ func (r *AskRegistry) Automatic(token TurnToken, req AskRequest, a AskAnswer) As
 //
 // outcome and by are the caller's: cancelled, turn_ended or closing, by the
 // provider. It always mints — a request answered before any handler ran never
-// had a craze id to adopt — and it is a mandatory completion, like every other
-// ending.
+// had a craze id to adopt — and always from the **hidden** counter
+// (hiddenMark), because it publishes no opening: at the baseline such a request
+// never reached the session's counter at all, and letting it spend a visible
+// number would renumber the next card a user really sees (review r17, finding
+// 8). It is a mandatory completion, like every other ending.
 func (r *AskRegistry) AnsweredEarly(token TurnToken, req AskRequest, outcome AskOutcome, by string) AskRecord {
 	if outcome == "" {
 		outcome = AskCancelled
@@ -734,7 +834,7 @@ func (r *AskRegistry) AnsweredEarly(token TurnToken, req AskRequest, outcome Ask
 	body := req.Body.clone()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id := r.mintLocked(AskRequest{Kind: req.Kind})
+	id := r.mintLocked(req.Kind, true)
 	setBodyID(req.Kind, body, id)
 	e := r.newEntryLocked(id, req.Kind, token, body)
 	r.retireLocked(e, outcome, by, "", AskAnswer{}, "")
@@ -952,16 +1052,104 @@ func (r *AskRegistry) newEntryLocked(id string, kind AskKind, token TurnToken, b
 	}
 }
 
-// mintLocked is the ask's id: the caller's adopted one, or the next of this
-// kind's own counter. Every mint spends a number — an ask that opened, one
-// that was refused, one policy answered — exactly as live.go's nextID does, so
-// the numbering a golden pins never depends on how an ask ended.
-func (r *AskRegistry) mintLocked(req AskRequest) string {
-	if req.ID != "" {
-		return req.ID
+// reserveLocked is where **every** ask id comes from: Open, a refused Open,
+// Automatic and AnsweredEarly all go through it, so the registry has one id
+// namespace per kind and per visibility, and nothing can mint an id an open ask
+// already holds (review r16, finding 1). Before it, only an explicit req.ID was
+// checked against the open map, so a later mint could land on an adopted id,
+// overwrite its entry and strand its waiter for ever.
+//
+// An adopted id an OPEN ask holds is ErrAskIDInUse: nothing is minted, nothing
+// is enqueued, and the ask holding it keeps its answers and its waiters. One
+// whose ask has ENDED is free again — tui.Stub's tests raise a second card with
+// the id the first one had — and one that spells an id this registry could have
+// minted takes its number out of that counter, so a later mint can never
+// reproduce it and unknownLocked still knows it was issued once its record has
+// been evicted.
+//
+// hidden picks the kind's counter: false for an ask that will publish its
+// opening, true for one nobody will ever be shown (hiddenMark).
+func (r *AskRegistry) reserveLocked(kind AskKind, adopt string, hidden bool) (string, error) {
+	if adopt == "" {
+		return r.mintLocked(kind, hidden), nil
 	}
-	r.seq[req.Kind]++
-	return fmt.Sprintf("%s-%d", req.Kind.idPrefix(), r.seq[req.Kind])
+	if _, open := r.open[adopt]; open {
+		return "", fmt.Errorf("%w: %s", ErrAskIDInUse, adopt)
+	}
+	r.accountForLocked(adopt)
+	return adopt, nil
+}
+
+// accountForLocked advances the counter an adopted id belongs to past it, so
+// the adopted and the minted halves of one namespace cannot collide.
+func (r *AskRegistry) accountForLocked(id string) {
+	kind, hidden, num, ok := canonicalID(id)
+	if !ok {
+		return
+	}
+	if seq := r.counterLocked(hidden); num > seq[kind] {
+		seq[kind] = num
+	}
+}
+
+// mintLocked is the next id of this kind's own counter, **skipping any an open
+// ask already holds**. Every mint spends a number of the counter it draws on —
+// one that publishes an opening spends a visible number, exactly as live.go's
+// nextID did, and one that never publishes spends a hidden one — and a number
+// whose id is taken is spent all the same, so the counter advances past it
+// rather than a second ask being given a live id. With no adoption in play the
+// visible sequence is exactly perm-1, perm-2, … as goldens and the --json
+// fixtures pin it.
+func (r *AskRegistry) mintLocked(kind AskKind, hidden bool) string {
+	seq := r.counterLocked(hidden)
+	for {
+		seq[kind]++
+		id := askID(kind, hidden, seq[kind])
+		if _, open := r.open[id]; !open {
+			return id
+		}
+	}
+}
+
+// counterLocked is one of the two per-kind id counters (hiddenMark).
+func (r *AskRegistry) counterLocked(hidden bool) map[AskKind]int {
+	if hidden {
+		return r.hiddenSeq
+	}
+	return r.seq
+}
+
+// askID spells one id in one of a kind's two namespaces: perm-7 visible,
+// perm-x7 hidden. The two can never collide, whatever the counters stand at.
+func askID(kind AskKind, hidden bool, n int) string {
+	if hidden {
+		return fmt.Sprintf("%s-%s%d", kind.idPrefix(), hiddenMark, n)
+	}
+	return fmt.Sprintf("%s-%d", kind.idPrefix(), n)
+}
+
+// canonicalID reads an id this registry could have minted: a known kind's
+// prefix, the hidden mark or nothing, and the exact decimal spelling of a
+// positive number. "perm-007" and "perm-+7" parse as 7 and are ids craze never
+// issued, so they are neither accounted for nor recognised (review r16, finding
+// 6).
+func canonicalID(id string) (kind AskKind, hidden bool, num int, ok bool) {
+	prefix, n, cut := strings.Cut(id, "-")
+	if !cut {
+		return "", false, 0, false
+	}
+	kind, known := kindForPrefix(prefix)
+	if !known {
+		return "", false, 0, false
+	}
+	if rest, marked := strings.CutPrefix(n, hiddenMark); marked {
+		n, hidden = rest, true
+	}
+	num, err := strconv.Atoi(n)
+	if err != nil || num < 1 || strconv.Itoa(num) != n {
+		return "", false, 0, false
+	}
+	return kind, hidden, num, true
 }
 
 // refusalLocked is why an Open cannot park, and "" when it can.
@@ -970,6 +1158,13 @@ func (r *AskRegistry) refusalLocked(token TurnToken) (AskOutcome, string, bool) 
 		return AskClosing, AskByClose, true
 	}
 	if !token.NoTurn() {
+		if token.reg != r.id {
+			// Another registry's turn. It is not one of this session's and
+			// never will be, so turn_ended is the honest outcome: that turn is
+			// over as far as anything here can ever know (review r16, finding
+			// 4).
+			return AskTurnEnded, AskByTurn, true
+		}
 		st, known := r.turns[token.n]
 		switch {
 		case !known:
@@ -1047,12 +1242,15 @@ func (r *AskRegistry) retire(e *askEntry, outcome AskOutcome, by, cause string, 
 		At:    e.rec.ResolvedAt,
 		Cause: cause,
 		Ask: &AskUpdate{
-			ID:       e.rec.ID,
-			Kind:     e.rec.Kind,
-			Outcome:  outcome,
-			By:       by,
+			ID:      e.rec.ID,
+			Kind:    e.rec.Kind,
+			Outcome: outcome,
+			By:      by,
+			// A copy of the answer map, never the one the record keeps: the
+			// event and the registry must not share memory (review r16,
+			// finding 2).
 			OptionID: ans.OptionID,
-			Answers:  ans.Answers,
+			Answers:  cloneAnswers(ans.Answers),
 			Skip:     ans.Skip,
 			Accepted: ans.Accept,
 			Label:    label,
@@ -1071,11 +1269,16 @@ func (r *AskRegistry) retireLocked(e *askEntry, outcome AskOutcome, by, cause st
 // endingBody is the body an ending carries: the opening, for an ask whose
 // opening was never published, and nothing for one a consumer has already seen
 // raised.
+//
+// It is a deep copy. A self-contained ending is the only place the registry
+// hands out a whole body on an event, and a consumer that changes what it
+// received must not be able to change what the record says was asked, or race
+// Record() while it does (review r16, finding 2).
 func (r *AskRegistry) endingBody(e *askEntry) *AskBody {
 	if e.published {
 		return nil
 	}
-	body := e.rec.Body
+	body := e.rec.Body.clone()
 	return &body
 }
 
@@ -1107,8 +1310,9 @@ func (r *AskRegistry) entryLocked(id string) *askEntry {
 // record answers for itself; past the eviction bound the id's own counter does,
 // because "perm-7" with the permission counter at 7 or more was issued by this
 // incarnation and therefore ended (05 pins already_resolved for exactly that,
-// never unknown_ask). An adopted id that does not spell "<kind>-N" has no
-// counter to consult and is unknown once its record has gone.
+// never unknown_ask). Each namespace answers for itself: "perm-x7" is read
+// against the hidden counter. An adopted id that spells neither has no counter
+// to consult and is unknown once its record has gone.
 func (r *AskRegistry) unknownLocked(id string) error {
 	if _, kept := r.done[id]; kept {
 		return fmt.Errorf("%w: %s", ErrAlreadyResolved, id)
@@ -1119,34 +1323,32 @@ func (r *AskRegistry) unknownLocked(id string) error {
 	return fmt.Errorf("%w: %s", ErrUnknownAsk, id)
 }
 
-// issuedLocked reports whether this incarnation ever minted id.
+// issuedLocked reports whether this incarnation ever issued id — minted it, or
+// accounted for it when somebody adopted it (accountForLocked).
 func (r *AskRegistry) issuedLocked(id string) bool {
-	prefix, n, ok := strings.Cut(id, "-")
-	if !ok {
-		return false
-	}
-	kind, known := kindForPrefix(prefix)
-	if !known {
-		return false
-	}
-	num, err := strconv.Atoi(n)
-	if err != nil {
-		return false
-	}
-	return num >= 1 && num <= r.seq[kind]
+	kind, hidden, num, ok := canonicalID(id)
+	return ok && num <= r.counterLocked(hidden)[kind]
 }
 
 // opening is the ask's opening event: the three kinds and shapes every
 // consumer already renders, with the id filled in and nothing else touched.
 // auto marks the headless path, whose opening carries the answer craze sent.
+//
+// The event carries a **deep copy** of the body, never the registry's own: a
+// consumer that changes an opening it received — an option id on a permission,
+// a question's options — must not be able to change what Answer validates
+// against, and must not race Record() while it does (review r16, finding 2).
+// Auto and its answers are therefore the event's alone too, which is also why
+// the record keeps the request exactly as it was offered.
 func (r *AskRegistry) opening(kind AskKind, body AskBody, auto bool, ans AskAnswer) Event {
+	body = body.clone()
 	ev := Event{At: r.now()}
 	switch kind {
 	case AskQuestion:
 		ev.Type, ev.Question = EventQuestion, body.Question
 		if auto && ev.Question != nil {
 			ev.Question.Auto = true
-			ev.Question.Answers = ans.Answers
+			ev.Question.Answers = cloneAnswers(ans.Answers)
 		}
 	case AskPlan:
 		ev.Type, ev.Plan = EventPlan, body.Plan
@@ -1212,7 +1414,16 @@ func validateAnswer(kind AskKind, body AskBody, a AskAnswer) (AskAnswer, string,
 			return AskAnswer{Skip: true}, "", nil
 		}
 		if len(a.Answers) == 0 {
-			return AskAnswer{}, "", fmt.Errorf("%w: a question takes its answers or a skip", ErrBadAnswer)
+			// A question that asks nothing — cursor really does send
+			// ask_question with no questions — is answered with no answers, by
+			// craze's policy and by a client alike: it is the only thing either
+			// could say, and it was answered accepted with empty answers before
+			// the registry existed. A question that asks anything still needs
+			// its answers or a skip.
+			if len(questionsOffered(body.Question)) > 0 {
+				return AskAnswer{}, "", fmt.Errorf("%w: a question takes its answers or a skip", ErrBadAnswer)
+			}
+			return AskAnswer{Answers: cloneAnswers(a.Answers)}, "", nil
 		}
 		if err := checkQuestionAnswers(body.Question, a.Answers); err != nil {
 			return AskAnswer{}, "", err
@@ -1264,6 +1475,15 @@ func checkQuestionAnswers(q *QuestionEvent, answers map[string][]string) error {
 		}
 	}
 	return nil
+}
+
+// questionsOffered is what a question ask actually asked, nil for one with no
+// body at all — which, like one with an empty list, asks nothing.
+func questionsOffered(q *QuestionEvent) []Question {
+	if q == nil {
+		return nil
+	}
+	return q.Questions
 }
 
 func questionByID(q *QuestionEvent, id string) (Question, bool) {

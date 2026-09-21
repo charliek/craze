@@ -813,7 +813,11 @@ func TestArrivalTellsARetiredTurnFromNoTurn(t *testing.T) {
 				t.Fatalf("a retired turn's request raised a card: %+v", ev.Question)
 			}
 		}
-		u := log.waitAsk(t, "ask-1")
+		// A hidden id: no card was raised for it, and at the baseline such a
+		// request never reached the session's counter at all, so it must not
+		// spend the number the next visible question would have had (review
+		// r17, finding 8).
+		u := log.waitAsk(t, "ask-x1")
 		if u.Outcome != AskTurnEnded || u.Body == nil {
 			t.Fatalf("ending %+v", u)
 		}
