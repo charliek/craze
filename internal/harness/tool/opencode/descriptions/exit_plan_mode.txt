@@ -1,5 +1,5 @@
 Claude Code calls this tool `ExitPlanMode`.
 
-Exit plan mode and present your plan to the user.
+Present your plan to the user for approval.
 
-Use this after you have finished writing your plan to the plan file in plan mode.
+Use this after you have finished writing your plan to the plan file in plan mode. If the user approves, your turn ends there and the user starts the implementation; if not, you stay in plan mode and revise the plan.

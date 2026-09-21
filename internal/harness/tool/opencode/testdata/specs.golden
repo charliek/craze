@@ -1,5 +1,5 @@
 # The opencode profile's tools as a model is offered them (Profile.ToolsJSON).
-# tools_sha256: 491540070947b504e73932c1936bf77a729ec6654e8038d52107ab62020f2653
+# tools_sha256: 654537569228aeed600f2444bf02423d747d61d67a8dbf7937eb2387933c15be
 
 === tool: bash
 --- description
@@ -373,9 +373,9 @@ Ask the user one or more multiple-choice questions.
 --- description
 Claude Code calls this tool `ExitPlanMode`.
 
-Exit plan mode and present your plan to the user.
+Present your plan to the user for approval.
 
-Use this after you have finished writing your plan to the plan file in plan mode.
+Use this after you have finished writing your plan to the plan file in plan mode. If the user approves, your turn ends there and the user starts the implementation; if not, you stay in plan mode and revise the plan.
 --- parameters
 {
   "type": "object",

@@ -263,7 +263,12 @@ Edits to those descriptions:
     Claude Code finds it (D-53);
   - todo_write keeps the template's first two paragraphs;
   - ask_user_question drops the sentence promising an automatic "Other"
-    choice: craze's card offers the options and nothing else.
+    choice: craze's card offers the options and nothing else;
+  - exit_plan_mode says "Present your plan to the user for approval" where
+    grok-build says "Exit plan mode and present your plan to the user", and
+    gains a sentence on what approval and refusal do: here the tool does not
+    leave plan mode — approving ends the turn, and the mode is the user's to
+    change (D-51) — so grok-build's words would tell the model something false.
 
 Result texts taken from grok-build: a question nobody answered
 (ask_user_question/format.rs:22-34) and a plan the person wants revised
