@@ -193,6 +193,8 @@ func TestAskUserQuestionValidates(t *testing.T) {
 		"option not object":  map[string]any{"questions": []any{map[string]any{"question": "q?", "options": []any{"a"}}}},
 		"blank label":        map[string]any{"questions": []any{map[string]any{"question": "q?", "options": []any{map[string]any{"label": ""}}}}},
 		"multi_select typed": map[string]any{"questions": []any{map[string]any{"question": "q?", "options": []any{opt}, "multi_select": "yes"}}},
+		"duplicate label": map[string]any{"questions": []any{map[string]any{"question": "q?", "options": []any{
+			map[string]any{"label": "Use this", "description": "SQLite"}, map[string]any{"label": "Use this", "description": "Postgres"}}}}},
 		"duplicate question": map[string]any{"questions": many(2, map[string]any{"question": "q?", "options": []any{opt}})},
 	}
 	a := &stubAsker{}
@@ -364,10 +366,77 @@ func TestExitPlanModeReadsOnlyAPlan(t *testing.T) {
 	})
 }
 
+// The plan file's path is craze's own; what is at it may not be. Made an alias
+// of the harness's key file it is refused, as every file tool refuses that
+// file, and never presented — with a key the session's redactor has never
+// seen, which is the case redaction cannot cover.
+func TestExitPlanModeRefusesTheCredentialsFile(t *testing.T) {
+	const rotated = "sk-rotated-on-disk-since-the-table-loaded"
+	for name, alias := range map[string]func(cred, plan string) error{
+		"a symlink":   os.Symlink,
+		"a hard link": os.Link,
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := &stubAsker{outcome: tool.PlanApproved}
+			f, plan := askFixture(t, a, nil)
+			cred := filepath.Join(f.env.Home, CredentialsFile)
+			must(t, os.WriteFile(cred, []byte("api_key = \""+rotated+"\"\n"), 0o600))
+			must(t, alias(cred, plan))
+			_, res := f.call(t, "exit_plan_mode", map[string]any{})
+			if !res.IsError || res.Text != credentialsText {
+				t.Fatalf("result = %+v, want the credentials refusal", res)
+			}
+			if len(a.plans) != 0 || strings.Contains(res.Text, rotated) {
+				t.Fatalf("the key file was presented: %+v", a.plans)
+			}
+		})
+	}
+}
+
 // The plan is read under craze's path lock, which a write still landing
-// holds, and the lock is given back before the person is asked: nobody waits
-// on a card to write a file.
-func TestExitPlanModeAndThePathLock(t *testing.T) {
+// holds: a reader started behind it waits, as the write tool's own call does
+// (TestWriteTakesThePathLock), and a cancel is what gets it back. The asker
+// here answers at once, so a reader that took no lock would have returned the
+// person's answer instead of waiting.
+func TestExitPlanModeWaitsForThePathLock(t *testing.T) {
+	a := &stubAsker{outcome: tool.PlanRejected}
+	f, plan := askFixture(t, a, nil)
+	must(t, os.WriteFile(plan, []byte("# plan"), 0o600))
+	real, err := realPath(plan)
+	must(t, err)
+	unlock, err := f.env.Locks.Lock(context.Background(), real)
+	must(t, err)
+	defer unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan tool.Result, 1)
+	go func() {
+		_, res := f.callCtx(t, ctx, "exit_plan_mode", map[string]any{})
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		t.Fatalf("exit_plan_mode did not wait for the lock: %+v", res)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case res := <-done:
+		if !res.IsError || res.Class != tool.ClassAborted {
+			t.Fatalf("result = %+v, want aborted", res)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a cancelled exit_plan_mode kept waiting")
+	}
+	if len(a.plans) != 0 {
+		t.Fatalf("the plan was presented from behind a held lock: %+v", a.plans)
+	}
+}
+
+// And the lock is given back before the person is asked: nobody waits on a
+// card to write a file.
+func TestExitPlanModeAsksWithoutTheLock(t *testing.T) {
 	a := &stubAsker{block: true}
 	f, plan := askFixture(t, a, nil)
 	must(t, os.WriteFile(plan, []byte("# plan"), 0o600))

@@ -152,6 +152,7 @@ func parseQuestion(raw json.RawMessage) (tool.Question, error) {
 		return tool.Question{}, fmt.Errorf("options has %d items, more than the %d a question may offer", len(rawOpts), maxOptions)
 	}
 	opts := make([]tool.QuestionOption, len(rawOpts))
+	labels := map[string]bool{}
 	for i, r := range rawOpts {
 		if t := jsonType(r); t != "object" {
 			return tool.Question{}, fmt.Errorf("options[%d] must be an object, got a JSON %s", i, t)
@@ -167,6 +168,12 @@ func parseQuestion(raw json.RawMessage) (tool.Question, error) {
 		if strings.TrimSpace(label) == "" {
 			return tool.Question{}, fmt.Errorf("options[%d]: label must not be empty", i)
 		}
+		// The model is answered with the labels picked, so two options with
+		// one label would tell it nothing about which the person chose.
+		if labels[label] {
+			return tool.Question{}, fmt.Errorf("options[%d]: duplicate label %q; give each option its own", i, label)
+		}
+		labels[label] = true
 		desc, _, err := oa.strOrNull("description")
 		if err != nil {
 			return tool.Question{}, fmt.Errorf("options[%d]: %w", i, err)

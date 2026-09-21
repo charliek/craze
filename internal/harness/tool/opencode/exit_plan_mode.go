@@ -140,6 +140,14 @@ func readPlan(ctx context.Context, env tool.Env, path string) (string, error) {
 	}
 	defer func() { _ = f.Close() }()
 	switch {
+	case isCredentials(env, real, info):
+		// The plan file's path is craze's own, but what is at it is not: made a
+		// symlink or a hard link to the key file, it would be shown to the
+		// person and sent to the model as a plan. Redaction is no answer — a
+		// key rotated on disk since the table loaded is one the redactor has
+		// never seen — so it is refused as every file tool refuses it, on the
+		// descriptor that was opened.
+		return "", fail(tool.ClassToolError, credentialsText)
 	case !info.Mode().IsRegular():
 		return "", fail(tool.ClassToolError, "The plan file is not a regular file: "+path)
 	case info.Size() > maxPlanBytes:

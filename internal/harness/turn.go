@@ -334,6 +334,7 @@ type turn struct {
 	// and every call of the step that has not started by then is refused
 	// (plan 023 §3.4, D-51).
 	planApproved bool
+	approvedAt   int // the asking call's place in its step (toolCall.order)
 
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
@@ -469,10 +470,24 @@ func (t *turn) halted([]fantasy.StepResult) bool {
 // planWasApproved records that the person approved the plan. The session's
 // asker calls it, on the tool goroutine that asked, before exit_plan_mode has
 // its answer (asker.go).
+//
+// It also fixes which call asked, as a place in the step: the last of the
+// calls running now. The asking call is one of them, and it is not Parallel,
+// so Fantasy dispatches nothing after it until it returns — whatever else is
+// running was placed before it. Every call placed after it is refused
+// (runTool).
 func (t *turn) planWasApproved() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.planApproved {
+		return
+	}
 	t.planApproved = true
+	for _, c := range t.list {
+		if c.running && c.order > t.approvedAt {
+			t.approvedAt = c.order
+		}
+	}
 }
 
 // stepStarted opens step n (from 0): its number, its clock, and an empty

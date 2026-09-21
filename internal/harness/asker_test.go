@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/harness/tool"
 	"github.com/charliek/craze/internal/harness/tool/opencode"
@@ -27,8 +28,10 @@ type parkedAsker struct {
 	plan   chan tool.PlanOutcome // the person's decision on a plan
 	answer chan tool.Answers     // the person's answer to a question
 
-	deaf    bool
-	release chan struct{} // closed to let a deaf ask go
+	deaf        bool
+	deafOutcome tool.PlanOutcome // what a deaf ask decides once it is let go
+	release     chan struct{}    // closed to let a deaf ask go
+	returned    chan struct{}    // closed as a deaf PresentPlan returns
 
 	mu    sync.Mutex
 	plans int
@@ -37,10 +40,11 @@ type parkedAsker struct {
 
 func newParkedAsker() *parkedAsker {
 	return &parkedAsker{
-		asked:   make(chan string, 8),
-		plan:    make(chan tool.PlanOutcome, 8),
-		answer:  make(chan tool.Answers, 8),
-		release: make(chan struct{}),
+		asked:    make(chan string, 8),
+		plan:     make(chan tool.PlanOutcome, 8),
+		answer:   make(chan tool.Answers, 8),
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
 	}
 }
 
@@ -70,7 +74,8 @@ func (a *parkedAsker) PresentPlan(ctx context.Context, p tool.PlanOffer) (tool.P
 	a.asked <- p.Text
 	if a.deaf {
 		<-a.release
-		return tool.PlanUnanswered, nil
+		close(a.returned)
+		return a.deafOutcome, nil
 	}
 	select {
 	case out := <-a.plan:
@@ -110,7 +115,9 @@ func lastLines(t *testing.T, s *Session, n int) []string {
 func TestAnApprovedPlanEndsTheTurn(t *testing.T) {
 	a := newParkedAsker()
 	_, s, m := planSession(t, a)
-	m.push(callStep(callParts("c1", "exit_plan_mode", "{}")), answerWith("never requested"))
+	// Nothing is scripted after the step: a request that followed the approval
+	// would find no answer and fail the turn.
+	m.push(callStep(callParts("c1", "exit_plan_mode", "{}")))
 
 	out := start(context.Background(), s, "plan it", nil)
 	if text := await(t, a.asked, "the plan to be presented"); text != "# The plan\n\n1. do it\n" {
@@ -132,10 +139,15 @@ func TestAnApprovedPlanEndsTheTurn(t *testing.T) {
 		t.Fatalf("the session is in %q mode; approving a plan does not change it", s.Mode())
 	}
 
-	// The next turn is an ordinary one: the approval was that turn's alone.
-	m.push(answerWith("ok"))
-	if res := run(t, s, "and now?"); res.StopReason != StopEndTurn || len(m.requests()) != 2 {
-		t.Fatalf("the next turn = %+v after %d requests", res, len(m.requests()))
+	// The next turn is an ordinary one: the approval was that turn's alone. It
+	// runs a tool, so an approval carried over would refuse the call and stop
+	// the turn before the request that reads its result.
+	m.push(callStep(callParts("c2", "todo_write", `{"todos":[{"id":"a","content":"first"}]}`)), answerWith("ok"))
+	if res := run(t, s, "and now?"); res.StopReason != StopEndTurn || len(m.requests()) != 3 {
+		t.Fatalf("the next turn = %+v after %d requests, want end_turn after 3", res, len(m.requests()))
+	}
+	if got := lastLines(t, s, 2)[0]; !strings.Contains(got, "[result c2: ") {
+		t.Fatalf("the next turn's call was answered %q", got)
 	}
 }
 
@@ -244,18 +256,20 @@ func TestACancelJoinsABlockedAsk(t *testing.T) {
 			}
 		})
 	}
-	t.Run("an approval that raced the cancel", func(t *testing.T) {
+	// The order is forced, not raced: the asker is deaf, so it is still inside
+	// PresentPlan when the cancel lands, and only then is it let go — with an
+	// approval. The turn has both, and reports the cancel.
+	t.Run("an approval that arrives after the cancel", func(t *testing.T) {
 		a := newParkedAsker()
+		a.deaf, a.deafOutcome = true, tool.PlanApproved
 		_, s, m := planSession(t, a)
 		m.push(callStep(callParts("c1", "exit_plan_mode", "{}")))
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		out := start(ctx, s, "go", nil)
 		await(t, a.asked, "the plan to be presented")
-		// Both are ready before the asker looks: whichever its select takes,
-		// the turn was cancelled, and that is what it reports.
-		a.plan <- tool.PlanApproved
 		cancel()
+		close(a.release)
 		if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopCancelled {
 			t.Fatalf("Run = %+v, %v; a cancel outranks an approval", got.res, got.err)
 		}
@@ -263,8 +277,9 @@ func TestACancelJoinsABlockedAsk(t *testing.T) {
 }
 
 // A tool that will not return holds the turn — Fantasy joins every tool
-// goroutine, and nothing times an ask out (D-52) — and the turn ends the
-// moment it does. Nothing here depends on how long that is.
+// goroutine, and nothing times an ask out (D-52) — and the turn ends only
+// once it has. The join is what is asserted: the asker's return is recorded
+// at its own boundary, and Run must not complete before it.
 func TestATurnWaitsForAToolThatWillNotReturn(t *testing.T) {
 	a := newParkedAsker()
 	a.deaf = true
@@ -275,17 +290,27 @@ func TestATurnWaitsForAToolThatWillNotReturn(t *testing.T) {
 	out := start(ctx, s, "go", nil)
 	await(t, a.asked, "the plan to be presented")
 	cancel()
+	// A bounded look, which can only ever fail a Run that did not wait.
 	select {
 	case got := <-out:
 		t.Fatalf("Run returned %+v, %v while its tool was still running", got.res, got.err)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	close(a.release)
-	if got := await(t, out, "the turn, once its tool let go"); got.err != nil || got.res.StopReason != StopCancelled {
+	got := await(t, out, "the turn, once its tool let go")
+	select {
+	case <-a.returned:
+	default:
+		t.Fatal("Run completed before the tool it was joining had returned")
+	}
+	if got.err != nil || got.res.StopReason != StopCancelled {
 		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
 	}
 	if n := len(m.requests()); n != 1 {
 		t.Fatalf("the model saw %d requests", n)
+	}
+	if n := s.tools.d.Pending(); n != 0 {
+		t.Fatalf("%d prepared calls leaked", n)
 	}
 }
 
