@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"testing"
 
 	"github.com/charliek/craze/internal/agent"
@@ -63,7 +64,10 @@ func TestStubStartWithoutReplayEmitsNothing(t *testing.T) {
 }
 
 // TestStubSetTitlePins mirrors the live session: /rename wins over a title the
-// agent produces later, and neither call emits anything.
+// agent produces later, it publishes one Title delta with no Event.Text — so a
+// rename still prints no title line and writes no agent title to the index —
+// and AgentTitle, which is test set-up rather than a session saying something,
+// publishes nothing at all.
 func TestStubSetTitlePins(t *testing.T) {
 	s := NewStub()
 	t.Cleanup(func() { _ = s.Close() })
@@ -71,14 +75,25 @@ func TestStubSetTitlePins(t *testing.T) {
 	if got := s.Snapshot().Title; got != "the agent's own title" {
 		t.Fatalf("title %q", got)
 	}
-	s.SetTitle("fix the flaky pty test")
+	if err := s.SetTitle("c-1/2", "fix the flaky pty test"); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
 	s.AgentTitle("a later agent title")
 	if got := s.Snapshot().Title; got != "fix the flaky pty test" {
 		t.Fatalf("the pin did not hold: %q", got)
 	}
+	// The delta is enqueued, so the barrier is the log's own.
+	if err := s.EventLog().Flush(context.Background(), nil); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	ev := <-s.Events()
+	if ev.Type != agent.EventMeta || ev.Text != "" || ev.Cause != "c-1/2" ||
+		ev.State == nil || ev.State.Title == nil || *ev.State.Title != "fix the flaky pty test" {
+		t.Fatalf("renaming published %+v", ev)
+	}
 	select {
 	case ev := <-s.Events():
-		t.Fatalf("renaming emits nothing, got %+v", ev)
+		t.Fatalf("a rename publishes exactly one event, and then %+v", ev)
 	default:
 	}
 }

@@ -150,6 +150,9 @@ func shape(ev agent.Event) string {
 	case agent.EventQueue:
 		return fmt.Sprintf("queue %s %q", ev.QueueChange, ev.Queue.Text)
 	case agent.EventMeta:
+		if st := settingsShape(ev); st != "" {
+			return st
+		}
 		s := sendNowDelta(ev)
 		switch {
 		case s == nil && ev.State != nil && ev.State.Reason != "":
@@ -173,6 +176,45 @@ func shape(ev agent.Event) string {
 		return fmt.Sprintf("foreign running=%v", ev.ForeignTurn.Running)
 	}
 	return string(ev.Type)
+}
+
+// settingsShape is shape's spelling of a settings delta: the sections it
+// carries, in full, and "" for a delta that carries none. A delta prefixed
+// "agent" is an agent-initiated update, which fills Event.Mode or Event.Text
+// beside its section — the two fields a craze-initiated change must leave empty
+// (plan 021 correction 20).
+func settingsShape(ev agent.Event) string {
+	st := ev.State
+	if st == nil {
+		return ""
+	}
+	var parts []string
+	if st.Title != nil {
+		parts = append(parts, fmt.Sprintf("title %q", *st.Title))
+	}
+	if st.Mode != nil {
+		parts = append(parts, fmt.Sprintf("mode %q", *st.Mode))
+	}
+	if st.Model != nil {
+		parts = append(parts, fmt.Sprintf("model %q", *st.Model))
+	}
+	if st.Config != nil {
+		parts = append(parts, fmt.Sprintf("config %d", len(st.Config.Options)))
+	}
+	if st.Commands != nil {
+		parts = append(parts, fmt.Sprintf("commands %d", len(st.Commands.Commands)))
+	}
+	if st.Plugins != nil {
+		parts = append(parts, fmt.Sprintf("plugins %d", len(st.Plugins.Plugins)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	out := strings.Join(parts, " ")
+	if ev.Mode != "" || ev.Text != "" {
+		out = "agent " + out
+	}
+	return out
 }
 
 // armedShape is shape's spelling of the delta that arms a send-now, for a test

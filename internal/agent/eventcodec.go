@@ -547,9 +547,52 @@ type wireAskBody struct {
 // omitempty on a pointer omits only nil, which is exactly the distinction the
 // type is for.
 type wireState struct {
-	SendNow *wireSendNow `json:"sendNow,omitempty"`
-	Reason  string       `json:"reason,omitempty"`
-	Detail  string       `json:"detail,omitempty"`
+	Title    *string          `json:"title,omitempty"`
+	Mode     *string          `json:"mode,omitempty"`
+	Model    *string          `json:"model,omitempty"`
+	Config   *wireConfig      `json:"config,omitempty"`
+	Commands *wireCommands    `json:"commands,omitempty"`
+	Plugins  *wirePluginsList `json:"plugins,omitempty"`
+	SendNow  *wireSendNow     `json:"sendNow,omitempty"`
+	Reason   string           `json:"reason,omitempty"`
+	Detail   string           `json:"detail,omitempty"`
+}
+
+// The three list sections. Each keeps its slice under a key of its own rather
+// than being the section itself, so a section that is present and empty is
+// {"options":null} and one that is absent is no key at all — the distinction
+// StateDelta's pointers are for.
+type wireConfig struct {
+	Options []wireConfigOption `json:"options,omitempty"`
+}
+
+type wireCommands struct {
+	Commands []wireCommandInfo `json:"commands,omitempty"`
+}
+
+type wirePluginsList struct {
+	Plugins []wirePluginCommand `json:"plugins,omitempty"`
+}
+
+// wireConfigOption is a ConfigOption, wireSelectValue a SelectValue and
+// wireCommandInfo a CommandInfo, each field for field in the same order.
+type wireConfigOption struct {
+	ID           string            `json:"id,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	Category     string            `json:"category,omitempty"`
+	Type         string            `json:"type,omitempty"`
+	Current      string            `json:"current,omitempty"`
+	SelectValues []wireSelectValue `json:"selectValues,omitempty"`
+}
+
+type wireSelectValue struct {
+	Value string `json:"value,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
+type wireCommandInfo struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // wireSendNow is SendNowState, field for field in the same order, so it
@@ -597,6 +640,20 @@ func convertSlice[From, To any](s []From, conv func(From) To) []To {
 
 func toWireTodo(t Todo) wireTodo { return wireTodo(t) }
 func eventTodo(t wireTodo) Todo  { return Todo(t) }
+
+func toWireConfigOption(c ConfigOption) wireConfigOption {
+	return wireConfigOption{
+		ID: c.ID, Name: c.Name, Category: c.Category, Type: c.Type, Current: c.Current,
+		SelectValues: convertSlice(c.SelectValues, func(v SelectValue) wireSelectValue { return wireSelectValue(v) }),
+	}
+}
+
+func configOptionOf(c wireConfigOption) ConfigOption {
+	return ConfigOption{
+		ID: c.ID, Name: c.Name, Category: c.Category, Type: c.Type, Current: c.Current,
+		SelectValues: convertSlice(c.SelectValues, func(v wireSelectValue) SelectValue { return SelectValue(v) }),
+	}
+}
 
 func toWireEvent(ev Event) wireEvent {
 	w := wireEvent{
@@ -653,7 +710,23 @@ func toWireEvent(ev Event) wireEvent {
 		w.Command = &wireCommand{PluginCommand: wirePluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
 	}
 	if s := ev.State; s != nil {
-		w.State = &wireState{SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail}
+		w.State = &wireState{
+			Title: s.Title, Mode: s.Mode, Model: s.Model,
+			SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
+		}
+		if c := s.Config; c != nil {
+			w.State.Config = &wireConfig{Options: convertSlice(c.Options, toWireConfigOption)}
+		}
+		if c := s.Commands; c != nil {
+			w.State.Commands = &wireCommands{Commands: convertSlice(c.Commands, func(c CommandInfo) wireCommandInfo {
+				return wireCommandInfo(c)
+			})}
+		}
+		if p := s.Plugins; p != nil {
+			w.State.Plugins = &wirePluginsList{Plugins: convertSlice(p.Plugins, func(p PluginCommand) wirePluginCommand {
+				return wirePluginCommand(p)
+			})}
+		}
 	}
 	if ev.Err != nil {
 		class, code := classifyEventErr(ev.Err)
@@ -826,7 +899,23 @@ func (w *wireEvent) event() Event {
 		ev.Command = &ExpandedCommand{PluginCommand: PluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
 	}
 	if s := w.State; s != nil {
-		ev.State = &StateDelta{SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail}
+		ev.State = &StateDelta{
+			Title: s.Title, Mode: s.Mode, Model: s.Model,
+			SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
+		}
+		if c := s.Config; c != nil {
+			ev.State.Config = &ConfigState{Options: convertSlice(c.Options, configOptionOf)}
+		}
+		if c := s.Commands; c != nil {
+			ev.State.Commands = &CommandsState{Commands: convertSlice(c.Commands, func(c wireCommandInfo) CommandInfo {
+				return CommandInfo(c)
+			})}
+		}
+		if p := s.Plugins; p != nil {
+			ev.State.Plugins = &PluginsState{Plugins: convertSlice(p.Plugins, func(p wirePluginCommand) PluginCommand {
+				return PluginCommand(p)
+			})}
+		}
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}

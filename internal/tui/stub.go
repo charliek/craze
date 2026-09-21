@@ -266,17 +266,33 @@ func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
 }
 
 // SetTitle is /rename, with the live session's semantics: it replaces
-// Snapshot.Title, emits nothing, and pins the title against a later agent one.
-func (s *Stub) SetTitle(title string) {
+// Snapshot.Title, pins it against a later agent one, and says so in a Title
+// delta with no Event.Text — so a rename still prints no title line. It waits
+// on nothing (it is called from a UI's Update), and it is the one setter that
+// can refuse for want of room in the log, because its check is atomic with its
+// mutation.
+func (s *Stub) SetTitle(cause, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.log.OutboxRoom() {
+		return agent.ErrSetUnavailable
+	}
 	s.snap.Title = title
 	s.titlePinned = true
+	s.enqueueDeltaLocked(cause, &agent.StateDelta{Title: &title})
+	return nil
 }
 
 // AgentTitle is a session_info_update: the agent's own title, which a pin from
 // SetTitle refuses. It is how a test reaches the live session's rule without
 // an agent.
+//
+// Like SetCommands, SetPlugins and the rest of the Set* helpers on this type it
+// publishes nothing: it is test set-up — how a test builds the session it wants
+// before the model looks at it — and not a change a session made while a client
+// was watching. The live session's own equivalent is the read loop's
+// session_info_update, which does publish a delta (live.go's onUpdate); the one
+// helper here that is a *seam* method, SetTitle, publishes one too.
 func (s *Stub) AgentTitle(title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -673,40 +689,46 @@ func stubCallOf(rec agent.AskRecord) stubCall {
 	return c
 }
 
-func (s *Stub) SetModel(_ context.Context, id string) error {
+// The three settings verbs, with the live session's shape (agent.Session): a
+// refusal changes nothing and says nothing, and a change that took is mutated
+// into the snapshot and its delta enqueued in one locked section, so state
+// order is event order here as it is on a real session (plan 021 §3.8). The
+// ticket is the delta's receipt: its Seq, once the log has committed it, is the
+// change's revision.
+func (s *Stub) SetModel(_ context.Context, cause, id string) (*agent.Ticket, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	fail := s.failModel
 	s.failModel = false
 	if fail {
-		s.mu.Unlock()
-		return fmt.Errorf("stub: set model failed")
+		return nil, fmt.Errorf("stub: set model failed")
 	}
 	s.snap.CurrentModel = id
-	s.mu.Unlock()
-	return nil
+	return s.enqueueDeltaLocked(cause, &agent.StateDelta{Model: &id}), nil
 }
 
-func (s *Stub) SetMode(_ context.Context, id string) error {
+func (s *Stub) SetMode(_ context.Context, cause, id string) (*agent.Ticket, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	fail := s.failMode
 	s.failMode = false
 	if fail {
-		s.mu.Unlock()
-		return fmt.Errorf("stub: set mode failed")
+		return nil, fmt.Errorf("stub: set mode failed")
 	}
 	s.snap.CurrentMode = id
-	s.mu.Unlock()
-	return nil
+	// Event.Mode stays empty, as on the live session: it is an agent-initiated
+	// update's field, and a client retires a plan offer on it.
+	return s.enqueueDeltaLocked(cause, &agent.StateDelta{Mode: &id}), nil
 }
 
-func (s *Stub) SetConfig(_ context.Context, id, value string) error {
+func (s *Stub) SetConfig(_ context.Context, cause, id, value string) (*agent.Ticket, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := s.configCalls
 	s.configCalls++
 	if s.failConfigAt == n {
 		s.failConfigAt = -1
-		s.mu.Unlock()
-		return fmt.Errorf("stub: set config failed")
+		return nil, fmt.Errorf("stub: set config failed")
 	}
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
@@ -714,8 +736,19 @@ func (s *Stub) SetConfig(_ context.Context, id, value string) error {
 			break
 		}
 	}
-	s.mu.Unlock()
-	return nil
+	return s.enqueueDeltaLocked(cause, &agent.StateDelta{Config: &agent.ConfigState{
+		Options: cloneStubConfig(s.snap.Config),
+	}}), nil
+}
+
+// enqueueDeltaLocked is the live session's own helper (live.go): one EventMeta
+// carrying st, stamped from the Stub's injected clock, enqueued under mu in the
+// section that changed the snapshot. mu is held, and the outbox's mutex is a
+// leaf, so nothing blocks here.
+func (s *Stub) enqueueDeltaLocked(cause string, st *agent.StateDelta) *agent.Ticket {
+	return s.log.EnqueueTicket(agent.Event{
+		Type: agent.EventMeta, State: st, Cause: cause, At: s.now(),
+	})
 }
 
 func (s *Stub) SetProvider(p agent.Provider) {

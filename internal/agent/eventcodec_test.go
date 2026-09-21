@@ -670,6 +670,43 @@ func TestEventCodecPinsTheWireShape(t *testing.T) {
 			`{"type":"meta","state":{"sendNow":{},"reason":"row_gone"}}`},
 		{Event{Type: EventMeta, State: &StateDelta{SendNow: &SendNowState{}, Reason: SendNowCancelFailed, Detail: "acp: connection closed"}},
 			`{"type":"meta","state":{"sendNow":{},"reason":"cancel_failed","detail":"acp: connection closed"}}`},
+		// The settings sections (plan 021 §3.8). A craze-initiated change
+		// carries its payload here and nowhere else — no top-level mode, no
+		// top-level text — and the cause names the command that asked.
+		{Event{Type: EventMeta, Cause: "c-1/7", State: &StateDelta{Mode: ptr("plan")}},
+			`{"type":"meta","state":{"mode":"plan"},"cause":"c-1/7"}`},
+		{Event{Type: EventMeta, Cause: "c-1/8", State: &StateDelta{Title: ptr("fix the pty flake")}},
+			`{"type":"meta","state":{"title":"fix the pty flake"},"cause":"c-1/8"}`},
+		{Event{Type: EventMeta, State: &StateDelta{Model: ptr("composer")}},
+			`{"type":"meta","state":{"model":"composer"}}`},
+		// An agent-initiated update fills its own field beside the section, and
+		// that is the whole difference: this is what prints a title line and
+		// retires a plan offer.
+		{Event{Type: EventMeta, Mode: "ask", State: &StateDelta{Mode: ptr("ask")}},
+			`{"type":"meta","mode":"ask","state":{"mode":"ask"}}`},
+		{Event{Type: EventMeta, Text: "the agent's own title", State: &StateDelta{Title: ptr("the agent's own title")}},
+			`{"type":"meta","text":"the agent's own title","state":{"title":"the agent's own title"}}`},
+		// Each list section is carried in full, under a key of its own, so a
+		// section that is present and empty ({}) differs from one the delta did
+		// not touch (absent).
+		{Event{Type: EventMeta, State: &StateDelta{Config: &ConfigState{Options: []ConfigOption{{
+			ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: "high",
+			SelectValues: []SelectValue{{Value: "low", Name: "low"}, {Value: "high", Name: "high"}},
+		}}}}},
+			`{"type":"meta","state":{"config":{"options":[{"id":"effort","name":"Effort","category":"thought_level",` +
+				`"type":"select","current":"high","selectValues":[{"value":"low","name":"low"},{"value":"high","name":"high"}]}]}}}`},
+		{Event{Type: EventMeta, State: &StateDelta{
+			Commands: &CommandsState{Commands: []CommandInfo{{Name: "research", Description: "look it up"}}},
+			Plugins: &PluginsState{Plugins: []PluginCommand{{
+				Plugin: "p", Bare: "b", Display: "b", Qualified: "p:b", Description: "d", Kind: "skill",
+			}}},
+		}},
+			`{"type":"meta","state":{"commands":{"commands":[{"name":"research","description":"look it up"}]},` +
+				`"plugins":{"plugins":[{"plugin":"p","bare":"b","display":"b","qualified":"p:b","description":"d","kind":"skill"}]}}}`},
+		{Event{Type: EventMeta, State: &StateDelta{
+			Title: ptr(""), Config: &ConfigState{}, Commands: &CommandsState{}, Plugins: &PluginsState{},
+		}},
+			`{"type":"meta","state":{"title":"","config":{},"commands":{},"plugins":{}}}`},
 	} {
 		got, err := EncodeEvent(tc.ev)
 		if err != nil {

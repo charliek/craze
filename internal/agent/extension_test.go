@@ -1202,6 +1202,11 @@ func TestCatalogStringsSanitised(t *testing.T) {
 
 func TestCurrentModeUpdateSanitised(t *testing.T) {
 	s := newSession(Options{})
+	// Closed, because a mode update is a delta the session enqueues and the
+	// log's own goroutine publishes (plan 021 §3.8): a session left open here
+	// leaves that goroutine running, and the log's leak assertions are process
+	// wide (settleGoroutines).
+	t.Cleanup(func() { _ = s.Close() })
 	go s.onUpdate(acp.SessionNotification{Update: mustJSON(map[string]any{
 		"sessionUpdate": acp.UpdateCurrentMode,
 		"currentModeId": "\x1b[2Jplan",

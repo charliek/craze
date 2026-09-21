@@ -50,6 +50,19 @@ var ErrAgentExited = acp.ErrAgentExited
 // turn has to settle it on this.
 var ErrPromptCancelled = errors.New("agent: prompt cancelled before it was sent")
 
+// ErrSetUnavailable refuses a settings change before it mutates anything
+// because the event log's outbox has no room for the delta it would publish —
+// the rejectable-admission rule of plan 021 §3.3, which the engine spells
+// engine.ErrUnavailable and maps to the code "unavailable". internal/agent
+// cannot see that sentinel (the engine imports this package, never the
+// reverse), so this is its own, beside ErrAskUnavailable, and engine.Code
+// answers "unavailable" for it.
+//
+// Only SetTitle returns it. The verbs that ask a provider are refused for room
+// by their caller, before the provider is asked at all: after the agent has
+// taken a change, refusing it here would say something untrue.
+var ErrSetUnavailable = errors.New("agent: the event log is backed up")
+
 type EventType string
 
 const (
@@ -172,10 +185,19 @@ const (
 // Every section is a pointer, and nil means "this event did not touch that
 // section" — not "that section is now empty". A section that has become empty
 // is a non-nil value saying so, which is the only way one event can say
-// "cleared" and another "unchanged" in the same field. Sections are added as
-// the phase reaches them: the send-now section ships with send-now itself, and
-// Title, Mode, Model, Config, Commands, Plugins and IndexErr arrive with the
-// settings deltas, each as one more field beside these.
+// "cleared" and another "unchanged" in the same field. IndexErr is the one
+// section still to come (plan 021's C12); everything else the phase named is
+// here.
+//
+// **A delta is enqueued by the session under s.mu, in the section that mutates
+// the snapshot** — or by the engine under e.mu, for the send-now section it
+// owns — so the order of the deltas is the order of the state they describe,
+// whoever changed it: the agent on the read loop, a client through
+// engine.Control.Set, or craze's own /rename (plan 021 §3.8, panel astra 14 /
+// CodeRabbit 7). **The revision of a settings change is the delta's Seq**, and
+// because one author writes each section under one lock, a client that folds
+// the stream and a client that reads Snapshot can never disagree about which
+// change was last.
 //
 // A craze-initiated change carries its payload here and nowhere else:
 // Event.Mode and Event.Text stay empty on it, because they are what an
@@ -183,6 +205,33 @@ const (
 // retires a plan offer, the other writes the index and prints a title line
 // (plan 021 correction 20).
 type StateDelta struct {
+	// Title is the session's name, as Snapshot.Title now stands: an agent's
+	// session_info_update, craze's own /rename, or the name a native session
+	// takes from its first prompt. A non-nil empty string is a title that has
+	// been cleared.
+	//
+	// A craze-initiated title (SetTitle) carries it here and leaves Event.Text
+	// empty, so `/rename` prints no title line and writes no agent title to the
+	// index; an agent-initiated one fills Event.Text as well, exactly as it
+	// always did.
+	Title *string
+	// Mode is Snapshot.CurrentMode, and Model is Snapshot.CurrentModel, as they
+	// now stand. As with Title, Event.Mode is filled beside Mode only for an
+	// agent-initiated update, because a client reads that field as "the agent
+	// changed mode" and retires a plan offer on it.
+	Mode  *string
+	Model *string
+	// Config is every option the session advertises, in full — not the one that
+	// changed. The section is the list, because that is what the provider's own
+	// config_option_update carries and what a client mirrors; a delta that
+	// named one option would leave a client unable to tell an option that went
+	// away from one this event did not mention.
+	Config *ConfigState
+	// Commands is the agent's command catalog and Plugins the on-disk entries
+	// resolved against it, both in full and for the same reason Config is. They
+	// change together, on the one update that brings a new catalog.
+	Commands *CommandsState
+	Plugins  *PluginsState
 	// SendNow is the engine's armed send-now, in full: nil when this event did
 	// not touch it, Armed true for a send just armed, and a value with Armed
 	// false for one that is gone, with Reason saying why.
@@ -208,6 +257,17 @@ type StateDelta struct {
 	// encoded without calling anything on it (eventlog.go's Enqueue).
 	Detail string
 }
+
+// The three list sections of a StateDelta. Each is a struct around one slice
+// rather than the slice itself, because a section has to be a pointer: nil
+// means "untouched" and a non-nil empty value means "there are none", and a
+// bare slice cannot say both. Each carries what the session's own snapshot
+// holds, cloned, so the event shares no memory with it (plan 021 §3.8).
+type (
+	ConfigState   struct{ Options []ConfigOption }
+	CommandsState struct{ Commands []CommandInfo }
+	PluginsState  struct{ Plugins []PluginCommand }
+)
 
 // SendNowState is the send-now section of a StateDelta: what the engine has
 // armed, or — with Armed false — that it has nothing armed any more. The text
@@ -755,15 +815,40 @@ type Session interface {
 	// Interject merges text into the running turn without cancelling it.
 	// Only grok can: everything else returns ErrUnsupported before the wire.
 	Interject(ctx context.Context, text string) error
-	SetModel(ctx context.Context, modelID string) error
-	SetMode(ctx context.Context, modeID string) error
-	SetConfig(ctx context.Context, id, value string) error
+	// The three settings verbs. Each asks the provider first, **outside the
+	// session's lock**, and only a change the provider took mutates anything:
+	// a refusal returns its error and publishes nothing at all. A change that
+	// took is then mutated into the snapshot and its StateDelta enqueued in
+	// **one** locked section, so the order of the deltas is the order of the
+	// state — against each other, and against the agent's own updates on the
+	// read loop, which enqueue theirs in the section that mutates too (plan 021
+	// §3.8).
+	//
+	// cause is the command that asked, as Event.Cause spells it ("client/id",
+	// engine.Command.Cause), and "" for a change nobody can claim. The Ticket
+	// is the delta's receipt: after a Flush it carries the event's Seq, which is
+	// the change's **revision** — what a client compares a delayed reply
+	// against. It is nil when nothing was published (a session that publishes
+	// no deltas, a log that is closing).
+	//
+	// They block on the provider and belong on a goroutine that is not the
+	// primary's reader, exactly as they always have. They never refuse for want
+	// of room in the log: the caller checks that *before* the provider is asked,
+	// because a refusal after the agent has taken the change would be a lie.
+	SetModel(ctx context.Context, cause, modelID string) (*Ticket, error)
+	SetMode(ctx context.Context, cause, modeID string) (*Ticket, error)
+	SetConfig(ctx context.Context, cause, id, value string) (*Ticket, error)
 	// SetTitle renames the session in craze alone: ACP v1 has no rename verb.
-	// It emits nothing — it is called from the UI's own update goroutine, and
-	// an emit onto a full event channel there would block the UI on a
-	// consumer the UI itself schedules. It pins the title, so a later agent
-	// session_info_update no longer replaces it.
-	SetTitle(title string)
+	// It pins the title, so a later agent session_info_update no longer
+	// replaces it, and it publishes the Title section of a StateDelta —
+	// enqueued under the session's lock with the pin, never published — so it
+	// still **waits on nothing** and may be called from a UI's own update
+	// goroutine, as it always has been.
+	//
+	// It is the one settings verb that asks no provider, so its check for room
+	// in the log is atomic with its mutation and it can honestly refuse:
+	// ErrSetUnavailable, with nothing changed and nothing pinned.
+	SetTitle(cause, title string) error
 	Snapshot() Snapshot
 	Close() error
 }

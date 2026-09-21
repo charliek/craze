@@ -102,7 +102,11 @@ type launch struct {
 // in the section that made the change it describes, so the order of the
 // engine's events is the order of its state, with no lock held across a send.
 // What follows from it is that an engine event trails the state it describes:
-// State can already show a turn whose started has not been delivered.
+// State can already show a turn whose started has not been delivered. The same
+// rule holds one layer down, and is the session's to keep: **s.mu → the outbox
+// mutex**, every settings delta enqueued in the section that mutates the
+// snapshot (plan 021 §3.8). The engine does not author those; it serialises the
+// calls that cause them (settings.go).
 //
 // The observer runs inside the log's publishing boundary and takes only
 // e.obsMu, a leaf that guards the two flags it keeps.
@@ -143,6 +147,12 @@ type Engine struct {
 
 	obsMu     sync.Mutex
 	replaying bool
+
+	// sets is the settings worker's FIFO: every Control.Set joins it under e.mu
+	// and is served one at a time, in arrival order (settings.go). setWake is
+	// its kick, one slot, for the same reason the driver's is.
+	sets    []*setReq
+	setWake chan struct{}
 
 	// kick wakes the driver. One slot is enough because the driver's passes
 	// are level-triggered: each re-reads the state under e.mu, so two kicks
@@ -203,6 +213,7 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		opts:     opts,
 		activity: ActivityStarting,
 		kick:     make(chan struct{}, 1),
+		setWake:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
 		hooks:    h,
 	}
@@ -216,8 +227,9 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
-	e.wg.Add(1)
+	e.wg.Add(2)
 	go e.drive()
+	go e.serveSets()
 	return e, nil
 }
 
@@ -228,17 +240,18 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 //
 // What is still reached through here, and what takes each away:
 //
-//   - SetModel, SetMode, SetConfig, SetTitle — until settings become state deltas
-//     in order behind Control.Set and Control.SetTitle (C10);
 //   - Snapshot, which the TUI reads through Control.State() already, and which a
 //     caller that has no engine state to merge may still read here;
 //   - Events, which is the log's primary and therefore the very channel
 //     Control.Events() hands out: a helper written against a session — headless
 //     craze's final sweeps — reads the same stream through either.
 //
-// The TUI additionally keeps writing the session index itself, from the snapshot
-// this hands it, until the index moves into the engine (C12). Nothing else may go
-// around Control: no Begin, no Cancel, no queue verb, no Interject.
+// The settings left with C10: SetModel, SetMode and SetConfig are Control.Set,
+// serialised by one worker and answered with a revision, and SetTitle is
+// Control.SetTitle. The TUI's one remaining reason to hold a session of its own
+// is the session index, which it still writes itself — from the snapshot this
+// hands it — until the index moves into the engine (C12). Nothing else may go
+// around Control: no Begin, no Cancel, no queue verb, no Interject, no setter.
 func (e *Engine) Session() agent.Session { return e.sess }
 
 // Start starts the session. Until it returns the engine refuses every

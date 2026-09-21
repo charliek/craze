@@ -358,7 +358,7 @@ func TestHostStatusPublishesOnChangeOnly(t *testing.T) {
 	if len(rec.statuses) != 0 {
 		t.Fatalf("an unchanged status was republished: %s", fmtStatuses(rec.statuses))
 	}
-	if err := stub.SetModel(context.Background(), "fast"); err != nil {
+	if _, err := stub.SetModel(context.Background(), "", "fast"); err != nil {
 		t.Fatal(err)
 	}
 	m = deliver(t, m, refreshSnapMsg{})

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +49,17 @@ type fakeSession struct {
 	startErr     error
 	clock        func() time.Time
 	closeOnce    sync.Once
+	// snap is what the settings verbs mutate and Snapshot reports; sets counts
+	// the ones that changed something.
+	snap agent.Snapshot
+	sets int
+	// setHold, when non-nil, holds every settings verb at its "provider" call,
+	// and setsHeld counts the ones parked there now: the barrier a test uses to
+	// know the worker has taken one and nothing has changed yet. setErr fails
+	// the call there instead.
+	setHold  chan struct{}
+	setsHeld int
+	setErr   error
 }
 
 // script is one prompt's answer. It is built whole before it is queued.
@@ -323,7 +333,57 @@ func (s *fakeSession) cancelsWritten() int {
 func (s *fakeSession) Snapshot() agent.Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return agent.Snapshot{SessionID: "fake-1", ForeignTurn: s.foreign}
+	out := s.snap
+	out.SessionID = "fake-1"
+	out.ForeignTurn = s.foreign
+	return out
+}
+
+// holdNextSets makes every settings verb from now wait at the "provider" call
+// until the returned barrier is closed: the point at which a Set has been taken
+// by the worker and nothing has changed yet.
+func (s *fakeSession) holdNextSets() (release func()) {
+	hold := make(chan struct{})
+	s.mu.Lock()
+	s.setHold = hold
+	s.mu.Unlock()
+	return sync.OnceFunc(func() {
+		s.mu.Lock()
+		s.setHold = nil
+		s.mu.Unlock()
+		close(hold)
+	})
+}
+
+// failSets makes every settings verb from now return err from its "provider"
+// call, with nothing mutated and nothing published.
+func (s *fakeSession) failSets(err error) {
+	s.mu.Lock()
+	s.setErr = err
+	s.mu.Unlock()
+}
+
+// setCalls is how many settings verbs have got past the provider and changed
+// something.
+func (s *fakeSession) setCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sets
+}
+
+// providerMode is an update the agent made itself — live.go's onUpdate for a
+// current_mode_update — with exactly that site's shape: the mutation and the
+// delta in one locked section, Event.Mode filled beside the section because
+// this one IS the agent's own, and the flush afterwards, on the read loop, with
+// the lock released.
+func (s *fakeSession) providerMode(id string) {
+	s.mu.Lock()
+	s.snap.CurrentMode = id
+	s.log.Enqueue(agent.Event{
+		Type: agent.EventMeta, Mode: id, State: &agent.StateDelta{Mode: &id}, At: s.clock(),
+	})
+	s.mu.Unlock()
+	_ = s.log.Flush(context.Background(), s.done)
 }
 
 func (s *fakeSession) Close() error {
@@ -337,9 +397,7 @@ func (s *fakeSession) Close() error {
 	return nil
 }
 
-var errFakeUnused = errors.New("fakeSession: not part of the driver's seam")
-
-// The rest of the seam is not the driver's yet: asks and settings move later.
+// The rest of the seam the engine does not drive.
 func (s *fakeSession) Interject(context.Context, string) error { return agent.ErrUnsupported }
 
 // Asks is the session's agent.AskSource, which the engine refuses a session
@@ -361,10 +419,78 @@ func (s *fakeSession) openAsk(t *testing.T) *agent.Ask {
 	return a
 }
 
-func (s *fakeSession) SetModel(context.Context, string) error          { return errFakeUnused }
-func (s *fakeSession) SetMode(context.Context, string) error           { return errFakeUnused }
-func (s *fakeSession) SetConfig(context.Context, string, string) error { return errFakeUnused }
-func (s *fakeSession) SetTitle(string)                                 {}
+// The settings verbs, with the live session's shape: the "provider" is asked
+// first (setErr stands in for it), and a change it took is written into the
+// snapshot and its delta enqueued in one locked section. Nothing here is a
+// stand-in for the ordering rule itself — that is the session's, and the live
+// session and the Stub are where it is tested — but the engine's own tests need
+// a session whose setters can be made to fail, to succeed, and to be held.
+func (s *fakeSession) SetModel(ctx context.Context, cause, id string) (*agent.Ticket, error) {
+	return s.set(ctx, cause, func(st *agent.StateDelta) { st.Model = &id }, func(snap *agent.Snapshot) {
+		snap.CurrentModel = id
+	})
+}
+
+func (s *fakeSession) SetMode(ctx context.Context, cause, id string) (*agent.Ticket, error) {
+	return s.set(ctx, cause, func(st *agent.StateDelta) { st.Mode = &id }, func(snap *agent.Snapshot) {
+		snap.CurrentMode = id
+	})
+}
+
+func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value string) (*agent.Ticket, error) {
+	return s.set(ctx, cause, func(st *agent.StateDelta) {
+		st.Config = &agent.ConfigState{Options: []agent.ConfigOption{{ID: id, Current: value}}}
+	}, func(snap *agent.Snapshot) {
+		snap.Config = []agent.ConfigOption{{ID: id, Current: value}}
+	})
+}
+
+// set is the three verbs' one body: the hook a test uses to hold or fail the
+// "provider" call, then the mutation and its delta under s.mu.
+func (s *fakeSession) set(ctx context.Context, cause string, delta func(*agent.StateDelta), apply func(*agent.Snapshot)) (*agent.Ticket, error) {
+	s.mu.Lock()
+	hold, fail := s.setHold, s.setErr
+	if hold != nil {
+		s.setsHeld++
+	}
+	s.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.setsHeld--
+			s.mu.Unlock()
+			return nil, ctx.Err()
+		}
+		s.mu.Lock()
+		s.setsHeld--
+		s.mu.Unlock()
+	}
+	if fail != nil {
+		return nil, fail
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sets++
+	apply(&s.snap)
+	st := &agent.StateDelta{}
+	delta(st)
+	return s.log.EnqueueTicket(agent.Event{Type: agent.EventMeta, State: st, Cause: cause, At: s.clock()}), nil
+}
+
+func (s *fakeSession) SetTitle(cause, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.log.OutboxRoom() {
+		return agent.ErrSetUnavailable
+	}
+	s.snap.Title = title
+	s.log.Enqueue(agent.Event{
+		Type: agent.EventMeta, State: &agent.StateDelta{Title: &title}, Cause: cause, At: s.clock(),
+	})
+	return nil
+}
 
 var (
 	_ agent.Session   = (*fakeSession)(nil)

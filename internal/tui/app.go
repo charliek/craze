@@ -158,13 +158,17 @@ type Model struct {
 	input textarea.Model
 
 	// eng is the engine the model drives its session through: admission, the
-	// message queue and its verbs, send-now, cancel, and the asks (plan 021
-	// §3.4, §3.6). sess is the engine's own session — the raw provider seam —
-	// kept only for what has not moved behind engine.Control yet: the setters
-	// (SetModel / SetMode / SetConfig / SetTitle, until C10), and nothing else.
-	// writeIndex stays in the model until C12, reading the snapshot the engine's
-	// State already gives it. Engine.Session's own comment carries the same list.
-	// Both are assigned only in setSession, which records the engine in owner too.
+	// message queue and its verbs, send-now, cancel, the asks, and — since C10 —
+	// the settings (plan 021 §3.4, §3.6, §3.8). sess is the engine's own
+	// session, the raw provider seam, and **no production path calls anything on
+	// it any more**: the setters were the last, and they are Control.Set and
+	// Control.SetTitle now. It is kept because an engine the model could not
+	// build leaves the session to be closed all the same (engErr), and because
+	// the tests reach for the session they handed in. What has still to move is
+	// the session index, which the model writes itself from the snapshot the
+	// engine's State gives it, until C12. Engine.Session's own comment carries
+	// the same list. Both are assigned only in setSession, which records the
+	// engine in owner too.
 	eng  *engine.Engine
 	sess agent.Session
 	// client is this model's client id on eng, minted once per engine, and
@@ -311,6 +315,20 @@ type Model struct {
 	// process, where the bug it was introduced for only made it flicker.
 	modeInFlight string
 	modeGen      int
+
+	// modeRev, modelRev and configRev are the highest StateDelta Seq this model
+	// has applied for each settings section: the mode, the model, and the
+	// config options — one revision for all of them, because a config delta
+	// carries every option in full.
+	//
+	// They are what a delayed answer is judged against (mayApply). modeGen,
+	// applyGen and modeInFlight stay exactly what they were: optimistic view
+	// state about this model's own requests. These are about the shared state
+	// the session actually holds, which another client can change too, and the
+	// only thing that orders the two is the revision the deltas carry.
+	modeRev   uint64
+	modelRev  uint64
+	configRev uint64
 
 	// dialog is the modal layer: at most one is up, drawn over the transcript
 	// region and hit-tested before any band. mdlg is the model dialog's own
@@ -546,26 +564,34 @@ type errMsg struct {
 }
 type actionErrMsg struct{ err error }
 
-// revertModeMsg is SetMode coming back refused, or never coming back inside
-// modeCallTimeout. gen is the request it answers for; prev is what the chip
-// showed before that request asked.
+// revertModeMsg is a mode change coming back refused, or never coming back
+// inside modeCallTimeout. gen is the request it answers for; prev is what the
+// chip showed before that request asked, and at the mode section's revision
+// when it asked (mayApply).
 type revertModeMsg struct {
 	gen  int
 	prev string
 	err  error
+	at   uint64
 }
 
-// modeAppliedMsg is SetMode coming back accepted: the session's snapshot
+// modeAppliedMsg is a mode change coming back accepted: the session's snapshot
 // carries this mode now, so the chip can go back to reading it. gen is the
-// request it answers for.
+// request it answers for. It writes no value of its own — it only takes the
+// chip's mask down — so it needs no revision.
 type modeAppliedMsg struct {
 	gen int
 	id  string
 }
 
+// revertModelMsg is a model change coming back refused. at is the model
+// section's revision when it asked: a refusal that arrives after somebody
+// else's change has been applied may show its error but may not put prev back
+// (mayApply).
 type revertModelMsg struct {
 	prev string
 	err  error
+	at   uint64
 }
 type refreshSnapMsg struct{}
 
@@ -595,6 +621,31 @@ type planImplementFailedMsg struct {
 	gen  int
 	prev string
 	err  error
+	at   uint64
+}
+
+// mayApply reports whether a settings answer that has come back late may still
+// write its value: it may unless a delta for its section with a higher revision
+// has been applied since the request was issued.
+//
+// applied is the highest revision this model has applied for that section
+// (Model.modeRev and its two siblings), at is where the section stood when the
+// request was issued, and rev is the revision the engine confirmed the change
+// at — 0 for a refusal, which confirms nothing. So a refusal is judged against
+// where it started and a confirmation against where it landed, and in both
+// cases the question is the same: has anything newer been applied?
+//
+// This is the guard a client that reads State() and a clock cannot have. The
+// engine's events trail the state they describe, a setting is not monotonic —
+// it can go plan → agent → plan — and the model's own optimistic value is not
+// the session's, so "read the snapshot and compare" answers the wrong question.
+// The revision of the last delta applied is the one thing that only ever moves
+// forward (plan 021 §3.8, panel astra 15).
+func mayApply(applied, at, rev uint64) bool {
+	if rev > at {
+		at = rev
+	}
+	return applied <= at
 }
 
 // sessionOwner is the one record of which engine — and so which session — the
@@ -671,6 +722,18 @@ func (m *Model) nextCmd() engine.Command {
 	}
 	m.cmdSeq++
 	return engine.Command{Client: m.client, ID: fmt.Sprintf("%d", m.cmdSeq)}
+}
+
+// nextCmds is n command ids at once, for an Update that hands a tea.Cmd more
+// than one call to make: the closure runs on another goroutine and may not
+// touch the model, so every id it can spend is minted here. One it turns out
+// not to need is simply a number nobody used.
+func (m *Model) nextCmds(n int) []engine.Command {
+	cmds := make([]engine.Command, n)
+	for i := range cmds {
+		cmds[i] = m.nextCmd()
+	}
+	return cmds
 }
 
 func New(cfg Config) Model {
@@ -1110,7 +1173,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// on the chip rather than lost behind prev. refreshSnap is a no-op
 		// before a session exists, which is what leaves prev in place then.
 		m.modeInFlight = ""
-		m.snap.CurrentMode = msg.prev
+		if mayApply(m.modeRev, msg.at, 0) {
+			m.snap.CurrentMode = msg.prev
+		}
 		m.refreshSnap()
 		m.addError(msg.err.Error())
 		return m, nil
@@ -1119,8 +1184,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.modeSettled(msg.gen), nil
 
 	case revertModelMsg:
-		m.snap.CurrentModel = msg.prev
-		m.model = msg.prev
+		// The guard /model never had: another client — or the agent — may have
+		// changed the model while this request was in flight, and a refusal
+		// about a value nobody is on any more must not put its prev back. The
+		// error row is still the user's to see either way.
+		if mayApply(m.modelRev, msg.at, 0) {
+			m.snap.CurrentModel = msg.prev
+			m.model = msg.prev
+		}
 		m.addError(msg.err.Error())
 		return m, nil
 
@@ -1206,7 +1277,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and the plan is still the last thing on screen, so it is still on
 		// offer — unless something retired it while SetMode was in flight, in
 		// which case there is no plan above to implement any more.
-		tm, cmd := m.update(revertModeMsg{gen: msg.gen, prev: msg.prev, err: msg.err})
+		tm, cmd := m.update(revertModeMsg{gen: msg.gen, prev: msg.prev, err: msg.err, at: msg.at})
 		next := tm.(Model)
 		if msg.seq == next.turnSeq && next.planDeadSeq != next.turnSeq {
 			next.planOfferSeq = next.turnSeq
@@ -2177,7 +2248,7 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 // while the session is still in plan mode, so the prompt is only written once
 // SetMode has come back, and a SetMode that fails sends nothing at all.
 func (m Model) implementPlan() (tea.Model, tea.Cmd) {
-	if m.viewing != "" {
+	if m.viewing != "" || m.eng == nil {
 		return m, nil
 	}
 	id := m.implementModeID()
@@ -2195,12 +2266,12 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
 	seq := m.turnSeq
-	sess := m.sess
+	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
 		defer cancel()
-		if err := sess.SetMode(ctx, id); err != nil {
-			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err}
+		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
+			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err, at: at}
 		}
 		return planImplementMsg{seq: seq, gen: gen, mode: id}
 	}
@@ -2886,6 +2957,22 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 // this deliberately leaves alone.
 func (m *Model) applyStateDelta(ev agent.Event) {
 	st := ev.State
+	// The settings sections draw nothing, and the mirror is still read from the
+	// session (refreshSnap, below in applyEvent): what is taken from them here
+	// is only their revision — the highest Seq applied per section — which is
+	// what tells a delayed answer whether the value it is about is still the
+	// current one (mayApply). It is recorded for every delta, this model's own
+	// included: an echo is still a change that has been applied, and the
+	// revision has to be able to overtake a request issued before it.
+	if st.Mode != nil && ev.Seq > m.modeRev {
+		m.modeRev = ev.Seq
+	}
+	if st.Model != nil && ev.Seq > m.modelRev {
+		m.modelRev = ev.Seq
+	}
+	if st.Config != nil && ev.Seq > m.configRev {
+		m.configRev = ev.Seq
+	}
 	// The note: what was lost, which only a cleared send-now section can say. It
 	// does not touch armedDraft: this delta names the command that caused the
 	// DISARM, not the one that armed what it retired, so clearing the marker from

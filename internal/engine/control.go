@@ -166,7 +166,7 @@ func Code(err error) string {
 		return "already_resolved"
 	case errors.Is(err, agent.ErrUnknownAsk):
 		return "unknown_ask"
-	case errors.Is(err, agent.ErrAskUnavailable):
+	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
 		return "unavailable"
 	case errors.Is(err, ErrBadRequest):
 		return "bad_request"
@@ -196,10 +196,10 @@ func Code(err error) string {
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
-// Ask, Answer, State, NewClientID and Events wait on nothing: no channel, no
-// provider call, no Publish. Start, Subscribe, Interject, Cancel, Stop, Sync
-// and Close block and belong on a goroutine that is not the primary's reader —
-// a tea.Cmd. Subscribe is among
+// Ask, Answer, SetTitle, State, NewClientID and Events wait on nothing: no
+// channel, no provider call, no Publish. Start, Subscribe, Interject, Cancel,
+// Stop, Set, Sync and Close block and belong on a goroutine that is not the
+// primary's reader — a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
@@ -259,6 +259,14 @@ type Control interface {
 	Asks() []agent.AskRecord
 	Ask(id string) (agent.AskRecord, bool)
 	Answer(c Command, id string, a agent.AskAnswer) error
+
+	// The session's settings. Set blocks — one FIFO worker asks the provider,
+	// the session writes the change and its delta in one locked section, and
+	// the answer carries the confirmed value and the delta's revision — and
+	// SetTitle waits on nothing, because craze owns the title and no provider
+	// is asked.
+	Set(ctx context.Context, c Command, s Setting) (SetResult, error)
+	SetTitle(c Command, title string) error
 
 	// The queue's verbs. None of them starts a turn, and none of them waits.
 	Queue(c Command, text string) (agent.QueuedPrompt, error)

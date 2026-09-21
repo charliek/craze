@@ -87,8 +87,14 @@ func TestFrameGoldenQueueEdit100x30(t *testing.T) {
 func TestFrameGoldenQueueSendNowConfirm100x30(t *testing.T) {
 	// Cursor cannot interject, so ctrl+l on a draft is send now — and every
 	// send now that cancels a running turn asks first.
+	//
+	// The wait for the tool row is what makes the frame the same every time.
+	// `working` is true the moment the turn is claimed, which is before the
+	// agent has said anything, so a script that typed straight after it raced
+	// the agent's first two updates — and the frame this golden pins has them.
 	got := runQueueFrame(t, "long-turn", 100, 30,
-		"<wait:idle>go the long way<enter><wait:working>Reply with PINEAPPLE<ctrl-l>",
+		"<wait:idle>go the long way<enter><wait:working><wait:text:Execute sleep && echo step1>"+
+			"Reply with PINEAPPLE<ctrl-l>",
 		agent.CursorProvider())
 	assertGolden(t, "queue-sendnow-confirm-100x30", 100, 30, got)
 	if !strings.Contains(got, confirmLine) {

@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -430,8 +431,14 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			m.addError("session is still starting")
 			return m, nil
 		}
-		if m.sess != nil {
-			m.sess.SetTitle(title)
+		if m.eng != nil {
+			if err := m.eng.SetTitle(m.nextCmd(), title); err != nil {
+				// The one refusal a rename has: the log's outbox is backed up,
+				// and nothing was renamed or pinned. The note and the index row
+				// would both be saying something untrue.
+				m.addError(err.Error())
+				return m, nil
+			}
 		}
 		m.refreshSnap()
 		// A user title always wins and pins the row, so no agent title the
@@ -478,7 +485,7 @@ func modeIDs(modes []agent.ModeInfo) []string {
 }
 
 func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
-	if id == "" || id == m.snap.CurrentMode {
+	if id == "" || id == m.snap.CurrentMode || m.eng == nil {
 		return m, nil
 	}
 	prev := m.snap.CurrentMode
@@ -493,14 +500,17 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	// kill is recorded against the turn so a late ending cannot bring it back.
 	m.retirePlanOffer()
 	m.addNote(modeNote(m.snap.Modes, id))
-	sess := m.sess
+	// The revision the mode section stood at when this asked, so a refusal that
+	// comes back after somebody else's change cannot roll that change back
+	// (revertModeMsg).
+	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
 	return m, func() tea.Msg {
 		// Bounded, so an agent that never answers produces a revert instead of
 		// pinning the chip for ever. See modeCallTimeout.
 		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
 		defer cancel()
-		if err := sess.SetMode(ctx, id); err != nil {
-			return revertModeMsg{gen: gen, prev: prev, err: err}
+		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
+			return revertModeMsg{gen: gen, prev: prev, err: err, at: at}
 		}
 		return modeAppliedMsg{gen: gen, id: id}
 	}
@@ -522,13 +532,16 @@ func modeNote(modes []agent.ModeInfo, id string) string {
 // applyModelEffort is `/model <id> [effort]`: optimistic, with the same
 // SetModel → SetConfig(model_config) fallback the dialog's model step uses.
 func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
+	if m.eng == nil {
+		m.input.SetValue("")
+		return m, nil
+	}
 	prev := m.snap.CurrentModel
 	m.snap.CurrentModel = id
 	m.model = id
 	m.input.SetValue("")
 	explicit := effort != ""
 
-	sess := m.sess
 	modelCfgID := ""
 	if opt := agent.ModelConfigOption(m.snap); opt != nil {
 		modelCfgID = opt.ID
@@ -540,20 +553,29 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// One command per call the closure can make — the model, the fallback that
+	// sets it as a config option, and the effort — minted here because the
+	// closure runs off this Update and may not touch the model. An id that goes
+	// unused is simply a number nobody spent.
+	eng, cmds, at := m.eng, m.nextCmds(3), m.modelRev
 	return m, func() tea.Msg {
 		ctx := context.Background()
-		if err := sess.SetModel(ctx, id); err != nil {
+		if _, err := eng.Set(ctx, cmds[0], engine.Setting{Kind: engine.SettingModel, Value: id}); err != nil {
 			if modelCfgID != "" {
-				if err2 := sess.SetConfig(ctx, modelCfgID, id); err2 == nil {
+				if _, err2 := eng.Set(ctx, cmds[1], engine.Setting{
+					Kind: engine.SettingConfig, ID: modelCfgID, Value: id,
+				}); err2 == nil {
 					err = nil
 				}
 			}
 			if err != nil {
-				return revertModelMsg{prev: prev, err: err}
+				return revertModelMsg{prev: prev, err: err, at: at}
 			}
 		}
 		if explicit && effortID != "" {
-			if err := sess.SetConfig(ctx, effortID, effort); err != nil {
+			if _, err := eng.Set(ctx, cmds[2], engine.Setting{
+				Kind: engine.SettingConfig, ID: effortID, Value: effort,
+			}); err != nil {
 				return actionErrMsg{err}
 			}
 			return refreshSnapMsg{}

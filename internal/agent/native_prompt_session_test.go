@@ -524,11 +524,11 @@ func TestNativeLearnsAKeyExportedAfterStart(t *testing.T) {
 	}
 	s := startContent(t, f, Options{}, nil, nil)
 
-	if err := s.SetModel(context.Background(), "nokey/d"); err == nil {
+	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err == nil {
 		t.Fatal("control: a switch to the unfunded provider succeeded before its key existed")
 	}
 	live.Store(true)
-	if err := s.SetModel(context.Background(), "nokey/d"); err != nil {
+	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err != nil {
 		t.Fatalf("a switch to a provider whose key was exported after Open: %v", err)
 	}
 	if got := s.Snapshot().CurrentModel; got != "nokey/d" {

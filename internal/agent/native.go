@@ -77,6 +77,12 @@ type nativeSession struct {
 	// across an emit (plan 019 §3.10): a publish blocked on a full primary
 	// under s.mu would stop Close from closing done, which is what releases
 	// it.
+	//
+	// **s.mu → the log's outbox mutex**, which is a strict leaf (plan 021
+	// §3.8): a settings delta is *enqueued*, not emitted, in the section that
+	// mutates the snapshot — the setters, and the first prompt naming the
+	// session — so the order of this session's state deltas is the order of its
+	// state, and still nothing blocks under s.mu.
 
 	// steerMu guards steerTexts, the running turn's interjections in both of
 	// their spellings, and is a leaf: Interject takes it with nothing else
@@ -878,6 +884,21 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		// of a command file would say nothing about what the user asked for.
 		// The journal's prompt note (Begin) keeps the typed text for the same
 		// reason; only the store records what was actually sent.
+		//
+		// It publishes NOTHING, as it never has, and that is deliberate rather
+		// than an omission (plan 021 C10). Every other change to shared state
+		// this session makes now carries a StateDelta; this is the one change
+		// no consumer has ever been told about, and telling them is a change of
+		// behaviour rather than a change of mechanism. The TUI re-reads the
+		// snapshot on any EventMeta, so a delta here would put this title in
+		// the frame's header from the first prompt on, where the baseline shows
+		// it only when something else happens to refresh — and S1b ships no
+		// behaviour change. The golden that says so is native-echo-80x24, which
+		// plan 021 X18 already caught this title moving once.
+		//
+		// The title is in Snapshot from here on, as it always was; a client
+		// that folds the stream learns it when the phase that owns titles and
+		// the session index does (C12, S1c).
 		s.snap.Title = nativeTitle(text)
 	}
 	// The references are resolved in the same locked section as the rest of
@@ -1190,55 +1211,78 @@ func (s *nativeSession) Close() error {
 // and leaves the current model in place. A switch that took is announced
 // (announceCurrent), because the new model can bring or take away the effort
 // option.
-func (s *nativeSession) SetModel(_ context.Context, modelID string) error {
+func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (*Ticket, error) {
 	s.mu.Lock()
 	hs, table := s.hs, s.table
 	models := s.snap.Models
 	s.mu.Unlock()
 	if hs == nil {
-		return fmt.Errorf("agent: session not started")
+		return nil, fmt.Errorf("agent: session not started")
 	}
 	alias, err := MatchModel(Snapshot{Models: models}, modelID)
 	if err != nil {
-		return fmt.Errorf("native: %v", err)
+		return nil, fmt.Errorf("native: %v", err)
 	}
 	if err := hs.SetModel(alias); err != nil {
-		return phraseSetupError(err, table, alias)
+		return nil, phraseSetupError(err, table, alias)
 	}
-	s.announceCurrent()
-	return nil
+	return s.announceCurrent(cause), nil
 }
 
-// announceCurrent republishes the current model and its effort option after
-// a switch, then emits one bare EventMeta — no Text, so `craze prompt --json`
-// prints nothing for it — outside s.mu, through the close-aware emit. It is
-// the native session's config_option_update: an ACP agent answers a model or
-// effort change with one, the live session turns it into exactly this event
-// (live.go's onUpdate), and the TUI re-reads the snapshot on it. Without it a
-// /model with no effort — whose command returns no message of its own —
-// left the TUI's snapshot on the old model's options, so a switch from a
-// model with no efforts to one with them never showed the effort, and the
-// next `/model <id> <effort>` could not tell the effort from the model name.
+// announceCurrent republishes the current model and its effort option after a
+// switch, as one EventMeta carrying both sections and no Text — so
+// `craze prompt --json` still prints nothing for it. It is the native session's
+// config_option_update: an ACP agent answers a model or effort change with one,
+// the live session turns it into exactly this event (live.go's onUpdate), and
+// the TUI re-reads the snapshot on it. Without it a /model with no effort —
+// whose command returns no message of its own — left the TUI's snapshot on the
+// old model's options, so a switch from a model with no efforts to one with
+// them never showed the effort, and the next `/model <id> <effort>` could not
+// tell the effort from the model name.
 //
-// It runs on the caller's goroutine, which for SetModel and SetConfig is a
-// command goroutine in the TUI (never Update) and may therefore wait on a
-// full channel like any other emit; Close releases it.
-func (s *nativeSession) announceCurrent() {
+// The mutation and the delta are **one** locked section (plan 021 §3.8): until
+// C10 the setter mutated and this re-locked to read it back, so two switches
+// could publish in the other order. Enqueuing rather than emitting is what
+// makes that possible — the outbox's mutex is a leaf, so nothing blocks under
+// s.mu — and the caller learns the delta's Seq from the ticket.
+//
+// Plugins are not announced: a native session resolves them once in Start and
+// they never change again (plan 021 X3), so there is nothing to say.
+func (s *nativeSession) announceCurrent(cause string) *Ticket {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.refreshCurrentLocked()
-	s.mu.Unlock()
-	s.emit(Event{Type: EventMeta})
+	model := s.snap.CurrentModel
+	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
+		Model:  &model,
+		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
+	})
+}
+
+// enqueueDeltaLocked is live.go's, for this session: one EventMeta carrying st,
+// stamped as emit stamps what it publishes, enqueued under s.mu in the section
+// that changed the snapshot. s.mu is held.
+func (s *nativeSession) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *Ticket {
+	base.Type = EventMeta
+	base.State = st
+	base.Cause = cause
+	if base.At.IsZero() {
+		base.At = time.Now()
+	}
+	return s.log.EnqueueTicket(base)
 }
 
 // SetMode is unsupported: the harness has no modes until H5.
-func (s *nativeSession) SetMode(context.Context, string) error { return ErrUnsupported }
+func (s *nativeSession) SetMode(context.Context, string, string) (*Ticket, error) {
+	return nil, ErrUnsupported
+}
 
 // SetConfig sets the effort, the one option the native session advertises;
 // any other id is unsupported. Like SetModel it is allowed during a turn, and
 // a change that took is announced the same way.
-func (s *nativeSession) SetConfig(_ context.Context, id, value string) error {
+func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (*Ticket, error) {
 	if id != nativeEffortID {
-		return ErrUnsupported
+		return nil, ErrUnsupported
 	}
 	s.mu.Lock()
 	hs, table := s.hs, s.table
@@ -1246,30 +1290,37 @@ func (s *nativeSession) SetConfig(_ context.Context, id, value string) error {
 	levels := s.efforts[alias]
 	s.mu.Unlock()
 	if hs == nil {
-		return fmt.Errorf("agent: session not started")
+		return nil, fmt.Errorf("agent: session not started")
 	}
 	// Checked here as well as by the harness so the refusal can name what
 	// the model does offer. "" is the model's default and always allowed.
 	if value != "" && !slices.Contains(levels, value) {
 		if len(levels) == 0 {
-			return fmt.Errorf("native: model %q has no effort control", alias)
+			return nil, fmt.Errorf("native: model %q has no effort control", alias)
 		}
-		return fmt.Errorf("native: model %q offers effort %s, not %q", alias, strings.Join(levels, ", "), value)
+		return nil, fmt.Errorf("native: model %q offers effort %s, not %q", alias, strings.Join(levels, ", "), value)
 	}
 	if err := hs.SetEffort(value); err != nil {
-		return phraseSetupError(err, table, alias)
+		return nil, phraseSetupError(err, table, alias)
 	}
-	s.announceCurrent()
-	return nil
+	return s.announceCurrent(cause), nil
 }
 
-// SetTitle is /rename: local, emitting nothing, and pinned against the title
-// the first prompt would otherwise give the session.
-func (s *nativeSession) SetTitle(title string) {
+// SetTitle is /rename: local, pinned against the title the first prompt would
+// otherwise give the session, and said in a Title delta with no Event.Text —
+// the live session's shape exactly (live.go's SetTitle), including the check
+// for room that is atomic with the mutation because no provider is asked.
+func (s *nativeSession) SetTitle(cause, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.snap.Title = sanitizeText(title)
+	if !s.log.OutboxRoom() {
+		return ErrSetUnavailable
+	}
+	clean := sanitizeText(title)
+	s.snap.Title = clean
 	s.titlePinned = true
+	s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Title: &clean})
+	return nil
 }
 
 func (s *nativeSession) Snapshot() Snapshot {

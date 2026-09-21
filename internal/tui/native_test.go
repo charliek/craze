@@ -253,7 +253,16 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 	}
 
 	// slash runs one /model command the way the composer does, then its
-	// command, then whatever the session emitted while that command ran.
+	// command, then the events that change made — waiting for them rather than
+	// draining whatever happens to be there.
+	//
+	// The wait is the point (plan 021 §2.8's C10 row). A settings change is a
+	// StateDelta the session *enqueues* under its own lock and the log's drainer
+	// publishes, so the command coming back is not the event arriving: an empty
+	// channel says only that nothing has been published yet. Sync is the
+	// barrier — everything enqueued before it is delivered when it returns — and
+	// it runs on a helper goroutine while this one keeps reading, because with a
+	// full primary the reader is what lets the drainer move (A19's shape).
 	slash := func(line string) {
 		t.Helper()
 		m.input.SetValue(line)
@@ -262,6 +271,24 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 		if msg := runCmd(cmd); msg != nil {
 			tm, _ = m.Update(msg)
 			m = tm.(Model)
+		}
+		synced := make(chan struct{})
+		eng := m.eng
+		go func() { defer close(synced); _ = eng.Sync(context.Background()) }()
+		for done := false; !done; {
+			select {
+			case ev, ok := <-sess.Events():
+				if !ok {
+					done = true
+					break
+				}
+				tm, _ := m.Update(eventMsg{ev})
+				m = tm.(Model)
+			case <-synced:
+				done = true
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s: the change's events never arrived", line)
+			}
 		}
 		drainSessionEvents(t, &m, sess)
 		if errs := texts(m, entryError); len(errs) > 0 {

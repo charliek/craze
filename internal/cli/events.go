@@ -272,8 +272,11 @@ func eventJSON(ev agent.Event) (any, bool) {
 		}
 		return j, true
 	case agent.EventMeta:
-		// The session carries the new title on EventMeta; other meta updates
-		// have nothing to report headlessly.
+		// A meta event carries a state delta (plan 021 §3.8), and Event.Text is
+		// filled on exactly one of them: the agent naming the session. The rest
+		// — a mode, model or config change, and a /rename, which sets the same
+		// title and fills no Text — have nothing to report headlessly, and
+		// `--json` gains no line kind for them in S1b (§3.9).
 		if ev.Text == "" {
 			return jsonEvent{}, false
 		}

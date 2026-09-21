@@ -32,6 +32,13 @@ import (
 //   - registry.mu → the log's outbox mutex, which is a strict leaf. Every ask
 //     event is enqueued in the registry section that changed the ask, so the
 //     order of the registry's events is the order of its state.
+//   - **s.mu → the log's outbox mutex**, for the same reason and by the same
+//     rule (plan 021 §3.8): every settings delta is enqueued in the section
+//     that mutates the snapshot — the setters here, and the four meta sites in
+//     onUpdate — so the order of this session's state deltas is the order of
+//     its state, for the agent's own updates and a client's Set alike. s.mu is
+//     never held across a Flush: the read loop enqueues under it, releases it,
+//     and only then waits (flushDelta).
 //   - **s.mu and registry.mu are never nested, in either direction.** The
 //     session calls BeginTurn, CancelTurn, EndTurn, Open, Automatic,
 //     AnsweredEarly and Report with s.mu released — each takes a value read
@@ -1097,63 +1104,109 @@ func (s *session) closeInFlightTools(status string) {
 	}
 }
 
-func (s *session) SetModel(ctx context.Context, modelID string) error {
+// The three settings verbs, each the seam's shape (Session): the agent is asked
+// first, with no lock held, and a change it took is written into the snapshot
+// and its delta enqueued in one locked section — so what a client folding the
+// events sees last is what a client reading Snapshot sees, whether the change
+// came from here or from the agent's own update on the read loop (plan 021
+// §3.8). A refusal mutates nothing and publishes nothing.
+func (s *session) SetModel(ctx context.Context, cause, modelID string) (*Ticket, error) {
 	client := s.clientRef()
 	if client == nil {
-		return fmt.Errorf("agent: session not started")
+		return nil, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetModel(ctx, modelID); err != nil {
-		return err
+		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.snap.CurrentModel = modelID
-	s.mu.Unlock()
-	return nil
+	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Model: &modelID}), nil
 }
 
-func (s *session) SetMode(ctx context.Context, modeID string) error {
+func (s *session) SetMode(ctx context.Context, cause, modeID string) (*Ticket, error) {
 	client := s.clientRef()
 	if client == nil {
-		return fmt.Errorf("agent: session not started")
+		return nil, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetMode(ctx, modeID); err != nil {
-		return err
+		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.snap.CurrentMode = modeID
-	s.mu.Unlock()
-	return nil
+	// Event.Mode stays empty: it is what an *agent*-initiated update fills, and
+	// a client retires a plan offer on it (plan 021 correction 20).
+	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &modeID}), nil
 }
 
-func (s *session) SetConfig(ctx context.Context, id, value string) error {
+func (s *session) SetConfig(ctx context.Context, cause, id, value string) (*Ticket, error) {
 	client := s.clientRef()
 	if client == nil {
-		return fmt.Errorf("agent: session not started")
+		return nil, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetConfig(ctx, id, value); err != nil {
-		return err
+		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
 			s.snap.Config[i].Current = value
 			break
 		}
 	}
-	s.mu.Unlock()
-	return nil
+	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Config: &ConfigState{
+		Options: cloneConfig(s.snap.Config),
+	}}), nil
 }
 
 // SetTitle is /rename: craze's own name for this session, since ACP v1 has no
-// rename verb. It emits nothing — it is called from the UI's update goroutine,
-// and an emit onto a full event channel there would block the UI on a consumer
-// the UI itself schedules; the caller re-reads the snapshot instead. It pins
-// the title, so a session_info_update the agent sends later is ignored.
-func (s *session) SetTitle(title string) {
+// rename verb. It pins the title, so a session_info_update the agent sends
+// later is ignored, and it says so in a Title delta — enqueued with the pin,
+// under the same lock, and never published, so it still waits on nothing and
+// may be called from a UI's update goroutine as it always has been.
+//
+// Event.Text stays empty on that delta, which is what keeps `/rename` out of
+// `craze prompt --json`'s title line and out of the index as an agent title
+// (plan 021 correction 20).
+//
+// It is the one settings verb with no provider behind it, so the room in the
+// log is checked here, in the section that would mutate: refused, nothing is
+// renamed and nothing is pinned.
+func (s *session) SetTitle(cause, title string) error {
 	s.mu.Lock()
-	s.snap.Title = sanitizeText(title)
+	defer s.mu.Unlock()
+	if !s.log.OutboxRoom() {
+		return ErrSetUnavailable
+	}
+	clean := sanitizeText(title)
+	s.snap.Title = clean
 	s.titlePinned = true
-	s.mu.Unlock()
+	s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Title: &clean})
+	return nil
+}
+
+// enqueueDeltaLocked enqueues one EventMeta carrying st, stamped exactly as
+// emit stamps what it publishes — the session's clock, and Replayed while a
+// session/load replay is running — with the cause the command that asked for
+// it. base is the rest of the event: the Mode or Text an *agent*-initiated
+// update fills, and the zero Event for a craze-initiated one.
+//
+// s.mu is held, and that is the point: the outbox's mutex is a strict leaf
+// (eventlog.go's Enqueue), so the delta is admitted in the very section that
+// changed the snapshot and no lock is held across a blocking send.
+func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *Ticket {
+	base.Type = EventMeta
+	base.State = st
+	base.Cause = cause
+	if base.At.IsZero() {
+		base.At = time.Now()
+	}
+	if s.replaying.Load() {
+		base.Replayed = true
+	}
+	return s.log.EnqueueTicket(base)
 }
 
 func (s *session) Snapshot() Snapshot {
@@ -1719,6 +1772,20 @@ func (s *session) staleAsk(req AskRequest) AskRecord {
 // barrier only its own last phase could free.
 func (s *session) flushAsks() { _ = s.log.Flush(context.Background(), s.done) }
 
+// flushDelta is the read loop's barrier behind a settings delta it enqueued
+// (onUpdate). The delta has to be admitted under s.mu, in the section that
+// mutated the snapshot, or its order against a client's own Set would be the
+// order two goroutines happened to reach the log in (plan 021 §3.8); what this
+// gives back is the one thing publishing directly used to give for free —
+// "emitted means buffered". The read loop waits here exactly as it waited
+// inside emit, so the agent's next update is behind this one on the primary and
+// `craze prompt --json`'s title line keeps its position.
+//
+// It is bounded by the session's own done, as every flush a session makes on
+// its own goroutines is (EventLog.Flush): a Close that waits for this goroutine
+// before it closes the log would otherwise be waiting for itself.
+func (s *session) flushDelta() { _ = s.log.Flush(context.Background(), s.done) }
+
 // askReported is the Replied hook for a parked ask: what became of the reply
 // carrying its decision, recorded against THIS ask and not against its id,
 // because a reply that comes back late must not land on whatever holds that id
@@ -1937,17 +2004,26 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 			// it has to take this very lock to read one.
 			close(s.commandsApplied)
 		}
+		// Both sections, because both changed: the catalog, and the on-disk
+		// entries resolved against it.
+		s.enqueueDeltaLocked("", Event{}, &StateDelta{
+			Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
+			Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+		})
 		s.mu.Unlock()
-		s.emit(Event{Type: EventMeta})
+		s.flushDelta()
 	case acp.UpdateCurrentMode:
 		if u.CurrentModeID != "" {
 			mode := sanitizeText(u.CurrentModeID)
 			s.mu.Lock()
 			s.snap.CurrentMode = mode
-			s.mu.Unlock()
 			// The mode rides on the event: a mode that changed and changed
 			// back is invisible in the snapshot, and the UI has to see it.
-			s.emit(Event{Type: EventMeta, Mode: mode})
+			// Event.Mode as well as the section, because this is the agent's
+			// own change and a client retires a plan offer on that field.
+			s.enqueueDeltaLocked("", Event{Mode: mode}, &StateDelta{Mode: &mode})
+			s.mu.Unlock()
+			s.flushDelta()
 		}
 	case acp.UpdateSessionInfo:
 		// session_info_update reuses the tool title field on the wire.
@@ -1962,21 +2038,25 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		if s.titlePinned {
 			// /rename won: the user's name for the session outlives every
 			// title the agent invents, including one produced by a live turn
-			// after a --continue.
+			// after a --continue. Nothing changed, so nothing is said.
 			s.mu.Unlock()
 			return
 		}
 		s.snap.Title = title
+		// Event.Text carries the new title so `prompt --json` can emit a title
+		// line and the TUI can write it to the index as an agent title, exactly
+		// as it always has; the section carries the same fact for a client that
+		// folds state.
+		s.enqueueDeltaLocked("", Event{Text: title}, &StateDelta{Title: &title})
 		s.mu.Unlock()
-		// EventMeta carries the new title so `prompt --json` can emit a
-		// title line; the TUI only re-reads the snapshot.
-		s.emit(Event{Type: EventMeta, Text: title})
+		s.flushDelta()
 	case acp.UpdateConfigOption:
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
 		s.snap.Config = cfg
+		s.enqueueDeltaLocked("", Event{}, &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}})
 		s.mu.Unlock()
-		s.emit(Event{Type: EventMeta})
+		s.flushDelta()
 	case acp.UpdatePlan:
 		if !s.provider().planUpdatesAreTodos {
 			return

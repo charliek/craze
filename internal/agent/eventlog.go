@@ -897,6 +897,37 @@ func (l *EventLog) commitLocked(ev Event, rec Record) {
 type outboxBatch struct {
 	evs   []pendingEvent
 	bytes int
+	// ticket is the receipt EnqueueTicket handed its caller, nil for a plain
+	// Enqueue: the drainer writes the batch's first sequence number into it.
+	ticket *Ticket
+}
+
+// Ticket is the receipt of one EnqueueTicket: once the batch has been
+// committed, Seq is the sequence number its first event was given.
+//
+// It exists for one caller: a session enqueuing the state delta of a settings
+// change, whose **revision is that delta's Seq** (plan 021 §3.8). The delta is
+// enqueued under the session's own lock, in the section that mutates the
+// snapshot, so nothing about it can be read from the call — the number is
+// assigned later, by the drainer, on another goroutine — and the engine's
+// settings worker needs it to answer Control.Set with a revision a client can
+// compare delayed replies against.
+//
+// The value is written and read through an atomic, so reading it is race-free
+// whenever it happens; what a Flush that covers the batch adds is that the
+// answer is *there*. Before that, and for a batch the log refused because Close
+// had begun, it is 0 — which a client reads as "no revision", never as a
+// revision older than every other.
+type Ticket struct{ seq atomic.Uint64 }
+
+// Seq is the sequence number the batch's first event was committed with, or 0
+// when it has not been committed (yet, or at all). A nil Ticket answers 0, so a
+// session that publishes no delta needs no special case at its caller.
+func (t *Ticket) Seq() uint64 {
+	if t == nil {
+		return 0
+	}
+	return t.seq.Load()
 }
 
 // pendingEvent is one enqueued event with the record built for it at enqueue
@@ -978,7 +1009,22 @@ type flushWaiter struct {
 // is all that is left; by then the engine has refused the command that would
 // have caused one. The cut is checked *before* anything is encoded, so a refused
 // batch costs the encoding of nothing.
-func (l *EventLog) Enqueue(evs ...Event) {
+//
+// EnqueueTicket is this with a receipt, for the one caller that has to learn
+// what number its event was given.
+func (l *EventLog) Enqueue(evs ...Event) { l.enqueue(nil, evs) }
+
+// EnqueueTicket is Enqueue with a receipt: the same append, under the same
+// rules, plus a Ticket that resolves to the sequence number the batch's first
+// event was committed with (Ticket says what that is for). A caller that does
+// not need the number calls Enqueue and allocates nothing.
+func (l *EventLog) EnqueueTicket(evs ...Event) *Ticket {
+	t := &Ticket{}
+	l.enqueue(t, evs)
+	return t
+}
+
+func (l *EventLog) enqueue(t *Ticket, evs []Event) {
 	if len(evs) == 0 {
 		return
 	}
@@ -990,7 +1036,7 @@ func (l *EventLog) Enqueue(evs ...Event) {
 		l.droppedAtClose.Add(int64(len(evs)))
 		return
 	}
-	b := outboxBatch{evs: make([]pendingEvent, len(evs))}
+	b := outboxBatch{evs: make([]pendingEvent, len(evs)), ticket: t}
 	for i, ev := range evs {
 		if ev.Err != nil {
 			// Never read: not Error(), not Unwrap, not Is or As. ev is this
@@ -1221,6 +1267,12 @@ func (l *EventLog) publishBatch(b outboxBatch, stopped *bool) {
 		b.evs[i] = pendingEvent{} // published: the batch no longer holds it
 		seq := l.next + 1
 		p.ev.Seq, p.rec.Seq = seq, seq
+		if i == 0 && b.ticket != nil {
+			// The batch's first number, written before the event is offered to
+			// anyone: a caller holding the ticket is waiting on a Flush, which
+			// cannot return until this whole batch has been committed.
+			b.ticket.seq.Store(seq)
+		}
 		l.sendOutbox(p.ev, seq, stopped)
 		l.commitLocked(p.ev, p.rec)
 	}

@@ -1194,7 +1194,7 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 	f.models["test/a"].push(h.step(textParts("from a")[:2], cat(textParts("")[2:], finishParts(fantasy.FinishReasonStop))))
 	out := startPrompt(s, "one")
 	await(t, h.reached, "the turn on test/a")
-	if err := s.SetModel(context.Background(), "test/b"); err != nil {
+	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
 		t.Fatalf("SetModel during a turn: %v", err)
 	}
 	snap := s.Snapshot()
@@ -1204,8 +1204,10 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 		// "high" is kept: test/b lists it too (plan 018 §3.7).
 		t.Fatalf("after SetModel: current %q, effort %+v", snap.CurrentModel, opt)
 	}
-	if meta := ofType(drained(s), EventMeta); len(meta) != 1 || meta[0].Text != "" {
-		t.Fatalf("SetModel during a turn emitted %+v, want one bare EventMeta", meta)
+	meta := ofType(deltaSettled(t, s), EventMeta)
+	if len(meta) != 1 || meta[0].Text != "" || meta[0].State == nil ||
+		meta[0].State.Model == nil || *meta[0].State.Model != "test/b" {
+		t.Fatalf("SetModel during a turn published %+v, want one EventMeta carrying the model", meta)
 	}
 	close(h.release)
 	if got := await(t, out, "the turn on test/a"); got.err != nil || got.res.StopReason != "end_turn" {
@@ -1219,20 +1221,20 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 		t.Fatalf("test/a got %d calls and test/b %d, want one each", a, b)
 	}
 
-	if err := s.SetModel(context.Background(), "other/c"); err != nil {
+	if _, err := s.SetModel(context.Background(), "", "other/c"); err != nil {
 		t.Fatal(err)
 	}
 	if snap := s.Snapshot(); snap.CurrentModel != "other/c" || EffortOption(snap) != nil || snap.Config != nil {
 		t.Fatalf("a model with no efforts: current %q, config %+v", snap.CurrentModel, snap.Config)
 	}
-	err := s.SetModel(context.Background(), "nokey/d")
+	_, err := s.SetModel(context.Background(), "", "nokey/d")
 	if err == nil || !errors.Is(err, harness.ErrNoAPIKey) || !strings.Contains(err.Error(), "NATIVE_NOKEY_KEY") {
 		t.Fatalf("SetModel to an unfunded model = %v", err)
 	}
 	if got := s.Snapshot().CurrentModel; got != "other/c" {
 		t.Fatalf("a failed switch moved the model to %q", got)
 	}
-	if err := s.SetModel(context.Background(), "nope"); err == nil || !strings.Contains(err.Error(), `unknown model "nope"`) {
+	if _, err := s.SetModel(context.Background(), "", "nope"); err == nil || !strings.Contains(err.Error(), `unknown model "nope"`) {
 		t.Fatalf("SetModel to an unknown model = %v", err)
 	}
 }
@@ -1257,21 +1259,33 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 	if opt := EffortOption(s.Snapshot()); opt != nil {
 		t.Fatalf("other/c has no efforts, yet the snapshot offers %+v", opt)
 	}
+	// One EventMeta, carrying the model and config sections in full and neither
+	// Event.Text nor Event.Mode: the sections are what a client folds, and the
+	// two bare fields are an *agent*-initiated update's, which a client reads as
+	// "write the index" and "retire the plan offer" (plan 021 §3.8). It is
+	// **never bare** again: an EventMeta with no State is what C10 removed.
 	oneMeta := func(t *testing.T, what string) {
 		t.Helper()
-		evs := drained(s)
+		evs := deltaSettled(t, s)
 		if len(evs) != 1 || evs[0].Type != EventMeta || evs[0].Text != "" || evs[0].Mode != "" {
-			t.Fatalf("%s emitted %+v, want exactly one bare EventMeta", what, evs)
+			t.Fatalf("%s published %+v, want exactly one EventMeta", what, evs)
+		}
+		st := evs[0].State
+		if st == nil || st.Model == nil || *st.Model != s.Snapshot().CurrentModel || st.Config == nil {
+			t.Fatalf("%s published %+v, want the model and config sections", what, evs[0].State)
+		}
+		if !reflect.DeepEqual(st.Config.Options, s.Snapshot().Config) {
+			t.Fatalf("%s published config %+v, want the snapshot's %+v", what, st.Config.Options, s.Snapshot().Config)
 		}
 	}
 	none := func(t *testing.T, what string) {
 		t.Helper()
-		if evs := drained(s); len(evs) != 0 {
+		if evs := deltaSettled(t, s); len(evs) != 0 {
 			t.Fatalf("%s emitted %+v, want nothing", what, evs)
 		}
 	}
 
-	if err := s.SetModel(context.Background(), "test/a"); err != nil {
+	if _, err := s.SetModel(context.Background(), "", "test/a"); err != nil {
 		t.Fatal(err)
 	}
 	oneMeta(t, "SetModel to a model with efforts")
@@ -1279,7 +1293,7 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 		t.Fatalf("after the switch to test/a the effort option is %+v, want low/high at high", opt)
 	}
 
-	if err := s.SetConfig(context.Background(), nativeEffortID, "low"); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low"); err != nil {
 		t.Fatal(err)
 	}
 	oneMeta(t, "SetConfig(effort)")
@@ -1287,20 +1301,20 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 		t.Fatalf("after SetConfig the effort option is %+v, want low", opt)
 	}
 
-	if err := s.SetModel(context.Background(), "nokey/d"); err == nil {
+	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err == nil {
 		t.Fatal("a switch to an unfunded model succeeded")
 	}
 	none(t, "a failed SetModel")
-	if err := s.SetConfig(context.Background(), nativeEffortID, "max"); err == nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "max"); err == nil {
 		t.Fatal("an effort the model does not offer was taken")
 	}
 	none(t, "a refused SetConfig")
-	if err := s.SetConfig(context.Background(), "fast", "true"); !errors.Is(err, ErrUnsupported) {
+	if _, err := s.SetConfig(context.Background(), "", "fast", "true"); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
 	}
 	none(t, "an unsupported SetConfig")
 
-	if err := s.SetModel(context.Background(), "other/c"); err != nil {
+	if _, err := s.SetModel(context.Background(), "", "other/c"); err != nil {
 		t.Fatal(err)
 	}
 	oneMeta(t, "SetModel to a model with no efforts")
@@ -1315,7 +1329,7 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 func TestNativeSetConfig(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
-	if err := s.SetConfig(context.Background(), nativeEffortID, "low"); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low"); err != nil {
 		t.Fatalf("SetConfig(effort, low): %v", err)
 	}
 	if _, effort := s.hs.Current(); effort != "low" {
@@ -1324,26 +1338,26 @@ func TestNativeSetConfig(t *testing.T) {
 	if opt := EffortOption(s.Snapshot()); opt == nil || opt.Current != "low" {
 		t.Fatalf("the effort option after SetConfig: %+v", opt)
 	}
-	err := s.SetConfig(context.Background(), nativeEffortID, "max")
+	_, err := s.SetConfig(context.Background(), "", nativeEffortID, "max")
 	if err == nil || !strings.Contains(err.Error(), "low, high") {
 		t.Fatalf("SetConfig(effort, max) = %v, want a refusal naming low, high", err)
 	}
 	if opt := EffortOption(s.Snapshot()); opt.Current != "low" {
 		t.Fatalf("a refused effort changed the option to %q", opt.Current)
 	}
-	if err := s.SetConfig(context.Background(), nativeEffortID, ""); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, ""); err != nil {
 		t.Fatalf("SetConfig(effort, \"\") = %v; the model's default is always allowed", err)
 	}
 	if opt := EffortOption(s.Snapshot()); opt.Current != "high" {
 		t.Fatalf("the default effort is %q, want high", opt.Current)
 	}
-	if err := s.SetConfig(context.Background(), "fast", "true"); !errors.Is(err, ErrUnsupported) {
+	if _, err := s.SetConfig(context.Background(), "", "fast", "true"); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("SetConfig(fast) = %v, want ErrUnsupported", err)
 	}
-	if err := s.SetModel(context.Background(), "other/c"); err != nil {
+	if _, err := s.SetModel(context.Background(), "", "other/c"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetConfig(context.Background(), nativeEffortID, "low"); err == nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low"); err == nil {
 		t.Fatal("SetConfig(effort) on a model with no effort control succeeded")
 	}
 }
@@ -1355,7 +1369,7 @@ func TestNativeUnsupported(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	for name, err := range map[string]error{
-		"SetMode": s.SetMode(context.Background(), "plan"),
+		"SetMode": setModeErr(s, "plan"),
 	} {
 		if !errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s = %v, want ErrUnsupported", name, err)
@@ -1373,9 +1387,35 @@ func TestNativeUnsupported(t *testing.T) {
 	}
 }
 
+// setModeErr is SetMode's error alone, for a table that only cares that the
+// verb is unsupported.
+func setModeErr(s Session, id string) error {
+	_, err := s.SetMode(context.Background(), "", id)
+	return err
+}
+
+// settled is drained behind the log's own barrier. A settings delta is
+// *enqueued* under the session's lock, in the section that mutates the
+// snapshot, and published by the log's drainer, so a setter returning is not
+// its event having arrived (plan 021 §3.8). The engine's settings worker
+// flushes for exactly this reason; a test calling the seam directly does it
+// here.
+func deltaSettled(t *testing.T, s Session) []Event {
+	t.Helper()
+	if o, ok := s.(LogOwner); ok {
+		_ = o.EventLog().Flush(context.Background(), nil)
+	}
+	return drained(s)
+}
+
 // TestNativeTitle: the title is the first line of the first prompt, on one
 // line, sanitized and capped, and later prompts leave it; /rename pins its own.
-// No title ever produces an event (craze prompt --json prints none).
+//
+// What is published: a /rename is one EventMeta carrying the Title section and
+// **no Text**, so `craze prompt --json` still prints no title line for a native
+// session (plan 021 §3.8, §3.9); the title the first prompt gives the session
+// is not published at all, which is what the baseline did and what keeps it out
+// of the TUI's header a frame early (native.go's prompt).
 func TestNativeTitle(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -1388,19 +1428,50 @@ func TestNativeTitle(t *testing.T) {
 	if got := s.Snapshot().Title; got != string(want) {
 		t.Fatalf("Title = %q, want %q", got, string(want))
 	}
+	// The first prompt named the session and said nothing: this is the one
+	// change to shared state a native session keeps to itself, because telling
+	// a consumer about it would put the title in the TUI's header a frame
+	// earlier than the baseline does (native.go's prompt, plan 021 C10).
+	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
+		t.Fatalf("the first prompt published titles %q, want none", titles)
+	}
 	if _, err := s.Prompt(context.Background(), "another"); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.Snapshot().Title; got != string(want) {
 		t.Fatalf("a later prompt changed the title to %q", got)
 	}
-	s.SetTitle("mine\x1b[2J")
+	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
+		t.Fatalf("a later prompt published titles %q", titles)
+	}
+	if err := s.SetTitle("", "mine\x1b[2J"); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
 	if got := s.Snapshot().Title; got != "mine" {
 		t.Fatalf("SetTitle: %q", got)
 	}
-	if meta := ofType(drained(s), EventMeta); len(meta) != 0 {
-		t.Fatalf("titles emitted %+v", meta)
+	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 1 || titles[0] != "mine" {
+		t.Fatalf("SetTitle published titles %q, want one %q", titles, "mine")
 	}
+}
+
+// titleDeltas is the title each EventMeta in evs reports, and it fails the
+// caller's expectation loudly if one carries Text: Event.Text is what an
+// ACP agent's session_info_update fills and what `craze prompt --json` prints
+// a title line from, and no native title has ever produced one.
+func titleDeltas(evs []Event) []string {
+	var out []string
+	for _, ev := range evs {
+		if ev.Type != EventMeta || ev.State == nil || ev.State.Title == nil {
+			continue
+		}
+		if ev.Text != "" {
+			out = append(out, "WITH Event.Text: "+ev.Text)
+			continue
+		}
+		out = append(out, *ev.State.Title)
+	}
+	return out
 }
 
 // TestNativeTitlePinnedBeforeTheFirstPrompt: a /rename before any prompt is
@@ -1408,13 +1479,20 @@ func TestNativeTitle(t *testing.T) {
 func TestNativeTitlePinnedBeforeTheFirstPrompt(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
-	s.SetTitle("named")
+	if err := s.SetTitle("", "named"); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
 	f.models["test/a"].push(answer("ok"))
 	if _, err := s.Prompt(context.Background(), "first"); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.Snapshot().Title; got != "named" {
 		t.Fatalf("Title = %q, want the pinned one", got)
+	}
+	// The rename is the one title a native session reports: the pin refused the
+	// first prompt's, and the first prompt's would say nothing in any case.
+	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 1 || titles[0] != "named" {
+		t.Fatalf("titles %q, want only the rename", titles)
 	}
 }
 

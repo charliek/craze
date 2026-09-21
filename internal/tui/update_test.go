@@ -1703,15 +1703,15 @@ func TestStalePlanImplementAnswerLeavesTheNewerRequestAlone(t *testing.T) {
 // message that takes the mask down.
 type wedgedMode struct{ *Stub }
 
-func (wedgedMode) SetMode(ctx context.Context, _ string) error {
+func (wedgedMode) SetMode(ctx context.Context, _, _ string) (*agent.Ticket, error) {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-time.After(2 * time.Second):
 		// Nothing bounded this call, so in the program it would never have
 		// come back at all. Say so rather than hang the suite out to the
 		// package timeout.
-		return errors.New("set_mode was never bounded")
+		return nil, errors.New("set_mode was never bounded")
 	}
 }
 
@@ -2227,7 +2227,7 @@ func TestPlanOfferCleared(t *testing.T) {
 			return tm.(Model)
 		}},
 		{"the agent changes the mode", func(t *testing.T, m Model) Model {
-			if err := m.sess.SetMode(context.Background(), "agent"); err != nil {
+			if _, err := m.sess.SetMode(context.Background(), "", "agent"); err != nil {
 				t.Fatal(err)
 			}
 			return feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "agent"})
