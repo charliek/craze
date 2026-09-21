@@ -354,6 +354,132 @@ func TestACancelledSetIsReplayedAsACancellationNotASuccess(t *testing.T) {
 	}
 }
 
+// TestAClaimedSetWhoseContextEndsSaysTheOutcomeIsUnknown is r25 finding 2: a
+// Set the worker has CLAIMED is bounded by its caller's context again, and
+// honestly.
+//
+// The schedule is the reviewer's: the worker claims a request and blocks inside
+// the provider — a real one blocks in the ACP encoder, where the request has
+// already been written and the context cannot yet be looked at — and the
+// caller's own deadline expires. Before this fix the caller waited
+// unconditionally on the worker's reply, so the TUI's 15-second bound on a mode
+// change bought nothing at all and modeInFlight could be set for ever.
+//
+// The caller now returns ErrSetOutcomeUnknown, which wraps its context's error,
+// and that is the whole of what is true: the provider has the change or is
+// about to. Everything else carries on exactly as it would have — the worker
+// finishes, the change's own delta is published, the next queued Set runs after
+// it, and the receipt keeps the answer the caller was actually given.
+func TestAClaimedSetWhoseContextEndsSaysTheOutcomeIsUnknown(t *testing.T) {
+	t.Run("the caller returns, the worker carries on", func(t *testing.T) {
+		r := newRig(t, Options{})
+		release := r.s.holdNextSetsIgnoringCtx()
+		// Only so a failing run cannot strand the worker.
+		t.Cleanup(release)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		c := Command{Client: r.e.NewClientID(), ID: "3"}
+		claimed := make(chan error, 1)
+		go func() {
+			_, err := r.e.Set(ctx, c, modeSetting("plan"))
+			claimed <- err
+		}()
+		waitFor(t, func() bool { return r.heldSets() })
+
+		// A second Set, queued behind the claimed one: FIFO has to survive the
+		// first caller walking away.
+		second := make(chan SetResult, 1)
+		go func() {
+			res, err := r.e.Set(context.Background(), Command{}, modeSetting("agent"))
+			if err != nil {
+				t.Errorf("the queued set: %v", err)
+			}
+			second <- res
+		}()
+		waitFor(t, func() bool { return r.queuedSets() == 1 })
+
+		cancel()
+		err := awaitErr(t, claimed, "the claimed Set")
+		if !errors.Is(err, ErrSetOutcomeUnknown) {
+			t.Fatalf("a claimed Set whose context ended: %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the sentinel dropped its context's error: %v", err)
+		}
+		if got := Code(err); got != "unavailable" {
+			t.Fatalf("the code is %q", got)
+		}
+
+		// The receipt keeps the answer the caller was GIVEN, not the success the
+		// worker is about to have: a resend of the same id and payload replays
+		// "the outcome is unknown" rather than a revision the caller never saw,
+		// and never runs the change a second time.
+		res, rerr := r.e.Set(context.Background(), c, modeSetting("plan"))
+		if !errors.Is(rerr, ErrSetOutcomeUnknown) || res.Rev != 0 || res.Value != "" {
+			t.Fatalf("the resend answered %+v, %v", res, rerr)
+		}
+
+		// The worker was never told to stop, and the change lands.
+		release()
+		if got := awaitSet(t, second); got.Value != "agent" {
+			t.Fatalf("the queued Set answered %+v", got)
+		}
+		got := r.until(func(ev agent.Event) bool {
+			return ev.Type == agent.EventMeta && ev.State != nil && ev.State.Mode != nil && *ev.State.Mode == "agent"
+		})
+		r.wantShapes(got, `mode "plan"`, `mode "agent"`)
+		if got := r.e.State().CurrentMode; got != "agent" {
+			t.Fatalf("the snapshot ended on %q, want the last delta's value", got)
+		}
+		if n := r.s.setCalls(); n != 2 {
+			t.Fatalf("%d settings reached the provider, want the abandoned one and the queued one", n)
+		}
+	})
+	t.Run("Close joins a worker whose provider ignores every context", func(t *testing.T) {
+		r := newRig(t, Options{})
+		release := r.s.holdNextSetsIgnoringCtx()
+		t.Cleanup(release)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		claimed := make(chan error, 1)
+		go func() {
+			_, err := r.e.Set(ctx, Command{}, modeSetting("plan"))
+			claimed <- err
+		}()
+		waitFor(t, func() bool { return r.heldSets() })
+		cancel()
+		if err := awaitErr(t, claimed, "the claimed Set"); !errors.Is(err, ErrSetOutcomeUnknown) {
+			t.Fatalf("a claimed Set whose context ended: %v", err)
+		}
+		// Nothing releases the hold by hand: the SESSION closing is what frees a
+		// provider call that ignores its context, and that is what Engine.Close
+		// relies on before it joins the worker (live's Close tears the ACP
+		// client down, which fails any write still blocked in the encoder).
+		closed := make(chan error, 1)
+		go func() { closed <- r.e.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatalf("close: %v", err)
+			}
+		case <-time.After(watchdog):
+			t.Fatal("Close is waiting on a settings worker its own close should have freed")
+		}
+	})
+}
+
+// awaitErr is one goroutine's error, with the watchdog.
+func awaitErr(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(watchdog):
+		t.Fatalf("%s never came back", what)
+	}
+	panic("unreachable")
+}
+
 // TestSetAnswersWithTheValueTheSessionConfirmed is r23 finding 4: the answer is
 // the value the SESSION is at, captured where the change was made — not an echo
 // of the request. A provider that resolves what it is sent (native turns an

@@ -135,7 +135,9 @@ type session struct {
 	// them while an update is rewriting the resolution. commandsApplied is
 	// commandsSeen as something to block on: it closes in the same locked
 	// section that sets the flag, so a prompt that read the flag as false is
-	// guaranteed to see the close.
+	// guaranteed to see the close — and it closes at the END of that section,
+	// after the catalog's own delta is enqueued, so a waiter that flushes on
+	// waking covers that delta too.
 	plugins         []PluginEntry
 	commandsSeen    bool
 	commandsApplied chan struct{}
@@ -552,13 +554,20 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// permanently behind (r23 finding 2). One delta, carrying every section the
 	// install wrote, in the section that wrote them; Event.Mode and Event.Text
 	// stay empty, because initialisation is nobody's agent update.
+	//
+	// Enqueued and NOT flushed: a new session's Start may not wait on the
+	// primary's reader, because a caller is allowed not to be one until Start
+	// has returned — `craze prompt` is exactly such a caller (r25 finding 1).
+	// What the flush bought is not lost. Every settings delta there will ever
+	// be goes through this same outbox, in the order its section took s.mu, so
+	// this one stays ahead of all of them and a client that folds them is
+	// never behind; and the engine flushes the outbox before it runs a turn, so
+	// a turn's own output cannot be numbered ahead of it either. What may now
+	// precede it is an event the read loop publishes directly — a foreign turn
+	// the agent was already running — which carries no settings and so moves
+	// nothing.
 	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
-	// Outside the lock, like every other flush behind a delta: it keeps
-	// "emitted means buffered" true of Start itself, so what a client reads
-	// first is the session's starting state and not whatever the first turn
-	// says before it.
-	s.flushDelta()
 	return false, nil
 }
 
@@ -607,6 +616,14 @@ func (s *session) stderrSink() io.Writer {
 // binary is the agent binary Start resolved and spawned, for the session note,
 // which is written here because this is where Start learns the id: after the
 // replay, and before the end bracket.
+//
+// Unlike the session/new path, this one DOES flush — twice, each behind a
+// replay boundary. It may: a load already requires its caller to be reading the
+// primary while Start runs, because the replay is published from the read loop
+// and a transcript longer than the primary's buffer would otherwise wedge it
+// (Session.Start). The TUI, which is the only caller that loads, arms its reader
+// in the same batch as the start command. These flushes ask for nothing the
+// replay did not already ask for (r25 finding 1).
 func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd, binary string) error {
 	if !initRes.LoadSession() {
 		// Nothing has reached the wire: an agent without the capability is
@@ -2116,18 +2133,23 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		first := !s.commandsSeen
 		s.commandsSeen = true
 		s.snap.Plugins = s.resolvePluginsLocked()
-		if first {
-			// Closed after the rows are resolved and before s.mu is released,
-			// so a prompt waiting on it cannot wake into the old resolution:
-			// it has to take this very lock to read one.
-			close(s.commandsApplied)
-		}
 		// Both sections, because both changed: the catalog, and the on-disk
 		// entries resolved against it.
 		s.enqueueDeltaLocked("", Event{}, &StateDelta{
 			Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
 			Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
 		})
+		if first {
+			// Closed after the rows are resolved AND after the delta that says
+			// so is enqueued, and still before s.mu is released: a prompt
+			// waiting on it cannot wake into the old resolution — it has to
+			// take this very lock to read one — and anything else waiting on it
+			// may flush and be sure the catalog's delta is in the outbox.
+			// Enqueuing takes only the outbox's leaf mutex and cannot block, so
+			// there is nothing between the two lines for the close to be late
+			// for.
+			close(s.commandsApplied)
+		}
 		s.mu.Unlock()
 		s.flushDelta()
 	case acp.UpdateCurrentMode:
@@ -2172,18 +2194,31 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
 		// The model section too, when the provider keeps its model in a config
-		// option and that option's value CHANGED: for such a provider, that is
+		// option and this update is a model CHANGE: for such a provider, that is
 		// how a model change is announced, and a client left to read it off the
 		// config section alone would never see CurrentModel or the model
-		// revision move (r23 finding 3). Only a change speaks: a config update
-		// that merely re-lists the same model — every one of cursor's carries
-		// every option — says nothing about the model, and must not write the
-		// option's value over a CurrentModel that session/set_model set.
+		// revision move (r23 finding 3).
+		//
+		// Three conditions, and each closes a different way of being wrong:
+		//
+		//   - the option's value is non-empty and DIFFERS from CurrentModel, or
+		//     there is nothing to announce;
+		//   - and either there was no such option before — its FIRST appearance
+		//     is how a session that started without one learns its model, and
+		//     treating that as "no previous value, so say nothing" left
+		//     CurrentModel permanently wrong, with every later identical update
+		//     now having a previous value equal to it and so repairing nothing
+		//     (r25 finding 3) —
+		//   - or the previous option's value differs from this one. An update
+		//     that merely RE-LISTS the value the option already had says nothing
+		//     about the model: every one of cursor's carries every option, and a
+		//     stale re-list must not write its value over a CurrentModel that
+		//     session/set_model has since moved.
 		was := ModelConfigOptionIn(s.snap.Config)
 		s.snap.Config = cfg
 		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
-		if now := ModelConfigOptionIn(cfg); now != nil && was != nil &&
-			now.Current != "" && now.Current != was.Current {
+		if now := ModelConfigOptionIn(cfg); now != nil && now.Current != "" &&
+			now.Current != s.snap.CurrentModel && (was == nil || was.Current != now.Current) {
 			s.snap.CurrentModel = now.Current
 			model := now.Current
 			st.Model = &model

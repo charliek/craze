@@ -183,6 +183,19 @@ var (
 	ErrBadRequest = errors.New("engine: bad request")
 	// ErrUnknownCommand answers a command id outside the retry horizon.
 	ErrUnknownCommand = errors.New("engine: that command id has expired")
+	// ErrSetOutcomeUnknown answers a Set whose caller's context ended after the
+	// settings worker had already CLAIMED the request: the provider has the
+	// change, or is about to, and whether it landed cannot be said from the
+	// caller's side — internal/acp writes a request before it can look at its
+	// context at all (conn.go's callRaw), so a cancellation past that point
+	// cannot honestly mean "nothing happened". It is the settings verb's
+	// CancelUnknown: the stream is what says, and the change's own delta
+	// arrives if it landed.
+	//
+	// It always WRAPS the context's own error, so errors.Is(err,
+	// context.DeadlineExceeded) and errors.Is(err, context.Canceled) still hold
+	// for a caller that matches on those. Its code is "unavailable".
+	ErrSetOutcomeUnknown = errors.New("engine: the settings change may or may not have landed")
 	// ErrCommandAborted answers a command id whose call did not return at all:
 	// it panicked on the way through. Whether it changed anything is not
 	// knowable, so the id is answered with this for as long as the table keeps
@@ -216,7 +229,10 @@ func Code(err error) string {
 	case errors.Is(err, agent.ErrUnknownAsk):
 		return "unknown_ask"
 	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable),
-		errors.Is(err, ErrCommandAborted):
+		errors.Is(err, ErrCommandAborted), errors.Is(err, ErrSetOutcomeUnknown):
+		// ErrSetOutcomeUnknown is spelled out rather than left to the default,
+		// because it wraps a context error and 05 has no better word for "you
+		// can only look at the stream, or try again".
 		return "unavailable"
 	case errors.Is(err, ErrBadRequest):
 		return "bad_request"
@@ -312,9 +328,12 @@ type Control interface {
 
 	// The session's settings. Set blocks — one FIFO worker asks the provider,
 	// the session writes the change and its delta in one locked section, and
-	// the answer carries the confirmed value and the delta's revision — and
-	// SetTitle waits on nothing, because craze owns the title and no provider
-	// is asked.
+	// the answer carries the confirmed value and the delta's revision — and it
+	// is bounded by its ctx throughout: a request still queued is answered with
+	// that context's error having changed nothing, and one the worker has
+	// claimed with ErrSetOutcomeUnknown, which is the honest answer once a
+	// request may already be on the wire. SetTitle waits on nothing, because
+	// craze owns the title and no provider is asked.
 	Set(ctx context.Context, c Command, s Setting) (SetResult, error)
 	SetTitle(c Command, title string) error
 

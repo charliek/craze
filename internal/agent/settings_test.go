@@ -125,11 +125,10 @@ func settle(t *testing.T, s *session) {
 // returned, and a fold drained before it — compared with a snapshot read after
 // it — would differ on the commands section alone.
 //
-// The snapshot read is half the barrier. commandsApplied is closed in the
-// middle of the section that applies the catalog, BEFORE that section enqueues
-// the delta saying so (live.go's UpdateAvailableCommands), so a flush made on
-// waking from the channel alone can still miss that delta. Taking the
-// session's own lock once here is what waits for the section to end.
+// The channel is the whole barrier: commandsApplied is closed in the section
+// that applies the catalog, after that section has enqueued the delta saying so
+// (live.go's UpdateAvailableCommands), so a flush made on waking from it covers
+// that delta.
 func awaitCatalog(t *testing.T, s *session) {
 	t.Helper()
 	select {
@@ -137,7 +136,6 @@ func awaitCatalog(t *testing.T, s *session) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the agent never advertised its commands")
 	}
-	_ = s.Snapshot()
 }
 
 // oneBufferedEvent is the single event the site just driven left in the
@@ -475,6 +473,70 @@ func TestAConfigBackedModelChangeMovesTheModelSection(t *testing.T) {
 		}
 		if got := s.Snapshot().CurrentModel; got != before {
 			t.Fatalf("the model moved from %q to %q on a config update", before, got)
+		}
+	})
+	// r25 finding 3: the model option's FIRST appearance. A session that started
+	// without one — `echo` advertises an effort and a fast toggle and no model
+	// category at all — learns its model from the update that introduces it.
+	// Before the fix "there was no previous value" meant "say nothing", and
+	// since every later update then HAD a previous value equal to the new one,
+	// nothing ever repaired CurrentModel: the status row and the snapshot
+	// disagreed with the agent's own option for the rest of the session.
+	t.Run("the option's first appearance", func(t *testing.T) {
+		s := startScript(t, "echo", false)
+		settle(t, s)
+		if got := s.Snapshot().CurrentModel; got != "default" {
+			t.Fatalf("the session started on %q", got)
+		}
+		if ModelConfigOption(s.Snapshot()) != nil {
+			t.Fatal("the session already had a model option, so nothing is introduced here")
+		}
+		s.onUpdate(modelConfigNotification("composer"))
+		ev := oneBufferedEvent(t, s)
+		if ev.State.Model == nil || *ev.State.Model != "composer" || ev.State.Config == nil {
+			t.Fatalf("the introduction carries %+v, want both sections", ev.State)
+		}
+		if got := s.Snapshot().CurrentModel; got != "composer" {
+			t.Fatalf("the snapshot's model is %q", got)
+		}
+	})
+	// The same first appearance, naming the model the session is ALREADY on:
+	// nothing changed, so nothing is said about the model.
+	t.Run("a first appearance that agrees says nothing", func(t *testing.T) {
+		s := startScript(t, "echo", false)
+		settle(t, s)
+		s.onUpdate(modelConfigNotification(s.Snapshot().CurrentModel))
+		ev := oneBufferedEvent(t, s)
+		if ev.State.Model != nil {
+			t.Fatalf("an option that agrees with the model carried the model section: %+v", ev.State)
+		}
+	})
+	// The stale re-list, which is the case the "only a change speaks" rule
+	// exists for and which the first-appearance rule must not reopen:
+	// session/set_model moved the model, and the agent then re-lists its options
+	// carrying the OLD value. That is not a change — the option is at the value
+	// it was already at — and it must not write itself over the model the setter
+	// set.
+	t.Run("a stale re-list after SetModel", func(t *testing.T) {
+		s := startScript(t, "modelconfig", false)
+		settle(t, s)
+		if _, err := s.SetModel(context.Background(), "c-1/1", "composer"); err != nil {
+			t.Fatalf("SetModel: %v", err)
+		}
+		if got := s.Snapshot().CurrentModel; got != "composer" {
+			t.Fatalf("SetModel left the session on %q", got)
+		}
+		// The option still reads "default": the agent has not moved it, and this
+		// update is its whole option list as it stands.
+		s.onUpdate(modelConfigNotification("default"))
+		if got := s.Snapshot().CurrentModel; got != "composer" {
+			t.Fatalf("a stale re-list put the model back to %q", got)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		for _, ev := range drainBuffered(s) {
+			if ev.Type == EventMeta && ev.State != nil && ev.State.Config != nil && ev.State.Model != nil {
+				t.Fatalf("a stale re-list carried the model section: %+v", ev.State)
+			}
 		}
 	})
 }
@@ -843,6 +905,56 @@ func TestTheInstallDeltaIsCrazesOwn(t *testing.T) {
 	if metas == 0 {
 		t.Fatal("the session published no install delta at all, so nothing was checked")
 	}
+}
+
+// TestStartReturnsWithThePrimaryFullAndNobodyReading is r25 finding 1, as the
+// reviewer's own schedule: a caller — `craze prompt` is one — calls Start and
+// does not begin reading the primary until it has returned, with the primary
+// already full when the session comes up.
+//
+// With Start flushing its install delta that was a deadlock: the log's drainer
+// waited for room in the primary, and the only goroutine that could make room
+// was waiting for Start. The flush used context.Background(), so nothing of the
+// caller's could break it either. The install is enqueued and left in the
+// outbox now, so Start returns whatever the primary holds and whether or not
+// anyone is reading it (Session.Start).
+//
+// The live half uses `nocommands` — a fake agent that advertises no catalog —
+// on purpose, and the reason is worth recording: an update that arrives BEFORE
+// session/new's reply is buffered by the ACP client and flushed inside
+// NewSession, on **Start's own goroutine** (acp/client.go's
+// flushSessionUpdates), where onUpdate's meta arms wait for the primary exactly
+// as they do on the read loop. That is a second way to wedge a start with a
+// full primary, it is older than this plan — before settings were deltas the
+// same arms called emit, which publishes straight into the primary — and it is
+// bounded by the session's own close rather than by the caller. An agent that
+// says nothing before its reply takes it out of the schedule, which leaves this
+// test measuring the one thing finding 1 is about.
+func TestStartReturnsWithThePrimaryFullAndNobodyReading(t *testing.T) {
+	t.Run("a live session", func(t *testing.T) {
+		s := newTestSession(t, Options{
+			Binary:    fakeAgentPath(t),
+			ExtraArgs: []string{"-script=nocommands"},
+			Workspace: t.TempDir(),
+			Stderr:    io.Discard,
+		})
+		fillPrimary(t, s.log)
+		within(t, "Start with a primary nobody reads", func() {
+			if err := s.Start(t.Context()); err != nil {
+				t.Errorf("Start: %v", err)
+			}
+		})
+	})
+	t.Run("a native session", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.session(Options{})
+		fillPrimary(t, s.log)
+		within(t, "Start with a primary nobody reads", func() {
+			if err := s.Start(t.Context()); err != nil {
+				t.Errorf("Start: %v", err)
+			}
+		})
+	})
 }
 
 // TestSetTitleRefusedForRoomChangesNothing: SetTitle is the one settings verb

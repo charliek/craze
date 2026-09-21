@@ -2403,6 +2403,13 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 // is still looking at the same screen. Timing out is an ordinary refusal: it
 // returns the revert, which puts the chip back and clears the flag.
 //
+// The bound is real only because the engine honours it after the settings
+// worker has claimed the request too: such a Set returns
+// engine.ErrSetOutcomeUnknown on this context rather than waiting for a
+// provider that may never answer (r25 finding 2). Here that error is an error
+// like any other — the row, and the revert the revision guard allows — and if
+// the change did land after all, its own delta corrects the mirror.
+//
 // A var rather than a const only so a test can shorten it: nothing in the
 // program writes it.
 var modeCallTimeout = 15 * time.Second

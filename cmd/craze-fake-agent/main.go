@@ -51,6 +51,9 @@ Flags:
           modelconfig same as echo, plus a category "model" config option: the
                       shape of an agent that has no session/set_model and keeps
                       its model among its options
+          modelconfig-refuse same, and session/set_model is answered -32601: the
+                      whole of that agent, so a client's
+                      set_model → set_config fallback runs for real
           permission  request allow_once / reject_once and wait for the client
           ask         emit cursor/ask_question then finish the turn
           plan        emit cursor/create_plan then finish the turn
@@ -136,7 +139,7 @@ func main() {
 		}
 	}
 	switch script {
-	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "permission", "ask", "plan",
+	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse", "permission", "ask", "plan",
 		"hang", "hang-ack", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail",

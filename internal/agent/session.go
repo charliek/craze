@@ -780,6 +780,35 @@ type CancelOutcome struct {
 }
 
 type Session interface {
+	// Start spawns or opens the session and installs its first snapshot.
+	//
+	// # What it asks of its caller
+	//
+	// Starting a NEW session enqueues its install delta and flushes nothing, so
+	// nothing Start does of its own waits for the primary's reader: a caller
+	// may call it and begin reading only afterwards, which is exactly what
+	// `craze prompt` does (r25 finding 1).
+	//
+	// One window in a new session's start is not Start's own and is older than
+	// this plan: an update the agent sends BEFORE its session/new reply is
+	// buffered by the ACP client and dispatched inside NewSession, on Start's
+	// goroutine (acp's flushSessionUpdates), and an update that moves a setting
+	// waits for the primary there exactly as it does on the read loop. An agent
+	// that fills the primary's 256 slots that way, with nobody reading, wedges
+	// a start until the session closes. Nothing here narrows that; it is
+	// recorded so the requirement below reads as the sharpest one rather than
+	// the only one.
+	//
+	// A LOAD (Options.LoadSessionID) is different, and always has been: the
+	// replayed transcript is published from the client's read loop **during**
+	// Start, so a replay longer than the primary's buffer blocks that read loop,
+	// the session/load result is never read, and Start never returns. **A caller
+	// that loads must therefore be reading the primary while Start runs** — the
+	// TUI arms its reader in the same batch as the start command (tui.Model.Init)
+	// and is the only caller that loads. The two flushes inside a load, which
+	// order the seeded title before EventReplay{start} and the restored snapshot
+	// before EventReplay{end}, rest on that same requirement and add nothing to
+	// it.
 	Start(ctx context.Context) error
 	// Prompt is Begin(text)(ctx): the claim and the prompt back to back.
 	Prompt(ctx context.Context, text string) (Result, error)

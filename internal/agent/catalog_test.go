@@ -35,6 +35,50 @@ func TestInitializeModelStateFallback(t *testing.T) {
 	}
 }
 
+// TestTheInitialModelCanComeFromTheModelConfigOption is r25 finding 3 at the
+// first snapshot a session ever has. An agent that keeps its model in a config
+// option and names no current model in its models block would otherwise start
+// on no model at all while advertising exactly which one it is on.
+//
+// The precedence is the one craze has always had: the models block wins
+// whenever it names a model, even when the option disagrees with it. Two
+// sources that disagree are a fact about the agent, not something to be
+// resolved by whichever is read last.
+func TestTheInitialModelCanComeFromTheModelConfigOption(t *testing.T) {
+	modelOption := json.RawMessage(`[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"composer","options":[{"value":"default","name":"Default"},{"value":"composer","name":"Composer"}]}]`)
+	t.Run("no models block", func(t *testing.T) {
+		snap := snapshotFromNew(&acp.NewSessionResult{ConfigOptions: modelOption})
+		if snap.CurrentModel != "composer" {
+			t.Fatalf("the session started on %q, want the model option's value", snap.CurrentModel)
+		}
+	})
+	t.Run("the models block wins when it names one", func(t *testing.T) {
+		snap := snapshotFromNew(&acp.NewSessionResult{
+			Models:        json.RawMessage(`{"currentModelId":"default","availableModels":[{"modelId":"default","name":"Default"}]}`),
+			ConfigOptions: modelOption,
+		})
+		if snap.CurrentModel != "default" {
+			t.Fatalf("the session started on %q, want the models block's value", snap.CurrentModel)
+		}
+	})
+	t.Run("an empty option says nothing", func(t *testing.T) {
+		snap := snapshotFromNew(&acp.NewSessionResult{
+			ConfigOptions: json.RawMessage(`[{"id":"model","name":"Model","category":"model","type":"select","currentValue":""}]`),
+		})
+		if snap.CurrentModel != "" {
+			t.Fatalf("the session started on %q", snap.CurrentModel)
+		}
+	})
+	t.Run("an ordinary option is not a model", func(t *testing.T) {
+		snap := snapshotFromNew(&acp.NewSessionResult{
+			ConfigOptions: json.RawMessage(`[{"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"high"}]`),
+		})
+		if snap.CurrentModel != "" {
+			t.Fatalf("an effort option was read as the model: %q", snap.CurrentModel)
+		}
+	})
+}
+
 func TestParseModelsAndModes(t *testing.T) {
 	modelsRaw := json.RawMessage(`{"currentModelId":"default","availableModels":[{"modelId":"default","name":"Default"},{"modelId":"composer","name":"Composer"}]}`)
 	cur, models := parseModels(modelsRaw)

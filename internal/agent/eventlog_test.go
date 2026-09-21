@@ -177,14 +177,20 @@ func fillPrimary(t *testing.T, l *EventLog) {
 	}
 }
 
-// takeStartDelta takes the one settings delta a session's Start publishes —
-// the install: everything session/new (or the native harness) brought, said in
-// the stream instead of only in Snapshot() (live.go's installDeltaLocked, r23
+// takeStartDelta takes the one settings delta a session's Start enqueues — the
+// install: everything session/new (or the native harness) brought, said in the
+// stream instead of only in Snapshot() (live.go's installDeltaLocked, r23
 // finding 2) — off the primary, so a test that goes on to fill the primary
-// starts from an empty buffer. Start flushes it, so it is already buffered when
-// Start returns and this never waits.
+// starts from an empty buffer.
+//
+// The flush is the test's own, and has to be: Start does NOT flush the install,
+// because it may not wait on a reader that a caller is allowed not to have
+// started yet (Session.Start, r25 finding 1). Here the primary is empty and
+// this goroutine is its reader, so the drainer has room and the barrier returns
+// at once.
 func takeStartDelta(t *testing.T, l *EventLog) Event {
 	t.Helper()
+	_ = l.Flush(context.Background(), nil)
 	select {
 	case ev := <-l.Primary():
 		if ev.Type != EventMeta || ev.State == nil {

@@ -91,10 +91,24 @@ func snapshotFromNewProvider(res *acp.NewSessionResult, p Provider, init *acp.In
 			curMode = modes[0].ID
 		}
 	}
+	config := parseConfigOptions(res.ConfigOptions)
+	if curModel == "" {
+		// A provider that keeps its model in a config option and names no
+		// current model in its models block — the shape a session/set_model-less
+		// agent has — would otherwise start on no model at all while advertising
+		// exactly which one it is on (r25 finding 3). The models block keeps
+		// precedence whenever it names one: two disagreeing sources are a fact
+		// about the agent, and the one craze has always believed is the models
+		// block. onUpdate's config arm will not flip it afterwards either — an
+		// update that re-lists the option unchanged is not a change.
+		if opt := ModelConfigOptionIn(config); opt != nil && opt.Current != "" {
+			curModel = opt.Current
+		}
+	}
 	return Snapshot{
 		Models:       models,
 		Modes:        modes,
-		Config:       parseConfigOptions(res.ConfigOptions),
+		Config:       config,
 		CurrentModel: curModel,
 		CurrentMode:  curMode,
 	}

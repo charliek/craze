@@ -380,16 +380,17 @@ func (s *nativeSession) start(context.Context) error {
 	// first-prompt title stays silent (X47), so no Title section, and
 	// Event.Mode/Event.Text stay empty: starting is nobody's agent update.
 	model := s.snap.CurrentModel
+	// Enqueued and not flushed, exactly as the live session's install is: Start
+	// may not wait on the primary's reader, because a caller is allowed not to
+	// be one until Start has returned (Session.Start, r25 finding 1). Every
+	// later settings delta goes through the same outbox behind it, so a client
+	// that folds them is never behind.
 	s.enqueueDeltaLocked("", Event{}, &StateDelta{
 		Model:   &model,
 		Config:  &ConfigState{Options: cloneConfig(s.snap.Config)},
 		Plugins: &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
 	})
 	s.mu.Unlock()
-	// Outside the lock, as the live session's install flushes: "emitted means
-	// buffered" when Start returns, so a client's first read of the stream is
-	// the session's starting state rather than a race with the first turn.
-	_ = s.log.Flush(context.Background(), s.done)
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: hs.ID()})

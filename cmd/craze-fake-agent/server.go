@@ -113,10 +113,21 @@ func defaultConfigOptions() []map[string]any {
 	}
 }
 
+// modelConfigScript names the two scripts that advertise the model option, and
+// refusesSetModel the one of them that is the whole of such an agent: it
+// answers session/set_model with -32601, the live wire for a method an agent
+// does not implement, so a client's set_model → set_config fallback runs end to
+// end instead of being simulated (r25 finding 3).
+func modelConfigScript(script string) bool {
+	return script == "modelconfig" || script == "modelconfig-refuse"
+}
+
+func refusesSetModel(script string) bool { return script == "modelconfig-refuse" }
+
 // modelConfigOptions is defaultConfigOptions plus the option a provider that
 // has no session/set_model keeps its MODEL in: category "model", whose values
 // are the models the session advertises. It belongs to the `modelconfig`
-// script alone, so no other script's chips or dialog rows move.
+// scripts alone, so no other script's chips or dialog rows move.
 func modelConfigOptions() []map[string]any {
 	return append(defaultConfigOptions(), map[string]any{
 		"id":           "model",
@@ -137,7 +148,7 @@ func run(script string) error {
 	switch {
 	case grokScript(script):
 		cfg = grokConfigOptions()
-	case script == "modelconfig":
+	case modelConfigScript(script):
 		cfg = modelConfigOptions()
 	}
 	s := &server{conn: conn, script: script, config: cfg}
@@ -394,6 +405,12 @@ func (s *server) onRequest(msg *acp.Message) {
 		}
 		go s.handleInterject(msg)
 	case acp.MethodSessionSetModel:
+		if refusesSetModel(s.script) {
+			// An agent that has no session/set_model at all: the live wire for
+			// one of those is -32601, and the model moves through set_config.
+			_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
+			return
+		}
 		s.reply(msg.ID, map[string]any{})
 	case acp.MethodSessionSetMode:
 		var p acp.SetModeParams

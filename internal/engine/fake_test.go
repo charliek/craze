@@ -62,10 +62,12 @@ type fakeSession struct {
 	// setHold, when non-nil, holds every settings verb at its "provider" call,
 	// and setsHeld counts the ones parked there now: the barrier a test uses to
 	// know the worker has taken one and nothing has changed yet. setErr fails
-	// the call there instead.
-	setHold  chan struct{}
-	setsHeld int
-	setErr   error
+	// the call there instead. setHoldDeaf makes that hold ignore the caller's
+	// context, which is what a real ACP write does (holdNextSetsIgnoringCtx).
+	setHold     chan struct{}
+	setHoldDeaf bool
+	setsHeld    int
+	setErr      error
 	// setResolve is a provider that answers with something other than what it
 	// was asked for (resolveSets), and setSilent one whose deltas carry no
 	// ticket (setsWithoutATicket).
@@ -353,14 +355,24 @@ func (s *fakeSession) Snapshot() agent.Snapshot {
 // holdNextSets makes every settings verb from now wait at the "provider" call
 // until the returned barrier is closed: the point at which a Set has been taken
 // by the worker and nothing has changed yet.
-func (s *fakeSession) holdNextSets() (release func()) {
+func (s *fakeSession) holdNextSets() (release func()) { return s.holdSets(false) }
+
+// holdNextSetsIgnoringCtx is holdNextSets for a provider that does NOT honour
+// the context it was given. That is not a contrivance: internal/acp writes a
+// request to the pipe before callRaw can look at its context at all, so a live
+// setter parked in that write is deaf to a cancellation in exactly this way
+// (r25 finding 2). The hold then ends two ways only — the test releasing it,
+// and the session closing, which is what tears a real client's transport down.
+func (s *fakeSession) holdNextSetsIgnoringCtx() (release func()) { return s.holdSets(true) }
+
+func (s *fakeSession) holdSets(deaf bool) (release func()) {
 	hold := make(chan struct{})
 	s.mu.Lock()
-	s.setHold = hold
+	s.setHold, s.setHoldDeaf = hold, deaf
 	s.mu.Unlock()
 	return sync.OnceFunc(func() {
 		s.mu.Lock()
-		s.setHold = nil
+		s.setHold, s.setHoldDeaf = nil, false
 		s.mu.Unlock()
 		close(hold)
 	})
@@ -468,19 +480,28 @@ func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value string) (a
 // is freed by the session's close rather than held by the worker's loop.
 func (s *fakeSession) set(ctx context.Context, cause, value string, delta func(string, *agent.StateDelta), apply func(string, *agent.Snapshot)) (agent.SetOutcome, error) {
 	s.mu.Lock()
-	hold, fail, resolve, silent := s.setHold, s.setErr, s.setResolve, s.setSilent
+	hold, deaf, fail, resolve, silent := s.setHold, s.setHoldDeaf, s.setErr, s.setResolve, s.setSilent
 	if hold != nil {
 		s.setsHeld++
 	}
 	s.mu.Unlock()
 	if hold != nil {
 		var err error
-		select {
-		case <-hold:
-		case <-ctx.Done():
-			err = ctx.Err()
-		case <-s.done:
-			err = errSessionClosed
+		if deaf {
+			// A provider that never looks at the context it was handed.
+			select {
+			case <-hold:
+			case <-s.done:
+				err = errSessionClosed
+			}
+		} else {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-s.done:
+				err = errSessionClosed
+			}
 		}
 		s.mu.Lock()
 		s.setsHeld--

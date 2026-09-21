@@ -76,6 +76,21 @@ type setReq struct {
 	c     Command
 	s     Setting
 	reply chan setAnswer
+	// claimed is closed by the worker in the very section that takes this
+	// request out of the queue TO RUN IT (takeSet) — and never for one it
+	// answers there without running, nor for one a closing engine refuses. It
+	// is what tells a caller whose context has ended which of those two
+	// happened: an unclaimed request changed nothing and is owed the plain
+	// context error, while a claimed one is at the provider and can only be
+	// answered honestly with ErrSetOutcomeUnknown.
+	claimed chan struct{}
+}
+
+// newSetReq is one Set's request, with both of its channels: reply is buffered
+// for the one answer it will ever carry, so the worker never blocks sending it
+// even when the caller has long since given up and gone.
+func newSetReq(ctx context.Context, c Command, s Setting) *setReq {
+	return &setReq{ctx: ctx, c: c, s: s, reply: make(chan setAnswer, 1), claimed: make(chan struct{})}
 }
 
 // ctxErr is the request's own cancellation, as the worker checks it when it
@@ -139,25 +154,33 @@ type setAnswer struct {
 // the worker dequeued a request whose caller had already given up and asked the
 // provider for a change nobody was waiting for (r23 finding 1).
 //
-// Once the worker has CLAIMED it, the caller waits for the worker's answer,
-// whatever its own context does: that answer is the truth about what the
-// provider was told, and a caller that returned "cancelled" while the change
-// was being made would be told the opposite of what happened. So a ctx that
-// ends DURING the provider call gets the session's own answer — a success with
-// its revision if the provider took the change before noticing, or the
-// provider's error if it did not. It is never "failed" for a change that was
-// made; it can be an error for a change the wire may still have carried, which
-// is the honest limit of a cancellation made after a request has gone out
-// (internal/acp writes before it checks its context) and not something this
-// layer can improve on. A ctx that ends during the flush leaves the change
-// standing with Rev 0 — see runSet.
+// Once the worker has CLAIMED it, this call is bounded by its context again,
+// honestly: it waits for the worker's answer OR for its own context, whichever
+// comes first, and a context that wins returns ErrSetOutcomeUnknown — wrapping
+// that context's error, so errors.Is(err, context.DeadlineExceeded) still
+// holds. That sentinel says exactly what is true: the provider has the change
+// or is about to, internal/acp writes a request before it can look at a context
+// at all, and nobody on this side can say whether it landed. The stream says —
+// if the change lands, its delta is published like any other.
+//
+// It is never plain context.Canceled for a claimed request, which would read as
+// "nothing happened", and never a success the caller has waited past its own
+// deadline for: a Set from a UI is bounded by modeCallTimeout precisely so an
+// agent that has stopped reading its stdin cannot pin a chip for ever, and a
+// setter that ignored its caller's context would take that bound away.
+//
+// The worker carries on regardless — a change the provider has taken has taken,
+// and abandoning the flush would only lose the revision — and its late answer
+// goes into a buffered channel nobody need read. A ctx that ends during the
+// flush of a change the caller is still waiting for leaves that change standing
+// with Rev 0; see runSet.
 func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, error) {
 	if err := s.validate(); err != nil {
 		return SetResult{}, err
 	}
 	hash := receiptHash("Set", string(s.Kind), s.ID, s.Value)
 	return withBlockingReceipt(ctx, e.receipts, c, hash, func() (SetResult, error) {
-		r := &setReq{ctx: ctx, c: c, s: s, reply: make(chan setAnswer, 1)}
+		r := newSetReq(ctx, c, s)
 		if err := e.queueSet(r); err != nil {
 			return SetResult{}, err
 		}
@@ -181,13 +204,29 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 				// asked of the provider and nothing changed.
 				return SetResult{}, ctx.Err()
 			}
-			// The worker has it. Its answer is the truth about what the provider
-			// was told, and it is coming: either the worker found this same dead
-			// context as it claimed the request and answered without running it,
-			// or the provider has the call and the flush follows — both take this
-			// ctx, so neither outlives it by much.
-			a := <-r.reply
-			return a.res, a.err
+			// The worker has it, and what that means is decided by the claim:
+			//
+			//   - claimed is still open: the worker either found this same dead
+			//     context in the section that would have claimed the request and
+			//     answered it WITHOUT running it, or the engine closed under it.
+			//     Nothing was asked of the provider, and the answer — the plain
+			//     context error, or ErrNotAccepting — is already on its way.
+			//   - claimed is closed: the request is at the provider. This call's
+			//     own deadline has passed and it says so, with the one answer
+			//     that is true (ErrSetOutcomeUnknown).
+			select {
+			case a := <-r.reply:
+				return a.res, a.err
+			case <-r.claimed:
+				// A reply that arrived in the same instant is preferred to the
+				// sentinel: it is strictly more informative and equally true.
+				select {
+				case a := <-r.reply:
+					return a.res, a.err
+				default:
+				}
+				return SetResult{}, setOutcomeUnknown(ctx.Err())
+			}
 		}
 	})
 }
@@ -255,9 +294,25 @@ func (e *Engine) takeSet() (*setReq, bool) {
 			r.reply <- setAnswer{err: err}
 			continue
 		}
+		// The claim, told to the caller in the same locked section that makes
+		// it: from here this request WILL be put to the provider, so a caller
+		// whose context ends can no longer say the change did not happen
+		// (setReq.claimed).
+		close(r.claimed)
 		return r, true
 	}
 	return nil, false
+}
+
+// setOutcomeUnknown is the answer a claimed request's caller gets when its own
+// context ends first: the sentinel AND the context's error, so a client that
+// matches on either is right (ErrSetOutcomeUnknown).
+func setOutcomeUnknown(ctxErr error) error {
+	if ctxErr == nil {
+		// Unreachable: this is only ever built from a context that is done.
+		return ErrSetOutcomeUnknown
+	}
+	return fmt.Errorf("%w: %w", ErrSetOutcomeUnknown, ctxErr)
 }
 
 // serveSets is the settings worker: one goroutine, one request at a time, in
