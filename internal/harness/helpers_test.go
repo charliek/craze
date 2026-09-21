@@ -421,6 +421,7 @@ func noTranscript(t *testing.T, s *Session) {
 //	assistant test/a high end_turn: (thinking: …) answer
 //	model_change test/b
 //	effort_change medium
+//	mode_change plan
 func entries(tr *store.Transcript) []string {
 	var out []string
 	for _, e := range tr.Entries {
@@ -429,6 +430,8 @@ func entries(tr *store.Transcript) []string {
 			out = append(out, "model_change "+e.Model.Alias)
 		case store.TypeEffortChange:
 			out = append(out, "effort_change "+e.Effort)
+		case store.TypeModeChange:
+			out = append(out, "mode_change "+e.Mode)
 		case store.TypeMessage:
 			head := []string{string(e.Message.Role), e.Model.Alias}
 			for _, extra := range []string{e.Effort, e.StopReason} {

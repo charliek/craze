@@ -1,0 +1,5 @@
+Claude Code calls this tool `AskUserQuestion`.
+
+Ask the user one or more multiple-choice questions.
+
+- Put your recommended option first and append "(Recommended)" to its label.

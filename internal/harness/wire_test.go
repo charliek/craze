@@ -428,6 +428,102 @@ func TestSteerPrefixIsStable(t *testing.T) {
 	}
 }
 
+// TestReminderPrefixIsStable is A2 on the wire: a plan-mode turn carries its
+// reminder in every one of its requests, at one index — right after the
+// user's prompt, ahead of the steer taken up later — and each request still
+// begins with the whole of the one before it, byte for byte, so the prefix
+// cache keeps hitting across the turn's three steps (D-30 within a turn).
+//
+// It is also where the cost §3.3 states shows: the next turn's history is
+// rebuilt from the transcript, which holds no reminder, so the turn's own
+// reminder is in none of the next turn's requests and that turn's first
+// request diverges from the previous one right after the previous prompt.
+// The control is the steer, which is the conversation: it is replayed.
+func TestReminderPrefixIsStable(t *testing.T) {
+	// The index both land at: the system prompt and the turn's prompt are
+	// ahead of the reminder, and the first tool step's assistant message and
+	// its results are ahead of the steer.
+	const reminderAt, steerAt = 2, 5
+	read := `{"filePath":"a.txt"}`
+	w := newWire(t,
+		sseReply(toolCallChunk("call_1", "read", read), finishChunk("tool_calls", true)),
+		sseReply(toolCallChunk("call_2", "read", read), finishChunk("tool_calls", true)),
+		sseReply(textChunk("Here is the plan."), finishChunk("stop", true)),
+		sseReply(textChunk("Still planning."), finishChunk("stop", true)),
+	)
+	f, opts := wireFixture(t, w)
+	opts.Now = time.Now // a real clock: nothing may reach the prompt
+	opts.Prompt = testPromptExtras()
+	opts.Mode = "plan"
+	s := f.open(opts)
+	f.put("a.txt", "alpha\n")
+
+	var sent atomic.Bool
+	if _, err := s.Run(context.Background(), "What should we change?", func(ev Event) {
+		if _, ok := ev.(ToolCalled); !ok || !sent.CompareAndSwap(false, true) {
+			return
+		}
+		if err := sendSteer(s, steerText); err != nil {
+			t.Errorf("Steer from the sink: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run(t, s, "Carry on.")
+
+	bodies := w.requests()
+	if len(bodies) != 4 {
+		t.Fatalf("the server saw %d requests, want 4", len(bodies))
+	}
+	// Within the turn every request extends the one before it; the steer
+	// arrives with the second, after the reminder that was already there.
+	grow := []int{3, 2}
+	for i := 1; i < 3; i++ {
+		prev, next := messages(t, bodies[i-1]), messages(t, bodies[i])
+		if k := prefixBreak(prev, next); k >= 0 {
+			t.Fatalf("request %d does not begin with request %d: message %d differs\n%s\n%s",
+				i+1, i, k, prev[k], next[min(k, len(next)-1)])
+		}
+		if len(next) != len(prev)+grow[i-1] {
+			t.Fatalf("request %d has %d messages, want request %d's %d plus %d", i+1, len(next), i, len(prev), grow[i-1])
+		}
+	}
+	// The reminder is at its index in every request of the turn, and in none
+	// of them anywhere else; the plan file's path is in it.
+	plan := planPathOf(s)
+	for i, body := range bodies[:3] {
+		for k, m := range messages(t, body) {
+			if holds := bytes.Contains(m, []byte(reminderTag)); holds != (k == reminderAt) {
+				t.Fatalf("request %d's message %d holds the reminder = %v:\n%s", i+1, k, holds, m)
+			}
+		}
+		if got := messages(t, body)[reminderAt]; !bytes.Contains(got, []byte(plan)) {
+			t.Fatalf("request %d's reminder does not name the plan file:\n%s", i+1, got)
+		}
+	}
+	if got := messages(t, bodies[1])[steerAt]; !bytes.Contains(got, []byte(steerText)) {
+		t.Fatalf("the steer is not at %d: %s", steerAt, got)
+	}
+
+	// The next turn: its own reminder is the only one, and it is the last
+	// message again — the previous turn's was never persisted, so the history
+	// it replays has none and the prefix breaks right after the last prompt
+	// (the cost §3.3 states).
+	last := messages(t, bodies[3])
+	for k, m := range last {
+		if holds := bytes.Contains(m, []byte(reminderTag)); holds != (k == len(last)-1) {
+			t.Fatalf("the next turn's message %d holds a reminder = %v:\n%s", k, holds, m)
+		}
+	}
+	if k := prefixBreak(messages(t, bodies[2]), last); k != reminderAt {
+		t.Fatalf("the next turn's request diverges at %d, want the reminder's index %d", k, reminderAt)
+	}
+	// The control: the steer, which is the conversation, was replayed.
+	if !bytes.Contains(bodies[3], []byte(steerText)) {
+		t.Fatal("control: the steer was not replayed next turn")
+	}
+}
+
 // TestWireErrors maps each provider failure onto the harness's errors, and
 // checks that no key reaches a returned error or an emitted event even when
 // the provider echoes it back.

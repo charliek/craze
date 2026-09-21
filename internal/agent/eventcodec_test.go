@@ -460,7 +460,13 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 		{"a question auto-answered, with a nil and an empty answer list", Event{Type: EventQuestion, Question: &QuestionEvent{
 			ID: "ask-1", Title: "Question",
 			Questions: []Question{
-				{ID: "q1", Prompt: "Pick one", Options: []Option{{ID: "opt-a", Label: "A"}, {ID: "opt-b", Label: "B"}}},
+				// The native harness's question tool gives each option a
+				// description; cursor's leave it empty, so both are here
+				// (plan 023 §3.4).
+				{ID: "q1", Prompt: "Pick one", Options: []Option{
+					{ID: "opt-a", Label: "A", Description: "what A means"},
+					{ID: "opt-b", Label: "B"},
+				}},
 				{ID: "q2", Prompt: "Free text", AllowMultiple: true},
 			},
 			Auto:    true,

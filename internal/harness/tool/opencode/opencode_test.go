@@ -146,7 +146,7 @@ func TestProfile(t *testing.T) {
 	if p.Name != Name || Name != "opencode" {
 		t.Fatalf("profile name = %q", p.Name)
 	}
-	if got := names(p); !slices.Equal(got, []string{"bash", "read", "glob", "grep", "edit", "write"}) {
+	if got := names(p); !slices.Equal(got, []string{"bash", "read", "glob", "grep", "edit", "write", "todo_write", "ask_user_question", "exit_plan_mode"}) {
 		t.Fatalf("tools = %q, want opencode's registry order", got)
 	}
 	want := map[string]struct {
@@ -160,6 +160,11 @@ func TestProfile(t *testing.T) {
 		"grep":  {tool.KindSearch, true, true, tool.None},
 		"edit":  {tool.KindEdit, false, false, tool.Head},
 		"write": {tool.KindEdit, false, false, tool.Head},
+		// plan 023 §3.4's table: the two that block on a person are not
+		// Parallel, and all three change nothing.
+		"todo_write":        {tool.KindTodo, true, true, tool.Head},
+		"ask_user_question": {tool.KindAsk, true, false, tool.Head},
+		"exit_plan_mode":    {tool.KindAsk, true, false, tool.Head},
 	}
 	for _, tl := range p.Tools {
 		s, w := tl.Spec(), want[tl.Spec().ID]

@@ -28,6 +28,15 @@
 // records the switch in the transcript before its own messages, so each
 // turn's prompt and answer stay adjacent in the file.
 //
+// # Modes
+//
+// A session runs in agent, plan or ask mode (Options.Mode, SetMode, Mode).
+// The mode is enforced by the tool gate — plan mode lets an edit-kind call
+// touch only the session's plan file, ask mode refuses everything that is not
+// read-only — and told to the model by a reminder spliced into the step's
+// input, which is never persisted and never shown (reminders.go, plan 023
+// §3.1, §3.3).
+//
 // # Concurrency
 //
 // One Run at a time (ErrInTurn otherwise). Every other method may be called
@@ -83,6 +92,16 @@ type Options struct {
 	// Effort is the effort the session starts at; "" is the model's
 	// default_effort (none, for a model with no effort control).
 	Effort string
+	// Mode is the mode the session starts in: "" or "agent" (implement),
+	// "plan" or "ask". Anything else is ErrUnknownMode and refuses Open. A
+	// session opened in plan mode creates its plan file and tells the model
+	// at its first step (reminders.go, plan 023 §3.1).
+	Mode string
+	// Asker is how the session's tools reach a person: ask_user_question and
+	// exit_plan_mode block on it (tool.Asker, plan 023 §3.4). The adapter in
+	// internal/agent hands in one over craze's ask registry; nil is nobody to
+	// ask, and both tools then answer at once that nobody answered.
+	Asker Asker
 	// NewModel builds a model's client; nil is llm.New. It is the test seam:
 	// a test hands in a scripted fantasy.LanguageModel.
 	NewModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
@@ -130,10 +149,16 @@ type Session struct {
 	// interjection can never wait on the turn it is meant for.
 	steers steerbox
 
+	// modes is the session's mode, the plan file and the reminders that carry
+	// both to the model (reminders.go). Like the steer box it has its own leaf
+	// lock, so a turn reading it at a step boundary and a SetMode from the UI
+	// never wait on each other. Fixed at Open, never nil.
+	modes *modes
+
 	mu      sync.Mutex
 	table   *modeltable.Table
 	cur     model  // what the next turn runs on; Current reports it
-	logged  logged // what the transcript was last told the model and effort are
+	logged  logged // what the transcript was last told the model, effort and mode are
 	closed  bool
 	running bool
 	turns   int                     // turns begun, which number their tool calls' ids
@@ -166,12 +191,19 @@ func (m model) id() store.Model {
 	return store.Model{Provider: m.r.ProviderID, Alias: m.r.Alias, WireModel: m.r.WireModel}
 }
 
-// logged is the model and effort the transcript last had a turn or a
+// logged is the model, effort and mode the transcript last had a turn or a
 // change entry for (held or written). A turn that runs on anything else
 // first appends a change entry.
+//
+// Model and effort are compared when a turn begins; the mode is compared as
+// the step whose request announced it is appended, so a switch made mid-turn
+// is recorded where it became visible rather than at the next turn's start
+// (plan 023 §3.1). It starts at agent: a session opened in another mode
+// records the switch to it, since the header carries no mode.
 type logged struct {
 	model  store.Model
 	effort string
+	mode   string
 }
 
 // Open starts a session: it resolves and builds the starting model, and from
@@ -202,6 +234,11 @@ func Open(opts Options) (*Session, error) {
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return llm.New(r) }
 	}
 
+	mode, err := normalizeMode(opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+
 	alias := opts.Model
 	if alias == "" {
 		alias = opts.Table.DefaultModel
@@ -217,7 +254,7 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, opts.Asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -249,7 +286,27 @@ func Open(opts Options) (*Session, error) {
 	}
 	s.store = st
 	s.cur = m
-	s.logged = logged{model: m.id(), effort: m.effort}
+	s.logged = logged{model: m.id(), effort: m.effort, mode: modeAgent}
+	// The plan file is the transcript's sibling, so it is named only now that
+	// the store has named the transcript; the gate learns it here and nowhere
+	// else. A session that opens in plan mode creates the file at once, so the
+	// reminder, the gate and the model all mean one path that is there.
+	//
+	// The path itself goes to the model verbatim in every plan-mode reminder
+	// (§3.3), so a configured key inside it refuses the session the way the
+	// working directory's does (errPlanPathKey): redacting it would leave the
+	// model a path that opens nothing. A key the session learns later is
+	// refused with the switch that brought it (toolset.resolve).
+	plan := store.PlanPath(st.Path())
+	if err := s.tools.adoptPlanPath(plan); err != nil {
+		return nil, err
+	}
+	s.modes = newModes(mode, plan, s.tools.modeGate)
+	if mode == modePlan {
+		if err := store.CreatePlanFile(s.modes.planPath); err != nil {
+			return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
+		}
+	}
 	return s, nil
 }
 
@@ -361,6 +418,49 @@ func (s *Session) SetEffort(level string) error {
 	s.cur = m
 	return nil
 }
+
+// SetMode puts the session in mode id — "" or "agent", "plan", "ask" — and,
+// like SetModel, is allowed while a turn runs: the gate judges the next call
+// that reaches it under the new mode, a call already past the check runs, and
+// the model is told at the turn's next step boundary (reminders.go, plan 023
+// §3.1). An id that is none of the three is ErrUnknownMode and changes
+// nothing; a session already in the mode is put in it again, which restarts
+// the plan reminder's alternation and nothing else.
+//
+// Entering plan mode creates the session's plan file if it is not there — the
+// only file an edit-kind call may touch in that mode — and a failure to
+// create it fails the switch and leaves the mode alone, as a model that
+// cannot be built leaves SetModel's alone. After Close it is ErrClosed.
+func (s *Session) SetMode(id string) error {
+	mode, err := normalizeMode(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	// Outside the lock, like SetModel's build: it touches the file system.
+	if mode == modePlan {
+		if err := store.CreatePlanFile(s.modes.planPath); err != nil {
+			return fmt.Errorf("harness: %w", s.tools.redactErr(err))
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	s.modes.set(mode)
+	return nil
+}
+
+// Mode is the mode the session is in: "agent", "plan" or "ask". It changes
+// the moment SetMode succeeds, even while a turn runs. Current keeps its two
+// results; the mode has never been one of them.
+func (s *Session) Mode() string { return s.modes.current() }
 
 // Models lists the model table's entries by alias. It includes models whose
 // provider has no key: SetModel reports that when one is chosen.

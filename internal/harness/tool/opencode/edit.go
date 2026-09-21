@@ -89,17 +89,19 @@ func (e *editTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 		return nil, err
 	}
 	abs := env.Resolve(path)
-	return &editCall{abs: abs, title: title(env, abs), oldString: oldString, newString: newString, replaceAll: replaceAll}, nil
+	return &editCall{abs: abs, real: targetPath(abs), title: title(env, abs),
+		oldString: oldString, newString: newString, replaceAll: replaceAll}, nil
 }
 
 type editCall struct {
-	abs, title           string
+	abs, real, title     string
 	oldString, newString string
 	replaceAll           bool
 }
 
+// Request names the file the edit will really land on in Targets; see write's.
 func (c *editCall) Request() tool.Request {
-	return tool.Request{Title: c.title, Paths: []string{c.abs}}
+	return tool.Request{Title: c.title, Paths: []string{c.abs}, Targets: []string{c.real}}
 }
 
 func (c *editCall) Run(ctx context.Context, env tool.Env) tool.Result {

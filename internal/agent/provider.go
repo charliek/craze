@@ -305,17 +305,29 @@ func GxProvider() Provider {
 // config.toml) and no listing shows it, it is never persisted as the default,
 // and its sessions are never indexed until H7 gives them a loader (§3.4).
 //
-// Effort and interject are its capabilities: H2's tool loop gives a turn later
-// steps, and a steer merges into the next one (plan 019 §3.10, D-34). Modes
-// wait for H5. The display label is its own field so the UI can later say
-// "craze" without touching the id that flags and config hold.
+// Effort and interject came with H2's tool loop, which gives a turn later
+// steps, and with the steer that merges into the next one (plan 019 §3.10,
+// D-34). H5's three tools bring the other three: ask_user_question and
+// exit_plan_mode open a question and a plan ask on the session's registry, and
+// todo_write fills the tasks panel (plan 023 §3.4). Modes stay off until the
+// second PR switches them on — SetMode is still ErrUnsupported and native's
+// open() still refuses a mode — and the cards are flipped here, ahead of them,
+// so a question raised between the two is never hidden and skipped (§5's
+// interim). The display label is its own field so the UI can later say "craze"
+// without touching the id that flags and config hold.
 func NativeProvider() Provider {
 	return Provider{
-		name:         nativeName,
-		displayName:  nativeName,
-		hidden:       true,
-		inProcess:    true,
-		capabilities: Capabilities{Effort: true, Interject: true},
+		name:        nativeName,
+		displayName: nativeName,
+		hidden:      true,
+		inProcess:   true,
+		capabilities: Capabilities{
+			Effort:    true,
+			Interject: true,
+			Todos:     true,
+			AskCards:  true,
+			PlanCards: true,
+		},
 	}
 }
 

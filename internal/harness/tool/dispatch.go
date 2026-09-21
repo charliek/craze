@@ -56,6 +56,8 @@ type Dispatcher struct {
 	// key when it switches to that provider's model, and every call from then
 	// on must redact it (SetRedactor).
 	red atomic.Pointer[redact.Replacer]
+	// planPath is Env.PlanPath, set once the session knows it (SetPlanPath).
+	planPath atomic.Pointer[string]
 
 	// interval is the progress throttle's; tests replace it.
 	interval time.Duration
@@ -121,6 +123,12 @@ func NewDispatcher(o Options) (*Dispatcher, error) {
 // the session knew a key belongs to that earlier state (plan 019 §3.8).
 func (d *Dispatcher) SetRedactor(r *redact.Replacer) { d.red.Store(r) }
 
+// SetPlanPath makes path the plan file every call prepared or run from now on
+// is told of (Env.PlanPath). The session calls it once, in Open, as soon as its
+// transcript — whose sibling the plan file is — has a name, which is after the
+// dispatcher is built.
+func (d *Dispatcher) SetPlanPath(path string) { d.planPath.Store(&path) }
+
 // redactor is the current one.
 func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 
@@ -129,6 +137,9 @@ func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 func (d *Dispatcher) callEnv(progress Progress) Env {
 	env := d.env
 	env.Progress, env.Redactor = progress, d.redactor()
+	if p := d.planPath.Load(); p != nil {
+		env.PlanPath = *p
+	}
 	return env
 }
 
@@ -145,6 +156,7 @@ func (d *Dispatcher) callEnv(progress Progress) Env {
 func (d *Dispatcher) Prepare(c Call) (req Request, res Result, ok bool) {
 	req = Request{ID: c.ID, CallID: c.CallID, Tool: c.Tool, Input: c.Input}
 	e := &entry{}
+	var targets []string // the gate's copy alone carries them; see Request
 	t, known := d.tools[c.Tool]
 	switch {
 	case !validID(c.ID):
@@ -160,9 +172,15 @@ func (d *Dispatcher) Prepare(c Call) (req Request, res Result, ok bool) {
 		var tr Request
 		e.prepared, tr, e.failed = d.prepare(t.tool, c)
 		req.Title, req.Paths, req.Command, req.Workdir = tr.Title, tr.Paths, tr.Command, tr.Workdir
+		targets = tr.Targets
 	}
 	req = d.redactRequest(req)
 	e.req = req
+	// The gate is the one consumer of Targets, and it gets them as the tool
+	// resolved them: a gate deciding where a call may write cannot be shown
+	// text a redactor has rewritten, and req — the copy the announcing event
+	// carries — has none (plan 023 §3.1).
+	e.req.Targets = targets
 
 	d.mu.Lock()
 	if old, dup := d.pending[c.ID]; dup {
@@ -330,11 +348,13 @@ func errorResult(class ErrorClass, text string) Result {
 	return Result{Text: text, IsError: true, Class: class}
 }
 
-// redactRequest returns a copy of r with every text field redacted. The
-// copy shares nothing with r, so an event holding it cannot see a tool's
-// later changes to its own slices.
+// redactRequest returns a copy of r with every text field redacted, and
+// without its Targets, which nothing outward may see (see Request). The copy
+// shares nothing with r, so an event holding it cannot see a tool's later
+// changes to its own slices.
 func (d *Dispatcher) redactRequest(r Request) Request {
 	red := d.redactor()
+	r.Targets = nil
 	r.CallID = red.String(r.CallID)
 	r.Tool = red.String(r.Tool)
 	r.Title = red.String(r.Title)

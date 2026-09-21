@@ -252,8 +252,9 @@ func TestNativeToolsInThePromptJSONStream(t *testing.T) {
 // TestNativeEventsAllRenderAsJSON is plan 019 §3.10's "every event the
 // native adapter can emit has a rendering in internal/cli/events.go". The
 // turn below provokes each kind the adapter has — text, thinking, tool
-// rows, a model switch, a turn that ended and one that failed — and every one
-// of them must project to a line, with the single documented exception below.
+// rows, a model switch, a question the headless policy answered itself, the
+// todo list, a turn that ended and one that failed — and every one of
+// them must project to a line, with the single documented exception below.
 // EventQueue is not among them: the queue left the provider seam (plan 021
 // §3.5), so the native adapter never emits one any more, and its rendering is
 // held by TestQueueJSONCarriesTheEditedVersion and json_test.go instead.
@@ -275,6 +276,14 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	}
 	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
 		nativeJSONCall("c1", "read", `{"filePath":"main.go"}`),
+		// The two H5 tools a headless run reaches (plan 023 §3.4): a question
+		// craze answers itself, which prints its Auto opening, and a todo
+		// list, which prints as `todos`. exit_plan_mode is not among them —
+		// the gate refuses it outside plan mode, and no mode can be entered
+		// until PR 2.
+		nativeJSONCall("c2", "todo_write", `{"todos":[{"id":"1","content":"first","status":"in_progress"}]}`),
+		nativeJSONCall("c3", "ask_user_question",
+			`{"questions":[{"question":"Which?","options":[{"label":"alpha","description":"the first"},{"label":"beta"}]}]}`),
 		nativeJSONAnswer("thinking", "done"),
 		// Nothing queued for the second turn: the model fails, which is
 		// the EventError this test needs.
@@ -317,6 +326,7 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	// Without this the test would pass on a turn that emitted nothing.
 	for _, want := range []agent.EventType{
 		agent.EventText, agent.EventThought, agent.EventTool, agent.EventCommand,
+		agent.EventQuestion, agent.EventTodos, agent.EventAsk,
 		agent.EventMeta, agent.EventDone, agent.EventError,
 	} {
 		if !seen[want] {

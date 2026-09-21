@@ -58,15 +58,18 @@ func (w *writeTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 		return nil, err
 	}
 	abs := env.Resolve(path)
-	return &writeCall{abs: abs, title: title(env, abs), content: content}, nil
+	return &writeCall{abs: abs, real: targetPath(abs), title: title(env, abs), content: content}, nil
 }
 
 type writeCall struct {
-	abs, title, content string
+	abs, real, title, content string
 }
 
+// Request names the file the write will really land on in Targets — resolved
+// here, where Run resolves it again under the path lock — so the gate judges
+// the file rather than the spelling (plan 023 §3.1).
 func (c *writeCall) Request() tool.Request {
-	return tool.Request{Title: c.title, Paths: []string{c.abs}}
+	return tool.Request{Title: c.title, Paths: []string{c.abs}, Targets: []string{c.real}}
 }
 
 // Run replaces the file with the content, keeping a byte order mark the
