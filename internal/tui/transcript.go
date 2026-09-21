@@ -44,6 +44,10 @@ const (
 	entryNote
 	entryPlan
 	entryError
+	// entryShell is the composer's `!`: a command craze ran for the user, on
+	// their own machine. It is the one kind that never came from an agent and
+	// never goes to one (plan 022 §3.6).
+	entryShell
 )
 
 // renderKey is everything outside an entry that changes how it draws. An entry
@@ -61,7 +65,11 @@ type entry struct {
 	text string
 	tool *agent.ToolEvent
 	plan *agent.PlanEvent
-	at   time.Time
+	// shell is an entryShell's own state; see shellEntry. It is a pointer so
+	// the run that finishes minutes later settles the row it opened, whatever
+	// the entry slice has done in between.
+	shell *shellEntry
+	at    time.Time
 	// end closes a thought run: the At of the first non-thought event after it.
 	end time.Time
 	// open marks a thought run that is still streaming.
@@ -174,7 +182,20 @@ func (t *transcript) addUser(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryUser, text: text}, now)
 }
 
-func (m *Model) addUser(text string) { m.main.addUser(text, m.now()) }
+// addUser writes the user block for text that went to the agent, wherever the
+// model learned of it: its own send, a turn the engine started for a drained
+// row or another client, or a prompt out of a replayed transcript.
+//
+// The shell context in front of that text is wire content and never display
+// content (plan 022 §3.6): the row shows the message, not the command output
+// craze attached to it — which is already on screen, in the `!` row the user
+// watched it come out of. Stripping in this one wrapper rather than at each of
+// the three callers is what makes the rule hold for every route into a user
+// row, including the ones the engine reports rather than this client sending.
+func (m *Model) addUser(text string) {
+	_, text = agent.SplitShellContext(text)
+	m.main.addUser(text, m.now())
+}
 
 // addInterjection is the user block for text merged into the running turn.
 // It is written from the agent's broadcast, not from the send: the ack only
@@ -187,7 +208,15 @@ func (t *transcript) addInterjection(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryUser, text: text, interject: true}, now)
 }
 
-func (m *Model) addInterjection(text string) { m.main.addInterjection(text, m.now()) }
+// addInterjection strips the same block for the same reason addUser does. An
+// interjection's echo is the one user row craze draws from what came back
+// rather than from what it sent, and on native it is the typed spelling the
+// adapter kept beside the steer — which is still the text craze handed to
+// Interject, block and all.
+func (m *Model) addInterjection(text string) {
+	_, text = agent.SplitShellContext(text)
+	m.main.addInterjection(text, m.now())
+}
 
 func (t *transcript) addNote(text string, now time.Time) {
 	if text == "" {
@@ -413,6 +442,10 @@ func (m *Model) clearTranscript() {
 	m.todoDone = false
 	// "the plan above" is gone, so there is nothing left to offer.
 	m.retirePlanOffer()
+	// The pending shell context is keyed off these entries as much as any
+	// cache is: it describes `!` rows that are no longer on screen, and a
+	// /clear is the user saying that conversation is over (plan 022 §3.6).
+	m.dropShellContext()
 }
 
 // noteTodos turns the todo stream into the two dim transcript notes; the panel
@@ -473,7 +506,12 @@ func (m *Model) setViewportContent(stick bool) {
 	}
 	for i := range tr.entries {
 		e := &tr.entries[i]
-		if e.dirty || e.renderedFor != key {
+		// A shell row that is still running draws the spinner, and the cache is
+		// keyed on things that do not move while it spins, so the row is
+		// re-rendered on every rebuild until it settles. The tick is what asks
+		// for those rebuilds (handleTick), so this costs one comparison per
+		// entry rather than a walk of its own.
+		if e.dirty || e.renderedFor != key || (e.shell != nil && !e.shell.done) {
 			e.rendered = m.renderEntry(tr, e, key)
 			e.renderedFor = key
 			e.dirty = false
@@ -521,6 +559,8 @@ func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
 		return m.planRows(e.plan, key)
 	case entryError:
 		return hangingRows(e.text, "error: ", "  ", key.width, styleFG(m.theme.Err))
+	case entryShell:
+		return m.shellRows(e, key)
 	}
 	return nil
 }

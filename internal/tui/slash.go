@@ -266,6 +266,14 @@ func (m Model) slashMenuOpen() bool {
 	if m.composerCovered() {
 		return false
 	}
+	// A shell draft has no slash tokens in it, whatever it looks like: `!ls
+	// /usr` is a path the shell will resolve, not a command craze would offer
+	// to complete. Suppressing it here rather than in the filter is what keeps
+	// the band and the keys agreeing — Tab, Enter and Esc all read slashRows,
+	// which reads this (plan 022 §3.6).
+	if m.shellMode() {
+		return false
+	}
 	start, _, name, ok := slashToken(m.input.Value(), m.composerCursorOffset())
 	return ok && m.slashHideKey != slashTokenKey(start, name)
 }

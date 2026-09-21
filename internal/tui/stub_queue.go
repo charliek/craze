@@ -20,6 +20,10 @@ func (s *Stub) Interject(_ context.Context, text string) error {
 	live := s.inPrompt && !s.doneEmitted && !s.cancelling
 	err := s.interjectErr
 	s.interjectErr = nil
+	// Recorded as Begin records a prompt, and for the same reason: what a test
+	// can read off the transcript is what craze drew, and the question is
+	// sometimes what craze sent.
+	s.interjections = append(s.interjections, text)
 	s.mu.Unlock()
 	if !live {
 		return agent.ErrNotInTurn
@@ -29,6 +33,15 @@ func (s *Stub) Interject(_ context.Context, text string) error {
 	}
 	s.emit(agent.Event{Type: agent.EventUser, Text: text, Interjection: true})
 	return nil
+}
+
+// Interjections is every text handed to Interject, in order, refusals
+// included: the guards above answer before the text goes anywhere, and a test
+// about what was offered wants to see those too.
+func (s *Stub) Interjections() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.interjections...)
 }
 
 // FailNextInterject makes the next Interject fail the way a refused ack does.

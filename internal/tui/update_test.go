@@ -1893,7 +1893,25 @@ func hangWorking(t *testing.T) Model {
 	if m.status != statusWorking {
 		t.Fatal("want working")
 	}
+	// statusWorking is the model's own answer, and the claim behind it becomes a
+	// turn on the driver's goroutine a moment later. A test that then cancels is
+	// asking what reached the agent, and a cancel that arrives in that gap
+	// withdraws the prompt instead of writing one (Stub.Cancel) — so the model
+	// is not handed back until the turn it calls working is open on the wire.
+	waitInTurn(t, stub)
 	return m
+}
+
+// waitInTurn blocks until the stub's claimed prompt has opened its turn.
+func waitInTurn(t *testing.T, s *Stub) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !s.InTurn() {
+		if time.Now().After(deadline) {
+			t.Fatal("the stub's prompt never opened its turn")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestInPlaceToolLineSameID(t *testing.T) {

@@ -46,12 +46,21 @@ func (m *Model) handleTick(msg tickMsg) {
 	m.tickLive = false
 	if m.tickFast && !m.frozen {
 		m.spinFrame++
+		if m.shellRunning() {
+			// The running `!` row draws the spinner from inside the transcript,
+			// where the render cache would otherwise hold whichever frame it
+			// was first drawn with. Marking the transcript dirty is what asks
+			// for the rebuild; setViewportContent re-renders that one row and
+			// reuses every other entry's cached lines.
+			m.main.dirty = true
+		}
 	}
 }
 
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
-		m.agentLingering() || m.copyLingering() || m.anySubagentRunning()
+		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() ||
+		m.shellRunning()
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a
