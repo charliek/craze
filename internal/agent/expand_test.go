@@ -1281,10 +1281,19 @@ func TestGrokNeverWaitsForACatalog(t *testing.T) {
 }
 
 // TestCancelledContextEndsTheCatalogWait: the caller has gone, so the wait
-// ends with it. What happens next is what an already-cancelled context has
-// always meant here — the prompt fails on the wire and the session reports it,
-// which is not the cancelled-before-the-wire ending Cancel produces — and no
-// expansion is reported, because none was resolved.
+// ends with it — the prompt returns, where the wait alone would have held it for
+// longCatalogWait. What happens next is what an already-cancelled context has
+// always meant here: the prompt goes to the wire, which is not the
+// cancelled-before-the-wire ending Cancel produces, and no expansion is
+// reported, because none was resolved.
+//
+// Whether that prompt then FAILS is not something the code promises, and this
+// test must not ask for it. The request is written before the context is looked
+// at (acp.Conn.callRaw), and the wait that follows selects between the agent's
+// reply and the dead context: an agent that has already answered makes both
+// ready, and select takes either. The fake agent answers at once, so on a loaded
+// runner the reply wins about as often as not — asserting an error here failed
+// CI's -race job, and fails 14 runs in 20 with that window held open by hand.
 func TestCancelledContextEndsTheCatalogWait(t *testing.T) {
 	shortCatalogWait(t, longCatalogWait)
 	s := startScriptOpts(t, "nocommands", Options{PluginDirs: []string{probeFixtureDir(t)}})
@@ -1298,9 +1307,6 @@ func TestCancelledContextEndsTheCatalogWait(t *testing.T) {
 		out <- err
 	}()
 	err := promptReturn(t, out, "a dead context did not end the wait")
-	if err == nil {
-		t.Fatal("the prompt must fail")
-	}
 	if errors.Is(err, ErrPromptCancelled) {
 		t.Fatalf("a dead context is not a cancel: %v", err)
 	}
