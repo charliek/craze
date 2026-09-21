@@ -89,7 +89,7 @@ measured in `12` and left undecided.
 **Exit result (S1b):** shipped 2026-09-21, plan `021-session-control-s1b-engine`,
 three PRs from fresh `origin/main` — `feature/plan-021-s1b-driver` (#41,
 `fdaaa6d`), `feature/plan-021-s1b-asks` (#42, `db7686e`),
-`feature/plan-021-s1b-state` (#NN, `TBD`). All seven exit clauses met, each
+`feature/plan-021-s1b-state` (#46). All seven exit clauses met, each
 against a named test; the criterion-by-criterion table, the execution
 amendments X1–X56, the live smoke record, and V2/V3/V5/V6/V7 are in `12`. No
 golden moved and no `testdata/` file changed except additions;

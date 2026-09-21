@@ -640,8 +640,8 @@ No follow-up issues were filed: the list above and `04`'s table of unshipped
 | Status | shipped |
 | Plan | `021-session-control-s1b-engine` (outside the repo, `~/.claude/plans/craze/`) |
 | Baseline | `6581e0a` |
-| Branch / PRs | three sequential PRs, each from fresh `origin/main`: `feature/plan-021-s1b-driver` (#41), `feature/plan-021-s1b-asks` (#42), `feature/plan-021-s1b-state` (#NN) |
-| Merged | PR 1 2026-09-20, `fdaaa6d`; PR 2 2026-09-20/21, `db7686e`; PR 3 2026-09-21, `TBD` |
+| Branch / PRs | three sequential PRs, each from fresh `origin/main`: `feature/plan-021-s1b-driver` (#41), `feature/plan-021-s1b-asks` (#42), `feature/plan-021-s1b-state` (#46) |
+| Merged | PR 1 2026-09-20, `fdaaa6d`; PR 2 2026-09-20/21, `db7686e`; PR 3 2026-09-21, the merge commit of #46 |
 
 ### Plan review — 2026-09-20
 
@@ -687,7 +687,7 @@ gated per commit. `internal/engine` now owns the turn driver, the queue and
 send-now (PR 1, `feature/plan-021-s1b-driver`, #41 `fdaaa6d`); the ask
 registry (PR 2, `feature/plan-021-s1b-asks`, #42 `db7686e`); and settings as
 state deltas, command ids and the durable session id (PR 3,
-`feature/plan-021-s1b-state`, #NN `TBD`). The TUI and `craze prompt` are both
+`feature/plan-021-s1b-state`, #46). The TUI and `craze prompt` are both
 engine clients now; `tui.Model` and `internal/cli/prompt.go` no longer drive a
 turn. It ships no feature: frame goldens are byte-identical at every commit,
 no `testdata/` file changed except additions, and `craze prompt --json` is
@@ -755,7 +755,7 @@ registry, tokens, `Open`/`Answer`, `EventAsk`, `ApprovalPolicy`, X37); C8a
 registry — `acp.Arrival`/`TurnActive` replace the turn-counter mapping, the
 hidden `perm-xN` ids, the turn-keyed cancel mask, X39–X44).
 
-**PR 3 — `feature/plan-021-s1b-state`** (#NN, `TBD`): C10 (settings as state
+**PR 3 — `feature/plan-021-s1b-state`** (#46): C10 (settings as state
 deltas, the settings worker, `EventLog.EnqueueTicket`, X47–X48); C11 (command
 ids, the receipts table, `classify`, X49); C12 (the durable `crazeId`, the
 index worker, `ErrIndexWrite`, X53); C13 (§7's A-X1..A-X6 as integration
@@ -1050,7 +1050,10 @@ whether that golden may move.
 **What S2 must do.** Call `Control.Sync` before replying to a command, because
 in-process a response is no longer ordered after the events its own command
 caused by the call simply returning (§4, and `05` below) — that promise now
-needs `Sync`. Call `Subscribe` off the primary's own reader goroutine: it
+needs `Sync`, plus a single serialized outbound writer per connection (or an
+explicit subscription-delivery barrier), since `Sync` only commits the events
+to the subscription and does not itself order a socket's write of them ahead
+of the reply's own write. Call `Subscribe` off the primary's own reader goroutine: it
 blocks inside the log's publishing boundary (X14). Mint a client id per
 connection (`Control.NewClientID`), bind it to that connection, and add
 release-on-disconnect — no client is ever retired from the receipts table

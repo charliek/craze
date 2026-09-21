@@ -317,7 +317,9 @@ queue's length as `Pending` — because this is the only place left that can
 say so, and it is a mandatory completion like every other ending; disarm any
 armed send-now, carrying the same cause; `Enqueue` that one batch. Release
 `e.mu`. Then, outside any lock: `sess.Close()` — which resolves every parked
-ask `closing` and closes the log last, so what the outbox still holds is
+ask (`closing` for an ACP session and the Stub; native cancels its turn context
+first, so an ask parked there ends `cancelled`, by `call` — Plan 023 §3.5, and
+`05`) and closes the log last, so what the outbox still holds is
 committed to the ring, the journal and every subscription with a
 **non-blocking** primary send, never lost to a stopped reader; `close(e.done)`;
 `e.wg.Wait()`, joining the driver and the settings worker; `e.idx.close()`,

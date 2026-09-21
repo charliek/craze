@@ -145,7 +145,7 @@ and H8 is open.** H3 and H5 waited for Plan 021's PR 2 (`feature/plan-021-s1b-as
 it merged — H5's own PR 1 (native asks, turn tokens) had already merged into
 S1b's PR 3 branch mid-execution (`a41ba29`, plan X51). H6, H7 and H8 waited
 for S1b as a whole, per SD-17's original ordering, relaxed above; all three
-PRs are merged (#41 `fdaaa6d`, #42 `db7686e`, #NN `TBD`), so nothing more
+PRs are merged (#41 `fdaaa6d`, #42 `db7686e`, #46), so nothing more
 blocks them from this file's side. `11`'s two shipped rows above — the
 settings seam (H5's `SetMode`) and the session index (H7) — are what those
 phases build on, as built rather than as planned.

@@ -26,9 +26,14 @@ stop reasons. shed's `LaneApprovalOption.kind` already uses the same words.
 
 Every session-scoped method takes `sessionId`, even on a per-session socket
 (SD-06). Every mutating method takes `commandId` (SD-11), which is not the
-JSON-RPC request id. Capabilities come at two levels (SD-28): the connection's
-(`hello`) and each session's (its roster row and attach reply), because a hub
-fronts hosts with different providers and versions.
+JSON-RPC request id. As shipped, a `commandId` must be a canonical positive
+base-10 integer — no sign, no leading zero, no whitespace; anything else is
+`bad_request` — numbered per client from 1, and the client id it travels with
+must be one the engine minted (S2: minted per connection and bound to it; an
+unminted client id is `bad_request` too). Capabilities come at two levels
+(SD-28): the connection's (`hello`) and each session's (its roster row and
+attach reply), because a hub fronts hosts with different providers and
+versions.
 
 Event payloads use the **lossless event codec** from S1a (`03`, SD-20), not
 `craze prompt --json`'s shapes, which drop ask ids, option kinds, plan bodies,
@@ -39,11 +44,11 @@ and more.
 | `hello` | protocol version (one integer), client kind, client capabilities; reply carries the endpoint's identity (host or hub), craze version, connection-level capabilities, the command retry horizon |
 | `sessions.list` / `sessions.subscribe` | roster rows: id, title, cwd, provider, model, activity, **pending ask count**, parent id, last change, host incarnation, session capabilities. Readable without attaching. The roster has its **own epoch and cursor**; a new epoch means reseed |
 | `session.attach` | `{cursor?: {incarnation, seq}}` → a **subscription id**, then `snapshot` (or replay), events, `synchronized`. `session.detach{subscriptionId}` ends it; closing the connection ends all of them and **never** stops the session |
-| `session.prompt` | `{text, mode: queue \| interject \| send_now}`; admitted by the engine's turn driver, answered with the engine turn id it became or queued behind |
+| `session.prompt` | `{text, mode: queue \| interject \| send_now}`, admitted by the engine's turn driver. As shipped, `queue` and `send_now` go through `Control.Submit(mode: queue \| send_now)`, answered with exactly one of the turn id it started, the queued row (no turn id yet — nothing to be "queued behind"), or `armed: true`; `interject` goes through a separate blocking `Control.Interject`, which answers with only an error. S2 must map the wire's three modes onto those two calls |
 | `session.cancel` | `{turnId?}` request/response: `rejected` (`not_accepting`, or the named turn is no longer current), `requested`, `settled`, or `unknown` after a timeout past the write |
-| `session.queue.*` | edit, remove, clear; mirrors `agent.Session` |
-| `asks.list` / `asks.get` / `asks.answer` | by id; answer carries the exact offered `optionId`, or question answers, or a plan outcome. First **valid** answer wins; an invalid one is `bad_request` and leaves the ask open. `asks.get` is `Control.Ask(id)`, waiting on nothing. An id whose opening was never published — a refused open, an automatic resolution, a request the provider answered before any handler ran — has the hidden spelling `perm-xN` / `ask-xN` / `plan-xN`, from a counter of its own, so it can never renumber a visible one |
-| `session.set` | model, mode, config, title; applied in the engine's order, answered and broadcast with the confirmed value and a revision. The reply is `{value, rev}`, where `rev` is the delta's own `seq` — the same number the broadcast `event` notification carries, so a caller that only reads the reply still has the revision a later change is compared against |
+| `session.queue.*` | edit, remove, clear; mirrors `engine.Control`'s queue verbs (the queue left `agent.Session` in S1b) |
+| `asks.list` / `asks.get` / `asks.answer` | by id; answer carries the exact offered `optionId`, or question answers, or a plan outcome. First **valid** answer wins; an invalid one is `bad_request` and leaves the ask open. `asks.get` is `Control.Ask(id)`, waiting on nothing. An id whose opening was never published has the hidden spelling `perm-xN` / `ask-xN` / `plan-xN`, from a counter of its own, so it can never renumber a visible one: a refused open, a request the provider answered before any handler ran, an automatic PERMISSION resolution, and an automatic question/plan fallback that cannot publish (a bad or cancelling automatic answer). An automatic question/plan answer that itself publishes its `Auto` opening keeps a visible id |
+| `session.set` | model, mode, config go through `Control.Set` and are applied in the engine's order, answered and broadcast with the confirmed value and a revision: `{value, rev}`, where `rev` is the delta's own `seq` — the same number the broadcast `event` notification carries — and may be `0` when the revision could not be learned (the change still happened; the delta carries it). Title is a separate call, `Control.SetTitle`: it waits on nothing, bypasses the settings worker, and returns only an error — its delta, not its reply, is how a client learns the title |
 | `session.stop` | explicitly end the session and its host. Distinct from closing a connection or a view (SD-28); defined in S2 |
 | `session.create` | hub only (S4): spawn a headless host |
 
@@ -96,10 +101,15 @@ consequence of the call simply returning: a command's effects are published
 through the log's outbox, so the call returning does not mean its events have
 been delivered (`engine.Control`'s own doc). `engine.Control.Sync` is how an
 in-process caller gets that ordering back — it returns once everything
-enqueued before the call is in the primary's buffer — and **S2's server must
-call `Sync` before it replies to a command**, which is what makes "ordered
-after its events" true for a socket client without it ever calling `Sync`
-itself (session control S1b, plan §4).
+enqueued before the call is committed (numbered, in the ring/journal, offered
+to every subscription). `Sync` alone does not put those events on a socket's
+wire ahead of the reply: that also needs a single serialized outbound writer
+per connection, or an explicit subscription-delivery barrier, so that what
+`Sync` has already offered the subscription is actually written before the
+reply is. **S2's server must provide both** — call `Sync` before it replies to
+a command, and serialize (or barrier) that connection's outbound writes — to
+make "ordered after its events" true for a socket client without it ever
+calling `Sync` itself (session control S1b, plan §4).
 
 Replay and live use the same per-event representation; nothing is coalesced
 in the log (SD-18). Unlike gx, **ask transitions are sequenced events in the
@@ -155,7 +165,7 @@ copied here, not invented:
 |---|---|
 | `unknown_row` | a queued row id the queue no longer holds — sent already, removed by another client, or never existed |
 | `unknown_command` | a command id at or below its client's evicted high-water mark: recognisably expired |
-| `in_progress` | a resend of a SYNCHRONOUS command that found its reservation still open — the first call has not returned |
+| `in_progress` | a resend that found its id's command still running: at once for a synchronous command, or, for a blocking one (`Cancel`, `Stop`, `Set`, `Interject`), when a waiting duplicate gives up because its own context ended |
 | `aborted` | a stored answer whose outcome the engine cannot itself vouch for — a command whose call panicked, or a `Set` whose caller's context ended after the settings worker had already claimed it |
 | `failed` | every other error the engine does not classify by its own sentinel — a provider/RPC refusal of a `Set`, an interject the agent refused, a cancel that failed — reached this way because the command DID run |
 | `index_write` | a command that did what it was asked and could not record it — today only `session.set`'s title write: the rename happened, and only `~/.craze/sessions.jsonl` was not updated |

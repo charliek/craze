@@ -693,10 +693,14 @@ func TestASeedOpportunityIsVisibleBeforeItsTurnCanEnd(t *testing.T) {
 	await(t, atHook, "B's caller to reach the window between its launch and its write")
 	// r32 finding 1's own fix: while B's caller is still parked at the hook —
 	// before its turn has had any chance to end and give e.wg's count back —
-	// the opportunity is ALREADY sitting in the index writer's one slot. This
-	// is what makes the schedule below deterministic rather than a race the
-	// regressed ordering could still win: admission is proven to have
-	// preceded the launch, not merely inferred from what the exit produced.
+	// the opportunity is ALREADY retained in the index writer's one slot. That
+	// is what this direct inspection proves: the opportunity is visible while
+	// the turn is still free to end, which deterministically rejects the
+	// regressed launch→hook→seed order (a wrong implementation that admitted
+	// after the launch could let this read race and sometimes lose). It does
+	// not prove admission preceded the launch on its own terms — that ordering
+	// is by construction in runOwn (admit, then `go e.runTurn`), not forced by
+	// this test.
 	r.e.idx.mu.Lock()
 	gotNext, gotText, gotCause := r.e.idx.seedNext, r.e.idx.seedText, r.e.idx.seedCause
 	r.e.idx.mu.Unlock()

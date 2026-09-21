@@ -260,14 +260,17 @@ func assertTurnRecordSelfConsistent(t *testing.T, evs []agent.Event) {
 	}
 }
 
-// TestTwoConcurrentClosesWithATurnRunning is r32's hunt item A / E: two Close
-// calls landing together on an engine with a turn running. closeOnce makes
-// only one of them do the work, but what this proves is the RECORD — the
-// turn gets its closing ending exactly once, from whichever call the once
-// picked, and both callers see the same nil answer. Run under -race and
-// -count so a data race in the shared batch or e.wg would show up as either a
-// failure or the detector firing.
-func TestTwoConcurrentClosesWithATurnRunning(t *testing.T) {
+// TestTwoClosesWithATurnRunningEndItOnce is r32's hunt item A / E: two Close
+// calls on an engine with a turn running, released together off one closed
+// channel so both are AT LEAST READY to enter Close at the same time — a
+// start gun, not a guarantee that they actually overlap inside Close, since
+// the scheduler may still run one to completion before the other is picked
+// up. What this proves is the RECORD — the turn gets its closing ending
+// exactly once, and both callers see the same nil answer — never that the two
+// calls contended concurrently. Run under -race and -count so a data race in
+// the shared batch or e.wg would show up as either a failure or the detector
+// firing.
+func TestTwoClosesWithATurnRunningEndItOnce(t *testing.T) {
 	r := newRigOn(t, Options{}, agent.EventLogOptions{})
 	turn := r.s.script(held())
 	r.submit("one")
@@ -275,13 +278,16 @@ func TestTwoConcurrentClosesWithATurnRunning(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
+	begin := make(chan struct{})
 	wg.Add(2)
 	for i := range errs {
 		go func(i int) {
 			defer wg.Done()
+			<-begin
 			errs[i] = r.e.Close()
 		}(i)
 	}
+	close(begin)
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {
@@ -437,19 +443,21 @@ func TestStopRacesCloseAfterQueueClearingBeforeCancelRelease(t *testing.T) {
 	r.wantRows()
 }
 
-// TestCloseEndsAReservedSuccessorBeforeItsContinuationRuns is r32's first
-// "Untested schedule": "Settlement reserves and enqueues a successor, then
-// Close ends that successor before run(next) launches it." turnReturned fires
-// on turn-1's own goroutine strictly after settleLocked has claimed turn-2 as
-// the successor and enqueued its started — but before turn-2's own
-// continuation has had any chance to do anything (its script is held, and
-// nothing but Close's own session-close can ever wake it). Closing from
-// inside that hook is therefore a Close that lands on a successor which is
-// current, whose started is already in the record, and whose continuation has
-// not run at all — exactly the schedule the review asks about, and it proves
-// Close authors that successor's own closing ending rather than leaving it
-// open or double-ending turn-1.
-func TestCloseEndsAReservedSuccessorBeforeItsContinuationRuns(t *testing.T) {
+// TestCloseRightAfterSettlementEndsTheSuccessorOnce is r32's first "Untested
+// schedule": "Settlement reserves and enqueues a successor, then Close ends
+// that successor before run(next) launches it." turnReturned fires on turn-1's
+// own goroutine strictly after settleLocked has claimed turn-2 as the
+// successor and enqueued its started — but this hook itself runs after
+// e.run(next) has already made the `go e.runTurn(l)` call that launches
+// turn-2's goroutine (engine.go's runTurn, the e.run(next) line), so by the
+// time Close is called from here turn-2's continuation may already have been
+// scheduled and entered (its script is held, so it can get no further; this
+// test does not, and cannot, force it to still be un-started). What this
+// schedule does force is a Close that lands on a successor which is current
+// and whose started is already in the record, and it proves Close authors
+// that successor's own closing ending rather than leaving it open or
+// double-ending turn-1.
+func TestCloseRightAfterSettlementEndsTheSuccessorOnce(t *testing.T) {
 	var r *rig
 	closed := make(chan error, 1)
 	r = newRigHooked(t, Options{}, agent.EventLogOptions{}, &hooks{
