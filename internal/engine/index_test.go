@@ -546,6 +546,64 @@ func TestAnOverlappingTurnRetriesAFailedSeed(t *testing.T) {
 	}
 }
 
+// TestClosingWaitsForAnInlineSeedThatOwesARetry is r30 finding 2, and the one
+// piece of owed work the worker's slot cannot show. A's seed is in flight on a
+// CLIENT's goroutine — Submit's own inline write, §3.2's documented exception —
+// and B is retained behind it; B only reaches the slot if A FAILS. The worker's
+// exit used to look at the slot, find a plain touch, and go: A then failed with
+// nobody left to hand B to, and a session that had run two prompts had no index
+// row at all, so --continue could not find it.
+//
+// The exit now waits for the attempt in flight whenever an opportunity is
+// retained — inside the same 500 ms bound as everything else it waits for — and
+// makes the retry its last write.
+func TestClosingWaitsForAnInlineSeedThatOwesARetry(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	boom := errors.New("craze: not saving the session: permission denied")
+	// Transient: A's write fails, and the retry the exit makes for it lands.
+	idx.failAt(1, boom)
+	r := indexed(t, idx, "018f-the-thread")
+	// The bound is not what this is about — TestCloseAbandonsALastWriteNothingCanInterrupt
+	// is — so it is set past the watchdog, as writerOn's own is. The barrier is
+	// what makes this the SHUTDOWN's schedule and not a race with an ordinary
+	// pass: released before the exit had begun, A's failure would simply kick a
+	// worker that is still running, and the retry it starts would be the
+	// ordinary in-flight write that close is entitled to ABANDON. Both fields
+	// are written here and never again, and the worker reads them only after it
+	// has seen the stop this test signals afterwards.
+	r.e.idx.closeWait = watchdog
+	finishing := make(chan struct{})
+	r.e.idx.beforeFinish = func() { close(finishing) }
+
+	_, _, submitted := overlappingSeeds(t, r, idx, entered)
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	await(t, finishing, "the worker's exit to begin with A's seed still in flight")
+	release()
+	await(t, submitted, "A's Submit to return once its write is let go")
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close never returned with an inline seed's retry owed")
+	}
+
+	// By the time Close has RETURNED the row is there: that is the whole claim.
+	// Its title is B's prompt, because A's attempt consumed A's.
+	row := idx.seedRow(t)
+	if got, want := row, wrote("018f-the-thread", "the second prompt", sessions.TitleKindFallback); got != want {
+		t.Fatalf("the exit wrote %+v, want %+v", got, want)
+	}
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows: %+v", n, idx.all())
+	}
+}
+
 // TestASucceededSeedDiscardsTheRetainedOne: the retained opportunity is a RETRY
 // and nothing more. A lands, so there is a row and its title is the first
 // prompt's, and B's text is never written — a second fallback row would name the
@@ -785,6 +843,150 @@ func TestSubsumptionIsConditionalOnSuccess(t *testing.T) {
 		w.runPending(indexWork{title: "the agent's own name", load: true, touch: true})
 		if n := idx.tries(); n != 1 {
 			t.Fatalf("%d writes, want the title alone", n)
+		}
+	})
+}
+
+// TestALoadedRowIsKnownToExistWhateverItsFirstWriteDid is r30 finding 3. A
+// loaded session's row is the very row --continue or --resume read its id out
+// of: it EXISTS, whatever the write that touches it comes to. Marking it known
+// only on a write that LANDED left a transiently failed load with row false, so
+// the touch merged beside it — and every ordinary touch after it — wrote
+// nothing at all. The promised retry never happened, and the durable craze id
+// and the recency a resumed session sorts by could stay unwritten for the whole
+// of that session.
+func TestALoadedRowIsKnownToExistWhateverItsFirstWriteDid(t *testing.T) {
+	boom := errors.New("craze: not saving the session: permission denied")
+	idx := newFakeIndex()
+	idx.failAt(1, boom)
+	w, reported := writerOn(t, idx)
+
+	// The replay-end load, merged with a touch: the load fails, and the touch
+	// behind it is the retry.
+	w.runPending(indexWork{load: true, touch: true})
+	if n := idx.tries(); n != 2 {
+		t.Fatalf("%d writes, want the load's failure and the touch behind it", n)
+	}
+	rows := idx.all()
+	if len(rows) != 1 {
+		t.Fatalf("%d rows landed: %+v", len(rows), rows)
+	}
+	if got, want := rows[0], wrote("018f-the-thread", "", sessions.TitleKindNone); got != want {
+		t.Fatalf("the touch wrote %+v, want %+v", got, want)
+	}
+	if got := reported(); len(got) != 1 || got[0] != ": "+boom.Error() {
+		t.Fatalf("the pass reported %q, want the load's failure alone", got)
+	}
+
+	// And an ORDINARY touch, in a pass of its own, is no longer suppressed
+	// either: the row is known, so the recency it records goes to the file.
+	w.runPending(indexWork{touch: true})
+	if n := idx.count(); n != 2 {
+		t.Fatalf("%d rows written, want the touch after the failed load to have landed too: %+v", n, idx.all())
+	}
+}
+
+// TestOneAdmissionSequenceForEverySeed is r30 finding 4. A seed opportunity
+// arrives on either of two goroutines — a client's own, inside Submit, and the
+// observer's post for a turn the ENGINE started — and with a pending slot and a
+// deferred slot kept apart, the retry handed back by a failed attempt could
+// find the pending one already taken by a LATER prompt and be dropped in its
+// favour. The session was then named by the wrong turn.
+//
+// Here A is in flight, B arrives inline behind it, C is posted behind B, and A
+// fails. B is the earliest opportunity still unwritten, so B is the fallback
+// title; C, which arrived while a seed was in flight, went into the same one
+// slot and lost it by arrival.
+func TestOneAdmissionSequenceForEverySeed(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	idx.failAt(1, errors.New("craze: not saving the session: permission denied"))
+	w, _ := writerOn(t, idx)
+	go w.serve()
+
+	// A: a posted seed the worker claims and parks in.
+	w.post(indexWork{seed: true, seedText: "the first prompt"})
+	await(t, entered, "A's seed to park in Upsert")
+	// B: an INLINE seed, arriving while A is in flight. It writes nothing and
+	// does not wait for A.
+	if w.seed("c-1/2", "the second prompt") {
+		t.Fatal("B's seed wrote a row with A's still in flight")
+	}
+	// C: a posted seed, arriving behind B and later than it.
+	w.post(indexWork{seed: true, seedText: "the third prompt"})
+
+	release()
+	idx.waitRows(t, 1)
+	row := idx.seedRow(t)
+	if got, want := row, wrote("018f-the-thread", "the second prompt", sessions.TitleKindFallback); got != want {
+		t.Fatalf("the retry wrote %+v, want %+v — the earliest opportunity still unwritten", got, want)
+	}
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows: %+v", n, idx.all())
+	}
+}
+
+// TestASuccessfulTitleRetiresFallbackSeeding is r30 finding 5. A row that has
+// been named by the AGENT — or by a /rename, which pins — wants no first-prompt
+// fallback: applyTitle would overrule it anyway. With seeded left false by the
+// seed's own failure, every later turn retried that useless write, and every
+// one of those that failed sent the client another IndexErr for a row that is
+// safely indexed and correctly named.
+func TestASuccessfulTitleRetiresFallbackSeeding(t *testing.T) {
+	boom := errors.New("craze: not saving the session: permission denied")
+
+	t.Run("the agent's own name", func(t *testing.T) {
+		idx := newFakeIndex()
+		idx.failAt(1, boom)
+		w, reported := writerOn(t, idx)
+		// One merged pass: the seed fails, and the title behind it lands.
+		w.runPending(indexWork{seed: true, seedText: "a prompt", title: "the agent's own name"})
+		if n := idx.tries(); n != 2 {
+			t.Fatalf("%d writes, want the seed's failure and the title behind it", n)
+		}
+		if got := idx.last(); got.TitleKind != sessions.TitleKindAgent {
+			t.Fatalf("the title wrote %+v", got)
+		}
+
+		// A later turn on a client's own goroutine attempts nothing...
+		if w.seed("c-1/1", "a second prompt") {
+			t.Fatal("a later Submit seeded a row the agent had already named")
+		}
+		// ...and one the ENGINE started is not even admitted, so no pass of the
+		// worker's carries it.
+		w.post(indexWork{seed: true, seedText: "a third prompt"})
+		if got := w.take(); got.seed {
+			t.Fatalf("a later engine turn's seed was admitted after the title: %+v", got)
+		}
+		if n := idx.seeds(); n != 0 {
+			t.Fatalf("%d first-prompt rows were written: %+v", n, idx.all())
+		}
+		if n := idx.tries(); n != 2 {
+			t.Fatalf("%d writes in all, want the two of the first pass: %+v", n, idx.all())
+		}
+		// One report, the first seed's: no repeated IndexErr for a named row.
+		if got := reported(); len(got) != 1 || got[0] != ": "+boom.Error() {
+			t.Fatalf("the writer reported %q, want the first seed's failure alone", got)
+		}
+	})
+
+	t.Run("a /rename", func(t *testing.T) {
+		idx := newFakeIndex()
+		idx.failAt(1, boom)
+		w, _ := writerOn(t, idx)
+		w.runPending(indexWork{seed: true, seedText: "a prompt"})
+		if err := w.rename("c-1/1", "a better name"); err != nil {
+			t.Fatalf("rename: %v", err)
+		}
+		if got := idx.last(); got.TitleKind != sessions.TitleKindUser {
+			t.Fatalf("the rename wrote %+v", got)
+		}
+		if w.seed("c-1/2", "a second prompt") {
+			t.Fatal("a later Submit seeded a row the user had already named and pinned")
+		}
+		if n := idx.seeds(); n != 0 {
+			t.Fatalf("%d first-prompt rows were written: %+v", n, idx.all())
 		}
 	})
 }

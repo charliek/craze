@@ -46,6 +46,9 @@ type fakeSession struct {
 	// ignoreCancel makes a cancel of an open turn a write the turn does not
 	// act on: an agent that has been told and has not stopped yet.
 	ignoreCancel bool
+	// interjectErr is what Interject answers with; unset, it is the
+	// ErrUnsupported of a session that has no interject verb (failInterjects).
+	interjectErr error
 	// titleEntered, when set, is closed by the next SetTitle as it is entered,
 	// which then waits for titleRelease: the barrier at the one synchronous
 	// command whose work is outside e.mu, and where C12 will put file I/O.
@@ -500,8 +503,25 @@ func (s *fakeSession) Close() error {
 	return nil
 }
 
-// The rest of the seam the engine does not drive.
-func (s *fakeSession) Interject(context.Context, string) error { return agent.ErrUnsupported }
+// Interject is the rest of the seam the engine does not drive: a session that
+// does not support it at all, which is what every test but the ones about what
+// its FAILURE is classified as wants. failInterjects makes it answer with
+// something else — a context error from a call whose request may already have
+// been written, in particular.
+func (s *fakeSession) Interject(context.Context, string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.interjectErr != nil {
+		return s.interjectErr
+	}
+	return agent.ErrUnsupported
+}
+
+func (s *fakeSession) failInterjects(err error) {
+	s.mu.Lock()
+	s.interjectErr = err
+	s.mu.Unlock()
+}
 
 // Asks is the session's agent.AskSource, which the engine refuses a session
 // without (plan 021 §3.6). The driver's schedules are about turns, so it is

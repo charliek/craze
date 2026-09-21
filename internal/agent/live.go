@@ -187,7 +187,17 @@ type session struct {
 	// leave a stale report free to name EITHER earlier value, never a third
 	// one, which is what makes the set — not the single latest value — the
 	// right thing to suppress against. Guarded by s.mu.
+	//
+	// It is BOUNDED at modelBeforeSetCap. An agent that never advertises a
+	// model option would otherwise keep one entry per successful direct set for
+	// the whole of a session, and one that changes the model over and over
+	// would grow it without limit (r30 finding 6). Past the cap the set is
+	// dropped for modelBeforeAny, the conservative answer: suppress the
+	// option's first appearance WHATEVER it carries, which is what the marker
+	// did for every value before r28 finding 2 narrowed it. Both are consumed
+	// by that first appearance, like the set alone always was.
 	modelBeforeSet map[string]bool
+	modelBeforeAny bool
 	// beforeSetSection is a test barrier, nil in every build but a test's: it
 	// runs on a setter's own goroutine after the provider has taken the change
 	// and before the locked section that mutates the snapshot and enqueues its
@@ -696,7 +706,24 @@ func (s *session) markAgentWroteLocked(set *bool) {
 // for. s.mu is held.
 func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
 	if ModelConfigOptionIn(cfg) != nil {
-		s.modelBeforeSet = nil
+		s.modelBeforeSet, s.modelBeforeAny = nil, false
+		return
+	}
+	if s.modelBeforeAny {
+		// Already conservative: there is nothing a further value could add.
+		return
+	}
+	if s.modelBeforeSet[before] {
+		return
+	}
+	if len(s.modelBeforeSet) >= modelBeforeSetCap {
+		// The bound (r30 finding 6). Keeping the values themselves is what lets
+		// the first appearance tell a stale report from a real change, and it
+		// is worth a small set and no more: a session that has made this many
+		// direct sets with no model option in sight gives that up and suppresses
+		// the first appearance whatever it says, rather than remembering an
+		// unbounded history of values it may never be asked about.
+		s.modelBeforeSet, s.modelBeforeAny = nil, true
 		return
 	}
 	if s.modelBeforeSet == nil {
@@ -704,6 +731,13 @@ func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
 	}
 	s.modelBeforeSet[before] = true
 }
+
+// modelBeforeSetCap bounds modelBeforeSet. Eight distinct pre-set values is
+// far past anything a real session reaches before its agent advertises a model
+// option at all — cursor advertises one from session/new, and grok and gx
+// advertise one as soon as they list anything — and the overflow answer
+// suppresses rather than adopts, so the bound can be small.
+const modelBeforeSetCap = 8
 
 // installDeltaLocked is one delta carrying every section of the snapshot, in
 // full, as it now stands: what a snapshot INSTALL leaves behind. s.mu is held.
@@ -2389,12 +2423,13 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.snap.Config = cfg
 		s.markAgentWroteLocked(&s.agentWrote.config)
 		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
-		stale := was == nil && now != nil && s.modelBeforeSet[now.Current]
+		stale := was == nil && now != nil && (s.modelBeforeAny || s.modelBeforeSet[now.Current])
 		if now != nil {
 			// The marker's whole life is "until the option appears", whether or
 			// not this appearance had anything to say about the model: it is
-			// consumed in full, not merely the one value it happened to match.
-			s.modelBeforeSet = nil
+			// consumed in full, not merely the one value it happened to match —
+			// the bounded set and the overflow bit alike (r30 finding 6).
+			s.modelBeforeSet, s.modelBeforeAny = nil, false
 		}
 		if now != nil && now.Current != "" && !stale &&
 			now.Current != s.snap.CurrentModel && (was == nil || was.Current != now.Current) {

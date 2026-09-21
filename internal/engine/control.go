@@ -66,21 +66,26 @@ import (
 //     as before the attempt. Resend the same id, or send a new one; either
 //     gets a genuine first attempt once the gate reopens rather than a cached
 //     echo of finding it shut.
-//   - aborted (ErrCommandAborted, and ErrSetOutcomeUnknown for the one Set
-//     whose own outcome a context ending after the settings worker's claim
-//     leaves honestly unknown): a STORED answer whose outcome the engine
+//   - aborted (ErrCommandAborted; ErrSetOutcomeUnknown for the one Set whose
+//     own outcome a context ending after the settings worker's claim leaves
+//     honestly unknown; and a plain context.Canceled or
+//     context.DeadlineExceeded from a command that RAN — a Cancel or Stop
+//     whose session/cancel gave up, an Interject whose deadline passed after
+//     its request was written): a STORED answer whose outcome the engine
 //     cannot itself vouch for — the command may already have mutated state,
-//     or a Set's request may already be on the wire — so this id will never
-//     run again and replays the same answer for as long as the table keeps
-//     it. Re-read state (or, for a Set, watch the stream for the change's
-//     own delta) before deciding anything else; send a NEW id if the command
-//     is still wanted.
-//   - failed: every error craze does not classify by its own sentinel — a
-//     provider/RPC refusal of a Set, an Interject the agent refused, a Cancel
-//     that failed — reached this way because the command DID run and its
-//     failure is what it ran into: a STORED, stable answer, exactly like the
-//     named refusals below, and never a reason to retry the same id. Send a
-//     NEW id for another attempt.
+//     or its request may already be on the wire — so this id will never run
+//     again and replays the same answer for as long as the table keeps it.
+//     Re-read state (or, for a Set, watch the stream for the change's own
+//     delta) before deciding anything else; send a NEW id if the command is
+//     still wanted, and never blindly resend the work under a new id without
+//     looking, or an interjection the agent already queued goes in twice
+//     (r30 finding 1).
+//   - failed: every OTHER error craze does not classify by its own sentinel —
+//     a provider/RPC refusal of a Set, an Interject the agent refused, a
+//     Cancel that failed — reached this way because the command DID run and
+//     its failure is what it ran into, and its failure is a definite one: a
+//     STORED, stable answer, exactly like the named refusals below, and never
+//     a reason to retry the same id. Send a NEW id for another attempt.
 //   - anything else: the command's own stored, stable answer — a success, or
 //     a refusal about THIS request or the specific resource it named (a
 //     stale turn, a bad answer, a stale queue version, an unknown row, a
@@ -339,6 +344,26 @@ func classify(err error) classification {
 		// every other gate refusal — it is NEVER STORED, and unavailable is
 		// its code because a client can only retry it (r28 finding 1).
 		return classification{code: "unavailable"}
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// A command that RAN and then gave up on its own context: Cancel's or
+		// Stop's session/cancel, an Interject whose deadline passed. Such a
+		// call cannot say that nothing happened — internal/acp writes a request
+		// to the pipe before callRaw can look at its context at all (conn.go),
+		// so the interjection may already be queued and the cancel may already
+		// have been taken, which is exactly what CancelUnknown says out loud —
+		// and "failed" would invite a client to send the same work under a NEW
+		// id and do it twice. aborted is the honest code: STORED, so this id
+		// never runs again, and the client re-reads state before deciding
+		// anything (r30 finding 1).
+		//
+		// Everything that ended on a dead context WITHOUT running is named
+		// ABOVE and never reaches here: a Set the caller took back out of the
+		// queue, or one takeSet or runSet found dead, wraps errNotRun, and one
+		// the worker had already claimed wraps ErrSetOutcomeUnknown. Both wrap
+		// the context's own error too, and both are matched first, so the order
+		// of these cases is what keeps "not run" and "ran, outcome unknown"
+		// apart.
+		return classification{code: "aborted", stored: true}
 	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
 		return classification{code: "unavailable"}
 	case errors.Is(err, ErrBadRequest):

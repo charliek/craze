@@ -1205,6 +1205,82 @@ func TestTwoSetModelsBeforeTheOptionAppearsKeepBothPreSetValues(t *testing.T) {
 	})
 }
 
+// TestTheModelMarkerIsBounded is r30 finding 6. modelBeforeSet holds one entry
+// per direct session/set_model made while no model option is advertised, and
+// an agent that never advertises one — `modellate` until its first config list
+// — would let a long session grow it with every model change it makes.
+//
+// Past modelBeforeSetCap the set is dropped for a single conservative bit:
+// suppress the option's FIRST appearance whatever it carries, which is what
+// the marker did for every value before r28 finding 2 narrowed it. A value
+// that would otherwise have been a real change is the price, and it is paid
+// only by a session that has already made nine direct sets with no option in
+// sight. Both are consumed by that first appearance, exactly as the set alone
+// always was.
+func TestTheModelMarkerIsBounded(t *testing.T) {
+	s := startScript(t, "modellate", false)
+	settle(t, s)
+	if got := s.Snapshot().CurrentModel; got != "default" {
+		t.Fatalf("the session started on %q", got)
+	}
+	// One more than the cap: the first modelBeforeSetCap sets fill it — the
+	// value before each, starting at "default" — and the next overflows it.
+	for i := 1; i <= modelBeforeSetCap+1; i++ {
+		id := fmt.Sprintf("m-%d", i)
+		if _, err := s.SetModel(t.Context(), fmt.Sprintf("c-1/%d", i), id); err != nil {
+			t.Fatalf("SetModel %q: %v", id, err)
+		}
+		s.mu.Lock()
+		n, any := len(s.modelBeforeSet), s.modelBeforeAny
+		s.mu.Unlock()
+		if n > modelBeforeSetCap {
+			t.Fatalf("after %d sets the marker holds %d values, past the cap of %d", i, n, modelBeforeSetCap)
+		}
+		if want := i > modelBeforeSetCap; any != want {
+			t.Fatalf("after %d sets the overflow bit is %v, want %v", i, any, want)
+		}
+	}
+	s.mu.Lock()
+	set, any := s.modelBeforeSet, s.modelBeforeAny
+	s.mu.Unlock()
+	if len(set) != 0 || !any {
+		t.Fatalf("the overflowed marker is %v / %v, want the set dropped for the bit", set, any)
+	}
+	_ = s.log.Flush(context.Background(), s.done)
+	drainBuffered(s) // every SetModel's own delta, not what this test is about.
+
+	// The option's first appearance, carrying a value the agent never held
+	// under craze: under the cap this would be a real change, and the
+	// overflowed marker suppresses it instead.
+	s.onUpdate(modelConfigNotification("sonnet"))
+	ev := oneBufferedEvent(t, s)
+	if ev.State.Model != nil {
+		t.Fatalf("the first appearance under an overflowed marker carried the model section: %+v", ev.State)
+	}
+	if ev.State.Config == nil {
+		t.Fatalf("the first appearance did not carry the config section: %+v", ev.State)
+	}
+	last := fmt.Sprintf("m-%d", modelBeforeSetCap+1)
+	if got := s.Snapshot().CurrentModel; got != last {
+		t.Fatalf("the suppressed first appearance moved the model to %q, want %q", got, last)
+	}
+	// And the marker is spent, both halves of it: the next report that really
+	// moves the option is a change like any other.
+	s.mu.Lock()
+	set, any = s.modelBeforeSet, s.modelBeforeAny
+	s.mu.Unlock()
+	if set != nil || any {
+		t.Fatalf("the marker survived the option's first appearance: %v / %v", set, any)
+	}
+	s.onUpdate(modelConfigNotification("opus"))
+	if ev := oneBufferedEvent(t, s); ev.State.Model == nil || *ev.State.Model != "opus" {
+		t.Fatalf("a real change after the first appearance carried %+v", ev.State)
+	}
+	if got := s.Snapshot().CurrentModel; got != "opus" {
+		t.Fatalf("a real change after the first appearance left the model on %q", got)
+	}
+}
+
 // TestSetTitleRefusedForRoomChangesNothing: SetTitle is the one settings verb
 // with no provider behind it, so its check for room in the log is atomic with
 // its mutation and it can honestly refuse — with nothing renamed and nothing

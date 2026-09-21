@@ -69,18 +69,35 @@ import (
 //
 // row says a row exists, so a touch has something to touch: a session started
 // and quit with no prompt, or a turn the agent ran on its own before craze
-// ever sent one, must leave nothing behind. seeded says the first prompt's
-// fallback title has been written, so later prompts do not rewrite the whole
-// file for a title no rule would keep any more. Only a write that LANDED sets
-// either, which is what makes a failed seed retry on the next turn.
+// ever sent one, must leave nothing behind. A write that LANDED sets it — and
+// so does PROCESSING a load, whatever that attempt comes to, because a loaded
+// session's row is the very row its id came from and it exists however the
+// write for it goes (r30 finding 3).
+//
+// seeded says the row no longer wants a first-prompt fallback title: either
+// that title has been written, or something of higher precedence has named the
+// row — a successful agent title or a /rename — so a fallback write would only
+// rewrite the whole file for a name no rule would keep (r30 finding 5). A
+// fallback write that FAILED sets nothing, which is what makes it retry on the
+// next turn.
 //
 // seeding covers the window in which one path's seed is in flight, and beside
-// it one DEFERRED seed opportunity is retained: the text and cause of the
-// earliest turn that reached the first prompt while that attempt was parked.
-// Without it "a failed seed is retried by the next turn" is not true of turns
-// that OVERLAP (r29 finding 2): the second turn's seed would find seeding, do
-// nothing, and be gone by the time the first attempt failed, so a session whose
-// first write lost its race could go unindexed however many turns it ran.
+// it ONE seed opportunity is retained: the earliest prompt that has reached the
+// first-prompt rule and not yet been attempted. Every opportunity — Submit's
+// own, written inline on a client's goroutine, and the engine's own turns,
+// posted by the observer — goes through the same locked admission, and the
+// FIRST to ARRIVE wins the slot (admitSeedLocked, r30 finding 4).
+//
+// ONE slot, rather than one per path, is what makes that order total. With a
+// pending seed and a deferred seed kept apart, the retry a failed attempt hands
+// back could find the pending slot already taken by a LATER prompt and be
+// dropped in its favour, and the session would end up named by the wrong turn.
+//
+// Retaining an opportunity at all is what makes "a failed seed is retried by
+// the next turn" true of turns that OVERLAP (r29 finding 2): the second turn's
+// seed would otherwise find seeding, do nothing, and be gone by the time the
+// first attempt failed, so a session whose first write lost its race could go
+// unindexed however many turns it ran.
 //
 // All of it lives under this file's own mutex, a LEAF: it is taken to merge, to
 // take and to record a result, never across the Upsert itself, and never while
@@ -145,18 +162,19 @@ type indexWork struct {
 	load bool
 	// title is the newest title the agent has named the session, "" for none.
 	title string
-	// seed is the first-prompt fallback title owed by a turn the ENGINE
-	// started — a drain, an armed send firing — which has no caller's
-	// goroutine to write on. seedText is that turn's prompt, and is a field of
-	// its own because an empty prompt still creates a row: "" cannot double as
-	// "nothing owed".
+	// seed is the first-prompt fallback title this pass is to write. Unlike
+	// the three fields above it is never MERGED here: a seed opportunity is
+	// admitted into the writer's own one-slot sequence (admitSeedLocked) and
+	// only ever reaches an indexWork when a pass CLAIMS it (take), so that the
+	// claim and the attempt it begins are one locked decision. seedText is the
+	// turn's prompt, and is a field of its own because an empty prompt still
+	// creates a row: "" cannot double as "nothing owed".
 	seed     bool
 	seedText string
 	// seedCause is the command that caused that turn, "" when the drain took
 	// it: a failed seed goes out as a StateDelta{IndexErr}, and the client
 	// whose command armed the send-now or re-claimed the turn is the one that
-	// wants to hear about it (r29 finding 4). It travels with seedText and is
-	// merged with it, first-wins.
+	// wants to hear about it (r29 finding 4). It travels with seedText.
 	seedCause string
 }
 
@@ -191,20 +209,27 @@ type indexWriter struct {
 	// indexCloseWait in every build but a test's.
 	closeWait time.Duration
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// pending is the work MERGED field by field, and it never holds a seed:
+	// seeds go through the one-slot admission below instead (indexWork.seed).
 	pending indexWork
 	row     bool
 	seeded  bool
 	// seeding says a seed is in flight on some goroutine, so a second path
 	// that reaches the first prompt while it is parked does not write a second
-	// row. A seed that fails leaves both false and the next turn tries again.
-	seeding bool
-	// deferred is the one seed opportunity retained behind an attempt that is
-	// in flight, with the text and cause of the turn that retained it: see the
-	// file's doc comment, and seed below for the rule.
-	deferred      bool
-	deferredText  string
-	deferredCause string
+	// row. seedDone is that attempt's completion, closed once its result has
+	// been recorded and whatever it owes is back in the slot; it is nil when no
+	// attempt is in flight. The worker's exit waits on it (finish, r30 finding
+	// 2), because an attempt on a CLIENT's goroutine is the one piece of owed
+	// work the slot cannot show on its own.
+	seeding  bool
+	seedDone chan struct{}
+	// seedNext is the ONE retained seed opportunity — the earliest prompt that
+	// has arrived and not yet been attempted — with the text and cause of the
+	// turn it belongs to. See the file's doc comment, and admitSeedLocked.
+	seedNext  bool
+	seedText  string
+	seedCause string
 
 	// closeOnce guards the stop signal, so close is idempotent for a caller
 	// that is not Engine.Close's own closeOnce.
@@ -214,8 +239,9 @@ type indexWriter struct {
 	// spirit of the engine's own hooks: it is called on the worker's goroutine
 	// as its exit begins, before the drain looks at anything, so a test can
 	// release a write parked in Upsert knowing it is the SHUTDOWN and not an
-	// ordinary pass that will pick up what is left. It is set before the worker
-	// is started and never written again, so it needs no lock.
+	// ordinary pass that will pick up what is left. It is written once, before
+	// the stop is signalled, and never again; the worker reads it only after it
+	// has observed done, so that ordering is what makes it safe without a lock.
 	beforeFinish func()
 }
 
@@ -251,30 +277,83 @@ func (w *indexWriter) post(work indexWork) {
 	if work.title != "" {
 		w.pending.title = work.title
 	}
-	if work.seed && !w.pending.seed {
-		// FIRST wins here, where the title's latest does: the seed is the FIRST
-		// prompt's title, so two turns starting before the worker looks owe the
-		// earlier one's text, not the later one's. The cause travels with the
-		// text it belongs to, so the report of a failure names the command that
-		// caused the turn whose prompt is being written.
-		w.pending.seed, w.pending.seedText, w.pending.seedCause = true, work.seedText, work.seedCause
+	if work.seed {
+		// Not merged into pending: a seed goes through the one admission every
+		// seed opportunity goes through, whichever goroutine it arrived on
+		// (r30 finding 4). run is false because the observer may not do I/O.
+		w.admitSeedLocked(work.seedCause, work.seedText, false)
 	}
 	w.mu.Unlock()
+	w.kick()
+}
+
+// kick wakes the worker, without waiting and without ever blocking: one slot,
+// because the work itself is merged under mu and every pass re-reads all of it.
+// wake is never closed, so a kick from a goroutine that outlived the worker —
+// an abandoned write's failure — neither blocks nor panics; it simply goes into
+// a slot nobody will drain.
+func (w *indexWriter) kick() {
 	select {
 	case w.wake <- struct{}{}:
 	default:
 	}
 }
 
-// take is everything the worker owes, cleared in the same section. Merging and
-// taking under one mutex is what makes "a title is never lost behind a touch"
-// hold: both fields are read and cleared together, so a post that lands in
-// between is simply the next pass's work.
+// admitSeedLocked places ONE seed opportunity in the writer's single slot: the
+// one locked decision every one of them goes through, whether it arrived on a
+// client's own goroutine (Submit's, seed below) or was posted by the observer
+// for a turn the ENGINE started (post above). w.mu is held.
+//
+// FIRST by ARRIVAL wins, and every later arrival is simply dropped: a fallback
+// title is the FIRST prompt's, and with one slot rather than one per path there
+// is no way for a retry handed back by a failed attempt to be dropped in favour
+// of a prompt that arrived after it (r30 finding 4).
+//
+// run says the arriving goroutine is willing to make the write itself. It
+// reports whether this caller has CLAIMED the attempt and must now make it: a
+// posted opportunity never claims, and an inline one claims only when no other
+// attempt is in flight.
+func (w *indexWriter) admitSeedLocked(cause, prompt string, run bool) bool {
+	if w.seeded || w.seedNext {
+		return false
+	}
+	w.seedNext, w.seedText, w.seedCause = true, prompt, cause
+	if !run {
+		return false
+	}
+	_, _, claimed := w.claimSeedLocked()
+	return claimed
+}
+
+// claimSeedLocked begins the attempt on the retained opportunity, taking it out
+// of the slot: it reports nothing to write when the slot is empty, when a row is
+// already named, or when another attempt is in flight. w.mu is held.
+//
+// Claiming here, in the section that empties the slot, is what closes the gap a
+// two-step "take it, then start it" left: an opportunity arriving in between
+// would find the slot empty and no attempt in flight, and make itself a second,
+// LATER first prompt.
+func (w *indexWriter) claimSeedLocked() (cause, prompt string, ok bool) {
+	if !w.seedNext || w.seeded || w.seeding {
+		return "", "", false
+	}
+	cause, prompt = w.seedCause, w.seedText
+	w.seedNext, w.seedText, w.seedCause = false, "", ""
+	w.seeding, w.seedDone = true, make(chan struct{})
+	return cause, prompt, true
+}
+
+// take is everything the worker owes, cleared in the same section — and, with
+// it, the CLAIM of the seed the worker is about to attempt. Merging and taking
+// under one mutex is what makes "a title is never lost behind a touch" hold:
+// both fields are read and cleared together, so a post that lands in between is
+// simply the next pass's work.
 func (w *indexWriter) take() indexWork {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	work := w.pending
 	w.pending = indexWork{}
+	work.seedCause, work.seedText, work.seed = w.claimSeedLocked()
 	return work
 }
 
@@ -353,9 +432,26 @@ func (w *indexWriter) begin(work indexWork) <-chan struct{} {
 // the write the worker was waiting for when close began, if there was one: the
 // final write queues behind it, because one engine never runs two Upserts on
 // this worker at once, and the whole of that — the wait and the write — is
-// bounded by closeWait, after which both are abandoned to their own goroutines.
-// Nothing is waited for at all when nothing must be written, so a quit with an
-// Upsert parked in a flock and nothing owed returns at once, as it did before.
+// bounded by ONE closeWait, after which everything is abandoned to its own
+// goroutine. Nothing is waited for at all when nothing must be written, so a
+// quit with an Upsert parked in a flock and nothing owed returns at once, as it
+// did before.
+//
+// # The seed on somebody else's goroutine
+//
+// There is one piece of owed work the slot cannot show, and it is what r30
+// finding 2 is about: a seed in flight on a CLIENT's goroutine (Submit's own
+// inline write) with a retained opportunity behind it. That opportunity only
+// reaches the slot if the attempt FAILS, and by then the worker would be gone,
+// so a session that ran two prompts could end up with no row at all. So when an
+// opportunity is retained, the exit waits for the attempt in flight too, inside
+// the same bound: a failure hands the retained seed over and it becomes this
+// last write, and a success means there is a row already and nothing is owed.
+//
+// After the bound everything is abandoned, and a failure that lands later is
+// harmless: recording it takes the leaf mutex and kicks a channel that is never
+// closed (kick), so it neither blocks nor panics — the opportunity simply
+// returns to a slot nobody will drain again.
 func (w *indexWriter) finish(inFlight <-chan struct{}) {
 	if w.beforeFinish != nil {
 		w.beforeFinish()
@@ -372,9 +468,16 @@ func (w *indexWriter) finish(inFlight <-chan struct{}) {
 			return
 		}
 	}
-	// Taken after the wait, not before: a seed that failed in the write above
-	// posts the deferred one from inside it, and that is exactly the retry this
-	// drain exists to catch.
+	if seed := w.activeSeed(); seed != nil {
+		select {
+		case <-seed:
+		case <-bound.C:
+			return
+		}
+	}
+	// Taken after the waits, not before: a seed that failed in one of them
+	// leaves the retained opportunity in the slot, and that is exactly the
+	// retry this drain exists to catch.
 	work := w.take()
 	if !work.mustWrite() {
 		return
@@ -386,12 +489,25 @@ func (w *indexWriter) finish(inFlight <-chan struct{}) {
 }
 
 // owed reports whether the worker still has to write something before it may
-// exit: work in the slot that is not a plain touch, or a deferred seed that an
-// attempt still in flight will post if it fails.
+// exit: work in the slot that is not a plain touch, or a retained seed
+// opportunity — which is owed whether it is waiting for the worker or waiting
+// on an attempt in flight that may yet fail and hand it over.
 func (w *indexWriter) owed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.pending.mustWrite() || w.deferred
+	return w.pending.mustWrite() || w.seedNext
+}
+
+// activeSeed is the completion of a seed attempt in flight when an opportunity
+// is retained behind it, and nil when there is nothing to wait for: no
+// opportunity retained, or none in flight to hand it over (finish).
+func (w *indexWriter) activeSeed() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.seedNext {
+		return nil
+	}
+	return w.seedDone
 }
 
 // stop signals the worker to finish, without waiting for it.
@@ -426,19 +542,37 @@ func (w *indexWriter) close() {
 func (w *indexWriter) runPending(work indexWork) {
 	landed := false
 	if work.seed {
-		landed = w.seed(work.seedCause, work.seedText)
+		landed = w.writeSeed(work.seedCause, work.seedText)
 	}
 	if work.title != "" {
 		landed = w.write("", work.title, sessions.TitleKindAgent)
 	}
-	if work.load && !landed {
-		// The row a load's id came from: a touch that is allowed to create,
-		// which is what the TUI's own sessionUp did.
-		landed = w.write("", "", sessions.TitleKindNone)
+	if work.load {
+		// The row a load's id came from EXISTS — it is the very row --continue
+		// or --resume read the id out of — so it is marked known HERE, before
+		// and independent of what this attempt comes to (r30 finding 3). A load
+		// whose write loses a race for the lock otherwise left row false, and
+		// the touch merged beside it, and every ordinary touch after it, wrote
+		// nothing at all: the promised retry never happened, and the durable id
+		// and the recency a resumed session sorts by could stay unwritten
+		// indefinitely.
+		w.knownRow()
+		if !landed {
+			// A touch that is allowed to create, which is what the TUI's own
+			// sessionUp did.
+			landed = w.write("", "", sessions.TitleKindNone)
+		}
 	}
 	if work.touch && !landed {
 		w.touch("")
 	}
+}
+
+// knownRow records that a row exists without having written one.
+func (w *indexWriter) knownRow() {
+	w.mu.Lock()
+	w.row = true
+	w.mu.Unlock()
 }
 
 // touch bumps the row's UpdatedAt, and is a no-op until a row exists: a turn
@@ -454,67 +588,69 @@ func (w *indexWriter) touch(cause string) {
 	w.write(cause, "", sessions.TitleKindNone)
 }
 
-// seed writes the first prompt's fallback title, once. It is what CREATES the
-// row: a session is worth showing in a picker from its first prompt on, and
-// that prompt's first line is what a picker shows until the agent or the user
-// names it.
+// seed is Submit's own first-prompt seed: the opportunity is admitted like
+// every other, and this caller makes the write when the admission claims the
+// attempt for it (§3.2's documented exception, file I/O on a client's
+// goroutine). It reports whether it wrote a row, so a caller composing a pass
+// knows whether a touch beside it is still owed.
 //
-// Only a write that LANDED retires the attempt. A session whose very first
-// write lost a race for the lock would otherwise never appear in a picker
-// again, however many turns it went on to run — so a failure leaves seeded
-// false and the next turn to start tries again.
+// It writes nothing at all when a row is already named, and nothing when
+// another attempt is in flight — the opportunity is simply retained, and the
+// caller returns at once rather than waiting for somebody else's write.
 //
-// seeding covers the window in which one path's seed is still in flight and
-// another turn starts: the second path writes no second row — and RETAINS
-// itself as the one deferred seed opportunity, which is what makes "a failed
-// seed is retried by the next turn" true of turns that overlap (r29 finding 2).
-// Without it, a second turn whose seed found a parked first attempt would do
-// nothing and be gone: the first attempt then failing leaves a session that has
-// run two turns with no row at all, and only a THIRD turn could give it one.
-//
-// The retained one is the FIRST to find the attempt in flight, matching the
-// slot's own first-wins rule for a seed: it is the earliest prompt after the
-// one being attempted, and the earliest prompt is what a fallback title is.
-// The attempt SUCCEEDING discards it — there is a row, and its title is the
-// first prompt's. The attempt FAILING posts it to the worker, which is a
-// non-blocking merge and a kick: this may be running on a client's own
-// goroutine inside Submit, and that caller has waited for one write already.
-//
-// cause is the command that started the turn, "" when the drain took it. It
-// reports whether it wrote a row, so a caller composing a pass knows whether a
-// touch beside it is still owed.
+// cause is the command that started the turn, "" when the drain took it.
 func (w *indexWriter) seed(cause, prompt string) bool {
 	w.mu.Lock()
-	if w.seeded {
-		w.mu.Unlock()
-		return false
-	}
-	if w.seeding {
-		if !w.deferred {
-			w.deferred, w.deferredText, w.deferredCause = true, prompt, cause
-		}
-		w.mu.Unlock()
-		return false
-	}
-	w.seeding = true
+	claimed := w.admitSeedLocked(cause, prompt, true)
 	w.mu.Unlock()
+	if !claimed {
+		return false
+	}
+	return w.writeSeed(cause, prompt)
+}
 
+// writeSeed makes the attempt on a seed this goroutine has CLAIMED — Submit's
+// own admission, or a worker pass's take — and records what it came to. It is
+// what CREATES the row: a session is worth showing in a picker from its first
+// prompt on, and that prompt's first line is what a picker shows until the
+// agent or the user names it.
+//
+// Only a write that LANDED retires the fallback. A session whose very first
+// write lost a race for the lock would otherwise never appear in a picker
+// again, however many turns it went on to run — so a failure leaves seeded
+// false, and whatever opportunity is retained behind this attempt is handed to
+// the worker (a kick, never a wait: this may be running on a client's own
+// goroutine inside Submit, and that caller has waited for one write already).
+// A failure with nothing retained owes nothing: the next turn to start admits
+// its own opportunity.
+//
+// The completion is closed LAST, after the result is recorded and the retained
+// opportunity is back in the slot, so a worker exit that waits on it (finish)
+// finds everything this attempt owes already there.
+func (w *indexWriter) writeSeed(cause, prompt string) bool {
 	ok := w.write(cause, fallbackTitle(prompt), sessions.TitleKindFallback)
 
 	w.mu.Lock()
 	w.seeding = false
-	retry := indexWork{}
-	switch {
-	case ok:
+	done := w.seedDone
+	w.seedDone = nil
+	retry := false
+	if ok {
+		// A row, named by the first prompt: a retained opportunity is a RETRY
+		// and nothing more, so it is discarded rather than written as a second,
+		// later fallback title.
 		w.seeded = true
-		w.deferred, w.deferredText, w.deferredCause = false, "", ""
-	case w.deferred:
-		retry = indexWork{seed: true, seedText: w.deferredText, seedCause: w.deferredCause}
-		w.deferred, w.deferredText, w.deferredCause = false, "", ""
+		w.seedNext, w.seedText, w.seedCause = false, "", ""
+	} else {
+		retry = w.seedNext
 	}
 	w.mu.Unlock()
-	// Outside the mutex: post takes it again.
-	w.post(retry)
+	if retry {
+		w.kick()
+	}
+	if done != nil {
+		close(done)
+	}
 	return ok
 }
 
@@ -589,8 +725,32 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 	}
 	w.mu.Lock()
 	w.row = true
+	if retiresFallback(kind) {
+		// The row has a name of HIGHER precedence than a first prompt's, so no
+		// fallback is wanted any more: the attempt is retired and a retained
+		// opportunity discarded (r30 finding 5). Without this, a seed that
+		// failed before an agent title landed left seeded false for ever, and
+		// every later turn retried a write that could only be overruled by
+		// applyTitle — reporting an IndexErr each time it failed, for a row
+		// that is safely indexed and correctly named.
+		w.seeded = true
+		w.seedNext, w.seedText, w.seedCause = false, "", ""
+	}
 	w.mu.Unlock()
 	return nil
+}
+
+// retiresFallback reports whether a title of this kind, once written, leaves
+// the row wanting no first-prompt fallback: its own (which IS the fallback),
+// the agent's own name for the session, and a /rename, which pins.
+// TitleKindNone is a touch and names nothing.
+func retiresFallback(kind sessions.TitleKind) bool {
+	switch kind {
+	case sessions.TitleKindFallback, sessions.TitleKindAgent, sessions.TitleKindUser:
+		return true
+	default:
+		return false
+	}
 }
 
 // indexWriteError is a failed index write as a command's answer: ErrIndexWrite
