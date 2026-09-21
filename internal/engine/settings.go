@@ -122,29 +122,32 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 	if err := s.validate(); err != nil {
 		return SetResult{}, err
 	}
-	r := &setReq{ctx: ctx, c: c, s: s, reply: make(chan setAnswer, 1)}
-	if err := e.queueSet(r); err != nil {
-		return SetResult{}, err
-	}
-	var done <-chan struct{}
-	if ctx != nil {
-		done = ctx.Done()
-	}
-	select {
-	case a := <-r.reply:
-		return a.res, a.err
-	case <-done:
-		if e.dropSet(r) {
-			// Still waiting its turn, and now out of the queue: nothing was
-			// asked of the provider and nothing changed.
-			return SetResult{}, ctx.Err()
+	hash := receiptHash("Set", string(s.Kind), s.ID, s.Value)
+	return withBlockingReceipt(ctx, e.receipts, c, hash, func() (SetResult, error) {
+		r := &setReq{ctx: ctx, c: c, s: s, reply: make(chan setAnswer, 1)}
+		if err := e.queueSet(r); err != nil {
+			return SetResult{}, err
 		}
-		// The worker has it. Its answer is the truth about what the provider
-		// was told, and it is coming: the provider call and the flush both take
-		// this same ctx, so neither outlives it by much.
-		a := <-r.reply
-		return a.res, a.err
-	}
+		var done <-chan struct{}
+		if ctx != nil {
+			done = ctx.Done()
+		}
+		select {
+		case a := <-r.reply:
+			return a.res, a.err
+		case <-done:
+			if e.dropSet(r) {
+				// Still waiting its turn, and now out of the queue: nothing was
+				// asked of the provider and nothing changed.
+				return SetResult{}, ctx.Err()
+			}
+			// The worker has it. Its answer is the truth about what the provider
+			// was told, and it is coming: the provider call and the flush both take
+			// this same ctx, so neither outlives it by much.
+			a := <-r.reply
+			return a.res, a.err
+		}
+	})
 }
 
 // queueSet puts r at the back of the settings queue and wakes the worker. The
@@ -295,15 +298,18 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 // Writing the index row for a rename is still the client's, until the index
 // moves into the engine (C12).
 func (e *Engine) SetTitle(c Command, title string) error {
-	e.mu.Lock()
-	refused := e.refusalLocked()
-	e.mu.Unlock()
-	if refused != nil {
-		return refused
-	}
-	// Outside e.mu: the engine calls exactly two things on the seam with its
-	// own lock held (Begin and ForeignTurn, engine.go), and this needs to be
-	// neither of them — it takes the session's lock and the outbox's, both
-	// briefly, and waits on nothing either way.
-	return e.sess.SetTitle(c.Cause(), title)
+	hash := receiptHash("SetTitle", title)
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		e.mu.Lock()
+		refused := e.refusalLocked()
+		e.mu.Unlock()
+		if refused != nil {
+			return refused
+		}
+		// Outside e.mu: the engine calls exactly two things on the seam with its
+		// own lock held (Begin and ForeignTurn, engine.go), and this needs to be
+		// neither of them — it takes the session's lock and the outbox's, both
+		// briefly, and waits on nothing either way.
+		return e.sess.SetTitle(c.Cause(), title)
+	})
 }

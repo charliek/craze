@@ -79,6 +79,10 @@ type State struct {
 	StartFailed bool
 	// Incarnation is the log's id: the scope of turn ids and sequence numbers.
 	Incarnation string
+	// RetryHorizon is the command-id table's bound (receipts.go): within it, a
+	// resent command id is answered from the table and never re-executes;
+	// past it, ErrUnknownCommand.
+	RetryHorizon RetryHorizon
 }
 
 // HeadAsk is the ask at the head of the queue of open ones, as a status line
@@ -98,7 +102,11 @@ type HeadAsk struct {
 // registry is read outside e.mu for the same reason, and because the two
 // mutexes are never nested.
 func (e *Engine) State() State {
-	st := State{Snapshot: e.sess.Snapshot(), Incarnation: e.log.Incarnation()}
+	st := State{
+		Snapshot:     e.sess.Snapshot(),
+		Incarnation:  e.log.Incarnation(),
+		RetryHorizon: e.receipts.horizon(),
+	}
 	if asks := e.asks.Asks(); len(asks) > 0 {
 		st.PendingAsks = len(asks)
 		st.HeadAsk = HeadAsk{ID: asks[0].ID, Kind: asks[0].Kind, Label: asks[0].Label()}

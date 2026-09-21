@@ -19,6 +19,32 @@ import (
 // effect from the reply has to be able to tell that effect's echo from
 // somebody else's change. In-process neither can happen yet, and the surface
 // is already the one a socket will carry.
+//
+// # Resends and the receipts table (receipts.go)
+//
+// A non-zero Command is tracked by an in-memory table, bounded and per
+// engine: it reserves an id while its command runs, matches a resend on a
+// payload hash (the method plus its arguments) and, once the command has
+// run, answers a matching resend with exactly what the first call returned —
+// a refusal included — never a second execution. A mismatched resend (the
+// same id, a different payload) is ErrBadRequest. An id at or below its
+// client's evicted high-water mark is ErrUnknownCommand: recognisably
+// expired, never a fresh (and very different) command running under a
+// number that used to mean something else.
+//
+// One refusal is never stored: a GATE refusal — the engine simply not
+// admitting anything at all right now (ErrNotAccepting, ErrUnavailable, and
+// their sibling spellings agent.ErrSetUnavailable / agent.ErrAskUnavailable),
+// whatever the command's own arguments — leaves the id exactly as unseen as
+// before the attempt, so a client that retries the same id once the outbox
+// has room, or the engine is admitting again, gets a genuine attempt rather
+// than a cached echo of finding the door shut: it was never told a result
+// worth caching, only that nothing happened yet. Every other refusal a
+// command reaches only after being hashed and reserved — a stale turn, a bad
+// answer, a stale queue version, an unknown row, a full queue, an
+// already-pending send, a foreign turn, … — is a genuine, stable fact about
+// THIS request or the specific resource it named, and is stored and replayed
+// like any success.
 type Command struct {
 	// Client is an id NewClientID minted, unique in the incarnation.
 	Client string

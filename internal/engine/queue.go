@@ -25,22 +25,25 @@ import (
 
 // Queue puts text at the back of the queue. It never starts a turn.
 func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.refusalLocked(); err != nil {
-		return agent.QueuedPrompt{}, err
-	}
-	if !e.log.OutboxRoom() {
-		return agent.QueuedPrompt{}, ErrUnavailable
-	}
-	row, qev, err := e.queue.Add(text, e.now())
-	if err != nil {
-		// A full queue or an oversized message, refused with nothing mutated,
-		// so the client still has the draft it tried to queue.
-		return agent.QueuedPrompt{}, err
-	}
-	e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
-	return row, nil
+	hash := receiptHash("Queue", text)
+	return withSyncReceipt(e.receipts, c, hash, func() (agent.QueuedPrompt, error) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err := e.refusalLocked(); err != nil {
+			return agent.QueuedPrompt{}, err
+		}
+		if !e.log.OutboxRoom() {
+			return agent.QueuedPrompt{}, ErrUnavailable
+		}
+		row, qev, err := e.queue.Add(text, e.now())
+		if err != nil {
+			// A full queue or an oversized message, refused with nothing mutated,
+			// so the client still has the draft it tried to queue.
+			return agent.QueuedPrompt{}, err
+		}
+		e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
+		return row, nil
+	})
 }
 
 // EditQueued rewrites a queued row in place: the id and the position are the
@@ -58,63 +61,72 @@ func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
 // client's edit, drain or clear can land between reading the version and
 // writing the text.
 func (e *Engine) EditQueued(c Command, id, text string, expectedVersion *int) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.refusalLocked(); err != nil {
-		return err
-	}
-	if !e.log.OutboxRoom() {
-		return ErrUnavailable
-	}
-	row, ok := e.rowLocked(id)
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrUnknownRow, id)
-	}
-	if expectedVersion != nil && *expectedVersion != row.Version {
-		return fmt.Errorf("%w: %s is at version %d, not %d", ErrStaleVersion, id, row.Version, *expectedVersion)
-	}
-	qev, err := e.queue.Edit(id, text)
-	if err != nil {
-		return err
-	}
-	e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
-	return nil
+	hash := receiptHash("EditQueued", id, text, versionSpelling(expectedVersion))
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err := e.refusalLocked(); err != nil {
+			return err
+		}
+		if !e.log.OutboxRoom() {
+			return ErrUnavailable
+		}
+		row, ok := e.rowLocked(id)
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrUnknownRow, id)
+		}
+		if expectedVersion != nil && *expectedVersion != row.Version {
+			return fmt.Errorf("%w: %s is at version %d, not %d", ErrStaleVersion, id, row.Version, *expectedVersion)
+		}
+		qev, err := e.queue.Edit(id, text)
+		if err != nil {
+			return err
+		}
+		e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
+		return nil
+	})
 }
 
 // Unqueue drops a row the user cancelled and answers with the row that went.
 func (e *Engine) Unqueue(c Command, id string) (agent.QueuedPrompt, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.refusalLocked(); err != nil {
-		return agent.QueuedPrompt{}, err
-	}
-	if !e.log.OutboxRoom() {
-		return agent.QueuedPrompt{}, ErrUnavailable
-	}
-	qev, ok := e.queue.Remove(id)
-	if !ok {
-		return agent.QueuedPrompt{}, fmt.Errorf("%w: %s", ErrUnknownRow, id)
-	}
-	e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
-	return qev.Prompt, nil
+	hash := receiptHash("Unqueue", id)
+	return withSyncReceipt(e.receipts, c, hash, func() (agent.QueuedPrompt, error) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err := e.refusalLocked(); err != nil {
+			return agent.QueuedPrompt{}, err
+		}
+		if !e.log.OutboxRoom() {
+			return agent.QueuedPrompt{}, ErrUnavailable
+		}
+		qev, ok := e.queue.Remove(id)
+		if !ok {
+			return agent.QueuedPrompt{}, fmt.Errorf("%w: %s", ErrUnknownRow, id)
+		}
+		e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
+		return qev.Prompt, nil
+	})
 }
 
 // ClearQueue empties the queue, head first, and answers with how many rows went.
 // Each is its own removal event, so a client can say where every follow-up went.
 func (e *Engine) ClearQueue(c Command) (int, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.refusalLocked(); err != nil {
-		return 0, err
-	}
-	if !e.log.OutboxRoom() {
-		return 0, ErrUnavailable
-	}
-	qevs := e.queue.Clear()
-	batch := make([]agent.Event, 0, len(qevs))
-	for _, qev := range qevs {
-		batch = append(batch, e.stamp(qev.Event(), c.Cause()))
-	}
-	e.log.Enqueue(batch...)
-	return len(qevs), nil
+	hash := receiptHash("ClearQueue")
+	return withSyncReceipt(e.receipts, c, hash, func() (int, error) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err := e.refusalLocked(); err != nil {
+			return 0, err
+		}
+		if !e.log.OutboxRoom() {
+			return 0, ErrUnavailable
+		}
+		qevs := e.queue.Clear()
+		batch := make([]agent.Event, 0, len(qevs))
+		for _, qev := range qevs {
+			batch = append(batch, e.stamp(qev.Event(), c.Cause()))
+		}
+		e.log.Enqueue(batch...)
+		return len(qevs), nil
+	})
 }

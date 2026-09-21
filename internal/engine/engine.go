@@ -148,6 +148,11 @@ type Engine struct {
 	obsMu     sync.Mutex
 	replaying bool
 
+	// receipts is the command-id table (receipts.go): one table for the whole
+	// engine, shared by every client, with its own mutex — never nested with
+	// e.mu or registry.mu, in either order (its package doc says why).
+	receipts *receiptTable
+
 	// sets is the settings worker's FIFO: every Control.Set joins it under e.mu
 	// and is served one at a time, in arrival order (settings.go). setWake is
 	// its kick, one slot, for the same reason the driver's is.
@@ -224,6 +229,9 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if c, ok := sess.(agent.Clocked); ok {
 		e.now = c.Now
 	}
+	// Built after e.now is resolved, so the table's clock is the same one the
+	// rest of the engine reads, whatever the session is (plan 021 §3.9).
+	e.receipts = newReceiptTable(e.now)
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
@@ -346,21 +354,33 @@ func (e *Engine) Ask(id string) (agent.AskRecord, bool) { return e.asks.Record(i
 //
 // It waits on nothing: one registry section and an enqueue, both of which are
 // bounded, so a client may call it from the primary's own reader.
+//
+// Its receipt is recorded without ever taking e.mu: Answer does not touch it
+// today (X40) and must not start now, so its entry hook (withSyncReceipt)
+// holds only the table's own mutex across the whole call — never nested with
+// registry.mu the other way around, because nothing else ever takes the
+// table's mutex while holding registry.mu (receipts.go's package doc).
 func (e *Engine) Answer(c Command, id string, a agent.AskAnswer) error {
-	_, err := e.asks.Answer(c.Cause(), id, a)
-	return err
+	hash := receiptHash("Answer", id, answerSpelling(a))
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		_, err := e.asks.Answer(c.Cause(), id, a)
+		return err
+	})
 }
 
 // Interject merges text into the running turn. It is the session's own verb
 // and its own refusals: the engine adds nothing but the door.
-func (e *Engine) Interject(ctx context.Context, _ Command, text string) error {
-	e.mu.Lock()
-	refused := e.refusalLocked()
-	e.mu.Unlock()
-	if refused != nil {
-		return refused
-	}
-	return e.sess.Interject(ctx, text)
+func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
+	hash := receiptHash("Interject", text)
+	return withBlockingReceiptErr(ctx, e.receipts, c, hash, func() error {
+		e.mu.Lock()
+		refused := e.refusalLocked()
+		e.mu.Unlock()
+		if refused != nil {
+			return refused
+		}
+		return e.sess.Interject(ctx, text)
+	})
 }
 
 // Close refuses every later command, closes the session — which ends the turn
@@ -492,6 +512,15 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 	default:
 		return SubmitResult{}, fmt.Errorf("%w: submit mode %q", ErrBadRequest, mode)
 	}
+	hash := receiptHash("Submit", text, string(mode), fromRow)
+	return withSyncReceipt(e.receipts, c, hash, func() (SubmitResult, error) {
+		return e.submit(c, text, mode, fromRow)
+	})
+}
+
+// submit is Submit's own work, run at most once per command id: see
+// withSyncReceipt.
+func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string) (SubmitResult, error) {
 	var started []launch
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
 	// locked section so the cancel itself is made with the lock released.
@@ -828,32 +857,35 @@ func (e *Engine) retryLocked(t *turn) []launch {
 //
 // The Command is not the ending's cause: the ending belongs to the turn and
 // carries the cause the turn was submitted with, as every other ending does.
-func (e *Engine) GiveUp(_ Command, turn string) error {
-	var next []launch
-	err := func() error {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.closed {
-			return ErrNotAccepting
-		}
-		if turn == "" || e.cur == nil || e.cur.id != turn {
-			return ErrStaleTurn
-		}
-		t := e.cur
-		if !t.retry {
-			// Running, or a claim of its own is in flight: either way this turn is
-			// not waiting for anything the client can give up on.
-			return ErrNotAccepting
-		}
-		t.givenUp, t.retry, t.retryDue = true, false, false
-		if e.cancelsInFlight > 0 {
+func (e *Engine) GiveUp(c Command, turn string) error {
+	hash := receiptHash("GiveUp", turn)
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		var next []launch
+		err := func() error {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.closed {
+				return ErrNotAccepting
+			}
+			if turn == "" || e.cur == nil || e.cur.id != turn {
+				return ErrStaleTurn
+			}
+			t := e.cur
+			if !t.retry {
+				// Running, or a claim of its own is in flight: either way this turn is
+				// not waiting for anything the client can give up on.
+				return ErrNotAccepting
+			}
+			t.givenUp, t.retry, t.retryDue = true, false, false
+			if e.cancelsInFlight > 0 {
+				return nil
+			}
+			next = e.settleLocked(t)
 			return nil
-		}
-		next = e.settleLocked(t)
-		return nil
-	}()
-	e.run(next)
-	return err
+		}()
+		e.run(next)
+		return err
+	})
 }
 
 // GiveUpDrain ends a client's wait for rows held behind a turn of the agent's
@@ -880,32 +912,46 @@ func (e *Engine) GiveUp(_ Command, turn string) error {
 // the gate Stop sets, so the abandonment cannot be overtaken by the very drain it
 // gave up on. It makes no blocking call: Begin is the one thing it may call on
 // the session, under e.mu like every other claim.
-func (e *Engine) GiveUpDrain(_ Command) (turn string, pending int, err error) {
-	var next []launch
-	func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.closed {
-			err = ErrNotAccepting
-			return
-		}
-		if e.cur == nil {
-			next = e.passLocked()
-		}
-		if e.cur != nil {
-			turn = e.cur.id
-			return
-		}
-		e.stopped = true
-		pending = e.queue.Len()
-		// A send armed and waiting for the same drain goes with it, and says so,
-		// as it does for Stop: nothing will fire it now.
-		if ev, ok := e.disarmLocked(agent.SendNowStopped, "", ""); ok {
-			e.log.Enqueue(ev)
-		}
-	}()
-	e.run(next)
-	return turn, pending, err
+// giveUpDrainResult bundles GiveUpDrain's two values so its receipt has one T
+// to store: a resend must get back exactly what the first call returned, the
+// pair included.
+type giveUpDrainResult struct {
+	turn    string
+	pending int
+}
+
+func (e *Engine) GiveUpDrain(c Command) (turn string, pending int, err error) {
+	hash := receiptHash("GiveUpDrain")
+	res, err := withSyncReceipt(e.receipts, c, hash, func() (giveUpDrainResult, error) {
+		var out giveUpDrainResult
+		var next []launch
+		var ferr error
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.closed {
+				ferr = ErrNotAccepting
+				return
+			}
+			if e.cur == nil {
+				next = e.passLocked()
+			}
+			if e.cur != nil {
+				out.turn = e.cur.id
+				return
+			}
+			e.stopped = true
+			out.pending = e.queue.Len()
+			// A send armed and waiting for the same drain goes with it, and says so,
+			// as it does for Stop: nothing will fire it now.
+			if ev, ok := e.disarmLocked(agent.SendNowStopped, "", ""); ok {
+				e.log.Enqueue(ev)
+			}
+		}()
+		e.run(next)
+		return out, ferr
+	})
+	return res.turn, res.pending, err
 }
 
 // drainLocked starts what is waiting when nothing is current and a turn may
