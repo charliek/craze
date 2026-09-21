@@ -91,6 +91,28 @@ func (a args) integer(name string, min int64) (n int64, ok bool, err error) {
 	return int64(f), true, nil
 }
 
+// array returns the JSON array field name, each element still raw: the
+// caller shapes its own items (todo_write's are objects; a future tool's
+// could be anything else). ok is false when an optional field is absent; a
+// required one that is absent, or any value that is not an array, is an
+// error.
+func (a args) array(name string, required bool) (items []json.RawMessage, ok bool, err error) {
+	raw, present := a[name]
+	if !present {
+		if required {
+			return nil, false, fmt.Errorf("%s is required: want an array", name)
+		}
+		return nil, false, nil
+	}
+	if t := jsonType(raw); t != "array" {
+		return nil, false, fmt.Errorf("%s must be an array, got a JSON %s", name, t)
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false, fmt.Errorf("%s must be an array: %v", name, err)
+	}
+	return items, true, nil
+}
+
 // jsonType names the type of a JSON value by its first byte. The value came
 // out of a successful decode, so it is valid and has no leading space.
 func jsonType(raw json.RawMessage) string {

@@ -178,6 +178,12 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 		logMode: s.recordMode,
 	}
 	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
+	// The session's todo store reaches this turn's sink only through here
+	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
+	// once Run returns, the same way modes and the steer box are handed a
+	// fixed reference at the start rather than looked up each time.
+	release := s.tools.todos.attach(t.emitLocked)
+	defer release()
 	// From here Steer is accepted, and only from here: a prompt the store
 	// refused above never became a turn, so there was nothing to steer into.
 	t.steers.begin()
@@ -346,6 +352,17 @@ func (t *turn) emit(ev Event) {
 	if !t.ended {
 		t.sink(ev)
 	}
+}
+
+// emitLocked is emit for a caller outside toolbridge.go's callbacks that
+// does not already hold mu: the session's todo store (todos.go), whose own
+// lock wraps a call to this one so that a mutation and its event are one
+// critical section from the store's side too (plan 023 §3.4). It takes and
+// releases mu itself, so a caller must not already hold it.
+func (t *turn) emitLocked(ev Event) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.emit(ev)
 }
 
 // call is the turn's request. MaxOutputTokens, effort and retries are per

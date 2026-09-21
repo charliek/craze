@@ -34,11 +34,15 @@ const (
 	KindEdit    Kind = "edit"
 	KindExecute Kind = "execute"
 	KindSearch  Kind = "search"
+	// KindTodo is todo_write (plan 023 §3.4): the TUI's generic row prints a
+	// kind verbatim, and --json does too, so this is its own kind rather than
+	// KindOther, which would read "other" on both.
+	KindTodo Kind = "todo"
 )
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindRead, KindEdit, KindExecute, KindSearch:
+	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo:
 		return true
 	}
 	return false
@@ -259,6 +263,13 @@ type Env struct {
 	// ctx cancelled with ErrClosing means the same (SessionClosing). nil
 	// never closes.
 	Closing <-chan struct{}
+	// Todos is the harness's todo list, reached only by todo_write
+	// (plan 023 §3.4): a narrow seam of pure data, since this package may
+	// not import internal/harness, which owns the concrete store and
+	// publishes the harness.Event{Todos} that follows every write. nil when
+	// no caller wired one (a harness test, or a build with no todos) —
+	// todo_write then returns a tool_error result rather than panic.
+	Todos TodoStore
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken

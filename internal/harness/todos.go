@@ -1,0 +1,226 @@
+package harness
+
+import (
+	"sync"
+	"unicode/utf8"
+
+	"github.com/charliek/craze/internal/harness/tool"
+)
+
+// The harness owns the session's todo list (plan 023 §3.4): todo_write
+// (internal/harness/tool/opencode/todo_write.go) only shapes and validates
+// one call — the id, and the status against the four the store accepts —
+// and hands it to sessionTodos.Write, which is where merge and replace, the
+// auto-upgrade, the caps and the event that follows every write all live.
+// The tool package may not import this one (deps_test.go), so the two meet
+// only through tool.TodoStore and tool.TodoUpdate: pure data, going one way.
+//
+// # The lock, and why the event order is guaranteed
+//
+// sessionTodos has its own lock, a leaf like modes' and the steer box's
+// (reminders.go, steer.go) — not Session.mu, which a running turn's
+// callbacks never touch (Session's own doc says so), so taking it here would
+// risk exactly the nesting those two avoid, for a store that has nothing to
+// do with claiming or releasing a turn. It is also not the turn's own mu:
+// Write is called from a tool's Run, which toolbridge.go's runTool already
+// executes outside t.mu (so a slow write cannot hold up every other
+// callback), and Write must still serialize against a concurrent Write on
+// another tool goroutine — Parallel is true for todo_write, and two calls of
+// a step run at once.
+//
+// So: b.mu is the outermost lock a write takes, and it wraps both the
+// mutation and the one emit that follows it. attach hands Write the
+// running turn's emitLocked — turn.mu taken and released inside that one
+// call, which is what lets the emit obey the sink's single-caller contract
+// (turn.go's Run doc) without this file needing to know anything about
+// Fantasy or the sink itself. Because both the mutation and the emit happen
+// under the same critical section, a second Write cannot begin — so cannot
+// mutate, and cannot emit — until the first has done both: the sequence of
+// list states Write produces and the sequence of events the sink receives
+// are the same sequence, in the same order, however many tool goroutines
+// call Write at once (plan 023 §3.4, "two parallel todo_write calls must
+// not publish out of order").
+//
+// The nesting (b.mu, then t.mu, inside it) is one-directional: nothing
+// elsewhere in the harness takes t.mu and then reaches for b.mu — turn.go's
+// callbacks that already hold t.mu (OnTextDelta and the rest) never call
+// into this file — so the two locks cannot deadlock on each other.
+type sessionTodos struct {
+	mu    sync.Mutex
+	items []tool.Todo
+	emit  func(Event) // the running turn's emitLocked; nil between turns
+}
+
+func newSessionTodos() *sessionTodos { return &sessionTodos{} }
+
+// attach makes emit the target of every Write while a turn runs, and returns
+// the func that detaches it once the turn ends. turn.go's Run calls it right
+// after building the turn and defers the release, the same way it hands the
+// turn a fixed reference to the session's modes and steer boxes.
+func (b *sessionTodos) attach(emit func(Event)) (release func()) {
+	b.mu.Lock()
+	b.emit = emit
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.emit = nil
+		b.mu.Unlock()
+	}
+}
+
+// Write is tool.TodoStore's one method (plan 023 §3.4). See the type's doc
+// above for the locking and ordering guarantee.
+func (b *sessionTodos) Write(merge *bool, updates []tool.TodoUpdate) (list []tool.Todo, dropped int) {
+	updates = dedupUpdates(updates)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	useMerge := merge == nil || *merge
+	if !useMerge && autoUpgrade(b.items, updates) {
+		useMerge = true
+	}
+	if useMerge {
+		b.items = applyMerge(b.items, updates)
+	} else {
+		b.items = applyReplace(updates)
+	}
+	if len(b.items) > tool.TodoCap {
+		dropped = len(b.items) - tool.TodoCap
+		b.items = b.items[:tool.TodoCap]
+	}
+
+	list = cloneTodos(b.items)
+	if b.emit != nil {
+		b.emit(Todos{Items: cloneTodos(b.items)})
+	}
+	return list, dropped
+}
+
+// dedupUpdates keeps one entry per id from updates: the last occurrence's
+// values, at the position the id first appeared — so a call that repeats an
+// id neither reorders the result nor applies the stale, earlier value
+// (plan 023 §3.4, "duplicate ids within one call: last wins").
+func dedupUpdates(updates []tool.TodoUpdate) []tool.TodoUpdate {
+	pos := make(map[string]int, len(updates))
+	out := make([]tool.TodoUpdate, 0, len(updates))
+	for _, u := range updates {
+		if i, ok := pos[u.ID]; ok {
+			out[i] = u
+			continue
+		}
+		pos[u.ID] = len(out)
+		out = append(out, u)
+	}
+	return out
+}
+
+// hasContent reports whether u carries a real content value: grok-build
+// treats "" the same as omitted (todo/mod.rs's has_no_content and its own
+// regression tests for a model that sends content: "" instead of leaving it
+// out), so a merge does not wipe a row's content down to nothing on either
+// spelling.
+func hasContent(u tool.TodoUpdate) bool { return u.Content != nil && *u.Content != "" }
+
+// autoUpgrade reports grok-build's regression fix (todo/mod.rs:334-348, D-53
+// / plan 023 §3.4): an explicit merge:false is still treated as a merge when
+// every update names an id already in items and carries no content — a
+// status-only call the model forgot to flag as a merge, which a literal
+// replace would otherwise wipe down to bare ids.
+func autoUpgrade(items []tool.Todo, updates []tool.TodoUpdate) bool {
+	if len(items) == 0 || len(updates) == 0 {
+		return false
+	}
+	have := make(map[string]bool, len(items))
+	for _, it := range items {
+		have[it.ID] = true
+	}
+	for _, u := range updates {
+		if hasContent(u) || !have[u.ID] {
+			return false
+		}
+	}
+	return true
+}
+
+// applyReplace rebuilds the list from updates alone (merge:false, and the
+// auto-upgrade did not apply): grok-build's apply_replace (todo/mod.rs:
+// 40-63). A missing or empty content falls back to the id; a missing status
+// is pending.
+func applyReplace(updates []tool.TodoUpdate) []tool.Todo {
+	out := make([]tool.Todo, len(updates))
+	for i, u := range updates {
+		out[i] = tool.Todo{ID: u.ID, Content: contentOf(u), Status: statusOf(u)}
+	}
+	return out
+}
+
+// applyMerge patches items by id: grok-build's apply_merge (todo/mod.rs:
+// 65-95). An id already in items keeps its content when the update carries
+// none, and its status changes only when the update gives one; an id not yet
+// present is created exactly as applyReplace would, appended after the ids
+// already tracked, so their order never moves.
+func applyMerge(items []tool.Todo, updates []tool.TodoUpdate) []tool.Todo {
+	idx := make(map[string]int, len(items))
+	out := make([]tool.Todo, len(items))
+	copy(out, items)
+	for i, it := range out {
+		idx[it.ID] = i
+	}
+	for _, u := range updates {
+		if i, ok := idx[u.ID]; ok {
+			if hasContent(u) {
+				out[i].Content = truncateContent(*u.Content)
+			}
+			if u.Status != nil {
+				out[i].Status = *u.Status
+			}
+			continue
+		}
+		idx[u.ID] = len(out)
+		out = append(out, tool.Todo{ID: u.ID, Content: contentOf(u), Status: statusOf(u)})
+	}
+	return out
+}
+
+// contentOf is the content a new item gets: the update's own, truncated, or
+// the id itself when the update carries none (also truncated — an id could
+// in principle be longer than the cap).
+func contentOf(u tool.TodoUpdate) string {
+	if hasContent(u) {
+		return truncateContent(*u.Content)
+	}
+	return truncateContent(u.ID)
+}
+
+func statusOf(u tool.TodoUpdate) tool.TodoStatus {
+	if u.Status != nil {
+		return *u.Status
+	}
+	return tool.TodoPending
+}
+
+// truncateContent keeps s to at most tool.TodoContentBytes bytes, cut on a
+// UTF-8 boundary with a trailing "…" — itself counted in the cap, so the
+// result (the ellipsis included) never exceeds it and never ends mid-rune.
+func truncateContent(s string) string {
+	if len(s) <= tool.TodoContentBytes {
+		return s
+	}
+	const ellipsis = "…" // 3 bytes
+	cut := tool.TodoContentBytes - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + ellipsis
+}
+
+// cloneTodos is a copy of items sharing no backing array with it, so a later
+// Write's append cannot alias what an earlier call returned or emitted —
+// each event and each Write's own return value is that write's state,
+// frozen.
+func cloneTodos(items []tool.Todo) []tool.Todo {
+	out := make([]tool.Todo, len(items))
+	copy(out, items)
+	return out
+}

@@ -46,12 +46,17 @@ type toolset struct {
 	// plan file's path, which is known only once the store has named the
 	// transcript; the modes box (reminders.go) owns it from then on.
 	modeGate *tool.ModeGate
-	profile  string      // the profile's name, which the header records
-	specs    []tool.Spec // the profile's tools' specs, in the order the model is offered them
-	byID     map[string]tool.Spec
-	wire     []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash
-	system   string // the frozen system prompt
-	d        *tool.Dispatcher
+	// todos is the session's todo list (todos.go, plan 023 §3.4), reached
+	// through the dispatcher's fixed Env.Todos; a turn attaches to it for its
+	// own life (turn.go's Run) so Write's one emit lands on the running
+	// turn's sink.
+	todos   *sessionTodos
+	profile string      // the profile's name, which the header records
+	specs   []tool.Spec // the profile's tools' specs, in the order the model is offered them
+	byID    map[string]tool.Spec
+	wire    []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash
+	system  string // the frozen system prompt
+	d       *tool.Dispatcher
 
 	// keys are every provider key the session knows, sorted, and red is the
 	// redactor over them, which the turn and the dispatcher read. A session
@@ -109,7 +114,7 @@ func openTools(home, workspace, mode string, table *modeltable.Table, getenv fun
 	for i, k := range keys {
 		vals[i] = k.Reveal()
 	}
-	ts := &toolset{keys: vals, closing: make(chan struct{})}
+	ts := &toolset{keys: vals, closing: make(chan struct{}), todos: newSessionTodos()}
 	slices.Sort(ts.keys)
 	ts.red.Store(redact.New(ts.keys...))
 	if holdsAKey(workspace, ts.keys) {
@@ -189,6 +194,7 @@ func openTools(home, workspace, mode string, table *modeltable.Table, getenv fun
 			Environ:   tool.ChildEnviron(os.Environ(), keyNames),
 			Locks:     &tool.PathLocks{},
 			Closing:   ts.closing,
+			Todos:     ts.todos,
 		},
 	})
 	if err != nil {

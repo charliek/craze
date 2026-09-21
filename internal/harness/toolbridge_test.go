@@ -305,6 +305,7 @@ func TestEventsRoundTrip(t *testing.T) {
 		StepDone{Step: 3, SaveError: "store: closed"},
 		Retrying{Delay: time.Second, Attempt: 1, Reason: "HTTP 503: busy"},
 		Diag{Kind: DiagNotExecuted, Fields: map[string]string{"step": "1"}},
+		Todos{Items: []tool.Todo{{ID: "1", Content: "buy milk", Status: tool.TodoPending}}},
 	}
 	for _, ev := range all {
 		b, err := json.Marshal(ev)
