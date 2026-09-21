@@ -23,7 +23,10 @@ type Stub struct {
 	asks   *agent.AskRegistry
 	closed chan struct{}
 	cancel chan struct{}
-	hang   bool
+	// hang makes the next prompt a turn that stays open until cancelled; hung is
+	// the barrier that turn closes once it is open (HangNext).
+	hang bool
+	hung chan struct{}
 	// park is the live session's catalog wait (§3.3): a prompt held back
 	// before any of the turn's bookkeeping, which a Cancel ends by handing it
 	// agent.ErrPromptCancelled. parked is the barrier that prompt closes on
@@ -180,10 +183,22 @@ func newStub(noPrimary bool) *Stub {
 	return s
 }
 
-func (s *Stub) HangNext() {
+// HangNext makes the next prompt a turn that stays open until it is cancelled
+// or the session closes.
+//
+// The channel it returns closes once that turn is OPEN. A cancel that lands
+// between the claim and the opening withdraws the prompt instead — no turn, no
+// event, agent.ErrPromptCancelled, as the live session has it — so a test that
+// goes on to wait for the hung turn's own cancelled ending has to receive from
+// it before it cancels, or it is waiting for an event a withdrawn prompt never
+// publishes whenever the cancel wins that race. A test that cancels without
+// caring which of the two it gets may ignore it.
+func (s *Stub) HangNext() <-chan struct{} {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.hang = true
-	s.mu.Unlock()
+	s.hung = make(chan struct{})
+	return s.hung
 }
 
 // ParkNext makes the next prompt behave as one the live session holds back for
@@ -502,8 +517,8 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 	// instead — a test that cancelled a hung turn and then sent again would hang
 	// or not depending on which won, which is a coin toss and not a test (plan
 	// 021 amendment X12). park is taken the same way, above.
-	hang := s.hang
-	s.hang = false
+	hang, hung := s.hang, s.hung
+	s.hang, s.hung = false, nil
 	if s.cancelling {
 		// Cancelled since the claim, and the turn is not open: withdraw.
 		s.mu.Unlock()
@@ -525,6 +540,11 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 	s.mu.Unlock()
 
 	if hang {
+		if hung != nil {
+			// The turn is open: from here a Cancel finds a turn to end, and this
+			// prompt is the one that takes it (s.cancel is buffered).
+			close(hung)
+		}
 		select {
 		case <-s.cancel:
 		case <-s.closed:

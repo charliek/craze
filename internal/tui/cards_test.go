@@ -612,11 +612,20 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 // see.
 func TestALiveNoTurnCardIsRaisedThroughTheCancelMask(t *testing.T) {
 	m, stub := sizedCards(t)
-	stub.HangNext()
+	hung := stub.HangNext()
 	m.input.SetValue("go")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
 	cancelled := m.turnID
+
+	// The turn has to be OPEN before the cancel, because this test goes on to
+	// wait for its cancelled ending: a cancel that beats the opening withdraws
+	// the prompt instead, and a withdrawn prompt publishes no done at all.
+	select {
+	case <-hung:
+	case <-time.After(stubEventWait):
+		t.Fatalf("the hung turn did not open within %v", stubEventWait)
+	}
 
 	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlC})
 	runCmd(cmd)
