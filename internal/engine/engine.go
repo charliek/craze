@@ -453,9 +453,16 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 // worker abandons a write still in flight rather than make a quit wait for
 // another process to let go of the lock (indexWriter.serve). That write lands
 // on its own goroutine; what it records is state the engine had already
-// decided. Work the observer posted that the worker has not picked up yet is
-// dropped with it — at most one touch, whose only effect is the UpdatedAt the
-// next run's first write bumps anyway.
+// decided.
+//
+// What the observer posted and the worker never picked up is NOT dropped with
+// it. The worker's exit drains the slot one last time and hands a pending
+// seed, agent title or loaded-row touch to one final write (indexWriter.finish)
+// — this is the last moment any of them can be recorded, and a first prompt the
+// drain started vanishing from --continue on a quit is not something the TUI's
+// synchronous writes ever did. That final write is bounded, at 500 ms, and
+// abandoned when the bound runs out. A plain touch on its own is still dropped:
+// its only effect is an UpdatedAt the next run's first write bumps anyway.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
@@ -832,10 +839,16 @@ func (e *Engine) stamp(ev agent.Event, cause string) agent.Event {
 // may do file I/O. The one exception is a client's own Submit, which runs its
 // seed inline (runOwn). A seed is claimed once and once only, so a turn that
 // posts one after another path has already written it does nothing.
+//
+// The turn's CAUSE goes with the text. A turn the engine started still has one
+// where a client's command asked for it — the send-now that was armed, the
+// submit whose claim is being taken again — and a seed of that turn that fails
+// is a StateDelta{IndexErr} that must name it, exactly as a Submit's own does
+// (r29 finding 4). Only a drain's is empty: nobody asked for that turn now.
 func (e *Engine) run(ls []launch) {
 	for _, l := range ls {
 		go e.runTurn(l)
-		e.idx.post(indexWork{seed: true, seedText: l.t.text})
+		e.idx.post(indexWork{seed: true, seedText: l.t.text, seedCause: l.t.cause})
 	}
 }
 

@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/journal"
+	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -29,6 +31,14 @@ type fakeIndex struct {
 	rows     []sessions.Row
 	err      error
 	attempts int
+	// failCall fails one numbered call and no other: the TRANSIENT failure the
+	// retry rules are about, where err fails every call.
+	failCall map[int]error
+	// live is how many Upserts are inside this double right now, and peak the
+	// most there have ever been: "one engine never runs two of these at once"
+	// is a claim about the worker that only counting can check.
+	live int
+	peak int
 	// parkFrom is the call number from which Upsert waits for release; 0 never
 	// parks. entered is closed by the first call that parks, so a test knows the
 	// write really is in flight.
@@ -42,9 +52,10 @@ type fakeIndex struct {
 
 func newFakeIndex() *fakeIndex {
 	return &fakeIndex{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-		wrote:   make(chan struct{}, 64),
+		failCall: map[int]error{},
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		wrote:    make(chan struct{}, 64),
 	}
 }
 
@@ -52,7 +63,16 @@ func (f *fakeIndex) Upsert(row sessions.Row) error {
 	f.mu.Lock()
 	f.attempts++
 	n, from := f.attempts, f.parkFrom
+	f.live++
+	if f.live > f.peak {
+		f.peak = f.live
+	}
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.live--
+		f.mu.Unlock()
+	}()
 	if from > 0 && n >= from {
 		if n == from {
 			close(f.entered)
@@ -61,6 +81,9 @@ func (f *fakeIndex) Upsert(row sessions.Row) error {
 	}
 	f.mu.Lock()
 	err := f.err
+	if e, ok := f.failCall[n]; ok {
+		err = e
+	}
 	if err == nil {
 		f.rows = append(f.rows, row)
 	}
@@ -70,6 +93,21 @@ func (f *fakeIndex) Upsert(row sessions.Row) error {
 	default:
 	}
 	return err
+}
+
+// failAt makes the n-th call, and only it, fail: an index that is busy for one
+// write and free for the next.
+func (f *fakeIndex) failAt(n int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failCall[n] = err
+}
+
+// peakLive is the most Upserts this double has ever held at one time.
+func (f *fakeIndex) peakLive() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.peak
 }
 
 // parkAt arms the park: from the n-th call on, an Upsert waits until the
@@ -181,6 +219,51 @@ func indexed(t *testing.T, idx Index, craze string) *rig {
 			TitleLine: func(s string) string { return strings.TrimSpace(s) },
 		},
 	})
+}
+
+// writerOn is the index worker ALONE, with no engine above it: the unit whose
+// properties are the shape of a pass and the shape of a shutdown, where an
+// engine can only arrange those through events. The snapshot is a session that
+// has learned its id; reported is every failure the writer published, as
+// "cause: message".
+//
+// closeWait is set past the watchdog, because the drain and not the bound is
+// what these tests are about: the one test about the bound sets it back to the
+// production value.
+func writerOn(t *testing.T, idx Index) (w *indexWriter, reported func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var out []string
+	w = newIndexWriter(
+		IndexOptions{
+			Store: idx, CWD: "/w", Provider: "cursor",
+			TitleLine: func(s string) string { return strings.TrimSpace(s) },
+		},
+		"018f-the-thread",
+		func() agent.Snapshot { return agent.Snapshot{SessionID: "fake-1"} },
+		func(cause, msg string) {
+			mu.Lock()
+			defer mu.Unlock()
+			out = append(out, cause+": "+msg)
+		},
+	)
+	w.closeWait = watchdog
+	t.Cleanup(w.stop)
+	return w, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), out...)
+	}
+}
+
+// wrote is the row a pass wrote for kind, and the zero Row for a kind nothing
+// wrote: the whole row, because what a test of an index write is about is what
+// a picker will read.
+func wrote(craze, title string, kind sessions.TitleKind) sessions.Row {
+	return sessions.Row{
+		SessionID: "fake-1", Provider: "cursor", CWD: "/w",
+		CrazeID: craze, Title: title, TitleKind: kind,
+	}
 }
 
 // ---------------------------------------------------------------- the identity
@@ -379,6 +462,214 @@ func TestAFailedSeedIsReportedOnceWithItsCause(t *testing.T) {
 	}
 }
 
+// overlappingSeeds runs the schedule r29 finding 2 is about, on the rig idx
+// backs: turn A's Submit parks in its seed, A's turn ends while that caller is
+// still inside the write, and turn B is then submitted and its seed finds A's
+// in flight. It returns the two commands and the barrier that says A's Submit
+// has come back, with A's write still parked — the caller releases it.
+func overlappingSeeds(t *testing.T, r *rig, idx *fakeIndex, entered <-chan struct{}) (a, b Command, submitted <-chan struct{}) {
+	t.Helper()
+	a = Command{Client: r.e.NewClientID(), ID: "1"}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := r.e.Submit(a, "the first prompt", SubmitQueue, ""); err != nil {
+			t.Errorf("submit A: %v", err)
+		}
+	}()
+	await(t, entered, "A's seed to park in Upsert")
+	// A's turn runs and ends while its caller is still inside that write. The
+	// touch it owes finds no row and writes nothing, so the session is still
+	// unindexed.
+	r.until(lastEnding)
+
+	b = Command{Client: a.Client, ID: "2"}
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		if _, err := r.e.Submit(b, "the second prompt", SubmitQueue, ""); err != nil {
+			t.Errorf("submit B: %v", err)
+		}
+	}()
+	// B's caller is not made to wait for A's write: that is the half of the fix
+	// that must not cost anything.
+	await(t, returned, "B's Submit to return while A's seed is parked")
+	r.until(lastEnding)
+	if n := idx.tries(); n != 1 {
+		t.Fatalf("%d writes with A's still parked, want only A's", n)
+	}
+	return a, b, done
+}
+
+// TestAnOverlappingTurnRetriesAFailedSeed is r29 finding 2. "A failed seed is
+// retried by the next turn" was not true of turns that OVERLAP: B's seed found
+// A's parked in Upsert, did nothing, and was gone by the time A failed — so a
+// session that had run two turns had no row at all, and only a THIRD turn could
+// give it one. B is now retained as the one deferred opportunity and posted to
+// the worker when A fails.
+func TestAnOverlappingTurnRetriesAFailedSeed(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	boom := errors.New("craze: not saving the session: permission denied")
+	// Transient: A's write fails, and the retry that follows it lands.
+	idx.failAt(1, boom)
+	r := indexed(t, idx, "018f-the-thread")
+
+	a, b, submitted := overlappingSeeds(t, r, idx, entered)
+	release()
+	await(t, submitted, "A's Submit to return once its write is let go")
+
+	idx.waitRows(t, 1)
+	row := idx.seedRow(t)
+	if got, want := row, wrote("018f-the-thread", "the second prompt", sessions.TitleKindFallback); got != want {
+		t.Fatalf("the retry wrote %+v, want %+v", got, want)
+	}
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows: %+v", n, idx.all())
+	}
+
+	// One failure, A's, and it names A's command: B's seed ran on the worker
+	// and landed, so there is nothing else to report.
+	got := r.until(func(ev agent.Event) bool {
+		return ev.Type == agent.EventMeta && ev.State != nil && ev.State.IndexErr != ""
+	})
+	last := got[len(got)-1]
+	if last.State.IndexErr != boom.Error() {
+		t.Fatalf("the delta carries %q, want the store's own message", last.State.IndexErr)
+	}
+	if last.Cause != a.Cause() {
+		t.Fatalf("the delta names %q, want A's command (%q)", last.Cause, a.Cause())
+	}
+	if last.Cause == b.Cause() {
+		t.Fatalf("the delta names B's command, but it was A's write that failed")
+	}
+}
+
+// TestASucceededSeedDiscardsTheRetainedOne: the retained opportunity is a RETRY
+// and nothing more. A lands, so there is a row and its title is the first
+// prompt's, and B's text is never written — a second fallback row would name the
+// session by the wrong prompt.
+func TestASucceededSeedDiscardsTheRetainedOne(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	r := indexed(t, idx, "018f-the-thread")
+
+	_, _, submitted := overlappingSeeds(t, r, idx, entered)
+	release()
+	// A's write landed before its Submit returned, and the discard happens in
+	// that same call: once this barrier is closed nothing can seed again.
+	await(t, submitted, "A's Submit to return once its write is let go")
+
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows, want only A's: %+v", n, idx.all())
+	}
+	if got := idx.seedRow(t).Title; got != "the first prompt" {
+		t.Fatalf("the first-prompt row is named %q, want A's prompt", got)
+	}
+}
+
+// indexErr accepts the state delta that reports a failed index write; cause,
+// when set, is the command it must name.
+func indexErr(cause string) func(agent.Event) bool {
+	return func(ev agent.Event) bool {
+		if ev.Type != agent.EventMeta || ev.State == nil || ev.State.IndexErr == "" {
+			return false
+		}
+		return cause == "" || ev.Cause == cause
+	}
+}
+
+// causesOf is the cause of every failed-index-write delta among evs, in order.
+func causesOf(evs []agent.Event) []string {
+	var out []string
+	for _, ev := range evs {
+		if indexErr("")(ev) {
+			out = append(out, ev.Cause)
+		}
+	}
+	return out
+}
+
+// TestAnArmedSendsFailedSeedNamesTheCommandThatArmedIt is r29 finding 4. A turn
+// the ENGINE started can still have a command behind it — the send-now a client
+// armed, which cancelled a running turn to make room for itself — and that
+// client is the one that wants to hear that the session could not be written
+// down. The worker's seed used to be posted with no cause at all, so the delta
+// arrived naming nobody and a client drawing its error row from the cause had
+// nothing to key it to.
+func TestAnArmedSendsFailedSeedNamesTheCommandThatArmedIt(t *testing.T) {
+	idx := newFakeIndex()
+	boom := errors.New("craze: no home directory to save the session index in")
+	idx.setErr(boom)
+	r := indexed(t, idx, "")
+
+	turn := r.s.script(held())
+	submit := Command{Client: r.e.NewClientID(), ID: "1"}
+	if _, err := r.e.Submit(submit, "the first prompt", SubmitQueue, ""); err != nil {
+		t.Fatalf("the first prompt: %v", err)
+	}
+	await(t, turn.opened, "the first turn to open")
+
+	// Armed behind it: the cancel this asks for ends that turn, and the
+	// settlement fires the send. Its seed is the WORKER's — there is no caller
+	// on that path — and it is a real first-prompt seed, because the one above
+	// failed.
+	arm := Command{Client: submit.Client, ID: "2"}
+	res, err := r.e.Submit(arm, "the armed prompt", SubmitSendNow, "")
+	if err != nil || !res.Armed {
+		t.Fatalf("arming a send-now: %+v %v", res, err)
+	}
+
+	got := r.until(indexErr(arm.Cause()))
+	if last := got[len(got)-1]; last.State.IndexErr != boom.Error() {
+		t.Fatalf("the delta carries %q, want the store's own message", last.State.IndexErr)
+	}
+	// The two failures on the record are the two prompts', each naming its own
+	// command: nothing reported with an empty cause on the way.
+	if want := []string{submit.Cause(), arm.Cause()}; strings.Join(causesOf(got), "|") != strings.Join(want, "|") {
+		t.Fatalf("the failures name %q, want %q%s", causesOf(got), want, describe(got))
+	}
+}
+
+// TestARetriedClaimsFailedSeedNamesItsCommandToo is the other worker-driven
+// seed with a command behind it: a turn the session refused because the agent
+// was running one of its own, claimed again by the driver. The turn is the same
+// turn, so it carries the same cause, and the seed the re-claim posts must name
+// it just as the first attempt's did.
+func TestARetriedClaimsFailedSeedNamesItsCommandToo(t *testing.T) {
+	idx := newFakeIndex()
+	idx.setErr(errors.New("craze: no home directory to save the session index in"))
+	ticks := make(chan time.Time)
+	returned := make(chan string, 16)
+	r := newRigHooked(t, Options{
+		Chain: ChainPolicy{RetryForeignTurn: true},
+		Index: IndexOptions{Store: idx, CWD: "/w", Provider: "cursor"},
+	}, agent.EventLogOptions{NoPrimary: true},
+		&hooks{retryTick: ticks, turnReturned: func(id string) { returned <- id }})
+
+	r.s.script(&script{refuse: agent.ErrForeignTurn})
+	c := Command{Client: r.e.NewClientID(), ID: "1"}
+	if _, err := r.e.Submit(c, "go", SubmitQueue, ""); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if id := <-returned; id != "turn-1" {
+		t.Fatalf("%s came back, want turn-1's refusal", id)
+	}
+	tick(t, ticks, returned)
+
+	// Two failures: the Submit's own seed, on its caller's goroutine, and the
+	// re-claim's, on the worker. Both name the command that submitted the turn.
+	first := r.until(indexErr(""))
+	second := r.until(indexErr(""))
+	for i, ev := range []agent.Event{first[len(first)-1], second[len(second)-1]} {
+		if ev.Cause != c.Cause() {
+			t.Fatalf("failure %d names %q, want the command that submitted the turn (%q)", i+1, ev.Cause, c.Cause())
+		}
+	}
+}
+
 // TestTheAgentTitleAndTheTurnEndAreWorkerWrites: neither has a caller — an
 // observer may not do I/O — so both go to the worker, and the row they write
 // carries the same durable id every other write does.
@@ -421,6 +712,81 @@ func TestATouchWithNoRowWritesNothing(t *testing.T) {
 	if n := idx.tries(); n != 1 {
 		t.Fatalf("%d writes, want only the title's: %+v", n, idx.all())
 	}
+}
+
+// TestSubsumptionIsConditionalOnSuccess is r29 finding 3. One pass writes once
+// wherever it can, because a write that lands bumps UpdatedAt and creates the
+// row — but a write that FAILED did neither, so the work merged beside it was
+// being consumed by a write that never happened. The baseline wrote each kind
+// separately and so never lost one to another's failure: a title write that
+// failed there still left the loaded row's touch to be made, and with it the
+// durable id that touch would have written.
+func TestSubsumptionIsConditionalOnSuccess(t *testing.T) {
+	boom := errors.New("craze: not saving the session: permission denied")
+
+	t.Run("a failed title still leaves the load", func(t *testing.T) {
+		idx := newFakeIndex()
+		idx.failAt(1, boom)
+		w, reported := writerOn(t, idx)
+		w.runPending(indexWork{title: "the agent's own name", load: true})
+
+		if n := idx.tries(); n != 2 {
+			t.Fatalf("%d writes, want the title's failure and the load behind it", n)
+		}
+		rows := idx.all()
+		if len(rows) != 1 {
+			t.Fatalf("%d rows landed: %+v", len(rows), rows)
+		}
+		// The load's own write, carrying the durable id a freshly minted one
+		// would otherwise have had to wait for another write to record.
+		if got, want := rows[0], wrote("018f-the-thread", "", sessions.TitleKindNone); got != want {
+			t.Fatalf("the load wrote %+v, want %+v", got, want)
+		}
+		if got := reported(); len(got) != 1 || got[0] != ": "+boom.Error() {
+			t.Fatalf("the pass reported %q, want the title's failure alone", got)
+		}
+	})
+
+	t.Run("a failed title still leaves the touch", func(t *testing.T) {
+		idx := newFakeIndex()
+		w, _ := writerOn(t, idx)
+		// A row to touch, from a pass of its own: write 1.
+		w.runPending(indexWork{load: true})
+		idx.failAt(2, boom)
+		w.runPending(indexWork{title: "the agent's own name", touch: true})
+
+		if n := idx.tries(); n != 3 {
+			t.Fatalf("%d writes, want the load's, the title's failure and the touch behind it", n)
+		}
+		rows := idx.all()
+		if len(rows) != 2 {
+			t.Fatalf("%d rows landed: %+v", len(rows), rows)
+		}
+		if got, want := rows[1], wrote("018f-the-thread", "", sessions.TitleKindNone); got != want {
+			t.Fatalf("the touch wrote %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("a seed that landed still subsumes a touch", func(t *testing.T) {
+		idx := newFakeIndex()
+		w, _ := writerOn(t, idx)
+		w.runPending(indexWork{seed: true, seedText: "a prompt", touch: true})
+		if n := idx.tries(); n != 1 {
+			t.Fatalf("%d writes, want the seed alone: its UpdatedAt IS the touch", n)
+		}
+		if got, want := idx.last(), wrote("018f-the-thread", "a prompt", sessions.TitleKindFallback); got != want {
+			t.Fatalf("the pass wrote %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("a title that landed subsumes both", func(t *testing.T) {
+		idx := newFakeIndex()
+		w, _ := writerOn(t, idx)
+		w.runPending(indexWork{title: "the agent's own name", load: true, touch: true})
+		if n := idx.tries(); n != 1 {
+			t.Fatalf("%d writes, want the title alone", n)
+		}
+	})
 }
 
 // TestLatestWinsNeverLosesATitleBehindATouch is why the worker's slot is a
@@ -521,6 +887,144 @@ func TestCloseJoinsTheIndexWorker(t *testing.T) {
 	case <-r.e.idx.exited:
 	default:
 		t.Fatal("Close returned with the index worker still running")
+	}
+}
+
+// TestTheWorkersExitDrainsWhatItStillOwes is r29 finding 1. A quit right after
+// a first prompt the DRAIN started — or after the agent named the session, or
+// after a load came up — used to be able to lose that write entirely: the
+// worker's select had `done` and `wake` both ready and chose between them at
+// random, and the branch that took `done` returned without ever looking at the
+// slot. The row then never existed, so --continue could not find the session at
+// all, where the TUI writing synchronously in Update never lost one.
+//
+// The schedule is FORCED here rather than raced for: the work is posted and the
+// stop signalled before the worker's loop exists, so both are ready the first
+// time it looks.
+func TestTheWorkersExitDrainsWhatItStillOwes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		work indexWork
+		want sessions.Row
+	}{
+		{"a drained first prompt's seed",
+			indexWork{seed: true, seedText: "the drained row\nand a second line"},
+			wrote("018f-the-thread", "the drained row", sessions.TitleKindFallback)},
+		{"the agent's own name",
+			indexWork{title: "the agent's own name"},
+			wrote("018f-the-thread", "the agent's own name", sessions.TitleKindAgent)},
+		{"a loaded row's touch",
+			indexWork{load: true},
+			wrote("018f-the-thread", "", sessions.TitleKindNone)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := newFakeIndex()
+			w, _ := writerOn(t, idx)
+			w.post(tc.work)
+			w.stop()
+			go w.serve()
+			w.close()
+
+			rows := idx.all()
+			if len(rows) != 1 {
+				t.Fatalf("closing wrote %d rows, want the one it still owed: %+v", len(rows), rows)
+			}
+			if rows[0] != tc.want {
+				t.Fatalf("closing wrote %+v, want %+v", rows[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestTheWorkersExitDropsAPlainTouch is the other half of the rule: a touch on
+// its own records nothing but an UpdatedAt that the next run's first write
+// bumps anyway, and it is not worth holding a quit for. The row exists here, so
+// this is a claim about the drain and not about "a touch with no row writes
+// nothing".
+func TestTheWorkersExitDropsAPlainTouch(t *testing.T) {
+	idx := newFakeIndex()
+	w, _ := writerOn(t, idx)
+	// One pass, run inline: the row now exists and the touch has something to
+	// touch.
+	w.runPending(indexWork{load: true})
+	if n := idx.count(); n != 1 {
+		t.Fatalf("the load wrote %d rows: %+v", n, idx.all())
+	}
+
+	w.post(indexWork{touch: true})
+	w.stop()
+	go w.serve()
+	w.close()
+	if n := idx.tries(); n != 1 {
+		t.Fatalf("%d writes, want only the load's: closing wrote the touch too", n)
+	}
+}
+
+// TestTheLastWriteQueuesBehindOneInFlight: one engine never runs two Upserts on
+// this worker at once, and closing does not break that. The write that was in
+// flight when the stop arrived is waited for — inside the same bound — and only
+// then does the final one go.
+func TestTheLastWriteQueuesBehindOneInFlight(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	w, _ := writerOn(t, idx)
+	// The barrier that makes this the shutdown's schedule and not a race with
+	// an ordinary pass: the write is let go only once the exit has begun.
+	finishing := make(chan struct{})
+	w.beforeFinish = func() { close(finishing) }
+	go w.serve()
+
+	w.post(indexWork{load: true})
+	await(t, entered, "the loaded row's touch to park in Upsert")
+	// Merged while that write is held, so it is still in the slot when the stop
+	// arrives and the worker is inside the select that waits for the write.
+	w.post(indexWork{title: "the agent's own name"})
+
+	w.stop()
+	await(t, finishing, "the worker's exit to begin with a write still in flight")
+	closed := make(chan struct{})
+	go func() { defer close(closed); w.close() }()
+	release()
+	await(t, closed, "close to return once both writes are through")
+
+	rows := idx.all()
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want the parked write's and the last one's: %+v", len(rows), rows)
+	}
+	if got, want := rows[1], wrote("018f-the-thread", "the agent's own name", sessions.TitleKindAgent); got != want {
+		t.Fatalf("the last write wrote %+v, want %+v", got, want)
+	}
+	if n := idx.peakLive(); n != 1 {
+		t.Fatalf("%d Upserts ran at once; the worker writes one at a time", n)
+	}
+}
+
+// TestCloseAbandonsALastWriteNothingCanInterrupt: the drain keeps Close bounded
+// where it always was. A flock has neither timeout nor context, so the last
+// write is waited for only up to the worker's own bound — the journal's, 500 ms
+// — and then left to its goroutine, exactly as a write already in flight is.
+func TestCloseAbandonsALastWriteNothingCanInterrupt(t *testing.T) {
+	idx := newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	w, _ := writerOn(t, idx)
+	// The production bound: this is the one test about it.
+	w.closeWait = indexCloseWait
+
+	w.post(indexWork{seed: true, seedText: "the drained row"})
+	w.stop()
+	go w.serve()
+	await(t, entered, "the last write to park in Upsert")
+
+	closed := make(chan struct{})
+	go func() { defer close(closed); w.close() }()
+	await(t, closed, "close to return with its last write parked in Upsert")
+	if n := idx.count(); n != 0 {
+		t.Fatalf("a parked write recorded %d rows", n)
+	}
+	if n := idx.tries(); n != 1 {
+		t.Fatalf("%d writes, want the one that was attempted and abandoned", n)
 	}
 }
 
@@ -636,6 +1140,157 @@ func TestRenameReturnsAFailedIndexWrite(t *testing.T) {
 	}
 	if n := idx.count(); n != 0 {
 		t.Fatalf("the resend wrote a row: %+v", idx.all())
+	}
+}
+
+// --------------------------------------------------- the real store, contended
+
+// countingStore is the REAL sessions.Store with a barrier: every Upsert that
+// returns sends a token, so a test can wait for writes to land without
+// sleeping. It is what the engine actually writes through in production, flock
+// and file rewrite included.
+type countingStore struct {
+	store sessions.Store
+	mu    sync.Mutex
+	n     int
+	wrote chan struct{}
+}
+
+func newCountingStore() *countingStore {
+	return &countingStore{wrote: make(chan struct{}, 64)}
+}
+
+func (c *countingStore) Upsert(row sessions.Row) error {
+	err := c.store.Upsert(row)
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	select {
+	case c.wrote <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func (c *countingStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func (c *countingStore) waitWrites(t *testing.T, n int) {
+	t.Helper()
+	timeout := time.After(watchdog)
+	for c.count() < n {
+		select {
+		case <-c.wrote:
+		case <-timeout:
+			t.Fatalf("%d writes landed in %s, want %d", c.count(), watchdog, n)
+		}
+	}
+}
+
+// TestBothKindsOfWriteContendOnARealFileLock is the schedule the fake store
+// cannot show: sessions.Store.Upsert taking an flock that somebody else already
+// holds — a second craze in the same workspace — with one COMMAND-driven write
+// (/rename, on its caller's goroutine) and one WORKER write (the agent naming
+// the session) both waiting on it.
+//
+// What it pins is A15's last clause against the real thing: no Control method
+// that takes e.mu waits for either of them, nothing reaches the file while the
+// lock is held, and both land on the one row once it is let go — named by the
+// /rename, whichever of the two gets there first, because applyTitle's
+// precedence and not the order is what decides it (a user title pins; an agent
+// title cannot take a pinned name back).
+//
+// The two writes are the WHOLE of what this session ever writes, deliberately:
+// a turn would leave an end-of-turn touch running behind the assertions, and a
+// write still landing in CRAZE_HOME while the test's temporary directory is
+// being removed is a flake, not a schedule. /rename is a command-driven write
+// that starts no turn.
+func TestBothKindsOfWriteContendOnARealFileLock(t *testing.T) {
+	t.Setenv("CRAZE_HOME", t.TempDir())
+	path := paths.SessionsPath()
+	if path == "" {
+		t.Fatal("no session index path under CRAZE_HOME")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The sibling lock sessions.Upsert takes, held here on a descriptor of our
+	// own: flock is per open file description, so this really does shut both
+	// writers out.
+	unlock, err := atomicfile.Lock(path + ".lock")
+	if err != nil {
+		t.Fatalf("taking the index lock: %v", err)
+	}
+	var once sync.Once
+	release := func() { once.Do(unlock) }
+	t.Cleanup(release)
+
+	store := newCountingStore()
+	r := newRig(t, Options{CrazeSessionID: "018f-the-thread", Index: IndexOptions{
+		Store: store, CWD: "/w", Provider: "cursor",
+		TitleLine: func(s string) string { return strings.TrimSpace(s) },
+	}})
+
+	renamed := make(chan struct{})
+	go func() {
+		defer close(renamed)
+		if err := r.e.SetTitle(Command{}, "a better name"); err != nil {
+			t.Errorf("rename with the index lock held: %v", err)
+		}
+	}()
+	r.s.emit(agent.Event{Type: agent.EventMeta, Text: "the agent's own name"})
+	r.sync()
+
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		r.e.State()
+		if _, err := r.e.Queue(Command{}, "a queued row"); err != nil {
+			t.Errorf("Queue with the index lock held: %v", err)
+		}
+		if _, err := r.e.ClearQueue(Command{}); err != nil {
+			t.Errorf("ClearQueue with the index lock held: %v", err)
+		}
+	}()
+	await(t, answered, "the Control methods to answer with the index lock held")
+
+	if n := store.count(); n != 0 {
+		t.Fatalf("%d writes got through a held file lock", n)
+	}
+	select {
+	case <-renamed:
+		t.Fatal("SetTitle returned with the index lock held: its write never reached the file")
+	default:
+	}
+
+	release()
+	await(t, renamed, "SetTitle to return once the lock is free")
+	store.waitWrites(t, 2)
+
+	rows, err := (&sessions.Store{}).Recent("/w", "cursor", 0)
+	if err != nil {
+		t.Fatalf("reading the index back: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d rows in the index, want the one session's: %+v", len(rows), rows)
+	}
+	if rows[0].Title != "a better name" || !rows[0].Pinned {
+		t.Fatalf("the row is %+v, want the rename's name, pinned", rows[0])
+	}
+	if rows[0].CrazeID != "018f-the-thread" {
+		t.Fatalf("the row carries craze id %q", rows[0].CrazeID)
+	}
+	// Nothing of this session's is still writing into CRAZE_HOME: the two
+	// writes are through, and closing the engine here — before the temporary
+	// directory goes — joins the worker rather than leaving it to a cleanup.
+	if err := r.e.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if n := store.count(); n != 2 {
+		t.Fatalf("%d writes in all, want the rename's and the agent title's", n)
 	}
 }
 
