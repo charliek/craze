@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 )
 
 const (
@@ -76,11 +77,18 @@ type modelApplyMsg struct {
 
 // applyStep is one leg of the chain. cfgID empty means the model step, which
 // has its own fallback.
+//
+// at is the revision its section stood at when the chain was built, and rev the
+// revision the engine confirmed it at — together, what settleStep needs to know
+// whether writing this step's value would be writing over something newer
+// (plan 021 §3.8, panel astra 15).
 type applyStep struct {
 	cfgID string
 	value string
 	note  string
 	label string
+	at    uint64
+	rev   uint64
 }
 
 func (m Model) openModelDialog() Model {
@@ -279,14 +287,14 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	var steps []applyStep
 	if d.sel >= 0 && d.sel < len(list) && list[d.sel].ID != m.snap.CurrentModel {
 		id := list[d.sel].ID
-		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model"})
+		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model", at: m.modelRev})
 		m.snap.CurrentModel = id
 		m.model = id
 	}
 	if m.showEffort() {
 		if opt := agent.EffortOption(m.snap); opt != nil && d.effort != "" && d.effort != opt.Current {
 			steps = append(steps, applyStep{
-				cfgID: opt.ID, value: d.effort, note: "effort → " + d.effort, label: "effort",
+				cfgID: opt.ID, value: d.effort, note: "effort → " + d.effort, label: "effort", at: m.configRev,
 			})
 			m = m.setConfigCurrent(opt.ID, d.effort)
 		}
@@ -294,7 +302,7 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	if m.showFast() {
 		if opt := agent.FastOption(m.snap); opt != nil && d.fast != "" && d.fast != opt.Current {
 			steps = append(steps, applyStep{
-				cfgID: opt.ID, value: d.fast, note: "fast → " + fastWord(opt, d.fast), label: "fast",
+				cfgID: opt.ID, value: d.fast, note: "fast → " + fastWord(opt, d.fast), label: "fast", at: m.configRev,
 			})
 			m = m.setConfigCurrent(opt.ID, d.fast)
 		}
@@ -302,23 +310,29 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	if len(steps) == 0 {
 		return m, nil
 	}
+	if m.eng == nil {
+		return m, nil
+	}
 
-	sess := m.sess
 	modelCfgID := ""
 	if opt := agent.ModelConfigOption(m.snap); opt != nil {
 		modelCfgID = opt.ID
 	}
 	m.applyGen++
 	gen := m.applyGen
+	// One command per step, plus one for the model step's fallback: the closure
+	// runs off this Update and may not mint any of its own.
+	eng, cmds := m.eng, m.nextCmds(len(steps)+1)
 	return m, func() tea.Msg {
 		ctx := context.Background()
 		out := modelApplyMsg{gen: gen}
-		for _, st := range steps {
-			err := applyOneStep(ctx, sess, st, modelCfgID)
+		for i, st := range steps {
+			rev, err := applyOneStep(ctx, eng, cmds[i], cmds[len(steps)], st, modelCfgID)
 			if err != nil {
 				out.step, out.err = st.label, err
 				return out
 			}
+			st.rev = rev
 			out.done = append(out.done, st)
 		}
 		return out
@@ -330,7 +344,21 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // what landed — the model step's fallback writes a config option and leaves
 // CurrentModel alone — so the steps that succeeded have the last word over the
 // refresh.
+//
+// Unless something newer has been applied since. A step is written only if no
+// delta for its section with a higher revision has reached this model since the
+// chain was issued: another client changing the model while this chain ran, or
+// this step's own confirmation coming back older than a change already applied,
+// would otherwise be overwritten by an answer about a value that is no longer
+// current (plan 021 §3.8, panel astra 15).
 func (m Model) settleStep(st applyStep) Model {
+	applied := m.modelRev
+	if st.cfgID != "" {
+		applied = m.configRev
+	}
+	if !mayApply(applied, st.at, st.rev) {
+		return m
+	}
 	if st.cfgID != "" {
 		return m.setConfigCurrent(st.cfgID, st.value)
 	}
@@ -339,20 +367,24 @@ func (m Model) settleStep(st applyStep) Model {
 	return m
 }
 
-// applyOneStep runs one leg. The model step keeps the fallback /model has
-// today: an agent without session/set_model may still take the model as a
-// config option.
-func applyOneStep(ctx context.Context, sess agent.Session, st applyStep, modelCfgID string) error {
+// applyOneStep runs one leg and answers with the revision the change was
+// confirmed at. The model step keeps the fallback /model has today: an agent
+// without session/set_model may still take the model as a config option, and
+// fb is the command id that fallback spends.
+func applyOneStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Command, st applyStep, modelCfgID string) (uint64, error) {
 	if st.cfgID != "" {
-		return sess.SetConfig(ctx, st.cfgID, st.value)
+		res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingConfig, ID: st.cfgID, Value: st.value})
+		return res.Rev, err
 	}
-	err := sess.SetModel(ctx, st.value)
+	res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: st.value})
 	if err != nil && modelCfgID != "" {
-		if err2 := sess.SetConfig(ctx, modelCfgID, st.value); err2 == nil {
-			return nil
+		if res2, err2 := eng.Set(ctx, fb, engine.Setting{
+			Kind: engine.SettingConfig, ID: modelCfgID, Value: st.value,
+		}); err2 == nil {
+			return res2.Rev, nil
 		}
 	}
-	return err
+	return res.Rev, err
 }
 
 // setConfigCurrent writes an option's new value into this model's own

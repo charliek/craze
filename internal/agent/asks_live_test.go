@@ -222,7 +222,10 @@ func TestAnAnsweredAskWhoseReplyWasLostSaysSo(t *testing.T) {
 	s := newTestSession(t, opts)
 	w := journalOf(t, s.log)
 	// Set before Start, so nothing is publishing while the field is written.
-	parked := make(chan uint64, 4)
+	// Room for more parks than this schedule makes — Start's own install flush
+	// parks here too (awaitFlushPast skips it by target) — because a full
+	// channel would hold the flusher inside the hook.
+	parked := make(chan uint64, 8)
 	s.log.hooks = &logHooks{flushParked: func(target uint64) { parked <- target }}
 	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)

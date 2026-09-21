@@ -196,6 +196,63 @@ func TestEngineEventsCarryTheStubsClock(t *testing.T) {
 	}
 }
 
+// TestClosingTheEngineEndsTheHungTurnOnTheRecord is the live smoke's finding A1
+// over the session every golden runs on: a quit while a turn is open on the wire
+// leaves that turn a started and an ended and nothing else, where before it left
+// a turn that never closed.
+//
+// askEngine is the rig, because its Stub's log has a PRIMARY and the primary is
+// the one reader that survives a close (committed says why): a budgeted
+// subscription's owner stops delivering the instant the log ends, so the very
+// event this test is about would be the one it could not see.
+//
+// HangNext's barrier is received from first: a turn that has not opened yet is
+// still withdrawable, and the ending a withdrawn prompt gets is the cancelled
+// one — a different claim from this one.
+func TestClosingTheEngineEndsTheHungTurnOnTheRecord(t *testing.T) {
+	stub, e := askEngine(t)
+	open := stub.HangNext()
+	res, err := e.Submit(engine.Command{}, "one", engine.SubmitQueue, "")
+	if err != nil || res.Turn == "" {
+		t.Fatalf("submit: %+v, %v", res, err)
+	}
+	select {
+	case <-open:
+	case <-time.After(watchdog):
+		t.Fatal("the turn never opened")
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Read once, after Close has returned — which is after its wait on the
+	// turn's own goroutine, so the continuation has already come back and had
+	// its chance to author a second ending.
+	var phases []string
+	var ending *agent.TurnInfo
+	for _, ev := range committed(t, e) {
+		if ev.Type != agent.EventTurn || ev.Turn == nil || ev.Turn.ID != res.Turn {
+			continue
+		}
+		phases = append(phases, ev.Turn.Phase)
+		if ev.Turn.Phase == agent.TurnEnded {
+			ending = ev.Turn
+		}
+	}
+	if strings.Join(phases, "|") != "started|ended" {
+		t.Fatalf("%s left the record %q, want exactly one started and one ended", res.Turn, phases)
+	}
+	if !ending.Synthetic || ending.StopReason != "closing" || ending.Next != "" || ending.Pending != 0 {
+		t.Fatalf("the ending is %+v, want a synthetic closing with no successor", ending)
+	}
+	if ending.Err != "" || ending.ErrClass != "" {
+		t.Fatalf("the ending carries a failure %q/%q: a close is not one", ending.Err, ending.ErrClass)
+	}
+	if st := e.State(); st.Turn != "" || st.Activity != engine.ActivityClosing {
+		t.Fatalf("state after the close: %+v", st)
+	}
+}
+
 // TestClosingTheEngineClosesTheStub: the session owner will hold the engine and
 // close it, and that has to be the whole of shutdown.
 func TestClosingTheEngineClosesTheStub(t *testing.T) {

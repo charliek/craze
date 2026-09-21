@@ -26,9 +26,14 @@ stop reasons. shed's `LaneApprovalOption.kind` already uses the same words.
 
 Every session-scoped method takes `sessionId`, even on a per-session socket
 (SD-06). Every mutating method takes `commandId` (SD-11), which is not the
-JSON-RPC request id. Capabilities come at two levels (SD-28): the connection's
-(`hello`) and each session's (its roster row and attach reply), because a hub
-fronts hosts with different providers and versions.
+JSON-RPC request id. As shipped, a `commandId` must be a canonical positive
+base-10 integer — no sign, no leading zero, no whitespace; anything else is
+`bad_request` — numbered per client from 1, and the client id it travels with
+must be one the engine minted (S2: minted per connection and bound to it; an
+unminted client id is `bad_request` too). Capabilities come at two levels
+(SD-28): the connection's (`hello`) and each session's (its roster row and
+attach reply), because a hub fronts hosts with different providers and
+versions.
 
 Event payloads use the **lossless event codec** from S1a (`03`, SD-20), not
 `craze prompt --json`'s shapes, which drop ask ids, option kinds, plan bodies,
@@ -39,11 +44,11 @@ and more.
 | `hello` | protocol version (one integer), client kind, client capabilities; reply carries the endpoint's identity (host or hub), craze version, connection-level capabilities, the command retry horizon |
 | `sessions.list` / `sessions.subscribe` | roster rows: id, title, cwd, provider, model, activity, **pending ask count**, parent id, last change, host incarnation, session capabilities. Readable without attaching. The roster has its **own epoch and cursor**; a new epoch means reseed |
 | `session.attach` | `{cursor?: {incarnation, seq}}` → a **subscription id**, then `snapshot` (or replay), events, `synchronized`. `session.detach{subscriptionId}` ends it; closing the connection ends all of them and **never** stops the session |
-| `session.prompt` | `{text, mode: queue \| interject \| send_now}`; admitted by the engine's turn driver, answered with the engine turn id it became or queued behind |
+| `session.prompt` | `{text, mode: queue \| interject \| send_now}`, admitted by the engine's turn driver. As shipped, `queue` and `send_now` go through `Control.Submit(mode: queue \| send_now)`, answered with exactly one of the turn id it started, the queued row (no turn id yet — nothing to be "queued behind"), or `armed: true`; `interject` goes through a separate blocking `Control.Interject`, which answers with only an error. S2 must map the wire's three modes onto those two calls |
 | `session.cancel` | `{turnId?}` request/response: `rejected` (`not_accepting`, or the named turn is no longer current), `requested`, `settled`, or `unknown` after a timeout past the write |
-| `session.queue.*` | edit, remove, clear; mirrors `agent.Session` |
-| `asks.list` / `asks.get` / `asks.answer` | by id; answer carries the exact offered `optionId`, or question answers, or a plan outcome. First **valid** answer wins; an invalid one is `bad_request` and leaves the ask open |
-| `session.set` | model, mode, config, title; applied in the engine's order, answered and broadcast with the confirmed value and a revision |
+| `session.queue.*` | edit, remove, clear; mirrors `engine.Control`'s queue verbs (the queue left `agent.Session` in S1b) |
+| `asks.list` / `asks.get` / `asks.answer` | by id; answer carries the exact offered `optionId`, or question answers, or a plan outcome. First **valid** answer wins; an invalid one is `bad_request` and leaves the ask open. `asks.get` is `Control.Ask(id)`, waiting on nothing. An id whose opening was never published has the hidden spelling `perm-xN` / `ask-xN` / `plan-xN`, from a counter of its own, so it can never renumber a visible one: a refused open, a request the provider answered before any handler ran, an automatic PERMISSION resolution, and an automatic question/plan fallback that cannot publish (a bad or cancelling automatic answer). An automatic question/plan answer that itself publishes its `Auto` opening keeps a visible id |
+| `session.set` | model, mode, config go through `Control.Set` and are applied in the engine's order, answered and broadcast with the confirmed value and a revision: `{value, rev}`, where `rev` is the delta's own `seq` — the same number the broadcast `event` notification carries — and may be `0` when no committed revision is available: the change was made, but its delta could not be confirmed committed (a flush that gave up) or was never committed at all (a `Set` that lost the race to the session closing), so a client must not wait for a matching event. Title is a separate call, `Control.SetTitle`: it waits on nothing, bypasses the settings worker, and returns only an error — its delta, not its reply, is how a client learns the title |
 | `session.stop` | explicitly end the session and its host. Distinct from closing a connection or a view (SD-28); defined in S2 |
 | `session.create` | hub only (S4): spawn a headless host |
 
@@ -51,6 +56,17 @@ Notifications carry the subscription id they belong to: `event` (`seq` + the
 event in the lossless codec), `reset{reason}`, `synchronized`; and
 `roster` (epoch + cursor) for roster subscriptions. Ask transitions are
 ordinary sequenced events.
+
+A parked ask's `closing` outcome is **guaranteed** when the host session
+closes, for an ACP-backed session and the Stub: both resolve every open ask
+before their event log closes. It is **best-effort** for a native session's
+own asks (Plan 023 §3.5): native cancels the turn's context first, so a
+parked native ask that context reaches ends `cancelled, by: "call"` rather
+than by an explicit `closing` resolution. And a turn current when the session
+closes always gets its `ended`: the host publishes it itself, synthetic, stop
+reason `closing`, in the same section that starts shutdown, before the
+session (and so the log) closes — never left `started` with no ending on the
+record (session control S1b's own live-smoke finding, `12`).
 
 ## Attach and resume (SD-09, SD-18)
 
@@ -80,7 +96,26 @@ cutoff.
 **Responses and events.** A command's response is ordered **after** the
 events its execution emitted on the same subscription, which follows from the
 engine applying a command's effect inside the command call (`03`). Fixtures
-and clients may rely on it.
+and clients may rely on it — **at the wire**. In process this is not a
+consequence of the call simply returning: a command's effects are published
+through the log's outbox, so the call returning does not mean its events have
+been delivered (`engine.Control`'s own doc). `engine.Control.Sync` is how an
+in-process caller gets that ordering back — it returns once everything
+enqueued before the call is committed (numbered, in the ring, offered to every
+subscription, and handed to the journal if one is attached — whose own append
+is asynchronous and bounded, and records a gap when saturated). `Sync` alone
+does not put those events on a socket's wire ahead of the reply, and neither
+does a single serialized writer by itself: the goroutine forwarding the
+subscription can still be unscheduled when the handler queues its reply.
+**S2's server needs a connection-local barrier**, which `Control` does not
+offer yet: `Sync(ctx) error` returns no sequence number. S2 adds one of two
+things — a `Sync` that returns the sequence it committed through, so the reply
+is queued to the connection's one outbound writer only after every record up
+to that number has been queued to that same writer; or a barrier through the
+forwarding goroutine itself, acknowledged once it has drained every
+subscription record present when `Sync` returned. That is what makes "ordered after its
+events" true for a socket client without it ever calling `Sync` itself
+(session control S1b, plan §4).
 
 Replay and live use the same per-event representation; nothing is coalesced
 in the log (SD-18). Unlike gx, **ask transitions are sequenced events in the
@@ -92,15 +127,15 @@ reconnect. The roster is ordered separately, by its own epoch and cursor.
 
 Published in the spec as a table, enforced by the engine (`03`):
 
-| activity | `queue` | `interject` | `send_now` | `cancel` |
-|---|---|---|---|---|
-| starting / replaying | refuse | refuse | refuse | refuse |
-| working | allow | allow if the provider can | allow | allow |
-| blocked on an ask | allow | `not_accepting` | `not_accepting` | allow |
-| foreign turn (the agent's own) | allow | `not_accepting` | `foreign_turn` | allow, written at once |
-| idle | allow | `not_accepting` | allow | `not_accepting` |
-| idle **with an ask pending** | allow | `not_accepting` | allow | **allow** |
-| failed / cancelling / closing | to be specified in S2 | | | |
+| activity | `queue` | `interject` | `send_now` | `cancel` | `session.set` |
+|---|---|---|---|---|---|
+| starting / replaying | refuse | refuse | refuse | refuse | refuse |
+| working | allow | allow if the provider can | allow | allow | allow |
+| blocked on an ask | allow | `not_accepting` | `not_accepting` | allow | allow |
+| foreign turn (the agent's own) | allow | `not_accepting` | `foreign_turn` | allow, written at once | allow |
+| idle | allow | `not_accepting` | allow | `not_accepting` | allow |
+| idle **with an ask pending** | allow | `not_accepting` | allow | **allow** | allow |
+| failed / cancelling / closing | to be specified in S2 | | | | refuse (after `session.stop`, or while closing) |
 
 Asks arrive between turns and during foreign turns too, so cancel is accepted
 whenever any ask is pending, whatever the activity. The table is a sketch; S2
@@ -127,6 +162,36 @@ whose terminal record has been evicted from the bounded registry is
 `already_resolved` (never `unknown_ask`, which means the id was never issued
 by this incarnation); and a resend with the same `commandId` but a different
 payload is `bad_request`, never a re-execution.
+
+Session control S1b (`internal/engine`) adds six codes, and the retry policy
+below, all of it `internal/engine/control.go`'s `Command` doc as built —
+copied here, not invented:
+
+| code | one line |
+|---|---|
+| `unknown_row` | a queued row id the queue no longer holds — sent already, removed by another client, or never existed |
+| `unknown_command` | a command id at or below its client's evicted high-water mark: recognisably expired |
+| `in_progress` | a resend that found its id's command still running: at once for a synchronous command, or, for a blocking one (`Cancel`, `Stop`, `Set`, `Interject`), when a waiting duplicate gives up because its own context ended |
+| `aborted` | a stored answer whose outcome the engine cannot itself vouch for — a command whose call panicked, or a `Set` whose caller's context ended after the settings worker had already claimed it |
+| `failed` | every other error the engine does not classify by its own sentinel — a provider/RPC refusal of a `Set`, an interject the agent refused, a cancel that failed — reached this way because the command DID run |
+| `index_write` | a command that did what it was asked and could not record it — today only `session.set`'s title write: the rename happened, and only `~/.craze/sessions.jsonl` was not updated |
+
+**The retry policy, by code.** A client decides what a resend means from the
+code alone, never from message text:
+
+| code | the command | what a client does |
+|---|---|---|
+| `unavailable`, `not_accepting`, `in_progress` | did NOT run — a gate refusal (the first two), or, for `in_progress` alone, is still running under this exact id | resend the SAME id (mandatory for `in_progress`, safe for the other two); either gets a genuine first attempt, never a cached echo of finding the gate shut |
+| `aborted` | ran, but its outcome cannot be vouched for | re-read state (or, for a `Set`, watch the stream for its own delta) before deciding anything else; send a NEW id if the command is still wanted — never blindly resend the same work under a new id, or a queued interjection can go in twice |
+| `failed` | ran, and failed a plain, definite failure | send a NEW id for another attempt |
+| anything else | the command's own stored, stable answer — a success, or a refusal about this request or the resource it named | replayed exactly as the first call got it; resending changes nothing |
+
+The invariant underneath the first row: `unavailable`, `not_accepting` and
+`in_progress` are the only three codes the receipts table never stores —
+nothing ran, and the id stays exactly as unseen as before the attempt. Every
+other code is a stored answer. One table (`classify` in `control.go`) decides
+both the code and whether the answer is stored, so the two can never again
+disagree about the same error.
 
 ## One session per connection (SQ14)
 

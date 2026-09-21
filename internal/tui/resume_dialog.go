@@ -122,16 +122,19 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	// --continue: tea.Batch promises no ordering between startCmd and the
 	// first waitEvent, so EventReplay{start} cannot be what learns it (§3.5).
 	m.replaying = true
-	m.loading = true
 	if m.loadSession != nil {
 		// The engine, not the session: see confirmProvider.
 		if m.eng != nil {
 			_ = m.eng.Close()
 		}
-		m.setSession(m.loadSession(p, row))
+		// The row's own durable id travels with it: this is the same thread of
+		// work, loaded into another agent session (session control SD-22). A
+		// row written before crazeId existed carries none, and the engine mints
+		// one that the next write puts in the file.
+		m.setSession(m.loadSession(p, row), row.CrazeID)
 	}
 	if m.eng == nil && m.engErr == nil {
-		m.setSession(NewStub())
+		m.setSession(NewStub(), "")
 	}
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -130,6 +131,377 @@ func TestCloseEndsTheTurnAndJoinsEverything(t *testing.T) {
 	r.wantPrompts("one")
 	if st := r.e.State(); st.Activity != ActivityClosing {
 		t.Fatalf("activity after Close: %s", st.Activity)
+	}
+}
+
+// TestCloseEndsTheTurnOnTheRecord is the live smoke's finding A1: a quit while
+// a turn was running left that turn with a started and no ended — on every
+// provider — and V3's first invariant ("every turn has exactly one started and
+// one ended") did not hold for the journals it wrote. The stream is meant to be
+// a complete record (SD-30).
+//
+// The settlement is not what was missing it: closed is set in the same locked
+// section that refuses admission, and the driver's pass returns at once for a
+// closed engine, so the continuation that comes back afterwards authors nothing
+// at all. So Close authors the ending itself, there, before the session's close
+// cuts the log — and because the whole decision is one section under e.mu, a
+// settlement that got in first left no current turn for this to find, and this
+// leaves no current turn for a settlement to find. Exactly one ending, whichever
+// order the two arrive in.
+//
+// Every case below reads the PRIMARY (rig.committed), which is the reader that
+// survives a close, and each reads it once, after Close has returned — which is
+// after e.wg.Wait(), so the turn's own continuation has already come back and
+// had whatever chance it had to author a second ending.
+func TestCloseEndsTheTurnOnTheRecord(t *testing.T) {
+	t.Run("a turn that was still running", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		turn := r.s.script(held())
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		got := turnRecord(r.committed())
+		want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=0 synthetic`}
+		if strings.Join(got, " | ") != strings.Join(want, " | ") {
+			t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+		// And State agrees with the stream it just wrote: the turn is over.
+		if st := r.e.State(); st.Turn != "" || st.Activity != ActivityClosing {
+			t.Fatalf("state after the close: %+v", st)
+		}
+	})
+
+	t.Run("the rows behind it are counted and left where they are", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		turn := r.s.script(held())
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+		r.queue("two")
+		r.queue("three")
+
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		got := turnRecord(r.committed())
+		want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=2 synthetic`}
+		if strings.Join(got, " | ") != strings.Join(want, " | ") {
+			t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+		// Close is not Stop: nothing is removed and nothing is said about the
+		// rows, so Pending is the honest count of what is still there.
+		r.wantRows("two", "three")
+		r.wantPrompts("one")
+	})
+
+	t.Run("a turn that settled just before the close", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		r.submit("one")
+		r.until(lastEnding)
+
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		got := turnRecord(r.committed())
+		want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="end_turn" next="" pending=0`}
+		if strings.Join(got, " | ") != strings.Join(want, " | ") {
+			t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+		}
+	})
+
+	t.Run("no turn at all", func(t *testing.T) {
+		r := newRigOn(t, Options{}, agent.EventLogOptions{})
+		if err := r.e.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		if got := turnRecord(r.committed()); len(got) != 0 {
+			t.Fatalf("closing an idle engine wrote %q", got)
+		}
+	})
+}
+
+// assertTurnRecordSelfConsistent is r32's "whatever the code does is
+// self-consistent" bar for a schedule this file does not pin an exact shape
+// for: every turn that started has EXACTLY one ending in the record, and none
+// is missing one. It says nothing about ORDER or STOP REASON — a schedule that
+// races Close against something else may settle a turn normally, or may have
+// Close author its "closing" ending instead, and both are consistent answers —
+// only that the stream never leaves a started turn open forever and never
+// ends one twice (SD-30, plan 021's r32 review, hunt item A).
+func assertTurnRecordSelfConsistent(t *testing.T, evs []agent.Event) {
+	t.Helper()
+	order := []string{}
+	endings := map[string]int{}
+	for _, ev := range evs {
+		if ev.Type != agent.EventTurn || ev.Turn == nil {
+			continue
+		}
+		id := ev.Turn.ID
+		switch ev.Turn.Phase {
+		case agent.TurnStarted:
+			if _, seen := endings[id]; seen {
+				t.Fatalf("%s started twice: %s", id, describe(evs))
+			}
+			endings[id] = 0
+			order = append(order, id)
+		case agent.TurnEnded:
+			if _, started := endings[id]; !started {
+				t.Fatalf("%s ended with no started in the record: %s", id, describe(evs))
+			}
+			endings[id]++
+		}
+	}
+	for _, id := range order {
+		if n := endings[id]; n != 1 {
+			t.Fatalf("%s started but has %d endings, want exactly 1: %s", id, n, describe(evs))
+		}
+	}
+}
+
+// TestTwoClosesWithATurnRunningEndItOnce is r32's hunt item A / E: two Close
+// calls on an engine with a turn running, released together off one closed
+// channel so both are AT LEAST READY to enter Close at the same time — a
+// start gun, not a guarantee that they actually overlap inside Close, since
+// the scheduler may still run one to completion before the other is picked
+// up. What this proves is the RECORD — the turn gets its closing ending
+// exactly once, and both callers see the same nil answer — never that the two
+// calls contended concurrently. Run under -race and -count so a data race in
+// the shared batch or e.wg would show up as either a failure or the detector
+// firing.
+func TestTwoClosesWithATurnRunningEndItOnce(t *testing.T) {
+	r := newRigOn(t, Options{}, agent.EventLogOptions{})
+	turn := r.s.script(held())
+	r.submit("one")
+	await(t, turn.opened, "the turn to open")
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	begin := make(chan struct{})
+	wg.Add(2)
+	for i := range errs {
+		go func(i int) {
+			defer wg.Done()
+			<-begin
+			errs[i] = r.e.Close()
+		}(i)
+	}
+	close(begin)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("close %d: %v", i, err)
+		}
+	}
+
+	got := turnRecord(r.committed())
+	want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=0 synthetic`}
+	if strings.Join(got, " | ") != strings.Join(want, " | ") {
+		t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+	if st := r.e.State(); st.Turn != "" || st.Activity != ActivityClosing {
+		t.Fatalf("state after two concurrent closes: %+v", st)
+	}
+}
+
+// TestACancelHoldReleasingAfterCloseSettlesOnce is r32's hunt item A: a cancel
+// in flight — cancelsInFlight > 0 — whose hold is released only AFTER Close
+// has already returned. The hold is forced open with afterSessionCancel,
+// which runs on the Cancel caller's own goroutine after the session's own
+// Cancel has already reached the agent (so the held turn's continuation
+// returns and gives its e.wg count back) but before releaseHold gives the
+// hold back — the exact gap r32's hunt list asks about: "the cancel path's
+// 'settled exactly when the held turn is no longer current' — any wrong
+// CancelResult.Outcome?".
+//
+// While the hold stands, the turn's continuation has returned but cannot
+// settle (passLocked requires cancelsInFlight == 0), so Close finds it still
+// current and authors the closing ending itself. When the hold is finally
+// released, releaseHold must find e.cur already cleared, report the turn
+// settled, and return with no panic and no second ending.
+func TestACancelHoldReleasingAfterCloseSettlesOnce(t *testing.T) {
+	atRelease, letGo := make(chan struct{}), make(chan struct{})
+	r := newRigHooked(t, Options{}, agent.EventLogOptions{}, &hooks{
+		afterSessionCancel: func(string) {
+			close(atRelease)
+			<-letGo
+		},
+	})
+	turn := r.s.script(held())
+	r.submit("one")
+	await(t, turn.opened, "the turn to open")
+
+	cancelDone := make(chan struct{})
+	var cancelRes CancelResult
+	var cancelErr error
+	go func() {
+		defer close(cancelDone)
+		cancelRes, cancelErr = r.e.Cancel(context.Background(), Command{}, "turn-1")
+	}()
+	await(t, atRelease, "the cancel to reach the session and park before its hold is released")
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close is waiting on a cancel hold it does not own")
+	}
+
+	close(letGo)
+	select {
+	case <-cancelDone:
+	case <-time.After(watchdog):
+		t.Fatal("Cancel never returned once its hold was released after Close")
+	}
+	if cancelErr != nil {
+		t.Fatalf("cancel: %v", cancelErr)
+	}
+	if cancelRes.Outcome != CancelSettled {
+		t.Fatalf("cancel outcome after its hold released post-close: %+v, want %s", cancelRes, CancelSettled)
+	}
+
+	got := turnRecord(r.committed())
+	want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=0 synthetic`}
+	if strings.Join(got, " | ") != strings.Join(want, " | ") {
+		t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+}
+
+// TestStopRacesCloseAfterQueueClearingBeforeCancelRelease is r32's hunt item A:
+// "Stop races Close ... including after queue clearing but before cancel
+// release." beforeSessionCancel parks Stop's own cancel right after its
+// locked section has stopped the engine, cleared the queue and taken its
+// hold, and right before Session.Cancel is made — the window named in that
+// sentence. Close is forced into exactly that window, so it must find the
+// running turn still current (Stop's cancel has not settled it) and author
+// the closing ending itself; Stop's own cancel, once let through, must land
+// on an already-closed engine without a second ending or a panic.
+func TestStopRacesCloseAfterQueueClearingBeforeCancelRelease(t *testing.T) {
+	atCancel, letGo := make(chan struct{}), make(chan struct{})
+	r := newRigHooked(t, Options{}, agent.EventLogOptions{}, &hooks{
+		beforeSessionCancel: func(string) {
+			close(atCancel)
+			<-letGo
+		},
+	})
+	turn := r.s.script(held())
+	r.submit("one")
+	await(t, turn.opened, "the turn to open")
+	r.queue("two")
+	r.queue("three")
+
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- r.e.Stop(context.Background(), Command{}) }()
+	await(t, atCancel, "Stop to reach the session's cancel with its queue already cleared")
+
+	closed := make(chan error, 1)
+	go func() { closed <- r.e.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close is waiting on Stop's cancel, still parked before it reaches the session")
+	}
+
+	close(letGo)
+	select {
+	case err := <-stopErr:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Stop never returned once its cancel was let through after Close")
+	}
+
+	got := r.committed()
+	assertTurnRecordSelfConsistent(t, got)
+	trec := turnRecord(got)
+	want := []string{`started turn-1 submit "one"`, `ended turn-1 stop="closing" next="" pending=0 synthetic`}
+	if strings.Join(trec, " | ") != strings.Join(want, " | ") {
+		t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(trec, "\n  "), strings.Join(want, "\n  "))
+	}
+	// Stop's own queue clear ran before Close ever saw the engine, so both rows
+	// are gone from it and nothing about them is said again by Close (Close is
+	// not Stop, and Pending on the closing ending is 0 because the queue was
+	// already empty by the time Close read it).
+	removed := 0
+	for _, ev := range got {
+		if ev.Type == agent.EventQueue && ev.QueueChange == agent.QueueRemoved {
+			removed++
+		}
+	}
+	if removed != 2 {
+		t.Fatalf("%d rows removed by Stop's own clear, want 2: %s", removed, describe(got))
+	}
+	r.wantRows()
+}
+
+// TestCloseRightAfterSettlementEndsTheSuccessorOnce is r32's first "Untested
+// schedule": "Settlement reserves and enqueues a successor, then Close ends
+// that successor before run(next) launches it." turnReturned fires on turn-1's
+// own goroutine strictly after settleLocked has claimed turn-2 as the
+// successor and enqueued its started — but this hook itself runs after
+// e.run(next) has already made the `go e.runTurn(l)` call that launches
+// turn-2's goroutine (engine.go's runTurn, the e.run(next) line), so by the
+// time Close is called from here turn-2's continuation may already have been
+// scheduled and entered (its script is held, so it can get no further; this
+// test does not, and cannot, force it to still be un-started). What this
+// schedule does force is a Close that lands on a successor which is current
+// and whose started is already in the record, and it proves Close authors
+// that successor's own closing ending rather than leaving it open or
+// double-ending turn-1.
+func TestCloseRightAfterSettlementEndsTheSuccessorOnce(t *testing.T) {
+	var r *rig
+	closed := make(chan error, 1)
+	r = newRigHooked(t, Options{}, agent.EventLogOptions{}, &hooks{
+		turnReturned: func(id string) {
+			if id == "turn-1" {
+				closed <- r.e.Close()
+			}
+		},
+	})
+	turnA := r.s.script(held())
+	// turn-2's script is held too, and this test never releases it: nothing but
+	// Close's own session-close (which fires s.done) can ever move it past its
+	// own opening, so whatever Close does to it while it is current and held
+	// is exactly what this test is about.
+	r.s.script(held())
+
+	r.submit("one")
+	await(t, turnA.opened, "turn-1 to open")
+	r.queue("two")
+	turnA.release()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close from the turnReturned hook: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close from the hook is waiting on something")
+	}
+
+	got := r.committed()
+	assertTurnRecordSelfConsistent(t, got)
+	trec := turnRecord(got)
+	want := []string{
+		`started turn-1 submit "one"`,
+		`ended turn-1 stop="end_turn" next="turn-2" pending=0`,
+		`started turn-2 drain "two"`,
+		`ended turn-2 stop="closing" next="" pending=0 synthetic`,
+	}
+	if strings.Join(trec, " | ") != strings.Join(want, " | ") {
+		t.Fatalf("the turn's record is\n  %s\nwant\n  %s", strings.Join(trec, "\n  "), strings.Join(want, "\n  "))
+	}
+	if st := r.e.State(); st.Turn != "" || st.Activity != ActivityClosing {
+		t.Fatalf("state after closing on a held successor: %+v", st)
 	}
 }
 

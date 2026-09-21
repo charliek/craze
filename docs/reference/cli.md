@@ -167,9 +167,11 @@ order of two lines; never on the arithmetic between them.
 
 The lines craze writes itself carry **no** `seq` at all, and craze never
 invents one: a startup failure (an `error` line written before any session
-existed), and the `queue` `removed` line for a row that left the queue just as
-a signal landed, which no session ever saw. An absent `seq` means craze said
-it, not the agent.
+existed) is the one left. The `queue` `removed` line for a row that left the
+queue just as a signal landed used to be one too; it now carries a `seq` like
+any other queue line, because taking a row and starting its turn are one
+transaction in the engine (session control S1b). An absent `seq` means craze
+said it, not the agent.
 
 `agent` is the sub-agent's own session id (grok) and appears only on lines
 that belong to one; main-session lines have no `agent` field. Grok streams a

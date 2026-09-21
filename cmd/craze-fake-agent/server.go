@@ -113,11 +113,70 @@ func defaultConfigOptions() []map[string]any {
 	}
 }
 
+// modelConfigScript names the scripts that advertise the model option, and
+// refusesSetModel the one of them that is the whole of such an agent: it
+// answers session/set_model with -32601, the live wire for a method an agent
+// does not implement, so a client's set_model → set_config fallback runs end to
+// end instead of being simulated (r25 finding 3).
+func modelConfigScript(script string) bool {
+	return script == "modelconfig" || script == "modelconfig-refuse" || script == "preinstall"
+}
+
+func refusesSetModel(script string) bool { return script == "modelconfig-refuse" }
+
+// preinstallTitle is the title the `preinstall` script sends before it answers
+// session/new, named here because the test reads it back.
+const preinstallTitle = "named before the reply"
+
+// preinstallUpdates are the three settings updates `preinstall` sends BEFORE it
+// answers session/new: a mode, a title and its whole option list with the model
+// moved. craze's ACP client has no session id yet, so it buffers them and
+// dispatches them inside NewSession — on Start's own goroutine, before the
+// snapshot that reply carries is installed. Every one of them contradicts that
+// snapshot on purpose (r27 finding 1).
+func (s *server) preinstallUpdates() {
+	s.update(fakeSessionID, acp.SessionUpdate{
+		SessionUpdate: acp.UpdateCurrentMode,
+		CurrentModeID: "plan",
+	})
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateSessionInfo,
+		"title":         preinstallTitle,
+	})
+	cfg := modelConfigOptions()
+	cfg[len(cfg)-1]["currentValue"] = "composer"
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateConfigOption,
+		"configOptions": cfg,
+	})
+}
+
+// modelConfigOptions is defaultConfigOptions plus the option a provider that
+// has no session/set_model keeps its MODEL in: category "model", whose values
+// are the models the session advertises. It belongs to the `modelconfig`
+// scripts alone, so no other script's chips or dialog rows move.
+func modelConfigOptions() []map[string]any {
+	return append(defaultConfigOptions(), map[string]any{
+		"id":           "model",
+		"name":         "Model",
+		"category":     "model",
+		"type":         "select",
+		"currentValue": "default",
+		"options": []map[string]string{
+			{"value": "default", "name": "Default"},
+			{"value": "composer", "name": "Composer"},
+		},
+	})
+}
+
 func run(script string) error {
 	conn := acp.NewConn(os.Stdin, os.Stdout)
 	cfg := defaultConfigOptions()
-	if grokScript(script) {
+	switch {
+	case grokScript(script):
 		cfg = grokConfigOptions()
+	case modelConfigScript(script):
+		cfg = modelConfigOptions()
 	}
 	s := &server{conn: conn, script: script, config: cfg}
 	s.writeFakeStderr()
@@ -317,6 +376,9 @@ func (s *server) onRequest(msg *acp.Message) {
 		if planExitScript(s.script) {
 			currentMode = "plan"
 		}
+		if s.script == "preinstall" {
+			s.preinstallUpdates()
+		}
 		s.reply(msg.ID, map[string]any{
 			"sessionId": fakeSessionID,
 			"modes": map[string]any{
@@ -373,7 +435,24 @@ func (s *server) onRequest(msg *acp.Message) {
 		}
 		go s.handleInterject(msg)
 	case acp.MethodSessionSetModel:
+		if refusesSetModel(s.script) {
+			// An agent that has no session/set_model at all: the live wire for
+			// one of those is -32601, and the model moves through set_config.
+			_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
+			return
+		}
 		s.reply(msg.ID, map[string]any{})
+		// `modellate` otherwise advertises no model option at all — its first
+		// list, carrying the value the option held BEFORE session/set_model,
+		// is exactly the r27 finding 2 schedule, and it is
+		// TestAFirstModelOptionDoesNotUndoASetModel that sends it, synchronously
+		// and only once the caller's own SetModel has returned, rather than this
+		// server racing its own reply against the client's read loop: the
+		// buffered response channel lets the read loop move straight on to the
+		// next frame, and on this wire that update would usually reach onUpdate
+		// before the caller's own goroutine reaches its locked mutation — a
+		// schedule the test needs to rule OUT, not hope for, to prove the marker
+		// itself works (r28 finding 3).
 	case acp.MethodSessionSetMode:
 		var p acp.SetModeParams
 		_ = json.Unmarshal(msg.Params, &p)

@@ -91,10 +91,24 @@ func snapshotFromNewProvider(res *acp.NewSessionResult, p Provider, init *acp.In
 			curMode = modes[0].ID
 		}
 	}
+	config := parseConfigOptions(res.ConfigOptions)
+	if curModel == "" {
+		// A provider that keeps its model in a config option and names no
+		// current model in its models block — the shape a session/set_model-less
+		// agent has — would otherwise start on no model at all while advertising
+		// exactly which one it is on (r25 finding 3). The models block keeps
+		// precedence whenever it names one: two disagreeing sources are a fact
+		// about the agent, and the one craze has always believed is the models
+		// block. onUpdate's config arm will not flip it afterwards either — an
+		// update that re-lists the option unchanged is not a change.
+		if opt := ModelConfigOptionIn(config); opt != nil && opt.Current != "" {
+			curModel = opt.Current
+		}
+	}
 	return Snapshot{
 		Models:       models,
 		Modes:        modes,
-		Config:       parseConfigOptions(res.ConfigOptions),
+		Config:       config,
 		CurrentModel: curModel,
 		CurrentMode:  curMode,
 	}
@@ -488,16 +502,35 @@ func FastOn(snap Snapshot) bool {
 	return ok && opt.Current == on
 }
 
+// modelCategory is the config category a provider keeps its MODEL in, rather
+// than behind session/set_model. Changing that option is changing the model,
+// which is why a session that has the concept moves Snapshot.CurrentModel with
+// it and says both sections in one delta (plan 021 §3.8, r23 finding 3).
+const modelCategory = "model"
+
 // ModelConfigOption returns the first config option with category "model".
 func ModelConfigOption(snap Snapshot) *ConfigOption {
-	for _, c := range snap.Config {
-		if c.Category == "model" {
+	return ModelConfigOptionIn(snap.Config)
+}
+
+// ModelConfigOptionIn is ModelConfigOption over a bare option list: the config
+// a session holds under its own lock, or the one an update just brought, where
+// there is no Snapshot to ask. One definition of "the model option", so the
+// session that writes CurrentModel from it and the UI that reads it can never
+// pick different options.
+func ModelConfigOptionIn(cfg []ConfigOption) *ConfigOption {
+	for _, c := range cfg {
+		if c.Category == modelCategory {
 			opt := c
 			return &opt
 		}
 	}
 	return nil
 }
+
+// IsModelConfigOption reports whether opt is the option a provider keeps its
+// model in: what makes SetConfig on it a MODEL change as well as a config one.
+func IsModelConfigOption(opt ConfigOption) bool { return opt.Category == modelCategory }
 
 func matchEffortValue(opt *ConfigOption, raw string) (string, bool) {
 	if opt == nil {

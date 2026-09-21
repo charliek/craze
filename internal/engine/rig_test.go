@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -150,6 +151,9 @@ func shape(ev agent.Event) string {
 	case agent.EventQueue:
 		return fmt.Sprintf("queue %s %q", ev.QueueChange, ev.Queue.Text)
 	case agent.EventMeta:
+		if st := settingsShape(ev); st != "" {
+			return st
+		}
 		s := sendNowDelta(ev)
 		switch {
 		case s == nil && ev.State != nil && ev.State.Reason != "":
@@ -173,6 +177,45 @@ func shape(ev agent.Event) string {
 		return fmt.Sprintf("foreign running=%v", ev.ForeignTurn.Running)
 	}
 	return string(ev.Type)
+}
+
+// settingsShape is shape's spelling of a settings delta: the sections it
+// carries, in full, and "" for a delta that carries none. A delta prefixed
+// "agent" is an agent-initiated update, which fills Event.Mode or Event.Text
+// beside its section — the two fields a craze-initiated change must leave empty
+// (plan 021 correction 20).
+func settingsShape(ev agent.Event) string {
+	st := ev.State
+	if st == nil {
+		return ""
+	}
+	var parts []string
+	if st.Title != nil {
+		parts = append(parts, fmt.Sprintf("title %q", *st.Title))
+	}
+	if st.Mode != nil {
+		parts = append(parts, fmt.Sprintf("mode %q", *st.Mode))
+	}
+	if st.Model != nil {
+		parts = append(parts, fmt.Sprintf("model %q", *st.Model))
+	}
+	if st.Config != nil {
+		parts = append(parts, fmt.Sprintf("config %d", len(st.Config.Options)))
+	}
+	if st.Commands != nil {
+		parts = append(parts, fmt.Sprintf("commands %d", len(st.Commands.Commands)))
+	}
+	if st.Plugins != nil {
+		parts = append(parts, fmt.Sprintf("plugins %d", len(st.Plugins.Plugins)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	out := strings.Join(parts, " ")
+	if ev.Mode != "" || ev.Text != "" {
+		out = "agent " + out
+	}
+	return out
 }
 
 // armedShape is shape's spelling of the delta that arms a send-now, for a test
@@ -305,6 +348,42 @@ func await(t *testing.T, ch <-chan struct{}, what string) {
 	case <-time.After(watchdog):
 		t.Fatalf("still waiting for %s after %s", what, watchdog)
 	}
+}
+
+// committed is everything the log has put on the PRIMARY since the last call,
+// with Sync as the barrier. It is the one reader that survives a close: the
+// primary is never closed and keeps what was committed to it, where a
+// subscription's owner stops delivering the instant the log ends (its send
+// selects on the subscription's kill). A rig that uses it is built with a
+// primary — newRigOn with the zero EventLogOptions — and nothing else reads it.
+func (r *rig) committed() []agent.Event {
+	r.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), watchdog)
+	defer cancel()
+	if err := r.e.Sync(ctx); err != nil && !errors.Is(err, agent.ErrLogClosing) && !errors.Is(err, agent.ErrClosed) {
+		r.t.Fatalf("sync: %v", err)
+	}
+	var evs []agent.Event
+	for {
+		select {
+		case ev := <-r.e.Events():
+			evs = append(evs, ev)
+		default:
+			return evs
+		}
+	}
+}
+
+// turnRecord is every turn event among evs, in order, as shape spells them:
+// what a client folding the stream would make of the turns alone.
+func turnRecord(evs []agent.Event) []string {
+	var out []string
+	for _, ev := range evs {
+		if ev.Type == agent.EventTurn && ev.Turn != nil {
+			out = append(out, shape(ev))
+		}
+	}
+	return out
 }
 
 // sync is Sync with the watchdog, for a test that has to know the engine's

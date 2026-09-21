@@ -19,6 +19,83 @@ import (
 // effect from the reply has to be able to tell that effect's echo from
 // somebody else's change. In-process neither can happen yet, and the surface
 // is already the one a socket will carry.
+//
+// # Resends and the receipts table (receipts.go)
+//
+// A non-zero Command is tracked by an in-memory table, bounded and per
+// engine: it reserves an id while its command runs, matches a resend on a
+// payload hash (the method plus its arguments) and, once the command has
+// run, answers a matching resend with exactly what the first call returned —
+// a refusal included — never a second execution. A mismatched resend (the
+// same id, a different payload) is ErrBadRequest, and so is a Client this
+// engine never minted. An id at or below its client's evicted high-water mark
+// is ErrUnknownCommand: recognisably expired, never a fresh (and very
+// different) command running under a number that used to mean something else.
+//
+// A resend that arrives while the first call is STILL RUNNING is answered
+// according to what that command does. A blocking one (Cancel, Stop, Set,
+// Interject) is waited for, and the resend gets its result. A synchronous one
+// — every method documented below as waiting on nothing — is never waited
+// for: the resend is refused with ErrCommandInProgress at once, having
+// changed nothing, and may simply ask again. That is what keeps "a duplicate
+// of a synchronous command never waits" literally true even when the command
+// itself stalls, which the index write inside Submit and SetTitle can. One
+// client cannot reach it in process — the TUI makes every call from its one
+// Update goroutine — and a socket client with two connections in flight can.
+//
+// # The retry policy, by code
+//
+// 05-protocol.md's codes are a closed set, and a client decides what a
+// resend means from the code ALONE, never by matching message text — the one
+// thing a socket client (session control S2) needs from this table that the
+// TUI, with every call running through its one Update goroutine, never has
+// to ask:
+//
+//   - in_progress (ErrCommandInProgress): this id is RESERVED and its
+//     command is still running — see the paragraph above. Resend THE SAME
+//     id; a new id would be a SECOND command layered on top of the one still
+//     in flight. Unreachable in process, so the TUI has, and needs, no
+//     handling for it.
+//   - unavailable (ErrUnavailable and its sibling gate sentinels,
+//     agent.ErrSetUnavailable / agent.ErrAskUnavailable, and errNotRun for a
+//     Set answered without running because its own ctx was already dead) or
+//     not_accepting (ErrNotAccepting, and agent.ErrNotInTurn — an Interject
+//     with no turn to merge into): a GATE refusal — the engine simply not
+//     admitting anything at all right now, this command's own arguments
+//     aside — and NEVER STORED: nothing ran, and the id is exactly as unseen
+//     as before the attempt. Resend the same id, or send a new one; either
+//     gets a genuine first attempt once the gate reopens rather than a cached
+//     echo of finding it shut.
+//   - aborted (ErrCommandAborted; ErrSetOutcomeUnknown for the one Set whose
+//     own outcome a context ending after the settings worker's claim leaves
+//     honestly unknown; and a plain context.Canceled or
+//     context.DeadlineExceeded from a command that RAN — a Cancel or Stop
+//     whose session/cancel gave up, an Interject whose deadline passed after
+//     its request was written): a STORED answer whose outcome the engine
+//     cannot itself vouch for — the command may already have mutated state,
+//     or its request may already be on the wire — so this id will never run
+//     again and replays the same answer for as long as the table keeps it.
+//     Re-read state (or, for a Set, watch the stream for the change's own
+//     delta) before deciding anything else; send a NEW id if the command is
+//     still wanted, and never blindly resend the work under a new id without
+//     looking, or an interjection the agent already queued goes in twice
+//     (r30 finding 1).
+//   - failed: every OTHER error craze does not classify by its own sentinel —
+//     a provider/RPC refusal of a Set, an Interject the agent refused, a
+//     Cancel that failed — reached this way because the command DID run and
+//     its failure is what it ran into, and its failure is a definite one: a
+//     STORED, stable answer, exactly like the named refusals below, and never
+//     a reason to retry the same id. Send a NEW id for another attempt.
+//   - anything else: the command's own stored, stable answer — a success, or
+//     a refusal about THIS request or the specific resource it named (a
+//     stale turn, a bad answer, a stale queue version, an unknown row, a
+//     full queue, an already-pending send, a foreign turn, …) — replayed
+//     exactly as the first call got it.
+//
+// classify (below) is the one table Code and gateRefusal (receipts.go) both
+// consult for these two questions — the code, and whether the answer is
+// stored — so the two can never again say different things about the same
+// error (r28 finding 1).
 type Command struct {
 	// Client is an id NewClientID minted, unique in the incarnation.
 	Client string
@@ -141,53 +218,185 @@ var (
 	ErrBadRequest = errors.New("engine: bad request")
 	// ErrUnknownCommand answers a command id outside the retry horizon.
 	ErrUnknownCommand = errors.New("engine: that command id has expired")
+	// ErrCommandInProgress refuses a resend of a SYNCHRONOUS command (Command's
+	// own doc says which) that found its reservation still open: the first
+	// call has not returned, this attempt ran nothing and changed nothing, and
+	// the id stays exactly as reserved as it was. Resend THE SAME id; a new id
+	// would be a second command layered on top of the one still running. Its
+	// code is "in_progress", the one code in the closed set that means that
+	// rather than "this attempt is over, try again however you like"
+	// (ErrUnavailable's and ErrNotAccepting's meaning) — see Command's own doc
+	// for the whole retry policy, by code.
+	ErrCommandInProgress = errors.New("engine: that command is still running")
+	// ErrSetOutcomeUnknown answers a Set whose caller's context ended after the
+	// settings worker had already CLAIMED the request: the provider has the
+	// change, or is about to, and whether it landed cannot be said from the
+	// caller's side — internal/acp writes a request before it can look at its
+	// context at all (conn.go's callRaw), so a cancellation past that point
+	// cannot honestly mean "nothing happened". It is the settings verb's
+	// CancelUnknown: the stream is what says, and the change's own delta
+	// arrives if it landed.
+	//
+	// It always WRAPS the context's own error, so errors.Is(err,
+	// context.DeadlineExceeded) and errors.Is(err, context.Canceled) still hold
+	// for a caller that matches on those. Its code is "aborted", shared with
+	// ErrCommandAborted: both are STORED answers whose outcome the engine
+	// cannot itself vouch for — see Command's own doc for the whole retry
+	// policy, by code.
+	ErrSetOutcomeUnknown = errors.New("engine: the settings change may or may not have landed")
+	// ErrIndexWrite answers a command that DID what it was asked to do and
+	// could not write it down: today the one such command is SetTitle, which
+	// renames and pins the session in craze and then records the new name in
+	// ~/.craze/sessions.jsonl for --continue and --resume to find. It always
+	// WRAPS the write's own failure, so errors.Is on that still holds.
+	//
+	// It is its own sentinel because the two halves need different words from
+	// a client: the rename HAPPENED and is to be said so, and beside it the
+	// index could not be written, which is a note and never a reason to stop
+	// (plan 021 §2.4). A client that could not tell them apart would have to
+	// choose between claiming a rename that did not happen and hiding one that
+	// did.
+	//
+	// Its code is "index_write", which 05-protocol.md does not list yet (C14
+	// adds it, beside unknown_row, in_progress and aborted). A resend of the
+	// SAME id replays this answer: the title is already set, so re-running the
+	// command would be a second rename. A client that wants the write attempted
+	// again sends a NEW id — or simply carries on, since the next index write
+	// of any kind records the pinned title along with everything else.
+	ErrIndexWrite = errors.New("engine: the session index could not be written")
+	// ErrCommandAborted answers a command id whose call did not return at all:
+	// it panicked on the way through. Whether it changed anything is not
+	// knowable, so the id is answered with this for as long as the table keeps
+	// it — never re-executed — and a client that wants another attempt sends a
+	// new id. Its code is "aborted": the closed set's word for "this answer is
+	// stored, but the outcome it stores is not knowable — re-read state before
+	// deciding anything, and use a new id if you still want the command,"
+	// because 05 has no code of its own for a craze bug.
+	ErrCommandAborted = errors.New("engine: the command's outcome is unknown")
 )
 
-// Code is err's protocol error code, the closed set 05-protocol.md lists, and
-// "" for nil. An error the engine does not know is "unavailable": a client
-// can only retry it.
-func Code(err error) string {
+// classification is one error's place in the closed set: the protocol code a
+// client matches on (05-protocol.md), and whether the receipts table STORES
+// the answer. classify is the ONE table Code and gateRefusal (receipts.go)
+// both consult — neither decides either question on its own — so they cannot
+// drift apart again the way r28 finding 1 found them: Code said not_accepting
+// for agent.ErrNotInTurn while gateRefusal did not know it, and a command
+// whose docs promise "never stored" was stored anyway.
+//
+// The invariant this exists to hold, over the WHOLE set: stored is false if
+// and only if code is one of unavailable, not_accepting or in_progress — the
+// three codes Command's own doc promises are never stored. Nothing here
+// decides that per case; it falls out of which three codes appear with
+// stored: false below, and classify_test.go asserts it holds for every
+// sentinel this switch names.
+type classification struct {
+	code   string
+	stored bool
+}
+
+func classify(err error) classification {
 	switch {
 	case err == nil:
-		return ""
+		return classification{code: ""}
+	case errors.Is(err, ErrIndexWrite):
+		// First among the sentinels, because this one WRAPS a failure from
+		// outside craze — a file error, whatever the filesystem said — and
+		// nothing below may be allowed to answer for it. STORED: the rename
+		// happened, and a resend must replay that fact rather than attempt a
+		// second rename (ErrIndexWrite's own doc, C12).
+		return classification{code: "index_write", stored: true}
 	case errors.Is(err, ErrNotAccepting), errors.Is(err, agent.ErrNotInTurn):
-		return "not_accepting"
+		// agent.ErrNotInTurn is an Interject with no turn: a GATE refusal
+		// exactly like ErrNotAccepting's — the engine has nothing to act on
+		// right now, whatever this command's own arguments are — so it is
+		// NEVER STORED (r28 finding 1).
+		return classification{code: "not_accepting"}
+	case errors.Is(err, ErrCommandInProgress):
+		// Never stored, but by a different mechanism: a duplicate that finds
+		// this reservation open is answered before finish is ever called, so
+		// gateRefusal is never actually consulted for it in production — it is
+		// classified false here anyway, for the one table's sake.
+		return classification{code: "in_progress"}
 	case errors.Is(err, ErrAlreadyPending):
-		return "already_submitted"
+		return classification{code: "already_submitted", stored: true}
 	case errors.Is(err, ErrStaleTurn):
-		return "stale_turn"
+		return classification{code: "stale_turn", stored: true}
 	case errors.Is(err, ErrStaleVersion):
-		return "stale_version"
+		return classification{code: "stale_version", stored: true}
 	case errors.Is(err, ErrUnknownRow):
-		return "unknown_row"
+		return classification{code: "unknown_row", stored: true}
 	case errors.Is(err, agent.ErrBadAnswer):
-		return "bad_request"
+		return classification{code: "bad_request", stored: true}
 	case errors.Is(err, agent.ErrAlreadyResolved):
-		return "already_resolved"
+		return classification{code: "already_resolved", stored: true}
 	case errors.Is(err, agent.ErrUnknownAsk):
-		return "unknown_ask"
-	case errors.Is(err, agent.ErrAskUnavailable):
-		return "unavailable"
+		return classification{code: "unknown_ask", stored: true}
+	case errors.Is(err, ErrCommandAborted), errors.Is(err, ErrSetOutcomeUnknown):
+		// Both are STORED answers whose outcome the engine cannot itself vouch
+		// for — a panic's, or a Set the worker had already claimed when its
+		// caller's context ended — spelled out rather than left to the
+		// default so a client can tell them from an ordinary "unavailable, try
+		// again" without matching text: see Command's own doc for the policy.
+		return classification{code: "aborted", stored: true}
+	case errors.Is(err, errNotRun):
+		// A Set answered WITHOUT running because its ctx was already dead when
+		// takeSet or runSet looked (settings.go): nothing happened, so — like
+		// every other gate refusal — it is NEVER STORED, and unavailable is
+		// its code because a client can only retry it (r28 finding 1).
+		return classification{code: "unavailable"}
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// A command that RAN and then gave up on its own context: Cancel's or
+		// Stop's session/cancel, an Interject whose deadline passed. Such a
+		// call cannot say that nothing happened — internal/acp writes a request
+		// to the pipe before callRaw can look at its context at all (conn.go),
+		// so the interjection may already be queued and the cancel may already
+		// have been taken, which is exactly what CancelUnknown says out loud —
+		// and "failed" would invite a client to send the same work under a NEW
+		// id and do it twice. aborted is the honest code: STORED, so this id
+		// never runs again, and the client re-reads state before deciding
+		// anything (r30 finding 1).
+		//
+		// Everything that ended on a dead context WITHOUT running is named
+		// ABOVE and never reaches here: a Set the caller took back out of the
+		// queue, or one takeSet or runSet found dead, wraps errNotRun, and one
+		// the worker had already claimed wraps ErrSetOutcomeUnknown. Both wrap
+		// the context's own error too, and both are matched first, so the order
+		// of these cases is what keeps "not run" and "ran, outcome unknown"
+		// apart.
+		return classification{code: "aborted", stored: true}
+	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
+		return classification{code: "unavailable"}
 	case errors.Is(err, ErrBadRequest):
-		return "bad_request"
+		return classification{code: "bad_request", stored: true}
 	case errors.Is(err, ErrUnknownCommand):
-		return "unknown_command"
+		return classification{code: "unknown_command", stored: true}
 	case errors.Is(err, agent.ErrQueueFull):
-		return "queue_full"
+		return classification{code: "queue_full", stored: true}
 	case errors.Is(err, agent.ErrQueueTextTooLong):
-		return "text_too_long"
+		return classification{code: "text_too_long", stored: true}
 	case errors.Is(err, agent.ErrPromptInFlight):
-		return "prompt_in_flight"
+		return classification{code: "prompt_in_flight", stored: true}
 	case errors.Is(err, agent.ErrForeignTurn):
-		return "foreign_turn"
+		return classification{code: "foreign_turn", stored: true}
 	case errors.Is(err, agent.ErrPromptCancelled):
-		return "prompt_cancelled"
+		return classification{code: "prompt_cancelled", stored: true}
 	case errors.Is(err, agent.ErrUnsupported):
-		return "unsupported"
+		return classification{code: "unsupported", stored: true}
 	default:
-		return "unavailable"
+		// Every error the switch above does not name is a command that RAN
+		// and failed — a provider/RPC refusal of a Set, an Interject the
+		// agent refused, a Cancel that failed — never a gate refusal (r28
+		// finding 1). "failed" says so: STORED, because the command already
+		// ran, and never "unavailable", which the docs promise a client is
+		// never told about a command that actually happened.
+		return classification{code: "failed", stored: true}
 	}
 }
+
+// Code is err's protocol error code, the closed set 05-protocol.md lists, and
+// "" for nil. An error the engine does not know is "failed": the command ran
+// and this is its stored, stable answer, never a reason to retry the same id.
+func Code(err error) string { return classify(err).code }
 
 // Control is the surface a client drives a session through: the TUI and
 // `craze prompt` hold one now, and the socket server and its clients will
@@ -196,10 +405,10 @@ func Code(err error) string {
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
-// Ask, Answer, State, NewClientID and Events wait on nothing: no channel, no
-// provider call, no Publish. Start, Subscribe, Interject, Cancel, Stop, Sync
-// and Close block and belong on a goroutine that is not the primary's reader —
-// a tea.Cmd. Subscribe is among
+// Ask, Answer, SetTitle, State, NewClientID and Events wait on nothing: no
+// channel, no provider call, no Publish. Start, Subscribe, Interject, Cancel,
+// Stop, Set, Sync and Close block and belong on a goroutine that is not the
+// primary's reader — a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
@@ -259,6 +468,22 @@ type Control interface {
 	Asks() []agent.AskRecord
 	Ask(id string) (agent.AskRecord, bool)
 	Answer(c Command, id string, a agent.AskAnswer) error
+
+	// The session's settings. Set blocks — one FIFO worker asks the provider,
+	// the session writes the change and its delta in one locked section, and
+	// the answer carries the confirmed value and the delta's revision — and it
+	// is bounded by its ctx throughout: a request still queued is answered with
+	// that context's error having changed nothing, and one the worker has
+	// claimed with ErrSetOutcomeUnknown, which is the honest answer once a
+	// request may already be on the wire.
+	//
+	// SetTitle asks no provider, so it is not queued behind anything; it does
+	// write the session's index row, which is file I/O on the caller's own
+	// goroutine (§3.2's documented exception, where the TUI has always done
+	// it). A write that failed comes back as ErrIndexWrite wrapping it, and
+	// means the session WAS renamed and only the record of it was not written.
+	Set(ctx context.Context, c Command, s Setting) (SetResult, error)
+	SetTitle(c Command, title string) error
 
 	// The queue's verbs. None of them starts a turn, and none of them waits.
 	Queue(c Command, text string) (agent.QueuedPrompt, error)

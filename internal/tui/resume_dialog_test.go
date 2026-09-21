@@ -136,7 +136,7 @@ func TestResumePickerEnterLoadsTheRow(t *testing.T) {
 	if !out.providerLocked || out.providerDefault.Name() != "cursor" {
 		t.Fatalf("provider %q locked=%v", out.providerDefault.Name(), out.providerLocked)
 	}
-	if !out.replaying || !out.loading {
+	if !out.replaying {
 		t.Fatal("a loaded session is replaying from the moment it is built (§3.5)")
 	}
 	if out.sess == nil {

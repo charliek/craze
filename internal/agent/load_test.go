@@ -126,7 +126,12 @@ func TestLoadReplayIsBracketedAndStamped(t *testing.T) {
 		t.Fatal(err)
 	}
 	evs := drainBuffered(s)
-	want := []string{"replay:start", "user", "thought", "tool", "text", "replay:end"}
+	// The meta before the end bracket is the install: the restored snapshot,
+	// said in the stream in the section that installed it, flushed before
+	// EventReplay{end} so it precedes the boundary that means "the restored
+	// snapshot is in place" (r23 finding 2). It is stamped replayed like
+	// everything else inside the bracket, which the loop below checks.
+	want := []string{"replay:start", "user", "thought", "tool", "text", "meta", "replay:end"}
 	if got := eventShape(evs); !equalStrings(got, want) {
 		t.Fatalf("replay shape %v, want %v\n%s", got, want, formatEvents(evs))
 	}
@@ -409,22 +414,36 @@ func TestLoadWithoutPinLetsTheAgentRetitle(t *testing.T) {
 	}
 }
 
-// TestSetTitlePinsAndEmitsNothing: /rename is craze's own — it renames the
-// session, pins it, and never touches the event channel, because it is called
-// from the UI's update goroutine and an emit there would block the UI on a
-// consumer the UI itself schedules.
-func TestSetTitlePinsAndEmitsNothing(t *testing.T) {
+// TestSetTitlePinsAndPublishesADelta: /rename is craze's own — it renames the
+// session, pins it against the agent's own title, and says so in a Title delta
+// with **no Event.Text**, which is what keeps a rename out of
+// `craze prompt --json`'s title line and out of the index as an agent title
+// (plan 021 §3.8). It still waits on nothing: the delta is enqueued with the
+// pin, under the same lock, and never published from the caller's goroutine,
+// because /rename is answered in the UI's own Update.
+func TestSetTitlePinsAndPublishesADelta(t *testing.T) {
 	s := newTestSession(t, Options{})
-	s.SetTitle("fix the flaky pty test")
+	if err := s.SetTitle("c-1/4", "fix the flaky pty test"); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
 	if got := s.Snapshot().Title; got != "fix the flaky pty test" {
 		t.Fatalf("title %q", got)
 	}
-	if evs := drainBuffered(s); len(evs) != 0 {
-		t.Fatalf("SetTitle must emit nothing:\n%s", formatEvents(evs))
+	_ = s.log.Flush(context.Background(), nil)
+	evs := drainBuffered(s)
+	if len(evs) != 1 || evs[0].Type != EventMeta || evs[0].Text != "" || evs[0].Cause != "c-1/4" ||
+		evs[0].State == nil || evs[0].State.Title == nil || *evs[0].State.Title != "fix the flaky pty test" {
+		t.Fatalf("SetTitle published:\n%s", formatEvents(evs))
 	}
 	s.onUpdate(sessionInfoNotification("the agent's own title"))
 	if got := s.Snapshot().Title; got != "fix the flaky pty test" {
 		t.Fatalf("the pin did not hold: %q", got)
+	}
+	// The pin refused the agent's title, so nothing changed and nothing is
+	// said: a delta is a change, not a notification that one was attempted.
+	_ = s.log.Flush(context.Background(), nil)
+	if evs := drainBuffered(s); len(evs) != 0 {
+		t.Fatalf("a refused agent title published:\n%s", formatEvents(evs))
 	}
 }
 

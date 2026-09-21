@@ -290,7 +290,7 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 	}}
 	sess := nativeJSONSession(t, model, ws)
 
-	if err := sess.SetModel(context.Background(), "test/b"); err != nil {
+	if _, err := sess.SetModel(context.Background(), "", "test/b"); err != nil {
 		t.Fatalf("SetModel: %v", err)
 	}
 	if _, err := sess.Prompt(context.Background(), "/expandme"); err != nil {
@@ -308,11 +308,13 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 		switch {
 		case ok:
 		case ev.Type == agent.EventMeta && ev.Text == "":
-			// The one event this file drops on purpose: the native
-			// session's answer to a model or effort switch is a bare
-			// EventMeta, which tells the TUI to re-read the snapshot and
-			// has nothing a headless caller could print (eventJSON's
-			// EventMeta case). Any other bare event is a missing rendering.
+			// The one event this file drops on purpose: an EventMeta with no
+			// Text. The native session's answer to a model or effort switch is
+			// one — it carries the model and config sections as a state delta
+			// (plan 021 §3.8) and has nothing a headless caller could print,
+			// because Event.Text is filled only by an agent naming the session
+			// (eventJSON's EventMeta case). Any other bare event is a missing
+			// rendering.
 		case ev.Type == agent.EventTurn, ev.Type == agent.EventAsk:
 			// The engine's turn events and the registry's ask endings fall to
 			// eventJSON's default on purpose: `--json` gains no line kind in

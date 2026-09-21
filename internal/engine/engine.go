@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/journal"
 )
 
 // ChainPolicy is what a settled turn does to the queue behind it. It is the
@@ -32,9 +33,22 @@ type ChainPolicy struct {
 	RetryForeignTurn bool
 }
 
-// Options configure an Engine. The zero value is the TUI's.
+// Options configure an Engine. The zero value is a TUI's chain policy and no
+// session index.
 type Options struct {
 	Chain ChainPolicy
+	// Index is the session index and what writing a row needs that the engine
+	// cannot know (index.go). A zero IndexOptions — which is what `craze
+	// prompt`, every TUI unit test and every golden leave it — writes nothing
+	// at all.
+	Index IndexOptions
+	// CrazeSessionID is the durable craze session id this session already has:
+	// the crazeId of the row a --continue or a --resume loaded, carried back in
+	// so that one thread of work keeps one identity across every agent session
+	// it is loaded into (session control SD-22). Empty mints a fresh UUIDv7,
+	// which is what a new session and a row written before crazeId existed both
+	// want.
+	CrazeSessionID string
 }
 
 // foreignRetryTick is how often a turn held by ChainPolicy.RetryForeignTurn
@@ -102,7 +116,11 @@ type launch struct {
 // in the section that made the change it describes, so the order of the
 // engine's events is the order of its state, with no lock held across a send.
 // What follows from it is that an engine event trails the state it describes:
-// State can already show a turn whose started has not been delivered.
+// State can already show a turn whose started has not been delivered. The same
+// rule holds one layer down, and is the session's to keep: **s.mu → the outbox
+// mutex**, every settings delta enqueued in the section that mutates the
+// snapshot (plan 021 §3.8). The engine does not author those; it serialises the
+// calls that cause them (settings.go).
 //
 // The observer runs inside the log's publishing boundary and takes only
 // e.obsMu, a leaf that guards the two flags it keeps.
@@ -117,6 +135,13 @@ type Engine struct {
 	asks *agent.AskRegistry
 	now  func() time.Time
 	opts Options
+	// craze is the durable craze session id (SD-22), fixed at construction and
+	// never written again, so it needs no lock.
+	craze string
+	// idx is the session index: the bookkeeping, the command-driven writes and
+	// the worker the observer feeds (index.go). Its mutex is a LEAF and no
+	// write of its ever runs under e.mu.
+	idx *indexWriter
 
 	mu       sync.Mutex
 	activity Activity
@@ -130,7 +155,6 @@ type Engine struct {
 	settled         map[string]error
 	settledIDs      []string
 	turnSeq         int
-	clientSeq       int
 	queue           agent.PromptQueue
 	armed           *armedSend
 	cancelsInFlight int
@@ -143,6 +167,26 @@ type Engine struct {
 
 	obsMu     sync.Mutex
 	replaying bool
+
+	// receipts is the command-id table (receipts.go): one table for the whole
+	// engine, shared by every client, with its own mutex — a LEAF. It is never
+	// held while e.mu, s.mu or registry.mu is taken (a command runs with it
+	// released), and never taken while one of those is held, so it adds no edge
+	// to the order above and cannot cycle. It mints the client ids too
+	// (NewClientID), which is why the engine keeps no client counter of its own.
+	receipts *receiptTable
+
+	// sets is the settings worker's FIFO: every Control.Set joins it under e.mu
+	// and is served one at a time, in arrival order (settings.go). setWake is
+	// its kick, one slot, for the same reason the driver's is.
+	sets    []*setReq
+	setWake chan struct{}
+	// beforeDropSet is a test barrier, nil in every build but a test's: it is
+	// called on a Set's own goroutine after its context has ended and before it
+	// takes itself out of the queue, so a test can force the one schedule the
+	// caller and the worker race for (settings.go's Set and takeSet). It is set
+	// before the engine is driven and never written again, so it needs no lock.
+	beforeDropSet func()
 
 	// kick wakes the driver. One slot is enough because the driver's passes
 	// are level-triggered: each re-reads the state under e.mu, so two kicks
@@ -173,6 +217,23 @@ type hooks struct {
 	// retryTick, when set, stands in for the driver's timer: a refused claim is
 	// taken again when the test sends on it, and at no other time.
 	retryTick <-chan time.Time
+	// beforeRunSet runs on the settings worker's own goroutine between taking a
+	// request out of the queue (takeSet) and the locked section that decides
+	// whether to run it and claims it (runSet) — the one gap in which a request
+	// is neither queued nor claimed, and the only place a test can force the
+	// schedules of r27 finding 3.
+	beforeRunSet func()
+	// beforeInlineSeed runs on a Submit's OWN goroutine, after that submit's
+	// turn has been launched and before the claimed index write it may still
+	// owe (runOwn): the window in which the turn can run, end and give its e.wg
+	// count back while its caller has not reached the write, which is the
+	// schedule r31 finding 1 is about. It is named the turn so a test can hold
+	// one submit and let the others through.
+	beforeInlineSeed func(turn string)
+	// receipts are the command-id table's own seams (receipts.go): its clock,
+	// and the barriers a duplicate's schedule turns on. Like the rest of these
+	// they are in place before the table exists and never assigned afterwards.
+	receipts *receiptHooks
 }
 
 // New builds the engine for sess. The session must own an event log
@@ -195,17 +256,24 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if !ok || src.Asks() == nil {
 		return nil, fmt.Errorf("engine: %T has no ask registry", sess)
 	}
+	craze := opts.CrazeSessionID
+	if craze == "" {
+		craze = newCrazeSessionID()
+	}
 	e := &Engine{
 		sess:     sess,
 		log:      owner.EventLog(),
 		asks:     src.Asks(),
 		now:      time.Now,
 		opts:     opts,
+		craze:    craze,
 		activity: ActivityStarting,
 		kick:     make(chan struct{}, 1),
+		setWake:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
 		hooks:    h,
 	}
+	e.idx = newIndexWriter(opts.Index, craze, sess.Snapshot, e.reportIndexErr)
 	// The session's clock, not the wall's: the Stub's is injected, and every
 	// golden that shows a time shows one of its. It is read where the session
 	// reads it already — on the goroutine that admits a prompt and the one
@@ -213,11 +281,32 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if c, ok := sess.(agent.Clocked); ok {
 		e.now = c.Now
 	}
+	// The receipts table keeps a clock of its OWN (time.Now, or a test's
+	// through these hooks) rather than the session's: how long a command id
+	// stays answerable is real elapsed time, and the session's clock is an
+	// event clock that a Stub freezes and a golden pins (r24 finding 6).
+	var rh *receiptHooks
+	if h != nil {
+		rh = h.receipts
+	}
+	e.receipts = newReceiptTable(rh)
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
-	e.wg.Add(1)
+	// The durable id, once per incarnation and before anything else can use it:
+	// one engine wraps one session, which owns one log, which is one
+	// incarnation, so this runs exactly once for each. It is a Note, so it is
+	// journal-only and never blocks, and it is written with no lock of any kind
+	// held — the convention every note in craze keeps (plan 020 §3.5, the
+	// session note's own noteSession).
+	e.log.Note(journal.DiagNote{Kind: journal.DiagCrazeSession, Fields: map[string]any{
+		"crazeSessionId": craze,
+		"loaded":         opts.CrazeSessionID != "",
+	}})
+	e.wg.Add(2)
 	go e.drive()
+	go e.serveSets()
+	go e.idx.serve()
 	return e, nil
 }
 
@@ -226,19 +315,19 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 // through Control, so that one component decides what runs and two clients cannot
 // contradict each other.
 //
-// What is still reached through here, and what takes each away:
+// What is still reached through here, and nothing else is:
 //
-//   - SetModel, SetMode, SetConfig, SetTitle — until settings become state deltas
-//     in order behind Control.Set and Control.SetTitle (C10);
 //   - Snapshot, which the TUI reads through Control.State() already, and which a
 //     caller that has no engine state to merge may still read here;
 //   - Events, which is the log's primary and therefore the very channel
 //     Control.Events() hands out: a helper written against a session — headless
 //     craze's final sweeps — reads the same stream through either.
 //
-// The TUI additionally keeps writing the session index itself, from the snapshot
-// this hands it, until the index moves into the engine (C12). Nothing else may go
-// around Control: no Begin, no Cancel, no queue verb, no Interject.
+// That is the whole list. The settings left with C10 — SetModel, SetMode and
+// SetConfig are Control.Set, serialised by one worker and answered with a
+// revision, and SetTitle is Control.SetTitle — and the session index left with
+// C12, so there is no verb here a client may still reach for: no Begin, no
+// Cancel, no queue verb, no Interject, no setter, no Upsert.
 func (e *Engine) Session() agent.Session { return e.sess }
 
 // Start starts the session. Until it returns the engine refuses every
@@ -295,13 +384,12 @@ func (e *Engine) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error
 	return e.log.Subscribe(o)
 }
 
-// NewClientID mints a client id unique in the incarnation.
-func (e *Engine) NewClientID() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.clientSeq++
-	return fmt.Sprintf("c-%d", e.clientSeq)
-}
+// NewClientID mints a client id unique in the incarnation. The receipts table
+// mints it, because the table is what has to recognise it afterwards: a
+// command naming a client this engine never minted is ErrBadRequest, which is
+// what keeps a per-client high-water mark meaningful (receipts.go's
+// "Identity"). It waits on nothing — the table's mutex is a leaf.
+func (e *Engine) NewClientID() string { return e.receipts.newClient() }
 
 // Sync returns once every event enqueued before the call has been delivered.
 func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) }
@@ -333,51 +421,141 @@ func (e *Engine) Ask(id string) (agent.AskRecord, bool) { return e.asks.Record(i
 //
 // It waits on nothing: one registry section and an enqueue, both of which are
 // bounded, so a client may call it from the primary's own reader.
+//
+// Its receipt is recorded without ever taking e.mu: Answer does not touch it
+// today (X40) and must not start now, so its entry hook (withSyncReceipt)
+// takes the table's mutex twice, briefly, with the registry section between
+// them and no lock of the engine's anywhere — and nothing else ever takes the
+// table's mutex while holding registry.mu either (receipts.go's package doc).
 func (e *Engine) Answer(c Command, id string, a agent.AskAnswer) error {
-	_, err := e.asks.Answer(c.Cause(), id, a)
-	return err
+	hash := receiptHash("Answer", id, answerSpelling(a))
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		_, err := e.asks.Answer(c.Cause(), id, a)
+		return err
+	})
 }
 
 // Interject merges text into the running turn. It is the session's own verb
 // and its own refusals: the engine adds nothing but the door.
-func (e *Engine) Interject(ctx context.Context, _ Command, text string) error {
-	e.mu.Lock()
-	refused := e.refusalLocked()
-	e.mu.Unlock()
-	if refused != nil {
-		return refused
-	}
-	return e.sess.Interject(ctx, text)
+func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
+	hash := receiptHash("Interject", text)
+	return withBlockingReceiptErr(ctx, e.receipts, c, hash, func() error {
+		e.mu.Lock()
+		refused := e.refusalLocked()
+		e.mu.Unlock()
+		if refused != nil {
+			return refused
+		}
+		return e.sess.Interject(ctx, text)
+	})
 }
 
 // Close refuses every later command, closes the session — which ends the turn
 // that is running and closes the log last, committing whatever the outbox
 // still holds — and joins the engine's goroutines, the cancel an armed send-now
 // asked for included. It is idempotent.
+//
+// # The turn that is running when it is called
+//
+// It gets its ending here, in the section that refuses admission, and that is
+// the ONE ending it gets. Without it a quit mid-turn left a turn with a started
+// and no ended in the record — the live smoke's finding A1, on every provider —
+// and a client folding the stream saw a turn that never closes. The stream is a
+// complete record (SD-30): a turn that has ended says so, whatever ended it,
+// and shutdown already authors the endings nothing else will (an armed send's
+// disarm below, every parked ask's `closing`).
+//
+// It is authored HERE and not left to the settlement because the settlement is
+// not coming: closed is set in this same section, and the driver's pass returns
+// at once for a closed engine (passLocked), so the continuation that comes back
+// afterwards runs no pass, emits nothing and touches nothing a client can see.
+// Clearing e.cur is what makes that final: the turn is no longer current for
+// State, for a cancel's release, or for anything that looks. One mutex, two
+// outcomes — a settlement that got there first found e.cur and left none behind,
+// and this one finds nothing to end — so there is exactly one ending either way.
+//
+// The ending is synthetic (the wire produced nothing), stopped `closing` — the
+// word the ask registry and the send-now's own disarm already use for this —
+// with no successor and the queue's own length as Pending: Close is not Stop, so
+// the rows stay where they are and nothing is said about them. It is enqueued
+// before the session's close, so the log's own close phases commit it.
+//
+// The index worker is joined too, but its join is bounded where the others are
+// not: a row is written through a file lock that nothing can interrupt, so the
+// worker abandons a write still in flight rather than make a quit wait for
+// another process to let go of the lock (indexWriter.serve). That write lands
+// on its own goroutine; what it records is state the engine had already
+// decided.
+//
+// What the observer posted and the worker never picked up is NOT dropped with
+// it. The worker's exit drains the slot one last time and hands a pending
+// seed, agent title or loaded-row touch to one final write (indexWriter.finish)
+// — this is the last moment any of them can be recorded, and a first prompt the
+// drain started vanishing from --continue on a quit is not something the TUI's
+// synchronous writes ever did. That final write is bounded, at 500 ms, and
+// abandoned when the bound runs out. A plain touch on its own is still dropped:
+// its only effect is an UpdatedAt the next run's first write bumps anyway.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
 		e.closed = true
 		e.activity = ActivityClosing
+		var batch []agent.Event
+		if t := e.cur; t != nil {
+			// The turn that was running has ended, and this is the only place
+			// left that can say so (the doc comment above). It carries the
+			// turn's own cause, as every other ending does.
+			e.cur = nil
+			batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+				ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
+				StopReason: stopClosing, Pending: e.queue.Len(),
+			}}, t.cause))
+		}
 		// An armed send will never fire now, and the record says so before the
 		// log stops taking work: a mandatory completion, like every other
-		// ending shutdown authors.
+		// ending shutdown authors. It follows the ending, where a settlement
+		// puts it too (settleLocked's batch).
 		if ev, ok := e.disarmLocked(agent.SendNowClosing, "", ""); ok {
-			e.log.Enqueue(ev)
+			batch = append(batch, ev)
 		}
+		e.log.Enqueue(batch...)
 		e.mu.Unlock()
 		e.closeErr = e.sess.Close()
 		close(e.done)
 		e.wg.Wait()
+		e.idx.close()
 	})
 	return e.closeErr
 }
 
+// reportIndexErr publishes a failed index write, for every write but the
+// rename whose caller is still there to be told (Control.SetTitle). The event
+// is a StateDelta carrying nothing but IndexErr: a session craze could not
+// remember is a note to the user and never a reason to stop running it, and
+// §2.4 keeps that note a client-local row.
+//
+// It is a mandatory completion — enqueued whether or not the outbox reports
+// room — because it is a report of something that has already happened and
+// there is nobody to refuse it to.
+func (e *Engine) reportIndexErr(cause, msg string) {
+	e.log.Enqueue(e.stamp(agent.Event{
+		Type: agent.EventMeta, State: &agent.StateDelta{IndexErr: msg},
+	}, cause))
+}
+
 // observe is the log's observer. It runs inside the publishing boundary, once
-// per committed event, so it does nothing but note what the driver has to look
-// at again and wake it: it takes no lock but its own leaf and calls neither the
-// log nor the session. It is the seed of S1c's fold.
+// per committed event, so it does nothing but note what the driver and the
+// index worker have to look at again and wake them: it takes no lock but its
+// own two leaves, does no I/O, and calls neither the log nor the session. It is
+// the seed of S1c's fold.
+//
+// A sub-agent's event is never the main session's news: the TUI has always
+// routed those away before any of this ran (applyEvent), and a sub-agent
+// finishing is not this session being used.
 func (e *Engine) observe(ev agent.Event) {
+	if ev.Agent != "" || ev.Type == agent.EventSubagent {
+		return
+	}
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
@@ -388,10 +566,34 @@ func (e *Engine) observe(ev agent.Event) {
 		e.obsMu.Unlock()
 		if ev.Replay.Phase == agent.ReplayEnd {
 			e.wake()
+			// Only a load replays, so this is exactly "a loaded session came
+			// up": its row is the row its id came from, and touching it is what
+			// sorts a resumed session to the front of the picker before it has
+			// done anything (index.go's load).
+			e.idx.post(indexWork{load: true})
 		}
 	case agent.EventForeignTurn:
 		if ev.ForeignTurn != nil && !ev.ForeignTurn.Running {
 			e.wake()
+		}
+	case agent.EventDone:
+		// A turn ended, so this session is the newest thing in the workspace.
+		// It is the session's own ending and not the engine's, because a turn
+		// the AGENT ran on its own ends here too and is just as much use of
+		// this session — which is what the TUI keyed on. A touch is a no-op
+		// until a row exists, so one before craze has ever prompted conjures
+		// nothing.
+		e.idx.post(indexWork{touch: true})
+	case agent.EventMeta:
+		// session_info_update: the agent named the session. Only an
+		// agent-initiated update fills Event.Text — a /rename and a load's own
+		// title seed carry theirs in State alone (plan 021 correction 20) — so
+		// this is the one title the index takes as the agent's. Replayed is
+		// deliberately NOT consulted: the TUI never consulted it either, and no
+		// agent replays a session_info_update, so the two rules cannot differ
+		// in practice and the one that was shipped is the one kept.
+		if ev.Text != "" {
+			e.idx.post(indexWork{title: ev.Text})
 		}
 	}
 }
@@ -479,6 +681,23 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 	default:
 		return SubmitResult{}, fmt.Errorf("%w: submit mode %q", ErrBadRequest, mode)
 	}
+	hash := receiptHash("Submit", text, string(mode), fromRow)
+	return withSyncReceipt(e.receipts, c, hash, func() (SubmitResult, error) {
+		return e.submit(c, text, mode, fromRow)
+	})
+}
+
+// submit is Submit's own work, run at most once per command id: see
+// withSyncReceipt.
+//
+// The index seed is the one thing here that is not instant: it is file I/O, on
+// this caller's goroutine, outside e.mu — §3.2's one documented exception, and
+// exactly where the TUI did it. It runs after the locked section has admitted
+// the turn and before this returns, so it is inside the command's receipt and a
+// resend replays the answer rather than writing a second row. Its failure is
+// NOT this call's answer: the turn has been admitted and is the answer, so the
+// failure goes out as a StateDelta{IndexErr} naming this command (index.go).
+func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string) (SubmitResult, error) {
 	var started []launch
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
 	// locked section so the cancel itself is made with the lock released.
@@ -552,7 +771,7 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 		e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
 		return SubmitResult{Queued: &row}, nil
 	}()
-	e.run(started)
+	e.runOwn(started, c.Cause())
 	if armedTurn != "" {
 		go e.cancelArmed(armedTurn, armedCause)
 	}
@@ -657,9 +876,69 @@ func (e *Engine) stamp(ev agent.Event, cause string) agent.Event {
 
 // run starts the continuations a locked section claimed, with the lock
 // released. Each was counted when it was claimed (launchLocked).
+//
+// It also posts each turn's first-prompt index seed to the worker. Every
+// caller of run but one is a turn the ENGINE started — a drain, a settlement's
+// successor, an armed send firing, a claim taken again — on the driver's
+// goroutine or on whichever one a continuation came back on, and none of those
+// may do file I/O. The one exception is a client's own Submit, which runs its
+// seed inline (runOwn). A seed is claimed once and once only, so a turn that
+// posts one after another path has already written it does nothing.
+//
+// The post comes BEFORE the launch, for the reason runOwn's admission does
+// (r31 finding 1): a turn gives its e.wg count back when it ends, so an
+// opportunity that only arrives after the launch can arrive after Close has
+// passed e.wg.Wait() and the worker's exit has looked at the slot — and then
+// nothing is left to write it. Posting is a merge and a non-blocking kick and
+// waits on nothing, so the turn loses nothing by it.
+//
+// The turn's CAUSE goes with the text. A turn the engine started still has one
+// where a client's command asked for it — the send-now that was armed, the
+// submit whose claim is being taken again — and a seed of that turn that fails
+// is a StateDelta{IndexErr} that must name it, exactly as a Submit's own does
+// (r29 finding 4). Only a drain's is empty: nobody asked for that turn now.
 func (e *Engine) run(ls []launch) {
 	for _, l := range ls {
+		e.idx.post(indexWork{seed: true, seedText: l.t.text, seedCause: l.t.cause})
+	}
+	for _, l := range ls {
 		go e.runTurn(l)
+	}
+}
+
+// runOwn is run for the turn a client's own Submit started: its seed is file
+// I/O on THIS goroutine — §3.2's one documented exception to "waits on
+// nothing", and exactly where the TUI wrote it — rather than the worker's, so
+// it sits inside the command's receipt and its failure names the command.
+//
+// The three steps are in this order, and the order is the whole of r31 finding
+// 1: the opportunity is ADMITTED (and claimed, when no other attempt is in
+// flight), then the turn is launched, then the claimed write is made. Every
+// turn e.wg counts has therefore made its seed opportunity visible to the
+// worker's exit before it can end, so Close can no longer pass e.wg.Wait() with
+// a seed that is about to be retained behind a failing one — which left a
+// session that had run two prompts with no index row at all, its retry kicking
+// a worker that had already gone.
+//
+// A claim this caller holds is never written by anyone else in the meantime:
+// the slot is empty while the attempt is in flight, so the worker's exit finds
+// nothing to claim and waits for this attempt through seedDone instead
+// (indexWriter.finish), and one engine still runs one Upsert at a time.
+func (e *Engine) runOwn(ls []launch, cause string) {
+	claimed := make([]bool, len(ls))
+	for i, l := range ls {
+		claimed[i] = e.idx.admitSeed(cause, l.t.text)
+	}
+	for _, l := range ls {
+		go e.runTurn(l)
+	}
+	for i, l := range ls {
+		if h := e.hooks; h != nil && h.beforeInlineSeed != nil {
+			h.beforeInlineSeed(l.t.id)
+		}
+		if claimed[i] {
+			e.idx.writeSeed(cause, l.t.text)
+		}
 	}
 }
 
@@ -815,32 +1094,35 @@ func (e *Engine) retryLocked(t *turn) []launch {
 //
 // The Command is not the ending's cause: the ending belongs to the turn and
 // carries the cause the turn was submitted with, as every other ending does.
-func (e *Engine) GiveUp(_ Command, turn string) error {
-	var next []launch
-	err := func() error {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.closed {
-			return ErrNotAccepting
-		}
-		if turn == "" || e.cur == nil || e.cur.id != turn {
-			return ErrStaleTurn
-		}
-		t := e.cur
-		if !t.retry {
-			// Running, or a claim of its own is in flight: either way this turn is
-			// not waiting for anything the client can give up on.
-			return ErrNotAccepting
-		}
-		t.givenUp, t.retry, t.retryDue = true, false, false
-		if e.cancelsInFlight > 0 {
+func (e *Engine) GiveUp(c Command, turn string) error {
+	hash := receiptHash("GiveUp", turn)
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		var next []launch
+		err := func() error {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.closed {
+				return ErrNotAccepting
+			}
+			if turn == "" || e.cur == nil || e.cur.id != turn {
+				return ErrStaleTurn
+			}
+			t := e.cur
+			if !t.retry {
+				// Running, or a claim of its own is in flight: either way this turn is
+				// not waiting for anything the client can give up on.
+				return ErrNotAccepting
+			}
+			t.givenUp, t.retry, t.retryDue = true, false, false
+			if e.cancelsInFlight > 0 {
+				return nil
+			}
+			next = e.settleLocked(t)
 			return nil
-		}
-		next = e.settleLocked(t)
-		return nil
-	}()
-	e.run(next)
-	return err
+		}()
+		e.run(next)
+		return err
+	})
 }
 
 // GiveUpDrain ends a client's wait for rows held behind a turn of the agent's
@@ -867,32 +1149,46 @@ func (e *Engine) GiveUp(_ Command, turn string) error {
 // the gate Stop sets, so the abandonment cannot be overtaken by the very drain it
 // gave up on. It makes no blocking call: Begin is the one thing it may call on
 // the session, under e.mu like every other claim.
-func (e *Engine) GiveUpDrain(_ Command) (turn string, pending int, err error) {
-	var next []launch
-	func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.closed {
-			err = ErrNotAccepting
-			return
-		}
-		if e.cur == nil {
-			next = e.passLocked()
-		}
-		if e.cur != nil {
-			turn = e.cur.id
-			return
-		}
-		e.stopped = true
-		pending = e.queue.Len()
-		// A send armed and waiting for the same drain goes with it, and says so,
-		// as it does for Stop: nothing will fire it now.
-		if ev, ok := e.disarmLocked(agent.SendNowStopped, "", ""); ok {
-			e.log.Enqueue(ev)
-		}
-	}()
-	e.run(next)
-	return turn, pending, err
+// giveUpDrainResult bundles GiveUpDrain's two values so its receipt has one T
+// to store: a resend must get back exactly what the first call returned, the
+// pair included.
+type giveUpDrainResult struct {
+	turn    string
+	pending int
+}
+
+func (e *Engine) GiveUpDrain(c Command) (turn string, pending int, err error) {
+	hash := receiptHash("GiveUpDrain")
+	res, err := withSyncReceipt(e.receipts, c, hash, func() (giveUpDrainResult, error) {
+		var out giveUpDrainResult
+		var next []launch
+		var ferr error
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.closed {
+				ferr = ErrNotAccepting
+				return
+			}
+			if e.cur == nil {
+				next = e.passLocked()
+			}
+			if e.cur != nil {
+				out.turn = e.cur.id
+				return
+			}
+			e.stopped = true
+			out.pending = e.queue.Len()
+			// A send armed and waiting for the same drain goes with it, and says so,
+			// as it does for Stop: nothing will fire it now.
+			if ev, ok := e.disarmLocked(agent.SendNowStopped, "", ""); ok {
+				e.log.Enqueue(ev)
+			}
+		}()
+		e.run(next)
+		return out, ferr
+	})
+	return res.turn, res.pending, err
 }
 
 // drainLocked starts what is waiting when nothing is current and a turn may
@@ -1131,6 +1427,12 @@ func (e *Engine) settleLocked(t *turn) []launch {
 const (
 	stopEndTurn   = "end_turn"
 	stopCancelled = "cancelled"
+	// stopClosing is the ending Close authors for the turn that was running
+	// when it was called. It is the word the rest of shutdown already uses for
+	// the same fact — agent.AskClosing for a parked ask, agent.SendNowClosing
+	// for an armed send — so a client that folds the stream reads one vocabulary
+	// for "the session went away under this".
+	stopClosing = "closing"
 )
 
 // settledCap is how many settled turns' failures TurnErr remembers.

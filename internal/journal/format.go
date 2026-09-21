@@ -127,6 +127,15 @@ const (
 	// did not change; the fields are the ask's id, kind and outcome, and the
 	// reason the reply was lost.
 	DiagAskLostDelivery = "ask_lost_delivery"
+	// DiagCrazeSession is the durable craze session id this incarnation is
+	// running under (session control SD-22, plan 021 §3.8), written once by
+	// the engine when it is built. It is the third identity beside the
+	// header's incarnation and the session note's provider session id: the
+	// one that survives a session/load into a new agent session and a host
+	// restart, and the one the session index row is keyed back to. The fields
+	// are the id and whether it was carried in from a loaded row or minted
+	// here.
+	DiagCrazeSession = "craze_session"
 )
 
 // diagNoteTooLarge replaces a note that stays over MaxRecordBytes even with

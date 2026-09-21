@@ -113,8 +113,15 @@ type Config struct {
 	// SessionIndex persists ~/.craze/sessions.jsonl, the catalog --continue
 	// and --resume read. nil means no persistence, which is what every TUI
 	// unit test and every golden uses: the TUI never reaches for the store
-	// itself, so nothing here can write a developer's real index (§3.2).
+	// itself, so nothing here can write a developer's real index (§3.2). It is
+	// handed to the engine, which is what writes it (plan 021 §3.8).
 	SessionIndex SessionIndex
+	// CrazeSessionID is the durable craze session id of the row Session was
+	// built to load: --continue resolves its row in internal/cli, so this is
+	// how that row's crazeId reaches the engine (session control SD-22). The
+	// resume picker has the row in hand and carries the id itself; a new
+	// session leaves this empty and the engine mints one.
+	CrazeSessionID string
 	// TerminalTitle turns on the tab title the Update wrapper maintains
 	// (§3.10). It defaults false, which is what every test Config and the
 	// frame runner leave it — the frame runner's tea.WithoutRenderer() makes
@@ -158,13 +165,15 @@ type Model struct {
 	input textarea.Model
 
 	// eng is the engine the model drives its session through: admission, the
-	// message queue and its verbs, send-now, cancel, and the asks (plan 021
-	// §3.4, §3.6). sess is the engine's own session — the raw provider seam —
-	// kept only for what has not moved behind engine.Control yet: the setters
-	// (SetModel / SetMode / SetConfig / SetTitle, until C10), and nothing else.
-	// writeIndex stays in the model until C12, reading the snapshot the engine's
-	// State already gives it. Engine.Session's own comment carries the same list.
-	// Both are assigned only in setSession, which records the engine in owner too.
+	// message queue and its verbs, send-now, cancel, the asks, the settings,
+	// and — since C12 — the session index and the durable session id (plan 021
+	// §3.4, §3.6, §3.8). sess is the engine's own session, the raw provider
+	// seam, and **no production path calls anything on it at all**: the index
+	// was the last thing the model did for itself, and the engine does it now.
+	// It is kept because an engine the model could not build leaves the session
+	// to be closed all the same (engErr), and because the tests reach for the
+	// session they handed in. Both are assigned only in setSession, which
+	// records the engine in owner too.
 	eng  *engine.Engine
 	sess agent.Session
 	// client is this model's client id on eng, minted once per engine, and
@@ -214,20 +223,17 @@ type Model struct {
 	// startCmd and the first waitEvent — and only EventReplay{end} clears it.
 	// Whichever of startedMsg and that event lands second runs sessionUp.
 	replaying bool
-	// loading remembers what replaying was constructed from, because
-	// replaying is cleared: only a loaded session touches the index when it
-	// comes up, since only a loaded session already has a row there.
-	loading bool
-
-	// sessionIndex is Config.SessionIndex; nil means nothing is persisted.
-	// indexRow says the index has a row for this session, so a touch has
-	// something to touch — a session started and quit without a prompt must
-	// leave nothing behind (§3.2). indexSeeded says the first send has
-	// already written its fallback title, so later sends do not rewrite the
-	// whole file for a title that can no longer change anything.
+	// sessionIndex is Config.SessionIndex; nil means nothing is persisted. The
+	// model does not write it any more — the engine does, and decides every
+	// moment worth recording (plan 021 §3.8) — so this is held only to hand to
+	// the engine setSession builds.
+	//
+	// crazeID is Config.CrazeSessionID: the durable id of the row a --continue
+	// loaded, for the engine to keep rather than mint a new one (SD-22). The
+	// resume picker has the row itself and passes its id to setSession
+	// directly.
 	sessionIndex SessionIndex
-	indexRow     bool
-	indexSeeded  bool
+	crazeID      string
 
 	// mouseEnabled is --no-mouse kept on the model: the flag decides what
 	// bubbletea reports, and this decides what craze does with a mouse message
@@ -311,6 +317,20 @@ type Model struct {
 	// process, where the bug it was introduced for only made it flicker.
 	modeInFlight string
 	modeGen      int
+
+	// modeRev, modelRev and configRev are the highest StateDelta Seq this model
+	// has applied for each settings section: the mode, the model, and the
+	// config options — one revision for all of them, because a config delta
+	// carries every option in full.
+	//
+	// They are what a delayed answer is judged against (mayApply). modeGen,
+	// applyGen and modeInFlight stay exactly what they were: optimistic view
+	// state about this model's own requests. These are about the shared state
+	// the session actually holds, which another client can change too, and the
+	// only thing that orders the two is the revision the deltas carry.
+	modeRev   uint64
+	modelRev  uint64
+	configRev uint64
 
 	// dialog is the modal layer: at most one is up, drawn over the transcript
 	// region and hit-tested before any band. mdlg is the model dialog's own
@@ -563,26 +583,34 @@ type errMsg struct {
 }
 type actionErrMsg struct{ err error }
 
-// revertModeMsg is SetMode coming back refused, or never coming back inside
-// modeCallTimeout. gen is the request it answers for; prev is what the chip
-// showed before that request asked.
+// revertModeMsg is a mode change coming back refused, or never coming back
+// inside modeCallTimeout. gen is the request it answers for; prev is what the
+// chip showed before that request asked, and at the mode section's revision
+// when it asked (mayApply).
 type revertModeMsg struct {
 	gen  int
 	prev string
 	err  error
+	at   uint64
 }
 
-// modeAppliedMsg is SetMode coming back accepted: the session's snapshot
+// modeAppliedMsg is a mode change coming back accepted: the session's snapshot
 // carries this mode now, so the chip can go back to reading it. gen is the
-// request it answers for.
+// request it answers for. It writes no value of its own — it only takes the
+// chip's mask down — so it needs no revision.
 type modeAppliedMsg struct {
 	gen int
 	id  string
 }
 
+// revertModelMsg is a model change coming back refused. at is the model
+// section's revision when it asked: a refusal that arrives after somebody
+// else's change has been applied may show its error but may not put prev back
+// (mayApply).
 type revertModelMsg struct {
 	prev string
 	err  error
+	at   uint64
 }
 type refreshSnapMsg struct{}
 
@@ -612,6 +640,31 @@ type planImplementFailedMsg struct {
 	gen  int
 	prev string
 	err  error
+	at   uint64
+}
+
+// mayApply reports whether a settings answer that has come back late may still
+// write its value: it may unless a delta for its section with a higher revision
+// has been applied since the request was issued.
+//
+// applied is the highest revision this model has applied for that section
+// (Model.modeRev and its two siblings), at is where the section stood when the
+// request was issued, and rev is the revision the engine confirmed the change
+// at — 0 for a refusal, which confirms nothing. So a refusal is judged against
+// where it started and a confirmation against where it landed, and in both
+// cases the question is the same: has anything newer been applied?
+//
+// This is the guard a client that reads State() and a clock cannot have. The
+// engine's events trail the state they describe, a setting is not monotonic —
+// it can go plan → agent → plan — and the model's own optimistic value is not
+// the session's, so "read the snapshot and compare" answers the wrong question.
+// The revision of the last delta applied is the one thing that only ever moves
+// forward (plan 021 §3.8, panel astra 15).
+func mayApply(applied, at, rev uint64) bool {
+	if rev > at {
+		at = rev
+	}
+	return applied <= at
 }
 
 // sessionOwner is the one record of which engine — and so which session — the
@@ -658,7 +711,16 @@ func (o *sessionOwner) current() *engine.Engine {
 // paths lands here. Exactly one engine ever wraps one session — a second is
 // refused by design — so a caller that swaps sessions closes the old engine
 // first, which is the same call that closes the old session.
-func (m *Model) setSession(s agent.Session) {
+//
+// crazeID is the durable craze session id this session already has: the crazeId
+// of the row it was built to load, so that one thread of work keeps one
+// identity across every agent session it is loaded into (session control
+// SD-22). Every construction path supplies it — internal/cli through
+// Config.CrazeSessionID for --continue, internal/cli's frame runner the same
+// way, and the resume picker from the row it chose — and "" is a new session,
+// which the engine mints an id for. The provider picker builds a NEW session
+// and so passes "" deliberately.
+func (m *Model) setSession(s agent.Session, crazeID string) {
 	// A command belongs to the session it was run from — its workspace is that
 	// session's — so a session change ends it. It does not *wait* for it: this
 	// runs inside Update, on the one goroutine bubbletea draws from, and a
@@ -689,7 +751,19 @@ func (m *Model) setSession(s agent.Session) {
 	// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind
 	// it carries on, and a prompt the session refuses is shown as the refusal it
 	// is rather than waited out (engine.ChainPolicy).
-	eng, err := engine.New(s, engine.Options{})
+	eng, err := engine.New(s, engine.Options{
+		CrazeSessionID: crazeID,
+		Index: engine.IndexOptions{
+			Store: m.sessionIndex,
+			CWD:   m.cwd,
+			// The provider a row is recorded under before the session has
+			// answered with one of its own: the resolved default it was
+			// started as.
+			Provider:  m.providerDefault.Name(),
+			Hidden:    hiddenProvider,
+			TitleLine: indexTitleLine,
+		},
+	})
 	if err != nil {
 		m.engErr = err
 		m.sess = s
@@ -709,6 +783,18 @@ func (m *Model) nextCmd() engine.Command {
 	}
 	m.cmdSeq++
 	return engine.Command{Client: m.client, ID: fmt.Sprintf("%d", m.cmdSeq)}
+}
+
+// nextCmds is n command ids at once, for an Update that hands a tea.Cmd more
+// than one call to make: the closure runs on another goroutine and may not
+// touch the model, so every id it can spend is minted here. One it turns out
+// not to need is simply a number nobody used.
+func (m *Model) nextCmds(n int) []engine.Command {
+	cmds := make([]engine.Command, n)
+	for i := range cmds {
+		cmds[i] = m.nextCmd()
+	}
+	return cmds
 }
 
 func New(cfg Config) Model {
@@ -749,6 +835,7 @@ func New(cfg Config) Model {
 		loadSession:     cfg.LoadSession,
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
+		crazeID:         cfg.CrazeSessionID,
 		terminalTitle:   cfg.TerminalTitle,
 		host:            cfg.Host,
 		sessProvider:    prov.Name(),
@@ -759,7 +846,6 @@ func New(cfg Config) Model {
 		shell: newShellController(),
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
-		loading:   cfg.Loading,
 		// Turn 1 is the session before the first prompt: every event has an
 		// identity from the start, and no engine turn carries it.
 		turnSeq: 1,
@@ -788,8 +874,10 @@ func New(cfg Config) Model {
 		}
 	}
 	// Once the switch has decided: a picker starts with whatever Config.Session
-	// was, usually nothing, and its own setSession replaces it.
-	m.setSession(sess)
+	// was, usually nothing, and its own setSession replaces it. Config's craze
+	// id belongs to Config.Session — the row --continue resolved — so a picker
+	// that builds another session carries its own row's id instead.
+	m.setSession(sess, m.crazeID)
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
@@ -1154,7 +1242,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// on the chip rather than lost behind prev. refreshSnap is a no-op
 		// before a session exists, which is what leaves prev in place then.
 		m.modeInFlight = ""
-		m.snap.CurrentMode = msg.prev
+		if mayApply(m.modeRev, msg.at, 0) {
+			m.snap.CurrentMode = msg.prev
+		}
 		m.refreshSnap()
 		m.addError(msg.err.Error())
 		return m, nil
@@ -1163,8 +1253,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.modeSettled(msg.gen), nil
 
 	case revertModelMsg:
-		m.snap.CurrentModel = msg.prev
-		m.model = msg.prev
+		// The guard /model never had: another client — or the agent — may have
+		// changed the model while this request was in flight, and a refusal
+		// about a value nobody is on any more must not put its prev back. The
+		// error row is still the user's to see either way.
+		if mayApply(m.modelRev, msg.at, 0) {
+			m.snap.CurrentModel = msg.prev
+			m.model = msg.prev
+		}
 		m.addError(msg.err.Error())
 		return m, nil
 
@@ -1255,7 +1351,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and the plan is still the last thing on screen, so it is still on
 		// offer — unless something retired it while SetMode was in flight, in
 		// which case there is no plan above to implement any more.
-		tm, cmd := m.update(revertModeMsg{gen: msg.gen, prev: msg.prev, err: msg.err})
+		tm, cmd := m.update(revertModeMsg{gen: msg.gen, prev: msg.prev, err: msg.err, at: msg.at})
 		next := tm.(Model)
 		if msg.seq == next.turnSeq && next.planDeadSeq != next.turnSeq {
 			next.planOfferSeq = next.turnSeq
@@ -2141,22 +2237,12 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 // beginTurn is what one turn starting does to the model's view of the session,
 // whether the model learned of it from Submit's own answer or from the started
 // event the engine published — a drained row, an armed send firing, another
-// client's prompt. One place, so the two can never drift: a drained row draws
-// its user block and seeds the index exactly as a typed one does, because until
-// the index moves into the engine this is where a first prompt is recorded.
+// client's prompt. One place, so the two can never drift.
+//
+// The first prompt's index seed used to be here; it is the engine's now, which
+// is what makes it happen for a turn no client started (plan 021 §3.8).
 func (m *Model) beginTurn(id, text string) {
 	m.addUser(text)
-	if !m.indexSeeded {
-		// The first prompt is the first thing worth showing in a picker, so
-		// it is what creates the row — and it is what fills the title of a
-		// loaded row that never got one. Later sends change nothing a title
-		// rule would keep, so they do not rewrite the file.
-		// Only a write that landed retires the first-prompt title: a
-		// session that has not learned its id yet, or an index craze could
-		// not write, gets another chance on the next send rather than
-		// leaving the session out of every future picker.
-		m.indexSeeded = m.writeIndex(fallbackTitle(text), sessions.TitleKindFallback)
-	}
 	m.status = statusWorking
 	// A new turn: whatever a cancel masked belonged to the turn before it.
 	m.cardMask, m.cardMasking = "", false
@@ -2292,7 +2378,7 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 // while the session is still in plan mode, so the prompt is only written once
 // SetMode has come back, and a SetMode that fails sends nothing at all.
 func (m Model) implementPlan() (tea.Model, tea.Cmd) {
-	if m.viewing != "" {
+	if m.viewing != "" || m.eng == nil {
 		return m, nil
 	}
 	id := m.implementModeID()
@@ -2310,12 +2396,12 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
 	seq := m.turnSeq
-	sess := m.sess
+	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
 		defer cancel()
-		if err := sess.SetMode(ctx, id); err != nil {
-			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err}
+		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
+			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err, at: at}
 		}
 		return planImplementMsg{seq: seq, gen: gen, mode: id}
 	}
@@ -2331,6 +2417,13 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 // makes it, and short enough that a wedged one corrects itself while the user
 // is still looking at the same screen. Timing out is an ordinary refusal: it
 // returns the revert, which puts the chip back and clears the flag.
+//
+// The bound is real only because the engine honours it after the settings
+// worker has claimed the request too: such a Set returns
+// engine.ErrSetOutcomeUnknown on this context rather than waiting for a
+// provider that may never answer (r25 finding 2). Here that error is an error
+// like any other — the row, and the revert the revision guard allows — and if
+// the change did land after all, its own delta corrects the mirror.
 //
 // A var rather than a const only so a test can shorten it: nothing in the
 // program writes it.
@@ -2621,8 +2714,8 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if m.planEarnsOffer(ev.StopReason) {
 			m.planOfferSeq = m.turnSeq
 		}
-		// A turn ended, so this session is the newest thing in the workspace.
-		m.touchIndex()
+		// A turn ended, so this session is the newest thing in the workspace —
+		// which the engine's own observer records in the index (plan 021 §3.8).
 	case agent.EventError:
 		// The session's own failure, and the one place its row is drawn: the
 		// turn's ending follows and only settles the status, which this has
@@ -2652,13 +2745,10 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.retirePlanOffer()
 		}
 		m.refreshSnap()
-		if ev.Text != "" {
-			// session_info_update: the agent named the session. It replaces a
-			// first-prompt fallback but loses to a /rename pin, which the
-			// index decides — the session has already refused it if it is
-			// pinned, so this only ever carries a title craze may keep.
-			m.writeIndex(ev.Text, sessions.TitleKindAgent)
-		}
+		// session_info_update fills ev.Text: the agent named the session, and
+		// the engine's observer writes that to the index as an agent title
+		// (plan 021 §3.8). The composer's own title is read back by refreshSnap
+		// above, as it always was.
 	}
 }
 
@@ -2943,15 +3033,22 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 	// to settle.
 	current := t.ID != "" && t.ID == m.turnID
 	failed := t.Err != ""
+	// cancelled is the synthetic ending the model has a word for. The engine
+	// authors one other kind that is synthetic and did not fail — the ending it
+	// gives the turn that was running when the session closed (engine's Close,
+	// stop reason "closing") — and that one is not a cancel: it reaches Update
+	// only while craze is already quitting, and a "cancelled" note under it
+	// would be the wrong word for the last thing on the screen.
+	cancelled := t.Synthetic && !failed && t.StopReason == stopCancelled
 	switch {
-	case t.Synthetic && !failed:
+	case cancelled:
 		// Cancelled before the prompt's turn opened: while it was still waiting
 		// for the agent's first command catalog, or right after Enter. Nothing
 		// ran and nothing failed, so this is not an error state: it is the ending
 		// a cancelled turn has, and the transcript owes the row it already drew
 		// the same note — Esc leaves nothing else behind.
 		m.addNote(stopCancelled)
-	case t.Synthetic:
+	case t.Synthetic && failed:
 		// A prompt the session refused emits no event of any kind, so this is
 		// the only place its row can be drawn.
 		m.addError(t.Err)
@@ -2959,7 +3056,7 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 	if !current {
 		return
 	}
-	if t.Synthetic && !failed {
+	if cancelled {
 		// Part of the settlement and not of the row: it is what tells the idle
 		// that follows Esc from the idle that follows an answer, so it belongs to
 		// the turn the model is on.
@@ -3008,6 +3105,22 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 // this deliberately leaves alone.
 func (m *Model) applyStateDelta(ev agent.Event) {
 	st := ev.State
+	// The settings sections draw nothing, and the mirror is still read from the
+	// session (refreshSnap, below in applyEvent): what is taken from them here
+	// is only their revision — the highest Seq applied per section — which is
+	// what tells a delayed answer whether the value it is about is still the
+	// current one (mayApply). It is recorded for every delta, this model's own
+	// included: an echo is still a change that has been applied, and the
+	// revision has to be able to overtake a request issued before it.
+	if st.Mode != nil && ev.Seq > m.modeRev {
+		m.modeRev = ev.Seq
+	}
+	if st.Model != nil && ev.Seq > m.modelRev {
+		m.modelRev = ev.Seq
+	}
+	if st.Config != nil && ev.Seq > m.configRev {
+		m.configRev = ev.Seq
+	}
 	// The note: what was lost, which only a cleared send-now section can say. It
 	// does not touch armedDraft: this delta names the command that caused the
 	// DISARM, not the one that armed what it retired, so clearing the marker from
@@ -3046,6 +3159,16 @@ func (m *Model) applyStateDelta(ev agent.Event) {
 	// and drawing the row from both would draw one failure twice.
 	if st.Detail != "" {
 		m.addError(st.Detail)
+	}
+	// A session-index write that failed: the same row writeIndex drew itself
+	// before the index moved into the engine, and §2.4's rule that it stays a
+	// client-local one. It is drawn for this model's OWN commands too — a seed
+	// is reported after Submit has already answered, so there is no return
+	// value it could have come back on — and for the writes no command caused
+	// at all (the agent's title, a turn's end), which is exactly the set the
+	// model used to write rows for.
+	if st.IndexErr != "" {
+		m.addError(st.IndexErr)
 	}
 }
 
@@ -3093,9 +3216,13 @@ func (m Model) modeSettled(gen int) Model {
 func (m Model) sessionReady() bool { return m.started && !m.replaying }
 
 // sessionUp is the tail startedMsg used to run alone: the status goes idle,
-// the elapsed counter starts, the skills are rescanned, and a loaded session
-// touches its index row. It is called from both keys and does nothing until
-// both have landed, so it runs exactly once however they are ordered.
+// the elapsed counter starts and the skills are rescanned. It is called from
+// both keys and does nothing until both have landed, so it runs exactly once
+// however they are ordered.
+//
+// A loaded session's index row used to be touched here. It is the engine's
+// now, keyed to the one event that says a load is over — EventReplay{end},
+// which only a load produces (plan 021 §3.8).
 func (m *Model) sessionUp() {
 	if !m.sessionReady() {
 		return
@@ -3103,12 +3230,16 @@ func (m *Model) sessionUp() {
 	m.status = statusIdle
 	m.sessStart = m.now()
 	m.rescanSkills()
-	if m.loading {
-		// Only a loaded session: its row is where the id came from, so
-		// touching it is bumping something that exists. A new session gets no
-		// row until it has something to show (§3.2).
-		m.writeIndex("", sessions.TitleKindNone)
+}
+
+// indexWriteText is the failure behind an engine.ErrIndexWrite as a transcript
+// row draws it: the store's own message and not the sentinel's, which is the
+// line writeIndex drew before the index moved into the engine.
+func indexWriteText(err error) string {
+	if cause := errors.Unwrap(err); cause != nil {
+		return cause.Error()
 	}
+	return err.Error()
 }
 
 // titleRuneCap is how long a session title may be in the index. Runes, not
@@ -3116,19 +3247,14 @@ func (m *Model) sessionUp() {
 // open in Japanese as in ASCII.
 const titleRuneCap = 120
 
-// fallbackTitle is the title a session carries until the agent names it or the
-// user renames it: the first line of the first prompt. It is not a pin — an
-// agent title replaces it, and /rename replaces either (§3.6).
-//
-// The prompt's shell context is not part of that first line. A picker row
-// reading "<shell_context>" would name every session that opened with a
-// command the same thing, and none of them by what was asked; the strip is
-// here rather than at the call site so that a second caller cannot forget it
-// (plan 022 §3.6, and nativeTitle for the native session's own copy).
-func fallbackTitle(prompt string) string {
-	_, prompt = agent.SplitShellContext(prompt)
-	first, _, _ := strings.Cut(prompt, "\n")
-	return capRunes(sanitizeLine(first), titleRuneCap)
+// indexTitleLine folds a title onto the one line a session-index row holds and
+// caps it. It is what the engine writes every row's title through
+// (engine.IndexOptions.TitleLine), and what /rename normalises with before it
+// even asks: how a title is made safe to draw is a rendering rule, so it stays
+// here with the rest of them rather than being spelled a second time above the
+// provider seam.
+func indexTitleLine(title string) string {
+	return capRunes(sanitizeLine(title), titleRuneCap)
 }
 
 func capRunes(s string, n int) string {
@@ -3143,66 +3269,6 @@ func capRunes(s string, n int) string {
 		count++
 	}
 	return s
-}
-
-// writeIndex is the one place the TUI persists a session. There is no store
-// here and no path: Config.SessionIndex is an interface and nil means "do not
-// persist", which is what keeps every unit test and every golden off a
-// developer's real ~/.craze/sessions.jsonl (§3.2). A session with no id yet is
-// nothing to record either.
-//
-// The write is synchronous on the bubbletea goroutine, exactly as
-// SaveProvider's is, and a failure is a transcript line rather than a fatal:
-// craze not being able to remember a session is not a reason to stop running
-// it.
-// writeIndex upserts this session's row, reporting whether the index now holds
-// it. A nil index is "nothing to persist", which counts as done, and so is a
-// hidden provider's session; a session that has not learned its id yet, and a
-// write that failed, both count as not done, so a caller that only writes once
-// can retry on its next chance.
-func (m *Model) writeIndex(title string, kind sessions.TitleKind) bool {
-	if m.sessionIndex == nil {
-		return true
-	}
-	provider := m.snap.Provider.Name
-	if provider == "" {
-		// Only reachable before a session has answered with its own
-		// provider; the resolved default is the one it was started as.
-		provider = m.providerDefault.Name()
-	}
-	if hiddenProvider(provider) {
-		// A hidden provider's sessions stay out of the shared index until it
-		// has a loader (plan 018 §3.4), so --continue and --resume never
-		// pick a row nothing can load. Done, not failed: no retry and no
-		// error line.
-		return true
-	}
-	if m.snap.SessionID == "" {
-		return false
-	}
-	row := sessions.Row{
-		SessionID: m.snap.SessionID,
-		Provider:  provider,
-		CWD:       m.cwd,
-		Title:     capRunes(sanitizeLine(title), titleRuneCap),
-		TitleKind: kind,
-	}
-	if err := m.sessionIndex.Upsert(row); err != nil {
-		m.addError(err.Error())
-		return false
-	}
-	m.indexRow = true
-	return true
-}
-
-// touchIndex bumps the row's updatedAt, so --resume orders by when a session
-// was last used. It is a no-op until a row exists: a turn the agent ran on its
-// own before craze ever sent a prompt must not conjure a titleless row.
-func (m *Model) touchIndex() {
-	if !m.indexRow {
-		return
-	}
-	_ = m.writeIndex("", sessions.TitleKindNone)
 }
 
 // refreshSnap re-reads the session's state through the engine, which embeds the

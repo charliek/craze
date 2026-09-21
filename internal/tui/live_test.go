@@ -194,6 +194,72 @@ func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	}
 }
 
+// TestWiredFallbackModelChangeGoesThroughSetConfig is r25 finding 3's last
+// gap, closed against the real wire: `/model`'s SetModel → SetConfig fallback,
+// end to end over ACP and through the engine, against an agent that really does
+// refuse session/set_model (-32601, the live shape for a method an agent does
+// not implement).
+//
+// Everything before this was a simulation of that agent — the Stub's
+// FailNextSetModel, or a session driven by hand — so the one thing nobody had
+// run was the whole chain: the command mints two ids, the first Set is refused
+// by the agent itself, the second sets the model as the config option it lives
+// in, the session moves CurrentModel with it and publishes both sections, and
+// the model's own mirror ends on the new model rather than being put back by
+// the refreshSnap that every meta triggers.
+func TestWiredFallbackModelChangeGoesThroughSetConfig(t *testing.T) {
+	isolateSkillsHome(t)
+	bin := buildFakeAgent(t)
+	ws := t.TempDir()
+	sess := agent.New(agent.Options{
+		Binary:    bin,
+		ExtraArgs: []string{"-script=modelconfig-refuse"},
+		Workspace: ws,
+		Force:     true,
+		Stderr:    io.Discard,
+	})
+	if err := sess.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing here quits, so the child is reaped by hand; the pump's cleanup
+	// closes the engine, which closes this session too, and both are idempotent.
+	t.Cleanup(func() { _ = sess.Close() })
+
+	m := New(Config{Session: sess, Workspace: ws, Yolo: true, Model: "default"})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = tm.(Model)
+	tm, _ = m.Update(startedMsg{})
+	m = tm.(Model)
+	if opt := agent.ModelConfigOption(m.snap); opt == nil || opt.Current != "default" {
+		t.Fatalf("the agent advertised %+v, want the model option at its starting value", opt)
+	}
+	if m.snap.CurrentModel != "default" {
+		t.Fatalf("the session started on %q", m.snap.CurrentModel)
+	}
+
+	m = pumpEnter(t, m, "/model composer")
+	m = pumpSettled(t, m)
+
+	if got := m.snap.CurrentModel; got != "composer" {
+		t.Fatalf("the screen ended on %q, want the model the fallback set", got)
+	}
+	if m.model != "composer" {
+		t.Fatalf("the status row says %q", m.model)
+	}
+	snap := sess.Snapshot()
+	if snap.CurrentModel != "composer" {
+		t.Fatalf("the session's own model is %q: a config-backed model change IS a model change", snap.CurrentModel)
+	}
+	// The proof that the FALLBACK is what moved it: session/set_model was
+	// refused, so the only thing that can have set the option is session/set_config.
+	if opt := agent.ModelConfigOption(snap); opt == nil || opt.Current != "composer" {
+		t.Fatalf("the model option is %+v, so the fallback never reached the agent", opt)
+	}
+	if rows := texts(m, entryError); len(rows) != 0 {
+		t.Fatalf("the fallback succeeded, so nothing is the user's to see: %q", rows)
+	}
+}
+
 // TestMain records the environment before any test rewrites HOME, so the one
 // fake-agent build below keeps the developer's warm build cache. It also forces
 // a true-colour profile: `go test` has no TTY, so lipgloss would otherwise

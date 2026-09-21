@@ -125,6 +125,20 @@ func openNative(t *testing.T) contractSession {
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// Start publishes one install delta — the model the harness opened on, its
+	// effort option and the plugin rows, said in the stream instead of only in
+	// Snapshot() (plan 021 §3.8, r23 finding 2). It is the session coming up
+	// and not a change made while a client watched, so it comes off here and
+	// every case below reads a stream that starts empty, exactly as the Stub's
+	// does (its set-up publishes nothing at all).
+	select {
+	case ev := <-s.Events():
+		if ev.Type != agent.EventMeta || ev.State == nil {
+			t.Fatalf("the first event a started native session published is %s, want the install delta", ev.Type)
+		}
+	case <-time.After(contractWait):
+		t.Fatal("a started native session published no install delta")
+	}
 	return contractSession{Session: s, hold: func(ctx context.Context) (context.Context, <-chan struct{}) {
 		opened := make(chan struct{})
 		m.holdNext(opened)

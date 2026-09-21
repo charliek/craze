@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
-	"github.com/charliek/craze/internal/sessions"
 )
 
 // What a command tells the agent, and what the screen never shows of it
@@ -82,7 +81,7 @@ func TestShellOutputLeadsTheNextSend(t *testing.T) {
 	if view := plainView(m); strings.Contains(view, "shell_context") {
 		t.Fatalf("the block is on screen:\n%s", view)
 	}
-	if got := idx.last().Title; got != "what did that say?" {
+	if got := idx.seedRow(t).Title; got != "what did that say?" {
 		t.Fatalf("the index title is %q", got)
 	}
 
@@ -325,7 +324,7 @@ func TestShellContextIsDropped(t *testing.T) {
 		m = plantShellResult(m, "ls", "a\n")
 		next := NewStub()
 		t.Cleanup(func() { _ = next.Close() })
-		m.setSession(next)
+		m.setSession(next, "")
 		if len(m.shellCtx) != 0 {
 			t.Fatalf("the new session inherited %d results", len(m.shellCtx))
 		}
@@ -349,7 +348,7 @@ func TestShellContextIsDroppedByASessionChangeThatKilledTheCommand(t *testing.T)
 
 	next := NewStub()
 	t.Cleanup(func() { _ = next.Close() })
-	m.setSession(next)
+	m.setSession(next, "")
 	if !waitMarker(t, marker, false, 15*time.Second) {
 		t.Fatal("the session change left the old session's command running")
 	}
@@ -464,14 +463,11 @@ func TestShellContextNeverReachesTheScreen(t *testing.T) {
 				t.Fatalf("a row put the block on screen:\n%s", view)
 			}
 			if tc.indexed {
-				if got := idx.last().Title; got != "what does it say?" {
-					t.Fatalf("index title %q", got)
+				if got := idx.seedRow(t); got.Title != "what does it say?" {
+					t.Fatalf("index title %q", got.Title)
 				}
-				if kind := idx.last().TitleKind; kind != sessions.TitleKindFallback {
-					t.Fatalf("index title kind %v", kind)
-				}
-			} else if len(idx.rows) != 0 {
-				t.Fatalf("a hidden provider was indexed: %+v", idx.rows)
+			} else if idx.count() != 0 {
+				t.Fatalf("a hidden provider was indexed: %+v", idx.all())
 			}
 		})
 	}

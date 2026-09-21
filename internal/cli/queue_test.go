@@ -527,9 +527,20 @@ func (s *stubSession) Interject(context.Context, string) error { return agent.Er
 // without (plan 021 §3.6).
 func (s *stubSession) Asks() *agent.AskRegistry { return s.asks }
 
-func (s *stubSession) SetModel(context.Context, string) error          { return nil }
-func (s *stubSession) SetMode(context.Context, string) error           { return nil }
-func (s *stubSession) SetConfig(context.Context, string, string) error { return nil }
+// The settings verbs are the interface's and nothing more: `craze prompt`
+// changes no setting mid-run — --model and --mode are applied inside Start —
+// so nothing here is ever called.
+func (s *stubSession) SetModel(context.Context, string, string) (agent.SetOutcome, error) {
+	return agent.SetOutcome{}, nil
+}
+
+func (s *stubSession) SetMode(context.Context, string, string) (agent.SetOutcome, error) {
+	return agent.SetOutcome{}, nil
+}
+
+func (s *stubSession) SetConfig(context.Context, string, string, string) (agent.SetOutcome, error) {
+	return agent.SetOutcome{}, nil
+}
 
 // Close is the live session's order: the done signal first, so an emit blocked
 // on a full primary gives its event up, then the log, which joins its own
@@ -548,10 +559,11 @@ func (s *stubSession) Close() error {
 
 // SetTitle is the interface's, and nothing more: the run never renames a
 // session — /rename is the TUI's, and `craze prompt` has no title of its own.
-func (s *stubSession) SetTitle(title string) {
+func (s *stubSession) SetTitle(_, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.title = title
+	return nil
 }
 
 func (s *stubSession) Snapshot() agent.Snapshot {

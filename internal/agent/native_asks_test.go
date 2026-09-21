@@ -1114,7 +1114,7 @@ func TestNativeExitPlanModeIsDeniedWhileModesAreOff(t *testing.T) {
 	}
 	// SetMode is still the refusal PR 2 removes, and the capability that draws
 	// the chip is still off.
-	if err := s.SetMode(context.Background(), "plan"); err != ErrUnsupported {
+	if _, err := s.SetMode(context.Background(), "", "plan"); err != ErrUnsupported {
 		t.Fatalf("SetMode = %v, want ErrUnsupported until PR 2", err)
 	}
 	if s.Snapshot().Provider.Capabilities().Modes {

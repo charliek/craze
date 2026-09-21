@@ -130,20 +130,23 @@ func (e *Engine) cancelArmed(turn, cause string) {
 // the answer to "undo what I asked for" has to distinguish "done" from "there
 // was nothing there". It waits on nothing.
 func (e *Engine) Disarm(c Command) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.refusalLocked(); err != nil {
-		return err
-	}
-	if !e.log.OutboxRoom() {
-		return ErrUnavailable
-	}
-	if e.armed == nil {
-		return ErrNotAccepting
-	}
-	ev, _ := e.disarmLocked(agent.SendNowWithdrawn, c.Cause(), "")
-	e.log.Enqueue(ev)
-	return nil
+	hash := receiptHash("Disarm")
+	return withSyncReceiptErr(e.receipts, c, hash, func() error {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if err := e.refusalLocked(); err != nil {
+			return err
+		}
+		if !e.log.OutboxRoom() {
+			return ErrUnavailable
+		}
+		if e.armed == nil {
+			return ErrNotAccepting
+		}
+		ev, _ := e.disarmLocked(agent.SendNowWithdrawn, c.Cause(), "")
+		e.log.Enqueue(ev)
+		return nil
+	})
 }
 
 // disarmLocked clears the armed send-now, if there is one, and returns the

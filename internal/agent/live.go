@@ -32,6 +32,13 @@ import (
 //   - registry.mu → the log's outbox mutex, which is a strict leaf. Every ask
 //     event is enqueued in the registry section that changed the ask, so the
 //     order of the registry's events is the order of its state.
+//   - **s.mu → the log's outbox mutex**, for the same reason and by the same
+//     rule (plan 021 §3.8): every settings delta is enqueued in the section
+//     that mutates the snapshot — the setters here, and the four meta sites in
+//     onUpdate — so the order of this session's state deltas is the order of
+//     its state, for the agent's own updates and a client's Set alike. s.mu is
+//     never held across a Flush: the read loop enqueues under it, releases it,
+//     and only then waits (flushDelta).
 //   - **s.mu and registry.mu are never nested, in either direction.** The
 //     session calls BeginTurn, CancelTurn, EndTurn, Open, Automatic,
 //     AnsweredEarly and Report with s.mu released — each takes a value read
@@ -128,7 +135,9 @@ type session struct {
 	// them while an update is rewriting the resolution. commandsApplied is
 	// commandsSeen as something to block on: it closes in the same locked
 	// section that sets the flag, so a prompt that read the flag as false is
-	// guaranteed to see the close.
+	// guaranteed to see the close — and it closes at the END of that section,
+	// after the catalog's own delta is enqueued, so a waiter that flushes on
+	// waking covers that delta too.
 	plugins         []PluginEntry
 	commandsSeen    bool
 	commandsApplied chan struct{}
@@ -151,7 +160,67 @@ type session struct {
 	// which stamps Event.Replayed from it — is deliberately lock-free, so it
 	// is an atomic rather than a field under s.mu.
 	replaying atomic.Bool
+	// agentWrote is which snapshot sections the AGENT's own updates have
+	// written while the session/new install is still pending, and
+	// installPending is that window. The install takes the response snapshot
+	// for every section not marked here and KEEPS the session's own value for
+	// every one that is (start, r27 finding 1). Both are guarded by s.mu, and
+	// both are dead once the install has run.
+	agentWrote     agentSections
+	installPending bool
+	// modelBeforeSet records, for every direct session/set_model that has
+	// succeeded since the model option last appeared (or since the session
+	// started), the value CurrentModel held immediately BEFORE that set: the
+	// set of values a stale first report could honestly be carrying. nil/empty
+	// means no set_model is waiting on the option to appear.
+	//
+	// The option's FIRST appearance then consumes the whole marker — nil is
+	// assigned back whatever it decides — and does not derive CurrentModel
+	// from that report when the report's value is IN this set: a first report
+	// can carry the value the option had before any one of the set_models made
+	// while it did not exist, and adopting it would roll the model back to
+	// whichever of those it happened to remember (the first-appearance rule's
+	// own version of the stale re-list, onUpdate's config arm, r27 finding 2 /
+	// r28 finding 2). A value that equals the CURRENT model is already a
+	// no-op by the surrounding "only a change speaks" rule, and any other
+	// value is a real change: two set_models racing the option's appearance
+	// leave a stale report free to name EITHER earlier value, never a third
+	// one, which is what makes the set — not the single latest value — the
+	// right thing to suppress against. Guarded by s.mu.
+	//
+	// It is BOUNDED at modelBeforeSetCap. An agent that never advertises a
+	// model option would otherwise keep one entry per successful direct set for
+	// the whole of a session, and one that changes the model over and over
+	// would grow it without limit (r30 finding 6). Past the cap the set is
+	// dropped for modelBeforeAny, the conservative answer: suppress the
+	// option's first appearance WHATEVER it carries, which is what the marker
+	// did for every value before r28 finding 2 narrowed it. Both are consumed
+	// by that first appearance, like the set alone always was.
+	modelBeforeSet map[string]bool
+	modelBeforeAny bool
+	// beforeSetSection is a test barrier, nil in every build but a test's: it
+	// runs on a setter's own goroutine after the provider has taken the change
+	// and before the locked section that mutates the snapshot and enqueues its
+	// delta. That gap is the only window in which another author — the agent's
+	// own update on the read loop — could interleave, and a test that parks a
+	// setter in it forces the schedule the sampling loops in settings_test.go
+	// can only hope for. Set before the session is driven and never written
+	// again, so it needs no lock.
+	beforeSetSection func()
+	// beforeInstall is the same kind of barrier for Start's own goroutine: it
+	// runs after session/new has replied — so the client is already dispatching
+	// live updates to onUpdate — and before the locked section that installs
+	// the response snapshot. A test that parks Start there and drives an update
+	// through it forces the window r27 finding 1 is about. Set at construction,
+	// before the session is driven, and never written again.
+	beforeInstall func()
 }
+
+// agentSections is one flag per snapshot section the agent's own updates can
+// write while the session/new install is still pending. Commands are not among
+// them: the install has always carried those over on its own (start), and the
+// resolved plugins are derived from them rather than written.
+type agentSections struct{ mode, title, config, model bool }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
 const taskReceiptCap = 32
@@ -247,6 +316,14 @@ func newSession(opts Options) *session {
 		taskReceipts:    make(map[string]TaskInfo),
 		subagents:       make(map[string]*subagentRec),
 	}
+	// The marks of r27 finding 1 are for the session/new install alone. A LOAD
+	// records none: its replayed updates arrive BEFORE the load's reply by
+	// design and the reply is the authority over every one of them (r23 finding
+	// 2), so a mark taken during a replay would invert that rule. Deciding it
+	// here, from the option that decides which path Start takes, is what makes
+	// "a load records nothing" a property of the session rather than of each
+	// arm's own bookkeeping.
+	s.installPending = opts.LoadSessionID == ""
 	if opts.Provider != nil {
 		p := *opts.Provider
 		s.opts.Provider = &p
@@ -487,8 +564,15 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 		if loading {
+			// On a load the snapshot has already been published, so this writes
+			// through s.mu — and says so, in the same section, or a client that
+			// folds the stream would keep the mode the replay left while
+			// Snapshot answers this one, for ever (r23 finding 2). Event.Mode
+			// stays empty: it is an *agent*-initiated update's field, and this
+			// is craze's own --mode.
 			s.mu.Lock()
 			s.snap.CurrentMode = modeID
+			s.enqueueDeltaLocked("", Event{}, &StateDelta{Mode: &modeID})
 			s.mu.Unlock()
 		} else {
 			snap.CurrentMode = modeID
@@ -499,28 +583,183 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 		if loading {
+			modelID := s.opts.Model
 			s.mu.Lock()
-			s.snap.CurrentModel = s.opts.Model
+			before := s.snap.CurrentModel
+			s.snap.CurrentModel = modelID
+			// The same marker, for the same reason: grok and gx return no config
+			// options at all on a load, so the option's first appearance after a
+			// resume is exactly the report that must not undo --model.
+			s.noteDirectModelSetLocked(s.snap.Config, before)
+			s.enqueueDeltaLocked("", Event{}, &StateDelta{Model: &modelID})
 			s.mu.Unlock()
 		} else {
+			before := snap.CurrentModel
 			snap.CurrentModel = s.opts.Model
+			// --model IS a direct session/set_model, and the first appearance of
+			// a model option carrying the value the agent had BEFORE it would
+			// roll it back exactly as it would a SetModel's (r27 finding 2). The
+			// option to compare against is the one session/new advertised, since
+			// the snapshot holding it has not been installed yet.
+			s.mu.Lock()
+			s.noteDirectModelSetLocked(snap.Config, before)
+			s.mu.Unlock()
 		}
 	}
 	if loading {
 		return false, nil
 	}
+	if s.beforeInstall != nil {
+		s.beforeInstall()
+	}
 	s.mu.Lock()
+	// The agent can have moved a section BEFORE this install runs, and such an
+	// update is NEWER than the response snapshot: the client starts dispatching
+	// live updates to onUpdate the moment session/new's reply installs the
+	// session id (acp's NewSession), and one the agent sent BEFORE that reply is
+	// dispatched inside NewSession on this very goroutine (flushSessionUpdates).
+	// Assigning the response snapshot over such a section would roll the session
+	// back, and — worse — publish an install delta contradicting the delta that
+	// update has already enqueued, so a client folding the stream would end on
+	// the older value for good (r27 finding 1).
+	//
+	// So each section the agent has written is KEPT and every other one takes
+	// the response snapshot, all under the one lock the marks are set under, and
+	// the single install delta below carries the MERGED state in full. State
+	// order is then event order: the update's delta first, this one behind it
+	// and agreeing with it.
+	//
+	// craze's own --mode/--model tail outranks a mark for its section: it is the
+	// LAST thing craze told the agent, whereas an update that arrived in this
+	// window may be the agent announcing the value it held before.
+	if s.agentWrote.title {
+		snap.Title = s.snap.Title
+	}
+	if s.agentWrote.mode && s.opts.Mode == "" {
+		snap.CurrentMode = s.snap.CurrentMode
+	}
+	if s.agentWrote.config {
+		snap.Config = s.snap.Config
+	}
+	if s.agentWrote.model && s.opts.Model == "" {
+		snap.CurrentModel = s.snap.CurrentModel
+	}
 	commands := s.snap.Commands
 	s.snap = snap
 	if len(s.snap.Commands) == 0 {
 		s.snap.Commands = commands
 	}
+	// The window is over: nothing after this install has an older snapshot to be
+	// protected from, and the marks are cleared with it.
+	s.installPending = false
+	s.agentWrote = agentSections{}
 	// Same locked section as the carry-over on purpose: the names resolve
 	// against whatever commands survived it, so an update that arrived early
 	// is honoured and one that arrives next redoes the work.
 	s.snap.Plugins = s.resolvePluginsLocked()
+	// The install is a change like any other, and it is the first one a client
+	// folding the stream ever sees: without it, everything session/new brought
+	// — the mode, the model, the options, the catalog, the resolved plugins,
+	// and the --mode/--model tail written into `snap` above — would be in
+	// Snapshot() and in no delta at all, and a folding client would be
+	// permanently behind (r23 finding 2). One delta, carrying every section the
+	// install wrote, in the section that wrote them; Event.Mode and Event.Text
+	// stay empty, because initialisation is nobody's agent update.
+	//
+	// Enqueued and NOT flushed: a new session's Start may not wait on the
+	// primary's reader, because a caller is allowed not to be one until Start
+	// has returned — `craze prompt` is exactly such a caller (r25 finding 1).
+	// What the flush bought is not lost. Every settings delta there will ever
+	// be goes through this same outbox, in the order its section took s.mu, so
+	// this one stays ahead of all of them and a client that folds them is
+	// never behind; and the engine flushes the outbox before it runs a turn, so
+	// a turn's own output cannot be numbered ahead of it either. What may now
+	// precede it is an event the read loop publishes directly — a foreign turn
+	// the agent was already running — which carries no settings and so moves
+	// nothing.
+	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
 	return false, nil
+}
+
+// markAgentWroteLocked records that one of the AGENT's own updates has written
+// a snapshot section while the session/new install is still pending, so that
+// install keeps the section rather than the older response snapshot (start, r27
+// finding 1). It is a no-op once the install has run — there is nothing left to
+// protect the section from — and on the load path, which records nothing at
+// all, because a load's result is the authority over everything its replay said
+// (r23 finding 2). s.mu is held.
+func (s *session) markAgentWroteLocked(set *bool) {
+	if s.installPending {
+		*set = true
+	}
+}
+
+// noteDirectModelSetLocked records that a direct session/set_model has just
+// succeeded, made while CurrentModel held before (its value immediately
+// before this set), by adding before to modelBeforeSet — UNLESS cfg already
+// advertises a model-category option, in which case no marker is needed or
+// wanted: the stale re-list rule already covers a report from an option that
+// exists (onUpdate's config arm, "or the previous option's value differs"),
+// and any marker armed by an EARLIER set_model, made before the option
+// existed, is cleared rather than left to outlive an appearance it was never
+// for. s.mu is held.
+func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
+	if ModelConfigOptionIn(cfg) != nil {
+		s.modelBeforeSet, s.modelBeforeAny = nil, false
+		return
+	}
+	if s.modelBeforeAny {
+		// Already conservative: there is nothing a further value could add.
+		return
+	}
+	if s.modelBeforeSet[before] {
+		return
+	}
+	if len(s.modelBeforeSet) >= modelBeforeSetCap {
+		// The bound (r30 finding 6). Keeping the values themselves is what lets
+		// the first appearance tell a stale report from a real change, and it
+		// is worth a small set and no more: a session that has made this many
+		// direct sets with no model option in sight gives that up and suppresses
+		// the first appearance whatever it says, rather than remembering an
+		// unbounded history of values it may never be asked about.
+		s.modelBeforeSet, s.modelBeforeAny = nil, true
+		return
+	}
+	if s.modelBeforeSet == nil {
+		s.modelBeforeSet = map[string]bool{}
+	}
+	s.modelBeforeSet[before] = true
+}
+
+// modelBeforeSetCap bounds modelBeforeSet. Eight distinct pre-set values is
+// far past anything a real session reaches before its agent advertises a model
+// option at all — cursor advertises one from session/new, and grok and gx
+// advertise one as soon as they list anything — and the overflow answer
+// suppresses rather than adopts, so the bound can be small.
+const modelBeforeSetCap = 8
+
+// installDeltaLocked is one delta carrying every section of the snapshot, in
+// full, as it now stands: what a snapshot INSTALL leaves behind. s.mu is held.
+//
+// Both installs — session/new's and session/load's — write whole sections at
+// once, and ONE delta per install carrying all of them is what keeps a client
+// that folds the stream level with Snapshot() (plan 021 §3.8, r23 finding 2). A
+// section the install happened not to move is restated rather than left out:
+// restating a fact that is already true costs a client nothing, and leaving a
+// section out on the strength of "it did not change this time" is the omission
+// the finding is about. Title included — a session/new snapshot has none, and
+// "there is no title" is a fact the stream has to be able to say.
+func (s *session) installDeltaLocked() *StateDelta {
+	title, mode, model := s.snap.Title, s.snap.CurrentMode, s.snap.CurrentModel
+	return &StateDelta{
+		Title:    &title,
+		Mode:     &mode,
+		Model:    &model,
+		Config:   &ConfigState{Options: cloneConfig(s.snap.Config)},
+		Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
+		Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+	}
 }
 
 // stderrSink is where the agent child's stderr goes: the journal's tee when
@@ -545,6 +784,14 @@ func (s *session) stderrSink() io.Writer {
 // binary is the agent binary Start resolved and spawned, for the session note,
 // which is written here because this is where Start learns the id: after the
 // replay, and before the end bracket.
+//
+// Unlike the session/new path, this one DOES flush — twice, each behind a
+// replay boundary. It may: a load already requires its caller to be reading the
+// primary while Start runs, because the replay is published from the read loop
+// and a transcript longer than the primary's buffer would otherwise wedge it
+// (Session.Start). The TUI, which is the only caller that loads, arms its reader
+// in the same batch as the start command. These flushes ask for nothing the
+// replay did not already ask for (r25 finding 1).
 func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *acp.InitializeResult, cwd, binary string) error {
 	if !initRes.LoadSession() {
 		// Nothing has reached the wire: an agent without the capability is
@@ -556,13 +803,28 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// resolved the id from is the only place a resumed title can come from,
 	// and the composer rule reads it from the first frame on.
 	s.mu.Lock()
+	seeded := false
 	if title := sanitizeText(s.opts.Title); title != "" {
 		s.snap.Title = title
+		// In the section that seeds it, like every other title author: the
+		// stored name is state a client mirrors, and without a delta a folding
+		// client would never learn the resumed session's name at all (r23
+		// finding 2). Event.Text stays empty — this is craze's own row from the
+		// index, not the agent naming the session, so it prints no `title` line
+		// and is never written back as an agent title.
+		s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+		seeded = true
 	}
 	if s.opts.TitlePinned {
 		s.titlePinned = true
 	}
 	s.mu.Unlock()
+	if seeded {
+		// Outside the lock, and before the bracket opens: the seed is state the
+		// session had BEFORE the replay, so it belongs ahead of ReplayStart
+		// rather than somewhere inside a bracket it has nothing to do with.
+		s.flushDelta()
+	}
 
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
 	s.replaying.Store(true)
@@ -594,7 +856,36 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.snap.SessionID = res.SessionID
 	s.snap.Provider = s.provider().Info()
 	s.snap.Plugins = s.resolvePluginsLocked()
+	// This install is UNCONDITIONAL, which is the one place the load path and
+	// the session/new path differ (r27 finding 1). The new-session install keeps
+	// every section the agent wrote before it, because such an update is newer
+	// than the response; here the opposite holds — the replayed updates arrive
+	// BEFORE the reply by design and the reply overrules every one of them, so
+	// nothing on this path records a mark at all (newSession's installPending).
+	// The window in which the read loop could deliver a genuinely LIVE update —
+	// after the reply, before this lock — does exist, but nothing here can tell
+	// such an update from a replayed one: replaying stays true until the end
+	// bracket, precisely because EventReplay{end} means "the restored snapshot
+	// is installed". Protecting it would mean protecting the replay too, which
+	// is the rule this install exists to enforce. The delta below still keeps
+	// state order and event order the same, so a client that folds the stream
+	// ends exactly where Snapshot() does.
+	//
+	// The restored sections, in the section that installed them. The replay
+	// itself can have produced deltas of its own — an agent that replays a
+	// current_mode_update or a config_option_update — and this result
+	// CONTRADICTS them: it restores another mode, another config, or none at
+	// all. Without a delta here a client that folds the stream would keep the
+	// replayed values for ever while Snapshot() answered the restored ones
+	// (r23 finding 2). Mode and Model are carried even when they are empty,
+	// because "the load cleared it" is exactly what such a client has to learn.
+	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
+	// Before the end bracket, and outside the lock: EventReplay{end} means "the
+	// restored snapshot is installed", so the delta that says what was
+	// installed has to be committed ahead of it (§3.8's ordering rule for a
+	// flush behind a boundary).
+	s.flushDelta()
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
@@ -1097,63 +1388,148 @@ func (s *session) closeInFlightTools(status string) {
 	}
 }
 
-func (s *session) SetModel(ctx context.Context, modelID string) error {
+// The three settings verbs, each the seam's shape (Session): the agent is asked
+// first, with no lock held, and a change it took is written into the snapshot
+// and its delta enqueued in one locked section — so what a client folding the
+// events sees last is what a client reading Snapshot sees, whether the change
+// came from here or from the agent's own update on the read loop (plan 021
+// §3.8). A refusal mutates nothing and publishes nothing.
+func (s *session) SetModel(ctx context.Context, cause, modelID string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetModel(ctx, modelID); err != nil {
-		return err
+		return SetOutcome{}, err
 	}
+	s.setBarrier()
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	before := s.snap.CurrentModel
 	s.snap.CurrentModel = modelID
-	s.mu.Unlock()
-	return nil
+	// With no model-category option advertised, the option's FIRST appearance
+	// would otherwise be free to write its own value over this one (r27 finding
+	// 2); the marker is what makes that first report say nothing.
+	s.noteDirectModelSetLocked(s.snap.Config, before)
+	// The confirmed value is read out of the very section that wrote it: ACP
+	// answers session/set_model with nothing, so what the session is now at is
+	// what it just stored, and a later Snapshot() read could only be somebody
+	// else's change (SetOutcome).
+	return SetOutcome{
+		Value:  s.snap.CurrentModel,
+		Ticket: s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Model: &modelID}),
+	}, nil
 }
 
-func (s *session) SetMode(ctx context.Context, modeID string) error {
+func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetMode(ctx, modeID); err != nil {
-		return err
+		return SetOutcome{}, err
 	}
+	s.setBarrier()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.snap.CurrentMode = modeID
-	s.mu.Unlock()
-	return nil
+	// Event.Mode stays empty: it is what an *agent*-initiated update fills, and
+	// a client retires a plan offer on it (plan 021 correction 20).
+	return SetOutcome{
+		Value:  s.snap.CurrentMode,
+		Ticket: s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &modeID}),
+	}, nil
 }
 
-func (s *session) SetConfig(ctx context.Context, id, value string) error {
+// SetConfig sets one advertised option. When that option is the one a provider
+// keeps its MODEL in (IsModelConfigOption), setting it IS a model change: the
+// snapshot's CurrentModel moves with it and the delta carries the Model section
+// beside the Config one, in this same locked section. Without that, `/model`'s
+// fallback — SetModel refused, the model set as a config option instead — left
+// CurrentModel on the old model for `craze prompt` and the status row, and left
+// the model section's revision standing still while the display had already
+// moved (plan 021 §3.8, r23 finding 3).
+func (s *session) SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetConfig(ctx, id, value); err != nil {
-		return err
+		return SetOutcome{}, err
 	}
+	s.setBarrier()
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	model := false
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
 			s.snap.Config[i].Current = value
+			model = IsModelConfigOption(s.snap.Config[i])
 			break
 		}
 	}
-	s.mu.Unlock()
-	return nil
+	st := &StateDelta{Config: &ConfigState{Options: cloneConfig(s.snap.Config)}}
+	if model {
+		s.snap.CurrentModel = value
+		st.Model = &value
+	}
+	return SetOutcome{Value: value, Ticket: s.enqueueDeltaLocked(cause, Event{}, st)}, nil
+}
+
+// setBarrier runs the test barrier between a setter's provider call and its
+// locked section, when a test has installed one (session.beforeSetSection).
+func (s *session) setBarrier() {
+	if s.beforeSetSection != nil {
+		s.beforeSetSection()
+	}
 }
 
 // SetTitle is /rename: craze's own name for this session, since ACP v1 has no
-// rename verb. It emits nothing — it is called from the UI's update goroutine,
-// and an emit onto a full event channel there would block the UI on a consumer
-// the UI itself schedules; the caller re-reads the snapshot instead. It pins
-// the title, so a session_info_update the agent sends later is ignored.
-func (s *session) SetTitle(title string) {
+// rename verb. It pins the title, so a session_info_update the agent sends
+// later is ignored, and it says so in a Title delta — enqueued with the pin,
+// under the same lock, and never published, so it still waits on nothing and
+// may be called from a UI's update goroutine as it always has been.
+//
+// Event.Text stays empty on that delta, which is what keeps `/rename` out of
+// `craze prompt --json`'s title line and out of the index as an agent title
+// (plan 021 correction 20).
+//
+// It is the one settings verb with no provider behind it, so the room in the
+// log is checked here, in the section that would mutate: refused, nothing is
+// renamed and nothing is pinned.
+func (s *session) SetTitle(cause, title string) error {
 	s.mu.Lock()
-	s.snap.Title = sanitizeText(title)
+	defer s.mu.Unlock()
+	if !s.log.OutboxRoom() {
+		return ErrSetUnavailable
+	}
+	clean := sanitizeText(title)
+	s.snap.Title = clean
 	s.titlePinned = true
-	s.mu.Unlock()
+	s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Title: &clean})
+	return nil
+}
+
+// enqueueDeltaLocked enqueues one EventMeta carrying st, stamped exactly as
+// emit stamps what it publishes — the session's clock, and Replayed while a
+// session/load replay is running — with the cause the command that asked for
+// it. base is the rest of the event: the Mode or Text an *agent*-initiated
+// update fills, and the zero Event for a craze-initiated one.
+//
+// s.mu is held, and that is the point: the outbox's mutex is a strict leaf
+// (eventlog.go's Enqueue), so the delta is admitted in the very section that
+// changed the snapshot and no lock is held across a blocking send.
+func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *Ticket {
+	base.Type = EventMeta
+	base.State = st
+	base.Cause = cause
+	if base.At.IsZero() {
+		base.At = time.Now()
+	}
+	if s.replaying.Load() {
+		base.Replayed = true
+	}
+	return s.log.EnqueueTicket(base)
 }
 
 func (s *session) Snapshot() Snapshot {
@@ -1719,6 +2095,20 @@ func (s *session) staleAsk(req AskRequest) AskRecord {
 // barrier only its own last phase could free.
 func (s *session) flushAsks() { _ = s.log.Flush(context.Background(), s.done) }
 
+// flushDelta is the read loop's barrier behind a settings delta it enqueued
+// (onUpdate). The delta has to be admitted under s.mu, in the section that
+// mutated the snapshot, or its order against a client's own Set would be the
+// order two goroutines happened to reach the log in (plan 021 §3.8); what this
+// gives back is the one thing publishing directly used to give for free —
+// "emitted means buffered". The read loop waits here exactly as it waited
+// inside emit, so the agent's next update is behind this one on the primary and
+// `craze prompt --json`'s title line keeps its position.
+//
+// It is bounded by the session's own done, as every flush a session makes on
+// its own goroutines is (EventLog.Flush): a Close that waits for this goroutine
+// before it closes the log would otherwise be waiting for itself.
+func (s *session) flushDelta() { _ = s.log.Flush(context.Background(), s.done) }
+
 // askReported is the Replied hook for a parked ask: what became of the reply
 // carrying its decision, recorded against THIS ask and not against its id,
 // because a reply that comes back late must not land on whatever holds that id
@@ -1931,23 +2321,38 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		first := !s.commandsSeen
 		s.commandsSeen = true
 		s.snap.Plugins = s.resolvePluginsLocked()
+		// Both sections, because both changed: the catalog, and the on-disk
+		// entries resolved against it.
+		s.enqueueDeltaLocked("", Event{}, &StateDelta{
+			Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
+			Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+		})
 		if first {
-			// Closed after the rows are resolved and before s.mu is released,
-			// so a prompt waiting on it cannot wake into the old resolution:
-			// it has to take this very lock to read one.
+			// Closed after the rows are resolved AND after the delta that says
+			// so is enqueued, and still before s.mu is released: a prompt
+			// waiting on it cannot wake into the old resolution — it has to
+			// take this very lock to read one — and anything else waiting on it
+			// may flush and be sure the catalog's delta is in the outbox.
+			// Enqueuing takes only the outbox's leaf mutex and cannot block, so
+			// there is nothing between the two lines for the close to be late
+			// for.
 			close(s.commandsApplied)
 		}
 		s.mu.Unlock()
-		s.emit(Event{Type: EventMeta})
+		s.flushDelta()
 	case acp.UpdateCurrentMode:
 		if u.CurrentModeID != "" {
 			mode := sanitizeText(u.CurrentModeID)
 			s.mu.Lock()
 			s.snap.CurrentMode = mode
-			s.mu.Unlock()
+			s.markAgentWroteLocked(&s.agentWrote.mode)
 			// The mode rides on the event: a mode that changed and changed
 			// back is invisible in the snapshot, and the UI has to see it.
-			s.emit(Event{Type: EventMeta, Mode: mode})
+			// Event.Mode as well as the section, because this is the agent's
+			// own change and a client retires a plan offer on that field.
+			s.enqueueDeltaLocked("", Event{Mode: mode}, &StateDelta{Mode: &mode})
+			s.mu.Unlock()
+			s.flushDelta()
 		}
 	case acp.UpdateSessionInfo:
 		// session_info_update reuses the tool title field on the wire.
@@ -1962,21 +2367,80 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		if s.titlePinned {
 			// /rename won: the user's name for the session outlives every
 			// title the agent invents, including one produced by a live turn
-			// after a --continue.
+			// after a --continue. Nothing changed, so nothing is said.
 			s.mu.Unlock()
 			return
 		}
 		s.snap.Title = title
+		s.markAgentWroteLocked(&s.agentWrote.title)
+		// Event.Text carries the new title so `prompt --json` can emit a title
+		// line and the TUI can write it to the index as an agent title, exactly
+		// as it always has; the section carries the same fact for a client that
+		// folds state.
+		s.enqueueDeltaLocked("", Event{Text: title}, &StateDelta{Title: &title})
 		s.mu.Unlock()
-		// EventMeta carries the new title so `prompt --json` can emit a
-		// title line; the TUI only re-reads the snapshot.
-		s.emit(Event{Type: EventMeta, Text: title})
+		s.flushDelta()
 	case acp.UpdateConfigOption:
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
+		// The model section too, when the provider keeps its model in a config
+		// option and this update is a model CHANGE: for such a provider, that is
+		// how a model change is announced, and a client left to read it off the
+		// config section alone would never see CurrentModel or the model
+		// revision move (r23 finding 3).
+		//
+		// Three conditions, and each closes a different way of being wrong:
+		//
+		//   - the option's value is non-empty and DIFFERS from CurrentModel, or
+		//     there is nothing to announce;
+		//   - and either there was no such option before — its FIRST appearance
+		//     is how a session that started without one learns its model, and
+		//     treating that as "no previous value, so say nothing" left
+		//     CurrentModel permanently wrong, with every later identical update
+		//     now having a previous value equal to it and so repairing nothing
+		//     (r25 finding 3) —
+		//   - or the previous option's value differs from this one. An update
+		//     that merely RE-LISTS the value the option already had says nothing
+		//     about the model: every one of cursor's carries every option, and a
+		//     stale re-list must not write its value over a CurrentModel that
+		//     session/set_model has since moved.
+		//
+		// A FIRST appearance has no previous value to be judged stale against,
+		// and that is the hole r27 finding 2 names: session/set_model moves the
+		// model, the agent then introduces its model option carrying the value
+		// it held BEFORE the set_model, and "no previous option" alone would
+		// adopt it and roll the model back. The marker a direct set_model leaves
+		// (noteDirectModelSetLocked) closes it — the first appearance consumes
+		// the marker and derives nothing from a report whose value is one the
+		// agent could honestly have held before one of craze's own sets, while a
+		// value that is NEITHER a pre-set value nor the current model is a real
+		// change like any other and moves the model again (r28 finding 2: the
+		// marker is value-blind no longer — it used to suppress EVERY value on
+		// the option's first appearance, not merely a stale one, which left
+		// CurrentModel stuck on a value the agent had since moved past).
+		was := ModelConfigOptionIn(s.snap.Config)
+		now := ModelConfigOptionIn(cfg)
 		s.snap.Config = cfg
+		s.markAgentWroteLocked(&s.agentWrote.config)
+		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
+		stale := was == nil && now != nil && (s.modelBeforeAny || s.modelBeforeSet[now.Current])
+		if now != nil {
+			// The marker's whole life is "until the option appears", whether or
+			// not this appearance had anything to say about the model: it is
+			// consumed in full, not merely the one value it happened to match —
+			// the bounded set and the overflow bit alike (r30 finding 6).
+			s.modelBeforeSet, s.modelBeforeAny = nil, false
+		}
+		if now != nil && now.Current != "" && !stale &&
+			now.Current != s.snap.CurrentModel && (was == nil || was.Current != now.Current) {
+			s.snap.CurrentModel = now.Current
+			model := now.Current
+			st.Model = &model
+			s.markAgentWroteLocked(&s.agentWrote.model)
+		}
+		s.enqueueDeltaLocked("", Event{}, st)
 		s.mu.Unlock()
-		s.emit(Event{Type: EventMeta})
+		s.flushDelta()
 	case acp.UpdatePlan:
 		if !s.provider().planUpdatesAreTodos {
 			return

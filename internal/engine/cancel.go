@@ -40,12 +40,15 @@ import (
 //     left to cancel, which writes one session/cancel the agent drops as
 //     naming no turn — the no-turn path's long-standing behaviour.
 func (e *Engine) Cancel(ctx context.Context, c Command, turn string) (CancelResult, error) {
-	asks := len(e.asks.Asks())
-	id, err := e.holdCancel(turn, false, asks, c.Cause())
-	if err != nil {
-		return CancelResult{}, err
-	}
-	return e.cancelHeld(ctx, id, c.Cause(), false)
+	hash := receiptHash("Cancel", turn)
+	return withBlockingReceipt(ctx, e.receipts, c, hash, func() (CancelResult, error) {
+		asks := len(e.asks.Asks())
+		id, err := e.holdCancel(turn, false, asks, c.Cause())
+		if err != nil {
+			return CancelResult{}, err
+		}
+		return e.cancelHeld(ctx, id, c.Cause(), false)
+	})
 }
 
 // Stop refuses every later admission, clears the queue, and cancels what is
@@ -64,18 +67,22 @@ func (e *Engine) Cancel(ctx context.Context, c Command, turn string) (CancelResu
 // not keep the order it exists to keep. The engine stays stopped and its queue
 // stays cleared either way, and the hold is given back.
 func (e *Engine) Stop(ctx context.Context, c Command) error {
-	// Always accepted, whatever is or is not running: a client that is shutting
-	// down is not asking for a turn to end, it is saying nothing more may start.
-	id, err := e.holdCancel("", true, 0, c.Cause())
-	if err != nil {
+	hash := receiptHash("Stop")
+	return withBlockingReceiptErr(ctx, e.receipts, c, hash, func() error {
+		// Always accepted, whatever is or is not running: a client that is
+		// shutting down is not asking for a turn to end, it is saying nothing
+		// more may start.
+		id, err := e.holdCancel("", true, 0, c.Cause())
+		if err != nil {
+			return err
+		}
+		if err := e.log.Flush(ctx, nil); err != nil && !errors.Is(err, agent.ErrLogClosing) {
+			e.releaseHold(id, c.Cause(), agent.CancelOutcome{}, nil, false)
+			return err
+		}
+		_, err = e.cancelHeld(ctx, id, c.Cause(), false)
 		return err
-	}
-	if err := e.log.Flush(ctx, nil); err != nil && !errors.Is(err, agent.ErrLogClosing) {
-		e.releaseHold(id, c.Cause(), agent.CancelOutcome{}, nil, false)
-		return err
-	}
-	_, err = e.cancelHeld(ctx, id, c.Cause(), false)
-	return err
+	})
 }
 
 // holdCancel validates a cancel and takes its hold, in one section.

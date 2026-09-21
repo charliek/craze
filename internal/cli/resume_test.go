@@ -257,6 +257,62 @@ func TestContinueLoadsTheRow(t *testing.T) {
 	}
 }
 
+// TestContinueCarriesTheRowsCrazeID is SD-22's first load path: --continue
+// resolves its row in internal/cli, so this is the one place the row's durable
+// id can reach the engine — through Config. A row written before crazeId
+// existed carries none, and the engine mints one the row gains on its next
+// write.
+func TestContinueCarriesTheRowsCrazeID(t *testing.T) {
+	for _, tc := range []struct{ name, id string }{
+		{"a row with a durable id", "018f-the-thread"},
+		{"a row written before crazeId existed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			indexHome(t)
+			ws := t.TempDir()
+			seedRow(t, sessions.Row{
+				SessionID: "s-1", Provider: "grok", CWD: ws, CrazeID: tc.id,
+				Title: "yesterday", TitleKind: sessions.TitleKindAgent,
+			}, time.Minute)
+
+			cfg, _, err := runResolveLoad(t, ws, "--continue")
+			if err != nil {
+				t.Fatalf("continue: %v", err)
+			}
+			if cfg.CrazeSessionID != tc.id {
+				t.Fatalf("Config.CrazeSessionID is %q, want %q", cfg.CrazeSessionID, tc.id)
+			}
+		})
+	}
+}
+
+// TestResumeRowsCarryTheirCrazeIDs is the second load path: the picker builds
+// the session itself, from a row it is handed, so the id travels on the row
+// rather than in Config.
+func TestResumeRowsCarryTheirCrazeIDs(t *testing.T) {
+	indexHome(t)
+	ws := t.TempDir()
+	seedRow(t, sessions.Row{SessionID: "s-1", Provider: "grok", CWD: ws, CrazeID: "018f-one", Title: "one", TitleKind: sessions.TitleKindAgent}, time.Hour)
+	seedRow(t, sessions.Row{SessionID: "s-2", Provider: "cursor", CWD: ws, Title: "two", TitleKind: sessions.TitleKindAgent}, time.Minute)
+
+	cfg, _, err := runResolveLoad(t, ws, "--resume")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	got := map[string]string{}
+	for _, row := range cfg.Resume {
+		got[row.SessionID] = row.CrazeID
+	}
+	if got["s-1"] != "018f-one" || got["s-2"] != "" {
+		t.Fatalf("the picker's rows carry %+v", got)
+	}
+	// The picker's own rows are the load path; Config's id is for --continue's
+	// session alone, and there is none here.
+	if cfg.CrazeSessionID != "" {
+		t.Fatalf("--resume set Config.CrazeSessionID to %q", cfg.CrazeSessionID)
+	}
+}
+
 // TestContinueWithExplicitProviderPersistsIt: --provider on the command line
 // is the same explicit choice it has always been, so this run may still write
 // it — and it filters the index, which is what makes the cursor row below

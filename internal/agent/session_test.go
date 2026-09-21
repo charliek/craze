@@ -54,10 +54,18 @@ func fakeAgentPath(t *testing.T) string {
 // reads HOME — the plugin caches live under it — so a test that skipped it
 // would pass or fail on what the developer running it happens to have
 // installed.
+// It also closes the session when the test ends. That used to be the caller's
+// business, because a session nobody started left nothing behind; since plan
+// 021's C10 it can, because a settings delta is *enqueued* rather than
+// published and the log starts its outbox drainer to publish it. Close is
+// idempotent, so the constructors that register a cleanup of their own
+// (newLoadSession, startScript) are unaffected.
 func newTestSession(t *testing.T, opts Options) *session {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	return newSession(opts)
+	s := newSession(opts)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
 }
 
 func startScript(t *testing.T, script string, force bool) *session {
@@ -230,7 +238,7 @@ func TestSnapshotModelsModesCommands(t *testing.T) {
 	if !commandNamed(snap, "research") {
 		t.Fatalf("commands %+v", snap.Commands)
 	}
-	if err := s.SetMode(t.Context(), "plan"); err != nil {
+	if _, err := s.SetMode(t.Context(), "", "plan"); err != nil {
 		t.Fatal(err)
 	}
 	if s.Snapshot().CurrentMode != "plan" {
@@ -530,7 +538,7 @@ func TestSetConfigEffort(t *testing.T) {
 	if got := configCurrent(s.Snapshot(), "effort"); got != "medium" {
 		t.Fatalf("current %q, config %+v", got, s.Snapshot().Config)
 	}
-	if err := s.SetConfig(t.Context(), "effort", "high"); err != nil {
+	if _, err := s.SetConfig(t.Context(), "", "effort", "high"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

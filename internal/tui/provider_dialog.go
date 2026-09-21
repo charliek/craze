@@ -92,10 +92,13 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 		if m.eng != nil {
 			_ = m.eng.Close()
 		}
-		m.setSession(m.newSession(p))
+		// A NEW session, so a new durable id: nothing is being continued, and
+		// the id of whatever this run started with belongs to the session it
+		// just closed (session control SD-22).
+		m.setSession(m.newSession(p), "")
 	}
 	if m.eng == nil && m.engErr == nil {
-		m.setSession(NewStub())
+		m.setSession(NewStub(), "")
 	}
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {

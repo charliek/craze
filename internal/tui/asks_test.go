@@ -89,9 +89,14 @@ func TestStubCallsKeepEveryAnswerWhenACardIDIsReused(t *testing.T) {
 func TestAnswerThroughControl(t *testing.T) {
 	m, stub := sizedCards(t)
 	stub.Emit(agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
-	c := m.nextCmd()
 
-	if err := m.eng.Answer(c, "ask-1", agent.AskAnswer{OptionID: "opt-a"}); !errors.Is(err, agent.ErrBadAnswer) {
+	// Each call below is a distinct user action against the card — a wrong
+	// answer, then a corrected one, then a stale retry — so each mints its own
+	// command id, exactly as cards.go's answerCard does on every keypress
+	// (plan 021 C11: a resend is the SAME id with the SAME payload, never a
+	// second attempt with a different one, which a command id table now
+	// answers with ErrBadRequest rather than running).
+	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{OptionID: "opt-a"}); !errors.Is(err, agent.ErrBadAnswer) {
 		t.Fatalf("a permission's answer must not fit a question: %v", err)
 	}
 	if engine.Code(errors.New("x")) == "" {
@@ -100,17 +105,17 @@ func TestAnswerThroughControl(t *testing.T) {
 	if got := len(stub.Calls()); got != 0 {
 		t.Fatalf("a refused answer resolved the ask: %+v", stub.Calls())
 	}
-	if err := m.eng.Answer(c, "ask-1", agent.AskAnswer{Skip: true}); err != nil {
+	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); err != nil {
 		t.Fatalf("the ask must still be answerable: %v", err)
 	}
-	if err := m.eng.Answer(c, "ask-1", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrAlreadyResolved) {
+	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrAlreadyResolved) {
 		t.Fatalf("a second answer: %v", err)
 	}
 	calls := stub.Calls()
 	if len(calls) != 1 || calls[0].ID != "ask-1" || !calls[0].Skip {
 		t.Fatalf("one ending, and it is the skip: %+v", calls)
 	}
-	if err := m.eng.Answer(c, "ask-404", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrUnknownAsk) {
+	if err := m.eng.Answer(m.nextCmd(), "ask-404", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrUnknownAsk) {
 		t.Fatalf("an id nobody issued: %v", err)
 	}
 }

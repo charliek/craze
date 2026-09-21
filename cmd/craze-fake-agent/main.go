@@ -48,6 +48,23 @@ Flags:
           planmode    session/new in plan mode; replies planned/implementing
           planmode-card same, plus the cursor/create_plan card cursor sends
           effort      same as echo (session/new includes effort configOptions)
+          modelconfig same as echo, plus a category "model" config option: the
+                      shape of an agent that has no session/set_model and keeps
+                      its model among its options
+          modelconfig-refuse same, and session/set_model is answered -32601: the
+                      whole of that agent, so a client's
+                      set_model → set_config fallback runs for real
+          modellate   echo with no model option at session/new and no
+                      session/set_model follow-up of its own: the shape of an
+                      agent whose FIRST config list arrives only after
+                      session/set_model has been answered, still carrying the
+                      model value it held before that set_model, is delivered
+                      by the test itself (r28 finding 3), so the schedule that
+                      exercises it is forced rather than raced on the wire
+          preinstall  modelconfig, but a current_mode_update, a session_info_update
+                      and a moved config list are sent BEFORE session/new is
+                      answered, so every one of them is dispatched ahead of the
+                      snapshot that reply carries — and contradicts it
           permission  request allow_once / reject_once and wait for the client
           ask         emit cursor/ask_question then finish the turn
           plan        emit cursor/create_plan then finish the turn
@@ -82,8 +99,11 @@ Flags:
           load-missing session/load fails -32602 "Session not found"
           load-hang   session/load is never answered
           load-long   session/load replays 600 message chunks then answers
+          load-settings cursor's replay plus a current_mode_update and a
+                      config_option_update, answered by a result that
+                      contradicts both (mode agent, model default, no options)
 
-The five load scripts refuse session/new with an error, so a test can prove no
+The six load scripts refuse session/new with an error, so a test can prove no
 client fell back to it. Every other script advertises loadSession false and
 answers session/load with -32601.
 
@@ -130,7 +150,8 @@ func main() {
 		}
 	}
 	switch script {
-	case "echo", "followup", "tool", "tasks", "effort", "permission", "ask", "plan",
+	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
+		"modellate", "preinstall", "permission", "ask", "plan",
 		"hang", "hang-ack", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail",
@@ -138,7 +159,7 @@ func main() {
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
-		"load", "grok-load", "load-missing", "load-hang", "load-long":
+		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)
