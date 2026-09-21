@@ -593,7 +593,7 @@ func TestFinishRunOrder(t *testing.T) {
 		// carry showAgentDiag, masking whether agentExited was folded in at
 		// all.
 		m, log, w := exitTailModel(t)
-		m.setSession(orderSession{Stub: NewStub(), log: log, exited: true})
+		m.setSession(orderSession{Stub: NewStub(), log: log, exited: true}, "")
 		m.started = true
 		h := &orderHost{log: log}
 		showAgentDiag, startErr := finishRun(w, m, m, h)

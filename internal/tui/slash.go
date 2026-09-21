@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
-	"github.com/charliek/craze/internal/sessions"
 )
 
 // slashMaxRows is the menu's natural height — grok-build's window, and the
@@ -440,19 +440,25 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.eng != nil {
+			// SetTitle renames, pins and records the row (plan 021 §3.8). Two
+			// different failures come back from it:
+			//
+			//   - the rename itself was refused — the log's outbox is backed up
+			//     — and nothing was renamed or pinned, so the note and the row
+			//     would both be saying something untrue: the error alone;
+			//   - the rename happened and only the index write failed
+			//     (ErrIndexWrite), which is the error row writeIndex used to
+			//     draw, followed by the note, in that order, because the
+			//     session really is renamed.
 			if err := m.eng.SetTitle(m.nextCmd(), title); err != nil {
-				// The one refusal a rename has: the log's outbox is backed up,
-				// and nothing was renamed or pinned. The note and the index row
-				// would both be saying something untrue.
-				m.addError(err.Error())
-				return m, nil
+				if !errors.Is(err, engine.ErrIndexWrite) {
+					m.addError(err.Error())
+					return m, nil
+				}
+				m.addError(indexWriteText(err))
 			}
 		}
 		m.refreshSnap()
-		// A user title always wins and pins the row, so no agent title the
-		// session produces afterwards — this session's or a later
-		// --continue's — can take the name back.
-		m.writeIndex(title, sessions.TitleKindUser)
 		m.addNote("renamed to " + title)
 		return m, nil
 	case "model":

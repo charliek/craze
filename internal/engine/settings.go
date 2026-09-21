@@ -459,12 +459,28 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 // "unavailable" for it, as it does for the engine's own ErrUnavailable.
 //
 // The delta carries the title in Event.State alone. An agent's own title fills
-// Event.Text as well, and a client writes *that* to the session index as an
-// agent title and prints it as `craze prompt --json`'s title line — which is
+// Event.Text as well, and the index takes *that* as the agent's own name for
+// the session and `craze prompt --json` prints it as a title line — which is
 // exactly why a rename must not fill it (plan 021 correction 20).
 //
-// Writing the index row for a rename is still the client's, until the index
-// moves into the engine (C12).
+// # The index row, and the one thing here that waits
+//
+// A rename is also a row in the session index, pinned, so that no agent title
+// this session or a later --continue produces can take the name back. That
+// write is file I/O and it runs HERE, on the caller's goroutine, outside e.mu
+// — §3.2's other documented exception, and exactly where the TUI did it. Its
+// failure is RETURNED, wrapped in ErrIndexWrite, because unlike every other
+// index write this one has a caller still standing: the session HAS been
+// renamed and pinned, and only the file write failed, so a client draws the
+// failure and still says the rename happened.
+//
+// Because it is returned it is also STORED by the receipts table, like any
+// other answer that is about this request rather than about the engine's door
+// being shut — which is right: the title really was set, so a resend of the
+// same command id must replay that answer rather than rename a second time.
+// What retries the write is the next index write of any kind (the next turn's
+// end touches the row, the next prompt seeds it if it never was), or a later
+// /rename with a new command id.
 func (e *Engine) SetTitle(c Command, title string) error {
 	hash := receiptHash("SetTitle", title)
 	return withSyncReceiptErr(e.receipts, c, hash, func() error {
@@ -478,6 +494,12 @@ func (e *Engine) SetTitle(c Command, title string) error {
 		// own lock held (Begin and ForeignTurn, engine.go), and this needs to be
 		// neither of them — it takes the session's lock and the outbox's, both
 		// briefly, and waits on nothing either way.
-		return e.sess.SetTitle(c.Cause(), title)
+		if err := e.sess.SetTitle(c.Cause(), title); err != nil {
+			return err
+		}
+		if err := e.idx.rename(c.Cause(), title); err != nil {
+			return &indexWriteError{err: err}
+		}
+		return nil
 	})
 }

@@ -185,9 +185,7 @@ const (
 // Every section is a pointer, and nil means "this event did not touch that
 // section" — not "that section is now empty". A section that has become empty
 // is a non-nil value saying so, which is the only way one event can say
-// "cleared" and another "unchanged" in the same field. IndexErr is the one
-// section still to come (plan 021's C12); everything else the phase named is
-// here.
+// "cleared" and another "unchanged" in the same field.
 //
 // **A delta is enqueued by the session under s.mu, in the section that mutates
 // the snapshot** — or by the engine under e.mu, for the send-now section it
@@ -256,6 +254,25 @@ type StateDelta struct {
 	// event enqueued through the log's outbox is immutable once accepted and is
 	// encoded without calling anything on it (eventlog.go's Enqueue).
 	Detail string
+	// IndexErr is a session-index write that failed, as text: craze could not
+	// remember this session in ~/.craze/sessions.jsonl, which is a note to the
+	// user and never a reason to stop running (plan 021 §3.8, §2.4's "local
+	// config and index write errors").
+	//
+	// It is a plain string and not a pointer, because it is a REPORT and not a
+	// section of mirrored state: there is nothing for a client to hold, and so
+	// nothing that could be "cleared" as against "untouched" — the same shape,
+	// and for the same reason, as Reason and Detail beside it. "" means this
+	// delta is not about a failed write.
+	//
+	// It exists because the engine writes the index on behalf of a command
+	// whose answer has already gone back: Submit's first-prompt seed runs after
+	// the turn has been handed to the caller, and the event-driven writes (the
+	// agent's title, a turn's end) have no caller at all. Event.Cause names the
+	// command where there was one. SetTitle is the one index write whose
+	// failure is RETURNED instead, because its caller is still there
+	// (engine.ErrIndexWrite).
+	IndexErr string
 }
 
 // The three list sections of a StateDelta. Each is a struct around one slice

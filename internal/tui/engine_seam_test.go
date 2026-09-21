@@ -1078,3 +1078,65 @@ func TestSendNowDeltasBecomeTheNotesTheyAlwaysWere(t *testing.T) {
 		assertPrompts(t, sess, "go", "MANGO")
 	})
 }
+
+// ------------------------------------------------- the durable craze session id
+
+// TestTheCrazeSessionIDTravelsEveryConstructionPath is A15's first clause from
+// the client's side (session control SD-22). The TUI builds its engine in
+// exactly one place, setSession, and three paths reach it: the session
+// internal/cli hands in for --continue, whose row's id arrives through Config;
+// the resume picker, which has the row itself; and the provider picker, which
+// builds a NEW session and therefore a new identity.
+func TestTheCrazeSessionIDTravelsEveryConstructionPath(t *testing.T) {
+	isolateSkillsHome(t)
+	loaded := NewStub()
+	t.Cleanup(func() { _ = loaded.Close() })
+	m := New(Config{
+		Session:        loaded,
+		CrazeSessionID: "018f-the-thread",
+		Theme:          "tokyo-night",
+		Workspace:      t.TempDir(),
+		Yolo:           true,
+		Loading:        true,
+		Provider:       agent.CursorProvider(),
+		NewSession:     func(agent.Provider) agent.Session { return NewStub() },
+		LoadSession:    func(agent.Provider, sessions.Row) agent.Session { return NewStub() },
+	})
+	if m.eng == nil {
+		t.Fatal("setup: no engine")
+	}
+	if got := m.eng.State().CrazeSessionID; got != "018f-the-thread" {
+		t.Fatalf("--continue's engine holds %q, want the row's own id", got)
+	}
+
+	// The resume picker: the row it chose carries the id.
+	row := resumeRow("s-1", "grok", "yesterday", time.Hour)
+	row.CrazeID = "018f-another-thread"
+	tm, _ := m.confirmResume(row)
+	m = tm.(Model)
+	t.Cleanup(func() { _ = m.eng.Close() })
+	if got := m.eng.State().CrazeSessionID; got != "018f-another-thread" {
+		t.Fatalf("the resume picker's engine holds %q, want the chosen row's id", got)
+	}
+
+	// A row written before crazeId existed: nothing to carry, so the engine
+	// mints one and the row gains it on its next write.
+	old := resumeRow("s-2", "grok", "older", 2*time.Hour)
+	tm, _ = m.confirmResume(old)
+	m = tm.(Model)
+	t.Cleanup(func() { _ = m.eng.Close() })
+	minted := m.eng.State().CrazeSessionID
+	if minted == "" || minted == "018f-another-thread" {
+		t.Fatalf("a row with no durable id left the engine holding %q", minted)
+	}
+
+	// The provider picker builds a NEW session, so it starts a new thread of
+	// work with an identity of its own.
+	tm, _ = m.confirmProvider(agent.GrokProvider(), true)
+	m = tm.(Model)
+	t.Cleanup(func() { _ = m.eng.Close() })
+	fresh := m.eng.State().CrazeSessionID
+	if fresh == "" || fresh == minted || fresh == "018f-another-thread" {
+		t.Fatalf("a new session took an old identity: %q", fresh)
+	}
+}

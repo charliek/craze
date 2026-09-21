@@ -75,6 +75,19 @@ type Row struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
+	// CrazeID is the durable craze session id (session control SD-22): the
+	// identity that survives a session/load into a new agent session and a
+	// host restart, where SessionID is the *provider's* id and changes with
+	// every load. The engine mints it and carries it back in on every load
+	// path (plan 021 §3.8).
+	//
+	// It is ADDITIVE, in both directions. The key is written only when it is
+	// set, so a row an older craze wrote keeps exactly the keys it had until
+	// something gives it one; and a row a newer craze wrote is read by an
+	// older one through extra, like any other unknown key, and written back
+	// unchanged. A row with none gains one on its next upsert.
+	CrazeID string `json:"crazeId,omitempty"`
+
 	// TitleKind is only meaningful as input to Upsert; see the type's doc.
 	// It is never read from or written to the file.
 	TitleKind TitleKind `json:"-"`
@@ -124,6 +137,10 @@ type Store struct {
 //   - TitleKindAgent overwrites unless the row is already Pinned;
 //   - TitleKindUser always overwrites and sets Pinned.
 //
+// in.CrazeID follows applyCrazeID: the stored id is the row's identity and is
+// never replaced, an empty one is filled, and an empty incoming id changes
+// nothing.
+//
 // CreatedAt is set once, when the row is first created. The whole operation
 // -- read, merge by key, rewrite -- runs under atomicfile.Lock; unlike
 // config.go's SaveTheme/SaveProvider, a lock failure here is a returned
@@ -165,6 +182,7 @@ func (s *Store) Upsert(in Row) error {
 		records[i].Row.CWD = in.CWD
 		records[i].Row.UpdatedAt = now
 		applyTitle(&records[i].Row, in)
+		applyCrazeID(&records[i].Row, in)
 		found = true
 		break
 	}
@@ -173,6 +191,7 @@ func (s *Store) Upsert(in Row) error {
 			SessionID: in.SessionID,
 			Provider:  in.Provider,
 			CWD:       in.CWD,
+			CrazeID:   in.CrazeID,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}}
@@ -207,6 +226,29 @@ func applyTitle(row *Row, in Row) {
 		// A non-empty Title with TitleKindNone should not happen (a pure
 		// "touch" carries no title); do nothing rather than guess.
 	}
+}
+
+// applyCrazeID folds in's durable craze session id into an existing row.
+//
+// The rule is "first one wins, and it is never replaced". The row is keyed on
+// (Provider, SessionID), and the first craze id minted against that pair IS
+// the row's durable identity: replacing it would silently rename a session
+// something else may already be holding by that id (a journal note, a host
+// status, an attached client). So:
+//
+//   - an empty incoming id changes nothing -- most writes are touches and
+//     titles, and "I did not say" must never mean "clear it";
+//   - an empty stored id is filled, which is how a row written by an older
+//     craze, or by a craze that had no id to give, gains one;
+//   - an incoming id that DIFFERS from the stored one is dropped, and the
+//     stored one kept. That is the conservative answer: the two crazes
+//     disagree about which incarnation owns the row, and the one that wrote
+//     it first is the one every other record already names.
+func applyCrazeID(row *Row, in Row) {
+	if in.CrazeID == "" || row.CrazeID != "" {
+		return
+	}
+	row.CrazeID = in.CrazeID
 }
 
 // evictOverflow drops the oldest rows (by UpdatedAt, ties broken by file
@@ -409,12 +451,17 @@ func decodeLine(line string) (record, error) {
 
 	title, _ := raw["title"].(string)
 	pinned, _ := raw["pinned"].(bool)
+	// crazeId is not in the validation list either: it is additive, so a row
+	// written before it existed simply has none, and one whose value is not a
+	// string is read as none rather than failing a whole file over a key that
+	// is not part of the read contract.
+	crazeID, _ := raw["crazeId"].(string)
 
 	extra := make(map[string]any, len(raw))
 	for k, v := range raw {
 		extra[k] = v
 	}
-	for _, k := range []string{"sessionId", "provider", "cwd", "title", "pinned", "createdAt", "updatedAt"} {
+	for _, k := range []string{"sessionId", "provider", "cwd", "title", "pinned", "crazeId", "createdAt", "updatedAt"} {
 		delete(extra, k)
 	}
 
@@ -425,6 +472,7 @@ func decodeLine(line string) (record, error) {
 			CWD:       cwd,
 			Title:     title,
 			Pinned:    pinned,
+			CrazeID:   crazeID,
 			CreatedAt: createdAt,
 			UpdatedAt: updatedAt,
 		},
@@ -444,6 +492,12 @@ func encodeLine(rec record) ([]byte, error) {
 	out["cwd"] = rec.Row.CWD
 	out["title"] = rec.Row.Title
 	out["pinned"] = rec.Row.Pinned
+	if rec.Row.CrazeID != "" {
+		// Written only when there is one, so a row that never gained a durable
+		// id keeps exactly the keys it had: an older craze rewriting this file
+		// sees no new key, and neither does anyone diffing it.
+		out["crazeId"] = rec.Row.CrazeID
+	}
 	out["createdAt"] = rec.Row.CreatedAt.UTC().Format(time.RFC3339Nano)
 	out["updatedAt"] = rec.Row.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	return json.Marshal(out)

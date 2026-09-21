@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/journal"
 )
 
 // ChainPolicy is what a settled turn does to the queue behind it. It is the
@@ -32,9 +33,22 @@ type ChainPolicy struct {
 	RetryForeignTurn bool
 }
 
-// Options configure an Engine. The zero value is the TUI's.
+// Options configure an Engine. The zero value is a TUI's chain policy and no
+// session index.
 type Options struct {
 	Chain ChainPolicy
+	// Index is the session index and what writing a row needs that the engine
+	// cannot know (index.go). A zero IndexOptions — which is what `craze
+	// prompt`, every TUI unit test and every golden leave it — writes nothing
+	// at all.
+	Index IndexOptions
+	// CrazeSessionID is the durable craze session id this session already has:
+	// the crazeId of the row a --continue or a --resume loaded, carried back in
+	// so that one thread of work keeps one identity across every agent session
+	// it is loaded into (session control SD-22). Empty mints a fresh UUIDv7,
+	// which is what a new session and a row written before crazeId existed both
+	// want.
+	CrazeSessionID string
 }
 
 // foreignRetryTick is how often a turn held by ChainPolicy.RetryForeignTurn
@@ -121,6 +135,13 @@ type Engine struct {
 	asks *agent.AskRegistry
 	now  func() time.Time
 	opts Options
+	// craze is the durable craze session id (SD-22), fixed at construction and
+	// never written again, so it needs no lock.
+	craze string
+	// idx is the session index: the bookkeeping, the command-driven writes and
+	// the worker the observer feeds (index.go). Its mutex is a LEAF and no
+	// write of its ever runs under e.mu.
+	idx *indexWriter
 
 	mu       sync.Mutex
 	activity Activity
@@ -228,18 +249,24 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if !ok || src.Asks() == nil {
 		return nil, fmt.Errorf("engine: %T has no ask registry", sess)
 	}
+	craze := opts.CrazeSessionID
+	if craze == "" {
+		craze = newCrazeSessionID()
+	}
 	e := &Engine{
 		sess:     sess,
 		log:      owner.EventLog(),
 		asks:     src.Asks(),
 		now:      time.Now,
 		opts:     opts,
+		craze:    craze,
 		activity: ActivityStarting,
 		kick:     make(chan struct{}, 1),
 		setWake:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
 		hooks:    h,
 	}
+	e.idx = newIndexWriter(opts.Index, craze, sess.Snapshot, e.reportIndexErr)
 	// The session's clock, not the wall's: the Stub's is injected, and every
 	// golden that shows a time shows one of its. It is read where the session
 	// reads it already — on the goroutine that admits a prompt and the one
@@ -259,9 +286,20 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
+	// The durable id, once per incarnation and before anything else can use it:
+	// one engine wraps one session, which owns one log, which is one
+	// incarnation, so this runs exactly once for each. It is a Note, so it is
+	// journal-only and never blocks, and it is written with no lock of any kind
+	// held — the convention every note in craze keeps (plan 020 §3.5, the
+	// session note's own noteSession).
+	e.log.Note(journal.DiagNote{Kind: journal.DiagCrazeSession, Fields: map[string]any{
+		"crazeSessionId": craze,
+		"loaded":         opts.CrazeSessionID != "",
+	}})
 	e.wg.Add(2)
 	go e.drive()
 	go e.serveSets()
+	go e.idx.serve()
 	return e, nil
 }
 
@@ -270,7 +308,7 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 // through Control, so that one component decides what runs and two clients cannot
 // contradict each other.
 //
-// What is still reached through here, and what takes each away:
+// What is still reached through here, and nothing else is:
 //
 //   - Snapshot, which the TUI reads through Control.State() already, and which a
 //     caller that has no engine state to merge may still read here;
@@ -278,12 +316,11 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 //     Control.Events() hands out: a helper written against a session — headless
 //     craze's final sweeps — reads the same stream through either.
 //
-// The settings left with C10: SetModel, SetMode and SetConfig are Control.Set,
-// serialised by one worker and answered with a revision, and SetTitle is
-// Control.SetTitle. The TUI's one remaining reason to hold a session of its own
-// is the session index, which it still writes itself — from the snapshot this
-// hands it — until the index moves into the engine (C12). Nothing else may go
-// around Control: no Begin, no Cancel, no queue verb, no Interject, no setter.
+// That is the whole list. The settings left with C10 — SetModel, SetMode and
+// SetConfig are Control.Set, serialised by one worker and answered with a
+// revision, and SetTitle is Control.SetTitle — and the session index left with
+// C12, so there is no verb here a client may still reach for: no Begin, no
+// Cancel, no queue verb, no Interject, no setter, no Upsert.
 func (e *Engine) Session() agent.Session { return e.sess }
 
 // Start starts the session. Until it returns the engine refuses every
@@ -410,6 +447,15 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 // that is running and closes the log last, committing whatever the outbox
 // still holds — and joins the engine's goroutines, the cancel an armed send-now
 // asked for included. It is idempotent.
+//
+// The index worker is joined too, but its join is bounded where the others are
+// not: a row is written through a file lock that nothing can interrupt, so the
+// worker abandons a write still in flight rather than make a quit wait for
+// another process to let go of the lock (indexWriter.serve). That write lands
+// on its own goroutine; what it records is state the engine had already
+// decided. Work the observer posted that the worker has not picked up yet is
+// dropped with it — at most one touch, whose only effect is the UpdatedAt the
+// next run's first write bumps anyway.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
@@ -425,15 +471,39 @@ func (e *Engine) Close() error {
 		e.closeErr = e.sess.Close()
 		close(e.done)
 		e.wg.Wait()
+		e.idx.close()
 	})
 	return e.closeErr
 }
 
+// reportIndexErr publishes a failed index write, for every write but the
+// rename whose caller is still there to be told (Control.SetTitle). The event
+// is a StateDelta carrying nothing but IndexErr: a session craze could not
+// remember is a note to the user and never a reason to stop running it, and
+// §2.4 keeps that note a client-local row.
+//
+// It is a mandatory completion — enqueued whether or not the outbox reports
+// room — because it is a report of something that has already happened and
+// there is nobody to refuse it to.
+func (e *Engine) reportIndexErr(cause, msg string) {
+	e.log.Enqueue(e.stamp(agent.Event{
+		Type: agent.EventMeta, State: &agent.StateDelta{IndexErr: msg},
+	}, cause))
+}
+
 // observe is the log's observer. It runs inside the publishing boundary, once
-// per committed event, so it does nothing but note what the driver has to look
-// at again and wake it: it takes no lock but its own leaf and calls neither the
-// log nor the session. It is the seed of S1c's fold.
+// per committed event, so it does nothing but note what the driver and the
+// index worker have to look at again and wake them: it takes no lock but its
+// own two leaves, does no I/O, and calls neither the log nor the session. It is
+// the seed of S1c's fold.
+//
+// A sub-agent's event is never the main session's news: the TUI has always
+// routed those away before any of this ran (applyEvent), and a sub-agent
+// finishing is not this session being used.
 func (e *Engine) observe(ev agent.Event) {
+	if ev.Agent != "" || ev.Type == agent.EventSubagent {
+		return
+	}
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
@@ -444,10 +514,34 @@ func (e *Engine) observe(ev agent.Event) {
 		e.obsMu.Unlock()
 		if ev.Replay.Phase == agent.ReplayEnd {
 			e.wake()
+			// Only a load replays, so this is exactly "a loaded session came
+			// up": its row is the row its id came from, and touching it is what
+			// sorts a resumed session to the front of the picker before it has
+			// done anything (index.go's load).
+			e.idx.post(indexWork{load: true})
 		}
 	case agent.EventForeignTurn:
 		if ev.ForeignTurn != nil && !ev.ForeignTurn.Running {
 			e.wake()
+		}
+	case agent.EventDone:
+		// A turn ended, so this session is the newest thing in the workspace.
+		// It is the session's own ending and not the engine's, because a turn
+		// the AGENT ran on its own ends here too and is just as much use of
+		// this session — which is what the TUI keyed on. A touch is a no-op
+		// until a row exists, so one before craze has ever prompted conjures
+		// nothing.
+		e.idx.post(indexWork{touch: true})
+	case agent.EventMeta:
+		// session_info_update: the agent named the session. Only an
+		// agent-initiated update fills Event.Text — a /rename and a load's own
+		// title seed carry theirs in State alone (plan 021 correction 20) — so
+		// this is the one title the index takes as the agent's. Replayed is
+		// deliberately NOT consulted: the TUI never consulted it either, and no
+		// agent replays a session_info_update, so the two rules cannot differ
+		// in practice and the one that was shipped is the one kept.
+		if ev.Text != "" {
+			e.idx.post(indexWork{title: ev.Text})
 		}
 	}
 }
@@ -543,6 +637,14 @@ func (e *Engine) Submit(c Command, text string, mode SubmitMode, fromRow string)
 
 // submit is Submit's own work, run at most once per command id: see
 // withSyncReceipt.
+//
+// The index seed is the one thing here that is not instant: it is file I/O, on
+// this caller's goroutine, outside e.mu — §3.2's one documented exception, and
+// exactly where the TUI did it. It runs after the locked section has admitted
+// the turn and before this returns, so it is inside the command's receipt and a
+// resend replays the answer rather than writing a second row. Its failure is
+// NOT this call's answer: the turn has been admitted and is the answer, so the
+// failure goes out as a StateDelta{IndexErr} naming this command (index.go).
 func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string) (SubmitResult, error) {
 	var started []launch
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
@@ -617,7 +719,7 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 		e.log.Enqueue(e.stamp(qev.Event(), c.Cause()))
 		return SubmitResult{Queued: &row}, nil
 	}()
-	e.run(started)
+	e.runOwn(started, c.Cause())
 	if armedTurn != "" {
 		go e.cancelArmed(armedTurn, armedCause)
 	}
@@ -722,9 +824,31 @@ func (e *Engine) stamp(ev agent.Event, cause string) agent.Event {
 
 // run starts the continuations a locked section claimed, with the lock
 // released. Each was counted when it was claimed (launchLocked).
+//
+// It also posts each turn's first-prompt index seed to the worker. Every
+// caller of run but one is a turn the ENGINE started — a drain, a settlement's
+// successor, an armed send firing, a claim taken again — on the driver's
+// goroutine or on whichever one a continuation came back on, and none of those
+// may do file I/O. The one exception is a client's own Submit, which runs its
+// seed inline (runOwn). A seed is claimed once and once only, so a turn that
+// posts one after another path has already written it does nothing.
 func (e *Engine) run(ls []launch) {
 	for _, l := range ls {
 		go e.runTurn(l)
+		e.idx.post(indexWork{seed: true, seedText: l.t.text})
+	}
+}
+
+// runOwn is run for the turn a client's own Submit started: its seed is file
+// I/O on THIS goroutine — §3.2's one documented exception to "waits on
+// nothing", and exactly where the TUI wrote it — rather than the worker's, so
+// it sits inside the command's receipt and its failure names the command.
+func (e *Engine) runOwn(ls []launch, cause string) {
+	for _, l := range ls {
+		go e.runTurn(l)
+	}
+	for _, l := range ls {
+		e.idx.seed(cause, l.t.text)
 	}
 }
 

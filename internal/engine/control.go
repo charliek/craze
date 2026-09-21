@@ -226,6 +226,26 @@ var (
 	// cannot itself vouch for — see Command's own doc for the whole retry
 	// policy, by code.
 	ErrSetOutcomeUnknown = errors.New("engine: the settings change may or may not have landed")
+	// ErrIndexWrite answers a command that DID what it was asked to do and
+	// could not write it down: today the one such command is SetTitle, which
+	// renames and pins the session in craze and then records the new name in
+	// ~/.craze/sessions.jsonl for --continue and --resume to find. It always
+	// WRAPS the write's own failure, so errors.Is on that still holds.
+	//
+	// It is its own sentinel because the two halves need different words from
+	// a client: the rename HAPPENED and is to be said so, and beside it the
+	// index could not be written, which is a note and never a reason to stop
+	// (plan 021 §2.4). A client that could not tell them apart would have to
+	// choose between claiming a rename that did not happen and hiding one that
+	// did.
+	//
+	// Its code is "index_write", which 05-protocol.md does not list yet (C14
+	// adds it, beside unknown_row, in_progress and aborted). A resend of the
+	// SAME id replays this answer: the title is already set, so re-running the
+	// command would be a second rename. A client that wants the write attempted
+	// again sends a NEW id — or simply carries on, since the next index write
+	// of any kind records the pinned title along with everything else.
+	ErrIndexWrite = errors.New("engine: the session index could not be written")
 	// ErrCommandAborted answers a command id whose call did not return at all:
 	// it panicked on the way through. Whether it changed anything is not
 	// knowable, so the id is answered with this for as long as the table keeps
@@ -244,6 +264,11 @@ func Code(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, ErrIndexWrite):
+		// First among the sentinels, because this one WRAPS a failure from
+		// outside craze — a file error, whatever the filesystem said — and
+		// nothing below may be allowed to answer for it.
+		return "index_write"
 	case errors.Is(err, ErrNotAccepting), errors.Is(err, agent.ErrNotInTurn):
 		return "not_accepting"
 	case errors.Is(err, ErrCommandInProgress):
@@ -369,8 +394,13 @@ type Control interface {
 	// is bounded by its ctx throughout: a request still queued is answered with
 	// that context's error having changed nothing, and one the worker has
 	// claimed with ErrSetOutcomeUnknown, which is the honest answer once a
-	// request may already be on the wire. SetTitle waits on nothing, because
-	// craze owns the title and no provider is asked.
+	// request may already be on the wire.
+	//
+	// SetTitle asks no provider, so it is not queued behind anything; it does
+	// write the session's index row, which is file I/O on the caller's own
+	// goroutine (§3.2's documented exception, where the TUI has always done
+	// it). A write that failed comes back as ErrIndexWrite wrapping it, and
+	// means the session WAS renamed and only the record of it was not written.
 	Set(ctx context.Context, c Command, s Setting) (SetResult, error)
 	SetTitle(c Command, title string) error
 

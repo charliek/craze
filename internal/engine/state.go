@@ -79,6 +79,13 @@ type State struct {
 	StartFailed bool
 	// Incarnation is the log's id: the scope of turn ids and sequence numbers.
 	Incarnation string
+	// CrazeSessionID is the durable craze session id (session control SD-22):
+	// the identity of this thread of work, which survives a session/load into
+	// a new agent session and a host restart. It is fixed for the engine's
+	// life. The other two identities are beside it: Snapshot.SessionID is the
+	// PROVIDER's, which changes with every load, and Incarnation is this one
+	// process lifetime.
+	CrazeSessionID string
 	// RetryHorizon is the command-id table's bound (receipts.go): within it, a
 	// resent command id is answered from the table and never re-executes;
 	// past it, ErrUnknownCommand.
@@ -103,9 +110,10 @@ type HeadAsk struct {
 // mutexes are never nested.
 func (e *Engine) State() State {
 	st := State{
-		Snapshot:     e.sess.Snapshot(),
-		Incarnation:  e.log.Incarnation(),
-		RetryHorizon: e.receipts.horizon(),
+		Snapshot:       e.sess.Snapshot(),
+		Incarnation:    e.log.Incarnation(),
+		CrazeSessionID: e.craze,
+		RetryHorizon:   e.receipts.horizon(),
 	}
 	if asks := e.asks.Asks(); len(asks) > 0 {
 		st.PendingAsks = len(asks)

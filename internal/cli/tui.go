@@ -283,6 +283,11 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	cfg.ProviderLocked = true
 	cfg.FallbackDefault = false
 	cfg.Loading = true
+	// The row's durable craze id travels with the session built from it: this
+	// is the same thread of work, loaded into another agent session (session
+	// control SD-22). A row written before crazeId existed has none, and the
+	// engine mints one that the row gains on its next write.
+	cfg.CrazeSessionID = row.CrazeID
 	cfg.Session = build(p, row)
 	return nil
 }

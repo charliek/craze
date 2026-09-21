@@ -528,7 +528,7 @@ func TestShellEveryQuitPathKillsTheCommand(t *testing.T) {
 		// The command still dies — that is the whole assertion — it just dies
 		// after the frame was drawn rather than before it.
 		m, marker, done := runningShell(t, sized(t))
-		m.setSession(NewStub())
+		m.setSession(NewStub(), "")
 		if !waitMarker(t, marker, false, 15*time.Second) {
 			t.Fatal("the new session left the old one's command running")
 		}

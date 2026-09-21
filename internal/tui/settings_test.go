@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/charliek/craze/internal/agent"
 )
 
@@ -417,23 +419,35 @@ func TestRenameGoesThroughControlAndDrawsItsNote(t *testing.T) {
 // instead of the note — and writes no index row for a rename that did not
 // happen.
 func TestRenameRefusedForRoomWritesNothing(t *testing.T) {
-	m := sized(t)
-	stub := m.sess.(*Stub)
+	isolateSkillsHome(t)
+	// The index goes in through Config, because the engine is built in New and
+	// is what writes it now (plan 021 §3.8): a store assigned to the model
+	// afterwards would never reach the engine, and this test would pass because
+	// nothing was ever configured to write.
 	idx := &fakeIndex{}
-	m.sessionIndex = idx
+	stub := NewStub()
+	t.Cleanup(func() { _ = stub.Close() })
+	m := New(Config{
+		Session:      stub,
+		Theme:        "tokyo-night",
+		Workspace:    t.TempDir(),
+		Model:        "grok",
+		Yolo:         true,
+		SessionIndex: idx,
+	})
+	m = deliver(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = deliver(t, m, startedMsg{})
 	saturateStub(t, stub)
 
-	m.input.SetValue("/rename never")
-	tm, _ := m.Update(enter())
-	m = tm.(Model)
+	m = runSlash(t, m, "/rename never")
 	if len(texts(m, entryError)) == 0 {
 		t.Fatal("a refused rename draws its error")
 	}
 	if notes := strings.Join(texts(m, entryNote), "|"); strings.Contains(notes, "renamed to") {
 		t.Fatalf("a refused rename wrote its note: %q", notes)
 	}
-	if len(idx.rows) != 0 {
-		t.Fatalf("a refused rename wrote %d index rows", len(idx.rows))
+	if idx.count() != 0 {
+		t.Fatalf("a refused rename wrote %d index rows", idx.count())
 	}
 	if got := stub.Snapshot().Title; got != "" {
 		t.Fatalf("a refused rename renamed the session to %q", got)

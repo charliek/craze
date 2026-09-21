@@ -221,6 +221,9 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 		cfg.Provider = p
 		cfg.Session = build(p, row)
 		cfg.Loading = true
+		// The same carry as runTUI's --continue: the row's durable craze id
+		// belongs to the session built from it (session control SD-22).
+		cfg.CrazeSessionID = row.CrazeID
 	case o.resume:
 		rows, err := index.Recent(cwd, "", resumeRowLimit)
 		if err != nil {

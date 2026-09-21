@@ -557,6 +557,7 @@ type wireState struct {
 	SendNow  *wireSendNow     `json:"sendNow,omitempty"`
 	Reason   string           `json:"reason,omitempty"`
 	Detail   string           `json:"detail,omitempty"`
+	IndexErr string           `json:"indexErr,omitempty"`
 }
 
 // The three list sections. Each keeps its slice under a key of its own rather
@@ -714,6 +715,7 @@ func toWireEvent(ev Event) wireEvent {
 		w.State = &wireState{
 			Title: s.Title, Mode: s.Mode, Model: s.Model,
 			SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
+			IndexErr: s.IndexErr,
 		}
 		if c := s.Config; c != nil {
 			w.State.Config = &wireConfig{Options: convertSlice(c.Options, toWireConfigOption)}
@@ -903,6 +905,7 @@ func (w *wireEvent) event() Event {
 		ev.State = &StateDelta{
 			Title: s.Title, Mode: s.Mode, Model: s.Model,
 			SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
+			IndexErr: s.IndexErr,
 		}
 		if c := s.Config; c != nil {
 			ev.State.Config = &ConfigState{Options: convertSlice(c.Options, configOptionOf)}

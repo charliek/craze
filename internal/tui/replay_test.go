@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,24 +18,146 @@ import (
 // fakeIndex is Config.SessionIndex as a recorder. It is the whole of what the
 // TUI knows about the index — one method — which is why a unit test can hold
 // every write moment in §3.2 without a file, a lock or a HOME.
+//
+// It is concurrency-safe and it SIGNALS, because the index moved into the
+// engine (plan 021 C12) and the event-driven writes — the agent's title, the
+// touch at a turn's end, a loaded row coming up — run on the engine's index
+// worker rather than on the model's own goroutine. A test that wants one waits
+// on waitRows or waitAttempts; nothing here ever sleeps.
 type fakeIndex struct {
+	mu   sync.Mutex
 	rows []sessions.Row
 	err  error
+	// attempts counts every call, a failing one included, which is what a test
+	// of the retry rule has to be able to see.
+	attempts int
+	// wrote carries one token per completed call. It is buffered well past
+	// anything a test writes so that Upsert never blocks on it.
+	wrote chan struct{}
 }
 
 func (f *fakeIndex) Upsert(row sessions.Row) error {
-	if f.err != nil {
-		return f.err
+	f.mu.Lock()
+	f.attempts++
+	err := f.err
+	if err == nil {
+		f.rows = append(f.rows, row)
 	}
-	f.rows = append(f.rows, row)
-	return nil
+	if f.wrote == nil {
+		f.wrote = make(chan struct{}, 64)
+	}
+	signal := f.wrote
+	f.mu.Unlock()
+	select {
+	case signal <- struct{}{}:
+	default:
+	}
+	return err
 }
 
 func (f *fakeIndex) last() sessions.Row {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(f.rows) == 0 {
 		return sessions.Row{}
 	}
 	return f.rows[len(f.rows)-1]
+}
+
+// seedRow is the first-prompt row: the one write that carries a fallback
+// title. A test about what a title SAYS wants this one and not last(), because
+// the turn's own end touches the row afterwards with no title at all — and
+// since the index moved into the engine that touch is the index worker's, so it
+// can land at any point after the event is committed (plan 021 §3.8).
+func (f *fakeIndex) seedRow(t *testing.T) sessions.Row {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.rows {
+		if r.TitleKind == sessions.TitleKindFallback {
+			return r
+		}
+	}
+	t.Fatalf("no first-prompt row was written: %+v", f.rows)
+	return sessions.Row{}
+}
+
+// seeds is how many first-prompt rows were written, which is the "later sends
+// do not rewrite the file for a title no rule would keep" guarantee as
+// something a test can count without racing a turn's end.
+func (f *fakeIndex) seeds() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.rows {
+		if r.TitleKind == sessions.TitleKindFallback {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeIndex) all() []sessions.Row {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sessions.Row(nil), f.rows...)
+}
+
+func (f *fakeIndex) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.rows)
+}
+
+func (f *fakeIndex) tries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts
+}
+
+func (f *fakeIndex) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+// signalChan is the channel Upsert posts to, created on first use by whichever
+// of a waiter and a writer gets there first.
+func (f *fakeIndex) signalChan() chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.wrote == nil {
+		f.wrote = make(chan struct{}, 64)
+	}
+	return f.wrote
+}
+
+// waitRows blocks until the index holds at least n rows. It is a barrier on
+// the writer's own signal, never a sleep; the deadline is the suite's
+// deadlock watchdog.
+func waitRows(t *testing.T, f *fakeIndex, n int) {
+	t.Helper()
+	waitIndex(t, f, n, f.count, "rows")
+}
+
+// waitAttempts is waitRows for calls rather than rows: what a test of a
+// FAILING index has to wait on, since a failed write records nothing.
+func waitAttempts(t *testing.T, f *fakeIndex, n int) {
+	t.Helper()
+	waitIndex(t, f, n, f.tries, "attempts")
+}
+
+func waitIndex(t *testing.T, f *fakeIndex, n int, have func() int, what string) {
+	t.Helper()
+	signal := f.signalChan()
+	timeout := deadline()
+	for have() < n {
+		select {
+		case <-signal:
+		case <-timeout:
+			t.Fatalf("the index reached %d %s, want %d: %+v", have(), what, n, f.all())
+		}
+	}
 }
 
 // replayTranscript is what a loaded session hands back: the user's earlier
@@ -153,7 +276,7 @@ func TestLoadedModelStartsRestoring(t *testing.T) {
 func TestNewSessionIsNeverRestoring(t *testing.T) {
 	isolateSkillsHome(t)
 	m := startSized(t, t.TempDir())
-	if m.replaying || m.loading || !m.sessionReady() {
+	if m.replaying || !m.sessionReady() {
 		t.Fatalf("a new session must come up on startedMsg alone: %+v", m)
 	}
 }
@@ -321,26 +444,32 @@ func TestNoIndexRowOnStartAlone(t *testing.T) {
 	idx := &fakeIndex{}
 	m, _ := loadedStub(t, idx)
 	// A *new* session: nothing loaded, so nothing to touch when it comes up.
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 	if !m.sessionReady() {
 		t.Fatal("the session never came up")
 	}
-	if len(idx.rows) != 0 {
-		t.Fatalf("a session with no prompt wrote %d rows: %+v", len(idx.rows), idx.rows)
+	if n := idx.count(); n != 0 {
+		t.Fatalf("a session with no prompt wrote %d rows: %+v", n, idx.all())
 	}
 }
 
 func TestLoadedSessionTouchesItsRowWhenItComesUp(t *testing.T) {
 	idx := &fakeIndex{}
-	m, _ := loadedStub(t, idx)
+	m, stub := loadedStub(t, idx)
 	m = deliver(t, m, startedMsg{})
-	if len(idx.rows) != 0 {
-		t.Fatalf("the row was touched before the replay ended: %+v", idx.rows)
+	if n := idx.count(); n != 0 {
+		t.Fatalf("the row was touched before the replay ended: %+v", idx.all())
 	}
-	m = feed(t, m, replayEvent(agent.ReplayEnd))
-	if len(idx.rows) != 1 {
-		t.Fatalf("a loaded session wrote %d rows, want one touch", len(idx.rows))
+	// Emitted through the session's log rather than handed to Update, because
+	// the touch is the engine's now: its observer runs where an event is
+	// committed, and an event the model was simply given never went past the
+	// engine at all (plan 021 §3.8).
+	stub.Emit(replayEvent(agent.ReplayEnd))
+	m = pumpUntil(t, m, func(m Model) bool { return m.sessionReady() })
+	waitRows(t, idx, 1)
+	if n := idx.count(); n != 1 {
+		t.Fatalf("a loaded session wrote %d rows, want one touch", n)
 	}
 	row := idx.last()
 	if row.TitleKind != sessions.TitleKindNone || row.Title != "" {
@@ -348,6 +477,9 @@ func TestLoadedSessionTouchesItsRowWhenItComesUp(t *testing.T) {
 	}
 	if row.SessionID != m.snap.SessionID || row.SessionID == "" || row.CWD != m.cwd {
 		t.Fatalf("touch row %+v, want the session's own id and cwd %q", row, m.cwd)
+	}
+	if row.CrazeID == "" {
+		t.Fatalf("the touch carried no durable craze id: %+v", row)
 	}
 }
 
@@ -357,7 +489,7 @@ func TestLoadedSessionTouchesItsRowWhenItComesUp(t *testing.T) {
 func TestFirstSendWritesTheFallbackTitle(t *testing.T) {
 	idx := &fakeIndex{}
 	m, _ := loadedStub(t, idx)
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 
 	long := strings.Repeat("é", 200)
@@ -365,44 +497,43 @@ func TestFirstSendWritesTheFallbackTitle(t *testing.T) {
 	if m.status != statusWorking {
 		t.Fatalf("the send was refused: status %s", m.status)
 	}
-	if len(idx.rows) != 1 {
-		t.Fatalf("the first send wrote %d rows", len(idx.rows))
-	}
-	row := idx.last()
-	if row.TitleKind != sessions.TitleKindFallback {
-		t.Fatalf("title kind %v, want fallback", row.TitleKind)
-	}
+	// The seed is Submit's own, on this goroutine (plan 021 §3.2's documented
+	// exception), so it has happened by the time Enter's Update has returned.
+	row := idx.seedRow(t)
 	if row.Title != "first line of the prompt" {
 		t.Fatalf("fallback title %q, want the sanitised first line", row.Title)
 	}
 	if row.Pinned {
 		t.Fatal("the fallback title is not a pin")
 	}
+	if row.CrazeID == "" {
+		t.Fatalf("the first-prompt row carried no durable craze id: %+v", row)
+	}
 
 	// A second send changes nothing a title rule would keep, so it does not
-	// rewrite the file. The first turn is waited out rather than declared over,
-	// so the second send is a send and not a queued row — which means the
-	// turn's own end has touched the row by now, so what this counts is only
-	// what the second send added.
+	// write a second first-prompt title. Counting the seeds rather than the
+	// rows is what makes that a claim about the seed alone: a turn's end
+	// touches the row on the engine's worker, whenever the worker gets to it.
 	m = pumpUntil(t, m, isIdle)
 	m = pumpSettled(t, m)
-	written := len(idx.rows)
 	m = pumpEnter(t, m, "second prompt")
 	if m.status != statusWorking {
 		t.Fatalf("the second send was refused: status %s", m.status)
 	}
-	if len(idx.rows) != written {
-		t.Fatalf("the second send wrote again: %+v", idx.rows[written:])
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows were written: %+v", n, idx.all())
 	}
 }
 
-func TestFallbackTitleIsCappedAt120Runes(t *testing.T) {
-	got := fallbackTitle(strings.Repeat("é", 200) + "\nsecond line")
+// TestIndexTitleIsCappedAt120Runes is the TUI's half of the fallback rule: how
+// a title is folded onto one row and capped. Taking the first line of a prompt
+// is the engine's half now (engine's TestFallbackTitleIsTheFirstLine).
+func TestIndexTitleIsCappedAt120Runes(t *testing.T) {
+	got := indexTitleLine(strings.Repeat("é", 200))
 	if n := len([]rune(got)); n != titleRuneCap {
 		t.Fatalf("title is %d runes, want %d", n, titleRuneCap)
-	}
-	if strings.Contains(got, "second line") {
-		t.Fatalf("the fallback took more than the first line: %q", got)
 	}
 }
 
@@ -413,11 +544,16 @@ func TestFallbackTitleIsCappedAt120Runes(t *testing.T) {
 func TestAgentTitleFillsTheRowAndAPinBeatsIt(t *testing.T) {
 	idx := &fakeIndex{}
 	m, stub := loadedStub(t, idx)
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 
 	stub.AgentTitle("list the working directory")
-	m = feed(t, m, agent.Event{Type: agent.EventMeta, Text: "list the working directory"})
+	// Emitted through the log, not handed to Update: an agent title is an
+	// event-driven write, so it is the engine's observer that has to see it,
+	// and the index worker that makes it (plan 021 §3.8).
+	stub.Emit(agent.Event{Type: agent.EventMeta, Text: "list the working directory"})
+	waitRows(t, idx, 1)
+	m = pumpDrained(t, m)
 	row := idx.last()
 	if row.TitleKind != sessions.TitleKindAgent || row.Title != "list the working directory" {
 		t.Fatalf("agent title row %+v", row)
@@ -438,30 +574,37 @@ func TestAgentTitleFillsTheRowAndAPinBeatsIt(t *testing.T) {
 	if got := stub.Snapshot().Title; got != "fix the flaky pty test" {
 		t.Fatalf("the pin did not hold: %q", got)
 	}
-	n := len(idx.rows)
-	m = feed(t, m, agent.Event{Type: agent.EventMeta})
-	if len(idx.rows) != n {
+	n := idx.count()
+	stub.Emit(agent.Event{Type: agent.EventMeta})
+	m = pumpSettled(t, m)
+	if got := idx.count(); got != n {
 		t.Fatalf("a title-less EventMeta wrote a row: %+v", idx.last())
 	}
 }
 
 func TestEventDoneTouchesTheRow(t *testing.T) {
 	idx := &fakeIndex{}
-	m, _ := loadedStub(t, idx)
-	m.replaying, m.loading = false, false
+	m, stub := loadedStub(t, idx)
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 
 	// No row yet, so the turn a foreign agent could run before craze ever
-	// prompted must not conjure a titleless one.
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	if len(idx.rows) != 0 {
-		t.Fatalf("EventDone created a row out of nothing: %+v", idx.rows)
+	// prompted must not conjure a titleless one. Emitted through the log,
+	// because a turn's end is the engine's observer's to see.
+	stub.Emit(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	m = pumpSettled(t, m)
+	if n := idx.count(); n != 0 {
+		t.Fatalf("EventDone created a row out of nothing: %+v", idx.all())
 	}
 
-	m, _ = typeAndEnter(t, m, "hello")
-	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
-	if len(idx.rows) != 2 {
-		t.Fatalf("rows %+v, want the creation and the touch", idx.rows)
+	// A real turn: the send creates the row and the turn's own ending touches
+	// it. The creation was Submit's own; the touch is the worker's.
+	m = pumpEnter(t, m, "hello")
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	waitRows(t, idx, 2)
+	if n := idx.count(); n != 2 {
+		t.Fatalf("rows %+v, want the creation and the touch", idx.all())
 	}
 	if got := idx.last(); got.TitleKind != sessions.TitleKindNone || got.Title != "" {
 		t.Fatalf("the touch carried a title: %+v", got)
@@ -474,17 +617,29 @@ func TestEventDoneTouchesTheRow(t *testing.T) {
 func TestIndexErrorsAreTranscriptLines(t *testing.T) {
 	idx := &fakeIndex{err: errFakeIndex}
 	m, _ := loadedStub(t, idx)
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
-	m, cmd := typeAndEnter(t, m, "a prompt")
-	if cmd == nil {
-		t.Fatal("the send was refused because the index failed")
+	m = pumpEnter(t, m, "a prompt")
+	if m.status != statusWorking {
+		t.Fatalf("the send was refused because the index failed: status %s", m.status)
 	}
+	// The seed ran on this goroutine, but its failure cannot come back as
+	// Submit's answer — the turn is the answer — so it arrives as a
+	// StateDelta{IndexErr} the model draws the same row from (plan 021 §3.8).
+	m = pumpUntil(t, m, func(m Model) bool { return len(texts(m, entryError)) > 0 })
 	if got := texts(m, entryError); len(got) != 1 || !strings.Contains(got[0], "no home directory") {
 		t.Fatalf("error entries %q", got)
 	}
-	if m.indexRow {
-		t.Fatal("a failed write must not claim the row exists")
+
+	// A failed write does not claim the row exists, which is observable: a
+	// turn's end touches nothing when there is nothing to touch. The index is
+	// let work again first, so the only reason for silence is the missing row.
+	tries := idx.tries()
+	idx.setErr(nil)
+	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
+	m = pumpSettled(t, m)
+	if got := idx.tries(); got != tries {
+		t.Fatalf("a failed write left %d attempts and the touch made %d: %+v", tries, got, idx.all())
 	}
 }
 
@@ -495,30 +650,38 @@ func TestIndexErrorsAreTranscriptLines(t *testing.T) {
 func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 	idx := &fakeIndex{err: errFakeIndex}
 	m, _ := loadedStub(t, idx)
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 
 	m = pumpEnter(t, m, "the first prompt")
-	if len(idx.rows) != 0 {
-		t.Fatalf("a failing index recorded %d rows", len(idx.rows))
-	}
-	if m.indexSeeded {
-		t.Fatal("a failed write must not retire the first-prompt title")
+	waitAttempts(t, idx, 1)
+	if n := idx.count(); n != 0 {
+		t.Fatalf("a failing index recorded %d rows", n)
 	}
 
-	// The next send finds the index working again.
-	idx.err = nil
+	// The next send finds the index working again, and the fallback title is
+	// tried once more: a failed write must not have retired it.
+	idx.setErr(nil)
 	m = pumpUntil(t, m, isIdle)
 	m = pumpSettled(t, m)
 	m = pumpEnter(t, m, "the second prompt")
-	if len(idx.rows) != 1 {
-		t.Fatalf("the retry wrote %d rows, want 1", len(idx.rows))
-	}
-	if got := idx.last(); got.Title != "the second prompt" || got.TitleKind != sessions.TitleKindFallback {
+	if got := idx.seedRow(t); got.Title != "the second prompt" {
 		t.Fatalf("the retry wrote %+v", got)
 	}
-	if !m.indexSeeded || !m.indexRow {
-		t.Fatalf("after a successful retry: seeded=%v row=%v", m.indexSeeded, m.indexRow)
+
+	// And now it IS retired: a third send writes no second first-prompt row,
+	// and the row the retry created is there to be touched.
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	m = pumpEnter(t, m, "the third prompt")
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
+	if n := idx.seeds(); n != 1 {
+		t.Fatalf("%d first-prompt rows were written: %+v", n, idx.all())
+	}
+	waitRows(t, idx, 2)
+	if got := idx.last(); got.TitleKind != sessions.TitleKindNone {
+		t.Fatalf("after the retry a turn's end wrote %+v, want a touch", got)
 	}
 }
 
@@ -567,9 +730,6 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 			// /rename — is reached, and none of them may write.
 			sc := scriptHeld()
 			m = startScripted(t, m, sess, "the first prompt", sc)
-			if !m.indexSeeded {
-				t.Fatal("a skipped write is done, not failed: the first-prompt write must not be retried")
-			}
 			sess.AgentTitle("an agent title")
 			sess.Emit(agent.Event{Type: agent.EventMeta, Text: "an agent title"})
 			m = pumpUntil(t, m, viewHas("an agent title"))
@@ -577,11 +737,8 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 			m = pumpUntil(t, m, isIdle)
 			m = pumpSettled(t, m)
 			m = runSlash(t, m, "/rename a user title")
-			if len(idx.rows) != 0 {
-				t.Fatalf("a hidden provider's session was indexed: %+v", idx.rows)
-			}
-			if m.indexRow {
-				t.Fatal("no row was written, so none may be claimed")
+			if n := idx.tries(); n != 0 {
+				t.Fatalf("a hidden provider's session was indexed: %+v", idx.all())
 			}
 			if got := texts(m, entryError); len(got) != 0 {
 				t.Fatalf("skipping the index is not an error: %q", got)
@@ -607,12 +764,15 @@ func TestNilSessionIndexWritesNothing(t *testing.T) {
 		t.Fatal("a Config without a SessionIndex must leave the model without one")
 	}
 	m = deliver(t, m, startedMsg{})
-	m = feed(t, m, replayEvent(agent.ReplayEnd))
-	m, _ = typeAndEnter(t, m, "a prompt that would create a row")
-	m = feed(t, m,
-		agent.Event{Type: agent.EventMeta, Text: "an agent title"},
-		agent.Event{Type: agent.EventDone, StopReason: "end_turn"},
-	)
+	// Emitted through the log, so every write moment the ENGINE owns is really
+	// reached — the loaded row's touch, the agent's title, a turn's end — and
+	// not only the two a client's own command makes.
+	stub.Emit(replayEvent(agent.ReplayEnd))
+	m = pumpUntil(t, m, func(m Model) bool { return m.sessionReady() })
+	m = pumpEnter(t, m, "a prompt that would create a row")
+	stub.Emit(agent.Event{Type: agent.EventMeta, Text: "an agent title"})
+	m = pumpUntil(t, m, isIdle)
+	m = pumpSettled(t, m)
 	m = runSlash(t, m, "/rename a user title")
 	if got := texts(m, entryError); len(got) != 0 {
 		t.Fatalf("a nil index produced errors: %q", got)
@@ -650,8 +810,8 @@ func TestRenameBeforeTheSessionIsUpIsRefused(t *testing.T) {
 	if stub.Snapshot().Title != "" {
 		t.Fatalf("the session was renamed while restoring: %q", stub.Snapshot().Title)
 	}
-	if len(idx.rows) != 0 {
-		t.Fatalf("a refused rename wrote %+v", idx.rows)
+	if idx.count() != 0 {
+		t.Fatalf("a refused rename wrote %+v", idx.all())
 	}
 	if m.input.Value() != "" {
 		t.Fatalf("the draft survived a refused rename: %q", m.input.Value())
@@ -660,7 +820,7 @@ func TestRenameBeforeTheSessionIsUpIsRefused(t *testing.T) {
 
 func TestRenameWithNoTitleIsAUsageError(t *testing.T) {
 	m, stub := loadedStub(t, &fakeIndex{})
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 	for _, args := range []string{"", "   ", "\a"} {
 		next := runSlash(t, m, strings.TrimRight("/rename "+args, " "))
@@ -679,7 +839,7 @@ func TestRenameRunsWhileATurnIsWorking(t *testing.T) {
 	}
 	idx := &fakeIndex{}
 	m, stub := loadedStub(t, idx)
-	m.replaying, m.loading = false, false
+	m.replaying = false
 	m = deliver(t, m, startedMsg{})
 	m, _ = typeAndEnter(t, m, "a prompt")
 	if m.status != statusWorking {

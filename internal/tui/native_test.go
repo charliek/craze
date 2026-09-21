@@ -181,8 +181,8 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 		t.Fatalf("started=%v provider=%q, want a started native session", m.started, m.snap.Provider.Name)
 	}
 	// startedMsg's own persist already had its chance by the time it returns.
-	if len(idx.rows) != 0 {
-		t.Fatalf("startedMsg indexed a session with no prompt yet: %+v", idx.rows)
+	if idx.count() != 0 {
+		t.Fatalf("startedMsg indexed a session with no prompt yet: %+v", idx.all())
 	}
 	if got := ConfigProvider(); got != "grok" {
 		t.Fatalf("startedMsg replaced the persisted default with %q", got)
@@ -205,8 +205,8 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 		t.Fatalf("the answer never rendered:\n%s", plainView(m))
 	}
 
-	if len(idx.rows) != 0 {
-		t.Fatalf("a completed turn on a hidden provider was indexed: %+v", idx.rows)
+	if idx.count() != 0 {
+		t.Fatalf("a completed turn on a hidden provider was indexed: %+v", idx.all())
 	}
 	if got := ConfigProvider(); got != "grok" {
 		body, _ := os.ReadFile(path)

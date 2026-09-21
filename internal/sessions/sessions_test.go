@@ -369,6 +369,130 @@ func TestUpsertCapsAt500Rows(t *testing.T) {
 	}
 }
 
+// --- the durable craze session id (SD-22) ------------------------------
+
+// TestCrazeIDRoundTripsAndIsOmittedWhenEmpty: the key is additive in both
+// directions. A row that has one keeps it through a read and a rewrite; a row
+// that has none keeps exactly the keys it had, so an older craze rewriting the
+// file sees nothing new and nothing is lost.
+func TestCrazeIDRoundTripsAndIsOmittedWhenEmpty(t *testing.T) {
+	path := setIndex(t)
+	var s Store
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "cursor", CWD: "/ws", CrazeID: "018f-one", Title: "one", TitleKind: TitleKindFallback})
+	mustUpsert(t, &s, Row{SessionID: "s2", Provider: "cursor", CWD: "/ws", Title: "two", TitleKind: TitleKindFallback})
+
+	rows, err := s.Recent("/ws", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, row := range rows {
+		got[row.SessionID] = row.CrazeID
+	}
+	if got["s1"] != "018f-one" || got["s2"] != "" {
+		t.Fatalf("Recent returned craze ids %+v", got)
+	}
+	latest, ok, err := s.Latest("/ws", "")
+	if err != nil || !ok {
+		t.Fatalf("Latest: ok=%v err=%v", ok, err)
+	}
+	if latest.SessionID != "s2" || latest.CrazeID != "" {
+		t.Fatalf("Latest returned %+v", latest)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), `"crazeId"`); n != 1 {
+		t.Fatalf("%d crazeId keys in the file, want one (the row that has an id):\n%s", n, b)
+	}
+	if !strings.Contains(string(b), `"crazeId":"018f-one"`) {
+		t.Fatalf("the craze id did not round-trip:\n%s", b)
+	}
+}
+
+// TestAnOlderRowGainsACrazeIDOnItsNextUpsert: a row written before crazeId
+// existed decodes unchanged, and the first write that has an id to give fills
+// it in. That is how --continue on an old session starts naming one thread of
+// work.
+func TestAnOlderRowGainsACrazeIDOnItsNextUpsert(t *testing.T) {
+	path := setIndex(t)
+	writeRaw(t, path, `{"sessionId":"s1","provider":"cursor","cwd":"/ws","title":"yesterday","pinned":false,`+
+		`"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"}`+"\n")
+
+	var s Store
+	before, ok, err := s.Latest("/ws", "")
+	if err != nil || !ok {
+		t.Fatalf("Latest: ok=%v err=%v", ok, err)
+	}
+	if before.CrazeID != "" || before.Title != "yesterday" {
+		t.Fatalf("an older row decoded as %+v", before)
+	}
+
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "cursor", CWD: "/ws", CrazeID: "018f-minted", TitleKind: TitleKindNone})
+	after, ok, err := s.Latest("/ws", "")
+	if err != nil || !ok {
+		t.Fatalf("Latest: ok=%v err=%v", ok, err)
+	}
+	if after.CrazeID != "018f-minted" {
+		t.Fatalf("the row gained %q, want the minted id", after.CrazeID)
+	}
+	if after.Title != "yesterday" {
+		t.Fatalf("gaining an id disturbed the row: %+v", after)
+	}
+}
+
+// TestUpsertKeepsTheStoredCrazeID: the row is keyed on (Provider, SessionID)
+// and the first craze id minted against that pair IS its durable identity, so
+// a later write that disagrees is dropped rather than allowed to rename a
+// thread of work other records already name. An empty incoming id says nothing
+// at all — most writes are touches and titles — and must never clear one.
+func TestUpsertKeepsTheStoredCrazeID(t *testing.T) {
+	setIndex(t)
+	var s Store
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "cursor", CWD: "/ws", CrazeID: "018f-first", Title: "one", TitleKind: TitleKindFallback})
+
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "cursor", CWD: "/ws", CrazeID: "018f-second", TitleKind: TitleKindNone})
+	row, _, err := s.Latest("/ws", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.CrazeID != "018f-first" {
+		t.Fatalf("a differing id replaced the stored one: %q", row.CrazeID)
+	}
+
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "cursor", CWD: "/ws", TitleKind: TitleKindNone})
+	row, _, err = s.Latest("/ws", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.CrazeID != "018f-first" {
+		t.Fatalf("a touch with no id left %q", row.CrazeID)
+	}
+}
+
+// TestCrazeIDIsKeyedPerProviderAndSession: two rows, two ids. The durable id
+// belongs to the row, not to the file.
+func TestCrazeIDIsKeyedPerProviderAndSession(t *testing.T) {
+	setIndex(t)
+	var s Store
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "cursor", CWD: "/ws", CrazeID: "018f-cursor", TitleKind: TitleKindNone})
+	mustUpsert(t, &s, Row{SessionID: "s1", Provider: "grok", CWD: "/ws", CrazeID: "018f-grok", TitleKind: TitleKindNone})
+
+	rows, err := s.Recent("/ws", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, row := range rows {
+		got[row.Provider] = row.CrazeID
+	}
+	if got["cursor"] != "018f-cursor" || got["grok"] != "018f-grok" {
+		t.Fatalf("craze ids by provider: %+v", got)
+	}
+}
+
 // --- unknown fields ---------------------------------------------------
 
 func TestUnknownFieldsRoundTrip(t *testing.T) {
