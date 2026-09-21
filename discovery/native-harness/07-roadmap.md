@@ -10,8 +10,8 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H1 | complete | skeleton shipped: hidden `native` provider; 14 of 15 imported models held a clean TUI turn, multi-turn sessions and `craze prompt --json` ran on a subset (OpenRouter via `openaicompat`, D-35); no interject, no modes (D-34) |
 | H2 | complete | tools shipped across PRs #33, #34, #35, #37: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38), the gate seam allowing everything (D-39), ripgrep on `PATH` (D-41), the doom-loop guard (D-42), abnormal-finish handling (D-43), and interject; live smoke completed 14 of 15 imported models on Linux and 4 of 4 on the mac-mini; D-35's condition met, `openaicompat` stays |
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
-| H4 | in progress | Claude compat shipped across PRs #39 and PR 2 (`feature/plan-022-h4-prompt`): content sources behind one seam, discovery, expansion, instructions with `@path` imports and confinement, the model-facing catalog, `[compat.claude]` toggles; the composer shell mode (PR 3, every provider) has not merged |
-| H5 | not started | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
+| H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
+| H5 | next, unblocked | modes: plan mode in the dispatcher, exit-plan and question tools, todos |
 | H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
@@ -420,7 +420,43 @@ diagnostics written before the redactor existed were their own leak,
 because loader `warn` lines interpolate paths and import references
 straight from the untrusted tree (X22).
 
+PR 3 (#43, merged `be05da9`) landed the composer shell mode, its process
+runner (`internal/tui/shell_run.go`, opencode's process lifecycle ported
+rather than imported), and the path that carries a command's output to the
+agent with the next prompt. **H4 is therefore complete.**
+
+Live smoke (V9, Linux, 2026-09-20), real tmux, binary rebuilt from the
+branch tip:
+
+| what | result |
+|---|---|
+| round trip on cursor: `! git status --short`, `! echo SHELLOUT-ALPHA`, then "summarise that" | pass — the user row shows only what was typed; the agent's echo leads with the `<shell_context>` block, carrying both commands' output and exit status |
+| the same on native, real model `fireworks/kimi-k3` | pass — `!echo NATIVE-SHELL-BETA` then "What exactly did that command print?"; the model answered `NATIVE-SHELL-BETA`, the user row showed only the question |
+| `!sleep 300` then Esc | pass — killed, no `sleep 300` left on the box |
+| `!sleep 4242 & sleep 4243` then Ctrl+C | pass — both gone, the backgrounded child included, and craze kept running: no quit, no turn cancelled |
+| `!sleep 5150 & sleep 5151` then Ctrl+D | pass — craze exited and nothing survived |
+
+Grok was not driven live: the fake agent's `echo` script advertises no auth
+method grok accepts (`agent: no supported auth method`), and the real
+`grok` binary is the one recorded as returning 402 in plan 012's smoke.
+What covers grok instead is that the mechanism is provider-independent —
+`SplitShellContext` and the attachment both happen in the TUI, before the
+text reaches any session — and `TestShellContextNeverReachesTheScreen`
+runs one sub-test per provider (cursor, grok, native), each over the own
+row, a drained row, a replayed row, the interjection echo, the queue band,
+and the title. The real-terminal proof exists on two of the three
+providers; the smoke record is explicit that this is not the same as
+driving three live.
+
+V2 (the `../roost` menu check) is still not run: PR 3's smoke did not
+include it. V8 (mac-mini) is still not run either, for the reason already
+recorded — the box is shared with the parallel session-control plan and CI
+already runs macOS.
+
 ### H5 — modes
+
+Unblocked and next: H4 is complete, and Plan 021's PR 2 — the dependency
+this phase was gated on — has merged as `db7686e`.
 
 - Plan, ask, implement as rulesets + reminders; dispatcher enforcement;
   `exit_plan_mode` and `ask_user_question` tools; `todo_write`.
