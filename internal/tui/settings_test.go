@@ -186,6 +186,178 @@ func TestAModeDeltaIsMaskedWhileAChangeOfItsOwnIsInFlight(t *testing.T) {
 	}
 }
 
+// stubDeltas is every event the session has published and not yet been read,
+// flushed first so "published" means "there": the REAL deltas, with the Seq the
+// log gave them and the sections the session really wrote. A test that feeds
+// these instead of hand-built events is the only kind that can catch a delta
+// whose SECTIONS are wrong — flushCmd never consumes a session event, so a
+// command-only test sees none of them (review r23, "TUI revision tests' blind
+// spots").
+func stubDeltas(t *testing.T, s *Stub) []agent.Event {
+	t.Helper()
+	if err := s.EventLog().Flush(context.Background(), nil); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	var out []agent.Event
+	for {
+		select {
+		case ev := <-s.Events():
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
+}
+
+// configBackedModel gives the model's session the shape of an agent with no
+// session/set_model: the model lives in a config option, and `/model` reaches
+// it through the fallback. The model's own mirror is refreshed, as a frame
+// would refresh it, so the dialog and the command see the option.
+func configBackedModel(t *testing.T, m Model) (Model, *Stub) {
+	t.Helper()
+	stub := m.sess.(*Stub)
+	stub.ModelConfigOption("model")
+	m.refreshSnap()
+	if agent.ModelConfigOption(m.snap) == nil {
+		t.Fatal("the session did not take the model option")
+	}
+	return m, stub
+}
+
+// TestAFallbackModelChangeEndsOnTheNewModel is r23 finding 3 through the real
+// reducers and the real deltas. `/model fast` with no effort: session/set_model
+// is refused, the fallback sets the model as a config option, and the command
+// returns no message of its own — so the ONLY thing that can correct the screen
+// afterwards is the delta that change published.
+//
+// Before the fix that delta moved the config section alone: refreshSnap put
+// CurrentModel back to the old model and nothing ever restored it. Both orders
+// are run, because which of the command's answer and the session's delta
+// reaches the model first is a race.
+func TestAFallbackModelChangeEndsOnTheNewModel(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		deltaFirst bool
+	}{
+		{"the delta arrives after the command's answer", false},
+		{"the delta arrives first", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, stub := configBackedModel(t, sized(t))
+			stubDeltas(t, stub) // whatever the set-up published
+			stub.FailNextSetModel()
+			m.input.SetValue("/model fast")
+			tm, cmd := m.Update(enter())
+			m = tm.(Model)
+			if m.snap.CurrentModel != "fast" {
+				t.Fatalf("the optimistic value is %q", m.snap.CurrentModel)
+			}
+			msg := runCmd(cmd)
+			if msg != nil {
+				t.Fatalf("a /model with no effort answers with nothing, got %T", msg)
+			}
+			evs := stubDeltas(t, stub)
+			if tc.deltaFirst {
+				m = feed(t, m, evs...)
+			} else {
+				m = flushCmd(t, m, cmd)
+				m = feed(t, m, evs...)
+			}
+			if got := m.snap.CurrentModel; got != "fast" {
+				t.Fatalf("the screen ended on %q, want the model the fallback set", got)
+			}
+			if m.model != "fast" {
+				t.Fatalf("the status row says %q", m.model)
+			}
+			if got := stub.Snapshot().CurrentModel; got != "fast" {
+				t.Fatalf("the session's own model is %q: the fallback IS a model change", got)
+			}
+			if len(texts(m, entryError)) != 0 {
+				t.Fatalf("the fallback succeeded, so nothing is the user's to see: %q", texts(m, entryError))
+			}
+		})
+	}
+}
+
+// TestAFallbackCompletionOlderThanAnotherClientsChangeIsNotWritten is the
+// second failure in r23 finding 3, and the one the revision guard exists for:
+// the dialog's model step lands through the fallback (a Config delta), another
+// client changes the same config-backed model afterwards, and only then does
+// the first step's completion reach the model.
+//
+// It works because the fallback's delta now carries the MODEL section too, so
+// the model revision the completion is judged against is one a config-backed
+// change can advance. Judged against the config revision alone — or against a
+// model revision nothing moves — the older answer would be written over the
+// newer value with nothing left to correct it.
+func TestAFallbackCompletionOlderThanAnotherClientsChangeIsNotWritten(t *testing.T) {
+	m, stub := configBackedModel(t, sized(t))
+	stubDeltas(t, stub)
+
+	// The dialog picks a model; its step falls back to the config option.
+	stub.FailNextSetModel()
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	if m.dialog != dialogModel {
+		t.Fatal("expected the model dialog")
+	}
+	m = typeInto(t, m, "FAST")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	// Its answer is held: nothing of it has reached the model yet.
+	msg := runCmd(cmd)
+	applied, ok := msg.(modelApplyMsg)
+	if !ok {
+		t.Fatalf("the dialog answered with %T", msg)
+	}
+	if applied.err != nil || len(applied.done) != 1 {
+		t.Fatalf("the dialog's chain came back %+v", applied)
+	}
+	if got := stub.Snapshot().CurrentModel; got != "fast" {
+		t.Fatalf("the fallback left the session on %q", got)
+	}
+	m = feed(t, m, stubDeltas(t, stub)...)
+
+	// Another client moves the same option, and this model applies that delta.
+	if _, err := stub.SetConfig(context.Background(), "c-9/1", "model", "grok"); err != nil {
+		t.Fatalf("the other client's change: %v", err)
+	}
+	newer := stubDeltas(t, stub)
+	m = feed(t, m, newer...)
+	if got := m.snap.CurrentModel; got != "grok" {
+		t.Fatalf("the newer change left the screen on %q", got)
+	}
+
+	// Only now does the dialog's own completion arrive.
+	m = deliver(t, m, applied)
+	if got := m.snap.CurrentModel; got != "grok" {
+		t.Fatalf("an older completion wrote %q over the newer change", got)
+	}
+	if m.model != "grok" {
+		t.Fatalf("the status row says %q", m.model)
+	}
+}
+
+// TestAZeroRevisionSuccessIsWrittenUnlessSomethingNewerWas is hunt A's last
+// question: a Set that succeeded but could not learn its revision — the flush
+// gave up, or the log was closing — answers Rev 0, and a client must read that
+// as "no revision" rather than as one older than every other. With nothing
+// applied since, the step is written; with a newer delta applied, it is not.
+func TestAZeroRevisionSuccessIsWrittenUnlessSomethingNewerWas(t *testing.T) {
+	m := sized(t)
+	m.snap.CurrentModel, m.model = "grok", "grok"
+	st := applyStep{value: "fast", note: "model → fast", label: "model", at: 4, rev: 0}
+	m.modelRev = 4
+	if got := m.settleStep(st); got.snap.CurrentModel != "fast" {
+		t.Fatalf("a zero-revision success with nothing newer applied wrote %q", got.snap.CurrentModel)
+	}
+	m.modelRev = 9
+	if got := m.settleStep(st); got.snap.CurrentModel != "grok" {
+		t.Fatalf("a zero-revision success wrote %q over a newer delta", got.snap.CurrentModel)
+	}
+}
+
 // TestASettingsDeltaDrawsNoRow is plan 021 §3.8's rule for S1b: the TUI renders
 // no transcript row from a settings delta — not another client's change, not
 // the agent's, and not the echo of its own. Its own notes stay exactly where

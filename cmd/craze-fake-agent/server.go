@@ -113,11 +113,32 @@ func defaultConfigOptions() []map[string]any {
 	}
 }
 
+// modelConfigOptions is defaultConfigOptions plus the option a provider that
+// has no session/set_model keeps its MODEL in: category "model", whose values
+// are the models the session advertises. It belongs to the `modelconfig`
+// script alone, so no other script's chips or dialog rows move.
+func modelConfigOptions() []map[string]any {
+	return append(defaultConfigOptions(), map[string]any{
+		"id":           "model",
+		"name":         "Model",
+		"category":     "model",
+		"type":         "select",
+		"currentValue": "default",
+		"options": []map[string]string{
+			{"value": "default", "name": "Default"},
+			{"value": "composer", "name": "Composer"},
+		},
+	})
+}
+
 func run(script string) error {
 	conn := acp.NewConn(os.Stdin, os.Stdout)
 	cfg := defaultConfigOptions()
-	if grokScript(script) {
+	switch {
+	case grokScript(script):
 		cfg = grokConfigOptions()
+	case script == "modelconfig":
+		cfg = modelConfigOptions()
 	}
 	s := &server{conn: conn, script: script, config: cfg}
 	s.writeFakeStderr()

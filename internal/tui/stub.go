@@ -712,50 +712,91 @@ func stubCallOf(rec agent.AskRecord) stubCall {
 // order is event order here as it is on a real session (plan 021 §3.8). The
 // ticket is the delta's receipt: its Seq, once the log has committed it, is the
 // change's revision.
-func (s *Stub) SetModel(_ context.Context, cause, id string) (*agent.Ticket, error) {
+func (s *Stub) SetModel(_ context.Context, cause, id string) (agent.SetOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fail := s.failModel
 	s.failModel = false
 	if fail {
-		return nil, fmt.Errorf("stub: set model failed")
+		return agent.SetOutcome{}, fmt.Errorf("stub: set model failed")
 	}
 	s.snap.CurrentModel = id
-	return s.enqueueDeltaLocked(cause, &agent.StateDelta{Model: &id}), nil
+	return agent.SetOutcome{
+		Value:  s.snap.CurrentModel,
+		Ticket: s.enqueueDeltaLocked(cause, &agent.StateDelta{Model: &id}),
+	}, nil
 }
 
-func (s *Stub) SetMode(_ context.Context, cause, id string) (*agent.Ticket, error) {
+func (s *Stub) SetMode(_ context.Context, cause, id string) (agent.SetOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fail := s.failMode
 	s.failMode = false
 	if fail {
-		return nil, fmt.Errorf("stub: set mode failed")
+		return agent.SetOutcome{}, fmt.Errorf("stub: set mode failed")
 	}
 	s.snap.CurrentMode = id
 	// Event.Mode stays empty, as on the live session: it is an agent-initiated
 	// update's field, and a client retires a plan offer on it.
-	return s.enqueueDeltaLocked(cause, &agent.StateDelta{Mode: &id}), nil
+	return agent.SetOutcome{
+		Value:  s.snap.CurrentMode,
+		Ticket: s.enqueueDeltaLocked(cause, &agent.StateDelta{Mode: &id}),
+	}, nil
 }
 
-func (s *Stub) SetConfig(_ context.Context, cause, id, value string) (*agent.Ticket, error) {
+// SetConfig is the live session's, including its model rule: setting the option
+// a provider keeps its MODEL in (agent.IsModelConfigOption) moves CurrentModel
+// too and says both sections in the one delta, so `/model`'s fallback — the
+// model set as a config option — reaches the model section's revision and the
+// status row exactly as a session/set_model would (plan 021 §3.8, r23 finding
+// 3). A test builds such an option with ModelConfigOption below; the Stub's own
+// default config has none, as cursor's captures have one and grok's do not.
+func (s *Stub) SetConfig(_ context.Context, cause, id, value string) (agent.SetOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := s.configCalls
 	s.configCalls++
 	if s.failConfigAt == n {
 		s.failConfigAt = -1
-		return nil, fmt.Errorf("stub: set config failed")
+		return agent.SetOutcome{}, fmt.Errorf("stub: set config failed")
 	}
+	model := false
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
 			s.snap.Config[i].Current = value
+			model = agent.IsModelConfigOption(s.snap.Config[i])
 			break
 		}
 	}
-	return s.enqueueDeltaLocked(cause, &agent.StateDelta{Config: &agent.ConfigState{
-		Options: cloneStubConfig(s.snap.Config),
-	}}), nil
+	st := &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}}
+	if model {
+		s.snap.CurrentModel = value
+		st.Model = &value
+	}
+	return agent.SetOutcome{Value: value, Ticket: s.enqueueDeltaLocked(cause, st)}, nil
+}
+
+// ModelConfigOption gives this Stub the config-backed model a provider without
+// session/set_model has: an option of category "model" whose values are the
+// models it already advertises, currently on CurrentModel. It is set-up, so it
+// publishes nothing — like every other Set* helper here, it is how a test
+// builds the session it wants **before the model looks at it**, and not a
+// change made while a client was watching.
+func (s *Stub) ModelConfigOption(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values := make([]agent.SelectValue, 0, len(s.snap.Models))
+	for _, m := range s.snap.Models {
+		values = append(values, agent.SelectValue{Value: m.ID, Name: m.Name})
+	}
+	s.snap.Config = append(cloneStubConfig(s.snap.Config), agent.ConfigOption{
+		ID:           id,
+		Name:         "Model",
+		Category:     "model",
+		Type:         "select",
+		Current:      s.snap.CurrentModel,
+		SelectValues: values,
+	})
 }
 
 // enqueueDeltaLocked is the live session's own helper (live.go): one EventMeta

@@ -371,7 +371,25 @@ func (s *nativeSession) start(context.Context) error {
 	s.snap.Models = infos
 	s.snap.SessionID = hs.ID()
 	s.refreshCurrentLocked()
+	// The install says what it installed, in the section that installed it:
+	// the model the harness opened on, the effort option that model brings,
+	// and the plugin rows — which a native session resolves once here and
+	// never again (X3). Without it a client folding the stream would have to
+	// call Snapshot() to learn the session's starting state, which is the gap
+	// r23 finding 2 is about. The title is not touched here and native's
+	// first-prompt title stays silent (X47), so no Title section, and
+	// Event.Mode/Event.Text stay empty: starting is nobody's agent update.
+	model := s.snap.CurrentModel
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{
+		Model:   &model,
+		Config:  &ConfigState{Options: cloneConfig(s.snap.Config)},
+		Plugins: &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+	})
 	s.mu.Unlock()
+	// Outside the lock, as the live session's install flushes: "emitted means
+	// buffered" when Start returns, so a client's first read of the stream is
+	// the session's starting state rather than a race with the first turn.
+	_ = s.log.Flush(context.Background(), s.done)
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: hs.ID()})
@@ -1217,22 +1235,27 @@ func (s *nativeSession) Close() error {
 // and leaves the current model in place. A switch that took is announced
 // (announceCurrent), because the new model can bring or take away the effort
 // option.
-func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (*Ticket, error) {
+func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
 	s.mu.Lock()
 	hs, table := s.hs, s.table
 	models := s.snap.Models
 	s.mu.Unlock()
 	if hs == nil {
-		return nil, fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	alias, err := MatchModel(Snapshot{Models: models}, modelID)
 	if err != nil {
-		return nil, fmt.Errorf("native: %v", err)
+		return SetOutcome{}, fmt.Errorf("native: %v", err)
 	}
 	if err := hs.SetModel(alias); err != nil {
-		return nil, phraseSetupError(err, table, alias)
+		return SetOutcome{}, phraseSetupError(err, table, alias)
 	}
-	return s.announceCurrent(cause), nil
+	// The confirmed model is the harness's own, captured where the snapshot
+	// took it: MatchModel resolves an alias — a prefix, a display name — to a
+	// canonical id, so the value that was asked for and the value the delta
+	// carries are not always the same string (SetOutcome).
+	model, _, t := s.announceCurrent(cause)
+	return SetOutcome{Value: model, Ticket: t}, nil
 }
 
 // announceCurrent republishes the current model and its effort option after a
@@ -1254,12 +1277,23 @@ func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (*Tic
 //
 // Plugins are not announced: a native session resolves them once in Start and
 // they never change again (plan 021 X3), so there is nothing to say.
-func (s *nativeSession) announceCurrent(cause string) *Ticket {
+// It answers with the two values it published — the model, and the effort the
+// harness resolved — read inside the locked section that captured them, which
+// is what lets a setter answer its caller with the CONFIRMED value rather than
+// with the one that was asked for (SetOutcome, r23 finding 4). A second read
+// afterwards could see another client's switch and answer this caller about it.
+func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *Ticket) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshCurrentLocked()
-	model := s.snap.CurrentModel
-	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
+	model = s.snap.CurrentModel
+	for _, opt := range s.snap.Config {
+		if opt.ID == nativeEffortID {
+			effort = opt.Current
+			break
+		}
+	}
+	return model, effort, s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
 		Model:  &model,
 		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
 	})
@@ -1279,16 +1313,16 @@ func (s *nativeSession) enqueueDeltaLocked(cause string, base Event, st *StateDe
 }
 
 // SetMode is unsupported: the harness has no modes until H5.
-func (s *nativeSession) SetMode(context.Context, string, string) (*Ticket, error) {
-	return nil, ErrUnsupported
+func (s *nativeSession) SetMode(context.Context, string, string) (SetOutcome, error) {
+	return SetOutcome{}, ErrUnsupported
 }
 
 // SetConfig sets the effort, the one option the native session advertises;
 // any other id is unsupported. Like SetModel it is allowed during a turn, and
 // a change that took is announced the same way.
-func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (*Ticket, error) {
+func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (SetOutcome, error) {
 	if id != nativeEffortID {
-		return nil, ErrUnsupported
+		return SetOutcome{}, ErrUnsupported
 	}
 	s.mu.Lock()
 	hs, table := s.hs, s.table
@@ -1296,20 +1330,24 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (*
 	levels := s.efforts[alias]
 	s.mu.Unlock()
 	if hs == nil {
-		return nil, fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	// Checked here as well as by the harness so the refusal can name what
 	// the model does offer. "" is the model's default and always allowed.
 	if value != "" && !slices.Contains(levels, value) {
 		if len(levels) == 0 {
-			return nil, fmt.Errorf("native: model %q has no effort control", alias)
+			return SetOutcome{}, fmt.Errorf("native: model %q has no effort control", alias)
 		}
-		return nil, fmt.Errorf("native: model %q offers effort %s, not %q", alias, strings.Join(levels, ", "), value)
+		return SetOutcome{}, fmt.Errorf("native: model %q offers effort %s, not %q", alias, strings.Join(levels, ", "), value)
 	}
 	if err := hs.SetEffort(value); err != nil {
-		return nil, phraseSetupError(err, table, alias)
+		return SetOutcome{}, phraseSetupError(err, table, alias)
 	}
-	return s.announceCurrent(cause), nil
+	// The confirmed effort, not the one asked for: "" means the model's own
+	// default, and what the harness resolved it to is what the delta carries
+	// (SetOutcome, r23 finding 4).
+	_, effort, t := s.announceCurrent(cause)
+	return SetOutcome{Value: effort, Ticket: t}, nil
 }
 
 // SetTitle is /rename: local, pinned against the title the first prompt would

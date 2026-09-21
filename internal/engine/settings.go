@@ -52,8 +52,12 @@ func (s Setting) validate() error {
 // SetResult is a settings change the provider took: the value it is now at, and
 // the revision that value was committed with.
 type SetResult struct {
-	// Value is the confirmed value — what the provider accepted, which for
-	// every setting craze has today is what was asked for.
+	// Value is the confirmed value: what the session is now at, captured in the
+	// section that changed it (agent.SetOutcome) and NOT an echo of what was
+	// asked for. The two differ wherever a provider resolves a request — the
+	// native session turns an empty effort into the model's own default and a
+	// model alias into its canonical id — and a client that was handed the
+	// request back would disagree with the delta at Rev.
 	Value string
 	// Rev is the Seq of the StateDelta the session enqueued for this change:
 	// the change's revision (plan 021 §3.8). A client that applies a delayed
@@ -72,6 +76,15 @@ type setReq struct {
 	c     Command
 	s     Setting
 	reply chan setAnswer
+}
+
+// ctxErr is the request's own cancellation, as the worker checks it when it
+// claims the request — and nil for a Set made with no context at all.
+func (r *setReq) ctxErr() error {
+	if r.ctx == nil {
+		return nil
+	}
+	return r.ctx.Err()
 }
 
 type setAnswer struct {
@@ -114,10 +127,30 @@ type setAnswer struct {
 //   - A refusal from the provider is returned as it came, with nothing mutated
 //     and no event published.
 //
-// A ctx that ends while the Set is still waiting its turn returns the context's
-// error, having changed nothing; one that ends after the worker has taken it
-// returns whatever the session makes of it, because by then the provider has
-// the call.
+// # What a context that ends buys, and what it does not
+//
+// A Set whose ctx ends while it is still WAITING ITS TURN changed nothing and
+// is told so with the context's error. Two goroutines can find that out — the
+// caller, which takes it out of the queue itself (dropSet), and the worker,
+// which checks the request's context in the very section that CLAIMS it
+// (takeSet) and answers a dead one there without running it. They take the same
+// lock, so exactly one of them has the request and exactly one answer is ever
+// sent; what the pair rules out is the schedule the other order allowed, where
+// the worker dequeued a request whose caller had already given up and asked the
+// provider for a change nobody was waiting for (r23 finding 1).
+//
+// Once the worker has CLAIMED it, the caller waits for the worker's answer,
+// whatever its own context does: that answer is the truth about what the
+// provider was told, and a caller that returned "cancelled" while the change
+// was being made would be told the opposite of what happened. So a ctx that
+// ends DURING the provider call gets the session's own answer — a success with
+// its revision if the provider took the change before noticing, or the
+// provider's error if it did not. It is never "failed" for a change that was
+// made; it can be an error for a change the wire may still have carried, which
+// is the honest limit of a cancellation made after a request has gone out
+// (internal/acp writes before it checks its context) and not something this
+// layer can improve on. A ctx that ends during the flush leaves the change
+// standing with Rev 0 — see runSet.
 func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, error) {
 	if err := s.validate(); err != nil {
 		return SetResult{}, err
@@ -136,14 +169,23 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 		case a := <-r.reply:
 			return a.res, a.err
 		case <-done:
+			if e.beforeDropSet != nil {
+				// A test barrier, nil in every other build: it parks this
+				// goroutine between its context ending and its own dequeue, so
+				// the schedule where the WORKER claims a request whose caller
+				// has already given up can be forced rather than hoped for.
+				e.beforeDropSet()
+			}
 			if e.dropSet(r) {
 				// Still waiting its turn, and now out of the queue: nothing was
 				// asked of the provider and nothing changed.
 				return SetResult{}, ctx.Err()
 			}
 			// The worker has it. Its answer is the truth about what the provider
-			// was told, and it is coming: the provider call and the flush both take
-			// this same ctx, so neither outlives it by much.
+			// was told, and it is coming: either the worker found this same dead
+			// context as it claimed the request and answered without running it,
+			// or the provider has the call and the flush follows — both take this
+			// ctx, so neither outlives it by much.
 			a := <-r.reply
 			return a.res, a.err
 		}
@@ -187,6 +229,15 @@ func (e *Engine) dropSet(r *setReq) bool {
 // takeSet is the next request for the worker, or false when there is none. A
 // closed engine has none ever again: everything still queued is answered here,
 // so no caller is left waiting on a worker that is about to exit.
+//
+// A request whose context has ended is answered here too, with that context's
+// error and WITHOUT being run: the check is in the same locked section that
+// claims it, which is what makes it airtight. A caller that gives up races
+// dropSet against this claim, and whichever wins, the request is out of the
+// queue exactly once and answered exactly once — and the provider is never
+// asked for a change whose caller had already gone (r23 finding 1). The
+// answers are sent under e.mu, which is safe because every reply channel is
+// buffered for the one answer it will ever carry.
 func (e *Engine) takeSet() (*setReq, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -197,12 +248,16 @@ func (e *Engine) takeSet() (*setReq, bool) {
 		e.sets = nil
 		return nil, false
 	}
-	if len(e.sets) == 0 {
-		return nil, false
+	for len(e.sets) > 0 {
+		r := e.sets[0]
+		e.sets = e.sets[1:]
+		if err := r.ctxErr(); err != nil {
+			r.reply <- setAnswer{err: err}
+			continue
+		}
+		return r, true
 	}
-	r := e.sets[0]
-	e.sets = e.sets[1:]
-	return r, true
+	return nil, false
 }
 
 // serveSets is the settings worker: one goroutine, one request at a time, in
@@ -257,17 +312,17 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		return SetResult{}, ErrUnavailable
 	}
 	var (
-		t   *agent.Ticket
+		out agent.SetOutcome
 		err error
 	)
 	cause := r.c.Cause()
 	switch r.s.Kind {
 	case SettingModel:
-		t, err = e.sess.SetModel(r.ctx, cause, r.s.Value)
+		out, err = e.sess.SetModel(r.ctx, cause, r.s.Value)
 	case SettingMode:
-		t, err = e.sess.SetMode(r.ctx, cause, r.s.Value)
+		out, err = e.sess.SetMode(r.ctx, cause, r.s.Value)
 	case SettingConfig:
-		t, err = e.sess.SetConfig(r.ctx, cause, r.s.ID, r.s.Value)
+		out, err = e.sess.SetConfig(r.ctx, cause, r.s.ID, r.s.Value)
 	default:
 		// Unreachable: Set validates before anything is queued.
 		return SetResult{}, fmt.Errorf("%w: setting kind %q", ErrBadRequest, r.s.Kind)
@@ -276,7 +331,12 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		return SetResult{}, err
 	}
 	_ = e.log.Flush(r.ctx, nil)
-	return SetResult{Value: r.s.Value, Rev: t.Seq()}, nil
+	// The session's confirmed value, never the one that was asked for: a
+	// provider is free to resolve what it was sent — an empty effort to the
+	// model's default, a model alias to its canonical id — and echoing the
+	// request here would hand a client a value that contradicts the very delta
+	// this Rev names (agent.SetOutcome, r23 finding 4).
+	return SetResult{Value: out.Value, Rev: out.Ticket.Seq()}, nil
 }
 
 // SetTitle renames the session — craze's own name for it, since ACP has no

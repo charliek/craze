@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +105,22 @@ func TestTheAgentsOwnUpdatesCarryTheirSectionAndAreBufferedWhenTheyReturn(t *tes
 	if ev.State.Title == nil || *ev.State.Title != "the agent's own title" {
 		t.Fatalf("the title section is %+v", ev.State.Title)
 	}
+}
+
+// settle drops everything a started session has already published — Start's
+// install delta, and the catalog the fake agent advertises on its way up — so
+// that what a case drives next is the only thing in the buffer. The wait is
+// for the catalog: it is sent on the read loop right after session/new's reply
+// and can otherwise land after Start has returned.
+func settle(t *testing.T, s *session) {
+	t.Helper()
+	select {
+	case <-s.commandsApplied:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the agent never advertised its commands")
+	}
+	_ = s.log.Flush(context.Background(), s.done)
+	drainBuffered(s)
 }
 
 // oneBufferedEvent is the single event the site just driven left in the
@@ -216,6 +234,11 @@ func TestStateOrderIsEventOrderForMode(t *testing.T) {
 		if err := s.Start(t.Context()); err != nil {
 			t.Fatal(err)
 		}
+		// Start's own install delta carries a Mode section too, so it is taken
+		// off here: counting it as one of the three below would stop the read
+		// one delta short and compare the snapshot against something that is
+		// not the last.
+		settle(t, s)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -254,6 +277,256 @@ func lastModeDelta(t *testing.T, s *session, want int) string {
 		}
 	}
 	return last
+}
+
+// TestForcedStateOrderForTheTitle is TestStateOrderIsEventOrderForTitle with
+// the sampling taken out. SetTitle's whole body is one locked section and it
+// asks no provider, so there are exactly TWO schedules — the agent's update
+// entirely before it, or entirely after it — and both are run here, once each.
+func TestForcedStateOrderForTheTitle(t *testing.T) {
+	t.Run("the agent names the session first", func(t *testing.T) {
+		s := newTestSession(t, Options{})
+		t.Cleanup(func() { _ = s.Close() })
+		s.onUpdate(sessionInfoNotification("the agent's own title"))
+		if err := s.SetTitle("c-1/1", "renamed"); err != nil {
+			t.Fatalf("SetTitle: %v", err)
+		}
+		wantLastTitleDelta(t, s, "renamed", 2)
+	})
+	t.Run("the rename lands first and pins", func(t *testing.T) {
+		s := newTestSession(t, Options{})
+		t.Cleanup(func() { _ = s.Close() })
+		if err := s.SetTitle("c-1/1", "renamed"); err != nil {
+			t.Fatalf("SetTitle: %v", err)
+		}
+		// Refused by the pin, so it publishes nothing: one delta, not two.
+		s.onUpdate(sessionInfoNotification("the agent's own title"))
+		wantLastTitleDelta(t, s, "renamed", 1)
+	})
+}
+
+// wantLastTitleDelta flushes, reads what the session buffered, and holds the
+// property both orders share: the snapshot is what the LAST title delta says,
+// and there were exactly want of them.
+func wantLastTitleDelta(t *testing.T, s *session, title string, want int) {
+	t.Helper()
+	_ = s.log.Flush(context.Background(), s.done)
+	last, n := "", 0
+	evs := drainBuffered(s)
+	for _, ev := range evs {
+		if ev.Type == EventMeta && ev.State != nil && ev.State.Title != nil {
+			last, n = *ev.State.Title, n+1
+		}
+	}
+	if n != want {
+		t.Fatalf("%d title deltas, want %d:\n%s", n, want, formatEvents(evs))
+	}
+	if last != title || s.Snapshot().Title != last {
+		t.Fatalf("the last title delta is %q, the snapshot says %q, want %q", last, s.Snapshot().Title, title)
+	}
+}
+
+// TestForcedStateOrderForTheMode is the mode's forced schedule, and the one
+// that needs a barrier: unlike SetTitle, SetMode asks the provider first, and
+// the gap between the provider taking the change and the session writing it is
+// the only window in which the agent's own update could interleave. The whole
+// of that update — mutate, enqueue, flush — is run inside it here.
+//
+// Whatever else the fake agent says about the mode it was asked for, the
+// property is the one the sampled test samples for: the snapshot holds what the
+// last mode delta by Seq says, and the update forced into the window is ordered
+// before the setter's own delta rather than lost behind it.
+func TestForcedStateOrderForTheMode(t *testing.T) {
+	s := startScript(t, "echo", false)
+	settle(t, s)
+	var once sync.Once
+	s.beforeSetSection = func() {
+		once.Do(func() { s.onUpdate(currentModeNotification("ask")) })
+	}
+	if _, err := s.SetMode(context.Background(), "c-1/1", "plan"); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+	// Three deltas: the forced update, the setter's own, and the
+	// current_mode_update the fake answers a set_mode with.
+	evs := modeDeltas(t, s, 3)
+	forced, own := -1, -1
+	last := ""
+	for i, ev := range evs {
+		if *ev.State.Mode == "ask" && forced < 0 {
+			forced = i
+		}
+		if ev.Cause == "c-1/1" {
+			own = i
+		}
+		last = *ev.State.Mode
+	}
+	if forced < 0 || own < 0 || forced > own {
+		t.Fatalf("the forced update is at %d and the setter's delta at %d:\n%s", forced, own, formatEvents(evs))
+	}
+	if got := s.Snapshot().CurrentMode; got != last {
+		t.Fatalf("the last mode delta is %q and the snapshot says %q", last, got)
+	}
+}
+
+// modeDeltas reads the session's events until it has seen want mode deltas and
+// answers with them, in order.
+func modeDeltas(t *testing.T, s *session, want int) []Event {
+	t.Helper()
+	var out []Event
+	for len(out) < want {
+		select {
+		case ev := <-s.Events():
+			if ev.Type == EventMeta && ev.State != nil && ev.State.Mode != nil {
+				out = append(out, ev)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of %d mode deltas arrived", len(out), want)
+		}
+	}
+	return out
+}
+
+// TestAConfigBackedModelChangeMovesTheModelSection is r23 finding 3 at the
+// author. An agent with no session/set_model keeps its model among its config
+// options, and `/model`'s fallback sets it there. Before the fix that moved the
+// option and nothing else: Snapshot().CurrentModel stayed on the old model for
+// `craze prompt` and the status row, and the MODEL section's revision stood
+// still while the display had already moved — so a delayed answer about the
+// model was judged against a revision no config-backed change could ever
+// advance.
+func TestAConfigBackedModelChangeMovesTheModelSection(t *testing.T) {
+	t.Run("the setter", func(t *testing.T) {
+		s := startScript(t, "modelconfig", false)
+		if got := s.Snapshot().CurrentModel; got != "default" {
+			t.Fatalf("the session started on %q", got)
+		}
+		out, err := s.SetConfig(context.Background(), "c-1/1", "model", "composer")
+		if err != nil {
+			t.Fatalf("SetConfig: %v", err)
+		}
+		if out.Value != "composer" {
+			t.Fatalf("SetConfig confirmed %q", out.Value)
+		}
+		if got := s.Snapshot().CurrentModel; got != "composer" {
+			t.Fatalf("the snapshot's model is %q: a config-backed model change is a model change", got)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		var own *Event
+		for _, ev := range drainBuffered(s) {
+			if ev.Type == EventMeta && ev.Cause == "c-1/1" {
+				own = &ev
+			}
+		}
+		if own == nil {
+			t.Fatal("the setter published no delta of its own")
+		}
+		if own.State.Model == nil || *own.State.Model != "composer" || own.State.Config == nil {
+			t.Fatalf("the delta carries %+v, want both sections", own.State)
+		}
+		if own.State.Config.Options[len(own.State.Config.Options)-1].Current != "composer" {
+			t.Fatalf("the config section is %+v", own.State.Config)
+		}
+	})
+	t.Run("the agent's own update", func(t *testing.T) {
+		s := startScript(t, "modelconfig", false)
+		settle(t, s)
+		s.onUpdate(modelConfigNotification("composer"))
+		ev := oneBufferedEvent(t, s)
+		if ev.State.Model == nil || *ev.State.Model != "composer" || ev.State.Config == nil {
+			t.Fatalf("the update carries %+v, want both sections", ev.State)
+		}
+		if got := s.Snapshot().CurrentModel; got != "composer" {
+			t.Fatalf("the snapshot's model is %q", got)
+		}
+		// A second update that merely re-lists the same value says nothing
+		// about the model: it is not a change, and adopting it would let a
+		// stale echo of the option write over a model session/set_model set.
+		s.onUpdate(modelConfigNotification("composer"))
+		ev = oneBufferedEvent(t, s)
+		if ev.State.Model != nil {
+			t.Fatalf("a config update that changed no model carried the model section: %+v", ev.State)
+		}
+	})
+	t.Run("an agent with no model option is untouched", func(t *testing.T) {
+		s := startScript(t, "echo", false)
+		settle(t, s)
+		before := s.Snapshot().CurrentModel
+		s.onUpdate(configOptionNotification("effort", "high"))
+		ev := oneBufferedEvent(t, s)
+		if ev.State.Model != nil {
+			t.Fatalf("an ordinary config update carried the model section: %+v", ev.State)
+		}
+		if got := s.Snapshot().CurrentModel; got != before {
+			t.Fatalf("the model moved from %q to %q on a config update", before, got)
+		}
+	})
+}
+
+// modelConfigNotification is the `modelconfig` script's option list with the
+// model option at value: what that agent sends when its model changes.
+func modelConfigNotification(model string) acp.SessionNotification {
+	return acp.SessionNotification{
+		SessionID: loadSessionID,
+		Update: mustJSON(map[string]any{
+			"sessionUpdate": acp.UpdateConfigOption,
+			"configOptions": []map[string]any{{
+				"id": "model", "name": "Model", "category": "model", "type": "select",
+				"currentValue": model,
+				"options": []map[string]any{
+					{"value": "default", "name": "Default"},
+					{"value": "composer", "name": "Composer"},
+				},
+			}},
+		}),
+	}
+}
+
+// TestNativeConfirmsTheValueItResolved is r23 finding 4 at the session that
+// really does resolve what it is asked for: an empty effort is the model's own
+// default, and a model alias is not its canonical id. The outcome carries what
+// the session ENDED at, captured in the section that wrote it, so it can never
+// contradict the delta whose revision it is answered with.
+func TestNativeConfirmsTheValueItResolved(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	if got := EffortOption(s.Snapshot()); got == nil || got.Current == "" {
+		t.Fatalf("the fixture's model has no default effort to resolve to: %+v", got)
+	}
+	want := EffortOption(s.Snapshot()).Current
+	out, err := s.SetConfig(context.Background(), "", nativeEffortID, "")
+	if err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if out.Value != want {
+		t.Fatalf("an empty effort was confirmed as %q, want the model's default %q", out.Value, want)
+	}
+	evs := deltaSettled(t, s)
+	last := evs[len(evs)-1]
+	if last.State == nil || last.State.Config == nil || last.State.Config.Options[0].Current != out.Value {
+		t.Fatalf("the delta carries %+v and the answer said %q", last.State, out.Value)
+	}
+	// A model by a spelling that is not its id — its display name — is resolved
+	// to the canonical one, which is what the snapshot and the delta both hold.
+	var alias, canonical string
+	for _, m := range s.Snapshot().Models {
+		if m.Name != "" && m.Name != m.ID && m.ID != s.Snapshot().CurrentModel {
+			alias, canonical = m.Name, m.ID
+			break
+		}
+	}
+	if alias == "" {
+		t.Fatal("no model in the fixture is spelled two ways, so nothing is resolved here")
+	}
+	got, err := s.SetModel(context.Background(), "", alias)
+	if err != nil {
+		t.Fatalf("SetModel(%q): %v", alias, err)
+	}
+	if got.Value != canonical {
+		t.Fatalf("SetModel(%q) confirmed %q, want the canonical %q", alias, got.Value, canonical)
+	}
+	if snap := s.Snapshot(); snap.CurrentModel != got.Value {
+		t.Fatalf("the snapshot is on %q and the answer said %q", snap.CurrentModel, got.Value)
+	}
 }
 
 // TestNoLiveMetaIsBare drives a whole scripted run of the live session over the
@@ -338,6 +611,218 @@ func TestADeltaSharesNoMemoryWithTheSnapshot(t *testing.T) {
 	s.mu.Unlock()
 	if got := ev.State.Commands.Commands[0].Name; got != "research" {
 		t.Fatalf("the delta followed the snapshot: %q", got)
+	}
+}
+
+// folded is what a client that folds the settings sections of the stream ends
+// up believing: the six sections a StateDelta carries, each one the last delta
+// that named it. It is the thing that has to equal Snapshot() — if a section is
+// installed without a delta, the fold stays behind for ever and no later event
+// repairs it (r23 finding 2).
+type folded struct {
+	Title, Mode, Model string
+	Config             []ConfigOption
+	Commands           []CommandInfo
+	Plugins            []PluginCommand
+}
+
+func foldDeltas(evs []Event) folded {
+	var f folded
+	for _, ev := range evs {
+		if ev.Type != EventMeta || ev.State == nil {
+			continue
+		}
+		st := ev.State
+		if st.Title != nil {
+			f.Title = *st.Title
+		}
+		if st.Mode != nil {
+			f.Mode = *st.Mode
+		}
+		if st.Model != nil {
+			f.Model = *st.Model
+		}
+		if st.Config != nil {
+			f.Config = st.Config.Options
+		}
+		if st.Commands != nil {
+			f.Commands = st.Commands.Commands
+		}
+		if st.Plugins != nil {
+			f.Plugins = st.Plugins.Plugins
+		}
+	}
+	return f
+}
+
+// snapSections is the same six sections read off the snapshot, which is the
+// answer the fold has to match.
+func snapSections(snap Snapshot) folded {
+	return folded{
+		Title: snap.Title, Mode: snap.CurrentMode, Model: snap.CurrentModel,
+		Config: snap.Config, Commands: snap.Commands, Plugins: snap.Plugins,
+	}
+}
+
+// sameList compares two list sections, reading nil and empty as the same
+// thing: a client folding one section at a time ends on the same values either
+// way, and the values are what this is about.
+func sameList[T any](a, b []T) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// wantFoldMatchesSnapshot compares the two section by section, so a failure
+// names the section that drifted rather than printing two structs.
+func wantFoldMatchesSnapshot(t *testing.T, evs []Event, snap Snapshot) {
+	t.Helper()
+	got, want := foldDeltas(evs), snapSections(snap)
+	for _, c := range []struct{ name, got, want string }{
+		{"title", got.Title, want.Title},
+		{"mode", got.Mode, want.Mode},
+		{"model", got.Model, want.Model},
+	} {
+		if c.got != c.want {
+			t.Errorf("the folded %s is %q, the snapshot's is %q\n%s", c.name, c.got, c.want, formatEvents(evs))
+		}
+	}
+	if !sameList(got.Config, want.Config) {
+		t.Errorf("the folded config is %+v, the snapshot's is %+v\n%s", got.Config, want.Config, formatEvents(evs))
+	}
+	if !sameList(got.Commands, want.Commands) {
+		t.Errorf("the folded commands are %+v, the snapshot's are %+v\n%s", got.Commands, want.Commands, formatEvents(evs))
+	}
+	if !sameList(got.Plugins, want.Plugins) {
+		t.Errorf("the folded plugins are %+v, the snapshot's are %+v\n%s", got.Plugins, want.Plugins, formatEvents(evs))
+	}
+}
+
+// TestStartAndLoadFoldToTheSnapshot is r23 finding 2: every author that
+// INSTALLS or overwrites a section says so in a delta, so a client that folds
+// the stream and a client that reads Snapshot() agree — at start-up and after a
+// resume, not only once the session is running.
+//
+// The concrete bug: a session/load whose replay carried a mode and a config
+// update produced deltas for both, and then the load result silently replaced
+// them (another mode, and no options at all, because cursor's load result
+// carries none). The folding client kept the replayed values for ever.
+func TestStartAndLoadFoldToTheSnapshot(t *testing.T) {
+	t.Run("a new session", func(t *testing.T) {
+		s := startScript(t, "echo", false)
+		_ = s.log.Flush(context.Background(), s.done)
+		wantFoldMatchesSnapshot(t, drainBuffered(s), s.Snapshot())
+	})
+	t.Run("a new session with --mode and --model", func(t *testing.T) {
+		s := startScriptOpts(t, "echo", Options{Mode: "plan", Model: "gpt-5"})
+		_ = s.log.Flush(context.Background(), s.done)
+		evs := drainBuffered(s)
+		wantFoldMatchesSnapshot(t, evs, s.Snapshot())
+		if got := foldDeltas(evs); got.Mode != "plan" || got.Model != "gpt-5" {
+			t.Fatalf("the fold is on %q/%q, want the overrides", got.Mode, got.Model)
+		}
+	})
+	t.Run("a load the replay contradicts", func(t *testing.T) {
+		s := newLoadSession(t, "load-settings", nil)
+		if err := s.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		evs := drainBuffered(s)
+		// The replay really did say something else, or the case is vacuous.
+		var replayed []string
+		for _, ev := range evs {
+			if ev.Type == EventMeta && ev.State != nil && ev.State.Mode != nil && ev.Replayed && ev.State.Config == nil {
+				replayed = append(replayed, *ev.State.Mode)
+			}
+		}
+		if !slices.Contains(replayed, "plan") {
+			t.Fatalf("the replay carried no mode update to contradict: %v\n%s", replayed, formatEvents(evs))
+		}
+		snap := s.Snapshot()
+		if snap.CurrentMode != "agent" || len(snap.Config) != 0 {
+			t.Fatalf("the load result did not contradict the replay: %q %+v", snap.CurrentMode, snap.Config)
+		}
+		wantFoldMatchesSnapshot(t, evs, snap)
+	})
+	t.Run("a load with a pinned title", func(t *testing.T) {
+		s := newLoadSession(t, "grok-load", func(o *Options) {
+			o.Title = "yesterday's thread"
+			o.TitlePinned = true
+		})
+		if err := s.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		evs := drainBuffered(s)
+		if got := foldDeltas(evs).Title; got != "yesterday's thread" {
+			t.Fatalf("the seeded title folded to %q", got)
+		}
+		// The seed is craze's own row from the index, so it prints no title
+		// line and is never written back as an agent title (A20).
+		for _, ev := range evs {
+			if ev.Type == EventMeta && ev.State != nil && ev.State.Title != nil && ev.Text != "" {
+				t.Fatalf("the seeded title filled Event.Text: %+v", ev)
+			}
+		}
+		wantFoldMatchesSnapshot(t, evs, s.Snapshot())
+	})
+	t.Run("a load with --mode and --model over it", func(t *testing.T) {
+		s := newLoadSession(t, "grok-load", func(o *Options) {
+			o.Mode = "plan"
+			o.Model = "grok-4.6"
+		})
+		if err := s.Start(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		evs := drainBuffered(s)
+		if got := foldDeltas(evs); got.Mode != "plan" || got.Model != "grok-4.6" {
+			t.Fatalf("the post-load overrides folded to %q/%q", got.Mode, got.Model)
+		}
+		wantFoldMatchesSnapshot(t, evs, s.Snapshot())
+	})
+	t.Run("native start", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.session(Options{})
+		if err := s.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		evs := deltaSettled(t, s)
+		snap := s.Snapshot()
+		// Native has no title at start-up and never publishes the one its first
+		// prompt gives it (X47), so the title is the one section the fold does
+		// not carry — and it is empty here, which is what makes that safe.
+		if snap.Title != "" {
+			t.Fatalf("a freshly started native session is named %q", snap.Title)
+		}
+		wantFoldMatchesSnapshot(t, evs, snap)
+	})
+}
+
+// TestTheInstallDeltaIsCrazesOwn: initialisation is nobody's agent update, so
+// the install carries its payload in Event.State alone — Event.Mode empty (it
+// would retire a plan offer) and Event.Text empty (it would print a `title`
+// line and write an agent title to the index).
+func TestTheInstallDeltaIsCrazesOwn(t *testing.T) {
+	s := startScript(t, "echo", false)
+	_ = s.log.Flush(context.Background(), s.done)
+	metas := 0
+	for _, ev := range drainBuffered(s) {
+		if ev.Type != EventMeta || ev.State == nil || ev.Cause != "" {
+			continue
+		}
+		if ev.State.Commands == nil && ev.State.Mode == nil && ev.State.Model == nil {
+			continue
+		}
+		metas++
+		if ev.Mode != "" || ev.Text != "" {
+			t.Fatalf("an install delta filled Mode %q / Text %q: %+v", ev.Mode, ev.Text, ev)
+		}
+	}
+	if metas == 0 {
+		t.Fatal("the session published no install delta at all, so nothing was checked")
 	}
 }
 

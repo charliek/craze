@@ -570,9 +570,10 @@ func TestNativeCancelDuringACommandEventReturns(t *testing.T) {
 	gitDir(t, wsDir)
 	s := f.session(Options{Workspace: wsDir, ContentHome: writeTree(t, filepath.Join(base, "home"), nil)})
 	// Set before Start, so nothing is publishing while the field is written.
-	// The fill takes seqs 1..primaryCap and Start publishes nothing, so the
+	// Start publishes exactly one event — its install delta, seq 1, taken off
+	// the primary below — and the fill then takes seqs 2..primaryCap+1, so the
 	// expansion's event is the next number.
-	hook, inside := insideAt(primaryCap + 1)
+	hook, inside := insideAt(primaryCap + 2)
 	abandoned := make(chan struct{})
 	var once sync.Once
 	s.log.hooks = &logHooks{
@@ -585,6 +586,7 @@ func TestNativeCancelDuringACommandEventReturns(t *testing.T) {
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	takeStartDelta(t, s.log)
 	fillPrimary(t, s.log)
 	// No step queued: the model fails the moment it is asked, so the turn's
 	// outcome is decided by the cancelled context and not by a scripted

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/charliek/craze/internal/harness"
@@ -266,15 +267,29 @@ func TestNativeCloseEndsATurnFullOfToolPublishers(t *testing.T) {
 func TestNativeCloseReturnsWithATurnsFlushBlockedOnTheOutbox(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.session(Options{})
-	// Set before Start, so nothing is publishing while the field is written.
+	// Set before Start, so nothing is publishing while the field is written —
+	// and armed only once the fill is in place, because Start's own flush (the
+	// install delta it publishes) parks on the drainer too, and taking THAT as
+	// "the turn's flush" would close the barrier before the turn had reached
+	// one.
 	parked := make(chan uint64, 1)
+	var armed atomic.Bool
 	var once sync.Once
-	s.log.hooks = &logHooks{flushParked: func(target uint64) { once.Do(func() { parked <- target }) }}
+	s.log.hooks = &logHooks{flushParked: func(target uint64) {
+		if !armed.Load() {
+			return
+		}
+		once.Do(func() { parked <- target })
+	}}
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
+	// Start's install delta, off the primary before the fill: without it the
+	// fill would find one slot already spent and park inside it.
+	takeStartDelta(t, s.log)
 	fillPrimary(t, s.log)
+	armed.Store(true)
 	// One event from above the seam, stuck: the drainer is inside the boundary
 	// offering it to a primary nobody will read again.
 	s.log.Enqueue(textEvent("from above the seam"))

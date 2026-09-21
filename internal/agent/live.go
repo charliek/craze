@@ -158,6 +158,15 @@ type session struct {
 	// which stamps Event.Replayed from it — is deliberately lock-free, so it
 	// is an atomic rather than a field under s.mu.
 	replaying atomic.Bool
+	// beforeSetSection is a test barrier, nil in every build but a test's: it
+	// runs on a setter's own goroutine after the provider has taken the change
+	// and before the locked section that mutates the snapshot and enqueues its
+	// delta. That gap is the only window in which another author — the agent's
+	// own update on the read loop — could interleave, and a test that parks a
+	// setter in it forces the schedule the sampling loops in settings_test.go
+	// can only hope for. Set before the session is driven and never written
+	// again, so it needs no lock.
+	beforeSetSection func()
 }
 
 // taskReceiptCap bounds the parked receipts of a single turn.
@@ -494,8 +503,15 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 		if loading {
+			// On a load the snapshot has already been published, so this writes
+			// through s.mu — and says so, in the same section, or a client that
+			// folds the stream would keep the mode the replay left while
+			// Snapshot answers this one, for ever (r23 finding 2). Event.Mode
+			// stays empty: it is an *agent*-initiated update's field, and this
+			// is craze's own --mode.
 			s.mu.Lock()
 			s.snap.CurrentMode = modeID
+			s.enqueueDeltaLocked("", Event{}, &StateDelta{Mode: &modeID})
 			s.mu.Unlock()
 		} else {
 			snap.CurrentMode = modeID
@@ -506,8 +522,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			return true, err
 		}
 		if loading {
+			modelID := s.opts.Model
 			s.mu.Lock()
-			s.snap.CurrentModel = s.opts.Model
+			s.snap.CurrentModel = modelID
+			s.enqueueDeltaLocked("", Event{}, &StateDelta{Model: &modelID})
 			s.mu.Unlock()
 		} else {
 			snap.CurrentModel = s.opts.Model
@@ -526,8 +544,45 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// against whatever commands survived it, so an update that arrived early
 	// is honoured and one that arrives next redoes the work.
 	s.snap.Plugins = s.resolvePluginsLocked()
+	// The install is a change like any other, and it is the first one a client
+	// folding the stream ever sees: without it, everything session/new brought
+	// — the mode, the model, the options, the catalog, the resolved plugins,
+	// and the --mode/--model tail written into `snap` above — would be in
+	// Snapshot() and in no delta at all, and a folding client would be
+	// permanently behind (r23 finding 2). One delta, carrying every section the
+	// install wrote, in the section that wrote them; Event.Mode and Event.Text
+	// stay empty, because initialisation is nobody's agent update.
+	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
+	// Outside the lock, like every other flush behind a delta: it keeps
+	// "emitted means buffered" true of Start itself, so what a client reads
+	// first is the session's starting state and not whatever the first turn
+	// says before it.
+	s.flushDelta()
 	return false, nil
+}
+
+// installDeltaLocked is one delta carrying every section of the snapshot, in
+// full, as it now stands: what a snapshot INSTALL leaves behind. s.mu is held.
+//
+// Both installs — session/new's and session/load's — write whole sections at
+// once, and ONE delta per install carrying all of them is what keeps a client
+// that folds the stream level with Snapshot() (plan 021 §3.8, r23 finding 2). A
+// section the install happened not to move is restated rather than left out:
+// restating a fact that is already true costs a client nothing, and leaving a
+// section out on the strength of "it did not change this time" is the omission
+// the finding is about. Title included — a session/new snapshot has none, and
+// "there is no title" is a fact the stream has to be able to say.
+func (s *session) installDeltaLocked() *StateDelta {
+	title, mode, model := s.snap.Title, s.snap.CurrentMode, s.snap.CurrentModel
+	return &StateDelta{
+		Title:    &title,
+		Mode:     &mode,
+		Model:    &model,
+		Config:   &ConfigState{Options: cloneConfig(s.snap.Config)},
+		Commands: &CommandsState{Commands: append([]CommandInfo(nil), s.snap.Commands...)},
+		Plugins:  &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
+	}
 }
 
 // stderrSink is where the agent child's stderr goes: the journal's tee when
@@ -563,13 +618,28 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	// resolved the id from is the only place a resumed title can come from,
 	// and the composer rule reads it from the first frame on.
 	s.mu.Lock()
+	seeded := false
 	if title := sanitizeText(s.opts.Title); title != "" {
 		s.snap.Title = title
+		// In the section that seeds it, like every other title author: the
+		// stored name is state a client mirrors, and without a delta a folding
+		// client would never learn the resumed session's name at all (r23
+		// finding 2). Event.Text stays empty — this is craze's own row from the
+		// index, not the agent naming the session, so it prints no `title` line
+		// and is never written back as an agent title.
+		s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+		seeded = true
 	}
 	if s.opts.TitlePinned {
 		s.titlePinned = true
 	}
 	s.mu.Unlock()
+	if seeded {
+		// Outside the lock, and before the bracket opens: the seed is state the
+		// session had BEFORE the replay, so it belongs ahead of ReplayStart
+		// rather than somewhere inside a bracket it has nothing to do with.
+		s.flushDelta()
+	}
 
 	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}})
 	s.replaying.Store(true)
@@ -601,7 +671,21 @@ func (s *session) loadSession(ctx context.Context, client *acp.Client, initRes *
 	s.snap.SessionID = res.SessionID
 	s.snap.Provider = s.provider().Info()
 	s.snap.Plugins = s.resolvePluginsLocked()
+	// The restored sections, in the section that installed them. The replay
+	// itself can have produced deltas of its own — an agent that replays a
+	// current_mode_update or a config_option_update — and this result
+	// CONTRADICTS them: it restores another mode, another config, or none at
+	// all. Without a delta here a client that folds the stream would keep the
+	// replayed values for ever while Snapshot() answered the restored ones
+	// (r23 finding 2). Mode and Model are carried even when they are empty,
+	// because "the load cleared it" is exactly what such a client has to learn.
+	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
+	// Before the end bracket, and outside the lock: EventReplay{end} means "the
+	// restored snapshot is installed", so the delta that says what was
+	// installed has to be committed ahead of it (§3.8's ordering rule for a
+	// flush behind a boundary).
+	s.flushDelta()
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: res.SessionID, LoadedFrom: s.opts.LoadSessionID, AgentBinary: binary})
@@ -1110,55 +1194,89 @@ func (s *session) closeInFlightTools(status string) {
 // events sees last is what a client reading Snapshot sees, whether the change
 // came from here or from the agent's own update on the read loop (plan 021
 // §3.8). A refusal mutates nothing and publishes nothing.
-func (s *session) SetModel(ctx context.Context, cause, modelID string) (*Ticket, error) {
+func (s *session) SetModel(ctx context.Context, cause, modelID string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return nil, fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetModel(ctx, modelID); err != nil {
-		return nil, err
+		return SetOutcome{}, err
 	}
+	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.CurrentModel = modelID
-	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Model: &modelID}), nil
+	// The confirmed value is read out of the very section that wrote it: ACP
+	// answers session/set_model with nothing, so what the session is now at is
+	// what it just stored, and a later Snapshot() read could only be somebody
+	// else's change (SetOutcome).
+	return SetOutcome{
+		Value:  s.snap.CurrentModel,
+		Ticket: s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Model: &modelID}),
+	}, nil
 }
 
-func (s *session) SetMode(ctx context.Context, cause, modeID string) (*Ticket, error) {
+func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return nil, fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetMode(ctx, modeID); err != nil {
-		return nil, err
+		return SetOutcome{}, err
 	}
+	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.CurrentMode = modeID
 	// Event.Mode stays empty: it is what an *agent*-initiated update fills, and
 	// a client retires a plan offer on it (plan 021 correction 20).
-	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &modeID}), nil
+	return SetOutcome{
+		Value:  s.snap.CurrentMode,
+		Ticket: s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &modeID}),
+	}, nil
 }
 
-func (s *session) SetConfig(ctx context.Context, cause, id, value string) (*Ticket, error) {
+// SetConfig sets one advertised option. When that option is the one a provider
+// keeps its MODEL in (IsModelConfigOption), setting it IS a model change: the
+// snapshot's CurrentModel moves with it and the delta carries the Model section
+// beside the Config one, in this same locked section. Without that, `/model`'s
+// fallback — SetModel refused, the model set as a config option instead — left
+// CurrentModel on the old model for `craze prompt` and the status row, and left
+// the model section's revision standing still while the display had already
+// moved (plan 021 §3.8, r23 finding 3).
+func (s *session) SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
-		return nil, fmt.Errorf("agent: session not started")
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if err := client.SetConfig(ctx, id, value); err != nil {
-		return nil, err
+		return SetOutcome{}, err
 	}
+	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	model := false
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
 			s.snap.Config[i].Current = value
+			model = IsModelConfigOption(s.snap.Config[i])
 			break
 		}
 	}
-	return s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Config: &ConfigState{
-		Options: cloneConfig(s.snap.Config),
-	}}), nil
+	st := &StateDelta{Config: &ConfigState{Options: cloneConfig(s.snap.Config)}}
+	if model {
+		s.snap.CurrentModel = value
+		st.Model = &value
+	}
+	return SetOutcome{Value: value, Ticket: s.enqueueDeltaLocked(cause, Event{}, st)}, nil
+}
+
+// setBarrier runs the test barrier between a setter's provider call and its
+// locked section, when a test has installed one (session.beforeSetSection).
+func (s *session) setBarrier() {
+	if s.beforeSetSection != nil {
+		s.beforeSetSection()
+	}
 }
 
 // SetTitle is /rename: craze's own name for this session, since ACP v1 has no
@@ -2053,8 +2171,24 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 	case acp.UpdateConfigOption:
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
+		// The model section too, when the provider keeps its model in a config
+		// option and that option's value CHANGED: for such a provider, that is
+		// how a model change is announced, and a client left to read it off the
+		// config section alone would never see CurrentModel or the model
+		// revision move (r23 finding 3). Only a change speaks: a config update
+		// that merely re-lists the same model — every one of cursor's carries
+		// every option — says nothing about the model, and must not write the
+		// option's value over a CurrentModel that session/set_model set.
+		was := ModelConfigOptionIn(s.snap.Config)
 		s.snap.Config = cfg
-		s.enqueueDeltaLocked("", Event{}, &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}})
+		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
+		if now := ModelConfigOptionIn(cfg); now != nil && was != nil &&
+			now.Current != "" && now.Current != was.Current {
+			s.snap.CurrentModel = now.Current
+			model := now.Current
+			st.Model = &model
+		}
+		s.enqueueDeltaLocked("", Event{}, st)
 		s.mu.Unlock()
 		s.flushDelta()
 	case acp.UpdatePlan:

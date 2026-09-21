@@ -158,6 +158,12 @@ type Engine struct {
 	// its kick, one slot, for the same reason the driver's is.
 	sets    []*setReq
 	setWake chan struct{}
+	// beforeDropSet is a test barrier, nil in every build but a test's: it is
+	// called on a Set's own goroutine after its context has ended and before it
+	// takes itself out of the queue, so a test can force the one schedule the
+	// caller and the worker race for (settings.go's Set and takeSet). It is set
+	// before the engine is driven and never written again, so it needs no lock.
+	beforeDropSet func()
 
 	// kick wakes the driver. One slot is enough because the driver's passes
 	// are level-triggered: each re-reads the state under e.mu, so two kicks

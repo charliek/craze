@@ -39,7 +39,7 @@ const (
 // answers session/load with the -32601 an agent without the capability sends.
 func loadScript(script string) bool {
 	switch script {
-	case "load", "grok-load", "load-missing", "load-hang", "load-long":
+	case "load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings":
 		return true
 	}
 	return false
@@ -95,6 +95,29 @@ func (s *server) handleLoad(msg *acp.Message) {
 		s.grokReplay(sid)
 		// grok's load result: models alone — no modes, no configOptions.
 		s.reply(msg.ID, map[string]any{"models": grokModels()})
+	case "load-settings":
+		// A replay that changes settings, and a result that contradicts every
+		// one of them: the mode goes back to `agent`, the model to `default`,
+		// and the options vanish, because cursor's load result carries none.
+		// It is the input for "the load reply overwrites what the replay said"
+		// (craze plan 021, r23 finding 2).
+		s.cursorReplay(sid)
+		s.replayUpdate(sid, map[string]any{
+			"sessionUpdate": acp.UpdateCurrentMode,
+			"currentModeId": "plan",
+		}, false)
+		s.replayUpdate(sid, map[string]any{
+			"sessionUpdate": acp.UpdateConfigOption,
+			"configOptions": []map[string]any{{
+				"id": "effort", "name": "Effort", "category": "thought_level",
+				"type": "select", "currentValue": "high",
+				"options": []map[string]any{
+					{"value": "low", "name": "Low"},
+					{"value": "high", "name": "High"},
+				},
+			}},
+		}, false)
+		s.reply(msg.ID, cursorLoadResult())
 	default: // "load"
 		s.cursorReplay(sid)
 		s.reply(msg.ID, cursorLoadResult())

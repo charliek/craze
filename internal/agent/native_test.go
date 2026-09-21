@@ -160,13 +160,20 @@ func closeAtCleanup(t *testing.T, s Session) {
 	})
 }
 
-// started is session plus a Start that must succeed.
+// started is session plus a Start that must succeed, with Start's own install
+// delta taken off the primary: the model the harness opened on, its effort
+// option and the plugin rows, said in the stream rather than only in Snapshot()
+// (r23 finding 2, native.go's Start). It is not a change made while a client
+// was watching — it IS the session coming up — so every case that asks "what
+// did this publish?" starts from after it, and the cases that are about the
+// install itself (settings_test.go) drive Start themselves.
 func (f *nativeFixture) started(opts Options) *nativeSession {
 	f.t.Helper()
 	s := f.session(opts)
 	if err := s.Start(context.Background()); err != nil {
 		f.t.Fatalf("Start: %v", err)
 	}
+	takeStartDelta(f.t, s.log)
 	return s
 }
 

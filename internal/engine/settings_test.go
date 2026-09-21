@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,6 +246,172 @@ func TestSetWhoseContextEndsInTheQueueChangesNothing(t *testing.T) {
 	}
 }
 
+// TestASetCancelledWhileQueuedIsAnsweredByTheWorkerWithoutRunning is r23
+// finding 1, forced rather than sampled. The schedule the test above cannot
+// reach is the one where the WORKER, not the caller, finds the dead context:
+//
+//	A is at the provider, holding the worker.
+//	B is queued behind it; B's caller's context ends.
+//	B's caller is parked (beforeDropSet) BEFORE it can dequeue itself.
+//	A is released; the worker comes back for the next request and takes B.
+//
+// Before the fix neither takeSet nor runSet looked at B's context: the worker
+// asked the provider for a change whose caller had already given up, and B was
+// told "cancelled" while its change was being made. Now the claim and the check
+// are one locked section, so the provider never sees B at all.
+func TestASetCancelledWhileQueuedIsAnsweredByTheWorkerWithoutRunning(t *testing.T) {
+	r := newRig(t, Options{})
+	parked, held := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	// Set before any Set is made: the field is read on the caller's goroutine
+	// and written here, before that goroutine exists.
+	r.e.beforeDropSet = func() {
+		once.Do(func() { close(parked) })
+		<-held
+	}
+	release := r.s.holdNextSets()
+
+	first := make(chan SetResult, 1)
+	go func() {
+		res, err := r.e.Set(context.Background(), Command{}, modeSetting("first"))
+		if err != nil {
+			t.Errorf("first set: %v", err)
+		}
+		first <- res
+	}()
+	waitFor(t, func() bool { return r.heldSets() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queued := make(chan error, 1)
+	go func() {
+		_, err := r.e.Set(ctx, Command{}, modeSetting("never"))
+		queued <- err
+	}()
+	waitFor(t, func() bool { return r.queuedSets() == 1 })
+	cancel()
+	await(t, parked, "the cancelled caller to reach its barrier")
+
+	// Its caller is parked, so from here only the worker can take it out of the
+	// queue — which is the point of the barrier.
+	release()
+	waitFor(t, func() bool { return r.queuedSets() == 0 })
+	select {
+	case err := <-queued:
+		t.Fatalf("the cancelled Set answered itself: %v", err)
+	default:
+	}
+	close(held)
+	select {
+	case err := <-queued:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("a Set claimed with a dead context: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("the worker never answered the request it claimed")
+	}
+	if got := awaitSet(t, first); got.Value != "first" {
+		t.Fatalf("the Set ahead of it answered %+v", got)
+	}
+	if n := r.s.setCalls(); n != 1 {
+		t.Fatalf("%d settings reached the provider, want only the one whose caller was still waiting", n)
+	}
+	if got := r.e.State().CurrentMode; got != "first" {
+		t.Fatalf("the snapshot says %q", got)
+	}
+}
+
+// TestACancelledSetIsReplayedAsACancellationNotASuccess is finding 1 meeting
+// C11's receipts hook. A Set whose context is already dead is answered with
+// that context's error without reaching the provider — by the caller or by the
+// worker, whichever gets to it — and the hook stores exactly that answer.
+//
+// So a resend of the same id and the same payload replays the cancellation: it
+// is never a success the caller would read as "the change landed", and never a
+// second execution. A duplicate parked on the reservation is released by the
+// same store (receipts.go's receipt.done), so nothing is stranded either.
+// context.Canceled is not one of the gate refusals the table forgets, and that
+// is right: it is an answer about THIS request, not about the engine's door.
+func TestACancelledSetIsReplayedAsACancellationNotASuccess(t *testing.T) {
+	r := newRig(t, Options{})
+	c := Command{Client: "c-1", ID: "7"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.e.Set(ctx, c, modeSetting("plan")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a Set made with a dead context: %v", err)
+	}
+	res, err := r.e.Set(context.Background(), c, modeSetting("plan"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the resend answered %+v, %v; want the cancellation replayed", res, err)
+	}
+	if res.Rev != 0 || res.Value != "" {
+		t.Fatalf("the resend answered %+v, which a client would read as a change that landed", res)
+	}
+	if n := r.s.setCalls(); n != 0 {
+		t.Fatalf("%d settings reached the provider for a cancelled command", n)
+	}
+	if got := r.e.State().CurrentMode; got == "plan" {
+		t.Fatal("a cancelled Set changed the session")
+	}
+}
+
+// TestSetAnswersWithTheValueTheSessionConfirmed is r23 finding 4: the answer is
+// the value the SESSION is at, captured where the change was made — not an echo
+// of the request. A provider that resolves what it is sent (native turns an
+// empty effort into the model's default, and a model alias into its canonical
+// id) would otherwise hand a client a value contradicting the very delta the
+// Rev names.
+func TestSetAnswersWithTheValueTheSessionConfirmed(t *testing.T) {
+	r := newRig(t, Options{})
+	r.s.resolveSets(func(v string) string {
+		if v == "" {
+			return "high"
+		}
+		return strings.TrimPrefix(v, "alias-")
+	})
+	res, err := r.e.Set(context.Background(), Command{}, Setting{Kind: SettingConfig, ID: "effort", Value: ""})
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if res.Value != "high" {
+		t.Fatalf("Set answered %q, want the value the session resolved it to", res.Value)
+	}
+	ev := r.next()
+	if ev.Seq != res.Rev || ev.State == nil || ev.State.Config == nil ||
+		ev.State.Config.Options[0].Current != res.Value {
+		t.Fatalf("the delta at %d carries %+v, want the answered value %q", ev.Seq, ev.State, res.Value)
+	}
+	got, err := r.e.Set(context.Background(), Command{}, Setting{Kind: SettingModel, Value: "alias-composer"})
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got.Value != "composer" || r.e.State().CurrentModel != "composer" {
+		t.Fatalf("Set answered %+v with the snapshot on %q", got, r.e.State().CurrentModel)
+	}
+}
+
+// TestASetWhoseRevisionCouldNotBeLearnedStillSucceeded is hunt A's zero-Rev
+// success: the change happened, the number did not arrive — a flush that gave
+// up, or a log that was closing. The result stands with Rev 0, which a client
+// reads as "no revision" and never as one older than every other (the TUI's
+// mayApply; internal/tui's own test for the same shape).
+func TestASetWhoseRevisionCouldNotBeLearnedStillSucceeded(t *testing.T) {
+	r := newRig(t, Options{})
+	r.s.setsWithoutATicket()
+	res, err := r.e.Set(context.Background(), Command{}, modeSetting("plan"))
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if res.Value != "plan" || res.Rev != 0 {
+		t.Fatalf("Set answered %+v, want the value with no revision", res)
+	}
+	if got := r.e.State().CurrentMode; got != "plan" {
+		t.Fatalf("the change did not land: %q", got)
+	}
+	if ev := r.next(); ev.State == nil || ev.State.Mode == nil || *ev.State.Mode != "plan" {
+		t.Fatalf("the delta is %s", shape(ev))
+	}
+}
+
 // TestASaturatedOutboxRefusesSetAndSetTitle is A5's settings half: over the
 // bound both refuse having changed nothing, and the provider is never asked —
 // a refusal after the agent had taken the change would be a lie.
@@ -316,13 +483,22 @@ func TestSetTitleWaitsOnNothingWithAFullPrimary(t *testing.T) {
 }
 
 // TestCloseJoinsTheSettingsWorker: a Set held at the provider when Close begins
-// is freed by the session closing, its caller is answered, and Close returns
-// once the worker has gone. A Set queued behind it is answered too — never left
-// waiting on a worker that is about to exit — and one made afterwards is
-// refused.
+// is freed by THE SESSION CLOSING — nothing here releases it by hand — its
+// caller is answered, and Close returns once the worker has gone. A Set queued
+// behind it is answered too, never left waiting on a worker that is about to
+// exit, and one made afterwards is refused.
+//
+// The hold is the fake's stand-in for a provider call, and it ends on the
+// session's own done channel exactly as a real one ends when its client is torn
+// down (fakeSession.set). That is what Close's comment claims — "a request in
+// flight is freed by that close rather than held by this loop" — and releasing
+// the call by hand, as this test used to, proved only that a test can release
+// something (review r23, "Untested schedules").
 func TestCloseJoinsTheSettingsWorker(t *testing.T) {
 	r := newRig(t, Options{})
 	release := r.s.holdNextSets()
+	// Only so a failing run cannot strand the goroutines; a passing one never
+	// reaches it, because the close has already freed them.
 	t.Cleanup(release)
 	running := make(chan error, 1)
 	go func() {
@@ -339,14 +515,13 @@ func TestCloseJoinsTheSettingsWorker(t *testing.T) {
 
 	closed := make(chan error, 1)
 	go func() { closed <- r.e.Close() }()
-	// The hold is the session's, and closing does not release it: this is a
-	// provider call that outlives the close, which is exactly the case Close
-	// must not join on with the lock held. Let it go and both callers come back.
-	release()
 	select {
-	case <-running:
+	case err := <-running:
+		if err == nil {
+			t.Fatal("a Set freed by the session closing must say the change did not land")
+		}
 	case <-time.After(watchdog):
-		t.Fatal("the Set at the provider was never answered")
+		t.Fatal("the Set at the provider was never freed by the close")
 	}
 	select {
 	case err := <-queued:
@@ -410,6 +585,53 @@ func TestTwoSetsAndAProviderUpdateAgreeOnTheLastDelta(t *testing.T) {
 		}
 		_ = r.e.Close()
 	}
+}
+
+// TestTheLastDeltaWinsInBothForcedOrders is the test above's property with the
+// sampling taken out: the two orders a Set and an update the provider made
+// itself can land in, each forced once by the provider hold, which parks the
+// Set between "the provider took it" and the locked section that mutates and
+// enqueues — the exact window a non-atomic section would lose (r23's
+// "Untested schedules": forced state-order races).
+func TestTheLastDeltaWinsInBothForcedOrders(t *testing.T) {
+	t.Run("the agent's update lands while the Set is at the provider", func(t *testing.T) {
+		r := newRig(t, Options{})
+		release := r.s.holdNextSets()
+		done := make(chan SetResult, 1)
+		go func() {
+			res, err := r.e.Set(context.Background(), Command{}, modeSetting("plan"))
+			if err != nil {
+				t.Errorf("set: %v", err)
+			}
+			done <- res
+		}()
+		waitFor(t, func() bool { return r.heldSets() })
+		// The whole of the agent's own update — mutation, delta, flush —
+		// between the provider taking the change and the session writing it.
+		r.s.providerMode("ask")
+		release()
+		res := awaitSet(t, done)
+		got := r.until(func(ev agent.Event) bool { return ev.Type == agent.EventMeta && ev.Seq == res.Rev })
+		r.wantShapes(got, `agent mode "ask"`, `mode "plan"`)
+		if state := r.e.State().CurrentMode; state != "plan" {
+			t.Fatalf("the snapshot says %q and the last delta %q", state, "plan")
+		}
+	})
+	t.Run("the agent's update lands after the Set has landed", func(t *testing.T) {
+		r := newRig(t, Options{})
+		if _, err := r.e.Set(context.Background(), Command{}, modeSetting("plan")); err != nil {
+			t.Fatalf("set: %v", err)
+		}
+		r.s.providerMode("ask")
+		r.sync()
+		got := r.until(func(ev agent.Event) bool {
+			return ev.Type == agent.EventMeta && ev.State != nil && ev.State.Mode != nil && *ev.State.Mode == "ask"
+		})
+		r.wantShapes(got, `mode "plan"`, `agent mode "ask"`)
+		if state := r.e.State().CurrentMode; state != "ask" {
+			t.Fatalf("the snapshot says %q and the last delta %q", state, "ask")
+		}
+	})
 }
 
 // modeAt is a folded mode: the value, and the Seq of the delta that set it.

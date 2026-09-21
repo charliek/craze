@@ -177,6 +177,26 @@ func fillPrimary(t *testing.T, l *EventLog) {
 	}
 }
 
+// takeStartDelta takes the one settings delta a session's Start publishes —
+// the install: everything session/new (or the native harness) brought, said in
+// the stream instead of only in Snapshot() (live.go's installDeltaLocked, r23
+// finding 2) — off the primary, so a test that goes on to fill the primary
+// starts from an empty buffer. Start flushes it, so it is already buffered when
+// Start returns and this never waits.
+func takeStartDelta(t *testing.T, l *EventLog) Event {
+	t.Helper()
+	select {
+	case ev := <-l.Primary():
+		if ev.Type != EventMeta || ev.State == nil {
+			t.Fatalf("the first event a started session published is %s, want the install delta", ev.Type)
+		}
+		return ev
+	default:
+		t.Fatal("Start published no install delta")
+		panic("unreachable")
+	}
+}
+
 // publishWithin publishes one event that must go through, failing the test
 // rather than hanging it if the primary has no room.
 func publishWithin(t *testing.T, l *EventLog, ev Event) {

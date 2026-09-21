@@ -126,7 +126,12 @@ func TestLoadReplayIsBracketedAndStamped(t *testing.T) {
 		t.Fatal(err)
 	}
 	evs := drainBuffered(s)
-	want := []string{"replay:start", "user", "thought", "tool", "text", "replay:end"}
+	// The meta before the end bracket is the install: the restored snapshot,
+	// said in the stream in the section that installed it, flushed before
+	// EventReplay{end} so it precedes the boundary that means "the restored
+	// snapshot is in place" (r23 finding 2). It is stamped replayed like
+	// everything else inside the bracket, which the loop below checks.
+	want := []string{"replay:start", "user", "thought", "tool", "text", "meta", "replay:end"}
 	if got := eventShape(evs); !equalStrings(got, want) {
 		t.Fatalf("replay shape %v, want %v\n%s", got, want, formatEvents(evs))
 	}

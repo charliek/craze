@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,11 @@ type fakeSession struct {
 	setHold  chan struct{}
 	setsHeld int
 	setErr   error
+	// setResolve is a provider that answers with something other than what it
+	// was asked for (resolveSets), and setSilent one whose deltas carry no
+	// ticket (setsWithoutATicket).
+	setResolve func(string) string
+	setSilent  bool
 }
 
 // script is one prompt's answer. It is built whole before it is queued.
@@ -425,59 +431,103 @@ func (s *fakeSession) openAsk(t *testing.T) *agent.Ask {
 // stand-in for the ordering rule itself — that is the session's, and the live
 // session and the Stub are where it is tested — but the engine's own tests need
 // a session whose setters can be made to fail, to succeed, and to be held.
-func (s *fakeSession) SetModel(ctx context.Context, cause, id string) (*agent.Ticket, error) {
-	return s.set(ctx, cause, func(st *agent.StateDelta) { st.Model = &id }, func(snap *agent.Snapshot) {
-		snap.CurrentModel = id
+func (s *fakeSession) SetModel(ctx context.Context, cause, id string) (agent.SetOutcome, error) {
+	return s.set(ctx, cause, id, func(v string, st *agent.StateDelta) { st.Model = &v }, func(v string, snap *agent.Snapshot) {
+		snap.CurrentModel = v
 	})
 }
 
-func (s *fakeSession) SetMode(ctx context.Context, cause, id string) (*agent.Ticket, error) {
-	return s.set(ctx, cause, func(st *agent.StateDelta) { st.Mode = &id }, func(snap *agent.Snapshot) {
-		snap.CurrentMode = id
+func (s *fakeSession) SetMode(ctx context.Context, cause, id string) (agent.SetOutcome, error) {
+	return s.set(ctx, cause, id, func(v string, st *agent.StateDelta) { st.Mode = &v }, func(v string, snap *agent.Snapshot) {
+		snap.CurrentMode = v
 	})
 }
 
-func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value string) (*agent.Ticket, error) {
-	return s.set(ctx, cause, func(st *agent.StateDelta) {
-		st.Config = &agent.ConfigState{Options: []agent.ConfigOption{{ID: id, Current: value}}}
-	}, func(snap *agent.Snapshot) {
-		snap.Config = []agent.ConfigOption{{ID: id, Current: value}}
+func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value string) (agent.SetOutcome, error) {
+	return s.set(ctx, cause, value, func(v string, st *agent.StateDelta) {
+		st.Config = &agent.ConfigState{Options: []agent.ConfigOption{{ID: id, Current: v}}}
+	}, func(v string, snap *agent.Snapshot) {
+		snap.Config = []agent.ConfigOption{{ID: id, Current: v}}
 	})
 }
 
 // set is the three verbs' one body: the hook a test uses to hold or fail the
-// "provider" call, then the mutation and its delta under s.mu.
-func (s *fakeSession) set(ctx context.Context, cause string, delta func(*agent.StateDelta), apply func(*agent.Snapshot)) (*agent.Ticket, error) {
+// "provider" call, then the mutation and its delta under s.mu. value is what
+// the session is now at, answered as the real ones answer it — from inside the
+// locked section that wrote it (agent.SetOutcome).
+//
+// The hold is a provider call this fake is parked in, and it ends three ways:
+// the test releasing it, the caller's context, and **the session closing**,
+// which is what a real provider call does when its client is torn down. That
+// last one is what makes engine.Close's promise testable — a request in flight
+// is freed by the session's close rather than held by the worker's loop.
+func (s *fakeSession) set(ctx context.Context, cause, value string, delta func(string, *agent.StateDelta), apply func(string, *agent.Snapshot)) (agent.SetOutcome, error) {
 	s.mu.Lock()
-	hold, fail := s.setHold, s.setErr
+	hold, fail, resolve, silent := s.setHold, s.setErr, s.setResolve, s.setSilent
 	if hold != nil {
 		s.setsHeld++
 	}
 	s.mu.Unlock()
 	if hold != nil {
+		var err error
 		select {
 		case <-hold:
 		case <-ctx.Done():
-			s.mu.Lock()
-			s.setsHeld--
-			s.mu.Unlock()
-			return nil, ctx.Err()
+			err = ctx.Err()
+		case <-s.done:
+			err = errSessionClosed
 		}
 		s.mu.Lock()
 		s.setsHeld--
 		s.mu.Unlock()
+		if err != nil {
+			return agent.SetOutcome{}, err
+		}
 	}
 	if fail != nil {
-		return nil, fail
+		return agent.SetOutcome{}, fail
+	}
+	if resolve != nil {
+		// A provider resolving what it was sent, as native does with an empty
+		// effort and a model alias: the value the session ends at, and the one
+		// its delta carries, is this one and not the request.
+		value = resolve(value)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sets++
-	apply(&s.snap)
+	apply(value, &s.snap)
 	st := &agent.StateDelta{}
-	delta(st)
-	return s.log.EnqueueTicket(agent.Event{Type: agent.EventMeta, State: st, Cause: cause, At: s.clock()}), nil
+	delta(value, st)
+	ev := agent.Event{Type: agent.EventMeta, State: st, Cause: cause, At: s.clock()}
+	if silent {
+		// A change that took with no revision to show for it: what a flush that
+		// gave up leaves behind (engine.SetResult.Rev's "no revision").
+		s.log.Enqueue(ev)
+		return agent.SetOutcome{Value: value}, nil
+	}
+	return agent.SetOutcome{Value: value, Ticket: s.log.EnqueueTicket(ev)}, nil
 }
+
+// resolveSets makes every later settings verb answer with f(value) rather than
+// with what it was asked for, and setsWithoutATicket makes them publish their
+// delta with no ticket at all — "the change happened, the revision could not be
+// learned".
+func (s *fakeSession) resolveSets(f func(string) string) {
+	s.mu.Lock()
+	s.setResolve = f
+	s.mu.Unlock()
+}
+
+func (s *fakeSession) setsWithoutATicket() {
+	s.mu.Lock()
+	s.setSilent = true
+	s.mu.Unlock()
+}
+
+// errSessionClosed is what a provider call parked in this fake answers when the
+// session closes under it: the shape of a real client whose transport has gone.
+var errSessionClosed = errors.New("fake: session closed")
 
 func (s *fakeSession) SetTitle(cause, title string) error {
 	s.mu.Lock()

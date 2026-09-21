@@ -530,16 +530,16 @@ func (s *stubSession) Asks() *agent.AskRegistry { return s.asks }
 // The settings verbs are the interface's and nothing more: `craze prompt`
 // changes no setting mid-run — --model and --mode are applied inside Start —
 // so nothing here is ever called.
-func (s *stubSession) SetModel(context.Context, string, string) (*agent.Ticket, error) {
-	return nil, nil
+func (s *stubSession) SetModel(context.Context, string, string) (agent.SetOutcome, error) {
+	return agent.SetOutcome{}, nil
 }
 
-func (s *stubSession) SetMode(context.Context, string, string) (*agent.Ticket, error) {
-	return nil, nil
+func (s *stubSession) SetMode(context.Context, string, string) (agent.SetOutcome, error) {
+	return agent.SetOutcome{}, nil
 }
 
-func (s *stubSession) SetConfig(context.Context, string, string, string) (*agent.Ticket, error) {
-	return nil, nil
+func (s *stubSession) SetConfig(context.Context, string, string, string) (agent.SetOutcome, error) {
+	return agent.SetOutcome{}, nil
 }
 
 // Close is the live session's order: the done signal first, so an emit blocked

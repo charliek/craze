@@ -825,19 +825,17 @@ type Session interface {
 	// §3.8).
 	//
 	// cause is the command that asked, as Event.Cause spells it ("client/id",
-	// engine.Command.Cause), and "" for a change nobody can claim. The Ticket
-	// is the delta's receipt: after a Flush it carries the event's Seq, which is
-	// the change's **revision** — what a client compares a delayed reply
-	// against. It is nil when nothing was published (a session that publishes
-	// no deltas, a log that is closing).
+	// engine.Command.Cause), and "" for a change nobody can claim. The
+	// SetOutcome is what the change came to: the value the session is now at,
+	// and the delta's receipt.
 	//
 	// They block on the provider and belong on a goroutine that is not the
 	// primary's reader, exactly as they always have. They never refuse for want
 	// of room in the log: the caller checks that *before* the provider is asked,
 	// because a refusal after the agent has taken the change would be a lie.
-	SetModel(ctx context.Context, cause, modelID string) (*Ticket, error)
-	SetMode(ctx context.Context, cause, modeID string) (*Ticket, error)
-	SetConfig(ctx context.Context, cause, id, value string) (*Ticket, error)
+	SetModel(ctx context.Context, cause, modelID string) (SetOutcome, error)
+	SetMode(ctx context.Context, cause, modeID string) (SetOutcome, error)
+	SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error)
 	// SetTitle renames the session in craze alone: ACP v1 has no rename verb.
 	// It pins the title, so a later agent session_info_update no longer
 	// replaces it, and it publishes the Title section of a StateDelta —
@@ -851,6 +849,27 @@ type Session interface {
 	SetTitle(cause, title string) error
 	Snapshot() Snapshot
 	Close() error
+}
+
+// SetOutcome is what one settings verb came to: the value the session is now
+// at, and the receipt of the delta that said so.
+//
+// Value is the **confirmed** value, captured in the very section that mutated
+// the snapshot — never asked for afterwards with a second read, which could
+// observe somebody else's change and answer this caller about it. It is not
+// always the value that was asked for: the native session resolves an empty
+// effort to the model's own default and a model alias to its canonical id, and
+// a provider is free to do the same. A caller that echoes what it requested
+// would then contradict the very delta this outcome carries the revision of
+// (plan 021 §3.8, r23 finding 4).
+//
+// Ticket is the delta's receipt: after a Flush its Seq is the change's
+// **revision**, what a client compares a delayed reply against. It is nil when
+// nothing was published (a session that publishes no deltas, a log that is
+// closing), and a nil Ticket answers Seq 0 — "no revision".
+type SetOutcome struct {
+	Value  string
+	Ticket *Ticket
 }
 
 // Clocked is a session that will say what time it is. It exists so that a

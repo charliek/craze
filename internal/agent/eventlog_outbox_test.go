@@ -1270,6 +1270,26 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 	settleGoroutines(t, drainerFrame, 0)
 }
 
+// TestATicketOfABatchCommittedByCloseCarriesItsSeq is the ticket's last edge
+// (review r23, hunt A): the batch is still in the outbox when Close begins,
+// with the primary full and nobody reading it, so its number is assigned by the
+// drainer during the close and the event itself is never delivered to anyone.
+// The ticket carries the number all the same — it is stored before the event is
+// offered — so a settings change committed by a closing log still answers with
+// a revision rather than a silent 0.
+func TestATicketOfABatchCommittedByCloseCarriesItsSeq(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	fillPrimary(t, l)
+	tk := l.EnqueueTicket(textEvent("a settings delta"))
+	if got := tk.Seq(); got != 0 {
+		t.Fatalf("the ticket answered %d before its batch was committed", got)
+	}
+	l.Close(context.Background())
+	if got := tk.Seq(); got != primaryCap+1 {
+		t.Fatalf("the ticket answered %d, want the number the close committed it with (%d)", got, primaryCap+1)
+	}
+}
+
 // BenchmarkEventLogPublishObserved is V7: S1a's publish benchmark with an
 // observer set, so the two runs side by side say what the observer costs on the
 // hot path. Budget, as in V7: a text delta with the journal attached under 5 µs.

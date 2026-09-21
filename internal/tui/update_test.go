@@ -1703,15 +1703,15 @@ func TestStalePlanImplementAnswerLeavesTheNewerRequestAlone(t *testing.T) {
 // message that takes the mask down.
 type wedgedMode struct{ *Stub }
 
-func (wedgedMode) SetMode(ctx context.Context, _, _ string) (*agent.Ticket, error) {
+func (wedgedMode) SetMode(ctx context.Context, _, _ string) (agent.SetOutcome, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return agent.SetOutcome{}, ctx.Err()
 	case <-time.After(2 * time.Second):
 		// Nothing bounded this call, so in the program it would never have
 		// come back at all. Say so rather than hang the suite out to the
 		// package timeout.
-		return nil, errors.New("set_mode was never bounded")
+		return agent.SetOutcome{}, errors.New("set_mode was never bounded")
 	}
 }
 

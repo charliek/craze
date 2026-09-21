@@ -544,8 +544,9 @@ func TestJournalResumeWritesANewFile(t *testing.T) {
 		}
 		evs = append(evs, ev)
 	}
-	// TestLoadReplayIsBracketedAndStamped's shape, read back from the file.
-	want := []string{"replay:start", "user", "thought", "tool", "text", "replay:end"}
+	// TestLoadReplayIsBracketedAndStamped's shape, read back from the file —
+	// the install delta before the end bracket included.
+	want := []string{"replay:start", "user", "thought", "tool", "text", "meta", "replay:end"}
 	if got := eventShape(evs); !equalStrings(got, want) {
 		t.Fatalf("the resumed journal's events are %v, want %v", got, want)
 	}
