@@ -34,10 +34,11 @@ before H6 (sub-agent event plumbing) and H7 (resume).
 | `agent.Event` and its encoders | H2 adds no field; one new stop reason, `max_turn_requests`; a test asserts every native event renders through `internal/cli/events.go` | S1a adds a **lossless codec** that is the journal and wire schema; `events.go` stays a lossy CLI projection (SD-20) | H2's test is right for the CLI. From S1a, any new `agent.Event` field must also round-trip the lossless codec in the same PR; that codec, not `events.go`, is what native events must survive. |
 | Persistence | `internal/harness/store`: pi's single tree store. The harness **dropped** its own two-rail proposal (harness D-03), and `03-session-store.md` defines TUI replay as the leaf→root walk | The journal: a UI-facing log craze adds above the provider seam (`04`, SD-31) | No harness change. The leaf→root walk stays the cross-incarnation replay authority for native (SD-23); the journal serves attach within an incarnation and is the debug record. Lines are joined by store entry id **with the persistence outcome**, because `StepDone` is emitted even when the store append failed. The journal does not import `internal/harness/store`. |
 | Rewind and fork | The store is a tree: rewind moves the leaf, fork copies the file | The journal is linear | A `transcript.reset{fromEntryId}` event kind is reserved so a rewind can be expressed in a linear log (`03`). |
-| Asks | Deferred; H2 ships a `Gate` seam (Allow / Deny{reason} / Ask) that allows everything | S1b's engine-owned ask registry | A future native Ask plugs into the registry. **Do not copy `live.go`'s parked-ask map into `native.go`.** |
+| Asks | Deferred; H2 ships a `Gate` seam (Allow / Deny{reason} / Ask) that allows everything | S1b's engine-owned ask registry, **shipped** (`internal/agent/asks.go`) | A future native Ask plugs into the registry. **Do not copy `live.go`'s parked-ask map into `native.go`.** Native's own asks close `cancelled, by: "call"` rather than `closing` at `Close`, because native cancels the turn's context first (Plan 023 §3.5, `05`) — the one place a native `Gate` `Ask` differs from an ACP one. |
+| Settings (H5) | H5's PR 2 puts `SetMode` on native | S1b's settings worker and setter signatures, **shipped** (C10) | The setters now take a `cause` parameter and return `SetOutcome{Value, Ticket}`; a session enqueues its own delta under `s.mu`, in the section that mutates its snapshot, and every session-side `Flush` a setter calls passes its own `done` channel (`EventLog.Flush(ctx, done)`, alongside `Publish`'s). An enqueued event may not carry `Err` — the log replaces a non-nil one with an inert sentinel rather than call a method on it under the caller's lock (S1b's C2, X7). H5's PR 2 builds `SetMode` on these signatures directly; it is not a new pattern to invent. |
 | Sub-agents (H6) | Child processes speaking `craze prompt --json` | The protocol's event schema; headless hosts (S4) | Children should speak the session-control event schema with `seq`, not a private variant; after S4 a child can be a real headless host and appear in the agent view under its parent id. |
 | Resume (H7) | "Replay for the TUI is the same leaf→root walk emitting Events" | The journal replays UI events for every provider | The leaf→root walk is H7's replay and stays the cross-incarnation authority for native (SD-23); the new incarnation journals those replayed events, flagged. Whether earlier journals ever enrich a restored transcript is SQ13, not H7's problem. |
-| Session index (H7) | Native sessions join `sessions.jsonl` at H7; until then `writeIndex` deliberately excludes them and `nativeSession.open` rejects a load | S1b moves index writes into the engine; S4's hub roster lists hosts | S1b **keeps the native exclusion** until H7. Attachable live sessions (the roster) and resumable stored sessions (the index) are different lists. |
+| Session index (H7) | Native sessions join `sessions.jsonl` at H7; until then `writeIndex` deliberately excludes them and `nativeSession.open` rejects a load | S1b moved index writes into the engine, **shipped** (C12: `engine.IndexOptions`, the index worker, `crazeId`) | S1b **kept the native exclusion**, unchanged by the move: `NativeProvider`'s own comment still says native sessions are never indexed until H7 gives them a loader, confirmed live on both platforms in S1b's smoke (`12`, V6/V4). H7 inherits that exclusion and the engine-owned index as the seam to extend, not to replace: attachable live sessions (the roster) and resumable stored sessions (the index) stay different lists. |
 | TUI state | H2 adds nothing to `tui.Model` | S1 moves session semantics out of `tui.Model` | New session semantics go in the adapter or engine, never `tui.Model`. |
 
 ## State of the harness track (2026-09-19)
@@ -132,19 +133,26 @@ parallel, each in its own session and worktree. Where they meet (plan
 |---|---|---|---|
 | `internal/harness/**` | one comment in `steer.go` (C6) | owns it | no conflict |
 | `internal/agent/{catalog,skills,plugins,expand}.go`, `internal/cli/import.go` | untouched | likely owns | no conflict |
-| `internal/agent/native.go` | prompt path, the queue, `Cancel`, `announceCurrent` and the setters, `Answer*` | `Start` / system-prompt assembly, the catalog it reports | H4 stays out of the ranges this plan names. **`announceCurrent` is the one shared site**: whoever lands second fills `StateDelta.Commands` / `Plugins` from what is there (C10) |
+| `internal/agent/native.go` | prompt path, the queue, `Cancel`, `announceCurrent` and the setters, `Answer*` | `Start` / system-prompt assembly, the catalog it reports | H4 stayed out of the ranges this plan named. **`announceCurrent` did not end up a shared site**: native's `snap.Plugins` is set once in `Start` and never changes, so C10 announces nothing for it and waits for nothing (plan X3). What did overlap: H4's PR 3 added about ten lines to `native.go`'s `prompt()` and a new `emitCtx`, merged into the S1b branch as one gated merge commit (X21) |
 | `agent.Session`, `agent.Event`, `agent.Snapshot` | narrowed and extended (§3) | should not change them | an H4 need here is raised with the owner first |
 | `internal/tui/slash.go` | `/rename`, `/model`, mode paths only | menu population | second lander rebases |
-| codec | new fields round-trip (the plan's A12) | any new `agent.Event` field must too (`11`, this file) | the completeness test enforces both |
-| reviewers, the mac-mini, `-race` on a shared box | | | stagger smokes; S1b's V5 runs on a quiet box |
+| codec | new fields round-trip (the plan's A12) | any new `agent.Event` field must too (`11`, this file) | the completeness test enforces both, and both landed clean |
+| reviewers, the mac-mini, `-race` on a shared box | | | stagger smokes; S1b's V5 ran on a quiet box |
 
-**H3 and H5 wait for Plan 021's PR 2** (`feature/plan-021-s1b-asks`, the ask
-registry and its sequenced endings). **H6, H7 and H8 wait for S1b as a
-whole** (all three PRs merged), per SD-17's original ordering, relaxed above.
+**S1b shipped 2026-09-21 (all three PRs merged): the gate for H3, H5, H6, H7
+and H8 is open.** H3 and H5 waited for Plan 021's PR 2 (`feature/plan-021-s1b-asks`,
+#42 `db7686e`, the ask registry and its sequenced endings) and could start once
+it merged — H5's own PR 1 (native asks, turn tokens) had already merged into
+S1b's PR 3 branch mid-execution (`a41ba29`, plan X51). H6, H7 and H8 waited
+for S1b as a whole, per SD-17's original ordering, relaxed above; all three
+PRs are merged (#41 `fdaaa6d`, #42 `db7686e`, #NN `TBD`), so nothing more
+blocks them from this file's side. `11`'s two shipped rows above — the
+settings seam (H5's `SetMode`) and the session index (H7) — are what those
+phases build on, as built rather than as planned.
 
-Every PR in Plan 021 starts from a freshly fetched `origin/main`, and the
-executor tells the `craze-harness` session when each PR opens and when it
-merges — the same discipline as the S1a / H2 integration above.
+Every PR in Plan 021 started from a freshly fetched `origin/main`, and the
+executor told the `craze-harness` session when each PR opened and when it
+merged — the same discipline as the S1a / H2 integration above.
 
 ## Practical notes
 

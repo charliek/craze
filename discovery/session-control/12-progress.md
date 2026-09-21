@@ -637,11 +637,11 @@ No follow-up issues were filed: the list above and `04`'s table of unshipped
 
 | | |
 |---|---|
-| Status | in progress (PR 1 of 3: the driver) |
+| Status | shipped |
 | Plan | `021-session-control-s1b-engine` (outside the repo, `~/.claude/plans/craze/`) |
 | Baseline | `6581e0a` |
-| Branch / PRs | three sequential PRs, each from fresh `origin/main`: `feature/plan-021-s1b-driver`, `feature/plan-021-s1b-asks`, `feature/plan-021-s1b-state` |
-| Merged | — (date and squash commits go here when all three PRs merge) |
+| Branch / PRs | three sequential PRs, each from fresh `origin/main`: `feature/plan-021-s1b-driver` (#41), `feature/plan-021-s1b-asks` (#42), `feature/plan-021-s1b-state` (#NN) |
+| Merged | PR 1 2026-09-20, `fdaaa6d`; PR 2 2026-09-20/21, `db7686e`; PR 3 2026-09-21, `TBD` |
 
 ### Plan review — 2026-09-20
 
@@ -682,21 +682,392 @@ in S1b, for tests, rather than waiting for S4.
 
 ### Outcome
 
-To be filled at merge.
+Shipped in three PRs, each branched from a freshly fetched `origin/main` and
+gated per commit. `internal/engine` now owns the turn driver, the queue and
+send-now (PR 1, `feature/plan-021-s1b-driver`, #41 `fdaaa6d`); the ask
+registry (PR 2, `feature/plan-021-s1b-asks`, #42 `db7686e`); and settings as
+state deltas, command ids and the durable session id (PR 3,
+`feature/plan-021-s1b-state`, #NN `TBD`). The TUI and `craze prompt` are both
+engine clients now; `tui.Model` and `internal/cli/prompt.go` no longer drive a
+turn. It ships no feature: frame goldens are byte-identical at every commit,
+no `testdata/` file changed except additions, and `craze prompt --json` is
+byte-identical apart from `seq` — **V2: 103/103 SAME** at the PR 3 tip
+(`9a00f32`, `021-session-control-s1b-engine/v2/run_pr3_final`).
+
+**The roadmap's S1b exit** (`07`):
+
+| criterion | result | evidence |
+|---|---|---|
+| two in-process clients on one session cannot double-drain the queue | pass | `TestTwoClientsSubmittingAndQueueingAtOnceAgreeOnEveryTurn` (`internal/engine/exit_test.go`), `TestTwoClientsSubmittingAtOnceStartEveryRowOnce` (`internal/engine/lifecycle_test.go`) |
+| a session with no client drains its own queue and parks asks | pass | `TestASessionWithNoClientRunsEveryTurnAndParksAnAskUntilItIsAnswered` (`internal/engine/exit_test.go`), `TestASessionWithNoClientDrainsItself` (`internal/engine/driver_test.go`) |
+| an ask answered twice yields one resolution and one `already_resolved`, and an invalid answer leaves it open | pass | `TestAnAskAnsweredTwiceThroughControlEndsOnce`, `TestAnInvalidAnswerThroughControlLeavesTheAskAnswerable`, `TestTwoClientsRacingOneAnswerLeaveOneEnding` (`internal/engine/exit_asks_test.go`); registry level `TestAskAnsweredOnceEndsOnce`, `TestAskBadAnswerLeavesItOpen`, `TestAskRacingAnswersLeaveOneEnding` (`internal/agent/asks_test.go`) |
+| every ask ending is a sequenced event | pass | the A-X4 matrix: `TestACancelWhileAnAskIsParkedEndsItOnce`, `TestCloseWhileAnAskIsParkedEndsItOnce`, `TestAnAskOpenedBetweenTurnsSurvivesAWholeTurn`, `TestATurnThatEndsWithAnAskOpenEndsItOnce` (`internal/engine/exit_asks_test.go`, `exit_test.go`), plus the ACP-answered-early / `Force` / non-interactive / lost-reply / room-refused / call-context rows in `internal/agent/asks_test.go` and `asks_live_test.go` |
+| a cancel names its turn and cannot hit the next one | pass | `TestACancelNamingAStaleTurnIsRefused`, `TestACancelHeldBeforeTheSessionAdmitsNothing`, `TestOverlappingCancelsEachHoldTheirOwn` (`internal/engine/cancel_test.go`, `cancel_schedules_test.go`) |
+| two concurrent settings changes converge on every client | pass | `TestTwoClientsTwoSetsAndAProviderUpdateAgreeOnTheLastDelta` (`internal/engine/exit_test.go`); `TestTheLastDeltaWinsInBothForcedOrders`, `TestForcedStateOrderForTheTitle`, `TestForcedStateOrderForTheMode`, `TestStartAndLoadFoldToTheSnapshot` (`internal/engine/settings_test.go`, `internal/agent/settings_test.go`) |
+| golden files byte-identical | pass | `git diff --stat 6581e0a..9a00f32 -- '*testdata*'` touches only additions; no frame golden edited at any commit |
+| `craze prompt`'s own driver moves into the engine, and its `--json` fixtures and tests are byte-identical apart from `seq` | pass | V2 103/103 SAME (above); `internal/cli/json_test.go` and `internal/cli/ask_json_test.go` unedited apart from the one listed exception (A-X8: `TestSignalBetweenTheTakeAndTheSendRemovesTheRow` removed, replaced by `TestSignalWithARowQueuedRemovesIt`, same content); `tests/cli/**` (147 pytest cases) unedited |
+
+**The plan's other acceptance criteria** (§7), where `07`'s exit wording
+doesn't already name a test:
+
+| # | result | evidence |
+|---|---|---|
+| A7 (status half): no idle across a cancelled turn with a queued row, or before a fired send-now | pass | `TestHostStatusNoIdleAcrossACancelledTurnWithAQueuedRow`, `TestHostStatusNoIdleBeforeAFiredSendNow` (`internal/tui/host_test.go`) |
+| A14: a delayed `/model` failure does not undo a newer confirmed model | pass | `TestADelayedModelRefusalDoesNotUndoANewerChange`, `TestACompletedStepOlderThanAnAppliedDeltaIsNotWritten`, `TestAFallbackCompletionOlderThanAnotherClientsChangeIsNotWritten`, `TestAZeroRevisionSuccessIsWrittenUnlessSomethingNewerWas`, `TestMayApply` (`internal/tui/settings_test.go`) |
+| A15: `crazeId` on all three load paths; native unindexed; a failed seed retries; a stalled index write blocks no `Control` method | pass | `TestTheCrazeSessionIDTravelsEveryConstructionPath`, `TestContinueCarriesTheRowsCrazeID`, `TestResumeRowsCarryTheirCrazeIDs`, `TestAHiddenProvidersSessionIsNeverIndexed`, `TestADrainedFirstPromptIsSeededByTheWorker`, `TestAStalledIndexWriteBlocksNoControlMethod`, `TestBothKindsOfWriteContendOnARealFileLock` (`internal/tui/engine_seam_test.go`, `internal/cli/resume_test.go`, `internal/engine/index_test.go`) |
+| A16: command ids never collide, replay a resend, reject a changed payload, expire past the horizon | pass | `TestTwoClientsBothNumberingFromOneNeverCollide` and the rest of `internal/engine/receipts_test.go`; `TestClassifyIsTheOneTable` (`internal/engine/classify_test.go`) |
+| A17: the engine's `State` derives the same `host.Status` as the TUI's mirror | pass | `TestEngineStateDerivesTheSameHostStatusAsTheTUIsMirror`, `TestInputFromStateReadsEveryFieldDeriveDoes` (`internal/tui/activity_parity_test.go`) |
+| A20: a craze-initiated change fills neither `Mode` nor `Text` | pass | `TestAPlanOfferSurvivesAModeClickMadeJustBeforeTheTurn`, `TestTheInstallDeltaIsCrazesOwn` (`internal/tui/settings_test.go`, `internal/agent/settings_test.go`); `internal/cli/settings_json_test.go` unedited |
+| smoke A1 (found live, fixed in `f65c6c6`): a turn current at `Close` gets its `ended` | pass | `TestCloseEndsTheTurnOnTheRecord` (`internal/engine/lifecycle_test.go`), `TestClosingTheEngineEndsTheHungTurnOnTheRecord` (`internal/engine/engine_stub_test.go`) |
+
+Per-commit gate (`make lint && make test && make test-race && make build &&
+make test-cli`) green at every one of the three PRs' commits, re-run by the
+orchestrator as well as each implementer; 147 pytest CLI tests unedited.
+`-cpu=1 -count=2` on the changed packages before every push-worthy commit from
+PR 3 on (a lesson PR 2's CI found, X45). `internal/engine` is in `test-race`
+alongside `internal/agent`. Ten external review rounds on PR 3 alone
+(`reviews/r23`–`r32`: astra on C10, sol on the rest), 36 findings, every one
+accepted and fixed or recorded; PR 1 fifteen rounds, PR 2 seven — see the two
+PR bodies for the full tables. CodeRabbit reviewed each PR's first head for
+real and found nothing actionable beyond what PR 1's four findings already
+list; it was rate-limited on every fix commit after and, per the owner's rule
+(`coderabbit-rate-limit`), was not waited for. Greptile posted nothing on any
+PR.
+
+### What shipped per commit
+
+**PR 1 — `feature/plan-021-s1b-driver`** (#41, `fdaaa6d`): C1 (roadmap docs,
+SD-33); T1/T2 (driver tests re-expressed against observable behaviour while
+the old drivers still passed them, X1–X2); C2 (`EventLog`'s outbox — `Enqueue`,
+`OutboxRoom`, `Flush`, the close phases, `Observe`, `NoPrimary`, X4–X7); C3a
+(`EventTurn`, `Event.Cause`, `Session.Cancel`'s outcome, `ForeignTurn()`, the
+depguard rule); C3b (`internal/engine`: `Control`, `State`, `Command`,
+admission with `Begin` under `e.mu`, the settlement transaction, the chain
+policy, `Cancel`/`Stop` with the hold, `Sync`, X8–X17); C3c (the queue verbs,
+the requeue rules, send-now); C4 (the TUI drives its session through the
+engine, X18, X22, X25); C5 (`craze prompt` is an engine client — `GiveUp`,
+`GiveUpDrain`, `State.Waiting`, `TurnErr`, X24, X26, X28, X31–X34); C6 (the
+queue leaves the provider seam, −1,370 lines, X27, X29).
+
+**PR 2 — `feature/plan-021-s1b-asks`** (#42, `db7686e`): C7 (`asks.go`: the ask
+registry, tokens, `Open`/`Answer`, `EventAsk`, `ApprovalPolicy`, X37); C8a
+(ACP's `EarlyAnswer` and `ReplyDisposition`, X38); C8b (every ask parked in the
+registry — `acp.Arrival`/`TurnActive` replace the turn-counter mapping, the
+hidden `perm-xN` ids, the turn-keyed cancel mask, X39–X44).
+
+**PR 3 — `feature/plan-021-s1b-state`** (#NN, `TBD`): C10 (settings as state
+deltas, the settings worker, `EventLog.EnqueueTicket`, X47–X48); C11 (command
+ids, the receipts table, `classify`, X49); C12 (the durable `crazeId`, the
+index worker, `ErrIndexWrite`, X53); C13 (§7's A-X1..A-X6 as integration
+tests, the activity-parity test); three fix commits from the live smoke and
+its review (`fd46f0b`, `f28a245`, `f65c6c6` — the index worker's write
+ordering, a context error after the write, and `Close` ending the running
+turn on the record, X54–X55); `9a00f32` (`test(engine)`, close/cancel/Stop
+schedules, no production change); **C14** (this commit).
 
 ### Deviations from the plan
 
-To be filled at merge.
+Numbered and grouped, mirroring the plan's execution amendments X1–X56; the
+full text and every failing schedule are in the plan.
+
+1. **`Close`'s phases run in a different order than §3.3 lists, and the outbox
+   is made immune to the cutoff rather than sequenced before it** (X4): cut
+   the outbox → `close(l.closed)` → join the drainer → the existing teardown.
+   A `Flush` parked when `Close` begins is answered nil, not `ErrLogClosing`,
+   because the at-close path commits rather than abandons (X5). Smaller
+   decisions: a batch stays contiguous in `Seq` against direct publishers too;
+   an `Enqueue` after the cut is `droppedAtClose`; `Stub.NoPrimary` is fixed at
+   construction (X6); an enqueued event may not carry `Err` — a non-nil one is
+   replaced by an inert sentinel, counted in `Health.OutboxErrReplaced` (X7).
+2. **Admission and cancel, decided during C3b/C3c** (X8–X17, X19): a cancel
+   with no turn of craze's own was accepted at first (PR 1 could not see
+   asks yet) and tightened to §3.7's `not_accepting` rule once PR 2 gave it
+   `PendingAsks` (X9, closed by X40); `CancelResult.Outcome` is decided from
+   the engine's own state after the hold releases, not from
+   `CancelOutcome.Settled`; `Stop` flushes the outbox between clearing the
+   queue and cancelling, found by a test that failed one run in thirty (X10);
+   the foreign-turn retry is paced by a tick alone, not by any wake-up (X13);
+   the seam's promise that `Cancel` is bounded by its context is made true in
+   `live.go` — the write moves to its own goroutine (X16) — and a late helper
+   could otherwise cancel the next turn's ask, fixed with `acp.Client.Held` /
+   `CancelHeld`, the one edit PR 1 makes to `internal/acp` (X19).
+3. **`Control.Subscribe` blocks** (X14): it registers inside the log's
+   publishing boundary, so the primary's own reader calling it with the
+   primary full would wait for a slot only it can free. Not in §3.2's list
+   either way; found first as a hang in the engine's own saturation test.
+4. **The TUI on the engine** (C4, X18, X22, X25): `Engine.Started(err)` opens
+   the gate the ~45 unit tests that inject a `startedMsg` need;
+   `Snapshot.Queue` stays the model's one queue mirror until C6; two model-lags-the-engine
+   defects from review — a `Submit` result applied early, and a cancel's
+   failure reported twice — fixed so a turn `Submit` hands back while another
+   is on screen is remembered as the pending successor rather than applied at
+   once, and each cancel's failure has exactly one reporter; a failed cancel
+   behind an armed send still draws its error row, from `StateDelta.Detail`.
+5. **`craze prompt`'s foreign-turn budget could not be done with `Stop`**
+   (X24, X26, X28, X31–X34): the plan's "the client owns the budget and calls
+   `Stop`" is `State.Waiting` + `Control.GiveUp(c, turn)` for a claim refused
+   outright, and `Control.GiveUpDrain(c)` for rows held behind a foreign turn
+   — both conditional, atomic, and waiting on nothing. Four review rounds
+   (r9, r11–r14) each found a schedule the previous fix left open (an
+   unconditional `Stop` could cancel a re-claim that had just succeeded; a
+   timed grace could not order the client against the engine's driver); the
+   final shape needs no wall-clock timing at all. **V2 at the final PR 1 fix:
+   103/103.**
+6. **The queue left the provider seam** (C6, X27): −1,370 lines; `queueOp` and
+   `emitMu` went with it, which is how S1a's hazard 1 closes.
+7. **PR 2's ask-to-turn mapping could not be done from ACP's own counter**
+   (X39, the one design change a review round forced): a request registered
+   during a turn whose handler is delayed past that turn's end, and one
+   registered between turns, both carry the same counter value and are not
+   distinguishable from session state alone. `acp.Arrival{Turn, InTurn}`,
+   captured at registration, replaces the plain `turn int` on every ACP
+   handler. Ids gained a second, hidden counter (`perm-xN` / `ask-xN` /
+   `plan-xN`, X41): an ask whose opening is never published (a refused
+   `Open`, `Force`, an automatic resolution) must not spend a *visible*
+   number, or `--json`'s next real question renumbers. `Control.Ask(id)` was
+   added in the simplify pass (X44) as `05`'s `asks.get`.
+8. **Settings, the install and its merge rule** (C10, X47–X51): `Set` /
+   `SetTitle` gained the cause parameter and a FIFO settings worker;
+   `EventLog.EnqueueTicket` is how a `Set` learns its own delta's `Seq` as
+   `Rev`; start-up and a `session/load` now enqueue their own install delta
+   (an addition the plan did not ask for — X48 found a folding client could
+   otherwise end permanently different from `Snapshot()`); an arm that races
+   the install keeps its section and the install publishes ONE merged delta
+   (X51); a `Set` whose caller's context ends after the worker has claimed it
+   is `ErrSetOutcomeUnknown`, never a silent "nothing happened" (X50). Native's
+   first-prompt title still publishes nothing — the plan's brief assumed it
+   already did (X47) — recorded for S1c below.
+9. **Receipts as built** (C11, X49, X52): the table's mutex is a leaf, held
+   only to admit and to finish a command, never across one — C12's index I/O
+   inside `Submit`/`SetTitle` would otherwise block every client's commands
+   (r24). No minted client is ever retired, only its completed commands (r26
+   overturned r24's first fix, which was found to revoke a live client). The
+   stored-or-forgotten invariant — `unavailable` / `not_accepting` /
+   `in_progress` ⇔ never stored, everything else stored — is now one switch,
+   `classify`, that both `Code` and the table's gate consult, so the two
+   cannot again say different things about one error (r28). New codes:
+   `in_progress`, `aborted`, `failed`, beside `unknown_row` / `unknown_command`
+   / `index_write`.
+10. **Identity and the index** (C12, X53–X54): `crazeId` is first-one-wins — an
+    empty stored id is filled, a differing incoming one dropped; the index
+    worker's slot merges touch/load/seed under a leaf mutex with a one-slot
+    kick, all bounded by one 500 ms close bound (the journal's own), because
+    `flock` cannot be interrupted; `/rename`'s write failure is
+    `ErrIndexWrite`, stored, because the rename happened whatever the file
+    did.
+11. **`Close` ends the running turn `closing`** (found live, V1, fixed in
+    `f65c6c6`; see "Live smoke" below): the plan's doc comment for `Close`
+    promised an ending for the turn that was running, and the first cut did
+    not deliver one.
+12. **Roadmap wording this plan departs from** (§4's last bullet, also
+    recorded in `05` and `03` by this commit): the ask registry lives below
+    the provider seam, in `internal/agent`, not above it; the settings
+    revision is the event's `Seq`; SD-30's shared mode/model/title rows ship
+    as state deltas with no TUI rendering (how a *remote* client words
+    someone else's change is S2's); command ids ship with an in-memory
+    receipts table and no wire; `NoPrimary` arrives a phase early, in S1b for
+    tests, rather than waiting for S4.
+13. **Recorded behaviour changes** — no user-visible change except these
+    seven, all deliberate:
+    - An invalid permission answer no longer cancels the request (§4).
+    - A card whose turn ended is removed (§4).
+    - Native's steer requeue follows `done` instead of preceding it (§4).
+    - A `Cancel` with nothing to cancel (no turn, no pending ask, no foreign
+      turn) is refused `not_accepting` rather than written (PR 2, X9/X40).
+    - Enter pressed while the session knows of a foreign turn the model has
+      not yet seen is now **queued** (removable, drains when the foreign turn
+      ends) where the baseline claimed it, drew it, and let Esc withdraw it
+      (X22's fourth change — the model's own admission-gate rule, not a
+      defect).
+    - A request of turn N whose handler starts only after ACP has settled N
+      but before the session released it is now refused `turn_ended` (the
+      agent is told cancelled), where the baseline's counter equality would
+      have parked it (X43, sol r19 judged this the safe result).
+    - `--json`'s one CLI-authored un-numbered `queue removed` line, for a row
+      a signal caught between the queue and the wire, is gone with the window
+      it existed for: the row's removal is now an engine event with a `seq`
+      (A-X8, the plan's one listed exception).
+14. **Known and recorded, not fixed** — each a genuine finding, deliberately
+    left rather than chased:
+    - A handler that loses the race to `EndTurn` enqueues its refused-`Open`
+      ending after `EventDone`, and an early-answer goroutine that runs after
+      the log has closed writes nothing: both are card-less records for
+      requests the agent already has its reply to, and closing them needs
+      request accounting the close phases exist to avoid (X42 finding 6).
+    - An ABA on a re-used ADOPTED id under the TUI's cancel mask — production
+      ids are minted and never re-used within an incarnation, so this is test
+      Stub territory only (X43).
+    - The id-adoption subsystem in `asks.go` (~265 lines) exists solely
+      because `tui.Stub` adopts test-chosen ids at ~40 sites; worth revisiting
+      once S1c gives the Stub a reason to mint (X44).
+    - `Start` dispatches an update the agent sends before its `session/new`
+      reply on `Start`'s own goroutine, where it waits for the primary like
+      any emit; with a full primary and no reader, `Start` wedges until the
+      session closes. Pre-existing, no worse than the baseline (X50, r27).
+    - The `SetModel` marker set (keeping the models that were current before
+      each direct set made while no model option existed) suppresses a
+      genuine return to a pre-set value on first appearance exactly once,
+      indistinguishable from the stale report it exists to catch (X52).
+    - The permission path has still never been reached by a live agent: six
+      attempts over two providers and four kinds of action on Linux, and
+      grok's config plus native's `AllowAll` gate rule it out on macOS too
+      (V1/V4, "What was not exercised").
+    - A live update in the gap before a `session/load`'s install delta is
+      lost exactly as a contradicting replay is (X51).
+    - `Model.loading` went with the touch it existed for, but `m.sess` stays
+      on the TUI model — 71 test sites use it, write-only in production — a
+      cheap follow-up (X53).
+15. **The smoke's pre-existing findings that are NOT S1b's** (found while
+    driving V1/V4, neither caused nor fixable by this branch): a pasted word
+    that spells a default `textarea` key name (`end`, `up`, `left`, `ctrl+a`
+    …) is silently eaten by the composer, because bubbletea v1 splits a
+    burst at spaces and bubbles' keymap consumes the word as that key (V1
+    anomaly A2); a grok interject-fallback foreign turn shows no spinner,
+    because `spinnerVisible()` keys off `statusWorking` alone and a foreign
+    turn does not set it (V1 anomaly A3, no macOS evidence either way — M1).
 
 ### Live smoke
 
-To be filled at merge.
+Full records: `021-session-control-s1b-engine/smoke/{linux,macos}/RESULTS.md`,
+`verification-summary.md`.
+
+#### Linux — `f28a245` (re-checked at `f65c6c6`)
+
+| leg | cursor | grok | native |
+|---|---|---|---|
+| 1 — queued follow-up drains | PASS | PASS | PASS |
+| 2 — Esc mid-turn with a row queued, no idle flash | PASS | PASS | PASS |
+| 3 — send-now | PASS | n/a | n/a |
+| 4a — interject mid-turn | n/a | PASS | n/a |
+| 4b — interject fallback holds the drain | n/a | PASS | n/a |
+| 5 — unanswered interjection requeued ahead of a queued row | n/a | n/a | PASS |
+| 6 — Esc right after Enter | PASS | not run | PASS |
+| 7 — `--no-force` permission | NOT REACHABLE | NOT REACHABLE | n/a (`AllowAll`) |
+| 8a — plan card (accept / reject / Esc) | PASS | n/a | n/a |
+| 8b — question card (answer / skip) | NOT REACHABLE | PASS (answer) | PASS (answer + skip) |
+| 9 — `/model` + mode cycle + `/rename` at speed | PASS | n/a | n/a |
+| 10 — `--continue` keeps `crazeId` | PASS | n/a | n/a |
+| 11 (re-check) — quit mid-turn (A1) | PASS | n/a | PASS |
+
+The ask registry's first live coverage: every ask, one opening, one ending.
+**Finding A1** (fixed in `f65c6c6`): quitting while a turn ran left it
+`started` and never `ended` — `Close` ran the session's own close, which ends
+the turn and closes the log, before the driver's settlement could publish the
+ending. Fixed by having `Close` author that turn's ending itself, synthetic,
+`closing`, inside the same locked section that starts shutdown, before the
+session (and so the log) closes — confirmed on Linux by re-running the repro
+at `f65c6c6` (native and cursor both: exactly one `ended{stopReason:closing,
+synthetic:true}`, the last event in the file). `droppedAtClose` stays
+non-zero on a mid-turn quit (2, unchanged before and after the fix): the
+session's own late tool-completion event, published after the cut — S1a's
+designed teardown, not a regression.
+
+#### macOS (V4) — mac-mini, `f65c6c6`
+
+| leg | grok | native |
+|---|---|---|
+| 1 — queued follow-up drains | PASS | PASS |
+| 2 — Esc mid-turn with a row queued, no idle flash | PASS | PASS |
+| 4a — interject mid-turn | PASS | n/a |
+| 4b — interject fallback holds the drain | NOT REACHABLE (7 attempts) | n/a |
+| 5 — unanswered interjection requeued ahead of a queued row | n/a | PASS |
+| 6 — Esc right after Enter | PASS | PASS |
+| 8b — question card answered / skipped | n/a (not asked) | PASS (both) |
+| 9 — `/model` + mode cycle + `/rename` at speed | PASS | n/a (no modes) |
+| 10 — `--continue` / native writes no row | PASS | PASS (no row) |
+| 11 — quit mid-turn (A1) | PASS | PASS |
+
+cursor is **NOT REACHABLE over ssh** (locked login keychain, as plan 020's
+smoke found) and is skipped by the brief. The grok interject fallback could
+not be provoked on this box's `Grok 4.7 (xhigh)`, whose turn ends within one
+0.3 s frame of its last token — a property of the model and the box, not of
+craze (M1); it PASSed on Linux. Two benign, box-dependent shape notes: grok's
+install delta lands at seq 3 on the mac (two catalog updates precede it) where
+it is seq 1 on Linux (M3); the `/rename` leg's delta lands **last** on grok
+(completion order, not typed order) where it landed first on Linux/cursor
+(M2) — a folding client keyed on the delta stream ends level with
+`Snapshot()` either way, and a client that assumed a fixed order would be
+wrong.
+
+#### V3 — the journal record
+
+Linux: **30 of 33 journals PASS**; the 3 failures are the deliberate
+mid-turn-quit repros of finding A1, all failing the same two invariants
+(unbalanced turn record, `droppedAtClose != 0`) before the fix — re-checked
+clean at `f65c6c6`. macOS: **25 of 27 PASS**; the 2 failures are the same
+deliberate repros, and after the fix they fail **only** `droppedAtClose == 0`
+(the turn record itself passes). Across all 60 journals: zero `gap` lines,
+`outboxSkippedPrimary` 0, exactly one `craze_session` diag note per file,
+`seq` contiguous from 1, every `meta` carries a state delta, no
+craze-initiated delta sets `mode` or `text`.
+
+#### V2, V5, V6, V7
+
+- **V2** (`--json` parity against the `6581e0a` baseline, 103 scenarios):
+  **103/103 SAME** at the PR 3 tip (`9a00f32`). Every intermediate DIFF during
+  execution was one of two documented unordered pairs
+  (`sigint-between-turns`, which varies in the baseline alone; or a foreign
+  turn's closing bracket against process teardown), each matching an output
+  the baseline itself produces.
+- **V5** (`go test -race -count=20 -timeout 60m ./internal/engine/...
+  ./internal/agent/...`, a quiet box): PASS, exit 0 — engine 38 s, agent
+  1,111 s, no failure, nothing retried.
+- **V6** (no disruption): Linux and macOS both PASS — the user's pre-existing
+  `sessions.jsonl` rows are a byte-identical prefix after the smoke, every new
+  row is the smoke's own workspace with a `crazeId`, native sessions are
+  correctly absent, and `config.toml` changed only in the pre-existing
+  `provider` key (restored on Linux; already matching on the mac).
+- **V7** (publish cost with an observer set): a text delta with the journal
+  attached is 1.7–2.4 µs over five runs (plain publish 1.8–2.1 µs); budget
+  5 µs, met by a wide margin
+  (`021-session-control-s1b-engine/smoke/linux/v7-publish-cost.txt`).
 
 ### Decisions and questions touched
 
-SD-33 recorded in `08`, ahead of execution (SQ12 resolved in `10`). Further
-rows to be filled at merge.
+SD-33 (session hosts born detached, the TUI a socket client for good) was
+recorded in `08` ahead of execution, and SQ12 resolved in `10` before the plan
+was written; nothing in execution reopened either. No new `SD-nn`. The
+roadmap-wording departures the plan's §4 flagged are recorded in this file's
+deviations above and mirrored into `03` and `05` by this commit, per the
+plan's own instruction, rather than as a new decision row: none of them
+reverses a settled `SD-nn`, and each is a departure from prose that was never
+itself a decision entry.
 
 ### Handoff
 
-To be filled at merge.
+**What S1c folds.** The delta sections (`StateDelta`'s `Title` / `Mode` /
+`Model` / `Config` / `Commands` / `Plugins` / `SendNow`), `EventTurn` and
+`EventAsk` are the shared facts the transcript model folds into entries; the
+engine's `Observe` callback — already the seed for the driver's and the index
+worker's own wake-ups — is also the fold's seed, called inside the log's
+publishing boundary, once per committed event, in `Seq` order. **Native's
+first-prompt title is NOT in the stream** (X47: `Start`'s own first-prompt
+title publishes nothing, on purpose, because S1b ships no feature and
+publishing it moved a golden) — a folding client therefore does not learn
+native's self-assigned title from the event stream alone until S1c decides
+whether that golden may move.
+
+**What S2 must do.** Call `Control.Sync` before replying to a command, because
+in-process a response is no longer ordered after the events its own command
+caused by the call simply returning (§4, and `05` below) — that promise now
+needs `Sync`. Call `Subscribe` off the primary's own reader goroutine: it
+blocks inside the log's publishing boundary (X14). Mint a client id per
+connection (`Control.NewClientID`), bind it to that connection, and add
+release-on-disconnect — no client is ever retired from the receipts table
+today (X49), which is exactly right for the TUI's one process-lifetime client
+and exactly wrong for a socket server that mints one per connection forever.
+Specify the gate table's `failed` / `cancelling` / `closing` rows (`05`,
+"to be specified in S2"). Implement the retry policy by code
+(`internal/engine/control.go`'s `Command` doc, mirrored into `05` below) at
+the wire, not just in process.
+
+**§9's "Open, for later phases", unchanged by this plan:** the gate table's
+`failed` / `cancelling` / `closing` rows (S2); restoring a row-sourced turn
+the TUI lost to a foreign-turn refusal (today's behaviour, kept — §4);
+retention (SQ3).
+
+**The H3 note** (R8): nothing forces a `--json` rendering to exist for a new
+event kind — `eventJSON`'s default silently drops an unknown kind — so H3,
+which is the first phase after S1b to add a native ask, must decide and build
+its own `--json` line for a native ask ending; none exists today because no
+native ask has ever fired one.

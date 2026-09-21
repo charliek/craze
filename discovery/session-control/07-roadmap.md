@@ -8,7 +8,7 @@ non-test source lines, from the reference reviews (`09`).
 | ID | status | one line |
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
-| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b in progress (Plan 021: PR 1 of 3, the driver, 2026-09-20)** |
+| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c next** |
 | S2 | not started | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
@@ -32,15 +32,16 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   adapter, and `tui.Stub`; sequence numbers; incarnation identity; the
   lossless event codec; the ring; the journal writer; `seq` on
   `craze prompt --json`. No behavior change.
-- **S1b** — the engine turn driver (admission, queue drain, send-now, foreign
-  turn wait, synthetic endings and rows); the shared/client-local split of
-  TUI-authored rows and state deltas in place of bare `EventMeta`; ask
-  registry with sequenced terminal outcomes; cancel outcomes on an engine turn
-  id; command ids; settings order; approval policy separated from frontend
-  presence; durable craze session id and index writes in the engine.
-  **In progress under Plan 021 (panel-reviewed 2026-09-20): three PRs — the driver, the asks, state and identity.**
-- **S1c** — the render-free transcript model folded inside the boundary;
-  bounded snapshots; in-process attach with snapshot + cursor; the
+- **S1b** (complete) — the engine turn driver (admission, queue drain,
+  send-now, foreign turn wait, synthetic endings and rows); the
+  shared/client-local split of TUI-authored rows and state deltas in place of
+  bare `EventMeta`; ask registry with sequenced terminal outcomes; cancel
+  outcomes on an engine turn id; command ids; settings order; approval policy
+  separated from frontend presence; durable craze session id and index writes
+  in the engine. **Shipped under Plan 021 (panel-reviewed 2026-09-20): three
+  PRs — the driver, the asks, state and identity.**
+- **S1c** — next. The render-free transcript model folded inside the
+  boundary; bounded snapshots; in-process attach with snapshot + cursor; the
   convergence check per event kind.
 
 - Size: L, about 4–5k lines plus test churn (raised after the panel: S1b is a
@@ -84,6 +85,21 @@ grok and native; `cursor-agent` is skipped there because the login keychain
 blocks it over ssh, and that skip exercised the stderr tee against a real
 agent. Inputs to SQ3 (retention) and SQ15 (tool-event conflation) are
 measured in `12` and left undecided.
+
+**Exit result (S1b):** shipped 2026-09-21, plan `021-session-control-s1b-engine`,
+three PRs from fresh `origin/main` — `feature/plan-021-s1b-driver` (#41,
+`fdaaa6d`), `feature/plan-021-s1b-asks` (#42, `db7686e`),
+`feature/plan-021-s1b-state` (#NN, `TBD`). All seven exit clauses met, each
+against a named test; the criterion-by-criterion table, the execution
+amendments X1–X56, the live smoke record, and V2/V3/V5/V6/V7 are in `12`. No
+golden moved and no `testdata/` file changed except additions;
+`craze prompt --json` is byte-identical apart from `seq` (V2: 103/103 SAME at
+the tip). One defect was found live and fixed before the tip: quitting while a
+turn ran left it `started` and never `ended`; `Close` now authors that turn's
+ending itself before the session closes (`12`, "Deviations", item 11). The
+permission path is still without live coverage on either platform — no agent
+this smoke could drive ever asks one, on Linux or the mac-mini — recorded as
+open, not failing, because nothing in S1b caused it.
 
 ### S2 — control socket
 

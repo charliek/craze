@@ -264,6 +264,66 @@ measured first (SQ15). A linear log also cannot express a **rewind** of the
 native store's tree: a `transcript.reset{fromEntryId}` event kind is reserved
 for it now (`11`).
 
+## S1b, as shipped (2026-09-21)
+
+The sections above describe the design as planned, from before S1a existed.
+`internal/engine.Engine` is now the code; this is how it actually locks and
+what its three workers do, so a later phase reads the real thing rather than
+the proposal (Plan 021 §3.1–§3.8, its execution amendments, and the package
+doc comments on `engine.Engine`, `receiptTable` and the index worker).
+
+**Lock order.** `e.mu → s.mu`: the engine calls exactly two things on the
+session while holding `e.mu`, both leaf on the session's side and waiting on
+nothing — `Begin` and the accessor `ForeignTurn()`. `e.mu → the outbox
+mutex`: every engine-authored event is `Enqueue`d in the locked section that
+made the change it describes. `registry.mu → the outbox mutex`, the same
+shape one layer down for the ask registry. **`s.mu → the outbox mutex`**:
+every settings delta is enqueued by the *session*, under `s.mu`, in the
+section that mutates its own snapshot (§3.8) — the engine does not author
+those; it only serialises the calls that cause them (the settings worker,
+below). **`s.mu` is never held across a registry call, for the live session
+and the Stub; native is the one exception, and holds it across the
+non-blocking `CancelTurn` only**, stated in `native.go`'s own struct comment
+(Plan 023 §3.5, the harness's use of the registry through the adapter). The
+receipts table's mutex and the index worker's mutex are each a leaf of their
+own: the receipts table's is held only to admit and to finish a command,
+never across one — C12's index I/O inside `Submit`/`SetTitle` would otherwise
+block every client's commands (PR 3's r24 finding). `e.mu` and `registry.mu`
+are never held across a blocking call — a provider call, `Session.Cancel`, a
+continuation, `Publish`, `Flush`, file I/O — and never nested in each other.
+
+**The workers.** Three, each engine-owned and joined by `Close`:
+
+- **The driver**, one per engine: `for { <-kick; try to settle, else try to
+  drain }` on a one-slot channel. Every source of a wake-up kicks it — the
+  log's observer (a foreign turn ended, a replay ended), a returned
+  continuation, a released cancel hold — and every kick re-reads state under
+  `e.mu`, even when the last pass did nothing, so two collapsed kicks are
+  harmless and a missing re-check would be a queue that never drains with no
+  error anywhere.
+- **The settings worker**, one FIFO: `Control.Set` calls queue behind it, and
+  each runs provider call → the session's locked mutate-and-enqueue → `Flush`
+  → return `SetResult{Value, Rev}`, where `Rev` is read back from
+  `EventLog.EnqueueTicket` (the drainer's own record of the batch's first
+  committed `Seq`).
+- **The index worker**, fed by the observer through a one-slot, latest-wins
+  channel: touch, load and title writes merge under its own leaf mutex, and
+  `Close` gives it one 500 ms bound (the journal's own close bound) to attempt
+  a last write before abandoning it, because `flock` cannot be interrupted.
+
+**What `Close` does, in order.** Under `e.mu`: mark the engine closing; if a
+turn is current, end it there — synthetic, stop reason `closing`, the
+queue's length as `Pending` — because this is the only place left that can
+say so, and it is a mandatory completion like every other ending; disarm any
+armed send-now, carrying the same cause; `Enqueue` that one batch. Release
+`e.mu`. Then, outside any lock: `sess.Close()` — which resolves every parked
+ask `closing` and closes the log last, so what the outbox still holds is
+committed to the ring, the journal and every subscription with a
+**non-blocking** primary send, never lost to a stopped reader; `close(e.done)`;
+`e.wg.Wait()`, joining the driver and the settings worker; `e.idx.close()`,
+the index worker's own bounded last attempt. A second `Close` is a no-op
+(`sync.Once`) and returns the first call's error.
+
 ## Shape of the change
 
 | PR | content | risk |

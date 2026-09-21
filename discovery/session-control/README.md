@@ -21,11 +21,10 @@ decisions `SD-nn`, open questions `SQ-n`.
 | 2026-09-19 | Plan 020 (S1a) written and panel-reviewed; SD-32. Not yet executed. |
 | 2026-09-19 | **S1a executed and complete**: the event log, the lossless codec, the journal, and `seq` on `craze prompt --json`. Live smoke on Linux (cursor, grok, native) and on the mac-mini (grok and native; `cursor-agent` skipped there, blocked by the login keychain over ssh). A native tool call could not be exercised on either platform until H2 gives the harness tools. Outcome, deviations, measurements and handoff in `12`. |
 | 2026-09-20 | Plan 021 (S1b) written and panel-reviewed; SD-33 (SQ12: born detached). Execution started. |
+| 2026-09-21 | **S1b executed and shipped**: the engine turn driver, the queue and send-now, the ask registry, settings as state deltas, command ids, and the durable craze session id. Three PRs (#41 `fdaaa6d`, #42 `db7686e`, #NN `TBD`). Live smoke on Linux (cursor, grok, native) and the mac-mini (grok, native; cursor skipped there, blocked by the login keychain over ssh, as S1a found too). Outcome, deviations, smoke tables and handoff in `12`. |
 
-**Current phase: S1a complete. S1b (the engine turn driver, the ask registry,
-and the shared/client-local split of TUI-authored rows) is planned and in
-progress under Plan 021, panel-reviewed 2026-09-20; progress is recorded in
-`12`.** S1–S5 are committed; S6–S7 are directional and get decided after
+**Current phase: S1b complete. S1c (the render-free transcript model) is
+next.** S1–S5 are committed; S6–S7 are directional and get decided after
 S1–S5 are in daily use (SD-12).
 
 ## Reading order
