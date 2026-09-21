@@ -65,11 +65,42 @@ import (
 // 11).
 
 const (
-	// keptAsks is how many terminal records the registry keeps. Past it the
+	// keptAsks is how many terminal records the registry keeps — endings, not
+	// ids, because one id can end more than once (keepLocked). Past it the
 	// oldest is evicted and an answer naming it is ErrAlreadyResolved rather
-	// than ErrUnknownAsk, decided from the id's counter (05-protocol.md pins
-	// that distinction: unknown means the id was never issued).
+	// than ErrUnknownAsk, decided from what its namespace issued: its counter,
+	// or a reservation (05-protocol.md pins that distinction: unknown means the
+	// id was never issued).
 	keptAsks = 256
+	// keptReservations is how many ids adopted AHEAD of their counter the
+	// registry remembers (accountForLocked). A reservation is two promises: a
+	// mint steps over that number when its counter reaches it, and an answer
+	// naming it is already_resolved rather than unknown even once its record
+	// has been evicted.
+	//
+	// How many a caller adopts is the caller's choice, so the list is bounded
+	// like every other one here: past the bound the oldest reservation is
+	// forgotten and its id reads as a custom one — known only while its record
+	// is kept. Nothing is corrupted by forgetting one, because a mint still
+	// skips an id an OPEN ask holds, and an id whose ask has ended is free to
+	// be adopted — and so to be minted — again.
+	keptReservations = 256
+	// maxAskNumber is the largest number an id can spell and still be one this
+	// registry could have minted (canonicalID). Above it a numeric id is a
+	// CUSTOM id, exactly like "card-1": adopted as a name, accounted for by no
+	// counter, and known only while its record is kept.
+	//
+	// The line is drawn where a counter stops being able to account for a
+	// number. A counter starts at zero and only ever advances by one, and each
+	// step is one ask really created — an entry, a channel, and at least one
+	// event through the log — so 2^62 steps is more than a century at one per
+	// nanosecond. No mint can reach the line, which is what makes "no later
+	// mint reproduces an adopted id" a promise the registry can keep, and
+	// uint64 keeps a further 3·2^62 above it so no arithmetic here can wrap.
+	// Without the line, adopting the signed maximum overflowed the counter and
+	// the next mint published "ask--9223372036854775808" (review r18, finding
+	// 2).
+	maxAskNumber = uint64(1) << 62
 	// keptTurns is how many retired turn tokens keep their exact ending. A
 	// token older than that reads as ended, which is what every retired token
 	// is; only the choice between "cancelled" and "turn_ended" is lost, and
@@ -405,10 +436,17 @@ type AskRequest struct {
 	// registry and the test's id survives.
 	//
 	// An adopted id spends no counter of its own, but one that spells an id
-	// this registry could have minted — "perm-7", "perm-x7" — takes that
-	// number out of its counter, so no later mint can reproduce it
-	// (accountForLocked). An id that spells neither is only known for as long
-	// as its record is kept: past the eviction bound an answer naming it is
+	// this registry could have minted — "perm-7", "perm-x7" — is RESERVED in
+	// that namespace (accountForLocked): the counter does not jump to it, and
+	// a mint steps over it when the counter reaches it, so no later mint can
+	// reproduce it. A reserved id counts as issued, so an answer naming it is
+	// ErrAlreadyResolved once its record has been evicted — while a number
+	// nobody adopted and no mint has reached is ErrUnknownAsk, however close to
+	// the counter it looks (review r18, finding 3).
+	//
+	// An id that spells neither — a name like "card-1", or a number past what
+	// a counter could ever reach (maxAskNumber) — is only known for as long as
+	// its record is kept: past the eviction bound an answer naming it is
 	// ErrUnknownAsk rather than ErrAlreadyResolved, because nothing is left to
 	// say it was ever issued.
 	//
@@ -574,16 +612,26 @@ type AskRegistry struct {
 	mu sync.Mutex
 	// seq and hiddenSeq are a kind's two id counters (hiddenMark): seq numbers
 	// the asks whose opening is published, hiddenSeq the ones nobody is ever
-	// shown.
-	seq       map[AskKind]int
-	hiddenSeq map[AskKind]int
+	// shown. Both count unsigned and only ever advance by one (mintLocked), so
+	// neither can be made to wrap by an id somebody adopted.
+	seq       map[AskKind]uint64
+	hiddenSeq map[AskKind]uint64
 	open      map[string]*askEntry
 	order     []string
-	done      map[string]*askEntry
-	// doneIDs is the eviction order of the terminal records, oldest first.
-	doneIDs []string
-	turnSeq uint64
-	turns   map[uint64]*turnState
+	// done is the ask each kept id names NOW — the most recent ending of an id
+	// that has had several, which is the one Record and Answer answer for.
+	done map[string]*askEntry
+	// doneOrder is the eviction order of the terminal records, oldest ending
+	// first. It holds entries rather than ids because one id can end more than
+	// once: an adopted id whose ask has ended may be adopted again (tui.Stub's
+	// tests do), and both endings are history (review r18, finding 1).
+	doneOrder []*askEntry
+	// reserved is every id adopted ahead of its counter, with reservedOrder
+	// its eviction order, oldest first (keptReservations).
+	reserved      map[askNumber]struct{}
+	reservedOrder []askNumber
+	turnSeq       uint64
+	turns         map[uint64]*turnState
 	// retired is the retirement order of the turn tokens that have ended or
 	// been cancelled, oldest first, so their exact ending is kept for a bounded
 	// while (keptTurns).
@@ -606,10 +654,11 @@ func NewAskRegistry(log *EventLog, now func() time.Time) *AskRegistry {
 		log:       log,
 		now:       now,
 		id:        askRegistries.Add(1),
-		seq:       map[AskKind]int{},
-		hiddenSeq: map[AskKind]int{},
+		seq:       map[AskKind]uint64{},
+		hiddenSeq: map[AskKind]uint64{},
 		open:      map[string]*askEntry{},
 		done:      map[string]*askEntry{},
+		reserved:  map[askNumber]struct{}{},
 		turns:     map[uint64]*turnState{},
 	}
 }
@@ -926,14 +975,16 @@ func (r *AskRegistry) report(e *askEntry, id string, rep AskReport) {
 // they were opened in. It is what a session rebuilds "every answer I was given,
 // in order" from — tui.Stub's Calls() — without keeping a second list beside
 // the registry's own. Every record is a copy.
+//
+// One ending per ask, and **every** ending: an id that was adopted again once
+// its first ask had ended is two asks and two entries here, in the order they
+// ended, not one row overwritten by the other (review r18, finding 1).
 func (r *AskRegistry) Resolved() []AskRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]AskRecord, 0, len(r.doneIDs))
-	for _, id := range r.doneIDs {
-		if e := r.done[id]; e != nil {
-			out = append(out, e.rec.clone())
-		}
+	out := make([]AskRecord, 0, len(r.doneOrder))
+	for _, e := range r.doneOrder {
+		out = append(out, e.rec.clone())
 	}
 	return out
 }
@@ -1063,9 +1114,8 @@ func (r *AskRegistry) newEntryLocked(id string, kind AskKind, token TurnToken, b
 // is enqueued, and the ask holding it keeps its answers and its waiters. One
 // whose ask has ENDED is free again — tui.Stub's tests raise a second card with
 // the id the first one had — and one that spells an id this registry could have
-// minted takes its number out of that counter, so a later mint can never
-// reproduce it and unknownLocked still knows it was issued once its record has
-// been evicted.
+// minted is reserved in that namespace, so a later mint steps over it and
+// unknownLocked still knows it was issued once its record has been evicted.
 //
 // hidden picks the kind's counter: false for an ask that will publish its
 // opening, true for one nobody will ever be shown (hiddenMark).
@@ -1080,76 +1130,127 @@ func (r *AskRegistry) reserveLocked(kind AskKind, adopt string, hidden bool) (st
 	return adopt, nil
 }
 
-// accountForLocked advances the counter an adopted id belongs to past it, so
-// the adopted and the minted halves of one namespace cannot collide.
+// accountForLocked records an adopted id in the namespace its spelling names,
+// so the adopted and the minted halves of one namespace cannot collide.
+//
+// It does **not** move the counter. A counter says "every number at or below me
+// was issued", and jumping it to an adopted perm-1000000 would claim the
+// 999,996 numbers in between, none of which anybody ever asked for: answering
+// perm-999999 would say already_resolved for an id that never existed (review
+// r18, finding 3). The adopted number is remembered as reserved instead —
+// mintLocked steps over it when the counter arrives, and issuedLocked counts it
+// as issued — which is the same protection with none of the claim.
+//
+// An id no counter could ever reach is a custom id and is not remembered at
+// all (maxAskNumber), as is one this namespace has already issued: the counter
+// is past it and that is what says it was issued.
 func (r *AskRegistry) accountForLocked(id string) {
-	kind, hidden, num, ok := canonicalID(id)
+	num, ok := canonicalID(id)
 	if !ok {
 		return
 	}
-	if seq := r.counterLocked(hidden); num > seq[kind] {
-		seq[kind] = num
+	if num.n <= r.counterLocked(num.hidden)[num.kind] {
+		return
+	}
+	if _, already := r.reserved[num]; already {
+		return
+	}
+	r.reserved[num] = struct{}{}
+	r.reservedOrder = append(r.reservedOrder, num)
+	for len(r.reservedOrder) > keptReservations {
+		delete(r.reserved, r.reservedOrder[0])
+		r.reservedOrder = r.reservedOrder[1:]
 	}
 }
 
-// mintLocked is the next id of this kind's own counter, **skipping any an open
-// ask already holds**. Every mint spends a number of the counter it draws on —
-// one that publishes an opening spends a visible number, exactly as live.go's
-// nextID did, and one that never publishes spends a hidden one — and a number
-// whose id is taken is spent all the same, so the counter advances past it
-// rather than a second ask being given a live id. With no adoption in play the
-// visible sequence is exactly perm-1, perm-2, … as goldens and the --json
-// fixtures pin it.
+// mintLocked is the next id of this kind's own counter, **skipping any number
+// an adoption reserved and any id an open ask already holds**. Every mint
+// spends a number of the counter it draws on — one that publishes an opening
+// spends a visible number, exactly as live.go's nextID did, and one that never
+// publishes spends a hidden one — and a number that is passed over is spent all
+// the same, so the counter advances past it rather than a second ask being
+// given a live id. With no adoption in play the visible sequence is exactly
+// perm-1, perm-2, … as goldens and the --json fixtures pin it.
+//
+// A reservation is dropped as the counter reaches it: from there on the counter
+// itself says that number was issued, which is what issuedLocked reads.
 func (r *AskRegistry) mintLocked(kind AskKind, hidden bool) string {
 	seq := r.counterLocked(hidden)
 	for {
 		seq[kind]++
-		id := askID(kind, hidden, seq[kind])
+		num := askNumber{kind: kind, hidden: hidden, n: seq[kind]}
+		if _, taken := r.reserved[num]; taken {
+			r.dropReservationLocked(num)
+			continue
+		}
+		id := askID(num)
 		if _, open := r.open[id]; !open {
 			return id
 		}
 	}
 }
 
+// dropReservationLocked forgets a reservation the counter has reached.
+func (r *AskRegistry) dropReservationLocked(num askNumber) {
+	delete(r.reserved, num)
+	if i := slices.Index(r.reservedOrder, num); i >= 0 {
+		r.reservedOrder = slices.Delete(r.reservedOrder, i, i+1)
+	}
+}
+
 // counterLocked is one of the two per-kind id counters (hiddenMark).
-func (r *AskRegistry) counterLocked(hidden bool) map[AskKind]int {
+func (r *AskRegistry) counterLocked(hidden bool) map[AskKind]uint64 {
 	if hidden {
 		return r.hiddenSeq
 	}
 	return r.seq
 }
 
+// askNumber is one id of this registry's own, taken apart: the kind, which of
+// the kind's two namespaces it belongs to (hiddenMark), and its number. It is
+// what a counter counts and what a reservation names.
+type askNumber struct {
+	kind   AskKind
+	hidden bool
+	n      uint64
+}
+
 // askID spells one id in one of a kind's two namespaces: perm-7 visible,
 // perm-x7 hidden. The two can never collide, whatever the counters stand at.
-func askID(kind AskKind, hidden bool, n int) string {
-	if hidden {
-		return fmt.Sprintf("%s-%s%d", kind.idPrefix(), hiddenMark, n)
+func askID(num askNumber) string {
+	if num.hidden {
+		return fmt.Sprintf("%s-%s%d", num.kind.idPrefix(), hiddenMark, num.n)
 	}
-	return fmt.Sprintf("%s-%d", kind.idPrefix(), n)
+	return fmt.Sprintf("%s-%d", num.kind.idPrefix(), num.n)
 }
 
 // canonicalID reads an id this registry could have minted: a known kind's
 // prefix, the hidden mark or nothing, and the exact decimal spelling of a
-// positive number. "perm-007" and "perm-+7" parse as 7 and are ids craze never
-// issued, so they are neither accounted for nor recognised (review r16, finding
-// 6).
-func canonicalID(id string) (kind AskKind, hidden bool, num int, ok bool) {
-	prefix, n, cut := strings.Cut(id, "-")
+// positive number no larger than maxAskNumber. "perm-007" and "perm-+7" parse
+// as 7 and are ids craze never issued, so they are neither accounted for nor
+// recognised (review r16, finding 6); a number past maxAskNumber — the signed
+// maximum among them — is a custom name that happens to look like an id, and is
+// read as one (review r18, finding 2).
+func canonicalID(id string) (askNumber, bool) {
+	prefix, rest, cut := strings.Cut(id, "-")
 	if !cut {
-		return "", false, 0, false
+		return askNumber{}, false
 	}
 	kind, known := kindForPrefix(prefix)
 	if !known {
-		return "", false, 0, false
+		return askNumber{}, false
 	}
-	if rest, marked := strings.CutPrefix(n, hiddenMark); marked {
-		n, hidden = rest, true
+	hidden := false
+	if after, marked := strings.CutPrefix(rest, hiddenMark); marked {
+		rest, hidden = after, true
 	}
-	num, err := strconv.Atoi(n)
-	if err != nil || num < 1 || strconv.Itoa(num) != n {
-		return "", false, 0, false
+	// ParseUint takes no sign and overflows to an error, so nothing here can
+	// wrap; the round trip refuses every other spelling craze never writes.
+	n, err := strconv.ParseUint(rest, 10, 64)
+	if err != nil || n < 1 || n > maxAskNumber || strconv.FormatUint(n, 10) != rest {
+		return askNumber{}, false
 	}
-	return kind, hidden, num, true
+	return askNumber{kind: kind, hidden: hidden, n: n}, true
 }
 
 // refusalLocked is why an Open cannot park, and "" when it can.
@@ -1283,15 +1384,30 @@ func (r *AskRegistry) endingBody(e *askEntry) *AskBody {
 }
 
 // keepLocked stores a resolved ask among the terminal records, evicting the
-// oldest past keptAsks.
+// oldest ending past keptAsks.
+//
+// **Every ending is kept, id reuse included.** An adopted id whose ask has
+// ended may be adopted again, and the second ask's ending is not the first
+// one's corrected: Resolved() — and so tui.Stub's Calls() — must hold both, in
+// the order they ended, each with a retention of its own. Storing the order as
+// ids meant the second ending replaced the first's record while sitting in the
+// first's ring position, so the newer record was evicted early and the older
+// one was never there at all (review r18, finding 1).
+//
+// The id map still names the ask that id means NOW, which is the most recent:
+// Record and Answer are about the ask somebody is holding, not about history.
+// It is therefore cleared on eviction only when it still points at the entry
+// being evicted.
 func (r *AskRegistry) keepLocked(e *askEntry) {
-	if _, kept := r.done[e.rec.ID]; !kept {
-		r.doneIDs = append(r.doneIDs, e.rec.ID)
-	}
+	r.doneOrder = append(r.doneOrder, e)
 	r.done[e.rec.ID] = e
-	for len(r.doneIDs) > keptAsks {
-		delete(r.done, r.doneIDs[0])
-		r.doneIDs = r.doneIDs[1:]
+	for len(r.doneOrder) > keptAsks {
+		old := r.doneOrder[0]
+		if r.done[old.rec.ID] == old {
+			delete(r.done, old.rec.ID)
+		}
+		r.doneOrder[0] = nil
+		r.doneOrder = r.doneOrder[1:]
 	}
 }
 
@@ -1313,6 +1429,10 @@ func (r *AskRegistry) entryLocked(id string) *askEntry {
 // never unknown_ask). Each namespace answers for itself: "perm-x7" is read
 // against the hidden counter. An adopted id that spells neither has no counter
 // to consult and is unknown once its record has gone.
+//
+// It reads the most recent record an id names, which for a re-used id is its
+// latest ask: the older ones are history (Resolved), not something a client
+// could still be answering.
 func (r *AskRegistry) unknownLocked(id string) error {
 	if _, kept := r.done[id]; kept {
 		return fmt.Errorf("%w: %s", ErrAlreadyResolved, id)
@@ -1323,11 +1443,20 @@ func (r *AskRegistry) unknownLocked(id string) error {
 	return fmt.Errorf("%w: %s", ErrUnknownAsk, id)
 }
 
-// issuedLocked reports whether this incarnation ever issued id — minted it, or
-// accounted for it when somebody adopted it (accountForLocked).
+// issuedLocked reports whether this incarnation ever issued id: minted it —
+// which is what "at or below its namespace's counter" means, and nothing
+// else — or reserved it for somebody who adopted it ahead of that counter
+// (accountForLocked). A number in neither is a hole nobody was ever given.
 func (r *AskRegistry) issuedLocked(id string) bool {
-	kind, hidden, num, ok := canonicalID(id)
-	return ok && num <= r.counterLocked(hidden)[kind]
+	num, ok := canonicalID(id)
+	if !ok {
+		return false
+	}
+	if num.n <= r.counterLocked(num.hidden)[num.kind] {
+		return true
+	}
+	_, reserved := r.reserved[num]
+	return reserved
 }
 
 // opening is the ask's opening event: the three kinds and shapes every

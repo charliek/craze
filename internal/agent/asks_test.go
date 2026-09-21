@@ -633,9 +633,11 @@ func TestAskAdoptedAndMintedIDsShareOneNamespace(t *testing.T) {
 // release it — cancelByCall rejected the entry-pointer mismatch and Wait
 // blocked on a channel nothing would ever close.
 //
-// Now the adoption takes 3 out of the question counter as it happens
-// (accountForLocked), so no mint can reach ask-3 at all, whether or not that
-// ask is still open.
+// Now the adoption RESERVES 3 as it happens (accountForLocked), so the mint
+// that reaches 3 steps over it, whether or not that ask is still open — while
+// ask-2, which nobody adopted and no mint had reached, is still minted in its
+// turn: a reservation claims one number and not the range below it (review r18,
+// finding 3).
 func TestAskAdoptionNeverStrandsAWaiter(t *testing.T) {
 	l := newTestLog(t, EventLogOptions{NoPrimary: true})
 	r := NewAskRegistry(l, func() time.Time { return askTestTime })
@@ -660,8 +662,8 @@ func TestAskAdoptionNeverStrandsAWaiter(t *testing.T) {
 	if slices.Contains(minted, "ask-3") {
 		t.Fatalf("a mint landed on the adopted ask-3: %v", minted)
 	}
-	if minted[0] != "ask-4" || minted[1] != "ask-5" || minted[2] != "ask-6" {
-		t.Fatalf("the mints are %v, want ask-4 ask-5 ask-6: the adoption spent 3", minted)
+	if minted[0] != "ask-2" || minted[1] != "ask-4" || minted[2] != "ask-5" {
+		t.Fatalf("the mints are %v, want ask-2 ask-4 ask-5: the adoption reserved 3 and claimed nothing below it", minted)
 	}
 
 	// The displaced waiter is not displaced: its own context still releases it.
@@ -683,8 +685,8 @@ func TestAskAdoptionNeverStrandsAWaiter(t *testing.T) {
 }
 
 // TestAskAdoptedCanonicalIDsAreAccountedFor is the other half of one namespace:
-// an adopted id that spells one this registry could have minted takes its
-// number out of that counter, so nothing mints it later and the unknown-vs-
+// an adopted id that spells one this registry could have minted is reserved in
+// that namespace, so the mint that reaches it steps over it and the unknown-vs-
 // evicted rule still knows it was issued (asks.go's accountForLocked).
 func TestAskAdoptedCanonicalIDsAreAccountedFor(t *testing.T) {
 	l := newTestLog(t, EventLogOptions{NoPrimary: true})
@@ -696,9 +698,15 @@ func TestAskAdoptedCanonicalIDsAreAccountedFor(t *testing.T) {
 	if _, err := r.Answer("", adopted.ID(), AskAnswer{Cancel: true}); err != nil {
 		t.Fatalf("Answer(perm-4): %v", err)
 	}
-	// The next mint is past it, although perm-4 is no longer open.
-	if got := mustOpen(t, r, t.Context(), TurnToken{}, permReq()).ID(); got != "perm-5" {
-		t.Fatalf("the next minted permission is %q, want perm-5: perm-4 was issued", got)
+	// The adoption claimed the one number and nothing below it, so the counter
+	// walks up to it as usual — and steps over it, although perm-4 is no longer
+	// open.
+	var minted []string
+	for range 4 {
+		minted = append(minted, mustOpen(t, r, t.Context(), TurnToken{}, permReq()).ID())
+	}
+	if !slices.Equal(minted, []string{"perm-1", "perm-2", "perm-3", "perm-5"}) {
+		t.Fatalf("the mints are %v, want perm-1 perm-2 perm-3 perm-5: perm-4 was issued", minted)
 	}
 	// A hidden adoption is accounted for in the hidden counter, and neither
 	// counter can see the other's.
@@ -707,12 +715,12 @@ func TestAskAdoptedCanonicalIDsAreAccountedFor(t *testing.T) {
 		t.Fatalf("the first hidden id is %q, want perm-x1: a visible adoption is not its business", early.ID)
 	}
 	hidden := mustOpen(t, r, t.Context(), TurnToken{}, AskRequest{
-		Kind: AskPermission, ID: "perm-x6", Body: permReq().Body})
+		Kind: AskPermission, ID: "perm-x2", Body: permReq().Body})
 	if _, err := r.Answer("", hidden.ID(), AskAnswer{Cancel: true}); err != nil {
-		t.Fatalf("Answer(perm-x6): %v", err)
+		t.Fatalf("Answer(perm-x2): %v", err)
 	}
-	if got := r.AnsweredEarly(TurnToken{}, permReq(), AskCancelled, AskByProvider).ID; got != "perm-x7" {
-		t.Fatalf("the next hidden id is %q, want perm-x7", got)
+	if got := r.AnsweredEarly(TurnToken{}, permReq(), AskCancelled, AskByProvider).ID; got != "perm-x3" {
+		t.Fatalf("the next hidden id is %q, want perm-x3: the hidden mint steps over the adopted perm-x2", got)
 	}
 	// Both are known as issued once their records have been evicted, which is
 	// what already_resolved rather than unknown_ask rests on.
@@ -722,13 +730,499 @@ func TestAskAdoptedCanonicalIDsAreAccountedFor(t *testing.T) {
 			t.Fatalf("Answer(%s): %v", a.ID(), err)
 		}
 	}
-	for _, id := range []string{"perm-4", "perm-x6"} {
+	for _, id := range []string{"perm-4", "perm-x2"} {
 		if _, kept := r.Record(id); kept {
 			t.Fatalf("%s is still kept; the eviction this asserts about never happened", id)
 		}
 		if _, err := r.Answer("", id, AskAnswer{Cancel: true}); !errors.Is(err, ErrAlreadyResolved) {
 			t.Fatalf("the evicted adopted id %s returned %v, want ErrAlreadyResolved", id, err)
 		}
+	}
+}
+
+// TestAskAReusedIDKeepsEveryEnding is review r18's finding 1: an adopted id
+// whose ask has ended may be adopted again, and the second ask is not a
+// correction of the first. Both endings are history — Resolved(), and so
+// tui.Stub's Calls(), holds each of them in the order they ended, each with a
+// retention of its own — while the id itself names the LATEST ask, which is the
+// one a client could still be answering.
+//
+// Before the fix the terminal order was a list of ids: the second ending
+// replaced the first's record in place, so Resolved() held one of the two
+// instead of both, sitting in the FIRST ending's ring position, where it was
+// evicted as if it were that much older.
+func TestAskAReusedIDKeepsEveryEnding(t *testing.T) {
+	// card ends one ask that adopts card-1, and ordinary one ask with an id of
+	// the registry's own: each is one terminal record.
+	registry := func(t *testing.T) (*AskRegistry, func(string), func() string) {
+		t.Helper()
+		l := newTestLog(t, EventLogOptions{NoPrimary: true})
+		r := NewAskRegistry(l, func() time.Time { return askTestTime })
+		card := func(option string) {
+			t.Helper()
+			a, err := r.Open(t.Context(), TurnToken{}, AskRequest{
+				Kind: AskPermission, ID: "card-1", Body: permReq().Body})
+			if err != nil {
+				t.Fatalf("adopting card-1: %v", err)
+			}
+			if _, err := r.Answer("", a.ID(), AskAnswer{OptionID: option}); err != nil {
+				t.Fatalf("Answer(card-1, %s): %v", option, err)
+			}
+		}
+		ordinary := func() string {
+			t.Helper()
+			a := mustOpen(t, r, t.Context(), TurnToken{}, permReq())
+			if _, err := r.Answer("", a.ID(), AskAnswer{Cancel: true}); err != nil {
+				t.Fatalf("Answer(%s): %v", a.ID(), err)
+			}
+			return a.ID()
+		}
+		return r, card, ordinary
+	}
+
+	t.Run("both endings are history", func(t *testing.T) {
+		r, card, ordinary := registry(t)
+		// An ordinary ask between the two, so what Resolved() reports is the
+		// order the asks ended in and not the order of their ids.
+		card("allow-once")
+		ordinary()
+		card("reject-once")
+
+		resolved := r.Resolved()
+		if len(resolved) != 3 {
+			t.Fatalf("Resolved() is %+v, want both endings of card-1 and the ask between them", resolved)
+		}
+		if resolved[0].ID != "card-1" || resolved[0].Answer.OptionID != "allow-once" {
+			t.Fatalf("the first record is %+v, want card-1's first ending", resolved[0])
+		}
+		if resolved[2].ID != "card-1" || resolved[2].Answer.OptionID != "reject-once" {
+			t.Fatalf("the last record is %+v, want card-1's second ending", resolved[2])
+		}
+		// The id names the latest ask, which is resolved like any other.
+		rec, kept := r.Record("card-1")
+		if !kept || rec.Answer.OptionID != "reject-once" {
+			t.Fatalf("Record(card-1) is %+v (kept %v), want the most recent ask of that id", rec, kept)
+		}
+		if _, err := r.Answer("", "card-1", AskAnswer{Cancel: true}); !errors.Is(err, ErrAlreadyResolved) {
+			t.Fatalf("answering the re-used id returned %v, want ErrAlreadyResolved", err)
+		}
+	})
+
+	t.Run("the newer ending is retained from where it really ended", func(t *testing.T) {
+		r, card, ordinary := registry(t)
+		// The two endings as far apart as the ring is long: the first is the
+		// oldest record, the second the newest, and the ring is exactly full.
+		card("allow-once")
+		for range keptAsks - 2 {
+			ordinary()
+		}
+		card("reject-once")
+		if got := len(r.Resolved()); got != keptAsks {
+			t.Fatalf("%d records, want the ring exactly full (%d)", got, keptAsks)
+		}
+
+		// One more ask per kept record drops everything older than the second
+		// ending, and nothing else: it is the last one in, so it is the last
+		// one out.
+		for range keptAsks - 1 {
+			ordinary()
+		}
+		resolved := r.Resolved()
+		if len(resolved) != keptAsks || resolved[0].ID != "card-1" || resolved[0].Answer.OptionID != "reject-once" {
+			t.Fatalf("the oldest of %d records is %+v, want card-1's second ending: it was evicted in the first's place",
+				len(resolved), resolved[0])
+		}
+		for _, rec := range resolved[1:] {
+			if rec.ID == "card-1" {
+				t.Fatalf("card-1's first ending is still kept: %+v", rec)
+			}
+		}
+		if rec, kept := r.Record("card-1"); !kept || rec.Answer.OptionID != "reject-once" {
+			t.Fatalf("Record(card-1) is %+v (kept %v), want the second ending", rec, kept)
+		}
+		// And the ask after that evicts it, so the bound is the ring's own and
+		// not an id that is never let go.
+		ordinary()
+		if rec, kept := r.Record("card-1"); kept {
+			t.Fatalf("card-1 outlived the ring: %+v", rec)
+		}
+		if _, err := r.Answer("", "card-1", AskAnswer{Cancel: true}); !errors.Is(err, ErrUnknownAsk) {
+			t.Fatalf("the evicted card-1 returned %v, want ErrUnknownAsk: no counter accounts for it", err)
+		}
+	})
+}
+
+// TestAskIDsPastWhatACounterCouldReachAreCustom is review r18's finding 2: an
+// adopted id spelling a number no counter could ever reach is a custom name
+// that happens to look like an id, and is treated as one — known while its
+// record is kept and unknown afterwards, exactly like "card-1".
+//
+// Before the fix the counters were signed ints an adoption jumped to: adopting
+// the signed maximum wrapped the next mint negative and published
+// "ask--9223372036854775808", which no id rule recognises and no counter can
+// account for.
+func TestAskIDsPastWhatACounterCouldReachAreCustom(t *testing.T) {
+	evict := func(t *testing.T, r *AskRegistry) {
+		t.Helper()
+		for range keptAsks {
+			a := mustOpen(t, r, t.Context(), TurnToken{}, questionReq())
+			if _, err := r.Answer("", a.ID(), AskAnswer{Skip: true}); err != nil {
+				t.Fatalf("Answer(%s): %v", a.ID(), err)
+			}
+		}
+	}
+	adopt := func(t *testing.T, r *AskRegistry, id string) {
+		t.Helper()
+		a, err := r.Open(t.Context(), TurnToken{}, AskRequest{
+			Kind: AskQuestion, ID: id, Body: questionReq().Body})
+		if err != nil {
+			t.Fatalf("adopting %s: %v", id, err)
+		}
+		if a.ID() != id {
+			t.Fatalf("Open minted %q over the adopted %q", a.ID(), id)
+		}
+		if _, err := r.Answer("", id, AskAnswer{Skip: true}); err != nil {
+			t.Fatalf("Answer(%s): %v", id, err)
+		}
+	}
+
+	for _, id := range []string{
+		"ask-9223372036854775807",                       // the signed maximum: the overflow itself
+		"ask-18446744073709551615",                      // the unsigned maximum
+		"ask-18446744073709551616",                      // past what any integer parses at all
+		fmt.Sprintf("ask-%d", maxAskNumber+1),           // one past the line
+		fmt.Sprintf("ask-%s%d", hiddenMark, ^uint64(0)), // and the hidden namespace's own
+	} {
+		t.Run(id, func(t *testing.T) {
+			l := newTestLog(t, EventLogOptions{NoPrimary: true})
+			r := NewAskRegistry(l, func() time.Time { return askTestTime })
+			adopt(t, r, id)
+
+			// The counter is where it always was, so the next mint is the first
+			// ordinary id — and an id this registry recognises as its own.
+			minted := mustOpen(t, r, t.Context(), TurnToken{}, questionReq()).ID()
+			if minted != "ask-1" {
+				t.Fatalf("the next minted question is %q, want ask-1: a custom id spends no number", minted)
+			}
+			if _, ok := canonicalID(minted); !ok {
+				t.Fatalf("the mint published %q, which is not an id this registry could have minted", minted)
+			}
+			// And it is known only while its record is kept.
+			if _, err := r.Answer("", id, AskAnswer{Skip: true}); !errors.Is(err, ErrAlreadyResolved) {
+				t.Fatalf("the kept custom record returned %v, want ErrAlreadyResolved", err)
+			}
+			evict(t, r)
+			if _, err := r.Answer("", id, AskAnswer{Skip: true}); !errors.Is(err, ErrUnknownAsk) {
+				t.Fatalf("the evicted custom id returned %v, want ErrUnknownAsk: no counter accounts for it", err)
+			}
+		})
+	}
+
+	t.Run("the line itself is an id of the registry's own", func(t *testing.T) {
+		l := newTestLog(t, EventLogOptions{NoPrimary: true})
+		r := NewAskRegistry(l, func() time.Time { return askTestTime })
+		id := fmt.Sprintf("ask-%d", maxAskNumber)
+		adopt(t, r, id)
+		evict(t, r)
+		if _, err := r.Answer("", id, AskAnswer{Skip: true}); !errors.Is(err, ErrAlreadyResolved) {
+			t.Fatalf("%s returned %v, want ErrAlreadyResolved: it is a number a counter can account for", id, err)
+		}
+	})
+}
+
+// TestAskAdoptionAheadOfTheCounterIssuesNoHoles is review r18's finding 3: a
+// counter says "every number at or below me was issued", so an adoption must
+// not drag it over numbers nobody was ever given. Adopt perm-1000000 and
+// perm-999999 is still an id that never existed — where advancing the counter
+// to the adopted one answered already_resolved for 999,996 ids craze never
+// wrote.
+func TestAskAdoptionAheadOfTheCounterIssuesNoHoles(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{NoPrimary: true})
+	r := NewAskRegistry(l, func() time.Time { return askTestTime })
+	answered := func(req AskRequest) string {
+		t.Helper()
+		a := mustOpen(t, r, t.Context(), TurnToken{}, req)
+		if _, err := r.Answer("", a.ID(), AskAnswer{Cancel: true}); err != nil {
+			t.Fatalf("Answer(%s): %v", a.ID(), err)
+		}
+		return a.ID()
+	}
+
+	// The visible sequence with no adoption in play, which the goldens and the
+	// headless fixtures pin.
+	var minted []string
+	for range 3 {
+		minted = append(minted, answered(permReq()))
+	}
+	if !slices.Equal(minted, []string{"perm-1", "perm-2", "perm-3"}) {
+		t.Fatalf("the mints are %v, want perm-1 perm-2 perm-3", minted)
+	}
+
+	far := permReq()
+	far.ID = "perm-1000000"
+	if got := answered(far); got != "perm-1000000" {
+		t.Fatalf("Open minted %q over the adopted perm-1000000", got)
+	}
+	for _, id := range []string{"perm-4", "perm-999999"} {
+		if _, err := r.Answer("", id, AskAnswer{Cancel: true}); !errors.Is(err, ErrUnknownAsk) {
+			t.Fatalf("%s returned %v, want ErrUnknownAsk: the adoption issued its own id and no other", id, err)
+		}
+	}
+	// The hidden namespace is under the same rule, and neither can see the
+	// other's reservations.
+	hidden := permReq()
+	hidden.ID = "perm-x9"
+	if got := answered(hidden); got != "perm-x9" {
+		t.Fatalf("Open minted %q over the adopted perm-x9", got)
+	}
+	if _, err := r.Answer("", "perm-x8", AskAnswer{Cancel: true}); !errors.Is(err, ErrUnknownAsk) {
+		t.Fatalf("perm-x8 returned %v, want ErrUnknownAsk", err)
+	}
+	if got := r.AnsweredEarly(TurnToken{}, permReq(), AskCancelled, AskByProvider).ID; got != "perm-x1" {
+		t.Fatalf("the first hidden mint is %q, want perm-x1: the adoption moved no counter", got)
+	}
+
+	// Both adopted ids outlive their records, because a reservation is what
+	// says they were issued.
+	for range keptAsks {
+		answered(permReq())
+	}
+	for _, id := range []string{"perm-1000000", "perm-x9"} {
+		if _, kept := r.Record(id); kept {
+			t.Fatalf("%s is still kept, so the eviction this asserts about never happened", id)
+		}
+		if _, err := r.Answer("", id, AskAnswer{Cancel: true}); !errors.Is(err, ErrAlreadyResolved) {
+			t.Fatalf("the evicted %s returned %v, want ErrAlreadyResolved", id, err)
+		}
+	}
+	if _, err := r.Answer("", "perm-999999", AskAnswer{Cancel: true}); !errors.Is(err, ErrUnknownAsk) {
+		t.Fatalf("perm-999999 returned %v, want ErrUnknownAsk: nothing ever issued it", err)
+	}
+}
+
+// TestAskReservationsAreBounded is the other half of finding 3's rule: what the
+// registry remembers for somebody else's ids is bounded like every other list
+// here. Past the bound the oldest reservation is forgotten and its id reads as
+// a custom one — which loses already_resolved for an ask nobody can still be
+// holding, and nothing else.
+func TestAskReservationsAreBounded(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{NoPrimary: true})
+	r := NewAskRegistry(l, func() time.Time { return askTestTime })
+
+	ids := make([]string, 0, keptReservations+1)
+	for i := range keptReservations + 1 {
+		req := permReq()
+		req.ID = fmt.Sprintf("perm-%d", 1000+i)
+		a, err := r.Open(t.Context(), TurnToken{}, req)
+		if err != nil {
+			t.Fatalf("adopting %s: %v", req.ID, err)
+		}
+		if _, err := r.Answer("", a.ID(), AskAnswer{Cancel: true}); err != nil {
+			t.Fatalf("Answer(%s): %v", a.ID(), err)
+		}
+		ids = append(ids, a.ID())
+	}
+	r.mu.Lock()
+	held, order := len(r.reserved), len(r.reservedOrder)
+	r.mu.Unlock()
+	if held > keptReservations || order != held {
+		t.Fatalf("%d reservations and %d in their order, want no more than %d and the two in step",
+			held, order, keptReservations)
+	}
+
+	// Every record of them is gone, so a reservation is all that is left to
+	// answer with.
+	for range keptAsks {
+		a := mustOpen(t, r, t.Context(), TurnToken{}, permReq())
+		if _, err := r.Answer("", a.ID(), AskAnswer{Cancel: true}); err != nil {
+			t.Fatalf("Answer(%s): %v", a.ID(), err)
+		}
+	}
+	if _, err := r.Answer("", ids[len(ids)-1], AskAnswer{Cancel: true}); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("the newest reservation %s returned %v, want ErrAlreadyResolved", ids[len(ids)-1], err)
+	}
+	if _, err := r.Answer("", ids[0], AskAnswer{Cancel: true}); !errors.Is(err, ErrUnknownAsk) {
+		t.Fatalf("the oldest reservation %s returned %v, want ErrUnknownAsk: the list is bounded", ids[0], err)
+	}
+}
+
+// TestAskRefusedOpenAdoptsItsID is the refusal path with an id of the caller's
+// own: a refusal MINTS from the hidden counter, because nobody is ever shown
+// its opening, but an adopted id is the caller's and reaches the ending
+// unchanged — and it is accounted for in the namespace its spelling names,
+// which is the visible one here and not the counter the refusal would have
+// drawn on.
+func TestAskRefusedOpenAdoptsItsID(t *testing.T) {
+	r, l := newAskRegistry(t)
+	ended := r.BeginTurn()
+	r.EndTurn(ended)
+	askEvents(t, l)
+
+	req := permReq()
+	req.ID = "perm-9"
+	a, err := r.Open(t.Context(), ended, req)
+	if err != nil {
+		t.Fatalf("a refused open with an adopted id: %v", err)
+	}
+	if a.ID() != "perm-9" {
+		t.Fatalf("the refused ask is %q, want the adopted perm-9", a.ID())
+	}
+	evs := askEvents(t, l)
+	if len(evs) != 1 {
+		t.Fatalf("a refused open wrote %s, want one ending and no opening", eventKinds(evs))
+	}
+	u := oneEnding(t, evs)
+	assertEnding(t, u, "perm-9", AskTurnEnded, AskByTurn)
+	if u.Body == nil || u.Body.Permission == nil || u.Body.Permission.ID != "perm-9" {
+		t.Fatalf("the ending is %+v, want the body carrying the adopted id", u)
+	}
+	assertResolved(t, a.Wait(), AskTurnEnded, AskByTurn)
+
+	// It spent no number: the cards a user sees are still perm-1, perm-2, …,
+	// and the mint that reaches 9 steps over it.
+	live := r.BeginTurn()
+	var minted []string
+	for range 9 {
+		minted = append(minted, mustOpen(t, r, t.Context(), live, permReq()).ID())
+	}
+	if minted[0] != "perm-1" || minted[8] != "perm-10" || slices.Contains(minted, "perm-9") {
+		t.Fatalf("the mints are %v, want perm-1 … perm-8 then perm-10", minted)
+	}
+	// Nor did it spend a hidden one, which is the counter a refusal with no id
+	// of its own draws on.
+	refused, err := r.Open(t.Context(), ended, permReq())
+	if err != nil {
+		t.Fatalf("Open on an ended turn: %v", err)
+	}
+	if refused.ID() != "perm-x1" {
+		t.Fatalf("the refused ask is %q, want perm-x1", refused.ID())
+	}
+	askEvents(t, l)
+}
+
+// TestAskHiddenIDsSkipWhatAnAdoptionHolds is the hidden namespace's half of one
+// namespace: an adopted id spelling one of its numbers is reserved there, so
+// Automatic's and AnsweredEarly's mints step over it — and Automatic, which has
+// no error to refuse a collision with, mints OVER an id an open ask holds
+// rather than stealing that ask's answers.
+func TestAskHiddenIDsSkipWhatAnAdoptionHolds(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{NoPrimary: true})
+	r := NewAskRegistry(l, func() time.Time { return askTestTime })
+	token := r.BeginTurn()
+
+	// A card of the caller's own, spelled like a hidden permission and parked.
+	req := permReq()
+	req.ID = "perm-x1"
+	held, err := r.Open(t.Context(), token, req)
+	if err != nil {
+		t.Fatalf("adopting perm-x1: %v", err)
+	}
+	waited := waitOn(held)
+
+	if got := r.Automatic(token, permReq(), AskAnswer{OptionID: "allow-once"}).ID; got != "perm-x2" {
+		t.Fatalf("the automatic permission is %q, want perm-x2: perm-x1 is taken", got)
+	}
+	if got := r.AnsweredEarly(token, permReq(), AskCancelled, AskByProvider).ID; got != "perm-x3" {
+		t.Fatalf("the early-answered ask is %q, want perm-x3", got)
+	}
+	// AnsweredEarly never adopts: a request answered before any handler ran had
+	// no craze id to adopt in the first place.
+	early := permReq()
+	early.ID = "perm-x1"
+	if got := r.AnsweredEarly(token, early, AskCancelled, AskByProvider).ID; got != "perm-x4" {
+		t.Fatalf("the early-answered ask is %q, want the minted perm-x4", got)
+	}
+	// Automatic mints over the id an open ask holds, and the decision is
+	// recorded under the id it really used.
+	over := r.Automatic(token, req, AskAnswer{OptionID: "allow-once"})
+	if over.ID != "perm-x5" {
+		t.Fatalf("the automatic permission is %q, want the minted perm-x5", over.ID)
+	}
+	if rec, kept := r.Record(over.ID); !kept || rec.Answer.OptionID != "allow-once" {
+		t.Fatalf("the automatic record is %+v (kept %v), want its own answer", rec, kept)
+	}
+
+	// The parked ask kept its id, its answers and its waiter through all of it.
+	select {
+	case rec := <-waited:
+		t.Fatalf("something else resolved the parked ask: %+v", rec)
+	default:
+	}
+	if _, err := r.Answer("", "perm-x1", AskAnswer{OptionID: "reject-once"}); err != nil {
+		t.Fatalf("answering the parked ask: %v", err)
+	}
+	rec := await(t, waited, "the parked ask's waiter")
+	assertResolved(t, rec, AskAnswered, AskByClient)
+	if rec.ID != "perm-x1" || rec.Answer.OptionID != "reject-once" {
+		t.Fatalf("the waiter woke on %+v, want its own perm-x1 and its own answer", rec)
+	}
+}
+
+// TestAskCallerValuesAreCopiedAtTheCall is the seam's memory rule from the
+// caller's side: a provider that reuses its request struct, or a policy that
+// reuses its answer map, cannot change what was recorded or what was published
+// by touching its own value after the call returned.
+func TestAskCallerValuesAreCopiedAtTheCall(t *testing.T) {
+	r, l := newAskRegistry(t)
+	token := r.BeginTurn()
+
+	// Automatic: the opening it publishes, the ending's answers, and the record
+	// it hands back.
+	req := questionReq()
+	answers := map[string][]string{"q1": {"opt-a"}}
+	auto := r.Automatic(token, req, AskAnswer{Answers: answers})
+	req.Body.Question.Questions[0].Options[0].ID = "tampered"
+	req.Body.Question.Questions[0].Prompt = "tampered"
+	answers["q1"][0] = "tampered"
+	answers["invented"] = []string{"tampered"}
+	auto.Body.Question.Questions[0].Prompt = "tampered"
+	auto.Answer.Answers["q1"][0] = "tampered"
+
+	evs := askEvents(t, l)
+	if len(evs) != 2 {
+		t.Fatalf("the policy wrote %s, want the Auto opening then its ending", eventKinds(evs))
+	}
+	if q := evs[0].Question; q.Questions[0].Options[0].ID != "opt-a" || q.Questions[0].Prompt != "Pick one" ||
+		len(q.Answers) != 1 || q.Answers["q1"][0] != "opt-a" {
+		t.Fatalf("a caller's own value reached the opening: %+v", q)
+	}
+	if u := evs[1].Ask; len(u.Answers) != 1 || u.Answers["q1"][0] != "opt-a" {
+		t.Fatalf("a caller's own value reached the ending: %+v", u)
+	}
+	rec, _ := r.Record(auto.ID)
+	if rec.Body.Question.Questions[0].Prompt != "Pick one" || rec.Answer.Answers["q1"][0] != "opt-a" {
+		t.Fatalf("a caller's own value reached the record: %+v", rec)
+	}
+
+	// AnsweredEarly: a plan's todos, which the body's own copy owns.
+	plan := planReq()
+	plan.Body.Plan.Todos = []Todo{{ID: "1", Content: "do it", Status: "pending"}}
+	early := r.AnsweredEarly(token, plan, AskCancelled, AskByProvider)
+	plan.Body.Plan.Todos[0].Content = "tampered"
+	plan.Body.Plan.Name = "tampered"
+	if rec, _ := r.Record(early.ID); rec.Body.Plan.Todos[0].Content != "do it" || rec.Body.Plan.Name != "Refactor" {
+		t.Fatalf("a caller's own value reached the early answer's record: %+v", rec.Body.Plan)
+	}
+	if u := oneEnding(t, askEvents(t, l)); u.Body.Plan.Todos[0].Content != "do it" || u.Body.Plan.Name != "Refactor" {
+		t.Fatalf("a caller's own value reached the early answer's ending: %+v", u.Body.Plan)
+	}
+
+	// Answer: the map a client still holds once its answer has been taken.
+	a := mustOpen(t, r, t.Context(), token, questionReq())
+	askEvents(t, l)
+	reply := map[string][]string{"q1": {"opt-b"}}
+	got, err := r.Answer("", a.ID(), AskAnswer{Answers: reply})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	reply["q1"][0] = "tampered"
+	reply["invented"] = []string{"tampered"}
+	got.Answer.Answers["q1"] = []string{"tampered"}
+	if rec, _ := r.Record(a.ID()); len(rec.Answer.Answers) != 1 || rec.Answer.Answers["q1"][0] != "opt-b" {
+		t.Fatalf("a client's own map reached the record: %+v", rec.Answer)
+	}
+	if u := oneEnding(t, askEvents(t, l)); len(u.Answers) != 1 || u.Answers["q1"][0] != "opt-b" {
+		t.Fatalf("a client's own map reached the ending: %+v", u)
 	}
 }
 
@@ -1800,10 +2294,31 @@ func TestAskEventsNeverShareMemoryWithTheRegistry(t *testing.T) {
 	})
 }
 
+// watchedContext reports every call to Done, which is where Ask.Wait parks: the
+// asking call's context is watched inside Wait's own select, so a Done() call is
+// proof that a waiter has reached that select — and not merely that its
+// goroutine has started. It is the barrier the wait-side race below is arranged
+// with; nothing here sleeps to find out where another goroutine is.
+type watchedContext struct {
+	context.Context
+	arrived chan<- struct{}
+}
+
+func (c watchedContext) Done() <-chan struct{} {
+	c.arrived <- struct{}{}
+	return c.Context.Done()
+}
+
 // TestAskManyWaitersRaceTheContextAgainstEveryEnding is A-X3 for the wait side:
 // several waiters on one ask, its asking call's context ending, and whatever
 // else can end it, all at the same instant. Whichever wins, there is exactly
 // one ending, every waiter is given that same one, and none is left blocked.
+//
+// The schedule is forced rather than hoped for (review r18, finding 4): every
+// waiter is provably blocked on the ask before anything can end it, so the race
+// the name claims is the race that runs. Without the barrier the ending could
+// win before a single waiter reached Wait, and the test would pass having
+// exercised the already-resolved path alone.
 func TestAskManyWaitersRaceTheContextAgainstEveryEnding(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1820,22 +2335,27 @@ func TestAskManyWaitersRaceTheContextAgainstEveryEnding(t *testing.T) {
 				r, l := newAskRegistry(t)
 				token := r.BeginTurn()
 				ctx, cancel := context.WithCancel(t.Context())
-				a, err := r.Open(ctx, token, permReq())
+				const waiters = 4
+				arrived := make(chan struct{}, waiters)
+				a, err := r.Open(watchedContext{Context: ctx, arrived: arrived}, token, permReq())
 				if err != nil {
 					t.Fatalf("Open: %v", err)
 				}
 				askEvents(t, l)
 
-				const waiters = 4
 				got := make(chan AskRecord, waiters)
-				start := make(chan struct{})
 				var wg sync.WaitGroup
 				for range waiters {
-					wg.Go(func() {
-						<-start
-						got <- a.Wait()
-					})
+					wg.Go(func() { got <- a.Wait() })
 				}
+				// Every waiter is inside Wait's select, on an ask nothing has
+				// ended yet: the ending and the context now race each other and
+				// not the waiters.
+				for range waiters {
+					await(t, arrived, "a waiter to park on the ask")
+				}
+
+				start := make(chan struct{})
 				wg.Go(func() { <-start; cancel() })
 				wg.Go(func() { <-start; tc.end(r, token, a.ID()) })
 				close(start)
@@ -1872,11 +2392,32 @@ func TestAskManyWaitersRaceTheContextAgainstEveryEnding(t *testing.T) {
 // opening from every direction while the registry closes. Every Open answers
 // with an ask that is resolved once the close has run — parked and then ended,
 // or refused outright — and nothing is left open behind it.
+//
+// Both sides are arranged rather than hoped for (review r18, finding 4): a
+// batch that is provably PARKED before the close is called, the concurrent
+// storm, and a batch opened once the close has returned, which is provably
+// refused. Left to the race alone, every Open could run before the close and
+// the refused side would never be exercised at all.
 func TestAskConcurrentOpenAndClose(t *testing.T) {
 	// NoPrimary: this writes more events than a primary nobody reads holds.
 	l := newTestLog(t, EventLogOptions{NoPrimary: true})
 	r := NewAskRegistry(l, func() time.Time { return askTestTime })
 	token := r.BeginTurn()
+
+	// The admitted side: open and still open, with their openings published,
+	// before the close exists to refuse them.
+	const parked = 4
+	before := make([]*Ask, 0, parked)
+	for range parked {
+		a := mustOpen(t, r, t.Context(), token, permReq())
+		if rec := a.Record(); rec.Status != AskOpen {
+			t.Fatalf("%s is %s before the close: this side must be admitted", rec.ID, rec.Status)
+		}
+		if strings.HasPrefix(a.ID(), "perm-"+hiddenMark) {
+			t.Fatalf("the parked ask is %q, want a visible id: its opening is published", a.ID())
+		}
+		before = append(before, a)
+	}
 
 	const openers, each = 6, 12
 	asks := make(chan *Ask, openers*each)
@@ -1899,6 +2440,29 @@ func TestAskConcurrentOpenAndClose(t *testing.T) {
 	close(start)
 	waitDone(t, &wg)
 	close(asks)
+
+	// The refused side: the close has returned, so every Open from here is
+	// resolved as it is opened and takes a hidden number, because nobody is
+	// ever shown its opening (hiddenMark).
+	for range parked {
+		a, err := r.Open(t.Context(), token, permReq())
+		if err != nil {
+			t.Fatalf("Open after the close: %v", err)
+		}
+		rec := a.Record()
+		if rec.Status != AskResolved {
+			t.Fatalf("%s is %s although the close has returned", rec.ID, rec.Status)
+		}
+		assertResolved(t, a.Wait(), AskClosing, AskByClose)
+		if !strings.HasPrefix(rec.ID, "perm-"+hiddenMark) {
+			t.Fatalf("the refused ask is %q, want a hidden id: its opening is never published", rec.ID)
+		}
+	}
+	// And the admitted side ended with the close, which is what it was there to
+	// prove: it was parked, and the close is what took it away.
+	for _, a := range before {
+		assertResolved(t, a.Wait(), AskClosing, AskByClose)
+	}
 
 	if got := r.Asks(); len(got) != 0 {
 		t.Fatalf("%d asks survived the close: %+v", len(got), got)

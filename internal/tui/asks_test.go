@@ -51,6 +51,38 @@ func TestStubEmitDoesNotOpenAnAutoRequest(t *testing.T) {
 	}
 }
 
+// A card id a test re-uses once the first card has been answered is a SECOND
+// ask, not a correction of the first. Calls() is rebuilt from the registry's
+// terminal records rather than kept beside them, so it must hold every answer
+// the stub was given, in the order it was given them, however the tests
+// numbered their cards (review r18, finding 1).
+func TestStubCallsKeepEveryAnswerWhenACardIDIsReused(t *testing.T) {
+	stub := NewStub()
+	t.Cleanup(func() { _ = stub.Close() })
+
+	stub.Emit(agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
+	if _, err := stub.Asks().Answer("", "ask-1", agent.AskAnswer{Skip: true}); err != nil {
+		t.Fatalf("the first answer: %v", err)
+	}
+	// The same id again, now that the ask holding it has ended.
+	stub.Emit(agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
+	if _, err := stub.Asks().Answer("", "ask-1",
+		agent.AskAnswer{Answers: map[string][]string{"q1": {"opt-b"}}}); err != nil {
+		t.Fatalf("the second answer: %v", err)
+	}
+
+	calls := stub.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("Calls() is %+v, want both answers: one card id is not one card", calls)
+	}
+	if calls[0].ID != "ask-1" || !calls[0].Skip || calls[0].Cancelled {
+		t.Fatalf("the first call is %+v, want the skip", calls[0])
+	}
+	if calls[1].ID != "ask-1" || calls[1].Skip || calls[1].Answers["q1"][0] != "opt-b" {
+		t.Fatalf("the second call is %+v, want the answer that followed it", calls[1])
+	}
+}
+
 // A-X3, through Control: an ask answered twice yields one ending and one
 // ErrAlreadyResolved; an invalid answer returns ErrBadAnswer, emits nothing,
 // and the ask is still answerable.
