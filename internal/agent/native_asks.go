@@ -28,7 +28,8 @@ import (
 // of the seam has none — and this file sanitizes, because only the adapter
 // knows the text is about to be drawn in a terminal. Both halves run over the
 // whole body, so nothing reaches the registry, the snapshot or an event
-// carrying either a provider key or an escape sequence.
+// carrying either a provider key or an escape sequence. Every outward string
+// goes through nativeSafe, which is the whole of that rule in one place.
 //
 // It all runs on one of Fantasy's tool goroutines, which the turn joins before
 // Run returns (agent.go's toolExecutionWg): the token it reads is its own
@@ -48,6 +49,31 @@ var _ tool.Asker = nativeAsker{}
 // of it in the snapshot and in the journal as a card's title.
 const nativePlanNameBytes = 120
 
+// nativeSafe is the one transformation every string that leaves the adapter
+// for a person goes through: **redact, sanitize, redact again** (plan 023
+// X14). It is a type rather than two loose functions so that a field cannot
+// be projected by hand and quietly skip a half.
+//
+// The last redaction is the point. The redactor matches whole values
+// (harness/redact), so a key split by something the sanitizer removes — a
+// zero-width space, an escape sequence, a C1 control — passes the first pass
+// untouched and is then PUT BACK TOGETHER by the sanitizer: `sk-can`,
+// U+200B, `ary…` goes in as three things no redactor can see and comes out
+// of sanitizeText as the key itself. Redacting again over the sanitized text
+// is what catches it. The first pass still earns its place: it keeps a key
+// the sanitizer would have edited in the middle — one holding a DEL, say —
+// from being shredded into a fragment nothing can match, and redacting twice
+// costs nothing, since the marker holds no key and redaction over redacted
+// text is a no-op (redact.MarkerOverlaps).
+type nativeSafe struct{ red func(string) string }
+
+// text is a document: its newlines and tabs are kept.
+func (n nativeSafe) text(s string) string { return n.red(sanitizeText(n.red(s))) }
+
+// line is a label: folded onto one line, because the card draws it beside
+// something else.
+func (n nativeSafe) line(s string) string { return n.red(sanitizeLine(n.red(s))) }
+
 // AskQuestion opens a question ask and blocks on it. Under the first-option
 // policy it opens nothing and answers from the policy instead, exactly as live
 // does (live.go's onAskQuestion), so `craze prompt --json` prints the same Auto
@@ -64,7 +90,7 @@ func (a nativeAsker) AskQuestion(ctx context.Context, qs []tool.Question) (tool.
 		// (asks.go's EndTurn), and the tool answers with its unanswered text.
 		return tool.Answers{}, nil
 	}
-	body := nativeQuestion(qs, red)
+	body := nativeQuestion(qs, nativeSafe{red: red})
 	req := AskRequest{Kind: AskQuestion, Body: AskBody{Question: body}}
 	if EffectiveApproval(s.opts).Question == ApprovalFirstOption {
 		rec := s.automaticAsk(tok, req, AskAnswer{Answers: firstOptionAnswers(body)})
@@ -98,8 +124,9 @@ func (a nativeAsker) PresentPlan(ctx context.Context, p tool.PlanOffer) (tool.Pl
 	// The name is taken from the sanitized text, not from the file: a heading
 	// that carried an escape would otherwise reach the card as the card's own
 	// title, which is the one string a transcript prints without a body.
-	text := sanitizeText(red(p.Text))
-	req := AskRequest{Kind: AskPlan, Body: AskBody{Plan: &PlanEvent{Name: nativePlanName(text), Plan: text}}}
+	safe := nativeSafe{red: red}
+	text := safe.text(p.Text)
+	req := AskRequest{Kind: AskPlan, Body: AskBody{Plan: &PlanEvent{Name: nativePlanName(text, safe), Plan: text}}}
 	if EffectiveApproval(s.opts).Plan == ApprovalAccept {
 		rec := s.automaticAsk(tok, req, AskAnswer{Accept: true})
 		if rec.Outcome != AskAutomatic || !rec.Answer.Accept {
@@ -186,23 +213,22 @@ func (s *nativeSession) flushAsks() { _ = s.log.Flush(context.Background(), s.do
 // checkQuestionAnswers). The model never sees them — it is answered by index
 // — so they exist only to name a choice between the card, the registry and
 // this file.
-func nativeQuestion(qs []tool.Question, red func(string) string) *QuestionEvent {
-	line := func(text string) string { return sanitizeLine(red(text)) }
+func nativeQuestion(qs []tool.Question, safe nativeSafe) *QuestionEvent {
 	out := &QuestionEvent{Questions: make([]Question, 0, len(qs))}
 	for i, q := range qs {
 		opts := make([]Option, 0, len(q.Options))
 		for j, o := range q.Options {
 			opts = append(opts, Option{
 				ID:          "o" + strconv.Itoa(j+1),
-				Label:       line(o.Label),
-				Description: line(o.Description),
+				Label:       safe.line(o.Label),
+				Description: safe.line(o.Description),
 			})
 		}
 		out.Questions = append(out.Questions, Question{
 			ID: "q" + strconv.Itoa(i+1),
 			// The question is prose and keeps its shape; the card folds it
 			// onto one line itself when it draws it.
-			Prompt:        sanitizeText(red(q.Question)),
+			Prompt:        safe.text(q.Question),
 			Options:       opts,
 			AllowMultiple: q.MultiSelect,
 		})
@@ -211,9 +237,9 @@ func nativeQuestion(qs []tool.Question, red func(string) string) *QuestionEvent 
 	// and the first question otherwise, which is what a card with no heading
 	// would have said anyway.
 	if len(qs) > 0 {
-		out.Title = line(qs[0].Header)
+		out.Title = safe.line(qs[0].Header)
 		if out.Title == "" {
-			out.Title = line(qs[0].Question)
+			out.Title = safe.line(qs[0].Question)
 		}
 	}
 	return out
@@ -263,14 +289,21 @@ func optionIndex(q Question, id string) int {
 // plan is the model's own document and nothing in it is a title, so the
 // heading is the closest thing to one; a plan with none still needs a word on
 // the card.
-func nativePlanName(text string) string {
+//
+// text has already been through nativeSafe, and the heading goes through it
+// again: folding a line is a transformation of its own — every run of
+// whitespace becomes one space — and a key spelled with one inside it would
+// be assembled by the fold and by nothing before it. The cap is applied
+// last, so the bound is exact: truncation only ever cuts, and a key in what
+// is left was a key in the whole, which the redaction before it already saw.
+func nativePlanName(text string, safe nativeSafe) string {
 	for line := range strings.SplitSeq(text, "\n") {
 		t := strings.TrimSpace(line)
 		if !strings.HasPrefix(t, "#") {
 			continue
 		}
 		if name := strings.TrimSpace(strings.TrimLeft(t, "#")); name != "" {
-			return truncateUTF8(sanitizeLine(name), nativePlanNameBytes)
+			return truncateUTF8(safe.line(name), nativePlanNameBytes)
 		}
 	}
 	return "Plan"
@@ -300,7 +333,7 @@ func (s *nativeSession) applyTodos(e harness.Todos) {
 	if hs != nil {
 		red = hs.Redact
 	}
-	todos := nativeTodos(e.Items, red)
+	todos := nativeTodos(e.Items, nativeSafe{red: red})
 	s.mu.Lock()
 	s.snap.Todos = todos
 	s.snap.TodosUpdatedAt = s.Now()
@@ -314,15 +347,15 @@ func (s *nativeSession) applyTodos(e harness.Todos) {
 // through as they are (the harness validates them to the same four the TUI
 // and `--json` know), the text is redacted and sanitized, and an empty list is
 // nil — which is what a cleared list has to be for the snapshot to clear.
-func nativeTodos(items []tool.Todo, red func(string) string) []Todo {
+func nativeTodos(items []tool.Todo, safe nativeSafe) []Todo {
 	if len(items) == 0 {
 		return nil
 	}
 	out := make([]Todo, 0, len(items))
 	for _, it := range items {
 		out = append(out, Todo{
-			ID:      sanitizeText(red(it.ID)),
-			Content: sanitizeText(red(it.Content)),
+			ID:      safe.text(it.ID),
+			Content: safe.text(it.Content),
 			Status:  string(it.Status),
 		})
 	}

@@ -1,6 +1,80 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// The 8-bit escape introducers and the bidi formatting controls, spelled from
+// their code points so no editor — and nothing that writes this file — can
+// turn an escape into the invisible character itself (native_test.go's
+// zeroWidthSpace is spelled the same way).
+var (
+	c1CSI   = string(rune(0x9b))   // CSI, the 8-bit form of ESC [
+	c1OSC   = string(rune(0x9d))   // OSC, the 8-bit form of ESC ]
+	c1DCS   = string(rune(0x90))   // DCS, the 8-bit form of ESC P
+	c1ST    = string(rune(0x9c))   // ST, which ends a string sequence
+	c1NEL   = string(rune(0x85))   // NEL: a C1 control that introduces nothing
+	nbsp    = string(rune(0xa0))   // the byte just past C1: ordinary text
+	bidiRLO = string(rune(0x202e)) // right-to-left override
+	bidiLRI = string(rune(0x2066)) // left-to-right isolate
+	bidiPDI = string(rune(0x2069)) // pop directional isolate
+	bidiRLM = string(rune(0x200f)) // right-to-left mark
+)
+
+// TestSanitizeTextDropsC1AndBidi (plan 023 X14): the 8-bit spellings of the
+// escape sequences go the way the 7-bit ones do — the introducer AND what it
+// introduces — and the bidi formatting controls go with the zero-width
+// runes. The fast path has to notice them too: a string
+// whose only fault is one of these is pure ASCII plus one valid rune, which
+// is exactly what `clean` used to wave through.
+func TestSanitizeTextDropsC1AndBidi(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"c1 csi colour", c1CSI + "31mred" + c1CSI + "0m", "red"},
+		{"c1 osc to st", c1OSC + "0;pwned" + c1ST + "title", "title"},
+		{"c1 osc to bel", c1OSC + "0;pwned\x07title", "title"},
+		{"c1 dcs to esc backslash", c1DCS + "q;stuff\x1b\\ok", "ok"},
+		{"esc osc closed by the 8-bit st", "\x1b]0;pwned" + c1ST + "title", "title"},
+		{"c1 csi swallows to its final byte, as esc does", "a" + c1CSI + "b", "a"},
+		{"lone c1 control", "a" + c1NEL + "b", "ab"},
+		{"lone string terminator", "a" + c1ST + "b", "ab"},
+		{"c1 at the end", "ok" + c1CSI, "ok"},
+		{"bidi override", "a" + bidiRLO + "b", "ab"},
+		{"bidi isolates", bidiLRI + "path" + bidiPDI, "path"},
+		{"bidi mark", "a" + bidiRLM + "b", "ab"},
+		// U+00A0 is the code point just past the C1 block: ordinary text, and
+		// a boundary the range check has to get right.
+		{"keeps no-break space", "a" + nbsp + "b", "a" + nbsp + "b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeText(tc.in); got != tc.want {
+				t.Fatalf("sanitizeText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			// The fast path is part of the sanitiser: an input it calls clean
+			// is returned untouched, so it must agree with the loop.
+			if clean(tc.in) != (tc.in == tc.want) {
+				t.Fatalf("clean(%q) = %v, but sanitizing gives %q", tc.in, clean(tc.in), tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeLineDropsC1AndBidi: the folded form is the sanitized one, so a
+// label, a path or a heading is as safe as a document.
+func TestSanitizeLineDropsC1AndBidi(t *testing.T) {
+	got := sanitizeLine("  before " + c1OSC + "0;x" + c1ST + "\n" + bidiRLO + "after  ")
+	if got != "before after" {
+		t.Fatalf("sanitizeLine = %q, want %q", got, "before after")
+	}
+	if strings.ContainsFunc(got, isDropped) {
+		t.Fatalf("sanitizeLine kept a rune it drops: %q", got)
+	}
+}
 
 func TestSanitizeText(t *testing.T) {
 	cases := []struct {

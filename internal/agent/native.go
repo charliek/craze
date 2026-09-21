@@ -141,6 +141,13 @@ type nativeSession struct {
 	turnCancel context.CancelFunc
 	turnToken  TurnToken
 	released   chan struct{}
+	// cancelSeam runs inside Cancel's critical section, with s.mu held, the
+	// turn's context already cancelled and the registry call still to come.
+	// **It is a test seam: nil in production**, set only by a test in this
+	// package and only under s.mu. It exists because "the read of the turn
+	// and CancelTurn are ONE critical section" (plan 023 §3.5) is a fact
+	// about a window, and a window can only be pinned from inside it.
+	cancelSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -1173,6 +1180,11 @@ func (s *nativeSession) Cancel(ctx context.Context) (CancelOutcome, error) {
 		// one lock it takes under its own is the log's outbox, whose Enqueue
 		// never waits (asks.go's "Locks").
 		cancel()
+		// Nil in production; a test's barrier inside the window (the struct's
+		// field says why).
+		if s.cancelSeam != nil {
+			s.cancelSeam()
+		}
 		s.asks.CancelTurn(s.turnToken)
 	}
 	s.mu.Unlock()

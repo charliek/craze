@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -47,6 +50,7 @@ type nativeWatcher struct {
 
 	stop chan struct{}
 	done chan struct{}
+	once sync.Once
 }
 
 func newNativeWatcher(t *testing.T, s *nativeSession) *nativeWatcher {
@@ -76,11 +80,19 @@ func newNativeWatcher(t *testing.T, s *nativeSession) *nativeWatcher {
 			}
 		}
 	}()
-	t.Cleanup(func() {
+	t.Cleanup(w.pause)
+	return w
+}
+
+// pause stops the reader, once, and returns when it has: whatever the primary
+// still held has been recorded and nobody is reading it from here on. A test
+// that needs the primary to stay full — so a flush has something to park on —
+// stops the reader with this rather than racing it.
+func (w *nativeWatcher) pause() {
+	w.once.Do(func() {
 		close(w.stop)
 		<-w.done
 	})
-	return w
 }
 
 func (w *nativeWatcher) add(ev Event) {
@@ -126,15 +138,50 @@ func (w *nativeWatcher) waitType(typ EventType) Event {
 	return w.wait("an "+string(typ)+" event", func(ev Event) bool { return ev.Type == typ })
 }
 
-// waitTerminal blocks until the turn's own ending has been recorded. Every
-// event a turn publishes is published before it, on the same goroutine and
-// through the same FIFO, so once the watcher has this one it has all of them:
-// it is the barrier every count and every ordering assertion below stands on.
-func (w *nativeWatcher) waitTerminal() {
+// waitCount blocks until n events the predicate accepts have been recorded.
+// It counts rather than matching the first, which is what a test that has run
+// more than one turn needs: the watcher keeps its whole history, so a
+// predicate an earlier turn already satisfied is matched at once and the test
+// reads the later turn's events before they exist (plan 023 X14).
+func (w *nativeWatcher) waitCount(what string, n int, pred func(Event) bool) {
 	w.t.Helper()
-	w.wait("the turn's ending", func(ev Event) bool {
+	deadline := time.After(nativeWait)
+	for {
+		seen := 0
+		for _, ev := range w.events() {
+			if pred(ev) {
+				seen++
+			}
+		}
+		if seen >= n {
+			return
+		}
+		select {
+		case <-w.bell:
+		case <-deadline:
+			w.t.Fatalf("timed out after %v waiting for %d × %s; the session published %s",
+				nativeWait, n, what, strings.Join(w.kinds(), ", "))
+		}
+	}
+}
+
+// waitTerminals blocks until n turn endings have been recorded. Every event a
+// turn publishes is published before its own ending, on the same goroutine and
+// through the same FIFO, so once the watcher has the nth ending it has
+// everything the first n turns published: it is the barrier every count and
+// every ordering assertion below stands on. **A test that runs more than one
+// turn passes the turn's number**, never 1.
+func (w *nativeWatcher) waitTerminals(n int) {
+	w.t.Helper()
+	w.waitCount("a turn's ending", n, func(ev Event) bool {
 		return ev.Type == EventDone || ev.Type == EventError
 	})
+}
+
+// waitTerminal is waitTerminals for the one turn a test ran.
+func (w *nativeWatcher) waitTerminal() {
+	w.t.Helper()
+	w.waitTerminals(1)
 }
 
 // kinds is what was published, for a failure message.
@@ -545,14 +592,196 @@ func TestNativeCancelOfOneTurnDoesNotDrainTheNext(t *testing.T) {
 
 	recA, _ := s.Asks().Record(first.ID)
 	recB, _ := s.Asks().Record(second.ID)
-	if recA.Outcome != AskCancelled || recA.By != AskByCancel || recA.Token != tokenA {
-		t.Fatalf("turn A's ask ended %+v", recA)
+	// Cancelled, and by one of the two hands that may legitimately end it
+	// (plan 023 X14). Cancel calls turnCancel() and CancelTurn in one
+	// section, but holding s.mu does not exclude the registry's own waiter:
+	// the woken Ask.Wait takes the registry's mutex on the tool's goroutine
+	// and can resolve the ask "cancelled, by call" before CancelTurn gets
+	// there. Which of them wins is a scheduling detail; that it is cancelled,
+	// once, on turn A's token is the property.
+	if recA.Outcome != AskCancelled || (recA.By != AskByCancel && recA.By != AskByCall) || recA.Token != tokenA {
+		t.Fatalf("turn A's ask ended %+v, want cancelled by the cancel or by the call", recA)
+	}
+	if n := len(endingsFor(s, first.ID)); n != 1 {
+		t.Fatalf("%d endings for turn A's ask, want exactly one", n)
+	}
+	if n := len(endingsFor(s, second.ID)); n != 1 {
+		t.Fatalf("%d endings for turn B's ask, want exactly one", n)
 	}
 	if recB.Outcome != AskAnswered || recB.By != AskByClient || recB.Token != tokenB {
 		t.Fatalf("turn B's ask ended %+v; the cancel of A must not reach it", recB)
 	}
 	if text := toolResultsOf(m.requests()[2])["c2"]; !strings.Contains(text, `="gamma"`) {
 		t.Fatalf("turn B's model was told %q", text)
+	}
+}
+
+// TestNativeCancelHoldsItsTurnWhileItDrainsTheRegistry (§3.5, plan 023 X14):
+// the dangerous interleaving the one critical section rules out is "A's
+// cancel reads the turn, lets go, B opens a card, A's CancelTurn drains it"
+// — CancelTurn ends EVERY open ask, whatever turn it belongs to.
+// The test stops the cancel INSIDE the section, immediately before the
+// registry call, which is the only place the claim can be made:
+//
+//   - s.mu is still held, so nothing else can install a turn. Move CancelTurn
+//     out of the section and this seam runs with the lock free, which is what
+//     the TryLock reads;
+//   - the claim and the token about to be drained are still turn A's, so
+//     "still the current turn" holds by construction rather than by timing;
+//   - everything the registry holds open at that instant belongs to turn A,
+//     so the drain about to happen can reach nothing else.
+//
+// Then the window closes and the rest is the behaviour: turn B runs, raises
+// its own card, and the person answers it.
+func TestNativeCancelHoldsItsTurnWhileItDrainsTheRegistry(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	m := f.models["test/a"]
+	// One step only: the cancel lands while the tool is asking, so turn A
+	// never comes back for a second and nothing it queued is taken by B.
+	m.push(nativeCallStep("c1", "ask_user_question", nativeQuestionArgs(t, "Turn A?", "alpha", "beta")))
+
+	out := startPrompt(s, "turn A")
+	first := w.waitType(EventQuestion).Question
+	tokenA := turnTokenOf(s)
+
+	inside, release := make(chan struct{}), make(chan struct{})
+	s.mu.Lock()
+	s.cancelSeam = func() {
+		// Read without taking s.mu because the caller holds it: that is the
+		// claim, and the TryLock below is what proves it.
+		if s.mu.TryLock() {
+			s.mu.Unlock()
+			t.Error("s.mu was free when CancelTurn was about to be made: the read of the turn and the registry call are not one critical section")
+		}
+		if !s.claimed || s.turnToken != tokenA {
+			t.Errorf("the window shows claimed=%v token=%v, want turn A still holding its claim and its token", s.claimed, s.turnToken)
+		}
+		// Reading the registry from here takes the order the call below takes
+		// — s.mu, then the registry's leaf mutex — so it cannot deadlock, and
+		// it is the same one exception §3.5 states.
+		for _, rec := range s.asks.Asks() {
+			if rec.Token != tokenA {
+				t.Errorf("the registry holds %s open on %v, which this drain would take; only turn A's may be open here", rec.ID, rec.Token)
+			}
+		}
+		close(inside)
+		<-release
+	}
+	s.mu.Unlock()
+
+	cancelled := make(chan error, 1)
+	go func() {
+		_, err := s.Cancel(context.Background())
+		cancelled <- err
+	}()
+	await(t, inside, "the cancel to reach the window inside its critical section")
+	close(release)
+	if err := await(t, cancelled, "Cancel"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if got := await(t, out, "turn A"); got.err != nil || got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("turn A = %+v, %v; want a cancelled turn", got.res, got.err)
+	}
+	// The seam is the cancel's, not the session's: nothing after this cancel
+	// runs through it.
+	s.mu.Lock()
+	s.cancelSeam = nil
+	s.mu.Unlock()
+
+	m.push(
+		nativeCallStep("c2", "ask_user_question", nativeQuestionArgs(t, "Turn B?", "gamma", "delta")),
+		answer("B answered"),
+	)
+	outB := startPrompt(s, "turn B")
+	second := w.wait("turn B's question", func(ev Event) bool {
+		return ev.Type == EventQuestion && ev.Question.Title == "Turn B?"
+	}).Question
+	tokenB := turnTokenOf(s)
+	answerQuestion(t, s, second, 0)
+	if got := await(t, outB, "turn B"); got.err != nil || got.res.StopReason != harness.StopEndTurn {
+		t.Fatalf("turn B = %+v, %v; want end_turn", got.res, got.err)
+	}
+	requireSettled(t, s)
+
+	recA, _ := s.Asks().Record(first.ID)
+	recB, _ := s.Asks().Record(second.ID)
+	if recA.Outcome != AskCancelled || recA.Token != tokenA {
+		t.Fatalf("turn A's ask ended %+v", recA)
+	}
+	if recB.Outcome != AskAnswered || recB.By != AskByClient || recB.Token != tokenB {
+		t.Fatalf("turn B's ask ended %+v; A's delayed drain must not reach it", recB)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if n := len(endingsFor(s, id)); n != 1 {
+			t.Fatalf("%d endings for %s, want exactly one", n, id)
+		}
+	}
+}
+
+// TestNativeDelayedCancelEndsTheTurnItArrivesIn (§3.5, plan 023 X14):
+// the guard is not "only the turn that was running when this Cancel was
+// called" — it is "whatever turn is current when this Cancel takes s.mu".
+// A cancel held outside the session until turn B is up cancels B, which is
+// Cancel's pre-existing meaning, and B's card ends cancelled exactly once.
+//
+// The delay is a barrier, not a sleep: the goroutine is launched while turn A
+// is still current and waits on B's own card being published.
+func TestNativeDelayedCancelEndsTheTurnItArrivesIn(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	m := f.models["test/a"]
+	m.push(nativeCallStep("c1", "ask_user_question", nativeQuestionArgs(t, "Turn A?", "alpha", "beta")))
+
+	out := startPrompt(s, "turn A")
+	first := w.waitType(EventQuestion).Question
+
+	// Issued now, while turn A is the current one, and let go only once B's
+	// card is up.
+	bIsUp := make(chan struct{})
+	delayed := make(chan error, 1)
+	go func() {
+		<-bIsUp
+		_, err := s.Cancel(context.Background())
+		delayed <- err
+	}()
+
+	if _, err := s.Cancel(context.Background()); err != nil {
+		t.Fatalf("cancelling turn A: %v", err)
+	}
+	if got := await(t, out, "turn A"); got.err != nil || got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("turn A = %+v, %v", got.res, got.err)
+	}
+
+	m.push(nativeCallStep("c2", "ask_user_question", nativeQuestionArgs(t, "Turn B?", "gamma", "delta")))
+	outB := startPrompt(s, "turn B")
+	second := w.wait("turn B's question", func(ev Event) bool {
+		return ev.Type == EventQuestion && ev.Question.Title == "Turn B?"
+	}).Question
+	tokenB := turnTokenOf(s)
+	close(bIsUp)
+
+	if err := await(t, delayed, "the delayed cancel"); err != nil {
+		t.Fatalf("the delayed cancel: %v", err)
+	}
+	if got := await(t, outB, "turn B"); got.err != nil || got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("turn B = %+v, %v; a cancel that arrives in B's turn cancels B", got.res, got.err)
+	}
+	requireSettled(t, s)
+
+	recB, _ := s.Asks().Record(second.ID)
+	if recB.Outcome != AskCancelled || recB.Token != tokenB {
+		t.Fatalf("turn B's ask ended %+v, want cancelled on B's own token", recB)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if n := len(endingsFor(s, id)); n != 1 {
+			t.Fatalf("%d endings for %s, want exactly one", n, id)
+		}
+	}
+	if n := len(m.requests()); n != 2 {
+		t.Fatalf("the model saw %d requests; neither cancelled ask may be followed by one", n)
 	}
 }
 
@@ -577,8 +806,11 @@ func TestNativeCloseWhileAnAskIsOpen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	got := await(t, out, "the prompt")
-	if got.err == nil && got.res.StopReason != harness.StopCancelled {
-		t.Fatalf("Prompt = %+v, %v; want the turn cut short", got.res, got.err)
+	// The established cancelled result, not "some error": Close cancels the
+	// turn's context, so Run comes back StopCancelled and the caller's own
+	// context is untouched — the same pair a Cancel gives (plan 023 X14).
+	if got.err != nil || got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("Prompt = %+v, %v; want a cancelled turn", got.res, got.err)
 	}
 	if n := len(m.requests()); n != 1 {
 		t.Fatalf("the model saw %d requests; nothing may follow a step whose ask was closed", n)
@@ -683,9 +915,84 @@ func TestNativeInterjectWhileAnAskIsOpenLandsAfterTheAnswer(t *testing.T) {
 	requireSettled(t, s)
 }
 
-// nativeNasty is every control byte §7 A3 names and a provider key, for a test
-// that puts them wherever a model can put text.
-var nativeNasty = "\x1b[31mred\x1b]0;title\x07\x07\x00 and " + nativeCanary + zeroWidthSpace
+// nativeSplitBy is the canary key with by — something the sanitizer REMOVES —
+// in the middle of it. A redactor matches whole values, so the key is not
+// there to be found on the way in; the sanitizer then takes by out and puts
+// the key back together. Only a redaction AFTER the sanitizer keeps it out of
+// the registry, the snapshot, an event and the codec's bytes (plan 023 X14).
+func nativeSplitBy(by string) string { return nativeCanary[:9] + by + nativeCanary[9:] }
+
+// nativeNasty is every control byte §7 A3 names, the C1 and bidi controls
+// plan 023 X14 adds, a provider key, and the same key split three ways, for
+// a test that puts them wherever a model can put text.
+var nativeNasty = "\x1b[31mred\x1b]0;title\x07\x07\x00 and " + nativeCanary + zeroWidthSpace +
+	c1CSI + "31m" + c1OSC + "0;title" + c1ST + bidiRLO + bidiLRI + bidiPDI + bidiRLM + " " +
+	nativeSplitBy(zeroWidthSpace) + " " + nativeSplitBy("\x1b[31m") + " " + nativeSplitBy(c1CSI+"31m")
+
+// assertNativeSafe is what every string the adapter projects for a person has
+// to satisfy: no provider key, whether or not the model split one with
+// something the sanitizer removes, and nothing a terminal would act on — the
+// C0 controls, the escape introducers in either spelling, the zero-width
+// runes and the bidi formatting controls.
+func assertNativeSafe(t *testing.T, what, got string) {
+	t.Helper()
+	for _, key := range []string{nativeCanary, nativeCanaryOther} {
+		if strings.Contains(got, key) {
+			t.Fatalf("%s carries a provider key: %q", what, got)
+		}
+	}
+	if strings.ContainsAny(got, "\x1b\x07\x00") {
+		t.Fatalf("%s carries a C0 control: %q", what, got)
+	}
+	for _, r := range got {
+		if isDropped(r) {
+			t.Fatalf("%s carries %U, which the sanitizer removes: %q", what, r, got)
+		}
+	}
+}
+
+// assertEventsSafe is the same check on the wire: the ask, plan and todo
+// events the session published, encoded as `craze prompt --json` encodes
+// them. The controls are asserted on the events themselves above — the codec
+// carries a string verbatim — so what this adds is the JSON's own escapes,
+// the shape a key would take if one reached an encoder.
+//
+// It covers this adapter's own projections and says so. **A tool ROW is a
+// different path** (native_tools.go): its text is redacted by the harness and
+// sanitized here, in that order and with no second redaction, so a key split
+// by something the sanitizer removes is put back together there too. That is
+// a hole of the same shape as the one plan 023 X14 closes here, older than
+// these three tools — every tool's raw input and output has taken that path
+// since H2 — and outside this commit, so it is recorded here rather than
+// papered over.
+func assertEventsSafe(t *testing.T, w *nativeWatcher) {
+	t.Helper()
+	covered := map[EventType]bool{
+		EventQuestion: true, EventPlan: true, EventAsk: true, EventTodos: true,
+	}
+	// Backslash-u, built from its code point so nothing that edits this file
+	// can turn the escape into the character it spells.
+	escaped := func(r rune) string { return fmt.Sprintf("%cu%04x", 0x5c, r) }
+	for _, ev := range w.events() {
+		if !covered[ev.Type] {
+			continue
+		}
+		body, err := EncodeEvent(ev)
+		if err != nil {
+			t.Fatalf("encoding the %s event: %v", ev.Type, err)
+		}
+		for _, key := range []string{nativeCanary, nativeCanaryOther} {
+			if strings.Contains(body, key) {
+				t.Fatalf("the encoded %s event carries a provider key: %s", ev.Type, body)
+			}
+		}
+		for _, r := range []rune{0x1b, 0x07, 0x00, 0x9b, 0x9d, 0x200b, 0x202e} {
+			if strings.Contains(body, escaped(r)) {
+				t.Fatalf("the encoded %s event carries %U: %s", ev.Type, r, body)
+			}
+		}
+	}
+}
 
 // TestNativeQuestionBodyIsRedactedAndSanitized (A3, panel correction 11):
 // nothing a model writes into a question reaches the registry, the snapshot or
@@ -719,20 +1026,27 @@ func TestNativeQuestionBodyIsRedactedAndSanitized(t *testing.T) {
 	w.waitTerminal()
 
 	one := q.Questions[0]
-	for what, got := range map[string]string{
-		"the title":           q.Title,
-		"the prompt":          one.Prompt,
-		"the label":           one.Options[0].Label,
-		"the description":     one.Options[0].Description,
-		"what an ending said": endingText(w),
-	} {
-		if strings.Contains(got, nativeCanary) {
-			t.Fatalf("%s carries the canary key: %q", what, got)
-		}
-		if strings.ContainsAny(got, "\x1b\x07\x00") || strings.Contains(got, zeroWidthSpace) {
-			t.Fatalf("%s carries a control byte: %q", what, got)
-		}
+	// The registry's own copy, not only the event's: the card, the journal
+	// and anything that lists the open asks read that one.
+	rec, ok := s.Asks().Record(q.ID)
+	if !ok || rec.Body.Question == nil {
+		t.Fatalf("the registry holds %+v", rec)
 	}
+	held := rec.Body.Question
+	for what, got := range map[string]string{
+		"the title":             q.Title,
+		"the prompt":            one.Prompt,
+		"the label":             one.Options[0].Label,
+		"the description":       one.Options[0].Description,
+		"the registry's title":  held.Title,
+		"the registry's prompt": held.Questions[0].Prompt,
+		"the registry's label":  held.Questions[0].Options[0].Label,
+		"the registry's desc":   held.Questions[0].Options[0].Description,
+		"what an ending said":   endingText(w),
+	} {
+		assertNativeSafe(t, what, got)
+	}
+	assertEventsSafe(t, w)
 	// A label is one line: the card draws it beside a number.
 	if strings.Contains(one.Options[0].Label, "\n") || strings.Contains(q.Title, "\n") {
 		t.Fatalf("a label kept its newline: %q / %q", one.Options[0].Label, q.Title)
@@ -993,7 +1307,7 @@ func TestNativePlanHeadlessIsAccepted(t *testing.T) {
 func TestNativePlanBodyIsRedactedAndSanitized(t *testing.T) {
 	f, s, plan := planModeFixture(t, Options{Interactive: true})
 	w := newNativeWatcher(t, s)
-	writeNativeFile(t, plan, "# Ship \x1b[31mit\x07 "+nativeCanary+"\n\nthe key is "+nativeCanary+"\x00\n")
+	writeNativeFile(t, plan, "# Ship \x1b[31mit\x07 "+nativeNasty+"\n\nthe key is "+nativeNasty+"\x00\n")
 	m := f.models["test/a"]
 	m.push(nativeCallStep("c1", "exit_plan_mode", "{}"), answer("never requested"))
 
@@ -1005,14 +1319,21 @@ func TestNativePlanBodyIsRedactedAndSanitized(t *testing.T) {
 	if got := await(t, out, "the prompt"); got.err != nil {
 		t.Fatalf("Prompt: %v", got.err)
 	}
-	for what, got := range map[string]string{"the name": p.Name, "the plan": p.Plan} {
-		if strings.Contains(got, nativeCanary) {
-			t.Fatalf("%s carries the canary key: %q", what, got)
-		}
-		if strings.ContainsAny(got, "\x1b\x07\x00") {
-			t.Fatalf("%s carries a control byte: %q", what, got)
-		}
+	w.waitTerminal()
+	rec, ok := s.Asks().Record(p.ID)
+	if !ok || rec.Body.Plan == nil {
+		t.Fatalf("the registry holds %+v", rec)
 	}
+	for what, got := range map[string]string{
+		"the name":            p.Name,
+		"the plan":            p.Plan,
+		"the registry's name": rec.Body.Plan.Name,
+		"the registry's plan": rec.Body.Plan.Plan,
+		"what an ending said": endingText(w),
+	} {
+		assertNativeSafe(t, what, got)
+	}
+	assertEventsSafe(t, w)
 	if !strings.HasPrefix(p.Name, "Ship it") {
 		t.Fatalf("the name lost its heading: %q", p.Name)
 	}
@@ -1034,16 +1355,30 @@ func TestNativePlanNameIsTheFirstHeading(t *testing.T) {
 		{"indented", "   ## Indented\n", "Indented"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := nativePlanName(c.text); got != c.want {
+			if got := nativePlanName(c.text, nativeSafe{red: identityRedactor}); got != c.want {
 				t.Fatalf("nativePlanName = %q, want %q", got, c.want)
 			}
 		})
 	}
 	long := "# " + strings.Repeat("x", 400)
-	if got := nativePlanName(long); len(got) > nativePlanNameBytes {
+	if got := nativePlanName(long, nativeSafe{red: identityRedactor}); len(got) > nativePlanNameBytes {
 		t.Fatalf("nativePlanName kept %d bytes, want at most %d", len(got), nativePlanNameBytes)
 	}
+	// The cap is the bound on what reaches the snapshot and the journal, so it
+	// is applied after the redaction, not before it: a heading of nothing but
+	// keys is 120 bytes of markers, not 120 bytes of markers and a tail.
+	keys := "# " + strings.Repeat(nativeCanary+" ", 20)
+	got := nativePlanName(keys, nativeSafe{red: func(s string) string {
+		return strings.ReplaceAll(s, nativeCanary, "[redacted]")
+	}})
+	if len(got) > nativePlanNameBytes || strings.Contains(got, nativeCanary) {
+		t.Fatalf("nativePlanName = %q (%d bytes)", got, len(got))
+	}
 }
+
+// identityRedactor is the session redactor of a session with no keys at all:
+// what nativeSafe reduces to when there is nothing to redact.
+func identityRedactor(s string) string { return s }
 
 // TestNativeTodosReachTheSnapshotThenTheEvent (A5, plan 023 §3.4): the snapshot
 // is written before the event goes out — a consumer that has the event has the
@@ -1098,7 +1433,10 @@ func TestNativeTodosReachTheSnapshotThenTheEvent(t *testing.T) {
 	if cleared.err != nil {
 		t.Fatalf("the second prompt: %v", cleared.err)
 	}
-	w.waitTerminal()
+	// The SECOND turn's ending: the watcher keeps its whole history, and
+	// waiting for "a terminal event" would match the first turn's and read the
+	// lists before the clearing one was published (plan 023 X14).
+	w.waitTerminals(2)
 	var lists [][]Todo
 	for _, e := range w.events() {
 		if e.Type == EventTodos {
@@ -1123,8 +1461,8 @@ func TestNativeTodoContentIsRedactedAndSanitized(t *testing.T) {
 	f.models["test/a"].push(
 		nativeCallStep("c1", "todo_write", nativeArgs(t, map[string]any{
 			"todos": []any{map[string]any{
-				"id":      "one\x1b[31m",
-				"content": "write \x1b]0;x\x07 the key " + nativeCanary + "\x00",
+				"id":      "one\x1b[31m" + nativeSplitBy(c1CSI+"31m"),
+				"content": "write " + nativeNasty,
 			}},
 		})),
 		answer("done"),
@@ -1134,16 +1472,12 @@ func TestNativeTodoContentIsRedactedAndSanitized(t *testing.T) {
 		t.Fatalf("Prompt: %v", got.err)
 	}
 	ev := w.waitType(EventTodos)
+	w.waitTerminal()
 	for _, td := range append(append([]Todo(nil), ev.Todos...), s.Snapshot().Todos...) {
-		for what, got := range map[string]string{"the id": td.ID, "the content": td.Content} {
-			if strings.Contains(got, nativeCanary) {
-				t.Fatalf("%s carries the canary key: %q", what, got)
-			}
-			if strings.ContainsAny(got, "\x1b\x07\x00") {
-				t.Fatalf("%s carries a control byte: %q", what, got)
-			}
-		}
+		assertNativeSafe(t, "the id", td.ID)
+		assertNativeSafe(t, "the content", td.Content)
 	}
+	assertEventsSafe(t, w)
 	if len(ev.Todos) != 1 || !strings.HasPrefix(ev.Todos[0].Content, "write ") {
 		t.Fatalf("the todo lost its text: %+v", ev.Todos)
 	}
@@ -1169,5 +1503,487 @@ func TestNativeAskWithNoTurnOpensNothing(t *testing.T) {
 	}
 	if len(s.Asks().Asks()) != 0 || len(s.Asks().Resolved()) != 0 {
 		t.Fatalf("the registry holds %+v / %+v", s.Asks().Asks(), s.Asks().Resolved())
+	}
+}
+
+// fillPrimaryHere fills the log's primary, so from then on the drainer can
+// commit nothing and every Flush parks. TryPublish never blocks, so an event
+// something else put there first cannot wedge the test; the length check is
+// what says the primary is really full rather than that the boundary was busy.
+func fillPrimaryHere(t *testing.T, l *EventLog) {
+	t.Helper()
+	for l.TryPublish(textEvent("fill")) {
+	}
+	if n := len(l.Primary()); n != primaryCap {
+		t.Fatalf("the primary holds %d of %d events; it never filled", n, primaryCap)
+	}
+}
+
+// TestNativeCloseReturnsWhileTheToolsFlushIsParked (§3.5, plan 021 X42's
+// lesson, plan 023 X14): the flush the ASKER makes is on a Fantasy tool
+// goroutine, and Close waits for that goroutine — it closes done, cancels the
+// turn, closes the registry and then waits for the continuation, which cannot
+// return until the tool does. With the primary full nothing but the log's own
+// Close can free the drainer, and the log is closed last, so a flush that did
+// not escape on the session's done would be a Close waiting on a goroutine
+// waiting on that same Close.
+//
+// **This test fails if flushAsks passes nil**: Flush's done leg is the only
+// one that can answer it here, so the tool would park for ever, the
+// continuation would never return and Close would never come back. It was
+// checked that way.
+func TestNativeCloseReturnsWhileTheToolsFlushIsParked(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.session(Options{Interactive: true})
+	// Set before Start, so nothing is publishing while the field is written.
+	parked := make(chan uint64, 16)
+	s.log.hooks = &logHooks{flushParked: func(target uint64) {
+		select {
+		case parked <- target:
+		default:
+		}
+	}}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	w := newNativeWatcher(t, s)
+	m := f.models["test/a"]
+	m.push(nativeCallStep("c1", "ask_user_question", nativeQuestionArgs(t, "Which shall it be?", "alpha", "beta")))
+
+	out := startPrompt(s, "ask me")
+	q := w.waitType(EventQuestion).Question
+
+	// The card is up, which means the asker's first flush returned and the
+	// tool is parked on Wait: the outbox is empty and nothing else is
+	// publishing. The reader stops — draining what it still held — and the
+	// primary is filled, so the asker's SECOND flush, the one it makes once
+	// Close resolves the ask, has something to park on.
+	w.pause()
+	fillPrimaryHere(t, s.log)
+	_, _, enqueued, _, _ := outboxState(s.log)
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	if err := await(t, closed, "Close while the tool's flush is parked"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got := await(t, out, "the prompt")
+	if got.err != nil || got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("Prompt = %+v, %v; want the established cancelled result", got.res, got.err)
+	}
+
+	// A flush really parked, and for a target past everything that had been
+	// enqueued before Close: the ask's ending is what pushed it there, so the
+	// flush that parked is the asker's own, after its Wait.
+	var targets []uint64
+drain:
+	for {
+		select {
+		case target := <-parked:
+			targets = append(targets, target)
+		default:
+			break drain
+		}
+	}
+	if !slices.ContainsFunc(targets, func(target uint64) bool { return target > enqueued }) {
+		t.Fatalf("flushes parked for %v, none past the %d enqueued before Close: the asker's flush never parked", targets, enqueued)
+	}
+	if n := len(m.requests()); n != 1 {
+		t.Fatalf("the model saw %d requests; nothing may follow a step whose ask was closed", n)
+	}
+	if n := len(endingsFor(s, q.ID)); n != 1 {
+		t.Fatalf("%d endings for one ask, want exactly one", n)
+	}
+}
+
+// TestNativeAskOpenedAfterItsTurnWentIsRefused (§3.5, plan 023 X14):
+// the adapter reads the turn's token under s.mu and releases it before the
+// registry parks the ask — Open is never made under s.mu — so the turn can go
+// in between. Open refuses, and a refusal is ONE self-contained ending with no
+// opening before it; the tool reads it through the same Wait as any other and
+// answers with its unanswered text.
+//
+// The window is driven at the seam rather than raced: a token read while the
+// turn was alive and handed to Open after it went is exactly the state the
+// window produces, and it is a fact here rather than a schedule.
+func TestNativeAskOpenedAfterItsTurnWentIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		went    func(*nativeSession, TurnToken)
+		outcome AskOutcome
+		by      string
+	}{
+		{"cancelled", func(s *nativeSession, tok TurnToken) { s.asks.CancelTurn(tok) }, AskCancelled, AskByCancel},
+		{"retired", func(s *nativeSession, tok TurnToken) { s.asks.EndTurn(tok) }, AskTurnEnded, AskByTurn},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newNativeFixture(t)
+			s := f.started(Options{Interactive: true})
+			w := newNativeWatcher(t, s)
+			h := newHeld(t)
+			f.models["test/a"].push(h.step(textParts("working"), finishParts(fantasy.FinishReasonStop)))
+
+			out := startPrompt(s, "hold the turn open")
+			await(t, h.reached, "the held step")
+			tok := turnTokenOf(s)
+			c.went(s, tok)
+
+			ans, err := nativeAsker{s: s}.AskQuestion(context.Background(), []tool.Question{{
+				Question: "Which shall it be?",
+				Options:  []tool.QuestionOption{{Label: "alpha"}, {Label: "beta"}},
+			}})
+			if err != nil || ans.Answered || ans.Picked != nil {
+				t.Fatalf("AskQuestion = %+v, %v; want nobody answered", ans, err)
+			}
+			// The asker's flush put the refusal on the primary; this is the
+			// watcher having taken it off, which is what makes the count below
+			// a fact. An opening, had there been one, would precede it.
+			w.waitType(EventAsk)
+			if n := w.count(EventQuestion); n != 0 {
+				t.Fatalf("%d question openings; a refused Open raises no card", n)
+			}
+			ends := w.asksOf()
+			if len(ends) != 1 || ends[0].Outcome != c.outcome || ends[0].By != c.by {
+				t.Fatalf("ask endings: %+v, want one %s by %s", ends, c.outcome, c.by)
+			}
+			// Self-contained: the ending carries the body no opening ever did.
+			if ends[0].Body == nil || ends[0].Body.Question == nil {
+				t.Fatalf("the ending carried %+v, want the question it refused", ends[0].Body)
+			}
+			if recs := s.Asks().Resolved(); len(recs) != 1 {
+				t.Fatalf("the registry recorded %+v, want the one refusal", recs)
+			}
+			requireSettled(t, s)
+
+			close(h.release)
+			if got := await(t, out, "the prompt"); got.err != nil {
+				t.Fatalf("Prompt: %v", got.err)
+			}
+		})
+	}
+}
+
+// TestNativeCancelBeforeTheTurnOpensRetiresItsToken (§3.5, plan 023 X14): a
+// Cancel racing the token's INSTALLATION, and the retirement an exceptional
+// return of prompt() owes.
+//
+// prompt mints its token before the locked section that installs it, so a
+// cancel that lands first finds no turn to write to, marks the claim, and the
+// continuation withdraws with nothing sent. The token it minted is still a
+// live turn as far as the registry is concerned until the deferred EndTurn
+// retires it — and that defer is the only thing that does, on this path.
+// Nothing can be opened against it afterwards, which is what retirement
+// means.
+func TestNativeCancelBeforeTheTurnOpensRetiresItsToken(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	m := f.models["test/a"]
+
+	// One real turn first, so the token the withdrawn prompt mints can be
+	// named: BeginTurn hands out consecutive numbers from this session's own
+	// registry, and a token that is never installed is otherwise unnameable.
+	h := newHeld(t)
+	m.push(h.step(textParts("working"), finishParts(fantasy.FinishReasonStop)))
+	first := startPrompt(s, "the first turn")
+	await(t, h.reached, "the held step")
+	ran := turnTokenOf(s)
+	close(h.release)
+	if got := await(t, first, "the first prompt"); got.err != nil {
+		t.Fatalf("the first prompt: %v", got.err)
+	}
+	w.waitTerminal()
+
+	// The window: the claim is taken and the cancel lands before the
+	// continuation runs. Its own context is already over, so Cancel does not
+	// wait for a continuation this test has not run yet.
+	run := s.Begin("ask me")
+	dead, stop := context.WithCancel(context.Background())
+	stop()
+	outcome, err := s.Cancel(dead)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cancel = %+v, %v; want it to come back on its own context", outcome, err)
+	}
+	if outcome.Wrote || !outcome.Withdrew {
+		t.Fatalf("CancelOutcome = %+v, want a withdrawal: there was no open turn to write to", outcome)
+	}
+	if _, err := run(context.Background()); !errors.Is(err, ErrPromptCancelled) {
+		t.Fatalf("the continuation = %v, want ErrPromptCancelled", err)
+	}
+
+	withdrawn := TurnToken{reg: ran.reg, n: ran.n + 1}
+	parked, err := s.asks.Open(context.Background(), withdrawn, AskRequest{
+		Kind: AskQuestion,
+		Body: AskBody{Question: &QuestionEvent{Title: "anyone?", Questions: []Question{{
+			ID: "q1", Prompt: "anyone?", Options: []Option{{ID: "o1", Label: "no"}},
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("opening against the withdrawn turn's token: %v", err)
+	}
+	// Record, not Wait: an unretired token would have PARKED this ask, and a
+	// test that waited on it would hang instead of failing.
+	if rec := parked.Record(); rec.Status != AskResolved || rec.Outcome != AskTurnEnded {
+		t.Fatalf("an ask opened against the withdrawn turn's token is %+v, want a turn_ended refusal: the token was never retired", rec)
+	}
+	requireSettled(t, s)
+}
+
+// TestNativeCancelAfterTheTurnsTokenWasRetired (§3.5, plan 023 X14): a
+// Cancel racing the token's RETIREMENT — prompt retires it outside s.mu and
+// the defer clears it from the session under s.mu, so a cancel in between
+// reads a token that is installed and already retired. It still calls the
+// registry with it, and that is harmless by construction: a retired turn is
+// not marked twice and it has nothing left open to drain, so the ask keeps
+// the one ending it already has.
+func TestNativeCancelAfterTheTurnsTokenWasRetired(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	h := newHeld(t)
+	f.models["test/a"].push(h.step(textParts("working"), finishParts(fantasy.FinishReasonStop)))
+
+	out := startPrompt(s, "hold the turn open")
+	await(t, h.reached, "the held step")
+
+	// An ask parked against the running turn, opened at the seam: the prompt
+	// path cannot leave one open past its turn's end, since the turn joins
+	// every tool goroutine before Run returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asked := make(chan tool.Answers, 1)
+	go func() {
+		ans, _ := nativeAsker{s: s}.AskQuestion(ctx, []tool.Question{{
+			Question: "Which shall it be?",
+			Options:  []tool.QuestionOption{{Label: "alpha"}},
+		}})
+		asked <- ans
+	}()
+	q := w.waitType(EventQuestion).Question
+
+	s.asks.EndTurn(turnTokenOf(s))
+	if ans := await(t, asked, "the ask to come back"); ans.Answered {
+		t.Fatalf("the asker answered %+v, want nobody answered", ans)
+	}
+
+	if _, err := s.Cancel(context.Background()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	got := await(t, out, "the cancelled prompt")
+	if got.err != nil || got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("Prompt = %+v, %v; want a cancelled turn", got.res, got.err)
+	}
+	rec, _ := s.Asks().Record(q.ID)
+	if rec.Outcome != AskTurnEnded || rec.By != AskByTurn {
+		t.Fatalf("the ask ended %+v; a cancel after the token retired must not re-end it", rec)
+	}
+	if n := len(endingsFor(s, q.ID)); n != 1 {
+		t.Fatalf("%d endings for one ask, want exactly one", n)
+	}
+	requireSettled(t, s)
+}
+
+// TestNativeAnswerAfterTheAskEndedIsRefused (§3.5): an answer that arrives
+// after the turn took the ask away is the registry's own sentinel, not a
+// second ending — ErrAlreadyResolved for an ask this session issued, and
+// ErrUnknownAsk for an id it never did.
+func TestNativeAnswerAfterTheAskEndedIsRefused(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	f.models["test/a"].push(nativeCallStep("c1", "ask_user_question", nativeQuestionArgs(t, "Which shall it be?", "alpha", "beta")))
+
+	out := startPrompt(s, "ask me")
+	q := w.waitType(EventQuestion).Question
+	if _, err := s.Cancel(context.Background()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if got := await(t, out, "the cancelled prompt"); got.res.StopReason != harness.StopCancelled {
+		t.Fatalf("Prompt = %+v, %v", got.res, got.err)
+	}
+	requireSettled(t, s)
+
+	late := AskAnswer{Answers: map[string][]string{"q1": {"o1"}}}
+	if _, err := s.Asks().Answer("test/late", q.ID, late); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("answering the retired ask = %v, want ErrAlreadyResolved", err)
+	}
+	if _, err := s.Asks().Answer("test/late", "ask-99", late); !errors.Is(err, ErrUnknownAsk) {
+		t.Fatalf("answering an id nothing ever issued = %v, want ErrUnknownAsk", err)
+	}
+	if n := len(endingsFor(s, q.ID)); n != 1 {
+		t.Fatalf("%d endings for one ask, want exactly one: a late answer adds none", n)
+	}
+}
+
+// TestNativeManyQuestionsAndMultiSelectMapBackByIndex (A3, plan 023 X14): one
+// call may ask several questions and let the person pick more than one
+// option. The ids are the adapter's, per question (q1…, and o1… inside
+// each question, so two questions both offer an o1); the answer goes back to
+// the model by INDEX, in the questions' own order, and comes out as the
+// labels the model wrote.
+func TestNativeManyQuestionsAndMultiSelectMapBackByIndex(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	m := f.models["test/a"]
+	m.push(
+		nativeCallStep("c1", "ask_user_question", nativeArgs(t, map[string]any{
+			"questions": []any{
+				map[string]any{
+					"question": "Which shall it be?",
+					"header":   "Pick one",
+					"options": []any{
+						map[string]any{"label": "alpha"},
+						map[string]any{"label": "beta"},
+					},
+				},
+				map[string]any{
+					"question":     "And which of these?",
+					"multi_select": true,
+					"options": []any{
+						map[string]any{"label": "one"},
+						map[string]any{"label": "two"},
+						map[string]any{"label": "three"},
+					},
+				},
+			},
+		})),
+		answer("both read"),
+	)
+
+	out := startPrompt(s, "ask me two things")
+	q := w.waitType(EventQuestion).Question
+	if len(q.Questions) != 2 || q.Title != "Pick one" {
+		t.Fatalf("the opening carried %+v", q)
+	}
+	one, two := q.Questions[0], q.Questions[1]
+	if one.ID != "q1" || two.ID != "q2" {
+		t.Fatalf("question ids: %q, %q", one.ID, two.ID)
+	}
+	// Each question's options are numbered inside it, which is what the
+	// registry validates an answer against.
+	if one.Options[1].ID != "o2" || two.Options[2].ID != "o3" {
+		t.Fatalf("option ids: %+v / %+v", one.Options, two.Options)
+	}
+	if one.AllowMultiple || !two.AllowMultiple {
+		t.Fatalf("multi-select: %v / %v", one.AllowMultiple, two.AllowMultiple)
+	}
+
+	if _, err := s.Asks().Answer("test/answer", q.ID, AskAnswer{Answers: map[string][]string{
+		"q1": {"o2"},
+		"q2": {"o1", "o3"},
+	}}); err != nil {
+		t.Fatalf("answering: %v", err)
+	}
+	got := await(t, out, "the prompt")
+	if got.err != nil || got.res.StopReason != harness.StopEndTurn {
+		t.Fatalf("Prompt = %+v, %v; want end_turn", got.res, got.err)
+	}
+	text := toolResultsOf(m.requests()[1])["c1"]
+	if !strings.Contains(text, `"Which shall it be?"="beta"`) {
+		t.Fatalf("the model was told %q for the first question", text)
+	}
+	if !strings.Contains(text, `"And which of these?"="one, three"`) {
+		t.Fatalf("the model was told %q for the multi-select question", text)
+	}
+	requireSettled(t, s)
+}
+
+// TestNativeTodoEventDoesNotAliasTheSnapshot (A5, plan 023 X14): the
+// event carries its own copy of the list. A consumer encodes the payload on a
+// goroutine of its own while Snapshot is handing the list out again, so an
+// event that shared the snapshot's array would be read while it was being
+// replaced.
+func TestNativeTodoEventDoesNotAliasTheSnapshot(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	f.models["test/a"].push(
+		nativeCallStep("c1", "todo_write", nativeArgs(t, map[string]any{
+			"todos": []any{map[string]any{"id": "1", "content": "first"}},
+		})),
+		answer("todos written"),
+	)
+	if got := await(t, startPrompt(s, "track it"), "the prompt"); got.err != nil {
+		t.Fatalf("Prompt: %v", got.err)
+	}
+	ev := w.waitType(EventTodos)
+	if len(ev.Todos) != 1 {
+		t.Fatalf("the event carried %+v", ev.Todos)
+	}
+
+	// The event's array is its own: scribbling on it changes nothing the
+	// session will hand out again.
+	ev.Todos[0].Content = "scribbled on the event"
+	if got := s.Snapshot().Todos; len(got) != 1 || got[0].Content != "first" {
+		t.Fatalf("the snapshot reads %+v after the event's payload was written to", got)
+	}
+	// And the snapshot's is a copy of the session's own, for the same reason.
+	snap := s.Snapshot().Todos
+	snap[0].Content = "scribbled on the snapshot"
+	if got := s.Snapshot().Todos; got[0].Content != "first" {
+		t.Fatalf("the next snapshot reads %+v after the first was written to", got)
+	}
+}
+
+// TestNativeParallelTodoWritesPublishInOrder (A5, plan 023 §3.4): todo_write
+// IS Parallel, so a step's two calls run at once. The harness makes the write
+// and the emit one locked section and sends the whole list every time, so the
+// adapter can only ever see the lists in the order the writes took effect: a
+// two-item list is never followed by the one-item list that preceded it, and
+// the snapshot ends as the last event.
+func TestNativeParallelTodoWritesPublishInOrder(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{Interactive: true})
+	w := newNativeWatcher(t, s)
+	m := f.models["test/a"]
+	m.push(
+		reply(
+			nativeCallParts("c1", "todo_write", nativeArgs(t, map[string]any{
+				"todos": []any{map[string]any{"id": "a", "content": "from the first call"}},
+			})),
+			nativeCallParts("c2", "todo_write", nativeArgs(t, map[string]any{
+				"todos": []any{map[string]any{"id": "b", "content": "from the second call"}},
+			})),
+			finishParts(fantasy.FinishReasonToolCalls),
+		),
+		answer("both written"),
+	)
+
+	got := await(t, startPrompt(s, "track both"), "the prompt")
+	if got.err != nil || got.res.StopReason != harness.StopEndTurn {
+		t.Fatalf("Prompt = %+v, %v; want end_turn", got.res, got.err)
+	}
+	w.waitTerminal()
+
+	var lists [][]Todo
+	for _, ev := range w.events() {
+		if ev.Type == EventTodos {
+			lists = append(lists, ev.Todos)
+		}
+	}
+	if len(lists) != 2 {
+		t.Fatalf("%d todo events, want one full list per write: %+v", len(lists), lists)
+	}
+	// Each write merges into the list the other left, so the sizes say the
+	// order: one then two, never two then one.
+	if len(lists[0]) != 1 || len(lists[1]) != 2 {
+		t.Fatalf("the lists published were %+v; a later write may not publish a shorter list", lists)
+	}
+	ids := map[string]bool{}
+	for _, td := range lists[1] {
+		ids[td.ID] = true
+	}
+	if !ids["a"] || !ids["b"] {
+		t.Fatalf("the last list is %+v, want both writes in it", lists[1])
+	}
+	snap := s.Snapshot().Todos
+	if len(snap) != len(lists[1]) {
+		t.Fatalf("the snapshot holds %+v and the last event %+v; they are one list", snap, lists[1])
+	}
+	for i := range snap {
+		if snap[i] != lists[1][i] {
+			t.Fatalf("the snapshot holds %+v and the last event %+v", snap, lists[1])
+		}
 	}
 }
