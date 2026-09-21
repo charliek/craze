@@ -573,9 +573,31 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 // already cancelled for another reason; Close returns well within the 3 s
 // bound, where without the channel it would wait out the rest of the grace.
 func TestCloseAfterACancelKillsAtOnce(t *testing.T) {
+	// The command floods its output before it says it is ready, and that is
+	// the whole of what keeps this test honest.
+	//
+	// Both cases need the call to be *supervised* when they act, and a file
+	// the command wrote does not say that it is. bash starts a command on a
+	// goroutine of its own and waits for it in launch; a cancel that lands
+	// while that goroutine is still on its way back abandons the start, which
+	// SIGKILLs what it began — no SIGTERM, no grace — and Run returns an
+	// aborted result at once (bashCall.launch, launched.discard, which calls
+	// the window "microseconds, or the scheduler's delay under load"). The
+	// command has by then run, so the file is there, and a cancel fired on the
+	// strength of the file alone can fall into that window: the control saw
+	// its turn come back 1.6 ms after the cancel instead of after the ~3 s
+	// grace, on a CI runner loaded enough to deschedule that goroutine for
+	// longer than the child took to reach its first write.
+	//
+	// Nothing drains the command's output pipe until Run is past launch and
+	// has started its reader, and a pipe holds 64 KiB at most, so a command
+	// that has written a quarter of a megabyte proves its call is being
+	// supervised — the state both cases here are about. Held inside launch,
+	// the flooding command never reaches the line below it, and the waits
+	// below simply wait, instead of racing.
 	stubborn := func(f *fixture) (string, step) {
 		ready := filepath.Join(f.workspace, "ready")
-		cmd := "trap '' TERM; : > " + ready + "; sleep 30"
+		cmd := "trap '' TERM; seq 1 40000; : > " + ready + "; sleep 30"
 		return ready, callStep(callParts("c1", "bash", input(t, map[string]any{"command": cmd})))
 	}
 	t.Run("control: a cancel alone waits out the grace", func(t *testing.T) {
@@ -586,7 +608,7 @@ func TestCloseAfterACancelKillsAtOnce(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		out := start(ctx, s, "go", nil)
-		waitFor(t, func() bool { return exists(ready) }, "the command to start")
+		waitFor(t, func() bool { return exists(ready) }, "the command's output to be drained, which says its call is supervised")
 		at := time.Now()
 		cancel()
 		got := await(t, out, "the cancelled turn")
@@ -602,7 +624,7 @@ func TestCloseAfterACancelKillsAtOnce(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		out := start(ctx, s, "go", nil)
-		waitFor(t, func() bool { return exists(ready) }, "the command to start")
+		waitFor(t, func() bool { return exists(ready) }, "the command's output to be drained, which says its call is supervised")
 		cancel()
 		time.Sleep(200 * time.Millisecond) // SIGTERM sent, and ignored
 		at := time.Now()
