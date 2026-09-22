@@ -600,7 +600,19 @@ func (m Model) questionCardBody(c card) string {
 				box = "[x] "
 			}
 		}
-		rows = append(rows, renderSegs(inner, seg{fmt.Sprintf("%s %d %s%s", mark, i+1, box, sanitizeLine(o.Label)), st}))
+		prefix := fmt.Sprintf("%s %d %s", mark, i+1, box)
+		rows = append(rows, renderSegs(inner, seg{prefix + sanitizeLine(o.Label), st}))
+		// A description goes UNDER its label, dimmed, indented to where the
+		// label starts (plan 023 §3.4). Beside it the two would compete for a
+		// narrow card's width and the label — the thing a number picks — would
+		// be the one clamped; under it, the description is the part that
+		// clamps, and an option that has none draws exactly the row it always
+		// did. Claude Code's AskUserQuestion is the one source of these
+		// (native's ask_user_question); an ACP question carries none, so no
+		// cursor or grok frame moves.
+		if desc := sanitizeLine(o.Description); desc != "" {
+			rows = append(rows, renderSegs(inner, seg{strings.Repeat(" ", lipgloss.Width(prefix)) + desc, styleFG(m.theme.Dim)}))
+		}
 	}
 	hint := "1-9 pick · ↑↓ move · enter select · esc skip"
 	if q.AllowMultiple {

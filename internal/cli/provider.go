@@ -83,12 +83,18 @@ func resolveProvider(cmd *cobra.Command, flag string, stderr io.Writer, hermetic
 const envAgentBin = "CRAZE_AGENT_BIN"
 
 // refuseInProcess is the usage error for asking an in-process provider for
-// something only a spawned agent has (plan 018 §3.4): an agent binary, from
-// --agent-bin or CRAZE_AGENT_BIN, has nothing to be spawned as, and a mode
-// (--ask or --plan, as mode) has no harness mode to map onto until H5 —
-// silently ignoring a requested plan mode would be worse than refusing it.
-// cmd is the command's name as its other usage errors spell it. It is nil for
-// every provider craze spawns.
+// something it has not got (plan 018 §3.4): an agent binary, from --agent-bin
+// or CRAZE_AGENT_BIN, has nothing to be spawned as, and a mode (--ask or
+// --plan, as mode) needs modes to map onto — silently ignoring a requested plan
+// mode would be worse than refusing it. cmd is the command's name as its other
+// usage errors spell it. It is nil for every provider craze spawns.
+//
+// The mode half is keyed on the capability rather than on "in-process", which
+// is what lets native take --plan and --ask from H5 on while an in-process
+// provider without modes is still refused (plan 023 §3.6). One function covers
+// all three callers — prompt, a fresh TUI session and frame, which has no mode
+// flag of its own and passes "" — so `craze --provider native --plan` switches
+// plan mode on in the TUI path too.
 //
 // The environment variable counts exactly as acp reads it — set and
 // non-empty — so a run the refusal lets through could never have spawned that
@@ -102,7 +108,7 @@ func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error 
 		return usagef("%s: --agent-bin cannot be used with provider %s, which runs inside craze", cmd, p.Name())
 	case os.Getenv(envAgentBin) != "":
 		return usagef("%s: %s cannot be used with provider %s, which runs inside craze; unset it", cmd, envAgentBin, p.Name())
-	case mode != "":
+	case mode != "" && !p.Capabilities().Modes:
 		return usagef("%s: --%s cannot be used with provider %s, which has no modes", cmd, mode, p.Name())
 	}
 	return nil

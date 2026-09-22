@@ -1,0 +1,30 @@
+❯ ask me                                                                                            
+⟳ ask  Which storage?                                                                               
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+✳ Waiting for your answer                                                                           
+─────────────────────────────────────────────────────────────────────────────────────────── ask me ─
+❯ message  / for commands                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│question 1/1  Which storage?                                                                      │
+│> 1 sqlite                                                                                        │
+│    one file, no server, good enough for a laptop                                                 │
+│  2 postgres                                                                                      │
+│    a server to run, and every query it can answer                                                │
+│  3 neither                                                                                       │
+│1-9 pick · ↑↓ move · enter select · esc skip                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ws │ native │ Echo │ 0m                                                                             
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      

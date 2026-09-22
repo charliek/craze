@@ -36,6 +36,9 @@ const (
 	// nativeTitleRuneCap is how long the title derived from the first prompt
 	// may be: the same cap the TUI puts on an index title, so the two agree.
 	nativeTitleRuneCap = 120
+	// nativeAgentMode is the id of the mode that implements, which is also the
+	// mode a session with no Options.Mode opens in (plan 023 §3.6).
+	nativeAgentMode = "agent"
 )
 
 // errNoModels is Start's answer when the harness has never been set up: the
@@ -390,16 +393,22 @@ func (s *nativeSession) start(context.Context) error {
 	s.snap.Plugins = rows
 	s.snap.Models = infos
 	s.snap.SessionID = hs.ID()
+	// The three modes native advertises, and the one it opened in — read back
+	// from the harness, which is where Options.Mode was resolved and where a
+	// later switch is confirmed from (plan 023 §3.6).
+	s.snap.Modes = nativeModes()
+	s.snap.CurrentMode = nativeCurrentMode(hs.Mode())
 	s.refreshCurrentLocked()
 	// The install says what it installed, in the section that installed it:
 	// the model the harness opened on, the effort option that model brings,
-	// and the plugin rows — which a native session resolves once here and
-	// never again (X3). Without it a client folding the stream would have to
-	// call Snapshot() to learn the session's starting state, which is the gap
-	// r23 finding 2 is about. The title is not touched here and native's
-	// first-prompt title stays silent (X47), so no Title section, and
-	// Event.Mode/Event.Text stay empty: starting is nobody's agent update.
-	model := s.snap.CurrentModel
+	// the mode it opened in, and the plugin rows — which a native session
+	// resolves once here and never again (X3). Without it a client folding the
+	// stream would have to call Snapshot() to learn the session's starting
+	// state, which is the gap r23 finding 2 is about. The title is not touched
+	// here and native's first-prompt title stays silent (X47), so no Title
+	// section, and Event.Mode/Event.Text stay empty: starting is nobody's agent
+	// update.
+	model, mode := s.snap.CurrentModel, s.snap.CurrentMode
 	// Enqueued and not flushed, exactly as the live session's install is: Start
 	// may not wait on the primary's reader, because a caller is allowed not to
 	// be one until Start has returned (Session.Start, r25 finding 1). Every
@@ -407,6 +416,7 @@ func (s *nativeSession) start(context.Context) error {
 	// that folds them is never behind.
 	s.enqueueDeltaLocked("", Event{}, &StateDelta{
 		Model:   &model,
+		Mode:    &mode,
 		Config:  &ConfigState{Options: cloneConfig(s.snap.Config)},
 		Plugins: &PluginsState{Plugins: append([]PluginCommand(nil), s.snap.Plugins...)},
 	})
@@ -556,11 +566,13 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 		// started fresh.
 		return nil, nil, none, errors.New("agent: native does not support session/load yet")
 	}
-	if s.opts.Mode != "" {
-		// The CLI refuses --ask/--plan with an in-process provider as a usage
-		// error; this is the same refusal for any other caller, because
-		// silently ignoring a requested plan mode would be worse than failing.
-		return nil, nil, none, fmt.Errorf("native: mode %q is not supported: the native harness has no modes yet", s.opts.Mode)
+	// The mode the session starts in, resolved before anything is opened: an
+	// unknown one must refuse Start rather than be silently ignored, and it is
+	// refused here so the message names the modes native has rather than
+	// arriving as the harness's own ErrUnknownMode (plan 023 §3.6).
+	mode, err := nativeMode(s.opts.Mode)
+	if err != nil {
+		return nil, nil, none, err
 	}
 	ws, err := nativeWorkspace(s.opts.Workspace)
 	if err != nil {
@@ -570,6 +582,7 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 		Home:      paths.NativeDir(),
 		Workspace: ws,
 		Version:   version.Version,
+		Mode:      mode,
 	}
 	if s.tweak != nil {
 		s.tweak(&hopts)
@@ -773,6 +786,61 @@ func nativeWorkspace(ws string) (string, error) {
 		return "", fmt.Errorf("native: %w", err)
 	}
 	return abs, nil
+}
+
+// nativeModes is what a native session advertises: cursor's three ids, which
+// are the harness's own three words as well (harness.Options.Mode), so `/plan`,
+// `/ask` and `/agent` resolve on native exactly as they do there and nothing
+// translates between the seam and the harness (plan 023 §3.6). A fresh slice
+// per call, because a snapshot hands its modes out.
+func nativeModes() []ModeInfo {
+	return []ModeInfo{
+		{ID: nativeAgentMode, Name: "Agent"},
+		{ID: "plan", Name: "Plan"},
+		{ID: "ask", Name: "Ask"},
+	}
+}
+
+// nativeMode is the harness id for the mode a session was asked to start in:
+// craze's vocabulary (--plan, --ask) resolved against the three above, so the
+// word that reaches cursor reaches the harness as the same mode. "" stays "",
+// which the harness reads as agent mode.
+//
+// An id none of the three answers to refuses Start rather than being ignored:
+// a caller that asked for plan mode and got agent mode would edit the
+// workspace.
+func nativeMode(want string) (string, error) {
+	if strings.TrimSpace(want) == "" {
+		return "", nil
+	}
+	return nativeResolveMode(want, modeIDs(nativeModes()))
+}
+
+// nativeResolveMode is Start's and SetMode's one reading of a mode word:
+// ResolveMode against the ids this session advertises — which is how every
+// provider resolves one — and the adapter's refusal naming them when it is
+// none. The refusal is the harness's ErrUnknownMode underneath, so a caller
+// can still test for it, and phrased here because only the adapter knows what
+// native offers.
+func nativeResolveMode(want string, ids []string) (string, error) {
+	if id, ok := ResolveMode(want, ids); ok {
+		return id, nil
+	}
+	return "", &nativeError{
+		msg:   fmt.Sprintf("native: mode %q is not one of %s", want, strings.Join(ids, ", ")),
+		cause: harness.ErrUnknownMode,
+	}
+}
+
+// nativeCurrentMode is the harness's mode as a snapshot spells it. The harness
+// answers with one of the three words for an open session; "" is what
+// Options.Mode spells for agent mode, and is read as agent here so a snapshot
+// never shows a mode its own list has not got.
+func nativeCurrentMode(mode string) string {
+	if mode == "" {
+		return nativeAgentMode
+	}
+	return mode
 }
 
 // tableModels is the model list a snapshot shows for table: aliases as ids,
@@ -1402,9 +1470,66 @@ func (s *nativeSession) enqueueDeltaLocked(cause string, base Event, st *StateDe
 	return s.log.EnqueueTicket(base)
 }
 
-// SetMode is unsupported: the harness has no modes until H5.
-func (s *nativeSession) SetMode(context.Context, string, string) (SetOutcome, error) {
-	return SetOutcome{}, ErrUnsupported
+// SetMode puts the session in mode modeID: what the tool gate enforces from
+// the next call it judges, and what the model is told at the turn's next step
+// boundary (plan 023 §3.1, §3.6). Like SetModel it is allowed while a turn
+// runs — the harness owns that boundary — and a switch the harness refuses,
+// entering plan mode when the plan file cannot be created among them, leaves
+// the snapshot exactly as it was.
+//
+// The id goes through craze's own mode vocabulary against the list this
+// session advertises (ResolveMode), so `/plan`, Shift+Tab and a client's
+// set_mode all land here exactly as they do on cursor, whose three ids these
+// are. The harness is asked outside s.mu, as SetModel asks it: entering plan
+// mode touches the file system.
+func (s *nativeSession) SetMode(_ context.Context, cause, modeID string) (SetOutcome, error) {
+	s.mu.Lock()
+	hs := s.hs
+	ids := modeIDs(s.snap.Modes)
+	s.mu.Unlock()
+	if hs == nil {
+		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	}
+	id, err := nativeResolveMode(modeID, ids)
+	if err != nil {
+		return SetOutcome{}, err
+	}
+	if err := hs.SetMode(id); err != nil {
+		return SetOutcome{}, phraseModeError(err, id)
+	}
+	mode, t := s.announceMode(cause)
+	return SetOutcome{Value: mode, Ticket: t}, nil
+}
+
+// announceMode publishes the mode the harness is now in as one EventMeta
+// carrying the Mode section and no Text — the live session's SetMode exactly
+// (live.go), and announceCurrent's shape for the mode instead of the model.
+//
+// The mutation and the delta are one locked section (plan 021 §3.8), and the
+// value is read back from the HARNESS inside it rather than taken from what
+// this caller asked for: two setters racing each other must each answer with
+// what the harness holds, which is the rule announceCurrent states for the
+// model (SetOutcome, r23 finding 4). Event.Mode stays empty, because that is
+// what an *agent*-initiated update fills and a client retires a plan offer on
+// it (plan 021 correction 20). s.hs is read under s.mu, as refreshCurrentLocked
+// reads it: the harness's own mode lock is a leaf and waits on nothing.
+func (s *nativeSession) announceMode(cause string) (string, *Ticket) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mode := nativeCurrentMode(s.hs.Mode())
+	s.snap.CurrentMode = mode
+	return mode, s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &mode})
+}
+
+// phraseModeError is a refused mode switch in the adapter's words: a closed
+// session reads as every other closed-session error does, and everything else
+// — the plan file that could not be created — names the mode that was asked
+// for, the way phraseSetupError names the model.
+func phraseModeError(err error, id string) error {
+	if errors.Is(err, harness.ErrClosed) {
+		return &nativeError{msg: "agent: session closed", cause: err}
+	}
+	return &nativeError{msg: fmt.Sprintf("native: mode %q: %s", id, sanitizeLine(err.Error())), cause: err}
 }
 
 // SetConfig sets the effort, the one option the native session advertises;
