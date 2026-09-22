@@ -51,15 +51,20 @@ type Stub struct {
 	// option each model advertises. nil — every Stub until a test installs one
 	// — is today's Stub, whose one static catalog outlives a model change.
 	modelCatalogs map[string][]agent.ConfigOption
-	// moveOnRead and moveAfterSet are the model-change barriers
-	// (MoveModelOnRead, MoveModelAfterNextSetModel): another client's switch
-	// landing at an exact point in a settings chain. dropOnSet is the option
-	// the next SetConfig of it takes and answers without (DropOptionOnSet);
-	// installAs is the value SetConfig installs for what it was asked
-	// (InstallConfigAs). All four are set-up, read under mu.
+	// moveOnRead, moveAfterSet and moveInSet are the model-change barriers
+	// (MoveModelOnRead, MoveModelAfterNextSetModel,
+	// MoveModelBeforeNextSetModelAnswers): another client's switch, or the
+	// agent's, landing at an exact point in a settings chain. dropOnSet is the
+	// option the next SetConfig of it takes and answers without
+	// (DropOptionOnSet), and dropOnSetOf the other option the next SetConfig
+	// of one answers without (DropOptionOnSetOf); installAs is the value
+	// SetConfig installs for what it was asked (InstallConfigAs). All six are
+	// set-up, read under mu.
 	moveOnRead   *stubModelMove
 	moveAfterSet string
+	moveInSet    string
 	dropOnSet    string
+	dropOnSetOf  stubOptionDrop
 	installAs    func(id, value string) string
 	// token is the running turn's registry token, the no-turn token between
 	// turns: what a card the test emits now is parked against, and therefore
@@ -742,6 +747,16 @@ func (s *Stub) SetModel(_ context.Context, cause, id string) (agent.SetOutcome, 
 		s.failModel = nil
 		return agent.SetOutcome{}, err
 	}
+	if to := s.moveInSet; to != "" {
+		// The live session's order (live.go's SetModel): the reply installs
+		// id, which publishes nothing of its own, the agent's push installs to
+		// with its own delta, and only then does the setter's section read the
+		// session to answer and announce — so both say to.
+		s.moveInSet = ""
+		s.installModelLocked(id)
+		s.setModelLocked(stubAgentPush, to)
+		return s.announceModelLocked(cause), nil
+	}
 	out := s.setModelLocked(cause, id)
 	if to := s.moveAfterSet; to != "" {
 		s.moveAfterSet = ""
@@ -753,25 +768,46 @@ func (s *Stub) SetModel(_ context.Context, cause, id string) (agent.SetOutcome, 
 // setModelLocked is a model change that took: the model moved and its delta
 // enqueued, in the caller's locked section.
 func (s *Stub) setModelLocked(cause, id string) agent.SetOutcome {
+	s.installModelLocked(id)
+	return s.announceModelLocked(cause)
+}
+
+// installModelLocked moves the model, and under a per-model catalog installs
+// the destination's: the live session's one-call switch (plan 025 design 2)
+// answers with that catalog, so it arrives with the model. A model the table
+// does not name advertises nothing.
+func (s *Stub) installModelLocked(id string) {
 	s.snap.CurrentModel = id
-	st := &agent.StateDelta{Model: &id}
 	if s.modelCatalogs != nil {
-		// A per-model catalog: the model change is the live session's one-call
-		// switch (plan 025 design 2), so the destination's catalog is installed
-		// in this same section and the one delta says both. A model the table
-		// does not name advertises nothing.
 		s.snap.Config = cloneStubConfig(s.modelCatalogs[id])
+	}
+}
+
+// announceModelLocked is the model change's one delta and its outcome, both
+// read from the snapshot as this section finds it: the Model section, and
+// under a per-model catalog the Config section with it, as the live session's
+// modelDeltaLocked builds them.
+func (s *Stub) announceModelLocked(cause string) agent.SetOutcome {
+	model := s.snap.CurrentModel
+	st := &agent.StateDelta{Model: &model}
+	if s.modelCatalogs != nil {
 		st.Config = &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}
 	}
 	return agent.SetOutcome{
-		Value:  s.snap.CurrentModel,
+		Value:  model,
 		Ticket: s.enqueueDeltaLocked(cause, st),
 	}
 }
 
-// stubOtherClient is the cause the model-change barriers publish under:
-// another client's command, as the revision tests spell one.
-const stubOtherClient = "c-9/1"
+// stubOtherClient is the cause MoveModelOnRead and MoveModelAfterNextSetModel
+// publish under: another client's command, as the revision tests spell one.
+// stubAgentPush is MoveModelBeforeNextSetModelAnswers's: the agent's own
+// update, which no command caused — the cause the live session's read loop
+// publishes a push under.
+const (
+	stubOtherClient = "c-9/1"
+	stubAgentPush   = ""
+)
 
 // stubModelMove is one armed MoveModelOnRead.
 type stubModelMove struct{ on, to string }
@@ -805,6 +841,20 @@ func (s *Stub) MoveModelAfterNextSetModel(to string) {
 	s.moveAfterSet = to
 }
 
+// MoveModelBeforeNextSetModelAnswers is the point inside the setter itself
+// (plan 025 X13, astra r4 item 1): the next SetModel that succeeds installs its
+// own model, as the live session's reply does, and then the agent's push moves
+// the session to model to BEFORE the setter's section reads the session to
+// answer — so the outcome, and the delta that announces it, say to, not the
+// model that was asked for. MoveModelAfterNextSetModel moves after that
+// capture, so its outcome still names the model asked for; this one is the
+// schedule where the outcome itself is the other model's.
+func (s *Stub) MoveModelBeforeNextSetModelAnswers(to string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moveInSet = to
+}
+
 // DropOptionOnSet makes the next SetConfig of option id the live session's
 // ErrOptionGone (plan 025 design 1): the agent takes the change, and the
 // catalog its answer carries — installed, and announced in the call's delta —
@@ -813,6 +863,20 @@ func (s *Stub) DropOptionOnSet(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dropOnSet = id
+}
+
+// stubOptionDrop is one armed DropOptionOnSetOf.
+type stubOptionDrop struct{ on, drop string }
+
+// DropOptionOnSetOf makes the next SetConfig of option on take, and answer
+// with a catalog that no longer lists option drop (plan 025 X13, astra r4
+// item 2): the change is confirmed as usual, and the catalog the answer
+// carries — installed, and announced in the call's delta — has lost another
+// option, so a later step for that one is judged against a catalog without it.
+func (s *Stub) DropOptionOnSetOf(on, drop string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropOnSetOf = stubOptionDrop{on: on, drop: drop}
 }
 
 // InstallConfigAs makes SetConfig install f(id, value) where it was asked for
@@ -881,6 +945,10 @@ func (s *Stub) SetConfig(_ context.Context, cause, id, value, forModel string) (
 			break
 		}
 	}
+	if d := s.dropOnSetOf; id != "" && id == d.on {
+		s.dropOnSetOf = stubOptionDrop{}
+		s.snap.Config = withoutStubOption(s.snap.Config, d.drop)
+	}
 	st := &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}}
 	if model {
 		s.snap.CurrentModel = value
@@ -900,18 +968,24 @@ func (s *Stub) SetConfig(_ context.Context, cause, id, value, forModel string) (
 // published and its ticket returned beside ErrOptionGone, as the live
 // session's are.
 func (s *Stub) dropOptionLocked(cause, id string) agent.SetOutcome {
-	kept := make([]agent.ConfigOption, 0, len(s.snap.Config))
-	for _, opt := range s.snap.Config {
-		if opt.ID != id {
-			kept = append(kept, opt)
-		}
-	}
+	kept := withoutStubOption(s.snap.Config, id)
 	s.snap.Config = kept
 	if s.modelCatalogs != nil {
 		s.modelCatalogs[s.snap.CurrentModel] = cloneStubConfig(kept)
 	}
 	st := &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(kept)}}
 	return agent.SetOutcome{Ticket: s.enqueueDeltaLocked(cause, st)}
+}
+
+// withoutStubOption is cfg without option id, on a fresh slice.
+func withoutStubOption(cfg []agent.ConfigOption, id string) []agent.ConfigOption {
+	kept := make([]agent.ConfigOption, 0, len(cfg))
+	for _, opt := range cfg {
+		if opt.ID != id {
+			kept = append(kept, opt)
+		}
+	}
+	return kept
 }
 
 // SetModelCatalogs gives this Stub cursor's per-model catalog (plan 025):

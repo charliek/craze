@@ -569,11 +569,12 @@ type effortNotAppliedMsg struct{ note string }
 //
 // The effort, when there is one, is a candidate until the model step has
 // landed, and is then judged against the catalog the session installed for the
-// model it landed on (plan 025 design 5, runModelEffort) — never the catalog
-// the session was on when the command was typed, which on cursor is another
-// model's, with its own effort option or none, under its own id and with its
-// own values. The model the command names is the destination even when it is
-// the one the session is already on.
+// model the command names (plan 025 design 5, runModelEffort) — never the
+// catalog the session was on when the command was typed, which on cursor is
+// another model's, with its own effort option or none, under its own id and
+// with its own values. The model the command names is the destination even
+// when it is the one the session is already on, and whatever model the
+// session reports back (X13).
 func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	if m.eng == nil {
 		m.input.SetValue("")
@@ -609,14 +610,16 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		if effort == "" {
 			return nil
 		}
-		// Bound to the model as the session named it on landing, which is the
-		// name the engine's ForModel check compares: a provider may resolve the
-		// id it was sent (plan 025 X10 (a)).
-		dest := id
-		if res.Value != "" {
-			dest = res.Value
+		// Bound to the model the command names, never the one the session
+		// reports back: id is canonical, off the model list (MatchModel), so
+		// there is no alias to resolve, and a reported model that is not id is
+		// a move installed before the setter read its outcome — adopted, it
+		// would send the effort to a model nobody chose (plan 025 X13,
+		// superseding X10 (a); astra r4 item 1). So the effort is stale.
+		if res.Value != id {
+			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
 		}
-		return runModelEffort(ctx, eng, cmds[2], dest, effort)
+		return runModelEffort(ctx, eng, cmds[2], id, effort)
 	}
 }
 
@@ -648,7 +651,7 @@ func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command,
 	if snap.CurrentModel != model {
 		// Moved again before the effort could be sent: the catalog read here is
 		// some other model's, and judging the effort against it would say the
-		// wrong thing about the model the user picked (X10 (b)).
+		// wrong thing about the model the user picked (X10 (b), X13).
 		return note(notAppliedStale)
 	}
 	opt := agent.EffortOption(snap)

@@ -447,13 +447,22 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 	}{
 		{
 			// No model step: the option steps are bound to grok-4.6, and the
-			// engine's worker is the only thing that can see the change.
-			name: "with no model step, the engine refuses it",
+			// move is already the session's when the chain reads it before
+			// its first step (plan 025 X13), so nothing is sent.
+			name: "with no model step, the chain sees it",
 			arm: func(s *Stub) {
 				if _, err := s.SetModel(context.Background(), stubOtherClient, "composer-2.5"); err != nil {
 					t.Fatal(err)
 				}
 			},
+			wantNotes: []string{"effort not applied: the model changed", "fast not applied: the model changed"},
+		},
+		{
+			// No model step, and the move lands straight after the chain's
+			// read of grok-4.6: the engine's worker, which reads the session
+			// again before the provider is asked, is what refuses it.
+			name:      "with no model step, the engine refuses it",
+			arm:       func(s *Stub) { s.MoveModelOnRead("grok-4.6", "composer-2.5") },
 			wantNotes: []string{"effort not applied: the model changed", "fast not applied: the model changed"},
 		},
 		{
@@ -470,6 +479,17 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 			// nothing.
 			name: "before the chain reads the destination, the chain sees it", filter: "claude",
 			arm:       func(s *Stub) { s.MoveModelAfterNextSetModel("composer-2.5") },
+			wantNotes: []string{"model → claude-opus-5", "effort not applied: the model changed", "fast not applied: the model changed"},
+		},
+		{
+			// astra r4 item 1: the agent's push lands before the setter reads
+			// its outcome, so the model step itself confirms composer-2.5.
+			// That is not the model the user picked, and the chain is bound
+			// to the one they did: every option step is stale, and fast —
+			// which composer-2.5 has — is not sent to it. The transcript is
+			// the schedule above's, which the user cannot tell apart from it.
+			name: "before the setter reads its outcome, the chain sees it", filter: "claude",
+			arm:       func(s *Stub) { s.MoveModelBeforeNextSetModelAnswers("composer-2.5") },
 			wantNotes: []string{"model → claude-opus-5", "effort not applied: the model changed", "fast not applied: the model changed"},
 		},
 	} {
@@ -557,11 +577,243 @@ func TestAnOptionGoneIsANoteAndTheChainGoesOn(t *testing.T) {
 	}
 }
 
-// TestTheFocusedTabsOptionGoingHandsTheFocusBack is the focus repair: a delta
-// arrives while the box is open and takes the focused tab's option away, so
-// the focus goes back to the list and stays there; a chosen value the new
-// catalog does not offer falls back to its option's current one; and a tab the
-// delta brings is seeded from its option's value.
+// TestEachStepIsJudgedOnTheLatestCatalog is astra r4 item 2 (plan 025 X13):
+// every step's answer installs a catalog, and an earlier step's can drop an
+// option a later step sets. Each option step is re-read and re-resolved just
+// before it is sent, so the step whose option effort's answer took away is the
+// "has no" note and is not sent — an agent would refuse it as an unknown
+// option, an error row that ends the chain — and the step after it still
+// lands. On a chain that switches models and on one that stays.
+func TestEachStepIsJudgedOnTheLatestCatalog(t *testing.T) {
+	for _, tc := range []struct {
+		name, filter, model string
+		wantNotes           []string
+	}{
+		{
+			name: "switching models", filter: "claude", model: "claude-opus-5",
+			wantNotes: []string{"model → claude-opus-5", "effort → low", "fast not applied: claude-opus-5 has no fast", "context → 300k"},
+		},
+		{
+			name: "staying on the model", model: "grok-4.6",
+			wantNotes: []string{"effort → low", "fast not applied: grok-4.6 has no fast", "context → 300k"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, stub := cursorStub(t, "grok-4.6")
+			// grok-4.6 with claude-opus-5's context after its effort and fast,
+			// so one box on it moves all three, in that order.
+			cfg := cursorCatalogs()
+			cfg["grok-4.6"] = append(cfg["grok-4.6"], agent.ConfigOption{
+				ID: "context", Name: "Context", Category: "model_config", Type: "select", Current: "1m",
+				SelectValues: []agent.SelectValue{{Value: "300k"}, {Value: "1m"}},
+			})
+			stub.SetModelCatalogs(cfg)
+			m.refreshSnap()
+			writes := configWrites(stub)
+			stub.DropOptionOnSetOf("effort", "fast")
+			m = openDialog(t, m)
+			m = typeInto(t, m, tc.filter)
+			// effort → low, fast → on, context → 300k
+			for _, key := range []tea.KeyType{tea.KeyLeft, tea.KeyRight, tea.KeyLeft} {
+				m = pressKey(t, m, tea.KeyTab)
+				m = pressKey(t, m, key)
+			}
+			m = applyDialog(t, m)
+			if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(tc.wantNotes, "|") {
+				t.Fatalf("notes %q, want %q", got, tc.wantNotes)
+			}
+			if errs := texts(m, entryError); len(errs) != 0 {
+				t.Fatalf("errors %q", errs)
+			}
+			if got, want := writes(), []string{"effort=low", "context=300k"}; strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Fatalf("the agent was sent %q, want %q", got, want)
+			}
+			for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+				if snap.CurrentModel != tc.model || agent.FastOption(snap) != nil ||
+					optionCurrent(snap.Config, "effort") != "low" || optionCurrent(snap.Config, "context") != "300k" {
+					t.Fatalf("want %s on low, 300k and no fast: %q %+v", tc.model, snap.CurrentModel, snap.Config)
+				}
+			}
+		})
+	}
+}
+
+// TestATouchedChoiceIsJudgedOnTheDestination is astra r4 item 3 (plan 025
+// X13): in a box that switches models, a touched tab is a step unless the
+// DESTINATION already holds its value. The source's value says nothing about
+// the destination's, so a delta that moves the source onto the value chosen
+// for the destination does not suppress the choice; the destination's own
+// value, which the chain reads once it has switched, does.
+func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		key        tea.KeyType // on effort, from grok-4.6's medium
+		moveSource bool        // another client puts grok-4.6 on the choice
+		wantWrites []string
+		wantNotes  []string
+		wantLabel  string
+	}{
+		{
+			// astra's schedule: low is chosen for claude-opus-5, which is on
+			// high, and grok-4.6 is then moved to low under the open box.
+			name: "the source moved onto the choice", key: tea.KeyLeft, moveSource: true,
+			wantWrites: []string{"effort=low"},
+			wantNotes:  []string{"model → claude-opus-5", "effort → low"},
+			wantLabel:  "Claude Opus 5 (low)",
+		},
+		{
+			// high is claude-opus-5's own value: nothing to send, and grok-4.6
+			// being on medium does not make it a change.
+			name: "the destination already holds the choice", key: tea.KeyRight,
+			wantNotes: []string{"model → claude-opus-5"},
+			wantLabel: "Claude Opus 5 (high)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, stub := cursorStub(t, "grok-4.6")
+			m = openDialog(t, m)
+			m = typeInto(t, m, "claude")
+			m = pressKey(t, m, tea.KeyTab)
+			m = pressKey(t, m, tc.key)
+			if tc.moveSource {
+				if _, err := stub.SetConfig(context.Background(), stubOtherClient, "effort", "low", ""); err != nil {
+					t.Fatal(err)
+				}
+				m = feed(t, m, stubDeltas(t, stub)...)
+				if m.dialog != dialogModel || optionCurrent(m.snap.Config, "effort") != "low" ||
+					!m.mdlg.touched["effort"] || m.mdlg.chosen["effort"] != "low" {
+					t.Fatalf("the delta should put grok-4.6 on low under the box, with the choice standing: %+v %+v", m.snap.Config, m.mdlg.chosen)
+				}
+			}
+			writes := configWrites(stub)
+			m = applyDialog(t, m)
+			if got := writes(); strings.Join(got, "|") != strings.Join(tc.wantWrites, "|") {
+				t.Fatalf("the agent was sent %q, want %q", got, tc.wantWrites)
+			}
+			if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(tc.wantNotes, "|") {
+				t.Fatalf("notes %q, want %q", got, tc.wantNotes)
+			}
+			if errs := texts(m, entryError); len(errs) != 0 {
+				t.Fatalf("errors %q", errs)
+			}
+			if snap := stub.Snapshot(); snap.CurrentModel != "claude-opus-5" {
+				t.Fatalf("the session is on %q", snap.CurrentModel)
+			}
+			if got := m.modelLabel(); got != tc.wantLabel {
+				t.Fatalf("the status row reads %q, want %q", got, tc.wantLabel)
+			}
+		})
+	}
+}
+
+// TestAnEmptyInstalledValueSettlesAsItIs is astra r4 item 4 (plan 025 X13): a
+// step's confirmed value is what the session installed, and an empty one is
+// installed too, not "nothing confirmed". The agent takes effort xhigh and
+// answers with the option on "": the rows show that, and the note names it,
+// whichever of the answer and the step's own delta reaches the model first —
+// once the delta is in, no later one would correct a settled xhigh.
+func TestAnEmptyInstalledValueSettlesAsItIs(t *testing.T) {
+	answerOrders(t, func(t *testing.T, deltasFirst bool) {
+		m, stub := cursorStub(t, "claude-opus-5")
+		stub.InstallConfigAs(func(id, value string) string {
+			if id == "effort" {
+				return ""
+			}
+			return value
+		})
+		m = openDialog(t, m)
+		for range 3 {
+			m = pressKey(t, m, tea.KeyTab) // thinking, context, effort
+		}
+		m = pressKey(t, m, tea.KeyRight) // effort → xhigh
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		applied, ok := runCmd(cmd).(modelApplyMsg)
+		if !ok || applied.err != nil {
+			t.Fatalf("the chain came back %+v", applied)
+		}
+		evs := stubDeltas(t, stub)
+		if deltasFirst {
+			m = feed(t, m, evs...)
+			m = deliver(t, m, applied)
+		} else {
+			m = deliver(t, m, applied)
+			m = feed(t, m, evs...)
+		}
+		if got, want := texts(m, entryNote), []string{`effort → ""`}; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("notes %q, want %q", got, want)
+		}
+		for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+			if opt := agent.EffortOption(snap); opt == nil || opt.Current != "" {
+				t.Fatalf("the effort is %+v, want the option on the installed empty value", opt)
+			}
+		}
+		if got := m.modelLabel(); got != "Claude Opus 5" {
+			t.Fatalf("the status row reads %q", got)
+		}
+	})
+}
+
+// TestADuplicateIDKeepsOneOccurrenceAndItsRole is astra r4 item 6 (plan 025
+// X13): an id the agent sends twice is one tab, its first occurrence, and its
+// role is judged on that occurrence alone. Here the first `knob` is a boolean
+// named Thinking and the second a low/high select named Reasoning, which
+// EffortOption over the whole list would pick: the tab is the first's —
+// "thinking", false/true, never effort — and applying it says so.
+func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
+	cfg := []agent.ConfigOption{
+		{
+			ID: "knob", Name: "Thinking", Category: "thought_level", Type: "select", Current: "false",
+			SelectValues: []agent.SelectValue{{Value: "false", Name: "Off"}, {Value: "true", Name: "On"}},
+		},
+		{
+			ID: "knob", Name: "Reasoning", Category: "thought_level", Type: "select", Current: "low",
+			SelectValues: []agent.SelectValue{{Value: "low", Name: "Low"}, {Value: "high", Name: "High"}},
+		},
+	}
+	if opt := agent.EffortOption(agent.Snapshot{Config: cfg}); opt == nil || opt.Name != "Reasoning" {
+		t.Fatalf("the set-up needs EffortOption to pick the second occurrence: %+v", opt)
+	}
+	tabs := catalogTabs(agent.Snapshot{Config: cfg})
+	if len(tabs) != 1 || tabs[0].label != "thinking" || tabs[0].role != roleOther || tabs[0].opt.Name != "Thinking" {
+		t.Fatalf("the tabs are %+v, want the first knob alone, as thinking", tabs)
+	}
+
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	stub.mu.Lock()
+	stub.snap.Config = cloneStubConfig(cfg)
+	stub.mu.Unlock()
+	m.refreshSnap()
+	m = openDialog(t, m)
+	view := plainView(m)
+	if !strings.Contains(view, "  thinking  [false]  true") || strings.Contains(view, "effort") {
+		t.Fatalf("the box should draw the first knob as thinking:\n%s", view)
+	}
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyRight) // thinking → true
+	m = applyDialog(t, m)
+	if got := texts(m, entryNote); len(got) != 1 || got[0] != "thinking → true" {
+		t.Fatalf("notes %q", got)
+	}
+	if errs := texts(m, entryError); len(errs) != 0 {
+		t.Fatalf("errors %q", errs)
+	}
+}
+
+// TestTheFocusedTabsOptionGoingHandsTheFocusBack is the focus repair when the
+// model observes the snapshot that takes the focused tab's option away: a
+// delta is handled while the box is open and the catalog it reads has no such
+// option, so the focus goes back to the list and stays there; a chosen value
+// that catalog does not offer falls back to its option's current one; and a
+// tab the delta brings is seeded from its option's value.
+//
+// Each switch is delivered before the next is made, which is what makes the
+// catalog without the option one the model reads: the repair acts on what
+// refreshSnap reads, never on a catalog the session only passed through.
+// Deltas that take the option away and bring it back before Update handles
+// either leave the focus and the choice standing, again valid on the model
+// they were chosen for (repaired; plan 025 X13, astra r4 item 5).
 func TestTheFocusedTabsOptionGoingHandsTheFocusBack(t *testing.T) {
 	m, stub := cursorStub(t, "claude-opus-5")
 	m = openDialog(t, m)

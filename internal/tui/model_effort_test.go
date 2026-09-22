@@ -188,6 +188,16 @@ func TestAnotherClientsModelChangeBeforeTheEffortIsANote(t *testing.T) {
 			arm:   func(s *Stub) { s.MoveModelAfterNextSetModel("composer-2.5") },
 			other: "composer-2.5", label: "Composer 2.5",
 		},
+		{
+			// astra r4 item 1: the agent's push lands before the setter reads
+			// its outcome, so the model step itself confirms claude-opus-5 —
+			// whose `effort` offers low. The effort is bound to grok-4.6, the
+			// model the command names, so it is stale and is not sent to a
+			// model nobody chose.
+			name:  "before the setter reads its outcome, the command sees it",
+			arm:   func(s *Stub) { s.MoveModelBeforeNextSetModelAnswers("claude-opus-5") },
+			other: "claude-opus-5", label: "Claude Opus 5 (high)",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			answerOrders(t, func(t *testing.T, deltasFirst bool) {

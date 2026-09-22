@@ -154,15 +154,31 @@ func isDialogTab(opt agent.ConfigOption) bool {
 // advertises, because the agent's catalog is the one authority on what the
 // current model takes and a bit fixed per provider cannot know that per model
 // (plan 025 design 4, CodeRabbit 11).
+//
+// An id the agent sent twice is its first occurrence — the one the session
+// sets and confirms, since its install finds the first option with the id —
+// and the roles are found among the occurrences kept, never across the whole
+// list: a role is matched by id, and an EffortOption that chose a later
+// occurrence would hand its role to a row that draws another option's name
+// and values (astra r4 item 6).
 func catalogTabs(snap agent.Snapshot) []modelTab {
-	effort, fast := agent.EffortOption(snap), agent.FastOption(snap)
 	seen := make(map[string]bool, len(snap.Config))
-	var out []modelTab
+	kept := make([]agent.ConfigOption, 0, len(snap.Config))
 	for _, opt := range snap.Config {
-		if !isDialogTab(opt) || seen[opt.ID] {
+		if seen[opt.ID] {
 			continue
 		}
 		seen[opt.ID] = true
+		kept = append(kept, opt)
+	}
+	once := snap
+	once.Config = kept
+	effort, fast := agent.EffortOption(once), agent.FastOption(once)
+	var out []modelTab
+	for _, opt := range kept {
+		if !isDialogTab(opt) {
+			continue
+		}
 		t := modelTab{opt: opt, label: tabLabel(opt)}
 		switch {
 		case effort != nil && opt.ID == effort.ID:
@@ -214,6 +230,17 @@ func tabIndex(tabs []modelTab, f dialogFocus) int {
 // the value it falls back to is nobody's choice and must not be sent. A value
 // chosen for an option that has gone is kept, and counts again if the option
 // comes back offering it.
+//
+// It acts on the snapshot the model observes, not on every catalog the
+// session passed through: a delta carries revisions, and refreshSnap reads the
+// session as it is when the event is handled. So deltas that take a catalog
+// away and bring it back (A→B→A) before Update sees either leave the focus
+// and a touched choice standing, which is correct rather than a missed repair
+// (plan 025 X13, astra r4 item 5): the choice is again one its option offers,
+// on the model it was chosen for, and whatever Enter then sends is still bound
+// to that model and re-judged on the latest catalog before it goes
+// (runModelApply). The repair happens when a snapshot without the option IS
+// observed.
 func (d modelDialog) repaired(tabs []modelTab) modelDialog {
 	if tabIndex(tabs, d.focus) < 0 {
 		d.focus = focusList
@@ -316,7 +343,8 @@ type applyStep struct {
 	label string
 	// role and opt are an option step's tab: its role, and the option its
 	// value belongs to — the one it was chosen on, until the chain re-resolves
-	// it on the model it has switched to (resolveOn), and that model's after.
+	// it on the catalog the session holds just before sending it (resolveOn),
+	// and that catalog's after.
 	role tabRole
 	opt  agent.ConfigOption
 	// skipped is a step the chain did not apply: its note is the X4 note that
@@ -333,9 +361,19 @@ func (st applyStep) landedNote() string {
 	case st.cfgID == "":
 		return "model → " + st.value
 	case st.role == roleFast:
-		return "fast → " + fastWord(&st.opt, st.value)
+		return "fast → " + noteValue(fastWord(&st.opt, st.value))
 	}
-	return st.label + " → " + st.value
+	return st.label + " → " + noteValue(st.value)
+}
+
+// noteValue is how a note spells an option's value: as the agent spells it,
+// and an empty one as "" — an agent may install an empty value (its catalog
+// parser accepts one), and a note that ends on its arrow names nothing.
+func noteValue(v string) string {
+	if v == "" {
+		return `""`
+	}
+	return v
 }
 
 // shownValue is the step's value as its row showed it, which is how a note
@@ -349,12 +387,13 @@ func (st applyStep) shownValue() string {
 
 // landed is the step as the engine confirmed it: the value the session is now
 // at (SetResult.Value), the revision that was committed at, and the note
-// rewritten to name what landed. A session that confirms no value leaves the
-// request standing — no dialog value is ever empty.
+// rewritten to name what landed. The value is taken as it is, empty included:
+// SetResult.Value is what the session installed, not a sentinel for "nothing
+// confirmed", so an agent that answers with an empty value is showing an
+// empty value, and the rows and the note must not claim the request instead
+// (plan 025 X13, astra r4 item 4) — no later delta would correct them.
 func (st applyStep) landed(res engine.SetResult) applyStep {
-	if res.Value != "" {
-		st.value = res.Value
-	}
+	st.value = res.Value
 	st.rev = res.Rev
 	st.note = st.landedNote()
 	return st
@@ -580,8 +619,8 @@ func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 // when the chain switches models, the current one when it does not (plan 025
 // X3). Chosen against one model's catalog, a value is nobody's choice for
 // another model's (design 3), so the engine refuses a step whose model has
-// moved by the time it runs, and a step after a model switch is first
-// re-resolved against the model it switched to (runModelApply).
+// moved by the time it runs, and every step is first re-resolved against the
+// latest catalog of the model it is bound to (runModelApply).
 func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	list := m.dialogModelList()
 	tabs := m.modelDialogTabs()
@@ -590,19 +629,32 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 
 	var steps []applyStep
 	forModel := m.snap.CurrentModel
+	switching := false
 	if d.sel >= 0 && d.sel < len(list) && list[d.sel].ID != m.snap.CurrentModel {
 		id := list[d.sel].ID
 		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model", at: m.modelRev})
 		m.snap.CurrentModel = id
 		m.model = id
 		forModel = id
+		switching = true
 	}
 	for _, t := range tabs {
 		// Only a tab the user moved is a change to make: an untouched one is
 		// on its option's live value, and sending it would at best repeat that
 		// value and at worst send back one a delta has since replaced.
 		v := d.chosen[t.opt.ID]
-		if !d.touched[t.opt.ID] || v == "" || v == t.opt.Current {
+		if !d.touched[t.opt.ID] || v == "" {
+			continue
+		}
+		// A value the option already holds is no change — on the model the
+		// chain stays on. On one it switches to, the value the source holds
+		// says nothing about the destination's, which only the chain can read
+		// once it has switched: there the choice is a step, and runModelApply
+		// drops it only if the destination already holds it. Judged on the
+		// source, a delta that moved the source onto the value chosen for the
+		// destination would silently lose the choice (plan 025 X13, astra r4
+		// item 3).
+		if !switching && v == t.opt.Current {
 			continue
 		}
 		st := applyStep{cfgID: t.opt.ID, value: v, label: t.label, role: t.role, opt: t.opt, at: m.configRev}
@@ -634,58 +686,81 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // runModelApply is the chain itself, on the command's goroutine: it reads the
 // engine and never the Model, which belongs to Update.
 //
-// The model step, when there is one, runs first. Once it has landed, each
-// option step is re-resolved against the catalog the session has installed
-// for that model — read here, from the engine, since the tabs the steps came
-// from were the previous model's (resolveOn) — and a step the new model cannot
-// take becomes a note and is not sent. Every option step is sent bound to the
-// model (Setting.ForModel), which is what refuses another client's model
-// change landing between two of these steps: the worker answers
-// engine.ErrStaleModel, the step and every step after it become notes, and
-// nothing more is sent, because the model is not the one they were chosen for.
-// A step the agent took but whose answer no longer lists the option
-// (agent.ErrOptionGone) is a note too, and the chain goes on. Any other error
-// names its step and ends the chain, as it always has — the model step's
-// answer that could not be read (agent.ErrBadCatalog) included, which ends it
-// too, since no option can be judged against a catalog nobody could read, but
-// whose row says the outcome is unknown (modelApplyMsg.unread).
+// forModel is the model every option step is bound to: the one the user
+// picked when the chain switches models, the current one when it does not.
+// It is the id the model step sends and never the model the session reports
+// back. The dialog sends a canonical id off the model list, so there is no
+// alias for the session to resolve, and a reported model that is not the one
+// sent is a move — the agent's, or another client's — installed before the
+// setter read its outcome, which the value alone cannot tell apart from an
+// alias resolved. Adopted as the destination, it would send the user's
+// choices to a model they did not pick (plan 025 X13, superseding X10 (a);
+// astra r4 item 1). So a model step that confirms another model ends the
+// chain there: every option step is the stale note.
+//
+// Each option step is judged immediately before it is sent, on the snapshot
+// read then (resolveOn): not the tabs it was chosen on, which were the
+// screen's, and not a catalog read once after the model step, because every
+// step's own answer installs a catalog, and an earlier step's can drop an
+// option a later step sets (astra r4 item 2). A session no longer on forModel
+// makes that step and every one after it stale notes; an option the model
+// does not advertise, or a value it does not offer, is its note, and the chain
+// goes on; a value the model already holds is no change, and nothing is sent
+// or written for it. Every step is sent bound to the model
+// (Setting.ForModel), which is what refuses a model change landing between
+// that read and the write: the worker answers engine.ErrStaleModel, the step
+// and every step after it become notes, and nothing more is sent, because the
+// model is not the one they were chosen for. A step the agent took but whose
+// answer no longer lists the option (agent.ErrOptionGone) is a note too, and
+// the chain goes on. Any other error names its step and ends the chain, as it
+// always has — the model step's answer that could not be read
+// (agent.ErrBadCatalog) included, which ends it too, since no option can be
+// judged against a catalog nobody could read, but whose row says the outcome
+// is unknown (modelApplyMsg.unread).
 func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep, forModel, modelCfgID string, gen int) modelApplyMsg {
 	ctx := context.Background()
 	out := modelApplyMsg{gen: gen}
-	switched := false
-	var dest []modelTab
 	for i, st := range steps {
 		if st.cfgID == "" {
-			res, err := applyModelStep(ctx, eng, cmds[i], cmds[len(steps)], st.value, modelCfgID)
+			res, err := applyModelStep(ctx, eng, cmds[i], cmds[len(steps)], forModel, modelCfgID)
 			if err != nil {
 				out.step, out.err = st.label, err
 				out.unread = errors.Is(err, agent.ErrBadCatalog)
 				return out
 			}
 			st = st.landed(res)
+			if st.value != forModel {
+				// The agent took the switch and the session is already on
+				// another model. The note names the switch as it was taken,
+				// and the stale notes after it say the model then changed —
+				// the transcript a move just after the setter's answer writes,
+				// which this schedule cannot be told apart from. The value it
+				// settles is the session's own word, which its delta carries.
+				st.note = "model → " + forModel
+				out.done = append(out.done, st)
+				return notAppliedFrom(out, steps[i+1:], notAppliedStale, forModel)
+			}
 			out.done = append(out.done, st)
-			// Bound to the model as the session named it on landing, which is
-			// the name the worker's check compares — a provider may resolve
-			// the id it was sent (engine.SetResult.Value).
-			forModel, switched = st.value, true
 			continue
 		}
-		if switched && dest == nil {
-			snap := eng.State().Snapshot
-			if snap.CurrentModel != forModel {
-				// Moved again before a step could be sent: the catalog read
-				// here is some other model's, and judging the steps against it
-				// would say the wrong thing about the model the user picked.
-				return notAppliedFrom(out, steps[i:], notAppliedStale, forModel)
-			}
-			dest = catalogTabs(snap)
+		snap := eng.State().Snapshot
+		if snap.CurrentModel != forModel {
+			// Moved before this step could be sent: the catalog read here is
+			// some other model's, and judging the step against it would say
+			// the wrong thing about the model the user picked.
+			return notAppliedFrom(out, steps[i:], notAppliedStale, forModel)
 		}
-		if switched {
-			var ok bool
-			if st, ok = st.resolveOn(dest, forModel); !ok {
-				out.done = append(out.done, st)
-				continue
-			}
+		var ok bool
+		if st, ok = st.resolveOn(catalogTabs(snap), forModel); !ok {
+			out.done = append(out.done, st)
+			continue
+		}
+		if st.value == st.opt.Current {
+			// Already the model's value: on a chain that switched, the
+			// destination's own (applyModelDialog leaves this judgement to
+			// the chain), and on one that did not, a change somebody else made
+			// since Enter. Nothing to send, and nothing to say.
+			continue
 		}
 		res, err := eng.Set(ctx, cmds[i], engine.Setting{
 			Kind: engine.SettingConfig, ID: st.cfgID, Value: st.value, ForModel: forModel,
@@ -714,12 +789,13 @@ func notAppliedFrom(out modelApplyMsg, rest []applyStep, why notAppliedReason, m
 	return out
 }
 
-// resolveOn is an option step re-resolved against the tabs of the model the
-// chain has just switched to (plan 025 X3): effort and fast by role, whatever
-// that model calls them, and every other tab by id — design 5's rule for
-// `/model <id> <effort>`, applied here so the two paths agree. It is sent only if
-// that model advertises the option and offers the chosen value; otherwise the
-// step comes back as its note, with ok false.
+// resolveOn is an option step re-resolved against the tabs of the model it is
+// bound to, as the session holds them when the step is about to be sent
+// (plan 025 X3, X13): effort and fast by role, whatever that model calls them,
+// and every other tab by id — design 5's rule for `/model <id> <effort>`,
+// applied here so the two paths agree. It is sent only if that model
+// advertises the option and offers the chosen value; otherwise the step comes
+// back as its note, with ok false.
 func (st applyStep) resolveOn(dest []modelTab, model string) (applyStep, bool) {
 	var to *agent.ConfigOption
 	for i := range dest {
@@ -796,7 +872,12 @@ func (m Model) settleStep(st applyStep) Model {
 		return m.setConfigCurrent(st.cfgID, st.value)
 	}
 	m.snap.CurrentModel = st.value
-	m.model = st.value
+	// m.model keeps the last model anyone named, as refreshSnap keeps it:
+	// the value is the session's word as it is (landed), and a word that
+	// names no model leaves the status row nothing to draw from.
+	if st.value != "" {
+		m.model = st.value
+	}
 	return m
 }
 
