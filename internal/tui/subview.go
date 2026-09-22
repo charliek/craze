@@ -205,12 +205,12 @@ func (m *Model) applyChildEvent(ev agent.Event) {
 		// prompts and those are the main session's — but a child's expansion
 		// belongs to the child's transcript for the same reason its user
 		// block does, and the alternative is dropping it silently.
-		tr.addCommandLine(ev.Command, m.now())
+		tr.addCommandLine(ev.Command, m.stamp(ev.At))
 	case agent.EventTool:
 		m.refreshSnap()
 		m.noteAgentStart(id)
 		if ev.Tool != nil {
-			tr.upsertTool(ev.Tool, m.now())
+			tr.upsertTool(ev.Tool, m.stamp(ev.At))
 		}
 	}
 }

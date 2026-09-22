@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -105,11 +106,13 @@ func (m Model) headCard() (card, bool) {
 // dropped: Cancel answered every request the session was holding, so a card for
 // it would be one nobody could answer. **What decides that is the ask itself,
 // not the mask alone** (maskCards).
-func (m *Model) pushCard(c card) {
+//
+// at is the opening event's At, which is where the run above the card ends.
+func (m *Model) pushCard(c card, at time.Time) {
 	if m.maskDrops(c) {
 		return
 	}
-	m.breakStream()
+	m.breakStream(at)
 	m.cards = append(append([]card(nil), m.cards...), c)
 	// A card is a question the user has to answer first, so the offer stands
 	// down while it is up — but it is not retired. cursor answers a plan-mode

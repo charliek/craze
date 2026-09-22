@@ -2256,7 +2256,7 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 				m.maskCards()
 			}
 		} else {
-			m.beginTurn(res.Turn, text)
+			m.beginTurn(res.Turn, text, m.now())
 			m.ownTurn = res.Turn
 		}
 		if fromRow == "" {
@@ -2285,8 +2285,11 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 //
 // The first prompt's index seed used to be here; it is the engine's now, which
 // is what makes it happen for a turn no client started (plan 021 §3.8).
-func (m *Model) beginTurn(id, text string) {
-	m.addUser(text)
+//
+// at stamps the user row: the client's clock for its own send, the started
+// event's At for a turn the model learned of from the log.
+func (m *Model) beginTurn(id, text string, at time.Time) {
+	m.addUserAt(text, at)
 	m.status = statusWorking
 	// A new turn: whatever a cancel masked belonged to the turn before it.
 	m.cardMask, m.cardMasking = "", false
@@ -2595,14 +2598,14 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// The turn is still running: the text joined it rather than
 			// starting one, so it is the only user block craze does not
 			// write from its own send.
-			m.addInterjection(ev.Text)
+			m.addInterjectionAt(ev.Text, ev.At)
 			return
 		}
 		if m.replaying || ev.Replayed {
 			// A prompt out of the restored transcript, which craze never sent
 			// and therefore never wrote. The session coalesces a multi-chunk
 			// one into a single event, so this is one user block per prompt.
-			m.addUser(ev.Text)
+			m.addUserAt(ev.Text, ev.At)
 			return
 		}
 		// A live main-session echo. grok and gx send one for every prompt the
@@ -2624,8 +2627,8 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// session is up as far as the replay is concerned. breakStream first,
 		// or the last replayed thought stays open and the note lands inside
 		// it.
-		m.breakStream()
-		m.addNote(restoredNote)
+		m.breakStream(ev.At)
+		m.addNoteAt(restoredNote, ev.At)
 		m.replaying = false
 		m.refreshSnap()
 		m.sessionUp()
@@ -2634,7 +2637,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// It arrives before the request reaches the wire, so the line lands
 		// under the user block craze has already written and above anything
 		// the agent goes on to say.
-		m.addCommandLine(ev.Command)
+		m.addCommandLine(ev.Command, ev.At)
 		return
 	case agent.EventQueue:
 		// The band draws from the engine's queue, which refreshSnap re-reads;
@@ -2652,7 +2655,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		case agent.TurnStarted:
 			m.applyTurnStarted(ev)
 		case agent.TurnEnded:
-			m.applyTurnEnded(ev.Turn)
+			m.applyTurnEnded(ev.Turn, ev.At)
 		}
 		return
 	case agent.EventForeignTurn:
@@ -2661,10 +2664,10 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// What follows is the agent talking without a prompt of craze's.
 			// The note is what stops the reply reading as an answer to the
 			// last thing the user said.
-			m.breakStream()
-			m.addNote(foreignTurnNote)
+			m.breakStream(ev.At)
+			m.addNoteAt(foreignTurnNote, ev.At)
 		} else {
-			m.breakStream()
+			m.breakStream(ev.At)
 		}
 		return
 	case agent.EventText:
@@ -2680,23 +2683,23 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case agent.EventTool:
 		m.refreshSnap()
 		if ev.Tool != nil {
-			m.upsertTool(ev.Tool)
+			m.upsertTool(ev.Tool, ev.At)
 		}
 	case agent.EventTodos:
 		m.refreshSnap()
 		todos := m.todosOf(ev)
 		m.noteTodoLifecycle(todos)
-		m.noteTodos(todos)
+		m.noteTodos(todos, ev.At)
 	case agent.EventPermission:
 		if ev.Permission != nil {
-			m.pushCard(card{kind: cardPermission, perm: ev.Permission})
+			m.pushCard(card{kind: cardPermission, perm: ev.Permission}, ev.At)
 		}
 	case agent.EventQuestion:
 		// An auto-answered request (headless) is already decided; only an
 		// interactive one is a card.
 		if ev.Question != nil && !ev.Question.Auto {
 			if m.showAsk() {
-				m.pushCard(card{kind: cardQuestion, ask: ev.Question})
+				m.pushCard(card{kind: cardQuestion, ask: ev.Question}, ev.At)
 			} else {
 				// The config hides questions: it is skipped where it stands,
 				// with no card and — as it always has — no row. The ending it
@@ -2713,9 +2716,9 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if ev.Plan != nil && !ev.Plan.Auto {
 			// The plan itself is transcript material; the card is only the
 			// three answers it needs.
-			m.addPlan(ev.Plan)
+			m.addPlan(ev.Plan, ev.At)
 			if m.showPlan() {
-				m.pushCard(card{kind: cardPlan, plan: ev.Plan})
+				m.pushCard(card{kind: cardPlan, plan: ev.Plan}, ev.At)
 			} else {
 				m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
 			}
@@ -2741,7 +2744,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// what it did at the baseline: a turn the agent ran on its own ends here
 		// too, and its reply can arm a plan offer. Unchanged, and not this
 		// commit's to fix.)
-		m.breakStream()
+		m.breakStream(ev.At)
 		// The cancel mask is NOT cleared here. It belongs to a turn, and it is
 		// the engine's ending for that turn that says every opening and ending
 		// of it has been delivered — this event is the session's own and can
@@ -2755,7 +2758,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// only other sign the cancel landed, and it is indistinguishable
 			// from the turn having finished on its own.
 			m.cancelled = true
-			m.addNote(stopCancelled)
+			m.addNoteAt(stopCancelled, ev.At)
 		}
 		if m.planEarnsOffer(ev.StopReason) {
 			m.planOfferSeq = m.turnSeq
@@ -2771,7 +2774,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.confirm = nil
 		if ev.Err != nil {
 			m.err = ev.Err.Error()
-			m.addError(m.err)
+			m.addErrorAt(m.err, ev.At)
 		}
 	case agent.EventMeta:
 		if ev.State != nil {
@@ -2937,6 +2940,10 @@ func (m *Model) applyAskEnded(cause string, u *agent.AskUpdate) {
 	if !ok || u.Outcome != agent.AskAnswered {
 		return
 	}
+	// The notes are client-local — written only by a client that had the card,
+	// like the ones this client writes when it answers (commitQuestion,
+	// skipQuestion, answerPlan) — so they keep this client's clock rather than
+	// taking the ending's At (plan 024 §3.3).
 	switch {
 	case c.kind == cardQuestion && u.Skip:
 		m.addNote(skipNote(c.ask))
@@ -3032,7 +3039,7 @@ func (m *Model) applyTurnStarted(ev agent.Event) {
 			m.nextTurn = ""
 		}
 	}
-	m.beginTurn(ev.Turn.ID, ev.Turn.Text)
+	m.beginTurn(ev.Turn.ID, ev.Turn.Text, ev.At)
 	if ev.Turn.Origin == agent.TurnOriginSendNow && ev.Cause != "" && ev.Cause == m.armedDraft {
 		// The send-now this client armed from its composer, firing: it takes that
 		// draft with it if the composer still holds it, and the marker goes with
@@ -3081,8 +3088,9 @@ func (m *Model) applyTurnStarted(ev agent.Event) {
 // a late cancelled note, or a late refusal's one error row, landing under the next
 // user block is the honest account of a late fact. That is also exactly what the
 // baseline did — promptDoneMsg carried no turn at all and drew both rows
-// unconditionally (app.go at 6581e0a) — so nothing a user sees moves here.
-func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
+// unconditionally (app.go at 6581e0a) — so nothing a user sees moves here. Both
+// rows are the ending event's, and are stamped at its At.
+func (m *Model) applyTurnEnded(t *agent.TurnInfo, at time.Time) {
 	if t.ID != "" && t.ID == m.cardMask {
 		// The masked turn is over, and its ending is ordered behind every
 		// opening and every ask ending that turn produced — the session ends
@@ -3111,11 +3119,11 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 		// ran and nothing failed, so this is not an error state: it is the ending
 		// a cancelled turn has, and the transcript owes the row it already drew
 		// the same note — Esc leaves nothing else behind.
-		m.addNote(stopCancelled)
+		m.addNoteAt(stopCancelled, at)
 	case t.Synthetic && failed:
 		// A prompt the session refused emits no event of any kind, so this is
 		// the only place its row can be drawn.
-		m.addError(t.Err)
+		m.addErrorAt(t.Err, at)
 	}
 	if !current {
 		return
@@ -3222,7 +3230,7 @@ func (m *Model) applyStateDelta(ev agent.Event) {
 	// cancel it made itself. A cancel this model asked for answers it directly,
 	// and drawing the row from both would draw one failure twice.
 	if st.Detail != "" {
-		m.addError(st.Detail)
+		m.addErrorAt(st.Detail, ev.At)
 	}
 	// A session-index write that failed: the same row writeIndex drew itself
 	// before the index moved into the engine, and §2.4's rule that it stays a
@@ -3232,7 +3240,7 @@ func (m *Model) applyStateDelta(ev agent.Event) {
 	// at all (the agent's title, a turn's end), which is exactly the set the
 	// model used to write rows for.
 	if st.IndexErr != "" {
-		m.addError(st.IndexErr)
+		m.addErrorAt(st.IndexErr, ev.At)
 	}
 }
 
