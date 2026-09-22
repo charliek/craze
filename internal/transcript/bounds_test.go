@@ -82,9 +82,10 @@ func TestTheEntryCapTrimsFromTheHead(t *testing.T) {
 }
 
 // TestTheByteCapTrimsFromTheHead: the retained-byte budget drops the oldest
-// entries until the rest fit — on an append, on a chunk that grows the open
-// entry, and on a tool update that grows its payload — and never the last
-// entry, however large it is on its own.
+// entries until the rest fit — on an append and on a chunk that grows the open
+// entry, but never on a tool update in place (r2 finding 2), whose growth
+// waits for the next append — and never the last entry, however large it is
+// on its own.
 func TestTheByteCapTrimsFromTheHead(t *testing.T) {
 	m := New(Options{Bounds: Bounds{MainBytes: 100}})
 	for i := range 3 {
@@ -111,17 +112,26 @@ func TestTheByteCapTrimsFromTheHead(t *testing.T) {
 	if got := facts(m.Main); len(got) != 1 || got[0].Text != huge || m.Main.bytes != 500 {
 		t.Fatalf("one entry over the budget is kept alone: %v", got)
 	}
-	// A tool update that grows its payload trims the entries above it.
-	u := New(Options{Bounds: Bounds{MainBytes: 200}})
+	// A tool update that grows its payload past the budget trims nothing: a
+	// trim could drop the row it just updated, and the update re-applied
+	// would then append it again (r2 finding 2). The next append enforces the
+	// budget, dropping from the head until the rest fit.
+	u := New(Options{Bounds: Bounds{MainBytes: 210}})
 	foldAll(t, u, true,
 		agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "t", RawInput: "ls"}},
 		note(1), note(2),
 		agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "u", RawInput: "x"}},
-		// 1+196 bytes, beside 3+7+7 above it: 214, and only the tool fits.
+		// 1+196 bytes, beside 3+7+7 above it: 214, over the budget by the 195
+		// the update added.
 		agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "u", RawInput: strings.Repeat("q", 196)}},
 	)
-	if got := facts(u.Main); len(got) != 1 || got[0].ToolID != "u" {
-		t.Fatalf("the grown tool is all that fits: %v", got)
+	if got := facts(u.Main); len(got) != 4 || u.Main.bytes != 214 || u.Main.grown != 195 || trimmed(u.Main) {
+		t.Fatalf("an update in place trims nothing: %v (%d bytes, %d grown in place)", got, u.Main.bytes, u.Main.grown)
+	}
+	// 214 + 7 = 221: the tool t and both rows go (17 bytes), and 204 fit.
+	foldAll(t, u, true, note(3))
+	if got := facts(u.Main); len(got) != 2 || got[0].ToolID != "u" || got[1].Text != "row 003" || u.Main.bytes != 204 || u.Main.grown != 0 {
+		t.Fatalf("the next append enforces the budget: %v (%d bytes)", got, u.Main.bytes)
 	}
 	if _, ok := toolIndexed(u.Main, "t"); ok {
 		t.Fatal("the trimmed tool is forgotten")
@@ -188,8 +198,13 @@ func TestTheAccountingCountsEveryPayloadString(t *testing.T) {
 	if got := planBytes(&plan); got != wantPlan {
 		t.Fatalf("planBytes counts %d of the %d string bytes a PlanEvent carries", got, wantPlan)
 	}
-	if got := entryBytes(&Entry{Text: "abc", Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}); got != 3+wantTool+wantPlan+errValueBytes {
-		t.Fatalf("entryBytes %d", got)
+	// An error whose text the fold read accounts that text; one it could not
+	// read is charged errValueBytes.
+	if got := entryBytes(&Entry{Text: "abc", Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}); got != 3+wantTool+wantPlan {
+		t.Fatalf("entryBytes with a read error %d", got)
+	}
+	if got := entryBytes(&Entry{Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}); got != wantTool+wantPlan+errValueBytes {
+		t.Fatalf("entryBytes with an unread error %d", got)
 	}
 }
 
@@ -228,10 +243,13 @@ func fillStrings(v reflect.Value, n *int) int {
 // "…" prefix, the cut moved forward to a rune start — whatever the chunk
 // sizes (empty, one byte, around the cap, past 2 × the cap) and wherever a
 // multi-byte rune straddles the cut, including bytes that are not UTF-8 at
-// all; the builder never holds more than 2 × the cap; and the open entry
-// accounts exactly its tail's length.
+// all and long runs of continuation bytes, where the cut has no rune start to
+// land on for a whole chunk or several (the kept cut of r2 finding 4); the
+// builder never holds more than 2 × the cap; and the open entry accounts
+// exactly its tail's length.
 func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 	runes := []string{"a", "é", "⤷", "😀", "\x80", "\xe2\x82", "\n"}
+	leads := []string{"", "", "\xe2", "\xf0", "a"}
 	for _, limit := range []int{4, 5, 7, 16, 64, 64 << 10} {
 		for seed := range uint64(12) {
 			r := rand.New(rand.NewPCG(seed, uint64(limit)))
@@ -252,6 +270,11 @@ func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 					size = limit - 3 + r.IntN(7)
 				case 2:
 					size = 2*limit + r.IntN(limit)
+				}
+				if size > 0 && r.IntN(3) == 0 {
+					// A run of continuation bytes, maybe behind a lead byte.
+					chunk.WriteString(leads[r.IntN(len(leads))])
+					chunk.WriteString(strings.Repeat("\x80", size))
 				}
 				for chunk.Len() < size {
 					chunk.WriteString(runes[r.IntN(len(runes))])
@@ -283,6 +306,62 @@ func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 			checkInvariants(t, m)
 		}
 	}
+}
+
+// TestTheBuilderOutlivesItsRunButNotAFinishedChild (r2 finding 7): a closed
+// run leaves its builder's capacity for the transcript's next run — at most
+// 2 × StreamText — so a long reply does not cost a new builder each time;
+// a child's goes when its roster row finishes, since children are many.
+func TestTheBuilderOutlivesItsRunButNotAFinishedChild(t *testing.T) {
+	m := New(Options{})
+	long := strings.Repeat("x", 200<<10)
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventSubagent, Subagent: &agent.SubagentInfo{ID: "a", Status: agent.SubagentRunning}, SubagentChange: agent.SubagentChangeSpawned},
+		agent.Event{Type: agent.EventText, Agent: "a", Text: long},
+		agent.Event{Type: agent.EventText, Text: long},
+		agent.Event{Type: agent.EventDone, StopReason: "end_turn"},
+	)
+	limit := 2 * DefaultBounds().StreamText
+	if c := cap(m.Main.buf); c == 0 || c > limit {
+		t.Fatalf("the main builder's capacity after its run closed is %d, want kept and at most %d", c, limit)
+	}
+	child := m.Sub("a")
+	if c := cap(child.buf); c == 0 || c > limit {
+		t.Fatalf("the running child's builder capacity is %d, want at most %d", c, limit)
+	}
+	foldAll(t, m, true, agent.Event{Type: agent.EventSubagent, Subagent: &agent.SubagentInfo{ID: "a", Status: agent.SubagentCompleted}, SubagentChange: agent.SubagentChangeFinished})
+	if child.buf != nil || !strings.HasPrefix(factsOf(child, "assistant")[0].Text, "…") {
+		t.Fatalf("a finished child's builder is let go (cap %d), its closed reply kept", cap(child.buf))
+	}
+}
+
+// TestASaturatedMalformedRunKeepsTodaysTail is r2 finding 4's schedule: a run
+// already 2 × StreamText of continuation bytes, grown one continuation byte at
+// a time — where the cut never finds a rune start — and then by bytes that
+// give it one. The tail is capText's at every step.
+func TestASaturatedMalformedRunKeepsTodaysTail(t *testing.T) {
+	const limit = 64 << 10
+	m := New(Options{Bounds: Bounds{StreamText: limit, MainBytes: 1 << 30}})
+	tr := m.Main
+	var whole strings.Builder
+	add := func(s string) {
+		t.Helper()
+		m.Fold(agent.Event{Type: agent.EventText, Text: s})
+		whole.WriteString(s)
+		if got, want := tr.tail(), capText(whole.String(), limit); got != want {
+			t.Fatalf("after %d bytes: tail %q, want %q", whole.Len(), clip(got), clip(want))
+		}
+		checkInvariants(t, m)
+	}
+	add(strings.Repeat("\x80", 2*limit))
+	for range 300 {
+		add("\x80")
+	}
+	add("a")
+	for range 300 {
+		add("\x80")
+	}
+	add("é" + strings.Repeat("\x80", limit))
 }
 
 func clip(s string) string {

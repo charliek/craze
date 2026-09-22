@@ -12,7 +12,8 @@ import (
 
 // BenchmarkFold is the fold's cost on the hot path (plan 024 §3.4, §3.7): a
 // text chunk into an open run, a saturated stream (every chunk past the
-// 2 × StreamText cap pays its share of the in-place copy), trimming at the
+// 2 × StreamText cap pays its share of the in-place copy), a saturated run of
+// bytes that are not UTF-8 grown a byte at a time, trimming at the
 // entry cap and at the byte budget, a tool update at the payload caps, a delta
 // of six sections, a chunk while another goroutine cuts snapshots, and the cut
 // itself on a transcript at its entry cap.
@@ -43,6 +44,20 @@ func BenchmarkFold(b *testing.B) {
 		m := New(Options{})
 		ev := agent.Event{Type: agent.EventText, Text: strings.Repeat("y", 4<<10)}
 		b.SetBytes(4 << 10)
+		b.ReportAllocs()
+		for b.Loop() {
+			m.Fold(next(ev))
+		}
+	})
+
+	// r2 finding 4's schedule: a run of 2 × StreamText continuation bytes, grown
+	// a continuation byte at a time, so the tail's cut never finds a rune
+	// start. Each chunk must cost what the ASCII chunk does, not a rescan of
+	// the ~64 KiB behind the cut.
+	b.Run("saturated-malformed", func(b *testing.B) {
+		m := New(Options{})
+		m.Fold(next(agent.Event{Type: agent.EventText, Text: strings.Repeat("\x80", 2*DefaultBounds().StreamText)}))
+		ev := agent.Event{Type: agent.EventText, Text: "\x80"}
 		b.ReportAllocs()
 		for b.Loop() {
 			m.Fold(next(ev))

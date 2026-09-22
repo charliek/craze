@@ -947,7 +947,7 @@ func TestEventLogASubscriberThatNeverReadsIsDroppedAndHoldsNobodyBack(t *testing
 func TestEventLogAnAbandonedPublishConsumesNoSeqAndReachesNothing(t *testing.T) {
 	far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	abandonedEvent := Event{Type: EventTool, At: logTestTime, Tool: &ToolEvent{ID: "abandoned", At: far}}
-	if r := (&EventLog{maxRecord: defaultMaxRecordBytes}).record(abandonedEvent); r.Omitted == nil || r.size() <= 1 {
+	if r, _ := (&EventLog{maxRecord: defaultMaxRecordBytes}).record(abandonedEvent); r.Omitted == nil || r.size() <= 1 {
 		t.Fatalf("the abandoned event's record is %+v: it must be omitted and weigh more than the tiny subscriber's budget", r)
 	}
 	type abandon struct {

@@ -3,6 +3,7 @@ package transcript
 import (
 	"slices"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -96,8 +97,18 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 	if open := len(live) > 0 && live[len(live)-1].Streaming; tr.streamOpen != open {
 		t.Fatalf("%s: streamOpen %v, but the last entry streaming is %v", tr.agent, tr.streamOpen, open)
 	}
-	if !tr.streamOpen && (len(tr.buf) > 0 || tr.bufCut) {
-		t.Fatalf("%s: no run is open but the builder holds %d bytes", tr.agent, len(tr.buf))
+	if !tr.streamOpen && (len(tr.buf) > 0 || tr.bufCut || tr.tailAt != 0) {
+		t.Fatalf("%s: no run is open but the builder holds %d bytes (cut at %d)", tr.agent, len(tr.buf), tr.tailAt)
+	}
+	// The kept cut against a scan from scratch: capText's, taken on buf.
+	if tr.streamOpen && tr.cutRun() {
+		start := max(len(tr.buf)-(tr.streamCap-len(ellipsis)), 0)
+		for start < len(tr.buf) && !utf8.RuneStart(tr.buf[start]) {
+			start++
+		}
+		if tr.tailAt != start {
+			t.Fatalf("%s: the kept cut is at %d, a scan finds %d", tr.agent, tr.tailAt, start)
+		}
 	}
 	if len(tr.buf) > 2*tr.streamCap {
 		t.Fatalf("%s: the builder holds %d bytes, past 2 × %d", tr.agent, len(tr.buf), tr.streamCap)
@@ -105,8 +116,10 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 	if len(live) > tr.maxEntries {
 		t.Fatalf("%s: %d entries, the bound is %d", tr.agent, len(live), tr.maxEntries)
 	}
-	if tr.bytes > tr.maxBytes && len(live) > 1 {
-		t.Fatalf("%s: %d bytes over %d entries, the bound is %d", tr.agent, tr.bytes, len(live), tr.maxBytes)
+	// The budget holds but for what tool updates in place have added since it
+	// was last enforced: an update in place never trims (upsertTool).
+	if tr.bytes-tr.grown > tr.maxBytes && len(live) > 1 {
+		t.Fatalf("%s: %d bytes (%d of them grown in place) over %d entries, the bound is %d", tr.agent, tr.bytes, tr.grown, len(live), tr.maxBytes)
 	}
 	if slices.ContainsFunc(tr.ents[:tr.head], func(e *Entry) bool { return e != nil }) {
 		t.Fatalf("%s: a trimmed slot still holds its entry", tr.agent)

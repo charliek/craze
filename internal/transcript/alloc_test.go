@@ -85,8 +85,22 @@ func TestFoldAllocationsAreBounded(t *testing.T) {
 			i++
 			m.Fold(next(agent.Event{Type: kinds[i%2], Text: chunk}))
 		})
-		t.Logf("a new note: %.2f allocs; a started's user row: %.2f; a run closing into a new one: %.2f", note, user, run)
-		for name, got := range map[string]float64{"a note": note, "a user row": user, "a new run": run} {
+		// Alternating 32 KiB chunks (r2 finding 7): every chunk closes a run
+		// whose builder is past StreamText/4, which C1 let go and grew again
+		// for the next run — a fourth allocation. The builder is kept across
+		// runs now: the closed Entry, its tail's copy, and the new Entry.
+		long := strings.Repeat("y", 32<<10)
+		big := New(Options{})
+		for j := range 64 {
+			big.Fold(next(agent.Event{Type: kinds[j%2], Text: long}))
+		}
+		j := 0
+		longRun := testing.AllocsPerRun(1024, func() {
+			j++
+			big.Fold(next(agent.Event{Type: kinds[j%2], Text: long}))
+		})
+		t.Logf("a new note: %.2f allocs; a started's user row: %.2f; a run closing into a new one: %.2f; the same with 32 KiB chunks: %.2f", note, user, run, longRun)
+		for name, got := range map[string]float64{"a note": note, "a user row": user, "a new run": run, "a new run after a 32 KiB one": longRun} {
 			if got > 3 {
 				t.Fatalf("%s allocates %.2f, the bound is 3", name, got)
 			}

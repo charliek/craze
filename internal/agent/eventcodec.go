@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/harness"
@@ -251,20 +252,34 @@ func typedEventErr(err error) (EventErrClass, int) {
 // (the event log) turns that into an omitted record rather than losing the
 // event for its live consumer.
 func EncodeEvent(ev Event) (string, error) {
+	body, _, err := encodeEvent(ev)
+	return body, err
+}
+
+// encodeEvent is EncodeEvent that also hands back the codec's view of ev.Err:
+// the *RemoteError a decoder of the body builds — the message, class and code
+// taken by the one call to Error() and the one classification the encoding
+// makes (toWireError), with the message as the JSON carries it
+// (remoteError). It is nil when ev.Err is nil, and when the encoding stopped
+// before it read Err at all (an event with no type); it is set even when the
+// encoding failed after reading it, so a caller that must never read an error
+// twice — the event log, for its observer — never has to.
+func encodeEvent(ev Event) (string, *RemoteError, error) {
 	if ev.Type == "" {
-		return "", errors.New("agent: encode event: no type")
+		return "", nil, errors.New("agent: encode event: no type")
 	}
 	e := eventEncoders.Get().(*eventEncoder)
 	defer e.release()
 	e.w = toWireEvent(ev)
+	remote := remoteError(e.w.Err)
 	if err := e.enc.Encode(&e.w); err != nil {
-		return "", fmt.Errorf("agent: encode %s event: %w", ev.Type, err)
+		return "", remote, fmt.Errorf("agent: encode %s event: %w", ev.Type, err)
 	}
 	// The body is the builder's own buffer, which release gives up rather
 	// than reuses, so it shares storage with no later encode. Encode ends it
 	// with a newline.
 	body := e.out.String()
-	return body[:len(body)-1], nil
+	return body[:len(body)-1], remote, nil
 }
 
 // eventEncoder is the wire struct and the encoder that writes it out, reused.
@@ -731,11 +746,56 @@ func toWireEvent(ev Event) wireEvent {
 			})}
 		}
 	}
-	if ev.Err != nil {
-		class, code := classifyEventErr(ev.Err)
-		w.Err = &wireError{Message: ev.Err.Error(), Class: class, Code: code}
-	}
+	w.Err = toWireError(ev.Err)
 	return w
+}
+
+// toWireError is an Event.Err on the wire, nil for nil: its class and code
+// (classifyEventErr, which walks the chain — Unwrap, Is, As) and its message
+// (Error). This is the one place the codec runs an error's own methods, once
+// per encoding.
+func toWireError(err error) *wireError {
+	if err == nil {
+		return nil
+	}
+	class, code := classifyEventErr(err)
+	return &wireError{Message: err.Error(), Class: class, Code: code}
+}
+
+// remoteError is the *RemoteError that decoding w yields, built without a
+// round trip, nil for nil. The message is taken as the JSON carries it: the
+// encoder writes each byte that is not part of valid UTF-8 as U+FFFD
+// (encoding/json's rule, per byte), so the decoded message differs from
+// Error()'s whenever Error() was not valid UTF-8 — a path in an os error,
+// say; craze's own messages and a provider's (oneLine) always are. Making the
+// same replacement here keeps this value byte for byte what every decoder of
+// the body holds (TestEncodeEventHandsBackWhatTheBodyDecodesTo). The check is
+// one pass over the message, and the copy only happens for an invalid one.
+func remoteError(w *wireError) *RemoteError {
+	if w == nil {
+		return nil
+	}
+	return &RemoteError{Message: asJSONCarriesIt(w.Message), Class: w.Class, Code: w.Code}
+}
+
+// asJSONCarriesIt is s as encoding/json writes it and reads it back: s itself
+// when it is valid UTF-8, else each invalid byte replaced by U+FFFD.
+func asJSONCarriesIt(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 2*utf8.UTFMax)
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteString("\uFFFD")
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
 }
 
 // toWirePermission is a PermissionEvent on the wire, nil for nil: the same

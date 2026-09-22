@@ -7,7 +7,10 @@ package transcript
 type Bounds struct {
 	// MainEntries and MainBytes bound the main transcript: the entry count, and
 	// the retained bytes (Entry.Bytes summed). Trimming drops from the front,
-	// never the last entry.
+	// never the last entry, after every append and every chunk. A tool update
+	// in place never trims (today's rule), so the byte budget can be exceeded
+	// by what such updates add — at most one tool payload per row updated in
+	// place — until the next append or chunk enforces it again.
 	MainEntries int
 	MainBytes   int
 	// SubEntries and SubBytes bound each child transcript the same way.

@@ -15,8 +15,10 @@
 // Because the engine's instance runs inside the boundary, Fold honours the
 // observer's contract (internal/agent/eventlog.go, Observe): it takes the
 // model's own mutex and nothing else, never blocks, never calls the log or the
-// session, runs no callback — no clock when Options.Clock is nil, never an
-// error's Error() — and allocates within the bounds §3.4 states. It is total:
+// session, runs no callback — no clock when Options.Clock is nil, no
+// Options.ErrText when it is nil, never a foreign error's methods (the log
+// hands its observer an *agent.RemoteError, whose text the fold reads as a
+// field) — and allocates within the bounds §3.4 states. It is total:
 // every EventType with every payload pointer nil is a no-op or a defined
 // effect, never a panic.
 //

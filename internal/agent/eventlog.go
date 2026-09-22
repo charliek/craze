@@ -675,7 +675,7 @@ func (l *EventLog) leave() {
 // way out of the section — the abandon paths and a panic from inside a commit —
 // leaves it free (release).
 func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) bool {
-	rec := l.record(ev)
+	rec, remote := l.record(ev)
 	if !l.enter() {
 		return l.abandon(true)
 	}
@@ -724,7 +724,7 @@ func (l *EventLog) Publish(ctx context.Context, done <-chan struct{}, ev Event) 
 		}
 	}
 	rec.Seq = seq
-	l.commitLocked(ev, rec)
+	l.commitLocked(ev, rec, remote)
 	return true
 }
 
@@ -762,7 +762,7 @@ func (l *EventLog) abandon(counted bool) bool {
 // returns false. Under NoPrimary there is no primary to be full, so the only
 // thing it can lose to is the boundary.
 func (l *EventLog) TryPublish(ev Event) bool {
-	rec := l.record(ev)
+	rec, remote := l.record(ev)
 	// Entering the in-flight region never waits, so this keeps its contract
 	// trivially: refused means Close has begun, and the event is dropped.
 	if !l.enter() {
@@ -795,7 +795,7 @@ func (l *EventLog) TryPublish(ev Event) bool {
 		}
 	}
 	rec.Seq = seq
-	l.commitLocked(ev, rec)
+	l.commitLocked(ev, rec, remote)
 	return true
 }
 
@@ -808,15 +808,34 @@ func (l *EventLog) TryPublish(ev Event) bool {
 // record is built, so the ring, every subscription and the file carry the one
 // omitted record and the log counts and notes the omission like any other.
 // The primary still gets the event whole; only the record is omitted.
-func (l *EventLog) record(ev Event) Record {
+//
+// It also hands back the codec's view of ev.Err, for the observer alone
+// (Observe): the *RemoteError every decoder of the body builds, set exactly
+// when ev.Err is, an omitted record's included. The encoding reads the error
+// once — Error() and the classification's chain-walk — and this is where that
+// one reading is kept, so nothing reads it again, under the boundary or
+// anywhere else; an event the codec never reached (a type too long to record,
+// or none) has its error read here instead, still once and still before the
+// boundary. It travels beside the record to commitLocked as a value of its
+// own — never in the Record, which the ring, every subscription and the
+// journal keep — so no reader holds it and nothing retained grows by it.
+func (l *EventLog) record(ev Event) (Record, *RemoteError) {
+	rec, remote := l.encodeRecord(ev)
+	if remote == nil && ev.Err != nil {
+		remote = remoteError(toWireError(ev.Err))
+	}
+	return rec, remote
+}
+
+func (l *EventLog) encodeRecord(ev Event) (Record, *RemoteError) {
 	rec := Record{At: ev.At, Type: ev.Type}
 	if len(ev.Type) > journal.MaxEventTypeBytes {
 		rec.Type = journal.OverlongEventType
 		rec.Omitted = &Omitted{Reason: journal.OmittedEncodeError, Error: fmt.Sprintf(
 			"agent: the event type is %d bytes, over the %d-byte cap", len(ev.Type), journal.MaxEventTypeBytes)}
-		return rec
+		return rec, nil
 	}
-	body, err := EncodeEvent(ev)
+	body, remote, err := encodeEvent(ev)
 	switch {
 	case err != nil:
 		rec.Omitted = &Omitted{Reason: journal.OmittedEncodeError, Error: omittedError(err)}
@@ -825,7 +844,7 @@ func (l *EventLog) record(ev Event) Record {
 	default:
 		rec.Body = body
 	}
-	return rec
+	return rec, remote
 }
 
 // omittedError is err's message as an omitted record keeps it: valid UTF-8
@@ -853,8 +872,12 @@ func omittedError(err error) string {
 // ev is rec's own event, with its Seq, and is what the observer is handed last
 // of all — here rather than at the three call sites, so "once per committed
 // event, in Seq order, never for an abandoned publish" is a property of the
-// commit itself and not of remembering to call it (plan 021 §3.3).
-func (l *EventLog) commitLocked(ev Event, rec Record) {
+// commit itself and not of remembering to call it (plan 021 §3.3). So is the
+// observer's Err: the copy of ev it is handed carries remote — record's view
+// of the error, built with rec — in place of the publisher's error, on every
+// path that commits: Publish, TryPublish, the outbox and its at-close commits.
+// remote is used for nothing else, and dropped with the call.
+func (l *EventLog) commitLocked(ev Event, rec Record, remote *RemoteError) {
 	l.next = rec.Seq
 	l.ring.push(rec)
 	dropped := 0
@@ -888,6 +911,11 @@ func (l *EventLog) commitLocked(ev Event, rec Record) {
 		}
 	}
 	if l.observer != nil {
+		if ev.Err != nil && remote != nil {
+			// ev is this call's own copy: the primary already took the
+			// publisher's value, and keeps it.
+			ev.Err = remote
+		}
 		l.observer(ev)
 	}
 }
@@ -937,6 +965,9 @@ func (t *Ticket) Seq() uint64 {
 type pendingEvent struct {
 	ev  Event
 	rec Record
+	// remote is record's view of ev.Err, the outbox's sentinel's (an enqueued
+	// event never carries a caller's error), for the observer at commit.
+	remote *RemoteError
 }
 
 // flushWaiter is one Flush parked until the drainer has committed target events
@@ -1044,8 +1075,8 @@ func (l *EventLog) enqueue(t *Ticket, evs []Event) {
 			ev.Err = errEnqueuedErr
 			l.outboxErrReplaced.Add(1)
 		}
-		rec := l.record(ev)
-		b.evs[i] = pendingEvent{ev: ev, rec: rec}
+		rec, remote := l.record(ev)
+		b.evs[i] = pendingEvent{ev: ev, rec: rec, remote: remote}
 		b.bytes += rec.size()
 	}
 	l.outboxMu.Lock()
@@ -1274,7 +1305,7 @@ func (l *EventLog) publishBatch(b outboxBatch, stopped *bool) {
 			b.ticket.seq.Store(seq)
 		}
 		l.sendOutbox(p.ev, seq, stopped)
-		l.commitLocked(p.ev, p.rec)
+		l.commitLocked(p.ev, p.rec, p.remote)
 	}
 }
 
@@ -1387,8 +1418,20 @@ func (l *EventLog) cutOutbox() {
 // handful of flags (plan 021 §3.3, SD-19).
 //
 // The event it is handed is the publisher's own value, the same one the primary
-// took: read-only, exactly as the primary's reader must treat it. Cost is one
-// nil check per commit when unset (R5, V7).
+// took — read-only, exactly as the primary's reader must treat it — with one
+// field changed: **Err, when set, is a *RemoteError**, the codec's view of the
+// publisher's error (its message, class and code) that the encoding took before
+// the boundary, and exactly what every subscriber decodes from the record. So
+// an observer never runs an error's own code (its Error, Unwrap, Is or As)
+// under the boundary, and a model folded here and one a client folds from a
+// subscription hold the same error. The message is carried as the JSON carries
+// it (remoteError: an invalid UTF-8 byte is U+FFFD), so the two agree byte for
+// byte. An event whose record was omitted — a body over MaxRecordBytes — still
+// has its RemoteError, since the encoding happened. An enqueued event carries
+// the outbox's inert sentinel in place of any error (Enqueue), so its observer
+// sees that sentinel's RemoteError, never a caller's error. The primary still
+// gets the publisher's own error value. Cost is one nil check per commit when
+// unset (R5, V7), and nothing more for an event with no Err.
 func (l *EventLog) Observe(fn func(Event)) error {
 	if fn == nil {
 		return errNilObserver

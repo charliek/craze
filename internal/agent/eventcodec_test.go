@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/acp"
@@ -950,6 +951,58 @@ func TestEventCodecReencodesADecodedEventUnchanged(t *testing.T) {
 	auth, _ := DecodeEvent(bodies[1])
 	if !errors.Is(auth.Err, harness.ErrAuth) {
 		t.Fatal("a decoded auth error does not match harness.ErrAuth")
+	}
+}
+
+// TestEncodeEventHandsBackWhatTheBodyDecodesTo: encodeEvent's view of an
+// Event.Err — which the event log hands its observer in place of the
+// publisher's error (Observe) — is exactly the *RemoteError a decoder of the
+// body builds, whatever the error: a typed chain, a sentinel, a RemoteError of
+// a class this build does not know, an empty message, and a message that is
+// not valid UTF-8, which the JSON carries with U+FFFD in place of each bad
+// byte (so the two agree byte for byte, and a model's accounting of the
+// message with them). It is nil for an event with no Err and for one the codec
+// refuses before reading Err, and set for one it refuses after.
+func TestEncodeEventHandsBackWhatTheBodyDecodesTo(t *testing.T) {
+	for _, err := range []error{
+		errors.New("boom"),
+		fmt.Errorf("the turn failed: %w", &acp.RPCError{Code: -32603, Message: "Internal error"}),
+		fmt.Errorf("%w: exit 0", acp.ErrAgentExited),
+		&RemoteError{Message: "a later craze's error", Class: "quantum", Code: 7},
+		errors.New(""),
+		errors.New("bad \xff\xfe bytes, a cut rune \xe2\x82, a good one é and a real \uFFFD"),
+		errors.New("\x80"),
+		errors.New(strings.Repeat("\xc3", 64) + "tail"),
+	} {
+		body, remote, encErr := encodeEvent(Event{Type: EventError, Err: err, At: codecTestTime})
+		if encErr != nil {
+			t.Fatalf("encodeEvent(%q): %v", err, encErr)
+		}
+		ev, decErr := DecodeEvent(body)
+		if decErr != nil {
+			t.Fatalf("DecodeEvent(%s): %v", body, decErr)
+		}
+		decoded, ok := ev.Err.(*RemoteError)
+		if !ok || remote == nil || !reflect.DeepEqual(decoded, remote) {
+			t.Fatalf("for %q the encoder handed back %+v, the body decodes to %+v", err, remote, ev.Err)
+		}
+		if !utf8.ValidString(remote.Message) {
+			t.Fatalf("the handed-back message %q is not valid UTF-8", remote.Message)
+		}
+		if plain, _ := EncodeEvent(Event{Type: EventError, Err: err, At: codecTestTime}); plain != body {
+			t.Fatalf("EncodeEvent and encodeEvent wrote different bodies:\n%s\n%s", plain, body)
+		}
+	}
+	if _, remote, _ := encodeEvent(Event{Type: EventText, Text: "no error"}); remote != nil {
+		t.Fatalf("an event with no Err handed back %+v", remote)
+	}
+	if _, remote, err := encodeEvent(Event{Err: errors.New("never read")}); err == nil || remote != nil {
+		t.Fatalf("an event with no type: err %v, handed back %+v; want an error and nothing read", err, remote)
+	}
+	far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, remote, err := encodeEvent(Event{Type: EventError, Err: errors.New("read, then refused"), At: far})
+	if err == nil || remote == nil || remote.Message != "read, then refused" || remote.Class != EventErrOther {
+		t.Fatalf("an event refused after its Err was read: err %v, handed back %+v; want both", err, remote)
 	}
 }
 

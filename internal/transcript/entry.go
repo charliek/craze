@@ -78,10 +78,15 @@ type Entry struct {
 	// retained by pointer and never written.
 	Tool *agent.ToolEvent
 	Plan *agent.PlanEvent
-	// Err is an EventError's error value, held and never read by the fold: its
-	// text is the reader's to take, outside the model's lock (§3.2). An error
-	// row drawn from text — a synthetic ending's, a delta's Detail or IndexErr
-	// — carries Text instead.
+	// Err is an EventError's error value, held. The fold reads its text only
+	// where no foreign code runs (Options.ErrText): an *agent.RemoteError —
+	// what the engine's instance and every decoding client are handed — or
+	// Options.ErrText's answer; that text is then Text too, and is what the
+	// entry accounts. An error it may not read (a unit fixture's, with no
+	// ErrText) is held unread with Text "", its text the reader's to take
+	// outside the model's lock, and is charged errValueBytes. An error row
+	// drawn from text alone — a synthetic ending's, a delta's Detail or
+	// IndexErr — has Text and no Err.
 	Err error
 	// At is when the event that created the entry says it happened, and End
 	// when its run ended: the last chunk's At while it streams, and for a
@@ -96,20 +101,24 @@ type Entry struct {
 	Streaming bool
 	// Bytes is what this entry accounts for against its transcript's byte
 	// budget: its text (for the open entry, the tail it would close with) plus
-	// every string its payload carries, or errValueBytes for an error value.
+	// every string its payload carries, or errValueBytes for an error value
+	// whose text the fold could not read.
 	Bytes int
 }
 
-// errValueBytes is what an entry holding an error value accounts for. The fold
-// may not call Error() to learn the real length (§3.2), so an error is charged
-// a fixed amount — generous for the one-line failures craze's sessions report.
+// errValueBytes is what an entry holding an error value the fold could not
+// read accounts for (Entry.Err): it may not call a foreign Error() to learn
+// the real length (§3.2), so such an error is charged a fixed amount. Only a
+// unit fixture reaches this — the engine's instance is handed RemoteErrors,
+// whose text is known and accounted, and a client outside the boundary sets
+// Options.ErrText.
 const errValueBytes = 256
 
 // entryBytes is the retained bytes of a closed entry: its text, its payload's
-// strings, and errValueBytes for an error value.
+// strings, and errValueBytes for an error value whose text is unknown.
 func entryBytes(e *Entry) int {
 	n := len(e.Text) + toolBytes(e.Tool) + planBytes(e.Plan)
-	if e.Err != nil {
+	if e.Err != nil && e.Text == "" {
 		n += errValueBytes
 	}
 	return n

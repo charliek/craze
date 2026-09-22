@@ -18,6 +18,28 @@ type Options struct {
 	// publishing boundary and a zero At stays zero; the TUI's passes its own
 	// clock, which keeps today's behaviour for unstamped fixtures (§3.2).
 	Clock func() time.Time
+	// ErrText reads an EventError's text, for a model that is NOT folded under
+	// the log's publishing boundary and is handed the publisher's own error
+	// values — the TUI's, which folds its primary (plan 024 §3.8). It is called
+	// once per error event that is not an *agent.RemoteError, on the folding
+	// goroutine, and its answer is the entry's text as given.
+	//
+	// nil means the fold never reads an error that is not an
+	// *agent.RemoteError. The engine's instance passes nil: the log hands its
+	// observer a *agent.RemoteError for every error (agent.EventLog.Observe),
+	// as every decoding client receives one, and a RemoteError's text is its
+	// Message, read with a plain type assertion. With neither — a unit test's
+	// arbitrary error and a nil ErrText — the error is held unread, its entry
+	// is kept whatever its text, and it is charged errValueBytes (Entry.Err).
+	//
+	// What a decoding client holds is the message as the JSON carries it,
+	// each invalid UTF-8 byte replaced by U+FFFD; the log makes the same
+	// replacement in the observer's RemoteError, so the engine's instance and
+	// a decoding client account the same bytes. An ErrText answer is not
+	// normalised: a client that must agree byte for byte with them returns
+	// valid UTF-8 (every message craze itself builds is; a path inside an os
+	// error need not be).
+	ErrText func(error) string
 	// Incarnation is the event log's incarnation the model is folded from,
 	// carried for the snapshot a client attaches from.
 	Incarnation string
@@ -35,6 +57,7 @@ type Model struct {
 	Main *Transcript
 
 	clock       func() time.Time
+	readErr     func(error) string // Options.ErrText
 	bounds      Bounds
 	incarnation string
 
@@ -59,9 +82,12 @@ type Model struct {
 	// subagentFinishSeq): a row's place in finish order breaks EndedAt ties.
 	finishSeq uint64
 
-	todos     []agent.Todo
-	asks      []Ask
-	ended     []AskEnding
+	todos []agent.Todo
+	// asks are the open asks and ended the last-ended list, each keyed by
+	// id in the order they opened or ended (keyedList): no scan under the
+	// boundary, however many asks are open.
+	asks      keyedList[Ask]
+	ended     keyedList[AskEnding]
 	turn      Turn
 	replaying bool
 	settings  Settings
@@ -126,6 +152,7 @@ type Settings struct {
 func New(o Options) *Model {
 	m := &Model{
 		clock:       o.Clock,
+		readErr:     o.ErrText,
 		bounds:      o.Bounds.withDefaults(),
 		incarnation: o.Incarnation,
 		subs:        make(map[string]*Transcript),
@@ -143,6 +170,21 @@ func (m *Model) now() time.Time {
 		return time.Time{}
 	}
 	return m.clock()
+}
+
+// errText is an error's text, and whether the fold may know it: a
+// *agent.RemoteError's, by a plain type assertion — its Error is agent's own
+// and returns its Message, so no foreign code runs, and errors.As, which
+// would run the chain's methods, is never used — else Options.ErrText's
+// answer when the model has one, else unknown (nothing is read).
+func (m *Model) errText(err error) (string, bool) {
+	if re, ok := err.(*agent.RemoteError); ok {
+		return re.Error(), true
+	}
+	if m.readErr != nil {
+		return m.readErr(err), true
+	}
+	return "", false
 }
 
 // stamp is the time a row drawn from an event is written at: the event's own
@@ -345,7 +387,7 @@ func (m *Model) Subs() []string {
 func (m *Model) EndedAsks() []AskEnding {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]AskEnding(nil), m.ended...)
+	return m.ended.values()
 }
 
 // State is the model's state projection (plan 024 §3.3, §3.7): everything
@@ -378,8 +420,9 @@ type ToolKey struct{ Agent, ID string }
 // History is the model's history projection: every transcript's entries as
 // values, with the open entry's Text resolved to its tail, and each one's
 // continuation state. It is what the engine's exactness test (C3) compares
-// beside State. An error value is carried as it was folded; a comparison
-// across a codec reads its text.
+// beside State. An error value is carried as it was folded: the engine's
+// instance and a decoding client both hold *agent.RemoteError values with the
+// same fields (agent.EventLog.Observe), which compare by value.
 type History struct {
 	Main TranscriptHistory
 	// Subs are the child transcripts, in the order they were created.
@@ -472,8 +515,8 @@ func (m *Model) cutLocked() cut {
 		incarnation: m.incarnation,
 		main:        m.Main.cutLocked(),
 		finishSeq:   m.finishSeq,
-		asks:        append([]Ask(nil), m.asks...),
-		ended:       append([]AskEnding(nil), m.ended...),
+		asks:        m.asks.values(),
+		ended:       m.ended.values(),
 		todos:       m.todos,
 		turn:        m.turn,
 		replaying:   m.replaying,

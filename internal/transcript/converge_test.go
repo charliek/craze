@@ -41,12 +41,62 @@ func priorEvents() []agent.Event {
 	})
 }
 
+// capPrior is priorEvents behind three named tools, so the transcript's head
+// is tool state: at a retention boundary, the next entries a trim drops are
+// the last states of h0, h1 and h2.
+func capPrior() []agent.Event {
+	var head []agent.Event
+	for i := range 3 {
+		head = append(head, agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: fmt.Sprintf("h%d", i)}, At: at(0)})
+	}
+	return sequenced(append(head, priorEvents()...))
+}
+
 // A convergenceFixture is one state or marker event and the prior it lands on
-// (priorEvents when prior is nil).
+// (priorEvents when prior is nil, and then at each retention boundary too),
+// under bounds (DefaultBounds' when zero). appends says the event's
+// re-application appends history by design (TestHistoryIsAppendOnly) — a
+// note, a plan entry, a user or an error row — which the test checks against
+// what the fold reports.
 type convergenceFixture struct {
-	name  string
-	prior []agent.Event
-	ev    agent.Event
+	name    string
+	prior   []agent.Event
+	bounds  Bounds
+	ev      agent.Event
+	appends bool
+}
+
+// A retention is where a fixture's prior leaves the transcripts: inside the
+// bounds, or exactly at the entry caps or the byte budgets with named tools at
+// the head (capPrior), so the next append trims tool state.
+type retention struct {
+	name   string
+	prior  []agent.Event
+	bounds Bounds
+}
+
+// retentionsOf is every retention a fixture runs at: its own prior and bounds
+// when it has them, else priorEvents inside the bounds and capPrior at both
+// boundaries, main and child alike.
+func retentionsOf(fx convergenceFixture) []retention {
+	if fx.prior != nil || fx.bounds != (Bounds{}) {
+		prior := fx.prior
+		if prior == nil {
+			prior = priorEvents()
+		}
+		return []retention{{name: "its own", prior: prior, bounds: fx.bounds}}
+	}
+	capped := capPrior()
+	probe := New(Options{})
+	for _, ev := range capped {
+		probe.Fold(ev)
+	}
+	sub := probe.Sub("sub-1")
+	return []retention{
+		{name: "inside the bounds", prior: priorEvents()},
+		{name: "at the entry caps", prior: capped, bounds: Bounds{MainEntries: probe.Main.len(), SubEntries: sub.len()}},
+		{name: "at the byte budgets", prior: capped, bounds: Bounds{MainBytes: probe.Main.bytes, SubBytes: sub.bytes}},
+	}
 }
 
 func convergenceFixtures() []convergenceFixture {
@@ -78,12 +128,12 @@ func convergenceFixtures() []convergenceFixture {
 		{name: "permission opens", ev: ev(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{ID: "perm-2", Tool: "Write"}})},
 		{name: "question opens", ev: ev(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-2"}})},
 		{name: "auto question", ev: ev(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-3", Auto: true}})},
-		{name: "plan opens", ev: ev(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Plan: "steps"}})},
+		{name: "plan opens", ev: ev(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-1", Plan: "steps"}}), appends: true},
 		{name: "auto plan", ev: ev(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-2", Auto: true}})},
 		{name: "ask ended", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "perm-1", Kind: agent.AskPermission, Outcome: agent.AskAnswered, By: agent.AskByClient}})},
 		{name: "unknown ask ended", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "perm-9", Kind: agent.AskPermission, Outcome: agent.AskAutomatic, By: agent.AskByPolicy}})},
 		{name: "done", ev: ev(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})},
-		{name: "done cancelled", ev: ev(agent.Event{Type: agent.EventDone, StopReason: "cancelled"})},
+		{name: "done cancelled", ev: ev(agent.Event{Type: agent.EventDone, StopReason: "cancelled"}), appends: true},
 		{name: "title", ev: meta(agent.StateDelta{Title: strp("renamed")})},
 		{name: "title cleared", ev: meta(agent.StateDelta{Title: strp("")})},
 		{name: "mode", ev: meta(agent.StateDelta{Mode: strp("plan")})},
@@ -94,8 +144,8 @@ func convergenceFixtures() []convergenceFixture {
 		{name: "plugins", ev: meta(agent.StateDelta{Plugins: &agent.PluginsState{Plugins: []agent.PluginCommand{{Qualified: "p:y"}}}})},
 		{name: "send now armed", ev: meta(agent.StateDelta{SendNow: &agent.SendNowState{Armed: true, Text: "now", Turn: "turn-1"}})},
 		{name: "send now gone", ev: meta(agent.StateDelta{SendNow: &agent.SendNowState{}, Reason: agent.SendNowWithdrawn})},
-		{name: "reason alone", ev: meta(agent.StateDelta{Reason: agent.SendNowCancelFailed, Detail: "cancel failed"})},
-		{name: "index error", ev: meta(agent.StateDelta{IndexErr: "disk full"})},
+		{name: "reason alone", ev: meta(agent.StateDelta{Reason: agent.SendNowCancelFailed, Detail: "cancel failed"}), appends: true},
+		{name: "index error", ev: meta(agent.StateDelta{IndexErr: "disk full"}), appends: true},
 		{name: "every section", ev: meta(agent.StateDelta{
 			Title: strp("t"), Mode: strp("ask"), Model: strp("m"),
 			Config:   &agent.ConfigState{Options: []agent.ConfigOption{{ID: "o"}}},
@@ -115,19 +165,27 @@ func convergenceFixtures() []convergenceFixture {
 		}()},
 		{name: "subagent finished", ev: roster("sub-1", agent.SubagentCompleted, agent.SubagentChangeFinished, at(99))},
 		{name: "subagent finished evicts", prior: full, ev: roster("new", agent.SubagentCompleted, agent.SubagentChangeFinished, at(99))},
+		// r2 finding 2's schedule: the budget is 10 bytes, a 1-byte tool at the
+		// head and a 9-byte note fill it, and the update adds a byte. Were an
+		// update in place to trim, it would drop its own row, and the update
+		// re-applied would append the row again.
+		{name: "an update past the byte budget, its row at the head", prior: sequenced([]agent.Event{
+			{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "t"}, At: at(1)},
+			{Type: agent.EventDone, StopReason: "cancelled", At: at(2)},
+		}), bounds: Bounds{MainBytes: 10}, ev: ev(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "t", RawInput: "x"}})},
 		{name: "queued", ev: queue("q3", "third", agent.QueueQueued, 0)},
 		{name: "duplicate queued", ev: queue("q2", "second again", agent.QueueQueued, 0)},
 		{name: "edited", ev: queue("q1", "first, edited", agent.QueueEdited, 0)},
 		{name: "removed", ev: queue("q1", "first", agent.QueueRemoved, 0)},
 		{name: "sent", ev: queue("q2", "second", agent.QueueSent, 0)},
-		{name: "foreign turn starts", ev: ev(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft-1", Running: true}})},
+		{name: "foreign turn starts", ev: ev(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft-1", Running: true}}), appends: true},
 		{name: "foreign turn ends", ev: ev(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft-1"}})},
 		{name: "replay starts", ev: ev(replayEvent(agent.ReplayStart))},
-		{name: "replay ends", ev: ev(replayEvent(agent.ReplayEnd))},
-		{name: "turn started", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-2", Phase: agent.TurnStarted, Text: "next", Origin: agent.TurnOriginDrain}})},
+		{name: "replay ends", ev: ev(replayEvent(agent.ReplayEnd)), appends: true},
+		{name: "turn started", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-2", Phase: agent.TurnStarted, Text: "next", Origin: agent.TurnOriginDrain}}), appends: true},
 		{name: "turn ended", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: "end_turn"}})},
-		{name: "turn ended cancelled", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: "cancelled", Synthetic: true}})},
-		{name: "turn ended refused", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, Synthetic: true, Err: "refused"}})},
+		{name: "turn ended cancelled", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: "cancelled", Synthetic: true}}), appends: true},
+		{name: "turn ended refused", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, Synthetic: true, Err: "refused"}}), appends: true},
 	}
 }
 
@@ -138,44 +196,123 @@ func convergenceFixtures() []convergenceFixture {
 // compared: a row whose defined effect is to append appends again, which
 // TestHistoryIsAppendOnly pins. Every state or marker kind of the table has a
 // fixture here, and every fixture's kind is one.
+//
+// Each fixture on priorEvents runs inside the bounds and at both retention
+// boundaries — the entry caps and the byte budgets, main and child — with
+// named tools at the head, where the next append trims tool state (r2
+// finding 2; r2 also added its own schedule as a fixture). A re-application
+// that appends nothing converges on the whole projection there too. One whose
+// defined effect is to append history (appends) converges on everything but
+// the tools that history displaced off the front — trimming is history's
+// effect, not the row's state: the re-application changes no tool's state and
+// re-adds none, it only lets the oldest go, as any appended row would (see
+// TestReappliedHistoryDisplacesToolStateAtTheCap). Every fold that changes the
+// tools' states says so in Change.State (r2 finding 6).
 func TestStateCarryingKindsConvergeUnderReapplication(t *testing.T) {
 	covered := map[agent.EventType]bool{}
+	displaced := 0
 	for _, fx := range convergenceFixtures() {
 		row := kinds[fx.ev.Type]
 		if row.class&(classState|classMarker) == 0 {
 			t.Errorf("%s: kind %q is neither state nor marker; it has no business here", fx.name, fx.ev.Type)
 		}
 		covered[fx.ev.Type] = true
-		t.Run(fx.name, func(t *testing.T) {
-			prior := fx.prior
-			if prior == nil {
-				prior = priorEvents()
-			}
-			m := New(Options{})
-			foldAll(t, m, true, prior...)
-			e := fx.ev
-			e.Seq = uint64(len(prior) + 1)
-
-			m.Fold(e)
-			once := m.State()
-			m.Fold(e)
-			twice := m.State()
-			checkInvariants(t, m)
-			if !reflect.DeepEqual(once, twice) {
-				t.Fatalf("re-applying moved the state:\nonce  %+v\ntwice %+v", once, twice)
-			}
-			e.Seq = 0
-			m.Fold(e)
-			if thrice := m.State(); !reflect.DeepEqual(once, thrice) {
-				t.Fatalf("re-applying unsequenced moved the state:\nonce   %+v\nthrice %+v", once, thrice)
-			}
-			checkInvariants(t, m)
-		})
+		for _, r := range retentionsOf(fx) {
+			t.Run(fx.name+"/"+r.name, func(t *testing.T) {
+				m := New(Options{Bounds: r.bounds})
+				foldAll(t, m, true, r.prior...)
+				if r.bounds != (Bounds{}) && trimmed(m.Main) {
+					t.Fatal("the prior itself trimmed: the retention is past its boundary, not at it")
+				}
+				fold := func(e agent.Event) (State, Change) {
+					t.Helper()
+					before := m.State()
+					c := m.Fold(e)
+					after := m.State()
+					checkInvariants(t, m)
+					if !reflect.DeepEqual(before.Tools, after.Tools) && !c.State {
+						t.Fatalf("the fold changed the tools' states without saying so: %+v", c)
+					}
+					return after, c
+				}
+				e := fx.ev
+				e.Seq = uint64(len(r.prior) + 1)
+				once, _ := fold(e)
+				twice, c2 := fold(e)
+				if assertConverged(t, fx, "re-applying", once, twice, c2, c2.Dropped) {
+					displaced++
+				}
+				e.Seq = 0
+				thrice, c3 := fold(e)
+				assertConverged(t, fx, "re-applying unsequenced", once, thrice, c3, c2.Dropped+c3.Dropped)
+			})
+		}
 	}
 	for k, row := range kinds {
 		if row.class&(classState|classMarker) != 0 && !covered[k] {
 			t.Errorf("kind %q is a state or marker row with no convergence fixture", k)
 		}
+	}
+	if displaced == 0 {
+		t.Error("no re-application displaced a tool: the retention fixtures no longer reach their boundaries, so nothing here tests them")
+	}
+}
+
+// assertConverged holds again — the state after re-applying a fixture — to
+// once, the state after its first application, and reports whether they
+// differ by displaced tools alone. c is the re-application's Change, and
+// dropped what the re-applications have trimmed between them.
+func assertConverged(t *testing.T, fx convergenceFixture, what string, once, again State, c Change, dropped int) bool {
+	t.Helper()
+	if appended := !c.AppendedFrom.IsZero(); appended != fx.appends {
+		t.Fatalf("%s appended=%v, but the fixture says its re-application appends=%v: %+v", what, appended, fx.appends, c)
+	}
+	if reflect.DeepEqual(once, again) {
+		return false
+	}
+	if !fx.appends || dropped == 0 {
+		t.Fatalf("%s moved the state:\nonce  %+v\nagain %+v", what, once, again)
+	}
+	o, a := once, again
+	o.Tools, a.Tools = nil, nil
+	if !reflect.DeepEqual(o, a) {
+		t.Fatalf("%s moved the state beyond the tools its history displaced:\nonce  %+v\nagain %+v", what, o, a)
+	}
+	for k, tool := range again.Tools {
+		if once.Tools[k] != tool {
+			t.Fatalf("%s changed or re-added tool %v: it may only displace", what, k)
+		}
+	}
+	return true
+}
+
+// TestReappliedHistoryDisplacesToolStateAtTheCap is the limit of the
+// convergence claim, pinned so it is a decision and not a surprise (r2
+// finding 2's broader schedule): at the entry cap, with named tools at the
+// head, each re-application of a row that appends history — a cancelled
+// done's note here — trims the oldest entry, and when that entry is a tool,
+// the tool's last state leaves State().Tools. The first application drops h0,
+// the second h1, the third h2: the projection a second application leaves is
+// not the first's. The tool state is bounded by the transcript's retention,
+// not kept beside it, so this holds for every row with a history half
+// (convergenceFixtures' appends).
+func TestReappliedHistoryDisplacesToolStateAtTheCap(t *testing.T) {
+	m := New(Options{Bounds: Bounds{MainEntries: 3}})
+	for i := range 3 {
+		m.Fold(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: fmt.Sprintf("h%d", i)}, Seq: uint64(i + 1)})
+	}
+	done := agent.Event{Type: agent.EventDone, StopReason: "cancelled", Seq: 4}
+	var held []int
+	for range 3 {
+		c := m.Fold(done)
+		checkInvariants(t, m)
+		if !c.State || c.Dropped != 1 {
+			t.Fatalf("the note displaced a tool and must say the state changed: %+v", c)
+		}
+		held = append(held, len(m.State().Tools))
+	}
+	if held[0] != 2 || held[1] != 1 || held[2] != 0 {
+		t.Fatalf("each re-applied note displaces the oldest tool: %v tools left", held)
 	}
 }
 

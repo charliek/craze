@@ -36,7 +36,11 @@ import (
 // copies its tail into the replacing entry's Text. It grows to 2 × StreamText;
 // a chunk that would take it past that keeps the last StreamText bytes, moved
 // to the front in place — one StreamText copy per StreamText of input. bufCut
-// records that the run is longer than buf holds, so its tail is led by "…".
+// records that the run is longer than buf holds, so its tail is led by "…",
+// and tailAt where that tail starts, kept as the run grows so no chunk rescans
+// what an earlier one looked at. buf keeps its capacity from one run to the
+// next (bufReset), so each live transcript retains at most 2 × StreamText of
+// builder; a child's is let go when its roster row finishes.
 type Transcript struct {
 	mu    *sync.Mutex // the model's
 	model *Model
@@ -51,11 +55,21 @@ type Transcript struct {
 	// tools is the tool index: a tool id to the entry that holds it.
 	tools map[string]EntryID
 
-	bytes      int
+	bytes int
+	// grown is what tool updates in place have added to bytes since the
+	// budget was last enforced (trimBytes). An update in place never trims
+	// (upsertTool), so between it and the next append or chunk the transcript
+	// may hold more than maxBytes over more than one entry — by exactly grown:
+	// bytes - grown fits the budget, or one entry is all there is
+	// (checkInvariants).
+	grown      int
 	trimmed    bool
 	streamOpen bool
 	buf        []byte
 	bufCut     bool
+	// tailAt is where the open run's tail starts in buf once the run is past
+	// the cap: capText's cut, kept as the run grows (advanceTail).
+	tailAt int
 
 	// The todo-note dedupe (the TUI's todoPlanned / todoDone): the largest
 	// list a "planned" note was written for, and whether the "done" note has
@@ -201,15 +215,21 @@ func (t *Transcript) trim() {
 }
 
 // trimBytes drops from the front until the retained bytes fit the budget,
-// never dropping the last entry (today's guard).
+// never dropping the last entry (today's guard). It runs after every append
+// and every chunk, never after a tool update in place (upsertTool), and it is
+// where the budget is enforced again: grown starts over.
 func (t *Transcript) trimBytes() {
 	for t.bytes > t.maxBytes && t.len() > 1 {
 		t.dropHead()
 	}
+	t.grown = 0
 }
 
 // dropHead is today's dropFirst(1): the oldest entry goes, and so does the
-// tool index's name for it, so a later update to that id appends a new row.
+// tool index's name for it, so a later update to that id appends a new row. A
+// named tool's row going takes that tool's last state out of the state
+// projection (State().Tools), so the fold's Change says the state changed (r2
+// finding 6).
 func (t *Transcript) dropHead() {
 	e := t.ents[t.head]
 	t.ents[t.head] = nil
@@ -220,6 +240,7 @@ func (t *Transcript) dropHead() {
 		if id, ok := t.tools[e.Tool.ID]; ok && id == e.ID {
 			delete(t.tools, e.Tool.ID)
 		}
+		t.model.fc.state = true
 	}
 	t.trimmed = true
 	t.model.noteDropped(t)
@@ -237,23 +258,41 @@ func (t *Transcript) dropHead() {
 // ---------------------------------------------------------- the builder
 
 // tailStart is where the open run's tail starts in buf, and whether the run
-// is longer than the cap, so the tail is led by "…". It is capText's cut,
-// taken on buf: when the run was compacted buf still holds its last StreamText
-// bytes, which is more than the StreamText - len("…") the tail keeps, so the
-// cut — and the scan forward to a rune start — land on the same bytes.
+// is longer than the cap, so the tail is led by "…". It is O(1): the cut is
+// kept in tailAt as the builder grows (advanceTail).
 func (t *Transcript) tailStart() (int, bool) {
-	n := len(t.buf)
-	if !t.bufCut && n <= t.streamCap {
+	if !t.cutRun() {
 		return 0, false
 	}
-	start := n - (t.streamCap - len(ellipsis))
-	if start < 0 {
-		start = 0
+	return t.tailAt, true
+}
+
+// cutRun reports whether the open run is longer than the cap, so its tail is
+// led by "…".
+func (t *Transcript) cutRun() bool { return t.bufCut || len(t.buf) > t.streamCap }
+
+// advanceTail moves tailAt to capText's cut, taken on buf: the first rune
+// start at or after len(buf) - (StreamText - len("…")), or len(buf) when there
+// is none. When the run was compacted buf still holds its last StreamText
+// bytes, which is more than the tail keeps, so the cut — and the scan forward
+// to a rune start — land on the same bytes as they would in the whole run.
+//
+// It never looks at a byte twice (r2 finding 4): the cut only moves forward as
+// the run grows, and the scan resumes from wherever it stopped — the rune
+// start it found, or the end of buf when it found none — unless the cut has
+// moved past that. A byte before the cut is never scanned at all, so however
+// long a run of continuation bytes is, a chunk costs its own length, amortised.
+// bufAppend keeps tailAt in step with a compaction; bufReset starts it over.
+func (t *Transcript) advanceTail() {
+	if !t.cutRun() {
+		return
 	}
-	for start < n && !utf8.RuneStart(t.buf[start]) {
-		start++
+	n := len(t.buf)
+	i := max(n-(t.streamCap-len(ellipsis)), t.tailAt)
+	for i < n && !utf8.RuneStart(t.buf[i]) {
+		i++
 	}
-	return start, true
+	t.tailAt = i
 }
 
 // tailLen is len(tail()) without building it: what the open entry accounts.
@@ -275,29 +314,36 @@ func (t *Transcript) tail() string {
 	return ellipsis + string(t.buf[start:])
 }
 
-// bufAppend adds a chunk to the open run.
+// bufAppend adds a chunk to the open run, and moves the tail's cut with it.
 func (t *Transcript) bufAppend(s string) {
 	limit := 2 * t.streamCap
 	if len(t.buf)+len(s) <= limit {
 		t.bufReserve(len(t.buf) + len(s))
 		t.buf = append(t.buf, s...)
+		t.advanceTail()
 		return
 	}
 	// Past 2 × StreamText: keep the last StreamText bytes of buf+s, at the
 	// front of the same array. Nothing aliases buf, so moving bytes in place
 	// is safe; the copy is at most StreamText bytes, and the next one is at
-	// least StreamText bytes of input away.
+	// least StreamText bytes of input away. The kept cut moves with the bytes
+	// it points into; if they are gone it starts from the front, which the new
+	// cut — len("…") bytes in — is past anyway.
 	keep := t.streamCap
 	if len(s) >= keep {
 		t.buf = t.buf[:0]
 		t.bufReserve(keep)
 		t.buf = append(t.buf, s[len(s)-keep:]...)
+		t.tailAt = 0
 	} else {
 		from := keep - len(s)
-		n := copy(t.buf, t.buf[len(t.buf)-from:])
+		drop := len(t.buf) - from
+		n := copy(t.buf, t.buf[drop:])
 		t.buf = append(t.buf[:n], s...)
+		t.tailAt = max(t.tailAt-drop, 0)
 	}
 	t.bufCut = true
+	t.advanceTail()
 }
 
 // bufReserve grows buf's capacity to at least need, doubling, but never past
@@ -315,16 +361,23 @@ func (t *Transcript) bufReserve(need int) {
 	t.buf = nb
 }
 
-// bufReset empties the builder for the next run. A small buffer is kept for
-// it; a large one is let go, so a transcript whose long reply has closed does
-// not keep up to 2 × StreamText of capacity for the rest of the session.
+// bufReset empties the builder for the next run and keeps its capacity: the
+// next run of this transcript reuses it rather than growing a new one (r2
+// finding 7), which is safe because nothing ever aliases buf (Tail and a
+// closing run both copy out of it). So a live transcript retains at most
+// 2 × StreamText of builder once one long run has closed; a child's is let go
+// when its roster row finishes (bufRelease) or with the whole transcript when
+// the row is evicted, since children are where transcripts are many.
 func (t *Transcript) bufReset() {
-	if cap(t.buf) > t.streamCap/4 {
-		t.buf = nil
-	} else {
-		t.buf = t.buf[:0]
-	}
+	t.buf = t.buf[:0]
 	t.bufCut = false
+	t.tailAt = 0
+}
+
+// bufRelease lets the builder's capacity go. The run must be closed.
+func (t *Transcript) bufRelease() {
+	t.bufReset()
+	t.buf = nil
 }
 
 // capText is today's capEntryText with the cap as a parameter: s whole when it
@@ -458,8 +511,17 @@ func (t *Transcript) upsertTool(tool *agent.ToolEvent, envelope time.Time) {
 				ne := *e
 				ne.Tool = tool
 				ne.Bytes = entryBytes(&ne)
+				// An update in place never trims — today's rule: the TUI trims
+				// only on append (r2 finding 2, which revises execution amendment
+				// X5 for this one path). A trim here could drop the very row it
+				// updated, and the same update re-applied would then append the
+				// row again: the tool's last state would not converge. The budget
+				// is exceeded meanwhile by what updates in place added since it
+				// was last enforced (grown) — at most one tool payload for each
+				// row updated in place since then — until the next append or
+				// chunk trims.
+				t.grown += ne.Bytes - e.Bytes
 				t.replace(ord, &ne)
-				t.trimBytes()
 				return
 			}
 		}
@@ -520,15 +582,14 @@ func (t *Transcript) addError(text string, now time.Time) {
 	t.appendEntry(&Entry{Kind: KindError, Text: text}, now)
 }
 
-// addErrValue is EventError's row: the error value, held. A nil error draws
-// nothing (today's rule); an error whose text is empty — which today draws
-// nothing either — cannot be told apart without calling Error(), so the
-// reader decides that one at render time.
-func (t *Transcript) addErrValue(err error, now time.Time) {
+// addErrValue is EventError's row: the error value, held, with its text when
+// the fold could read it ("" when it could not — foldError has already dropped
+// a known empty one, today's rule). A nil error draws nothing.
+func (t *Transcript) addErrValue(err error, text string, now time.Time) {
 	if err == nil {
 		return
 	}
-	t.appendEntry(&Entry{Kind: KindError, Err: err}, now)
+	t.appendEntry(&Entry{Kind: KindError, Err: err, Text: text}, now)
 }
 
 // noteTodos turns the todo stream into the two notes, under today's dedupe:

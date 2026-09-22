@@ -3,6 +3,7 @@ package transcript
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"slices"
 	"strings"
@@ -255,6 +256,77 @@ func TestAnAsksEndingDrawsNoEntryAndIsRecorded(t *testing.T) {
 	}
 }
 
+// TestAsksAreKeyedAndStayCompact (r2 finding 5): the open asks and the
+// last-ended list are id-keyed with O(1) upserts and removals under the
+// boundary, and read exactly as C1's ordered slices did — an opening of a
+// present id replaces it where it stands, an ending removes it, an ending
+// replaces its own earlier ending in place, and the ended list keeps the
+// newest 256 — over thousands of asks in a random interleaving, held against
+// a reference that is those slices; the holes removals leave are squeezed out,
+// so the storage stays within twice what is held.
+func TestAsksAreKeyedAndStayCompact(t *testing.T) {
+	m := New(Options{})
+	var open []string
+	var ended []string
+	r := rand.New(rand.NewPCG(24, 5))
+	for i := range 20000 {
+		id := fmt.Sprintf("ask-%d", r.IntN(3000))
+		if r.IntN(100) < 55 {
+			m.Fold(agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: id, Auto: true}, At: at(i)})
+			if !slices.Contains(open, id) {
+				open = append(open, id)
+			}
+		} else {
+			m.Fold(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: id, Kind: agent.AskQuestion}, At: at(i)})
+			if j := slices.Index(open, id); j >= 0 {
+				open = slices.Delete(open, j, j+1)
+			}
+			if !slices.Contains(ended, id) {
+				if len(ended) >= maxEnded {
+					ended = ended[1:]
+				}
+				ended = append(ended, id)
+			}
+		}
+		if i%101 != 0 && i != 19999 {
+			continue
+		}
+		var gotOpen, gotEnded []string
+		for _, a := range m.State().Asks {
+			gotOpen = append(gotOpen, a.ID)
+		}
+		for _, e := range m.EndedAsks() {
+			gotEnded = append(gotEnded, e.ID)
+		}
+		if !slices.Equal(gotOpen, open) || !slices.Equal(gotEnded, ended) {
+			t.Fatalf("op %d: open %d asks (want %d), ended %d (want %d), or out of order", i, len(gotOpen), len(open), len(gotEnded), len(ended))
+		}
+		for name, l := range map[string][2]int{"open": {len(m.asks.items), m.asks.len()}, "ended": {len(m.ended.items), m.ended.len()}} {
+			if l[0] > 2*l[1]+32 {
+				t.Fatalf("op %d: the %s list's storage is %d slots for %d asks: its holes are not squeezed out", i, name, l[0], l[1])
+			}
+		}
+	}
+	// An opening replaces its ask where it stands, and the list empties clean.
+	a, b := at(1), at(2)
+	c := New(Options{})
+	foldAll(t, c, true,
+		agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "x"}, At: a},
+		agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "y"}, At: a},
+		agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "x"}, At: b},
+	)
+	if asks := c.State().Asks; len(asks) != 2 || asks[0].ID != "x" || !asks[0].At.Equal(b) || asks[1].ID != "y" {
+		t.Fatalf("a second opening replaces the first where it stands: %+v", asks)
+	}
+	foldAll(t, c, true,
+		agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "x"}},
+		agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "y"}},
+	)
+	if c.State().Asks != nil || len(c.asks.items) != 0 {
+		t.Fatalf("every ask ended: %+v, %d slots", c.State().Asks, len(c.asks.items))
+	}
+}
+
 func TestDoneClosesTheRunAndACancelLeavesItsNote(t *testing.T) {
 	m := New(Options{})
 	foldAll(t, m, true,
@@ -293,6 +365,10 @@ type panicError struct{}
 
 func (panicError) Error() string { panic("the fold called Error()") }
 
+// TestTheFoldNeverCallsError: with no Options.ErrText — the engine's
+// configuration — an error that is not a RemoteError is held unread: its entry
+// is kept, with no text, charged errValueBytes (TestAnErrorEventHoldsItsValue),
+// and nothing reading the model calls it either.
 func TestTheFoldNeverCallsError(t *testing.T) {
 	m := New(Options{})
 	foldAll(t, m, true, agent.Event{Type: agent.EventError, Err: panicError{}, At: at(1)})
@@ -301,6 +377,88 @@ func TestTheFoldNeverCallsError(t *testing.T) {
 	_ = m.cut()
 	if got := m.Main.live()[0].Err; got != (panicError{}) {
 		t.Fatalf("held %v", got)
+	}
+}
+
+// TestARemoteErrorIsAccountedByItsText (r2 finding 1): the engine's instance
+// is handed *agent.RemoteError values (agent.EventLog.Observe), whose text the
+// fold reads as its Message: the entry carries it as Text and accounts its
+// real length, so ten 1 MiB failures are trimmed to the 8 MiB budget like any
+// other rows rather than retained at a fixed 256 bytes each.
+func TestARemoteErrorIsAccountedByItsText(t *testing.T) {
+	m := New(Options{})
+	for i := range 10 {
+		big := strings.Repeat(string(rune('a'+i)), 1<<20)
+		foldAll(t, m, true, agent.Event{Type: agent.EventError, Err: &agent.RemoteError{Message: big, Class: agent.EventErrOther}, At: at(i), Seq: uint64(i + 1)})
+	}
+	es := m.Main.live()
+	if len(es) != 8 || m.Main.bytes != 8<<20 || !trimmed(m.Main) {
+		t.Fatalf("10 MiB of failures under an 8 MiB budget: %d entries, %d bytes, trimmed %v", len(es), m.Main.bytes, trimmed(m.Main))
+	}
+	first := es[0]
+	if first.Text != strings.Repeat("c", 1<<20) || first.Bytes != 1<<20 || first.Kind != KindError {
+		t.Fatalf("the oldest kept failure is the third, its text held and accounted: %q… (%d bytes)", first.Text[:1], first.Bytes)
+	}
+	if re, ok := first.Err.(*agent.RemoteError); !ok || re.Message != first.Text {
+		t.Fatalf("the entry still holds the error value: %T", first.Err)
+	}
+}
+
+// TestAnEmptyErrorDrawsNothingAndLeavesTheRunOpen (r2 finding 3): an error
+// whose known text is empty draws no row and closes nothing — today's rule, so
+// the thoughts around it stay one run — whether the fold knows the text from a
+// RemoteError or from Options.ErrText; and it changes nothing a client would
+// re-render.
+func TestAnEmptyErrorDrawsNothingAndLeavesTheRunOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+		err  error
+	}{
+		{name: "an empty RemoteError", err: &agent.RemoteError{Class: agent.EventErrOther}},
+		{name: "an empty error read by ErrText", opts: Options{ErrText: func(err error) string { return err.Error() }}, err: errors.New("")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(tc.opts)
+			foldAll(t, m, true, agent.Event{Type: agent.EventThought, Text: "a", At: at(1), Seq: 1})
+			c := m.Fold(agent.Event{Type: agent.EventError, Err: tc.err, At: at(2), Seq: 2})
+			checkInvariants(t, m)
+			foldAll(t, m, true, agent.Event{Type: agent.EventThought, Text: "b", At: at(3), Seq: 3})
+			if got := facts(m.Main); len(got) != 1 || got[0].Kind != "thought" || got[0].Text != "ab" || !got[0].Open {
+				t.Fatalf("thought a, an empty error, thought b is one open \"ab\" thought: %v", got)
+			}
+			if c != (Change{}) {
+				t.Fatalf("the empty error changed %+v", c)
+			}
+		})
+	}
+}
+
+// TestErrTextReadsAnErrorForAClientOutsideTheBoundary: Options.ErrText is how a
+// client folding the publisher's own error values (the TUI's primary) gives
+// them their text — called once per error that is not a RemoteError, its
+// answer held as the entry's Text and accounted — and a RemoteError never
+// reaches it.
+func TestErrTextReadsAnErrorForAClientOutsideTheBoundary(t *testing.T) {
+	calls := 0
+	m := New(Options{ErrText: func(err error) string {
+		calls++
+		return "read: " + err.Error()
+	}})
+	boom := errors.New("boom")
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventError, Err: boom, At: at(1)},
+		agent.Event{Type: agent.EventError, Err: &agent.RemoteError{Message: "remote"}, At: at(2)},
+	)
+	es := m.Main.live()
+	if len(es) != 2 || es[0].Text != "read: boom" || es[0].Err != boom || es[0].Bytes != len("read: boom") {
+		t.Fatalf("ErrText's answer is the entry's text, accounted, beside the held value: %+v", es[0])
+	}
+	if es[1].Text != "remote" || es[1].Bytes != len("remote") {
+		t.Fatalf("a RemoteError's text is its Message: %+v", es[1])
+	}
+	if calls != 1 {
+		t.Fatalf("ErrText was called %d times, want once: never for a RemoteError", calls)
 	}
 }
 
@@ -618,5 +776,31 @@ func TestChangeSaysWhatTheFoldTouched(t *testing.T) {
 	c = one.Fold(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Detail: "x", IndexErr: "y"}, Seq: 1})
 	if c.AppendedFrom != (EntryID{1, 1}) || c.AppendedTo != (EntryID{1, 1}) || c.Dropped != 1 {
 		t.Fatalf("the first row was trimmed by the second: %+v", c)
+	}
+	// A trim that drops a named tool takes its last state out of the state
+	// projection, so the fold that trimmed says the state changed — a chunk
+	// here, which is no state row at all (r2 finding 6). Dropping history does
+	// not, and neither does dropping an id-less tool, which is history too.
+	tl := New(Options{Bounds: Bounds{MainEntries: 1}})
+	tl.Fold(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "t"}, Seq: 1})
+	c = tl.Fold(agent.Event{Type: agent.EventText, Text: "x", Seq: 2})
+	if !c.State || c.Dropped != 1 || tl.State().Tools != nil {
+		t.Fatalf("a chunk that trimmed a named tool must report the state change: %+v (tools %v)", c, tl.State().Tools)
+	}
+	tl.Fold(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{Title: "anonymous"}, Seq: 3})
+	for i, ev := range []agent.Event{
+		{Type: agent.EventText, Text: "y"}, // drops the id-less tool
+		{Type: agent.EventCommand, Command: &agent.ExpandedCommand{PluginCommand: agent.PluginCommand{Qualified: "p:c"}}}, // drops the reply
+	} {
+		ev.Seq = uint64(4 + i)
+		if c = tl.Fold(ev); c.State || c.Dropped != 1 {
+			t.Fatalf("seq %d dropped history and reported a state change: %+v", ev.Seq, c)
+		}
+	}
+	// The child's transcript trims the same way, and its tools are state too.
+	ch := New(Options{Bounds: Bounds{SubEntries: 1}})
+	ch.Fold(agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c"}, Seq: 1})
+	if c = ch.Fold(agent.Event{Type: agent.EventText, Agent: "sub", Text: "x", Seq: 2}); !c.State || c.Scope != "sub" || c.Dropped != 1 {
+		t.Fatalf("a child's chunk that trimmed its named tool: %+v", c)
 	}
 }

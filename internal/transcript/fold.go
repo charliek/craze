@@ -20,10 +20,12 @@ import (
 // against agent's EventType constants in both directions.
 //
 // Fold takes the model's mutex and nothing else, blocks on nothing, runs no
-// callback but Options.Clock — and that only for an event with a zero At —
-// never calls Error() on an error, and is total over every event shape: an
-// unknown kind, and every kind with any payload nil, is a no-op or a defined
-// effect.
+// callback but Options.Clock — only for an event with a zero At — and
+// Options.ErrText — only for an error that is not an *agent.RemoteError — and
+// the engine's instance sets neither; it never runs a foreign error's methods
+// (a RemoteError's text is its Message), and is total over every event shape:
+// an unknown kind, and every kind with any payload nil, is a no-op or a
+// defined effect.
 func (m *Model) Fold(ev agent.Event) Change {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -132,11 +134,22 @@ func foldUser(m *Model, ev agent.Event) {
 // the parent handed the child arrives in chunks like any reply.
 func childUser(t *Transcript, ev agent.Event) { t.appendStream(KindUser, ev.Text, ev.At) }
 
+// foldError is the session's failure row. Its text is read only where that
+// runs no foreign code (Model.errText): an *agent.RemoteError — what the log
+// hands the engine's observer and every decoding client receives — or
+// Options.ErrText's answer. A known empty text draws nothing and closes
+// nothing, which is today's rule (the TUI's addError skips an empty text before
+// it can end the run above it). An error the fold may not read is held unread
+// and its entry kept (Entry.Err).
 func foldError(m *Model, ev agent.Event) {
 	if ev.Err == nil {
 		return
 	}
-	m.Main.addErrValue(ev.Err, m.stamp(ev.At))
+	text, known := m.errText(ev.Err)
+	if known && text == "" {
+		return
+	}
+	m.Main.addErrValue(ev.Err, text, m.stamp(ev.At))
 }
 
 // ------------------------------------------------------------- tool, todos
@@ -205,46 +218,34 @@ func foldPlan(m *Model, ev agent.Event) {
 
 // openAsk records an open ask, keyed by id: a second opening of the same id
 // replaces the first where it stands. An opening with no id cannot be ended
-// and is not kept.
+// and is not kept. O(1) (keyedList).
 func (m *Model) openAsk(id string, kind agent.AskKind, body agent.AskBody, at time.Time) {
 	if id == "" {
 		return
 	}
-	a := Ask{ID: id, Kind: kind, Body: body, At: at}
 	m.fc.state = true
-	for i := range m.asks {
-		if m.asks[i].ID == id {
-			m.asks[i] = a
-			return
-		}
-	}
-	m.asks = append(m.asks, a)
+	m.asks.upsert(Ask{ID: id, Kind: kind, Body: body, At: at})
 }
 
 // foldAsk is an ask's ending: the ask leaves the open set and joins the
-// last-ended list. No entry — the answer, skip and plan notes are written only
-// by the client that had the card (§3.3).
+// last-ended list — replacing its own earlier ending where it stands, else
+// appended, the oldest going past maxEnded. No entry — the answer, skip and
+// plan notes are written only by the client that had the card (§3.3). O(1),
+// amortised (keyedList).
 func foldAsk(m *Model, ev agent.Event) {
 	u := ev.Ask
 	if u == nil {
 		return
 	}
 	m.fc.state = true
-	if i := slices.IndexFunc(m.asks, func(a Ask) bool { return a.ID == u.ID }); i >= 0 {
-		m.asks = slices.Delete(m.asks, i, i+1)
-	}
 	if u.ID == "" {
 		return
 	}
-	end := AskEnding{ID: u.ID, Kind: u.Kind, Outcome: u.Outcome, By: u.By, At: m.stamp(ev.At)}
-	if i := slices.IndexFunc(m.ended, func(a AskEnding) bool { return a.ID == u.ID }); i >= 0 {
-		m.ended[i] = end
-		return
+	m.asks.remove(u.ID)
+	if !m.ended.has(u.ID) && m.ended.len() >= maxEnded {
+		m.ended.dropOldest()
 	}
-	if len(m.ended) >= maxEnded {
-		m.ended = slices.Delete(m.ended, 0, len(m.ended)-maxEnded+1)
-	}
-	m.ended = append(m.ended, end)
+	m.ended.upsert(AskEnding{ID: u.ID, Kind: u.Kind, Outcome: u.Outcome, By: u.By, At: m.stamp(ev.At)})
 }
 
 // ----------------------------------------------------------- markers, turn
@@ -396,6 +397,11 @@ func foldSubagent(m *Model, ev agent.Event) {
 		// one, like every other event-driven close (r1: the TUI's
 		// applySubagentEvent carried the same fix).
 		t.closeStream(m.stamp(ev.At))
+		// A finished child streams no more (a new attempt starts over with
+		// spawned), so its builder's capacity goes now rather than with the
+		// row's eviction: children are where transcripts are many (r2
+		// finding 7).
+		t.bufRelease()
 		m.evictFinished(id)
 	}
 }
