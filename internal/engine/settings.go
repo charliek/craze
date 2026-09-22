@@ -102,15 +102,23 @@ type setReq struct {
 	s     Setting
 	reply chan setAnswer
 	// claimed is closed by the worker in the one locked section that has
-	// established that this request WILL be put to the provider (runSet) —
-	// never for one answered without running it, whether by takeSet's own
-	// dead-context check or by runSet's re-check of the context, the engine's
-	// refusal and the outbox's room. It means "the provider is about to be
-	// asked", and nothing weaker: a caller whose context has ended reads it as
-	// the difference between a request that changed nothing — owed the plain
-	// context error or the plain refusal, both of which leave its command id
-	// retryable — and one at the provider, which can only be answered honestly
-	// with ErrSetOutcomeUnknown (r27 finding 3).
+	// established that nothing the ENGINE decides can stop this request going
+	// to the session (runSet) — never for one answered without running it,
+	// whether by takeSet's own dead-context check or by runSet's re-check of
+	// the context, the engine's refusal, the outbox's room and the model
+	// binding. It means "the session is about to be asked", and a caller whose
+	// context has ended reads it as the difference between a request that
+	// changed nothing — owed the plain context error or the plain refusal, both
+	// of which leave its command id retryable — and one that may be at the
+	// provider, which can only be answered honestly with ErrSetOutcomeUnknown
+	// (r27 finding 3).
+	//
+	// It is not quite "the provider is about to be asked": the session still
+	// refuses a config change bound to a model the agent has left since the
+	// worker looked (ErrStaleModel, Session.SetConfig's forModel), sending
+	// nothing, and a caller whose context ends in that instant is answered
+	// ErrSetOutcomeUnknown for it — stored "aborted" — for a change that did not
+	// happen (runSet, "The claim").
 	claimed chan struct{}
 }
 
@@ -200,10 +208,12 @@ type setAnswer struct {
 // honestly: it waits for the worker's answer OR for its own context, whichever
 // comes first, and a context that wins returns ErrSetOutcomeUnknown — wrapping
 // that context's error, so errors.Is(err, context.DeadlineExceeded) still
-// holds. That sentinel says exactly what is true: the provider has the change
-// or is about to, internal/acp writes a request before it can look at a context
-// at all, and nobody on this side can say whether it landed. The stream says —
-// if the change lands, its delta is published like any other.
+// holds. That sentinel says what is true of what this side can know: the
+// provider has the change or is about to, internal/acp writes a request before
+// it can look at a context at all, and nobody on this side can say whether it
+// landed. The stream says — if the change lands, its delta is published like
+// any other. (The one claimed request the provider is never asked is a config
+// change the session refuses as stale after the claim; runSet, "The claim".)
 //
 // It is never plain context.Canceled for a claimed request, which would read as
 // "nothing happened", and never a success the caller has waited past its own
@@ -254,15 +264,18 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 			// The worker has it, and what that means is decided by the claim:
 			//
 			//   - claimed is still open: the worker has not yet decided to run
-			//     the request, and the answer on its way is one of the three that
+			//     the request, and the answer on its way is one of those that
 			//     mean nothing was asked of the provider — the plain context
-			//     error, ErrNotAccepting or ErrUnavailable. The wait is bounded:
-			//     between takeSet and the locked section that decides (runSet)
-			//     the worker does nothing that can block, so one of these two
-			//     channels is always about to be ready.
-			//   - claimed is closed: the request is at the provider. This call's
-			//     own deadline has passed and it says so, with the one answer
-			//     that is true (ErrSetOutcomeUnknown).
+			//     error, ErrNotAccepting, ErrUnavailable or ErrStaleModel. The
+			//     wait is bounded: between takeSet and the locked section that
+			//     decides (runSet) the worker does nothing that can block, so
+			//     one of these two channels is always about to be ready.
+			//   - claimed is closed: the request is at the session, on its way
+			//     to the provider. This call's own deadline has passed and it
+			//     says so, with the one answer that is true of what it can know
+			//     (ErrSetOutcomeUnknown) — including, in runSet's one accepted
+			//     exception, for a bound change the session then refuses as
+			//     stale.
 			select {
 			case a := <-r.reply:
 				return a.res, a.err
@@ -423,11 +436,13 @@ func (e *Engine) serveSets() {
 //
 // # The claim
 //
-// Everything that can still refuse this request without running it is decided
-// in ONE locked section, and only then is the request claimed (setReq.claimed).
-// That is what makes the claim mean "the provider is about to be asked" and
-// nothing weaker, so ErrSetOutcomeUnknown is never stored for a change that
-// provably did not happen (r27 finding 3). Three things can refuse it:
+// Everything the engine can still refuse this request for without running it
+// is decided in ONE locked section, and only then is the request claimed
+// (setReq.claimed). That is what makes the claim mean "the session is about to
+// be asked", so ErrSetOutcomeUnknown is never stored for a change the engine
+// refused (r27 finding 3) — and, but for the one refusal the session makes
+// after the claim (below), never for one that provably did not happen. These
+// can refuse it:
 //
 //   - the engine's gate, which Close or Stop can have shut since this request
 //     was queued: ErrNotAccepting;
@@ -460,10 +475,21 @@ func (e *Engine) serveSets() {
 // having sent nothing (astra r2 item 3). That leaves only the window no one
 // can close: the agent's move and the request crossing on the wire, which ACP,
 // with no conditional set, gives the client no way to order (Setting.ForModel).
-// The session's refusal comes after the claim, so a caller whose own context
-// ends in that instant is answered ErrSetOutcomeUnknown, which is true of
-// what it can know; a caller still waiting gets ErrStaleModel, never stored,
-// exactly as it would from the check here.
+//
+// The session's refusal comes after the claim, and that is the one exception
+// to what the claim means, accepted: a caller still waiting gets
+// ErrStaleModel, never stored, exactly as it would from the check here, but a
+// caller whose own context ends before that refusal reaches it is answered
+// ErrSetOutcomeUnknown — stored "aborted", so the same command id replays
+// "aborted" rather than running, even once the session is back on the model it
+// was bound to — for a change the session refused having sent nothing (astra
+// r3 D). It needs a bound request, the agent moving its model after the check
+// here, and the caller giving up in the instant before the session answers;
+// what the caller is told is true of what it can know, and a new id runs it.
+// The claim is not moved into the session to close it, because a session that
+// had to make it — a callback from its own locked section — and wrote without
+// making it would have its caller answered "not run", retryable, for a write
+// that ran: a resend would make the change twice, and that is the worse error.
 //
 // The two GATE refusals are preferred to the context error when both are true,
 // which is takeSet's own precedence for a closed engine — it answers everything
@@ -510,8 +536,10 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		e.mu.Unlock()
 		return SetResult{}, ErrStaleModel
 	}
-	// Nothing left that could refuse it: the claim is made here, in the section
-	// that established that, and the lock released before the provider is asked.
+	// Nothing left that the engine could refuse it for: the claim is made here,
+	// in the section that established that, and the lock released before the
+	// session is asked. The session may still refuse a bound config change as
+	// stale, having sent nothing (# The claim, above).
 	close(r.claimed)
 	e.mu.Unlock()
 	var (

@@ -286,11 +286,17 @@ func offers(opt *agent.ConfigOption, value string) bool {
 // closes optimistically, so it can be reopened while the first chain is still
 // running) and only the newest one speaks for what the rows show: an older
 // one's failure must not put back a value the user has changed since.
+//
+// unread is the model step failing on an answer the session could not read
+// (agent.ErrBadCatalog): the chain ends there as on any failure, but nothing
+// says the model was refused — the agent may have switched — so the row says
+// the outcome is unknown (unreadModelText) rather than naming a refusal.
 type modelApplyMsg struct {
-	gen  int
-	done []applyStep
-	step string
-	err  error
+	gen    int
+	done   []applyStep
+	step   string
+	err    error
+	unread bool
 }
 
 // applyStep is one leg of the chain. cfgID empty means the model step, which
@@ -639,7 +645,10 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // nothing more is sent, because the model is not the one they were chosen for.
 // A step the agent took but whose answer no longer lists the option
 // (agent.ErrOptionGone) is a note too, and the chain goes on. Any other error
-// names its step and ends the chain, as it always has.
+// names its step and ends the chain, as it always has — the model step's
+// answer that could not be read (agent.ErrBadCatalog) included, which ends it
+// too, since no option can be judged against a catalog nobody could read, but
+// whose row says the outcome is unknown (modelApplyMsg.unread).
 func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep, forModel, modelCfgID string, gen int) modelApplyMsg {
 	ctx := context.Background()
 	out := modelApplyMsg{gen: gen}
@@ -650,6 +659,7 @@ func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep,
 			res, err := applyModelStep(ctx, eng, cmds[i], cmds[len(steps)], st.value, modelCfgID)
 			if err != nil {
 				out.step, out.err = st.label, err
+				out.unread = errors.Is(err, agent.ErrBadCatalog)
 				return out
 			}
 			st = st.landed(res)
@@ -796,9 +806,17 @@ func (m Model) settleStep(st applyStep) Model {
 // the command id that fallback spends. The live session takes the config path
 // itself now when the catalog has a model option (plan 025 design 2), so the
 // fallback is rarely reached; it costs nothing where it is not.
+//
+// An answer the session could not read (agent.ErrBadCatalog) takes no
+// fallback. It is not the model refused: the agent answered, and may have
+// switched, so setting the model again as a config option would be a second
+// write craze did not mean — the session's own changeModel does not fall back
+// on it either. Nothing of that answer was installed, so both callers show
+// what the session's snapshot says, and say the outcome is unknown
+// (unreadModelText).
 func applyModelStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Command, id, modelCfgID string) (engine.SetResult, error) {
 	res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
-	if err != nil && modelCfgID != "" {
+	if err != nil && modelCfgID != "" && !errors.Is(err, agent.ErrBadCatalog) {
 		if res2, err2 := eng.Set(ctx, fb, engine.Setting{
 			Kind: engine.SettingConfig, ID: modelCfgID, Value: id,
 		}); err2 == nil {
@@ -806,6 +824,19 @@ func applyModelStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Comm
 		}
 	}
 	return res, err
+}
+
+// unreadModelText is the error row for a model change whose answer could not
+// be read (agent.ErrBadCatalog; applyModelStep): the outcome is unknown, and
+// the row says so and names the model craze shows once the screen has read the
+// session back — the one it was on before the call, unless somebody has moved
+// it since, because nothing of that answer was installed.
+func (m Model) unreadModelText() string {
+	shown := m.snap.CurrentModel
+	if shown == "" {
+		shown = m.model
+	}
+	return "model: the agent's answer could not be read — it may have switched; craze still shows " + sanitizeLine(shown)
 }
 
 // setConfigCurrent writes an option's new value into this model's own

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -37,7 +38,9 @@ type Stub struct {
 	startDelay time.Duration
 	n          int
 	failMode   bool
-	failModel  bool
+	// failModel is what the next SetModel answers with instead of switching,
+	// nil for none (FailNextSetModel, FailNextSetModelWith).
+	failModel error
 	// failConfigAt is the SetConfig call that fails, counted from the next
 	// one, or -1 for none. The dialog's apply chain sends more than one, so a
 	// test has to be able to fail the second and not the first.
@@ -389,9 +392,15 @@ func (s *Stub) FailNextSetMode() {
 	s.mu.Unlock()
 }
 
-func (s *Stub) FailNextSetModel() {
+func (s *Stub) FailNextSetModel() { s.FailNextSetModelWith(errors.New("stub: set model failed")) }
+
+// FailNextSetModelWith makes the next SetModel answer err, and change and
+// publish nothing: the kind of failure is the test's to choose —
+// agent.ErrBadCatalog, the live session's answer when the agent's reply to a
+// model change could not be read, among them.
+func (s *Stub) FailNextSetModelWith(err error) {
 	s.mu.Lock()
-	s.failModel = true
+	s.failModel = err
 	s.mu.Unlock()
 }
 
@@ -729,10 +738,9 @@ func stubCallOf(rec agent.AskRecord) stubCall {
 func (s *Stub) SetModel(_ context.Context, cause, id string) (agent.SetOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fail := s.failModel
-	s.failModel = false
-	if fail {
-		return agent.SetOutcome{}, fmt.Errorf("stub: set model failed")
+	if err := s.failModel; err != nil {
+		s.failModel = nil
+		return agent.SetOutcome{}, err
 	}
 	out := s.setModelLocked(cause, id)
 	if to := s.moveAfterSet; to != "" {

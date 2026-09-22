@@ -618,6 +618,14 @@ type revertModelMsg struct {
 	err  error
 	at   uint64
 }
+
+// modelUnreadMsg is a model change coming back with an answer the session
+// could not read (agent.ErrBadCatalog). It is not revertModelMsg: the agent
+// answered and may have switched, so nothing says the model was refused and
+// there is no prev to put back. Nothing of the answer was installed, so the
+// screen reads the session's snapshot back, and the row says the outcome is
+// unknown (unreadModelText).
+type modelUnreadMsg struct{}
 type refreshSnapMsg struct{}
 
 // dblClickMsg is the frame runner's <dblclick:X,Y>: the gesture without the
@@ -1270,13 +1278,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addError(msg.err.Error())
 		return m, nil
 
+	case modelUnreadMsg:
+		// Read back rather than put back: the snapshot is the model the
+		// session is on as far as anyone can say — the one before the call,
+		// or whatever the agent or another client has moved it to since.
+		m.refreshSnap()
+		m.addError(m.unreadModelText())
+		return m, nil
+
 	case modelApplyMsg:
 		// The steps that landed are the truth; the one that did not is named.
 		for _, st := range msg.done {
 			m.addNote(st.note)
-		}
-		if msg.err != nil {
-			m.addError(msg.step + ": " + msg.err.Error())
 		}
 		if msg.gen == m.applyGen {
 			// Only the newest apply settles the rows: the snapshot is re-read
@@ -1287,6 +1300,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, st := range msg.done {
 				m = m.settleStep(st)
 			}
+		}
+		// After the rows are settled, because a model step whose answer could
+		// not be read names the model the screen then shows.
+		switch {
+		case msg.unread:
+			m.addError(m.unreadModelText())
+		case msg.err != nil:
+			m.addError(msg.step + ": " + msg.err.Error())
 		}
 		return m, nil
 

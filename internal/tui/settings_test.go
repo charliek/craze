@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -278,6 +279,123 @@ func TestAFallbackModelChangeEndsOnTheNewModel(t *testing.T) {
 				t.Fatalf("the fallback succeeded, so nothing is the user's to see: %q", texts(m, entryError))
 			}
 		})
+	}
+}
+
+// errUnreadModelAnswer is what the live session answers a model change with
+// when the agent's reply could not be read: agent.ErrBadCatalog as its
+// settings handler wraps it for a member that is not an option, under the
+// call's method.
+var errUnreadModelAnswer = fmt.Errorf("session/set_config_option: %w: member 3 is not an option", agent.ErrBadCatalog)
+
+// unreadModelRow is the one error row a model change whose answer could not be
+// read leaves, naming the model the screen then shows.
+func unreadModelRow(shown string) string {
+	return "model: the agent's answer could not be read — it may have switched; craze still shows " + shown
+}
+
+// TestAModelAnswerThatCouldNotBeReadIsNotARefusal is astra r3 C at `/model`: a
+// model change whose answer the session could not read (agent.ErrBadCatalog)
+// RAN — the agent answered, and may have switched — so it is neither retried
+// through the config-option fallback nor reverted as a refused model. Nothing
+// more is written to the agent, the effort included; the screen reads the
+// session back rather than putting its own prev back; and the one error row
+// says the outcome is unknown and names the model the screen shows.
+//
+// The second case is why it reads back: another client's change lands after
+// the answer and before this model has seen its delta, so prev is no longer
+// what the session is on, and only the snapshot says so.
+//
+// Before the fix the fallback set the model again as a config option under
+// another command id, and the Stub took it: a second write for a change craze
+// could not confirm, and the effort sent after it. Had that write failed too,
+// the screen would have gone back to prev as for a refusal.
+func TestAModelAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// moved is the other client's model, "" for none.
+		moved string
+	}{
+		{"nothing moved since", ""},
+		{"another client moved it since", "composer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, stub := configBackedModel(t, sized(t))
+			stubDeltas(t, stub)
+			stub.FailNextSetModelWith(errUnreadModelAnswer)
+			m.input.SetValue("/model fast high")
+			tm, cmd := m.Update(enter())
+			m = tm.(Model)
+			if m.snap.CurrentModel != "fast" {
+				t.Fatalf("the optimistic value is %q", m.snap.CurrentModel)
+			}
+			msg := runCmd(cmd)
+			if _, ok := msg.(modelUnreadMsg); !ok {
+				t.Fatalf("an answer that could not be read came back as %T %+v", msg, msg)
+			}
+			if n := stubConfigCalls(stub); n != 0 {
+				t.Fatalf("%d option writes reached the agent after an answer that could not be read", n)
+			}
+			want := "grok"
+			if tc.moved != "" {
+				agentSetsModel(stub, tc.moved)
+				want = tc.moved
+			}
+			m = deliver(t, m, msg)
+			if got := stub.Snapshot().CurrentModel; got != want {
+				t.Fatalf("the session is on %q, want %q", got, want)
+			}
+			if m.snap.CurrentModel != want || m.model != want {
+				t.Fatalf("the screen is on %q / %q, want the session's %q", m.snap.CurrentModel, m.model, want)
+			}
+			if errs := texts(m, entryError); len(errs) != 1 || errs[0] != unreadModelRow(want) {
+				t.Fatalf("errors %q, want the one row %q", errs, unreadModelRow(want))
+			}
+			if notes := texts(m, entryNote); len(notes) != 0 {
+				t.Fatalf("notes %q: nothing landed", notes)
+			}
+		})
+	}
+}
+
+// TestModelDialogAnAnswerThatCouldNotBeReadIsNotARefusal is the same for the
+// dialog's model step (applyModelStep): no fallback, and no option step after
+// it either — the chain ends as on any failure, since an option cannot be
+// judged against a catalog nobody could read — the rows read back from the
+// session, and the row says the outcome is unknown instead of naming a
+// refusal.
+func TestModelDialogAnAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
+	m, stub := configBackedModel(t, sized(t))
+	stubDeltas(t, stub)
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyRight)
+	stub.FailNextSetModelWith(errUnreadModelAnswer)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.snap.CurrentModel != "fast" || optionCurrent(m.snap.Config, "effort") != "high" {
+		t.Fatalf("the optimistic rows are %q, effort %q", m.snap.CurrentModel, optionCurrent(m.snap.Config, "effort"))
+	}
+	m = flushCmd(t, m, cmd)
+	if n := stubConfigCalls(stub); n != 0 {
+		t.Fatalf("%d option writes reached the agent after an answer that could not be read", n)
+	}
+	snap := stub.Snapshot()
+	if snap.CurrentModel != "grok" || optionCurrent(snap.Config, "effort") != "medium" {
+		t.Fatalf("the session is on %q, effort %q", snap.CurrentModel, optionCurrent(snap.Config, "effort"))
+	}
+	if m.snap.CurrentModel != "grok" || m.model != "grok" || optionCurrent(m.snap.Config, "effort") != "medium" {
+		t.Fatalf("the rows are %q / %q, effort %q: want the session's", m.snap.CurrentModel, m.model,
+			optionCurrent(m.snap.Config, "effort"))
+	}
+	if errs := texts(m, entryError); len(errs) != 1 || errs[0] != unreadModelRow("grok") {
+		t.Fatalf("errors %q, want the one row %q", errs, unreadModelRow("grok"))
+	}
+	if notes := texts(m, entryNote); len(notes) != 0 {
+		t.Fatalf("notes %q: nothing landed", notes)
 	}
 }
 

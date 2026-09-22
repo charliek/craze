@@ -1580,11 +1580,12 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 // catalog does not list as the model's is an ordinary option's call even if
 // the agent keeps its model there: craze does not refuse an id it has not been
 // shown (the agent is the judge of its own ids, and refuses one it lacks), and
-// nothing about the call said it was a model change. Its reply is then
-// installed by the push's own derivation (applyConfigLocked), so if the answer
-// shows the id to be the model's option the model follows it by the rule an
-// agent's own update follows, and the delta carries the Model section because
-// the answered option is the model's.
+// nothing about the call said it was a model change. If its answer shows the
+// id to be the model's option, the reply is installed as the model change it
+// turned out to be (onSettingsReply) — adopted as the agent's answer to this
+// write, never judged by the rule for the agent's own reports, whose stale
+// marker would keep the model this call moved away from — and the delta carries
+// the Model section because the answered option is the model's.
 //
 // The Model section rides along for any other option too whenever the model
 // is owed one (owedModelLocked): a reply's catalog names the model it belongs
@@ -2719,12 +2720,29 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 // reply was handed here returns that reply, whatever its context or the
 // connection did meanwhile (acp.Conn.callReply).
 //
-// What is installed depends on the call it answers, as that call said when it
-// was made (acp.SettingsReply.ModelChange) — never on the catalogs found here,
-// which the agent's own updates can have changed while it was in flight: one
-// that took the model option away would otherwise turn a model change into an
-// ordinary option's reply and leave the model where it was, the change
-// answered as a success on the old model (astra r2 item 4).
+// What is installed depends on what the call was, and there are two ways of
+// knowing it was a model change:
+//
+//   - the call said so when it was made (acp.SettingsReply.ModelChange), and
+//     then it is installed as one whatever the catalogs found here hold. The
+//     agent's own updates can have changed them while it was in flight: one
+//     that took the model option away would otherwise turn a model change into
+//     an ordinary option's reply and leave the model where it was, the change
+//     answered as a success on the old model (astra r2 item 4).
+//   - the catalog the reply leaves standing — the one it carries, or the
+//     session's when it carries none — lists the option the call set as the
+//     model's. The caller did not know the id was the model's (SetConfig of an
+//     id the catalog it held did not list as one) and the answer shows it. That
+//     answer is the agent's reply to a write of craze's own, not a report of
+//     the agent's to be judged stale: through the push's rule
+//     (applyConfigLocked) a marker a direct set had armed for the very value
+//     this call asked for would suppress it as a stale first appearance, and
+//     the setter would confirm the model it had left while the agent held the
+//     one it was asked for — for good, since every later identical update is a
+//     re-list the same rule ignores (astra r3 P1). "Not known to be the model's
+//     when it was sent" is not evidence of anything.
+//
+// So:
 //
 //   - set_model, and set_config_option on the model's own option, are a MODEL
 //     change (adoptModelLocked). The reply's catalog is the new model's when
@@ -2739,9 +2757,7 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 //     as an agent's own update (applyConfigLocked), with the reply's catalog —
 //     or, when it carries none, the catalog the session holds with the option
 //     at the value it was sent, which is what the setter has always written for
-//     a reply that says nothing. So an option the caller did not know to be
-//     the model's, and the answer shows to be, moves the model by the rule an
-//     update of the agent's own would (SetConfig).
+//     a reply that says nothing.
 //
 // A catalog whose array holds a member that is not an option is refused whole
 // (parseReplyConfigOptions): the error is the call's answer, and nothing of
@@ -2772,11 +2788,18 @@ func (s *session) onSettingsReply(r acp.SettingsReply) error {
 	return nil
 }
 
-// installReplyLocked is onSettingsReply's install, by the call's own word for
-// what it was (onSettingsReply). cfg is the reply's parsed catalog when it
-// carried one. s.mu is held.
+// installReplyLocked is onSettingsReply's install, by what the call was: a
+// model change when it said so as it was made (acp.SettingsReply.ModelChange),
+// or when the catalog the reply leaves standing — its own when it carries one,
+// the session's when it carries none — lists the option it set as the model's
+// (onSettingsReply). cfg is the reply's parsed catalog when it carried one.
+// s.mu is held.
 func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
-	if r.ModelChange {
+	standing := s.snap.Config
+	if r.Catalog.Present {
+		standing = cfg
+	}
+	if r.ModelChange || isModelOptionID(r.ConfigID, standing) {
 		switch {
 		case r.Catalog.Present:
 			s.snap.Config = cfg

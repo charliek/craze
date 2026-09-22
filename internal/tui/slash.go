@@ -563,7 +563,9 @@ type effortNotAppliedMsg struct{ note string }
 
 // applyModelEffort is `/model <id> [effort]`: optimistic, with the same
 // SetModel → SetConfig(model_config) fallback the dialog's model step uses
-// (applyModelStep). A refused model is revertModelMsg, as it always was.
+// (applyModelStep). A refused model is revertModelMsg, as it always was. An
+// answer the session could not read is not a refusal (agent.ErrBadCatalog):
+// it is modelUnreadMsg, with no fallback and no effort sent.
 //
 // The effort, when there is one, is a candidate until the model step has
 // landed, and is then judged against the catalog the session installed for the
@@ -595,7 +597,13 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx := context.Background()
 		res, err := applyModelStep(ctx, eng, cmds[0], cmds[1], id, modelCfgID)
-		if err != nil {
+		switch {
+		case errors.Is(err, agent.ErrBadCatalog):
+			// The agent may have switched, so there is no prev to put back and
+			// no effort to judge: the catalog it would be judged against is
+			// the one nobody could read.
+			return modelUnreadMsg{}
+		case err != nil:
 			return revertModelMsg{prev: prev, err: err, at: at}
 		}
 		if effort == "" {

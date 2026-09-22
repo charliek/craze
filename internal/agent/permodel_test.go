@@ -989,6 +989,110 @@ func TestAModelChangeKeepsItsIdentityInFlight(t *testing.T) {
 	}
 }
 
+// TestAWriteTheAnswerShowsToBeTheModelsIsAModelChange is astra r3 P1: a
+// set_config_option craze sent as an ordinary option's, because the catalog it
+// held did not list the id as the model's, is a model change all the same when
+// the catalog the reply leaves standing lists it as one — and it is installed
+// as one (adoptModelLocked), never by the rule for the agent's own reports,
+// whose stale marker is armed for the very value this write asked for.
+//
+// The schedule, with no concurrency but the fake's own wire:
+//
+//  1. On grok-4.6 — A — SetModel(composer-2.5) — B — sends
+//     set_config_option(model, B). Its reply is substituted on the read loop
+//     with `{"configOptions": []}`: the session adopts B, clears the catalog,
+//     and arms the marker with A against a stale first model option.
+//  2. SetConfig(model, A): the held catalog is empty, so the id is not known to
+//     be the model's and the request is not marked as a model change. The fake
+//     switches to A.
+//  3. The reply names A in the model's own option:
+//     - "the reply's catalog": the fake's own reply, A's whole catalog (the
+//     review's schedule exactly);
+//     - "the session's catalog": the fake answers `{}` (permodel-noreply), and
+//     just ahead of that reply the agent pushes A's catalog — a first
+//     appearance of the model option, at A, which the marker suppresses as it
+//     should. The `{}` keeps that catalog, and it lists the id as the
+//     model's.
+//
+// Before the fix both replies went through the push's rule: the first
+// appearance of the model option at A met the marker for A and was taken for a
+// stale report, and SetConfig answered success with Value B — the provider on
+// A, the snapshot and the fold on B, and no later identical update able to
+// repair it, since each is a re-list of the value the option already has.
+func TestAWriteTheAnswerShowsToBeTheModelsIsAModelChange(t *testing.T) {
+	const onA, onB = "grok-4.6", "composer-2.5"
+	for _, tc := range []struct {
+		name, script string
+		// pushA is whether A's catalog is pushed ahead of the second reply.
+		pushA bool
+	}{
+		{"the reply's catalog", "permodel", false},
+		{"the session's catalog", "permodel-noreply", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := startScript(t, tc.script, false)
+			awaitCatalog(t, s)
+			catalogA := s.Snapshot().Config
+			var replies atomic.Int32
+			var secondMarked atomic.Bool
+			s.client.SetSettingsHandler(func(r acp.SettingsReply) error {
+				switch replies.Add(1) {
+				case 1:
+					r.Catalog = acp.ConfigCatalog{Present: true, Options: json.RawMessage(`[]`)}
+				case 2:
+					secondMarked.Store(r.ModelChange)
+					if tc.pushA {
+						s.onUpdate(configPushOf(catalogA))
+					}
+				}
+				return s.onSettingsReply(r)
+			})
+
+			if out, err := s.SetModel(context.Background(), "c-1/1", onB); err != nil || out.Value != onB {
+				t.Fatalf("SetModel answered (%+v, %v), want %s", out, err, onB)
+			}
+			wantOnModel(t, s.Snapshot(), onB, "")
+			s.mu.Lock()
+			armed := s.modelBeforeSet[onA]
+			s.mu.Unlock()
+			if !armed {
+				t.Fatal("the switch to an empty catalog armed no marker for the model it left")
+			}
+
+			out, err := s.SetConfig(context.Background(), "c-1/2", "model", onA, "")
+			if err != nil {
+				t.Fatalf("SetConfig(model, %s): %v", onA, err)
+			}
+			if replies.Load() != 2 {
+				t.Fatalf("%d settings replies, want two", replies.Load())
+			}
+			if secondMarked.Load() {
+				t.Fatal("the write was sent as a model change: the schedule needs one the session did not know to be")
+			}
+			if out.Value != onA {
+				t.Fatalf("the write confirmed %q, want %s: the agent is on %s", out.Value, onA, onA)
+			}
+			snap := s.Snapshot()
+			wantOnModel(t, snap, onA, permodelFresh[onA])
+			s.mu.Lock()
+			markers, overflow := len(s.modelBeforeSet), s.modelBeforeAny
+			s.mu.Unlock()
+			if markers != 0 || overflow {
+				t.Fatalf("the model option is installed and %d markers (overflow %v) outlive it", markers, overflow)
+			}
+			evs := flushAll(s)
+			own := ownDeltas(evs, "c-1/2")
+			if len(own) != 1 || own[0].State.Model == nil || *own[0].State.Model != onA || own[0].State.Config == nil {
+				t.Fatalf("the write's delta does not say the model it moved to:\n%s", formatEvents(evs))
+			}
+			wantFoldMatchesSnapshot(t, evs, snap)
+			if got := providerCatalog(t, s); got != permodelFresh[onA] {
+				t.Fatalf("the agent holds %s", got)
+			}
+		})
+	}
+}
+
 // replaceLastMember is a reply's configOptions with its last member replaced
 // by member. It runs on the read loop, so it reports nothing: a raw it cannot
 // read is returned as it is, and the case then fails on what it asserts.

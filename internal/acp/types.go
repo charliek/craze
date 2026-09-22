@@ -332,11 +332,15 @@ type SettingsReply struct {
 	// ModelChange is whether the call was a model change — set_model, or a
 	// set_config_option on the option the agent keeps its model in
 	// (Client.SetModelOption) — as the caller that made it said when it made
-	// it. A handler classifies the reply by this and never by the catalogs it
-	// finds when the reply arrives: an update of the agent's own can take the
-	// model option out of the catalog while the call is in flight, and a reply
-	// judged by the catalog then would install a model change as an ordinary
-	// option's and leave the model where it was (plan 025 C1, astra r2 item 4).
+	// it. A handler installs a reply that carries it as a model change whatever
+	// the catalogs it finds when the reply arrives: an update of the agent's
+	// own can take the model option out of the catalog while the call is in
+	// flight, and a reply judged by the catalog then would install a model
+	// change as an ordinary option's and leave the model where it was (plan 025
+	// C1, astra r2 item 4). Its absence says only that the caller did not know:
+	// a set_config_option on an id the caller had not been shown as the
+	// model's is still a model change if the reply's catalog lists it as one,
+	// and the handler reads that there (plan 025, astra r3 P1).
 	ModelChange bool
 	Catalog     ConfigCatalog
 }

@@ -42,6 +42,18 @@ var ErrForeignTurn = acp.ErrForeignTurn
 // forbids (Makefile's acp-import rule).
 var ErrAgentExited = acp.ErrAgentExited
 
+// ErrBadCatalog answers a settings change whose reply could not be read: its
+// configOptions is not a list, or holds a member that is not an option (plan
+// 025 design 1, "malformed is an error"). Nothing of the reply was installed,
+// so the snapshot is exactly as it was before the call — but the call RAN: the
+// agent has answered, and may well have made the change. It is not a refusal,
+// and a client must not treat it as one: no fallback write for a model change
+// (a second write craze did not mean), and no "the model is still X" — only
+// that craze could not read what the agent now holds. It is acp.ErrBadCatalog,
+// re-exported so internal/tui can match it without importing internal/acp
+// (Makefile's acp-import rule), exactly as ErrAgentExited is.
+var ErrBadCatalog = acp.ErrBadCatalog
+
 // ErrPromptCancelled is a prompt Cancel stopped before its turn opened: while it
 // was still waiting for the agent's first command catalog, or once it had been
 // claimed by Begin and before its continuation opened the turn. No turn was
