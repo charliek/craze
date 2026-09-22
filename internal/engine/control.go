@@ -76,7 +76,8 @@ import (
 //     choosing again.
 //   - aborted (ErrCommandAborted; ErrSetOutcomeUnknown for the one Set whose
 //     own outcome a context ending after the settings worker's claim leaves
-//     honestly unknown; and a plain context.Canceled or
+//     honestly unknown; agent.ErrBadCatalog for a Set the agent answered in a
+//     form craze could not read; and a plain context.Canceled or
 //     context.DeadlineExceeded from a command that RAN — a Cancel or Stop
 //     whose session/cancel gave up, an Interject whose deadline passed after
 //     its request was written): a STORED answer whose outcome the engine
@@ -381,6 +382,16 @@ func classify(err error) classification {
 		// announced. A plain, definite failure of this request — STORED, the
 		// code every other failed provider answer gets.
 		return classification{code: "failed", stored: true}
+	case errors.Is(err, agent.ErrBadCatalog):
+		// A Set that RAN and whose answer could not be read (plan 025 design
+		// 1, "malformed is an error"): the agent answered, so the write may
+		// well have happened, and nothing of the answer was installed, so
+		// nothing this side holds says whether it did. That is not a definite
+		// failure — "failed" would invite the same change under a new id
+		// without looking — but an outcome the engine cannot vouch for:
+		// aborted, STORED, and the client re-reads state (astra r5 item 2,
+		// closing plan 025 X14's follow-up).
+		return classification{code: "aborted", stored: true}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A command that RAN and then gave up on its own context: Cancel's or
 		// Stop's session/cancel, an Interject whose deadline passed. Such a

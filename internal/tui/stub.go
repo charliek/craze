@@ -43,8 +43,11 @@ type Stub struct {
 	failModel error
 	// failConfigAt is the SetConfig call that fails, counted from the next
 	// one, or -1 for none. The dialog's apply chain sends more than one, so a
-	// test has to be able to fail the second and not the first.
+	// test has to be able to fail the second and not the first. failConfig is
+	// what it answers with, nil for the Stub's own refusal
+	// (FailNextSetConfigWith).
 	failConfigAt int
+	failConfig   error
 	configCalls  int
 	snap         agent.Snapshot
 	// modelCatalogs is the per-model catalog SetModelCatalogs installs: every
@@ -416,6 +419,18 @@ func (s *Stub) FailNextSetConfig() { s.FailNextSetConfigAfter(0) }
 func (s *Stub) FailNextSetConfigAfter(n int) {
 	s.mu.Lock()
 	s.failConfigAt = s.configCalls + n
+	s.failConfig = nil
+	s.mu.Unlock()
+}
+
+// FailNextSetConfigWith makes the next SetConfig answer err, and change and
+// publish nothing, as FailNextSetModelWith does for SetModel — the fallback
+// `/model` and the dialog's model step take when SetModel is refused, answered
+// agent.ErrBadCatalog, among them.
+func (s *Stub) FailNextSetConfigWith(err error) {
+	s.mu.Lock()
+	s.failConfigAt = s.configCalls
+	s.failConfig = err
 	s.mu.Unlock()
 }
 
@@ -928,7 +943,12 @@ func (s *Stub) SetConfig(_ context.Context, cause, id, value, forModel string) (
 	s.configCalls++
 	if s.failConfigAt == n {
 		s.failConfigAt = -1
-		return agent.SetOutcome{}, fmt.Errorf("stub: set config failed")
+		err := s.failConfig
+		s.failConfig = nil
+		if err == nil {
+			err = fmt.Errorf("stub: set config failed")
+		}
+		return agent.SetOutcome{}, err
 	}
 	if id != "" && id == s.dropOnSet {
 		s.dropOnSet = ""

@@ -895,13 +895,23 @@ func (m Model) settleStep(st applyStep) Model {
 // on it either. Nothing of that answer was installed, so both callers show
 // what the session's snapshot says, and say the outcome is unknown
 // (unreadModelText).
+//
+// The same holds for the fallback's own answer. When the first call was
+// refused and the fallback's answer could not be read, the fallback's error is
+// the step's answer, not the first refusal: the fallback was sent and
+// answered, and may have switched the model, so "refused" is no longer true of
+// where the model is — returned as the refusal, `/model` would put its prev
+// back without reading the session, and the dialog would name a refusal
+// instead of saying the outcome is unknown (astra r5 item 2). Any other
+// fallback error leaves the first refusal as the answer, as it always has.
 func applyModelStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Command, id, modelCfgID string) (engine.SetResult, error) {
 	res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
 	if err != nil && modelCfgID != "" && !errors.Is(err, agent.ErrBadCatalog) {
-		if res2, err2 := eng.Set(ctx, fb, engine.Setting{
+		res2, err2 := eng.Set(ctx, fb, engine.Setting{
 			Kind: engine.SettingConfig, ID: modelCfgID, Value: id,
-		}); err2 == nil {
-			return res2, nil
+		})
+		if err2 == nil || errors.Is(err2, agent.ErrBadCatalog) {
+			return res2, err2
 		}
 	}
 	return res, err

@@ -165,6 +165,17 @@ func (g *pushGate) awaitApplied(t *testing.T) {
 // configPushOf is a config_option_update carrying cfg, in the wire's shape: what
 // the agent sends when it moves an option on its own.
 func configPushOf(cfg []ConfigOption) acp.SessionNotification {
+	// The id is the other helpers' (settings_test.go): onUpdate, driven
+	// directly as the read loop drives it, routes nothing by it.
+	return acp.SessionNotification{
+		SessionID: loadSessionID,
+		Update:    mustJSON(map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": wireOptions(cfg)}),
+	}
+}
+
+// wireOptions is cfg as a configOptions array in the wire's shape: what a
+// push carries and what a settings reply answers with.
+func wireOptions(cfg []ConfigOption) []map[string]any {
 	opts := make([]map[string]any, 0, len(cfg))
 	for _, o := range cfg {
 		values := make([]map[string]string, 0, len(o.SelectValues))
@@ -176,12 +187,7 @@ func configPushOf(cfg []ConfigOption) acp.SessionNotification {
 			"currentValue": o.Current, "options": values,
 		})
 	}
-	// The id is the other helpers' (settings_test.go): onUpdate, driven
-	// directly as the read loop drives it, routes nothing by it.
-	return acp.SessionNotification{
-		SessionID: loadSessionID,
-		Update:    mustJSON(map[string]any{"sessionUpdate": acp.UpdateConfigOption, "configOptions": opts}),
-	}
+	return opts
 }
 
 // withValue is cfg with option id at value, as a fresh slice.
@@ -1088,6 +1094,175 @@ func TestAWriteTheAnswerShowsToBeTheModelsIsAModelChange(t *testing.T) {
 			wantFoldMatchesSnapshot(t, evs, snap)
 			if got := providerCatalog(t, s); got != permodelFresh[onA] {
 				t.Fatalf("the agent holds %s", got)
+			}
+		})
+	}
+}
+
+// selectorCatalog is a catalog with two options of category "model": the model
+// option, first, and review_model — omitted when review is "" — a second
+// selector, naming a model for something other than the session's turns; then
+// an effort select. No fake script advertises such a catalog, so the agent that
+// answers with one is the test itself (newInProcess).
+func selectorCatalog(model, review, effort string) []ConfigOption {
+	models := []SelectValue{{Value: "grok-4.6", Name: "Grok 4.6"}, {Value: "composer-2.5", Name: "Composer 2.5"}}
+	cfg := []ConfigOption{{ID: "model", Name: "Model", Category: "model", Type: "select", Current: model, SelectValues: models}}
+	if review != "" {
+		cfg = append(cfg, ConfigOption{
+			ID: "review_model", Name: "Review model", Category: "model", Type: "select", Current: review, SelectValues: models,
+		})
+	}
+	return append(cfg, ConfigOption{
+		ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: effort,
+		SelectValues: []SelectValue{{Value: "low", Name: "Low"}, {Value: "high", Name: "High"}},
+	})
+}
+
+// TestASecondModelSelectorIsNotTheModel is astra r5 item 1: "the model option"
+// is ONE option — the first of category "model" (ModelConfigOptionIn) —
+// wherever a model change is recognised or applied. A write to any other
+// model-category option is an ordinary option's: it is not sent as a model
+// change (SetConfig), its reply is not installed as one (installReplyLocked),
+// it confirms its own value rather than the model, and its delta carries no
+// Model section. And a model change whose reply brings no catalog moves only
+// the model option (withoutModelOptions): a second selector keeps its value.
+//
+// The agent is the test, over the in-process pipes, so the order of every
+// frame is the wire's own: the request is read, then the agent's push (when
+// there is one) and the reply are written behind it, and the read loop applies
+// them in that order. The session is on A, holding the case's catalog.
+//
+//   - "a push lists it, the reply is {}" is the review's schedule exactly: the
+//     held catalog has no review_model, so SetConfig(review_model, B) goes out
+//     unmarked; the agent's push installs model=A, review_model=B, effort=low
+//     ahead of the reply; the reply is {}. Before the fix the held catalog then
+//     listed review_model as a model-category option, so the reply was taken
+//     for a model change to B: catalogOnModelLocked compared B with the model
+//     option's A, withoutModelOptions moved BOTH selectors to B and dropped
+//     effort, and the session announced B — while the agent's model option
+//     still said A.
+//   - "the reply carries it" is the same answer in the reply's own catalog.
+//     Before the fix it was installed as a model change too: CurrentModel
+//     stayed A only because adoption read the first option, and the write
+//     confirmed the model (A) rather than its own value, with a Model section.
+//   - "the held catalog lists it" is SetConfig's own decision: before the fix
+//     it sent the write as a model change (SetModelOption), and the {} reply
+//     moved the session to B and dropped effort.
+//   - "a model change keeps it" is withoutModelOptions: SetModel(B) answered {}
+//     moves the model option to B and leaves review_model on A. Before the fix
+//     both read B.
+func TestASecondModelSelectorIsNotTheModel(t *testing.T) {
+	const onA, onB = "grok-4.6", "composer-2.5"
+	setReview := func(s *session) (SetOutcome, error) {
+		return s.SetConfig(context.Background(), "c-1/1", "review_model", onB, "")
+	}
+	for _, tc := range []struct {
+		name string
+		held []ConfigOption
+		set  func(*session) (SetOutcome, error)
+		// wantID is the option the request must name on the wire; push, when
+		// set, is written ahead of the reply; reply is its result.
+		wantID string
+		push   []ConfigOption
+		reply  any
+		// marked is whether the request is a model change; value, model and
+		// cfg are what it confirms and the session then holds; deltaModel is
+		// the Model section its delta carries, "" for none.
+		marked            bool
+		value, model, cfg string
+		deltaModel        string
+	}{
+		{
+			name: "a push lists it, the reply is {}", held: selectorCatalog(onA, "", "high"), set: setReview,
+			wantID: "review_model", push: selectorCatalog(onA, onB, "low"), reply: map[string]any{},
+			value: onB, model: onA, cfg: "model=grok-4.6 review_model=composer-2.5 effort=low",
+		},
+		{
+			name: "the reply carries it", held: selectorCatalog(onA, "", "high"), set: setReview,
+			wantID: "review_model", reply: map[string]any{"configOptions": wireOptions(selectorCatalog(onA, onB, "low"))},
+			value: onB, model: onA, cfg: "model=grok-4.6 review_model=composer-2.5 effort=low",
+		},
+		{
+			name: "the held catalog lists it", held: selectorCatalog(onA, onA, "high"), set: setReview,
+			wantID: "review_model", reply: map[string]any{},
+			value: onB, model: onA, cfg: "model=grok-4.6 review_model=composer-2.5 effort=high",
+		},
+		{
+			name: "a model change keeps it", held: selectorCatalog(onA, onA, "high"),
+			set: func(s *session) (SetOutcome, error) {
+				return s.SetModel(context.Background(), "c-1/1", onB)
+			},
+			wantID: "model", reply: map[string]any{},
+			marked: true, value: onB, model: onB, cfg: "model=composer-2.5 review_model=grok-4.6", deltaModel: onB,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newInProcess(t, acp.DialectCursor, nil)
+			s := p.s
+			// The read loop as Start wires it, with each reply's marking
+			// recorded on its way into the install.
+			var marked atomic.Bool
+			p.client.SetUpdateHandler(s.onUpdate)
+			p.client.SetSettingsHandler(func(r acp.SettingsReply) error {
+				marked.Store(r.ModelChange)
+				return s.onSettingsReply(r)
+			})
+			s.mu.Lock()
+			s.snap.CurrentModel = onA
+			s.snap.Config = cloneConfig(tc.held)
+			s.mu.Unlock()
+
+			type answer struct {
+				out SetOutcome
+				err error
+			}
+			done := make(chan answer, 1)
+			go func() {
+				out, err := tc.set(s)
+				done <- answer{out, err}
+			}()
+			req := p.expect(t, acp.MethodSessionSetConfig)
+			var params acp.SetConfigParams
+			if err := json.Unmarshal(req.Params, &params); err != nil || params.ConfigID != tc.wantID || params.Value != onB {
+				t.Fatalf("craze wrote set_config_option %s (%v), want %s=%s", req.Params, err, tc.wantID, onB)
+			}
+			if tc.push != nil {
+				n := configPushOf(tc.push)
+				n.SessionID = "s1"
+				p.notify(t, acp.MethodSessionUpdate, string(mustJSON(n)))
+			}
+			p.reply(t, req.ID, tc.reply)
+			var a answer
+			select {
+			case a = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the setter never came back")
+			}
+
+			if a.err != nil {
+				t.Fatalf("the write answered %v", a.err)
+			}
+			if marked.Load() != tc.marked {
+				t.Fatalf("the request's ModelChange is %v, want %v", marked.Load(), tc.marked)
+			}
+			if a.out.Value != tc.value {
+				t.Fatalf("the write confirmed %q, want %q", a.out.Value, tc.value)
+			}
+			snap := s.Snapshot()
+			wantOnModel(t, snap, tc.model, tc.cfg)
+			evs := flushAll(s)
+			own := ownDeltas(evs, "c-1/1")
+			if len(own) != 1 || own[0].State.Config == nil {
+				t.Fatalf("the write's deltas:\n%s", formatEvents(evs))
+			}
+			if got := cfgString(own[0].State.Config.Options); got != tc.cfg {
+				t.Fatalf("the write's delta says the catalog is %s, want %s", got, tc.cfg)
+			}
+			switch m := own[0].State.Model; {
+			case tc.deltaModel == "" && m != nil:
+				t.Fatalf("the write's delta carries the Model section %q: a second selector's write is not a model change", *m)
+			case tc.deltaModel != "" && (m == nil || *m != tc.deltaModel):
+				t.Fatalf("the write's delta does not say the model it moved to:\n%s", formatEvents(evs))
 			}
 		})
 	}

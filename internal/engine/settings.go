@@ -115,10 +115,11 @@ type setReq struct {
 	//
 	// It is not quite "the provider is about to be asked": the session still
 	// refuses a config change bound to a model the agent has left since the
-	// worker looked (ErrStaleModel, Session.SetConfig's forModel), sending
-	// nothing, and a caller whose context ends in that instant is answered
-	// ErrSetOutcomeUnknown for it — stored "aborted" — for a change that did not
-	// happen (runSet, "The claim").
+	// worker looked (ErrStaleModel, Session.SetConfig's forModel), and answers
+	// any request whose connection has closed before it could be written, in
+	// both cases sending nothing, and a caller whose context ends in that
+	// instant is answered ErrSetOutcomeUnknown for it — stored "aborted" — for a
+	// change that did not happen (runSet, "The claim").
 	claimed chan struct{}
 }
 
@@ -212,8 +213,12 @@ type setAnswer struct {
 // provider has the change or is about to, internal/acp writes a request before
 // it can look at a context at all, and nobody on this side can say whether it
 // landed. The stream says — if the change lands, its delta is published like
-// any other. (The one claimed request the provider is never asked is a config
-// change the session refuses as stale after the claim; runSet, "The claim".)
+// any other. (A claimed request is not always written: the session can still
+// answer one without writing it — a config change it refuses as stale after
+// the claim, or any request whose connection has closed before callRaw
+// reaches its closed check — and a caller whose context ends before that
+// answer is told this sentinel for it all the same, which is true of what it
+// can know; runSet, "The claim".)
 //
 // It is never plain context.Canceled for a claimed request, which would read as
 // "nothing happened", and never a success the caller has waited past its own
@@ -273,9 +278,10 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 			//   - claimed is closed: the request is at the session, on its way
 			//     to the provider. This call's own deadline has passed and it
 			//     says so, with the one answer that is true of what it can know
-			//     (ErrSetOutcomeUnknown) — including, in runSet's one accepted
-			//     exception, for a bound change the session then refuses as
-			//     stale.
+			//     (ErrSetOutcomeUnknown) — including, in runSet's accepted
+			//     exceptions, for a request the session then answers without
+			//     writing it: a bound change it refuses as stale, or one whose
+			//     connection has closed.
 			select {
 			case a := <-r.reply:
 				return a.res, a.err
@@ -440,9 +446,9 @@ func (e *Engine) serveSets() {
 // is decided in ONE locked section, and only then is the request claimed
 // (setReq.claimed). That is what makes the claim mean "the session is about to
 // be asked", so ErrSetOutcomeUnknown is never stored for a change the engine
-// refused (r27 finding 3) — and, but for the one refusal the session makes
-// after the claim (below), never for one that provably did not happen. These
-// can refuse it:
+// refused (r27 finding 3) — and, but for the answers the session can still give
+// after the claim without writing anything (below), never for one that provably
+// did not happen. These can refuse it:
 //
 //   - the engine's gate, which Close or Stop can have shut since this request
 //     was queued: ErrNotAccepting;
@@ -476,8 +482,8 @@ func (e *Engine) serveSets() {
 // can close: the agent's move and the request crossing on the wire, which ACP,
 // with no conditional set, gives the client no way to order (Setting.ForModel).
 //
-// The session's refusal comes after the claim, and that is the one exception
-// to what the claim means, accepted: a caller still waiting gets
+// The session's refusal comes after the claim, and that is an exception to
+// what the claim means, accepted: a caller still waiting gets
 // ErrStaleModel, never stored, exactly as it would from the check here, but a
 // caller whose own context ends before that refusal reaches it is answered
 // ErrSetOutcomeUnknown — stored "aborted", so the same command id replays
@@ -490,6 +496,14 @@ func (e *Engine) serveSets() {
 // had to make it — a callback from its own locked section — and wrote without
 // making it would have its caller answered "not run", retryable, for a write
 // that ran: a resend would make the change twice, and that is the worse error.
+//
+// It is not the only one. Any claimed request whose connection closes after
+// the claim and before the client writes it — callRaw's closed check, in
+// internal/acp — is answered with the connection's error having sent nothing,
+// and a caller whose context ends before that answer reaches it is answered
+// ErrSetOutcomeUnknown in the same way (astra r5 item 3). It is the same
+// accepted gap, left open for the same reason: only the write itself could
+// make the claim exact, and a claim made there is the callback above.
 //
 // The two GATE refusals are preferred to the context error when both are true,
 // which is takeSet's own precedence for a closed engine — it answers everything

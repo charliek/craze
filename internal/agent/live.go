@@ -1565,7 +1565,8 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 }
 
 // SetConfig sets one advertised option. When that option is the one a provider
-// keeps its MODEL in (IsModelConfigOption), setting it IS a model change, by
+// keeps its MODEL in — the model option, the first of category "model"
+// (ModelConfigOptionIn, isModelOptionID) — setting it IS a model change, by
 // SetModel's rules: it is sent as one (acp.Client.SetModelOption), so the
 // reply's install moves CurrentModel with it (onSettingsReply) whatever the
 // catalog holds by then, and the delta carries the Model section beside the
@@ -1586,6 +1587,16 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 // write, never judged by the rule for the agent's own reports, whose stale
 // marker would keep the model this call moved away from — and the delta carries
 // the Model section because the answered option is the model's.
+//
+// Any other option of category "model" is an ordinary option here, sent,
+// installed and confirmed as one: a second selector that names a model for
+// something other than the session's turns. "The model option" is one option
+// wherever a model change is recognised or applied — this call's decision, the
+// reply's install (installReplyLocked), the adoption that reads the model back
+// (adoptModelLocked) and the catalog a change with no catalog of its own
+// leaves (withoutModelOptions) — because any one of them that took a second
+// selector for the model's would move the model to that selector's value
+// while the agent's own model option still named another (astra r5 item 1).
 //
 // The Model section rides along for any other option too whenever the model
 // is owed one (owedModelLocked): a reply's catalog names the model it belongs
@@ -1641,7 +1652,7 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel stri
 			break
 		}
 	}
-	model := isModel || (opt != nil && IsModelConfigOption(*opt))
+	model := isModel || isModelOptionID(id, s.snap.Config)
 	st := &StateDelta{Config: &ConfigState{Options: cloneConfig(s.snap.Config)}}
 	if model {
 		cur := s.snap.CurrentModel
@@ -1660,20 +1671,15 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel stri
 	}
 }
 
-// isModelOptionID reports whether id names the model's option in any of the
-// catalogs given. s.mu is held when one of them is the session's.
-func isModelOptionID(id string, catalogs ...[]ConfigOption) bool {
-	if id == "" {
-		return false
-	}
-	for _, cfg := range catalogs {
-		for _, opt := range cfg {
-			if opt.ID == id && IsModelConfigOption(opt) {
-				return true
-			}
-		}
-	}
-	return false
+// isModelOptionID reports whether id names cfg's model option: the FIRST
+// option of category "model" (ModelConfigOptionIn), which is the one
+// CurrentModel is read from (adoptModelLocked, applyConfigLocked) and the one a
+// change with no catalog of its own moves (withoutModelOptions). A second
+// model-category option is not the model's, and a write to it is not a model
+// change. s.mu is held when cfg is the session's.
+func isModelOptionID(id string, cfg []ConfigOption) bool {
+	opt := ModelConfigOptionIn(cfg)
+	return id != "" && opt != nil && opt.ID == id
 }
 
 // setBarrier runs the test barrier between a setter's provider call and its
@@ -2730,11 +2736,15 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 //     an ordinary option's reply and leave the model where it was, the change
 //     answered as a success on the old model (astra r2 item 4).
 //   - the catalog the reply leaves standing — the one it carries, or the
-//     session's when it carries none — lists the option the call set as the
-//     model's. The caller did not know the id was the model's (SetConfig of an
-//     id the catalog it held did not list as one) and the answer shows it. That
-//     answer is the agent's reply to a write of craze's own, not a report of
-//     the agent's to be judged stale: through the push's rule
+//     session's when it carries none — has the option the call set as its
+//     model option (isModelOptionID: the first of category "model", never a
+//     second selector — a write of one installed as a model change moved the
+//     model to that selector's value while the agent's model option still
+//     named the old one, astra r5 item 1). The caller did not know the id was
+//     the model's (SetConfig of an id the catalog it held did not list as
+//     one) and the answer shows it. That answer is the agent's reply to a
+//     write of craze's own, not a report of the agent's to be judged stale:
+//     through the push's rule
 //     (applyConfigLocked) a marker a direct set had armed for the very value
 //     this call asked for would suppress it as a stale first appearance, and
 //     the setter would confirm the model it had left while the agent held the
@@ -2791,9 +2801,9 @@ func (s *session) onSettingsReply(r acp.SettingsReply) error {
 // installReplyLocked is onSettingsReply's install, by what the call was: a
 // model change when it said so as it was made (acp.SettingsReply.ModelChange),
 // or when the catalog the reply leaves standing — its own when it carries one,
-// the session's when it carries none — lists the option it set as the model's
-// (onSettingsReply). cfg is the reply's parsed catalog when it carried one.
-// s.mu is held.
+// the session's when it carries none — has the option it set as its model
+// option (isModelOptionID; onSettingsReply). cfg is the reply's parsed catalog
+// when it carried one. s.mu is held.
 func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
 	standing := s.snap.Config
 	if r.Catalog.Present {
@@ -2824,10 +2834,12 @@ func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
 }
 
 // catalogOnModelLocked reports whether the catalog the session holds is
-// already model's: by its model option when it has one — which only the
-// agent's own update, or an earlier reply, can have moved there — and by
-// CurrentModel when it has none, so that a set_model to the model the session
-// is already on drops nothing. s.mu is held.
+// already model's: by its model option when it has one — the first of
+// category "model", the one every model change is recognised by
+// (isModelOptionID), which only the agent's own update, or an earlier reply,
+// can have moved there — and by CurrentModel when it has none, so that a
+// set_model to the model the session is already on drops nothing. s.mu is
+// held.
 func (s *session) catalogOnModelLocked(model string) bool {
 	if opt := ModelConfigOptionIn(s.snap.Config); opt != nil {
 		return opt.Current == model
@@ -2840,9 +2852,10 @@ func (s *session) catalogOnModelLocked(model string) bool {
 // design 2 pins for it:
 //
 //  1. CurrentModel is the installed catalog's model option when it has one —
-//     the agent's own word for the model it is now on, which may be the
-//     canonical id of an alias it was sent — and the model that was asked for
-//     when it has none;
+//     the first of category "model" (ModelConfigOptionIn), never a second
+//     selector's value — the agent's own word for the model it is now on,
+//     which may be the canonical id of an alias it was sent — and the model
+//     that was asked for when it has none;
 //  2. noteDirectModelSetLocked, against that NEW catalog: a model option in it
 //     clears every marker, and a catalog without one arms the marker with the
 //     model this change moved away from (r27 finding 2);

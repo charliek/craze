@@ -62,12 +62,13 @@ func classifyTable() []classifyCase {
 		// A Set the agent took whose answer no longer lists the option: it ran.
 		{"agent.ErrOptionGone", agent.ErrOptionGone, "failed", false},
 		// A Set whose answer could not be read (plan 025 design 1, "malformed
-		// is an error"): it ran — the agent answered — and nothing of the
-		// answer was installed. classify names no case for it, so it is the
-		// default: STORED, "failed", like any other provider answer that did
-		// not confirm the change. Wrapped as the live session returns it.
+		// is an error"): it ran — the agent answered, and may have made the
+		// change — and nothing of the answer was installed, so its outcome is
+		// one the engine cannot vouch for: STORED, "aborted", never the
+		// default's "failed", which reads as a definite failure (astra r5
+		// item 2). Wrapped as the live session returns it.
 		{"agent.ErrBadCatalog",
-			fmt.Errorf("session/set_config_option: %w: member 0 is not an option", agent.ErrBadCatalog), "failed", false},
+			fmt.Errorf("session/set_config_option: %w: member 0 is not an option", agent.ErrBadCatalog), "aborted", false},
 		// A command that RAN and gave up on its own context: the write may
 		// already have happened, so the answer is stored and the client re-reads
 		// state rather than resending the work under a new id (r30 finding 1).

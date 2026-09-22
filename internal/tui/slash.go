@@ -564,8 +564,9 @@ type effortNotAppliedMsg struct{ note string }
 // applyModelEffort is `/model <id> [effort]`: optimistic, with the same
 // SetModel → SetConfig(model_config) fallback the dialog's model step uses
 // (applyModelStep). A refused model is revertModelMsg, as it always was. An
-// answer the session could not read is not a refusal (agent.ErrBadCatalog):
-// it is modelUnreadMsg, with no fallback and no effort sent.
+// answer the session could not read — the model call's, or the fallback's —
+// is not a refusal (agent.ErrBadCatalog): it is modelUnreadMsg, with no write
+// after it, the fallback and the effort included.
 //
 // The effort, when there is one, is a candidate until the model step has
 // landed, and is then judged against the catalog the session installed for the

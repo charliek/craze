@@ -583,8 +583,11 @@ func ModelConfigOptionIn(cfg []ConfigOption) *ConfigOption {
 	return nil
 }
 
-// IsModelConfigOption reports whether opt is the option a provider keeps its
-// model in: what makes SetConfig on it a MODEL change as well as a config one.
+// IsModelConfigOption reports whether opt is of the category a provider keeps
+// its model in. That alone does not make a write to it a MODEL change: the
+// model option is the first of the category (ModelConfigOptionIn), and a
+// catalog that lists a second — a selector naming a model for something other
+// than the session's turns — lists an ordinary option (Session.SetConfig).
 func IsModelConfigOption(opt ConfigOption) bool { return opt.Category == modelCategory }
 
 // modeCategory is the category cursor files its mode option under.
@@ -592,7 +595,9 @@ const modeCategory = "mode"
 
 // withoutModelOptions is cfg after a model change that brought no catalog of
 // its own: the mode option and the model option kept, the model option moved
-// to model, and every other option dropped (plan 025 design 2, panel astra 3).
+// to model, and every other option dropped (plan 025 design 2, panel astra 3)
+// — except any other option of category "model", which is kept at its own
+// value.
 //
 // Those others — effort, fast, context, thinking — are per model on cursor,
 // and what cfg holds are the PREVIOUS model's: offering them would offer a
@@ -605,15 +610,31 @@ const modeCategory = "mode"
 // the value the previous catalog left in it, so that the Model section and the
 // Config section of the delta announcing the change say the same thing — and
 // so that a later list carrying the old value is read, in arrival order, as
-// the change it is. A fresh slice: cfg is left as it was.
+// the change it is.
+//
+// Only the model option moves: the first of the category (ModelConfigOptionIn),
+// the one the change was made on and the one CurrentModel is read back from
+// (adoptModelLocked). A second model-category option is a selector of its own
+// — a model for something other than the session's turns — and writing the new
+// model into it would say the agent had moved a selector nobody asked it to
+// move (astra r5 item 1). It is kept at all, where effort and the rest are
+// dropped, because it is not one of the previous model's controls: its values
+// are models, not a model's settings, so the switch is no reason to think it
+// gone, and dropping it would hide a selector the agent still offers. If the
+// new model has no such selector, the agent's next catalog takes it away, as
+// it brings the new model's effort back.
+//
+// A fresh slice: cfg is left as it was.
 func withoutModelOptions(cfg []ConfigOption, model string) []ConfigOption {
 	out := make([]ConfigOption, 0, 2)
+	moved := false
 	for _, opt := range cfg {
 		switch {
-		case IsModelConfigOption(opt):
+		case IsModelConfigOption(opt) && !moved:
+			moved = true
 			opt.Current = model
 			out = append(out, opt)
-		case opt.Category == modeCategory:
+		case IsModelConfigOption(opt), opt.Category == modeCategory:
 			out = append(out, opt)
 		}
 	}

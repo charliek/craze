@@ -399,6 +399,101 @@ func TestModelDialogAnAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
 	}
 }
 
+// TestAFallbackAnswerThatCouldNotBeReadIsNotARefusal is astra r5 item 2 at
+// `/model`: session/set_model is refused ordinarily, the config-option
+// fallback is sent, and ITS answer could not be read (agent.ErrBadCatalog).
+// The fallback ran — the agent answered it and may have switched — so the
+// step's answer is the fallback's uncertainty, not the first call's refusal:
+// no effort after it, no prev put back, the screen read back from the session,
+// and the one row saying the outcome is unknown. The second case is why it
+// reads back, as in TestAModelAnswerThatCouldNotBeReadIsNotARefusal: a change
+// another client made since is only in the snapshot.
+//
+// Before the fix applyModelStep dropped every fallback error and answered with
+// the first refusal, so the command came back as revertModelMsg: the screen
+// went back to prev without reading the session — missing the other client's
+// change too — and the row named a refusal.
+func TestAFallbackAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// moved is the other client's model, "" for none.
+		moved string
+	}{
+		{"nothing moved since", ""},
+		{"another client moved it since", "composer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, stub := configBackedModel(t, sized(t))
+			stubDeltas(t, stub)
+			stub.FailNextSetModel()
+			stub.FailNextSetConfigWith(errUnreadModelAnswer)
+			m.input.SetValue("/model fast high")
+			tm, cmd := m.Update(enter())
+			m = tm.(Model)
+			msg := runCmd(cmd)
+			if _, ok := msg.(modelUnreadMsg); !ok {
+				t.Fatalf("a fallback whose answer could not be read came back as %T %+v", msg, msg)
+			}
+			if n := stubConfigCalls(stub); n != 1 {
+				t.Fatalf("%d option writes reached the agent, want the fallback alone", n)
+			}
+			want := "grok"
+			if tc.moved != "" {
+				agentSetsModel(stub, tc.moved)
+				want = tc.moved
+			}
+			m = deliver(t, m, msg)
+			if m.snap.CurrentModel != want || m.model != want {
+				t.Fatalf("the screen is on %q / %q, want the session's %q", m.snap.CurrentModel, m.model, want)
+			}
+			if errs := texts(m, entryError); len(errs) != 1 || errs[0] != unreadModelRow(want) {
+				t.Fatalf("errors %q, want the one row %q", errs, unreadModelRow(want))
+			}
+			if notes := texts(m, entryNote); len(notes) != 0 {
+				t.Fatalf("notes %q: nothing landed", notes)
+			}
+		})
+	}
+}
+
+// TestModelDialogAFallbackAnswerThatCouldNotBeReadIsNotARefusal is the same
+// for the dialog's model step: the fallback's unreadable answer ends the chain
+// with no option step sent, the rows read back from the session, and the row
+// says the outcome is unknown (modelApplyMsg.unread). Before the fix the chain
+// ended on the first call's refusal with unread false, and the row named it.
+func TestModelDialogAFallbackAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
+	m, stub := configBackedModel(t, sized(t))
+	stubDeltas(t, stub)
+	m.input.SetValue("/model")
+	tm, _ := m.Update(enter())
+	m = tm.(Model)
+	m = pressKey(t, m, tea.KeyDown)
+	m = pressKey(t, m, tea.KeyTab)
+	m = pressKey(t, m, tea.KeyRight)
+	stub.FailNextSetModel()
+	stub.FailNextSetConfigWith(errUnreadModelAnswer)
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	m = flushCmd(t, m, cmd)
+	if n := stubConfigCalls(stub); n != 1 {
+		t.Fatalf("%d option writes reached the agent, want the fallback alone", n)
+	}
+	snap := stub.Snapshot()
+	if snap.CurrentModel != "grok" || optionCurrent(snap.Config, "effort") != "medium" {
+		t.Fatalf("the session is on %q, effort %q", snap.CurrentModel, optionCurrent(snap.Config, "effort"))
+	}
+	if m.snap.CurrentModel != "grok" || m.model != "grok" || optionCurrent(m.snap.Config, "effort") != "medium" {
+		t.Fatalf("the rows are %q / %q, effort %q: want the session's", m.snap.CurrentModel, m.model,
+			optionCurrent(m.snap.Config, "effort"))
+	}
+	if errs := texts(m, entryError); len(errs) != 1 || errs[0] != unreadModelRow("grok") {
+		t.Fatalf("errors %q, want the one row %q", errs, unreadModelRow("grok"))
+	}
+	if notes := texts(m, entryNote); len(notes) != 0 {
+		t.Fatalf("notes %q: nothing landed", notes)
+	}
+}
+
 // TestAFallbackCompletionOlderThanAnotherClientsChangeIsNotWritten is the
 // second failure in r23 finding 3, and the one the revision guard exists for:
 // the dialog's model step lands through the fallback (a Config delta), another
