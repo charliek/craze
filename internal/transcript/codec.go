@@ -118,11 +118,12 @@ type wireAskEnding struct {
 }
 
 type wireTurn struct {
-	ID      string          `json:"id,omitempty"`
-	Text    string          `json:"text,omitempty"`
-	Origin  string          `json:"origin,omitempty"`
-	At      time.Time       `json:"at,omitzero"`
-	Foreign json.RawMessage `json:"foreign,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Origin    string          `json:"origin,omitempty"`
+	At        time.Time       `json:"at,omitzero"`
+	Foreign   json.RawMessage `json:"foreign,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
 }
 
 // wireSettings keeps each list section under the event codec's own section
@@ -267,8 +268,8 @@ func encodeHeader(jw *jsonWriter, s *Snapshot) ([]byte, error) {
 	for _, e := range s.Ended {
 		h.Ended = append(h.Ended, wireAskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
-	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil {
-		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC()}
+	if t := s.Turn; t.ID != "" || t.Text != "" || t.Origin != "" || !t.At.IsZero() || t.Foreign != nil || t.Truncated {
+		h.Turn = &wireTurn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Truncated: t.Truncated}
 		if h.Turn.Foreign, err = agent.EncodeForeignTurnInfo(t.Foreign); err != nil {
 			return nil, fail("turn", err)
 		}
@@ -608,7 +609,7 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 		s.Ended = append(s.Ended, AskEnding{ID: e.ID, Kind: e.Kind, Outcome: e.Outcome, By: e.By, At: e.At.UTC()})
 	}
 	if t := w.Turn; t != nil {
-		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC()}
+		s.Turn = Turn{ID: t.ID, Text: t.Text, Origin: t.Origin, At: t.At.UTC(), Truncated: t.Truncated}
 		var err error
 		if s.Turn.Foreign, err = agent.DecodeForeignTurnInfo(t.Foreign); err != nil {
 			return fail("turn", err)

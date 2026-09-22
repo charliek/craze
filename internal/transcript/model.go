@@ -147,6 +147,11 @@ type Turn struct {
 	// Foreign is the last foreign-turn bracket: Running while the agent runs
 	// a turn of its own.
 	Foreign *agent.ForeignTurnInfo
+	// Truncated reports that the snapshot this model was restored from
+	// carried only the head of Text, over ItemCap (plan 024 §3.5), so a
+	// client can say so. A model folded from the event stream never sets it;
+	// the next turn started replaces Text whole.
+	Truncated bool
 }
 
 // Settings is every StateDelta section as the last delta that carried it left

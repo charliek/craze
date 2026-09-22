@@ -117,6 +117,9 @@ func TestFoldClassifiesEveryEventKind(t *testing.T) {
 			`const EventScratch = EventType("scratch")`,
 			"const (\n\tunrelated = 1\n\tEventScratch = EventType(\"scratch\")\n)",
 			`const EventScratch EventType = EventType("scratch")`,
+			`const EventScratch (EventType) = "scratch"`,
+			"type Kind = EventType\n\nconst EventScratch Kind = \"scratch\"",
+			"type Kind = EventType\n\ntype Louder = Kind\n\nconst EventScratch Louder = \"scratch\"",
 		} {
 			found, err := withScratch(t, scratch)
 			if err != nil {
@@ -145,10 +148,12 @@ func TestFoldClassifiesEveryEventKind(t *testing.T) {
 			}
 		}
 		// What is not an EventType is not refused: an iota block of another
-		// type, and untyped strings.
+		// type, untyped strings, and a DEFINED type built on EventType (a
+		// distinct type in Go, not EventType itself — r3 finding 2).
 		for _, scratch := range []string{
 			"type scratchKind int\n\nconst (\n\tscratchA scratchKind = iota\n\tscratchB\n)",
 			`const scratchText = "scratch"`,
+			"type K EventType\n\nconst EventScratch K = \"scratch\"",
 		} {
 			if _, err := withScratch(t, scratch); err != nil {
 				t.Fatalf("%s: %v", scratch, err)
@@ -266,6 +271,13 @@ func eventTypeConsts(t *testing.T, dir string) []string {
 //   - an untyped spec whose value converts a string literal, the type Go
 //     infers: `EventScratch = EventType("scratch")` (r2 finding 8).
 //
+// "Typed EventType" is read generously, since a const spec's type can spell
+// EventType in ways that are not the bare identifier: parenthesised
+// (`(EventType)`), or through a type alias of EventType declared anywhere in
+// dir's non-test sources, followed transitively (`type Kind = EventType`,
+// `type Louder = Kind`; r3 finding 2). A DEFINED type (`type K EventType`, no
+// `=`) is a distinct type in Go and is never read as EventType.
+//
 // Any other declaration that makes an EventType constant, or might, is an
 // error rather than a skip (the guard would otherwise miss a kind): a typed
 // spec whose value is not a literal; an untyped value that mentions EventType
@@ -279,6 +291,44 @@ func scanEventTypeConsts(dir string) ([]string, error) {
 		return nil, fmt.Errorf("reading %s: %v", dir, err)
 	}
 	fset := token.NewFileSet()
+	type parsed struct {
+		name string
+		file *ast.File
+	}
+	var files []parsed
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %v", name, err)
+		}
+		files = append(files, parsed{name: name, file: f})
+	}
+
+	// First pass, every file: collect dir's type aliases of EventType by their
+	// declaration's right-hand side (`type X = <rhs>`). A spec with no `=` is a
+	// DEFINED type, not an alias, and is left out — resolvesToEventType then
+	// never reads it as EventType.
+	aliasRHS := map[string]ast.Expr{}
+	for _, p := range files {
+		for _, decl := range p.file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok || !ts.Assign.IsValid() {
+					continue
+				}
+				aliasRHS[ts.Name.Name] = ts.Type
+			}
+		}
+	}
+
 	names := map[string]bool{} // every EventType constant read
 	var out []string
 	// Checked once every file has been read, when names is complete.
@@ -288,15 +338,8 @@ func scanEventTypeConsts(dir string) ([]string, error) {
 		typed bool       // the repeated spec was typed EventType
 	}
 	var unread []pending
-	for _, e := range entries {
-		file := e.Name()
-		if e.IsDir() || !strings.HasSuffix(file, ".go") || strings.HasSuffix(file, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, file), nil, 0)
-		if err != nil {
-			return nil, fmt.Errorf("parsing %s: %v", file, err)
-		}
+	for _, p := range files {
+		file, f := p.name, p.file
 		for _, decl := range f.Decls {
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.CONST {
@@ -312,10 +355,10 @@ func scanEventTypeConsts(dir string) ([]string, error) {
 				switch {
 				case vs.Type == nil && len(vs.Values) == 0:
 					if last != nil {
-						unread = append(unread, pending{where: where + " (an implicit repetition)", exprs: last.Values, typed: isEventTypeName(last.Type)})
+						unread = append(unread, pending{where: where + " (an implicit repetition)", exprs: last.Values, typed: resolvesToEventType(last.Type, aliasRHS)})
 					}
 					continue
-				case isEventTypeName(vs.Type):
+				case resolvesToEventType(vs.Type, aliasRHS):
 					for i, n := range vs.Names {
 						if i >= len(vs.Values) {
 							return nil, fmt.Errorf("%s: EventType %s has no value of its own", file, n.Name)
@@ -339,13 +382,17 @@ func scanEventTypeConsts(dir string) ([]string, error) {
 						}
 						unread = append(unread, pending{where: file + ": " + n.Name, exprs: vs.Values[i : i+1]})
 					}
+				default:
+					// vs.Type names neither EventType nor an unreadable form of
+					// it (an unrelated type, e.g. another iota-typed const):
+					// nothing to read, nothing to flag.
 				}
 				last = vs
 			}
 		}
 	}
 	for _, p := range unread {
-		if p.typed || slices.ContainsFunc(p.exprs, func(x ast.Expr) bool { return mentionsEventType(x, names) }) {
+		if p.typed || slices.ContainsFunc(p.exprs, func(x ast.Expr) bool { return mentionsEventType(x, names, aliasRHS) }) {
 			return nil, fmt.Errorf("%s declares an EventType constant in a form the guard cannot read: spell it `Name EventType = \"kind\"` or `Name = EventType(\"kind\")`", p.where)
 		}
 	}
@@ -356,9 +403,64 @@ func scanEventTypeConsts(dir string) ([]string, error) {
 	return out, nil
 }
 
+// isEventTypeName reports whether x is exactly the bare identifier EventType
+// — literalKind's and mentionsEventType's view of a value-position
+// conversion (`EventType("kind")`), which stays strict: a parenthesised or
+// aliased spelling used as a conversion (`(EventType)("kind")`, `Kind("kind")`)
+// is not a second accepted spelling, it is a form the guard cannot read
+// (mentionsEventType still catches the literal EventType identifier nested
+// inside one and refuses it, rather than skipping it). resolvesToEventType is
+// the generous reading, for a const spec's declared type only.
 func isEventTypeName(x ast.Expr) bool {
 	id, ok := x.(*ast.Ident)
 	return ok && id.Name == "EventType"
+}
+
+// unwrapParens strips any parenthesisation around x, so `(EventType)` and
+// `((EventType))` both read as the identifier they wrap.
+func unwrapParens(x ast.Expr) ast.Expr {
+	for {
+		p, ok := x.(*ast.ParenExpr)
+		if !ok {
+			return x
+		}
+		x = p.X
+	}
+}
+
+// resolvesToEventType reports whether x — a const spec's declared type —
+// denotes EventType: the bare identifier, any parenthesisation of it, or a
+// type alias of it from aliasRHS (every `type X = <rhs>` in dir), followed
+// transitively (`type Kind = EventType`, `type Louder = Kind`). aliasRHS is
+// collected once for the whole scan, across every non-test file, so an alias
+// is found whichever file declares it. A DEFINED type (`type K EventType`) has
+// no entry in aliasRHS and so never resolves — it is a distinct type, not
+// EventType, and not an event kind. A cycle (`type A = B; type B = A`, which
+// cannot arise from real Go source but costs nothing to guard) resolves to
+// false rather than looping.
+func resolvesToEventType(x ast.Expr, aliasRHS map[string]ast.Expr) bool {
+	id, ok := unwrapParens(x).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	seen := map[string]bool{}
+	for {
+		if id.Name == "EventType" {
+			return true
+		}
+		if seen[id.Name] {
+			return false
+		}
+		seen[id.Name] = true
+		rhs, ok := aliasRHS[id.Name]
+		if !ok {
+			return false
+		}
+		id, ok = unwrapParens(rhs).(*ast.Ident)
+		if !ok {
+			return false
+		}
+	}
 }
 
 // literalKind reads a kind's string from x: a string literal where the spec is
@@ -375,13 +477,17 @@ func literalKind(x ast.Expr, typed bool) (string, bool) {
 	return v, err == nil
 }
 
-// mentionsEventType reports whether x names the EventType type or one of its
-// constants anywhere in it.
-func mentionsEventType(x ast.Expr, names map[string]bool) bool {
+// mentionsEventType reports whether x names the EventType type, one of its
+// constants, or an alias of it (resolvesToEventType) anywhere in it.
+func mentionsEventType(x ast.Expr, names map[string]bool, aliasRHS map[string]ast.Expr) bool {
 	found := false
 	ast.Inspect(x, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && (id.Name == "EventType" || names[id.Name]) {
-			found = true
+		if id, ok := n.(*ast.Ident); ok {
+			if id.Name == "EventType" || names[id.Name] {
+				found = true
+			} else if _, isAlias := aliasRHS[id.Name]; isAlias && resolvesToEventType(id, aliasRHS) {
+				found = true
+			}
 		}
 		return !found
 	})

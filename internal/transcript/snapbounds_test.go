@@ -273,6 +273,49 @@ func TestMandatoryStateOverTheBudgetIsRefused(t *testing.T) {
 		}
 		snapshotOf(t, m, 6<<20)
 	})
+
+	// TestMandatoryStateOverTheBudgetIsRefused's turn case (r3 finding 3): the
+	// running turn's own Text is mandatory state, exactly the way an open
+	// ask's body is. A 5 MiB prompt no longer blocks every snapshot the way an
+	// uncapped Text did (mandatory alone, over budget, whatever else the
+	// session holds): the mandatory turn is its head, capped and Truncated,
+	// same as the ask above. What is left uncapped is the user row addUser
+	// wrote to the main transcript at TurnStarted — a transcript entry like
+	// any other, so it follows the window's own rule: carried whole when it
+	// fits, and if it is the newest entry and does not, ErrSnapshotTooLarge
+	// names it, not the (now-capped) mandatory turn.
+	t.Run("a 5 MiB prompt: the turn's own text is capped, its user row follows the window", func(t *testing.T) {
+		body := strings.Repeat("p", 5<<20)
+		m := New(Options{})
+		foldAll(t, m, true, sequenced([]agent.Event{
+			{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted, Text: body}, At: at(1)},
+		})...)
+		if _, err := m.Snapshot(budget); !errors.Is(err, ErrSnapshotTooLarge) || !strings.Contains(err.Error(), "newest") {
+			t.Fatalf("the mandatory turn is capped, but its 5 MiB user row is the main transcript's newest entry and does not fit beside it in a 4 MiB budget: %v", err)
+		}
+		// With room for the row, the mandatory turn is still only its head:
+		// the row alone is required to carry the prompt whole.
+		s, b := snapshotOf(t, m, 16<<20)
+		if !s.Turn.Truncated || len(s.Turn.Text) != ItemCap || !strings.HasPrefix(body, s.Turn.Text) {
+			t.Fatalf("the turn's text is its head: %d bytes, truncated %v", len(s.Turn.Text), s.Turn.Truncated)
+		}
+		if e := s.Main.Entries[len(s.Main.Entries)-1]; e.Kind != KindUser || e.Text != body {
+			t.Fatalf("the user row is carried whole: %v, %d bytes", e.Kind, len(e.Text))
+		}
+		for _, r := range func() []*Model { x, y := restoredBoth(t, s, b, Options{}); return []*Model{x, y} }() {
+			st := r.State()
+			if !st.Turn.Truncated || len(st.Turn.Text) != ItemCap {
+				t.Fatalf("a restored client cannot tell the turn was truncated: %+v", st.Turn)
+			}
+			if h := r.History(); h.Main.Entries[len(h.Main.Entries)-1].Text != body {
+				t.Fatal("the restored user row is not whole")
+			}
+			r.Fold(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-2", Phase: agent.TurnStarted, Text: "next"}, At: at(2), Seq: 2})
+			if st := r.State(); st.Turn.Truncated {
+				t.Fatalf("a new turn started replaces Text whole: %+v", st.Turn)
+			}
+		}
+	})
 }
 
 // outputCapTool is a tool report at internal/agent/tools.go's output caps —

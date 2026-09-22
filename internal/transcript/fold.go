@@ -309,6 +309,8 @@ func foldTurn(m *Model, ev agent.Event) {
 	case agent.TurnStarted:
 		at := m.stamp(ev.At)
 		m.turn.ID, m.turn.Text, m.turn.Origin, m.turn.At = tu.ID, tu.Text, tu.Origin, at
+		// The event carries Text whole, so a head a snapshot truncated is gone.
+		m.turn.Truncated = false
 		m.fc.state = true
 		_, text := agent.SplitShellContext(tu.Text)
 		m.Main.addUser(text, at)

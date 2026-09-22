@@ -788,19 +788,25 @@ func toWireError(err error) *wireError {
 }
 
 // remoteError is the *RemoteError that decoding w yields, built without a
-// round trip, nil for nil. The message is taken as the JSON carries it: the
-// encoder writes each byte that is not part of valid UTF-8 as U+FFFD
-// (encoding/json's rule, per byte), so the decoded message differs from
-// Error()'s whenever Error() was not valid UTF-8 — a path in an os error,
-// say; craze's own messages and a provider's (oneLine) always are. Making the
-// same replacement here keeps this value byte for byte what every decoder of
-// the body holds (TestEncodeEventHandsBackWhatTheBodyDecodesTo). The check is
-// one pass over the message, and the copy only happens for an invalid one.
+// round trip, nil for nil. Message and Class are taken as the JSON carries
+// them: the encoder writes each byte that is not part of valid UTF-8 as
+// U+FFFD (encoding/json's rule, per byte), so either field can differ from
+// what was published whenever the source was not valid UTF-8 — a path in an
+// os error, say, or a Class this build did not construct; craze's own
+// messages and classes always are. Making the same replacement here keeps
+// this value byte for byte what every decoder of the body holds
+// (TestEncodeEventHandsBackWhatTheBodyDecodesTo). Code is an int and carries
+// no such risk. The check is one pass per field, and the copy only happens
+// for an invalid one.
 func remoteError(w *wireError) *RemoteError {
 	if w == nil {
 		return nil
 	}
-	return &RemoteError{Message: asJSONCarriesIt(w.Message), Class: w.Class, Code: w.Code}
+	return &RemoteError{
+		Message: asJSONCarriesIt(w.Message),
+		Class:   EventErrClass(asJSONCarriesIt(string(w.Class))),
+		Code:    w.Code,
+	}
 }
 
 // asJSONCarriesIt is s as encoding/json writes it and reads it back: s itself

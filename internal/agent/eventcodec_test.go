@@ -970,6 +970,7 @@ func TestEncodeEventHandsBackWhatTheBodyDecodesTo(t *testing.T) {
 		fmt.Errorf("the turn failed: %w", &acp.RPCError{Code: -32603, Message: "Internal error"}),
 		fmt.Errorf("%w: exit 0", acp.ErrAgentExited),
 		&RemoteError{Message: "a later craze's error", Class: "quantum", Code: 7},
+		&RemoteError{Message: "boom", Class: EventErrClass("\xff"), Code: 7},
 		errors.New(""),
 		errors.New("bad \xff\xfe bytes, a cut rune \xe2\x82, a good one é and a real \uFFFD"),
 		errors.New("\x80"),

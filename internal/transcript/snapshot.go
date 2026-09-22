@@ -21,9 +21,11 @@ const DefaultSnapshotBytes = 4 << 20
 // ItemCap is the per-item cap of a snapshot's mandatory sections (plan 024
 // §3.5): an open ask's body text — a plan's Plan and Overview, a question's
 // prompts and its options' labels and descriptions, a permission's tool text
-// — and a roster row's Prompt and Output are each carried as their head, cut
-// back to a rune boundary, when they are longer, and the ask or row is marked
-// Truncated.
+// — a roster row's Prompt and Output, and the current turn's Text are each
+// carried as their head, cut back to a rune boundary, when they are longer,
+// and the ask, row or turn is marked Truncated (r3 finding 3: the turn's Text
+// is otherwise mandatory and uncapped, so a multi-MiB prompt makes every
+// snapshot ErrSnapshotTooLarge until the next turn).
 const ItemCap = 256 << 10
 
 // ErrSnapshotTooLarge is Snapshot's refusal: the mandatory sections alone, or
@@ -158,7 +160,7 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 		FinishSeq:   c.finishSeq,
 		Todos:       c.todos,
 		Ended:       c.ended,
-		Turn:        c.turn,
+		Turn:        capTurn(c.turn),
 		Replaying:   c.replaying,
 		Settings:    c.settings,
 		Queue:       c.queue,
@@ -435,6 +437,19 @@ func capAgent(info agent.SubagentInfo) (agent.SubagentInfo, bool) {
 	info.Prompt, a = headOf(info.Prompt, ItemCap)
 	info.Output, b = headOf(info.Output, ItemCap)
 	return info, a || b
+}
+
+// capTurn is the current turn with its Text capped at ItemCap (r3 finding
+// 3): a running turn with a multi-MiB prompt is carried as its head rather
+// than making the snapshot's mandatory sections ErrSnapshotTooLarge. t.
+// Truncated is kept once set, since a snapshot may be built from a cut that
+// already carries a prior snapshot's own truncation (Restore, then Snapshot
+// again with no turn started since).
+func capTurn(t Turn) Turn {
+	cut := false
+	t.Text, cut = headOf(t.Text, ItemCap)
+	t.Truncated = t.Truncated || cut
+	return t
 }
 
 // capAsk is an open ask with its body's text capped at ItemCap: the payload
