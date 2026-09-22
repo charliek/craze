@@ -289,13 +289,24 @@ func TestNativeSetModeMidTurn(t *testing.T) {
 // answer with a value the HARNESS held, never with the one they asked for, and
 // the last delta by Seq must be what the snapshot says.
 //
-// Under -race it is also the lock check: the mutation and the enqueue are one
-// locked section, so the deltas cannot be published in the other order from the
-// one the snapshot ended up in.
+// The interleaving is forced, not hoped for (r6 finding 3): the mode seam
+// holds each setter after the harness took its switch and before it
+// announces, until BOTH have got there. From then on the harness holds one
+// mode — whichever switch landed second — and a setter that answered with
+// what it asked for would answer "plan" or "ask" by its argument; one that
+// reads the harness back inside the locked section answers the same word as
+// its rival. Under -race it is also the lock check: the mutation and the
+// enqueue are one locked section, so the deltas cannot be published in the
+// other order from the one the snapshot ended up in.
 func TestNativeRacingSetModesEachAnswerWhatTheHarnessHeld(t *testing.T) {
 	for range 20 {
 		f := newNativeFixture(t)
 		s := f.started(Options{})
+		var both sync.WaitGroup
+		both.Add(2)
+		s.mu.Lock()
+		s.modeSeam = func() { both.Done(); both.Wait() }
+		s.mu.Unlock()
 		var wg sync.WaitGroup
 		values := make([]string, 2)
 		for i, id := range []string{"plan", "ask"} {
@@ -310,21 +321,50 @@ func TestNativeRacingSetModesEachAnswerWhatTheHarnessHeld(t *testing.T) {
 			}()
 		}
 		wg.Wait()
+		held := harnessModeOf(s)
 		for i, got := range values {
-			if got != "plan" && got != "ask" {
-				t.Fatalf("setter %d answered %q, want a mode the harness held", i, got)
+			if got != held {
+				t.Fatalf("setter %d answered %q; the harness held %q when both announced", i, got, held)
 			}
 		}
 		last := ""
 		for _, mode := range nativeModeDeltas(deltaSettled(t, s)) {
 			last = mode
 		}
+		if last != held {
+			t.Fatalf("the last mode delta is %q and the harness says %q", last, held)
+		}
 		if got := s.Snapshot().CurrentMode; got != last {
 			t.Fatalf("the last mode delta is %q and the snapshot says %q", last, got)
 		}
-		if got := harnessModeOf(s); got != last {
-			t.Fatalf("the last mode delta is %q and the harness says %q", last, got)
-		}
 		_ = s.Close()
+	}
+}
+
+// TestNativeSetModeRacingCloseIsRefused is r6 finding 1: a Close that lands
+// between the harness taking the switch and the announcement must be seen by
+// the announcement. Without the guard the setter rewrote a closed session's
+// snapshot, enqueued into a log that had stopped admitting (a ticket of Seq
+// 0), and reported success. The window is pinned from inside it with the mode
+// seam, as the cancel window is with cancelSeam.
+func TestNativeSetModeRacingCloseIsRefused(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	s.mu.Lock()
+	s.modeSeam = func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}
+	s.mu.Unlock()
+	out, err := s.SetMode(context.Background(), "", "plan")
+	if err == nil || err.Error() != "agent: session closed" {
+		t.Fatalf("SetMode racing Close = (%+v, %v), want the closed refusal", out, err)
+	}
+	if out.Ticket != nil || out.Value != "" {
+		t.Fatalf("a refused SetMode answered %+v", out)
+	}
+	if got := s.Snapshot().CurrentMode; got != "agent" {
+		t.Fatalf("a Close mid-SetMode left the closed snapshot in %q", got)
 	}
 }

@@ -148,11 +148,13 @@ def parallel_step(*calls: ToolCall, finish: str = "", interleaved: bool = True) 
 ScriptStep = Step | Callable[[RecordedRequest], Step]
 
 
-# PLAN_PATH_RE finds the plan file's absolute path in a request body. Every
-# plan-mode reminder names it in backticks (internal/harness/reminders.go), and
-# that is the only place it is written down: the file name carries the session's
-# own id and its start stamp, so nothing outside craze can guess it.
-PLAN_PATH_RE = re.compile(r"`([^`]+\.plan\.md)`")
+# PLAN_PATH_RE finds the plan file's absolute path in a request body: the
+# backticked path inside a <system-reminder> block, which is the only place the
+# harness writes it down (internal/harness/reminders.go) and the only text a
+# test may take it from — a prompt of the user's own can name a decoy (r6
+# finding 4). The file name carries the session's own id and its start stamp,
+# so nothing outside craze can guess it.
+PLAN_PATH_RE = re.compile(r"<system-reminder>.*?`([^`]+\.plan\.md)`.*?</system-reminder>", re.S)
 
 
 def plan_path_in(request: RecordedRequest) -> str:

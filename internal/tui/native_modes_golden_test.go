@@ -28,13 +28,15 @@ import (
 // first heading becomes the card's name, so it is what the frame shows.
 const nativePlanText = "# Ship the widget\n\n1. read main.go\n2. write the widget\n"
 
-// nativePlanPathRE finds the plan file's absolute path in a request body. Every
-// plan-mode reminder names it in backticks (harness/reminders.go), which is the
-// only way anything outside the harness can learn it: the name carries the
-// session's own id and its start stamp.
-var nativePlanPathRE = regexp.MustCompile("`([^`]+\\.plan\\.md)`")
+// nativePlanPathRE finds the plan file's absolute path in a request body: the
+// backticked path inside a <system-reminder> part, which is the only place the
+// harness writes it down (harness/reminders.go) and the only text a test may
+// take it from — a prompt of the user's own can name a decoy (r6 finding 4).
+// The name carries the session's own id and its start stamp, so nothing
+// outside craze can guess it.
+var nativePlanPathRE = regexp.MustCompile("(?s)<system-reminder>.*?`([^`]+\\.plan\\.md)`.*?</system-reminder>")
 
-// nativePlanPathIn is the plan file named by the reminder in call, or "".
+// nativePlanPathIn is the plan file the reminder in call names, or "".
 func nativePlanPathIn(call fantasy.Call) string {
 	for _, msg := range call.Prompt {
 		for _, p := range msg.Content {

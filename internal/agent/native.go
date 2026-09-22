@@ -157,6 +157,12 @@ type nativeSession struct {
 	// and CancelTurn are ONE critical section" (plan 023 §3.5) is a fact
 	// about a window, and a window can only be pinned from inside it.
 	cancelSeam func()
+	// modeSeam runs in SetMode between the harness taking the switch and the
+	// announcement that publishes it, with s.mu released. **A test seam: nil
+	// in production**, set only by a test in this package. It exists so a test
+	// can hold two setters at that point and prove each announces what the
+	// harness holds rather than what it asked for (r6 finding 3).
+	modeSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -1484,7 +1490,7 @@ func (s *nativeSession) enqueueDeltaLocked(cause string, base Event, st *StateDe
 // mode touches the file system.
 func (s *nativeSession) SetMode(_ context.Context, cause, modeID string) (SetOutcome, error) {
 	s.mu.Lock()
-	hs := s.hs
+	hs, seam := s.hs, s.modeSeam
 	ids := modeIDs(s.snap.Modes)
 	s.mu.Unlock()
 	if hs == nil {
@@ -1497,7 +1503,13 @@ func (s *nativeSession) SetMode(_ context.Context, cause, modeID string) (SetOut
 	if err := hs.SetMode(id); err != nil {
 		return SetOutcome{}, phraseModeError(err, id)
 	}
-	mode, t := s.announceMode(cause)
+	if seam != nil {
+		seam()
+	}
+	mode, t, err := s.announceMode(cause)
+	if err != nil {
+		return SetOutcome{}, err
+	}
 	return SetOutcome{Value: mode, Ticket: t}, nil
 }
 
@@ -1513,12 +1525,21 @@ func (s *nativeSession) SetMode(_ context.Context, cause, modeID string) (SetOut
 // what an *agent*-initiated update fills and a client retires a plan offer on
 // it (plan 021 correction 20). s.hs is read under s.mu, as refreshCurrentLocked
 // reads it: the harness's own mode lock is a leaf and waits on nothing.
-func (s *nativeSession) announceMode(cause string) (string, *Ticket) {
+//
+// A Close that ran between the harness taking the switch and this section is
+// seen here, under the same lock that Close's transition takes: the snapshot
+// of a closed session is not rewritten and nothing is enqueued into a log that
+// has stopped admitting, so the setter answers "closed" rather than a success
+// whose delta went nowhere (r6 finding 1).
+func (s *nativeSession) announceMode(cause string) (string, *Ticket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return "", nil, fmt.Errorf("agent: session closed")
+	}
 	mode := nativeCurrentMode(s.hs.Mode())
 	s.snap.CurrentMode = mode
-	return mode, s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &mode})
+	return mode, s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &mode}), nil
 }
 
 // phraseModeError is a refused mode switch in the adapter's words: a closed
