@@ -436,10 +436,16 @@ type Model struct {
 	turnSeq int
 	// sawAssistantSeq is the turn that said something implementable: a turn
 	// that only thought, only ran tools or only sent empty chunks left no plan
-	// behind. planOfferSeq is the turn whose ending armed the offer, and
-	// planDeadSeq the turn whose offer an action has killed — which is what
-	// stops a late EventDone re-arming an offer Esc, /clear or a card retired.
+	// behind. planApprovedSeq is the turn in which a plan ask was ACCEPTED,
+	// which is the other way a turn leaves a plan to implement: on the native
+	// provider a plan is a file the model wrote and offered through
+	// exit_plan_mode, and such a turn can end with no assistant text at all
+	// (plan 023 §3.6, correction 2). planOfferSeq is the turn whose ending armed
+	// the offer, and planDeadSeq the turn whose offer an action has killed —
+	// which is what stops a late EventDone re-arming an offer Esc, /clear or a
+	// card retired.
 	sawAssistantSeq int
+	planApprovedSeq int
 	planOfferSeq    int
 	planDeadSeq     int
 	// turnID is the engine turn turnSeq names: what the model is looking at, and
@@ -2363,8 +2369,10 @@ func (m Model) planEarnsOffer(stopReason string) bool {
 		return false
 	}
 	// A turn that only thought, or only ran tools, said nothing to implement —
-	// and so did one whose chunks were all empty.
-	if m.sawAssistantSeq != m.turnSeq {
+	// and so did one whose chunks were all empty. Unless it had a plan
+	// approved: native's plan is the file exit_plan_mode presented, and a turn
+	// of write(plan) + exit_plan_mode says nothing in words (plan 023 §3.6).
+	if m.sawAssistantSeq != m.turnSeq && m.planApprovedSeq != m.turnSeq {
 		return false
 	}
 	if m.snap.Provider.Kind(m.snap.CurrentMode) != agent.ModePlan {
@@ -2882,6 +2890,7 @@ func (m *Model) takeAskEcho(cause string) bool {
 // card for — the hidden paths, a card the cancel mask dropped, and an ending
 // that carries its own Body, which by definition never had an opening.
 func (m *Model) applyAskEnded(cause string, u *agent.AskUpdate) {
+	m.notePlanApproved(u)
 	if m.takeAskEcho(cause) {
 		// This model's own answer, applied in the Update that sent it.
 		return
@@ -2897,6 +2906,23 @@ func (m *Model) applyAskEnded(cause string, u *agent.AskUpdate) {
 		m.addAnswerNotes(c.ask, u.Answers)
 	case c.kind == cardPlan:
 		m.addNote(planNote(c.plan, u.Accepted))
+	}
+}
+
+// notePlanApproved records the turn an accepted plan belongs to, so a turn that
+// left a plan behind and said nothing in words still earns the implement offer
+// (planEarnsOffer, plan 023 correction 2). It is the first thing applyAskEnded
+// does, ahead of the echo check, because the two routes to an accepted plan —
+// this model answering the card itself, whose ending comes back as its own echo
+// and is skipped, and an accept from anywhere else — must both land here.
+//
+// Only an answered acceptance counts. An automatic one (Auto) is craze's own
+// headless policy, where nothing draws a card: the plan is never written to the
+// transcript either (applyEvent's EventPlan arm skips an Auto plan), so an offer
+// to implement "the plan above" would point at nothing on screen.
+func (m *Model) notePlanApproved(u *agent.AskUpdate) {
+	if u.Kind == agent.AskPlan && u.Outcome == agent.AskAnswered && u.Accepted {
+		m.planApprovedSeq = m.turnSeq
 	}
 }
 

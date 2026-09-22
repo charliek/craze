@@ -307,23 +307,31 @@ func GxProvider() Provider {
 //
 // Effort and interject came with H2's tool loop, which gives a turn later
 // steps, and with the steer that merges into the next one (plan 019 §3.10,
-// D-34). H5's three tools bring the other three: ask_user_question and
-// exit_plan_mode open a question and a plan ask on the session's registry, and
-// todo_write fills the tasks panel (plan 023 §3.4). Modes stay off until the
-// second PR switches them on — SetMode is still ErrUnsupported and native's
-// open() still refuses a mode — and the cards are flipped here, ahead of them,
-// so a question raised between the two is never hidden and skipped (§5's
-// interim). The display label is its own field so the UI can later say "craze"
-// without touching the id that flags and config hold.
+// D-34). H5 brings the rest: ask_user_question and exit_plan_mode open a
+// question and a plan ask on the session's registry, todo_write fills the
+// tasks panel, and the harness's three modes turn the chip, `/plan` `/ask`
+// `/agent`, Shift+Tab and `--plan`/`--ask` on (plan 023 §3.4, §3.6).
+//
+// The mode table and the implement prompt are cursor's: native's ids are the
+// same three words, so craze's canonical mode commands (`/plan`, `--ask`, the
+// cycle) resolve to the same spellings here as there, and a plan approved on
+// native is implemented by the same offer sending the same sentence. What
+// stays zero is everything ACP-shaped.
+//
+// The display label is its own field so the UI can later say "craze" without
+// touching the id that flags and config hold.
 func NativeProvider() Provider {
 	return Provider{
-		name:        nativeName,
-		displayName: nativeName,
-		hidden:      true,
-		inProcess:   true,
+		name:            nativeName,
+		displayName:     nativeName,
+		hidden:          true,
+		inProcess:       true,
+		modeKinds:       cursorModeKinds,
+		implementPrompt: cursorImplementPrompt,
 		capabilities: Capabilities{
 			Effort:    true,
 			Interject: true,
+			Modes:     true,
 			Todos:     true,
 			AskCards:  true,
 			PlanCards: true,

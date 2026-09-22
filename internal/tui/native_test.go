@@ -26,9 +26,17 @@ type nativeScriptedModel struct {
 	provider, wire string
 	steps          [][]fantasy.StreamPart
 	calls          int
+	// onCall, when set, runs on every request before the step answering it.
+	// It is what lets a scripted turn act on something only the request knows
+	// — the plan file's absolute path, which a plan-mode reminder names and
+	// nothing outside the harness can guess (nativePlanPathIn, plan 023 §3.2).
+	onCall func(fantasy.Call)
 }
 
-func (m *nativeScriptedModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
+func (m *nativeScriptedModel) Stream(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	if m.onCall != nil {
+		m.onCall(call)
+	}
 	if m.calls >= len(m.steps) {
 		return nil, errors.New("nativeScriptedModel: no step queued")
 	}

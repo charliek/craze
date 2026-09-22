@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import zip_longest
@@ -141,6 +143,47 @@ def parallel_step(*calls: ToolCall, finish: str = "", interleaved: bool = True) 
     return Step(calls=calls, finish=finish, interleaved=interleaved)
 
 
+# ScriptStep is one entry of a script: a fixed response, or a function of the
+# request that took it.
+ScriptStep = Step | Callable[[RecordedRequest], Step]
+
+
+# PLAN_PATH_RE finds the plan file's absolute path in a request body: the
+# backticked path inside a <system-reminder> block, which is the only place the
+# harness writes it down (internal/harness/reminders.go) and the only text a
+# test may take it from — a prompt of the user's own can name a decoy (r6
+# finding 4). The file name carries the session's own id and its start stamp,
+# so nothing outside craze can guess it.
+PLAN_PATH_RE = re.compile(r"<system-reminder>.*?`([^`]+\.plan\.md)`.*?</system-reminder>", re.S)
+
+
+def plan_path_in(request: RecordedRequest) -> str:
+    """The plan file the reminder in request names, or "" if there is none.
+
+    A message's content is a string on this wire, and a list of typed parts on
+    others, so both are read: what is being looked for is the text, wherever
+    the encoder happened to put it.
+
+    A request names exactly one plan file or none; two different paths —
+    a scripted prompt quoting a reminder of its own — is a broken test and
+    raises rather than picking one (r7 finding 1).
+    """
+    found: set[str] = set()
+    for msg in request.messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            chunks = [content]
+        elif isinstance(content, list):
+            chunks = [p.get("text", "") for p in content if isinstance(p, dict)]
+        else:
+            chunks = []
+        for text in chunks:
+            found.update(PLAN_PATH_RE.findall(text))
+    if len(found) > 1:
+        raise AssertionError(f"the request names {len(found)} plan files: {sorted(found)}")
+    return next(iter(found), "")
+
+
 @dataclass
 class SSEFixture:
     """A background HTTP server answering POST <base_url>/chat/completions.
@@ -160,9 +203,11 @@ class SSEFixture:
         self._mode = "ok"
         self._sticky = Step(text=("ok",))
         # None means "answer every request with _sticky"; a list is consumed
-        # one Step per request, and running off its end is a test bug the
+        # one entry per request, and running off its end is a test bug the
         # fixture reports loudly rather than papering over (_reply_exhausted).
-        self._script: list[Step] | None = None
+        # An entry is a Step, or a callable taking the RecordedRequest that
+        # took it and answering with one.
+        self._script: list[ScriptStep] | None = None
         self.unscripted = 0
         self.requests: list[RecordedRequest] = []
         fixture = self
@@ -179,11 +224,20 @@ class SSEFixture:
                 except json.JSONDecodeError:
                     body = {"_unparsed": raw.decode("utf-8", "replace")}
                 auth = self.headers.get("Authorization", "")
+                record = RecordedRequest(self.path, auth, body)
                 with fixture._lock:
                     n = len(fixture.requests)
-                    fixture.requests.append(RecordedRequest(self.path, auth, body))
+                    fixture.requests.append(record)
                     mode = fixture._mode
                     step = fixture._take_step_locked()
+                # A scripted entry may be a function of the request that took
+                # it, which is how a step answers with something only the
+                # request knows -- the plan file's absolute path, which a
+                # plan-mode reminder names and nothing out here can guess
+                # (plan 023 §3.2). It runs outside the lock, because it is a
+                # test's own code.
+                if callable(step):
+                    step = step(record)
                 if mode == "ok":
                     if step is None:
                         self._reply_exhausted(n)
@@ -267,20 +321,22 @@ class SSEFixture:
                 reasoning=tuple(reasoning_parts or []),
             )
 
-    def set_script(self, steps: list[Step]) -> None:
+    def set_script(self, steps: list[ScriptStep]) -> None:
         """Answer request i with steps[i]; a request past the end fails (400).
 
         This is how a tool loop is declared: each Step is one model response,
         so a list like [call_step(...), call_step(...), answer(...)] is a
-        two-call turn that then ends.
+        two-call turn that then ends. An entry may instead be a callable of the
+        request that took it, for a step whose arguments only that request can
+        supply.
         """
         with self._lock:
             self._mode = "ok"
             self._script = list(steps)
             self.unscripted = 0
 
-    def _take_step_locked(self) -> Step | None:
-        """The response for this request. self._lock is held."""
+    def _take_step_locked(self) -> ScriptStep | None:
+        """The entry for this request. self._lock is held."""
         if self._script is None:
             return self._sticky
         if not self._script:

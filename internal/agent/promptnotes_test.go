@@ -601,7 +601,7 @@ func TestNativeCloseSynthesizesAnEndingForAnUnrunContinuation(t *testing.T) {
 func TestNativeStartFailedIsNoted(t *testing.T) {
 	f := newNativeFixture(t)
 	dir := filepath.Join(t.TempDir(), "journal")
-	s := f.session(Options{Mode: "plan", JournalDir: dir})
+	s := f.session(Options{Mode: "architecting", JournalDir: dir})
 	w := journalOf(t, s.log)
 	if err := s.Start(t.Context()); err == nil {
 		t.Fatal("the native session started in a mode it has none of")
@@ -613,7 +613,7 @@ func TestNativeStartFailedIsNoted(t *testing.T) {
 	if len(failures) != 1 {
 		t.Fatalf("%d start_failed diags, want one (%v)", len(failures), lines)
 	}
-	if msg, _ := failures[0]["errMessage"].(string); !strings.Contains(msg, "not supported") {
+	if msg, _ := failures[0]["errMessage"].(string); !strings.Contains(msg, `mode "architecting"`) {
 		t.Fatalf("start_failed errMessage %q, want the adapter's refusal", msg)
 	}
 }

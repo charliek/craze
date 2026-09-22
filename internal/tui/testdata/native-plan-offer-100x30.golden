@@ -1,3 +1,11 @@
+❯ plan it                                                                                           
+✓ ask  present the plan                                                                             
+PLAN Ship the widget                                                                                
+Ship the widget                                                                                     
+                                                                                                    
+1. read main.go                                                                                     
+2. write the widget                                                                                 
+plan Ship the widget → accepted                                                                     
                                                                                                     
                                                                                                     
                                                                                                     
@@ -15,16 +23,8 @@
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-❯ /linux-test   run the Linux tests (project)                                                       
-  /linux-notes  the user's own notes (user)                                                         
-──────────────────────────────────────────────────────────────────────────────────────────── craze ─
-❯ /lin                                                                                              
+────────────────────────────────────────────────────────────────────────────────────────── plan it ─
+❯ enter implements this plan  ·  type to refine  ·  shift+tab leaves plan mode                      
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ native │ Echo │ 0m                                                                             
-◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
+◆ plan · shift+tab · ▸▸ bypass permissions on                                                       

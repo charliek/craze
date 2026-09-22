@@ -1084,11 +1084,17 @@ func endingText(w *nativeWatcher) string {
 	return b.String()
 }
 
-// TestNativeExitPlanModeIsDeniedWhileModesAreOff is plan 023 §5's interim,
-// exactly: the three tools are advertised and the cards work, but no mode can
-// be entered until PR 2, so the gate refuses exit_plan_mode by name wherever it
-// is called. The model reads grok-build's text and no ask is opened.
-func TestNativeExitPlanModeIsDeniedWhileModesAreOff(t *testing.T) {
+// TestNativeExitPlanModeIsDeniedOutsidePlanMode is correction 17, end to end
+// through the adapter: exit_plan_mode is ReadOnly, so only the gate's check by
+// NAME keeps it from running in agent mode and inviting the model to write a
+// plan file where nothing may be planned. The model reads grok-build's text and
+// no ask is opened.
+//
+// Until plan 023's PR 2 this was the whole story — no mode could be entered at
+// all — and the case carried the interim's two assertions (SetMode
+// ErrUnsupported, Modes off). Those are now TestNativeSetMode's and
+// TestNativeProviderIsRegisteredHidden's; what is left is the rule itself.
+func TestNativeExitPlanModeIsDeniedOutsidePlanMode(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{Interactive: true})
 	w := newNativeWatcher(t, s)
@@ -1112,37 +1118,41 @@ func TestNativeExitPlanModeIsDeniedWhileModesAreOff(t *testing.T) {
 	if got := s.Asks().Resolved(); len(got) != 0 {
 		t.Fatalf("the registry recorded %+v", got)
 	}
-	// SetMode is still the refusal PR 2 removes, and the capability that draws
-	// the chip is still off.
-	if _, err := s.SetMode(context.Background(), "", "plan"); err != ErrUnsupported {
-		t.Fatalf("SetMode = %v, want ErrUnsupported until PR 2", err)
-	}
-	if s.Snapshot().Provider.Capabilities().Modes {
-		t.Fatal("Modes is on; PR 1 leaves it off (plan 023 §5)")
+	// The session was in agent mode throughout, which is what the gate judged
+	// by: nothing here entered a mode.
+	if mode := s.Snapshot().CurrentMode; mode != "agent" {
+		t.Fatalf("the session is in %q mode", mode)
 	}
 }
 
-// planModeFixture is a native session whose HARNESS runs in plan mode, through
-// NewNative's own options seam. The adapter still refuses agent.Options.Mode
-// and still reports no Modes capability — that is PR 2's work — so this is the
-// one way to reach exit_plan_mode's behaviour from here, and it is the same
-// session, gate, tools and registry a mode switch will give it.
+// planModeFixture is a native session in plan mode, through the adapter's own
+// Options.Mode — the path `--plan` takes since plan 023's PR 2, rather than the
+// harness options seam these cases reached for while the adapter still refused
+// a mode. It is the same session, gate, tools and registry a mode switch gives.
 // The plan file is the path it answers with. A session opened in plan mode
 // creates it there and then (harness.Open), before any turn has written a
 // transcript, so it is found on disk rather than derived from one.
 func planModeFixture(t *testing.T, opts Options) (*nativeFixture, *nativeSession, string) {
 	t.Helper()
 	f := newNativeFixture(t)
-	f.edit = func(o *harness.Options) { o.Mode = "plan" }
+	opts.Mode = "plan"
 	s := f.started(opts)
+	return f, s, planFileIn(t, f)
+}
+
+// planFileIn is the one plan file under f's harness home, and the assertion
+// that there is exactly one: entering plan mode is what creates it — at Open
+// or at SetMode — and nothing else under the home is named like it.
+func planFileIn(t *testing.T, f *nativeFixture) string {
+	t.Helper()
 	plans, err := filepath.Glob(filepath.Join(f.dir, "sessions", "*", "*"+planSuffix))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plans) != 1 {
-		t.Fatalf("%d plan files under %s, want the one a plan-mode session creates", len(plans), f.dir)
+		t.Fatalf("%d plan files under %s, want the one plan mode creates", len(plans), f.dir)
 	}
-	return f, s, plans[0]
+	return plans[0]
 }
 
 // planSuffix is how store.PlanPath spells a transcript's plan file, taken from

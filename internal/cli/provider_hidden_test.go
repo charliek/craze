@@ -189,16 +189,21 @@ func TestProviderIDsNeverNameAHiddenProvider(t *testing.T) {
 }
 
 // TestInProcessProviderRefusesSpawnFlags is plan 018 §3.4's usage errors: an
-// in-process provider has no binary to spawn and no modes, so --agent-bin,
-// CRAZE_AGENT_BIN and --ask/--plan are refused with exit 2 in all three
-// commands, whether the provider came from the flag or the environment.
+// in-process provider has no binary to spawn, so --agent-bin and
+// CRAZE_AGENT_BIN are refused with exit 2 in all three commands, whether the
+// provider came from the flag or the environment.
+//
+// --ask/--plan is the other half, and from plan 023 §3.6 it is keyed on the
+// MODES capability rather than on "in-process": native has the harness's three
+// modes now and takes both flags (TestRefuseInProcessLeavesModedProvidersAlone),
+// so the mode rows here are the planted hidden provider, which is in-process
+// with no capabilities at all — exactly the shape the refusal is still for.
 func TestInProcessProviderRefusesSpawnFlags(t *testing.T) {
 	const (
-		binMsg  = ": --agent-bin cannot be used with provider native, which runs inside craze"
-		envMsg  = ": CRAZE_AGENT_BIN cannot be used with provider native, which runs inside craze; unset it"
-		askMsg  = "craze: --ask cannot be used with provider native, which has no modes"
-		planMsg = "craze: --plan cannot be used with provider native, which has no modes"
+		binMsg = ": --agent-bin cannot be used with provider native, which runs inside craze"
+		envMsg = ": CRAZE_AGENT_BIN cannot be used with provider native, which runs inside craze; unset it"
 	)
+	askMsg, planMsg := modeRefusal("ask"), modeRefusal("plan")
 	for _, tc := range []struct {
 		name string
 		tui  []string // the root command's flags; nil runs NewRootCmd with argv instead
@@ -209,20 +214,21 @@ func TestInProcessProviderRefusesSpawnFlags(t *testing.T) {
 		{name: "craze --agent-bin", tui: []string{"--provider", "native", "--agent-bin", "/bin/true"}, want: "craze" + binMsg},
 		{name: "craze CRAZE_AGENT_BIN", tui: []string{"--provider", "native"},
 			env: map[string]string{"CRAZE_AGENT_BIN": "/bin/true"}, want: "craze" + envMsg},
-		{name: "craze --ask", tui: []string{"--provider", "native", "--ask"}, want: askMsg},
+		{name: "craze --ask", tui: []string{"--provider", hiddenID, "--ask"}, want: askMsg},
 		{name: "craze --plan from the environment's provider", tui: []string{"--plan"},
-			env: map[string]string{"CRAZE_PROVIDER": "native"}, want: planMsg},
+			env: map[string]string{"CRAZE_PROVIDER": hiddenID}, want: planMsg},
 		{name: "prompt --agent-bin", argv: []string{"prompt", "--provider", "native", "--agent-bin", "/bin/true", "hi"}, want: "craze" + binMsg},
 		{name: "prompt CRAZE_AGENT_BIN", argv: []string{"prompt", "--provider", "native", "hi"},
 			env: map[string]string{"CRAZE_AGENT_BIN": "/bin/true"}, want: "craze" + envMsg},
-		{name: "prompt --ask", argv: []string{"prompt", "--provider", "native", "--ask", "hi"}, want: askMsg},
+		{name: "prompt --ask", argv: []string{"prompt", "--provider", hiddenID, "--ask", "hi"}, want: askMsg},
 		{name: "prompt --plan from the environment's provider", argv: []string{"prompt", "--plan", "hi"},
-			env: map[string]string{"CRAZE_PROVIDER": "native"}, want: planMsg},
+			env: map[string]string{"CRAZE_PROVIDER": hiddenID}, want: planMsg},
 		{name: "frame --agent-bin", argv: []string{"frame", "--provider", "native", "--agent-bin", "/bin/true"}, want: "craze frame" + binMsg},
 		{name: "frame CRAZE_AGENT_BIN", argv: []string{"frame", "--provider", "native"},
 			env: map[string]string{"CRAZE_AGENT_BIN": "/bin/true"}, want: "craze frame" + envMsg},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			plantHidden(t)
 			crazeHome(t)
 			t.Setenv("CRAZE_PROVIDER", "")
 			t.Setenv("CRAZE_AGENT_BIN", "")
@@ -248,9 +254,10 @@ func TestInProcessProviderRefusesSpawnFlags(t *testing.T) {
 	}
 }
 
-// TestRefuseInProcessLeavesSpawnedProvidersAlone: the refusal is for
-// in-process providers only; every ACP provider takes --agent-bin and the
-// modes exactly as before, and native with neither is let through.
+// TestRefuseInProcessLeavesSpawnedProvidersAlone: the binary half of the
+// refusal is for in-process providers only; every ACP provider takes
+// --agent-bin and the modes exactly as before, and native with neither is let
+// through.
 func TestRefuseInProcessLeavesSpawnedProvidersAlone(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "/bin/true")
 	for _, p := range agent.Providers() {
@@ -262,6 +269,36 @@ func TestRefuseInProcessLeavesSpawnedProvidersAlone(t *testing.T) {
 	if err := refuseInProcess("craze", agent.NativeProvider(), "", ""); err != nil {
 		t.Fatalf("native with no spawn flags: %v", err)
 	}
+}
+
+// TestRefuseInProcessLeavesModedProvidersAlone is plan 023 §3.6's key: the
+// mode half asks the provider whether it HAS modes, not whether craze spawns
+// it. Native runs in process and has the harness's three, so --ask and --plan
+// go through on all three callers; an in-process provider with none is still
+// refused, which is what keeps the refusal a live rule rather than dead code.
+//
+// The one function is every caller that can carry a mode (prompt and a fresh
+// TUI session; frame has no mode flag and passes ""), so this is the whole
+// surface.
+func TestRefuseInProcessLeavesModedProvidersAlone(t *testing.T) {
+	t.Setenv("CRAZE_AGENT_BIN", "")
+	p := plantHidden(t)
+	for _, mode := range []string{"ask", "plan"} {
+		if err := refuseInProcess("craze", agent.NativeProvider(), "", mode); err != nil {
+			t.Fatalf("native --%s: %v", mode, err)
+		}
+		err := refuseInProcess("craze", p, "", mode)
+		if err == nil || err.Error() != modeRefusal(mode) {
+			t.Fatalf("%s --%s = %v, want %q", hiddenID, mode, err, modeRefusal(mode))
+		}
+	}
+}
+
+// modeRefusal is the usage error refuseInProcess gives the planted hidden
+// provider for --ask or --plan: one spelling of the message, for the table
+// above and the case beside it.
+func modeRefusal(mode string) string {
+	return "craze: --" + mode + " cannot be used with provider " + hiddenID + ", which has no modes"
 }
 
 // TestInProcessRefusalSkipsALoad: --continue and --resume start the indexed

@@ -439,10 +439,10 @@ func endings(t *testing.T, evs []Event, stop string) error {
 
 // TestNativeProviderIsRegisteredHidden: the native provider resolves by id
 // and is listed nowhere (plan 018 §3.4), is in-process, shows its label, and
-// has exactly the capabilities the harness backs today. Modes is the one H5
-// leaves off in this PR: SetMode is still ErrUnsupported and open() still
-// refuses a mode, so the chip, the three slash commands and Shift+Tab must
-// stay hidden (plan 023 §5's interim).
+// has exactly the capabilities the harness backs. Modes came with plan 023's
+// PR 2, and with them the mode table and the implement prompt the plan offer
+// needs: without the table the chip has no colour and the offer has no mode to
+// go to (tui's implementModeID), and without the prompt it would send nothing.
 func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 	p, err := ProviderByName("native")
 	if err != nil {
@@ -451,9 +451,17 @@ func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 	if !p.Hidden() || !p.InProcess() || p.DisplayName() != "native" {
 		t.Fatalf("native is hidden=%v inProcess=%v label %q", p.Hidden(), p.InProcess(), p.DisplayName())
 	}
-	want := Capabilities{Effort: true, Interject: true, Todos: true, AskCards: true, PlanCards: true}
+	want := Capabilities{Effort: true, Interject: true, Modes: true, Todos: true, AskCards: true, PlanCards: true}
 	if got := p.Capabilities(); got != want {
 		t.Fatalf("Capabilities = %+v, want %+v", got, want)
+	}
+	for id, kind := range map[string]ModeKind{"agent": ModeImplement, "plan": ModePlan, "ask": ModeReadOnly} {
+		if got := p.ModeKind(id); got != kind {
+			t.Fatalf("ModeKind(%q) = %v, want %v", id, got, kind)
+		}
+	}
+	if got := p.ImplementPrompt(); got != "Implement the plan above." {
+		t.Fatalf("ImplementPrompt = %q", got)
 	}
 	if slices.Contains(ProviderNames(), "native") {
 		t.Fatalf("ProviderNames lists native: %q", ProviderNames())
@@ -514,8 +522,15 @@ func TestNativeStart(t *testing.T) {
 		!reflect.DeepEqual(opt.SelectValues, []SelectValue{{Value: "low", Name: "low"}, {Value: "high", Name: "high"}}) {
 		t.Fatalf("EffortOption = %+v, want low/high at high", opt)
 	}
-	if len(snap.Modes) != 0 || len(snap.Commands) != 0 || FastOption(snap) != nil {
-		t.Fatalf("a native snapshot advertises modes %v, commands %v, fast %v", snap.Modes, snap.Commands, FastOption(snap))
+	// The three modes are cursor's ids, so every spelling ResolveMode knows
+	// reaches them, and a session with no Options.Mode is in agent mode
+	// (plan 023 §3.6). Commands and the fast toggle stay native's two nos.
+	wantModes := []ModeInfo{{ID: "agent", Name: "Agent"}, {ID: "plan", Name: "Plan"}, {ID: "ask", Name: "Ask"}}
+	if !reflect.DeepEqual(snap.Modes, wantModes) || snap.CurrentMode != "agent" {
+		t.Fatalf("a native snapshot advertises modes %+v at %q, want %+v at agent", snap.Modes, snap.CurrentMode, wantModes)
+	}
+	if len(snap.Commands) != 0 || FastOption(snap) != nil {
+		t.Fatalf("a native snapshot advertises commands %v, fast %v", snap.Commands, FastOption(snap))
 	}
 	// Nothing is written until a turn has output.
 	if got := f.transcripts(); len(got) != 0 {
@@ -562,7 +577,12 @@ func TestNativeStartRefusals(t *testing.T) {
 	}{
 		{name: "session/load", opts: Options{LoadSessionID: "abc"},
 			want: []string{"agent: native does not support session/load yet"}},
-		{name: "a mode", opts: Options{Mode: "plan"}, want: []string{`mode "plan"`, "no modes"}},
+		// A mode native has not got. The three it has start a session
+		// (TestNativeStartsInPlanMode); an id the vocabulary cannot resolve is
+		// refused rather than quietly ignored, because a caller that asked for
+		// plan mode and was given agent mode would edit the workspace.
+		{name: "an unknown mode", opts: Options{Mode: "architecting"},
+			want: []string{`mode "architecting"`, "agent, plan, ask"}, is: harness.ErrUnknownMode},
 		{name: "no model table", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", t.TempDir())
 		}, want: []string{`native: no models configured — run "craze import gx"`}, is: errNoModels},
@@ -1374,17 +1394,16 @@ func TestNativeSetConfig(t *testing.T) {
 }
 
 // TestNativeUnsupported: what the harness does not have says so before
-// anything runs. Interject is not here since C12: it is supported, and is
-// refused with ErrNotInTurn while the session is idle (TestNativeInterject).
+// anything runs. Two verbs have left this list: Interject in C12 (it is
+// supported, and refused with ErrNotInTurn while the session is idle,
+// TestNativeInterject) and SetMode with plan 023's PR 2, where the harness
+// gained the three modes (TestNativeSetMode). What is left is the one config
+// option a native session does not advertise.
 func TestNativeUnsupported(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
-	for name, err := range map[string]error{
-		"SetMode": setModeErr(s, "plan"),
-	} {
-		if !errors.Is(err, ErrUnsupported) {
-			t.Errorf("%s = %v, want ErrUnsupported", name, err)
-		}
+	if _, err := s.SetConfig(context.Background(), "", "fast", "true"); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("SetConfig(fast) = %v, want ErrUnsupported", err)
 	}
 	// The three Answer* verbs left the seam with plan 021's C8b: a client
 	// answers through the ask registry, and native's is empty because nothing
@@ -1398,11 +1417,11 @@ func TestNativeUnsupported(t *testing.T) {
 	}
 }
 
-// setModeErr is SetMode's error alone, for a table that only cares that the
-// verb is unsupported.
-func setModeErr(s Session, id string) error {
-	_, err := s.SetMode(context.Background(), "", id)
-	return err
+// setMode is SetMode's confirmed value and its error, for a case that wants
+// both without naming the ticket.
+func setMode(s Session, id string) (string, error) {
+	out, err := s.SetMode(context.Background(), "", id)
+	return out.Value, err
 }
 
 // settled is drained behind the log's own barrier. A settings delta is

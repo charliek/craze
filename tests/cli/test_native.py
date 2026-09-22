@@ -25,11 +25,14 @@ from conftest import require_rg, without_seq
 from sse_fixture import (
     CANARY,
     UNUSED_ENV_KEY,
+    RecordedRequest,
     SSEFixture,
+    Step,
     ToolCall,
     answer,
     call_step,
     parallel_step,
+    plan_path_in,
     sse_call_chunks,
     write_native_config,
 )
@@ -569,17 +572,6 @@ def test_native_agent_bin_is_a_usage_error(craze_bin: Path, tmp_path: Path) -> N
     assert proc.stdout == ""
 
 
-@pytest.mark.parametrize("flag", ["--ask", "--plan"])
-def test_native_ask_or_plan_is_a_usage_error(
-    craze_bin: Path, tmp_path: Path, flag: str
-) -> None:
-    craze_home = tmp_path / "craze-home"
-    proc = run_native(craze_bin, craze_home, tmp_path, flag, "hi", json_mode=False)
-    assert proc.returncode == 2, proc.stderr
-    assert "native" in proc.stderr, proc.stderr
-    assert proc.stdout == ""
-
-
 # --- Plan 019 C11: tool loops, end to end ---------------------------------
 #
 # From here on the fixture is scripted (sse_fixture.Step): one response per
@@ -600,6 +592,20 @@ def tool_workspace(tmp_path: Path) -> Path:
     (ws / "notes.txt").write_text("alpha\n", encoding="utf-8")
     (ws / "main.go").write_text("package main\n\n// TODO: ship it\n", encoding="utf-8")
     return ws
+
+
+def tree(root: Path) -> dict[str, bytes]:
+    """Every file under root by relative path, with its bytes.
+
+    It is what "no workspace file changed" is asserted with (A6): a path that
+    appeared, one that went and one whose contents moved all show up as a
+    difference between two of these.
+    """
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
 
 
 def test_native_tool_loop_read_grep_edit_bash(
@@ -805,6 +811,125 @@ def test_native_question_is_auto_answered_and_reaches_the_model(
     assert '"Which shall it be?"="alpha"' in results["ask_user_question"], results["ask_user_question"]
     assert "o1" not in results["ask_user_question"], results["ask_user_question"]
     assert "ask the user" in results["todo_write"], results["todo_write"]
+
+
+# The plan text the scripted model writes below. The first heading becomes the
+# plan ask's name, which is what the `plan` line prints.
+PLAN_TEXT = "# Ship the widget\n\n1. read main.go\n2. write the widget\n"
+
+
+def test_native_plan_mode_ends_the_turn_and_leaves_the_workspace_alone(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """`craze prompt --provider native --plan --json`, end to end (plan 023 A6).
+
+    --plan reaches the harness now (refuseInProcess is keyed on the provider's
+    modes), so this is the whole of plan mode from outside: the reminder in the
+    first request names the plan file, the model writes to it -- the one
+    edit-kind call the gate allows there -- and calls exit_plan_mode; `craze
+    prompt` accepts the plan itself, as it does for cursor, and the turn ENDS
+    there, which is what makes a headless --plan mean plan-only (D-51).
+
+    The plan file's path is read out of the request rather than guessed: it is
+    the transcript's sibling under the craze home and its name carries the
+    session's own id.
+
+    "No file under the workspace changed" is the acceptance criterion this is
+    for: the plan and the transcript live under the home, and the repository the
+    run was pointed at is untouched.
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+
+    seen: list[str] = []
+
+    def write_the_plan(request: RecordedRequest) -> Step:
+        path = plan_path_in(request)
+        seen.append(path)
+        # An empty path would write to "" and fail loudly rather than
+        # silently scripting something else.
+        return call_step("write", {"filePath": path, "content": PLAN_TEXT})
+
+    # Two entries and no more: a third request means the approval did not end
+    # the turn, and the fixture answers it with a 400 that says so.
+    fixture_server.set_script([write_the_plan, call_step("exit_plan_mode", {})])
+
+    before = tree(ws)
+    proc = run_native(craze_bin, craze_home, ws, "--plan", "plan the widget", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    assert CANARY not in proc.stdout and CANARY not in proc.stderr
+
+    # The reminder really carried the path, and it is under the craze home.
+    assert seen and seen[0].endswith(".plan.md"), seen
+    plan_file = Path(seen[0])
+    assert plan_file.is_relative_to(craze_home), (plan_file, craze_home)
+    assert plan_file.read_text(encoding="utf-8") == PLAN_TEXT
+
+    # The plan opening, answered by craze's own policy exactly as cursor's is.
+    plans = [e for e in events if e["type"] == "plan"]
+    assert len(plans) == 1, plans
+    assert plans[0]["id"] == "plan-1", plans[0]
+    assert plans[0]["auto"] is True and plans[0]["accepted"] is True, plans[0]
+    assert plans[0]["name"] == "Ship the widget", plans[0]
+
+    # Two requests: the one the plan was written from and the one that offered
+    # it. The approval's own result reaches no third, because the turn ended.
+    assert len(fixture_server.requests) == 2, len(fixture_server.requests)
+    assert fixture_server.script_remaining == 0 and fixture_server.unscripted == 0
+    wire = json.dumps([r.body for r in fixture_server.requests])
+    assert "The user approved the plan" not in wire
+
+    # The write reached the plan file and was allowed there.
+    results = {
+        m["tool_call_id"]: m["content"]
+        for m in fixture_server.requests[-1].messages
+        if m.get("role") == "tool"
+    }
+    assert set(results) == {"write"}, sorted(results)
+    assert "Rejected" not in results["write"], results["write"]
+
+    assert tree(ws) == before, "plan mode wrote to the workspace"
+
+
+def test_native_ask_mode_denies_a_write_and_leaves_the_workspace_alone(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """`--ask` on native: every non-read-only call is denied by the gate, the
+    model is told why in the next request's tool result, and the workspace is
+    untouched (plan 023 A1, A6).
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    fixture_server.set_script(
+        [
+            call_step("write", {"filePath": "notes.txt", "content": "beta\n"}),
+            answer("I cannot write in ask mode"),
+        ]
+    )
+
+    before = tree(ws)
+    proc = run_native(craze_bin, craze_home, ws, "--ask", "what does notes.txt say", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert joined(events, "text") == "I cannot write in ask mode"
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+
+    rows = last_tools(events)
+    assert [(r["name"], r["status"]) for r in rows] == [("write", "failed")], rows
+
+    assert len(fixture_server.requests) == 2, len(fixture_server.requests)
+    results = {
+        m["tool_call_id"]: m["content"]
+        for m in fixture_server.requests[-1].messages
+        if m.get("role") == "tool"
+    }
+    assert "ask mode is read-only" in results["write"], results["write"]
+
+    assert tree(ws) == before, "ask mode wrote to the workspace"
 
 
 def test_sse_fixture_interleaves_parallel_calls() -> None:

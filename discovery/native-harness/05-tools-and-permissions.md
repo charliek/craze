@@ -16,9 +16,9 @@ four-tools-then-`ls` plan and its multi-edit shape.
 | `bash` | execute | no | `command`, `timeout?` (ms), `workdir?`; `/bin/bash -c`, else `sh -c`; `Setsid` (new session, no controlling terminal); stdin `/dev/null`; stdout/stderr merged; default timeout 120 s, cap 600 s (a larger request is clamped and the result says so); everything left in the command's session is killed when it returns; a non-zero exit is **not** an error result — the model reads the code; live output streams through a harness-owned progress channel, throttled to 100 ms, lossy; tail kept at 2000 lines / 50 KiB by the tool itself, full output spilled once it passes 50 KiB; `exit code: N` added to `<shell_metadata>` on a non-zero exit; known limitations: a stop landing between the pre-start check and launch taking the started command kills it without the TERM grace, a goroutine stuck in a syscall that never returns leaks until it returns (bounded memory), macOS reaps the leader before the final group kill (the same window `internal/acp/spawn.go` accepts), and a process that starts its own session or process group escapes the kill |
 | `grep` | search | yes | `pattern`, `path?`, `include?`; ripgrep (`PATH`), `--hidden`, `.gitignore` respected, 100 matches, grouped by file as `  Line n: text` |
 | `glob` | search | yes | `pattern`, `path?`; ripgrep `--files --glob`, no `--hidden`, 100 results, ripgrep's own order |
-| `todo_write` | todo | yes | H5, planned; harness-owned list; `merge` (default true) patches by id, an explicit `merge:false` replaces unless the auto-upgrade applies; caps at 64 items × 200 bytes, UTF-8-truncated; every write feeds one full-list `EventTodos` |
-| `ask_user_question` | ask | no | H5, planned; blocks on the person; feeds `EventQuestion`; no timeout (D-52) — cancelled, closed, or turn-ended returns grok-build's unanswered text as a non-error result |
-| `exit_plan_mode` | ask | no | H5, planned; blocks on the person; reads the plan from the plan file through the file tools' guarded open, never from arguments; approve ends the turn (D-51), reject continues plan mode with no feedback channel, Esc cancels the turn with the mode unchanged; empty or missing file → `EmptyPlan`, no ask |
+| `todo_write` | todo | yes | harness-owned list; `merge` (default true) patches by id, an explicit `merge:false` replaces unless the auto-upgrade applies; caps at 64 items × 200 bytes, UTF-8-truncated; every write feeds one full-list `EventTodos` |
+| `ask_user_question` | ask | no | blocks on the person; feeds `EventQuestion`; no timeout (D-52) — cancelled, closed, or turn-ended returns grok-build's unanswered text — error class `aborted` when the call was stopped (its context done or `Env.Closing` closed), otherwise a non-error result |
+| `exit_plan_mode` | ask | no | blocks on the person; reads the plan from the plan file through the file tools' guarded open, never from arguments; approve ends the turn (D-51), reject continues plan mode with no feedback channel, Esc cancels the turn with the mode unchanged; empty or missing file → `EmptyPlan`, no ask |
 | `agent` | think | — | H6; see below |
 
 Dropped from the earlier plan: **no `ls` tool** (`read` lists directories)
@@ -194,8 +194,14 @@ the **dispatcher** only, so it survives yolo: `tool.ModeGate` wraps
 
 In every mode but plan, `exit_plan_mode` is denied by `Request.Tool` — it
 is `ReadOnly` and would otherwise run anywhere and answer `EmptyPlan`.
-`ask_user_question` and `todo_write` are allowed in every mode. The
-rejection texts are verbatim:
+`ask_user_question` and `todo_write` are allowed in every mode. Three of the
+result texts are craze's own, not grok-build's, because grok-build's
+wording would be false here: `EmptyPlan` names the plan file and says to
+write the plan first (grok-build's says the mode is exited, which does not
+happen); a plan nobody decided on gets "The user did not decide on the
+plan. Plan mode is still active…" rather than the question tool's declined
+text; the approved text is craze's own, "Your turn ends here; the user will
+start implementation." (§3.4). The rejection texts are verbatim:
 
 - plan, a denied edit: "Rejected: file edits are not allowed in plan mode -
   the only editable file is the plan file (`<path>`)."
@@ -228,19 +234,39 @@ every request of that turn but not in the next turn's history, so a plan-
 or ask-mode turn's first request diverges from the previous turn right
 after the previous prompt and the provider re-reads it uncached — stated
 and measured (H5 R3), not fixed; a one-byte variant marker on the stored
-user entry is the follow-up if it matters.
+user entry is the follow-up if it matters. Measured on `fireworks/kimi-k3`:
+a plan-mode turn's first request is a **full** cache miss (0 cache-read
+tokens) against ~9,000–10,000 in agent mode on the same turns — worse than
+the model above, which expected only the tail past the previous prompt to
+diverge; within a turn the second request still hits on both. The
+variant-marker replay is now the priority follow-up, not a nice-to-have.
 
 The plan file is the transcript's sibling,
 `<home>/sessions/<slug>/<stamp>_<id>.plan.md` — the only writable path in
 plan mode. `exit_plan_mode` reads it through the file tools' guarded open
 (non-blocking, regular file only, bounded at 256 KiB), never from an
 argument. **No ask timeout** (D-52): a cancelled, closed, or turn-ended ask
-returns grok-build's unanswered text as a non-error result. Approving the
+returns grok-build's unanswered text — as an error of class `aborted` when
+the call was stopped (its context done, or `Env.Closing` closed), and as a
+non-error result otherwise, an ask that was skipped or left unanswered while
+the turn lived. Approving the
 plan **ends the turn** through a typed handoff, not `StopTurn` (D-51); the
 TUI's existing "implement" offer then switches to agent mode and sends the
 provider's implement prompt exactly as craze does for cursor and grok.
 Rejecting continues the turn in plan mode with no feedback channel — the
 user's feedback is their next message.
+
+**The veto after approval is decided by a call's place in its step**, not by
+when its goroutine reaches the turn's lock: every call ordered after the
+approving `exit_plan_mode` in Fantasy's own dispatch order is refused,
+whether or not it had started running, so a read placed and dispatched
+before the ask is never refused just because its goroutine had not yet
+reached the check. Execution found the timing-based rule unsound (a
+scheduling race could refuse a call placed before the ask) and fixed it
+before the live smoke ran. Telling the model of a mode change and writing
+its `mode_change` store entry both wait for a step that persisted output —
+a reasoning-only or cancelled step does not consume a pending transition, so
+it survives to the next boundary that does.
 
 ## Sub-agents (H6)
 
