@@ -313,9 +313,10 @@ func GxProvider() Provider {
 // `/agent`, Shift+Tab and `--plan`/`--ask` on (plan 023 §3.4, §3.6).
 //
 // The mode table and the implement prompt are cursor's: native's ids are the
-// same three words, so every spelling the vocabulary knows resolves here as it
-// does there, and a plan approved on native is implemented by the same offer
-// sending the same sentence. What stays zero is everything ACP-shaped.
+// same three words, so craze's canonical mode commands (`/plan`, `--ask`, the
+// cycle) resolve to the same spellings here as there, and a plan approved on
+// native is implemented by the same offer sending the same sentence. What
+// stays zero is everything ACP-shaped.
 //
 // The display label is its own field so the UI can later say "craze" without
 // touching the id that flags and config hold.

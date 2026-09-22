@@ -17,7 +17,7 @@ four-tools-then-`ls` plan and its multi-edit shape.
 | `grep` | search | yes | `pattern`, `path?`, `include?`; ripgrep (`PATH`), `--hidden`, `.gitignore` respected, 100 matches, grouped by file as `  Line n: text` |
 | `glob` | search | yes | `pattern`, `path?`; ripgrep `--files --glob`, no `--hidden`, 100 results, ripgrep's own order |
 | `todo_write` | todo | yes | harness-owned list; `merge` (default true) patches by id, an explicit `merge:false` replaces unless the auto-upgrade applies; caps at 64 items × 200 bytes, UTF-8-truncated; every write feeds one full-list `EventTodos` |
-| `ask_user_question` | ask | no | blocks on the person; feeds `EventQuestion`; no timeout (D-52) — cancelled, closed, or turn-ended returns grok-build's unanswered text as a non-error result |
+| `ask_user_question` | ask | no | blocks on the person; feeds `EventQuestion`; no timeout (D-52) — cancelled, closed, or turn-ended returns grok-build's unanswered text — error class `aborted` when the call was stopped (its context done or `Env.Closing` closed), otherwise a non-error result |
 | `exit_plan_mode` | ask | no | blocks on the person; reads the plan from the plan file through the file tools' guarded open, never from arguments; approve ends the turn (D-51), reject continues plan mode with no feedback channel, Esc cancels the turn with the mode unchanged; empty or missing file → `EmptyPlan`, no ask |
 | `agent` | think | — | H6; see below |
 
@@ -246,7 +246,10 @@ The plan file is the transcript's sibling,
 plan mode. `exit_plan_mode` reads it through the file tools' guarded open
 (non-blocking, regular file only, bounded at 256 KiB), never from an
 argument. **No ask timeout** (D-52): a cancelled, closed, or turn-ended ask
-returns grok-build's unanswered text as a non-error result. Approving the
+returns grok-build's unanswered text — as an error of class `aborted` when
+the call was stopped (its context done, or `Env.Closing` closed), and as a
+non-error result otherwise, an ask that was skipped or left unanswered while
+the turn lived. Approving the
 plan **ends the turn** through a typed handoff, not `StopTurn` (D-51); the
 TUI's existing "implement" offer then switches to agent mode and sends the
 provider's implement prompt exactly as craze does for cursor and grok.

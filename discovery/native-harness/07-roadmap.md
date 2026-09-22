@@ -477,7 +477,7 @@ file, read by the tool, never argued), D-51 (approving ends the turn
 through a typed handoff; the TUI's offer implements), D-52 (no ask
 timeout), D-53 (the tool ids and their Claude-name aliases).
 
-**Exit result:** shipped across two PRs. PR 1 (#45, `b0ea4c4`, 11 commits
+**Exit result:** shipped across two PRs. PR 1 (#45, `b0ea4c4`, 10 commits
 preserved) landed the harness side: `Options.Mode`, `Session.SetMode`/`Mode`,
 `tool.ModeGate` over `AllowAll` with the plan and ask rejection texts,
 `Request.Targets` for edit-kind tools, the plan file (`store.PlanPath`) and
@@ -494,27 +494,30 @@ on native the way Plan 021's C10 left the setters, `Snapshot.Modes`/
 eligible for a turn with no assistant text, and the question card's
 description line.
 
-Live smoke, Linux, real tmux, binary rebuilt from each PR's tip,
+Live smoke, Linux, real tmux, binary rebuilt from each PR's smoke tip (PR 1
+`8993e7d`, PR 2 `ab351a7` — the review fixes after it, `ae16ad2`, changed
+no behaviour a smoke exercises),
 `fireworks/kimi-k3` and `openrouter/glm-5.3-flash`, `--provider native`
 (PR 1: `023-native-harness-h5-modes/smoke/pr1-linux.md`; PR 2:
 `smoke/pr2-linux.md`):
 
 | # | what | result |
 |---|---|---|
-| V1 | `/plan`, plan a change, accept, offer, Enter | pass (kimi and glm): the plan file written under the home, `⟳ ask present the plan`, the card, `a` → accepted, the turn ended with no assistant text, the offer armed, Enter → agent mode, "Implement the plan above.", the file changed |
+| V1 | `/plan`, plan a change, accept, offer, Enter | pass (kimi, the whole path): the plan file written under the home, `⟳ ask present the plan`, the card, `a` → accepted, the turn ended with no assistant text, the offer armed, Enter → agent mode, "Implement the plan above.", the file changed; glm ran it through the accept and the armed offer only |
 | V2 | in plan mode, an outright edit of a repo file | no denial fired live on either model: both kimi and glm obey the plan reminder and present a plan instead of attempting the edit; the live denial is V7's; the plan-mode denial of a non-plan file is covered by the harness tests and the `native-plan-denied` golden |
 | V3 | a skill that asks a question (`AskUserQuestion` by Claude's name) | pass: the card raised (two options, `1-9 pick`), an option picked, the transcript row read the answer, the model used it |
 | V4 | reject the plan; feedback as the next message | pass (kimi): rejected, the model asked what to change, the next message produced a revised plan |
 | V5 | Esc on the plan card | pass (kimi): cancelled, chip stayed `plan`, `/agent` left |
 | V6 | Ctrl+C while the question card is open | pass: cancelled, the TUI stayed responsive, the next prompt ran |
-| V7 | Shift+Tab mid-turn while the model is writing files | pass (kimi), richer than planned: Shift+Tab cycled agent→plan→ask mid-turn; the write of the plan file the model had already placed ran, but the next write after the switch to ask was denied (`Rejected: ask mode is read-only…`), `exit_plan_mode` in ask mode was denied by name too, and the model was told at the next step boundary |
+| V7 | Shift+Tab mid-turn while the model is writing files | pass (kimi), richer than planned: Shift+Tab cycled agent→plan→ask mid-turn; a write of the plan file the model had placed while told "plan" ran after the switch to ask and was denied (`Rejected: ask mode is read-only…` — the Prepare→SetMode→Run boundary, live), so was the next workspace write, `exit_plan_mode` in ask mode was denied by name, and the model was told at the next step boundary |
 | V8 | `craze prompt --provider native --plan/--ask --json` | pass on both models, both halves: `--plan` ends with the plan auto-accepted and no workspace file changed; `--ask` denies every non-read-only call and answers from the reminder |
 | V9 | todos: a multi-step task | pass: the tasks panel filled, statuses moved, `TASKS 2/2 ✓` |
 
 R1: PR 1 already had `TodoWrite` and `AskUserQuestion` reaching their
 snake_case tools; PR 2 added `ExitPlanMode` — **3 of 3 Claude names now reach
 the tool on both models**, with no hint beyond the alias sentence. R2:
-neither model writes todos unprompted on a multi-step task, across both PRs;
+neither model writes todos unprompted on a multi-step task (measured in PR
+1's smoke; PR 2 did not rerun it);
 the prompt-sentence follow-up stands. **R3, the cross-turn cache cost,
 measured on `fireworks/kimi-k3`:** plan mode is a full cache miss on every
 turn's first request (0 cache-read tokens, against ~9,000–10,000 in agent

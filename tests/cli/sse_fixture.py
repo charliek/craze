@@ -163,7 +163,12 @@ def plan_path_in(request: RecordedRequest) -> str:
     A message's content is a string on this wire, and a list of typed parts on
     others, so both are read: what is being looked for is the text, wherever
     the encoder happened to put it.
+
+    A request names exactly one plan file or none; two different paths —
+    a scripted prompt quoting a reminder of its own — is a broken test and
+    raises rather than picking one (r7 finding 1).
     """
+    found: set[str] = set()
     for msg in request.messages:
         content = msg.get("content")
         if isinstance(content, str):
@@ -173,10 +178,10 @@ def plan_path_in(request: RecordedRequest) -> str:
         else:
             chunks = []
         for text in chunks:
-            found = PLAN_PATH_RE.search(text)
-            if found:
-                return found.group(1)
-    return ""
+            found.update(PLAN_PATH_RE.findall(text))
+    if len(found) > 1:
+        raise AssertionError(f"the request names {len(found)} plan files: {sorted(found)}")
+    return next(iter(found), "")
 
 
 @dataclass

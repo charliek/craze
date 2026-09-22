@@ -36,20 +36,31 @@ const nativePlanText = "# Ship the widget\n\n1. read main.go\n2. write the widge
 // outside craze can guess it.
 var nativePlanPathRE = regexp.MustCompile("(?s)<system-reminder>.*?`([^`]+\\.plan\\.md)`.*?</system-reminder>")
 
-// nativePlanPathIn is the plan file the reminder in call names, or "".
-func nativePlanPathIn(call fantasy.Call) string {
+// nativePlanPathIn is the plan file the reminder in call names, or "". A
+// request names exactly one plan file or none: a second, different path —
+// a scripted prompt quoting a reminder of its own — is a broken test, not a
+// choice to make (r7 finding 1).
+func nativePlanPathIn(t *testing.T, call fantasy.Call) string {
+	t.Helper()
+	found := ""
 	for _, msg := range call.Prompt {
 		for _, p := range msg.Content {
-			t, ok := fantasy.AsMessagePart[fantasy.TextPart](p)
+			tp, ok := fantasy.AsMessagePart[fantasy.TextPart](p)
 			if !ok {
 				continue
 			}
-			if m := nativePlanPathRE.FindStringSubmatch(t.Text); m != nil {
-				return m[1]
+			for _, m := range nativePlanPathRE.FindAllStringSubmatch(tp.Text, -1) {
+				if found != "" && m[1] != found {
+					// Errorf, not Fatalf: the hook runs on the scripted
+					// model's goroutine, where FailNow is not allowed.
+					t.Errorf("the request names two plan files, %q and %q", found, m[1])
+					return ""
+				}
+				found = m[1]
 			}
 		}
 	}
-	return ""
+	return found
 }
 
 // writesThePlan is a scripted model's onCall hook: a request that names a plan
@@ -65,7 +76,7 @@ func nativePlanPathIn(call fantasy.Call) string {
 func writesThePlan(t *testing.T) func(fantasy.Call) {
 	t.Helper()
 	return func(call fantasy.Call) {
-		path := nativePlanPathIn(call)
+		path := nativePlanPathIn(t, call)
 		if path == "" {
 			return
 		}

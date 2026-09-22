@@ -418,9 +418,10 @@ arriving all clear it too.
 On the native provider (`--provider native`, hidden) the same `/plan`,
 `/ask`, `/agent`, `Shift+Tab` and the offer above work. Plan mode lets the
 model edit only its plan file, which lives under the harness home beside the
-session transcript
-(`~/.craze/native/sessions/<workspace-slug>/<stamp>_<id>.plan.md`) and is
-never deleted by craze. Ask mode denies every edit, write and shell command.
+session transcript — by default
+`~/.craze/native/sessions/<workspace-slug>/<stamp>_<id>.plan.md`, or under
+`$CRAZE_HOME/native/` when the home is relocated — and is never deleted by
+craze. Ask mode denies every edit, write and shell command.
 Accepting the plan card ends the turn and arms the offer above, even when
 the model said nothing else in that turn.
 

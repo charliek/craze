@@ -25,7 +25,7 @@ answers on the question card, a model-initiated `enter_plan_mode` tool, and
 a system-prompt sentence nudging the model to write todos — R2's smoke
 measures whether a model writes them unprompted with none. R2's answer:
 neither `fireworks/kimi-k3` nor `openrouter/glm-5.3-flash` writes todos
-unprompted on a multi-step task, on either PR, so the prompt-sentence
+unprompted on a multi-step task (PR 1's smoke), so the prompt-sentence
 follow-up stands. R3 measured the plan-mode reminder's cache cost stated in
 `05`: a full cache-read miss on every plan-mode turn's first request on
 Fireworks (0 against ~9,000–10,000 in agent mode) — worse than expected, so
