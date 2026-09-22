@@ -625,9 +625,10 @@ func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 // latest catalog of the model it is bound to (runModelApply).
 //
 // The box can be reopened and applied again while this chain is still
-// running, and the second chain then runs only once this one has finished
-// (chainLock): the model it is bound to is often the one this chain is still
-// switching to, and its reads of the session must follow this chain's installs.
+// running, and the second chain then runs only once this one has finished,
+// in the order the two were applied (chainLock): the model it is bound to is
+// often the one this chain is still switching to, and its reads of the
+// session must follow this chain's installs.
 func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	list := m.dialogModelList()
 	tabs := m.modelDialogTabs()
@@ -675,19 +676,20 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	m.applyGen++
 	gen := m.applyGen
 	// One command per step: the closure runs off this Update and may not mint
-	// any of its own.
-	eng, cmds, chains := m.eng, m.nextCmds(len(steps)), m.chains
-	return m, func() tea.Msg {
-		chains.lock()
-		defer chains.unlock()
+	// any of its own. Its place in the line is taken here, in the Update the
+	// user applied in, and not when the program gets round to starting it
+	// (chainLock.take).
+	eng, cmds := m.eng, m.nextCmds(len(steps))
+	return m, m.chains.take(func() tea.Msg {
 		return runModelApply(eng, cmds, steps, forModel, gen)
-	}
+	})
 }
 
-// chainLock orders this client's model changes against each other: a dialog
-// apply chain (runModelApply) and a `/model <id> [<effort>]` command
-// (applyModelEffort) each hold it for their whole body, so one issued while
-// another is still running starts only once that one has finished.
+// chainLock is this client's line of model changes: a dialog apply chain
+// (runModelApply) and a `/model <id> [<effort>]` command (applyModelEffort)
+// each run whole, one at a time, in the order they were issued — one issued
+// while another is still running starts only once that one, and every other
+// issued before it, has finished.
 //
 // The engine's settings FIFO orders the Sets themselves, and that is not
 // enough: a chain decides what to send from reads of the session made BEFORE
@@ -697,37 +699,122 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // session as it was before that change. A box reopened on the claude the
 // screen already shows, with effort low chosen for it, would read the grok
 // the session is still on and note low as stale; the switch would then land
-// and low would be lost (astra r6). Held for the whole chain, the lock puts
-// every read a later chain makes after every install an earlier one made.
+// and low would be lost (astra r6). Run whole and one at a time, the chains
+// put every read a later one makes after every install an earlier one made.
 //
-// It is taken only on a command's goroutine, never in Update, so the frame
-// never waits for it; and a chain waits on nothing under it but its own Sets,
-// so what a chain waits for to take it is the chain before it and nothing
-// else. Another client's changes are not ordered by it — nothing on this side
-// could order them — and stay the engine worker's ForModel check's job
-// (engine.Setting.ForModel).
+// The order is the one the user acted in, so a chain's place is taken in the
+// Update that builds its command (take), never on the command's goroutine.
+// bubbletea starts every command on a goroutine of its own, a batched one a
+// hop later, and promises nothing about which of them runs first: two chains
+// issued one after the other can start the other way round. Ordered by
+// whichever goroutine reached a lock first, a later chain could overtake an
+// earlier one still waiting — low and then xhigh chosen behind a change still
+// outstanding ended on low, and a choice made for the model a waiting switch
+// was moving to was judged before that switch, on the old model, and noted
+// stale (astra r8).
+//
+// A chain is run by the first command to find it at the head of the line with
+// nothing running: its own, as a rule, but a command behind it that gets there
+// first runs it rather than wait on a goroutine that has not started. That is
+// what gives up the place of a command the program never runs — bubbletea
+// drops the commands it has not started once it is shutting down, and a test
+// can build a command and discard it. Given up only by its own command
+// finishing, that place would wedge every chain behind it for good; skipped,
+// it would break the order those chains were issued on, since a choice made
+// for the model the screen shows is often one made for the model that chain
+// switches to. So a command only ever waits for a chain that is running, and
+// every chain issued runs, in its place. What a dropped command would have
+// answered is lost, as any dropped command's message is; the deltas its
+// chain's installs publish still reach the screen.
+//
+// None of it blocks Update: take appends under a mutex never held across a
+// chain, and every wait is on a command's goroutine. A chain waits on nothing
+// but its own Sets, so what a command waits for is the chains ahead of it and
+// nothing else. Another client's changes are not ordered by it — nothing on
+// this side could order them — and stay the engine worker's ForModel check's
+// job (engine.Setting.ForModel).
 type chainLock struct {
 	mu sync.Mutex
+	// line is the chains issued and not yet started, oldest first; running is
+	// the one under way, nil while none is.
+	line    []*chainTicket
+	running *chainTicket
 	// waits is a test barrier, nil in every other build: it is called when a
-	// chain finds the lock held and is about to wait for it, so a test can know
-	// its second command is waiting behind the first rather than hope it is.
+	// command finds a chain running — one ahead of its own, or its own run by
+	// a command behind it — and is about to wait for it, so a test can know a
+	// command is waiting rather than hope it is.
 	waits func()
 }
 
-func (l *chainLock) lock() {
-	if l.mu.TryLock() {
-		return
-	}
-	if l.waits != nil {
-		l.waits()
-	}
-	l.mu.Lock()
+// chainTicket is one chain's place in the line.
+type chainTicket struct {
+	run func() tea.Msg
+	// msg is what run answered. It is written before done closes, and read by
+	// the ticket's own command once it has.
+	msg  tea.Msg
+	done chan struct{}
 }
 
-func (l *chainLock) unlock() { l.mu.Unlock() }
+// take puts a chain at the back of the line, in the Update that builds its
+// command, and is that command: it answers with what the chain answered, once
+// the chain has run.
+func (l *chainLock) take(run func() tea.Msg) tea.Cmd {
+	t := &chainTicket{run: run, done: make(chan struct{})}
+	l.mu.Lock()
+	l.line = append(l.line, t)
+	l.mu.Unlock()
+	return func() tea.Msg { return l.serve(t) }
+}
 
-// runModelApply is the chain itself, on the command's goroutine: it reads the
-// engine and never the Model, which belongs to Update.
+// serve is t's command, on the goroutine the program gave it. While a chain is
+// running it waits for that one; while none is, it runs the head of the line —
+// t, or a chain issued before t whose command has not got there — and looks
+// again, until t has run, on this goroutine or on that of a command behind it.
+func (l *chainLock) serve(t *chainTicket) tea.Msg {
+	waited := false
+	for {
+		l.mu.Lock()
+		select {
+		case <-t.done:
+			l.mu.Unlock()
+			return t.msg
+		default:
+		}
+		if ahead := l.running; ahead != nil {
+			l.mu.Unlock()
+			if !waited && l.waits != nil {
+				l.waits()
+			}
+			waited = true
+			<-ahead.done
+			continue
+		}
+		// Nothing is running and t has not run, so t has not started: it is
+		// still in the line, and the head is t or a chain issued before it.
+		head := l.line[0]
+		l.line[0] = nil
+		l.line = l.line[1:]
+		l.running = head
+		l.mu.Unlock()
+		l.runHead(head)
+	}
+}
+
+// runHead runs the chain serve took off the line, and frees the line however
+// the chain ends — a panic included, so no command is left waiting on a chain
+// that has stopped.
+func (l *chainLock) runHead(head *chainTicket) {
+	defer func() {
+		l.mu.Lock()
+		l.running = nil
+		close(head.done)
+		l.mu.Unlock()
+	}()
+	head.msg = head.run()
+}
+
+// runModelApply is the chain itself, on a command's goroutine (chainLock): it
+// reads the engine and never the Model, which belongs to Update.
 //
 // forModel is the model every option step is bound to: the one the user
 // picked when the chain switches models, the current one when it does not.

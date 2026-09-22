@@ -589,14 +589,13 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	// One command per call the closure can make — the model and the effort —
 	// minted here because the closure runs off this Update and may not touch
 	// the model. An id that goes unused is simply a number nobody spent.
-	eng, cmds, at, chains := m.eng, m.nextCmds(2), m.modelRev, m.chains
-	return m, func() tea.Msg {
-		// Behind any chain of this client's still running and ahead of any
-		// issued after it (chainLock): a dialog reopened on the model this
-		// command is switching to binds its steps to that model, and must not
-		// read the session before this switch has landed.
-		chains.lock()
-		defer chains.unlock()
+	eng, cmds, at := m.eng, m.nextCmds(2), m.modelRev
+	// Behind every chain of this client's issued before it and ahead of every
+	// one issued after, its place taken here, in this Update (chainLock): a
+	// dialog reopened on the model this command is switching to binds its steps
+	// to that model, and must not read the session before this switch has
+	// landed, whichever of the two commands the program starts first.
+	return m, m.chains.take(func() tea.Msg {
 		ctx := context.Background()
 		res, err := applyModelStep(ctx, eng, cmds[0], id)
 		switch {
@@ -621,10 +620,10 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
 		}
 		return runModelEffort(ctx, eng, cmds[1], id, effort)
-	}
+	})
 }
 
-// runModelEffort is `/model`'s effort step, on the command's goroutine once the
+// runModelEffort is `/model`'s effort step, on a command's goroutine once the
 // model step has landed on model: it reads the engine and never the Model,
 // which belongs to Update.
 //

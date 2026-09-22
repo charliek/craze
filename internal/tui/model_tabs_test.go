@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -719,9 +720,9 @@ func goCmd(cmd tea.Cmd) <-chan tea.Msg {
 }
 
 // chainWaits arms the model's chainLock barrier: the channel it returns
-// receives when a chain finds the lock taken and is about to wait for it. It
-// is armed before any command runs, so no goroutine reads the hook while it is
-// written.
+// receives when a command finds a chain running that it has to wait for, and
+// is about to. It is armed before any command runs, so no goroutine reads the
+// hook while it is written.
 func chainWaits(m Model) <-chan struct{} {
 	ch := make(chan struct{}, 1)
 	m.chains.waits = func() {
@@ -931,6 +932,34 @@ func TestAChoiceTheSessionAlreadyHoldsIsStillSent(t *testing.T) {
 	})
 }
 
+// claudeSwitches is a switch from grok-4.6 to claude-opus-5 made from each
+// place a user can make one, the dialog and `/model`, with the notes its
+// answer writes: `/model` with no effort writes none of its own.
+var claudeSwitches = []struct {
+	name     string
+	switchTo func(t *testing.T, m Model) (Model, tea.Cmd)
+	notes    []string
+}{
+	{
+		name: "the dialog",
+		switchTo: func(t *testing.T, m Model) (Model, tea.Cmd) {
+			m = openDialog(t, m)
+			m = typeInto(t, m, "claude")
+			tm, cmd := m.Update(enter())
+			return tm.(Model), cmd
+		},
+		notes: []string{"model → claude-opus-5"},
+	},
+	{
+		name: "/model",
+		switchTo: func(t *testing.T, m Model) (Model, tea.Cmd) {
+			m.input.SetValue("/model claude-opus-5")
+			tm, cmd := m.Update(enter())
+			return tm.(Model), cmd
+		},
+	},
+}
+
 // TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch is astra r6's second
 // schedule, with the switch made from the dialog and from `/model`: on
 // grok-4.6, a switch to claude-opus-5 is under way with its answer held — the
@@ -941,33 +970,8 @@ func TestAChoiceTheSessionAlreadyHoldsIsStillSent(t *testing.T) {
 // ends on low. Before, it read grok-4.6, noted low as "the model changed", and
 // claude-opus-5 kept its high.
 func TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		switchTo  func(t *testing.T, m Model) (Model, tea.Cmd)
-		wantNotes []string
-	}{
-		{
-			name: "the dialog",
-			switchTo: func(t *testing.T, m Model) (Model, tea.Cmd) {
-				m = openDialog(t, m)
-				m = typeInto(t, m, "claude")
-				tm, cmd := m.Update(enter())
-				return tm.(Model), cmd
-			},
-			wantNotes: []string{"model → claude-opus-5", "effort → low"},
-		},
-		{
-			// `/model` with no effort writes no note of its own.
-			name: "/model",
-			switchTo: func(t *testing.T, m Model) (Model, tea.Cmd) {
-				m.input.SetValue("/model claude-opus-5")
-				tm, cmd := m.Update(enter())
-				return tm.(Model), cmd
-			},
-			wantNotes: []string{"effort → low"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, sw := range claudeSwitches {
+		t.Run(sw.name, func(t *testing.T) {
 			answerOrders(t, func(t *testing.T, deltasFirst bool) {
 				m, stub := cursorStub(t, "grok-4.6")
 				writes := configWrites(stub)
@@ -975,7 +979,7 @@ func TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch(t *testing.T) {
 				held, release := stub.HoldNextSet()
 				t.Cleanup(release)
 
-				m, cmd := tc.switchTo(t, m)
+				m, cmd := sw.switchTo(t, m)
 				first := goCmd(cmd)
 				waitClosed(t, held, "the switch's setter")
 				if m.snap.CurrentModel != "claude-opus-5" || stub.Snapshot().CurrentModel != "grok-4.6" {
@@ -1000,8 +1004,196 @@ func TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch(t *testing.T) {
 				if got, want := writes(), []string{"effort=low"}; strings.Join(got, "|") != strings.Join(want, "|") {
 					t.Fatalf("the agent was sent %q, want %q", got, want)
 				}
-				if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(tc.wantNotes, "|") {
-					t.Fatalf("notes %q, want %q", got, tc.wantNotes)
+				wantNotes := append(slices.Clone(sw.notes), "effort → low")
+				if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(wantNotes, "|") {
+					t.Fatalf("notes %q, want %q", got, wantNotes)
+				}
+				if errs := texts(m, entryError); len(errs) != 0 {
+					t.Fatalf("errors %q", errs)
+				}
+				for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+					if snap.CurrentModel != "claude-opus-5" || optionCurrent(snap.Config, "effort") != "low" {
+						t.Fatalf("want claude-opus-5 on low: %q %+v", snap.CurrentModel, snap.Config)
+					}
+				}
+				if got := m.modelLabel(); got != "Claude Opus 5 (low)" {
+					t.Fatalf("the status row reads %q", got)
+				}
+			})
+		})
+	}
+}
+
+// applyEffort reopens the box, moves its first tab — effort, on the grok-4.6
+// catalog the screen shows in these schedules — by keys onto want, and presses
+// Enter. The command comes back unrun, for the test to start when it chooses.
+func applyEffort(t *testing.T, m Model, want string, keys ...tea.KeyType) (Model, tea.Cmd) {
+	t.Helper()
+	m = openDialog(t, m)
+	m = pressKey(t, m, tea.KeyTab)
+	for _, k := range keys {
+		m = pressKey(t, m, k)
+	}
+	if got := m.mdlg.chosen["effort"]; got != want || !m.mdlg.touched["effort"] {
+		t.Fatalf("the box is on %q, touched %v: want %q", got, m.mdlg.touched["effort"], want)
+	}
+	tm, cmd := m.Update(enter())
+	return tm.(Model), cmd
+}
+
+// startReversed starts two commands issued one after the other the other way
+// round, as the program may: the later one's goroutine first, and the earlier
+// one's only once the later one is waiting behind the chain that is running
+// (chainLock.waits), which the earlier one then does too. A command that
+// finishes instead of waiting ran while that chain was still under way, which
+// is a defect of its own, and the test says so.
+func startReversed(t *testing.T, waits <-chan struct{}, earlier, later tea.Cmd) (e, l <-chan tea.Msg) {
+	t.Helper()
+	behind := func(ch <-chan tea.Msg, what string) {
+		t.Helper()
+		select {
+		case <-waits:
+		case msg := <-ch:
+			t.Fatalf("%s finished while the chain ahead of it was still running: %+v", what, msg)
+		case <-deadline():
+			t.Fatalf("%s neither waited nor finished", what)
+		}
+	}
+	l = goCmd(later)
+	behind(l, "the later command")
+	e = goCmd(earlier)
+	behind(e, "the earlier command")
+	return e, l
+}
+
+// TestLaterChoicesLandInTheOrderTheyWereMade is astra r8's schedule on one
+// model: on grok-4.6, effort high is applied and its setter held, and low and
+// then xhigh are applied behind it, the program starting xhigh's command
+// first. Each chain's place in the line is taken when it is applied
+// (chainLock), so once high is released low is sent and then xhigh, and the
+// session ends on the latest choice. Ordered by whichever command reached a
+// lock first, xhigh overtook low, and low, sent last, won.
+func TestLaterChoicesLandInTheOrderTheyWereMade(t *testing.T) {
+	answerOrders(t, func(t *testing.T, deltasFirst bool) {
+		m, stub := cursorStub(t, "grok-4.6")
+		writes := configWrites(stub)
+		waits := chainWaits(m)
+		held, release := stub.HoldNextSet()
+		t.Cleanup(release)
+
+		m, high := applyEffort(t, m, "high", tea.KeyRight) // from medium
+		a := goCmd(high)
+		waitClosed(t, held, "high's setter")
+		m, low := applyEffort(t, m, "low", tea.KeyLeft, tea.KeyLeft)
+		m, xhigh := applyEffort(t, m, "xhigh", tea.KeyRight, tea.KeyRight, tea.KeyRight)
+		b, c := startReversed(t, waits, low, xhigh)
+		release()
+		m = deliverAnswers(t, m, stub, deltasFirst,
+			received(t, a, "high's command"), received(t, b, "low's command"), received(t, c, "xhigh's command"))
+
+		if got, want := writes(), []string{"effort=high", "effort=low", "effort=xhigh"}; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("the agent was sent %q, want %q", got, want)
+		}
+		if got, want := texts(m, entryNote), []string{"effort → high", "effort → low", "effort → xhigh"}; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("notes %q, want %q", got, want)
+		}
+		if errs := texts(m, entryError); len(errs) != 0 {
+			t.Fatalf("errors %q", errs)
+		}
+		for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+			if got := optionCurrent(snap.Config, "effort"); got != "xhigh" {
+				t.Fatalf("the effort is %q, want the latest choice, xhigh", got)
+			}
+		}
+		if got := m.modelLabel(); got != "Grok 4.6 (xhigh)" {
+			t.Fatalf("the status row reads %q", got)
+		}
+	})
+}
+
+// TestAChoiceForTheModelBeingSwitchedToWaitsForAnEarlierSwitch is astra r8's
+// second schedule, the switch made from the dialog and from `/model`: on
+// grok-4.6, effort high is applied and its setter held; a switch to
+// claude-opus-5 is issued behind it, and then effort low, in a box reopened on
+// the claude-opus-5 the screen shows, the program starting low's command
+// first. The switch runs before low whichever command starts first
+// (chainLock), so low is judged on claude-opus-5 and sent, and claude-opus-5
+// ends on low. Run first, low read the grok-4.6 the session was still on, was
+// noted "the model changed", and claude-opus-5 kept its high.
+func TestAChoiceForTheModelBeingSwitchedToWaitsForAnEarlierSwitch(t *testing.T) {
+	for _, sw := range claudeSwitches {
+		t.Run(sw.name, func(t *testing.T) {
+			answerOrders(t, func(t *testing.T, deltasFirst bool) {
+				m, stub := cursorStub(t, "grok-4.6")
+				writes := configWrites(stub)
+				waits := chainWaits(m)
+				held, release := stub.HoldNextSet()
+				t.Cleanup(release)
+
+				m, high := applyEffort(t, m, "high", tea.KeyRight) // from medium
+				a := goCmd(high)
+				waitClosed(t, held, "high's setter")
+				m, toClaude := sw.switchTo(t, m)
+				// The rows are still grok-4.6's, on the high applied above.
+				m, low := applyEffort(t, m, "low", tea.KeyLeft, tea.KeyLeft)
+				b, c := startReversed(t, waits, toClaude, low)
+				release()
+				m = deliverAnswers(t, m, stub, deltasFirst,
+					received(t, a, "high's command"), received(t, b, "the switch's command"), received(t, c, "low's command"))
+
+				if got, want := writes(), []string{"effort=high", "effort=low"}; strings.Join(got, "|") != strings.Join(want, "|") {
+					t.Fatalf("the agent was sent %q, want %q", got, want)
+				}
+				wantNotes := append(append([]string{"effort → high"}, sw.notes...), "effort → low")
+				if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(wantNotes, "|") {
+					t.Fatalf("notes %q, want %q", got, wantNotes)
+				}
+				if errs := texts(m, entryError); len(errs) != 0 {
+					t.Fatalf("errors %q", errs)
+				}
+				for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+					if snap.CurrentModel != "claude-opus-5" || optionCurrent(snap.Config, "effort") != "low" {
+						t.Fatalf("want claude-opus-5 on low: %q %+v", snap.CurrentModel, snap.Config)
+					}
+				}
+				if got := m.modelLabel(); got != "Claude Opus 5 (low)" {
+					t.Fatalf("the status row reads %q", got)
+				}
+			})
+		})
+	}
+}
+
+// TestAChainWhoseCommandNeverRunsStillRunsInItsPlace is the place of a command
+// the program never runs (chainLock), the switch made from the dialog and from
+// `/model`: bubbletea drops the commands it has not started once it is
+// shutting down, and the switch's command is discarded here the same way. Low
+// is then applied in a box reopened on the claude-opus-5 the screen shows. Its
+// command neither waits for one that will never run — which would wedge it and
+// every chain after it — nor skips it, which would judge low on the grok-4.6
+// the switch was leaving: it runs the switch in its place, then low, and
+// claude-opus-5 ends on low. What the discarded command would have answered is
+// lost with it, the dialog's note for the switch included, and the deltas put
+// the screen right.
+func TestAChainWhoseCommandNeverRunsStillRunsInItsPlace(t *testing.T) {
+	for _, sw := range claudeSwitches {
+		t.Run(sw.name, func(t *testing.T) {
+			answerOrders(t, func(t *testing.T, deltasFirst bool) {
+				m, stub := cursorStub(t, "grok-4.6")
+				writes := configWrites(stub)
+				m, _ = sw.switchTo(t, m)                        // its command discarded, never run
+				m, low := applyEffort(t, m, "low", tea.KeyLeft) // from grok-4.6's medium
+				msg := received(t, goCmd(low), "low's command")
+				if applied, ok := msg.(modelApplyMsg); !ok || applied.err != nil {
+					t.Fatalf("low's command came back %+v", msg)
+				}
+				m = deliverAnswers(t, m, stub, deltasFirst, msg)
+
+				if got, want := writes(), []string{"effort=low"}; strings.Join(got, "|") != strings.Join(want, "|") {
+					t.Fatalf("the agent was sent %q, want %q", got, want)
+				}
+				if got, want := texts(m, entryNote), []string{"effort → low"}; strings.Join(got, "|") != strings.Join(want, "|") {
+					t.Fatalf("notes %q, want %q", got, want)
 				}
 				if errs := texts(m, entryError); len(errs) != 0 {
 					t.Fatalf("errors %q", errs)

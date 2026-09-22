@@ -184,9 +184,10 @@ type Model struct {
 	client string
 	cmdSeq int
 	// chains orders this client's model changes against each other: the
-	// dialog's apply chains and `/model <id> [<effort>]` hold it for their whole
-	// body (chainLock). It is minted with the client id in setSession, one per
-	// engine, and is a pointer so every copy bubbletea makes shares it.
+	// dialog's apply chains and `/model <id> [<effort>]` each take a place in
+	// its line in the Update that issues them, and run whole, one at a time, in
+	// that order (chainLock). It is minted with the client id in setSession,
+	// one per engine, and is a pointer so every copy bubbletea makes shares it.
 	chains *chainLock
 	// engErr is what wrapping the session in an engine came back with. It is
 	// unreachable in practice — every session owns an event log and no path
