@@ -137,15 +137,31 @@ func TestScrolledUpSurvivesChunkResizeThemeAndCtrlO(t *testing.T) {
 	}
 }
 
+// The tests from here to TestEntryCapTrimsWithANote, and
+// TestOnlyTheWiresEndingClosesAStreamRun and TestCancelledTurnLeavesANote
+// below, state transcript facts through model_facts_test.go's helpers, so C1
+// carries their assertion lines into internal/transcript unchanged (plan 024
+// §3.8). What a frame shows of the same events is each one's …Renders
+// companion, which stays here.
+
 func TestTodoToolIsNeverAdded(t *testing.T) {
+	m := sized(t)
+	tr := &m.main
+	m = toolEvent(m, &agent.ToolEvent{
+		ID: "todo-1", Kind: "other", Status: "completed",
+		Title: "Update TODOs: read, edit, vet", ToolName: "updateTodos",
+	})
+	if got := factsOf(tr, "tool"); len(got) != 0 {
+		t.Fatalf("the todo writer must not reach the transcript: %v", got)
+	}
+}
+
+func TestTodoToolIsNeverAddedRenders(t *testing.T) {
 	m := sized(t)
 	m = toolEvent(m, &agent.ToolEvent{
 		ID: "todo-1", Kind: "other", Status: "completed",
 		Title: "Update TODOs: read, edit, vet", ToolName: "updateTodos",
 	})
-	if rows := toolRows(m); len(rows) != 0 {
-		t.Fatalf("the todo writer must not reach the transcript: %q", rows)
-	}
 	if strings.Contains(plainView(m), "Update TODOs") {
 		t.Fatalf("Update TODOs is visible:\n%s", plainView(m))
 	}
@@ -153,6 +169,7 @@ func TestTodoToolIsNeverAdded(t *testing.T) {
 
 func TestTodoStreamNotes(t *testing.T) {
 	m := sized(t)
+	tr := &m.main
 	todos := []agent.Todo{
 		{ID: "1", Content: "Read main.go", Status: "in_progress"},
 		{ID: "2", Content: "Edit main.go", Status: "pending"},
@@ -162,7 +179,7 @@ func TestTodoStreamNotes(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
-	if got := texts(m, entryNote); len(got) != 1 || got[0] != "tasks: 3 planned" {
+	if got := factTexts(tr, "note"); len(got) != 1 || got[0] != "tasks: 3 planned" {
 		t.Fatalf("planned note %q", got)
 	}
 	for i := range todos {
@@ -170,12 +187,37 @@ func TestTodoStreamNotes(t *testing.T) {
 	}
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
-	if got := texts(m, entryNote); len(got) != 2 || got[1] != "tasks: 3/3 done" {
+	if got := factTexts(tr, "note"); len(got) != 2 || got[1] != "tasks: 3/3 done" {
 		t.Fatalf("done note %q", got)
 	}
 }
 
 func TestThoughtRunCollapsesToOneRow(t *testing.T) {
+	m := sized(t)
+	tr := &m.main
+	// These chunks carry no timestamps, so each entry is stamped from the clock.
+	// A clock that stands still makes "nothing was measured" exact rather than
+	// "less than the row rounds away"; the …Renders companion keeps the real one.
+	base := time.Now()
+	m.clock = func() time.Time { return base }
+	for _, chunk := range []string{"weighing ", "the options"} {
+		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: chunk}})
+		m = tm.(Model)
+	}
+	if got := facts(tr); len(got) != 1 || got[0].Kind != "thought" || !got[0].Open || got[0].Text != "weighing the options" {
+		t.Fatalf("a thought run should be one open entry holding every chunk: %v", got)
+	}
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "answer"}})
+	m = tm.(Model)
+	if f := facts(tr)[0]; f.Kind != "thought" || f.Open {
+		t.Fatalf("the next entry should close the thought run: %v", f)
+	}
+	if f := facts(tr)[0]; f.End.Sub(f.At) != 0 {
+		t.Fatalf("a thought run that took no measurable time must not hold a duration: %v", f)
+	}
+}
+
+func TestThoughtRunCollapsesToOneRowRenders(t *testing.T) {
 	m := sized(t)
 	for _, chunk := range []string{"weighing ", "the options"} {
 		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: chunk}})
@@ -211,6 +253,23 @@ func TestThoughtRunCollapsesToOneRow(t *testing.T) {
 // run that really did take time still says how long.
 func TestThoughtRunShowsAMeasuredDuration(t *testing.T) {
 	m := sized(t)
+	tr := &m.main
+	base := time.Now()
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{
+		Type: agent.EventText,
+		Text: "answer",
+		At:   base.Add(5 * time.Second),
+	}})
+	m = tm.(Model)
+	if f := facts(tr)[0]; f.Kind != "thought" || f.Open || f.End.Sub(f.At) != 5*time.Second {
+		t.Fatalf("a measured thought run should hold its duration: %v", f)
+	}
+}
+
+func TestThoughtRunShowsAMeasuredDurationRenders(t *testing.T) {
+	m := sized(t)
 	base := time.Now()
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
 	m = tm.(Model)
@@ -229,6 +288,31 @@ func TestThoughtRunShowsAMeasuredDuration(t *testing.T) {
 // whatever is appended next: a note between the run and EventDone used to leave
 // the row saying "Thinking…" for the rest of the session.
 func TestThoughtRunClosesWhenANoteLandsAfterIt(t *testing.T) {
+	m := sized(t)
+	tr := &m.main
+	base := time.Now()
+	m.clock = func() time.Time { return base.Add(5 * time.Second) }
+
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{
+		Type:  agent.EventTodos,
+		Todos: []agent.Todo{{ID: "1", Content: "Read main.go", Status: "pending"}},
+		At:    base.Add(5 * time.Second),
+	}})
+	m = tm.(Model)
+	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: base.Add(9 * time.Second)}})
+	m = tm.(Model)
+
+	if f := facts(tr)[0]; f.Kind != "thought" || f.End.Sub(f.At) != 5*time.Second {
+		t.Fatalf("elapsed should freeze where the note landed: %v", f)
+	}
+	if facts(tr)[0].Open || streamOpen(tr) {
+		t.Fatal("the run should be closed in the model too")
+	}
+}
+
+func TestThoughtRunClosesWhenANoteLandsAfterItRenders(t *testing.T) {
 	m := sized(t)
 	base := time.Now()
 	m.clock = func() time.Time { return base.Add(5 * time.Second) }
@@ -251,15 +335,13 @@ func TestThoughtRunClosesWhenANoteLandsAfterIt(t *testing.T) {
 	if !strings.Contains(view, "+ Thought for 5s") {
 		t.Fatalf("elapsed should freeze where the note landed:\n%s", view)
 	}
-	if m.main.entries[0].open || m.main.streamOpen {
-		t.Fatal("the run should be closed in the model too")
-	}
 }
 
 // TestToolRowEndsTheThoughtRunAboveIt covers the in-place path: a tool update
 // that lands in an existing row still ends the run.
 func TestToolRowEndsTheThoughtRunAboveIt(t *testing.T) {
 	m := sized(t)
+	tr := &m.main
 	tool := &agent.ToolEvent{ID: "b1", Kind: "execute", Status: "pending", Title: "Shell", RawInput: "echo hi"}
 	m = toolEvent(m, tool)
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "first"}})
@@ -268,15 +350,47 @@ func TestToolRowEndsTheThoughtRunAboveIt(t *testing.T) {
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "second"}})
 	m = tm.(Model)
 
-	if got := texts(m, entryThought); len(got) != 2 {
+	if got := factTexts(tr, "thought"); len(got) != 2 {
 		t.Fatalf("a tool update between chunks must end the run: %q", got)
 	}
-	if len(toolRows(m)) != 1 {
-		t.Fatalf("the tool must still be one row: %q", toolRows(m))
+	if got := factsOf(tr, "tool"); len(got) != 1 {
+		t.Fatalf("the tool must still be one row: %v", got)
 	}
 }
 
+// TestEntryCapTrimsWithANote is re-expressed rather than moved (plan 024 A13).
+// It used to pin the tool index's rebase — the surviving row's index moving
+// down by one — which the package's EntryID addressing retires; what outlives
+// the rebase is that the surviving tool is still the one its id finds. The two
+// indexed entries are tool entries here, the only kind the index can name once
+// the fold builds it. The trim note's visibility is the …Renders companion.
 func TestEntryCapTrimsWithANote(t *testing.T) {
+	m := sized(t)
+	tr := &m.main
+	m.main.entries = make([]entry, maxEntries)
+	for i := range m.main.entries {
+		m.main.entries[i] = entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
+	}
+	m.main.entries[0] = entry{kind: entryTool, tool: &agent.ToolEvent{ID: "first"}}
+	m.main.entries[maxEntries-1] = entry{kind: entryTool, tool: &agent.ToolEvent{ID: "last"}}
+	m.main.toolLine = map[string]int{"first": 0, "last": maxEntries - 1}
+	m.appendEntry(entry{kind: entryNote, text: "newest"})
+
+	if got := len(facts(tr)); got != maxEntries {
+		t.Fatalf("cap not enforced: %d entries", got)
+	}
+	if !trimmed(tr) {
+		t.Fatal("trimming should be recorded")
+	}
+	if _, ok := toolIndexed(tr, "first"); ok {
+		t.Fatal("a trimmed tool row must be forgotten")
+	}
+	if f, ok := toolIndexed(tr, "last"); !ok || f.Kind != "tool" || f.ToolID != "last" {
+		t.Fatalf("the surviving tool row is not the entry its id finds: %v (indexed %v)", f, ok)
+	}
+}
+
+func TestEntryCapTrimsWithANoteRenders(t *testing.T) {
 	m := sized(t)
 	m.main.entries = make([]entry, maxEntries)
 	for i := range m.main.entries {
@@ -285,18 +399,6 @@ func TestEntryCapTrimsWithANote(t *testing.T) {
 	m.main.toolLine = map[string]int{"first": 0, "last": maxEntries - 1}
 	m.appendEntry(entry{kind: entryNote, text: "newest"})
 
-	if len(m.main.entries) != maxEntries {
-		t.Fatalf("cap not enforced: %d entries", len(m.main.entries))
-	}
-	if !m.main.trimmed {
-		t.Fatal("trimming should be recorded")
-	}
-	if _, ok := m.main.toolLine["first"]; ok {
-		t.Fatal("a trimmed tool row must be forgotten")
-	}
-	if got := m.main.toolLine["last"]; got != maxEntries-2 {
-		t.Fatalf("surviving tool row index %d, want %d", got, maxEntries-2)
-	}
 	m.refreshViewport()
 	m.vp.GotoTop()
 	if !strings.Contains(plainView(m), trimmedNote) {
@@ -471,17 +573,18 @@ func TestToolRowsClampToWidth(t *testing.T) {
 // EventDone is, and it closes the run as it always did.
 func TestOnlyTheWiresEndingClosesAStreamRun(t *testing.T) {
 	m := sized(t)
+	tr := &m.main
 	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "a"})
 	m = feed(t, m, agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
 		ID: "turn-1", Phase: agent.TurnEnded, StopReason: "end_turn",
 	}})
 	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "b"})
-	if got := texts(m, entryThought); len(got) != 1 || got[0] != "ab" {
+	if got := factTexts(tr, "thought"); len(got) != 1 || got[0] != "ab" {
 		t.Fatalf("the turn's ending split the run: %q", got)
 	}
 	m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn"})
 	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "c"})
-	if got := texts(m, entryThought); len(got) != 2 {
+	if got := factTexts(tr, "thought"); len(got) != 2 {
 		t.Fatalf("EventDone must close the run: %q", got)
 	}
 }
@@ -501,21 +604,31 @@ func TestModeChangeLeavesANote(t *testing.T) {
 // indistinguishable from the turn having finished on its own.
 func TestCancelledTurnLeavesANote(t *testing.T) {
 	m := sized(t)
+	tr := &m.main
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
 	m = tm.(Model)
-	if notes := texts(m, entryNote); len(notes) != 1 || notes[0] != "cancelled" {
+	if notes := factTexts(tr, "note"); len(notes) != 1 || notes[0] != "cancelled" {
 		t.Fatalf("cancel note %q", notes)
-	}
-	if m.status != statusIdle {
-		t.Fatalf("status %v after a cancel", m.status)
 	}
 
 	// A turn that ended on its own says nothing.
 	m = sized(t)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
-	if notes := texts(m, entryNote); len(notes) != 0 {
+	if notes := factTexts(tr, "note"); len(notes) != 0 {
 		t.Fatalf("a normal turn end should be silent, got %q", notes)
+	}
+}
+
+// TestCancelledTurnLeavesANoteRenders holds the one assertion of the test above
+// that is neither a frame nor a transcript fact: the TUI's own status after a
+// cancel, which stays with the client.
+func TestCancelledTurnLeavesANoteRenders(t *testing.T) {
+	m := sized(t)
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
+	m = tm.(Model)
+	if m.status != statusIdle {
+		t.Fatalf("status %v after a cancel", m.status)
 	}
 }
 
