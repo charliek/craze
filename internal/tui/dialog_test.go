@@ -251,12 +251,12 @@ func TestFastOnSendsTheAdvertisedValue(t *testing.T) {
 	m = m.openModelDialog()
 	m = pressKey(t, m, tea.KeyTab)
 	m = pressKey(t, m, tea.KeyTab)
-	if m.mdlg.focus != focusFast {
+	if m.mdlg.focus != dialogFocus("fast") {
 		t.Fatalf("focus %v", m.mdlg.focus)
 	}
 	m = pressKey(t, m, tea.KeyRight)
-	if m.mdlg.fast != "true" {
-		t.Fatalf("the on value is %q, want the advertised \"true\"", m.mdlg.fast)
+	if m.mdlg.chosen["fast"] != "true" {
+		t.Fatalf("the on value is %q, want the advertised \"true\"", m.mdlg.chosen["fast"])
 	}
 	tm, cmd := m.Update(enter())
 	m = flushCmd(t, tm.(Model), cmd)
@@ -543,7 +543,7 @@ func TestModelDialogFooterTellsTheTruth(t *testing.T) {
 	if got := f.dialogModelList(); len(got) != 1 || got[0].ID != "fast" {
 		t.Fatalf("typing on a toggle row stopped filtering: %+v", got)
 	}
-	if f.mdlg.focus != focusEffort {
+	if f.mdlg.focus != dialogFocus("effort") {
 		t.Fatalf("typing moved the focus: %v", f.mdlg.focus)
 	}
 }

@@ -3323,6 +3323,14 @@ func (m *Model) refreshSnap() {
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}
+	if m.dialog == dialogModel {
+		// The model dialog's tabs are this snapshot's catalog, which a delta
+		// can change under the open box — another client's model change
+		// brings another model's options. A focused tab whose option has gone
+		// hands the focus back to the list for good, rather than taking it
+		// back if the option returns (plan 025 design 4).
+		m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
+	}
 	// Stamp the rows on first sight in a snapshot, not only on the lifecycle
 	// event: a tool re-emit can carry a finished status one Update ahead of
 	// the `finished` event, and a finished row without its stamp would drop

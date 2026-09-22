@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/cursor"
@@ -16,12 +18,16 @@ import (
 const (
 	// modelDialogTitle / themeDialogTitle name the two dialogs; the frame is
 	// shared and the title is how the user tells them apart.
-	modelDialogTitle      = "model"
-	themeDialogTitle      = "theme"
-	modelDialogHint       = "type to filter · ↑↓ · tab effort/fast · enter · esc"
-	modelDialogHintEffort = "type to filter · ↑↓ · tab effort · enter · esc"
-	modelDialogHintFast   = "type to filter · ↑↓ · tab fast · enter · esc"
-	modelDialogHintPlain  = "type to filter · ↑↓ · enter · esc"
+	modelDialogTitle = "model"
+	themeDialogTitle = "theme"
+	// modelHintHead and modelHintTail bracket the list's footer. Between them
+	// goes "tab " and the tabs' labels joined by "/" when the catalog has any
+	// (modelDialogHintText), which for effort and fast is modelDialogHint —
+	// the footer every golden over the Stub's catalog is drawn with.
+	modelHintHead        = "type to filter · ↑↓ · "
+	modelHintTail        = "enter · esc"
+	modelDialogHint      = modelHintHead + "tab effort/fast · " + modelHintTail
+	modelDialogHintPlain = modelHintHead + modelHintTail
 	// modelValueHint is the footer once focus is on a toggle row: ←/→ is the
 	// key that now does something, and the filter still takes what is typed, so
 	// the hint says both rather than dropping one of them.
@@ -39,30 +45,204 @@ const (
 	dialogValueSep = "  "
 )
 
-// dialogFocus is the row ←/→ act on. The list is always first, which is where
-// the filter's keystrokes go whatever has focus.
-type dialogFocus int
+// dialogFocus is the row ←/→ act on: focusList, or a tab named by the id of
+// the option it sets. The list is always first, which is where the filter's
+// keystrokes go whatever has focus.
+//
+// An id and not a position, because the tabs are read off the catalog every
+// time they are asked for and a delta can add, drop or reorder options under
+// an open box: a position would move the focus onto another option without the
+// user touching a key, where an id either still names its option or names
+// nothing, which repaired turns back into the list.
+type dialogFocus string
 
-const (
-	focusList dialogFocus = iota
-	focusEffort
-	focusFast
-)
+// focusList is the model list. No tab can take it: an option with an empty id
+// is never a tab (isDialogTab), since nothing could set it.
+const focusList dialogFocus = ""
 
 // modelDialog is the model dialog's own state: what has been typed, which
-// model is under the cursor, and the effort and fast values the user has
-// chosen but not yet applied.
+// model is under the cursor, which row has the keys, and the value chosen on
+// each tab but not yet applied.
 type modelDialog struct {
 	filter textinput.Model
 	sel    int
 	focus  dialogFocus
-	effort string
-	fast   string
+	// chosen is each tab's value, by option id: seeded from currentOrFirst for
+	// every tab when the box opens, and for a tab that appears while it is
+	// open the first time it is needed (repaired). It is copied on write, like
+	// setConfigCurrent's slice: every Model copy shares the map, and a key
+	// must not write through into a copy bubbletea has already discarded.
+	chosen map[string]string
 }
 
-// modelApplyMsg is the result of the apply chain: the steps that landed, and
-// the one that did not. A tea.Cmd cannot append to the transcript — only Update
-// can — so the chain reports what happened and Update writes it.
+// tabRole is what a tab is to the rest of craze. Effort and fast have a
+// presentation of their own, byte for byte what the dialog drew before its
+// rows came from the catalog (plan 025 design 4), and they are found by role
+// on the model a chain switches to, whatever that model calls them (X3). Every
+// other option is roleOther: its advertised name, its raw values, its id.
+type tabRole int
+
+const (
+	roleOther tabRole = iota
+	roleEffort
+	roleFast
+)
+
+// modelTab is one row under the model list: an option the current catalog
+// advertises, what the row calls it, and its role.
+type modelTab struct {
+	opt   agent.ConfigOption
+	label string
+	role  tabRole
+}
+
+func (t modelTab) focus() dialogFocus { return dialogFocus(t.opt.ID) }
+
+// valueName is how the row spells a value: fast's as on/off, which is what the
+// row promises and the note writes, and every other tab's as the agent sent it.
+func (t modelTab) valueName() func(string) string {
+	if t.role == roleFast {
+		return fastLabel(&t.opt)
+	}
+	return nil
+}
+
+// modeCategory is the category cursor files its mode option under. The mode
+// has its own chip, its own commands and Shift+Tab, so it is never a tab here.
+const modeCategory = "mode"
+
+// isDialogTab reports whether an advertised option gets a row: a select with
+// at least one value to pick, and neither the mode nor the model — which are
+// told apart by their semantic category first and by id second (plan 025
+// design 4, astra 12), since the model has the list above and the mode its
+// chip. A type left empty is read as a select, as isEffortSelect reads it.
+func isDialogTab(opt agent.ConfigOption) bool {
+	switch {
+	case opt.ID == "":
+		return false
+	case opt.Type != "" && opt.Type != "select":
+		return false
+	case len(opt.SelectValues) == 0:
+		return false
+	case opt.Category == modeCategory || agent.IsModelConfigOption(opt):
+		return false
+	case strings.EqualFold(opt.ID, "mode") || strings.EqualFold(opt.ID, "model"):
+		return false
+	}
+	return true
+}
+
+// catalogTabs is the dialog's tab list over a snapshot: one tab per option
+// isDialogTab admits, in catalog order, each id once.
+//
+// An option the catalog advertises is shown, capability bit or not. The
+// provider's Effort and FastToggle bits (showEffort, showFast) say which chips
+// the status row draws; they do not hide a control the model itself
+// advertises, because the agent's catalog is the one authority on what the
+// current model takes and a bit fixed per provider cannot know that per model
+// (plan 025 design 4, CodeRabbit 11).
+func catalogTabs(snap agent.Snapshot) []modelTab {
+	effort, fast := agent.EffortOption(snap), agent.FastOption(snap)
+	seen := make(map[string]bool, len(snap.Config))
+	var out []modelTab
+	for _, opt := range snap.Config {
+		if !isDialogTab(opt) || seen[opt.ID] {
+			continue
+		}
+		seen[opt.ID] = true
+		t := modelTab{opt: opt, label: tabLabel(opt)}
+		switch {
+		case effort != nil && opt.ID == effort.ID:
+			t.role, t.label = roleEffort, "effort"
+		case fast != nil && opt.ID == fast.ID:
+			t.role, t.label = roleFast, "fast"
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// tabLabel is a tab's label when it is neither effort nor fast: the name the
+// agent advertises, lowercased like those two, and folded onto the one line a
+// row is allowed to be — the agent's text, so its id stands in when it sent no
+// name at all.
+func tabLabel(opt agent.ConfigOption) string {
+	if name := sanitizeLine(opt.Name); name != "" {
+		return strings.ToLower(name)
+	}
+	return strings.ToLower(sanitizeLine(opt.ID))
+}
+
+// modelDialogTabs is the tab list over this model's snapshot, derived each
+// time it is read — at render, at a key, at a click — so it is always the
+// current model's catalog and never one captured when the box opened.
+func (m Model) modelDialogTabs() []modelTab { return catalogTabs(m.snap) }
+
+// tabIndex is the tab f names, or -1 — for focusList among others, since no
+// tab has an empty id.
+func tabIndex(tabs []modelTab, f dialogFocus) int {
+	for i, t := range tabs {
+		if t.focus() == f {
+			return i
+		}
+	}
+	return -1
+}
+
+// repaired is the dialog made consistent with the tabs the catalog advertises
+// now. A delta can arrive while the box is open — another client's model
+// change brings another model's catalog — so the option the focused tab set
+// can be gone, and a chosen value can be one its option no longer offers. The
+// focus then goes back to the list, and a tab with no chosen value, or one it
+// no longer offers, takes currentOrFirst. A value chosen for an option that has
+// gone is kept, and counts again if the option comes back offering it.
+func (d modelDialog) repaired(tabs []modelTab) modelDialog {
+	if tabIndex(tabs, d.focus) < 0 {
+		d.focus = focusList
+	}
+	var next map[string]string
+	for _, t := range tabs {
+		if v, ok := d.chosen[t.opt.ID]; ok && offers(&t.opt, v) {
+			continue
+		}
+		if next == nil {
+			next = make(map[string]string, len(tabs))
+			maps.Copy(next, d.chosen)
+		}
+		next[t.opt.ID] = currentOrFirst(&t.opt)
+	}
+	if next != nil {
+		d.chosen = next
+	}
+	return d
+}
+
+// choose is the dialog with one tab's value picked, on a fresh map.
+func (d modelDialog) choose(id, value string) modelDialog {
+	next := make(map[string]string, len(d.chosen)+1)
+	maps.Copy(next, d.chosen)
+	next[id] = value
+	d.chosen = next
+	return d
+}
+
+// offers reports whether opt advertises value, exactly as spelled.
+func offers(opt *agent.ConfigOption, value string) bool {
+	for _, v := range opt.SelectValues {
+		if v.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+// modelApplyMsg is the result of the apply chain: the steps it got through, in
+// order, and the one that failed. A tea.Cmd cannot append to the transcript —
+// only Update can — so the chain reports what happened and Update writes it.
+//
+// done holds every step that landed and every step the chain noted instead of
+// applying (applyStep.skipped), each with its note, so the transcript reads in
+// the order the chain ran.
 //
 // gen is the apply it belongs to. Two applies can be in flight at once (the box
 // closes optimistically, so it can be reopened while the first chain is still
@@ -84,11 +264,100 @@ type modelApplyMsg struct {
 // (plan 021 §3.8, panel astra 15).
 type applyStep struct {
 	cfgID string
+	// value is what the step asks for until it lands, and from then on what
+	// the session installed (landed): the value the agent's answer holds,
+	// which is not always the one asked for (plan 025 design 1).
 	value string
 	note  string
 	label string
-	at    uint64
-	rev   uint64
+	// role and opt are an option step's tab: its role, and the option its
+	// value belongs to — the one it was chosen on, until the chain re-resolves
+	// it on the model it has switched to (resolveOn), and that model's after.
+	role tabRole
+	opt  agent.ConfigOption
+	// skipped is a step the chain did not apply: its note is the X4 note that
+	// says why, and it has nothing to settle.
+	skipped bool
+	at      uint64
+	rev     uint64
+}
+
+// landedNote is what a step that landed writes: the arrow note, fast spelled
+// on/off, and the value as it is now — the installed one, once it has landed.
+func (st applyStep) landedNote() string {
+	switch {
+	case st.cfgID == "":
+		return "model → " + st.value
+	case st.role == roleFast:
+		return "fast → " + fastWord(&st.opt, st.value)
+	}
+	return st.label + " → " + st.value
+}
+
+// shownValue is the step's value as its row showed it, which is how a note
+// that names the value names it.
+func (st applyStep) shownValue() string {
+	if st.role == roleFast {
+		return fastWord(&st.opt, st.value)
+	}
+	return st.value
+}
+
+// landed is the step as the engine confirmed it: the value the session is now
+// at (SetResult.Value), the revision that was committed at, and the note
+// rewritten to name what landed. A session that confirms no value leaves the
+// request standing — no dialog value is ever empty.
+func (st applyStep) landed(res engine.SetResult) applyStep {
+	if res.Value != "" {
+		st.value = res.Value
+	}
+	st.rev = res.Rev
+	st.note = st.landedNote()
+	return st
+}
+
+// notApplied is the step as a note instead of a change.
+func (st applyStep) notApplied(why notAppliedReason, model string) applyStep {
+	st.skipped = true
+	st.note = optionNotAppliedNote(st.label, model, st.shownValue(), why)
+	return st
+}
+
+// notAppliedReason is why an option change was not applied (plan 025 X4).
+type notAppliedReason int
+
+const (
+	// notAppliedStale: the session is no longer on the model the change was
+	// chosen for — engine.ErrStaleModel, or a chain that found the model
+	// moved before it could send the change at all.
+	notAppliedStale notAppliedReason = iota
+	// notAppliedMissing: the model has no such option — its catalog does not
+	// advertise it, or the agent's answer no longer lists it
+	// (agent.ErrOptionGone).
+	notAppliedMissing
+	// notAppliedUnoffered: the model has the option but not that value.
+	notAppliedUnoffered
+)
+
+// optionNotAppliedNote is the note an option change that was not applied
+// writes (plan 025 X4). It is a note and never an error row: nothing failed —
+// the model the user chose does not take that setting, or is no longer the
+// session's — and the steps around it still ran. label is the tab's label
+// (effort, fast, context, …), model the id of the model the change was for,
+// and value the value as the user saw it. The dialog writes these, and
+// `/model <id> <effort>` writes the same three.
+func optionNotAppliedNote(label, model, value string, why notAppliedReason) string {
+	if model == "" {
+		model = "the model"
+	}
+	head := label + " not applied: "
+	switch why {
+	case notAppliedStale:
+		return head + "the model changed"
+	case notAppliedUnoffered:
+		return head + model + " does not offer " + value
+	}
+	return head + model + " has no " + label
 }
 
 func (m Model) openModelDialog() Model {
@@ -103,18 +372,9 @@ func (m Model) openModelDialog() Model {
 	// craze routes back to the input, and keeps a frame deterministic.
 	ti.Cursor.SetMode(cursor.CursorStatic)
 	ti.Focus()
-	d := modelDialog{filter: ti}
-	if m.showEffort() {
-		if opt := agent.EffortOption(m.snap); opt != nil {
-			d.effort = currentOrFirst(opt)
-		}
-	}
-	if m.showFast() {
-		if opt := agent.FastOption(m.snap); opt != nil {
-			d.fast = currentOrFirst(opt)
-		}
-	}
-	m.mdlg = d
+	// Every tab starts on its option's current value: repaired seeds a tab
+	// that has none, and at open that is all of them.
+	m.mdlg = modelDialog{filter: ti}.repaired(m.modelDialogTabs())
 	m.dialog = dialogModel
 	return m
 }
@@ -182,30 +442,32 @@ func (m Model) dialogModelList() []agent.ModelInfo {
 	return out
 }
 
-// modelDialogFocuses is the Tab order: the list, then whichever of the two
-// toggle rows the session actually advertises.
-func (m Model) modelDialogFocuses() []dialogFocus {
-	out := []dialogFocus{focusList}
-	if m.showEffort() {
-		out = append(out, focusEffort)
-	}
-	if m.showFast() {
-		out = append(out, focusFast)
+// modelDialogFocuses is the Tab order: the list, then every tab the catalog
+// advertises, in its order.
+func modelDialogFocuses(tabs []modelTab) []dialogFocus {
+	out := make([]dialogFocus, 0, 1+len(tabs))
+	out = append(out, focusList)
+	for _, t := range tabs {
+		out = append(out, t.focus())
 	}
 	return out
 }
 
 func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The keys act on the tabs as they are now, and on a dialog repaired to
+	// match them, so no key can land on an option the catalog has dropped.
+	tabs := m.modelDialogTabs()
+	m.mdlg = m.mdlg.repaired(tabs)
 	switch msg.Type {
 	case tea.KeyEsc:
 		return m.closeDialog(true), nil
 	case tea.KeyEnter:
 		return m.applyModelDialog()
 	case tea.KeyTab:
-		m.mdlg.focus = cycleFocus(m.modelDialogFocuses(), m.mdlg.focus, 1)
+		m.mdlg.focus = cycleFocus(modelDialogFocuses(tabs), m.mdlg.focus, 1)
 		return m, nil
 	case tea.KeyShiftTab:
-		m.mdlg.focus = cycleFocus(m.modelDialogFocuses(), m.mdlg.focus, -1)
+		m.mdlg.focus = cycleFocus(modelDialogFocuses(tabs), m.mdlg.focus, -1)
 		return m, nil
 	case tea.KeyUp, tea.KeyDown:
 		n := len(m.dialogModelList())
@@ -223,7 +485,7 @@ func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyLeft {
 			delta = -1
 		}
-		return m.moveDialogValue(delta), nil
+		return m.moveDialogValue(tabs, delta), nil
 	}
 	// Everything else is filtering, whatever has focus: the footer promises
 	// "type to filter" and the toggle rows have no text of their own.
@@ -244,68 +506,61 @@ func cycleFocus(all []dialogFocus, cur dialogFocus, delta int) dialogFocus {
 	return all[0]
 }
 
-// moveDialogValue steps the focused toggle row along its advertised values.
-func (m Model) moveDialogValue(delta int) Model {
-	var opt *agent.ConfigOption
-	cur := ""
-	switch m.mdlg.focus {
-	case focusEffort:
-		opt, cur = agent.EffortOption(m.snap), m.mdlg.effort
-	case focusFast:
-		opt, cur = agent.FastOption(m.snap), m.mdlg.fast
-	default:
+// moveDialogValue steps the focused tab along its advertised values.
+func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
+	i := tabIndex(tabs, m.mdlg.focus)
+	if i < 0 {
 		return m
 	}
-	if opt == nil || len(opt.SelectValues) == 0 {
-		return m
-	}
+	opt := &tabs[i].opt
 	idx := 0
-	for i, v := range opt.SelectValues {
-		if v.Value == cur {
-			idx = i
+	for j, v := range opt.SelectValues {
+		if v.Value == m.mdlg.chosen[opt.ID] {
+			idx = j
 			break
 		}
 	}
-	next := opt.SelectValues[(idx+delta+len(opt.SelectValues))%len(opt.SelectValues)].Value
-	if m.mdlg.focus == focusEffort {
-		m.mdlg.effort = next
-	} else {
-		m.mdlg.fast = next
-	}
+	n := len(opt.SelectValues)
+	m.mdlg = m.mdlg.choose(opt.ID, opt.SelectValues[(idx+delta+n)%n].Value)
 	return m
 }
 
 // applyModelDialog is Enter: the box closes optimistically, and one chained
-// command applies model → effort → fast, each step only if it changed. Notes
-// are written for the steps that landed and an error names the one that did
-// not, so a half-applied change is visible rather than guessed at.
+// command applies model → each tab in catalog order, each step only if it
+// changed. Notes are written for the steps that landed, and for the ones the
+// chain did not apply (optionNotAppliedNote), and an error names the one that
+// failed, so a half-applied change is visible rather than guessed at.
+//
+// Every option step is bound to the model the chain ends on: the one picked
+// when the chain switches models, the current one when it does not (plan 025
+// X3). Chosen against one model's catalog, a value is nobody's choice for
+// another model's (design 3), so the engine refuses a step whose model has
+// moved by the time it runs, and a step after a model switch is first
+// re-resolved against the model it switched to (runModelApply).
 func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	list := m.dialogModelList()
-	d := m.mdlg
+	tabs := m.modelDialogTabs()
+	d := m.mdlg.repaired(tabs)
 	m = m.closeDialog(false)
 
 	var steps []applyStep
+	forModel := m.snap.CurrentModel
 	if d.sel >= 0 && d.sel < len(list) && list[d.sel].ID != m.snap.CurrentModel {
 		id := list[d.sel].ID
 		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model", at: m.modelRev})
 		m.snap.CurrentModel = id
 		m.model = id
+		forModel = id
 	}
-	if m.showEffort() {
-		if opt := agent.EffortOption(m.snap); opt != nil && d.effort != "" && d.effort != opt.Current {
-			steps = append(steps, applyStep{
-				cfgID: opt.ID, value: d.effort, note: "effort → " + d.effort, label: "effort", at: m.configRev,
-			})
-			m = m.setConfigCurrent(opt.ID, d.effort)
+	for _, t := range tabs {
+		v := d.chosen[t.opt.ID]
+		if v == "" || v == t.opt.Current {
+			continue
 		}
-	}
-	if m.showFast() {
-		if opt := agent.FastOption(m.snap); opt != nil && d.fast != "" && d.fast != opt.Current {
-			steps = append(steps, applyStep{
-				cfgID: opt.ID, value: d.fast, note: "fast → " + fastWord(opt, d.fast), label: "fast", at: m.configRev,
-			})
-			m = m.setConfigCurrent(opt.ID, d.fast)
-		}
+		st := applyStep{cfgID: t.opt.ID, value: v, label: t.label, role: t.role, opt: t.opt, at: m.configRev}
+		st.note = st.landedNote()
+		steps = append(steps, st)
+		m = m.setConfigCurrent(t.opt.ID, v)
 	}
 	if len(steps) == 0 {
 		return m, nil
@@ -324,26 +579,149 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	// runs off this Update and may not mint any of its own.
 	eng, cmds := m.eng, m.nextCmds(len(steps)+1)
 	return m, func() tea.Msg {
-		ctx := context.Background()
-		out := modelApplyMsg{gen: gen}
-		for i, st := range steps {
-			rev, err := applyOneStep(ctx, eng, cmds[i], cmds[len(steps)], st, modelCfgID)
+		return runModelApply(eng, cmds, steps, forModel, modelCfgID, gen)
+	}
+}
+
+// runModelApply is the chain itself, on the command's goroutine: it reads the
+// engine and never the Model, which belongs to Update.
+//
+// The model step, when there is one, runs first. Once it has landed, each
+// option step is re-resolved against the catalog the session has installed
+// for that model — read here, from the engine, since the tabs the steps came
+// from were the previous model's (resolveOn) — and a step the new model cannot
+// take becomes a note and is not sent. Every option step is sent bound to the
+// model (Setting.ForModel), which is what refuses another client's model
+// change landing between two of these steps: the worker answers
+// engine.ErrStaleModel, the step and every step after it become notes, and
+// nothing more is sent, because the model is not the one they were chosen for.
+// A step the agent took but whose answer no longer lists the option
+// (agent.ErrOptionGone) is a note too, and the chain goes on. Any other error
+// names its step and ends the chain, as it always has.
+func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep, forModel, modelCfgID string, gen int) modelApplyMsg {
+	ctx := context.Background()
+	out := modelApplyMsg{gen: gen}
+	switched := false
+	var dest []modelTab
+	for i, st := range steps {
+		if st.cfgID == "" {
+			res, err := applyModelStep(ctx, eng, cmds[i], cmds[len(steps)], st.value, modelCfgID)
 			if err != nil {
 				out.step, out.err = st.label, err
 				return out
 			}
-			st.rev = rev
+			st = st.landed(res)
 			out.done = append(out.done, st)
+			// Bound to the model as the session named it on landing, which is
+			// the name the worker's check compares — a provider may resolve
+			// the id it was sent (engine.SetResult.Value).
+			forModel, switched = st.value, true
+			continue
 		}
-		return out
+		if switched && dest == nil {
+			snap := eng.State().Snapshot
+			if snap.CurrentModel != forModel {
+				// Moved again before a step could be sent: the catalog read
+				// here is some other model's, and judging the steps against it
+				// would say the wrong thing about the model the user picked.
+				return notAppliedFrom(out, steps[i:], notAppliedStale, forModel)
+			}
+			dest = catalogTabs(snap)
+		}
+		if switched {
+			var ok bool
+			if st, ok = st.resolveOn(dest, forModel); !ok {
+				out.done = append(out.done, st)
+				continue
+			}
+		}
+		res, err := eng.Set(ctx, cmds[i], engine.Setting{
+			Kind: engine.SettingConfig, ID: st.cfgID, Value: st.value, ForModel: forModel,
+		})
+		switch {
+		case errors.Is(err, engine.ErrStaleModel):
+			return notAppliedFrom(out, steps[i:], notAppliedStale, forModel)
+		case errors.Is(err, agent.ErrOptionGone):
+			out.done = append(out.done, st.notApplied(notAppliedMissing, forModel))
+			continue
+		case err != nil:
+			out.step, out.err = st.label, err
+			return out
+		}
+		out.done = append(out.done, st.landed(res))
 	}
+	return out
+}
+
+// notAppliedFrom ends a chain with every remaining step noted for the same
+// reason and none of them sent.
+func notAppliedFrom(out modelApplyMsg, rest []applyStep, why notAppliedReason, model string) modelApplyMsg {
+	for _, st := range rest {
+		out.done = append(out.done, st.notApplied(why, model))
+	}
+	return out
+}
+
+// resolveOn is an option step re-resolved against the tabs of the model the
+// chain has just switched to (plan 025 X3): effort and fast by role, whatever
+// that model calls them, and every other tab by id — design 5's rule for
+// `/model <id> <effort>`, applied here so the two paths agree. It is sent only if
+// that model advertises the option and offers the chosen value; otherwise the
+// step comes back as its note, with ok false.
+func (st applyStep) resolveOn(dest []modelTab, model string) (applyStep, bool) {
+	var to *agent.ConfigOption
+	for i := range dest {
+		t := &dest[i]
+		if (st.role != roleOther && t.role == st.role) || (st.role == roleOther && t.opt.ID == st.cfgID) {
+			to = &t.opt
+			break
+		}
+	}
+	if to == nil {
+		return st.notApplied(notAppliedMissing, model), false
+	}
+	v, ok := st.valueOn(to)
+	if !ok {
+		return st.notApplied(notAppliedUnoffered, model), false
+	}
+	st.cfgID, st.value, st.opt = to.ID, v, *to
+	return st, true
+}
+
+// valueOn is the step's value as the option to spells it, if it offers one.
+// Effort is matched without regard to case, as `/model`'s effort word is
+// (agent.SplitModelEffort); fast by what the value means, since what the user
+// picked is on or off and each model spells its own two values; everything
+// else exactly as the agent advertised it.
+func (st applyStep) valueOn(to *agent.ConfigOption) (string, bool) {
+	switch st.role {
+	case roleEffort:
+		for _, v := range to.SelectValues {
+			if strings.EqualFold(v.Value, st.value) {
+				return v.Value, true
+			}
+		}
+		return "", false
+	case roleFast:
+		srcOff, srcOn, srcOK := agent.FastOnOff(&st.opt)
+		dstOff, dstOn, dstOK := agent.FastOnOff(to)
+		switch {
+		case srcOK && dstOK && st.value == srcOn:
+			return dstOn, true
+		case srcOK && dstOK && st.value == srcOff && dstOff != "":
+			return dstOff, true
+		}
+	}
+	return st.value, offers(to, st.value)
 }
 
 // settleStep writes a step the agent accepted into the snapshot. It is the
 // optimistic write made good: the session's own snapshot does not always carry
 // what landed — the model step's fallback writes a config option and leaves
 // CurrentModel alone — so the steps that succeeded have the last word over the
-// refresh.
+// refresh. What it writes is what the session installed (applyStep.landed),
+// never the request: an agent whose answer holds another value than the one
+// asked for is showing that value, and so must the rows.
 //
 // Unless something newer has been applied since. A step is written only if no
 // delta for its section with a higher revision has reached this model since the
@@ -352,6 +730,9 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // would otherwise be overwritten by an answer about a value that is no longer
 // current (plan 021 §3.8, panel astra 15).
 func (m Model) settleStep(st applyStep) Model {
+	if st.skipped {
+		return m
+	}
 	applied := m.modelRev
 	if st.cfgID != "" {
 		applied = m.configRev
@@ -367,24 +748,22 @@ func (m Model) settleStep(st applyStep) Model {
 	return m
 }
 
-// applyOneStep runs one leg and answers with the revision the change was
-// confirmed at. The model step keeps the fallback /model has today: an agent
-// without session/set_model may still take the model as a config option, and
-// fb is the command id that fallback spends.
-func applyOneStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Command, st applyStep, modelCfgID string) (uint64, error) {
-	if st.cfgID != "" {
-		res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingConfig, ID: st.cfgID, Value: st.value})
-		return res.Rev, err
-	}
-	res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: st.value})
+// applyModelStep runs the model step and answers with what the engine
+// confirmed. It keeps the fallback /model has today: an agent without
+// session/set_model may still take the model as a config option, and fb is
+// the command id that fallback spends. The live session takes the config path
+// itself now when the catalog has a model option (plan 025 design 2), so the
+// fallback is rarely reached; it costs nothing where it is not.
+func applyModelStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Command, id, modelCfgID string) (engine.SetResult, error) {
+	res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
 	if err != nil && modelCfgID != "" {
 		if res2, err2 := eng.Set(ctx, fb, engine.Setting{
-			Kind: engine.SettingConfig, ID: modelCfgID, Value: st.value,
+			Kind: engine.SettingConfig, ID: modelCfgID, Value: id,
 		}); err2 == nil {
-			return res2.Rev, nil
+			return res2, nil
 		}
 	}
-	return res.Rev, err
+	return res, err
 }
 
 // setConfigCurrent writes an option's new value into this model's own
@@ -414,17 +793,18 @@ func fastWord(opt *agent.ConfigOption, value string) string {
 	return value
 }
 
-// modelDialogRows is what fits: the list length, and whether each of the
-// single rows is still drawn.
+// modelDialogRows is what fits: the list length, whether the footer and the
+// filter are still drawn, and how many tab rows are — always the first ones,
+// in catalog order.
 type modelDialogRows struct {
-	list               int
-	footer, filter     bool
-	fastRow, effortRow bool
+	list           int
+	footer, filter bool
+	tabs           int
 }
 
 func (r modelDialogRows) total() int {
-	n := 1 + r.list // the title row is never dropped
-	for _, on := range []bool{r.footer, r.filter, r.fastRow, r.effortRow} {
+	n := 1 + r.list + r.tabs // the title row is never dropped
+	for _, on := range []bool{r.footer, r.filter} {
 		if on {
 			n++
 		}
@@ -433,10 +813,12 @@ func (r modelDialogRows) total() int {
 }
 
 // fitModelDialog drops rows in the pinned order until the box fits its budget:
-// the list shrinks first, then the footer hint, then the filter, and the two
-// toggle rows last because nothing else in craze can set them.
-func fitModelDialog(budget, list int, effort, fast bool) modelDialogRows {
-	r := modelDialogRows{list: list, footer: true, filter: true, fastRow: fast, effortRow: effort}
+// the list shrinks first, then the footer hint, then the filter, and the tab
+// rows last, from the last tab to the first, because nothing else in craze can
+// set them. Over effort and fast that is the order the two fixed rows always
+// dropped in: fast, then effort.
+func fitModelDialog(budget, list, tabs int) modelDialogRows {
+	r := modelDialogRows{list: list, footer: true, filter: true, tabs: tabs}
 	for r.total() > budget {
 		switch {
 		case r.list > 0:
@@ -445,10 +827,8 @@ func fitModelDialog(budget, list int, effort, fast bool) modelDialogRows {
 			r.footer = false
 		case r.filter:
 			r.filter = false
-		case r.fastRow:
-			r.fastRow = false
-		case r.effortRow:
-			r.effortRow = false
+		case r.tabs > 0:
+			r.tabs--
 		default:
 			return r
 		}
@@ -457,45 +837,47 @@ func fitModelDialog(budget, list int, effort, fast bool) modelDialogRows {
 }
 
 // modelDialogPlan is what the box draws at one inner height: which rows
-// survived the budget, and the window onto the filtered list. The renderer and
+// survived the budget, the window onto the filtered list, and the tabs — every
+// one the catalog advertises, of which rows.tabs are drawn. The renderer and
 // the hit-tester both take it, so a click can never land on a row that was not
 // drawn.
 type modelDialogPlan struct {
-	rows         modelDialogRows
-	list         []agent.ModelInfo
-	top, shown   int
-	effort, fast *agent.ConfigOption
+	rows       modelDialogRows
+	list       []agent.ModelInfo
+	top, shown int
+	tabs       []modelTab
 }
 
 func (m Model) modelDialogPlan(budget int) modelDialogPlan {
 	list := m.dialogModelList()
-	var effort, fast *agent.ConfigOption
-	if m.showEffort() {
-		effort = agent.EffortOption(m.snap)
-	}
-	if m.showFast() {
-		fast = agent.FastOption(m.snap)
-	}
-	rows := fitModelDialog(budget, min(len(list), dialogListMax), effort != nil, fast != nil)
+	tabs := m.modelDialogTabs()
+	rows := fitModelDialog(budget, min(len(list), dialogListMax), len(tabs))
 	top, shown := dialogListWindow(len(list), m.mdlg.sel, rows.list)
-	return modelDialogPlan{rows: rows, list: list, top: top, shown: shown, effort: effort, fast: fast}
+	return modelDialogPlan{rows: rows, list: list, top: top, shown: shown, tabs: tabs}
 }
 
-func (m Model) modelDialogHintText() string {
-	switch {
-	case m.showEffort() && m.showFast():
-		return modelDialogHint
-	case m.showEffort():
-		return modelDialogHintEffort
-	case m.showFast():
-		return modelDialogHintFast
-	default:
+// modelDialogHintText is the list's footer: what Tab reaches, named by the
+// tabs' labels in their order — "tab effort/fast", "tab effort", "tab fast"
+// over the catalogs craze has always drawn — or no Tab at all when the model
+// advertises nothing.
+func modelDialogHintText(tabs []modelTab) string {
+	if len(tabs) == 0 {
 		return modelDialogHintPlain
 	}
+	labels := make([]string, len(tabs))
+	for i, t := range tabs {
+		labels[i] = t.label
+	}
+	return modelHintHead + "tab " + strings.Join(labels, "/") + " · " + modelHintTail
 }
 
 func (m Model) modelDialogBody(inner, budget int) []string {
 	p := m.modelDialogPlan(budget)
+	// Drawn from the dialog as the tabs now are, which a key or a refresh
+	// would have repaired it to anyway: a focus mark on a tab that is not
+	// drawn, or a value its option does not offer, would be a row nobody can
+	// act on.
+	d := m.mdlg.repaired(p.tabs)
 	rows := []string{m.dialogTitle(modelDialogTitle, inner)}
 	if p.rows.filter {
 		f := m.mdlg.filter
@@ -510,17 +892,14 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		if md.ID == m.snap.CurrentModel {
 			tag = strings.TrimSpace("current " + tag)
 		}
-		rows = append(rows, m.dialogRow(modelRowText(md), tag, p.top+i == m.mdlg.sel, m.mdlg.focus == focusList, inner))
+		rows = append(rows, m.dialogRow(modelRowText(md), tag, p.top+i == d.sel, d.focus == focusList, inner))
 	}
-	if p.rows.effortRow {
-		rows = append(rows, m.dialogValueRow("effort", p.effort, m.mdlg.effort, m.mdlg.focus == focusEffort, inner, nil))
-	}
-	if p.rows.fastRow {
-		rows = append(rows, m.dialogValueRow("fast", p.fast, m.mdlg.fast, m.mdlg.focus == focusFast, inner, fastLabel(p.fast)))
+	for _, t := range p.tabs[:p.rows.tabs] {
+		rows = append(rows, m.dialogValueRow(t.label, &t.opt, d.chosen[t.opt.ID], d.focus == t.focus(), inner, t.valueName()))
 	}
 	if p.rows.footer {
-		hint := m.modelDialogHintText()
-		if m.mdlg.focus != focusList {
+		hint := modelDialogHintText(p.tabs)
+		if d.focus != focusList {
 			hint = modelValueHint
 		}
 		rows = append(rows, m.dialogFooter(hint, inner))
@@ -529,9 +908,12 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 }
 
 // modelDialogClick maps a body row onto what it draws: a list row picks that
-// model and applies, a toggle row takes the focus so the arrows reach it.
+// model and applies, a tab row takes the focus so the arrows reach it. The
+// rows are counted off the same plan the renderer drew, so the rows the budget
+// dropped are rows no click can reach.
 func (m Model) modelDialogClick(i int) (tea.Model, tea.Cmd) {
 	p := m.modelDialogPlan(m.lay.Dialog.H - dialogBorder)
+	m.mdlg = m.mdlg.repaired(p.tabs)
 	row := i - 1 // the title row
 	if p.rows.filter {
 		row--
@@ -543,16 +925,8 @@ func (m Model) modelDialogClick(i int) (tea.Model, tea.Cmd) {
 		m.mdlg.sel = p.top + row
 		return m.applyModelDialog()
 	}
-	row -= p.shown
-	if p.rows.effortRow {
-		if row == 0 {
-			m.mdlg.focus = focusEffort
-			return m, nil
-		}
-		row--
-	}
-	if p.rows.fastRow && row == 0 {
-		m.mdlg.focus = focusFast
+	if row -= p.shown; row < p.rows.tabs {
+		m.mdlg.focus = p.tabs[row].focus()
 	}
 	return m, nil
 }

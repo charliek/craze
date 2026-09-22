@@ -1186,6 +1186,65 @@ func TestFrameGoldenModelDialog(t *testing.T) {
 	}
 }
 
+// runStubCatalogFrame is runStubFrame over a Stub whose current model
+// advertises cfg in place of the static effort/fast catalog: the frames only a
+// richer catalog draws. runStubFrame itself, and every golden drawn from it,
+// keep the static one.
+func runStubCatalogFrame(t *testing.T, cols, rows int, cfg []agent.ConfigOption, script string) string {
+	t.Helper()
+	isolateSkillsHome(t)
+	stub := NewStub()
+	stub.SetModelCatalogs(map[string][]agent.ConfigOption{"grok": cfg})
+	plain, _, err := RunFrameScript(Config{
+		Session:   stub,
+		Theme:     "tokyo-night",
+		Workspace: frameWorkspace(t),
+		Model:     "grok",
+		Yolo:      true,
+	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
+	return plain
+}
+
+// TestFrameGoldenModelDialogFourTabs is plan 025 design 4's new frames: a
+// catalog with four selects draws four tabs under the list — effort and fast
+// exactly as the two-tab frames above draw them, then context and thinking by
+// their advertised names with their raw values — and Tab reaches each in
+// catalog order, the gutter and the footer following it.
+func TestFrameGoldenModelDialogFourTabs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		keys string
+		want []string
+	}{
+		{"model-dialog-four-tabs-100x30", "<wait:idle>/model<enter>gro", []string{
+			"> Grok", "  effort  low  medium  [high]  xhigh  max", "  fast  [off]  on",
+			"  context  [300k]  1m", "  thinking  false  [true]", "tab effort/fast/context/",
+		}},
+		{"model-dialog-context-100x30", "<wait:idle>/model<enter>gro<tab><tab><tab>", []string{
+			"· Grok", "  fast  [off]  on", "> context  [300k]  1m", "  thinking  false  [true]", "←→ change",
+		}},
+		{"model-dialog-thinking-100x30", "<wait:idle>/model<enter>gro<tab><tab><tab><tab>", []string{
+			"· Grok", "  context  [300k]  1m", "> thinking  false  [true]", "←→ change",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStubCatalogFrame(t, 100, 30, stubFourSelectCatalog(), tc.keys)
+			assertGolden(t, tc.name, 100, 30, got)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("frame is missing %q:\n%s", want, got)
+				}
+			}
+			if n := strings.Count(got, dialogCursorMark); n != 1 {
+				t.Fatalf("the frame draws %d cursor gutters, want exactly one:\n%s", n, got)
+			}
+		})
+	}
+}
+
 // TestFrameModelDialogFocusDrawsThreeFrames is the bug the goldens above could
 // not see before this change: Tab cycled the focus and the stripped frame came
 // out identical, so nothing on screen said which row the arrows would move.
