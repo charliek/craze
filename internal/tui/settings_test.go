@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -732,15 +733,47 @@ func TestRenameRefusedForRoomWritesNothing(t *testing.T) {
 
 // saturateStub fills the Stub's outbox past its soft bound, with nobody reading
 // the primary: the state in which every rejectable command refuses.
+//
+// The state has to be one the log's drainer cannot leave, or a test that reads
+// OutboxRoom after it races the drainer. Filling the outbox alone is not that:
+// the drainer moves whole batches onto the primary while the primary has room,
+// and each batch it commits gives the outbox that much room back — so on a slow
+// runner the loop could end with the drainer still to commit its first batch,
+// and the room return a moment later (a macOS CI run of
+// TestRenameRefusedForRoomWritesNothing saw the "refused" rename succeed). So
+// the primary is filled FIRST, to exactly its capacity, and flushed: every
+// filler is committed and the outbox is empty. Only then is the outbox filled,
+// and the drainer's very next send blocks on the full primary for good — it
+// commits nothing, and no room comes back while nobody reads.
 func saturateStub(t *testing.T, s *Stub) {
 	t.Helper()
 	log := s.EventLog()
-	filler := make([]agent.Event, 256)
-	for i := range filler {
-		filler[i] = agent.Event{Type: agent.EventText, Text: "fill"}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Everything already enqueued is on the primary first, so what is left of
+	// its buffer is known and stays so: nothing else writes to it here.
+	if err := log.Flush(ctx, nil); err != nil {
+		t.Fatalf("flushing before the fill: %v", err)
 	}
+	fill := func(n int) []agent.Event {
+		out := make([]agent.Event, n)
+		for i := range out {
+			out[i] = agent.Event{Type: agent.EventText, Text: "fill"}
+		}
+		return out
+	}
+	primary := s.Events()
+	if free := cap(primary) - len(primary); free > 0 {
+		log.Enqueue(fill(free)...)
+		// They all fit, so the drainer publishes and commits them without
+		// waiting for a reader, and this returns once it has.
+		if err := log.Flush(ctx, nil); err != nil {
+			t.Fatalf("flushing the primary full: %v", err)
+		}
+	}
+	batch := fill(256)
 	for log.OutboxRoom() {
-		log.Enqueue(filler...)
+		log.Enqueue(batch...)
 	}
 }
 
