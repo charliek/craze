@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -720,9 +721,7 @@ func toWireEvent(ev Event) wireEvent {
 	if a := ev.Subagent; a != nil {
 		w.Subagent = toWireSubagent(a)
 	}
-	if q := ev.Queue; q != nil {
-		w.Queue = &wireQueued{ID: q.ID, Text: q.Text, QueuedAt: q.QueuedAt.UTC(), Version: q.Version}
-	}
+	w.Queue = toWireQueued(ev.Queue)
 	if c := ev.Command; c != nil {
 		w.Command = &wireCommand{PluginCommand: wirePluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
 	}
@@ -732,22 +731,48 @@ func toWireEvent(ev Event) wireEvent {
 			SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
 			IndexErr: s.IndexErr,
 		}
-		if c := s.Config; c != nil {
-			w.State.Config = &wireConfig{Options: convertSlice(c.Options, toWireConfigOption)}
-		}
-		if c := s.Commands; c != nil {
-			w.State.Commands = &wireCommands{Commands: convertSlice(c.Commands, func(c CommandInfo) wireCommandInfo {
-				return wireCommandInfo(c)
-			})}
-		}
-		if p := s.Plugins; p != nil {
-			w.State.Plugins = &wirePluginsList{Plugins: convertSlice(p.Plugins, func(p PluginCommand) wirePluginCommand {
-				return wirePluginCommand(p)
-			})}
-		}
+		w.State.Config = toWireConfig(s.Config)
+		w.State.Commands = toWireCommands(s.Commands)
+		w.State.Plugins = toWirePlugins(s.Plugins)
 	}
 	w.Err = toWireError(ev.Err)
 	return w
+}
+
+// toWireQueued is a QueuedPrompt on the wire, nil for nil: an EventQueue's
+// payload and a transcript snapshot's queue row (EncodeQueuedPrompt).
+func toWireQueued(q *QueuedPrompt) *wireQueued {
+	if q == nil {
+		return nil
+	}
+	return &wireQueued{ID: q.ID, Text: q.Text, QueuedAt: q.QueuedAt.UTC(), Version: q.Version}
+}
+
+// The three list sections on the wire, nil for nil: a StateDelta's and a
+// transcript snapshot's (EncodeConfigState and its siblings).
+func toWireConfig(c *ConfigState) *wireConfig {
+	if c == nil {
+		return nil
+	}
+	return &wireConfig{Options: convertSlice(c.Options, toWireConfigOption)}
+}
+
+func toWireCommands(c *CommandsState) *wireCommands {
+	if c == nil {
+		return nil
+	}
+	return &wireCommands{Commands: convertSlice(c.Commands, func(c CommandInfo) wireCommandInfo {
+		return wireCommandInfo(c)
+	})}
+}
+
+func toWirePlugins(p *PluginsState) *wirePluginsList {
+	if p == nil {
+		return nil
+	}
+	return &wirePluginsList{Plugins: convertSlice(p.Plugins, func(p PluginCommand) wirePluginCommand {
+		return wirePluginCommand(p)
+	})}
 }
 
 // toWireError is an Event.Err on the wire, nil for nil: its class and code
@@ -955,9 +980,7 @@ func (w *wireEvent) event() Event {
 	if a := w.Subagent; a != nil {
 		ev.Subagent = a.subagent()
 	}
-	if q := w.Queue; q != nil {
-		ev.Queue = &QueuedPrompt{ID: q.ID, Text: q.Text, QueuedAt: q.QueuedAt.UTC(), Version: q.Version}
-	}
+	ev.Queue = w.Queue.queued()
 	if c := w.Command; c != nil {
 		ev.Command = &ExpandedCommand{PluginCommand: PluginCommand(c.PluginCommand), Path: c.Path, Text: c.Text}
 	}
@@ -967,24 +990,48 @@ func (w *wireEvent) event() Event {
 			SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
 			IndexErr: s.IndexErr,
 		}
-		if c := s.Config; c != nil {
-			ev.State.Config = &ConfigState{Options: convertSlice(c.Options, configOptionOf)}
-		}
-		if c := s.Commands; c != nil {
-			ev.State.Commands = &CommandsState{Commands: convertSlice(c.Commands, func(c wireCommandInfo) CommandInfo {
-				return CommandInfo(c)
-			})}
-		}
-		if p := s.Plugins; p != nil {
-			ev.State.Plugins = &PluginsState{Plugins: convertSlice(p.Plugins, func(p wirePluginCommand) PluginCommand {
-				return PluginCommand(p)
-			})}
-		}
+		ev.State.Config = s.Config.config()
+		ev.State.Commands = s.Commands.commands()
+		ev.State.Plugins = s.Plugins.plugins()
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}
 	}
 	return ev
+}
+
+// queued is a wireQueued back as a QueuedPrompt, nil for nil.
+func (w *wireQueued) queued() *QueuedPrompt {
+	if w == nil {
+		return nil
+	}
+	return &QueuedPrompt{ID: w.ID, Text: w.Text, QueuedAt: w.QueuedAt.UTC(), Version: w.Version}
+}
+
+// config, commands and plugins are the list sections back, nil for nil.
+func (w *wireConfig) config() *ConfigState {
+	if w == nil {
+		return nil
+	}
+	return &ConfigState{Options: convertSlice(w.Options, configOptionOf)}
+}
+
+func (w *wireCommands) commands() *CommandsState {
+	if w == nil {
+		return nil
+	}
+	return &CommandsState{Commands: convertSlice(w.Commands, func(c wireCommandInfo) CommandInfo {
+		return CommandInfo(c)
+	})}
+}
+
+func (w *wirePluginsList) plugins() *PluginsState {
+	if w == nil {
+		return nil
+	}
+	return &PluginsState{Plugins: convertSlice(w.Plugins, func(p wirePluginCommand) PluginCommand {
+		return PluginCommand(p)
+	})}
 }
 
 func (w *wireTool) tool() *ToolEvent {
@@ -1093,4 +1140,256 @@ func (w *wireSubagent) subagent() *SubagentInfo {
 		Transcript:   w.Transcript,
 		Background:   w.Background,
 	}
+}
+
+// ------------------------------------------------------------- leaf wrappers
+//
+// The leaf types another codec carries — the transcript snapshot's (plan 024
+// §3.5) — each go through the wire twin EncodeEvent uses for it, by the same
+// conversion, so a field added to an agent type reaches every codec by the one
+// line that adds it to its twin and the shapes cannot drift:
+// EncodeToolEvent(t) is byte for byte the "tool" value of
+// EncodeEvent(Event{Type: EventTool, Tool: t}), and likewise for each
+// (TestLeafWrappersWriteWhatTheEventCarries). The rules are the event codec's:
+// times in UTC, RFC 3339 with nanoseconds; nil and empty collections decode
+// nil; a pointer's presence is kept; HTML is not escaped. A nil pointer
+// encodes to nil — no value, which a caller omits — and no value or null
+// decodes to nil. An encoding fails only where EncodeEvent's would: a time
+// JSON cannot write.
+
+// encodeLeaf is v as one compact JSON value, HTML unescaped, as the event
+// encoder writes it.
+func encodeLeaf(what string, v any) (json.RawMessage, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, fmt.Errorf("agent: encode %s: %w", what, err)
+	}
+	// Encode ends the value with a newline.
+	return json.RawMessage(b.Bytes()[:b.Len()-1]), nil
+}
+
+// decodeLeaf is raw as the wire twin W, nil for no value or null.
+func decodeLeaf[W any](what string, raw json.RawMessage) (*W, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	w := new(W)
+	if err := json.Unmarshal(raw, w); err != nil {
+		return nil, fmt.Errorf("agent: decode %s: %w", what, err)
+	}
+	return w, nil
+}
+
+// EncodeToolEvent is t as the event codec writes an EventTool's payload.
+func EncodeToolEvent(t *ToolEvent) (json.RawMessage, error) {
+	if t == nil {
+		return nil, nil
+	}
+	return encodeLeaf("tool", toWireTool(t))
+}
+
+// DecodeToolEvent is EncodeToolEvent's inverse.
+func DecodeToolEvent(raw json.RawMessage) (*ToolEvent, error) {
+	w, err := decodeLeaf[wireTool]("tool", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.tool(), nil
+}
+
+// EncodePlanEvent is p as the event codec writes an EventPlan's payload.
+func EncodePlanEvent(p *PlanEvent) (json.RawMessage, error) {
+	if p == nil {
+		return nil, nil
+	}
+	return encodeLeaf("plan", toWirePlan(p))
+}
+
+// DecodePlanEvent is EncodePlanEvent's inverse.
+func DecodePlanEvent(raw json.RawMessage) (*PlanEvent, error) {
+	w, err := decodeLeaf[wirePlan]("plan", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.plan(), nil
+}
+
+// EncodeTodo is t as the event codec writes one of an EventTodos's items.
+func EncodeTodo(t Todo) (json.RawMessage, error) {
+	return encodeLeaf("todo", toWireTodo(t))
+}
+
+// DecodeTodo is EncodeTodo's inverse; no value decodes as the zero Todo.
+func DecodeTodo(raw json.RawMessage) (Todo, error) {
+	w, err := decodeLeaf[wireTodo]("todo", raw)
+	if w == nil {
+		return Todo{}, err
+	}
+	return eventTodo(*w), nil
+}
+
+// EncodeSubagentInfo is a as the event codec writes an EventSubagent's
+// payload.
+func EncodeSubagentInfo(a *SubagentInfo) (json.RawMessage, error) {
+	if a == nil {
+		return nil, nil
+	}
+	return encodeLeaf("subagent", toWireSubagent(a))
+}
+
+// DecodeSubagentInfo is EncodeSubagentInfo's inverse.
+func DecodeSubagentInfo(raw json.RawMessage) (*SubagentInfo, error) {
+	w, err := decodeLeaf[wireSubagent]("subagent", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.subagent(), nil
+}
+
+// EncodePermissionEvent is p as the event codec writes an EventPermission's
+// payload (and an ask body's permission).
+func EncodePermissionEvent(p *PermissionEvent) (json.RawMessage, error) {
+	if p == nil {
+		return nil, nil
+	}
+	return encodeLeaf("permission", toWirePermission(p))
+}
+
+// DecodePermissionEvent is EncodePermissionEvent's inverse.
+func DecodePermissionEvent(raw json.RawMessage) (*PermissionEvent, error) {
+	w, err := decodeLeaf[wirePermission]("permission", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.permission(), nil
+}
+
+// EncodeQuestionEvent is q as the event codec writes an EventQuestion's
+// payload: an answer list keeps null apart from [].
+func EncodeQuestionEvent(q *QuestionEvent) (json.RawMessage, error) {
+	if q == nil {
+		return nil, nil
+	}
+	return encodeLeaf("question", toWireQuestionEv(q))
+}
+
+// DecodeQuestionEvent is EncodeQuestionEvent's inverse.
+func DecodeQuestionEvent(raw json.RawMessage) (*QuestionEvent, error) {
+	w, err := decodeLeaf[wireQuestionEv]("question", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.question(), nil
+}
+
+// EncodeQueuedPrompt is q as the event codec writes an EventQueue's payload.
+func EncodeQueuedPrompt(q QueuedPrompt) (json.RawMessage, error) {
+	return encodeLeaf("queued prompt", toWireQueued(&q))
+}
+
+// DecodeQueuedPrompt is EncodeQueuedPrompt's inverse; no value decodes as the
+// zero QueuedPrompt.
+func DecodeQueuedPrompt(raw json.RawMessage) (QueuedPrompt, error) {
+	w, err := decodeLeaf[wireQueued]("queued prompt", raw)
+	if w == nil {
+		return QueuedPrompt{}, err
+	}
+	return *w.queued(), nil
+}
+
+// EncodeConfigState is c as the event codec writes a StateDelta's Config
+// section.
+func EncodeConfigState(c *ConfigState) (json.RawMessage, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return encodeLeaf("config", toWireConfig(c))
+}
+
+// DecodeConfigState is EncodeConfigState's inverse.
+func DecodeConfigState(raw json.RawMessage) (*ConfigState, error) {
+	w, err := decodeLeaf[wireConfig]("config", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.config(), nil
+}
+
+// EncodeCommandsState is c as the event codec writes a StateDelta's Commands
+// section.
+func EncodeCommandsState(c *CommandsState) (json.RawMessage, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return encodeLeaf("commands", toWireCommands(c))
+}
+
+// DecodeCommandsState is EncodeCommandsState's inverse.
+func DecodeCommandsState(raw json.RawMessage) (*CommandsState, error) {
+	w, err := decodeLeaf[wireCommands]("commands", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.commands(), nil
+}
+
+// EncodePluginsState is p as the event codec writes a StateDelta's Plugins
+// section.
+func EncodePluginsState(p *PluginsState) (json.RawMessage, error) {
+	if p == nil {
+		return nil, nil
+	}
+	return encodeLeaf("plugins", toWirePlugins(p))
+}
+
+// DecodePluginsState is EncodePluginsState's inverse.
+func DecodePluginsState(raw json.RawMessage) (*PluginsState, error) {
+	w, err := decodeLeaf[wirePluginsList]("plugins", raw)
+	if w == nil {
+		return nil, err
+	}
+	return w.plugins(), nil
+}
+
+// EncodeSendNowState is s as the event codec writes a StateDelta's SendNow
+// section.
+func EncodeSendNowState(s *SendNowState) (json.RawMessage, error) {
+	if s == nil {
+		return nil, nil
+	}
+	return encodeLeaf("send-now", (*wireSendNow)(s))
+}
+
+// DecodeSendNowState is EncodeSendNowState's inverse.
+func DecodeSendNowState(raw json.RawMessage) (*SendNowState, error) {
+	w, err := decodeLeaf[wireSendNow]("send-now", raw)
+	return (*SendNowState)(w), err
+}
+
+// EncodeForeignTurnInfo is f as the event codec writes an EventForeignTurn's
+// payload.
+func EncodeForeignTurnInfo(f *ForeignTurnInfo) (json.RawMessage, error) {
+	if f == nil {
+		return nil, nil
+	}
+	return encodeLeaf("foreign turn", (*wireForeignTurn)(f))
+}
+
+// DecodeForeignTurnInfo is EncodeForeignTurnInfo's inverse.
+func DecodeForeignTurnInfo(raw json.RawMessage) (*ForeignTurnInfo, error) {
+	w, err := decodeLeaf[wireForeignTurn]("foreign turn", raw)
+	return (*ForeignTurnInfo)(w), err
+}
+
+// RemoteErrorOf is what the event codec keeps of err: the *RemoteError a
+// decoder of an event carrying err holds — its message as the JSON carries it,
+// its class and its code — and nil for nil. It runs err's own methods (Error,
+// and the chain walk that classifies it) once, as the event encoder does, so a
+// caller that may not run an error's code under a lock calls it outside that
+// lock, as the transcript snapshot's encoder does for an error entry (plan 024
+// §3.2). A *RemoteError keeps its own class and code.
+func RemoteErrorOf(err error) *RemoteError {
+	return remoteError(toWireError(err))
 }

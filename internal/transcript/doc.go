@@ -33,6 +33,31 @@
 // storage is each transcript's stream builder, which no reader ever aliases:
 // the open entry's text is read through Transcript.Tail, which copies.
 //
+// # Snapshots
+//
+// A client attaching mid-session starts from Model.Snapshot and Restore and
+// folds on from the snapshot's Seq (plan 024 §3.5). The snapshot carries what
+// decides the next event's effect — an open run's tail, the todo-note dedupe,
+// the roster's finish order, the last-ended asks, the counter for unsequenced
+// ids — so the restored model folds on exactly as the first one does; and it
+// is bounded by a byte budget on its encoding (EncodeSnapshot), filled
+// mandatory state first, then the main transcript's newest entries, then each
+// child's. The one lock it takes is held for the cut alone.
+//
+// Four limits, each separate and each tested (§3.5):
+//
+//   - retained model memory: Bounds, the model's own accounting of what it
+//     holds (TestTheModelIsBoundedOnAWorstCaseSession);
+//   - the snapshot's encoded size: at most its budget, envelope and metadata
+//     included, with ErrSnapshotTooLarge when mandatory state or the main
+//     transcript's newest entry cannot fit (TestSnapshotStaysInsideItsByteBudget,
+//     TestMandatoryStateOverTheBudgetIsRefused);
+//   - the subscription's storage: the event log's MaxBytes plus the one record
+//     being handed over — the snapshot travels beside the subscription, never
+//     through it (internal/agent's EventLog, and the engine's attach test);
+//   - the decoding peak: the decoded snapshot beside its encoding, then one
+//     record at a time (TestDecodingASnapshotPeaksNearItsSize).
+//
 // # What is not here
 //
 // Rows a client writes for a message of its own (a usage error, the

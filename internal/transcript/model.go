@@ -72,6 +72,9 @@ type Model struct {
 	idN   uint32
 	// fc is what the current Fold changed, turned into its Change at the end.
 	fc foldCtx
+	// lockHeld, when a test sets it, is told how long each Snapshot held mu
+	// (TestSnapshotHoldsTheModelLockBriefly). Production leaves it nil.
+	lockHeld func(time.Duration)
 
 	subs     map[string]*Transcript
 	subOrder []string
@@ -95,10 +98,13 @@ type Model struct {
 }
 
 // rosterRow is one roster entry: the last SubagentInfo the stream carried for
-// it, and its place in finish order (0 while it has not finished this run).
+// it, its place in finish order (0 while it has not finished this run), and
+// whether a snapshot this model was restored from carried only the head of its
+// Prompt or Output (the next roster event for it replaces the row whole).
 type rosterRow struct {
-	info   agent.SubagentInfo
-	finish uint64
+	info      agent.SubagentInfo
+	finish    uint64
+	truncated bool
 }
 
 // Ask is one open ask: what was asked, and when.
@@ -108,6 +114,13 @@ type Ask struct {
 	// Body is the opening: exactly one of its pointers is set, the event's own.
 	Body agent.AskBody
 	At   time.Time
+	// Truncated reports that the snapshot this model was restored from carried
+	// only the head of the body's text — a plan's Plan or Overview, a
+	// question's prompts and options, a permission's tool text over ItemCap
+	// (plan 024 §3.5) — so a client can say so. A model folded from the event
+	// stream never sets it; a new opening of the same id replaces the ask
+	// whole.
+	Truncated bool
 }
 
 // AskEnding is one ask's ending, as the last-ended list keeps it: who ended it
@@ -411,6 +424,12 @@ type State struct {
 	// Tools is every tool's last state by id: the payload of each tool entry
 	// a transcript still holds under its id. nil when there is none.
 	Tools map[ToolKey]*agent.ToolEvent
+	// TruncatedAgents names the roster rows whose Prompt or Output the
+	// snapshot this model was restored from carried only the head of (over
+	// ItemCap, plan 024 §3.5); nil when there is none, which is always so for
+	// a model folded from the event stream. The next roster event for a row
+	// replaces it whole and takes it out of this set.
+	TruncatedAgents map[string]bool
 }
 
 // ToolKey names one tool call: the transcript it is in ("" main, else the
@@ -431,8 +450,12 @@ type History struct {
 
 // TranscriptHistory is one transcript in the history projection.
 type TranscriptHistory struct {
-	Entries     []Entry
-	Trimmed     bool
+	Entries []Entry
+	Trimmed bool
+	// Windowed reports that the transcript was restored from a snapshot that
+	// omitted its older entries to fit its byte budget (plan 024 §3.5): a
+	// client draws the trim note for Trimmed || Windowed.
+	Windowed    bool
 	StreamOpen  bool
 	TodoPlanned int
 	TodoDone    bool
@@ -495,6 +518,13 @@ type transcriptCut struct {
 	tailCut     bool
 	todoPlanned int
 	todoDone    bool
+	// The window a restored transcript carries (Transcript.windowed and the
+	// rest): what the snapshot it came from omitted. omitted is shared, not
+	// copied: nothing writes it after Restore.
+	windowed   bool
+	dropped    int
+	omitted    map[string]EntryID
+	omittedRun Kind
 }
 
 type subCut struct {
@@ -506,6 +536,20 @@ func (m *Model) cut() cut {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cutLocked()
+}
+
+// snapshotCut is Snapshot's critical section, and all of it (plan 024 §3.4):
+// the cut, under mu, timed for a test that asks.
+func (m *Model) snapshotCut() cut {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lockHeld == nil {
+		return m.cutLocked()
+	}
+	start := time.Now()
+	c := m.cutLocked()
+	m.lockHeld(time.Since(start))
+	return c
 }
 
 func (m *Model) cutLocked() cut {
@@ -545,6 +589,10 @@ func (t *Transcript) cutLocked() transcriptCut {
 		streamOpen:  t.streamOpen,
 		todoPlanned: t.todoPlanned,
 		todoDone:    t.todoDone,
+		windowed:    t.windowed,
+		dropped:     t.dropped,
+		omitted:     t.omitted,
+		omittedRun:  t.omittedRun,
 	}
 	if n := len(tc.entries); t.streamOpen && n > 0 && tc.entries[n-1].Streaming {
 		open := *tc.entries[n-1]
@@ -575,6 +623,12 @@ func (c *cut) state() State {
 		s.Agents = make([]agent.SubagentInfo, len(c.agents))
 		for i := range c.agents {
 			s.Agents[i] = c.agents[i].info
+			if c.agents[i].truncated {
+				if s.TruncatedAgents == nil {
+					s.TruncatedAgents = make(map[string]bool)
+				}
+				s.TruncatedAgents[c.agents[i].info.ID] = true
+			}
 		}
 	}
 	addTools := func(agentID string, tc *transcriptCut) {
@@ -609,6 +663,7 @@ func (c *cut) history() History {
 func (tc *transcriptCut) history() TranscriptHistory {
 	th := TranscriptHistory{
 		Trimmed:     tc.trimmed,
+		Windowed:    tc.windowed,
 		StreamOpen:  tc.streamOpen,
 		TodoPlanned: tc.todoPlanned,
 		TodoDone:    tc.todoDone,

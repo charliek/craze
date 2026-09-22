@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1112,6 +1113,171 @@ func TestEncodeEventBodiesShareNothingUnderConcurrentUse(t *testing.T) {
 				t.Fatalf("a body changed after it was returned: %v", d)
 			}
 		}
+	}
+}
+
+// leafFragment is the raw value at path inside an event body: object keys, and
+// an index for an array.
+func leafFragment(t *testing.T, body string, path ...string) json.RawMessage {
+	t.Helper()
+	raw := json.RawMessage(body)
+	for _, key := range path {
+		if i, err := strconv.Atoi(key); err == nil {
+			var arr []json.RawMessage
+			if err := json.Unmarshal(raw, &arr); err != nil || i >= len(arr) {
+				t.Fatalf("%s at %q: %v", body, key, err)
+			}
+			raw = arr[i]
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			t.Fatalf("%s at %q: %v", body, key, err)
+		}
+		raw = obj[key]
+	}
+	return raw
+}
+
+// checkLeaf holds one leaf wrapper to the event codec: a value filled by the
+// completeness filler (the distinct pass, then the zero pass) is written byte
+// for byte as the event carries it at path, and reads back equivalent under
+// the event codec's rules; nil writes nothing, and nothing or null reads nil.
+func checkLeaf[T any](t *testing.T, name string, event func(*T) Event, path []string,
+	enc func(*T) (json.RawMessage, error), dec func(json.RawMessage) (*T, error)) {
+	t.Helper()
+	for _, zero := range []bool{false, true} {
+		v := new(T)
+		f := &codecFiller{t: t, zero: zero, boolOn: func(int) bool { return true }}
+		f.fill(name, reflect.ValueOf(v).Elem())
+		raw, err := enc(v)
+		if err != nil {
+			t.Fatalf("%s (zero %v): encode: %v", name, zero, err)
+		}
+		body, err := EncodeEvent(event(v))
+		if err != nil {
+			t.Fatalf("%s (zero %v): EncodeEvent: %v", name, zero, err)
+		}
+		if want := leafFragment(t, body, path...); string(raw) != string(want) {
+			t.Fatalf("%s (zero %v): the wrapper wrote\n %s\nthe event carries\n %s", name, zero, raw, want)
+		}
+		got, err := dec(raw)
+		if err != nil || got == nil {
+			t.Fatalf("%s (zero %v): decode %s: %v, %v", name, zero, raw, got, err)
+		}
+		var d []string
+		codecCompare(name, reflect.ValueOf(*v), reflect.ValueOf(*got), &d)
+		if len(d) > 0 {
+			t.Fatalf("%s (zero %v) did not survive its wrapper:\n  %s\nbody: %s", name, zero, strings.Join(d, "\n  "), raw)
+		}
+	}
+	if raw, err := enc(nil); raw != nil || err != nil {
+		t.Fatalf("%s: nil encodes to %s, %v; want nothing", name, raw, err)
+	}
+	for _, none := range []json.RawMessage{nil, json.RawMessage("null")} {
+		if got, err := dec(none); got != nil || err != nil {
+			t.Fatalf("%s: %q decodes to %+v, %v; want nil", name, none, got, err)
+		}
+	}
+	if _, err := dec(json.RawMessage(`{"id":`)); err == nil {
+		t.Fatalf("%s: malformed input decoded", name)
+	}
+}
+
+// byValue adapts a wrapper over a value type to checkLeaf's pointer form: nil
+// is the value's absence.
+func byValue[T any](enc func(T) (json.RawMessage, error), dec func(json.RawMessage) (T, error)) (
+	func(*T) (json.RawMessage, error), func(json.RawMessage) (*T, error)) {
+	return func(v *T) (json.RawMessage, error) {
+			if v == nil {
+				return nil, nil
+			}
+			return enc(*v)
+		}, func(raw json.RawMessage) (*T, error) {
+			if len(raw) == 0 || string(raw) == "null" {
+				v, err := dec(raw)
+				var zero T
+				if err != nil || !reflect.DeepEqual(v, zero) {
+					return nil, fmt.Errorf("no value decoded as %+v, %v; want the zero value", v, err)
+				}
+				return nil, nil
+			}
+			v, err := dec(raw)
+			if err != nil {
+				return nil, err
+			}
+			return &v, nil
+		}
+}
+
+// TestLeafWrappersWriteWhatTheEventCarries (plan 024 §3.5): every exported leaf
+// wrapper writes exactly the bytes EncodeEvent writes for the same value where
+// an event carries it, and reads them back losslessly — so the transcript
+// snapshot's codec and the event codec share one wire shape per leaf type and
+// a field added to one reaches both. The wrappers' own completeness rides on
+// TestEventCodecCarriesEveryFieldReachableFromEvent, which walks the same wire
+// twins through Event.
+func TestLeafWrappersWriteWhatTheEventCarries(t *testing.T) {
+	checkLeaf(t, "ToolEvent", func(v *ToolEvent) Event { return Event{Type: EventTool, Tool: v} },
+		[]string{"tool"}, EncodeToolEvent, DecodeToolEvent)
+	checkLeaf(t, "PlanEvent", func(v *PlanEvent) Event { return Event{Type: EventPlan, Plan: v} },
+		[]string{"plan"}, EncodePlanEvent, DecodePlanEvent)
+	encTodo, decTodo := byValue(EncodeTodo, DecodeTodo)
+	checkLeaf(t, "Todo", func(v *Todo) Event { return Event{Type: EventTodos, Todos: []Todo{*v}} },
+		[]string{"todos", "0"}, encTodo, decTodo)
+	checkLeaf(t, "SubagentInfo", func(v *SubagentInfo) Event { return Event{Type: EventSubagent, Subagent: v} },
+		[]string{"subagent"}, EncodeSubagentInfo, DecodeSubagentInfo)
+	checkLeaf(t, "PermissionEvent", func(v *PermissionEvent) Event { return Event{Type: EventPermission, Permission: v} },
+		[]string{"permission"}, EncodePermissionEvent, DecodePermissionEvent)
+	checkLeaf(t, "QuestionEvent", func(v *QuestionEvent) Event { return Event{Type: EventQuestion, Question: v} },
+		[]string{"question"}, EncodeQuestionEvent, DecodeQuestionEvent)
+	encQueued, decQueued := byValue(EncodeQueuedPrompt, DecodeQueuedPrompt)
+	checkLeaf(t, "QueuedPrompt", func(v *QueuedPrompt) Event { return Event{Type: EventQueue, Queue: v} },
+		[]string{"queue"}, encQueued, decQueued)
+	checkLeaf(t, "ConfigState", func(v *ConfigState) Event { return Event{Type: EventMeta, State: &StateDelta{Config: v}} },
+		[]string{"state", "config"}, EncodeConfigState, DecodeConfigState)
+	checkLeaf(t, "CommandsState", func(v *CommandsState) Event { return Event{Type: EventMeta, State: &StateDelta{Commands: v}} },
+		[]string{"state", "commands"}, EncodeCommandsState, DecodeCommandsState)
+	checkLeaf(t, "PluginsState", func(v *PluginsState) Event { return Event{Type: EventMeta, State: &StateDelta{Plugins: v}} },
+		[]string{"state", "plugins"}, EncodePluginsState, DecodePluginsState)
+	checkLeaf(t, "SendNowState", func(v *SendNowState) Event { return Event{Type: EventMeta, State: &StateDelta{SendNow: v}} },
+		[]string{"state", "sendNow"}, EncodeSendNowState, DecodeSendNowState)
+	checkLeaf(t, "ForeignTurnInfo", func(v *ForeignTurnInfo) Event { return Event{Type: EventForeignTurn, ForeignTurn: v} },
+		[]string{"foreignTurn"}, EncodeForeignTurnInfo, DecodeForeignTurnInfo)
+
+	// A time JSON cannot write fails the wrapper as it fails the event.
+	if _, err := EncodeToolEvent(&ToolEvent{At: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}); err == nil {
+		t.Fatal("a year past 9999 encoded")
+	}
+}
+
+// TestRemoteErrorOfIsWhatTheEventDecodesTo: RemoteErrorOf gives the error value
+// a decoder of an event carrying err holds, whatever err is — a typed chain, a
+// sentinel, a RemoteError of a class this build does not know, an empty
+// message, bytes that are not UTF-8 — and nil for nil.
+func TestRemoteErrorOfIsWhatTheEventDecodesTo(t *testing.T) {
+	for _, err := range []error{
+		errors.New("boom"),
+		fmt.Errorf("the turn failed: %w", &acp.RPCError{Code: -32603, Message: "Internal error"}),
+		fmt.Errorf("%w: exit 0", acp.ErrAgentExited),
+		&RemoteError{Message: "a later craze's error", Class: "quantum", Code: 7},
+		errors.New(""),
+		errors.New("bad \xff\xfe bytes"),
+	} {
+		body, encErr := EncodeEvent(Event{Type: EventError, Err: err})
+		if encErr != nil {
+			t.Fatal(encErr)
+		}
+		ev, decErr := DecodeEvent(body)
+		if decErr != nil {
+			t.Fatal(decErr)
+		}
+		if got := RemoteErrorOf(err); !reflect.DeepEqual(got, ev.Err) {
+			t.Fatalf("RemoteErrorOf(%q) = %+v, the event decodes to %+v", err, got, ev.Err)
+		}
+	}
+	if got := RemoteErrorOf(nil); got != nil {
+		t.Fatalf("RemoteErrorOf(nil) = %+v", got)
 	}
 }
 

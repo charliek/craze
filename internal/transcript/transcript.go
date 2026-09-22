@@ -76,6 +76,21 @@ type Transcript struct {
 	// been written for the list as it stands. The main transcript's only.
 	todoPlanned int
 	todoDone    bool
+
+	// The window, set only by Restore from a snapshot that omitted older
+	// entries to fit its byte budget (plan 024 §3.5), and carried forward by
+	// this model's own snapshots. windowed and dropped say so and how many.
+	// omitted maps the id of every tool whose row the window dropped to that
+	// row's EntryID: an update to one of them applies to nothing — the first
+	// client updates a row this one never had, and the suffix the two share is
+	// unchanged. It is written by Restore alone, so a cut shares it. omittedRun
+	// is the kind of the open run's entry when the window dropped that too (a
+	// child that fitted nothing, mid-stream): its next chunks of that kind
+	// apply to nothing, and whatever ends the run clears it.
+	windowed   bool
+	dropped    int
+	omitted    map[string]EntryID
+	omittedRun Kind
 }
 
 func newTranscript(m *Model, agentID string, maxEntries, maxBytes int) *Transcript {
@@ -133,11 +148,20 @@ func (t *Transcript) Tail() string {
 }
 
 // Trimmed reports whether the transcript has dropped entries off its front;
-// a client draws TrimmedNote above it.
+// a client draws TrimmedNote above it for Trimmed || Windowed.
 func (t *Transcript) Trimmed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.trimmed
+}
+
+// Windowed reports whether the transcript was restored from a snapshot that
+// omitted its older entries to fit the snapshot's byte budget (plan 024
+// §3.5); a client draws TrimmedNote above it for Trimmed || Windowed.
+func (t *Transcript) Windowed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.windowed
 }
 
 // StreamOpen reports whether a run is open: the next chunk of the last entry's
@@ -434,6 +458,13 @@ func (t *Transcript) endRun(at time.Time) {
 	if !open {
 		return
 	}
+	if t.omittedRun != 0 {
+		// A restored window dropped the open run's entry: the run ends here
+		// as it does on the first client, with no entry to close.
+		t.omittedRun = 0
+		t.bufReset()
+		return
+	}
 	last := t.lastEntry()
 	if last == nil || !last.Streaming {
 		// Unreachable: an open run is always the last entry, and only a
@@ -467,7 +498,12 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 		return
 	}
 	at = t.model.stamp(at)
-	if t.streamOpen {
+	if t.streamOpen && t.omittedRun == kind {
+		// The run continues on the first client, in an entry the window this
+		// model was restored from dropped: nothing here to grow.
+		return
+	}
+	if t.streamOpen && t.omittedRun == 0 {
 		if last := t.lastEntry(); last != nil && last.Kind == kind {
 			t.bufAppend(text)
 			ne := *last
@@ -506,6 +542,13 @@ func (t *Transcript) upsertTool(tool *agent.ToolEvent, envelope time.Time) {
 	// existing row still means the thinking before it is over.
 	t.closeStream(at)
 	if tool.ID != "" {
+		if _, ok := t.omitted[tool.ID]; ok {
+			// The row is one the window this model was restored from dropped:
+			// the first client updates it in place, and this one has nothing
+			// to update — the suffix the two share is unchanged (plan 024
+			// §3.5). The run above it closed all the same, on both.
+			return
+		}
 		if id, ok := t.tools[tool.ID]; ok {
 			if ord, e := t.lookup(id); e != nil && e.Kind == KindTool {
 				ne := *e

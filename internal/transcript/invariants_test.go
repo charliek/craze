@@ -94,8 +94,19 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 			t.Fatalf("%s: the tool index names %q → %v, which is not that tool's entry", tr.agent, id, eid)
 		}
 	}
-	if open := len(live) > 0 && live[len(live)-1].Streaming; tr.streamOpen != open {
-		t.Fatalf("%s: streamOpen %v, but the last entry streaming is %v", tr.agent, tr.streamOpen, open)
+	// A restored window can have dropped the open run's entry (omittedRun):
+	// the run is open with no entry of its own, in a transcript that has
+	// drawn nothing since.
+	if open := len(live) > 0 && live[len(live)-1].Streaming; tr.streamOpen != (open || tr.omittedRun != 0) {
+		t.Fatalf("%s: streamOpen %v, but the last entry streaming is %v (omitted run %v)", tr.agent, tr.streamOpen, open, tr.omittedRun)
+	}
+	if tr.omittedRun != 0 && (!tr.streamOpen || len(live) > 0) {
+		t.Fatalf("%s: an omitted %v run beside %d entries (open %v)", tr.agent, tr.omittedRun, len(live), tr.streamOpen)
+	}
+	for tid := range tr.omitted {
+		if _, held := tr.tools[tid]; held {
+			t.Fatalf("%s: tool %q is both held and omitted", tr.agent, tid)
+		}
 	}
 	if !tr.streamOpen && (len(tr.buf) > 0 || tr.bufCut || tr.tailAt != 0) {
 		t.Fatalf("%s: no run is open but the builder holds %d bytes (cut at %d)", tr.agent, len(tr.buf), tr.tailAt)

@@ -1,7 +1,6 @@
 package transcript
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -62,7 +61,9 @@ func raceScript(n int) []agent.Event {
 			ev = agent.Event{Type: agent.EventSubagent, Subagent: &agent.SubagentInfo{ID: child, Status: agent.SubagentCompleted, EndedAt: stamp}, SubagentChange: agent.SubagentChangeFinished}
 		case 16:
 			if i%3 == 0 {
-				ev = agent.Event{Type: agent.EventError, Err: errors.New("boom")}
+				// An error as the engine's observer holds one (X14), so a
+				// restored model's history compares equal by value.
+				ev = agent.Event{Type: agent.EventError, Err: &agent.RemoteError{Message: "boom", Class: agent.EventErrOther}}
 			} else {
 				ev = agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: fmt.Sprintf("turn-%d", i), Phase: agent.TurnStarted, Text: "go"}}
 			}
@@ -75,100 +76,163 @@ func raceScript(n int) []agent.Event {
 	return sequenced(evs)
 }
 
+// raced is one reader's take at one Seq: the bare cut, and a whole Snapshot
+// with its encoding, made on the reader's goroutine while the fold runs on.
+type raced struct {
+	seq uint64
+	c   *cut
+	s   *Snapshot
+	b   []byte
+}
+
 // TestASnapshotRacingTheFoldIsExactAtItsSeq (plan 024 §3.4, A6; run under
-// -race by make test-race): readers take cuts while another goroutine folds —
-// chunks, tool updates, deltas, trims, roster evictions — and every cut, read
-// only after the whole run is over, equals a fresh model folded to exactly the
-// cut's Seq, on the history and the state projections. A cut that shared
-// anything the fold later wrote would differ from its prefix model, or race.
+// -race by make test-race): readers take cuts, and whole snapshots which they
+// encode on the spot, while another goroutine folds — chunks, tool updates,
+// deltas, trims, roster evictions. Read only after the whole run is over,
+// every cut equals a fresh model folded to exactly its Seq on the history and
+// the state projections, and so does every snapshot restored — in process and
+// through the codec — on those and the last-ended list; the snapshots taken
+// at the checkpoints, restored, fold the rest of the session to exactly the
+// model the reference reaches. A cut or a snapshot that shared anything the
+// fold later wrote would differ from its prefix model, or race.
 //
 // Barriers, not sleeps: at every checkpoint the folder hands a reader a reply
-// channel and waits for the cut it takes, so cuts land at known Seqs whatever
-// the scheduler does; between checkpoints the readers cut freely, racing the
-// fold.
+// channel and waits for the cut and the snapshot it takes, so they land at
+// known Seqs whatever the scheduler does; between checkpoints the readers take
+// them freely, racing the fold.
 func TestASnapshotRacingTheFoldIsExactAtItsSeq(t *testing.T) {
 	evs := raceScript(1200)
 	opts := Options{Bounds: raceBounds}
 	m := New(opts)
 
+	take := func(snap bool) raced {
+		if !snap {
+			c := m.cut()
+			return raced{seq: c.seq, c: &c}
+		}
+		s, err := m.Snapshot(0)
+		if err != nil {
+			panic(err)
+		}
+		b, err := EncodeSnapshot(s)
+		if err != nil {
+			panic(err)
+		}
+		return raced{seq: s.Seq, s: s, b: b}
+	}
 	const readers = 3
-	checkpoint := make(chan chan cut)
+	checkpoint := make(chan chan [2]raced)
 	done := make(chan struct{})
-	got := make([][]cut, readers)
+	got := make([][]raced, readers)
 	var wg sync.WaitGroup
 	for r := range readers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var last uint64
-			keep := func(c cut) {
-				if c.seq != last || len(got[r]) == 0 {
-					got[r] = append(got[r], c)
-					last = c.seq
+			var last [2]uint64
+			keep := func(x raced) {
+				i := 0
+				if x.s != nil {
+					i = 1
+				}
+				if x.seq != last[i] || len(got[r]) < 2 {
+					got[r] = append(got[r], x)
+					last[i] = x.seq
 				}
 			}
-			for {
+			for n := 0; ; n++ {
 				select {
 				case <-done:
 					return
 				case reply := <-checkpoint:
-					c := m.cut()
-					keep(c)
-					reply <- c
+					pair := [2]raced{take(false), take(true)}
+					keep(pair[0])
+					keep(pair[1])
+					reply <- pair
 				default:
-					keep(m.cut())
+					keep(take(n%2 == 1))
 				}
 			}
 		}()
 	}
-	var barrier []cut
+	var barrier []raced
 	for i, ev := range evs {
 		m.Fold(ev)
 		if i%97 == 0 {
-			reply := make(chan cut)
+			reply := make(chan [2]raced)
 			checkpoint <- reply
-			barrier = append(barrier, <-reply)
+			pair := <-reply
+			barrier = append(barrier, pair[0], pair[1])
 		}
 	}
 	close(done)
 	wg.Wait()
 
-	all := append([]cut(nil), barrier...)
-	for _, cs := range got {
-		all = append(all, cs...)
+	all := append([]raced(nil), barrier...)
+	for _, xs := range got {
+		all = append(all, xs...)
 	}
-	bySeq := map[uint64][]cut{}
-	for _, c := range all {
-		bySeq[c.seq] = append(bySeq[c.seq], c)
+	bySeq := map[uint64][]raced{}
+	snapshots := 0
+	for _, x := range all {
+		bySeq[x.seq] = append(bySeq[x.seq], x)
+		if x.s != nil {
+			snapshots++
+		}
 	}
-	if len(bySeq) < len(barrier) {
-		t.Fatalf("only %d distinct cuts", len(bySeq))
+	if len(bySeq) < len(barrier)/2 || snapshots < len(barrier)/2 {
+		t.Fatalf("only %d distinct Seqs, %d snapshots", len(bySeq), snapshots)
 	}
 
 	// The reference folds the same events, in order, and is compared with every
-	// cut at the Seq it reaches.
+	// cut and every restored snapshot at the Seq it reaches.
 	ref := New(opts)
-	openTails := 0
+	openTails, restored := 0, 0
+	var onward []*Model
 	for s := uint64(0); s <= uint64(len(evs)); s++ {
 		if s > 0 {
 			ref.Fold(evs[s-1])
+			for _, r := range onward {
+				r.Fold(evs[s-1])
+			}
 		}
-		cs := bySeq[s]
-		if len(cs) == 0 {
+		xs := bySeq[s]
+		if len(xs) == 0 {
 			continue
 		}
 		wantH, wantS := ref.History(), ref.State()
-		for _, c := range cs {
-			if c.main.streamOpen {
+		for _, x := range xs {
+			if x.c == nil {
+				continue
+			}
+			if x.c.main.streamOpen {
 				openTails++
 			}
-			if h := c.history(); !reflect.DeepEqual(h, wantH) {
+			if h := x.c.history(); !reflect.DeepEqual(h, wantH) {
 				t.Fatalf("the cut at Seq %d differs from a model folded to %d:\ncut %+v\nref %+v", s, s, h.Main, wantH.Main)
 			}
-			if st := c.state(); !reflect.DeepEqual(st, wantS) {
+			if st := x.c.state(); !reflect.DeepEqual(st, wantS) {
 				t.Fatalf("the cut's state at Seq %d differs from a model folded to %d:\ncut %+v\nref %+v", s, s, st, wantS)
 			}
 		}
+		first := true
+		for _, x := range xs {
+			if x.s == nil {
+				continue
+			}
+			r1, r2 := restoredBoth(t, x.s, x.b, opts)
+			assertSameModel(t, fmt.Sprintf("the snapshot at Seq %d, restored in process", s), ref, r1)
+			assertSameModel(t, fmt.Sprintf("the snapshot at Seq %d, restored through the codec", s), ref, r2)
+			restored++
+			// One snapshot per Seq folds on to the end, both ways.
+			if first {
+				onward = append(onward, r1, r2)
+				first = false
+			}
+		}
+	}
+	for i, r := range onward {
+		assertSameModel(t, fmt.Sprintf("restored model %d folded to the end", i), ref, r)
 	}
 	if openTails == 0 {
 		t.Fatal("no cut caught an open run, so none copied a tail")
@@ -176,5 +240,6 @@ func TestASnapshotRacingTheFoldIsExactAtItsSeq(t *testing.T) {
 	if !ref.Main.trimmed || len(ref.subOrder) >= len(evs)/40 || ref.Main.head+ref.Main.base == 0 {
 		t.Fatal("the script no longer trims and evicts, so the cuts no longer race those paths")
 	}
-	t.Logf("%d cuts at %d distinct Seqs, %d holding an open run's tail", len(all), len(bySeq), openTails)
+	t.Logf("%d takes at %d distinct Seqs: %d cuts (%d holding an open run's tail), %d snapshots restored twice, %d restored models folded to the end",
+		len(all), len(bySeq), len(all)-snapshots, openTails, restored, len(onward))
 }

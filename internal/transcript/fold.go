@@ -378,6 +378,8 @@ func foldSubagent(m *Model, ev agent.Event) {
 		m.agentOrder = append(m.agentOrder, id)
 	}
 	row.info = *info
+	// The event carries the row whole, so a head a snapshot truncated is gone.
+	row.truncated = false
 	switch ev.SubagentChange {
 	case agent.SubagentChangeSpawned:
 		// A new attempt no longer holds a finish slot.
