@@ -517,8 +517,18 @@ func TestAConfigBackedModelChangeMovesTheModelSection(t *testing.T) {
 	// carrying the OLD value. That is not a change — the option is at the value
 	// it was already at — and it must not write itself over the model the setter
 	// set.
+	//
+	// Since plan 025 a SetModel over a catalog with a model option does not use
+	// session/set_model at all: it sets that option (design 2), and the option
+	// then reads the new model — so a list carrying the old value afterwards is
+	// the agent moving back, not a stale re-list, and the next case says so.
+	// What is left of a direct set_model with an option that did not move is
+	// the one below: set_model on an agent that advertised no model option, and
+	// the option's first appearance carrying the pre-set value, which the
+	// marker suppresses (r27 finding 2) and which leaves the option behind the
+	// model. The same list again is then a re-list and still says nothing.
 	t.Run("a stale re-list after SetModel", func(t *testing.T) {
-		s := startScript(t, "modelconfig", false)
+		s := startScript(t, "modellate", false)
 		settle(t, s)
 		if _, err := s.SetModel(context.Background(), "c-1/1", "composer"); err != nil {
 			t.Fatalf("SetModel: %v", err)
@@ -526,18 +536,40 @@ func TestAConfigBackedModelChangeMovesTheModelSection(t *testing.T) {
 		if got := s.Snapshot().CurrentModel; got != "composer" {
 			t.Fatalf("SetModel left the session on %q", got)
 		}
-		// The option still reads "default": the agent has not moved it, and this
-		// update is its whole option list as it stands.
+		// The first appearance, stale and suppressed: the option reads
+		// "default", the model stays where SetModel put it.
+		s.onUpdate(modelConfigNotification("default"))
+		// And the same list again: the option is at the value it was already
+		// at, which is not a change.
 		s.onUpdate(modelConfigNotification("default"))
 		if got := s.Snapshot().CurrentModel; got != "composer" {
 			t.Fatalf("a stale re-list put the model back to %q", got)
 		}
 		_ = s.log.Flush(context.Background(), s.done)
 		for _, ev := range drainBuffered(s) {
-			if ev.Type == EventMeta && ev.State != nil && ev.State.Config != nil && ev.State.Model != nil {
+			if ev.Type == EventMeta && ev.State != nil && ev.State.Config != nil && ev.State.Model != nil &&
+				ev.Cause == "" {
 				t.Fatalf("a stale re-list carried the model section: %+v", ev.State)
 			}
 		}
+	})
+	t.Run("a list after a one-call SetModel is a change", func(t *testing.T) {
+		s := startScript(t, "modelconfig", false)
+		awaitCatalog(t, s)
+		if _, err := s.SetModel(context.Background(), "c-1/1", "composer"); err != nil {
+			t.Fatalf("SetModel: %v", err)
+		}
+		if opt := ModelConfigOption(s.Snapshot()); opt == nil || opt.Current != "composer" {
+			t.Fatalf("SetModel went through the option, which should read the new model: %+v", opt)
+		}
+		// The option moved, so this list moves it back: the agent's word, in
+		// arrival order, after its answer to the set.
+		s.onUpdate(modelConfigNotification("default"))
+		if got := s.Snapshot().CurrentModel; got != "default" {
+			t.Fatalf("the agent moved its option back and the model stayed on %q", got)
+		}
+		_ = s.log.Flush(context.Background(), s.done)
+		wantFoldMatchesSnapshot(t, drainBuffered(s), s.Snapshot())
 	})
 }
 

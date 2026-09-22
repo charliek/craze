@@ -207,6 +207,12 @@ func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 // in, the session moves CurrentModel with it and publishes both sections, and
 // the model's own mirror ends on the new model rather than being put back by
 // the refreshSnap that every meta triggers.
+//
+// Since plan 025 (design 2) the session's own SetModel sets a model the catalog
+// keeps in an option through that option, so the first Set already lands by
+// session/set_config_option and the command's fallback is not reached; the
+// chain this pins — set_config_option moving the model, both sections, the
+// mirror ending on the new model — is the same one, one call earlier.
 func TestWiredFallbackModelChangeGoesThroughSetConfig(t *testing.T) {
 	isolateSkillsHome(t)
 	bin := buildFakeAgent(t)

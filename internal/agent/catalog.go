@@ -404,11 +404,19 @@ func isEffortSelect(opt ConfigOption) bool {
 		strings.Contains(name, "effort") || strings.Contains(name, "reasoning")
 }
 
+// effortRank orders the options isEffortSelect admits. The exact id `effort`
+// comes first, ahead of every category: cursor files `thinking` under
+// thought_level beside its effort select (plan 025 X1.2), so a category is
+// no evidence that an option is the effort, and the one name that is
+// unambiguous wins whatever the agent's categories say. isEffortSelect already
+// keeps `thinking` out by its id and name; this is the second lock on the same
+// door, so a future spelling that slipped past the first cannot outrank the
+// real control.
 func effortRank(opt ConfigOption) int {
-	if opt.Category == "model_option" {
+	if strings.EqualFold(opt.ID, "effort") {
 		return 0
 	}
-	if strings.EqualFold(opt.ID, "effort") {
+	if opt.Category == "model_option" {
 		return 1
 	}
 	if opt.Category == "thought_level" {
@@ -417,8 +425,8 @@ func effortRank(opt ConfigOption) int {
 	return 3
 }
 
-// EffortOption returns the advertised effort/reasoning select, preferring
-// category model_option, then id effort, then thought_level, else the first match.
+// EffortOption returns the advertised effort/reasoning select, preferring id
+// effort, then category model_option, then thought_level, else the first match.
 // Which options qualify is the session provider's call.
 func EffortOption(snap Snapshot) *ConfigOption {
 	p := snap.Provider.provider()
@@ -531,6 +539,39 @@ func ModelConfigOptionIn(cfg []ConfigOption) *ConfigOption {
 // IsModelConfigOption reports whether opt is the option a provider keeps its
 // model in: what makes SetConfig on it a MODEL change as well as a config one.
 func IsModelConfigOption(opt ConfigOption) bool { return opt.Category == modelCategory }
+
+// modeCategory is the category cursor files its mode option under.
+const modeCategory = "mode"
+
+// withoutModelOptions is cfg after a model change that brought no catalog of
+// its own: the mode option and the model option kept, the model option moved
+// to model, and every other option dropped (plan 025 design 2, panel astra 3).
+//
+// Those others — effort, fast, context, thinking — are per model on cursor,
+// and what cfg holds are the PREVIOUS model's: offering them would offer a
+// control the new model may not have, or hide one it does, and setting one
+// would be refused ("Unknown model config option"). They are gone until the
+// next catalog the agent sends, a push or a later reply, brings the new
+// model's back.
+//
+// The model option reads the model the agent has just accepted, rather than
+// the value the previous catalog left in it, so that the Model section and the
+// Config section of the delta announcing the change say the same thing — and
+// so that a later list carrying the old value is read, in arrival order, as
+// the change it is. A fresh slice: cfg is left as it was.
+func withoutModelOptions(cfg []ConfigOption, model string) []ConfigOption {
+	out := make([]ConfigOption, 0, 2)
+	for _, opt := range cfg {
+		switch {
+		case IsModelConfigOption(opt):
+			opt.Current = model
+			out = append(out, opt)
+		case opt.Category == modeCategory:
+			out = append(out, opt)
+		}
+	}
+	return out
+}
 
 func matchEffortValue(opt *ConfigOption, raw string) (string, bool) {
 	if opt == nil {

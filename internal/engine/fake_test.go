@@ -76,6 +76,12 @@ type fakeSession struct {
 	// ticket (setsWithoutATicket).
 	setResolve func(string) string
 	setSilent  bool
+	// setGone makes a settings verb do everything a success does — mutate,
+	// enqueue its delta — and answer agent.ErrOptionGone beside the ticket:
+	// the live session's SetConfig whose answered catalog no longer lists the
+	// option (answerGone). lastTicket is the last ticket a verb handed out.
+	setGone    bool
+	lastTicket *agent.Ticket
 }
 
 // script is one prompt's answer. It is built whole before it is queued.
@@ -632,7 +638,27 @@ func (s *fakeSession) set(ctx context.Context, cause, value string, delta func(s
 		s.log.Enqueue(ev)
 		return agent.SetOutcome{Value: value}, nil
 	}
-	return agent.SetOutcome{Value: value, Ticket: s.log.EnqueueTicket(ev)}, nil
+	t := s.log.EnqueueTicket(ev)
+	s.lastTicket = t
+	if s.setGone {
+		return agent.SetOutcome{Ticket: t}, agent.ErrOptionGone
+	}
+	return agent.SetOutcome{Value: value, Ticket: t}, nil
+}
+
+// answerGone makes every later settings verb publish and then answer
+// agent.ErrOptionGone (setGone).
+func (s *fakeSession) answerGone() {
+	s.mu.Lock()
+	s.setGone = true
+	s.mu.Unlock()
+}
+
+// ticket is the last ticket a settings verb handed out.
+func (s *fakeSession) ticket() *agent.Ticket {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastTicket
 }
 
 // resolveSets makes every later settings verb answer with f(value) rather than

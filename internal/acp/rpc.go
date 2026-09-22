@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -44,6 +45,33 @@ func (e *RPCError) Error() string {
 		return "json-rpc error"
 	}
 	return fmt.Sprintf("json-rpc error %d: %s", e.Code, e.Message)
+}
+
+// DataMessage is the error's data read as the text an agent put there, in
+// either of the two shapes the agents use: cursor's object carrying a message
+// (`{"message": "Unknown model config option: effort"}`), and grok's bare string
+// (`"unknown model id"`). It is "" for no data or for any other shape. The two
+// -32602 refusals cursor has for a settings call differ in nothing else, so this
+// is what a caller tells them apart by (plan 025 X1.3, X2).
+func (e *RPCError) DataMessage() string {
+	if e == nil {
+		return ""
+	}
+	raw := bytes.TrimSpace(e.Data)
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if raw[0] == '{' && json.Unmarshal(raw, &obj) == nil {
+		return obj.Message
+	}
+	return ""
 }
 
 func MethodNotFound(method string) *RPCError {

@@ -63,6 +63,18 @@ var ErrPromptCancelled = errors.New("agent: prompt cancelled before it was sent"
 // taken a change, refusing it here would say something untrue.
 var ErrSetUnavailable = errors.New("agent: the event log is backed up")
 
+// ErrOptionGone answers a SetConfig the agent TOOK whose answer no longer has
+// the option it set: the reply carried the agent's catalog, and that catalog
+// — the one now installed — lists no option by that id (plan 025 design 1).
+// Cursor's options are per model, so a change of model between the choice and
+// the call is the ordinary way to get here.
+//
+// It is not a refusal, and nothing is undone: what the reply installed is
+// installed, and its delta is enqueued like any other setter's, so
+// SetOutcome.Ticket is set beside the error. Only the value this caller asked
+// about is not there to confirm.
+var ErrOptionGone = errors.New("agent: the agent's catalog no longer has that option")
+
 type EventType string
 
 const (
@@ -874,6 +886,14 @@ type Session interface {
 	// read loop, which enqueue theirs in the section that mutates too (plan 021
 	// §3.8).
 	//
+	// Where the provider's REPLY says what it now holds — the live session's
+	// set_config_option answers with the whole catalog — that part of the
+	// mutation is the read loop's, made as the reply is read, so it is ordered
+	// against the agent's own updates by the wire; the setter's section then
+	// announces the snapshot as it finds it (plan 025 design 1). The one error
+	// that still publishes is ErrOptionGone: the change took, and what it
+	// installed is announced, but the option asked about is no longer there.
+	//
 	// cause is the command that asked, as Event.Cause spells it ("client/id",
 	// engine.Command.Cause), and "" for a change nobody can claim. The
 	// SetOutcome is what the change came to: the value the session is now at,
@@ -904,9 +924,9 @@ type Session interface {
 // SetOutcome is what one settings verb came to: the value the session is now
 // at, and the receipt of the delta that said so.
 //
-// Value is the **confirmed** value, captured in the very section that mutated
-// the snapshot — never asked for afterwards with a second read, which could
-// observe somebody else's change and answer this caller about it. It is not
+// Value is the **confirmed** value, captured in the very section that
+// announced the change — never asked for afterwards with a second read, which
+// could observe somebody else's change and answer this caller about it. It is not
 // always the value that was asked for: the native session resolves an empty
 // effort to the model's own default and a model alias to its canonical id, and
 // a provider is free to do the same. A caller that echoes what it requested

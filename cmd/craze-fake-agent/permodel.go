@@ -468,11 +468,13 @@ func (s *server) onPermodelRequest(msg *acp.Message) {
 }
 
 // permodelLoad answers session/load with the session/new result, the current
-// model's catalog included, and replays nothing. Live cursor's load result
-// carries no configOptions (load.go's cursorLoadResult), so a resumed cursor
-// session has no catalog until one arrives; this one does, which is what lets
-// a resume `--model` take the one-call path in a test. It answers on the read
-// loop: with no replay there is nothing to block on.
+// model's catalog included, and replays nothing. That is live cursor's shape
+// with craze's parameterizedModelPicker meta — {modes, models, configOptions},
+// the loaded model's catalog (plan 025 X1.5, re-probed 2026-09-22); load.go's
+// cursorLoadResult, which has no configOptions, predates the meta and is left
+// as it is so the scripts built on it do not move. A resume `--model` against
+// this one takes the one-call path, as it does against cursor. It answers on
+// the read loop: with no replay there is nothing to block on.
 func (s *server) permodelLoad(msg *acp.Message) {
 	var p acp.LoadSessionParams
 	_ = json.Unmarshal(msg.Params, &p)

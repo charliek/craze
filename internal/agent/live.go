@@ -489,6 +489,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	s.client = client
 	s.mu.Unlock()
 	client.SetUpdateHandler(s.onUpdate)
+	client.SetSettingsHandler(s.onSettingsReply)
 	client.SetSubagentHandler(s.onSubagent)
 	client.SetPermissionHandler(s.onPermission)
 	client.SetAskHandler(s.onAskQuestion)
@@ -547,10 +548,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		// Close in that window drops it, which noteSession accepts and counts.
 		s.log.noteSession(journal.SessionNote{ProviderSessionID: sess.SessionID, AgentBinary: binary})
 	}
-	// The --ask/--plan/--model tail, unchanged: it runs after session setup
-	// either way. On a load that means after the restored snapshot has been
-	// installed and the replay bracket closed, so it writes through s.mu
-	// instead of into a snapshot that has not been published yet.
+	// The --ask/--plan/--model tail: it runs after session setup either way. On
+	// a load that means after the restored snapshot has been installed and the
+	// replay bracket closed, so it writes through s.mu instead of into a
+	// snapshot that has not been published yet.
 	modes := snap.Modes
 	if loading {
 		modes = s.Snapshot().Modes
@@ -579,32 +580,55 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		}
 	}
 	if s.opts.Model != "" {
-		if err := client.SetModel(ctx, s.opts.Model); err != nil {
+		// --model is a model change like SetModel's, by the same path (plan 025
+		// design 2, panel astra 6): one set_config_option on the model's option
+		// when the catalog has one, whose reply carries the new model's catalog,
+		// and set_model otherwise. Either way the reply is installed by the read
+		// loop (onSettingsReply) — into s.snap, in arrival order — which is also
+		// where the change's marker is armed or cleared (r27 finding 2: a first
+		// model option carrying the model the agent had BEFORE --model must not
+		// roll it back).
+		if !loading {
+			// On a new session the snapshot session/new answered has not been
+			// installed yet: it is Start's local snap. The reply's install works
+			// on s.snap, so s.snap is given the catalog and model that answer
+			// brought — unless an update of the agent's own has already written
+			// them since, which is newer and is kept exactly as the install
+			// would keep it (agentWrote). The path is chosen against the same
+			// catalog, and the previous model's options a set_model drops are
+			// the ones session/new advertised.
+			s.mu.Lock()
+			if !s.agentWrote.config {
+				s.snap.Config = cloneConfig(snap.Config)
+			}
+			if !s.agentWrote.model {
+				s.snap.CurrentModel = snap.CurrentModel
+			}
+			s.mu.Unlock()
+		}
+		if err := s.changeModel(ctx, client, s.opts.Model); err != nil {
 			return true, err
 		}
+		s.mu.Lock()
 		if loading {
-			modelID := s.opts.Model
-			s.mu.Lock()
-			before := s.snap.CurrentModel
-			s.snap.CurrentModel = modelID
-			// The same marker, for the same reason: grok and gx return no config
-			// options at all on a load, so the option's first appearance after a
-			// resume is exactly the report that must not undo --model.
-			s.noteDirectModelSetLocked(s.snap.Config, before)
-			s.enqueueDeltaLocked("", Event{}, &StateDelta{Model: &modelID})
-			s.mu.Unlock()
+			// On a load the snapshot has already been published, so the change
+			// is announced here, in one delta carrying both sections as the read
+			// loop left them — the Model section it always carried, and the
+			// catalog the new model came with (or the previous model's options
+			// dropped: grok and gx answer a load with no catalog at all, which
+			// leaves nothing to drop).
+			s.enqueueDeltaLocked("", Event{}, s.modelDeltaLocked())
 		} else {
-			before := snap.CurrentModel
-			snap.CurrentModel = s.opts.Model
-			// --model IS a direct session/set_model, and the first appearance of
-			// a model option carrying the value the agent had BEFORE it would
-			// roll it back exactly as it would a SetModel's (r27 finding 2). The
-			// option to compare against is the one session/new advertised, since
-			// the snapshot holding it has not been installed yet.
-			s.mu.Lock()
-			s.noteDirectModelSetLocked(snap.Config, before)
-			s.mu.Unlock()
+			// On a new session the install below publishes it: the override's
+			// result goes into the snapshot that install carries, with no delta
+			// of its own. An update that lands after this and before the install
+			// is newer still, and the install keeps it by the same marks as any
+			// other (agentWrote), except that --model outranks a mark for the
+			// model section, as it always has.
+			snap.Config = cloneConfig(s.snap.Config)
+			snap.CurrentModel = s.snap.CurrentModel
 		}
+		s.mu.Unlock()
 	}
 	if loading {
 		return false, nil
@@ -695,15 +719,17 @@ func (s *session) markAgentWroteLocked(set *bool) {
 	}
 }
 
-// noteDirectModelSetLocked records that a direct session/set_model has just
-// succeeded, made while CurrentModel held before (its value immediately
-// before this set), by adding before to modelBeforeSet — UNLESS cfg already
-// advertises a model-category option, in which case no marker is needed or
-// wanted: the stale re-list rule already covers a report from an option that
-// exists (onUpdate's config arm, "or the previous option's value differs"),
-// and any marker armed by an EARLIER set_model, made before the option
-// existed, is cleared rather than left to outlive an appearance it was never
-// for. s.mu is held.
+// noteDirectModelSetLocked records that a model change of craze's own has just
+// succeeded — a session/set_model, or since plan 025 the set_config_option on
+// the model's option that replaces it wherever the catalog has one — made
+// while CurrentModel held before (its value immediately before this set), by
+// adding before to modelBeforeSet — UNLESS cfg, the catalog the change left
+// installed, already advertises a model-category option, in which case no
+// marker is needed or wanted: the stale re-list rule already covers a report
+// from an option that exists (applyConfigLocked, "or the previous option's
+// value differs"), and any marker armed by an EARLIER set_model, made before
+// the option existed, is cleared rather than left to outlive an appearance it
+// was never for. s.mu is held.
 func (s *session) noteDirectModelSetLocked(cfg []ConfigOption, before string) {
 	if ModelConfigOptionIn(cfg) != nil {
 		s.modelBeforeSet, s.modelBeforeAny = nil, false
@@ -1389,36 +1415,112 @@ func (s *session) closeInFlightTools(status string) {
 }
 
 // The three settings verbs, each the seam's shape (Session): the agent is asked
-// first, with no lock held, and a change it took is written into the snapshot
-// and its delta enqueued in one locked section — so what a client folding the
-// events sees last is what a client reading Snapshot sees, whether the change
-// came from here or from the agent's own update on the read loop (plan 021
-// §3.8). A refusal mutates nothing and publishes nothing.
+// first, with no lock held, and a change it took is announced by its delta,
+// enqueued in one locked section — so what a client folding the events sees
+// last is what a client reading Snapshot sees, whether the change came from
+// here or from the agent's own update on the read loop (plan 021 §3.8). A
+// refusal mutates nothing and publishes nothing.
+//
+// A reply that says what the agent now holds — set_config_option's catalog,
+// set_model's model — is NOT written by the setter. The read loop installs it
+// (onSettingsReply) before the call returns, so it is ordered against the
+// agent's pushes by the wire, and the setter's section only announces: its one
+// delta is built from the snapshot as that section finds it, which is the
+// reply's install plus whatever the agent pushed after it, and its SetOutcome
+// is the value read in the same place (plan 025 design 1).
+
+// SetModel is a model change by the one call the catalog allows (changeModel):
+// set_config_option on the model's option, whose reply carries the new model's
+// catalog, or set_model where there is no such option or the agent refuses
+// that path. Either way it is announced by one delta carrying the Model and the
+// Config section together (plan 025 design 2), because the catalog is per model
+// and moves with it.
 func (s *session) SetModel(ctx context.Context, cause, modelID string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
-	if err := client.SetModel(ctx, modelID); err != nil {
+	if err := s.changeModel(ctx, client, modelID); err != nil {
 		return SetOutcome{}, err
 	}
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	before := s.snap.CurrentModel
-	s.snap.CurrentModel = modelID
-	// With no model-category option advertised, the option's FIRST appearance
-	// would otherwise be free to write its own value over this one (r27 finding
-	// 2); the marker is what makes that first report say nothing.
-	s.noteDirectModelSetLocked(s.snap.Config, before)
-	// The confirmed value is read out of the very section that wrote it: ACP
-	// answers session/set_model with nothing, so what the session is now at is
-	// what it just stored, and a later Snapshot() read could only be somebody
-	// else's change (SetOutcome).
+	// Steps (1) to (3) of design 2's order — CurrentModel from the installed
+	// catalog, the marker against it, no mark — were the reply's install's,
+	// on the read loop (adoptModelLocked); this is (4), the one delta.
+	//
+	// The confirmed value is read out of this section, the one that announces
+	// it, and it is CurrentModel as the read loop has left it: the installed
+	// catalog's model option — or the model asked for, when the catalog has
+	// none — unless the agent has moved the model again since, in which case
+	// the later word is the one the session is at and the one this delta
+	// carries (panel astra 2, astra 5). It is never read back from the model
+	// option directly: an option whose first appearance was a stale report the
+	// marker suppressed names a model the session is not on (r27 finding 2).
 	return SetOutcome{
 		Value:  s.snap.CurrentModel,
-		Ticket: s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Model: &modelID}),
+		Ticket: s.enqueueDeltaLocked(cause, Event{}, s.modelDeltaLocked()),
 	}, nil
+}
+
+// modelDeltaLocked is the delta a model change of craze's own is announced by:
+// the Model section and the Config section, both as the snapshot now holds
+// them. s.mu is held.
+func (s *session) modelDeltaLocked() *StateDelta {
+	model := s.snap.CurrentModel
+	return &StateDelta{Model: &model, Config: &ConfigState{Options: cloneConfig(s.snap.Config)}}
+}
+
+// changeModel asks the agent to move to modelID, by one call when the catalog
+// allows it (plan 025 design 2, §1.2): set_config_option on the model's option,
+// which cursor answers with modelID's whole catalog and grok with the same
+// catalog and a push. With no model option advertised it is set_model, as it
+// always was, and it falls back to set_model too when the agent refuses the
+// config path itself — -32601, the method it lacks, or -32602 whose data says
+// the option is unknown (X1.3). Every other refusal is the change refused:
+// cursor's "Invalid model value" and grok's "unknown model id" (X2) are both
+// -32602, and both say the model, not the path, is wrong — nothing changed, and
+// the error is the caller's.
+//
+// Nothing is written here. What the answering reply says is installed by the
+// read loop before the call returns (onSettingsReply); the caller announces it.
+// The option is read under s.mu and the lock released before the call, so no
+// lock is held across the wire.
+func (s *session) changeModel(ctx context.Context, client *acp.Client, modelID string) error {
+	s.mu.Lock()
+	opt := ModelConfigOptionIn(s.snap.Config)
+	s.mu.Unlock()
+	if opt != nil {
+		_, err := client.SetConfig(ctx, opt.ID, modelID)
+		if !configPathRefused(err) {
+			return err
+		}
+	}
+	_, err := client.SetModel(ctx, modelID)
+	return err
+}
+
+// unknownConfigOption is how cursor's -32602 for an option id the current
+// model does not have begins its data.message ("Unknown model config option:
+// model"); its other -32602, "Invalid model value: X", is a model refused.
+const unknownConfigOption = "Unknown model config option"
+
+// configPathRefused reports whether err is the agent refusing the config path
+// for a model change, rather than refusing the model: what sends changeModel
+// on to set_model.
+func configPathRefused(err error) bool {
+	var rpcErr *acp.RPCError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	switch rpcErr.Code {
+	case acp.CodeMethodNotFound:
+		return true
+	case acp.CodeInvalidParams:
+		return strings.HasPrefix(rpcErr.DataMessage(), unknownConfigOption)
+	}
+	return false
 }
 
 func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome, error) {
@@ -1442,38 +1544,80 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 }
 
 // SetConfig sets one advertised option. When that option is the one a provider
-// keeps its MODEL in (IsModelConfigOption), setting it IS a model change: the
-// snapshot's CurrentModel moves with it and the delta carries the Model section
-// beside the Config one, in this same locked section. Without that, `/model`'s
-// fallback — SetModel refused, the model set as a config option instead — left
-// CurrentModel on the old model for `craze prompt` and the status row, and left
-// the model section's revision standing still while the display had already
-// moved (plan 021 §3.8, r23 finding 3).
+// keeps its MODEL in (IsModelConfigOption), setting it IS a model change, by
+// SetModel's rules: the reply's install moves CurrentModel with it
+// (onSettingsReply), and the delta carries the Model section beside the Config
+// one. Without that, `/model`'s fallback — SetModel refused, the model set as a
+// config option instead — left CurrentModel on the old model for `craze
+// prompt` and the status row, and left the model section's revision standing
+// still while the display had already moved (plan 021 §3.8, r23 finding 3).
+//
+// The Model section rides along for any other option too, whenever the model
+// the snapshot holds is not the one it held when this call was made: a reply's
+// catalog names the model it belongs to, and one that moved it must not leave
+// the model section's value and revision behind the config section's (panel
+// astra 5). If the agent's own update moved it in between, the section merely
+// restates what that update has already said.
+//
+// The confirmed value is the option's as the installed catalog has it — what
+// the agent answered, not what was asked — and an option that catalog no longer
+// lists is ErrOptionGone, with the delta for what was installed enqueued all
+// the same, because an install is never left unannounced.
 func (s *session) SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
-	if err := client.SetConfig(ctx, id, value); err != nil {
+	s.mu.Lock()
+	modelBefore := s.snap.CurrentModel
+	wasModel := isModelOptionID(id, s.snap.Config)
+	s.mu.Unlock()
+	if _, err := client.SetConfig(ctx, id, value); err != nil {
 		return SetOutcome{}, err
 	}
 	s.setBarrier()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	model := false
+	var opt *ConfigOption
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
-			s.snap.Config[i].Current = value
-			model = IsModelConfigOption(s.snap.Config[i])
+			opt = &s.snap.Config[i]
 			break
 		}
 	}
+	model := wasModel || (opt != nil && IsModelConfigOption(*opt))
 	st := &StateDelta{Config: &ConfigState{Options: cloneConfig(s.snap.Config)}}
-	if model {
-		s.snap.CurrentModel = value
-		st.Model = &value
+	if model || s.snap.CurrentModel != modelBefore {
+		cur := s.snap.CurrentModel
+		st.Model = &cur
 	}
-	return SetOutcome{Value: value, Ticket: s.enqueueDeltaLocked(cause, Event{}, st)}, nil
+	t := s.enqueueDeltaLocked(cause, Event{}, st)
+	switch {
+	case model:
+		// A model change answers with the model, as SetModel does — even when
+		// the answered catalog has no model option left to read it from.
+		return SetOutcome{Value: s.snap.CurrentModel, Ticket: t}, nil
+	case opt == nil:
+		return SetOutcome{Ticket: t}, ErrOptionGone
+	default:
+		return SetOutcome{Value: opt.Current, Ticket: t}, nil
+	}
+}
+
+// isModelOptionID reports whether id names the model's option in any of the
+// catalogs given. s.mu is held when one of them is the session's.
+func isModelOptionID(id string, catalogs ...[]ConfigOption) bool {
+	if id == "" {
+		return false
+	}
+	for _, cfg := range catalogs {
+		for _, opt := range cfg {
+			if opt.ID == id && IsModelConfigOption(opt) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // setBarrier runs the test barrier between a setter's provider call and its
@@ -2384,57 +2528,15 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		cfg := parseConfigOptions(u.ConfigOptions)
 		s.mu.Lock()
 		// The model section too, when the provider keeps its model in a config
-		// option and this update is a model CHANGE: for such a provider, that is
-		// how a model change is announced, and a client left to read it off the
-		// config section alone would never see CurrentModel or the model
-		// revision move (r23 finding 3).
-		//
-		// Three conditions, and each closes a different way of being wrong:
-		//
-		//   - the option's value is non-empty and DIFFERS from CurrentModel, or
-		//     there is nothing to announce;
-		//   - and either there was no such option before — its FIRST appearance
-		//     is how a session that started without one learns its model, and
-		//     treating that as "no previous value, so say nothing" left
-		//     CurrentModel permanently wrong, with every later identical update
-		//     now having a previous value equal to it and so repairing nothing
-		//     (r25 finding 3) —
-		//   - or the previous option's value differs from this one. An update
-		//     that merely RE-LISTS the value the option already had says nothing
-		//     about the model: every one of cursor's carries every option, and a
-		//     stale re-list must not write its value over a CurrentModel that
-		//     session/set_model has since moved.
-		//
-		// A FIRST appearance has no previous value to be judged stale against,
-		// and that is the hole r27 finding 2 names: session/set_model moves the
-		// model, the agent then introduces its model option carrying the value
-		// it held BEFORE the set_model, and "no previous option" alone would
-		// adopt it and roll the model back. The marker a direct set_model leaves
-		// (noteDirectModelSetLocked) closes it — the first appearance consumes
-		// the marker and derives nothing from a report whose value is one the
-		// agent could honestly have held before one of craze's own sets, while a
-		// value that is NEITHER a pre-set value nor the current model is a real
-		// change like any other and moves the model again (r28 finding 2: the
-		// marker is value-blind no longer — it used to suppress EVERY value on
-		// the option's first appearance, not merely a stale one, which left
-		// CurrentModel stuck on a value the agent had since moved past).
-		was := ModelConfigOptionIn(s.snap.Config)
-		now := ModelConfigOptionIn(cfg)
-		s.snap.Config = cfg
+		// option and this update is a model CHANGE (applyConfigLocked): for such
+		// a provider, that is how a model change is announced, and a client left
+		// to read it off the config section alone would never see CurrentModel
+		// or the model revision move (r23 finding 3).
+		moved := s.applyConfigLocked(cfg)
 		s.markAgentWroteLocked(&s.agentWrote.config)
 		st := &StateDelta{Config: &ConfigState{Options: cloneConfig(cfg)}}
-		stale := was == nil && now != nil && (s.modelBeforeAny || s.modelBeforeSet[now.Current])
-		if now != nil {
-			// The marker's whole life is "until the option appears", whether or
-			// not this appearance had anything to say about the model: it is
-			// consumed in full, not merely the one value it happened to match —
-			// the bounded set and the overflow bit alike (r30 finding 6).
-			s.modelBeforeSet, s.modelBeforeAny = nil, false
-		}
-		if now != nil && now.Current != "" && !stale &&
-			now.Current != s.snap.CurrentModel && (was == nil || was.Current != now.Current) {
-			s.snap.CurrentModel = now.Current
-			model := now.Current
+		if moved {
+			model := s.snap.CurrentModel
 			st.Model = &model
 			s.markAgentWroteLocked(&s.agentWrote.model)
 		}
@@ -2456,6 +2558,168 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 		s.mu.Unlock()
 		s.emit(Event{Type: EventTodos, Todos: out})
 	}
+}
+
+// applyConfigLocked installs cfg as the session's catalog, and moves
+// CurrentModel with it when the provider keeps its model in a config option and
+// cfg says the model CHANGED — reporting whether it moved it. It is the one
+// derivation both authors of a catalog go through: the agent's own
+// config_option_update (onUpdate), which then marks the sections and enqueues
+// its delta, and the catalog a settings reply carries (onSettingsReply), which
+// does neither, because its setter announces it (plan 025 design 1). s.mu is
+// held.
+//
+// Three conditions, and each closes a different way of being wrong:
+//
+//   - the option's value is non-empty and DIFFERS from CurrentModel, or there
+//     is nothing to announce;
+//   - and either there was no such option before — its FIRST appearance is how
+//     a session that started without one learns its model, and treating that
+//     as "no previous value, so say nothing" left CurrentModel permanently
+//     wrong, with every later identical update now having a previous value
+//     equal to it and so repairing nothing (r25 finding 3) —
+//   - or the previous option's value differs from this one. An update that
+//     merely RE-LISTS the value the option already had says nothing about the
+//     model: every one of cursor's carries every option, and a stale re-list
+//     must not write its value over a CurrentModel that session/set_model has
+//     since moved.
+//
+// A FIRST appearance has no previous value to be judged stale against, and that
+// is the hole r27 finding 2 names: session/set_model moves the model, the agent
+// then introduces its model option carrying the value it held BEFORE the
+// set_model, and "no previous option" alone would adopt it and roll the model
+// back. The marker a direct set_model leaves (noteDirectModelSetLocked) closes
+// it — the first appearance consumes the marker and derives nothing from a
+// report whose value is one the agent could honestly have held before one of
+// craze's own sets, while a value that is NEITHER a pre-set value nor the
+// current model is a real change like any other and moves the model again (r28
+// finding 2: the marker is value-blind no longer — it used to suppress EVERY
+// value on the option's first appearance, not merely a stale one, which left
+// CurrentModel stuck on a value the agent had since moved past).
+func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
+	was := ModelConfigOptionIn(s.snap.Config)
+	now := ModelConfigOptionIn(cfg)
+	s.snap.Config = cfg
+	stale := was == nil && now != nil && (s.modelBeforeAny || s.modelBeforeSet[now.Current])
+	if now != nil {
+		// The marker's whole life is "until the option appears", whether or not
+		// this appearance had anything to say about the model: it is consumed in
+		// full, not merely the one value it happened to match — the bounded set
+		// and the overflow bit alike (r30 finding 6).
+		s.modelBeforeSet, s.modelBeforeAny = nil, false
+	}
+	if now != nil && now.Current != "" && !stale &&
+		now.Current != s.snap.CurrentModel && (was == nil || was.Current != now.Current) {
+		s.snap.CurrentModel = now.Current
+		return true
+	}
+	return false
+}
+
+// onSettingsReply installs what a successful settings reply says, on the read
+// goroutine and before the reply is delivered to the call that sent it
+// (acp.Client.SetSettingsHandler). It is the ONE place a reply's catalog is
+// written, so that catalog and every catalog the agent pushes are applied in
+// the order they reached the wire (plan 025 design 1, panel astra 2): a push
+// that arrived ahead of the reply is overwritten by it, and one that arrives
+// behind it overwrites it. A setter that wrote the reply from its own
+// goroutine, as they all did, could land an older reply on top of a newer push
+// — and give it the newer revision, so no revision guard could tell.
+//
+// It writes the snapshot and nothing else: it enqueues no delta and marks no
+// section (markAgentWroteLocked). A reply is craze's own change coming back,
+// announced by exactly one delta — its setter's, from the locked section that
+// follows the call (SetModel, SetConfig, Start's --model tail) — and built from
+// the snapshot as that section finds it, so a push applied in between is what
+// that delta carries too. The section always runs once this has: a call whose
+// reply was handed here returns that reply, whatever its context or the
+// connection did meanwhile (acp.Conn.callReply).
+//
+// What is installed depends on the call it answers:
+//
+//   - set_model, and set_config_option on the model's own option, are a MODEL
+//     change (adoptModelLocked). The reply's catalog is the new model's when
+//     it carries one, and is installed whole — `[]` included, which clears.
+//     When it carries none, the catalog the session has is the previous
+//     model's, and its options other than the mode and the model are dropped
+//     (withoutModelOptions, panel astra 3) — unless it is already the new
+//     model's (catalogOnModelLocked): an update of the agent's own that got
+//     there first, or a change to the model the session was already on, and
+//     then it is kept.
+//   - set_config_option on any other option: the reply's catalog goes through
+//     the same derivation as an agent's own update (applyConfigLocked); with
+//     none, the option is set to the value it was sent, which is what the
+//     setter has always written for a reply that says nothing.
+func (s *session) onSettingsReply(r acp.SettingsReply) {
+	var cfg []ConfigOption
+	if r.Catalog.Present {
+		cfg = parseConfigOptions(r.Catalog.Options)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.Method == acp.MethodSessionSetModel || isModelOptionID(r.ConfigID, s.snap.Config, cfg) {
+		switch {
+		case r.Catalog.Present:
+			s.snap.Config = cfg
+		case !s.catalogOnModelLocked(r.Value):
+			s.snap.Config = withoutModelOptions(s.snap.Config, r.Value)
+		}
+		s.adoptModelLocked(r.Value)
+		return
+	}
+	if r.Catalog.Present {
+		s.applyConfigLocked(cfg)
+		return
+	}
+	for i := range s.snap.Config {
+		if s.snap.Config[i].ID == r.ConfigID {
+			s.snap.Config[i].Current = r.Value
+			break
+		}
+	}
+}
+
+// catalogOnModelLocked reports whether the catalog the session holds is
+// already model's: by its model option when it has one — which only the
+// agent's own update, or an earlier reply, can have moved there — and by
+// CurrentModel when it has none, so that a set_model to the model the session
+// is already on drops nothing. s.mu is held.
+func (s *session) catalogOnModelLocked(model string) bool {
+	if opt := ModelConfigOptionIn(s.snap.Config); opt != nil {
+		return opt.Current == model
+	}
+	return s.snap.CurrentModel == model
+}
+
+// adoptModelLocked is a model change the agent has just accepted, written into
+// the snapshot once the catalog it brought is installed, in the order plan 025
+// design 2 pins for it:
+//
+//  1. CurrentModel is the installed catalog's model option when it has one —
+//     the agent's own word for the model it is now on, which may be the
+//     canonical id of an alias it was sent — and the model that was asked for
+//     when it has none;
+//  2. noteDirectModelSetLocked, against that NEW catalog: a model option in it
+//     clears every marker, and a catalog without one arms the marker with the
+//     model this change moved away from (r27 finding 2);
+//  3. no markAgentWroteLocked: this is craze's change coming back, not the
+//     agent writing on its own, and on a new session's --model it is Start's
+//     own tail that carries it into the install;
+//  4. and the one delta is the caller's.
+//
+// It runs on the read loop, at the reply, rather than in the setter's section,
+// because the model is part of what the reply says: a model option arriving
+// behind the reply is then judged against a model that has already moved and a
+// marker that is already armed, where the setter's section might not have run
+// yet. s.mu is held.
+func (s *session) adoptModelLocked(requested string) {
+	before := s.snap.CurrentModel
+	model := requested
+	if opt := ModelConfigOptionIn(s.snap.Config); opt != nil && opt.Current != "" {
+		model = opt.Current
+	}
+	s.snap.CurrentModel = model
+	s.noteDirectModelSetLocked(s.snap.Config, before)
 }
 
 func planEntriesToTodos(raw json.RawMessage) ([]Todo, bool) {

@@ -1,9 +1,11 @@
 package acp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"sync"
@@ -64,6 +66,7 @@ type Client struct {
 	taskHandler     func(TaskRequest)
 	earlyHandler    func(EarlyAnswer)
 	onUpdate        func(SessionNotification)
+	settingsHandler func(SettingsReply)
 	subagentHandler func(SubagentNotification)
 	pendingUpdates  []SessionNotification
 	// children is the routed-child allowlist, in registration order. A
@@ -418,6 +421,23 @@ func (c *Client) SetUpdateHandler(h func(SessionNotification)) {
 	c.mu.Unlock()
 }
 
+// SetSettingsHandler registers h for every successful session/set_config_option
+// and session/set_model reply. h runs on the read goroutine, as the update
+// handler does, and BEFORE the reply is delivered to the call that sent it —
+// which is the point: a catalog a reply carries and a catalog an update pushes
+// reach h and the update handler in the order they reached the wire, never in
+// the order two goroutines happen to take a lock (plan 025 design 1, panel
+// astra 2). The call returns only after h has run, and always returns its reply
+// once it has (Conn.callReply).
+//
+// Like the update handler it must not block and must not call back into this
+// client's wire.
+func (c *Client) SetSettingsHandler(h func(SettingsReply)) {
+	c.mu.Lock()
+	c.settingsHandler = h
+	c.mu.Unlock()
+}
+
 // Prompt sends one text block: the draft, exactly as the user typed it.
 func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error) {
 	return c.PromptBlocks(ctx, []ContentBlock{{Type: "text", Text: text}}, nil, nil)
@@ -567,11 +587,15 @@ func (c *Client) failPromptWaiters(res PromptResult, err error) {
 	}
 }
 
-func (c *Client) SetModel(ctx context.Context, modelID string) error {
-	return c.conn.Call(ctx, MethodSessionSetModel, SetModelParams{
+// SetModel is session/set_model. Its reply is decoded like set_config_option's
+// (CodeRabbit 15): cursor answers {} and grok {"_meta": …}, neither of which
+// carries a catalog, but one that does is handed to the settings handler and
+// returned exactly as SetConfig's is.
+func (c *Client) SetModel(ctx context.Context, modelID string) (ConfigCatalog, error) {
+	return c.callSettings(ctx, MethodSessionSetModel, SetModelParams{
 		SessionID: c.SessionID(),
 		ModelID:   modelID,
-	}, nil)
+	}, "", modelID)
 }
 
 func (c *Client) SetMode(ctx context.Context, modeID string) error {
@@ -581,12 +605,78 @@ func (c *Client) SetMode(ctx context.Context, modeID string) error {
 	}, nil)
 }
 
-func (c *Client) SetConfig(ctx context.Context, configID, value string) error {
-	return c.conn.Call(ctx, MethodSessionSetConfig, SetConfigParams{
+// SetConfig is session/set_config_option, and it answers with the catalog the
+// reply carried (ConfigCatalog): cursor's is the current model's whole catalog,
+// which after a set_config_option(model, X) is X's (plan 025 §1.2).
+func (c *Client) SetConfig(ctx context.Context, configID, value string) (ConfigCatalog, error) {
+	return c.callSettings(ctx, MethodSessionSetConfig, SetConfigParams{
 		SessionID: c.SessionID(),
 		ConfigID:  configID,
 		Value:     value,
-	}, nil)
+	}, configID, value)
+}
+
+// ErrBadCatalog is a settings reply whose configOptions is present and is not
+// an array. Nothing of it is installed: the call answers with this error, and
+// the settings handler never sees the reply (ConfigCatalog).
+var ErrBadCatalog = errors.New("acp: a settings reply's configOptions is not a list")
+
+// callSettings is one settings call. Its reply is read on the read goroutine
+// by the reply hook, which decodes the catalog and hands it to the settings
+// handler before the reply is delivered (SetSettingsHandler); the same catalog
+// is this call's answer, so the caller can tell a reply that carried one from
+// one that did not.
+func (c *Client) callSettings(ctx context.Context, method string, params any, configID, value string) (ConfigCatalog, error) {
+	// Written by the hook on the read goroutine and read here after the reply
+	// has come through the call's channel, which is what orders the two.
+	var cat ConfigCatalog
+	_, err := c.conn.callReply(ctx, method, params, func(result json.RawMessage) error {
+		got, err := decodeConfigCatalog(result)
+		if err != nil {
+			return fmt.Errorf("%s: %w", method, err)
+		}
+		cat = got
+		c.mu.Lock()
+		h := c.settingsHandler
+		c.mu.Unlock()
+		if h != nil {
+			h(SettingsReply{Method: method, ConfigID: configID, Value: value, Catalog: got})
+		}
+		return nil
+	})
+	if err != nil {
+		return ConfigCatalog{}, err
+	}
+	return cat, nil
+}
+
+// decodeConfigCatalog reads a settings reply's configOptions with its presence
+// kept (ConfigCatalog). A result that is not an object at all — null, which is
+// what a reply with no result decodes as — carries no catalog: there is no
+// field to be present, and today's replies were never read, so nothing is
+// refused that used to be accepted except a configOptions that is there and is
+// not a list.
+func decodeConfigCatalog(result json.RawMessage) (ConfigCatalog, error) {
+	raw := bytes.TrimSpace(result)
+	if len(raw) == 0 || raw[0] != '{' {
+		return ConfigCatalog{}, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return ConfigCatalog{}, nil
+	}
+	opts, ok := fields["configOptions"]
+	if !ok {
+		return ConfigCatalog{}, nil
+	}
+	opts = bytes.TrimSpace(opts)
+	if string(opts) == "null" {
+		return ConfigCatalog{}, nil
+	}
+	if len(opts) == 0 || opts[0] != '[' {
+		return ConfigCatalog{}, ErrBadCatalog
+	}
+	return ConfigCatalog{Present: true, Options: append(json.RawMessage(nil), opts...)}, nil
 }
 
 // Cancel answers every blocking request cancelled and tells the agent to stop

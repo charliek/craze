@@ -340,13 +340,16 @@ func TestEffortOptionPreference(t *testing.T) {
 	idEffort := sel("effort", "Effort", "")
 	modelOpt := sel("x", "Effort", "model_option")
 
-	got := EffortOption(Snapshot{Config: []ConfigOption{first, thought, idEffort, modelOpt}})
-	if got == nil || got.ID != "x" {
-		t.Fatalf("prefer model_option, got %+v", got)
-	}
-	got = EffortOption(Snapshot{Config: []ConfigOption{first, thought, idEffort}})
+	// The exact id first, ahead of every category (plan 025 X1.2: cursor files
+	// `thinking` under thought_level beside its effort, so a category is no
+	// evidence), then model_option, then thought_level.
+	got := EffortOption(Snapshot{Config: []ConfigOption{first, thought, modelOpt, idEffort}})
 	if got == nil || got.ID != "effort" {
 		t.Fatalf("prefer id effort, got %+v", got)
+	}
+	got = EffortOption(Snapshot{Config: []ConfigOption{first, thought, modelOpt}})
+	if got == nil || got.ID != "x" {
+		t.Fatalf("prefer model_option, got %+v", got)
 	}
 	got = EffortOption(Snapshot{Config: []ConfigOption{first, thought}})
 	if got == nil || got.ID != "tl" {

@@ -296,6 +296,40 @@ type SetConfigParams struct {
 	Value     string `json:"value"`
 }
 
+// ConfigCatalog is the configOptions field of a settings reply with its
+// presence kept, because the three shapes mean three different things (plan
+// 025 design 1, panel astra 14):
+//
+//   - the key absent, or null: the reply carries no catalog — Present is false
+//     and the catalog the client already has stands;
+//   - an array, the empty one included: the agent's whole catalog as it now
+//     is — Present is true and Options is that array verbatim, so `[]` clears;
+//   - anything else is not a catalog at all, and the call that answered it is
+//     an error (ErrBadCatalog) rather than a reply with nothing in it.
+//
+// ACP's SetSessionConfigOptionResponse is {configOptions}: cursor answers
+// set_config_option with the current model's whole catalog, and set_model with
+// {}. The options stay raw here; parsing them is internal/agent's, beside the
+// parser every other catalog goes through.
+type ConfigCatalog struct {
+	Present bool
+	Options json.RawMessage
+}
+
+// SettingsReply is one successful settings reply, as the read loop hands it to
+// the client's settings handler (Client.SetSettingsHandler): the call it
+// answers, what that call asked for, and the catalog it carried.
+type SettingsReply struct {
+	// Method is MethodSessionSetConfig or MethodSessionSetModel.
+	Method string
+	// ConfigID is the option set_config_option set, "" for set_model.
+	ConfigID string
+	// Value is what was asked for: the option's new value, or the model
+	// set_model moved to.
+	Value   string
+	Catalog ConfigCatalog
+}
+
 type ToolCallLocation struct {
 	Path string `json:"path"`
 	Line int    `json:"line,omitempty"`

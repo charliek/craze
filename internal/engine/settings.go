@@ -27,6 +27,16 @@ type Setting struct {
 	Kind  SettingKind
 	ID    string
 	Value string
+	// ForModel binds a SettingConfig to the model it was chosen for: when it
+	// is set, the settings worker refuses the change with ErrStaleModel if the
+	// session is on any other model when the change's turn comes — checked
+	// before the provider is asked, so nothing is sent (plan 025 design 3).
+	// An option's values are per model on cursor, and an effort picked against
+	// one model's catalog is not a choice anyone made for the next one, even
+	// when both call it by the same id and both accept the value (panel astra
+	// 4). Empty binds it to nothing, which is what it always was; the other two
+	// kinds take none.
+	ForModel string
 }
 
 // A setting's kind is also the StateDelta section it changes, which is what a
@@ -38,6 +48,9 @@ func (s Setting) validate() error {
 	case SettingModel, SettingMode:
 		if s.ID != "" {
 			return fmt.Errorf("%w: a %s setting names no option", ErrBadRequest, s.Kind)
+		}
+		if s.ForModel != "" {
+			return fmt.Errorf("%w: a %s setting is bound to no model", ErrBadRequest, s.Kind)
 		}
 		return nil
 	case SettingConfig:
@@ -145,6 +158,12 @@ type setAnswer struct {
 //     that waited in the queue is judged by the room there is when its turn
 //     comes, and one refused there is refused having run nothing at all, so its
 //     command id stays retryable (runSet, r27 finding 3).
+//   - A config change bound to a model (Setting.ForModel) when the session is
+//     on another one by the time the change's turn comes: ErrStaleModel,
+//     decided in the worker before the provider is asked — so another
+//     client's model change queued ahead of it is always seen — and, like
+//     the two above, before the request is claimed, so nothing ran and its
+//     command id stays retryable (runSet, plan 025 design 3).
 //   - A refusal from the provider is returned as it came, with nothing mutated
 //     and no event published.
 //
@@ -190,7 +209,10 @@ func (e *Engine) Set(ctx context.Context, c Command, s Setting) (SetResult, erro
 	if err := s.validate(); err != nil {
 		return SetResult{}, err
 	}
-	hash := receiptHash("Set", string(s.Kind), s.ID, s.Value)
+	// ForModel is part of what the request IS: the same option and value bound
+	// to another model is another request, and a resend that changed it is a
+	// mismatch, never a replay.
+	hash := receiptHash("Set", string(s.Kind), s.ID, s.Value, s.ForModel)
 	return withBlockingReceipt(ctx, e.receipts, c, hash, func() (SetResult, error) {
 		r := newSetReq(ctx, c, s)
 		if err := e.queueSet(r); err != nil {
@@ -404,7 +426,22 @@ func (e *Engine) serveSets() {
 //     changed yet: ErrUnavailable;
 //   - the request's own context, re-read because it can have ended between
 //     takeSet and this section: the context error, wrapped in errNotRun, and
-//     nothing run (r23's rule).
+//     nothing run (r23's rule);
+//   - a config change bound to a model the session is no longer on:
+//     ErrStaleModel (Setting.ForModel, plan 025 design 3).
+//
+// The last is what makes an option edit atomic with the model it was chosen
+// for. The model is read HERE, on the worker, because every Set runs through
+// this one FIFO: a model change another client queued ahead of this request
+// has finished — provider call, install, delta — before this is looked at, and
+// none can start until this one is answered, so no client's Set can land
+// between the check and the call. A snapshot check made when the request was
+// queued would be judged against a model a Set still ahead of it in the queue
+// was about to replace (panel astra 4). The session is read before e.mu is
+// taken, as the engine calls nothing on the session under its own lock but
+// Begin and ForeignTurn (engine.go). What the FIFO cannot order is the agent
+// moving its model on its own; that is the agent's, like every push, and its
+// delta says so.
 //
 // The two GATE refusals are preferred to the context error when both are true,
 // which is takeSet's own precedence for a closed engine — it answers everything
@@ -430,6 +467,7 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		// whole of what r27 finding 3 is about.
 		h.beforeRunSet()
 	}
+	stale := r.s.ForModel != "" && e.sess.Snapshot().CurrentModel != r.s.ForModel
 	e.mu.Lock()
 	refused := e.refusalLocked()
 	room := e.log.OutboxRoom()
@@ -446,6 +484,9 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		// Nothing ran: wrapped in errNotRun for the same reason takeSet's own
 		// dead-ctx branch is (r28 finding 1).
 		return SetResult{}, notRun(ctxErr)
+	case stale:
+		e.mu.Unlock()
+		return SetResult{}, ErrStaleModel
 	}
 	// Nothing left that could refuse it: the claim is made here, in the section
 	// that established that, and the lock released before the provider is asked.
@@ -468,6 +509,15 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 		return SetResult{}, fmt.Errorf("%w: setting kind %q", ErrBadRequest, r.s.Kind)
 	}
 	if err != nil {
+		if out.Ticket != nil {
+			// A refusal that still published: agent.ErrOptionGone is a change
+			// the agent took whose answer no longer lists the option asked
+			// about, and what that answer installed has its delta. It is
+			// committed before the caller hears the error, exactly as a
+			// success's is, so a client never learns of the refusal ahead of
+			// the change it came with.
+			_ = e.log.Flush(r.ctx, nil)
+		}
 		return SetResult{}, err
 	}
 	_ = e.log.Flush(r.ctx, nil)
