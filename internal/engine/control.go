@@ -222,7 +222,13 @@ var (
 	// names is one that can stop being true — the model can come back — so the
 	// same id resent is a genuine attempt judged against the model then, never
 	// a replay of this answer (Command's retry policy).
-	ErrStaleModel = errors.New("engine: the model that option was chosen for is no longer the session's")
+	//
+	// It is the session's own sentinel (agent.ErrStaleModel), the way
+	// os.ErrNotExist is fs.ErrNotExist: the worker refuses before its claim and
+	// the session refuses again, under its own lock, just before the request is
+	// written (runSet), and a client matches this one value whichever of the
+	// two it was.
+	ErrStaleModel = agent.ErrStaleModel
 	// ErrUnknownRow answers a queued row id the queue does not hold: one the
 	// drain already sent, one another client removed, or one that never
 	// existed. It is its own code and not bad_request, because a client's
@@ -363,10 +369,11 @@ func classify(err error) classification {
 		// its code because a client can only retry it (r28 finding 1).
 		return classification{code: "unavailable"}
 	case errors.Is(err, ErrStaleModel):
-		// Refused before the claim, with nothing asked of the provider
-		// (runSet), about a condition that can clear — so NEVER STORED, like
-		// the gate refusals, but with a code of its own: a client needs to say
-		// "not applied, the model changed", which "unavailable" cannot.
+		// Refused with nothing asked of the provider — by the worker before its
+		// claim, or by the session just before the write (runSet) — about a
+		// condition that can clear: so NEVER STORED, like the gate refusals, but
+		// with a code of its own: a client needs to say "not applied, the model
+		// changed", which "unavailable" cannot.
 		return classification{code: "stale_model"}
 	case errors.Is(err, agent.ErrOptionGone):
 		// A Set that RAN: the agent took it and answered with a catalog that

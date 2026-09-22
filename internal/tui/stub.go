@@ -841,9 +841,17 @@ func (s *Stub) SetMode(_ context.Context, cause, id string) (agent.SetOutcome, e
 // status row exactly as a session/set_model would (plan 021 §3.8, r23 finding
 // 3). A test builds such an option with ModelConfigOption below; the Stub's own
 // default config has none, as cursor's captures have one and grok's do not.
-func (s *Stub) SetConfig(_ context.Context, cause, id, value string) (agent.SetOutcome, error) {
+//
+// forModel is the live session's binding too (agent.Session): a change chosen
+// for another model than the one the Stub is on is agent.ErrStaleModel, and
+// nothing — the failure counter included — is touched, because nothing was
+// asked of the "agent".
+func (s *Stub) SetConfig(_ context.Context, cause, id, value, forModel string) (agent.SetOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if forModel != "" && s.snap.CurrentModel != forModel {
+		return agent.SetOutcome{}, agent.ErrStaleModel
+	}
 	n := s.configCalls
 	s.configCalls++
 	if s.failConfigAt == n {

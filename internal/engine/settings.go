@@ -28,14 +28,25 @@ type Setting struct {
 	ID    string
 	Value string
 	// ForModel binds a SettingConfig to the model it was chosen for: when it
-	// is set, the settings worker refuses the change with ErrStaleModel if the
-	// session is on any other model when the change's turn comes — checked
-	// before the provider is asked, so nothing is sent (plan 025 design 3).
-	// An option's values are per model on cursor, and an effort picked against
-	// one model's catalog is not a choice anyone made for the next one, even
-	// when both call it by the same id and both accept the value (panel astra
-	// 4). Empty binds it to nothing, which is what it always was; the other two
-	// kinds take none.
+	// is set, the change is refused with ErrStaleModel if the session is on any
+	// other model when the change's turn comes — checked before the provider is
+	// asked, so nothing is sent (plan 025 design 3). An option's values are per
+	// model on cursor, and an effort picked against one model's catalog is not
+	// a choice anyone made for the next one, even when both call it by the same
+	// id and both accept the value (panel astra 4). Empty binds it to nothing,
+	// which is what it always was; the other two kinds take none.
+	//
+	// It is checked twice (runSet). The settings worker checks before it claims
+	// the change, which is what makes it atomic against every other client's
+	// Set: they all run through the one FIFO. The session checks again, under
+	// its own lock, at the last moment before the request is written, which is
+	// what catches the agent moving its model on its own after the worker
+	// looked. What neither can catch is the agent's move and the request
+	// crossing on the wire — a move the agent makes while the request is on its
+	// way, or one the session applies in the instant between its check and the
+	// write: ACP's set_config_option carries no precondition, so the agent
+	// applies what it is sent to whatever model it is on when it arrives, and
+	// the delta the agent's own update produces is how a client learns of it.
 	ForModel string
 }
 
@@ -439,9 +450,20 @@ func (e *Engine) serveSets() {
 // queued would be judged against a model a Set still ahead of it in the queue
 // was about to replace (panel astra 4). The session is read before e.mu is
 // taken, as the engine calls nothing on the session under its own lock but
-// Begin and ForeignTurn (engine.go). What the FIFO cannot order is the agent
-// moving its model on its own; that is the agent's, like every push, and its
-// delta says so.
+// Begin and ForeignTurn (engine.go).
+//
+// What the FIFO cannot order is the agent moving its model on its own, which
+// can land after this check and before the request is written. So the binding
+// goes down with the change (Session.SetConfig's forModel), and the session
+// checks it again under its own lock in the section that decides the call —
+// the last moment before the write — and refuses with the same ErrStaleModel,
+// having sent nothing (astra r2 item 3). That leaves only the window no one
+// can close: the agent's move and the request crossing on the wire, which ACP,
+// with no conditional set, gives the client no way to order (Setting.ForModel).
+// The session's refusal comes after the claim, so a caller whose own context
+// ends in that instant is answered ErrSetOutcomeUnknown, which is true of
+// what it can know; a caller still waiting gets ErrStaleModel, never stored,
+// exactly as it would from the check here.
 //
 // The two GATE refusals are preferred to the context error when both are true,
 // which is takeSet's own precedence for a closed engine — it answers everything
@@ -503,7 +525,7 @@ func (e *Engine) runSet(r *setReq) (SetResult, error) {
 	case SettingMode:
 		out, err = e.sess.SetMode(r.ctx, cause, r.s.Value)
 	case SettingConfig:
-		out, err = e.sess.SetConfig(r.ctx, cause, r.s.ID, r.s.Value)
+		out, err = e.sess.SetConfig(r.ctx, cause, r.s.ID, r.s.Value, r.s.ForModel)
 	default:
 		// Unreachable: Set validates before anything is queued.
 		return SetResult{}, fmt.Errorf("%w: setting kind %q", ErrBadRequest, r.s.Kind)

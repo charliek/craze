@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1168,6 +1169,66 @@ func TestAnOptionStepBoundToAnotherModelIsRefused(t *testing.T) {
 		if _, err := r.e.Set(ctx, Command{}, s); !errors.Is(err, ErrBadRequest) {
 			t.Fatalf("a %s setting bound to a model answered %v, want ErrBadRequest", s.Kind, err)
 		}
+	}
+}
+
+// TestAnOptionStepTheAgentMovedAwayFromIsRefusedAtTheSession is astra r2 item
+// 3 through the engine: the FIFO orders every client's Set, and not the agent
+// moving its model on its own, so the binding goes down with the change and
+// the session checks it again just before the write.
+//
+// The schedule, forced with the fake's barrier at SetConfig's entry:
+//
+//  1. A's step, bound to grok-4.6, is taken by the worker. The session is on
+//     grok-4.6, so the worker's own check passes and the step is claimed.
+//  2. Before the session's check, the agent moves the model to composer-2.5 —
+//     the barrier writes it, as the read loop applying the agent's push would.
+//  3. The session's check finds composer-2.5 and refuses with ErrStaleModel,
+//     which it can only do because runSet handed it the binding; the provider
+//     is never asked.
+//
+// Nothing ran, so nothing is stored, exactly as for the worker's own refusal:
+// once the model is back, the same id resent is a genuine attempt and lands.
+func TestAnOptionStepTheAgentMovedAwayFromIsRefusedAtTheSession(t *testing.T) {
+	r := newRig(t, Options{})
+	ctx := context.Background()
+	a := r.e.NewClientID()
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "1"}, Setting{Kind: SettingModel, Value: "grok-4.6"}); err != nil {
+		t.Fatalf("the model: %v", err)
+	}
+	var moved atomic.Bool
+	r.s.mu.Lock()
+	r.s.beforeConfigCheck = func() {
+		if moved.CompareAndSwap(false, true) {
+			r.s.mu.Lock()
+			r.s.snap.CurrentModel = "composer-2.5"
+			r.s.mu.Unlock()
+		}
+	}
+	r.s.mu.Unlock()
+
+	step := Setting{Kind: SettingConfig, ID: "fast", Value: "true", ForModel: "grok-4.6"}
+	before := r.s.setCalls()
+	_, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, step)
+	if !moved.Load() {
+		t.Fatalf("the step never reached the session (%v): the worker refused it before the agent moved", err)
+	}
+	if !errors.Is(err, ErrStaleModel) || !errors.Is(err, agent.ErrStaleModel) || Code(err) != "stale_model" {
+		t.Fatalf("a step bound to grok-4.6, sent on composer-2.5, answered %v (%s), want ErrStaleModel", err, Code(err))
+	}
+	if got := r.s.setCalls(); got != before {
+		t.Fatalf("%d settings reached the provider, want none", got-before)
+	}
+
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "3"}, Setting{Kind: SettingModel, Value: "grok-4.6"}); err != nil {
+		t.Fatalf("the model back: %v", err)
+	}
+	calls := r.s.setCalls()
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, step); err != nil {
+		t.Fatalf("the step resent on its own model: %v", err)
+	}
+	if got := r.s.setCalls(); got != calls+1 {
+		t.Fatal("the resend was answered from the receipts table instead of running")
 	}
 }
 

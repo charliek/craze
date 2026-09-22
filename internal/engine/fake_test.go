@@ -82,6 +82,9 @@ type fakeSession struct {
 	// option (answerGone). lastTicket is the last ticket a verb handed out.
 	setGone    bool
 	lastTicket *agent.Ticket
+	// beforeConfigCheck, when set, runs at SetConfig's entry, before its
+	// forModel check (SetConfig).
+	beforeConfigCheck func()
 }
 
 // script is one prompt's answer. It is built whole before it is queued.
@@ -566,7 +569,24 @@ func (s *fakeSession) SetMode(ctx context.Context, cause, id string) (agent.SetO
 	})
 }
 
-func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value string) (agent.SetOutcome, error) {
+// SetConfig holds forModel against the fake's own model at its entry, before
+// the "provider" is asked, as the live session does under its lock just before
+// the write (agent.Session). beforeConfigCheck, when set, runs first: the
+// barrier a test moves the model from, standing in for the agent moving it on
+// its own after the settings worker has checked and claimed the change.
+func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value, forModel string) (agent.SetOutcome, error) {
+	s.mu.Lock()
+	check := s.beforeConfigCheck
+	s.mu.Unlock()
+	if check != nil {
+		check()
+	}
+	s.mu.Lock()
+	stale := forModel != "" && s.snap.CurrentModel != forModel
+	s.mu.Unlock()
+	if stale {
+		return agent.SetOutcome{}, agent.ErrStaleModel
+	}
 	return s.set(ctx, cause, value, func(v string, st *agent.StateDelta) {
 		st.Config = &agent.ConfigState{Options: []agent.ConfigOption{{ID: id, Current: v}}}
 	}, func(v string, snap *agent.Snapshot) {

@@ -538,7 +538,7 @@ func TestSetConfigEffort(t *testing.T) {
 	if got := configCurrent(s.Snapshot(), "effort"); got != "medium" {
 		t.Fatalf("current %q, config %+v", got, s.Snapshot().Config)
 	}
-	if _, err := s.SetConfig(t.Context(), "", "effort", "high"); err != nil {
+	if _, err := s.SetConfig(t.Context(), "", "effort", "high", ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

@@ -322,7 +322,7 @@ func TestAFallbackCompletionOlderThanAnotherClientsChangeIsNotWritten(t *testing
 	m = feed(t, m, stubDeltas(t, stub)...)
 
 	// Another client moves the same option, and this model applies that delta.
-	if _, err := stub.SetConfig(context.Background(), "c-9/1", "model", "grok"); err != nil {
+	if _, err := stub.SetConfig(context.Background(), "c-9/1", "model", "grok", ""); err != nil {
 		t.Fatalf("the other client's change: %v", err)
 	}
 	newer := stubDeltas(t, stub)

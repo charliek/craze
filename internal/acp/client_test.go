@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -1776,10 +1777,11 @@ func TestASettingsReplyKeepsItsCatalogsPresence(t *testing.T) {
 				p.setSession("s1")
 				var mu sync.Mutex
 				var got []SettingsReply
-				p.client.SetSettingsHandler(func(r SettingsReply) {
+				p.client.SetSettingsHandler(func(r SettingsReply) error {
 					mu.Lock()
 					got = append(got, r)
 					mu.Unlock()
+					return nil
 				})
 				done := make(chan settingsAnswer, 1)
 				go func() {
@@ -1846,7 +1848,7 @@ func TestTheSettingsHandlerRunsInWireOrder(t *testing.T) {
 		_ = json.Unmarshal(n.Update, &u)
 		note("update " + u.Tag)
 	})
-	p.client.SetSettingsHandler(func(r SettingsReply) { note("reply " + r.ConfigID) })
+	p.client.SetSettingsHandler(func(r SettingsReply) error { note("reply " + r.ConfigID); return nil })
 	done := make(chan settingsAnswer, 1)
 	go func() {
 		cat, err := p.client.SetConfig(context.Background(), "model", "composer-2.5")
@@ -1975,6 +1977,92 @@ func TestACallThatGaveUpFirstNeverRunsItsReplyHook(t *testing.T) {
 	p.roundTrip(t)
 	if ran.Load() {
 		t.Fatal("the reply hook ran for a call that had already given up")
+	}
+}
+
+// TestASettingsReplyCarriesItsCallsWord is astra r2 items 4 and 7 at the wire.
+// Item 4: whether a reply answers a model change is what the CALL said when it
+// was made — set_config_option is a model change when it goes out through
+// SetModelOption and not through SetConfig, and set_model always is — so the
+// handler never has to work it out from the catalogs it finds. SetModelOption
+// is SetConfig on the wire, byte for byte. Item 7: the handler may refuse the
+// reply, and its error is then the call's answer, wrapped with the method — the
+// way a member that is not an option, which only internal/agent's parser can
+// judge, becomes an error that installs nothing, like a configOptions that is
+// not a list at all (TestASettingsReplyKeepsItsCatalogsPresence).
+func TestASettingsReplyCarriesItsCallsWord(t *testing.T) {
+	refusal := fmt.Errorf("%w: member 0 is not an option", ErrBadCatalog)
+	for _, call := range []struct {
+		name, method, id, value string
+		model                   bool
+		call                    func(c *Client) (ConfigCatalog, error)
+	}{
+		{"SetConfig", MethodSessionSetConfig, "fast", "true", false, func(c *Client) (ConfigCatalog, error) {
+			return c.SetConfig(context.Background(), "fast", "true")
+		}},
+		{"SetModelOption", MethodSessionSetConfig, "model", "composer-2.5", true, func(c *Client) (ConfigCatalog, error) {
+			return c.SetModelOption(context.Background(), "model", "composer-2.5")
+		}},
+		{"SetModel", MethodSessionSetModel, "", "composer-2.5", true, func(c *Client) (ConfigCatalog, error) {
+			return c.SetModel(context.Background(), "composer-2.5")
+		}},
+	} {
+		for _, refuse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/refused=%v", call.name, refuse), func(t *testing.T) {
+				p := newRawPipe(t)
+				p.setSession("s1")
+				var mu sync.Mutex
+				var got []SettingsReply
+				p.client.SetSettingsHandler(func(r SettingsReply) error {
+					mu.Lock()
+					got = append(got, r)
+					mu.Unlock()
+					if refuse {
+						return refusal
+					}
+					return nil
+				})
+				done := make(chan settingsAnswer, 1)
+				go func() {
+					cat, err := call.call(p.client)
+					done <- settingsAnswer{cat, err}
+				}()
+				req := p.readWithin(t, 3*time.Second, call.method)
+				if req.Method != call.method {
+					t.Fatalf("the call wrote %q", req.Method)
+				}
+				if call.method == MethodSessionSetConfig {
+					var params SetConfigParams
+					if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID != "s1" ||
+						params.ConfigID != call.id || params.Value != call.value {
+						t.Fatalf("the call wrote %s", req.Params)
+					}
+				}
+				p.answerWith(t, req, `{"configOptions":[]}`)
+				a := awaitSettings(t, done)
+				mu.Lock()
+				defer mu.Unlock()
+				if len(got) != 1 {
+					t.Fatalf("the settings handler ran %d times, want once", len(got))
+				}
+				r := got[0]
+				if r.Method != call.method || r.ConfigID != call.id || r.Value != call.value || r.ModelChange != call.model {
+					t.Fatalf("the handler was told %+v, want a model change: %v", r, call.model)
+				}
+				if !refuse {
+					if a.err != nil || !a.cat.Present {
+						t.Fatalf("the call answered (%+v, %v)", a.cat, a.err)
+					}
+					return
+				}
+				if !errors.Is(a.err, ErrBadCatalog) || !strings.Contains(a.err.Error(), call.method) {
+					t.Fatalf("a refused reply answered (%+v, %v), want the handler's error with the method", a.cat, a.err)
+				}
+				if a.cat.Present {
+					t.Fatalf("a refused reply answered with a catalog: %+v", a.cat)
+				}
+			})
+		}
 	}
 }
 

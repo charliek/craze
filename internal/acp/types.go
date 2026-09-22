@@ -310,7 +310,9 @@ type SetConfigParams struct {
 // ACP's SetSessionConfigOptionResponse is {configOptions}: cursor answers
 // set_config_option with the current model's whole catalog, and set_model with
 // {}. The options stay raw here; parsing them is internal/agent's, beside the
-// parser every other catalog goes through.
+// parser every other catalog goes through — and so is judging whether each
+// member of the array is an option at all, which the settings handler answers
+// by refusing the reply (Client.SetSettingsHandler).
 type ConfigCatalog struct {
 	Present bool
 	Options json.RawMessage
@@ -326,8 +328,17 @@ type SettingsReply struct {
 	ConfigID string
 	// Value is what was asked for: the option's new value, or the model
 	// set_model moved to.
-	Value   string
-	Catalog ConfigCatalog
+	Value string
+	// ModelChange is whether the call was a model change — set_model, or a
+	// set_config_option on the option the agent keeps its model in
+	// (Client.SetModelOption) — as the caller that made it said when it made
+	// it. A handler classifies the reply by this and never by the catalogs it
+	// finds when the reply arrives: an update of the agent's own can take the
+	// model option out of the catalog while the call is in flight, and a reply
+	// judged by the catalog then would install a model change as an ordinary
+	// option's and leave the model where it was (plan 025 C1, astra r2 item 4).
+	ModelChange bool
+	Catalog     ConfigCatalog
 }
 
 type ToolCallLocation struct {

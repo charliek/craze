@@ -126,6 +126,13 @@ func commandsFromUpdate(cmds []acp.AvailableCommand) []CommandInfo {
 	return out
 }
 
+// parseConfigOptions is the tolerant parse, and it is the one the agent's own
+// updates and the session/new and session/load results go through: a member it
+// cannot read as an option is skipped and the rest are kept, and anything that
+// is not an array at all is no catalog. That is unchanged by plan 025. An update
+// has no caller to be answered — refusing it whole would leave the session on
+// the catalog before it for no one's benefit — whereas a settings reply does,
+// and is held to parseReplyConfigOptions instead.
 func parseConfigOptions(raw json.RawMessage) []ConfigOption {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
@@ -144,6 +151,40 @@ func parseConfigOptions(raw json.RawMessage) []ConfigOption {
 		out = append(out, opt)
 	}
 	return out
+}
+
+// parseReplyConfigOptions is a settings reply's catalog, which is all or
+// nothing (plan 025 design 1, "malformed is an error"; astra r2 item 7): every
+// member of the array has to be an option, or the reply is malformed — the
+// error wraps acp.ErrBadCatalog — and nothing of it is installed. raw is the
+// array acp handed over (acp.ConfigCatalog.Options), already known to be one.
+//
+// A member is malformed exactly when parseConfigOption cannot read it, which is
+// when it is not a JSON object (a number, a string, a list — or null, which
+// reads as an object with no id), when one of the fields it reads as text
+// (id, name, category, type) is of another JSON type, or when it has no id.
+// There is nothing else: parseConfigOption skips no option it can read. One of
+// a type craze draws no control for is kept, with that type and no values, and
+// an unknown field is ignored, as is a currentValue that is no scalar (read as
+// ""). What is inside an option's own value list is the option's: a value that
+// cannot be read is left out of it by parseSelectValues, on this path as on the
+// push path, and the option stands.
+func parseReplyConfigOptions(raw json.RawMessage) ([]ConfigOption, error) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("%w: %v", acp.ErrBadCatalog, err)
+	}
+	out := make([]ConfigOption, 0, len(items))
+	for i, item := range items {
+		opt, ok := parseConfigOption(item)
+		if !ok {
+			// The member itself stays out of the error, which a client may draw:
+			// the journal has the wire.
+			return nil, fmt.Errorf("%w: member %d is not an option", acp.ErrBadCatalog, i)
+		}
+		out = append(out, opt)
+	}
+	return out, nil
 }
 
 func parseConfigOption(raw json.RawMessage) (ConfigOption, bool) {

@@ -1324,7 +1324,7 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 		t.Fatalf("after the switch to test/a the effort option is %+v, want low/high at high", opt)
 	}
 
-	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low"); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low", ""); err != nil {
 		t.Fatal(err)
 	}
 	oneMeta(t, "SetConfig(effort)")
@@ -1336,11 +1336,11 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 		t.Fatal("a switch to an unfunded model succeeded")
 	}
 	none(t, "a failed SetModel")
-	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "max"); err == nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "max", ""); err == nil {
 		t.Fatal("an effort the model does not offer was taken")
 	}
 	none(t, "a refused SetConfig")
-	if _, err := s.SetConfig(context.Background(), "", "fast", "true"); !errors.Is(err, ErrUnsupported) {
+	if _, err := s.SetConfig(context.Background(), "", "fast", "true", ""); !errors.Is(err, ErrUnsupported) {
 		t.Fatal(err)
 	}
 	none(t, "an unsupported SetConfig")
@@ -1360,7 +1360,7 @@ func TestNativeSwitchesAnnounceTheirOptions(t *testing.T) {
 func TestNativeSetConfig(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
-	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low"); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low", ""); err != nil {
 		t.Fatalf("SetConfig(effort, low): %v", err)
 	}
 	if _, effort := s.hs.Current(); effort != "low" {
@@ -1369,27 +1369,54 @@ func TestNativeSetConfig(t *testing.T) {
 	if opt := EffortOption(s.Snapshot()); opt == nil || opt.Current != "low" {
 		t.Fatalf("the effort option after SetConfig: %+v", opt)
 	}
-	_, err := s.SetConfig(context.Background(), "", nativeEffortID, "max")
+	_, err := s.SetConfig(context.Background(), "", nativeEffortID, "max", "")
 	if err == nil || !strings.Contains(err.Error(), "low, high") {
 		t.Fatalf("SetConfig(effort, max) = %v, want a refusal naming low, high", err)
 	}
 	if opt := EffortOption(s.Snapshot()); opt.Current != "low" {
 		t.Fatalf("a refused effort changed the option to %q", opt.Current)
 	}
-	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, ""); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "", ""); err != nil {
 		t.Fatalf("SetConfig(effort, \"\") = %v; the model's default is always allowed", err)
 	}
 	if opt := EffortOption(s.Snapshot()); opt.Current != "high" {
 		t.Fatalf("the default effort is %q, want high", opt.Current)
 	}
-	if _, err := s.SetConfig(context.Background(), "", "fast", "true"); !errors.Is(err, ErrUnsupported) {
+	if _, err := s.SetConfig(context.Background(), "", "fast", "true", ""); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("SetConfig(fast) = %v, want ErrUnsupported", err)
 	}
 	if _, err := s.SetModel(context.Background(), "", "other/c"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low"); err == nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low", ""); err == nil {
 		t.Fatal("SetConfig(effort) on a model with no effort control succeeded")
+	}
+}
+
+// TestNativeSetConfigHoldsItsBinding is astra r2 item 3 on the native session:
+// an effort bound to a model the session is not on is ErrStaleModel, checked
+// against the model read in the same section as the model's effort levels, and
+// the harness is never asked — its effort, the snapshot and the log are as they
+// were. Bound to the model it is on, the same effort is set.
+func TestNativeSetConfigHoldsItsBinding(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	model := s.Snapshot().CurrentModel
+	_, before := s.hs.Current()
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low", "other/c"); !errors.Is(err, ErrStaleModel) {
+		t.Fatalf("an effort bound to other/c, set on %s, answered %v, want ErrStaleModel", model, err)
+	}
+	if _, effort := s.hs.Current(); effort != before {
+		t.Fatalf("a refused effort reached the harness, which is at %q", effort)
+	}
+	if opt := EffortOption(s.Snapshot()); opt == nil || opt.Current != before {
+		t.Fatalf("a refused effort changed the option: %+v", opt)
+	}
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "low", model); err != nil {
+		t.Fatalf("the effort bound to the model it is on: %v", err)
+	}
+	if _, effort := s.hs.Current(); effort != "low" {
+		t.Fatalf("the harness's effort is %q, want low", effort)
 	}
 }
 
@@ -1402,7 +1429,7 @@ func TestNativeSetConfig(t *testing.T) {
 func TestNativeUnsupported(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
-	if _, err := s.SetConfig(context.Background(), "", "fast", "true"); !errors.Is(err, ErrUnsupported) {
+	if _, err := s.SetConfig(context.Background(), "", "fast", "true", ""); !errors.Is(err, ErrUnsupported) {
 		t.Errorf("SetConfig(fast) = %v, want ErrUnsupported", err)
 	}
 	// The three Answer* verbs left the seam with plan 021's C8b: a client

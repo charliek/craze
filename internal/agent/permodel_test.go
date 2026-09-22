@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -374,7 +376,7 @@ func TestTheSetModelFallbackDropsThePreviousModelsOptions(t *testing.T) {
 			t.Fatalf("the fallback's delta carries %s", got)
 		}
 		// The next catalog the agent answers is composer-2.5's, fast and all.
-		if _, err := s.SetConfig(context.Background(), "c-1/2", "fast", "true"); err != nil {
+		if _, err := s.SetConfig(context.Background(), "c-1/2", "fast", "true", ""); err != nil {
 			t.Fatalf("SetConfig: %v", err)
 		}
 		wantOnModel(t, s.Snapshot(), "composer-2.5", "mode=agent model=composer-2.5 fast=true")
@@ -401,7 +403,7 @@ func TestTheSetModelFallbackDropsThePreviousModelsOptions(t *testing.T) {
 		if !armed {
 			t.Fatal("a set_model with no model option armed no marker")
 		}
-		if _, err := s.SetConfig(context.Background(), "c-1/2", "fast", "true"); err != nil {
+		if _, err := s.SetConfig(context.Background(), "c-1/2", "fast", "true", ""); err != nil {
 			t.Fatalf("SetConfig: %v", err)
 		}
 		wantOnModel(t, s.Snapshot(), "composer-2.5", "mode=agent fast=true")
@@ -634,7 +636,7 @@ func TestSetOutcomeCarriesTheInstalledValue(t *testing.T) {
 			s.mu.Unlock()
 			s.onUpdate(configPushOf(cfg))
 		}
-		out, err := s.SetConfig(context.Background(), "c-1/1", "effort", "low")
+		out, err := s.SetConfig(context.Background(), "c-1/1", "effort", "low", "")
 		if err != nil {
 			t.Fatalf("SetConfig: %v", err)
 		}
@@ -666,7 +668,7 @@ func TestSetOutcomeCarriesTheInstalledValue(t *testing.T) {
 	t.Run("an option the answered catalog no longer has", func(t *testing.T) {
 		s := startScript(t, "permodel-empty", false)
 		settle(t, s)
-		out, err := s.SetConfig(context.Background(), "c-1/1", "fast", "false")
+		out, err := s.SetConfig(context.Background(), "c-1/1", "fast", "false", "")
 		if !errors.Is(err, ErrOptionGone) {
 			t.Fatalf("SetConfig answered %v, want ErrOptionGone", err)
 		}
@@ -692,12 +694,13 @@ func TestSetOutcomeCarriesTheInstalledValue(t *testing.T) {
 // reply carrying none leaves the catalog standing, with the one option it set
 // at its new value. (`{}` to a MODEL change is the fallback's case: the kept
 // catalog is the previous model's, and its knobs go.) A malformed catalog is
-// refused at the ACP layer (acp's TestASettingsReplyKeepsItsCatalogsPresence).
+// refused at the ACP layer (acp's TestASettingsReplyKeepsItsCatalogsPresence),
+// and one with a malformed member here (TestAMalformedReplyInstallsNothing).
 func TestAnEmptyCatalogClearsAndAMissingOneKeeps(t *testing.T) {
 	t.Run("a catalog replaces", func(t *testing.T) {
 		s := startScript(t, "permodel", false)
 		settle(t, s)
-		if _, err := s.SetConfig(context.Background(), "c-1/1", "fast", "false"); err != nil {
+		if _, err := s.SetConfig(context.Background(), "c-1/1", "fast", "false", ""); err != nil {
 			t.Fatalf("SetConfig: %v", err)
 		}
 		wantOnModel(t, s.Snapshot(), "grok-4.6", "mode=agent model=grok-4.6 effort=high fast=false")
@@ -725,7 +728,7 @@ func TestAnEmptyCatalogClearsAndAMissingOneKeeps(t *testing.T) {
 		// own): the catalog stands, the option at its value.
 		s := startScript(t, "effort", false)
 		settle(t, s)
-		if _, err := s.SetConfig(context.Background(), "c-1/1", "effort", "high"); err != nil {
+		if _, err := s.SetConfig(context.Background(), "c-1/1", "effort", "high", ""); err != nil {
 			t.Fatalf("SetConfig: %v", err)
 		}
 		if got := cfgString(s.Snapshot().Config); got != "effort=high fast=false" {
@@ -746,4 +749,419 @@ func TestAnEmptyCatalogClearsAndAMissingOneKeeps(t *testing.T) {
 		}
 		wantOnModel(t, s.Snapshot(), "composer-2.5", permodelFresh["composer-2.5"])
 	})
+}
+
+// The C1 fixes for astra's r2 review. Each schedule is written out in its
+// test's comment and forced — on the read loop, from the setter's barrier, or
+// by the fake's own wire — with no clock but a watchdog.
+
+// pushAheadOfReply is the read-loop barrier for an agent push that the wire has
+// just ahead of a settings reply. It stands in the session's settings handler,
+// and for the first reply it is handed it applies a config_option_update
+// carrying move(the catalog the session holds) through the read loop's own
+// entry point (onUpdate), and only then the reply (onSettingsReply): the two
+// reach the session in that order, on the read goroutine, with nothing between
+// them — two frames written one behind the other, the push first. The setter
+// is inside its call all the while, waiting for that reply. Every later reply
+// goes straight to the session. The answer reports whether the push ran.
+func pushAheadOfReply(s *session, move func([]ConfigOption) []ConfigOption) func() bool {
+	var fired atomic.Bool
+	s.client.SetSettingsHandler(func(r acp.SettingsReply) error {
+		if fired.CompareAndSwap(false, true) {
+			s.mu.Lock()
+			cfg := move(cloneConfig(s.snap.Config))
+			s.mu.Unlock()
+			s.onUpdate(configPushOf(cfg))
+		}
+		return s.onSettingsReply(r)
+	})
+	return fired.Load
+}
+
+// TestAModelTheReplyMovedBackIsStillAnnounced is astra r2 item 1: the Model
+// section is owed whenever an install has moved the model without saying so,
+// and that is not the same as "the model differs from the one before the
+// call".
+//
+// The schedule, forced on the read loop (pushAheadOfReply):
+//
+//  1. SetConfig(effort, low) on grok-4.6 — A — sends set_config_option(effort).
+//  2. Ahead of its reply, the agent pushes a catalog whose model option is on
+//     composer-2.5 — B. onUpdate applies it and announces Model=B and B's
+//     Config: a client folding the stream is on B.
+//  3. The reply is the fake's answer, grok-4.6's catalog with effort=low. Its
+//     install moves the model B → A and announces nothing — its setter does.
+//  4. The setter's section finds A, the model it was on before its call.
+//
+// Before the fix that section compared the two, found them equal and enqueued
+// the Config section alone: Snapshot() said A for good and the fold said B for
+// good. Now the install leaves the Model section owed and the section pays it.
+//
+// The debt is the session's, not the call's, so when another setter's section
+// runs first — SetConfig parked at its barrier, after the install and before
+// its section, while SetMode or SetTitle runs to the end — that section pays
+// it, and the stream says A from that delta on.
+func TestAModelTheReplyMovedBackIsStillAnnounced(t *testing.T) {
+	const onA, onB = "grok-4.6", "composer-2.5"
+	toB := func(cfg []ConfigOption) []ConfigOption { return withValue(cfg, "model", onB) }
+	wantCfg := "mode=agent model=grok-4.6 effort=low fast=true"
+	// wantThePushSaidB is the schedule's own evidence: the agent's delta said B
+	// before anything said A again.
+	wantThePushSaidB := func(t *testing.T, evs []Event) {
+		t.Helper()
+		for _, ev := range ownDeltas(evs, "") {
+			if st := ev.State; st.Model != nil && *st.Model == onB && st.Config != nil {
+				return
+			}
+		}
+		t.Fatalf("no push moved the model to %s ahead of the reply:\n%s", onB, formatEvents(evs))
+	}
+
+	t.Run("the setter's own section", func(t *testing.T) {
+		s := startScript(t, "permodel", false)
+		awaitCatalog(t, s)
+		fired := pushAheadOfReply(s, toB)
+		out, err := s.SetConfig(context.Background(), "c-1/1", "effort", "low", "")
+		if err != nil {
+			t.Fatalf("SetConfig: %v", err)
+		}
+		if !fired() {
+			t.Fatal("the push never ran ahead of the reply")
+		}
+		if out.Value != "low" {
+			t.Fatalf("SetConfig confirmed %q, want the installed low", out.Value)
+		}
+		snap := s.Snapshot()
+		wantOnModel(t, snap, onA, wantCfg)
+		evs := flushAll(s)
+		wantThePushSaidB(t, evs)
+		own := ownDeltas(evs, "c-1/1")
+		if len(own) != 1 || own[0].State.Model == nil || *own[0].State.Model != onA || own[0].State.Config == nil {
+			t.Fatalf("the setter's delta does not say the model its reply moved back to:\n%s", formatEvents(evs))
+		}
+		wantFoldMatchesSnapshot(t, evs, snap)
+		s.mu.Lock()
+		owed := s.modelUnannounced
+		s.mu.Unlock()
+		if owed {
+			t.Fatal("the setter's delta said the model and the debt is still standing")
+		}
+	})
+
+	for _, other := range []struct {
+		name string
+		run  func(s *session) error
+	}{
+		{"SetMode", func(s *session) error {
+			_, err := s.SetMode(context.Background(), "c-1/2", "plan")
+			return err
+		}},
+		{"SetTitle", func(s *session) error { return s.SetTitle("c-1/2", "renamed") }},
+	} {
+		t.Run(other.name+"'s section first", func(t *testing.T) {
+			s := startScript(t, "permodel", false)
+			awaitCatalog(t, s)
+			fired := pushAheadOfReply(s, toB)
+			// The first section to reach the barrier is SetConfig's, after its
+			// reply's install; it waits there until the other setter is done.
+			// Every later one — SetMode's own — goes straight through.
+			var calls atomic.Int32
+			parked, release := make(chan struct{}), make(chan struct{})
+			s.beforeSetSection = func() {
+				if calls.Add(1) == 1 {
+					close(parked)
+					<-release
+				}
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := s.SetConfig(context.Background(), "c-1/1", "effort", "low", "")
+				done <- err
+			}()
+			select {
+			case <-parked:
+			case <-time.After(10 * time.Second):
+				t.Fatal("SetConfig never reached its section")
+			}
+			if !fired() {
+				t.Fatal("the push never ran ahead of the reply")
+			}
+			if err := other.run(s); err != nil {
+				close(release)
+				t.Fatalf("%s: %v", other.name, err)
+			}
+			close(release)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("SetConfig: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("SetConfig never came back")
+			}
+			snap := s.Snapshot()
+			wantOnModel(t, snap, onA, wantCfg)
+			evs := flushAll(s)
+			wantThePushSaidB(t, evs)
+			paid := ownDeltas(evs, "c-1/2")
+			if len(paid) != 1 || paid[0].State.Model == nil || *paid[0].State.Model != onA {
+				t.Fatalf("%s's delta, the first after the install, does not say the model:\n%s", other.name, formatEvents(evs))
+			}
+			wantFoldMatchesSnapshot(t, evs, snap)
+		})
+	}
+}
+
+// TestAModelChangeKeepsItsIdentityInFlight is astra r2 item 4: a call that is a
+// model change is installed as one whatever the catalog holds when its reply
+// arrives, because the call says what it is (acp.SettingsReply.ModelChange).
+//
+// The schedule, forced on the read loop (pushAheadOfReply):
+//
+//  1. On grok-4.6, SetModel(composer-2.5) finds the model option and sends
+//     set_config_option(model, composer-2.5) — or SetConfig sets that option
+//     by its id, which the catalog lists as the model's.
+//  2. Ahead of its reply, the agent pushes an empty catalog. Applied, the
+//     session holds no options at all, and CurrentModel is still grok-4.6.
+//  3. The reply carries no model option either: `{"configOptions": []}`
+//     (permodel-empty) or `{}` (permodel-noreply).
+//
+// Before the fix the install looked for the model option in the two catalogs
+// it could see, found it in neither, took the ordinary option's branch and left
+// the model on grok-4.6, and the setter answered success with Value grok-4.6
+// for a switch the agent had made. Now it is installed as the model change it
+// is: the model is the one asked for, the catalog is empty (the fallback drops
+// nothing from nothing), and the marker is armed with grok-4.6 against a stale
+// first model option (r27 finding 2).
+func TestAModelChangeKeepsItsIdentityInFlight(t *testing.T) {
+	const to = "composer-2.5"
+	empty := func([]ConfigOption) []ConfigOption { return nil }
+	for _, script := range []string{"permodel-empty", "permodel-noreply"} {
+		for _, call := range []struct {
+			name string
+			set  func(s *session) (SetOutcome, error)
+		}{
+			{"SetModel", func(s *session) (SetOutcome, error) {
+				return s.SetModel(context.Background(), "c-1/1", to)
+			}},
+			{"SetConfig on the model option", func(s *session) (SetOutcome, error) {
+				return s.SetConfig(context.Background(), "c-1/1", "model", to, "")
+			}},
+		} {
+			t.Run(script+"/"+call.name, func(t *testing.T) {
+				s := startScript(t, script, false)
+				awaitCatalog(t, s)
+				fired := pushAheadOfReply(s, empty)
+				out, err := call.set(s)
+				if err != nil {
+					t.Fatalf("the model change: %v", err)
+				}
+				if !fired() {
+					t.Fatal("the push never ran ahead of the reply")
+				}
+				if out.Value != to {
+					t.Fatalf("the model change confirmed %q, want %s", out.Value, to)
+				}
+				snap := s.Snapshot()
+				wantOnModel(t, snap, to, "")
+				s.mu.Lock()
+				armed := s.modelBeforeSet["grok-4.6"]
+				s.mu.Unlock()
+				if !armed {
+					t.Fatal("a model change that left no model option armed no marker")
+				}
+				evs := flushAll(s)
+				own := ownDeltas(evs, "c-1/1")
+				if len(own) != 1 || own[0].State.Model == nil || *own[0].State.Model != to ||
+					own[0].State.Config == nil || len(own[0].State.Config.Options) != 0 {
+					t.Fatalf("the change's delta is not the model it made:\n%s", formatEvents(evs))
+				}
+				wantFoldMatchesSnapshot(t, evs, snap)
+				if script == "permodel-noreply" {
+					// This fake's next reply carries its whole catalog: the agent
+					// is on the model the session says it is.
+					if got := providerCatalog(t, s); got != permodelFresh[to] {
+						t.Fatalf("the agent holds %s", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+// replaceLastMember is a reply's configOptions with its last member replaced
+// by member. It runs on the read loop, so it reports nothing: a raw it cannot
+// read is returned as it is, and the case then fails on what it asserts.
+func replaceLastMember(raw json.RawMessage, member string) json.RawMessage {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return raw
+	}
+	items[len(items)-1] = json.RawMessage(member)
+	out, err := json.Marshal(items)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// TestAMalformedReplyInstallsNothing is astra r2 item 7 at the session: a
+// settings reply whose catalog holds a member that is not an option is an
+// error, and nothing of it is installed — plan 025 design 1's "malformed is an
+// error" for the members of the array as well as for the array itself.
+//
+// The reply is the fake's own, with its last member — fast, on grok-4.6 and on
+// composer-2.5 alike — replaced by the review's `{"id":"fast","name":7}` on
+// the read loop before the session sees it. Before the fix the tolerant parse
+// dropped that member and installed the rest: SetConfig(fast) published a
+// catalog without fast and answered ErrOptionGone, and SetModel switched with
+// fast missing. Now both answer the error, the snapshot is exactly as it was,
+// nothing is published, and a model change does not go on to set_model — the
+// agent took the change, and a second one would be a write craze did not mean.
+func TestAMalformedReplyInstallsNothing(t *testing.T) {
+	const bad = `{"id":"fast","name":7}`
+	for _, tc := range []struct {
+		name string
+		set  func(s *session) (SetOutcome, error)
+	}{
+		{"an option", func(s *session) (SetOutcome, error) {
+			return s.SetConfig(context.Background(), "c-1/1", "fast", "false", "")
+		}},
+		{"a model change", func(s *session) (SetOutcome, error) {
+			return s.SetModel(context.Background(), "c-1/1", "composer-2.5")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := startScript(t, "permodel", false)
+			settle(t, s)
+			s.client.SetSettingsHandler(func(r acp.SettingsReply) error {
+				r.Catalog.Options = replaceLastMember(r.Catalog.Options, bad)
+				return s.onSettingsReply(r)
+			})
+			before := s.Snapshot()
+			out, err := tc.set(s)
+			if !errors.Is(err, acp.ErrBadCatalog) {
+				t.Fatalf("a reply with a malformed member answered (%+v, %v), want acp.ErrBadCatalog", out, err)
+			}
+			if out.Ticket != nil {
+				t.Fatal("a refused reply came with a ticket")
+			}
+			wantOnModel(t, s.Snapshot(), before.CurrentModel, cfgString(before.Config))
+			if evs := flushAll(s); len(evs) != 0 {
+				t.Fatalf("a refused reply published:\n%s", formatEvents(evs))
+			}
+			s.mu.Lock()
+			owed, markers := s.modelUnannounced, len(s.modelBeforeSet)
+			s.mu.Unlock()
+			if owed || markers != 0 {
+				t.Fatalf("a refused reply left owed=%v and %d markers", owed, markers)
+			}
+		})
+	}
+}
+
+// TestAReplysCatalogIsAllOrNothing is the line astra r2 item 7 draws, at the
+// parser: a settings reply's member is malformed exactly when parseConfigOption
+// cannot read it — not an object, a text field of another JSON type, no id —
+// and one such member makes the whole reply ErrBadCatalog. Everything that
+// parser reads is kept, the kinds craze draws no control for included, so
+// nothing well-formed is refused. The push path's parse is unchanged: it skips
+// the member and keeps the rest.
+func TestAReplysCatalogIsAllOrNothing(t *testing.T) {
+	const good = `{"id":"effort","name":"Effort","category":"thought_level","type":"select","currentValue":"high",` +
+		`"options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}`
+	for _, tc := range []struct{ name, member string }{
+		{"a number", `7`},
+		{"a string", `"fast"`},
+		{"a boolean", `true`},
+		{"a list", `[]`},
+		{"null", `null`},
+		{"no id", `{"name":"Fast","currentValue":"true"}`},
+		{"an empty id", `{"id":"","currentValue":"true"}`},
+		{"an id that is not text", `{"id":7}`},
+		{"a name that is not text", `{"id":"fast","name":7}`},
+		{"a category that is not text", `{"id":"fast","category":["model_config"]}`},
+		{"a type that is not text", `{"id":"fast","type":{"kind":"select"}}`},
+	} {
+		raw := json.RawMessage("[" + good + "," + tc.member + "]")
+		if got, err := parseReplyConfigOptions(raw); !errors.Is(err, acp.ErrBadCatalog) {
+			t.Errorf("%s: a reply parsed as %s, %v; want acp.ErrBadCatalog", tc.name, cfgString(got), err)
+		}
+		if got := cfgString(parseConfigOptions(raw)); got != "effort=high" {
+			t.Errorf("%s: the push path read %q, want the member skipped and the rest kept", tc.name, got)
+		}
+	}
+	for _, tc := range []struct{ name, member, want string }{
+		{"a type craze draws nothing for", `{"id":"note","type":"text","currentValue":"hi"}`, "effort=high note=hi"},
+		{"an unknown field", `{"id":"fast","type":"select","currentValue":"true","extra":{"x":1}}`, "effort=high fast=true"},
+		{"a currentValue that is no scalar", `{"id":"fast","currentValue":{"on":true}}`, "effort=high fast="},
+		{"a value list that is not a list", `{"id":"fast","currentValue":"true","options":"on/off"}`, "effort=high fast=true"},
+		{"an unreadable value in the list", `{"id":"fast","currentValue":"true","options":[7,{"value":"true","name":"On"}]}`,
+			"effort=high fast=true"},
+		{"a boolean option", `{"id":"fast","type":"boolean","currentValue":true}`, "effort=high fast=true"},
+	} {
+		raw := json.RawMessage("[" + good + "," + tc.member + "]")
+		got, err := parseReplyConfigOptions(raw)
+		if err != nil || cfgString(got) != tc.want {
+			t.Errorf("%s: a reply parsed as (%s, %v), want %s", tc.name, cfgString(got), err, tc.want)
+		}
+		if push := parseConfigOptions(raw); !reflect.DeepEqual(push, got) {
+			t.Errorf("%s: the two parses disagree on a well-formed catalog: %+v vs %+v", tc.name, push, got)
+		}
+	}
+	if got, err := parseReplyConfigOptions(json.RawMessage(`[]`)); err != nil || len(got) != 0 {
+		t.Errorf("the empty list parsed as (%+v, %v): it is a catalog, and it clears", got, err)
+	}
+}
+
+// TestAnOptionBoundToAModelTheAgentLeftIsNeverSent is astra r2 item 3 at the
+// session: the binding goes down with the change and is checked under the
+// session's lock at the last moment before the write, so a model the agent
+// moved on its own — after the engine's worker looked — refuses it there.
+//
+// The schedule, forced by the fake's wire and the push gate:
+//
+//  1. SetModel(composer-2.5) on permodel-pushmodel-after is answered with
+//     composer-2.5's catalog, and right behind the reply the agent moves on
+//     its own to claude-opus-5 and pushes that catalog. The case waits until
+//     the push has been applied: the read loop has told the session.
+//  2. SetConfig(fast, true) bound to composer-2.5 — chosen from its catalog,
+//     and what the worker would have let through had it looked before step
+//     1's push landed. Both models have a fast toggle that takes "true", so
+//     nothing but the binding can refuse it.
+//  3. The session's check finds claude-opus-5: ErrStaleModel. Nothing is
+//     written — the agent's claude-opus-5 keeps fast off — and nothing is
+//     published.
+//
+// Before the fix the binding stopped at the worker, the write went out, and
+// claude-opus-5's fast was turned on by a choice made for composer-2.5.
+func TestAnOptionBoundToAModelTheAgentLeftIsNeverSent(t *testing.T) {
+	s := startScript(t, "permodel-pushmodel-after", false)
+	settle(t, s)
+	g := gatePushes(t, s, false)
+	if _, err := s.SetModel(context.Background(), "c-1/1", "composer-2.5"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	g.awaitApplied(t)
+	moved := s.Snapshot()
+	wantOnModel(t, moved, "claude-opus-5", permodelFresh["claude-opus-5"])
+	flushAll(s)
+
+	out, err := s.SetConfig(context.Background(), "c-1/2", "fast", "true", "composer-2.5")
+	if !errors.Is(err, ErrStaleModel) {
+		t.Fatalf("an option bound to composer-2.5, set on claude-opus-5, answered (%+v, %v), want ErrStaleModel", out, err)
+	}
+	wantOnModel(t, s.Snapshot(), "claude-opus-5", cfgString(moved.Config))
+	if evs := flushAll(s); len(evs) != 0 {
+		t.Fatalf("a refused option published:\n%s", formatEvents(evs))
+	}
+	if got := providerCatalog(t, s); got != permodelFresh["claude-opus-5"] {
+		t.Fatalf("the refused option reached the agent, which holds %s", got)
+	}
+	// Bound to the model the session is on, the same change is sent and lands.
+	if _, err := s.SetConfig(context.Background(), "c-1/3", "fast", "true", "claude-opus-5"); err != nil {
+		t.Fatalf("the option bound to the current model: %v", err)
+	}
+	claudeFast := strings.Replace(permodelFresh["claude-opus-5"], "fast=false", "fast=true", 1)
+	wantOnModel(t, s.Snapshot(), "claude-opus-5", claudeFast)
 }

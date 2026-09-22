@@ -75,6 +75,15 @@ var ErrSetUnavailable = errors.New("agent: the event log is backed up")
 // about is not there to confirm.
 var ErrOptionGone = errors.New("agent: the agent's catalog no longer has that option")
 
+// ErrStaleModel refuses a SetConfig bound to a model (its forModel) when the
+// session is on another one by the time the call is about to be made: the
+// option was chosen from that model's catalog, and is not a choice anyone made
+// for this one (plan 025 design 3). Nothing was sent. The engine's settings
+// worker refuses the same thing before it claims a Set, and answers with this
+// very value (engine.ErrStaleModel), so a client matches one error whichever
+// of the two checks caught it.
+var ErrStaleModel = errors.New("agent: the model that option was chosen for is no longer the session's")
+
 type EventType string
 
 const (
@@ -903,9 +912,17 @@ type Session interface {
 	// primary's reader, exactly as they always have. They never refuse for want
 	// of room in the log: the caller checks that *before* the provider is asked,
 	// because a refusal after the agent has taken the change would be a lie.
+	//
+	// SetConfig's forModel binds the change to the model it was chosen for
+	// (engine.Setting.ForModel, plan 025 design 3): when it is set and the
+	// session is on any other model, the call is ErrStaleModel and nothing is
+	// asked of the provider. The check is the session's own current model, read
+	// under the session's lock at the last moment before the provider is asked,
+	// so a model the agent moved on its own and the session has already heard
+	// about is seen. "" binds it to nothing.
 	SetModel(ctx context.Context, cause, modelID string) (SetOutcome, error)
 	SetMode(ctx context.Context, cause, modeID string) (SetOutcome, error)
-	SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error)
+	SetConfig(ctx context.Context, cause, id, value, forModel string) (SetOutcome, error)
 	// SetTitle renames the session in craze alone: ACP v1 has no rename verb.
 	// It pins the title, so a later agent session_info_update no longer
 	// replaces it, and it publishes the Title section of a StateDelta —

@@ -538,7 +538,7 @@ func (s *stubSession) SetMode(context.Context, string, string) (agent.SetOutcome
 	return agent.SetOutcome{}, nil
 }
 
-func (s *stubSession) SetConfig(context.Context, string, string, string) (agent.SetOutcome, error) {
+func (s *stubSession) SetConfig(context.Context, string, string, string, string) (agent.SetOutcome, error) {
 	return agent.SetOutcome{}, nil
 }
 

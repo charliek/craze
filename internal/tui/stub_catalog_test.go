@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestStubSetModelInstallsTheModelsCatalog(t *testing.T) {
 	if _, err := s.SetModel(context.Background(), "c-4", "fast"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetConfig(context.Background(), "c-5", "context", "1m"); err != nil {
+	if _, err := s.SetConfig(context.Background(), "c-5", "context", "1m", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, m := range []string{"grok", "fast"} {
@@ -122,6 +123,34 @@ func TestStubSetModelInstallsTheModelsCatalog(t *testing.T) {
 	}
 	if got := catalogIDs(s.Snapshot().Config); got != "effort=high fast=false context=1m thinking=true" {
 		t.Fatalf("back on fast the catalog is %s: the context value did not persist", got)
+	}
+}
+
+// TestStubSetConfigHoldsItsBinding: the Stub holds SetConfig's forModel as the
+// live session does (astra r2 item 3) — a change chosen for another model is
+// agent.ErrStaleModel and touches nothing, not even the call a test armed to
+// fail — and one bound to the model it is on goes through.
+func TestStubSetConfigHoldsItsBinding(t *testing.T) {
+	s := NewStub()
+	t.Cleanup(func() { _ = s.Close() })
+	model := s.Snapshot().CurrentModel
+	const static = "effort=medium fast=false"
+	s.FailNextSetConfig()
+	if _, err := s.SetConfig(context.Background(), "c-1", "effort", "high", "not-"+model); !errors.Is(err, agent.ErrStaleModel) {
+		t.Fatalf("an effort bound to another model answered %v, want agent.ErrStaleModel", err)
+	}
+	if evs := stubDeltas(t, s); len(evs) != 0 || catalogIDs(s.Snapshot().Config) != static {
+		t.Fatalf("a refused change published %d events and left %s", len(evs), catalogIDs(s.Snapshot().Config))
+	}
+	// The armed failure is still the next call's: the refusal was not a call.
+	if _, err := s.SetConfig(context.Background(), "c-2", "effort", "high", ""); err == nil {
+		t.Fatal("the failure armed before the refused change was used up by it")
+	}
+	if _, err := s.SetConfig(context.Background(), "c-3", "effort", "high", model); err != nil {
+		t.Fatalf("an effort bound to the model it is on: %v", err)
+	}
+	if got := catalogIDs(s.Snapshot().Config); got != "effort=high fast=false" {
+		t.Fatalf("the bound change left %s", got)
 	}
 }
 

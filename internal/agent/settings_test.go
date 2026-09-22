@@ -415,7 +415,7 @@ func TestAConfigBackedModelChangeMovesTheModelSection(t *testing.T) {
 		if got := s.Snapshot().CurrentModel; got != "default" {
 			t.Fatalf("the session started on %q", got)
 		}
-		out, err := s.SetConfig(context.Background(), "c-1/1", "model", "composer")
+		out, err := s.SetConfig(context.Background(), "c-1/1", "model", "composer", "")
 		if err != nil {
 			t.Fatalf("SetConfig: %v", err)
 		}
@@ -604,7 +604,7 @@ func TestNativeConfirmsTheValueItResolved(t *testing.T) {
 		t.Fatalf("the fixture's model has no default effort to resolve to: %+v", got)
 	}
 	want := EffortOption(s.Snapshot()).Current
-	out, err := s.SetConfig(context.Background(), "", nativeEffortID, "")
+	out, err := s.SetConfig(context.Background(), "", nativeEffortID, "", "")
 	if err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestNoNativeMetaIsBare(t *testing.T) {
 	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "high"); err != nil {
+	if _, err := s.SetConfig(context.Background(), "", nativeEffortID, "high", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetTitle("", "renamed"); err != nil {

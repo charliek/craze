@@ -171,6 +171,10 @@ func agentSentinels() map[string]error {
 		"ErrPromptCancelled":  agent.ErrPromptCancelled,
 		"ErrSetUnavailable":   agent.ErrSetUnavailable,
 		"ErrOptionGone":       agent.ErrOptionGone,
+		// The session's refusal of a Set bound to a model it has left, made just
+		// before the write. engine.ErrStaleModel is this very value, so the
+		// table's ErrStaleModel row is its row too.
+		"ErrStaleModel": agent.ErrStaleModel,
 	}
 }
 

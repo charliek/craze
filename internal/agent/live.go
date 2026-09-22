@@ -198,6 +198,22 @@ type session struct {
 	// by that first appearance, like the set alone always was.
 	modelBeforeSet map[string]bool
 	modelBeforeAny bool
+	// modelUnannounced is true while CurrentModel holds a value no delta has
+	// said yet: a settings reply's install moved it (onSettingsReply), and that
+	// install announces nothing of its own — its setter's section does. Any
+	// delta that carries the Model section at the current value clears it
+	// (enqueueDeltaLocked), and every delta craze enqueues itself carries that
+	// section while it is set (owedModelLocked). Guarded by s.mu.
+	//
+	// It is the session's and not the call's because what is owed is a fact
+	// about the stream, not about any one reply: a client folding the deltas
+	// holds the model the LAST Model section said, and the question a setter's
+	// section has to answer is whether that is still CurrentModel — which
+	// comparing the model before and after its own call cannot tell. The agent
+	// can move the model away and a reply bring it back (A, then B announced,
+	// then A unannounced) and the call's before and after then agree while the
+	// fold is on B (astra r2 item 1).
+	modelUnannounced bool
 	// beforeSetSection is a test barrier, nil in every build but a test's: it
 	// runs on a setter's own goroutine after the provider has taken the change
 	// and before the locked section that mutates the snapshot and enqueues its
@@ -573,7 +589,7 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 			// is craze's own --mode.
 			s.mu.Lock()
 			s.snap.CurrentMode = modeID
-			s.enqueueDeltaLocked("", Event{}, &StateDelta{Mode: &modeID})
+			s.enqueueDeltaLocked("", Event{}, s.owedModelLocked(&StateDelta{Mode: &modeID}))
 			s.mu.Unlock()
 		} else {
 			snap.CurrentMode = modeID
@@ -587,7 +603,10 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		// loop (onSettingsReply) — into s.snap, in arrival order — which is also
 		// where the change's marker is armed or cleared (r27 finding 2: a first
 		// model option carrying the model the agent had BEFORE --model must not
-		// roll it back).
+		// roll it back). What announces it carries the Model section at the
+		// model the read loop left — the load's delta below, or the new
+		// session's install — so the model the install moved is never owed past
+		// it (modelUnannounced).
 		if !loading {
 			// On a new session the snapshot session/new answered has not been
 			// installed yet: it is Start's local snap. The reply's install works
@@ -1486,13 +1505,15 @@ func (s *session) modelDeltaLocked() *StateDelta {
 // Nothing is written here. What the answering reply says is installed by the
 // read loop before the call returns (onSettingsReply); the caller announces it.
 // The option is read under s.mu and the lock released before the call, so no
-// lock is held across the wire.
+// lock is held across the wire. Both calls are sent as the model change they
+// are (acp.Client.SetModelOption, SetModel), so the reply is installed as one
+// whatever the agent's own updates do to the catalog while it is in flight.
 func (s *session) changeModel(ctx context.Context, client *acp.Client, modelID string) error {
 	s.mu.Lock()
 	opt := ModelConfigOptionIn(s.snap.Config)
 	s.mu.Unlock()
 	if opt != nil {
-		_, err := client.SetConfig(ctx, opt.ID, modelID)
+		_, err := client.SetModelOption(ctx, opt.ID, modelID)
 		if !configPathRefused(err) {
 			return err
 		}
@@ -1539,40 +1560,74 @@ func (s *session) SetMode(ctx context.Context, cause, modeID string) (SetOutcome
 	// a client retires a plan offer on it (plan 021 correction 20).
 	return SetOutcome{
 		Value:  s.snap.CurrentMode,
-		Ticket: s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Mode: &modeID}),
+		Ticket: s.enqueueDeltaLocked(cause, Event{}, s.owedModelLocked(&StateDelta{Mode: &modeID})),
 	}, nil
 }
 
 // SetConfig sets one advertised option. When that option is the one a provider
 // keeps its MODEL in (IsModelConfigOption), setting it IS a model change, by
-// SetModel's rules: the reply's install moves CurrentModel with it
-// (onSettingsReply), and the delta carries the Model section beside the Config
-// one. Without that, `/model`'s fallback — SetModel refused, the model set as a
-// config option instead — left CurrentModel on the old model for `craze
-// prompt` and the status row, and left the model section's revision standing
-// still while the display had already moved (plan 021 §3.8, r23 finding 3).
+// SetModel's rules: it is sent as one (acp.Client.SetModelOption), so the
+// reply's install moves CurrentModel with it (onSettingsReply) whatever the
+// catalog holds by then, and the delta carries the Model section beside the
+// Config one. Without that, `/model`'s fallback — SetModel refused, the model
+// set as a config option instead — left CurrentModel on the old model for
+// `craze prompt` and the status row, and left the model section's revision
+// standing still while the display had already moved (plan 021 §3.8, r23
+// finding 3).
 //
-// The Model section rides along for any other option too, whenever the model
-// the snapshot holds is not the one it held when this call was made: a reply's
-// catalog names the model it belongs to, and one that moved it must not leave
-// the model section's value and revision behind the config section's (panel
-// astra 5). If the agent's own update moved it in between, the section merely
-// restates what that update has already said.
+// Which of the two a call is, is decided here, against the catalog the session
+// holds as the call is made — the one the option was chosen from. An id that
+// catalog does not list as the model's is an ordinary option's call even if
+// the agent keeps its model there: craze does not refuse an id it has not been
+// shown (the agent is the judge of its own ids, and refuses one it lacks), and
+// nothing about the call said it was a model change. Its reply is then
+// installed by the push's own derivation (applyConfigLocked), so if the answer
+// shows the id to be the model's option the model follows it by the rule an
+// agent's own update follows, and the delta carries the Model section because
+// the answered option is the model's.
+//
+// The Model section rides along for any other option too whenever the model
+// is owed one (owedModelLocked): a reply's catalog names the model it belongs
+// to, and one that moved it must not leave the model section's value and
+// revision behind the config section's (panel astra 5) — including when the
+// model it moved to is the one it was on before the call, and the agent's own
+// update had announced another in between (astra r2 item 1).
+//
+// forModel binds the change to the model it was chosen for (Session): the
+// check is made under s.mu in the section that decides the call, the last
+// moment before the request is written, so a model the agent has moved on its
+// own and the read loop has applied — after the engine's worker checked, or
+// with no engine at all — refuses it with ErrStaleModel and nothing is sent.
+// What no check can see is a move the agent makes while the request is on its
+// way, or one the read loop applies in the instant between this section and
+// the write: set_config_option carries no precondition in ACP, so the agent
+// applies what it is sent to whatever model it is on when it arrives. The
+// lock is not held across the write, for the reason no lock is: the read loop
+// would wait on it while the agent waited on the read loop.
 //
 // The confirmed value is the option's as the installed catalog has it — what
 // the agent answered, not what was asked — and an option that catalog no longer
 // lists is ErrOptionGone, with the delta for what was installed enqueued all
 // the same, because an install is never left unannounced.
-func (s *session) SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error) {
+func (s *session) SetConfig(ctx context.Context, cause, id, value, forModel string) (SetOutcome, error) {
 	client := s.clientRef()
 	if client == nil {
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	s.mu.Lock()
-	modelBefore := s.snap.CurrentModel
-	wasModel := isModelOptionID(id, s.snap.Config)
+	if forModel != "" && s.snap.CurrentModel != forModel {
+		s.mu.Unlock()
+		return SetOutcome{}, ErrStaleModel
+	}
+	isModel := isModelOptionID(id, s.snap.Config)
 	s.mu.Unlock()
-	if _, err := client.SetConfig(ctx, id, value); err != nil {
+	var err error
+	if isModel {
+		_, err = client.SetModelOption(ctx, id, value)
+	} else {
+		_, err = client.SetConfig(ctx, id, value)
+	}
+	if err != nil {
 		return SetOutcome{}, err
 	}
 	s.setBarrier()
@@ -1585,13 +1640,13 @@ func (s *session) SetConfig(ctx context.Context, cause, id, value string) (SetOu
 			break
 		}
 	}
-	model := wasModel || (opt != nil && IsModelConfigOption(*opt))
+	model := isModel || (opt != nil && IsModelConfigOption(*opt))
 	st := &StateDelta{Config: &ConfigState{Options: cloneConfig(s.snap.Config)}}
-	if model || s.snap.CurrentModel != modelBefore {
+	if model {
 		cur := s.snap.CurrentModel
 		st.Model = &cur
 	}
-	t := s.enqueueDeltaLocked(cause, Event{}, st)
+	t := s.enqueueDeltaLocked(cause, Event{}, s.owedModelLocked(st))
 	switch {
 	case model:
 		// A model change answers with the model, as SetModel does — even when
@@ -1636,7 +1691,9 @@ func (s *session) setBarrier() {
 //
 // Event.Text stays empty on that delta, which is what keeps `/rename` out of
 // `craze prompt --json`'s title line and out of the index as an agent title
-// (plan 021 correction 20).
+// (plan 021 correction 20). Like every delta craze enqueues, it carries the
+// Model section too while a settings reply's install has left the model
+// unannounced (owedModelLocked).
 //
 // It is the one settings verb with no provider behind it, so the room in the
 // log is checked here, in the section that would mutate: refused, nothing is
@@ -1650,7 +1707,7 @@ func (s *session) SetTitle(cause, title string) error {
 	clean := sanitizeText(title)
 	s.snap.Title = clean
 	s.titlePinned = true
-	s.enqueueDeltaLocked(cause, Event{}, &StateDelta{Title: &clean})
+	s.enqueueDeltaLocked(cause, Event{}, s.owedModelLocked(&StateDelta{Title: &clean}))
 	return nil
 }
 
@@ -1663,6 +1720,10 @@ func (s *session) SetTitle(cause, title string) error {
 // s.mu is held, and that is the point: the outbox's mutex is a strict leaf
 // (eventlog.go's Enqueue), so the delta is admitted in the very section that
 // changed the snapshot and no lock is held across a blocking send.
+//
+// A delta whose Model section carries CurrentModel has said the model, and it
+// clears the debt a reply's install left (modelUnannounced), whoever enqueued
+// it — the agent's own update included.
 func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *Ticket {
 	base.Type = EventMeta
 	base.State = st
@@ -1673,7 +1734,29 @@ func (s *session) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *
 	if s.replaying.Load() {
 		base.Replayed = true
 	}
+	if st != nil && st.Model != nil && *st.Model == s.snap.CurrentModel {
+		s.modelUnannounced = false
+	}
 	return s.log.EnqueueTicket(base)
+}
+
+// owedModelLocked is st with the Model section added, at CurrentModel, when a
+// reply's install has moved the model and no delta has said so yet
+// (modelUnannounced). Every delta craze enqueues itself goes through it — a
+// setter's section, and Start's tails on a load — so the first of them after
+// such an install says the model, whichever setter's reply it was: in the
+// engine that is always that reply's own setter, whose section follows the
+// reply (acp.Conn.callReply); a caller driving two setters at once gets it from
+// whichever section runs first. A section that already carries the model is
+// returned as it is. Restating a model a client already holds costs it nothing
+// (installDeltaLocked); leaving one out that it does not is the omission. s.mu
+// is held.
+func (s *session) owedModelLocked(st *StateDelta) *StateDelta {
+	if st.Model == nil && s.modelUnannounced {
+		model := s.snap.CurrentModel
+		st.Model = &model
+	}
+	return st
 }
 
 func (s *session) Snapshot() Snapshot {
@@ -2565,9 +2648,10 @@ func (s *session) onUpdate(n acp.SessionNotification) {
 // cfg says the model CHANGED — reporting whether it moved it. It is the one
 // derivation both authors of a catalog go through: the agent's own
 // config_option_update (onUpdate), which then marks the sections and enqueues
-// its delta, and the catalog a settings reply carries (onSettingsReply), which
-// does neither, because its setter announces it (plan 025 design 1). s.mu is
-// held.
+// its delta, and a settings reply to an ordinary option (onSettingsReply) — the
+// catalog it carries, or the held one with the option at the value sent —
+// which does neither, because its setter announces it (plan 025 design 1). s.mu
+// is held.
 //
 // Three conditions, and each closes a different way of being wrong:
 //
@@ -2635,7 +2719,12 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 // reply was handed here returns that reply, whatever its context or the
 // connection did meanwhile (acp.Conn.callReply).
 //
-// What is installed depends on the call it answers:
+// What is installed depends on the call it answers, as that call said when it
+// was made (acp.SettingsReply.ModelChange) — never on the catalogs found here,
+// which the agent's own updates can have changed while it was in flight: one
+// that took the model option away would otherwise turn a model change into an
+// ordinary option's reply and leave the model where it was, the change
+// answered as a success on the old model (astra r2 item 4).
 //
 //   - set_model, and set_config_option on the model's own option, are a MODEL
 //     change (adoptModelLocked). The reply's catalog is the new model's when
@@ -2646,18 +2735,48 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 //     model's (catalogOnModelLocked): an update of the agent's own that got
 //     there first, or a change to the model the session was already on, and
 //     then it is kept.
-//   - set_config_option on any other option: the reply's catalog goes through
-//     the same derivation as an agent's own update (applyConfigLocked); with
-//     none, the option is set to the value it was sent, which is what the
-//     setter has always written for a reply that says nothing.
-func (s *session) onSettingsReply(r acp.SettingsReply) {
+//   - set_config_option on any other option goes through the same derivation
+//     as an agent's own update (applyConfigLocked), with the reply's catalog —
+//     or, when it carries none, the catalog the session holds with the option
+//     at the value it was sent, which is what the setter has always written for
+//     a reply that says nothing. So an option the caller did not know to be
+//     the model's, and the answer shows to be, moves the model by the rule an
+//     update of the agent's own would (SetConfig).
+//
+// A catalog whose array holds a member that is not an option is refused whole
+// (parseReplyConfigOptions): the error is the call's answer, and nothing of
+// the reply is installed — the model, the catalog and the markers are exactly
+// as they were, and the setter, told the error, announces nothing (plan 025
+// design 1, "malformed is an error"; astra r2 item 7). What the agent itself
+// now holds is then not known here; its next catalog says. The agent's own
+// updates keep their tolerant parse.
+//
+// An install that moves CurrentModel leaves the Model section owed
+// (modelUnannounced), which the next delta craze enqueues — the setter's —
+// pays whether or not that setter's own call was a model change.
+func (s *session) onSettingsReply(r acp.SettingsReply) error {
 	var cfg []ConfigOption
 	if r.Catalog.Present {
-		cfg = parseConfigOptions(r.Catalog.Options)
+		var err error
+		if cfg, err = parseReplyConfigOptions(r.Catalog.Options); err != nil {
+			return err
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r.Method == acp.MethodSessionSetModel || isModelOptionID(r.ConfigID, s.snap.Config, cfg) {
+	before := s.snap.CurrentModel
+	s.installReplyLocked(r, cfg)
+	if s.snap.CurrentModel != before {
+		s.modelUnannounced = true
+	}
+	return nil
+}
+
+// installReplyLocked is onSettingsReply's install, by the call's own word for
+// what it was (onSettingsReply). cfg is the reply's parsed catalog when it
+// carried one. s.mu is held.
+func (s *session) installReplyLocked(r acp.SettingsReply, cfg []ConfigOption) {
+	if r.ModelChange {
 		switch {
 		case r.Catalog.Present:
 			s.snap.Config = cfg
@@ -2667,16 +2786,18 @@ func (s *session) onSettingsReply(r acp.SettingsReply) {
 		s.adoptModelLocked(r.Value)
 		return
 	}
-	if r.Catalog.Present {
-		s.applyConfigLocked(cfg)
-		return
-	}
-	for i := range s.snap.Config {
-		if s.snap.Config[i].ID == r.ConfigID {
-			s.snap.Config[i].Current = r.Value
-			break
+	if !r.Catalog.Present {
+		// A copy, so that applyConfigLocked compares the option as it was with
+		// the option as it is now, and sees the change if it is the model's.
+		cfg = cloneConfig(s.snap.Config)
+		for i := range cfg {
+			if cfg[i].ID == r.ConfigID {
+				cfg[i].Current = r.Value
+				break
+			}
 		}
 	}
+	s.applyConfigLocked(cfg)
 }
 
 // catalogOnModelLocked reports whether the catalog the session holds is

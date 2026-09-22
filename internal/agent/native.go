@@ -1569,7 +1569,13 @@ func phraseModeError(err error, id string) error {
 // SetConfig sets the effort, the one option the native session advertises;
 // any other id is unsupported. Like SetModel it is allowed during a turn, and
 // a change that took is announced the same way.
-func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (SetOutcome, error) {
+//
+// forModel is checked against the model read in the same section as the
+// effort levels (Session): on this session only SetModel moves the model, and
+// the engine's worker runs one Set at a time, so the check is the worker's own
+// made again — what it adds is that a caller without an engine is held to the
+// binding too.
+func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel string) (SetOutcome, error) {
 	if id != nativeEffortID {
 		return SetOutcome{}, ErrUnsupported
 	}
@@ -1580,6 +1586,9 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (S
 	s.mu.Unlock()
 	if hs == nil {
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	}
+	if forModel != "" && alias != forModel {
+		return SetOutcome{}, ErrStaleModel
 	}
 	// Checked here as well as by the harness so the refusal can name what
 	// the model does offer. "" is the model's default and always allowed.
