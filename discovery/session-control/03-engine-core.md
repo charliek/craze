@@ -305,7 +305,23 @@ continuation, `Publish`, `Flush`, file I/O — and never nested in each other.
   each runs provider call → the session's locked mutate-and-enqueue → `Flush`
   → return `SetResult{Value, Rev}`, where `Rev` is read back from
   `EventLog.EnqueueTicket` (the drainer's own record of the batch's first
-  committed `Seq`).
+  committed `Seq`). Plan 025 added the worker's `Setting.ForModel` check: a
+  change bound to a model the session has since left is refused
+  `ErrStaleModel` before the provider is asked — atomic, because the FIFO
+  serialises every `Set`, and refused again, the same way, under `s.mu` in
+  the session's own section just before the write, for a model move landing
+  in the instant between (`stale_model`, `05`). And what a settings reply
+  says the agent now holds — `set_config_option`'s catalog, `set_model`'s
+  model — is never written by the setter's own locked section any more: the
+  **read loop** installs it, under `s.mu`, before the call returns to its
+  caller, ordering a reply against the agent's own pushes by wire arrival
+  rather than by which goroutine takes `s.mu` first; the setter's locked
+  section only announces — its one delta is built from the snapshot as that
+  section finds it (the reply's install plus whatever the agent pushed after
+  it), and its `SetOutcome`/`SetResult` value is read from the same place
+  (plan 025 designs 1–3). The lock-order paragraph above still holds: the
+  read loop's install and the setter's announce are each their own `s.mu`
+  section, `s.mu → the outbox mutex` either way, never nested.
 - **The index worker**, fed by the observer through a one-slot, latest-wins
   channel: touch, load and title writes merge under its own leaf mutex, and
   `Close` gives it one 500 ms bound (the journal's own close bound) to attempt

@@ -180,6 +180,17 @@ that gx lacked.
   `reasoning_details` replay is not used. H1 preserves structured fields and
   drops reasoning only when an entry's `provider` or `wire_model` differs
   from the current model's (D-33), rather than blanket-stripping.
+- **Speed has nothing to build today (plan 025 design 6).** None of the
+  wired providers (OpenRouter, Fireworks, GLM, Kimi) expose a per-request
+  speed tier; where they offer speed at all, it is a model variant
+  (`-flash`, `-fast` in the alias table above), which the model list already
+  shows — no separate control needed. A per-request tier on a provider not
+  wired today (OpenAI `service_tier`, Anthropic's fast mode) arrives the
+  same way any other advertised option does: a `fast` config option in the
+  catalog's usual shape, which the model dialog shows with no TUI change
+  (craze's cursor-side dialog already renders any select a catalog
+  advertises, plan 025 design 4) — nothing native-specific to add beyond
+  advertising it.
 
 ## Cost inputs
 
