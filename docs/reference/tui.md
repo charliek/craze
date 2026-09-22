@@ -85,10 +85,9 @@ A restored session does not reconstruct everything:
 - **Sub-agent transcripts** are not reconstructed. A finished sub-agent's
   row comes back from the replayed spawn/finish lifecycle, but there is no
   transcript behind it to open.
-- **Grok and gx** show no `effort` or `fast` row in the [model
-  dialog](#model-dialog) right after a resume — their `session/load` result
-  carries neither, unlike a fresh `session/new`. A later live turn may
-  supply them again.
+- **Grok and gx** show no tabs in the [model dialog](#model-dialog) right
+  after a resume — their `session/load` result carries no catalog, unlike a
+  fresh `session/new`. A later live turn may supply one again.
 - A rename is craze's own and is never sent to the agent: `agent ls` and
   `grok --resume` still show whatever title the agent itself gave the
   session.
@@ -599,31 +598,60 @@ expands exactly as if it had been typed at the start.
 `/model`, or a click on the model name in status row 1, opens a centred box
 over the transcript: a filter (`❯ `, type to narrow by name or id), the model
 list (current model first, then the agent's own order, `current` tagged,
-`▲`/`▼` when it scrolls), and, only when the agent advertises them, an `effort`
-row (`low medium high xhigh`, the picked one bracketed) and a `fast` row
-(`on`/`off`). Grok advertises effort but not fast, so the fast row stays
-hidden.
+`▲`/`▼` when it scrolls), and one tab below it per select option the
+**current model's** catalog advertises, other than `mode` and `model`
+(semantic category first, then id, in the agent's own order). `effort`
+(`low medium high xhigh`, the picked one bracketed) and `fast` (`on`/`off`)
+are drawn exactly as they always were, whichever id or name the agent files
+them under; any other option the model offers — `context` or `thinking` on
+cursor's Claude models — gets a tab too, labelled with the agent's own name,
+lowercased, showing its raw values. A tab is shown whenever the catalog
+advertises the option; there is no capability-bit gate on a tab (the
+provider's effort/fast bits gate only the status-row chips and the
+`/model <effort>` shorthand, never a control the model itself advertises).
+Composer-2.5 shows `fast` alone; claude-opus-5 shows `effort`, `fast`,
+`context` and `thinking`; grok shows `effort` alone, never `fast`.
 
-The list, `effort` and `fast` are three focus targets, and the one the keys are
-on carries a `> ` gutter and the selection background — so exactly one row looks
-active, in a screenshot and with the colour stripped alike. A model that is
-selected but no longer focused keeps a dimmer `· ` mark: `[value]` says which
-value is *picked*, the gutter says which row is *focused*. The footer says which
-keys are live, `type to filter · ↑↓ · tab effort/fast · enter · esc` on the list
-and `←→ change · tab cycles · type filters · enter · esc` on a toggle row.
-Typing filters the list whatever has focus.
+The dialog does not rebuild itself for the model under the cursor: the tabs
+on screen are the current model's, and highlighting another model in the list
+never previews its options. A choice made on a tab still travels with a model
+switch in the same `Enter` when the destination model offers that option and
+value; after the switch, the new model's own tabs are edited by reopening
+`/model`, which then shows exactly them.
 
-`Tab`/`Shift+Tab` move focus between the list, effort and fast; `←`/`→` change
-the focused row's value; clicking a row focuses it. `Enter` closes the dialog
-and applies whatever changed — model, then effort, then fast — each as its own
-step; a note is written for every step that succeeds, and a failed step is
-named in an error instead of silently reverting the rest. `Esc`, or a click
-outside the box, closes it and applies nothing. Status row 1 then reads
-`Name (effort · fast)`, with `fast` shown only when it is on.
+The list and each tab are focus targets, and the one the keys are on carries
+a `> ` gutter and the selection background — so exactly one row looks active,
+in a screenshot and with the colour stripped alike. A model that is selected
+but no longer focused keeps a dimmer `· ` mark: `[value]` says which value is
+*picked*, the gutter says which row is *focused*. The footer says which keys
+are live: `type to filter · ↑↓ · tab <label>/<label> · enter · esc` on the
+list, naming the tabs in order, and `←→ change · tab cycles · type filters ·
+enter · esc` on a tab. Effort-and-fast-only footers (`tab effort/fast`,
+`tab effort`, `tab fast`) are drawn at every width exactly as before,
+clamped the same way when the box is narrower than the text; a catalog with
+any other tab has no footer of old to keep and falls back to `tab options`
+once the tabs' names do not fit. Typing filters the list whatever has focus.
+
+`Tab`/`Shift+Tab` move focus between the list and the tabs; `←`/`→` change
+the focused tab's value; clicking a row focuses it. `Enter` closes the
+dialog and applies model, then each **changed** tab, in catalog order, each
+as its own step — a tab the user never moved is left alone: it always shows
+its option's live value (tracking a delta that lands while the box is open),
+and nothing is sent for it. A note is written for every step that lands, and
+for one that could not be — the model changed under it, the destination
+model has no such option, or does not offer that value — never an error row
+for those; an actual failure is still named in an error row instead of
+silently reverting the rest. `Esc`, or a click outside the box, closes it and
+applies nothing. Status row 1 then reads `Name (effort · fast)`, with `fast`
+shown only when it is on.
 
 `/model <id>` and `/model <id> <effort>` still work without opening the
-dialog. There is no full-width picker band and no `Ctrl+M` binding; the only
-band left under the transcript is the slash menu.
+dialog. `/model <id> <effort>` resolves the model first — matched against the
+model list without reading any catalog — and then checks the effort word
+against the **destination** model's catalog, so `/model grok-4.6 high` typed
+while on composer-2.5 (which has no effort) still lands on grok-4.6 instead
+of being read as an unknown model. There is no full-width picker band and no
+`Ctrl+M` binding; the only band left under the transcript is the slash menu.
 
 `Ctrl+G`/`/theme` opens the same kind of box (title `theme`, no filter);
 `↑`/`↓` preview live, `Enter` keeps it, and `Esc` or a click outside reverts to

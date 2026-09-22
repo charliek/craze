@@ -466,8 +466,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			m.input.SetValue("")
 			return m.openModelDialog(), nil
 		}
-		modelArg, effortArg := agent.SplitModelEffort(args, m.snap)
-		id, err := agent.MatchModel(m.snap, modelArg)
+		id, effortArg, err := resolveModelArgs(m.snap, args, m.effortShorthand())
 		if err != nil {
 			m.input.SetValue("")
 			m.addError(err.Error())
@@ -543,8 +542,40 @@ func modeNote(modes []agent.ModeInfo, id string) string {
 	return note
 }
 
-// applyModelEffort is `/model <id> [effort]`: optimistic, with the same
-// SetModel → SetConfig(model_config) fallback the dialog's model step uses.
+// resolveModelArgs reads `/model`'s argument into a model id and an effort
+// candidate. With the shorthand on (effortShorthand) the model is resolved
+// first and the last word may be the candidate (agent.MatchModelEffort); off,
+// the whole argument is the model's name and there is never an effort.
+func resolveModelArgs(snap agent.Snapshot, args string, shorthand bool) (id, effort string, err error) {
+	if !shorthand {
+		id, err = agent.MatchModel(snap, strings.TrimSpace(args))
+		return id, "", err
+	}
+	return agent.MatchModelEffort(snap, args)
+}
+
+// effortNotAppliedMsg is `/model <id> <effort>` coming back with its model
+// step landed and its effort not applied: note is the X4 note that says why
+// (optionNotAppliedNote). Nothing failed — the model the user chose does not
+// take that effort, or the session is no longer on it — so it is a note and
+// never an error row.
+type effortNotAppliedMsg struct{ note string }
+
+// applyModelEffort is `/model <id> [effort]`: optimistic, and one model Set,
+// the dialog's model step (applyModelStep) — which call moves the model is the
+// session's to choose, and a refusal is never retried here. A refused model is
+// revertModelMsg, as it always was. An answer the session could not read is
+// not a refusal (agent.ErrBadCatalog): it is modelUnreadMsg, with no write
+// after it, the effort included.
+//
+// The effort, when there is one, is a candidate until the model step has
+// landed, and is then judged against the catalog the session installed for the
+// model the command names (plan 025 design 5, runModelEffort) — never the
+// catalog the session was on when the command was typed, which on cursor is
+// another model's, with its own effort option or none, under its own id and
+// with its own values. The model the command names is the destination even
+// when it is the one the session is already on, and whatever model the
+// session reports back (X13).
 func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	if m.eng == nil {
 		m.input.SetValue("")
@@ -554,48 +585,95 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	m.snap.CurrentModel = id
 	m.model = id
 	m.input.SetValue("")
-	explicit := effort != ""
 
-	modelCfgID := ""
-	if opt := agent.ModelConfigOption(m.snap); opt != nil {
-		modelCfgID = opt.ID
-	}
-	effortID := ""
-	if explicit {
-		if opt := agent.EffortOption(m.snap); opt != nil {
-			effortID = opt.ID
-		}
-	}
-
-	// One command per call the closure can make — the model, the fallback that
-	// sets it as a config option, and the effort — minted here because the
-	// closure runs off this Update and may not touch the model. An id that goes
-	// unused is simply a number nobody spent.
-	eng, cmds, at := m.eng, m.nextCmds(3), m.modelRev
-	return m, func() tea.Msg {
+	// One command per call the closure can make — the model and the effort —
+	// minted here because the closure runs off this Update and may not touch
+	// the model. An id that goes unused is simply a number nobody spent.
+	eng, cmds, at := m.eng, m.nextCmds(2), m.modelRev
+	// Behind every chain of this client's issued before it and ahead of every
+	// one issued after, its place taken here, in this Update (chainLock): a
+	// dialog reopened on the model this command is switching to binds its steps
+	// to that model, and must not read the session before this switch has
+	// landed, whichever of the two commands the program starts first.
+	return m, m.chains.take(func() tea.Msg {
 		ctx := context.Background()
-		if _, err := eng.Set(ctx, cmds[0], engine.Setting{Kind: engine.SettingModel, Value: id}); err != nil {
-			if modelCfgID != "" {
-				if _, err2 := eng.Set(ctx, cmds[1], engine.Setting{
-					Kind: engine.SettingConfig, ID: modelCfgID, Value: id,
-				}); err2 == nil {
-					err = nil
-				}
-			}
-			if err != nil {
-				return revertModelMsg{prev: prev, err: err, at: at}
-			}
+		res, err := applyModelStep(ctx, eng, cmds[0], id)
+		switch {
+		case errors.Is(err, agent.ErrBadCatalog):
+			// The agent may have switched, so there is no prev to put back and
+			// no effort to judge: the catalog it would be judged against is
+			// the one nobody could read.
+			return modelUnreadMsg{}
+		case err != nil:
+			return revertModelMsg{prev: prev, err: err, at: at}
 		}
-		if explicit && effortID != "" {
-			if _, err := eng.Set(ctx, cmds[2], engine.Setting{
-				Kind: engine.SettingConfig, ID: effortID, Value: effort,
-			}); err != nil {
-				return actionErrMsg{err}
-			}
-			return refreshSnapMsg{}
+		if effort == "" {
+			return nil
 		}
-		return nil
+		// Bound to the model the command names, never the one the session
+		// reports back: id is canonical, off the model list (MatchModel), so
+		// there is no alias to resolve, and a reported model that is not id is
+		// a move installed before the setter read its outcome — adopted, it
+		// would send the effort to a model nobody chose (plan 025 X13,
+		// superseding X10 (a); astra r4 item 1). So the effort is stale.
+		if res.Value != id {
+			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
+		}
+		return runModelEffort(ctx, eng, cmds[1], id, effort)
+	})
+}
+
+// runModelEffort is `/model`'s effort step, on a command's goroutine once the
+// model step has landed on model: it reads the engine and never the Model,
+// which belongs to Update.
+//
+// The candidate is judged against the catalog the session holds now, which the
+// model step installed: that model's effort option, whatever its id (effort,
+// reasoning_effort, reasoning — agent.EffortOption), and the value spelled as
+// it offers it (agent.MatchEffortValue). This is the rule the dialog's chain
+// re-resolves its effort step by once it has switched models (resolveOn, plan
+// 025 X3), so the two paths agree about what a model takes. The change is sent
+// bound to model (Setting.ForModel), so another client's model change landing
+// after this read is refused by the engine rather than applied to a model the
+// effort was never chosen for.
+//
+// What is not applied is a note (optionNotAppliedNote, X4): the session had
+// moved on before the effort could be sent, or the engine refused it for that
+// (engine.ErrStaleModel) — "the model changed"; the model has no effort, or
+// the agent's answer no longer lists it (agent.ErrOptionGone) — "has no
+// effort"; the model does not offer the value — "does not offer". Any other
+// refusal is the error row it always was.
+func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command, model, effort string) tea.Msg {
+	note := func(why notAppliedReason) tea.Msg {
+		return effortNotAppliedMsg{note: optionNotAppliedNote("effort", model, effort, why)}
 	}
+	snap := eng.State().Snapshot
+	if snap.CurrentModel != model {
+		// Moved again before the effort could be sent: the catalog read here is
+		// some other model's, and judging the effort against it would say the
+		// wrong thing about the model the user picked (X10 (b), X13).
+		return note(notAppliedStale)
+	}
+	opt := agent.EffortOption(snap)
+	if opt == nil {
+		return note(notAppliedMissing)
+	}
+	value, ok := agent.MatchEffortValue(opt, effort)
+	if !ok {
+		return note(notAppliedUnoffered)
+	}
+	_, err := eng.Set(ctx, cmd, engine.Setting{
+		Kind: engine.SettingConfig, ID: opt.ID, Value: value, ForModel: model,
+	})
+	switch {
+	case errors.Is(err, engine.ErrStaleModel):
+		return note(notAppliedStale)
+	case errors.Is(err, agent.ErrOptionGone):
+		return note(notAppliedMissing)
+	case err != nil:
+		return actionErrMsg{err}
+	}
+	return refreshSnapMsg{}
 }
 
 // acceptSlash puts row i into the draft: only the token under the cursor is

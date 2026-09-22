@@ -183,6 +183,12 @@ type Model struct {
 	// mean something.
 	client string
 	cmdSeq int
+	// chains orders this client's model changes against each other: the
+	// dialog's apply chains and `/model <id> [<effort>]` each take a place in
+	// its line in the Update that issues them, and run whole, one at a time, in
+	// that order (chainLock). It is minted with the client id in setSession,
+	// one per engine, and is a pointer so every copy bubbletea makes shares it.
+	chains *chainLock
 	// engErr is what wrapping the session in an engine came back with. It is
 	// unreachable in practice — every session owns an event log and no path
 	// wraps one twice — and is carried rather than panicked on, so it fails the
@@ -618,6 +624,14 @@ type revertModelMsg struct {
 	err  error
 	at   uint64
 }
+
+// modelUnreadMsg is a model change coming back with an answer the session
+// could not read (agent.ErrBadCatalog). It is not revertModelMsg: the agent
+// answered and may have switched, so nothing says the model was refused and
+// there is no prev to put back. Nothing of the answer was installed, so the
+// screen reads the session's snapshot back, and the row says the outcome is
+// unknown (unreadModelText).
+type modelUnreadMsg struct{}
 type refreshSnapMsg struct{}
 
 // dblClickMsg is the frame runner's <dblclick:X,Y>: the gesture without the
@@ -749,7 +763,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	m.shell.disown()
 	m.dropShellContext()
 	m.eng, m.sess, m.engErr = nil, nil, nil
-	m.client, m.cmdSeq = "", 0
+	m.client, m.cmdSeq, m.chains = "", 0, nil
 	m.owner.set(nil)
 	if s == nil {
 		return
@@ -777,6 +791,9 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	}
 	m.eng, m.sess = eng, eng.Session()
 	m.client = eng.NewClientID()
+	// A new client, so a new order: a chain still running on the engine this
+	// replaced orders nothing on this one.
+	m.chains = &chainLock{}
 	m.owner.set(eng)
 }
 
@@ -1270,13 +1287,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addError(msg.err.Error())
 		return m, nil
 
+	case modelUnreadMsg:
+		// Read back rather than put back: the snapshot is the model the
+		// session is on as far as anyone can say — the one before the call,
+		// or whatever the agent or another client has moved it to since.
+		m.refreshSnap()
+		m.addError(m.unreadModelText())
+		return m, nil
+
 	case modelApplyMsg:
 		// The steps that landed are the truth; the one that did not is named.
 		for _, st := range msg.done {
 			m.addNote(st.note)
-		}
-		if msg.err != nil {
-			m.addError(msg.step + ": " + msg.err.Error())
 		}
 		if msg.gen == m.applyGen {
 			// Only the newest apply settles the rows: the snapshot is re-read
@@ -1288,10 +1310,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.settleStep(st)
 			}
 		}
+		// After the rows are settled, because a model step whose answer could
+		// not be read names the model the screen then shows.
+		switch {
+		case msg.unread:
+			m.addError(m.unreadModelText())
+		case msg.err != nil:
+			m.addError(msg.step + ": " + msg.err.Error())
+		}
 		return m, nil
 
 	case refreshSnapMsg:
 		m.refreshSnap()
+		return m, nil
+
+	case effortNotAppliedMsg:
+		// The model step landed, so the rows are read back as the landed effort
+		// step's refreshSnapMsg reads them, and then the note says why the
+		// effort did not follow it.
+		m.refreshSnap()
+		m.addNote(msg.note)
 		return m, nil
 
 	case shellDoneMsg:
@@ -3322,6 +3360,14 @@ func (m *Model) refreshSnap() {
 	}
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
+	}
+	if m.dialog == dialogModel {
+		// The model dialog's tabs are this snapshot's catalog, which a delta
+		// can change under the open box — another client's model change
+		// brings another model's options. A focused tab whose option has gone
+		// hands the focus back to the list for good, rather than taking it
+		// back if the option returns (plan 025 design 4).
+		m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
 	}
 	// Stamp the rows on first sight in a snapshot, not only on the lifecycle
 	// event: a tool re-emit can carry a finished status one Update ahead of

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -37,13 +38,42 @@ type Stub struct {
 	startDelay time.Duration
 	n          int
 	failMode   bool
-	failModel  bool
+	// failModel is what the next SetModel answers with instead of switching,
+	// nil for none (FailNextSetModel, FailNextSetModelWith).
+	failModel error
 	// failConfigAt is the SetConfig call that fails, counted from the next
 	// one, or -1 for none. The dialog's apply chain sends more than one, so a
-	// test has to be able to fail the second and not the first.
+	// test has to be able to fail the second and not the first. failConfig is
+	// what it answers with, nil for the Stub's own refusal
+	// (FailNextSetConfigWith).
 	failConfigAt int
+	failConfig   error
 	configCalls  int
 	snap         agent.Snapshot
+	// modelCatalogs is the per-model catalog SetModelCatalogs installs: every
+	// option each model advertises. nil — every Stub until a test installs one
+	// — is today's Stub, whose one static catalog outlives a model change.
+	modelCatalogs map[string][]agent.ConfigOption
+	// moveOnRead, moveAfterSet and moveInSet are the model-change barriers
+	// (MoveModelOnRead, MoveModelAfterNextSetModel,
+	// MoveModelBeforeNextSetModelAnswers): another client's switch, or the
+	// agent's, landing at an exact point in a settings chain. dropOnSet is the
+	// option the next SetConfig of it takes and answers without
+	// (DropOptionOnSet), and dropOnSetOf the other option the next SetConfig
+	// of one answers without (DropOptionOnSetOf); installAs is the value
+	// SetConfig installs for what it was asked (InstallConfigAs). All six are
+	// set-up, read under mu.
+	moveOnRead   *stubModelMove
+	moveAfterSet string
+	moveInSet    string
+	dropOnSet    string
+	dropOnSetOf  stubOptionDrop
+	installAs    func(id, value string) string
+	// hold is the armed HoldNextSet: the next SetModel or SetConfig parks on it
+	// before it installs anything. setOnRead is the armed SetOptionOnRead. Both
+	// are set-up too, taken under mu.
+	hold      *stubHold
+	setOnRead *stubOptionSet
 	// token is the running turn's registry token, the no-turn token between
 	// turns: what a card the test emits now is parked against, and therefore
 	// what a cancel or that turn's end takes away.
@@ -375,9 +405,15 @@ func (s *Stub) FailNextSetMode() {
 	s.mu.Unlock()
 }
 
-func (s *Stub) FailNextSetModel() {
+func (s *Stub) FailNextSetModel() { s.FailNextSetModelWith(errors.New("stub: set model failed")) }
+
+// FailNextSetModelWith makes the next SetModel answer err, and change and
+// publish nothing: the kind of failure is the test's to choose —
+// agent.ErrBadCatalog, the live session's answer when the agent's reply to a
+// model change could not be read, among them.
+func (s *Stub) FailNextSetModelWith(err error) {
 	s.mu.Lock()
-	s.failModel = true
+	s.failModel = err
 	s.mu.Unlock()
 }
 
@@ -388,6 +424,17 @@ func (s *Stub) FailNextSetConfig() { s.FailNextSetConfigAfter(0) }
 func (s *Stub) FailNextSetConfigAfter(n int) {
 	s.mu.Lock()
 	s.failConfigAt = s.configCalls + n
+	s.failConfig = nil
+	s.mu.Unlock()
+}
+
+// FailNextSetConfigWith makes the next SetConfig answer err, and change and
+// publish nothing, as FailNextSetModelWith does for SetModel —
+// agent.ErrBadCatalog, an answer the session could not read, among them.
+func (s *Stub) FailNextSetConfigWith(err error) {
+	s.mu.Lock()
+	s.failConfigAt = s.configCalls
+	s.failConfig = err
 	s.mu.Unlock()
 }
 
@@ -712,19 +759,255 @@ func stubCallOf(rec agent.AskRecord) stubCall {
 // order is event order here as it is on a real session (plan 021 §3.8). The
 // ticket is the delta's receipt: its Seq, once the log has committed it, is the
 // change's revision.
+//
+// SetModel is the live session's model change (plan 025 design 2): a catalog
+// that advertises the model option — the PRIMARY one, the first of category
+// "model" (agent.ModelConfigOptionIn, X16) — is switched through it, as the
+// live session's one-call path sets it with set_config_option; a catalog with
+// none is switched as by session/set_model, as it always was. Either way it is
+// one change in one section: the model moved, the model option moved with it,
+// and one delta carrying the Model section and, whenever the catalog moved
+// too, the Config section (installModelLocked, announceModelLocked). A
+// refusal (FailNextSetModel) is the change refused on the path the session
+// chose; nothing above the session tries another (applyModelStep).
 func (s *Stub) SetModel(_ context.Context, cause, id string) (agent.SetOutcome, error) {
+	s.parkIfHeld()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fail := s.failModel
-	s.failModel = false
-	if fail {
-		return agent.SetOutcome{}, fmt.Errorf("stub: set model failed")
+	if err := s.failModel; err != nil {
+		s.failModel = nil
+		return agent.SetOutcome{}, err
 	}
+	if to := s.moveInSet; to != "" {
+		// The live session's order (live.go's SetModel): the reply installs
+		// id, which publishes nothing of its own, the agent's push installs to
+		// with its own delta, and only then does the setter's section read the
+		// session to answer and announce — so both say to.
+		s.moveInSet = ""
+		s.installModelLocked(id)
+		s.setModelLocked(stubAgentPush, to)
+		return s.announceModelLocked(cause), nil
+	}
+	out := s.setModelLocked(cause, id)
+	if to := s.moveAfterSet; to != "" {
+		s.moveAfterSet = ""
+		s.setModelLocked(stubOtherClient, to)
+	}
+	return out, nil
+}
+
+// setModelLocked is a model change that took: the model moved and its delta
+// enqueued, in the caller's locked section.
+func (s *Stub) setModelLocked(cause, id string) agent.SetOutcome {
+	s.installModelLocked(id)
+	return s.announceModelLocked(cause)
+}
+
+// installModelLocked moves the model, and under a per-model catalog installs
+// the destination's: the live session's one-call switch (plan 025 design 2)
+// answers with that catalog, so it arrives with the model. A model the table
+// does not name advertises nothing. The model option, when the catalog that
+// stands has one, then names the model — the switch was made on it, and a
+// catalog the agent pushes with a move names its own model — while a second
+// model-category option keeps its value, as the live session's install keeps
+// it (internal/agent's withoutModelOptions).
+func (s *Stub) installModelLocked(id string) {
 	s.snap.CurrentModel = id
+	if s.modelCatalogs != nil {
+		s.snap.Config = cloneStubConfig(s.modelCatalogs[id])
+	}
+	if i := stubModelOptionIndex(s.snap.Config); i >= 0 {
+		s.snap.Config[i].Current = id
+	}
+}
+
+// stubModelOptionIndex is where cfg's model option is — the PRIMARY one, the
+// first of category "model" (agent.ModelConfigOptionIn) — or -1 for none.
+func stubModelOptionIndex(cfg []agent.ConfigOption) int {
+	for i := range cfg {
+		if agent.IsModelConfigOption(cfg[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// announceModelLocked is the model change's one delta and its outcome, both
+// read from the snapshot as this section finds it: the Model section, and the
+// Config section with it whenever the catalog moved with the model — under a
+// per-model catalog, or through the model option — as the live session's
+// modelDeltaLocked builds them.
+func (s *Stub) announceModelLocked(cause string) agent.SetOutcome {
+	model := s.snap.CurrentModel
+	st := &agent.StateDelta{Model: &model}
+	if s.modelCatalogs != nil || stubModelOptionIndex(s.snap.Config) >= 0 {
+		st.Config = &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}
+	}
 	return agent.SetOutcome{
-		Value:  s.snap.CurrentModel,
-		Ticket: s.enqueueDeltaLocked(cause, &agent.StateDelta{Model: &id}),
-	}, nil
+		Value:  model,
+		Ticket: s.enqueueDeltaLocked(cause, st),
+	}
+}
+
+// stubOtherClient is the cause MoveModelOnRead and MoveModelAfterNextSetModel
+// publish under: another client's command, as the revision tests spell one.
+// stubAgentPush is MoveModelBeforeNextSetModelAnswers's: the agent's own
+// update, which no command caused — the cause the live session's read loop
+// publishes a push under.
+const (
+	stubOtherClient = "c-9/1"
+	stubAgentPush   = ""
+)
+
+// stubModelMove is one armed MoveModelOnRead.
+type stubModelMove struct{ on, to string }
+
+// MoveModelOnRead is another client's model change landing at an exact point
+// in a settings chain, with no clock involved (plan 025 X3, panel astra 4): the
+// first Snapshot that finds the session on model on answers with it, and then,
+// in the same locked section so nothing can read the session in between, the
+// Stub switches to model to exactly as SetModel does — to's catalog installed
+// under a per-model table, one delta — caused by another client. Whatever reads
+// the session next sees to.
+//
+// Over the dialog's chain that is the read that re-resolves the option steps
+// once the model step has landed: the steps are judged against the model the
+// user picked, and the engine's ForModel check, which reads the session again
+// before the provider is asked, finds the other one.
+func (s *Stub) MoveModelOnRead(on, to string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moveOnRead = &stubModelMove{on: on, to: to}
+}
+
+// MoveModelAfterNextSetModel is the earlier point: the next SetModel that
+// succeeds answers for its own model, and in the same section the Stub then
+// switches to model to, caused by another client — so whatever reads the
+// session after that answer already finds to. The agent moving its model on
+// its own lands there too; the FIFO orders neither.
+func (s *Stub) MoveModelAfterNextSetModel(to string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moveAfterSet = to
+}
+
+// MoveModelBeforeNextSetModelAnswers is the point inside the setter itself
+// (plan 025 X13, astra r4 item 1): the next SetModel that succeeds installs its
+// own model, as the live session's reply does, and then the agent's push moves
+// the session to model to BEFORE the setter's section reads the session to
+// answer — so the outcome, and the delta that announces it, say to, not the
+// model that was asked for. MoveModelAfterNextSetModel moves after that
+// capture, so its outcome still names the model asked for; this one is the
+// schedule where the outcome itself is the other model's.
+func (s *Stub) MoveModelBeforeNextSetModelAnswers(to string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moveInSet = to
+}
+
+// stubOptionSet is one armed SetOptionOnRead.
+type stubOptionSet struct{ id, value string }
+
+// SetOptionOnRead is MoveModelOnRead for an option: the next Snapshot answers,
+// and then, in the same locked section, another client sets option id to value
+// on the current model — its delta enqueued, the model's table entry kept in
+// step, as SetConfig keeps it. Over a dialog chain armed after Enter, that
+// read is the chain's own, just before its step is sent: the step was judged
+// on a value the session no longer holds when the step reaches it (astra r6).
+func (s *Stub) SetOptionOnRead(id, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setOnRead = &stubOptionSet{id: id, value: value}
+}
+
+// setOptionLocked is an option change that took, another client's: the value
+// installed and its delta enqueued in the caller's locked section.
+func (s *Stub) setOptionLocked(cause, id, value string) {
+	for i := range s.snap.Config {
+		if s.snap.Config[i].ID == id {
+			s.snap.Config[i].Current = value
+			break
+		}
+	}
+	if s.modelCatalogs != nil {
+		s.modelCatalogs[s.snap.CurrentModel] = cloneStubConfig(s.snap.Config)
+	}
+	s.enqueueDeltaLocked(cause, &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}})
+}
+
+// stubHold is one armed HoldNextSet.
+type stubHold struct {
+	held    chan struct{}
+	release chan struct{}
+}
+
+// HoldNextSet is a change still waiting for the agent's answer, held open for
+// as long as a test needs (astra r6): the next SetModel or SetConfig parks
+// before its section runs at all — on the engine's worker, the request
+// claimed — so nothing it would install has been, and the session reads as it
+// did before the change until release is called. held closes once the setter
+// is parked, which is the moment a test runs its second command. Nothing is
+// held under mu while it waits, so a Snapshot — the second command's read —
+// answers with the session as it stands; closing the Stub frees it too, so a
+// test that fails before its release cannot hang the engine's Close. release
+// may be called more than once.
+func (s *Stub) HoldNextSet() (held <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := &stubHold{held: make(chan struct{}), release: make(chan struct{})}
+	s.hold = h
+	var once sync.Once
+	return h.held, func() { once.Do(func() { close(h.release) }) }
+}
+
+// parkIfHeld is where an armed HoldNextSet parks its setter, and disarms it.
+func (s *Stub) parkIfHeld() {
+	s.mu.Lock()
+	h := s.hold
+	s.hold = nil
+	s.mu.Unlock()
+	if h == nil {
+		return
+	}
+	close(h.held)
+	select {
+	case <-h.release:
+	case <-s.closed:
+	}
+}
+
+// DropOptionOnSet makes the next SetConfig of option id the live session's
+// ErrOptionGone (plan 025 design 1): the agent takes the change, and the
+// catalog its answer carries — installed, and announced in the call's delta —
+// no longer lists the option, so there is no value to confirm.
+func (s *Stub) DropOptionOnSet(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropOnSet = id
+}
+
+// stubOptionDrop is one armed DropOptionOnSetOf.
+type stubOptionDrop struct{ on, drop string }
+
+// DropOptionOnSetOf makes the next SetConfig of option on take, and answer
+// with a catalog that no longer lists option drop (plan 025 X13, astra r4
+// item 2): the change is confirmed as usual, and the catalog the answer
+// carries — installed, and announced in the call's delta — has lost another
+// option, so a later step for that one is judged against a catalog without it.
+func (s *Stub) DropOptionOnSetOf(on, drop string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropOnSetOf = stubOptionDrop{on: on, drop: drop}
+}
+
+// InstallConfigAs makes SetConfig install f(id, value) where it was asked for
+// value — an agent that resolves what it is sent, whose answer, and so
+// SetOutcome.Value, holds the value it installed and not the request (plan 025
+// design 1, panel astra 5). nil installs what was asked, as always.
+func (s *Stub) InstallConfigAs(f func(id, value string) string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.installAs = f
 }
 
 func (s *Stub) SetMode(_ context.Context, cause, id string) (agent.SetOutcome, error) {
@@ -744,41 +1027,153 @@ func (s *Stub) SetMode(_ context.Context, cause, id string) (agent.SetOutcome, e
 	}, nil
 }
 
-// SetConfig is the live session's, including its model rule: setting the option
-// a provider keeps its MODEL in (agent.IsModelConfigOption) moves CurrentModel
-// too and says both sections in the one delta, so `/model`'s fallback — the
-// model set as a config option — reaches the model section's revision and the
-// status row exactly as a session/set_model would (plan 021 §3.8, r23 finding
-// 3). A test builds such an option with ModelConfigOption below; the Stub's own
+// SetConfig is the live session's, including its model rule: setting the model
+// option — the PRIMARY one, the first of category "model" in the catalog as the
+// call finds it (agent.ModelConfigOptionIn, plan 025 X16) — moves CurrentModel
+// too and says both sections in the one delta, so a model set as a config
+// option reaches the model section's revision and the status row exactly as a
+// session/set_model would (plan 021 §3.8, r23 finding 3). Any other option of
+// category "model" is an ordinary option, as on the live session: a second
+// selector, whose write moves nothing but itself (astra r5 item 1, r7 item 2).
+// A test builds such options with ModelConfigOption below; the Stub's own
 // default config has none, as cursor's captures have one and grok's do not.
-func (s *Stub) SetConfig(_ context.Context, cause, id, value string) (agent.SetOutcome, error) {
+//
+// forModel is the live session's binding too (agent.Session): a change chosen
+// for another model than the one the Stub is on is agent.ErrStaleModel, and
+// nothing — the failure counter included — is touched, because nothing was
+// asked of the "agent".
+func (s *Stub) SetConfig(_ context.Context, cause, id, value, forModel string) (agent.SetOutcome, error) {
+	s.parkIfHeld()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if forModel != "" && s.snap.CurrentModel != forModel {
+		return agent.SetOutcome{}, agent.ErrStaleModel
+	}
 	n := s.configCalls
 	s.configCalls++
 	if s.failConfigAt == n {
 		s.failConfigAt = -1
-		return agent.SetOutcome{}, fmt.Errorf("stub: set config failed")
+		err := s.failConfig
+		s.failConfig = nil
+		if err == nil {
+			err = fmt.Errorf("stub: set config failed")
+		}
+		return agent.SetOutcome{}, err
 	}
-	model := false
+	if id != "" && id == s.dropOnSet {
+		s.dropOnSet = ""
+		return s.dropOptionLocked(cause, id), agent.ErrOptionGone
+	}
+	if s.installAs != nil {
+		value = s.installAs(id, value)
+	}
+	primary := stubModelOptionIndex(s.snap.Config)
+	model := id != "" && primary >= 0 && s.snap.Config[primary].ID == id
 	for i := range s.snap.Config {
 		if s.snap.Config[i].ID == id {
 			s.snap.Config[i].Current = value
-			model = agent.IsModelConfigOption(s.snap.Config[i])
 			break
 		}
+	}
+	if d := s.dropOnSetOf; id != "" && id == d.on {
+		s.dropOnSetOf = stubOptionDrop{}
+		s.snap.Config = withoutStubOption(s.snap.Config, d.drop)
 	}
 	st := &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}}
 	if model {
 		s.snap.CurrentModel = value
 		st.Model = &value
+	} else if s.modelCatalogs != nil {
+		// The value is the current model's to keep, so a switch away and back
+		// finds it, as cursor keeps each model's settings. A model option's
+		// write is today's rule, table or not: a test switches with SetModel.
+		s.modelCatalogs[s.snap.CurrentModel] = cloneStubConfig(s.snap.Config)
 	}
 	return agent.SetOutcome{Value: value, Ticket: s.enqueueDeltaLocked(cause, st)}, nil
 }
 
-// ModelConfigOption gives this Stub the config-backed model a provider without
-// session/set_model has: an option of category "model" whose values are the
-// models it already advertises, currently on CurrentModel. It is set-up, so it
+// dropOptionLocked is DropOptionOnSet's answer: the option gone from the
+// current model's catalog, and from its table entry when there is one, and the
+// catalog the agent answered with announced — the change took, so its delta is
+// published and its ticket returned beside ErrOptionGone, as the live
+// session's are.
+func (s *Stub) dropOptionLocked(cause, id string) agent.SetOutcome {
+	kept := withoutStubOption(s.snap.Config, id)
+	s.snap.Config = kept
+	if s.modelCatalogs != nil {
+		s.modelCatalogs[s.snap.CurrentModel] = cloneStubConfig(kept)
+	}
+	st := &agent.StateDelta{Config: &agent.ConfigState{Options: cloneStubConfig(kept)}}
+	return agent.SetOutcome{Ticket: s.enqueueDeltaLocked(cause, st)}
+}
+
+// withoutStubOption is cfg without option id, on a fresh slice.
+func withoutStubOption(cfg []agent.ConfigOption, id string) []agent.ConfigOption {
+	kept := make([]agent.ConfigOption, 0, len(cfg))
+	for _, opt := range cfg {
+		if opt.ID != id {
+			kept = append(kept, opt)
+		}
+	}
+	return kept
+}
+
+// SetModelCatalogs gives this Stub cursor's per-model catalog (plan 025):
+// table[m] is every option model m advertises, and from here the Stub's catalog
+// is always the current model's — table[CurrentModel] now, and on SetModel the
+// destination's, installed with the model in one delta. With no table SetModel
+// moves the model alone and the static catalog stays, which is what every
+// `model-dialog-*` golden is drawn from.
+//
+// It is set-up, so it publishes nothing, like every other Set* helper here.
+func (s *Stub) SetModelCatalogs(table map[string][]agent.ConfigOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelCatalogs = make(map[string][]agent.ConfigOption, len(table))
+	for m, cfg := range table {
+		s.modelCatalogs[m] = cloneStubConfig(cfg)
+	}
+	s.snap.Config = cloneStubConfig(s.modelCatalogs[s.snap.CurrentModel])
+}
+
+// stubFourSelectCatalog is a catalog with four selects for the model dialog —
+// effort, fast, context and thinking — in cursor's claude-opus-5 shapes: its
+// ids, names, categories and values as captured 2026-09-21, on cursor's
+// defaults (the capture's currentValues are the account's persisted choices,
+// so context starts on the smaller window and effort on high). The order
+// is not cursor's (it answers thinking, context, effort, fast): effort and fast
+// come first, where the static catalog has them, so a four-tab frame is
+// today's two tabs with two more after them. `thinking` shares effort's
+// category and `context` shares fast's; only the ids and names tell them apart.
+func stubFourSelectCatalog() []agent.ConfigOption {
+	offOn := func(on string) []agent.SelectValue {
+		return []agent.SelectValue{{Value: "false", Name: "Off"}, {Value: "true", Name: on}}
+	}
+	return []agent.ConfigOption{
+		{
+			ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: "high",
+			SelectValues: []agent.SelectValue{
+				{Value: "low", Name: "Low"},
+				{Value: "medium", Name: "Medium"},
+				{Value: "high", Name: "High"},
+				{Value: "xhigh", Name: "Extra High"},
+				{Value: "max", Name: "Max"},
+			},
+		},
+		{ID: "fast", Name: "Fast", Category: "model_config", Type: "select", Current: "false", SelectValues: offOn("Fast")},
+		{
+			ID: "context", Name: "Context", Category: "model_config", Type: "select", Current: "300k",
+			SelectValues: []agent.SelectValue{{Value: "300k", Name: "300K"}, {Value: "1m", Name: "1M"}},
+		},
+		{ID: "thinking", Name: "Thinking", Category: "thought_level", Type: "select", Current: "true", SelectValues: offOn("On")},
+	}
+}
+
+// ModelConfigOption gives this Stub the config-backed model cursor has: an
+// option of category "model" whose values are the models it already
+// advertises, currently on CurrentModel. The first such option is the model's
+// — SetModel switches through it, and SetConfig of it is a model change — and
+// a second one a test adds is a selector of its own. It is set-up, so it
 // publishes nothing — like every other Set* helper here, it is how a test
 // builds the session it wants **before the model looks at it**, and not a
 // change made while a client was watching.
@@ -828,6 +1223,17 @@ func (s *Stub) Snapshot() agent.Snapshot {
 	out.Tools = cloneStubTools(s.snap.Tools)
 	out.Subagents = cloneStubSubagents(s.snap.Subagents)
 	out.ForeignTurn = s.foreign
+	if mv := s.moveOnRead; mv != nil && s.snap.CurrentModel == mv.on {
+		// The barrier: this read has its answer, and the model moves before
+		// anything else can take the lock (MoveModelOnRead).
+		s.moveOnRead = nil
+		s.setModelLocked(stubOtherClient, mv.to)
+	}
+	if o := s.setOnRead; o != nil {
+		// The same barrier for an option (SetOptionOnRead).
+		s.setOnRead = nil
+		s.setOptionLocked(stubOtherClient, o.id, o.value)
+	}
 	return out
 }
 

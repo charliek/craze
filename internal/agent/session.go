@@ -42,6 +42,18 @@ var ErrForeignTurn = acp.ErrForeignTurn
 // forbids (Makefile's acp-import rule).
 var ErrAgentExited = acp.ErrAgentExited
 
+// ErrBadCatalog answers a settings change whose reply could not be read: its
+// configOptions is not a list, or holds a member that is not an option (plan
+// 025 design 1, "malformed is an error"). Nothing of the reply was installed,
+// so the snapshot is exactly as it was before the call — but the call RAN: the
+// agent has answered, and may well have made the change. It is not a refusal,
+// and a client must not treat it as one: no fallback write for a model change
+// (a second write craze did not mean), and no "the model is still X" — only
+// that craze could not read what the agent now holds. It is acp.ErrBadCatalog,
+// re-exported so internal/tui can match it without importing internal/acp
+// (Makefile's acp-import rule), exactly as ErrAgentExited is.
+var ErrBadCatalog = acp.ErrBadCatalog
+
 // ErrPromptCancelled is a prompt Cancel stopped before its turn opened: while it
 // was still waiting for the agent's first command catalog, or once it had been
 // claimed by Begin and before its continuation opened the turn. No turn was
@@ -62,6 +74,27 @@ var ErrPromptCancelled = errors.New("agent: prompt cancelled before it was sent"
 // by their caller, before the provider is asked at all: after the agent has
 // taken a change, refusing it here would say something untrue.
 var ErrSetUnavailable = errors.New("agent: the event log is backed up")
+
+// ErrOptionGone answers a SetConfig the agent TOOK whose answer no longer has
+// the option it set: the reply carried the agent's catalog, and that catalog
+// — the one now installed — lists no option by that id (plan 025 design 1).
+// Cursor's options are per model, so a change of model between the choice and
+// the call is the ordinary way to get here.
+//
+// It is not a refusal, and nothing is undone: what the reply installed is
+// installed, and its delta is enqueued like any other setter's, so
+// SetOutcome.Ticket is set beside the error. Only the value this caller asked
+// about is not there to confirm.
+var ErrOptionGone = errors.New("agent: the agent's catalog no longer has that option")
+
+// ErrStaleModel refuses a SetConfig bound to a model (its forModel) when the
+// session is on another one by the time the call is about to be made: the
+// option was chosen from that model's catalog, and is not a choice anyone made
+// for this one (plan 025 design 3). Nothing was sent. The engine's settings
+// worker refuses the same thing before it claims a Set, and answers with this
+// very value (engine.ErrStaleModel), so a client matches one error whichever
+// of the two checks caught it.
+var ErrStaleModel = errors.New("agent: the model that option was chosen for is no longer the session's")
 
 type EventType string
 
@@ -874,6 +907,14 @@ type Session interface {
 	// read loop, which enqueue theirs in the section that mutates too (plan 021
 	// §3.8).
 	//
+	// Where the provider's REPLY says what it now holds — the live session's
+	// set_config_option answers with the whole catalog — that part of the
+	// mutation is the read loop's, made as the reply is read, so it is ordered
+	// against the agent's own updates by the wire; the setter's section then
+	// announces the snapshot as it finds it (plan 025 design 1). The one error
+	// that still publishes is ErrOptionGone: the change took, and what it
+	// installed is announced, but the option asked about is no longer there.
+	//
 	// cause is the command that asked, as Event.Cause spells it ("client/id",
 	// engine.Command.Cause), and "" for a change nobody can claim. The
 	// SetOutcome is what the change came to: the value the session is now at,
@@ -883,9 +924,17 @@ type Session interface {
 	// primary's reader, exactly as they always have. They never refuse for want
 	// of room in the log: the caller checks that *before* the provider is asked,
 	// because a refusal after the agent has taken the change would be a lie.
+	//
+	// SetConfig's forModel binds the change to the model it was chosen for
+	// (engine.Setting.ForModel, plan 025 design 3): when it is set and the
+	// session is on any other model, the call is ErrStaleModel and nothing is
+	// asked of the provider. The check is the session's own current model, read
+	// under the session's lock at the last moment before the provider is asked,
+	// so a model the agent moved on its own and the session has already heard
+	// about is seen. "" binds it to nothing.
 	SetModel(ctx context.Context, cause, modelID string) (SetOutcome, error)
 	SetMode(ctx context.Context, cause, modeID string) (SetOutcome, error)
-	SetConfig(ctx context.Context, cause, id, value string) (SetOutcome, error)
+	SetConfig(ctx context.Context, cause, id, value, forModel string) (SetOutcome, error)
 	// SetTitle renames the session in craze alone: ACP v1 has no rename verb.
 	// It pins the title, so a later agent session_info_update no longer
 	// replaces it, and it publishes the Title section of a StateDelta —
@@ -904,9 +953,9 @@ type Session interface {
 // SetOutcome is what one settings verb came to: the value the session is now
 // at, and the receipt of the delta that said so.
 //
-// Value is the **confirmed** value, captured in the very section that mutated
-// the snapshot — never asked for afterwards with a second read, which could
-// observe somebody else's change and answer this caller about it. It is not
+// Value is the **confirmed** value, captured in the very section that
+// announced the change — never asked for afterwards with a second read, which
+// could observe somebody else's change and answer this caller about it. It is not
 // always the value that was asked for: the native session resolves an empty
 // effort to the model's own default and a model alias to its canonical id, and
 // a provider is free to do the same. A caller that echoes what it requested

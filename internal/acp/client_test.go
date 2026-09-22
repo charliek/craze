@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -709,7 +710,7 @@ func TestSetConfigJSONShape(t *testing.T) {
 	if _, err := client.NewSession(ctx, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.SetConfig(ctx, "effort", "high"); err != nil {
+	if _, err := client.SetConfig(ctx, "effort", "high"); err != nil {
 		t.Fatal(err)
 	}
 	params := <-got
@@ -1666,5 +1667,421 @@ func TestCloseDoesNotWaitToAnswerOnAWedgedStdin(t *testing.T) {
 		// this one and hang the package instead of reporting.
 		_ = p.serverR.Close()
 		t.Fatal("Close waited to answer a request on a stdin nobody reads")
+	}
+}
+
+// The settings calls' replies (plan 025 design 1). A reply's catalog is read on
+// the read goroutine and handed to the settings handler before the reply is
+// delivered, so it is ordered against the agent's pushes by the wire; its
+// configOptions keeps its presence; and a call whose reply hook ran always
+// answers with that reply.
+
+// answerWith writes a successful reply to req carrying result verbatim.
+func (p *rawPipe) answerWith(t *testing.T, req *Message, result string) {
+	t.Helper()
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: req.ID, Result: json.RawMessage(result)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pushUpdate writes a session/update notification for session sid.
+func (p *rawPipe) pushUpdate(t *testing.T, sid, update string) {
+	t.Helper()
+	params := `{"sessionId":"` + sid + `","update":` + update + `}`
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, Method: MethodSessionUpdate, Params: json.RawMessage(params)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// roundTrip is the wire barrier the settings tests use: one more request, and
+// its -32601 written by the test, so everything the test wrote before it has
+// been read — and dispatched, because the read loop handles one frame at a
+// time — by the time it returns.
+func (p *rawPipe) roundTrip(t *testing.T) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- p.client.Conn().Call(context.Background(), "craze/barrier", nil, nil) }()
+	req := p.readWithin(t, 3*time.Second, "the barrier request")
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: req.ID, Error: MethodNotFound(req.Method)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		var rpcErr *RPCError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != CodeMethodNotFound {
+			t.Fatalf("the barrier answered %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the barrier never came back")
+	}
+}
+
+type settingsAnswer struct {
+	cat ConfigCatalog
+	err error
+}
+
+// awaitSettings is a settings call's answer, with a watchdog.
+func awaitSettings(t *testing.T, done <-chan settingsAnswer) settingsAnswer {
+	t.Helper()
+	select {
+	case a := <-done:
+		return a
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call never came back")
+		return settingsAnswer{}
+	}
+}
+
+// TestASettingsReplyKeepsItsCatalogsPresence is panel astra 14 at the wire: a
+// reply with no configOptions (or null) carries no catalog, an array — the
+// empty one too — is the whole catalog, and anything else is an error that
+// installs nothing, for set_config_option and set_model alike (CodeRabbit 15:
+// set_model's reply is decoded too).
+func TestASettingsReplyKeepsItsCatalogsPresence(t *testing.T) {
+	const opts = `[{"id":"fast","name":"Fast","category":"model_config","type":"select","currentValue":"true","options":[]}]`
+	cases := []struct {
+		name    string
+		result  string
+		present bool
+		options string
+		bad     bool
+	}{
+		{"no field", `{}`, false, "", false},
+		{"a null result", `null`, false, "", false},
+		{"another field only", `{"_meta":{"x.ai/model":"grok-4.6"}}`, false, "", false},
+		{"a null field", `{"configOptions":null}`, false, "", false},
+		{"an empty list clears", `{"configOptions":[]}`, true, `[]`, false},
+		{"a list", `{"configOptions":` + opts + `}`, true, opts, false},
+		{"an object", `{"configOptions":{"fast":"true"}}`, false, "", true},
+		{"a string", `{"configOptions":"fast"}`, false, "", true},
+		{"a number", `{"configOptions":3}`, false, "", true},
+	}
+	calls := []struct {
+		method string
+		call   func(c *Client) (ConfigCatalog, error)
+		id     string
+		value  string
+	}{
+		{MethodSessionSetConfig, func(c *Client) (ConfigCatalog, error) {
+			return c.SetConfig(context.Background(), "fast", "true")
+		}, "fast", "true"},
+		{MethodSessionSetModel, func(c *Client) (ConfigCatalog, error) {
+			return c.SetModel(context.Background(), "composer-2.5")
+		}, "", "composer-2.5"},
+	}
+	for _, call := range calls {
+		for _, tc := range cases {
+			t.Run(call.method+"/"+tc.name, func(t *testing.T) {
+				p := newRawPipe(t)
+				p.setSession("s1")
+				var mu sync.Mutex
+				var got []SettingsReply
+				p.client.SetSettingsHandler(func(r SettingsReply) error {
+					mu.Lock()
+					got = append(got, r)
+					mu.Unlock()
+					return nil
+				})
+				done := make(chan settingsAnswer, 1)
+				go func() {
+					cat, err := call.call(p.client)
+					done <- settingsAnswer{cat, err}
+				}()
+				req := p.readWithin(t, 3*time.Second, call.method)
+				if req.Method != call.method {
+					t.Fatalf("the call wrote %q", req.Method)
+				}
+				p.answerWith(t, req, tc.result)
+				a := awaitSettings(t, done)
+				mu.Lock()
+				defer mu.Unlock()
+				if tc.bad {
+					if !errors.Is(a.err, ErrBadCatalog) {
+						t.Fatalf("a configOptions that is not a list answered (%+v, %v), want ErrBadCatalog", a.cat, a.err)
+					}
+					if len(got) != 0 {
+						t.Fatalf("a malformed reply reached the settings handler: %+v", got)
+					}
+					return
+				}
+				if a.err != nil {
+					t.Fatalf("the call failed: %v", a.err)
+				}
+				if a.cat.Present != tc.present || string(a.cat.Options) != tc.options {
+					t.Fatalf("the call answered %+v (%s), want present=%v %s", a.cat, a.cat.Options, tc.present, tc.options)
+				}
+				if len(got) != 1 {
+					t.Fatalf("the settings handler ran %d times, want once", len(got))
+				}
+				r := got[0]
+				if r.Method != call.method || r.ConfigID != call.id || r.Value != call.value {
+					t.Fatalf("the handler was told %+v", r)
+				}
+				if r.Catalog.Present != tc.present || string(r.Catalog.Options) != tc.options {
+					t.Fatalf("the handler's catalog is %+v (%s)", r.Catalog, r.Catalog.Options)
+				}
+			})
+		}
+	}
+}
+
+// TestTheSettingsHandlerRunsInWireOrder is panel astra 2 at the ACP boundary: a
+// catalog pushed ahead of a settings reply, the reply, and a catalog pushed
+// behind it reach their handlers in exactly that order, because the reply's is
+// run on the read loop as the reply is read — and the call has not returned
+// before it has.
+func TestTheSettingsHandlerRunsInWireOrder(t *testing.T) {
+	p := newRawPipe(t)
+	p.setSession("s1")
+	var mu sync.Mutex
+	var seen []string
+	note := func(s string) {
+		mu.Lock()
+		seen = append(seen, s)
+		mu.Unlock()
+	}
+	p.client.SetUpdateHandler(func(n SessionNotification) {
+		var u struct {
+			Tag string `json:"tag"`
+		}
+		_ = json.Unmarshal(n.Update, &u)
+		note("update " + u.Tag)
+	})
+	p.client.SetSettingsHandler(func(r SettingsReply) error { note("reply " + r.ConfigID); return nil })
+	done := make(chan settingsAnswer, 1)
+	go func() {
+		cat, err := p.client.SetConfig(context.Background(), "model", "composer-2.5")
+		// Recorded on the caller's goroutine the moment the call returns.
+		note("returned")
+		done <- settingsAnswer{cat, err}
+	}()
+	req := p.readWithin(t, 3*time.Second, "set_config_option")
+	p.pushUpdate(t, "s1", `{"sessionUpdate":"config_option_update","tag":"before","configOptions":[]}`)
+	p.answerWith(t, req, `{"configOptions":[]}`)
+	if a := awaitSettings(t, done); a.err != nil || !a.cat.Present {
+		t.Fatalf("the call answered (%+v, %v)", a.cat, a.err)
+	}
+	p.pushUpdate(t, "s1", `{"sessionUpdate":"config_option_update","tag":"after","configOptions":[]}`)
+	p.roundTrip(t)
+	mu.Lock()
+	defer mu.Unlock()
+	// The first two are fixed by the wire, and the reply's handler has run
+	// before the call returned. Only "returned" and the push behind the reply
+	// may land either way round: once the reply is handed over, the caller's
+	// goroutine and the read loop race — the race a setter's section tolerates
+	// by reading the snapshot as it finds it, never the reply.
+	if len(seen) != 4 || seen[0] != "update before" || seen[1] != "reply model" {
+		t.Fatalf("the handlers ran %q, want the push ahead of the reply, then the reply, then the rest", seen)
+	}
+	if rest := strings.Join(seen[2:], ","); rest != "returned,update after" && rest != "update after,returned" {
+		t.Fatalf("the handlers ran %q", seen)
+	}
+}
+
+// TestACallWhoseReplyHookRanAnswersWithTheReply is rule R1 (plan 025 C1): once
+// deliver has taken a request's reply — and so may have run its hook, which
+// installs a catalog — the call returns that reply, never its context's error
+// and never the connection's close. Before, callRaw's select could pick either
+// with the reply already buffered, and a setter would then report as failed a
+// change the read loop had already installed, owing a delta it never wrote.
+//
+// The schedule is forced from inside it: the hook is held after the reply was
+// taken, the call is made to give up — its context ended, or the connection
+// closed — and takenWait says the call has found its request already taken
+// before the hook is let go.
+func TestACallWhoseReplyHookRanAnswersWithTheReply(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		giveUp func(cancel context.CancelFunc, c *Conn)
+	}{
+		{"its context ends", func(cancel context.CancelFunc, _ *Conn) { cancel() }},
+		{"the connection closes", func(_ context.CancelFunc, c *Conn) { _ = c.Close() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipe(t)
+			conn := p.client.Conn()
+			waiting := make(chan struct{})
+			conn.takenWait = func() { close(waiting) }
+			entered, release := make(chan struct{}), make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type answer struct {
+				raw json.RawMessage
+				err error
+			}
+			done := make(chan answer, 1)
+			go func() {
+				raw, err := conn.callReply(ctx, "test/settle", nil, func(json.RawMessage) error {
+					close(entered)
+					<-release
+					return nil
+				})
+				done <- answer{raw, err}
+			}()
+			req := p.readWithin(t, 3*time.Second, "the request")
+			p.answerWith(t, req, `{"settled":true}`)
+			await := func(ch <-chan struct{}, what string) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("timed out waiting for %s", what)
+				}
+			}
+			await(entered, "the reply hook")
+			tc.giveUp(cancel, conn)
+			await(waiting, "the call to find its request taken")
+			close(release)
+			var a answer
+			select {
+			case a = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the call never came back")
+			}
+			if a.err != nil || string(a.raw) != `{"settled":true}` {
+				t.Fatalf("a call whose reply hook ran answered (%s, %v), want the reply", a.raw, a.err)
+			}
+		})
+	}
+}
+
+// TestACallThatGaveUpFirstNeverRunsItsReplyHook is R1's other half: a call
+// whose context ended while its request was still pending answers with that
+// error, and the reply that comes later is dropped whole — its hook never runs,
+// so nothing is installed that nobody will announce.
+func TestACallThatGaveUpFirstNeverRunsItsReplyHook(t *testing.T) {
+	p := newRawPipe(t)
+	conn := p.client.Conn()
+	var ran atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.callReply(ctx, "test/settle", nil, func(json.RawMessage) error {
+			ran.Store(true)
+			return nil
+		})
+		done <- err
+	}()
+	req := p.readWithin(t, 3*time.Second, "the request")
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("a call that gave up with its request pending answered %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call never came back")
+	}
+	p.answerWith(t, req, `{"settled":true}`)
+	p.roundTrip(t)
+	if ran.Load() {
+		t.Fatal("the reply hook ran for a call that had already given up")
+	}
+}
+
+// TestASettingsReplyCarriesItsCallsWord is astra r2 items 4 and 7 at the wire.
+// Item 4: whether a reply answers a model change is what the CALL said when it
+// was made — set_config_option is a model change when it goes out through
+// SetModelOption and not through SetConfig, and set_model always is — so the
+// handler never has to work it out from the catalogs it finds. SetModelOption
+// is SetConfig on the wire, byte for byte. Item 7: the handler may refuse the
+// reply, and its error is then the call's answer, wrapped with the method — the
+// way a member that is not an option, which only internal/agent's parser can
+// judge, becomes an error that installs nothing, like a configOptions that is
+// not a list at all (TestASettingsReplyKeepsItsCatalogsPresence).
+func TestASettingsReplyCarriesItsCallsWord(t *testing.T) {
+	refusal := fmt.Errorf("%w: member 0 is not an option", ErrBadCatalog)
+	for _, call := range []struct {
+		name, method, id, value string
+		model                   bool
+		call                    func(c *Client) (ConfigCatalog, error)
+	}{
+		{"SetConfig", MethodSessionSetConfig, "fast", "true", false, func(c *Client) (ConfigCatalog, error) {
+			return c.SetConfig(context.Background(), "fast", "true")
+		}},
+		{"SetModelOption", MethodSessionSetConfig, "model", "composer-2.5", true, func(c *Client) (ConfigCatalog, error) {
+			return c.SetModelOption(context.Background(), "model", "composer-2.5")
+		}},
+		{"SetModel", MethodSessionSetModel, "", "composer-2.5", true, func(c *Client) (ConfigCatalog, error) {
+			return c.SetModel(context.Background(), "composer-2.5")
+		}},
+	} {
+		for _, refuse := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/refused=%v", call.name, refuse), func(t *testing.T) {
+				p := newRawPipe(t)
+				p.setSession("s1")
+				var mu sync.Mutex
+				var got []SettingsReply
+				p.client.SetSettingsHandler(func(r SettingsReply) error {
+					mu.Lock()
+					got = append(got, r)
+					mu.Unlock()
+					if refuse {
+						return refusal
+					}
+					return nil
+				})
+				done := make(chan settingsAnswer, 1)
+				go func() {
+					cat, err := call.call(p.client)
+					done <- settingsAnswer{cat, err}
+				}()
+				req := p.readWithin(t, 3*time.Second, call.method)
+				if req.Method != call.method {
+					t.Fatalf("the call wrote %q", req.Method)
+				}
+				if call.method == MethodSessionSetConfig {
+					var params SetConfigParams
+					if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID != "s1" ||
+						params.ConfigID != call.id || params.Value != call.value {
+						t.Fatalf("the call wrote %s", req.Params)
+					}
+				}
+				p.answerWith(t, req, `{"configOptions":[]}`)
+				a := awaitSettings(t, done)
+				mu.Lock()
+				defer mu.Unlock()
+				if len(got) != 1 {
+					t.Fatalf("the settings handler ran %d times, want once", len(got))
+				}
+				r := got[0]
+				if r.Method != call.method || r.ConfigID != call.id || r.Value != call.value || r.ModelChange != call.model {
+					t.Fatalf("the handler was told %+v, want a model change: %v", r, call.model)
+				}
+				if !refuse {
+					if a.err != nil || !a.cat.Present {
+						t.Fatalf("the call answered (%+v, %v)", a.cat, a.err)
+					}
+					return
+				}
+				if !errors.Is(a.err, ErrBadCatalog) || !strings.Contains(a.err.Error(), call.method) {
+					t.Fatalf("a refused reply answered (%+v, %v), want the handler's error with the method", a.cat, a.err)
+				}
+				if a.cat.Present {
+					t.Fatalf("a refused reply answered with a catalog: %+v", a.cat)
+				}
+			})
+		}
+	}
+}
+
+// TestRPCErrorDataMessage reads both shapes the agents put a refusal's detail
+// in: cursor's {message} (X1.3) and grok's bare string (X2).
+func TestRPCErrorDataMessage(t *testing.T) {
+	for _, tc := range []struct {
+		data, want string
+	}{
+		{`{"message":"Unknown model config option: model"}`, "Unknown model config option: model"},
+		{`"unknown model id"`, "unknown model id"},
+		{``, ""},
+		{`null`, ""},
+		{`3`, ""},
+		{`{"detail":"x"}`, ""},
+	} {
+		e := &RPCError{Code: CodeInvalidParams, Message: "Invalid params", Data: json.RawMessage(tc.data)}
+		if got := e.DataMessage(); got != tc.want {
+			t.Errorf("DataMessage(%s) = %q, want %q", tc.data, got, tc.want)
+		}
 	}
 }

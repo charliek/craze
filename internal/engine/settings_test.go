@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1076,6 +1077,178 @@ func (r *rig) queuedSets() int {
 	r.e.mu.Lock()
 	defer r.e.mu.Unlock()
 	return len(r.e.sets)
+}
+
+// TestAnOptionStepBoundToAnotherModelIsRefused is panel astra 4, with two
+// clients: A picks a model and then an option for it, and B's model change
+// runs between A's two steps. Every Set is ordered by the FIFO, but A's
+// composite choice is not — so A's option step, bound to the model it was
+// chosen for (Setting.ForModel), is refused ErrStaleModel when its turn comes
+// on another model, before the provider is asked, even though the option id and
+// value would be accepted there too (the fake takes any id: the binding alone
+// refuses it).
+//
+// The check is made when the step RUNS, not when it is queued: B's change is
+// held at the provider while A's step joins the queue behind it, so the model
+// at queue time is still A's — a check made then would have let the step
+// through to a model it was never chosen for.
+func TestAnOptionStepBoundToAnotherModelIsRefused(t *testing.T) {
+	r := newRig(t, Options{})
+	ctx := context.Background()
+	a, b := r.e.NewClientID(), r.e.NewClientID()
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "1"}, Setting{Kind: SettingModel, Value: "grok-4.6"}); err != nil {
+		t.Fatalf("A's model: %v", err)
+	}
+
+	release := r.s.holdNextSets()
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := r.e.Set(ctx, Command{Client: b, ID: "1"}, Setting{Kind: SettingModel, Value: "composer-2.5"})
+		bDone <- err
+	}()
+	waitFor(t, r.heldSets)
+	if got := r.e.State().CurrentModel; got != "grok-4.6" {
+		t.Fatalf("B's change is still at the provider and the model is %q", got)
+	}
+	step := Setting{Kind: SettingConfig, ID: "fast", Value: "true", ForModel: "grok-4.6"}
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, step)
+		aDone <- err
+	}()
+	waitFor(t, func() bool { return r.queuedSets() == 1 })
+	before := r.s.setCalls()
+	release()
+
+	if err := awaitErr(t, bDone, "B's model"); err != nil {
+		t.Fatalf("B's model: %v", err)
+	}
+	err := awaitErr(t, aDone, "A's option step")
+	if !errors.Is(err, ErrStaleModel) || Code(err) != "stale_model" {
+		t.Fatalf("A's step bound to grok-4.6, run on composer-2.5, answered %v (%s), want ErrStaleModel", err, Code(err))
+	}
+	if got := r.s.setCalls(); got != before+1 {
+		t.Fatalf("%d settings reached the provider after the release, want B's alone", got-before)
+	}
+	if got := r.e.State().CurrentModel; got != "composer-2.5" {
+		t.Fatalf("the session is on %q", got)
+	}
+
+	// Unbound, the same change goes through: it is the binding that refused.
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "3"}, Setting{Kind: SettingConfig, ID: "fast", Value: "true"}); err != nil {
+		t.Fatalf("the same step unbound: %v", err)
+	}
+	// Bound to the model the session is on, it goes through too.
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "4"}, Setting{Kind: SettingConfig, ID: "fast", Value: "false", ForModel: "composer-2.5"}); err != nil {
+		t.Fatalf("a step bound to the current model: %v", err)
+	}
+
+	// Nothing ran, so nothing was stored: once the model is back, a resend of
+	// A's refused command is a genuine attempt and lands.
+	if _, err := r.e.Set(ctx, Command{Client: b, ID: "2"}, Setting{Kind: SettingModel, Value: "grok-4.6"}); err != nil {
+		t.Fatalf("B's model back: %v", err)
+	}
+	calls := r.s.setCalls()
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, step); err != nil {
+		t.Fatalf("A's step resent on its own model: %v", err)
+	}
+	if got := r.s.setCalls(); got != calls+1 {
+		t.Fatal("the resend was answered from the receipts table instead of running")
+	}
+
+	// The binding is part of the request: the same id with another binding is
+	// a different request, never a replay.
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, Setting{Kind: SettingConfig, ID: "fast", Value: "true", ForModel: "composer-2.5"}); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("the same id rebound answered %v, want ErrBadRequest", err)
+	}
+	// And only an option is bound to a model.
+	for _, s := range []Setting{
+		{Kind: SettingModel, Value: "grok-4.6", ForModel: "grok-4.6"},
+		{Kind: SettingMode, Value: "plan", ForModel: "grok-4.6"},
+	} {
+		if _, err := r.e.Set(ctx, Command{}, s); !errors.Is(err, ErrBadRequest) {
+			t.Fatalf("a %s setting bound to a model answered %v, want ErrBadRequest", s.Kind, err)
+		}
+	}
+}
+
+// TestAnOptionStepTheAgentMovedAwayFromIsRefusedAtTheSession is astra r2 item
+// 3 through the engine: the FIFO orders every client's Set, and not the agent
+// moving its model on its own, so the binding goes down with the change and
+// the session checks it again just before the write.
+//
+// The schedule, forced with the fake's barrier at SetConfig's entry:
+//
+//  1. A's step, bound to grok-4.6, is taken by the worker. The session is on
+//     grok-4.6, so the worker's own check passes and the step is claimed.
+//  2. Before the session's check, the agent moves the model to composer-2.5 —
+//     the barrier writes it, as the read loop applying the agent's push would.
+//  3. The session's check finds composer-2.5 and refuses with ErrStaleModel,
+//     which it can only do because runSet handed it the binding; the provider
+//     is never asked.
+//
+// Nothing ran, so nothing is stored, exactly as for the worker's own refusal:
+// once the model is back, the same id resent is a genuine attempt and lands.
+func TestAnOptionStepTheAgentMovedAwayFromIsRefusedAtTheSession(t *testing.T) {
+	r := newRig(t, Options{})
+	ctx := context.Background()
+	a := r.e.NewClientID()
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "1"}, Setting{Kind: SettingModel, Value: "grok-4.6"}); err != nil {
+		t.Fatalf("the model: %v", err)
+	}
+	var moved atomic.Bool
+	r.s.mu.Lock()
+	r.s.beforeConfigCheck = func() {
+		if moved.CompareAndSwap(false, true) {
+			r.s.mu.Lock()
+			r.s.snap.CurrentModel = "composer-2.5"
+			r.s.mu.Unlock()
+		}
+	}
+	r.s.mu.Unlock()
+
+	step := Setting{Kind: SettingConfig, ID: "fast", Value: "true", ForModel: "grok-4.6"}
+	before := r.s.setCalls()
+	_, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, step)
+	if !moved.Load() {
+		t.Fatalf("the step never reached the session (%v): the worker refused it before the agent moved", err)
+	}
+	if !errors.Is(err, ErrStaleModel) || !errors.Is(err, agent.ErrStaleModel) || Code(err) != "stale_model" {
+		t.Fatalf("a step bound to grok-4.6, sent on composer-2.5, answered %v (%s), want ErrStaleModel", err, Code(err))
+	}
+	if got := r.s.setCalls(); got != before {
+		t.Fatalf("%d settings reached the provider, want none", got-before)
+	}
+
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "3"}, Setting{Kind: SettingModel, Value: "grok-4.6"}); err != nil {
+		t.Fatalf("the model back: %v", err)
+	}
+	calls := r.s.setCalls()
+	if _, err := r.e.Set(ctx, Command{Client: a, ID: "2"}, step); err != nil {
+		t.Fatalf("the step resent on its own model: %v", err)
+	}
+	if got := r.s.setCalls(); got != calls+1 {
+		t.Fatal("the resend was answered from the receipts table instead of running")
+	}
+}
+
+// TestAnOptionGoneIsAnnouncedBeforeItsAnswer: a Set the agent took whose
+// answer no longer lists the option (agent.ErrOptionGone) still installed
+// something, and its delta is committed before the caller hears the refusal —
+// its ticket has its revision by then, exactly as a success's has.
+func TestAnOptionGoneIsAnnouncedBeforeItsAnswer(t *testing.T) {
+	r := newRig(t, Options{})
+	r.s.answerGone()
+	_, err := r.e.Set(context.Background(), Command{}, Setting{Kind: SettingConfig, ID: "fast", Value: "true"})
+	if !errors.Is(err, agent.ErrOptionGone) || Code(err) != "failed" {
+		t.Fatalf("Set answered %v (%s), want ErrOptionGone", err, Code(err))
+	}
+	if r.s.ticket().Seq() == 0 {
+		t.Fatal("ErrOptionGone was answered before its delta was committed")
+	}
+	if ev := r.next(); ev.Type != agent.EventMeta || ev.State == nil || ev.State.Config == nil {
+		t.Fatalf("the install was announced as %+v", ev)
+	}
 }
 
 // waitFor polls a predicate about another goroutine's progress, with the

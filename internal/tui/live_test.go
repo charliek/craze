@@ -194,20 +194,21 @@ func TestWiredFakeAgentTurnFailDrawsOneErrorRow(t *testing.T) {
 	}
 }
 
-// TestWiredFallbackModelChangeGoesThroughSetConfig is r25 finding 3's last
-// gap, closed against the real wire: `/model`'s SetModel → SetConfig fallback,
-// end to end over ACP and through the engine, against an agent that really does
-// refuse session/set_model (-32601, the live shape for a method an agent does
-// not implement).
+// TestWiredModelChangeGoesThroughTheModelOption is r25 finding 3's last gap,
+// closed against the real wire: a model the catalog keeps in a config option,
+// changed by `/model`, end to end over ACP and through the engine, against an
+// agent that really does refuse session/set_model (-32601, the live shape for
+// a method an agent does not implement).
 //
-// Everything before this was a simulation of that agent — the Stub's
-// FailNextSetModel, or a session driven by hand — so the one thing nobody had
-// run was the whole chain: the command mints two ids, the first Set is refused
-// by the agent itself, the second sets the model as the config option it lives
-// in, the session moves CurrentModel with it and publishes both sections, and
-// the model's own mirror ends on the new model rather than being put back by
-// the refreshSnap that every meta triggers.
-func TestWiredFallbackModelChangeGoesThroughSetConfig(t *testing.T) {
+// It was first written for `/model`'s own SetModel → SetConfig fallback. Since
+// plan 025 (design 2) the session's SetModel sets such a model through its
+// option, so the one Set lands by session/set_config_option, and the TUI has
+// no fallback left at all (astra r7 item 1). What it pins is the chain that
+// fallback was for: set_config_option moving the model, the session moving
+// CurrentModel with it and publishing both sections, and the model's own
+// mirror ending on the new model rather than being put back by the
+// refreshSnap that every meta triggers.
+func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 	isolateSkillsHome(t)
 	bin := buildFakeAgent(t)
 	ws := t.TempDir()
@@ -241,7 +242,7 @@ func TestWiredFallbackModelChangeGoesThroughSetConfig(t *testing.T) {
 	m = pumpSettled(t, m)
 
 	if got := m.snap.CurrentModel; got != "composer" {
-		t.Fatalf("the screen ended on %q, want the model the fallback set", got)
+		t.Fatalf("the screen ended on %q, want the model the option was set to", got)
 	}
 	if m.model != "composer" {
 		t.Fatalf("the status row says %q", m.model)
@@ -250,13 +251,13 @@ func TestWiredFallbackModelChangeGoesThroughSetConfig(t *testing.T) {
 	if snap.CurrentModel != "composer" {
 		t.Fatalf("the session's own model is %q: a config-backed model change IS a model change", snap.CurrentModel)
 	}
-	// The proof that the FALLBACK is what moved it: session/set_model was
-	// refused, so the only thing that can have set the option is session/set_config.
+	// The proof that the OPTION is what moved it: session/set_model is
+	// refused, so the only thing that can have set it is session/set_config_option.
 	if opt := agent.ModelConfigOption(snap); opt == nil || opt.Current != "composer" {
-		t.Fatalf("the model option is %+v, so the fallback never reached the agent", opt)
+		t.Fatalf("the model option is %+v, so the change never reached it", opt)
 	}
 	if rows := texts(m, entryError); len(rows) != 0 {
-		t.Fatalf("the fallback succeeded, so nothing is the user's to see: %q", rows)
+		t.Fatalf("the change succeeded, so nothing is the user's to see: %q", rows)
 	}
 }
 

@@ -368,3 +368,29 @@ func TestNativeSetModeRacingCloseIsRefused(t *testing.T) {
 		t.Fatalf("a Close mid-SetMode left the closed snapshot in %q", got)
 	}
 }
+
+// TestNativeAnnounceCurrentAfterCloseIsRefused is the same window for
+// SetModel and SetConfig (plan 025 §1): a Close that lands between the harness
+// taking a model or effort switch and announceCurrent must be seen by it. The
+// announcement is made here with the Close already run, which is that window's
+// far side: it answers "closed", rewrites nothing of the closed session's
+// snapshot, and enqueues nothing into a log that has stopped admitting.
+func TestNativeAnnounceCurrentAfterCloseIsRefused(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	before := s.Snapshot()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	model, effort, tk, err := s.announceCurrent("c-1/1")
+	if err == nil || err.Error() != "agent: session closed" {
+		t.Fatalf("announceCurrent after Close = %v, want the closed refusal", err)
+	}
+	if model != "" || effort != "" || tk != nil {
+		t.Fatalf("a refused announcement answered %q/%q/%v", model, effort, tk)
+	}
+	after := s.Snapshot()
+	if after.CurrentModel != before.CurrentModel || len(after.Config) != len(before.Config) {
+		t.Fatalf("an announcement after Close rewrote the snapshot: %+v → %+v", before, after)
+	}
+}

@@ -296,6 +296,55 @@ type SetConfigParams struct {
 	Value     string `json:"value"`
 }
 
+// ConfigCatalog is the configOptions field of a settings reply with its
+// presence kept, because the three shapes mean three different things (plan
+// 025 design 1, panel astra 14):
+//
+//   - the key absent, or null: the reply carries no catalog — Present is false
+//     and the catalog the client already has stands;
+//   - an array, the empty one included: the agent's whole catalog as it now
+//     is — Present is true and Options is that array verbatim, so `[]` clears;
+//   - anything else is not a catalog at all, and the call that answered it is
+//     an error (ErrBadCatalog) rather than a reply with nothing in it.
+//
+// ACP's SetSessionConfigOptionResponse is {configOptions}: cursor answers
+// set_config_option with the current model's whole catalog, and set_model with
+// {}. The options stay raw here; parsing them is internal/agent's, beside the
+// parser every other catalog goes through — and so is judging whether each
+// member of the array is an option at all, which the settings handler answers
+// by refusing the reply (Client.SetSettingsHandler).
+type ConfigCatalog struct {
+	Present bool
+	Options json.RawMessage
+}
+
+// SettingsReply is one successful settings reply, as the read loop hands it to
+// the client's settings handler (Client.SetSettingsHandler): the call it
+// answers, what that call asked for, and the catalog it carried.
+type SettingsReply struct {
+	// Method is MethodSessionSetConfig or MethodSessionSetModel.
+	Method string
+	// ConfigID is the option set_config_option set, "" for set_model.
+	ConfigID string
+	// Value is what was asked for: the option's new value, or the model
+	// set_model moved to.
+	Value string
+	// ModelChange is whether the call was a model change — set_model, or a
+	// set_config_option on the option the agent keeps its model in
+	// (Client.SetModelOption) — as the caller that made it said when it made
+	// it. A handler installs a reply that carries it as a model change whatever
+	// the catalogs it finds when the reply arrives: an update of the agent's
+	// own can take the model option out of the catalog while the call is in
+	// flight, and a reply judged by the catalog then would install a model
+	// change as an ordinary option's and leave the model where it was (plan 025
+	// C1, astra r2 item 4). Its absence says only that the caller did not know:
+	// a set_config_option on an id the caller had not been shown as the
+	// model's is still a model change if the reply's catalog lists it as one,
+	// and the handler reads that there (plan 025, astra r3 P1).
+	ModelChange bool
+	Catalog     ConfigCatalog
+}
+
 type ToolCallLocation struct {
 	Path string `json:"path"`
 	Line int    `json:"line,omitempty"`

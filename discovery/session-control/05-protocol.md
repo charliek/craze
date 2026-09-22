@@ -163,8 +163,9 @@ whose terminal record has been evicted from the bounded registry is
 by this incarnation); and a resend with the same `commandId` but a different
 payload is `bad_request`, never a re-execution.
 
-Session control S1b (`internal/engine`) adds six codes, and the retry policy
-below, all of it `internal/engine/control.go`'s `Command` doc as built —
+Session control S1b (`internal/engine`) adds six codes and the retry policy
+below; plan 025 adds a seventh, `stale_model`, on the settings worker it built
+on S1b's. All of it is `internal/engine/control.go`'s `Command` doc as built —
 copied here, not invented:
 
 | code | one line |
@@ -172,6 +173,7 @@ copied here, not invented:
 | `unknown_row` | a queued row id the queue no longer holds — sent already, removed by another client, or never existed |
 | `unknown_command` | a command id at or below its client's evicted high-water mark: recognisably expired |
 | `in_progress` | a resend that found its id's command still running: at once for a synchronous command, or, for a blocking one (`Cancel`, `Stop`, `Set`, `Interject`), when a waiting duplicate gives up because its own context ended |
+| `stale_model` (plan 025) | a `Set` bound to a model (`Setting.ForModel`) the session has since left, refused before the provider was asked — about this command's own arguments, unlike the gate refusals, which is why it has a code of its own: "not applied, the model changed" |
 | `aborted` | a stored answer whose outcome the engine cannot itself vouch for — a command whose call panicked, or a `Set` whose caller's context ended after the settings worker had already claimed it |
 | `failed` | every other error the engine does not classify by its own sentinel — a provider/RPC refusal of a `Set`, an interject the agent refused, a cancel that failed — reached this way because the command DID run |
 | `index_write` | a command that did what it was asked and could not record it — today only `session.set`'s title write: the rename happened, and only `~/.craze/sessions.jsonl` was not updated |
@@ -182,16 +184,19 @@ code alone, never from message text:
 | code | the command | what a client does |
 |---|---|---|
 | `unavailable`, `not_accepting`, `in_progress` | did NOT run — a gate refusal (the first two), or, for `in_progress` alone, is still running under this exact id | resend the SAME id (mandatory for `in_progress`, safe for the other two); either gets a genuine first attempt, never a cached echo of finding the gate shut |
+| `stale_model` | did NOT run — refused before the provider was asked, because the session had left the model the change was bound to | resend the SAME id once the model is what it should be again; it is judged against the model the session is on then, never a replay of this refusal |
 | `aborted` | ran, but its outcome cannot be vouched for | re-read state (or, for a `Set`, watch the stream for its own delta) before deciding anything else; send a NEW id if the command is still wanted — never blindly resend the same work under a new id, or a queued interjection can go in twice |
 | `failed` | ran, and failed a plain, definite failure | send a NEW id for another attempt |
 | anything else | the command's own stored, stable answer — a success, or a refusal about this request or the resource it named | replayed exactly as the first call got it; resending changes nothing |
 
-The invariant underneath the first row: `unavailable`, `not_accepting` and
-`in_progress` are the only three codes the receipts table never stores —
-nothing ran, and the id stays exactly as unseen as before the attempt. Every
-other code is a stored answer. One table (`classify` in `control.go`) decides
-both the code and whether the answer is stored, so the two can never again
-disagree about the same error.
+The invariant underneath the first row: `unavailable`, `not_accepting`,
+`in_progress` and `stale_model` are the only four codes the receipts table
+never stores — nothing ran, and the id stays exactly as unseen as before the
+attempt (`stale_model` because the condition it names, the session being on
+the wrong model, can stop being true; plan 025 X8). Every other code is a
+stored answer. One table (`classify` in `control.go`) decides both the code
+and whether the answer is stored, so the two can never again disagree about
+the same error.
 
 ## One session per connection (SQ14)
 

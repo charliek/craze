@@ -76,6 +76,15 @@ type fakeSession struct {
 	// ticket (setsWithoutATicket).
 	setResolve func(string) string
 	setSilent  bool
+	// setGone makes a settings verb do everything a success does — mutate,
+	// enqueue its delta — and answer agent.ErrOptionGone beside the ticket:
+	// the live session's SetConfig whose answered catalog no longer lists the
+	// option (answerGone). lastTicket is the last ticket a verb handed out.
+	setGone    bool
+	lastTicket *agent.Ticket
+	// beforeConfigCheck, when set, runs at SetConfig's entry, before its
+	// forModel check (SetConfig).
+	beforeConfigCheck func()
 }
 
 // script is one prompt's answer. It is built whole before it is queued.
@@ -560,7 +569,24 @@ func (s *fakeSession) SetMode(ctx context.Context, cause, id string) (agent.SetO
 	})
 }
 
-func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value string) (agent.SetOutcome, error) {
+// SetConfig holds forModel against the fake's own model at its entry, before
+// the "provider" is asked, as the live session does under its lock just before
+// the write (agent.Session). beforeConfigCheck, when set, runs first: the
+// barrier a test moves the model from, standing in for the agent moving it on
+// its own after the settings worker has checked and claimed the change.
+func (s *fakeSession) SetConfig(ctx context.Context, cause, id, value, forModel string) (agent.SetOutcome, error) {
+	s.mu.Lock()
+	check := s.beforeConfigCheck
+	s.mu.Unlock()
+	if check != nil {
+		check()
+	}
+	s.mu.Lock()
+	stale := forModel != "" && s.snap.CurrentModel != forModel
+	s.mu.Unlock()
+	if stale {
+		return agent.SetOutcome{}, agent.ErrStaleModel
+	}
 	return s.set(ctx, cause, value, func(v string, st *agent.StateDelta) {
 		st.Config = &agent.ConfigState{Options: []agent.ConfigOption{{ID: id, Current: v}}}
 	}, func(v string, snap *agent.Snapshot) {
@@ -632,7 +658,27 @@ func (s *fakeSession) set(ctx context.Context, cause, value string, delta func(s
 		s.log.Enqueue(ev)
 		return agent.SetOutcome{Value: value}, nil
 	}
-	return agent.SetOutcome{Value: value, Ticket: s.log.EnqueueTicket(ev)}, nil
+	t := s.log.EnqueueTicket(ev)
+	s.lastTicket = t
+	if s.setGone {
+		return agent.SetOutcome{Ticket: t}, agent.ErrOptionGone
+	}
+	return agent.SetOutcome{Value: value, Ticket: t}, nil
+}
+
+// answerGone makes every later settings verb publish and then answer
+// agent.ErrOptionGone (setGone).
+func (s *fakeSession) answerGone() {
+	s.mu.Lock()
+	s.setGone = true
+	s.mu.Unlock()
+}
+
+// ticket is the last ticket a settings verb handed out.
+func (s *fakeSession) ticket() *agent.Ticket {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastTicket
 }
 
 // resolveSets makes every later settings verb answer with f(value) rather than

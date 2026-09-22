@@ -35,8 +35,9 @@ const (
 )
 
 // loadScript names the scripts that advertise loadSession, answer session/load,
-// and refuse session/new. Every other script keeps loadSession false and
-// answers session/load with the -32601 an agent without the capability sends.
+// and refuse session/new. The permodel scripts (permodel.go) advertise it and
+// answer both. Every other script keeps loadSession false and answers
+// session/load with the -32601 an agent without the capability sends.
 func loadScript(script string) bool {
 	switch script {
 	case "load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings":

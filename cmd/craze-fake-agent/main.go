@@ -52,8 +52,8 @@ Flags:
                       shape of an agent that has no session/set_model and keeps
                       its model among its options
           modelconfig-refuse same, and session/set_model is answered -32601: the
-                      whole of that agent, so a client's
-                      set_model → set_config fallback runs for real
+                      whole of that agent, so a client that tried
+                      set_model first would have to fall back to set_config
           modellate   echo with no model option at session/new and no
                       session/set_model follow-up of its own: the shape of an
                       agent whose FIRST config list arrives only after
@@ -102,10 +102,29 @@ Flags:
           load-settings cursor's replay plus a current_mode_update and a
                       config_option_update, answered by a result that
                       contradicts both (mode agent, model default, no options)
+          permodel    cursor's per-model catalog (permodel.go): grok-4.6,
+                      composer-2.5, claude-opus-5 and glm-5.2, each with its
+                      own options; set_config_option(model, X) switches and
+                      answers X's catalog, pushing nothing; set_model switches
+                      and answers {}; session/load answers with the current
+                      model's catalog; an echo turn
+          permodel-empty same, and every set_config_option that succeeds
+                      answers {"configOptions": []}
+          permodel-noreply same, and set_config_option(model, X) answers {}
+          permodel-refuse same, and set_config_option(model, …) is refused
+                      -32602 "Unknown model config option: model"
+          permodel-nomodel same, and no catalog carries a model option
+          permodel-pushbefore same, and set_config_option(model, X) writes a
+                      config_option_update just before its reply: X's catalog
+                      with its last option moved to the other value
+          permodel-pushafter the same push, just after the reply
+          permodel-pushmodel-after after the reply, a push of the next
+                      model's catalog, the model moved on to it
 
 The six load scripts refuse session/new with an error, so a test can prove no
-client fell back to it. Every other script advertises loadSession false and
-answers session/load with -32601.
+client fell back to it. The permodel scripts advertise loadSession and answer
+both. Every other script advertises loadSession false and answers
+session/load with -32601.
 
 Environment:
   CRAZE_FAKE_LINGER=1  do not exit when stdin closes: stay alive until a signal
@@ -159,7 +178,9 @@ func main() {
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
-		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings":
+		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",
+		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
+		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

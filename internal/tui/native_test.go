@@ -225,9 +225,10 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 // TestNativeModelSwitchGainsTheEffortOption is the live smoke's bug, through
 // the TUI's own /model path on a real native session: started on a model with
 // no efforts, `/model <a model with efforts>` must leave the snapshot — and
-// so the status row — with that model's effort option, because a following
-// `/model <id> <effort>` is split by SplitModelEffort against exactly that
-// option. /model with no effort returns no message of its own; what brings
+// so the status row — with that model's effort option, because a
+// `/model <id> <effort>` judges its effort against exactly the catalog the
+// session holds once the model step has landed (runModelEffort, plan 025
+// design 5). /model with no effort returns no message of its own; what brings
 // the new options in is the session's bare EventMeta, as an ACP agent's
 // config_option_update does.
 func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {

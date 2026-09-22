@@ -38,6 +38,9 @@ type server struct {
 	// replay on it and every later stream uses it, so a craze that loads some
 	// other id than fakeSessionID still sees its own session.
 	loadedID string
+	// pm is the permodel scripts' per-model catalog state (permodel.go), and
+	// nil for every other script.
+	pm *permodelState
 	// order is every session/set_mode and session/prompt in arrival order, with
 	// the mode each set_mode asked for. It is what lets the planmode scripts
 	// prove craze chained the two rather than racing them; recording it anywhere
@@ -116,8 +119,10 @@ func defaultConfigOptions() []map[string]any {
 // modelConfigScript names the scripts that advertise the model option, and
 // refusesSetModel the one of them that is the whole of such an agent: it
 // answers session/set_model with -32601, the live wire for a method an agent
-// does not implement, so a client's set_model → set_config fallback runs end to
-// end instead of being simulated (r25 finding 3).
+// does not implement, so a model change that reaches it by set_model is refused
+// end to end instead of being simulated (r25 finding 3). craze itself now changes
+// the model through the model option wherever the catalog has one (plan 025), so
+// against this script the model moves by set_config_option without a refusal.
 func modelConfigScript(script string) bool {
 	return script == "modelconfig" || script == "modelconfig-refuse" || script == "preinstall"
 }
@@ -171,17 +176,8 @@ func modelConfigOptions() []map[string]any {
 
 func run(script string) error {
 	conn := acp.NewConn(os.Stdin, os.Stdout)
-	cfg := defaultConfigOptions()
-	switch {
-	case grokScript(script):
-		cfg = grokConfigOptions()
-	case modelConfigScript(script):
-		cfg = modelConfigOptions()
-	}
-	s := &server{conn: conn, script: script, config: cfg}
+	s := newServer(conn, script)
 	s.writeFakeStderr()
-	conn.SetRequestHandler(s.onRequest)
-	conn.SetNotifyHandler(s.onNotify)
 	conn.Start()
 	<-conn.Done()
 	if os.Getenv("CRAZE_FAKE_LINGER") == "1" {
@@ -192,6 +188,27 @@ func run(script string) error {
 		time.Sleep(lingerMax)
 	}
 	return nil
+}
+
+// newServer is the fake for one script with its handlers installed on conn,
+// which is not started yet: run's, over stdio, and the in-process tests', over
+// a pipe, so the two cannot drift.
+func newServer(conn *acp.Conn, script string) *server {
+	cfg := defaultConfigOptions()
+	switch {
+	case grokScript(script):
+		cfg = grokConfigOptions()
+	case modelConfigScript(script):
+		cfg = modelConfigOptions()
+	}
+	s := &server{conn: conn, script: script, config: cfg}
+	conn.SetRequestHandler(s.onRequest)
+	if permodelScript(script) {
+		s.pm = newPermodelState(script)
+		conn.SetRequestHandler(s.onPermodelRequest)
+	}
+	conn.SetNotifyHandler(s.onNotify)
+	return s
 }
 
 func grokScript(script string) bool {
@@ -323,7 +340,10 @@ func (s *server) onRequest(msg *acp.Message) {
 			"agentInfo":       map[string]string{"name": "craze-fake-agent", "version": "test"},
 			"authMethods":     auth,
 			"agentCapabilities": map[string]any{
-				"loadSession": loadScript(s.script),
+				// The permodel scripts advertise it too, and answer session/new
+				// as well: their own handler takes both (permodel.go), so
+				// loadScript's refusal of session/new never applies to them.
+				"loadSession": loadScript(s.script) || permodelScript(s.script),
 			},
 		}
 		if grokScript(s.script) {

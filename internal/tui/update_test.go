@@ -1253,8 +1253,8 @@ func TestModelDialogStaleFailureKeepsTheNewerChoice(t *testing.T) {
 	m = pressKey(t, m, tea.KeyTab)
 	m = pressKey(t, m, tea.KeyLeft)
 	m = pressKey(t, m, tea.KeyLeft)
-	if m.mdlg.effort != "low" {
-		t.Fatalf("the reopened box is on %q", m.mdlg.effort)
+	if m.mdlg.chosen["effort"] != "low" {
+		t.Fatalf("the reopened box is on %q", m.mdlg.chosen["effort"])
 	}
 	tm, low := m.Update(enter())
 	m = tm.(Model)
@@ -1293,7 +1293,7 @@ func TestModelDialogTabSkipsMissingRows(t *testing.T) {
 		t.Fatalf("a session with no fast option draws no fast row:\n%s", plainView(m))
 	}
 	m = pressKey(t, m, tea.KeyTab)
-	if m.mdlg.focus != focusEffort {
+	if m.mdlg.focus != dialogFocus("effort") {
 		t.Fatalf("focus %v", m.mdlg.focus)
 	}
 	m = pressKey(t, m, tea.KeyTab)

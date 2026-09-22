@@ -529,7 +529,12 @@ func (s *stubSession) Asks() *agent.AskRegistry { return s.asks }
 
 // The settings verbs are the interface's and nothing more: `craze prompt`
 // changes no setting mid-run — --model and --mode are applied inside Start —
-// so nothing here is ever called.
+// so nothing here is ever called. SetConfig keeps the binding rule the
+// contract gives every session all the same (agent.Session's forModel): a
+// change bound to a model is checked against the model the session is on, and
+// this one's Snapshot names none, so a bound change is always
+// agent.ErrStaleModel and nothing is changed — no implementation of the seam,
+// a test's included, lets a bound change through unchecked.
 func (s *stubSession) SetModel(context.Context, string, string) (agent.SetOutcome, error) {
 	return agent.SetOutcome{}, nil
 }
@@ -538,7 +543,10 @@ func (s *stubSession) SetMode(context.Context, string, string) (agent.SetOutcome
 	return agent.SetOutcome{}, nil
 }
 
-func (s *stubSession) SetConfig(context.Context, string, string, string) (agent.SetOutcome, error) {
+func (s *stubSession) SetConfig(_ context.Context, _, _, _, forModel string) (agent.SetOutcome, error) {
+	if forModel != "" {
+		return agent.SetOutcome{}, agent.ErrStaleModel
+	}
 	return agent.SetOutcome{}, nil
 }
 

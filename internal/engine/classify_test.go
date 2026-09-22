@@ -55,6 +55,20 @@ func classifyTable() []classifyCase {
 		{"ErrCommandAborted", ErrCommandAborted, "aborted", false},
 		{"ErrSetOutcomeUnknown", setOutcomeUnknown(context.Canceled), "aborted", false},
 		{"errNotRun (a Set that never ran)", notRun(context.Canceled), "unavailable", true},
+		// A config change bound to a model the session has left (plan 025
+		// design 3): refused before the claim, and forgotten, because nothing
+		// ran and the model can come back.
+		{"ErrStaleModel", ErrStaleModel, "stale_model", true},
+		// A Set the agent took whose answer no longer lists the option: it ran.
+		{"agent.ErrOptionGone", agent.ErrOptionGone, "failed", false},
+		// A Set whose answer could not be read (plan 025 design 1, "malformed
+		// is an error"): it ran — the agent answered, and may have made the
+		// change — and nothing of the answer was installed, so its outcome is
+		// one the engine cannot vouch for: STORED, "aborted", never the
+		// default's "failed", which reads as a definite failure (astra r5
+		// item 2). Wrapped as the live session returns it.
+		{"agent.ErrBadCatalog",
+			fmt.Errorf("session/set_config_option: %w: member 0 is not an option", agent.ErrBadCatalog), "aborted", false},
 		// A command that RAN and gave up on its own context: the write may
 		// already have happened, so the answer is stored and the client re-reads
 		// state rather than resending the work under a new id (r30 finding 1).
@@ -84,7 +98,7 @@ func classifyTable() []classifyCase {
 // default, and asserts the invariant classify exists to hold over the WHOLE
 // closed set:
 //
-//	Code(err) ∈ {unavailable, not_accepting, in_progress} ⇔ the receipt was
+//	Code(err) ∈ {unavailable, not_accepting, in_progress, stale_model} ⇔ the receipt was
 //	NOT stored — gateRefusal(err) is true, the same id may be resent, and
 //	classify(err).stored is false.
 //
@@ -106,12 +120,13 @@ func TestClassifyIsTheOneTable(t *testing.T) {
 				t.Fatalf("gateRefusal(%v) = %v, want %v", tc.err, got, tc.forgot)
 			}
 			// The invariant itself, in both directions, over THIS row: forgotten
-			// iff the code is one of the three codes never stored. A row that
+			// iff the code is one of the four codes never stored. A row that
 			// fails this has a bad table, not a bad implementation — classify's
 			// own switch is what both Code and gateRefusal read, so the two
 			// cannot disagree with each other; they can still disagree with the
 			// invariant, which is what this line catches.
-			wantForgotten := tc.code == "unavailable" || tc.code == "not_accepting" || tc.code == "in_progress"
+			wantForgotten := tc.code == "unavailable" || tc.code == "not_accepting" || tc.code == "in_progress" ||
+				tc.code == "stale_model"
 			if tc.forgot != wantForgotten {
 				t.Fatalf("%s: table says forgotten=%v for code %q, want %v", tc.name, tc.forgot, tc.code, wantForgotten)
 			}
@@ -135,6 +150,7 @@ func engineSentinels() map[string]error {
 		"ErrAlreadyPending":    ErrAlreadyPending,
 		"ErrStaleTurn":         ErrStaleTurn,
 		"ErrStaleVersion":      ErrStaleVersion,
+		"ErrStaleModel":        ErrStaleModel,
 		"ErrUnknownRow":        ErrUnknownRow,
 		"ErrUnavailable":       ErrUnavailable,
 		"ErrBadRequest":        ErrBadRequest,
@@ -162,6 +178,12 @@ func agentSentinels() map[string]error {
 		"ErrForeignTurn":      agent.ErrForeignTurn,
 		"ErrPromptCancelled":  agent.ErrPromptCancelled,
 		"ErrSetUnavailable":   agent.ErrSetUnavailable,
+		"ErrOptionGone":       agent.ErrOptionGone,
+		"ErrBadCatalog":       agent.ErrBadCatalog,
+		// The session's refusal of a Set bound to a model it has left, made just
+		// before the write. engine.ErrStaleModel is this very value, so the
+		// table's ErrStaleModel row is its row too.
+		"ErrStaleModel": agent.ErrStaleModel,
 	}
 }
 

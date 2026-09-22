@@ -1418,7 +1418,10 @@ func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetO
 	// took it: MatchModel resolves an alias — a prefix, a display name — to a
 	// canonical id, so the value that was asked for and the value the delta
 	// carries are not always the same string (SetOutcome).
-	model, _, t := s.announceCurrent(cause)
+	model, _, t, err := s.announceCurrent(cause)
+	if err != nil {
+		return SetOutcome{}, err
+	}
 	return SetOutcome{Value: model, Ticket: t}, nil
 }
 
@@ -1446,9 +1449,19 @@ func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetO
 // is what lets a setter answer its caller with the CONFIRMED value rather than
 // with the one that was asked for (SetOutcome, r23 finding 4). A second read
 // afterwards could see another client's switch and answer this caller about it.
-func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *Ticket) {
+//
+// A Close that ran between the harness taking the switch and this section is
+// seen here, under the same lock Close's transition takes — announceMode's
+// guard, for the same window (r6 finding 1, plan 025 §1): a closed session's
+// snapshot is not rewritten and nothing is enqueued into a log that has
+// stopped admitting, so the setter answers "closed" rather than a success
+// whose delta went nowhere.
+func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *Ticket, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return "", "", nil, fmt.Errorf("agent: session closed")
+	}
 	s.refreshCurrentLocked()
 	model = s.snap.CurrentModel
 	for _, opt := range s.snap.Config {
@@ -1460,7 +1473,7 @@ func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *
 	return model, effort, s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
 		Model:  &model,
 		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
-	})
+	}), nil
 }
 
 // enqueueDeltaLocked is live.go's, for this session: one EventMeta carrying st,
@@ -1556,7 +1569,13 @@ func phraseModeError(err error, id string) error {
 // SetConfig sets the effort, the one option the native session advertises;
 // any other id is unsupported. Like SetModel it is allowed during a turn, and
 // a change that took is announced the same way.
-func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (SetOutcome, error) {
+//
+// forModel is checked against the model read in the same section as the
+// effort levels (Session): on this session only SetModel moves the model, and
+// the engine's worker runs one Set at a time, so the check is the worker's own
+// made again — what it adds is that a caller without an engine is held to the
+// binding too.
+func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel string) (SetOutcome, error) {
 	if id != nativeEffortID {
 		return SetOutcome{}, ErrUnsupported
 	}
@@ -1567,6 +1586,9 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (S
 	s.mu.Unlock()
 	if hs == nil {
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	}
+	if forModel != "" && alias != forModel {
+		return SetOutcome{}, ErrStaleModel
 	}
 	// Checked here as well as by the harness so the refusal can name what
 	// the model does offer. "" is the model's default and always allowed.
@@ -1582,7 +1604,10 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value string) (S
 	// The confirmed effort, not the one asked for: "" means the model's own
 	// default, and what the harness resolved it to is what the delta carries
 	// (SetOutcome, r23 finding 4).
-	_, effort, t := s.announceCurrent(cause)
+	_, effort, t, err := s.announceCurrent(cause)
+	if err != nil {
+		return SetOutcome{}, err
+	}
 	return SetOutcome{Value: effort, Ticket: t}, nil
 }
 

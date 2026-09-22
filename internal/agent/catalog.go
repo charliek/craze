@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -126,6 +127,13 @@ func commandsFromUpdate(cmds []acp.AvailableCommand) []CommandInfo {
 	return out
 }
 
+// parseConfigOptions is the tolerant parse, and it is the one the agent's own
+// updates and the session/new and session/load results go through: a member it
+// cannot read as an option is skipped and the rest are kept, and anything that
+// is not an array at all is no catalog. That is unchanged by plan 025. An update
+// has no caller to be answered — refusing it whole would leave the session on
+// the catalog before it for no one's benefit — whereas a settings reply does,
+// and is held to parseReplyConfigOptions instead.
 func parseConfigOptions(raw json.RawMessage) []ConfigOption {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
@@ -144,6 +152,40 @@ func parseConfigOptions(raw json.RawMessage) []ConfigOption {
 		out = append(out, opt)
 	}
 	return out
+}
+
+// parseReplyConfigOptions is a settings reply's catalog, which is all or
+// nothing (plan 025 design 1, "malformed is an error"; astra r2 item 7): every
+// member of the array has to be an option, or the reply is malformed — the
+// error wraps acp.ErrBadCatalog — and nothing of it is installed. raw is the
+// array acp handed over (acp.ConfigCatalog.Options), already known to be one.
+//
+// A member is malformed exactly when parseConfigOption cannot read it, which is
+// when it is not a JSON object (a number, a string, a list — or null, which
+// reads as an object with no id), when one of the fields it reads as text
+// (id, name, category, type) is of another JSON type, or when it has no id.
+// There is nothing else: parseConfigOption skips no option it can read. One of
+// a type craze draws no control for is kept, with that type and no values, and
+// an unknown field is ignored, as is a currentValue that is no scalar (read as
+// ""). What is inside an option's own value list is the option's: a value that
+// cannot be read is left out of it by parseSelectValues, on this path as on the
+// push path, and the option stands.
+func parseReplyConfigOptions(raw json.RawMessage) ([]ConfigOption, error) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("%w: %v", acp.ErrBadCatalog, err)
+	}
+	out := make([]ConfigOption, 0, len(items))
+	for i, item := range items {
+		opt, ok := parseConfigOption(item)
+		if !ok {
+			// The member itself stays out of the error, which a client may draw:
+			// the journal has the wire.
+			return nil, fmt.Errorf("%w: member %d is not an option", acp.ErrBadCatalog, i)
+		}
+		out = append(out, opt)
+	}
+	return out, nil
 }
 
 func parseConfigOption(raw json.RawMessage) (ConfigOption, bool) {
@@ -273,6 +315,11 @@ func NextModeID(snap Snapshot) string {
 	return snap.Modes[(idx+1)%len(snap.Modes)].ID
 }
 
+// errUnknownModel is MatchModel's refusal of a name no advertised model has,
+// as against one several models share: what lets MatchModelEffort tell a
+// string that names no model from one that names too many.
+var errUnknownModel = errors.New("unknown model")
+
 func MatchModel(snap Snapshot, raw string) (string, error) {
 	want := normalizeIdent(raw)
 	if want == "" {
@@ -294,7 +341,7 @@ func MatchModel(snap Snapshot, raw string) (string, error) {
 	case 1:
 		return hits[0], nil
 	case 0:
-		return "", fmt.Errorf("unknown model %q", raw)
+		return "", fmt.Errorf("%w %q", errUnknownModel, raw)
 	default:
 		return "", fmt.Errorf("ambiguous model %q", raw)
 	}
@@ -404,11 +451,19 @@ func isEffortSelect(opt ConfigOption) bool {
 		strings.Contains(name, "effort") || strings.Contains(name, "reasoning")
 }
 
+// effortRank orders the options isEffortSelect admits. The exact id `effort`
+// comes first, ahead of every category: cursor files `thinking` under
+// thought_level beside its effort select (plan 025 X1.2), so a category is
+// no evidence that an option is the effort, and the one name that is
+// unambiguous wins whatever the agent's categories say. isEffortSelect already
+// keeps `thinking` out by its id and name; this is the second lock on the same
+// door, so a future spelling that slipped past the first cannot outrank the
+// real control.
 func effortRank(opt ConfigOption) int {
-	if opt.Category == "model_option" {
+	if strings.EqualFold(opt.ID, "effort") {
 		return 0
 	}
-	if strings.EqualFold(opt.ID, "effort") {
+	if opt.Category == "model_option" {
 		return 1
 	}
 	if opt.Category == "thought_level" {
@@ -417,8 +472,8 @@ func effortRank(opt ConfigOption) int {
 	return 3
 }
 
-// EffortOption returns the advertised effort/reasoning select, preferring
-// category model_option, then id effort, then thought_level, else the first match.
+// EffortOption returns the advertised effort/reasoning select, preferring id
+// effort, then category model_option, then thought_level, else the first match.
 // Which options qualify is the session provider's call.
 func EffortOption(snap Snapshot) *ConfigOption {
 	p := snap.Provider.provider()
@@ -528,11 +583,69 @@ func ModelConfigOptionIn(cfg []ConfigOption) *ConfigOption {
 	return nil
 }
 
-// IsModelConfigOption reports whether opt is the option a provider keeps its
-// model in: what makes SetConfig on it a MODEL change as well as a config one.
+// IsModelConfigOption reports whether opt is of the category a provider keeps
+// its model in. That alone does not make a write to it a MODEL change: the
+// model option is the first of the category (ModelConfigOptionIn), and a
+// catalog that lists a second — a selector naming a model for something other
+// than the session's turns — lists an ordinary option (Session.SetConfig).
 func IsModelConfigOption(opt ConfigOption) bool { return opt.Category == modelCategory }
 
-func matchEffortValue(opt *ConfigOption, raw string) (string, bool) {
+// modeCategory is the category cursor files its mode option under.
+const modeCategory = "mode"
+
+// withoutModelOptions is cfg after a model change that brought no catalog of
+// its own: the mode option and the model option kept, the model option moved
+// to model, and every other option dropped (plan 025 design 2, panel astra 3)
+// — except any other option of category "model", which is kept at its own
+// value.
+//
+// Those others — effort, fast, context, thinking — are per model on cursor,
+// and what cfg holds are the PREVIOUS model's: offering them would offer a
+// control the new model may not have, or hide one it does, and setting one
+// would be refused ("Unknown model config option"). They are gone until the
+// next catalog the agent sends, a push or a later reply, brings the new
+// model's back.
+//
+// The model option reads the model the agent has just accepted, rather than
+// the value the previous catalog left in it, so that the Model section and the
+// Config section of the delta announcing the change say the same thing — and
+// so that a later list carrying the old value is read, in arrival order, as
+// the change it is.
+//
+// Only the model option moves: the first of the category (ModelConfigOptionIn),
+// the one the change was made on and the one CurrentModel is read back from
+// (adoptModelLocked). A second model-category option is a selector of its own
+// — a model for something other than the session's turns — and writing the new
+// model into it would say the agent had moved a selector nobody asked it to
+// move (astra r5 item 1). It is kept at all, where effort and the rest are
+// dropped, because it is not one of the previous model's controls: its values
+// are models, not a model's settings, so the switch is no reason to think it
+// gone, and dropping it would hide a selector the agent still offers. If the
+// new model has no such selector, the agent's next catalog takes it away, as
+// it brings the new model's effort back.
+//
+// A fresh slice: cfg is left as it was.
+func withoutModelOptions(cfg []ConfigOption, model string) []ConfigOption {
+	out := make([]ConfigOption, 0, 2)
+	moved := false
+	for _, opt := range cfg {
+		switch {
+		case IsModelConfigOption(opt) && !moved:
+			moved = true
+			opt.Current = model
+			out = append(out, opt)
+		case IsModelConfigOption(opt), opt.Category == modeCategory:
+			out = append(out, opt)
+		}
+	}
+	return out
+}
+
+// MatchEffortValue is raw, an effort word as the user typed it, spelled the way
+// opt offers it: matched without regard to case or surrounding space, and
+// answered in the agent's own spelling, which is what craze sends back. ok is
+// false when there is no option, or it offers no such value.
+func MatchEffortValue(opt *ConfigOption, raw string) (string, bool) {
 	if opt == nil {
 		return "", false
 	}
@@ -557,20 +670,37 @@ func splitLastToken(s string) (rest, last string) {
 	return strings.TrimSpace(s[:i]), s[i+1:]
 }
 
-// SplitModelEffort splits `/model` args: if the last token is an advertised
-// effort value, it is effort and the remainder is the model. Otherwise the
-// whole string is the model.
-func SplitModelEffort(args string, snap Snapshot) (model, effort string) {
+// MatchModelEffort reads `/model <model> [effort]` model first (plan 025
+// design 5): the model is matched against the model list alone, and no effort
+// catalog is consulted. The only catalog there is to consult is the one the
+// session is on NOW, and on cursor that says nothing about the model being
+// switched to — read through it, `/model grok-4.6 high` typed on composer-2.5,
+// which has no effort, was a model named "grok-4.6 high".
+//
+// If the whole of args names a model, that is the model and there is no
+// effort, whatever its last word looks like. Otherwise, if everything before
+// the last token names one, that is the model and the last token is the effort
+// CANDIDATE, as typed: whether it is an effort at all, and how the agent spells
+// it, is for the destination's own catalog to say once the session is on it
+// (MatchEffortValue). Otherwise args is an unknown model, reported as
+// MatchModel reports it — whole, as it always was. A name several models share
+// is reported as ambiguous rather than read some other way, whole or head.
+func MatchModelEffort(snap Snapshot, args string) (model, effort string, err error) {
 	args = strings.TrimSpace(args)
-	if args == "" {
-		return "", ""
+	id, err := MatchModel(snap, args)
+	if !errors.Is(err, errUnknownModel) {
+		return id, "", err
 	}
 	rest, last := splitLastToken(args)
 	if rest == "" {
-		return args, ""
+		return "", "", err
 	}
-	if val, ok := matchEffortValue(EffortOption(snap), last); ok {
-		return rest, val
+	head, headErr := MatchModel(snap, rest)
+	switch {
+	case headErr == nil:
+		return head, last, nil
+	case errors.Is(headErr, errUnknownModel):
+		return "", "", err
 	}
-	return args, ""
+	return "", "", headErr
 }
