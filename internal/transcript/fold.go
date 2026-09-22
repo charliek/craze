@@ -392,10 +392,10 @@ func foldSubagent(m *Model, ev agent.Event) {
 	m.agents[id] = row
 	m.fc.state = true
 	if ev.SubagentChange == agent.SubagentChangeFinished {
-		// The event's own At, unstamped: the TUI closes the child's run at
-		// ev.At directly, so an unstamped finish leaves the run's end as it
-		// was.
-		t.closeStream(ev.At)
+		// The event's own At, and Options.Clock's fallback for an unstamped
+		// one, like every other event-driven close (r1: the TUI's
+		// applySubagentEvent carried the same fix).
+		t.closeStream(m.stamp(ev.At))
 		m.evictFinished(id)
 	}
 }

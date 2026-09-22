@@ -414,15 +414,17 @@ func TestTheRosterIsUpsertedAndAFinishClosesTheChildsRun(t *testing.T) {
 	if f := facts(m.Sub("a"))[0]; f.Open || streamOpen(m.Sub("a")) || !f.End.Equal(at(4)) {
 		t.Fatalf("a finish closes the child's run at its At: %v", f)
 	}
-	// An unstamped finish closes the run and leaves its end (the TUI closes at
-	// ev.At itself, not at its clock).
+	// An unstamped finish closes the run at Options.Clock's fallback, like
+	// every other event-driven close (r1: the TUI's applySubagentEvent
+	// carried the same fix; clock_test.go's TestAChildFinishedIsStampedByIt-
+	// sEvent holds the full matrix, including the no-clock case).
 	c := New(Options{Clock: func() time.Time { return at(50) }})
 	foldAll(t, c, true,
 		agent.Event{Type: agent.EventThought, Agent: "a", Text: "hm", At: at(1)},
 		agent.Event{Type: agent.EventSubagent, Subagent: &agent.SubagentInfo{ID: "a", Status: agent.SubagentCompleted}, SubagentChange: agent.SubagentChangeFinished},
 	)
-	if f := facts(c.Sub("a"))[0]; f.Open || !f.End.Equal(at(1)) {
-		t.Fatalf("an unstamped finish ends the run where it was: %v", f)
+	if f := facts(c.Sub("a"))[0]; f.Open || !f.End.Equal(at(50)) {
+		t.Fatalf("an unstamped finish falls back to the clock: %v", f)
 	}
 }
 

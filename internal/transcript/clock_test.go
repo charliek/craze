@@ -490,3 +490,54 @@ func TestAChildCommandLineIsStampedByItsEvent(t *testing.T) {
 		t.Fatalf("the child's line reached the main transcript: %v", got)
 	}
 }
+
+// TestAChildFinishedIsStampedByItsEvent is r1's fix, carried from the TUI's
+// TestAChildFinishedIsStampedByItsEvent: a sub-agent's finished closes its
+// transcript's run at the event's own At, unstamped falls back to
+// Options.Clock like every other event-driven close, and with no clock
+// configured a zero At leaves the run's end as it was (the engine's
+// TestAnUnstampedClosingEventWithNoClockLeavesTheRunsEnd, carried).
+func TestAChildFinishedIsStampedByItsEvent(t *testing.T) {
+	fin := func() *agent.SubagentInfo {
+		return &agent.SubagentInfo{ID: "task-1", Description: "count lines", Status: agent.SubagentCompleted}
+	}
+	t.Run("stamped", func(t *testing.T) {
+		m := withChild(t, lateModel(t), "task-1")
+		closedAt := clockBase.Add(closedAfter)
+		feed(t, m, thoughtAt("task-1", clockBase))
+		tr := m.ensureSub("task-1")
+		feed(t, m, agent.Event{
+			Type: agent.EventSubagent, Subagent: fin(), SubagentChange: agent.SubagentChangeFinished, At: closedAt,
+		})
+
+		if f := closedThought(t, tr); !f.End.Equal(closedAt) {
+			t.Fatalf("the child's run ends at %v, want the finished event's %v", f.End, closedAt)
+		}
+	})
+	t.Run("unstamped falls back to the clock", func(t *testing.T) {
+		m := withChild(t, lateModel(t), "task-1")
+		feed(t, m, thoughtAt("task-1", clockBase))
+		tr := m.ensureSub("task-1")
+		feed(t, m, agent.Event{
+			Type: agent.EventSubagent, Subagent: fin(), SubagentChange: agent.SubagentChangeFinished,
+		})
+
+		clock := m.now()
+		if f := closedThought(t, tr); !f.End.Equal(clock) {
+			t.Fatalf("an unstamped finished ends the child's run at %v, want the clock's %v", f.End, clock)
+		}
+	})
+	t.Run("unstamped with no clock leaves the run's end", func(t *testing.T) {
+		m := New(Options{})
+		m = withChild(t, m, "task-1")
+		feed(t, m, thoughtAt("task-1", clockBase))
+		tr := m.ensureSub("task-1")
+		feed(t, m, agent.Event{
+			Type: agent.EventSubagent, Subagent: fin(), SubagentChange: agent.SubagentChangeFinished,
+		})
+
+		if f := closedThought(t, tr); !f.End.Equal(clockBase) {
+			t.Fatalf("the child's run end moved to %v with no stamp and no clock, want its own %v", f.End, clockBase)
+		}
+	})
+}

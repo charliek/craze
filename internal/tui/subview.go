@@ -176,7 +176,7 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 	case agent.SubagentChangeFinished:
 		m.noteAgentDone(id)
 		if t := m.subs[id]; t != nil {
-			t.closeStream(ev.At)
+			t.closeStream(m.stamp(ev.At))
 		}
 	default:
 		m.noteAgentStart(id)

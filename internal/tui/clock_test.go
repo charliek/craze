@@ -391,6 +391,41 @@ func TestAChildCommandLineIsStampedByItsEvent(t *testing.T) {
 	}
 }
 
+// TestAChildFinishedIsStampedByItsEvent is r1's fix: a sub-agent's finished
+// closes its transcript's run at the event's own At like every other
+// event-driven close, and unstamped falls back to the clock.
+func TestAChildFinishedIsStampedByItsEvent(t *testing.T) {
+	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
+	t.Run("stamped", func(t *testing.T) {
+		m := withChild(t, lateModel(t), "task-1")
+		closedAt := clockBase.Add(closedAfter)
+		m = feed(t, m, thoughtAt("task-1", clockBase))
+		tr := m.ensureSub("task-1")
+		m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+		m = feed(t, m, agent.Event{
+			Type: agent.EventSubagent, Subagent: &fin, SubagentChange: agent.SubagentChangeFinished, At: closedAt,
+		})
+
+		if f := closedThought(t, tr); !f.End.Equal(closedAt) {
+			t.Fatalf("the child's run ends at %v, want the finished event's %v", f.End, closedAt)
+		}
+	})
+	t.Run("unstamped falls back to the clock", func(t *testing.T) {
+		m := withChild(t, lateModel(t), "task-1")
+		m = feed(t, m, thoughtAt("task-1", clockBase))
+		tr := m.ensureSub("task-1")
+		m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+		m = feed(t, m, agent.Event{
+			Type: agent.EventSubagent, Subagent: &fin, SubagentChange: agent.SubagentChangeFinished,
+		})
+
+		clock := m.now()
+		if f := closedThought(t, tr); !f.End.Equal(clock) {
+			t.Fatalf("an unstamped finished ends the child's run at %v, want the clock's %v", f.End, clock)
+		}
+	})
+}
+
 // TestALocalRowKeepsTheClientsClock is the other side of the rule: a row the
 // client writes for a message of its own is no event's, so it is stamped when
 // the client wrote it — a slash command's usage error, and the optimistic user
