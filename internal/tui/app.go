@@ -1294,6 +1294,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshSnap()
 		return m, nil
 
+	case effortNotAppliedMsg:
+		// The model step landed, so the rows are read back as the landed effort
+		// step's refreshSnapMsg reads them, and then the note says why the
+		// effort did not follow it.
+		m.refreshSnap()
+		m.addNote(msg.note)
+		return m, nil
+
 	case shellDoneMsg:
 		// The command is over; the row it opened says how it went.
 		m.finishShell(msg)

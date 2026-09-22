@@ -1221,7 +1221,9 @@ func TestFrameGoldenModelDialogFourTabs(t *testing.T) {
 	}{
 		{"model-dialog-four-tabs-100x30", "<wait:idle>/model<enter>gro", []string{
 			"> Grok", "  effort  low  medium  [high]  xhigh  max", "  fast  [off]  on",
-			"  context  [300k]  1m", "  thinking  false  [true]", "tab effort/fast/context/",
+			// Four tabs' names are wider than the box, so the footer says
+			// "tab options" and still ends on enter · esc (modelDialogHintAt).
+			"  context  [300k]  1m", "  thinking  false  [true]", "type to filter · ↑↓ · tab options · enter · esc",
 		}},
 		{"model-dialog-context-100x30", "<wait:idle>/model<enter>gro<tab><tab><tab>", []string{
 			"· Grok", "  fast  [off]  on", "> context  [300k]  1m", "  thinking  false  [true]", "←→ change",

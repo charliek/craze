@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -314,6 +315,11 @@ func NextModeID(snap Snapshot) string {
 	return snap.Modes[(idx+1)%len(snap.Modes)].ID
 }
 
+// errUnknownModel is MatchModel's refusal of a name no advertised model has,
+// as against one several models share: what lets MatchModelEffort tell a
+// string that names no model from one that names too many.
+var errUnknownModel = errors.New("unknown model")
+
 func MatchModel(snap Snapshot, raw string) (string, error) {
 	want := normalizeIdent(raw)
 	if want == "" {
@@ -335,7 +341,7 @@ func MatchModel(snap Snapshot, raw string) (string, error) {
 	case 1:
 		return hits[0], nil
 	case 0:
-		return "", fmt.Errorf("unknown model %q", raw)
+		return "", fmt.Errorf("%w %q", errUnknownModel, raw)
 	default:
 		return "", fmt.Errorf("ambiguous model %q", raw)
 	}
@@ -614,7 +620,11 @@ func withoutModelOptions(cfg []ConfigOption, model string) []ConfigOption {
 	return out
 }
 
-func matchEffortValue(opt *ConfigOption, raw string) (string, bool) {
+// MatchEffortValue is raw, an effort word as the user typed it, spelled the way
+// opt offers it: matched without regard to case or surrounding space, and
+// answered in the agent's own spelling, which is what craze sends back. ok is
+// false when there is no option, or it offers no such value.
+func MatchEffortValue(opt *ConfigOption, raw string) (string, bool) {
 	if opt == nil {
 		return "", false
 	}
@@ -639,20 +649,37 @@ func splitLastToken(s string) (rest, last string) {
 	return strings.TrimSpace(s[:i]), s[i+1:]
 }
 
-// SplitModelEffort splits `/model` args: if the last token is an advertised
-// effort value, it is effort and the remainder is the model. Otherwise the
-// whole string is the model.
-func SplitModelEffort(args string, snap Snapshot) (model, effort string) {
+// MatchModelEffort reads `/model <model> [effort]` model first (plan 025
+// design 5): the model is matched against the model list alone, and no effort
+// catalog is consulted. The only catalog there is to consult is the one the
+// session is on NOW, and on cursor that says nothing about the model being
+// switched to — read through it, `/model grok-4.6 high` typed on composer-2.5,
+// which has no effort, was a model named "grok-4.6 high".
+//
+// If the whole of args names a model, that is the model and there is no
+// effort, whatever its last word looks like. Otherwise, if everything before
+// the last token names one, that is the model and the last token is the effort
+// CANDIDATE, as typed: whether it is an effort at all, and how the agent spells
+// it, is for the destination's own catalog to say once the session is on it
+// (MatchEffortValue). Otherwise args is an unknown model, reported as
+// MatchModel reports it — whole, as it always was. A name several models share
+// is reported as ambiguous rather than read some other way, whole or head.
+func MatchModelEffort(snap Snapshot, args string) (model, effort string, err error) {
 	args = strings.TrimSpace(args)
-	if args == "" {
-		return "", ""
+	id, err := MatchModel(snap, args)
+	if !errors.Is(err, errUnknownModel) {
+		return id, "", err
 	}
 	rest, last := splitLastToken(args)
 	if rest == "" {
-		return args, ""
+		return "", "", err
 	}
-	if val, ok := matchEffortValue(EffortOption(snap), last); ok {
-		return rest, val
+	head, headErr := MatchModel(snap, rest)
+	switch {
+	case headErr == nil:
+		return head, last, nil
+	case errors.Is(headErr, errUnknownModel):
+		return "", "", err
 	}
-	return args, ""
+	return "", "", headErr
 }

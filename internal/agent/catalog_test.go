@@ -439,40 +439,72 @@ func optionID(opt *ConfigOption) string {
 	return opt.ID
 }
 
-func TestSplitModelEffort(t *testing.T) {
-	snap := Snapshot{
-		Models: []ModelInfo{{ID: "grok", Name: "Grok"}, {ID: "fast", Name: "Fast"}},
-		Config: []ConfigOption{{
-			ID: "effort", Name: "Effort", Category: "thought_level", Type: "select",
-			SelectValues: []SelectValue{
-				{Value: "low", Name: "Low"},
-				{Value: "medium", Name: "Medium"},
-				{Value: "high", Name: "High"},
-			},
-		}},
+// TestMatchModelEffort is plan 025 design 5's rule: the model is matched
+// against the model list alone — the whole string first, then everything
+// before the last token — and the last token is only a candidate, as typed,
+// for the destination's catalog to judge. It replaces TestSplitModelEffort,
+// which pinned the rule design 5 retires: a suffix recognised only through the
+// SOURCE model's effort catalog, so on a model without effort `/model grok high`
+// was a model named "grok high".
+func TestMatchModelEffort(t *testing.T) {
+	effort := ConfigOption{
+		ID: "effort", Name: "Effort", Category: "thought_level", Type: "select",
+		SelectValues: []SelectValue{
+			{Value: "low", Name: "Low"},
+			{Value: "medium", Name: "Medium"},
+			{Value: "high", Name: "High"},
+		},
 	}
-	model, effort := SplitModelEffort("grok high", snap)
-	if model != "grok" || effort != "high" {
-		t.Fatalf("grok high → %q %q", model, effort)
+	models := []ModelInfo{
+		{ID: "grok", Name: "Grok"},
+		{ID: "fast", Name: "Fast"},
+		{ID: "c2", Name: "Composer 2"},
+		{ID: "grok-max", Name: "Grok Max"},
+		{ID: "a", Name: "Twin"},
+		{ID: "b", Name: "Twin"},
 	}
-	model, effort = SplitModelEffort("grok HIGH", snap)
-	if model != "grok" || effort != "high" {
-		t.Fatalf("canonical effort → %q %q", model, effort)
-	}
-	model, effort = SplitModelEffort("Composer 2", snap)
-	if model != "Composer 2" || effort != "" {
-		t.Fatalf("spaced name → %q %q", model, effort)
-	}
-	model, effort = SplitModelEffort("grok", snap)
-	if model != "grok" || effort != "" {
-		t.Fatalf("model only → %q %q", model, effort)
-	}
-	model, effort = SplitModelEffort("high", snap)
-	if model != "high" || effort != "" {
-		t.Fatalf("single token stays model → %q %q", model, effort)
-	}
-	if _, err := MatchModel(snap, "Composer 2"); err == nil {
-		t.Fatal("unknown spaced name should fail MatchModel")
+	for _, snap := range []struct {
+		name string
+		snap Snapshot
+	}{
+		{"on a model with effort", Snapshot{Models: models, Config: []ConfigOption{effort}}},
+		// The design-5 case: the model the session is on has no effort, and
+		// the split is the same, because no catalog is read.
+		{"on a model without effort", Snapshot{Models: models}},
+	} {
+		for _, tc := range []struct {
+			args, model, effort, err string
+		}{
+			{args: "grok high", model: "grok", effort: "high"},
+			// The candidate as typed: its spelling is the destination's to give.
+			{args: "grok HIGH", model: "grok", effort: "HIGH"},
+			// Anything is a candidate once the head names a model; whether it
+			// is an effort is the destination's catalog's call.
+			{args: "grok turbo", model: "grok", effort: "turbo"},
+			{args: "  grok \t high  ", model: "grok", effort: "high"},
+			{args: "grok", model: "grok"},
+			{args: "Fast", model: "fast"},
+			// A name with a space is matched whole before it is split.
+			{args: "Composer 2", model: "c2"},
+			{args: "Composer 2 low", model: "c2", effort: "low"},
+			// The whole string wins over a split, whatever its last word
+			// looks like: "grok max" is the model grok-max, not grok at max.
+			{args: "grok max", model: "grok-max"},
+			{args: "high", err: `unknown model "high"`},
+			// Unknown whole and head: reported whole, as it always was.
+			{args: "Composer 3 high", err: `unknown model "Composer 3 high"`},
+			{args: "Twin", err: `ambiguous model "Twin"`},
+			{args: "Twin high", err: `ambiguous model "Twin"`},
+		} {
+			model, eff, err := MatchModelEffort(snap.snap, tc.args)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if model != tc.model || eff != tc.effort || gotErr != tc.err {
+				t.Errorf("%s: %q → %q %q %q, want %q %q %q", snap.name, tc.args, model, eff, gotErr, tc.model, tc.effort, tc.err)
+			}
+		}
 	}
 	cfgOnly := Snapshot{
 		Config: []ConfigOption{{
@@ -483,5 +515,33 @@ func TestSplitModelEffort(t *testing.T) {
 	id, err := MatchModel(cfgOnly, "Fast")
 	if err != nil || id != "fast" {
 		t.Fatalf("config models MatchModel %q %v", id, err)
+	}
+	// A model list that lives in the model option is split the same way.
+	if id, eff, err := MatchModelEffort(cfgOnly, "Fast high"); err != nil || id != "fast" || eff != "high" {
+		t.Fatalf("config models MatchModelEffort %q %q %v", id, eff, err)
+	}
+}
+
+// TestMatchEffortValue is the candidate judged against a catalog: any case and
+// surrounding space, answered in the agent's own spelling, and nothing when
+// there is no option or it offers no such value.
+func TestMatchEffortValue(t *testing.T) {
+	opt := &ConfigOption{ID: "reasoning", Type: "select", SelectValues: []SelectValue{{Value: "high"}, {Value: "Max"}}}
+	for _, tc := range []struct {
+		opt  *ConfigOption
+		raw  string
+		want string
+		ok   bool
+	}{
+		{opt, "high", "high", true},
+		{opt, " HIGH ", "high", true},
+		{opt, "max", "Max", true},
+		{opt, "low", "", false},
+		{opt, " ", "", false},
+		{nil, "high", "", false},
+	} {
+		if got, ok := MatchEffortValue(tc.opt, tc.raw); got != tc.want || ok != tc.ok {
+			t.Errorf("%q → %q %v, want %q %v", tc.raw, got, ok, tc.want, tc.ok)
+		}
 	}
 }

@@ -602,8 +602,9 @@ func TestTheFocusedTabsOptionGoingHandsTheFocusBack(t *testing.T) {
 	}
 
 	// Back to claude-opus-5 by another client: the focus that was repaired
-	// stays where the user now has it, and the tabs that come back are drawn
-	// on their options' values.
+	// stays where the user now has it, and every tab is drawn on its option's
+	// value — effort too, whose max the repair above took back, so it is no
+	// choice of the user's any more and follows the model's own high.
 	m = pressKey(t, m, tea.KeyShiftTab)
 	if _, err := stub.SetModel(context.Background(), stubOtherClient, "claude-opus-5"); err != nil {
 		t.Fatal(err)
@@ -613,7 +614,7 @@ func TestTheFocusedTabsOptionGoingHandsTheFocusBack(t *testing.T) {
 		t.Fatalf("focus %q", m.mdlg.focus)
 	}
 	view = plainView(m)
-	for _, want := range []string{"  thinking  false  [true]", "  context  300k  [1m]", "  effort  low  [medium]  high  xhigh  max"} {
+	for _, want := range []string{"  thinking  false  [true]", "  context  300k  [1m]", "  effort  low  medium  [high]  xhigh  max"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("the box is missing %q:\n%s", want, view)
 		}

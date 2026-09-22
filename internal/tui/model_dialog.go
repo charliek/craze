@@ -28,6 +28,10 @@ const (
 	modelHintTail        = "enter · esc"
 	modelDialogHint      = modelHintHead + "tab effort/fast · " + modelHintTail
 	modelDialogHintPlain = modelHintHead + modelHintTail
+	// modelDialogHintOptions stands in for the tabs' labels when they do not
+	// fit the box (modelDialogHintAt): four tabs' names are wider than the
+	// box, and clamped they would cut off the enter · esc every footer ends on.
+	modelDialogHintOptions = modelHintHead + "tab options · " + modelHintTail
 	// modelValueHint is the footer once focus is on a toggle row: ←/→ is the
 	// key that now does something, and the filter still takes what is typed, so
 	// the hint says both rather than dropping one of them.
@@ -73,6 +77,15 @@ type modelDialog struct {
 	// setConfigCurrent's slice: every Model copy shares the map, and a key
 	// must not write through into a copy bubbletea has already discarded.
 	chosen map[string]string
+	// touched is the tabs the user has moved (choose), by option id, copied on
+	// write like chosen. Only a touched tab is a choice: an untouched one
+	// shows its option's live value, following every delta that moves it
+	// (repaired), and Enter sends nothing for it. Without the distinction a
+	// value seeded when the box opened would be sent back on Enter after
+	// another client or the agent had changed the option under the open box —
+	// undoing a change nobody in this dialog asked to undo (plan 025 X10 (f),
+	// panel astra 8).
+	touched map[string]bool
 }
 
 // tabRole is what a tab is to the rest of craze. Effort and fast have a
@@ -191,38 +204,63 @@ func tabIndex(tabs []modelTab, f dialogFocus) int {
 
 // repaired is the dialog made consistent with the tabs the catalog advertises
 // now. A delta can arrive while the box is open — another client's model
-// change brings another model's catalog — so the option the focused tab set
-// can be gone, and a chosen value can be one its option no longer offers. The
-// focus then goes back to the list, and a tab with no chosen value, or one it
-// no longer offers, takes currentOrFirst. A value chosen for an option that has
-// gone is kept, and counts again if the option comes back offering it.
+// change brings another model's catalog, or the agent moves an option — so the
+// option the focused tab set can be gone, an option's live value can have
+// moved, and a chosen value can be one its option no longer offers. The focus
+// then goes back to the list; a tab the user has not touched takes its
+// option's live value (currentOrFirst), whatever it was showing; and a touched
+// tab whose value its option no longer offers takes it too, and is untouched
+// again — what it showed was the user's choice, and that choice is gone, so
+// the value it falls back to is nobody's choice and must not be sent. A value
+// chosen for an option that has gone is kept, and counts again if the option
+// comes back offering it.
 func (d modelDialog) repaired(tabs []modelTab) modelDialog {
 	if tabIndex(tabs, d.focus) < 0 {
 		d.focus = focusList
 	}
-	var next map[string]string
+	var chosen map[string]string
+	var touched map[string]bool
 	for _, t := range tabs {
-		if v, ok := d.chosen[t.opt.ID]; ok && offers(&t.opt, v) {
+		id, live := t.opt.ID, currentOrFirst(&t.opt)
+		v, ok := d.chosen[id]
+		switch {
+		case ok && d.touched[id] && offers(&t.opt, v):
+			continue
+		case ok && !d.touched[id] && v == live:
 			continue
 		}
-		if next == nil {
-			next = make(map[string]string, len(tabs))
-			maps.Copy(next, d.chosen)
+		if chosen == nil {
+			chosen = make(map[string]string, len(tabs))
+			maps.Copy(chosen, d.chosen)
 		}
-		next[t.opt.ID] = currentOrFirst(&t.opt)
+		chosen[id] = live
+		if d.touched[id] {
+			if touched == nil {
+				touched = maps.Clone(d.touched)
+			}
+			delete(touched, id)
+		}
 	}
-	if next != nil {
-		d.chosen = next
+	if chosen != nil {
+		d.chosen = chosen
+	}
+	if touched != nil {
+		d.touched = touched
 	}
 	return d
 }
 
-// choose is the dialog with one tab's value picked, on a fresh map.
+// choose is the dialog with one tab's value picked by the user, and the tab
+// touched, each on a fresh map.
 func (d modelDialog) choose(id, value string) modelDialog {
 	next := make(map[string]string, len(d.chosen)+1)
 	maps.Copy(next, d.chosen)
 	next[id] = value
 	d.chosen = next
+	touched := make(map[string]bool, len(d.touched)+1)
+	maps.Copy(touched, d.touched)
+	touched[id] = true
+	d.touched = touched
 	return d
 }
 
@@ -527,9 +565,10 @@ func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 
 // applyModelDialog is Enter: the box closes optimistically, and one chained
 // command applies model → each tab in catalog order, each step only if it
-// changed. Notes are written for the steps that landed, and for the ones the
-// chain did not apply (optionNotAppliedNote), and an error names the one that
-// failed, so a half-applied change is visible rather than guessed at.
+// changed — and a tab only if the user moved it (modelDialog.touched). Notes
+// are written for the steps that landed, and for the ones the chain did not
+// apply (optionNotAppliedNote), and an error names the one that failed, so a
+// half-applied change is visible rather than guessed at.
 //
 // Every option step is bound to the model the chain ends on: the one picked
 // when the chain switches models, the current one when it does not (plan 025
@@ -553,8 +592,11 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		forModel = id
 	}
 	for _, t := range tabs {
+		// Only a tab the user moved is a change to make: an untouched one is
+		// on its option's live value, and sending it would at best repeat that
+		// value and at worst send back one a delta has since replaced.
 		v := d.chosen[t.opt.ID]
-		if v == "" || v == t.opt.Current {
+		if !d.touched[t.opt.ID] || v == "" || v == t.opt.Current {
 			continue
 		}
 		st := applyStep{cfgID: t.opt.ID, value: v, label: t.label, role: t.role, opt: t.opt, at: m.configRev}
@@ -690,7 +732,7 @@ func (st applyStep) resolveOn(dest []modelTab, model string) (applyStep, bool) {
 
 // valueOn is the step's value as the option to spells it, if it offers one.
 // Effort is matched without regard to case, as `/model`'s effort word is
-// (agent.SplitModelEffort); fast by what the value means, since what the user
+// (agent.MatchEffortValue); fast by what the value means, since what the user
 // picked is on or off and each model spells its own two values; everything
 // else exactly as the agent advertised it.
 func (st applyStep) valueOn(to *agent.ConfigOption) (string, bool) {
@@ -871,6 +913,35 @@ func modelDialogHintText(tabs []modelTab) string {
 	return modelHintHead + "tab " + strings.Join(labels, "/") + " · " + modelHintTail
 }
 
+// modelDialogHintAt is the footer the box draws at an inner width: the tabs
+// named (modelDialogHintText) when that fits, and "tab options" in their place
+// when it does not.
+//
+// Except over effort and fast alone, whose footers — "tab effort/fast", "tab
+// effort", "tab fast" — are drawn at every width exactly as craze has always
+// drawn them (plan 025 design 4 pins their presentation byte for byte): where
+// the box is narrower than one of them, it is clamped as it always was, as the
+// 40x12 frame shows. A catalog with any other tab has no footer of old to keep.
+func modelDialogHintAt(tabs []modelTab, inner int) string {
+	hint := modelDialogHintText(tabs)
+	if lipgloss.Width(hint) <= inner || onlyEffortAndFast(tabs) {
+		return hint
+	}
+	return modelDialogHintOptions
+}
+
+// onlyEffortAndFast reports whether every tab is effort or fast: the catalogs
+// the dialog drew before its tabs came from the catalog — no tab at all among
+// them, whose footer names none and so has nothing to stand in for.
+func onlyEffortAndFast(tabs []modelTab) bool {
+	for _, t := range tabs {
+		if t.role == roleOther {
+			return false
+		}
+	}
+	return true
+}
+
 func (m Model) modelDialogBody(inner, budget int) []string {
 	p := m.modelDialogPlan(budget)
 	// Drawn from the dialog as the tabs now are, which a key or a refresh
@@ -898,7 +969,7 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		rows = append(rows, m.dialogValueRow(t.label, &t.opt, d.chosen[t.opt.ID], d.focus == t.focus(), inner, t.valueName()))
 	}
 	if p.rows.footer {
-		hint := modelDialogHintText(p.tabs)
+		hint := modelDialogHintAt(p.tabs, inner)
 		if d.focus != focusList {
 			hint = modelValueHint
 		}
