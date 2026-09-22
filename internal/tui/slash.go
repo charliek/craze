@@ -561,12 +561,12 @@ func resolveModelArgs(snap agent.Snapshot, args string, shorthand bool) (id, eff
 // never an error row.
 type effortNotAppliedMsg struct{ note string }
 
-// applyModelEffort is `/model <id> [effort]`: optimistic, with the same
-// SetModel → SetConfig(model_config) fallback the dialog's model step uses
-// (applyModelStep). A refused model is revertModelMsg, as it always was. An
-// answer the session could not read — the model call's, or the fallback's —
-// is not a refusal (agent.ErrBadCatalog): it is modelUnreadMsg, with no write
-// after it, the fallback and the effort included.
+// applyModelEffort is `/model <id> [effort]`: optimistic, and one model Set,
+// the dialog's model step (applyModelStep) — which call moves the model is the
+// session's to choose, and a refusal is never retried here. A refused model is
+// revertModelMsg, as it always was. An answer the session could not read is
+// not a refusal (agent.ErrBadCatalog): it is modelUnreadMsg, with no write
+// after it, the effort included.
 //
 // The effort, when there is one, is a candidate until the model step has
 // landed, and is then judged against the catalog the session installed for the
@@ -586,19 +586,19 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	m.model = id
 	m.input.SetValue("")
 
-	modelCfgID := ""
-	if opt := agent.ModelConfigOption(m.snap); opt != nil {
-		modelCfgID = opt.ID
-	}
-
-	// One command per call the closure can make — the model, the fallback that
-	// sets it as a config option, and the effort — minted here because the
-	// closure runs off this Update and may not touch the model. An id that goes
-	// unused is simply a number nobody spent.
-	eng, cmds, at := m.eng, m.nextCmds(3), m.modelRev
+	// One command per call the closure can make — the model and the effort —
+	// minted here because the closure runs off this Update and may not touch
+	// the model. An id that goes unused is simply a number nobody spent.
+	eng, cmds, at, chains := m.eng, m.nextCmds(2), m.modelRev, m.chains
 	return m, func() tea.Msg {
+		// Behind any chain of this client's still running and ahead of any
+		// issued after it (chainLock): a dialog reopened on the model this
+		// command is switching to binds its steps to that model, and must not
+		// read the session before this switch has landed.
+		chains.lock()
+		defer chains.unlock()
 		ctx := context.Background()
-		res, err := applyModelStep(ctx, eng, cmds[0], cmds[1], id, modelCfgID)
+		res, err := applyModelStep(ctx, eng, cmds[0], id)
 		switch {
 		case errors.Is(err, agent.ErrBadCatalog):
 			// The agent may have switched, so there is no prev to put back and
@@ -620,7 +620,7 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		if res.Value != id {
 			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
 		}
-		return runModelEffort(ctx, eng, cmds[2], id, effort)
+		return runModelEffort(ctx, eng, cmds[1], id, effort)
 	}
 }
 

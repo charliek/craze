@@ -183,6 +183,11 @@ type Model struct {
 	// mean something.
 	client string
 	cmdSeq int
+	// chains orders this client's model changes against each other: the
+	// dialog's apply chains and `/model <id> [<effort>]` hold it for their whole
+	// body (chainLock). It is minted with the client id in setSession, one per
+	// engine, and is a pointer so every copy bubbletea makes shares it.
+	chains *chainLock
 	// engErr is what wrapping the session in an engine came back with. It is
 	// unreachable in practice — every session owns an event log and no path
 	// wraps one twice — and is carried rather than panicked on, so it fails the
@@ -757,7 +762,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	m.shell.disown()
 	m.dropShellContext()
 	m.eng, m.sess, m.engErr = nil, nil, nil
-	m.client, m.cmdSeq = "", 0
+	m.client, m.cmdSeq, m.chains = "", 0, nil
 	m.owner.set(nil)
 	if s == nil {
 		return
@@ -785,6 +790,9 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	}
 	m.eng, m.sess = eng, eng.Session()
 	m.client = eng.NewClientID()
+	// A new client, so a new order: a chain still running on the engine this
+	// replaced orders nothing on this one.
+	m.chains = &chainLock{}
 	m.owner.set(eng)
 }
 

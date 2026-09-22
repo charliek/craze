@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -326,8 +327,8 @@ type modelApplyMsg struct {
 	unread bool
 }
 
-// applyStep is one leg of the chain. cfgID empty means the model step, which
-// has its own fallback.
+// applyStep is one leg of the chain. cfgID empty means the model step
+// (applyModelStep).
 //
 // at is the revision its section stood at when the chain was built, and rev the
 // revision the engine confirmed it at — together, what settleStep needs to know
@@ -609,10 +610,11 @@ func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 }
 
 // applyModelDialog is Enter: the box closes optimistically, and one chained
-// command applies model → each tab in catalog order, each step only if it
-// changed — and a tab only if the user moved it (modelDialog.touched). Notes
-// are written for the steps that landed, and for the ones the chain did not
-// apply (optionNotAppliedNote), and an error names the one that failed, so a
+// command applies model → each tab in catalog order — the model only if the
+// user picked another one, and a tab only if the user moved it
+// (modelDialog.touched), whatever value it shows. Notes are written for the
+// steps that landed, and for the ones the chain did not apply
+// (optionNotAppliedNote), and an error names the one that failed, so a
 // half-applied change is visible rather than guessed at.
 //
 // Every option step is bound to the model the chain ends on: the one picked
@@ -621,6 +623,11 @@ func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 // another model's (design 3), so the engine refuses a step whose model has
 // moved by the time it runs, and every step is first re-resolved against the
 // latest catalog of the model it is bound to (runModelApply).
+//
+// The box can be reopened and applied again while this chain is still
+// running, and the second chain then runs only once this one has finished
+// (chainLock): the model it is bound to is often the one this chain is still
+// switching to, and its reads of the session must follow this chain's installs.
 func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	list := m.dialogModelList()
 	tabs := m.modelDialogTabs()
@@ -629,14 +636,12 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 
 	var steps []applyStep
 	forModel := m.snap.CurrentModel
-	switching := false
 	if d.sel >= 0 && d.sel < len(list) && list[d.sel].ID != m.snap.CurrentModel {
 		id := list[d.sel].ID
 		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model", at: m.modelRev})
 		m.snap.CurrentModel = id
 		m.model = id
 		forModel = id
-		switching = true
 	}
 	for _, t := range tabs {
 		// Only a tab the user moved is a change to make: an untouched one is
@@ -646,17 +651,15 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		if !d.touched[t.opt.ID] || v == "" {
 			continue
 		}
-		// A value the option already holds is no change — on the model the
-		// chain stays on. On one it switches to, the value the source holds
-		// says nothing about the destination's, which only the chain can read
-		// once it has switched: there the choice is a step, and runModelApply
-		// drops it only if the destination already holds it. Judged on the
-		// source, a delta that moved the source onto the value chosen for the
-		// destination would silently lose the choice (plan 025 X13, astra r4
-		// item 3).
-		if !switching && v == t.opt.Current {
-			continue
-		}
+		// A moved tab is sent even on the value its option shows. What the
+		// rows show is not what the session will hold when the step reaches
+		// it: an earlier change of this client's can still be waiting for its
+		// answer, or a refresh can have read the session back from under the
+		// rows' optimistic value, and a choice dropped for equalling either is
+		// lost when that change lands after it (astra r6). On a chain that
+		// switches, the rows are the source's, which says nothing about the
+		// destination (astra r4 item 3). The agent takes a write of the value
+		// it already holds as no change.
 		st := applyStep{cfgID: t.opt.ID, value: v, label: t.label, role: t.role, opt: t.opt, at: m.configRev}
 		st.note = st.landedNote()
 		steps = append(steps, st)
@@ -669,19 +672,59 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	modelCfgID := ""
-	if opt := agent.ModelConfigOption(m.snap); opt != nil {
-		modelCfgID = opt.ID
-	}
 	m.applyGen++
 	gen := m.applyGen
-	// One command per step, plus one for the model step's fallback: the closure
-	// runs off this Update and may not mint any of its own.
-	eng, cmds := m.eng, m.nextCmds(len(steps)+1)
+	// One command per step: the closure runs off this Update and may not mint
+	// any of its own.
+	eng, cmds, chains := m.eng, m.nextCmds(len(steps)), m.chains
 	return m, func() tea.Msg {
-		return runModelApply(eng, cmds, steps, forModel, modelCfgID, gen)
+		chains.lock()
+		defer chains.unlock()
+		return runModelApply(eng, cmds, steps, forModel, gen)
 	}
 }
+
+// chainLock orders this client's model changes against each other: a dialog
+// apply chain (runModelApply) and a `/model <id> [<effort>]` command
+// (applyModelEffort) each hold it for their whole body, so one issued while
+// another is still running starts only once that one has finished.
+//
+// The engine's settings FIFO orders the Sets themselves, and that is not
+// enough: a chain decides what to send from reads of the session made BEFORE
+// its step joins that queue — whether the session is still on the model its
+// steps are bound to, what that model's catalog advertises — and a read made
+// while an earlier chain's change is still waiting for its answer sees the
+// session as it was before that change. A box reopened on the claude the
+// screen already shows, with effort low chosen for it, would read the grok
+// the session is still on and note low as stale; the switch would then land
+// and low would be lost (astra r6). Held for the whole chain, the lock puts
+// every read a later chain makes after every install an earlier one made.
+//
+// It is taken only on a command's goroutine, never in Update, so the frame
+// never waits for it; and a chain waits on nothing under it but its own Sets,
+// so what a chain waits for to take it is the chain before it and nothing
+// else. Another client's changes are not ordered by it — nothing on this side
+// could order them — and stay the engine worker's ForModel check's job
+// (engine.Setting.ForModel).
+type chainLock struct {
+	mu sync.Mutex
+	// waits is a test barrier, nil in every other build: it is called when a
+	// chain finds the lock held and is about to wait for it, so a test can know
+	// its second command is waiting behind the first rather than hope it is.
+	waits func()
+}
+
+func (l *chainLock) lock() {
+	if l.mu.TryLock() {
+		return
+	}
+	if l.waits != nil {
+		l.waits()
+	}
+	l.mu.Lock()
+}
+
+func (l *chainLock) unlock() { l.mu.Unlock() }
 
 // runModelApply is the chain itself, on the command's goroutine: it reads the
 // engine and never the Model, which belongs to Update.
@@ -705,8 +748,13 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // option a later step sets (astra r4 item 2). A session no longer on forModel
 // makes that step and every one after it stale notes; an option the model
 // does not advertise, or a value it does not offer, is its note, and the chain
-// goes on; a value the model already holds is no change, and nothing is sent
-// or written for it. Every step is sent bound to the model
+// goes on; a value the model already holds is sent all the same. That read is
+// the latest this client can make — every earlier chain of its own has
+// finished before this one started (chainLock) — but the equality it would
+// show is still no reason to drop a choice: a change of another client's can
+// be queued ahead of this step, and the choice must land after it rather than
+// be lost to it, and the agent takes a write of the value it holds as no
+// change (astra r6). Every step is sent bound to the model
 // (Setting.ForModel), which is what refuses a model change landing between
 // that read and the write: the worker answers engine.ErrStaleModel, the step
 // and every step after it become notes, and nothing more is sent, because the
@@ -717,12 +765,12 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 // (agent.ErrBadCatalog) included, which ends it too, since no option can be
 // judged against a catalog nobody could read, but whose row says the outcome
 // is unknown (modelApplyMsg.unread).
-func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep, forModel, modelCfgID string, gen int) modelApplyMsg {
+func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep, forModel string, gen int) modelApplyMsg {
 	ctx := context.Background()
 	out := modelApplyMsg{gen: gen}
 	for i, st := range steps {
 		if st.cfgID == "" {
-			res, err := applyModelStep(ctx, eng, cmds[i], cmds[len(steps)], forModel, modelCfgID)
+			res, err := applyModelStep(ctx, eng, cmds[i], forModel)
 			if err != nil {
 				out.step, out.err = st.label, err
 				out.unread = errors.Is(err, agent.ErrBadCatalog)
@@ -753,13 +801,6 @@ func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep,
 		var ok bool
 		if st, ok = st.resolveOn(catalogTabs(snap), forModel); !ok {
 			out.done = append(out.done, st)
-			continue
-		}
-		if st.value == st.opt.Current {
-			// Already the model's value: on a chain that switched, the
-			// destination's own (applyModelDialog leaves this judgement to
-			// the chain), and on one that did not, a change somebody else made
-			// since Enter. Nothing to send, and nothing to say.
 			continue
 		}
 		res, err := eng.Set(ctx, cmds[i], engine.Setting{
@@ -844,12 +885,9 @@ func (st applyStep) valueOn(to *agent.ConfigOption) (string, bool) {
 }
 
 // settleStep writes a step the agent accepted into the snapshot. It is the
-// optimistic write made good: the session's own snapshot does not always carry
-// what landed — the model step's fallback writes a config option and leaves
-// CurrentModel alone — so the steps that succeeded have the last word over the
-// refresh. What it writes is what the session installed (applyStep.landed),
-// never the request: an agent whose answer holds another value than the one
-// asked for is showing that value, and so must the rows.
+// optimistic write made good, and what it writes is what the session installed
+// (applyStep.landed), never the request: an agent whose answer holds another
+// value than the one asked for is showing that value, and so must the rows.
 //
 // Unless something newer has been applied since. A step is written only if no
 // delta for its section with a higher revision has reached this model since the
@@ -881,40 +919,30 @@ func (m Model) settleStep(st applyStep) Model {
 	return m
 }
 
-// applyModelStep runs the model step and answers with what the engine
-// confirmed. It keeps the fallback /model has today: an agent without
-// session/set_model may still take the model as a config option, and fb is
-// the command id that fallback spends. The live session takes the config path
-// itself now when the catalog has a model option (plan 025 design 2), so the
-// fallback is rarely reached; it costs nothing where it is not.
+// applyModelStep runs the model step — the dialog's and `/model`'s — and
+// answers with what the engine confirmed: one Set, and nothing sent after a
+// refusal.
 //
-// An answer the session could not read (agent.ErrBadCatalog) takes no
-// fallback. It is not the model refused: the agent answered, and may have
-// switched, so setting the model again as a config option would be a second
-// write craze did not mean — the session's own changeModel does not fall back
-// on it either. Nothing of that answer was installed, so both callers show
-// what the session's snapshot says, and say the outcome is unknown
-// (unreadModelText).
+// There is no fallback here any more (astra r7 item 1). Which call moves the
+// model is the session's to choose (plan 025 design 2): its SetModel sets the
+// model through the model option when the catalog advertises one, and by
+// session/set_model when it advertises none or the agent refuses that path
+// (the live session's changeModel). A refusal that reaches this step is the
+// model refused on the path the session chose, and the retry this step used to
+// make — the model written again as a config option — only re-sent a write the
+// session had just had refused. Worse, it wrote an option id captured from the
+// screen's snapshot before the first call: if the agent's own update had since
+// made another model-category option the model's, that id named a second
+// selector, whose write the session answers as an ordinary option's success —
+// announced here as the model changed, and settled on the screen, while the
+// session stayed on the model it was on.
 //
-// The same holds for the fallback's own answer. When the first call was
-// refused and the fallback's answer could not be read, the fallback's error is
-// the step's answer, not the first refusal: the fallback was sent and
-// answered, and may have switched the model, so "refused" is no longer true of
-// where the model is — returned as the refusal, `/model` would put its prev
-// back without reading the session, and the dialog would name a refusal
-// instead of saying the outcome is unknown (astra r5 item 2). Any other
-// fallback error leaves the first refusal as the answer, as it always has.
-func applyModelStep(ctx context.Context, eng *engine.Engine, cmd, fb engine.Command, id, modelCfgID string) (engine.SetResult, error) {
-	res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
-	if err != nil && modelCfgID != "" && !errors.Is(err, agent.ErrBadCatalog) {
-		res2, err2 := eng.Set(ctx, fb, engine.Setting{
-			Kind: engine.SettingConfig, ID: modelCfgID, Value: id,
-		})
-		if err2 == nil || errors.Is(err2, agent.ErrBadCatalog) {
-			return res2, err2
-		}
-	}
-	return res, err
+// An answer the session could not read (agent.ErrBadCatalog) is not the model
+// refused: the agent answered, and may have switched. Nothing of that answer
+// was installed, so both callers show what the session's snapshot says and say
+// the outcome is unknown (unreadModelText).
+func applyModelStep(ctx context.Context, eng *engine.Engine, cmd engine.Command, id string) (engine.SetResult, error) {
+	return eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
 }
 
 // unreadModelText is the error row for a model change whose answer could not

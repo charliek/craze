@@ -52,8 +52,8 @@ Flags:
                       shape of an agent that has no session/set_model and keeps
                       its model among its options
           modelconfig-refuse same, and session/set_model is answered -32601: the
-                      whole of that agent, so a client's
-                      set_model → set_config fallback runs for real
+                      whole of that agent, so a client that tried
+                      set_model first would have to fall back to set_config
           modellate   echo with no model option at session/new and no
                       session/set_model follow-up of its own: the shape of an
                       agent whose FIRST config list arrives only after

@@ -639,11 +639,12 @@ func TestEachStepIsJudgedOnTheLatestCatalog(t *testing.T) {
 }
 
 // TestATouchedChoiceIsJudgedOnTheDestination is astra r4 item 3 (plan 025
-// X13): in a box that switches models, a touched tab is a step unless the
-// DESTINATION already holds its value. The source's value says nothing about
-// the destination's, so a delta that moves the source onto the value chosen
-// for the destination does not suppress the choice; the destination's own
-// value, which the chain reads once it has switched, does.
+// X13): in a box that switches models, a touched tab is a step judged on the
+// DESTINATION. The source's value says nothing about the destination's, so a
+// delta that moves the source onto the value chosen for the destination does
+// not suppress the choice — and since astra r6 neither does the destination
+// already holding it: a moved tab is always sent, and the agent takes the
+// write of a value it holds as no change.
 func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -662,11 +663,14 @@ func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 			wantLabel:  "Claude Opus 5 (low)",
 		},
 		{
-			// high is claude-opus-5's own value: nothing to send, and grok-4.6
-			// being on medium does not make it a change.
+			// high is claude-opus-5's own value, and it is sent all the same:
+			// a choice dropped for equalling a value the session only seems to
+			// hold is lost to a change that lands after the read (astra r6;
+			// X15's silent drop withdrawn).
 			name: "the destination already holds the choice", key: tea.KeyRight,
-			wantNotes: []string{"model → claude-opus-5"},
-			wantLabel: "Claude Opus 5 (high)",
+			wantWrites: []string{"effort=high"},
+			wantNotes:  []string{"model → claude-opus-5", "effort → high"},
+			wantLabel:  "Claude Opus 5 (high)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -702,6 +706,315 @@ func TestATouchedChoiceIsJudgedOnTheDestination(t *testing.T) {
 			if got := m.modelLabel(); got != tc.wantLabel {
 				t.Fatalf("the status row reads %q, want %q", got, tc.wantLabel)
 			}
+		})
+	}
+}
+
+// goCmd runs a command on its own goroutine, as the program does, and hands
+// back its message once it has finished.
+func goCmd(cmd tea.Cmd) <-chan tea.Msg {
+	out := make(chan tea.Msg, 1)
+	go func() { out <- runCmd(cmd) }()
+	return out
+}
+
+// chainWaits arms the model's chainLock barrier: the channel it returns
+// receives when a chain finds the lock taken and is about to wait for it. It
+// is armed before any command runs, so no goroutine reads the hook while it is
+// written.
+func chainWaits(m Model) <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	m.chains.waits = func() {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	return ch
+}
+
+// waitClosed waits for a barrier to close, or fails the test.
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-deadline():
+		t.Fatalf("%s never got there", what)
+	}
+}
+
+// received is the message a command answered with, or the test's failure.
+func received(t *testing.T, ch <-chan tea.Msg, what string) tea.Msg {
+	t.Helper()
+	select {
+	case msg := <-ch:
+		return msg
+	case <-deadline():
+		t.Fatalf("%s never answered", what)
+		return nil
+	}
+}
+
+// behindTheFirst is astra r6's schedule once both commands are running: the
+// first one's setter is held (Stub.HoldNextSet) and the second has started.
+// Only once the second is waiting for the first (chainLock) is the first
+// released, and the two messages come back the first's first. A second that
+// finishes while the first is still held is the defect itself — it judged its
+// steps on the session as it was before the first's change — and the test says
+// so, then goes on to show what that cost.
+func behindTheFirst(t *testing.T, waits <-chan struct{}, release func(), first, second <-chan tea.Msg) (tea.Msg, tea.Msg) {
+	t.Helper()
+	var early tea.Msg
+	finished := false
+	select {
+	case <-waits:
+	case early = <-second:
+		finished = true
+		t.Errorf("the second command finished while the first was still waiting for its answer")
+	case <-deadline():
+		t.Fatal("the second command neither waited for the first nor finished")
+	}
+	release()
+	a := received(t, first, "the first command")
+	if finished {
+		return a, early
+	}
+	return a, received(t, second, "the second command")
+}
+
+// deliverAnswers hands the commands' messages and then the session's deltas to
+// the model, or the deltas first. A command with nothing to say — `/model`
+// with no effort — answers nil and is skipped.
+func deliverAnswers(t *testing.T, m Model, stub *Stub, deltasFirst bool, msgs ...tea.Msg) Model {
+	t.Helper()
+	evs := stubDeltas(t, stub)
+	if deltasFirst {
+		m = feed(t, m, evs...)
+	}
+	for _, msg := range msgs {
+		if msg != nil {
+			m = deliver(t, m, msg)
+		}
+	}
+	if !deltasFirst {
+		m = feed(t, m, evs...)
+	}
+	return m
+}
+
+// TestALaterChoiceLandsAfterTheChangeStillOutstanding is astra r6's first
+// schedule: effort is on medium and an apply of high is under way, its setter
+// held before the agent's answer installs it — the rows show high, the session
+// still says medium. The box is reopened, medium chosen and applied. The later
+// choice has to land after high: the second chain waits for the first
+// (chainLock) and sends medium whatever the session then reads, so the session
+// ends on medium. Before, the second chain read the session's medium, found
+// nothing to change, sent nothing, and high won.
+//
+// The rows can say medium too, when anything refreshes them from the session
+// while high is outstanding: the box then opens on medium, and medium chosen
+// there — moved off and back — is still a choice, and still sent. Dropped at
+// Enter for equalling the rows, it was lost to high the same way.
+func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readBack bool
+		keys     []tea.KeyType // on effort, in the reopened box
+	}{
+		{name: "the rows show the change", keys: []tea.KeyType{tea.KeyLeft}},
+		{name: "the rows were read back under it", readBack: true, keys: []tea.KeyType{tea.KeyRight, tea.KeyLeft}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answerOrders(t, func(t *testing.T, deltasFirst bool) {
+				m, stub := cursorStub(t, "grok-4.6")
+				writes := configWrites(stub)
+				waits := chainWaits(m)
+				held, release := stub.HoldNextSet()
+				t.Cleanup(release)
+
+				m = openDialog(t, m)
+				m = pressKey(t, m, tea.KeyTab)
+				m = pressKey(t, m, tea.KeyRight) // effort → high
+				tm, cmd := m.Update(enter())
+				m = tm.(Model)
+				first := goCmd(cmd)
+				waitClosed(t, held, "the first chain's setter")
+				if got := optionCurrent(stub.Snapshot().Config, "effort"); got != "medium" {
+					t.Fatalf("the session is on %q: high should still be waiting for its answer", got)
+				}
+				want := "high"
+				if tc.readBack {
+					m = deliver(t, m, refreshSnapMsg{})
+					want = "medium"
+				}
+				if got := optionCurrent(m.snap.Config, "effort"); got != want {
+					t.Fatalf("the rows show %q, want %q", got, want)
+				}
+
+				m = openDialog(t, m)
+				m = pressKey(t, m, tea.KeyTab)
+				for _, k := range tc.keys {
+					m = pressKey(t, m, k)
+				}
+				if got := m.mdlg.chosen["effort"]; got != "medium" || !m.mdlg.touched["effort"] {
+					t.Fatalf("the reopened box is on %q, touched %v", got, m.mdlg.touched["effort"])
+				}
+				tm, cmd = m.Update(enter())
+				m = tm.(Model)
+				a, b := behindTheFirst(t, waits, release, first, goCmd(cmd))
+				m = deliverAnswers(t, m, stub, deltasFirst, a, b)
+
+				if got, want := writes(), []string{"effort=high", "effort=medium"}; strings.Join(got, "|") != strings.Join(want, "|") {
+					t.Fatalf("the agent was sent %q, want %q", got, want)
+				}
+				if got, want := texts(m, entryNote), []string{"effort → high", "effort → medium"}; strings.Join(got, "|") != strings.Join(want, "|") {
+					t.Fatalf("notes %q, want %q", got, want)
+				}
+				if errs := texts(m, entryError); len(errs) != 0 {
+					t.Fatalf("errors %q", errs)
+				}
+				for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+					if got := optionCurrent(snap.Config, "effort"); got != "medium" {
+						t.Fatalf("the effort is %q, want the later choice, medium", got)
+					}
+				}
+				if got := m.modelLabel(); got != "Grok 4.6 (medium)" {
+					t.Fatalf("the status row reads %q", got)
+				}
+			})
+		})
+	}
+}
+
+// TestAChoiceTheSessionAlreadyHoldsIsStillSent is the schedule the chainLock
+// cannot order, and why a moved tab is sent even on the value the session
+// holds (astra r6): the chain reads effort on medium, the value chosen, and
+// another client's change to high lands straight after that read
+// (SetOptionOnRead). The chain sends medium all the same, the engine's FIFO
+// runs it after high, and the session ends on the choice made in this box.
+// Dropped for equalling the medium the chain read, it was lost to high.
+func TestAChoiceTheSessionAlreadyHoldsIsStillSent(t *testing.T) {
+	answerOrders(t, func(t *testing.T, deltasFirst bool) {
+		m, stub := cursorStub(t, "grok-4.6")
+		writes := configWrites(stub)
+		m = openDialog(t, m)
+		m = pressKey(t, m, tea.KeyTab)
+		m = pressKey(t, m, tea.KeyRight) // effort → high
+		m = pressKey(t, m, tea.KeyLeft)  // and back to medium
+		if got := m.mdlg.chosen["effort"]; got != "medium" || !m.mdlg.touched["effort"] {
+			t.Fatalf("the box is on %q, touched %v", got, m.mdlg.touched["effort"])
+		}
+		tm, cmd := m.Update(enter())
+		m = tm.(Model)
+		// Armed after Enter, so the read it lands on is the chain's own.
+		stub.SetOptionOnRead("effort", "high")
+		applied, ok := runCmd(cmd).(modelApplyMsg)
+		if !ok || applied.err != nil {
+			t.Fatalf("the chain came back %+v", applied)
+		}
+		m = deliverAnswers(t, m, stub, deltasFirst, applied)
+
+		if got, want := writes(), []string{"effort=medium"}; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("the agent was sent %q, want %q", got, want)
+		}
+		if got, want := texts(m, entryNote), []string{"effort → medium"}; strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("notes %q, want %q", got, want)
+		}
+		for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+			if got := optionCurrent(snap.Config, "effort"); got != "medium" {
+				t.Fatalf("the effort is %q, want this box's medium, after the other client's high", got)
+			}
+		}
+		if got := m.modelLabel(); got != "Grok 4.6 (medium)" {
+			t.Fatalf("the status row reads %q", got)
+		}
+	})
+}
+
+// TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch is astra r6's second
+// schedule, with the switch made from the dialog and from `/model`: on
+// grok-4.6, a switch to claude-opus-5 is under way with its answer held — the
+// screen already names claude-opus-5, the session is still on grok-4.6. The
+// box is reopened on the model it shows, effort low chosen and applied: no
+// model step, so the chain is bound to claude-opus-5. It waits for the switch
+// (chainLock), reads claude-opus-5's catalog and sends low, and claude-opus-5
+// ends on low. Before, it read grok-4.6, noted low as "the model changed", and
+// claude-opus-5 kept its high.
+func TestAChoiceForTheModelBeingSwitchedToWaitsForTheSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		switchTo  func(t *testing.T, m Model) (Model, tea.Cmd)
+		wantNotes []string
+	}{
+		{
+			name: "the dialog",
+			switchTo: func(t *testing.T, m Model) (Model, tea.Cmd) {
+				m = openDialog(t, m)
+				m = typeInto(t, m, "claude")
+				tm, cmd := m.Update(enter())
+				return tm.(Model), cmd
+			},
+			wantNotes: []string{"model → claude-opus-5", "effort → low"},
+		},
+		{
+			// `/model` with no effort writes no note of its own.
+			name: "/model",
+			switchTo: func(t *testing.T, m Model) (Model, tea.Cmd) {
+				m.input.SetValue("/model claude-opus-5")
+				tm, cmd := m.Update(enter())
+				return tm.(Model), cmd
+			},
+			wantNotes: []string{"effort → low"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answerOrders(t, func(t *testing.T, deltasFirst bool) {
+				m, stub := cursorStub(t, "grok-4.6")
+				writes := configWrites(stub)
+				waits := chainWaits(m)
+				held, release := stub.HoldNextSet()
+				t.Cleanup(release)
+
+				m, cmd := tc.switchTo(t, m)
+				first := goCmd(cmd)
+				waitClosed(t, held, "the switch's setter")
+				if m.snap.CurrentModel != "claude-opus-5" || stub.Snapshot().CurrentModel != "grok-4.6" {
+					t.Fatalf("the screen is on %q and the session on %q: want the switch outstanding",
+						m.snap.CurrentModel, stub.Snapshot().CurrentModel)
+				}
+
+				m = openDialog(t, m)
+				if list := m.dialogModelList(); list[m.mdlg.sel].ID != "claude-opus-5" {
+					t.Fatalf("the box opened on %q, want the model the screen shows", list[m.mdlg.sel].ID)
+				}
+				m = pressKey(t, m, tea.KeyTab)
+				m = pressKey(t, m, tea.KeyLeft) // effort → low
+				if got := m.mdlg.chosen["effort"]; got != "low" {
+					t.Fatalf("the reopened box is on %q", got)
+				}
+				tm, cmd := m.Update(enter())
+				m = tm.(Model)
+				a, b := behindTheFirst(t, waits, release, first, goCmd(cmd))
+				m = deliverAnswers(t, m, stub, deltasFirst, a, b)
+
+				if got, want := writes(), []string{"effort=low"}; strings.Join(got, "|") != strings.Join(want, "|") {
+					t.Fatalf("the agent was sent %q, want %q", got, want)
+				}
+				if got := texts(m, entryNote); strings.Join(got, "|") != strings.Join(tc.wantNotes, "|") {
+					t.Fatalf("notes %q, want %q", got, tc.wantNotes)
+				}
+				if errs := texts(m, entryError); len(errs) != 0 {
+					t.Fatalf("errors %q", errs)
+				}
+				for _, snap := range []agent.Snapshot{stub.Snapshot(), m.snap} {
+					if snap.CurrentModel != "claude-opus-5" || optionCurrent(snap.Config, "effort") != "low" {
+						t.Fatalf("want claude-opus-5 on low: %q %+v", snap.CurrentModel, snap.Config)
+					}
+				}
+				if got := m.modelLabel(); got != "Claude Opus 5 (low)" {
+					t.Fatalf("the status row reads %q", got)
+				}
+			})
 		})
 	}
 }

@@ -119,8 +119,10 @@ func defaultConfigOptions() []map[string]any {
 // modelConfigScript names the scripts that advertise the model option, and
 // refusesSetModel the one of them that is the whole of such an agent: it
 // answers session/set_model with -32601, the live wire for a method an agent
-// does not implement, so a client's set_model → set_config fallback runs end to
-// end instead of being simulated (r25 finding 3).
+// does not implement, so a model change that reaches it by set_model is refused
+// end to end instead of being simulated (r25 finding 3). craze itself now changes
+// the model through the model option wherever the catalog has one (plan 025), so
+// against this script the model moves by set_config_option without a refusal.
 func modelConfigScript(script string) bool {
 	return script == "modelconfig" || script == "modelconfig-refuse" || script == "preinstall"
 }

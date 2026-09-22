@@ -2758,8 +2758,11 @@ func (s *session) applyConfigLocked(cfg []ConfigOption) bool {
 //     change (adoptModelLocked). The reply's catalog is the new model's when
 //     it carries one, and is installed whole — `[]` included, which clears.
 //     When it carries none, the catalog the session has is the previous
-//     model's, and its options other than the mode and the model are dropped
-//     (withoutModelOptions, panel astra 3) — unless it is already the new
+//     model's, and every option in it but the mode and those of category
+//     "model" is dropped — the model option moved to the new model, and a
+//     second model-category selector kept at its own value, since its values
+//     are models and not the previous model's settings (withoutModelOptions,
+//     panel astra 3, astra r5 item 1) — unless it is already the new
 //     model's (catalogOnModelLocked): an update of the agent's own that got
 //     there first, or a change to the model the session was already on, and
 //     then it is kept.
