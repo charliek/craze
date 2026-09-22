@@ -44,6 +44,10 @@ type Stub struct {
 	failConfigAt int
 	configCalls  int
 	snap         agent.Snapshot
+	// modelCatalogs is the per-model catalog SetModelCatalogs installs: every
+	// option each model advertises. nil — every Stub until a test installs one
+	// — is today's Stub, whose one static catalog outlives a model change.
+	modelCatalogs map[string][]agent.ConfigOption
 	// token is the running turn's registry token, the no-turn token between
 	// turns: what a card the test emits now is parked against, and therefore
 	// what a cancel or that turn's end takes away.
@@ -721,9 +725,18 @@ func (s *Stub) SetModel(_ context.Context, cause, id string) (agent.SetOutcome, 
 		return agent.SetOutcome{}, fmt.Errorf("stub: set model failed")
 	}
 	s.snap.CurrentModel = id
+	st := &agent.StateDelta{Model: &id}
+	if s.modelCatalogs != nil {
+		// A per-model catalog: the model change is the live session's one-call
+		// switch (plan 025 design 2), so the destination's catalog is installed
+		// in this same section and the one delta says both. A model the table
+		// does not name advertises nothing.
+		s.snap.Config = cloneStubConfig(s.modelCatalogs[id])
+		st.Config = &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)}
+	}
 	return agent.SetOutcome{
 		Value:  s.snap.CurrentModel,
-		Ticket: s.enqueueDeltaLocked(cause, &agent.StateDelta{Model: &id}),
+		Ticket: s.enqueueDeltaLocked(cause, st),
 	}, nil
 }
 
@@ -772,8 +785,64 @@ func (s *Stub) SetConfig(_ context.Context, cause, id, value string) (agent.SetO
 	if model {
 		s.snap.CurrentModel = value
 		st.Model = &value
+	} else if s.modelCatalogs != nil {
+		// The value is the current model's to keep, so a switch away and back
+		// finds it, as cursor keeps each model's settings. A model option's
+		// write is today's rule, table or not: a test switches with SetModel.
+		s.modelCatalogs[s.snap.CurrentModel] = cloneStubConfig(s.snap.Config)
 	}
 	return agent.SetOutcome{Value: value, Ticket: s.enqueueDeltaLocked(cause, st)}, nil
+}
+
+// SetModelCatalogs gives this Stub cursor's per-model catalog (plan 025):
+// table[m] is every option model m advertises, and from here the Stub's catalog
+// is always the current model's — table[CurrentModel] now, and on SetModel the
+// destination's, installed with the model in one delta. With no table SetModel
+// moves the model alone and the static catalog stays, which is what every
+// `model-dialog-*` golden is drawn from.
+//
+// It is set-up, so it publishes nothing, like every other Set* helper here.
+func (s *Stub) SetModelCatalogs(table map[string][]agent.ConfigOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelCatalogs = make(map[string][]agent.ConfigOption, len(table))
+	for m, cfg := range table {
+		s.modelCatalogs[m] = cloneStubConfig(cfg)
+	}
+	s.snap.Config = cloneStubConfig(s.modelCatalogs[s.snap.CurrentModel])
+}
+
+// stubFourSelectCatalog is a catalog with four selects for the model dialog —
+// effort, fast, context and thinking — in cursor's claude-opus-5 shapes: its
+// ids, names, categories and values as captured 2026-09-21, on cursor's
+// defaults (the capture's currentValues are the account's persisted choices,
+// so context starts on the smaller window and effort on high). The order
+// is not cursor's (it answers thinking, context, effort, fast): effort and fast
+// come first, where the static catalog has them, so a four-tab frame is
+// today's two tabs with two more after them. `thinking` shares effort's
+// category and `context` shares fast's; only the ids and names tell them apart.
+func stubFourSelectCatalog() []agent.ConfigOption {
+	offOn := func(on string) []agent.SelectValue {
+		return []agent.SelectValue{{Value: "false", Name: "Off"}, {Value: "true", Name: on}}
+	}
+	return []agent.ConfigOption{
+		{
+			ID: "effort", Name: "Effort", Category: "thought_level", Type: "select", Current: "high",
+			SelectValues: []agent.SelectValue{
+				{Value: "low", Name: "Low"},
+				{Value: "medium", Name: "Medium"},
+				{Value: "high", Name: "High"},
+				{Value: "xhigh", Name: "Extra High"},
+				{Value: "max", Name: "Max"},
+			},
+		},
+		{ID: "fast", Name: "Fast", Category: "model_config", Type: "select", Current: "false", SelectValues: offOn("Fast")},
+		{
+			ID: "context", Name: "Context", Category: "model_config", Type: "select", Current: "300k",
+			SelectValues: []agent.SelectValue{{Value: "300k", Name: "300K"}, {Value: "1m", Name: "1M"}},
+		},
+		{ID: "thinking", Name: "Thinking", Category: "thought_level", Type: "select", Current: "true", SelectValues: offOn("On")},
+	}
 }
 
 // ModelConfigOption gives this Stub the config-backed model a provider without

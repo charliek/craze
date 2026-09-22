@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -370,6 +372,68 @@ func TestEffortOptionPreference(t *testing.T) {
 	if stubLike == nil || stubLike.Current != "medium" || len(stubLike.SelectValues) != 3 {
 		t.Fatalf("stub/fake shape %+v", stubLike)
 	}
+}
+
+// TestEffortIsNotThinkingOrContext runs the effort and fast heuristics over
+// cursor's own catalogs, captured live 2026-09-21 (Plan 025 X1) as
+// set_config_option(model, X) answered them, the model option trimmed to four
+// models: testdata/cursor-<model>.json. claude-opus-5 carries two selects
+// craze does not offer — `thinking`, which shares effort's category
+// (thought_level), and `context`, which shares fast's (model_config) — and
+// neither may ever be taken for the control it sits beside: only the id and
+// the name tell them apart. glm-5.2's effort is spelled `reasoning`, and it has
+// no fast toggle. The captured currentValues are the account's persisted
+// choices, which is why nothing here reads them.
+func TestEffortIsNotThinkingOrContext(t *testing.T) {
+	for _, tc := range []struct {
+		model  string
+		effort string // the id EffortOption must find, or "" for none
+		fast   string // the id FastOption must find, or "" for none
+	}{
+		{"claude-opus-5", "effort", "fast"},
+		{"glm-5.2", "reasoning", ""},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", "cursor-"+tc.model+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := parseConfigOptions(raw)
+			if len(cfg) == 0 {
+				t.Fatalf("the capture parsed to nothing: %s", raw)
+			}
+			snap := Snapshot{Provider: CursorProvider().Info(), Config: cfg}
+			if got := optionID(EffortOption(snap)); got != tc.effort {
+				t.Fatalf("EffortOption found %q, want %q", got, tc.effort)
+			}
+			if got := optionID(FastOption(snap)); got != tc.fast {
+				t.Fatalf("FastOption found %q, want %q", got, tc.fast)
+			}
+			// With the real controls taken away, what is left must not stand in
+			// for them: a catalog of thinking and context has no effort select
+			// and no fast toggle, whatever their categories say.
+			var rest []ConfigOption
+			for _, opt := range cfg {
+				if opt.ID != tc.effort && opt.ID != tc.fast {
+					rest = append(rest, opt)
+				}
+			}
+			bare := Snapshot{Provider: CursorProvider().Info(), Config: rest}
+			if got := EffortOption(bare); got != nil {
+				t.Fatalf("without %q, EffortOption took %q", tc.effort, got.ID)
+			}
+			if got := FastOption(bare); got != nil {
+				t.Fatalf("without %q, FastOption took %q", tc.fast, got.ID)
+			}
+		})
+	}
+}
+
+func optionID(opt *ConfigOption) string {
+	if opt == nil {
+		return ""
+	}
+	return opt.ID
 }
 
 func TestSplitModelEffort(t *testing.T) {
