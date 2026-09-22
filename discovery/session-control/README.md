@@ -23,9 +23,9 @@ decisions `SD-nn`, open questions `SQ-n`.
 | 2026-09-20 | Plan 021 (S1b) written and panel-reviewed; SD-33 (SQ12: born detached). Execution started. |
 | 2026-09-21 | **S1b executed and shipped**: the engine turn driver, the queue and send-now, the ask registry, settings as state deltas, command ids, and the durable craze session id. Three PRs (#41 `fdaaa6d`, #42 `db7686e`, #46). Live smoke on Linux (cursor, grok, native) and the mac-mini (grok, native; cursor skipped there, blocked by the login keychain over ssh, as S1a found too). Outcome, deviations, smoke tables and handoff in `12`. |
 
-**Current phase: S1b complete. S1c (the render-free transcript model) is
-next.** S1–S5 are committed; S6–S7 are directional and get decided after
-S1–S5 are in daily use (SD-12).
+**Current phase: S1c (the render-free transcript model) is in progress**
+(Plan 024, panel-reviewed 2026-09-21). S1–S5 are committed; S6–S7 are
+directional and get decided after S1–S5 are in daily use (SD-12).
 
 ## Reading order
 

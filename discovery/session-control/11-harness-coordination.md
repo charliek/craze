@@ -162,6 +162,33 @@ Every PR in Plan 021 started from a freshly fetched `origin/main`, and the
 executor told the `craze-harness` session when each PR opened and when it
 merged — the same discipline as the S1a / H2 integration above.
 
+## Plan 024 (S1c) / harness H5 PR 2 and beyond — parallel run (2026-09-21)
+
+Plan 024 (S1c: the render-free transcript model) runs in `../craze-plan024`
+while harness H5 PR 2 (modes) finishes and H6/H7 follow. H5 PR 2 merged as #48
+→ `origin/main` `2b5229b` (2026-09-21, late); the `craze-harness-modes`
+session's seam review found no objections (two cautions, folded into the
+plan's §3.3: H6's children are depth 1; H7's native replay emits
+`EventMeta{State{Mode}}` deltas inside the replay bracket). Where the two meet
+(plan `024-session-control-s1c-transcript-model.md` §2.7):
+
+| surface | this plan (S1c) | harness | rule |
+|---|---|---|---|
+| `internal/transcript/**` (new) | owns it | untouched | no conflict |
+| `internal/engine/{engine,control,attach}.go` | owns it (the fold wiring, `Attach`) | untouched | no conflict |
+| `internal/agent/eventlog.go` | `SubscribeOptions.Ctx` only | untouched | no conflict |
+| `internal/agent/eventcodec.go` | exported leaf wrappers for the snapshot codec | untouched | no conflict |
+| `internal/agent/native.go` | PR 2's C8 only, the title section of `prompt()` | owns it otherwise (H5 PR 2's `start()` install delta, `open()`, `SetMode`, the provider caps; H6, H7 beyond) | second lander rebases; C8 waits for H5 PR 2 on `main` (it is, `2b5229b`) |
+| `internal/cli/` | the hidden attach probe | `provider.go` | no conflict |
+| `internal/tui/transcript*.go`, `app.go`/`cards.go` | PR 1: T1a/T1b only; PR 2: the rest of `internal/tui/**` | H5 PR 2's `planApprovedSeq` field and `cards.go`'s question option descriptions (already on `main`) | no conflict — H5 PR 2 landed first |
+| `.golangci.yml`, `Makefile` | PR 1 | untouched | no conflict |
+| `provider.go`, `internal/harness/**` | untouched | owns it | no conflict |
+| Plan 025 (provider effort/speed, parallel, `13` SF-42) | none of PR 1's files | n/a | may run beside S1c on `live.go`'s setters, `acp/client.go`, `model_dialog.go`, `slash.go`, the fake agent and the Stub |
+
+**Rule:** second lander rebases; both sessions announce opens and merges; PR 2
+of this plan branches only after H5 PR 2 is on `main` (it is) — for
+`app.go`'s sake too, not only C8's `native.go`.
+
 ## Practical notes
 
 - This folder is on `main` from `f943472` (2026-09-19); a harness worktree
