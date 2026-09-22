@@ -23,4 +23,10 @@ H5 (Plan 023, 2026-09-21) leaves three items as follow-ups rather than
 questions for now, each recorded in the plan's §4/§9: free-text "Other"
 answers on the question card, a model-initiated `enter_plan_mode` tool, and
 a system-prompt sentence nudging the model to write todos — R2's smoke
-measures whether a model writes them unprompted with none.
+measures whether a model writes them unprompted with none. R2's answer:
+neither `fireworks/kimi-k3` nor `openrouter/glm-5.3-flash` writes todos
+unprompted on a multi-step task, on either PR, so the prompt-sentence
+follow-up stands. R3 measured the plan-mode reminder's cache cost stated in
+`05`: a full cache-read miss on every plan-mode turn's first request on
+Fireworks (0 against ~9,000–10,000 in agent mode) — worse than expected, so
+the variant-marker replay is now a priority follow-up, not a nice-to-have.

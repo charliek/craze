@@ -415,6 +415,15 @@ mode and the offer disappears once the composer is non-empty. `Esc` clears the
 offer without losing focus. Changing mode, `/clear`, the next turn or a card
 arriving all clear it too.
 
+On the native provider (`--provider native`, hidden) the same `/plan`,
+`/ask`, `/agent`, `Shift+Tab` and the offer above work. Plan mode lets the
+model edit only its plan file, which lives under the harness home beside the
+session transcript
+(`~/.craze/native/sessions/<workspace-slug>/<stamp>_<id>.plan.md`) and is
+never deleted by craze. Ask mode denies every edit, write and shell command.
+Accepting the plan card ends the turn and arms the offer above, even when
+the model said nothing else in that turn.
+
 ## Cards
 
 A blocking request from the agent is a card, and the card owns the keyboard and
@@ -427,6 +436,9 @@ queue, and only the one on top is drawn.
 | permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a` allow once, **`A` allow always**, `n` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
 | question card | `1`–`9` pick, `↑` `↓` move, `Enter` selects (single-choice) or confirms (multiple-choice), `Space` toggles a multiple-choice option. `Esc` **skips** the whole request. |
 | plan card — `plan <name>  [a]ccept  [r]eject  esc cancel` | `a` accept, `r` reject. `Esc` cancels the turn. |
+
+A question card's option may carry a description, drawn dimmed on its own
+line under the label.
 
 `Esc` means two different things on purpose. On a question it is *skipped*: the
 agent is told you declined to answer and the turn carries on. On a plan or a

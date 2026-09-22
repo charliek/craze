@@ -11,7 +11,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H2 | complete | tools shipped across PRs #33, #34, #35, #37: opencode's ported contract (`read`, `write`, `edit`, `bash`, `grep`, `glob`, D-38), the gate seam allowing everything (D-39), ripgrep on `PATH` (D-41), the doom-loop guard (D-42), abnormal-finish handling (D-43), and interject; live smoke completed 14 of 15 imported models on Linux and 4 of 4 on the mac-mini; D-35's condition met, `openaicompat` stays |
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
-| H5 | in progress | modes: plan mode in the dispatcher, exit-plan and question tools, todos; Plan 023 planned and panel-reviewed 2026-09-21, PR 1 next |
+| H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #TBD (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
 | H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
@@ -476,6 +476,80 @@ a gate over a canonical target, the toolset stays fixed), D-50 (the plan
 file, read by the tool, never argued), D-51 (approving ends the turn
 through a typed handoff; the TUI's offer implements), D-52 (no ask
 timeout), D-53 (the tool ids and their Claude-name aliases).
+
+**Exit result:** shipped across two PRs. PR 1 (#45, `b0ea4c4`, 11 commits
+preserved) landed the harness side: `Options.Mode`, `Session.SetMode`/`Mode`,
+`tool.ModeGate` over `AllowAll` with the plan and ask rejection texts,
+`Request.Targets` for edit-kind tools, the plan file (`store.PlanPath`) and
+`mode_change` at step boundaries, reminders spliced in from step 0 with
+full/sparse alternation, `todo_write` (harness-owned list, merge/replace, the
+auto-upgrade, caps), `ask_user_question` and `exit_plan_mode` (grok-build's
+ids and outcome texts, each description opening with its Claude Code name as
+an alias), the typed approval handoff that ends a turn from a tool, and
+native opening asks through `tool.Asker` with todos projected to the tasks
+panel. PR 2 (`ab351a7`, review fixes `ae16ad2`) switched modes on: `SetMode`
+on native the way Plan 021's C10 left the setters, `Snapshot.Modes`/
+`CurrentMode`, `refuseInProcess` keyed on `Capabilities.Modes` (so `craze
+--provider native --plan` works in the TUI path too), the plan-offer made
+eligible for a turn with no assistant text, and the question card's
+description line.
+
+Live smoke, Linux, real tmux, binary rebuilt from each PR's tip,
+`fireworks/kimi-k3` and `openrouter/glm-5.3-flash`, `--provider native`
+(PR 1: `023-native-harness-h5-modes/smoke/pr1-linux.md`; PR 2:
+`smoke/pr2-linux.md`):
+
+| # | what | result |
+|---|---|---|
+| V1 | `/plan`, plan a change, accept, offer, Enter | pass (kimi and glm): the plan file written under the home, `⟳ ask present the plan`, the card, `a` → accepted, the turn ended with no assistant text, the offer armed, Enter → agent mode, "Implement the plan above.", the file changed |
+| V2 | in plan mode, an outright edit of a repo file | no denial fired live on either model: both kimi and glm obey the plan reminder and present a plan instead of attempting the edit; the live denial is V7's; the plan-mode denial of a non-plan file is covered by the harness tests and the `native-plan-denied` golden |
+| V3 | a skill that asks a question (`AskUserQuestion` by Claude's name) | pass: the card raised (two options, `1-9 pick`), an option picked, the transcript row read the answer, the model used it |
+| V4 | reject the plan; feedback as the next message | pass (kimi): rejected, the model asked what to change, the next message produced a revised plan |
+| V5 | Esc on the plan card | pass (kimi): cancelled, chip stayed `plan`, `/agent` left |
+| V6 | Ctrl+C while the question card is open | pass: cancelled, the TUI stayed responsive, the next prompt ran |
+| V7 | Shift+Tab mid-turn while the model is writing files | pass (kimi), richer than planned: Shift+Tab cycled agent→plan→ask mid-turn; the write of the plan file the model had already placed ran, but the next write after the switch to ask was denied (`Rejected: ask mode is read-only…`), `exit_plan_mode` in ask mode was denied by name too, and the model was told at the next step boundary |
+| V8 | `craze prompt --provider native --plan/--ask --json` | pass on both models, both halves: `--plan` ends with the plan auto-accepted and no workspace file changed; `--ask` denies every non-read-only call and answers from the reminder |
+| V9 | todos: a multi-step task | pass: the tasks panel filled, statuses moved, `TASKS 2/2 ✓` |
+
+R1: PR 1 already had `TodoWrite` and `AskUserQuestion` reaching their
+snake_case tools; PR 2 added `ExitPlanMode` — **3 of 3 Claude names now reach
+the tool on both models**, with no hint beyond the alias sentence. R2:
+neither model writes todos unprompted on a multi-step task, across both PRs;
+the prompt-sentence follow-up stands. **R3, the cross-turn cache cost,
+measured on `fireworks/kimi-k3`:** plan mode is a full cache miss on every
+turn's first request (0 cache-read tokens, against ~9,000–10,000 in agent
+mode on the same turns) — worse than §3.3's stated model, which expected the
+system-prompt prefix to hit and only the tail to diverge; within a turn the
+second request still hits on both. The variant-marker replay of reminders is
+now the priority follow-up, not a nice-to-have.
+
+**This is the first time a real model called `exit_plan_mode`, and ending
+the turn from the tool behaved exactly as designed**: the tool result was the
+approval text, the turn ended `end_turn`, the mode stayed `plan`, and the
+TUI's offer armed. D-51 holds and §3.4's fallback was never needed.
+
+V10 (the mac-mini): not run; CI runs macOS.
+
+Follow-ups:
+
+- the variant-marker replay of reminders (priority, R3);
+- OWNER'S CALL: a native ask parked at quit ends `cancelled, by call`, not
+  `closing` (X10; adapter-only change if wanted);
+- PRE-EXISTING: `native_tools.go`'s tool-row projection sanitises after
+  redaction with no second redaction (X15);
+- PRE-EXISTING: `announceCurrent` (`SetModel`/`SetConfig`) has the same
+  Close window `announceMode` now guards (X23.1);
+- PRE-EXISTING: bubbletea v1 treats a fast chunk of runes spelling a key
+  name as that key in the composer (X24);
+- cosmetic: a `todo_write` that only completes items titles its row `0
+  todos` (X17);
+- free-text "Other" answers; `enter_plan_mode`; the todo prompt sentence
+  (§4, §9; `10-open-questions.md` already lists these three);
+- `--json` has no field for a plan's body (X22.7).
+
+H6 (sub-agents) is next; its gate is nothing — a child-process `agent` tool,
+event tagging, cancel propagation, and personas from workspace and imported
+agents.
 
 ### H6 — sub-agents
 
