@@ -1035,6 +1035,10 @@ itself a decision entry.
 
 ### Handoff
 
+Everything below, and the smaller items the deviations above record as "not
+fixed", is the backlog in `13` (SF-01 to SF-41) with a phase and a size per row;
+plan from there. This section is the narrative.
+
 **What S1c folds.** The delta sections (`StateDelta`'s `Title` / `Mode` /
 `Model` / `Config` / `Commands` / `Plugins` / `SendNow`), `EventTurn` and
 `EventAsk` are the shared facts the transcript model folds into entries; the

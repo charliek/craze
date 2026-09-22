@@ -41,11 +41,16 @@ S1–S5 are in daily use (SD-12).
 10. [10 — Open questions](10-open-questions.md): `SQ-n`, each with a default.
 11. [11 — Harness coordination](11-harness-coordination.md): overlap with `discovery/native-harness/` and the ordering that matters.
 12. [12 — Progress and results](12-progress.md): what each phase actually did, with a template for recording one.
+13. [13 — Follow-ups](13-follow-ups.md): the backlog, `SF-nn` — everything a phase found and did not do, by the phase that should take it.
 
 ## How to use this folder in a future session
 
 - Planning a phase: read `README`, `01`, `02`, `07`, `08`, then the topic
-  file for the phase (`03`+`04` for S1, `05` for S2, `06` for S3).
+  file for the phase (`03`+`04` for S1, `05` for S2, `06` for S3), **and the
+  phase's section of `13`**: the plan's work breakdown says which `SF-nn` rows
+  it takes and which it leaves.
+- Closing a phase: before it is called complete, everything it found and did
+  not do is a row in `13`, and every row it closed is deleted from it.
 - Any plan touching `internal/agent` or the native adapter: read `11` first.
 - When a phase's plan is final, add its section to `12` as planned. When it
   merges, in the same PR: fill in `12`, update `07`'s phase table and this
