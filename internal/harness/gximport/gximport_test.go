@@ -684,6 +684,39 @@ func TestImportKeepsAManualToolProfile(t *testing.T) {
 // TestImportPreservesSubagents: gx has no concept of sub-agent defaults or
 // tiers, so an existing [subagents] section survives a merge untouched, the
 // same way a manual provider or model does (plan 026 §3.6, decision 3).
+// TestImportClearsAStaleSubagentsEffort (PR #51's CodeRabbit review): the
+// [subagents] default model is a gx one, and the existing table offers an
+// effort on it that the re-imported model no longer does. The import still
+// succeeds: the stale effort is cleared and a note says so, and the model and
+// the tiers are kept. Without the clearing, Validate refused the whole merge.
+func TestImportClearsAStaleSubagentsEffort(t *testing.T) {
+	existing := existingTable()
+	kimi := existing.Models["fireworks/kimi-k3"]
+	kimi.Efforts = append(slices.Clone(kimi.Efforts), "ultra")
+	existing.Models["fireworks/kimi-k3"] = kimi
+	existing.Subagents = modeltable.Subagents{Model: "fireworks/kimi-k3", Effort: "ultra",
+		Tiers: map[string]string{"opus": "local/model"}}
+	if err := existing.Validate(); err != nil {
+		t.Fatalf("control: the existing table is invalid: %v", err)
+	}
+	got, report, err := Import(fixture, existing)
+	if err != nil {
+		t.Fatalf("Import = %v; want the stale effort cleared, not the import refused", err)
+	}
+	if slices.Contains(got.Models["fireworks/kimi-k3"].Efforts, "ultra") {
+		t.Fatal("control: the re-imported model still offers ultra, so nothing went stale")
+	}
+	want := modeltable.Subagents{Model: "fireworks/kimi-k3", Tiers: map[string]string{"opus": "local/model"}}
+	if !reflect.DeepEqual(got.Subagents, want) {
+		t.Fatalf("Subagents = %+v, want %+v", got.Subagents, want)
+	}
+	if !slices.ContainsFunc(report.Models.Notes, func(n Note) bool {
+		return n.ID == "fireworks/kimi-k3" && strings.Contains(n.Text, `effort "ultra"`)
+	}) {
+		t.Fatalf("no note says the effort was cleared: %+v", report.Models.Notes)
+	}
+}
+
 func TestImportPreservesSubagents(t *testing.T) {
 	existing := existingTable()
 	existing.Subagents = modeltable.Subagents{
