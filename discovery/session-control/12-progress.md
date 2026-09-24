@@ -1132,8 +1132,8 @@ flake fix moved in two more (X39).
 
 | criterion | result | evidence |
 |---|---|---|
-| golden files byte-identical; `transcript_test.go` assertions move packages unchanged | pass | A1: `git diff --stat` on `*testdata*` across both PRs touches only H5's pre-existing row (already on `main` before this plan), `native-echo-80x24` row 20 and `native-mode-100x30`'s separator row (SF-01, X38, at C8), and `grok-subagent-rows-{80x24,100x30}`'s frozen spinner glyph `✴` → `✳` (a pre-existing macOS-CI flake fixed test-side, X39) — every other golden byte-identical; A13: the listed assertions kept / moved / split / deleted, named in both packages at T1a and C5c, the PR bodies list every one |
-| a second in-process subscriber attached mid-turn from a snapshot reproduces the first's transcript exactly | pass | A2: `TestASecondSubscriberAttachedMidTurnReproducesTheFirst`, `TestAttachOverTheFakeAgentReproducesTheFirst`, `TestAWindowedSnapshotReproducesTheSuffix` (`internal/engine/exactness_test.go`); live, PR 1's attach probe (4/4 SAME, Linux) and PR 2's V1 attach probe (3/3 SAME on Linux at the early and the tip binary, 2/2 SAME on the mac-mini) — see "Live smoke" |
+| golden files byte-identical, with four permitted one-row exceptions (SF-01's two title rows, X38; X39's two spinner glyphs); `transcript_test.go` assertions move packages unchanged | pass | A1: PR 2's diff (`git diff --stat f5c3cfd..HEAD -- '*testdata*'`) is exactly those four files — `native-echo-80x24` row 20 and `native-mode-100x30`'s separator row (SF-01, X38, at C8), `grok-subagent-rows-{80x24,100x30}`'s frozen spinner glyph `✴` → `✳` (a pre-existing macOS-CI flake fixed test-side, X39) — every other golden byte-identical; A13: the listed assertions kept / moved / split / deleted, named in both packages at T1a and C5c, the PR bodies list every one |
+| a second in-process subscriber attached mid-turn from a snapshot reproduces the first's transcript exactly | pass | A2: `TestASecondSubscriberAttachedMidTurnReproducesTheFirst`, `TestAttachOverTheFakeAgentReproducesTheFirst`, `TestAWindowedSnapshotReproducesTheSuffix` (`internal/engine/exactness_test.go`); live, PR 1's attach probe (4/4 SAME, Linux) and PR 2's V1 attach probe (3/3 SAME on Linux at the early phase and at the pre-rebase `bee8547` binary, 2/2 SAME on the mac-mini) — see "Live smoke" |
 | snapshot and replay memory stay inside stated byte bounds on a worst-case session | pass | A3: `TestTheModelIsBoundedOnAWorstCaseSession`, `TestSnapshotStaysInsideItsByteBudget`, `TestMandatoryStateOverTheBudgetIsRefused`, `TestAttachOverAWorstCaseSessionFitsTheSubscription`; numbers in "Measurements" below |
 
 ### What shipped per commit
@@ -1569,8 +1569,8 @@ as S1a/S1b/PR1 all found):
 | — | native title on the separator | n/a | PASS |
 | — | attach probe | PASS (SAME) | PASS (SAME) |
 
-**V3, the journal record**: Linux tip 21/21 PASS (the early phase on the C5c
-binary: 11/11 PASS); mac-mini 17/17 PASS. No `gap` lines anywhere, every
+**V3, the journal record**: Linux, the pre-rebase `bee8547` binary, 21/21
+PASS (the early phase on the C5c binary: 11/11 PASS); mac-mini 17/17 PASS. No `gap` lines anywhere, every
 `closing` diag `droppedAtClose = 0`/`outboxSkippedPrimary = 0`, exactly one
 `craze_session` note per file, every ask has one opening and one ending, no
 craze-initiated meta sets `mode`/`text`.
