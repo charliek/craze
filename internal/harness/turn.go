@@ -74,14 +74,25 @@ type Result struct {
 // step at a time, until the model answers without one — and each step's
 // end. A nil sink discards events.
 //
-// sink is called only while the turn holds its own lock, so it is never
-// called twice at once, though tool events arrive from Fantasy's tool
-// goroutines; nothing reaches it after Run returns. It must not block for
-// long, and it must never block on a ToolProgress: progress is lossy by
-// contract, and a snapshot the turn cannot hand over at once (its lock is
-// busy) is dropped, never queued — a consumer that may block delivers
-// ToolProgress without blocking, or drops it. sink may call the session's
-// other methods, but not Close, which waits for this Run.
+// The turn's own events reach sink only while the turn holds its own lock, so
+// two of them never arrive at once, though tool events come from Fantasy's
+// tool goroutines; the lifecycle of a sub-agent — SubagentStarted and
+// SubagentFinished — is the turn's own and arrives the same way. A
+// sub-agent's own events do not (plan 026 §3.9): each child's turn hands them,
+// wrapped in SubagentEvent, straight to this sink while it holds the child's
+// lock and never this turn's, so that nothing on the parent's side ever waits
+// on a child. While children run, sink is therefore entered concurrently — by
+// this turn under its lock, and by each child under its own — and a consumer
+// whose state both touch must guard it. The events of any one child still
+// arrive one at a time and in its order. Nothing reaches sink after Run
+// returns: a child is joined before its agent call returns, and the turn
+// before its calls. It must not block for long, and it must never block on a
+// ToolProgress, a child's included: progress is lossy by contract, and a
+// snapshot the turn cannot hand over at once (its lock is busy) is dropped,
+// never queued — a consumer that may block delivers ToolProgress without
+// blocking, or drops it. A consumer that blocks on one child's event holds up
+// that child, and neither the parent nor another child. sink may call the
+// session's other methods, but not Close, which waits for this Run.
 //
 // It returns a Result when the model finished (end_turn, max_tokens,
 // refusal), when the harness stopped it (max_turn_requests), or when the
@@ -181,13 +192,26 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	// The session's todo store reaches this turn's sink only through here
 	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
 	// once Run returns, the same way modes and the steer box are handed a
-	// fixed reference at the start rather than looked up each time.
-	release := s.tools.todos.attach(t.emitLocked)
-	defer release()
+	// fixed reference at the start rather than looked up each time. A
+	// sub-agent has no todo list (plan 026 §3.2).
+	if s.tools.todos != nil {
+		defer s.tools.todos.attach(t.emitLocked)()
+	}
 	// And the session's asker tells this turn, and no other, of a plan the
 	// person approved (asker.go).
 	if s.tools.asker != nil {
 		defer s.tools.asker.attach(t.planWasApproved)()
+	}
+	// And the session's sub-agent runner reports to this turn, and resolves a
+	// child's model against this turn's, for as long as it runs (plan 026
+	// §3.6, §3.9): a call's children report their lifecycle through the
+	// turn's lock and their own events straight to its sink, and one made
+	// after a SetModel mid-turn still starts from the model the turn — and
+	// so the call — runs on, not the session's current one (panel CodeRabbit
+	// 12). Detached once Run returns, by which time every call, and so every
+	// child, has.
+	if s.subs != nil {
+		defer s.subs.attach(t)()
 	}
 	// From here Steer is accepted, and only from here: a prompt the store
 	// refused above never became a turn, so there was nothing to steer into.
@@ -564,6 +588,12 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 	t.stop = stepStop(step.FinishReason, len(open))
 	t.usage = *store.UsageOf(step.Usage)
 	done := t.stepDone(step)
+	// What the step's sub-agents spent, a row per model (plan 026 §3.7): on
+	// the step's tool entry below, and on its StepDone whatever becomes of the
+	// append — a step refused for its ids or whose save fails is persisted
+	// nowhere, and the report is then the only record (panel P40).
+	children := subagentUsage(t.list)
+	done.SubagentUsage = children
 
 	results, bad := t.stepResults(step, open)
 	if bad {
@@ -584,7 +614,12 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		}
 		var toolEntry *store.MessageEntry
 		if results != nil {
-			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort}
+			// The children's usage rides on the entry that holds their results,
+			// each row priced by its own model; the entry itself is stamped with
+			// the parent's model and carries no plain usage, which that model's
+			// rate would price (plan 026 §3.7).
+			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort,
+				SubagentUsage: children}
 		}
 		// The mode this step's request announced is handed over first, so the
 		// store writes the mode_change ahead of this step's own entries

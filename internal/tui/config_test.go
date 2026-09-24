@@ -385,3 +385,37 @@ func TestConfigCompatClaudeTable(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigCompatClaudeAgents is the sixth key, agents (plan 026 §3.4): the
+// personas' switch, read by the same rule as the other five — on by default,
+// off only for a literal false, and a value that is not a bool is on plus a
+// line, reported after the five in the table's own order.
+func TestConfigCompatClaudeAgents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want agent.ClaudeCompat
+		why  []string
+	}{
+		{"absent", "[compat.claude]\nskills = false\n", agent.ClaudeCompat{NoSkills: true}, nil},
+		{"on", "[compat.claude]\nagents = true\n", agent.ClaudeCompat{}, nil},
+		{"off", "[compat.claude]\nagents = false\n", agent.ClaudeCompat{NoAgents: true}, nil},
+		{"off with plugins off", "[compat.claude]\nagents = false\nplugins = false\n",
+			agent.ClaudeCompat{NoAgents: true, NoPlugins: true}, nil},
+		{"not a bool", "[compat.claude]\nagents = \"off\"\nrules = 0\n", agent.ClaudeCompat{}, []string{
+			"config.toml compat.claude.rules is not a bool; leaving it on",
+			"config.toml compat.claude.agents is not a bool; leaving it on",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			got, why := ConfigCompatClaude()
+			if got != tc.want {
+				t.Errorf("ConfigCompatClaude() = %+v, want %+v", got, tc.want)
+			}
+			if strings.Join(why, "|") != strings.Join(tc.why, "|") {
+				t.Errorf("diagnostics %q, want %q", why, tc.why)
+			}
+		})
+	}
+}

@@ -50,15 +50,25 @@ type ClaudeCompat struct {
 	NoSkills   bool
 	NoCommands bool
 	NoPlugins  bool
+	// NoAgents removes every persona, from all three of their sources — the
+	// workspace chain's, the user's and every plugin's (plan 026 §3.4). Unlike
+	// NoSkills and NoCommands it reaches into the plugins: the owner's switch
+	// for personas is one switch over sub-agent types wherever they come from.
+	// NoPlugins removes a plugin's personas as well, with everything else a
+	// plugin ships. Neither changes the menu or the prompt, which personas
+	// never reach; they change the types the agent tool offers.
+	NoAgents bool
 }
 
 // sources is src with the classes this table turns off taken out of it, which
-// is the whole of how four of the five toggles are implemented: contentSources
+// is the whole of how five of the six toggles are implemented: contentSources
 // already carries "where content lives" as data (§3.1), so removing a class is
 // removing its name from the layout rather than threading a flag down into
 // every loop that reads one. A loader asked for a directory called "" finds
 // nothing (nativeSubdir, readRules), so each of these is exactly one class
-// less and nothing else.
+// less and nothing else. NoAgents clears the sources' one persona flag instead
+// of three names, because it has to reach the plugin pass as well (plan 026
+// §3.4).
 //
 // NoInstructions is not here: it removes the loader's whole output rather than
 // one of its inputs, and loadNativeContent simply does not call it.
@@ -75,7 +85,15 @@ func (c ClaudeCompat) sources(src contentSources) contentSources {
 	if c.NoPlugins {
 		// The zero scan is "this provider needs no plugin scan" (PluginScan),
 		// which is how every provider that reads no plugin already says so.
+		// It takes the plugins' personas with it: their pass runs inside the
+		// plugin scan (rootEntries).
 		src.Plugins = PluginScan{}
+	}
+	if c.NoAgents {
+		// The one flag over all three persona sources (contentSources.Personas),
+		// the plugin pass included — not the layout's names, which would leave
+		// the plugin pass to NoPlugins.
+		src.Personas = false
 	}
 	return src
 }
@@ -97,6 +115,11 @@ type nativeLoad struct {
 	// the same row, not because two runs of the resolver agree.
 	rows   []PluginCommand
 	extras harness.PromptExtras
+	// personas are the sub-agent types the scan found, mapped for the harness
+	// (nativePersonas, plan 026 §3.4). They are a list of their own, read by the
+	// same run and never part of entries, rows or extras: the menu and the
+	// frozen prompt do not change with them.
+	personas []harness.Persona
 }
 
 // loadNativeContent is that reading: the scan, the names, the instruction
@@ -109,7 +132,8 @@ type nativeLoad struct {
 func loadNativeContent(src contentSources, c ClaudeCompat, keys []string, warn func(string)) nativeLoad {
 	src = c.sources(src)
 	content := nativeLoad{}
-	content.entries = discoverNative(src, warn)
+	entries, agents := discoverNativeContent(src, warn)
+	content.entries = entries
 	// taken is nil because native advertises no commands of its own
 	// (ResolvePluginNames adds craze's builtins itself), and provisional is
 	// false because there is no catalog still to arrive that could rename a
@@ -118,6 +142,9 @@ func loadNativeContent(src contentSources, c ClaudeCompat, keys []string, warn f
 	// The key gate, once, over the resolved list and before either projection
 	// is taken from it.
 	content.entries, content.rows = dropKeyBearing(content.entries, content.rows, keys, warn)
+	// The personas the same run read, mapped and gated apart from the entries:
+	// nothing below reads them, so the catalog is what it would be without them.
+	content.personas = nativePersonas(agents, keys, warn)
 	if !c.NoInstructions {
 		content.extras.Instructions = loadInstructions(src, warn)
 	}

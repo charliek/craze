@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -335,4 +337,140 @@ func TestNativeEventsAllRenderAsJSON(t *testing.T) {
 			t.Fatalf("the session never emitted a %s event, so nothing checked its rendering", want)
 		}
 	}
+}
+
+// TestPromptJSONNativeSubagent (A11, plan 026 §3.12): a native sub-agent as
+// `craze prompt --json` prints it, with no change to this file's projection:
+// subagent lines for its spawn, its progress and its finish, carrying the row
+// whole — its id, the parent's call it belongs to, its type, model, task and
+// answer — and the child's own lines tagged with its id: its task as a user
+// line, its tool rows and its answer. The parent's agent call is a task-kind
+// tool line whose task names the child and its model once it has finished.
+// Every event the session emitted has a line, and none of them holds the
+// session's key, which the call's description carries whole and its prompt
+// split by a zero-width space — which no redactor sees, and which the
+// sanitizer would join back into the key (plan 026 §3.9, panel P38).
+func TestPromptJSONNativeSubagent(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The key nativeJSONSession's environment holds: redacted wherever the
+	// adapter publishes the call's own text.
+	const key = "test-key"
+	split := key[:4] + string(rune(0x200b)) + key[4:]
+	args := fmt.Sprintf(`{"description":"scan with %s","prompt":"Read main.go with %s and say what it is."}`, key, split)
+	model := &nativeJSONModel{steps: [][]fantasy.StreamPart{
+		nativeJSONCall("a1", "agent", args),
+		// The child's two requests: one model serves parent and child, one
+		// request at a time, so the steps are taken in the order sent.
+		nativeJSONCall("r1", "read", `{"filePath":"main.go"}`),
+		nativeJSONAnswer("looking", "it is package main"),
+		nativeJSONAnswer("done", "the child says it is package main"),
+	}}
+	sess := nativeJSONSession(t, model, ws)
+	if _, err := sess.Prompt(context.Background(), "delegate it"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	evs := drainNativeEvents(sess)
+	for _, ev := range evs {
+		_, ok := eventJSON(ev)
+		switch {
+		case ok:
+		case ev.Type == agent.EventMeta && ev.Text == "", ev.Type == agent.EventTurn, ev.Type == agent.EventAsk:
+			// TestNativeEventsAllRenderAsJSON's documented exceptions.
+		default:
+			t.Fatalf("no rendering for the %s event the adapter emitted: %+v", ev.Type, ev)
+		}
+	}
+	objs := encodeNativeEvents(t, evs)
+	var buf bytes.Buffer
+	for _, o := range objs {
+		fmt.Fprintln(&buf, o)
+	}
+	if strings.Contains(buf.String(), key) {
+		t.Fatalf("the JSON stream holds the key:\n%s", buf.String())
+	}
+
+	var subs []map[string]any
+	for _, o := range objs {
+		if o["type"] == "subagent" {
+			subs = append(subs, o)
+		}
+	}
+	if len(subs) < 3 || subs[0]["event"] != "spawned" || subs[len(subs)-1]["event"] != "finished" {
+		t.Fatalf("the subagent lines are %v; want spawned first, finished last", subs)
+	}
+	id, _ := subs[0]["id"].(string)
+	fin := subs[len(subs)-1]
+	switch {
+	case id == "" || fin["id"] != id:
+		t.Fatalf("the subagent lines name %q and %v", id, fin["id"])
+	case subs[0]["status"] != "running" || subs[0]["toolCallId"] != "t1.1.1" || subs[0]["subagentType"] != "general-purpose" ||
+		subs[0]["model"] != "test/a" || subs[0]["transcript"] != true:
+		t.Fatalf("the spawned line is %v", subs[0])
+	case !strings.Contains(fmt.Sprint(subs[0]["description"]), "[craze:redacted-credential]"):
+		t.Fatalf("the spawned line's description is %v; want the key redacted", subs[0]["description"])
+	case fin["status"] != "completed" || fin["output"] != "it is package main" || fin["toolCalls"] != float64(1) ||
+		fin["turns"] != float64(2):
+		t.Fatalf("the finished line is %v", fin)
+	}
+	for _, s := range subs[1 : len(subs)-1] {
+		if s["event"] != "progress" || s["id"] != id {
+			t.Fatalf("a subagent line between spawned and finished is %v", s)
+		}
+	}
+
+	var childKinds []string
+	for _, o := range objs {
+		if o["agent"] != id {
+			continue
+		}
+		childKinds = append(childKinds, fmt.Sprint(o["type"]))
+		switch o["type"] {
+		case "user":
+			if !strings.Contains(fmt.Sprint(o["text"]), "Read main.go with [craze:redacted-credential]") {
+				t.Fatalf("the child's user line is %v; want its task, the key redacted", o)
+			}
+		case "tool":
+			if o["name"] != "read" {
+				t.Fatalf("a child tool line is %v", o)
+			}
+		}
+	}
+	for _, want := range []string{"user", "tool", "thought", "text"} {
+		if !slices.Contains(childKinds, want) {
+			t.Fatalf("the child's lines are %v; want a %s line among them", childKinds, want)
+		}
+	}
+	if joined := joinedText(objs, id); joined != "it is package main" {
+		t.Fatalf("the child's text lines say %q", joined)
+	}
+	if joined := joinedText(objs, ""); joined != "the child says it is package main" {
+		t.Fatalf("the parent's text lines say %q", joined)
+	}
+
+	var call map[string]any
+	for _, o := range objs {
+		if o["type"] == "tool" && o["agent"] == nil && o["id"] == "t1.1.1" {
+			call = o
+		}
+	}
+	task, _ := call["task"].(map[string]any)
+	if call["kind"] != "task" || call["status"] != "completed" || task == nil || task["agentId"] != id ||
+		task["model"] != "test/a" || task["status"] != "completed" {
+		t.Fatalf("the agent call's last line is %v", call)
+	}
+}
+
+// joinedText is the text lines of agent's (the parent's for ""), joined.
+func joinedText(objs []map[string]any, agentID string) string {
+	var b strings.Builder
+	for _, o := range objs {
+		a, _ := o["agent"].(string)
+		if o["type"] == "text" && a == agentID {
+			fmt.Fprint(&b, o["text"])
+		}
+	}
+	return b.String()
 }

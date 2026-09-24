@@ -65,6 +65,12 @@ var (
 	// to one of those three first (plan 023 §3.1). Nothing is changed.
 	ErrUnknownMode = errors.New("harness: unknown mode")
 
+	// ErrChildMode is SetMode's refusal on a sub-agent's session: a child runs
+	// in the mode its parent was in when it opened, and only the parent's own
+	// later switches reach it, as tightening through its gate (plan 026 §3.5).
+	// Nothing is changed.
+	ErrChildMode = errors.New("harness: a sub-agent's mode is its parent's and cannot be switched")
+
 	// ErrInTurn is Run's refusal while another Run is live on the session.
 	// The adapter serializes turns itself, so it never reaches a user.
 	ErrInTurn = errors.New("harness: a turn is already running")

@@ -1,5 +1,5 @@
 # The opencode profile's tools as a model is offered them (Profile.ToolsJSON).
-# tools_sha256: 654537569228aeed600f2444bf02423d747d61d67a8dbf7937eb2387933c15be
+# tools_sha256: 3487c047ff8a9fe1ef0bb33d8ad6217b8a29c35503592c719b61a0a2614a922e
 
 === tool: bash
 --- description
@@ -253,6 +253,50 @@ Usage:
   "required": [
     "content",
     "filePath"
+  ]
+}
+
+=== tool: agent
+--- description
+Claude Code calls this tool `Agent` (formerly `Task`); grok calls it `task`.
+
+Start a sub-agent: a separate agent with its own context and tools, which does one task and returns its result to you.
+
+Delegate work that is self-contained and would otherwise fill your context with intermediate steps: a broad search of the codebase, research that takes many reads, or a change you can describe completely. Choose the agent type that fits the task from the agent types listed below.
+
+- Several agent calls in one message run in parallel. Start independent tasks together, in one message.
+- The sub-agent cannot see this conversation. Write a prompt that stands on its own: the goal, what you already know, the files and names that matter, whether to change code or only report, and what to return.
+- The result is the sub-agent's final message. Do not redo the work it did.
+- Leave `model` and `effort` out unless the task needs a different model or effort; the models you can choose are listed below.
+- Do not use it to read a single file or to run one search: the read, grep and glob tools do that directly, and faster.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "description": {
+      "description": "A short (3-5 word) description of the task, which the user sees.",
+      "type": "string"
+    },
+    "effort": {
+      "description": "Optional. The sub-agent's reasoning effort: one of the efforts its model offers, as listed in this tool's description.",
+      "type": "string"
+    },
+    "model": {
+      "description": "Optional. The model the sub-agent runs on: one of the models listed in this tool's description, a tier name (fable, opus, sonnet or haiku; one the Tiers line does not map is your own model), or inherit for your own. Omit it to use the agent type's model, or else the configured default, or else your own.",
+      "type": "string"
+    },
+    "prompt": {
+      "description": "The task for the sub-agent. It cannot see this conversation, so include everything it needs.",
+      "type": "string"
+    },
+    "subagent_type": {
+      "description": "Optional. The agent type to start, one of those listed in this tool's description (default: general-purpose).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "description",
+    "prompt"
   ]
 }
 

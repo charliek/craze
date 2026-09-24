@@ -71,8 +71,36 @@ caches warm, grok's lesson).
   order; `--continue` and `--resume` (plan 013's surfaces) are redone on it.
 - **Torn last line** (crash mid-write) is tolerated on load.
 
+## Sub-agents (H6)
+
+**Status: planned (Plan 026), not built.** A child's transcript is an
+ordinary session file, in the same `sessions/<cwd-slug>/` directory as any
+other. Its header gains four additive keys beside the usual `session`
+fields: `parent_session`, `parent_tool_call` (the parent's `ToolStarted`
+id), `subagent_type` (the resolved persona name), and `persona_path` (the
+source file, when the persona came from one, as provenance only — personas
+never enter the parent's skills catalog). An old header loaded without them
+still loads (lenient decode). `sessions.jsonl`, the shared index, is
+untouched — native sessions stay out of it until H7, and a child is no
+exception.
+
+A tool-call `message` entry gains an additive field, `subagent_usage`: a
+list of `{provider, model, wire_model, usage}` rows, one per model a child
+ran on, merged onto the entry that owns the call (the `stepFinished` and
+`synthesizeStep` paths both write it). A tool entry never carries a plain
+`usage` — only `subagent_usage` — because the entry is stamped with the
+**parent's** model, and a plain `usage` there would price a child that ran
+on another model at the parent's rate.
+
 ## Cost and usage
 
 Each assistant message carries usage; the session total is the sum over the
 current branch. Prices come from the catalog (`04`); the status row shows the
 turn and session cost from H7.
+
+**The one accounting rule (H6, pinned):** a session's cost is the sum of the
+`usage` on its own assistant entries, each priced by that entry's model,
+**plus** the `subagent_usage` rows on every one of its own entries that owns
+them — whatever the entry's role, tool or user — each priced by the row's
+own model. A child's transcript is a record, never added into a parent's
+cost, so nothing is counted twice. H7's cost row follows this rule.

@@ -787,6 +787,204 @@ func TestKeysTheMarkerPrintsBackAreRefused(t *testing.T) {
 	}
 }
 
+// TestSubagentsSectionRoundTrip: a table with a [subagents] section
+// round-trips through Save/Load byte for byte, and one with none saves
+// exactly as it did before the section existed (TestSaveWritesStableReadableFiles
+// pins that byte-for-byte, over validTable(), which sets no Subagents).
+func TestSubagentsSectionRoundTrip(t *testing.T) {
+	tbl := validTable()
+	tbl.Subagents = Subagents{
+		Model:  "fireworks/kimi-k3",
+		Effort: "high",
+		Tiers: map[string]string{
+			"opus":   "fireworks/kimi-k3",
+			"sonnet": "openrouter/minimax-m3",
+			"custom": "openrouter/minimax-m3",
+		},
+	}
+	if err := tbl.Validate(); err != nil {
+		t.Fatalf("a valid Subagents section: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := Save(dir, tbl); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, tbl) {
+		t.Fatalf("round trip =\n%+v\nwant\n%+v", got, tbl)
+	}
+
+	mb, err := os.ReadFile(filepath.Join(dir, ModelsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"[subagents]\n",
+		`model = "fireworks/kimi-k3"`,
+		`effort = "high"`,
+		"[subagents.tiers]\n",
+		`custom = "openrouter/minimax-m3"`,
+		`opus = "fireworks/kimi-k3"`,
+		`sonnet = "openrouter/minimax-m3"`,
+	} {
+		if !strings.Contains(string(mb), want) {
+			t.Fatalf("%s does not contain %q:\n%s", ModelsFile, want, mb)
+		}
+	}
+
+	// Saving twice gives the same bytes (TestSaveWritesStableReadableFiles's
+	// rule extended to a table that has a [subagents] section).
+	dir2 := t.TempDir()
+	if err := Save(dir2, tbl); err != nil {
+		t.Fatal(err)
+	}
+	mb2, err := os.ReadFile(filepath.Join(dir2, ModelsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(mb) != string(mb2) {
+		t.Fatal("two saves of one table with a [subagents] section wrote different bytes")
+	}
+}
+
+// TestSubagentsSectionOmittedWhenEmpty: an in-memory Subagents value that
+// reads as "no section" (every field zero, even a present-but-empty Tiers
+// map) never writes [subagents] at all, matching what Load returns for a
+// models.toml with none.
+func TestSubagentsSectionOmittedWhenEmpty(t *testing.T) {
+	tbl := validTable()
+	tbl.Subagents = Subagents{Tiers: map[string]string{}}
+	dir := t.TempDir()
+	if err := Save(dir, tbl); err != nil {
+		t.Fatal(err)
+	}
+	mb, err := os.ReadFile(filepath.Join(dir, ModelsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(mb), "subagents") {
+		t.Fatalf("%s holds a [subagents] section for an empty one:\n%s", ModelsFile, mb)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Subagents, Subagents{}) {
+		t.Fatalf("Subagents = %+v, want the zero value", got.Subagents)
+	}
+}
+
+// TestSubagentsUnknownKeyIsStrict: an unknown key under [subagents] fails
+// the same way any other unknown key does (decodeStrict, plan 026 §3.6).
+func TestSubagentsUnknownKeyIsStrict(t *testing.T) {
+	models := validModels + "\n[subagents]\nbogus = \"x\"\n"
+	dir := writeFiles(t, validProviders, models)
+	_, err := Load(dir)
+	fe := wantFileError(t, err, filepath.Join(dir, ModelsFile), "subagents", "bogus")
+	if fe.Reason != "unknown key" {
+		t.Fatalf("reason = %q, want unknown key", fe.Reason)
+	}
+}
+
+// TestValidateSubagentsFailures pins decision 1's rules: model and every
+// tier value must be aliases in the table ("" allowed for model and
+// effort); a tier key must match [a-z0-9-]+; an effort set together with a
+// model must be one that model offers.
+func TestValidateSubagentsFailures(t *testing.T) {
+	cases := []struct {
+		name             string
+		subagents        Subagents
+		file, table, key string
+		// wantReason, when set, is a substring the FileError's Reason must
+		// contain, so a case is pinned to its own rule and not just any
+		// rejection at the same key (used by the "inherit" cases below,
+		// which would otherwise also satisfy tierKeyPattern's generic
+		// reason for the upper-case spelling).
+		wantReason string
+	}{
+		{
+			name: "model unknown", subagents: Subagents{Model: "nope"},
+			file: ModelsFile, table: "subagents", key: "model",
+		},
+		{
+			name:      "effort not offered when model is set",
+			subagents: Subagents{Model: "openrouter/minimax-m3", Effort: "high"}, // that model has no Efforts
+			file:      ModelsFile, table: "subagents", key: "effort",
+		},
+		{
+			name:      "tier key bad format",
+			subagents: Subagents{Tiers: map[string]string{"Opus": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "Opus",
+		},
+		{
+			// review r5, finding 1: "inherit" always means the parent's model
+			// (resolveModelValue checks it before ever consulting
+			// [subagents.tiers]), so a mapping under that key could never be
+			// used.
+			name:      "tier key is inherit",
+			subagents: Subagents{Tiers: map[string]string{"inherit": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "inherit",
+			wantReason: "parent's model",
+		},
+		{
+			// Case-insensitively: an upper-case spelling is caught by the same
+			// rule, not just tierKeyPattern's generic "must match [a-z0-9-]+".
+			name:      "tier key is inherit in another case",
+			subagents: Subagents{Tiers: map[string]string{"INHERIT": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "INHERIT",
+			wantReason: "parent's model",
+		},
+		{
+			name:      "tier key with an underscore",
+			subagents: Subagents{Tiers: map[string]string{"my_tier": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "my_tier",
+		},
+		{
+			name:      "tier value empty",
+			subagents: Subagents{Tiers: map[string]string{"opus": ""}},
+			file:      ModelsFile, table: "subagents.tiers", key: "opus",
+		},
+		{
+			name:      "tier value unknown",
+			subagents: Subagents{Tiers: map[string]string{"opus": "nope"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "opus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := validTable()
+			tbl.Subagents = tc.subagents
+			fe := wantFileError(t, tbl.Validate(), tc.file, tc.table, tc.key)
+			if tc.wantReason != "" && !strings.Contains(fe.Reason, tc.wantReason) {
+				t.Fatalf("reason = %q, want it to contain %q", fe.Reason, tc.wantReason)
+			}
+		})
+	}
+
+	// A model-less effort is not checked at Validate: resolution checks it
+	// against whichever model the child actually runs.
+	tbl := validTable()
+	tbl.Subagents = Subagents{Effort: "an-effort-no-model-offers"}
+	if err := tbl.Validate(); err != nil {
+		t.Fatalf("a model-less subagents.effort failed Validate: %v", err)
+	}
+
+	// A valid section still passes, so the cases above fail for their own
+	// reason and not some other one.
+	valid := validTable()
+	valid.Subagents = Subagents{
+		Model: "fireworks/kimi-k3", Effort: "high",
+		Tiers: map[string]string{"opus": "fireworks/kimi-k3"},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("a valid Subagents section: %v", err)
+	}
+}
+
 func setProvider(t *Table, id string, f func(*Provider)) {
 	p := t.Providers[id]
 	f(&p)

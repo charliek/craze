@@ -224,11 +224,14 @@ func openTarget(ctx context.Context, env tool.Env, abs string) (*target, error) 
 	if err != nil {
 		return nil, err
 	}
-	// On a case-insensitive file system two spellings of one file take two
-	// locks. Within a session that never matters: edit and write are not
-	// Parallel, so Fantasy runs them one at a time and this lock is never
-	// contended there. Across sessions, replace's last check is what
-	// catches the other writer, as it catches an editor.
+	// The table is shared by a session and the sub-agents it starts (plan 026
+	// §3.2): within one session edit and write are not Parallel, so Fantasy
+	// runs them one at a time, but a parent's call and its children's — or two
+	// children's — run concurrently, and this lock is what serializes their
+	// edits of one file. On a case-insensitive file system two spellings of
+	// one file still take two locks, as they always have. Across unrelated
+	// sessions, replace's last check is what catches the other writer, as it
+	// catches an editor.
 	unlock, err := env.Locks.Lock(ctx, real)
 	if err != nil {
 		return nil, err

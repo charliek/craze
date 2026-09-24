@@ -187,7 +187,7 @@ func TestToolLoop(t *testing.T) {
 		for _, tl := range c.Tools {
 			names = append(names, tl.GetName())
 		}
-		if !slices.Equal(names, []string{"bash", "read", "glob", "grep", "edit", "write", "todo_write", "ask_user_question", "exit_plan_mode"}) {
+		if !slices.Equal(names, []string{"bash", "read", "glob", "grep", "edit", "write", "agent", "todo_write", "ask_user_question", "exit_plan_mode"}) {
 			t.Fatalf("request %d offered %v", i+1, names)
 		}
 	}

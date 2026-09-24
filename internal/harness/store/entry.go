@@ -70,18 +70,40 @@ func UsageOf(u fantasy.Usage) *Usage {
 	}
 }
 
+// ModelUsage is what sub-agents spent on one model: the model table's provider
+// id and alias and the provider's wire id, as a message entry names its own
+// model, and the usage summed over every child of the entry's step that ran on
+// it (plan 026 §3.7). A child can run on another model than its parent, whose
+// model stamps the entry, so its usage is kept apart, per model, rather than
+// folded into a plain usage the parent's rate would price.
+type ModelUsage struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	WireModel string `json:"wire_model"`
+	Usage     Usage  `json:"usage"`
+}
+
 // MessageEntry is what a caller hands AppendUser or AppendStep: the message
 // in Fantasy's own shape and what it was sent to. Usage and StopReason belong
 // to assistant messages. Interrupted belongs to an assistant message, and to
 // the tool message the runner's cancel defence writes with one (results it
 // made up for calls a cancel cut off). Effort is optional on every role.
+//
+// SubagentUsage is the usage of the sub-agents whose results the entry holds,
+// one row per model (plan 026 §3.7): on the tool message of a step whose agent
+// calls ran children. A tool message never carries a plain Usage. A session's
+// cost is the usage on its own assistant entries, each priced by that entry's
+// model, plus these rows on every entry that owns them, whatever its role,
+// each priced by its row's model; a child's own transcript is a record, never
+// added into its parent's cost, so nothing is counted twice.
 type MessageEntry struct {
-	Message     fantasy.Message
-	Model       Model
-	Effort      string
-	Usage       *Usage
-	StopReason  string
-	Interrupted bool // a partial step, cut short by a cancel or an error
+	Message       fantasy.Message
+	Model         Model
+	Effort        string
+	Usage         *Usage
+	StopReason    string
+	Interrupted   bool // a partial step, cut short by a cancel or an error
+	SubagentUsage []ModelUsage
 }
 
 // Entry is one line after the header, as written or read back. Type selects
@@ -123,6 +145,10 @@ type messageLine struct {
 	Usage       *Usage          `json:"usage,omitempty"`
 	StopReason  string          `json:"stopReason,omitempty"`
 	Interrupted bool            `json:"interrupted,omitempty"`
+	// SubagentUsage is additive and omitted when empty, so every entry
+	// without it is written byte for byte as before and an older craze
+	// reading one with it ignores the key (plan 026 §3.7).
+	SubagentUsage []ModelUsage `json:"subagent_usage,omitempty"`
 }
 
 type modelChangeLine struct {
@@ -152,15 +178,25 @@ type modeChangeLine struct {
 // was written under. The tool profile and the tools array's hash do the same
 // for the tool contract; both are optional, and absent for a session with no
 // tools, so a header without them reads as it always has.
+//
+// A sub-agent's header also links it to its parent: the parent's session id,
+// the harness id of the agent call that started it, the agent type it ran as
+// and the persona file that defined it (plan 026 §3.2). All four are
+// optional, absent for every other session, and a header written before them
+// reads as it always has.
 type Header struct {
 	Version            int
-	ID                 string // the session id, a UUID
+	ID                 string // the session id: a UUID, or the one a sub-agent's runner minted
 	Timestamp          time.Time
 	Cwd                string
 	CrazeVersion       string
 	SystemPromptSHA256 string // hex
 	ToolProfile        string // "" for none
 	ToolsSHA256        string // hex; "" for none
+	ParentSession      string // "" for a session no other started
+	ParentToolCall     string // the parent's harness call id; "" for none
+	SubagentType       string // "" for none
+	PersonaPath        string // "" for none, and for a built-in agent type
 }
 
 type headerLine struct {
@@ -173,6 +209,10 @@ type headerLine struct {
 	SystemPromptSHA256 string `json:"system_prompt_sha256"`
 	ToolProfile        string `json:"tool_profile,omitempty"`
 	ToolsSHA256        string `json:"tools_sha256,omitempty"`
+	ParentSession      string `json:"parent_session,omitempty"`
+	ParentToolCall     string `json:"parent_tool_call,omitempty"`
+	SubagentType       string `json:"subagent_type,omitempty"`
+	PersonaPath        string `json:"persona_path,omitempty"`
 }
 
 func formatTime(t time.Time) string { return t.UTC().Format(timeLayout) }
@@ -188,6 +228,10 @@ func encodeHeader(h Header) ([]byte, error) {
 		SystemPromptSHA256: h.SystemPromptSHA256,
 		ToolProfile:        h.ToolProfile,
 		ToolsSHA256:        h.ToolsSHA256,
+		ParentSession:      h.ParentSession,
+		ParentToolCall:     h.ParentToolCall,
+		SubagentType:       h.SubagentType,
+		PersonaPath:        h.PersonaPath,
 	})
 }
 
@@ -218,6 +262,10 @@ func decodeHeader(line []byte) (Header, error) {
 		SystemPromptSHA256: hl.SystemPromptSHA256,
 		ToolProfile:        hl.ToolProfile,
 		ToolsSHA256:        hl.ToolsSHA256,
+		ParentSession:      hl.ParentSession,
+		ParentToolCall:     hl.ParentToolCall,
+		SubagentType:       hl.SubagentType,
+		PersonaPath:        hl.PersonaPath,
 	}, nil
 }
 
@@ -231,15 +279,16 @@ func encodeEntry(e Entry) ([]byte, error) {
 	switch e.Type {
 	case TypeMessage:
 		return json.Marshal(messageLine{
-			envelope:    env,
-			Message:     e.Message,
-			Provider:    e.Model.Provider,
-			Model:       e.Model.Alias,
-			WireModel:   e.Model.WireModel,
-			Effort:      e.Effort,
-			Usage:       e.Usage,
-			StopReason:  e.StopReason,
-			Interrupted: e.Interrupted,
+			envelope:      env,
+			Message:       e.Message,
+			Provider:      e.Model.Provider,
+			Model:         e.Model.Alias,
+			WireModel:     e.Model.WireModel,
+			Effort:        e.Effort,
+			Usage:         e.Usage,
+			StopReason:    e.StopReason,
+			Interrupted:   e.Interrupted,
+			SubagentUsage: e.SubagentUsage,
 		})
 	case TypeModelChange:
 		return json.Marshal(modelChangeLine{
@@ -291,12 +340,13 @@ func decodeEntry(line []byte) (Entry, error) {
 			return Entry{}, errors.New("message has no role")
 		}
 		e.MessageEntry = MessageEntry{
-			Message:     ml.Message,
-			Model:       Model{Provider: ml.Provider, Alias: ml.Model, WireModel: ml.WireModel},
-			Effort:      ml.Effort,
-			Usage:       ml.Usage,
-			StopReason:  ml.StopReason,
-			Interrupted: ml.Interrupted,
+			Message:       ml.Message,
+			Model:         Model{Provider: ml.Provider, Alias: ml.Model, WireModel: ml.WireModel},
+			Effort:        ml.Effort,
+			Usage:         ml.Usage,
+			StopReason:    ml.StopReason,
+			Interrupted:   ml.Interrupted,
+			SubagentUsage: ml.SubagentUsage,
 		}
 	case TypeModelChange:
 		var mc modelChangeLine

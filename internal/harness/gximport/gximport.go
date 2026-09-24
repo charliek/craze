@@ -186,9 +186,25 @@ func Import(grokHome string, existing *modeltable.Table) (*modeltable.Table, Rep
 	merged.DefaultModel, report.DefaultRule = chooseDefault(existing, merged, strings.TrimSpace(gxDefault), models)
 	report.DefaultModel = merged.DefaultModel
 
+	// [subagents] is the owner's and is kept whole (clone), but its effort is
+	// checked against its model, which gx may just have re-imported with other
+	// efforts, or none. A stale effort would fail the whole import below, over
+	// a setting runtime resolution already falls through on (plan 026 §3.6), so
+	// it is cleared and said so rather than refused (PR #51's CodeRabbit
+	// review). An import never removes a model, so the model and the tiers
+	// still name aliases in the table.
+	if s := merged.Subagents; s.Model != "" && s.Effort != "" {
+		if m, ok := merged.Models[s.Model]; ok && !slices.Contains(m.Efforts, s.Effort) {
+			merged.Subagents.Effort = ""
+			report.Models.Notes = append(report.Models.Notes, Note{ID: s.Model,
+				Text: fmt.Sprintf("[subagents] effort %q is no longer offered by %q; cleared", s.Effort, s.Model)})
+		}
+	}
+
 	if err := merged.Validate(); err != nil {
 		// Only an invalid existing table (one that did not come from
-		// modeltable.Load) can get here: every imported entry is built to pass.
+		// modeltable.Load) can get here: every imported entry is built to pass,
+		// and a [subagents] effort the import made stale is cleared above.
 		return nil, report, fmt.Errorf("gximport: the merged table is invalid: %w", err)
 	}
 	return merged, report, nil
@@ -693,6 +709,10 @@ func nilIfEmpty(s []string) []string {
 
 // clone deep-copies t so the merge never writes through to the caller's
 // table. Warnings are not carried: they described the load that produced t.
+//
+// Subagents is copied whole and never otherwise touched by Import: gx has no
+// concept of sub-agent defaults or tiers, so an existing [subagents] section
+// survives every import untouched (plan 026 §3.6, decision 3).
 func clone(t *modeltable.Table) *modeltable.Table {
 	out := &modeltable.Table{Providers: map[string]modeltable.Provider{}, Models: map[string]modeltable.Model{}}
 	if t == nil {
@@ -706,6 +726,11 @@ func clone(t *modeltable.Table) *modeltable.Table {
 	for alias, m := range t.Models {
 		m.Efforts = slices.Clone(m.Efforts)
 		out.Models[alias] = m
+	}
+	out.Subagents = modeltable.Subagents{
+		Model:  t.Subagents.Model,
+		Effort: t.Subagents.Effort,
+		Tiers:  maps.Clone(t.Subagents.Tiers),
 	}
 	return out
 }

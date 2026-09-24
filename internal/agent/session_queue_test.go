@@ -27,6 +27,21 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// waitPromptOnWire waits until the agent holds craze's prompt: the client
+// learns the prompt's id only from the queue/changed the agent broadcasts once
+// it has read the session/prompt, so anything written after this is behind the
+// prompt in the pipe. promptInFlight is not that point: the session opens the
+// turn before grok's writer goroutine puts the prompt on the wire, and an
+// interjection that overtakes it reaches an idle agent, which strands it as a
+// fallback turn that runs, and ends, before the prompt is even started.
+func waitPromptOnWire(t *testing.T, s *session) {
+	t.Helper()
+	waitUntil(t, "the agent to hold the prompt", func() bool {
+		c := s.clientRef()
+		return c != nil && c.PromptID() != ""
+	})
+}
+
 // foreignTurnCounts is how many foreign turns the log says started and ended.
 // Both are read from the same snapshot, so a turn cannot be counted as having
 // ended in a pass that never saw it start.
@@ -76,7 +91,7 @@ func TestInterjectLandsAsAUserEventFromTheBroadcast(t *testing.T) {
 			t.Errorf("prompt: %v", err)
 		}
 	}()
-	waitUntil(t, "the turn to start", s.promptInFlight)
+	waitPromptOnWire(t, s)
 	if err := s.Interject(t.Context(), "BANANA"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
@@ -151,7 +166,7 @@ func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
 			t.Errorf("prompt: %v", err)
 		}
 	}()
-	waitUntil(t, "the turn to start", s.promptInFlight)
+	waitPromptOnWire(t, s)
 	if err := s.Interject(t.Context(), "BANANA"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
@@ -219,7 +234,7 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 			t.Errorf("prompt: %v", err)
 		}
 	}()
-	waitUntil(t, "the turn to start", s.promptInFlight)
+	waitPromptOnWire(t, s)
 	if err := s.Interject(t.Context(), "BANANA"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}

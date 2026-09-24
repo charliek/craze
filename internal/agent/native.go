@@ -101,10 +101,24 @@ type nativeSession struct {
 	// events on Fantasy's tool goroutines as well as on its stream one
 	// (native_tools.go). It is its own lock, not s.mu: the sink runs inside
 	// the harness's turn, and nothing it touches may reach back into the
-	// harness.
-	toolMu    sync.Mutex
-	tools     map[string]ToolEvent
-	toolOrder []string
+	// harness. tools is the parent's set, Snapshot().Tools; childTools holds
+	// one set per sub-agent, by its id (plan 026 §3.9). A leaf: s.mu → toolMu,
+	// and never nested with rosterMu either way.
+	toolMu     sync.Mutex
+	tools      nativeToolSet
+	childTools map[string]*nativeToolSet
+
+	// rosterMu guards the sub-agent roster (native_subagents.go): the rows in
+	// spawn order, the finish counter and the last finish's EndedAt. A leaf
+	// of the adapter's: s.mu → rosterMu → the log's outbox, and neither toolMu
+	// nor s.mu is ever taken under it, nor it under toolMu (plan 026 §3.9,
+	// panel P17). Every EventSubagent is enqueued inside the section that made
+	// its change, and it is never held across Publish or Flush.
+	rosterMu    sync.Mutex
+	roster      map[string]*nativeChild
+	rosterOrder []string
+	finishSeq   uint64
+	lastEnded   time.Time
 
 	// s.mu is held across exactly one ask-registry call: the non-blocking
 	// CancelTurn in Cancel, which has to be atomic with the read of the turn
@@ -644,11 +658,12 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	// the redactor every content diagnostic goes through (contentWarn), and —
 	// through the memo above — the redactor Open builds for what it freezes.
 	keys := nativeTableKeys(table, hopts.Getenv)
+	red := redact.New(keys...)
 	content := loadNativeContent(
 		resolveNativeSources(hopts.Workspace, s.contentHome()),
 		s.opts.Compat,
 		keys,
-		s.contentWarn(redact.New(keys...)),
+		s.contentWarn(red),
 	)
 	// Only where the seam left it alone, so that tweak keeps its last word on
 	// every field of harness.Options (NewNative). The assignment cannot simply
@@ -667,6 +682,22 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	// keeps it; in every real build tweak is nil and this is the asker.
 	if hopts.Asker == nil {
 		hopts.Asker = nativeAsker{s: s}
+	}
+	// The sub-agent seams (plan 026 §3.4, §3.6), each left to tweak's last word
+	// like the two above: the personas this reading found, already mapped to
+	// native tool ids; a child's model matched the way --model was above; and
+	// the lane the harness reports a persona's or the default's unresolved
+	// model or effort on, journaled (native_personas.go). opened is how that
+	// lane reaches the session's own redactor once Open has returned it.
+	if hopts.Personas == nil {
+		hopts.Personas = content.personas
+	}
+	if hopts.MatchModel == nil {
+		hopts.MatchModel = nativeModelMatcher(table)
+	}
+	var opened atomic.Pointer[harness.Session]
+	if hopts.Warn == nil {
+		hopts.Warn = s.subagentWarn(red, &opened)
 	}
 
 	// The last look at closed before anything is opened. A Close racing Start
@@ -689,6 +720,7 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	if err != nil {
 		return nil, nil, none, phraseSetupError(err, table, hopts.Model)
 	}
+	opened.Store(hs)
 	return hs, table, content, nil
 }
 
@@ -1199,15 +1231,53 @@ func nativeTitle(prompt string) string {
 // sink is the harness's event sink: the model's text and thinking become
 // the session's events, sanitized, because unsanitized model output is a
 // terminal-escape path into the TUI, its tool events become the rows
-// native_tools.go merges, and its todo list becomes the snapshot's and one
-// EventTodos (native_asks.go). StepDone, Retrying and Diag have no agent event
-// and are dropped: usage goes to the transcript only, the harness allows
-// one silent retry (plan 018 §3.8), and a Diag is for the journal and for
-// diagnosis, not for a consumer (plan 019 §3.5). ToolProgress never blocks
-// here, since the harness drops a snapshot rather than wait on it.
+// native_tools.go merges, its todo list becomes the snapshot's and one
+// EventTodos (native_asks.go), and its sub-agents become the roster, the
+// children's own tagged events and the agent row's task (native_subagents.go,
+// plan 026 §3.9). StepDone, Retrying and Diag have no agent event and are
+// dropped: usage goes to the transcript only — but for the sub-agent usage an
+// unsaved step could not record, which is journaled (noteSubagentUsage) — the
+// harness allows one silent retry (plan 018 §3.8), and a Diag is for the
+// journal and for diagnosis, not for a consumer (plan 019 §3.5). ToolProgress
+// never blocks here, since the harness drops a snapshot rather than wait on
+// it.
 //
 // It runs synchronously on Fantasy's callbacks — the tool ones on tool
 // goroutines — which is why emit gives up once Close has begun.
+//
+// # It is concurrent (plan 026 §3.9, panel P16): the audit
+//
+// Until sub-agents it had only ever been entered by one goroutine at a time:
+// every harness emit ran under the parent turn's mutex (turn.go; progress
+// takes it with TryLock). Now each child's events reach it under the child
+// turn's own mutex, straight from the runner and never through the parent's,
+// so the parent's goroutines and up to four children's are in here at once,
+// plus the dispatcher's lossy progress goroutines of each. Every case below
+// therefore touches only state behind a lock of its own that is a leaf where
+// it is taken, and holds none of them across a publish:
+//
+//   - TextDelta, ThoughtDelta, Steered's emit, a child's text and thought and
+//     its EventUser: the event log alone — Publish's boundary, entered with no
+//     lock of the adapter's held (emit).
+//   - the four tool events, the parent's and a child's alike: toolMu, for the
+//     merge into the owner's set only, released before the row is published
+//     (native_tools.go). A parent agent row's close reads the roster first,
+//     under rosterMu, released before toolMu is taken.
+//   - Steered: steerMu, a leaf, for the lookup of the typed text.
+//   - Todos: s.mu, for the one assignment of the snapshot's list, and only
+//     the parent's — a child has no todo list, and its Todos is dropped. s.mu
+//     is held across nothing that waits on a sink.
+//   - StepDone (the parent's): the journal's Note, which never blocks.
+//   - the three sub-agent events: rosterMu for the roster and its enqueue (the
+//     outbox mutex, a leaf beneath it), toolMu for the child's set in sections
+//     of its own, never nested, and the log's Flush with no lock held. The
+//     redactor is taken before rosterMu or toolMu is — read under s.mu, its
+//     keys gathered under the harness's own leaf locks (redactor) — and then
+//     applied inside the section, to the whole payload, where applying it
+//     takes no lock (review r8).
+//
+// s.mu, when a case takes it, is taken alone: never under toolMu or rosterMu,
+// which Snapshot takes under s.mu, one after the other.
 func (s *nativeSession) sink(ev harness.Event) {
 	switch e := ev.(type) {
 	case harness.TextDelta:
@@ -1219,13 +1289,23 @@ func (s *nativeSession) sink(ev harness.Event) {
 			s.emit(Event{Type: EventThought, Text: t})
 		}
 	case harness.ToolStarted:
-		s.toolStarted(e)
+		s.toolStarted("", e)
 	case harness.ToolCalled:
-		s.toolCalled(e)
+		s.toolCalled("", e)
 	case harness.ToolProgress:
-		s.toolProgress(e)
+		s.toolProgress("", e)
 	case harness.ToolFinished:
-		s.toolFinished(e)
+		s.toolFinished("", e)
+	case harness.StepDone:
+		s.noteSubagentUsage(e)
+	case harness.SubagentStarted:
+		s.subagentStarted(e)
+	case harness.SubagentEvent:
+		s.subagentEvent(e)
+	case harness.SubagentFinished:
+		s.subagentFinished(e)
+	case harness.Retrying, harness.Diag:
+		// Dropped (the function's comment).
 	case harness.Todos:
 		s.applyTodos(e)
 	case harness.Steered:
@@ -1632,7 +1712,12 @@ func (s *nativeSession) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.snap
+	// The parent's tool rows and then the roster, one lock after the other and
+	// never one inside the other (plan 026 §3.9, panel P17). Each is its own
+	// deep copy: a child's rows are events only, as the live session keeps a
+	// grok child's.
 	out.Tools = s.toolRows()
+	out.Subagents = s.rosterRows()
 	out.Models = append([]ModelInfo(nil), s.snap.Models...)
 	// Cloned as the live session clones it (live.go): the menu reads the rows
 	// off a snapshot and the expansion lookup is built from the session's own

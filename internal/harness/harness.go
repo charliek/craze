@@ -51,6 +51,17 @@
 // before its next step, the model reads it, and the step that saw it writes it
 // to the transcript. Whatever no step persisted comes back in
 // Result.Unanswered (steer.go, plan 019 §3.10).
+//
+// # Sub-agents
+//
+// The agent tool starts a sub-agent: a second Session, opened in-process as
+// the parent's child (child.go), which runs one turn on the call's goroutine
+// and answers the call with its final message (subagents.go, plan 026). At
+// most four run at once per session; a call blocks until its child has run
+// and closed, so the turn outlives every child it started. The child's own
+// events reach Run's sink wrapped in SubagentEvent, from the child's turn,
+// which makes the sink concurrent while children run (see Run). Close tells
+// the children it is closing before it joins its turn.
 package harness
 
 import (
@@ -67,6 +78,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 )
 
@@ -95,13 +107,31 @@ type Options struct {
 	// Mode is the mode the session starts in: "" or "agent" (implement),
 	// "plan" or "ask". Anything else is ErrUnknownMode and refuses Open. A
 	// session opened in plan mode creates its plan file and tells the model
-	// at its first step (reminders.go, plan 023 §3.1).
+	// at its first step (reminders.go, plan 023 §3.1). A sub-agent's mode is
+	// Child.Mode, and this is not read.
 	Mode string
 	// Asker is how the session's tools reach a person: ask_user_question and
 	// exit_plan_mode block on it (tool.Asker, plan 023 §3.4). The adapter in
 	// internal/agent hands in one over craze's ask registry; nil is nobody to
-	// ask, and both tools then answer at once that nobody answered.
+	// ask, and both tools then answer at once that nobody answered. A
+	// sub-agent has nobody to ask, and this is not read.
 	Asker Asker
+	// Personas are the agent types the adapter found in persona files — the
+	// workspace's .claude/agents chain, ~/.claude/agents and installed
+	// plugins' agents/ — with their tools already mapped to native ids
+	// (tool.MapClaudeTools) and a user persona that would shadow a built-in
+	// already dropped (plan 026 §3.4). The session merges them with its own
+	// built-ins (BuiltinAgentTypes) in precedence order, lists them in the
+	// agent tool's description, and resolves a call's subagent_type against
+	// that one list. Like Prompt it is data, taken once at Open; nil offers
+	// the built-ins alone. A sub-agent has no agent tool, and this is not read
+	// for one.
+	Personas []Persona
+	// Child opens the session as a sub-agent of another (child.go, plan 026
+	// §3.2); nil is an ordinary session. Only the runner that starts children
+	// sets it, and fills the rest of these Options with the parent's own
+	// values.
+	Child *ChildOptions
 	// NewModel builds a model's client; nil is llm.New. It is the test seam:
 	// a test hands in a scripted fantasy.LanguageModel.
 	NewModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
@@ -114,6 +144,20 @@ type Options struct {
 	// Version is craze's version, recorded in the transcript's header. It is
 	// passed in so the harness does not import craze's version package.
 	Version string
+
+	// MatchModel is the adapter's `--model` normalisation (case, spaces, a
+	// display name; internal/agent.MatchModel), handed in at Open so the
+	// harness itself never imports internal/agent. It resolves a sub-agent
+	// call's `model` field to a table alias (subagent_models.go, plan 026
+	// §3.6); nothing else in the harness uses it. nil is exact alias match
+	// only: a call's `model` must name a table alias byte for byte.
+	MatchModel func(raw string) (alias string, ok bool)
+	// Warn is a diagnostic channel for runtime fall-throughs that are not
+	// errors: a sub-agent persona's or the configured default's model or
+	// effort that does not resolve, so resolution moves on to the next
+	// candidate instead of failing the call (subagent_models.go, plan 026
+	// §3.6). nil discards; the adapter journals what it is handed.
+	Warn func(string)
 
 	// tools are the tool set's test seams (tools.go); zero is production.
 	tools toolSeams
@@ -154,6 +198,31 @@ type Session struct {
 	// lock, so a turn reading it at a step boundary and a SetMode from the UI
 	// never wait on each other. Fixed at Open, never nil.
 	modes *modes
+
+	// child is set for a sub-agent's session (Options.Child), fixed at Open:
+	// its mode never changes (SetMode), and it starts no sub-agent of its own.
+	child bool
+
+	// subs is the sub-agent runner (subagents.go, plan 026 §3.8): the
+	// registry of this session's live children, the cap on them, and the
+	// running turn they report to. The agent tool reaches it through the
+	// dispatcher's Env.Subagents. nil for a sub-agent, which starts none.
+	// Fixed at Open.
+	subs *subagents
+	// base is what a child inherits of the Options this session was opened
+	// with and keeps nowhere else (plan 026 §3.2); zero for a sub-agent.
+	// Fixed at Open.
+	base childBase
+	// now is Options.Now, defaulted: the clock a sub-agent's lifecycle
+	// events are stamped with, as the transcript is.
+	now func() time.Time
+
+	// matchModel and warn are Options.MatchModel and Options.Warn, read only
+	// by a sub-agent's model and effort resolution (subagent_models.go, plan
+	// 026 §3.6). Neither is defaulted here: matchModel's nil behaviour (exact
+	// alias match) and warn's (discard) are handled where each is called.
+	matchModel func(raw string) (alias string, ok bool)
+	warn       func(string)
 
 	mu      sync.Mutex
 	table   *modeltable.Table
@@ -217,15 +286,27 @@ type logged struct {
 // fall back to another model (plan 018 §3.8). A key anywhere in the table,
 // used or not, that is too short to redact from tool output fails it
 // (modeltable.ErrKeyTooShort, plan 019 §3.8).
+//
+// With Options.Child set it opens a sub-agent (child.go, plan 026 §3.2): the
+// runner's id, the parent's links in the header, a filtered toolset, the
+// parent's frozen prompt with a role section after it, the parent's mode and
+// no plan file, nobody to ask, and the parent's path locks. A key inside that
+// prompt refuses it (errChildPromptKey), as does one in its home's path, which
+// begins every spill path of its calls (errChildHomeKey).
 func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
 	}
+	child := opts.Child
 	s := &Session{
-		getenv:   opts.Getenv,
-		newModel: opts.NewModel,
-		newAgent: defaultAgent,
-		table:    opts.Table,
+		getenv:     opts.Getenv,
+		newModel:   opts.NewModel,
+		newAgent:   defaultAgent,
+		table:      opts.Table,
+		child:      child != nil,
+		matchModel: opts.MatchModel,
+		warn:       opts.Warn,
+		now:        opts.Now,
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
@@ -233,8 +314,31 @@ func Open(opts Options) (*Session, error) {
 	if s.newModel == nil {
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return llm.New(r) }
 	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	// A session that is not a sub-agent can start them: its runner exists
+	// before its tools, which hand it to the agent tool (Env.Subagents), and
+	// reads the rest of the session only when a call arrives, by which time
+	// Open has returned it. A child gets neither: depth is 1 (plan 026 §3.2).
+	if child == nil {
+		s.subs = newSubagents(s)
+		s.base = childBase{
+			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
+			prompt: opts.Prompt.clone(), seams: opts.tools,
+		}
+	}
 
-	mode, err := normalizeMode(opts.Mode)
+	modeID, asker := opts.Mode, opts.Asker
+	if child != nil {
+		// A child's id is its runner's, so the parent can name it before it
+		// writes anything; one that minted none has nothing to give it.
+		if child.ID == "" {
+			return nil, errors.New("harness: a sub-agent's session needs the id its runner minted")
+		}
+		modeID, asker = child.Mode, nil
+	}
+	mode, err := normalizeMode(modeID)
 	if err != nil {
 		return nil, err
 	}
@@ -254,11 +358,11 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, opts.Asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.Personas, child, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
-	st, err := store.New(store.Options{
+	sopts := store.Options{
 		Home: opts.Home,
 		// The real working directory: the header records it and the prompt
 		// names it, and openTools has refused one whose path holds a provider
@@ -269,7 +373,21 @@ func Open(opts Options) (*Session, error) {
 		ToolProfile:  s.tools.profile,
 		Tools:        s.tools.wire,
 		Now:          opts.Now,
-	})
+	}
+	if child != nil {
+		// The header goes to disk as it is. The type and the persona's path
+		// come from files a plugin or a repository wrote, so they are redacted
+		// as the prompt's extras are; the two ids are the runner's own, and
+		// are redacted alike because one rule is simpler to check than two.
+		// The session id cannot be: it names the file.
+		red := s.tools.redactor()
+		sopts.SessionID = child.ID
+		sopts.ParentSession = red.String(child.ParentSession)
+		sopts.ParentToolCall = red.String(child.ParentCall)
+		sopts.SubagentType = red.String(child.Type)
+		sopts.PersonaPath = red.String(child.PersonaPath)
+	}
+	st, err := store.New(sopts)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
@@ -284,6 +402,16 @@ func Open(opts Options) (*Session, error) {
 	if h := st.Header(); s.tools.holdsKey(h.SystemPromptSHA256) || s.tools.holdsKey(h.ToolsSHA256) {
 		return nil, errDigestKey
 	}
+	// And the line as a whole, which is what reaches the disk. Every field
+	// that came from outside the harness is redacted above, one at a time, but
+	// the encoding writes `","persona_path":"` and the like between two of
+	// them, so a key spelled across that framing is in the line and in neither
+	// field (plan 026 r1): the prompt's join, one level down. Nothing here can
+	// be rewritten — the fields are what they are — so it refuses, as the
+	// digests do. An ordinary header holds no key and this changes nothing.
+	if line, err := st.HeaderLine(); err != nil || s.tools.holdsKey(string(line)) {
+		return nil, errHeaderKey
+	}
 	s.store = st
 	s.cur = m
 	s.logged = logged{model: m.id(), effort: m.effort, mode: modeAgent}
@@ -297,6 +425,14 @@ func Open(opts Options) (*Session, error) {
 	// working directory's does (errPlanPathKey): redacting it would leave the
 	// model a path that opens nothing. A key the session learns later is
 	// refused with the switch that brought it (toolset.resolve).
+	//
+	// A sub-agent has no plan file at all (plan 026 §3.2): nothing is adopted
+	// or created, the gate's plan path stays "", and in plan mode every edit
+	// it attempts is refused.
+	if child != nil {
+		s.modes = newChildModes(mode, s.tools.modeGate)
+		return s, nil
+	}
 	plan := store.PlanPath(st.Path())
 	if err := s.tools.adoptPlanPath(plan); err != nil {
 		return nil, err
@@ -431,7 +567,23 @@ func (s *Session) SetEffort(level string) error {
 // only file an edit-kind call may touch in that mode — and a failure to
 // create it fails the switch and leaves the mode alone, as a model that
 // cannot be built leaves SetModel's alone. After Close it is ErrClosed.
+//
+// A sub-agent's mode is its parent's and fixed at Open: SetMode on one is
+// ErrChildMode, whatever id it names, and changes nothing. The parent's later
+// switches reach a running child through its gate instead, and only ever
+// tighten it (tool.NewChildModeGate, plan 026 §3.5): the switch raises every
+// registered child's strictness in the same critical section that sets the
+// mode, under the runner's registry lock, and a child's registration reads
+// the mode under that lock too — so a child is either registered before the
+// switch and raised by it, or registered after it and opened in the new mode,
+// and a round trip such as agent → ask → agent can never slip between two of
+// a child's checks unseen (panel P50). The lock order is s.mu → regMu →
+// modes.mu, and registration's regMu → modes.mu; nothing takes them the other
+// way round.
 func (s *Session) SetMode(id string) error {
+	if s.child {
+		return ErrChildMode
+	}
 	mode, err := normalizeMode(id)
 	if err != nil {
 		return err
@@ -453,7 +605,7 @@ func (s *Session) SetMode(id string) error {
 	if s.closed {
 		return ErrClosed
 	}
-	s.modes.set(mode)
+	s.subs.setMode(mode, s.modes.set)
 	return nil
 }
 
@@ -529,7 +681,39 @@ func (s *Session) PromptSHA256() string { return s.store.Header().SystemPromptSH
 // it has returned and before the Run it was redacting for: two calls cannot
 // be made one from out here, and the caller that cares holds the prompt path
 // between them.
-func (s *Session) Redact(text string) string { return s.tools.widest().String(text) }
+//
+// It covers the session's sub-agents' keys too (plan 026 §3.9, review r8,
+// finding 1): a child that opened after the environment gained a key knows
+// one its parent does not, and the adapter publishes what the child wrote —
+// its roster row, its lifecycle, the failure its call returns — through this
+// redactor, after sanitizing, which can put a key the runner's union could not
+// see back together. So every registered child's keys are covered — a child
+// is still registered when its SubagentFinished reaches the sink — and so are
+// those of every child the running turn has retired, until that turn ends:
+// the call's ToolFinished follows the retirement and carries the child's
+// text (subagents.childKeys). One replacer over them all, never two in turn
+// (subagents.union says why).
+func (s *Session) Redact(text string) string { return s.redactor().String(text) }
+
+// Redactor is Redact taken once: a function over the keys Redact covers now,
+// which takes no lock when it is applied. A caller that redacts inside a lock
+// of its own, where Redact's — the toolset's and the runner's registry's —
+// may not be taken, takes it before that lock (the adapter's roster and task
+// rows, plan 026 §3.9, review r8). It cannot cover a key learned after it was
+// taken: Redact's own limit, for one call.
+func (s *Session) Redactor() func(string) string { return s.redactor().String }
+
+// redactor is the replacer Redact applies: the widest one while no sub-agent
+// knows a key the session does not, and otherwise one over both sessions'
+// keys together. The toolset's lock and the runner's are each taken alone
+// (knownKeys, widest, childKeys): both are leaves.
+func (s *Session) redactor() *redact.Replacer {
+	keys, kids := s.tools.knownKeys(), s.subs.childKeys()
+	if !slices.ContainsFunc(kids, func(k string) bool { return !slices.Contains(keys, k) }) {
+		return s.tools.widest()
+	}
+	return redact.New(append(keys, kids...)...)
+}
 
 // Close ends the session: it cancels a live Run and waits for it to return —
 // by which time a partial answer has been persisted, interrupted — then
@@ -544,17 +728,22 @@ func (s *Session) Redact(text string) string { return s.tools.widest().String(te
 // already cancelled for another reason: either way a running command is
 // killed at once, not given its grace, so Close returns within the tools'
 // close bound — about 3 s — even after a cancel (plan 019 §3.9, §7.7).
+//
+// A session's sub-agents are told first (plan 026 §3.8, panel P3): Close
+// seals the runner's registry, so no child registers after it, and signals
+// every registered child's closing — the child's own cancel with
+// tool.ErrClosing and its own closing channel, without waiting for either —
+// before it cancels and joins its own turn. A cause is fixed by the first
+// cancel, and the adapter's Close cancels the turn ordinarily before it calls
+// this one, which reaches a child through its context first; without the
+// signal the child's closing channel would stay open until the child itself
+// closed, after its commands had had their grace. The children are joined by
+// the join of the turn: an agent call returns only once its child has run and
+// closed, and the turn only once its calls have.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		cancel, done := s.cancel, s.done
-		s.mu.Unlock()
-		if cancel != nil {
-			cancel(errClosing)
-		}
-		s.tools.close()
-		if cancel != nil {
+		s.subs.closeChildren()
+		if done := s.signalClose(); done != nil {
 			<-done
 		}
 		if err := s.store.Close(); err != nil {
@@ -562,4 +751,29 @@ func (s *Session) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+// signalClose is the first half of Close, and does not wait (plan 026 §3.8):
+// the session is marked closed, so no turn begins from here; a live turn is
+// cancelled with tool.ErrClosing; and the tools' closing channel is closed,
+// which reaches a call whose turn was already cancelled for another reason.
+// It returns the live turn's done channel, which Close waits on, or nil when
+// no turn was running — read in the same critical section that marks the
+// session closed, so a turn cannot begin between the two (begin checks closed
+// under the same lock, and registers its cancel there).
+//
+// It is idempotent and safe from any goroutine, and takes no lock but s.mu,
+// briefly: a parent's Close calls it on each of its children, through their
+// registry handles, while the children's own turns may still be running, and
+// the runner's deferred Close of each child calls it again.
+func (s *Session) signalClose() (done chan struct{}) {
+	s.mu.Lock()
+	s.closed = true
+	cancel, done := s.cancel, s.done
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel(errClosing)
+	}
+	s.tools.close()
+	return done
 }

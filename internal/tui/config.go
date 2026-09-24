@@ -195,6 +195,9 @@ func ConfigCompatClaude() (agent.ClaudeCompat, []string) {
 		{"skills", &c.NoSkills},
 		{"commands", &c.NoCommands},
 		{"plugins", &c.NoPlugins},
+		// Personas, the sub-agent types (plan 026 §3.4): off removes them from
+		// all three of their sources, a plugin's included.
+		{"agents", &c.NoAgents},
 	}
 	var why []string
 	for _, k := range off {

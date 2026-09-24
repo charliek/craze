@@ -629,7 +629,7 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 			t.Errorf("prompt: %v", err)
 		}
 	}()
-	waitUntil(t, "the turn to start", s.promptInFlight)
+	waitPromptOnWire(t, s)
 	if err := s.Interject(t.Context(), "BANANA"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}

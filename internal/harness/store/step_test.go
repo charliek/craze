@@ -352,6 +352,46 @@ func TestInterruptedToolEntry(t *testing.T) {
 	}
 }
 
+// TestSubagentUsageRoundTrips (plan 026 §3.7): a tool entry's subagent_usage
+// rows — one per model a step's children ran on — are written under that key
+// and read back as they were, in order; the entry carries no plain usage. The
+// control is the step before it, with no rows: no key on its line at all, so
+// every entry written before sub-agents reads, and is written, as it was.
+func TestSubagentUsageRoundTrips(t *testing.T) {
+	s := newStore(t, testOptions(t))
+	if err := s.AppendUser(user("q", kimi)); err != nil {
+		t.Fatal(err)
+	}
+	step(t, s, nil, calls(kimi, "a"), results(kimi, "a"))
+	rows := []ModelUsage{
+		{Provider: "test", Model: "test/b", WireModel: "wire-b", Usage: Usage{Input: 20, Output: 10, CacheRead: 8}},
+		{Provider: "other", Model: "other/c", WireModel: "wire-c", Usage: Usage{Input: 10, Output: 5, Reasoning: 2}},
+	}
+	withRows := results(kimi, "b")
+	withRows.SubagentUsage = rows
+	step(t, s, nil, calls(kimi, "b"), withRows)
+
+	b, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if n := strings.Count(string(b), `"subagent_usage"`); n != 1 || !strings.Contains(lines[len(lines)-1], `"subagent_usage":[{"provider":"test","model":"test/b","wire_model":"wire-b","usage":{`) {
+		t.Fatalf("the key appears %d times; want once, on the last line:\n%s", n, b)
+	}
+	tr, err := Load(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := tr.Entries[len(tr.Entries)-1]
+	if !reflect.DeepEqual(last.SubagentUsage, rows) || last.Usage != nil {
+		t.Fatalf("read back rows %+v and usage %+v; want %+v and none", last.SubagentUsage, last.Usage, rows)
+	}
+	if prev := tr.Entries[len(tr.Entries)-3]; prev.SubagentUsage != nil {
+		t.Fatalf("control: the earlier tool entry read back rows %+v", prev.SubagentUsage)
+	}
+}
+
 // TestHeaderRecordsTheToolContract: the header carries the tool profile and
 // the tools array's hash, never the array, and they read back. The control
 // is a session with no tools, whose header has neither field.

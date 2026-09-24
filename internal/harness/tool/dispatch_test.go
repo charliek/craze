@@ -415,6 +415,44 @@ func TestDispatcherKeepsTargetsForTheGateAlone(t *testing.T) {
 	}
 }
 
+// TestDispatcherRedactsChildUsage (plan 026 §3.7, review r2 of C3a): the
+// model names on a sub-agent's usage — which the harness writes into the
+// parent's transcript as subagent_usage — are redacted like every other
+// outward string, in a copy: the value the tool returned keeps its own. The
+// same run with no keys is the control.
+func TestDispatcherRedactsChildUsage(t *testing.T) {
+	for _, redacting := range []bool{true, false} {
+		t.Run(fmt.Sprintf("redacting=%v", redacting), func(t *testing.T) {
+			var keys []string
+			if redacting {
+				keys = []string{keyA}
+			}
+			child := &ChildUsage{Provider: "prov-" + keyA, Model: "p/" + keyA, WireModel: "w-" + keyA, Usage: Usage{Input: 7, Output: 3}}
+			f := newFake("agent", func(context.Context, Env, fakeInput) Result {
+				return Result{Text: "done", Child: child}
+			})
+			d := newDispatcher(t, testEnv(t, keys...), nil, f)
+			if _, _, ok := d.Prepare(Call{ID: "t1.1.1", Tool: "agent", Input: input(t, fakeInput{Text: "go"})}); !ok {
+				t.Fatal("Prepare refused the call")
+			}
+			res := d.Run(context.Background(), "t1.1.1", nil)
+			if res.Child == nil || res.Child.Usage != child.Usage {
+				t.Fatalf("the result's Child = %+v, want the tool's usage carried through", res.Child)
+			}
+			got := res.Child.Provider + " " + res.Child.Model + " " + res.Child.WireModel
+			switch {
+			case redacting && (strings.Contains(got, keyA) || strings.Count(got, redact.Marker) != 3):
+				t.Fatalf("the Child's names = %q; want all three redacted", got)
+			case !redacting && strings.Count(got, keyA) != 3:
+				t.Fatalf("control: the Child's names = %q; want the key in all three", got)
+			}
+			if res.Child == child || child.Model != "p/"+keyA {
+				t.Fatalf("the tool's own ChildUsage was written to (%+v), or returned as it is", child)
+			}
+		})
+	}
+}
+
 // TestDispatcherTruncates runs a long result through each Direction. Head
 // and Tail cut the text and spill the whole of it, redacted, to a private
 // file named from the call's id; None leaves text and Trunc as the tool set

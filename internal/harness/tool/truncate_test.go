@@ -113,7 +113,8 @@ func TestTruncateLayout(t *testing.T) {
 	if tr.Spill != spill2 || tr.KeptLines != 2 {
 		t.Fatalf("Trunc = %+v", tr)
 	}
-	// The hint never mentions a Task tool: craze has none.
+	// The hint never mentions a Task tool: opencode's variant that sends the
+	// spill file to a sub-agent stays out, agent tool or not (plan 026 §3.3).
 	if strings.Contains(got, "Task") {
 		t.Fatal("the hint names the Task tool")
 	}

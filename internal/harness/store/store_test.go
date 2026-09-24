@@ -152,7 +152,7 @@ func testOptions(t *testing.T) Options {
 		CrazeVersion: "v0.0.0-test",
 		SystemPrompt: "You are craze.",
 		Now:          newClock().now,
-		sessionID:    "00000000-0000-4000-8000-000000000001",
+		SessionID:    "00000000-0000-4000-8000-000000000001",
 		entryID:      seqIDs(),
 	}
 }
@@ -386,18 +386,18 @@ func TestNewDoesNoIO(t *testing.T) {
 func TestPathLayout(t *testing.T) {
 	opts := testOptions(t)
 	s := newStore(t, opts)
-	want := filepath.Join(opts.Home, "sessions", "--work-craze--", "20260918T120000Z_"+opts.sessionID+".jsonl")
+	want := filepath.Join(opts.Home, "sessions", "--work-craze--", "20260918T120000Z_"+opts.SessionID+".jsonl")
 	if s.Path() != want {
 		t.Fatalf("Path = %s, want %s", s.Path(), want)
 	}
-	if s.ID() != opts.sessionID {
-		t.Fatalf("ID = %s, want %s", s.ID(), opts.sessionID)
+	if s.ID() != opts.SessionID {
+		t.Fatalf("ID = %s, want %s", s.ID(), opts.SessionID)
 	}
 }
 
 func TestNewGeneratesAUUIDv4(t *testing.T) {
 	opts := testOptions(t)
-	opts.sessionID = ""
+	opts.SessionID = ""
 	a, b := newStore(t, opts), newStore(t, opts)
 	for _, id := range []string{a.ID(), b.ID()} {
 		// xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx

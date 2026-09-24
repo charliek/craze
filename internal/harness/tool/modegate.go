@@ -28,6 +28,15 @@ const (
 // there is no plan to present (panel correction 17).
 const ExitPlanModeTool = "exit_plan_mode"
 
+// AgentTool is the id of the tool that starts a sub-agent (plan 026 §3.3).
+// ModeGate knows the name for the opposite reason it knows exit_plan_mode's:
+// it is allowed by name in every mode, ahead of the mode's rules. The agent
+// tool is not ReadOnly — a child may edit — so ask mode would otherwise refuse
+// it for that alone, but the call itself changes nothing: the child inherits
+// the parent's mode (plan 026 §3.5), and its gate refuses what the mode
+// forbids, call by call.
+const AgentTool = "agent"
+
 // The refusals, grok-build's word for word (plan_mode.rs:325-371), with
 // craze's plan path spliced in. They are what the model reads back as the
 // call's error result, so each says what the rule is rather than that a rule
@@ -42,6 +51,74 @@ func planEditRejected(planPath string) string {
 	return "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (`" + planPath + "`)."
 }
 
+// A sub-agent's refusals, craze's own (plan 026 §3.5). A child in plan mode
+// has no plan file — every edit is refused, and there is no path to name — so
+// grok-build's text, which offers the plan file as the one exception, would
+// send it looking for a file it cannot have. The two "switched" texts are the
+// refusals a child reads when its parent's later switch, not the mode it
+// opened in, is what refuses the call: the model otherwise sees a tool that
+// ran a step ago refused now, with nothing in its reminder to say why, since
+// a tightening changes no reminder.
+const (
+	childPlanRejectedText = "Rejected: file edits are not allowed — the agent that started you is in plan mode."
+	childPlanSwitchedText = "Rejected: file edits are not allowed — the agent that started you switched to plan mode."
+	childAskSwitchedText  = "Rejected: no edits, writes, or shell commands — the agent that started you switched to ask mode, which is read-only."
+)
+
+// The ranks Strictness gives the modes.
+const (
+	strictnessAgent int32 = iota
+	strictnessPlan
+	strictnessAsk
+)
+
+// Strictness ranks a mode by what it refuses: agent (nothing) below plan
+// (edits) below ask (everything that is not read-only). A sub-agent's gate
+// judges each call under the stricter of the mode it opened in and the rank
+// its parent has pushed since (plan 026 §3.5, panel P37, P50). An unknown mode
+// ranks as agent, as ModeGate judges one.
+func Strictness(mode string) int32 {
+	switch mode {
+	case ModePlan:
+		return strictnessPlan
+	case ModeAsk:
+		return strictnessAsk
+	}
+	return strictnessAgent
+}
+
+// modeOf is Strictness's inverse over the three ranks.
+func modeOf(rank int32) string {
+	switch {
+	case rank >= strictnessAsk:
+		return ModeAsk
+	case rank == strictnessPlan:
+		return ModePlan
+	}
+	return ModeAgent
+}
+
+// Raise lifts s to mode's rank when it is below it, and never lowers it: a
+// monotonic maximum, by compare-and-swap, so two raises racing each other
+// settle on the stricter and a raise towards agent is a no-op. A parent's
+// SetMode calls it for every running child (plan 026 §3.5): sampling the
+// parent's live mode at each of a child's checks instead would miss an
+// agent→ask→agent round trip made between two of them (panel P37, P50), and
+// the maximum is what makes a switch back loosen nothing. A nil s is nothing
+// to raise.
+func Raise(s *atomic.Int32, mode string) {
+	if s == nil {
+		return
+	}
+	want := Strictness(mode)
+	for {
+		cur := s.Load()
+		if cur >= want || s.CompareAndSwap(cur, want) {
+			return
+		}
+	}
+}
+
 // ModeGate judges a call against the session's mode and hands everything it
 // does not refuse to an inner gate — AllowAll today, H3's evaluator later,
 // which wraps the same way. Its rules:
@@ -53,6 +130,10 @@ func planEditRejected(planPath string) string {
 //     carries the rule.
 //   - ask: a call that is not ReadOnly is refused.
 //   - any mode but plan: exit_plan_mode is refused by name.
+//   - every mode: agent is allowed by name, ahead of all of the above, and
+//     goes inward like any call the mode allows (plan 026 §3.3, panel GLM 8).
+//     The restriction reaches the child instead: it runs in its parent's mode
+//     and is tightened by the parent's later switches (NewChildModeGate).
 //
 // The mode is read atomically on every call, so SetMode is effective at once:
 // the next call whose Check reaches the read is judged under the new mode,
@@ -73,10 +154,26 @@ func planEditRejected(planPath string) string {
 // protection from another process rearranging the tree mid-call.
 //
 // Check runs on Fantasy's tool goroutines, up to five at once.
+//
+// # A sub-agent's gate
+//
+// NewChildModeGate builds the gate of a session another started (plan 026
+// §3.5). Its mode is the parent's when the child opened and never changes by
+// SetMode — the harness refuses a child's switch — but the parent's own later
+// switches reach it as strictness: an atomic rank the parent only ever raises
+// (Raise), which the gate reads at every Check and judges by whenever it is
+// stricter than the mode. So a running child is tightened from its next call
+// and never loosened. Its plan-mode refusal is the child's own text, since a
+// child has no plan file to offer as the exception, and a refusal only the
+// raised rank makes says the parent switched.
 type ModeGate struct {
 	mode     atomic.Pointer[string]
 	planPath atomic.Pointer[string]
 	inner    Gate
+	// child and strictness are fixed at construction (NewChildModeGate) and
+	// read without a lock; strictness is nil for a session no parent tightens.
+	child      bool
+	strictness *atomic.Int32
 }
 
 // NewModeGate is a gate in mode over inner (nil is AllowAll). The plan file is
@@ -89,6 +186,16 @@ func NewModeGate(mode string, inner Gate) *ModeGate {
 	g := &ModeGate{inner: inner}
 	g.SetMode(mode)
 	g.SetPlanPath("")
+	return g
+}
+
+// NewChildModeGate is a sub-agent's gate in mode over inner (nil is
+// AllowAll), tightened by strictness, which its parent raises (Raise); nil
+// strictness tightens nothing. Its plan path stays unset: a child has no plan
+// file, so in plan mode it refuses every edit (plan 026 §3.2, §3.5).
+func NewChildModeGate(mode string, strictness *atomic.Int32, inner Gate) *ModeGate {
+	g := NewModeGate(mode, inner)
+	g.child, g.strictness = true, strictness
 	return g
 }
 
@@ -119,21 +226,66 @@ func (g *ModeGate) PlanPath() string { return *g.planPath.Load() }
 
 // Check is the Gate.
 func (g *ModeGate) Check(ctx context.Context, req Request) (Decision, error) {
-	mode := g.Mode()
+	// By exact name, before the mode is read: the plan branch would otherwise
+	// judge the call by its kind and ask mode by ReadOnly, and neither says
+	// anything about a call that only starts an agent the mode then binds. A
+	// sub-agent's gate never sees one — a child is not offered the tool, and
+	// the dispatcher refuses a call to a tool it does not have before any gate
+	// runs — so the rule is the parent's in practice.
+	if req.Tool == AgentTool {
+		return g.inner.Check(ctx, req)
+	}
+	mode, raised := g.judgedMode()
 	if mode != ModePlan && req.Tool == ExitPlanModeTool {
 		return Deny{Reason: planDisabledText}, nil
 	}
 	switch mode {
 	case ModePlan:
 		if req.Kind == KindEdit && !g.onlyThePlan(req.Targets) {
-			return Deny{Reason: planEditRejected(g.PlanPath())}, nil
+			return Deny{Reason: g.planRefusal(raised)}, nil
 		}
 	case ModeAsk:
 		if !req.ReadOnly {
-			return Deny{Reason: askRejectedText}, nil
+			return Deny{Reason: g.askRefusal(raised)}, nil
 		}
 	}
 	return g.inner.Check(ctx, req)
+}
+
+// judgedMode is the mode a call is judged under now, and whether it is
+// stricter than the gate's own mode because a sub-agent's parent raised it.
+// For every other gate it is the mode, unraised.
+func (g *ModeGate) judgedMode() (mode string, raised bool) {
+	mode = g.Mode()
+	if g.strictness == nil {
+		return mode, false
+	}
+	if r := g.strictness.Load(); r > Strictness(mode) {
+		return modeOf(r), true
+	}
+	return mode, false
+}
+
+// planRefusal is plan mode's refusal of an edit: grok-build's, naming the plan
+// file, for a session; a sub-agent's own, which names none, for a child — and
+// the one saying its parent switched when that is what refused the call.
+func (g *ModeGate) planRefusal(raised bool) string {
+	switch {
+	case raised:
+		return childPlanSwitchedText
+	case g.child:
+		return childPlanRejectedText
+	}
+	return planEditRejected(g.PlanPath())
+}
+
+// askRefusal is ask mode's refusal of a call that is not read-only: the one
+// text every session reads, unless a sub-agent's parent switched it to ask.
+func (g *ModeGate) askRefusal(raised bool) string {
+	if raised {
+		return childAskSwitchedText
+	}
+	return askRejectedText
 }
 
 // onlyThePlan reports whether targets are the plan file and nothing else. An

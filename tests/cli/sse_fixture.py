@@ -147,6 +147,44 @@ def parallel_step(*calls: ToolCall, finish: str = "", interleaved: bool = True) 
 # request that took it.
 ScriptStep = Step | Callable[[RecordedRequest], Step]
 
+# RoutePredicate says whether a request is one a route answers: it is handed
+# the RecordedRequest -- its body is the whole request the provider was sent --
+# and answers True for one it owns.
+RoutePredicate = Callable[[RecordedRequest], bool]
+
+
+@dataclass
+class _Route:
+    """One route: the requests predicate owns, answered from steps in order."""
+
+    predicate: RoutePredicate
+    steps: list[ScriptStep]
+
+
+def user_prompt(request: RecordedRequest) -> str:
+    """The text of request's first user message: the prompt of the turn that
+    sent it. A sub-agent's first user message is the task its parent gave it
+    (plan 026 §3.2), so this is how a child's requests are told apart from its
+    parent's and from its siblings'. A mode's reminder follows the prompt, and
+    a tool result is a message of its own role, so neither is ever first.
+    """
+    for msg in request.messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # The prompt is the message's first text part.
+            return next((p.get("text", "") for p in content if isinstance(p, dict) and "text" in p), "")
+        return ""
+    return ""
+
+
+def prompt_is(prompt: str) -> RoutePredicate:
+    """A predicate owning every request of the turn whose prompt is prompt."""
+    return lambda request: user_prompt(request) == prompt
+
 
 # PLAN_PATH_RE finds the plan file's absolute path in a request body: the
 # backticked path inside a <system-reminder> block, which is the only place the
@@ -208,6 +246,9 @@ class SSEFixture:
         # An entry is a Step, or a callable taking the RecordedRequest that
         # took it and answering with one.
         self._script: list[ScriptStep] | None = None
+        # Routes, tried in the order they were added, ahead of the script:
+        # see route().
+        self._routes: list[_Route] = []
         self.unscripted = 0
         self.requests: list[RecordedRequest] = []
         fixture = self
@@ -226,10 +267,25 @@ class SSEFixture:
                 auth = self.headers.get("Authorization", "")
                 record = RecordedRequest(self.path, auth, body)
                 with fixture._lock:
+                    routes = list(fixture._routes)
+                # Which route owns the request is decided outside the lock,
+                # for the reason a callable step runs outside it: a predicate
+                # is a test's own code.
+                owner = next((r for r in routes if r.predicate(record)), None)
+                # Then the request is recorded and its step taken in ONE
+                # critical section, after its predicate (review r8, finding
+                # 5), for a route and the script alike: recorded before the
+                # predicate and answered in a second section, a request held
+                # in its predicate was recorded ahead of one that then took
+                # the earlier step, so .requests and the answers disagreed on
+                # the order. Now .requests is the order the steps were handed
+                # out in, and two requests of one route -- a child's, sent
+                # while its siblings stream -- still never take the same step.
+                with fixture._lock:
                     n = len(fixture.requests)
                     fixture.requests.append(record)
                     mode = fixture._mode
-                    step = fixture._take_step_locked()
+                    step = fixture._take_step_locked(owner)
                 # A scripted entry may be a function of the request that took
                 # it, which is how a step answers with something only the
                 # request knows -- the plan file's absolute path, which a
@@ -335,8 +391,33 @@ class SSEFixture:
             self._script = list(steps)
             self.unscripted = 0
 
-    def _take_step_locked(self) -> ScriptStep | None:
-        """The entry for this request. self._lock is held."""
+    def route(self, predicate: RoutePredicate, steps: list[ScriptStep]) -> None:
+        """Answer the requests predicate owns with steps, one per request, in
+        order, whatever else the script holds.
+
+        A native parent's sub-agents run at once (plan 026 §3.13), so their
+        requests reach the fixture interleaved with each other's and with their
+        parent's: one queue of steps would hand a child its sibling's answer. A
+        route is a queue of its own, matched on the request -- prompt_is(task)
+        owns every request of the child whose task that is. Routes are tried in
+        the order they were added and the first that owns a request answers it;
+        one whose steps are spent answers the unscripted 400, never the script,
+        so a child that asks once more than its route has fails loudly -- which
+        is also how a case scripts a child whose provider fails: route(pred,
+        []). A request no route owns takes the script, exactly as before routes
+        existed.
+        """
+        with self._lock:
+            self._routes.append(_Route(predicate, list(steps)))
+
+    def _take_step_locked(self, owner: _Route | None = None) -> ScriptStep | None:
+        """The entry for this request: owner's next step when a route owns it,
+        else the script's. self._lock is held."""
+        if owner is not None:
+            if not owner.steps:
+                self.unscripted += 1
+                return None
+            return owner.steps.pop(0)
         if self._script is None:
             return self._sticky
         if not self._script:
