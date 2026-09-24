@@ -174,10 +174,8 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 		m.agentStart[id] = m.now()
 		delete(m.agentDone, id)
 	case agent.SubagentChangeFinished:
+		// The child's run is closed by the fold, at the event's At.
 		m.noteAgentDone(id)
-		if t := m.subs[id]; t != nil {
-			t.closeStream(m.stamp(ev.At))
-		}
 	default:
 		m.noteAgentStart(id)
 	}
@@ -190,28 +188,19 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 	}
 }
 
+// applyChildEvent is a sub-agent's own event. Its rows are the fold's, in the
+// child's transcript: a reply, a thought and the prompt the parent handed it
+// stream; a tool is kept one row per call; and a command line — nothing emits
+// one against a child today, but a child's expansion belongs to the child's
+// transcript for the same reason its user block does — is a note. What is left
+// here is the pane every child event has always made, and what a child's tool
+// says about the roster.
 func (m *Model) applyChildEvent(ev agent.Event) {
 	id := ev.Agent
-	tr := m.ensureSub(id)
-	switch ev.Type {
-	case agent.EventText:
-		tr.appendStream(entryAssistant, ev.Text, ev.At, m.now())
-	case agent.EventThought:
-		tr.appendStream(entryThought, ev.Text, ev.At, m.now())
-	case agent.EventUser:
-		tr.appendStream(entryUser, ev.Text, ev.At, m.now())
-	case agent.EventCommand:
-		// Nothing emits one against a child today — craze expands on its own
-		// prompts and those are the main session's — but a child's expansion
-		// belongs to the child's transcript for the same reason its user
-		// block does, and the alternative is dropping it silently.
-		tr.addCommandLine(ev.Command, m.stamp(ev.At))
-	case agent.EventTool:
+	m.ensureSub(id)
+	if ev.Type == agent.EventTool {
 		m.refreshSnap()
 		m.noteAgentStart(id)
-		if ev.Tool != nil {
-			tr.upsertTool(ev.Tool, m.stamp(ev.At))
-		}
 	}
 }
 

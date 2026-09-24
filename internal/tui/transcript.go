@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/textdiff"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 const (
@@ -26,7 +27,9 @@ const (
 	subMaxEntries = 1000
 	subTextBudget = 1 << 20
 	entryTextCap  = 64 << 10
-	trimmedNote   = "… earlier transcript trimmed"
+	// trimmedNote leads a pane whose oldest rows were dropped: the shared
+	// model's wording, so every client draws the same one.
+	trimmedNote = transcript.TrimmedNote
 	// outputPreviewLines is how much of a tool's output an expanded row shows.
 	outputPreviewLines = 20
 	// editCollapsedLines is how much of the first hunk a collapsed edit shows.
@@ -60,7 +63,9 @@ type renderKey struct {
 }
 
 // entry is one row of a pane's display list: what the row shows, and its render
-// cache (rendered, renderedFor, dirty).
+// cache (rendered, renderedFor, dirty). A shared row's display value is read
+// from the shared model's entry it shows (show); a local row's is the client's
+// own.
 type entry struct {
 	kind entryKind
 	text string
@@ -82,6 +87,19 @@ type entry struct {
 	// local marks a row this client wrote for a message of its own rather than
 	// one an event drew (see pane): it is no event's, and no other client has it.
 	local bool
+	// id is the shared entry the row shows, the zero id for a local row.
+	id transcript.EntryID
+	// streaming marks the row showing the shared model's open stream entry,
+	// whose text is the model's tail and grows with every chunk.
+	streaming bool
+	// cont marks a continuation (execution amendment X30): the run that was
+	// open at /clear, shown from contFrom bytes into its text and dated at the
+	// first chunk after the clear, which is what that chunk has always drawn.
+	// Once the run is longer than the stream cap its text is a moving tail and
+	// the offset no longer names a place in it, so the row shows the whole
+	// tail (the recorded approximation).
+	cont     bool
+	contFrom int
 
 	rendered    []string
 	renderedFor renderKey
@@ -93,25 +111,58 @@ func (m Model) renderKey() renderKey {
 	return renderKey{width: m.width, theme: m.theme.Name, expanded: m.expanded}
 }
 
-// ---------------------------------------------------------------- the old fold
-//
-// From here to noteTodos is the old fold: the rows the session's events draw,
-// written through appendShared, and the edits it makes to the shared rows
-// already drawn — a chunk growing the open run, a tool updated in place, a run
-// closed. The event-driven wrappers stamp at the event's At. C5c replaces it
-// with the shared model's Change, all but notePath and displayPath: pathDirs is
-// the pane's own, fed from the tool rows it is given.
+// kindOf is the row kind a shared entry draws as.
+func kindOf(k transcript.Kind) entryKind {
+	switch k {
+	case transcript.KindUser:
+		return entryUser
+	case transcript.KindAssistant:
+		return entryAssistant
+	case transcript.KindThought:
+		return entryThought
+	case transcript.KindTool:
+		return entryTool
+	case transcript.KindPlan:
+		return entryPlan
+	case transcript.KindError:
+		return entryError
+	}
+	return entryNote
+}
+
+// show makes r display the shared entry e of tr, as it stands now: its kind,
+// its text — the model's tail for the open stream entry, whose stored text is
+// empty (X7, X24), read afresh on every touch — its payload, its span and its
+// marks. An error entry's text is the error's, which the model read through
+// Options.ErrText. A continuation keeps its own At and shows the text from its
+// offset. r is re-rendered at the next paint.
+func (r *entry) show(e *transcript.Entry, tr *transcript.Transcript) {
+	text := e.Text
+	if e.Streaming {
+		text = tr.Tail()
+	}
+	at := e.At
+	if r.cont {
+		at = r.at
+		if !e.Cut && r.contFrom <= len(text) {
+			text = text[r.contFrom:]
+		}
+	}
+	r.kind = kindOf(e.Kind)
+	r.text = text
+	r.tool, r.plan = e.Tool, e.Plan
+	r.at, r.end = at, e.End
+	r.open, r.interject, r.streaming = e.Open, e.Interject, e.Streaming
+	r.local = false
+	r.id = e.ID
+	r.dirty = true
+}
 
 // stamp is the time a row drawn from an event is written at: the event's own
 // At, and this client's clock only for an event that carries none, which is a
-// unit test's fixture — every production event is stamped. The row, and the End
-// of the run it closes, then say when the session reported the thing and not
-// when this client got round to consuming it, which is the instant every client
-// folding the same event agrees on (plan 024 §3.2).
-//
-// A row the client writes for a message of its own — a local failure, a theme
-// or usage note, the optimistic user row at Enter, an ask's answer notes — is
-// no event's, and keeps m.now(): the local wrappers that take no time (pane.go).
+// unit test's fixture — every production event is stamped. The shared model
+// stamps its entries by the same rule (plan 024 §3.2); this is for the one row
+// the pane writes on an event's behalf (noteTodos).
 func (m *Model) stamp(at time.Time) time.Time {
 	if at.IsZero() {
 		return m.now()
@@ -119,160 +170,17 @@ func (m *Model) stamp(at time.Time) time.Time {
 	return at
 }
 
-// rebaseToolLine moves the tool index down with a list that lost its first n
-// rows, and forgets the rows that fell off: the index is by position.
-func (t *pane) rebaseToolLine(n int) {
-	for id, idx := range t.toolLine {
-		if idx-n < 0 {
-			delete(t.toolLine, id)
-			continue
-		}
-		t.toolLine[id] = idx - n
-	}
-}
-
 // userText is what a user row shows of text that went to the agent. The shell
 // context in front of it is wire content and never display content (plan 022
 // §3.6): the row shows the message, not the command output craze attached to it
 // — which is already on screen, in the `!` row the user watched it come out of.
-// Every route into a user row goes through it — this client's own send
-// (addUser), a turn the engine started or a replayed prompt (addUserAt), and an
-// interjection's broadcast (addInterjectionAt) — which is what makes the rule
-// hold for the rows the engine reports as well as the ones this client sends.
+// It is this client's own send's rule (addUser), and the shared model's for
+// every user entry it draws (agent.SplitShellContext), which is what makes the
+// rule hold for the rows the engine reports as well as the ones this client
+// sends.
 func userText(text string) string {
 	_, text = agent.SplitShellContext(text)
 	return text
-}
-
-// addUser is a user row an event drew. hide is the echo rule (appendShared).
-func (t *pane) addUser(text string, now time.Time, hide bool) {
-	t.appendShared(entry{kind: entryUser, text: text}, now, hide)
-}
-
-// addUserAt writes the user block for text the session reports went to the
-// agent — a turn the engine started, for a drained row, an armed send-now or
-// another client, or a prompt out of a replayed transcript — stamped at the
-// event's At. hide is set for the one started whose row this client already
-// drew at Enter (applyTurnStarted), which the pane gives no row.
-func (m *Model) addUserAt(text string, at time.Time, hide bool) {
-	m.main.addUser(userText(text), m.stamp(at), hide)
-}
-
-// addInterjection is the user block for text merged into the running turn.
-// It is written from the agent's broadcast, not from the send: the ack only
-// says the text was accepted, and grok broadcasts one for an interjection it
-// could not merge as well. So it has no local twin and nothing to hide: the
-// broadcast's row is the display (plan 024 X26).
-func (t *pane) addInterjection(text string, now time.Time) {
-	if text == "" {
-		return
-	}
-	t.appendShared(entry{kind: entryUser, text: text, interject: true}, now, false)
-}
-
-// addInterjection is addInterjectionAt at the client's clock.
-func (m *Model) addInterjection(text string) { m.addInterjectionAt(text, m.now()) }
-
-// addInterjectionAt strips the same block for the same reason addUserAt does.
-// An interjection's echo is the one user row craze draws from what came back
-// rather than from what it sent, and on native it is the typed spelling the
-// adapter kept beside the steer — which is still the text craze handed to
-// Interject, block and all. It is the broadcast's row, so it is stamped at the
-// broadcast's At.
-func (m *Model) addInterjectionAt(text string, at time.Time) {
-	m.main.addInterjection(userText(text), m.stamp(at))
-}
-
-// addNote is a note an event drew.
-func (t *pane) addNote(text string, now time.Time) {
-	if text == "" {
-		return
-	}
-	t.appendShared(entry{kind: entryNote, text: text}, now, false)
-}
-
-// addNoteAt is a note drawn from an event, stamped at its At.
-func (m *Model) addNoteAt(text string, at time.Time) { m.main.addNote(text, m.stamp(at)) }
-
-// commandLineMark leads the provenance line under a user entry craze expanded
-// a plugin command or skill into. It points down and to the right, at the entry
-// above it rather than at anything the agent said.
-const commandLineMark = "⤷ "
-
-// addCommandLine records that craze expanded something into the prompt above:
-// which entry, by the plugin:name spelling that always resolves, and whether it
-// was a command or a skill. It is a note, so it draws dim under the user block
-// like every other thing craze says about a turn rather than in it.
-//
-// The block itself is deliberately not shown. It is the plugin's whole body,
-// often pages of it, and the transcript is the conversation the user is having;
-// a headless caller that wants the text reads the command JSON line.
-func (t *pane) addCommandLine(cmd *agent.ExpandedCommand, now time.Time) {
-	if cmd == nil {
-		return
-	}
-	name := sanitizeLine(cmd.Qualified)
-	if name == "" {
-		return
-	}
-	line := commandLineMark + name
-	if kind := sanitizeLine(cmd.Kind); kind != "" {
-		line += " (" + kind + ")"
-	}
-	t.addNote(line, now)
-}
-
-// addCommandLine is the command event's line, stamped at its At.
-func (m *Model) addCommandLine(cmd *agent.ExpandedCommand, at time.Time) {
-	m.main.addCommandLine(cmd, m.stamp(at))
-}
-
-// addPlan puts the plan cursor proposed into the transcript as a note block,
-// which is why the card itself only has to carry the three answers.
-func (t *pane) addPlan(p *agent.PlanEvent, now time.Time) {
-	if p == nil {
-		return
-	}
-	plan := *p
-	t.appendShared(entry{kind: entryPlan, plan: &plan}, now, false)
-}
-
-// addPlan is the plan event's block, stamped at its At.
-func (m *Model) addPlan(p *agent.PlanEvent, at time.Time) { m.main.addPlan(p, m.stamp(at)) }
-
-// addError is an error row an event drew.
-func (t *pane) addError(text string, now time.Time) {
-	if text == "" {
-		return
-	}
-	t.appendShared(entry{kind: entryError, text: text}, now, false)
-}
-
-// addErrorAt is an error row drawn from an event, stamped at its At.
-func (m *Model) addErrorAt(text string, at time.Time) { m.main.addError(text, m.stamp(at)) }
-
-// appendStream grows the open entry of the same kind, so a reply that arrives
-// in five chunks stays one entry and costs one re-render per chunk.
-func (t *pane) appendStream(kind entryKind, text string, at, now time.Time) {
-	if text == "" {
-		return
-	}
-	if at.IsZero() {
-		at = now
-	}
-	if t.streamOpen && len(t.rows) > 0 {
-		last := t.rows[len(t.rows)-1]
-		if last.kind == kind {
-			last.text = capEntryText(last.text + text)
-			last.end = at
-			last.dirty = true
-			t.dirty = true
-			return
-		}
-	}
-	// The append ends the previous run, so the flag is raised after it.
-	t.appendShared(entry{kind: kind, text: capEntryText(text), at: at, end: at, open: kind == entryThought}, now, false)
-	t.streamOpen = true
 }
 
 func capEntryText(s string) string {
@@ -291,89 +199,6 @@ func capEntryText(s string) string {
 		start++
 	}
 	return "…" + s[start:]
-}
-
-func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
-	m.main.appendStream(kind, text, at, m.now())
-}
-
-// endRun ends the open run in place, reporting whether anything changed. The
-// open run is always the last entry, which the pane's append keeps true.
-func (t *pane) endRun(at time.Time) bool {
-	t.streamOpen = false
-	n := len(t.rows)
-	if n == 0 {
-		return false
-	}
-	e := t.rows[n-1]
-	if e.kind != entryThought || !e.open {
-		return false
-	}
-	e.open = false
-	if !at.IsZero() {
-		e.end = at
-	}
-	e.dirty = true
-	return true
-}
-
-// closeStream ends the open run. A thought run freezes its elapsed time at the
-// first event that follows it.
-func (t *pane) closeStream(at time.Time) {
-	if t.endRun(at) {
-		t.dirty = true
-	}
-}
-
-func (t *pane) breakStream(now time.Time) { t.closeStream(now) }
-
-// breakStream ends the open run at the At of the event that ended it — a
-// turn's done, a foreign-turn bracket, a replay's end, an ask opening — so a
-// thought's duration measures the events and not how late this client consumed
-// the last of them (plan 024 §3.2).
-func (m *Model) breakStream(at time.Time) { m.main.breakStream(m.stamp(at)) }
-
-// upsertTool keeps one row per toolCallId, updated in place. Cursor's todo
-// writer is hidden: the todo stream owns that state.
-//
-// A tool is stamped with its own At, which is when the agent reported that
-// state of the call, and with at — the envelope's At, else the client's clock —
-// only when it carries none (plan 024 X1). That one stamp both closes the run
-// above it and dates a new row.
-func (t *pane) upsertTool(tool *agent.ToolEvent, at time.Time) {
-	if tool == nil || tool.IsTodoTool() {
-		return
-	}
-	ev := *tool
-	t.notePath(ev)
-	if !tool.At.IsZero() {
-		at = tool.At
-	}
-	// A tool call ends the run above it either way: an update that lands in an
-	// existing row still means the thinking before it is over.
-	t.closeStream(at)
-	if tool.ID != "" {
-		if idx, ok := t.toolLine[tool.ID]; ok && idx >= 0 && idx < len(t.rows) && t.rows[idx].kind == entryTool {
-			e := t.rows[idx]
-			e.tool = &ev
-			e.dirty = true
-			t.dirty = true
-			return
-		}
-	}
-	t.appendShared(entry{kind: entryTool, tool: &ev, at: at}, at, false)
-	if tool.ID != "" {
-		if t.toolLine == nil {
-			t.toolLine = make(map[string]int)
-		}
-		t.toolLine[tool.ID] = len(t.rows) - 1
-	}
-}
-
-// upsertTool is the tool event's row. at is the event's envelope At, which
-// stamps it only when the tool carries no At of its own.
-func (m *Model) upsertTool(tool *agent.ToolEvent, at time.Time) {
-	m.main.upsertTool(tool, m.stamp(at))
 }
 
 // notePath records which directories a basename has been seen in, so a row can
@@ -418,10 +243,18 @@ func (m Model) displayPath(tr *pane, p string) string {
 	return filepath.Join(filepath.Base(filepath.Dir(p)), base)
 }
 
-// noteTodos turns the todo stream into the two dim transcript notes; the panel
-// itself is the pinned home for the list. The notes are the todos event's, so
-// they are stamped at its At.
-func (m *Model) noteTodos(todos []agent.Todo, at time.Time) {
+// noteTodos is the pane's half of the todo stream's two dim notes; the panel
+// itself is the pinned home for the list. The shared model writes the notes
+// under its own dedupe, which is the session's and never resets; this one is
+// the pane's, which /clear resets, and it decides what the pane shows
+// (execution amendment X31): a note the fold wrote (folded) is the display,
+// and one the pane owes that the fold did not write — which only a /clear
+// makes possible — is written here, locally, stamped at the event's At.
+//
+// The pane's counters never run ahead of the model's (they start at or below
+// them, move by the same rule, and only /clear lowers them), so the fold never
+// writes a note the pane does not owe.
+func (m *Model) noteTodos(todos []agent.Todo, at time.Time, folded bool) {
 	if len(todos) == 0 {
 		return
 	}
@@ -431,18 +264,23 @@ func (m *Model) noteTodos(todos []agent.Todo, at time.Time) {
 			closed++
 		}
 	}
+	var owed string
 	if closed == len(todos) {
 		if !m.todoDone {
 			m.todoDone = true
-			m.addNoteAt(fmt.Sprintf("tasks: %d/%d done", closed, len(todos)), at)
+			owed = fmt.Sprintf("tasks: %d/%d done", closed, len(todos))
 		}
+	} else {
+		m.todoDone = false
+		if len(todos) > m.todoPlanned {
+			m.todoPlanned = len(todos)
+			owed = fmt.Sprintf("tasks: %d planned", len(todos))
+		}
+	}
+	if owed == "" || folded {
 		return
 	}
-	m.todoDone = false
-	if len(todos) > m.todoPlanned {
-		m.todoPlanned = len(todos)
-		m.addNoteAt(fmt.Sprintf("tasks: %d planned", len(todos)), at)
-	}
+	m.main.appendLocal(entry{kind: entryNote, text: owed}, m.stamp(at))
 }
 
 func (m *Model) refreshViewport() {

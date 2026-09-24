@@ -19,10 +19,11 @@ import (
 // It folds the same EventCommand into a transcript.New(...) model — the
 // package's own commandLine, built from its transcribed sanitizeLine — and
 // holds the resulting note's text against what this package's own
-// sanitizeLine and commandLineMark would draw (internal/tui/transcript.go's
-// addCommandLine, rule for rule: commandLineMark + sanitizeLine(q), plus
-// " (" + sanitizeLine(k) + ")" when the kind sanitises to something, and no
-// note at all when sanitizeLine(q) == ""). So a bump of x/ansi that changes
+// sanitizeLine and commandLineMark would draw (the rule the TUI's own
+// addCommandLine drew by before the shared model took the row over in C5c:
+// commandLineMark + sanitizeLine(q), plus " (" + sanitizeLine(k) + ")" when
+// the kind sanitises to something, and no note at all when
+// sanitizeLine(q) == ""). So a bump of x/ansi that changes
 // the TUI's answer — and not the transcribed copy's — fails the gate.
 func TestTranscriptModelsCommandLineMatchesTheTUIs(t *testing.T) {
 	check := func(t *testing.T, q, k string) {

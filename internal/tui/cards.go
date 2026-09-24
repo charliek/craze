@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -107,12 +106,13 @@ func (m Model) headCard() (card, bool) {
 // it would be one nobody could answer. **What decides that is the ask itself,
 // not the mask alone** (maskCards).
 //
-// at is the opening event's At, which is where the run above the card ends.
-func (m *Model) pushCard(c card, at time.Time) {
+// The run above the card has already ended: the shared model's fold ends it at
+// every non-Auto opening, at the opening's At, whether or not this client
+// raises a card for it (plan 024 §3.3).
+func (m *Model) pushCard(c card) {
 	if m.maskDrops(c) {
 		return
 	}
-	m.breakStream(at)
 	m.cards = append(append([]card(nil), m.cards...), c)
 	// A card is a question the user has to answer first, so the offer stands
 	// down while it is up — but it is not retired. cursor answers a plan-mode

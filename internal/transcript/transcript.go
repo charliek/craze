@@ -172,6 +172,28 @@ func (t *Transcript) Entries() []*Entry {
 	return es
 }
 
+// Range is the entries from from to to, both included, oldest first — a
+// Change's appended range (AppendedFrom..AppendedTo), which is how a client
+// reads what one fold appended without copying the whole transcript. It is
+// materialised like Entries: a copy of the pointers, the open stream entry a
+// copy carrying the run's current End with an empty Text (its text is Tail).
+// It is O(the range), and nil when the transcript no longer holds either end
+// or to comes before from.
+func (t *Transcript) Range(from, to EntryID) []*Entry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	first, fe := t.lookup(from)
+	last, le := t.lookup(to)
+	if fe == nil || le == nil || last < first {
+		return nil
+	}
+	es := append([]*Entry(nil), t.ents[first-t.base:last-t.base+1]...)
+	if n := len(es); es[n-1].Streaming {
+		es[n-1] = t.current(es[n-1])
+	}
+	return es
+}
+
 // Entry is the entry id names, if the transcript still holds it.
 func (t *Transcript) Entry(id EntryID) (*Entry, bool) {
 	t.mu.Lock()

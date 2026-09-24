@@ -2004,8 +2004,8 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 	if len(m.main.entries()) != 0 {
 		t.Fatalf("clear left entries %+v", m.main.entries())
 	}
-	if len(m.main.toolLine) != 0 {
-		t.Fatalf("clear left toolLine %+v", m.main.toolLine)
+	if len(m.main.toolLine()) != 0 {
+		t.Fatalf("clear left toolLine %+v", m.main.toolLine())
 	}
 	if len(m.main.pathDirs) != 0 || m.main.trimmed {
 		t.Fatalf("clear left the path cache %+v (trimmed=%v)", m.main.pathDirs, m.main.trimmed)
@@ -2558,9 +2558,9 @@ func TestPlanOfferBelongsToTheTurnThatEarnedIt(t *testing.T) {
 	assertPrompts(t, sess, "plan it", "and now this")
 }
 
-// TestPlanOfferIgnoresEmptyAssistantChunks: appendStream drops an empty chunk,
-// so it is not on the screen and cannot be a plan — and the live adapter does
-// emit them for content it cannot read as text.
+// TestPlanOfferIgnoresEmptyAssistantChunks: the shared model's fold drops an
+// empty chunk, so it is not on the screen and cannot be a plan — and the live
+// adapter does emit them for content it cannot read as text.
 func TestPlanOfferIgnoresEmptyAssistantChunks(t *testing.T) {
 	m, sess := scriptedModel(t)
 	m = intoPlanMode(t, m)

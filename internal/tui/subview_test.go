@@ -339,12 +339,12 @@ func TestParentEventsWhileViewingDoNotMoveChildViewport(t *testing.T) {
 	if m.vp.YOffset != offset {
 		t.Fatalf("a parent chunk moved the child viewport: %d -> %d", offset, m.vp.YOffset)
 	}
-	if m.main.streamOpen == false {
+	if m.main.streamOpen() == false {
 		t.Fatal("parent text should open the main stream")
 	}
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
-	if m.main.streamOpen {
+	if m.main.streamOpen() {
 		t.Fatal("parent done must close the main stream")
 	}
 	if m.viewing != "task-1" {
@@ -702,7 +702,7 @@ func TestChildFinishedClosesChildStream(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: "partial"}})
 	m = tm.(Model)
-	if !m.subs["task-1"].streamOpen {
+	if !m.subs["task-1"].streamOpen() {
 		t.Fatal("expected an open child stream")
 	}
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
@@ -713,7 +713,7 @@ func TestChildFinishedClosesChildStream(t *testing.T) {
 		SubagentChange: agent.SubagentChangeFinished,
 	}})
 	m = tm.(Model)
-	if m.subs["task-1"].streamOpen {
+	if m.subs["task-1"].streamOpen() {
 		t.Fatal("finished must close the child stream")
 	}
 }

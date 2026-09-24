@@ -265,10 +265,14 @@ func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 // fake-agent build below keeps the developer's warm build cache. It also forces
 // a true-colour profile: `go test` has no TTY, so lipgloss would otherwise
 // render every theme as no colour at all and the raw-ANSI assertions in
-// theme_test.go would pass against an empty palette.
+// theme_test.go would pass against an empty palette. And it installs the
+// parity watch (parity_test.go), so every fold of every test in the package is
+// held against a model folded from the same events (plan 024 A11); a broken
+// rule fails the test that broke it, and the run.
 func TestMain(m *testing.M) {
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
+	installParityWatch()
 	// No test may shell out to xclip, overwrite the developer's clipboard or
 	// read it. The seam itself stays real so the OSC 52 bytes are still
 	// asserted; only the native tools are stubbed out, and the tests that care
@@ -277,6 +281,11 @@ func TestMain(m *testing.M) {
 		func(string) error { return nil },
 		func() (string, error) { return "", nil })
 	code := m.Run()
+	parity.report()
+	if err := parity.err(); err != nil && code == 0 {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
 	if fakeAgentDir != "" {
 		_ = os.RemoveAll(fakeAgentDir)
 	}

@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 // entries is the pane's display list as values, oldest first, in the []entry
@@ -22,6 +23,27 @@ func (t *pane) entries() []entry {
 	out := make([]entry, len(t.rows))
 	for i, e := range t.rows {
 		out[i] = *e
+	}
+	return out
+}
+
+// streamOpen is the old fold's field of that name as the display list holds
+// it (C5c): whether the pane's last row shows the shared model's open stream
+// entry, which the next chunk of its kind grows in place.
+func (t *pane) streamOpen() bool {
+	n := len(t.rows)
+	return n > 0 && t.rows[n-1].streaming
+}
+
+// toolLine is the old fold's tool index as the display list holds it (C5c):
+// the tool id of every tool row the pane's id index can find, and the row's
+// position in the list.
+func (t *pane) toolLine() map[string]int {
+	out := map[string]int{}
+	for i, e := range t.rows {
+		if e.kind == entryTool && e.tool != nil && !e.id.IsZero() && t.ids[e.id] == e {
+			out[e.tool.ID] = i
+		}
 	}
 	return out
 }
@@ -44,7 +66,7 @@ func TestModelCopiesShareTheirPanes(t *testing.T) {
 	}
 
 	sub := cp.ensureSub("task-1")
-	sub.addNote("in the child", cp.now())
+	sub.appendLocal(entry{kind: entryNote, text: "in the child"}, cp.now())
 	if m.subs["task-1"] != sub {
 		t.Fatal("a sub-agent's pane made through the copy is not the original's")
 	}
@@ -243,10 +265,11 @@ func TestMixedRowsAtTheCapTrimFromTheFront(t *testing.T) {
 	}
 }
 
-// TestClientLocalRowsLiveInThePane is the half of §3.8's local-row rule that
-// holds under the old fold (A12): every row this client writes for a message
-// of its own — §2.4's first list — is marked local, and every row an event
-// drew is not. (C5c adds that the shared model never holds a local row.)
+// TestClientLocalRowsLiveInThePane is §3.8's local-row rule (A12): every row
+// this client writes for a message of its own — §2.4's first list — is marked
+// local, and every row an event drew is not; and the shared model never holds
+// a local row — the act that wrote one appended no entry to it, and the row
+// names none — while every row an event drew shows an entry the model holds.
 func TestClientLocalRowsLiveInThePane(t *testing.T) {
 	boom := errors.New("boom")
 	update := func(msg tea.Msg) func(*testing.T, Model) Model {
@@ -405,6 +428,7 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 			if p := paneOf(m); p != nil {
 				before = len(p.rows)
 			}
+			held := modelIDs(m)
 			m = tc.act(t, m)
 			p := paneOf(m)
 			if p == nil {
@@ -419,6 +443,382 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 					t.Fatalf("row %v is marked local=%v, want %v (all: %v)", r, r.local, tc.local, got)
 				}
 			}
+			// The shared model's side of the same rows.
+			now := modelIDs(m)
+			for _, e := range p.rows[before:] {
+				switch {
+				case tc.local && !e.id.IsZero():
+					t.Fatalf("local row %q names shared entry %v", e.text, e.id)
+				case !tc.local && !now[e.id]:
+					t.Fatalf("row %q names entry %v, which the shared model does not hold", e.text, e.id)
+				}
+			}
+			if tc.local {
+				for id := range now {
+					if !held[id] {
+						t.Fatalf("writing a local row appended entry %v to the shared model", id)
+					}
+				}
+			}
 		})
+	}
+}
+
+// modelIDs is every entry the shared model holds, over all its transcripts.
+func modelIDs(m Model) map[transcript.EntryID]bool {
+	out := map[transcript.EntryID]bool{}
+	if m.shared == nil {
+		return out
+	}
+	h := m.shared.History()
+	for _, e := range h.Main.Entries {
+		out[e.ID] = true
+	}
+	for _, sub := range h.Subs {
+		for _, e := range sub.Entries {
+			out[e.ID] = true
+		}
+	}
+	return out
+}
+
+// The TUI's tests' names for rows only the shared model writes now (plan 024
+// C5c), so no production code reads them.
+const (
+	// foreignTurnNote heads the stream of a turn the agent started on its own.
+	foreignTurnNote = transcript.NoteForeignTurn
+	// restoredNote closes a session/load replay in the transcript: everything
+	// above it is history the agent handed back, everything below is this
+	// session.
+	restoredNote = transcript.NoteRestored
+	// commandLineMark leads the provenance line under a user entry craze
+	// expanded a plugin command or skill into.
+	commandLineMark = transcript.CommandLineMark
+)
+
+// TestTheNoteWordingsAreTheSharedModels pins the TUI's names for the notes
+// the shared model writes to the model's own wording: a test that reads a row
+// by the TUI's constant reads the model's row.
+func TestTheNoteWordingsAreTheSharedModels(t *testing.T) {
+	for _, c := range []struct{ tui, model string }{
+		{stopCancelled, transcript.NoteCancelled},
+		{restoredNote, transcript.NoteRestored},
+		{foreignTurnNote, transcript.NoteForeignTurn},
+		{commandLineMark, transcript.CommandLineMark},
+		{trimmedNote, transcript.TrimmedNote},
+	} {
+		if c.tui != c.model {
+			t.Fatalf("the TUI says %q where the shared model writes %q", c.tui, c.model)
+		}
+	}
+}
+
+// TestALocalRowInsideAStreamDrawsBelowTheGrowingEntry is the recorded change
+// of plan 024 §3.8 and §4 (i), as execution amendment X27 pins it: a local row
+// that lands while a run is streaming no longer ends the run. The run is the
+// shared model's, so the next chunk grows the entry above the local row — for
+// an assistant reply as for a thought — where the old fold started a new row
+// below it; and a thought's duration freezes at the next event, not at the
+// local row.
+func TestALocalRowInsideAStreamDrawsBelowTheGrowingEntry(t *testing.T) {
+	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	t.Run("an assistant reply", func(t *testing.T) {
+		m := sized(t)
+		theme := otherTheme(t, m)
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "one ", At: base})
+		m = runSlash(t, m, "/theme "+theme)
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "two", At: base.Add(time.Second)})
+		want := []shownRow{
+			{kind: "assistant", text: "one two"},
+			{kind: "note", text: "theme → " + theme, local: true},
+		}
+		if got := shownRows(m.main); !slices.Equal(got, want) {
+			t.Fatalf("rows %v, want the reply grown above the local row: %v", got, want)
+		}
+		if !m.main.rows[0].streaming {
+			t.Fatal("the reply above the local row is no longer the open run")
+		}
+		if view := plainView(m); !inOrder(view, "one two", "theme → "+theme) {
+			t.Fatalf("the frame does not draw the grown reply above the local row:\n%s", view)
+		}
+	})
+	t.Run("a thought", func(t *testing.T) {
+		m := sized(t)
+		m.clock = func() time.Time { return base.Add(3 * time.Second) }
+		theme := otherTheme(t, m)
+		m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "weighing ", At: base})
+		m = runSlash(t, m, "/theme "+theme)
+		m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "it", At: base.Add(4 * time.Second)})
+		if got := factsOf(m.main, "thought"); len(got) != 1 || !got[0].Open || got[0].Text != "weighing it" {
+			t.Fatalf("the thought run did not grow past the local row: %v", facts(m.main))
+		}
+		if view := plainView(m); !inOrder(view, "+ Thinking…", "theme → "+theme) {
+			t.Fatalf("the open run is not drawn above the local row:\n%s", view)
+		}
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "answer", At: base.Add(5 * time.Second)})
+		want := []shownRow{
+			{kind: "thought", text: "weighing it"},
+			{kind: "note", text: "theme → " + theme, local: true},
+			{kind: "assistant", text: "answer"},
+		}
+		if got := shownRows(m.main); !slices.Equal(got, want) {
+			t.Fatalf("rows %v, want %v", got, want)
+		}
+		// The local row landed at +3s; the run ended at the reply's +5s.
+		if f := factsOf(m.main, "thought")[0]; f.Open || f.End.Sub(f.At) != 5*time.Second {
+			t.Fatalf("the thought froze at %v, want at the next event's 5s: %v", f.End.Sub(f.At), f)
+		}
+		if view := plainView(m); !inOrder(view, "+ Thought for 5s", "theme → "+theme, "answer") {
+			t.Fatalf("the frame:\n%s", view)
+		}
+	})
+}
+
+// TestAClearMidStreamContinuesInANewRow is execution amendment X30: /clear
+// empties the pane but not the session, so the run it interrupted goes on in
+// the shared model — one entry holding everything streamed — and the pane
+// shows what came after the clear as a row of its own, dated at the first
+// chunk after it and closed with the run: exactly the row the old fold drew.
+// Once the run is longer than the stream cap, the row shows the whole tail
+// (the recorded approximation).
+func TestAClearMidStreamContinuesInANewRow(t *testing.T) {
+	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	t.Run("a reply", func(t *testing.T) {
+		m := sized(t)
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "before the clear ", At: base})
+		m = runSlash(t, m, "/clear")
+		if n := len(m.main.rows); n != 0 {
+			t.Fatalf("/clear left %d rows", n)
+		}
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "after", At: base.Add(2 * time.Second)})
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: " it", At: base.Add(3 * time.Second)})
+		if got, want := shownRows(m.main), []shownRow{{kind: "assistant", text: "after it"}}; !slices.Equal(got, want) {
+			t.Fatalf("rows %v, want the text after the clear alone: %v", got, want)
+		}
+		if f := facts(m.main)[0]; !f.At.Equal(base.Add(2 * time.Second)) {
+			t.Fatalf("the continuation is dated %v, want its first chunk's %v", f.At, base.Add(2*time.Second))
+		}
+		if view := plainView(m); strings.Contains(view, "before the clear") || !strings.Contains(view, "after it") {
+			t.Fatalf("the frame after the clear:\n%s", view)
+		}
+		// The session's own record is one entry, uncleared.
+		if es := m.shared.Main.Entries(); len(es) != 1 || m.shared.Main.Tail() != "before the clear after it" {
+			t.Fatalf("the shared model holds %d entries, tail %q", len(es), m.shared.Main.Tail())
+		}
+		m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: base.Add(4 * time.Second)})
+		if got, want := shownRows(m.main), []shownRow{{kind: "assistant", text: "after it"}}; !slices.Equal(got, want) || m.main.streamOpen() {
+			t.Fatalf("the run closed into %v (open=%v), want %v", got, m.main.streamOpen(), want)
+		}
+	})
+	t.Run("a thought", func(t *testing.T) {
+		m := sized(t)
+		m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "early ", At: base})
+		m = runSlash(t, m, "/clear")
+		m = feed(t, m,
+			agent.Event{Type: agent.EventThought, Text: "late", At: base.Add(10 * time.Second)},
+			agent.Event{Type: agent.EventText, Text: "answer", At: base.Add(13 * time.Second)},
+		)
+		thoughts := factsOf(m.main, "thought")
+		if len(thoughts) != 1 || thoughts[0].Text != "late" || thoughts[0].Open {
+			t.Fatalf("the continuation: %v", facts(m.main))
+		}
+		// Dated at the first chunk after the clear, closed where the run closed.
+		if f := thoughts[0]; !f.At.Equal(base.Add(10*time.Second)) || f.End.Sub(f.At) != 3*time.Second {
+			t.Fatalf("the continuation spans %v from %v, want 3s from the chunk after the clear", f.End.Sub(f.At), f.At)
+		}
+		if view := plainView(m); !inOrder(view, "+ Thought for 3s", "answer") {
+			t.Fatalf("the frame:\n%s", view)
+		}
+	})
+	t.Run("a run past the stream cap", func(t *testing.T) {
+		m := sized(t)
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "head ", At: base})
+		m = runSlash(t, m, "/clear")
+		long := strings.Repeat("z", entryTextCap+10)
+		m = feed(t, m, agent.Event{Type: agent.EventText, Text: long, At: base.Add(time.Second)})
+		rows := m.main.entries()
+		if len(rows) != 1 || rows[0].text != m.shared.Main.Tail() || !strings.HasPrefix(rows[0].text, "…") {
+			t.Fatalf("a cut run's continuation shows %d bytes, want the model's whole tail", len(rows[0].text))
+		}
+	})
+	t.Run("a run the clear saw close", func(t *testing.T) {
+		m := sized(t)
+		m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "weighing", At: base})
+		m = runSlash(t, m, "/clear")
+		m = feed(t, m, agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: base.Add(time.Second)})
+		if n := len(m.main.rows); n != 0 {
+			t.Fatalf("closing a cleared run drew %v", shownRows(m.main))
+		}
+		m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "next", At: base.Add(2 * time.Second)})
+		if got, want := shownRows(m.main), []shownRow{{kind: "thought", text: "next"}}; !slices.Equal(got, want) {
+			t.Fatalf("rows %v, want the next run alone: %v", got, want)
+		}
+	})
+}
+
+// TestTodoNotesAfterClearAreThePanes is execution amendment X31: the shared
+// model's todo-note dedupe is the session's and never resets, and the pane's —
+// which /clear resets — decides what the pane shows. A note the fold wrote is
+// the display; a note the pane owes that the fold did not write, which only a
+// /clear makes possible, is written by the pane, locally, at the event's At;
+// and the pane's counters never run ahead of the model's, so the fold never
+// writes a note the pane does not owe.
+func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
+	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	m := sized(t)
+	todos := func(done bool) []agent.Todo {
+		st := "pending"
+		if done {
+			st = "completed"
+		}
+		return []agent.Todo{{ID: "1", Content: "Read", Status: st}, {ID: "2", Content: "Edit", Status: st}}
+	}
+	notes := func() []shownRow {
+		var out []shownRow
+		for _, r := range shownRows(m.main) {
+			if r.kind == "note" {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	step := 0
+	send := func(list []agent.Todo) {
+		t.Helper()
+		step++
+		before := len(m.shared.Main.Entries())
+		m = feed(t, m, agent.Event{Type: agent.EventTodos, Todos: list, At: base.Add(time.Duration(step) * time.Second)})
+		folded := len(m.shared.Main.Entries()) > before
+		// The invariant: the pane's counters never exceed the model's.
+		h := m.shared.History().Main
+		if m.todoPlanned > h.TodoPlanned || (m.todoDone && !h.TodoDone) {
+			t.Fatalf("step %d: the pane's dedupe (%d, %v) ran ahead of the model's (%d, %v)", step, m.todoPlanned, m.todoDone, h.TodoPlanned, h.TodoDone)
+		}
+		// So a note the fold wrote is one the pane shows.
+		if folded {
+			last := m.main.rows[len(m.main.rows)-1]
+			if last.local || last.id.IsZero() {
+				t.Fatalf("step %d: the fold wrote a note the pane did not show as its row", step)
+			}
+		}
+	}
+
+	send(todos(false))
+	if got, want := notes(), []shownRow{{kind: "note", text: "tasks: 2 planned"}}; !slices.Equal(got, want) {
+		t.Fatalf("notes %v, want %v", got, want)
+	}
+	send(todos(false))
+	if got := notes(); len(got) != 1 {
+		t.Fatalf("a repeated list noted again: %v", got)
+	}
+	m = runSlash(t, m, "/clear")
+	send(todos(false))
+	// The pane owes the note again; the session's model has it already.
+	if got, want := notes(), []shownRow{{kind: "note", text: "tasks: 2 planned", local: true}}; !slices.Equal(got, want) {
+		t.Fatalf("after /clear the notes are %v, want %v", got, want)
+	}
+	if f := lastFact(t, m.main, "note", "tasks: 2 planned"); !f.At.Equal(base.Add(3 * time.Second)) {
+		t.Fatalf("the pane's note is stamped %v, want the event's %v", f.At, base.Add(3*time.Second))
+	}
+	planned := 0
+	for _, e := range m.shared.Main.Entries() {
+		if e.Kind == transcript.KindNote && e.Text == "tasks: 2 planned" {
+			planned++
+		}
+	}
+	if planned != 1 {
+		t.Fatalf("the shared model holds %d planned notes, want its one", planned)
+	}
+	// Both owe the done note, so the fold's is the display.
+	send(todos(true))
+	if got, want := notes(), []shownRow{{kind: "note", text: "tasks: 2 planned", local: true}, {kind: "note", text: "tasks: 2/2 done"}}; !slices.Equal(got, want) {
+		t.Fatalf("notes %v, want %v", got, want)
+	}
+	// And after another clear, the pane owes it again and the model does not.
+	m = runSlash(t, m, "/clear")
+	send(todos(true))
+	if got, want := notes(), []shownRow{{kind: "note", text: "tasks: 2/2 done", local: true}}; !slices.Equal(got, want) {
+		t.Fatalf("notes %v, want %v", got, want)
+	}
+}
+
+// TestAModelTrimLeavesThePaneFromTheFront is execution amendment X28: when the
+// shared model trims — here its 8 MiB main budget (owner decision 3), filled by
+// tool payloads — the rows of the entries it let go leave the pane: from the
+// front, with the local rows older than them, and a row re-appended out of the
+// model's order on its own. The trim note leads what is left.
+func TestAModelTrimLeavesThePaneFromTheFront(t *testing.T) {
+	m := sized(t)
+	// Eight of these fit the model's 8 MiB main budget and a ninth does not.
+	big := strings.Repeat("x", 1<<20-4<<10)
+	tool := func(id string) agent.Event {
+		return agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+			ID: id, Kind: "execute", Status: "completed", Title: "Shell", RawInput: "echo " + id, ContentText: big,
+		}}
+	}
+	m.addError("local 0")
+	m = feed(t, m, tool("t1"))
+	m.addError("local 1")
+	m = feed(t, m, tool("t2"), tool("t3"))
+	m.addError("local 3")
+	for i := 4; i <= 8; i++ {
+		m = feed(t, m, tool(fmt.Sprintf("t%d", i)))
+	}
+	if m.shared.Main.Trimmed() || m.main.trimmed {
+		t.Fatal("fixture: 8 MiB of payloads already trimmed")
+	}
+	// The ninth pushes the model past its budget: t1 goes, and with it the
+	// local row older than it; the local row after it stays.
+	m = feed(t, m, tool("t9"))
+	if !m.shared.Main.Trimmed() {
+		t.Fatal("fixture: the model did not trim")
+	}
+	got := shownRows(m.main)
+	if got[0] != (shownRow{kind: "error", text: "local 1", local: true}) || got[1].text != "t2" {
+		t.Fatalf("after the model's trim the pane starts %v", got[:3])
+	}
+	for _, r := range got {
+		if r.text == "t1" || r.text == "local 0" {
+			t.Fatalf("row %v outlived the entry in front of it: %v", r, got)
+		}
+	}
+	if !m.main.trimmed {
+		t.Fatal("the pane does not say it lost rows")
+	}
+	m.refreshViewport()
+	m.vp.GotoTop()
+	if view := plainView(m); !inOrder(view, trimmedNote, "local 1") {
+		t.Fatalf("the trim note does not lead the pane:\n%s", view)
+	}
+
+	// A re-appended row: /clear, then an update to t3 shows it again at the
+	// tail, behind rows the model holds as newer. When the model lets t3 go,
+	// that row leaves on its own.
+	m = runSlash(t, m, "/clear")
+	m = feed(t, m, tool("t10"))
+	upd := tool("t3")
+	upd.Tool.Status = "failed"
+	m = feed(t, m, upd)
+	if got := shownRows(m.main); len(got) != 2 || got[0].text != "t10" || got[1].text != "t3" {
+		t.Fatalf("after /clear the pane shows %v, want t10 then the re-appended t3", got)
+	}
+	t3 := m.main.rows[1].id
+	for id := 11; ; id++ {
+		if id > 30 {
+			t.Fatal("fixture: the model never let t3 go")
+		}
+		m = feed(t, m, tool(fmt.Sprintf("t%d", id)))
+		if _, held := m.shared.Main.Entry(t3); !held {
+			break
+		}
+	}
+	got = shownRows(m.main)
+	if got[0].text != "t10" {
+		t.Fatalf("the model let t3 go before t10, yet t10's row left: %v", got)
+	}
+	for _, r := range got {
+		if r.text == "t3" {
+			t.Fatalf("the re-appended row outlived its entry: %v", got)
+		}
 	}
 }

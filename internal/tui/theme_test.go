@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -204,7 +203,7 @@ func TestUserRowGlyphAndTextColour(t *testing.T) {
 func TestInterjectionRowGlyphAndTextColour(t *testing.T) {
 	m := themeModel(t, "craze-dark")
 	th := m.theme
-	m.addInterjection("hi there")
+	m.applyEvent(agent.Event{Type: agent.EventUser, Interjection: true, Text: "hi there"})
 	m.refreshViewport()
 	want := styleFG(th.UserMark).Render("↳ ") + styleFG(th.User).Bold(true).Render("hi there")
 	if !strings.Contains(m.View(), want) {
@@ -238,7 +237,7 @@ func TestUserRowContinuationIsUnstyled(t *testing.T) {
 func TestMarkdownHeadingAndInlineCodeColours(t *testing.T) {
 	m := themeModel(t, "craze-dark")
 	th := m.theme
-	m.appendStream(entryAssistant, "## Title\n\n`code`", time.Time{})
+	m.applyEvent(agent.Event{Type: agent.EventText, Text: "## Title\n\n`code`"})
 	m.refreshViewport()
 	view := m.View()
 	wantHeading := lipgloss.NewStyle().Foreground(th.Heading).Bold(true).Render("Title")

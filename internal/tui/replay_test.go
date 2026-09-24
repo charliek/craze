@@ -395,7 +395,7 @@ func TestReplayRendersTheRestoredTranscript(t *testing.T) {
 	if got := texts(m, entryNote); len(got) != 1 || got[0] != restoredNote {
 		t.Fatalf("notes %q, want one %q", got, restoredNote)
 	}
-	if m.main.streamOpen {
+	if m.main.streamOpen() {
 		t.Fatal("the replay left a stream open under the restored note")
 	}
 	for _, e := range m.main.entries() {
