@@ -1542,9 +1542,14 @@ func TestFrameGoldenGrokPlan(t *testing.T) {
 }
 
 func TestFrameGoldenGrokSubagentRows(t *testing.T) {
-	keys := "<wait:idle>go<enter><wait:text:4.7k tok>"
+	// The row's "4.7k tok" is read from the live snapshot (refreshSnap), which
+	// can run ahead of the event stream: an older child tool event applied late
+	// already shows it. The wait tool's row is drawn only by its own event, so
+	// both are waited on, and the hold script sends nothing after progress —
+	// no finish can overtake either.
+	keys := "<wait:idle>go<enter><wait:text:◌ tool  get_command_or_subagent_output><wait:text:4.7k tok>"
 	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
-		got := runFakeFrameProvider(t, "grok-subagent", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		got := runFakeFrameFrozen(t, "grok-subagent-hold", size.cols, size.rows, keys, agent.GrokProvider())
 		name := fmt.Sprintf("grok-subagent-rows-%dx%d", size.cols, size.rows)
 		assertGolden(t, name, size.cols, size.rows, got)
 		if !strings.Contains(got, "○ explore  List directory files  0s · 4.7k tok") {

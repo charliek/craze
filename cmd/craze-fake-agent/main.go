@@ -181,7 +181,7 @@ func main() {
 		"env", "turnfail",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
-		"grok-subagent-late", "grok-subagent-cancel", "grok-subagent-cancel-early",
+		"grok-subagent-late", "grok-subagent-hold", "grok-subagent-cancel", "grok-subagent-cancel-early",
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
 		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",
 		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
