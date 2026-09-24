@@ -425,9 +425,12 @@ func (s *nativeSession) start(context.Context) error {
 	// resolves once here and never again (X3). Without it a client folding the
 	// stream would have to call Snapshot() to learn the session's starting
 	// state, which is the gap r23 finding 2 is about. The title is not touched
-	// here and native's first-prompt title stays silent (X47), so no Title
-	// section, and Event.Mode/Event.Text stay empty: starting is nobody's agent
-	// update.
+	// here: Start has nothing to name the session with (native load is
+	// unsupported, so there is no seeded title as live.go's loadSession has),
+	// and the first prompt is what gives it one, publishing its own Title
+	// delta now (plan 024 S1c C8, SF-01, superseding X47's "stays silent") —
+	// so Start's install carries no Title section, and Event.Mode/Event.Text
+	// stay empty: starting is nobody's agent update.
 	model, mode := s.snap.CurrentModel, s.snap.CurrentMode
 	// Enqueued and not flushed, exactly as the live session's install is: Start
 	// may not wait on the primary's reader, because a caller is allowed not to
@@ -1052,35 +1055,50 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		// reason; only the store records what was actually sent.
 		title := nativeTitle(text)
 		s.snap.Title = title
-		// Published now (plan 024 S1c C8, SF-01), where S1b left it
-		// unpublished on purpose: a State-only Title delta with no Event.Text,
-		// SetTitle's shape exactly (below), so a client that folds the stream
-		// — S2's socket client, which has no other way to learn it (SD-30) —
-		// learns the title from the first prompt on instead of waiting for
-		// /rename or some other refresh.
-		//
-		// Cause is "" because none is in hand: unlike SetTitle/SetModel/
-		// SetMode/SetConfig, each called with the client's Command cause,
-		// Prompt/Begin take none — Engine.Submit holds a Command but does not
-		// forward its cause into Begin (engine.go) — so this is the session's
-		// own event, the same "" loadSession uses for the title it seeds
-		// before a resumed session's replay (live.go), the one other title
-		// delta no client asked for.
-		//
-		// No OutboxRoom check: unlike SetTitle, a rejectable command that
-		// checks room before it mutates anything and refuses the whole rename
-		// if there is none, this section has already committed to running the
-		// turn, so refusing the prompt over a full outbox is not on the table.
-		// It does not need to be: Enqueue (eventlog.go) always accepts past
-		// the soft bound OutboxRoom reports on; the only enqueue it refuses is
-		// one that lands after Close has cut the outbox, and even then it
-		// drops the event silently (counted in droppedAtClose) rather than
-		// returning an error. enqueueDeltaLocked cannot fail this call.
-		//
-		// Indexing is unchanged: native stays unindexed, and the index
-		// observer keys on Event.Text (engine.go), which stays empty here —
-		// this is craze's own title, not the agent naming the session.
-		s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+		// A non-empty title only: the guard above fires while
+		// s.snap.Title == "", so an empty one (a leading blank line, a
+		// shell-context block with no message of its own, whitespace only)
+		// leaves it "" and the NEXT prompt gets the same chance — today's
+		// rule for the snapshot (plan 021 C10), now extended to the delta
+		// rather than bypassed by it (sol r19 finding 2). Publishing one here
+		// would say the wrong thing twice over: State.Title's own doc calls a
+		// non-nil empty string a title that has been CLEARED, which no
+		// prompt this session has taken up has done, and a title-less prompt
+		// would otherwise publish on every retry until one finally names the
+		// session.
+		if title != "" {
+			// Published now (plan 024 S1c C8, SF-01), where S1b left it
+			// unpublished on purpose: a State-only Title delta with no
+			// Event.Text, SetTitle's shape exactly (below), so a client that
+			// folds the stream — S2's socket client, which has no other way
+			// to learn it (SD-30) — learns the title from the first prompt on
+			// instead of waiting for /rename or some other refresh.
+			//
+			// Cause is "" because none is in hand: unlike SetTitle/SetModel/
+			// SetMode/SetConfig, each called with the client's Command cause,
+			// Prompt/Begin take none — Engine.Submit holds a Command but does
+			// not forward its cause into Begin (engine.go) — so this is the
+			// session's own event, the same "" loadSession uses for the
+			// title it seeds before a resumed session's replay (live.go),
+			// the one other title delta no client asked for.
+			//
+			// No OutboxRoom check: unlike SetTitle, a rejectable command
+			// that checks room before it mutates anything and refuses the
+			// whole rename if there is none, this section has already
+			// committed to running the turn, so refusing the prompt over a
+			// full outbox is not on the table. It does not need to be:
+			// Enqueue (eventlog.go) always accepts past the soft bound
+			// OutboxRoom reports on; the only enqueue it refuses is one that
+			// lands after Close has cut the outbox, and even then it drops
+			// the event silently (counted in droppedAtClose) rather than
+			// returning an error. enqueueDeltaLocked cannot fail this call.
+			//
+			// Indexing is unchanged: native stays unindexed, and the index
+			// observer keys on Event.Text (engine.go), which stays empty
+			// here — this is craze's own title, not the agent naming the
+			// session.
+			s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
+		}
 	}
 	// The references are resolved in the same locked section as the rest of
 	// the turn's state, as the live session resolves its own: the rows and the

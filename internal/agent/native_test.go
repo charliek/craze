@@ -1632,6 +1632,39 @@ func TestNativesFirstPromptTitleIsADelta(t *testing.T) {
 			t.Fatalf("the first prompt published titles %q after a pin, want none", titles)
 		}
 	})
+
+	// sol r19 finding 2: nativeTitle("\nempty title") is "" — strings.Cut
+	// stops at the leading newline and the first line is empty — so the
+	// first prompt here names nothing. It must publish no delta (a published
+	// "" would read as the title being CLEARED, which nothing here did), and
+	// the guard must still be open for the next prompt to try.
+	t.Run("an empty title publishes nothing, the next prompt's does", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		f.models["test/a"].push(answer("1"), answer("2"))
+		if got := nativeTitle("\nempty title"); got != "" {
+			t.Fatalf("fixture: nativeTitle(%q) = %q, want empty", "\nempty title", got)
+		}
+		if _, err := s.Prompt(context.Background(), "\nempty title"); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.Snapshot().Title; got != "" {
+			t.Fatalf("Title = %q after an empty-title prompt, want empty", got)
+		}
+		if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
+			t.Fatalf("an empty-title first prompt published titles %q, want none", titles)
+		}
+
+		if _, err := s.Prompt(context.Background(), "world"); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.Snapshot().Title; got != "world" {
+			t.Fatalf("Title = %q, want %q", got, "world")
+		}
+		if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 1 || titles[0] != "world" {
+			t.Fatalf("the next prompt published titles %q, want one %q", titles, "world")
+		}
+	})
 }
 
 // TestNativeWireErrorsArePhrasedWithoutTheKey runs the production model stack
