@@ -99,10 +99,20 @@ type Entry struct {
 	// Streaming marks the transcript's open stream entry — the last entry,
 	// whose text lives in the transcript's builder until the run closes.
 	Streaming bool
+	// Cut marks a streamed entry (assistant, thought, a child's user rows)
+	// whose run was longer than Bounds.StreamText, so its text is the run's
+	// tail, led by "…" (execution amendment X25). The open entry's is the
+	// run's so far.
+	Cut bool
 	// Bytes is what this entry accounts for against its transcript's byte
-	// budget: its text (for the open entry, the tail it would close with) plus
-	// every string its payload carries, or errValueBytes for an error value
-	// whose text the fold could not read.
+	// budget: its text plus every string its payload carries, or
+	// errValueBytes for an error value whose text the fold could not read. A
+	// streamed entry's text accounts min(bytes streamed, StreamText) (X25):
+	// its length while the run fits the cap, and StreamText once it is Cut —
+	// at most three bytes more than the tail it keeps, whose cut moves
+	// forward to a rune start. That is a function of byte counts alone, so a
+	// restored model's placeholder for a run its window omitted follows it
+	// exactly (X23).
 	Bytes int
 }
 
@@ -114,10 +124,16 @@ type Entry struct {
 // Options.ErrText.
 const errValueBytes = 256
 
-// entryBytes is the retained bytes of a closed entry: its text, its payload's
-// strings, and errValueBytes for an error value whose text is unknown.
-func entryBytes(e *Entry) int {
-	n := len(e.Text) + toolBytes(e.Tool) + planBytes(e.Plan)
+// entryBytes is the retained bytes of a closed entry: its text — streamCap
+// for a streamed entry whose run was cut (Cut, X25), however long the tail it
+// kept — its payload's strings, and errValueBytes for an error value whose
+// text is unknown.
+func entryBytes(e *Entry, streamCap int) int {
+	n := len(e.Text)
+	if e.Cut {
+		n = streamCap
+	}
+	n += toolBytes(e.Tool) + planBytes(e.Plan)
 	if e.Err != nil && e.Text == "" {
 		n += errValueBytes
 	}

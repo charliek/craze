@@ -272,13 +272,112 @@ func TestAnUpdateToAPlaceholderToolReaccountsIt(t *testing.T) {
 	}
 }
 
-// TestAnOmittedRunsPlaceholderFollowsItsTail (X23's one approximation): a
-// child the window emptied mid-run keeps the run as its last placeholder,
-// whose bytes follow the first model's open entry chunk by chunk — exactly for
-// ASCII, at the cap and past it, and within three bytes when multi-byte text
-// is cut at the cap, where only the run's bytes can say where the first
-// model's tail starts. The run's placeholder is never trimmed while it is
-// open, and closing the run keeps it at what it accounts.
+// TestACutRunTheWindowOmittedKeepsTheVisibleSuffix is review r7's schedule
+// (X25). In a child, a tool "x" (1 accounted byte), then a thought of 17 "é":
+// 34 bytes, cut at the 32-byte stream cap to a 31-byte tail. A snapshot omits
+// the whole child, so its ledger is x's record and the open run's. X3 had the
+// open run account its tail's length, which depends on where the cut lands in
+// a multi-byte rune, and the restored placeholder could only approximate it:
+// one more "é" left the first model's tail at 31 bytes and took the
+// placeholder to 32, the restored model dropped x's placeholder, and the next
+// update to x appended a visible row the first model never had. A streamed
+// entry now accounts min(bytes streamed, StreamText), 32 here, which the
+// placeholder tracks exactly. At a child budget of 33 both rows fit and keep
+// fitting, the update to x draws nothing on the restored model and
+// re-accounts its placeholder, and the trims after it come at the same folds
+// on both; at 32 the thought alone fits and x goes on both at once. The
+// restored model is the first's suffix after every fold.
+func TestACutRunTheWindowOmittedKeepsTheVisibleSuffix(t *testing.T) {
+	const limit = 32
+	thought := strings.Repeat("é", 17)
+	for _, subBytes := range []int{32, 33} {
+		t.Run(fmt.Sprint("SubBytes ", subBytes), func(t *testing.T) {
+			o := Options{Bounds: Bounds{SubBytes: subBytes, StreamText: limit}}
+			m := New(o)
+			evs := sequenced([]agent.Event{
+				{Type: agent.EventSubagent, Subagent: &agent.SubagentInfo{ID: "sub", Status: agent.SubagentRunning}, SubagentChange: agent.SubagentChangeSpawned, At: at(1)},
+				{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "x"}, At: at(2)},
+				{Type: agent.EventThought, Agent: "sub", Text: thought, At: at(3)},
+				{Type: agent.EventText, Text: "main", At: at(4)},
+			})
+			foldAll(t, m, true, evs...)
+			child := m.Sub("sub")
+			if tail := child.Tail(); tail != capText(thought, limit) || len(tail) != limit-1 {
+				t.Fatalf("the thought's tail is %q (%d bytes), want the 31 bytes capText keeps", tail, len(tail))
+			}
+			// The whole child omitted: its ledger is the first model's rows as it
+			// accounts them.
+			var want []Omitted
+			for _, e := range child.Entries() {
+				want = append(want, omittedOf(e))
+			}
+			full, _ := snapshotOf(t, m, 1<<40)
+			s, b := snapshotOf(t, m, encodedLen(t, windowedTo(full, 1, 0)))
+			if got := s.Subs[0]; len(got.Entries) != 0 || got.OmittedRun != KindThought || !reflect.DeepEqual(got.Omitted, want) {
+				t.Fatalf("the window: %d child entries, run %v, ledger %v; want the ledger %v", len(got.Entries), got.OmittedRun, got.Omitted, want)
+			}
+			r1, r2 := restoredBoth(t, s, b, o)
+			rs := []*Model{r1, r2}
+			for i, r := range rs {
+				assertSuffixOf(t, fmt.Sprintf("restored (twin %d)", i), m, r)
+			}
+			seq := len(evs)
+			next := func(ev agent.Event) agent.Event {
+				seq++
+				ev.Seq, ev.At = uint64(seq), at(seq)
+				return ev
+			}
+			// One more "é": 36 bytes streamed, the tail still 31 bytes, and the
+			// run accounts 32 on both.
+			foldSuffix(t, "one more é", m, rs, next(agent.Event{Type: agent.EventThought, Agent: "sub", Text: "é"}))
+			wantLedger := []Omitted{{Bytes: 1, Tool: "x"}, {Bytes: limit}}
+			if subBytes == 32 {
+				// 1 + 32 is over 32: x went at the thought, on the first model
+				// before the snapshot.
+				wantLedger = wantLedger[1:]
+			}
+			if len(child.Tail()) != limit-1 || child.Bytes() != subBytes || !reflect.DeepEqual(want, wantLedger) {
+				t.Fatalf("the first model: a %d-byte tail, %d bytes accounted, ledger %v; want 31, %d and %v", len(child.Tail()), child.Bytes(), want, subBytes, wantLedger)
+			}
+			// The update to x closes the run on both. At 33 the first model
+			// updates its row in place and the restored model draws nothing; at
+			// 32 both forgot x with its row and append it.
+			foldSuffix(t, "the update to x", m, rs, next(agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "x", Status: "done"}}))
+			if got := factsOf(child, "tool"); len(got) != 1 {
+				t.Fatalf("the first model holds %d rows of x: %v", len(got), facts(child))
+			}
+			for i, r := range rs {
+				rows := factsOf(r.Sub("sub"), "tool")
+				if drawn := len(rows) == 1; drawn != (subBytes == 32) {
+					t.Fatalf("twin %d after the update to x: %v", i, facts(r.Sub("sub")))
+				}
+			}
+			// A new run: at 33 it trims x and the closed thought on both, at the
+			// same fold, and the next update to x appends on both; at 32 the x
+			// row appended above and the new run fit, and the update lands in
+			// that row on both.
+			foldSuffix(t, "a new run", m, rs, next(agent.Event{Type: agent.EventThought, Agent: "sub", Text: "é"}))
+			foldSuffix(t, "x again", m, rs, next(agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "x", Status: "again"}}))
+			for i, r := range append([]*Model{m}, rs...) {
+				tr := r.Sub("sub")
+				rows := factsOf(tr, "tool")
+				appended := tr.lastEntry().Kind == KindTool
+				if st := r.State().Tools[ToolKey{Agent: "sub", ID: "x"}]; len(rows) != 1 || st == nil || st.Status != "again" || appended != (subBytes == 33) {
+					t.Fatalf("model %d: x again: %v", i, facts(tr))
+				}
+			}
+		})
+	}
+}
+
+// TestAnOmittedRunsPlaceholderFollowsItsTail (X23, X25): a child the window
+// emptied mid-run keeps the run as its last placeholder, whose bytes are the
+// first model's open entry's chunk by chunk, exactly — min(bytes streamed,
+// StreamText), up to the cap and past it, for ASCII and for multi-byte text
+// whose cut lands inside a rune alike (X23's approximation is gone). The
+// run's placeholder is never trimmed while it is open, and closing the run
+// keeps it at what it accounts; the restored model is the first's suffix
+// throughout.
 func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 	for _, unit := range []string{"ab", "é", "😀", "a😀é"} {
 		t.Run(unit, func(t *testing.T) {
@@ -299,24 +398,28 @@ func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 			}
 			r1, r2 := restoredBoth(t, s, b, o)
 			seq := len(evs)
-			exact := unit == "ab"
+			shorter := false
 			for i := range 3 * limit {
 				seq++
 				ev := sequencedAt(agent.Event{Type: agent.EventThought, Agent: "sub", Text: unit, At: at(seq)}, seq)
 				m.Fold(ev)
-				want := m.Sub("sub").current(m.Sub("sub").lastEntry()).Bytes
+				first := m.Sub("sub")
+				want := first.current(first.lastEntry()).Bytes
+				shorter = shorter || len(first.Tail()) < want
 				for j, r := range []*Model{r1, r2} {
 					r.Fold(ev)
-					checkInvariants(t, r)
+					assertSuffixOf(t, fmt.Sprintf("twin %d after %d chunks", j, i+1), m, r)
 					tr := r.Sub("sub")
-					got := tr.ledger[len(tr.ledger)-1].Bytes
-					if d := got - want; exact && d != 0 || d < -3 || d > 3 {
-						t.Fatalf("twin %d after %d chunks: the run's placeholder accounts %d bytes, the first model's entry %d", j, i+1, got, want)
-					}
-					if exact && tr.bytes != m.Sub("sub").bytes {
-						t.Fatalf("twin %d: %d bytes, the first model %d", j, tr.bytes, m.Sub("sub").bytes)
+					if got := tr.ledger[len(tr.ledger)-1].Bytes; got != want || tr.bytes != first.bytes {
+						t.Fatalf("twin %d after %d chunks: the run's placeholder accounts %d bytes (%d in all), the first model's entry %d (%d)", j, i+1, got, tr.bytes, want, first.bytes)
 					}
 				}
+			}
+			// The multi-byte units cut inside a rune: the first model's tail is
+			// shorter than what the run accounts, and the placeholder is exact
+			// all the same.
+			if shorter != (unit != "ab") {
+				t.Fatalf("a tail shorter than the run's accounting: %v", shorter)
 			}
 			seq++
 			closing := sequencedAt(agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c1"}, At: at(seq)}, seq)
@@ -329,9 +432,7 @@ func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 				if tr.omittedRun != 0 || tr.held() != 2 || tr.ledger[1] != before[1] || tr.Len() != 1 {
 					t.Fatalf("closing the omitted run: run %v, %d placeholders, %d entries", tr.omittedRun, tr.held(), tr.Len())
 				}
-				if exact {
-					assertSuffixOf(t, "closed", m, r)
-				}
+				assertSuffixOf(t, "closed", m, r)
 			}
 		})
 	}
@@ -342,8 +443,10 @@ func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 // that appends, chunks into either stream of the main transcript or a child,
 // new tools and updates to any id ever used — retained, windowed out or
 // trimmed alike — asks, todos, errors, children spawned and finished. Every
-// chunk is ASCII, so the ledger is exact (X23's approximation needs a
-// multi-byte cut at the stream cap).
+// text mixes ASCII with 2-, 3- and 4-byte runes (sessionRunes), so a run cut
+// at the stream cap often lands inside a rune and keeps a tail shorter than
+// the cap: the case X3's tail-length accounting could not carry across a
+// window, and X25's min(bytes streamed, StreamText) does.
 type ledgerSession struct {
 	r        *rand.Rand
 	seq      int
@@ -352,6 +455,10 @@ type ledgerSession struct {
 	running  map[string]bool
 }
 
+// sessionRunes are what ledgerSession's texts are drawn from: ASCII and runes
+// of every other UTF-8 length.
+var sessionRunes = []string{"a", "b", "c", "é", "ß", "€", "⤷", "😀", "𝄞"}
+
 func (g *ledgerSession) next() agent.Event {
 	g.seq++
 	r := g.r
@@ -359,7 +466,13 @@ func (g *ledgerSession) next() agent.Event {
 	if len(g.children) > 0 && r.Intn(3) == 0 {
 		where = g.children[r.Intn(len(g.children))]
 	}
-	text := func() string { return strings.Repeat(string(rune('a'+r.Intn(26))), 1+r.Intn(24)) }
+	text := func() string {
+		var b strings.Builder
+		for n := 1 + r.Intn(24); n > 0; n-- {
+			b.WriteString(sessionRunes[r.Intn(len(sessionRunes))])
+		}
+		return b.String()
+	}
 	ev := agent.Event{Agent: where, At: at(g.seq)}
 	switch k := r.Intn(16); {
 	case k < 3:
@@ -432,6 +545,13 @@ func windowedSnapshot(t *testing.T, r *rand.Rand, m *Model) (*Snapshot, []byte) 
 // the first's over the suffix). At a random later seq the restored model is
 // snapshotted again, windowed, and its restored twin — its ledger carried
 // forward — joins them.
+//
+// The texts are multi-byte (ledgerSession), the stream cap is small and the
+// byte budgets a few caps wide, so runs are cut inside a rune and a cut run
+// and a row or two sit at the budget. The test counts the folds where a
+// restored model streams into an omitted run past the cap while the first
+// model's tail for it is shorter than the cap (X25's case: the two differ by
+// its tail's length) and fails if there are none.
 func TestAWindowedRestoreStaysTheFirstModelsSuffix(t *testing.T) {
 	// The race detector slows every fold and projection several times over,
 	// and the package's race runs are for its concurrent paths, not this.
@@ -439,13 +559,14 @@ func TestAWindowedRestoreStaysTheFirstModelsSuffix(t *testing.T) {
 	if testing.Short() || raceEnabled {
 		seeds = 40
 	}
-	windowed, placeholdersDropped, rechained := 0, 0, 0
+	windowed, placeholdersDropped, rechained, shortOmitted := 0, 0, 0, 0
 	for seed := range seeds {
 		r := rand.New(rand.NewSource(int64(seed)))
+		st := minStreamText + r.Intn(29)
 		o := Options{Bounds: Bounds{
-			MainEntries: 4 + r.Intn(8), MainBytes: 150 + r.Intn(500),
-			SubEntries: 2 + r.Intn(5), SubBytes: 80 + r.Intn(200),
-			StreamText: 8 + r.Intn(40), Agents: 1 + r.Intn(2),
+			MainEntries: 4 + r.Intn(8), MainBytes: 2*st + r.Intn(6*st+120),
+			SubEntries: 2 + r.Intn(5), SubBytes: st + r.Intn(3*st+40),
+			StreamText: st, Agents: 1 + r.Intn(2),
 		}}
 		g := &ledgerSession{r: r, tools: make(map[string][]string), running: make(map[string]bool)}
 		m := New(o)
@@ -472,9 +593,15 @@ func TestAWindowedRestoreStaysTheFirstModelsSuffix(t *testing.T) {
 		for range 120 {
 			ev := g.next()
 			m.Fold(ev)
+			fts := transcriptsByID(m)
 			for i, rm := range rs {
 				rm.Fold(ev)
 				assertSuffixOf(t, fmt.Sprintf("%s: twin %d after seq %d", what, i, ev.Seq), m, rm)
+				for id, tr := range transcriptsByID(rm) {
+					if tr.omittedRun != 0 && tr.runLen > tr.streamCap && len(fts[id].Tail()) < tr.streamCap {
+						shortOmitted++
+					}
+				}
 			}
 			if g.seq == rechainAt {
 				s2, b2 := windowedSnapshot(t, r, r1)
@@ -495,9 +622,10 @@ func TestAWindowedRestoreStaysTheFirstModelsSuffix(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("%d of %d sessions windowed; %d windowed transcripts trimmed every placeholder; %d restored again", windowed, seeds, placeholdersDropped, rechained)
-	if windowed < seeds/2 || placeholdersDropped == 0 || rechained == 0 {
-		t.Fatalf("the sessions do not exercise the ledger: %d windowed, %d emptied, %d rechained", windowed, placeholdersDropped, rechained)
+	t.Logf("%d of %d sessions windowed; %d windowed transcripts trimmed every placeholder; %d restored again; %d folds into an omitted run past the cap with a shorter tail on the first model",
+		windowed, seeds, placeholdersDropped, rechained, shortOmitted)
+	if windowed < seeds/2 || placeholdersDropped == 0 || rechained == 0 || shortOmitted == 0 {
+		t.Fatalf("the sessions do not exercise the ledger: %d windowed, %d emptied, %d rechained, %d short omitted runs", windowed, placeholdersDropped, rechained, shortOmitted)
 	}
 }
 

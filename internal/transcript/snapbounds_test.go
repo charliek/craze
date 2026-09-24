@@ -142,6 +142,35 @@ func TestSnapshotStaysInsideItsByteBudget(t *testing.T) {
 	t.Logf("mandatory sections %d bytes; with the newest main entry %d", mandatory, withNewest)
 }
 
+// TestTheNewestMainEntryIsWeighedBeforeTheRefusal is review r7's finding 2:
+// the all-ledger form (every entry a ledger record, beside "windowed",
+// "dropped" and "omitted") is not a lower bound on the snapshot's size. Taking
+// an entry in can shrink the encoding, because the last record goes and takes
+// those three members with it. A replayed user row with no text and no time
+// encodes whole to 69 bytes, where its all-ledger form is 74. So the refusal
+// is decided with the newest main entry taken in: at its encoded size the
+// snapshot is whole, and one byte less is refused.
+func TestTheNewestMainEntryIsWeighedBeforeTheRefusal(t *testing.T) {
+	m := New(Options{})
+	m.Fold(agent.Event{Seq: 1, Type: agent.EventUser, Replayed: true})
+	full, fb := snapshotOf(t, m, 1<<40)
+	const whole = `{"version":1,"seq":1,"main":{"entries":[{"id":"1.0","kind":"user"}]}}`
+	if string(fb) != whole {
+		t.Fatalf("the whole snapshot is %s, want %s", fb, whole)
+	}
+	if ledger := encodedLen(t, windowedTo(full, 0)); ledger != 74 || len(fb) != 69 {
+		t.Fatalf("the all-ledger form encodes to %d bytes and the whole to %d; the case wants 74 and 69", ledger, len(fb))
+	}
+	s, b := snapshotOf(t, m, len(fb))
+	if string(b) != whole || s.Main.Windowed || len(s.Main.Entries) != 1 {
+		t.Fatalf("at its encoded size the snapshot is %s (windowed %v)", b, s.Main.Windowed)
+	}
+	_, err := m.Snapshot(len(fb) - 1)
+	if !errors.Is(err, ErrSnapshotTooLarge) || !strings.Contains(err.Error(), "newest") {
+		t.Fatalf("one byte short of the whole snapshot: %v", err)
+	}
+}
+
 // planModel is a turn that proposed a plan whose body is n bytes of text (and
 // an overview half as long), Auto or waiting on the user.
 func planModel(t *testing.T, body string, auto bool) (*Model, *agent.PlanEvent) {
@@ -469,7 +498,7 @@ func lockFixture(t *testing.T) *Model {
 		t.Fatalf("the fixture holds %d main entries and %d children", m.Main.len(), len(m.subOrder))
 	}
 	for _, id := range m.subOrder {
-		if tr := m.subs[id]; tr.len() != 1000 || !tr.streamOpen || !tr.cutRun() {
+		if tr := m.subs[id]; tr.len() != 1000 || !tr.streamOpen || !tr.runCut() {
 			t.Fatalf("child %s: %d entries, open %v", id, tr.len(), tr.streamOpen)
 		}
 	}

@@ -35,26 +35,36 @@ import (
 // touches: a chunk appends to it, Tail copies out of it, and a closing run
 // copies its tail into the replacing entry's Text. It grows to 2 × StreamText;
 // a chunk that would take it past that keeps the last StreamText bytes, moved
-// to the front in place — one StreamText copy per StreamText of input. bufCut
-// records that the run is longer than buf holds, so its tail is led by "…",
-// and tailAt where that tail starts, kept as the run grows so no chunk rescans
-// what an earlier one looked at. buf keeps its capacity from one run to the
-// next (bufReset), so each live transcript retains at most 2 × StreamText of
-// builder; a child's is let go when its roster row finishes.
+// to the front in place — one StreamText copy per StreamText of input. runLen
+// is the run's length, saturated just past the cap: while the run fits the
+// cap buf is all of it, and once it does not, its tail ("…" and the run's
+// last bytes from a rune start, today's capEntryText) is found in buf when it
+// is read (tail), never by a chunk. buf keeps its capacity from one run to
+// the next (bufReset), so each live transcript retains at most 2 ×
+// StreamText of builder; a child's is let go when its roster row finishes.
+//
+// # The open run's accounting (execution amendment X25)
+//
+// A streamed entry, open or closed, accounts min(bytes streamed, StreamText)
+// (Entry.Bytes): a chunk adds its length to runLen, and the run accounts
+// runBytes. That depends on byte counts alone — not on where the tail's cut
+// lands in a multi-byte rune — so a chunk does no rune work, and a restored
+// model's placeholder for a run its window omitted follows the first model's
+// entry exactly (X23).
 //
 // # The open run's end (execution amendment X24)
 //
 // A chunk into the open run allocates nothing: it appends to buf and records
 // its stamp in openEnd, and the stored open entry — the one marked Streaming —
 // is left as it was when the run opened. So while a run is open that stored
-// pointer's End and Bytes are stale; the transcript holds the truth (openEnd,
-// tailLen) and the entry is never handed out as stored. Every reader gets a
-// fresh copy carrying the current end and accounting (current: Entries,
-// Entry, the cut, and through the cut History, State and the snapshot, which
-// also copies the tail in as Text), and the run's closing stores a new entry
-// with the final end and tail, as before. This took V7's one allocation per
-// chunk — a ~200-byte Entry built only to carry the new End — off the fold's
-// hot path.
+// pointer's End, Cut and Bytes are stale; the transcript holds the truth
+// (openEnd, runLen) and the entry is never handed out as stored. Every reader
+// gets a fresh copy carrying the current end, cut and accounting (current:
+// Entries, Entry, the cut, and through the cut History, State and the
+// snapshot, which also copies the tail in as Text), and the run's closing
+// stores a new entry with the final end and tail, as before. This took V7's
+// one allocation per chunk — a ~200-byte Entry built only to carry the new
+// End — off the fold's hot path.
 type Transcript struct {
 	mu    *sync.Mutex // the model's
 	model *Model
@@ -80,10 +90,12 @@ type Transcript struct {
 	trimmed    bool
 	streamOpen bool
 	buf        []byte
-	bufCut     bool
-	// tailAt is where the open run's tail starts in buf once the run is past
-	// the cap: capText's cut, kept as the run grows (advanceTail).
-	tailAt int
+	// runLen is the open run's length — every byte streamed into it, whether
+	// its entry is held or a restored window omitted it (omittedRun) —
+	// saturated at StreamText + 1: all that is read of it is whether the run
+	// is longer than the cap (runCut) and min(runLen, StreamText), what the
+	// run accounts (runBytes, X25). 0 while no run is open.
+	runLen int
 	// openEnd is the open run's end — its last chunk's stamp — while a run
 	// is open (X24): the stored Streaming entry's End is its first chunk's.
 	openEnd time.Time
@@ -119,14 +131,13 @@ type Transcript struct {
 	// omittedRun is the kind of the open run's entry when the window dropped
 	// that too (a child that fitted nothing, mid-stream): its placeholder is
 	// the ledger's last, its next chunks of that kind draw nothing and grow
-	// the placeholder's bytes as the first model's tail grows (see
-	// growOmittedRun for the one approximation), and whatever ends the run
-	// clears it. runLen is that run's length as far as it is known.
+	// runLen, the placeholder accounting runBytes as the first model's open
+	// entry does (X25) — exactly, the snapshot's record being the run's own
+	// figure at the cut — and whatever ends the run clears it.
 	ledger     []Omitted
 	lhead      int
 	ptools     map[string]int
 	omittedRun Kind
-	runLen     int
 }
 
 func newTranscript(m *Model, agentID string, maxEntries, maxBytes int) *Transcript {
@@ -227,25 +238,26 @@ func (t *Transcript) Bytes() int {
 // ------------------------------------------------------ the deque, unlocked
 
 // current is e as a reader may see it: e itself, unless e is the open stream
-// entry, whose stored End and Bytes a chunk leaves stale (X24) — then a fresh
-// copy carrying the run's end and what its tail accounts. Its Text stays
-// empty; the cut puts the tail in.
+// entry, whose stored End, Cut and Bytes a chunk leaves stale (X24) — then a
+// fresh copy carrying the run's end, whether it is cut, and what it accounts.
+// Its Text stays empty; the cut puts the tail in.
 func (t *Transcript) current(e *Entry) *Entry {
 	if !e.Streaming {
 		return e
 	}
 	c := *e
 	c.End = t.openEnd
+	c.Cut = t.runCut()
 	c.Bytes = t.bytesOf(e)
 	return &c
 }
 
 // bytesOf is what e accounts now: its Bytes, or for the open stream entry,
-// whose stored Bytes a chunk leaves stale (X24), its tail's length (X3) —
-// read before the builder is reset.
+// whose stored Bytes a chunk leaves stale (X24), what the run accounts,
+// min(bytes streamed, StreamText) (X25) — read before the builder is reset.
 func (t *Transcript) bytesOf(e *Entry) int {
 	if e.Streaming {
-		return t.tailLen() + toolBytes(e.Tool) + planBytes(e.Plan)
+		return t.runBytes() + toolBytes(e.Tool) + planBytes(e.Plan)
 	}
 	return e.Bytes
 }
@@ -393,119 +405,68 @@ func (t *Transcript) dropPlaceholder() {
 	}
 }
 
-// growOmittedRun accounts a chunk of n bytes into an open run whose entry the
-// window omitted (omittedRun): its placeholder — the ledger's last — follows
-// the first model's open entry, which accounts its tail's length (X3).
-//
-// The one approximation X23 records: the first model's tail, once the run is
-// longer than StreamText, is "…" and the run's last bytes from the first rune
-// start at or after its cut, so its length is StreamText less up to three
-// bytes when the cut lands inside a multi-byte rune — which only the run's
-// bytes say, and this model does not have them. The placeholder starts at the
-// first model's exact figure (the snapshot's) and accounts min(run,
-// StreamText) from there, the run's length being that figure plus every chunk
-// since: exact while the run fits the cap, and past it whenever the first
-// model's cut lands on a rune start (always, for ASCII); otherwise it can
-// differ from the first model's by up to three bytes. So a byte-budget
-// trim can come one fold apart on the two models only when multi-byte text
-// streams at the cap in a child the window emptied.
-func (t *Transcript) growOmittedRun(n int) {
-	i := len(t.ledger) - 1
-	t.runLen = min(t.runLen+n, t.streamCap+1) // saturated: only min(·, cap) is read
-	nb := min(t.runLen, t.streamCap)
-	t.bytes += nb - t.ledger[i].Bytes
-	t.ledger[i].Bytes = nb
-}
-
 // ---------------------------------------------------------- the builder
 
-// tailStart is where the open run's tail starts in buf, and whether the run
-// is longer than the cap, so the tail is led by "…". It is O(1): the cut is
-// kept in tailAt as the builder grows (advanceTail).
-func (t *Transcript) tailStart() (int, bool) {
-	if !t.cutRun() {
-		return 0, false
-	}
-	return t.tailAt, true
-}
+// streamed adds a chunk of n bytes to the open run's length, saturating just
+// past the cap: nothing reads more than whether it is past (runLen).
+func (t *Transcript) streamed(n int) { t.runLen = min(t.runLen+n, t.streamCap+1) }
 
-// cutRun reports whether the open run is longer than the cap, so its tail is
-// led by "…".
-func (t *Transcript) cutRun() bool { return t.bufCut || len(t.buf) > t.streamCap }
+// runBytes is what the open run accounts (X25): min(bytes streamed,
+// StreamText).
+func (t *Transcript) runBytes() int { return min(t.runLen, t.streamCap) }
 
-// advanceTail moves tailAt to capText's cut, taken on buf: the first rune
-// start at or after len(buf) - (StreamText - len("…")), or len(buf) when there
-// is none. When the run was compacted buf still holds its last StreamText
-// bytes, which is more than the tail keeps, so the cut — and the scan forward
-// to a rune start — land on the same bytes as they would in the whole run.
-//
-// It never looks at a byte twice (r2 finding 4): the cut only moves forward as
-// the run grows, and the scan resumes from wherever it stopped — the rune
-// start it found, or the end of buf when it found none — unless the cut has
-// moved past that. A byte before the cut is never scanned at all, so however
-// long a run of continuation bytes is, a chunk costs its own length, amortised.
-// bufAppend keeps tailAt in step with a compaction; bufReset starts it over.
-func (t *Transcript) advanceTail() {
-	if !t.cutRun() {
-		return
-	}
-	n := len(t.buf)
-	i := max(n-(t.streamCap-len(ellipsis)), t.tailAt)
-	for i < n && !utf8.RuneStart(t.buf[i]) {
-		i++
-	}
-	t.tailAt = i
-}
+// runCut reports whether the open run is longer than the cap, so its tail is
+// led by "…" and its entry is Cut.
+func (t *Transcript) runCut() bool { return t.runLen > t.streamCap }
 
-// tailLen is len(tail()) without building it: what the open entry accounts.
-func (t *Transcript) tailLen() int {
-	start, cut := t.tailStart()
-	n := len(t.buf) - start
-	if cut {
-		n += len(ellipsis)
-	}
-	return n
-}
-
-// tail is the open run's text as today's capEntryText(whole) gives it.
+// tail is the open run's text as today's capEntryText(whole run, StreamText)
+// gives it, found here — on read, never by a chunk. While the run fits the
+// cap buf is all of it. Past the cap the tail is "…" and buf's last
+// StreamText − len("…") bytes, the cut moved forward to a rune start (or to
+// the end, when there is none). When buf is not all of the run it holds the
+// run's last StreamText bytes or more (bufAppend's compaction keeps them), or
+// — restored from a snapshot — what came after the first model's cut, and
+// the whole run's cut never moves back past that one; so the cut, clamped to
+// buf's start, and the scan land where they would in the whole run
+// (TestTheBuilderKeepsTodaysTail, TestRestoreContinuesEveryContinuation-
+// State). The scan is at most StreamText bytes, the order of the copy it
+// precedes: a run of continuation bytes (r2 finding 4) costs a read that, and
+// a chunk nothing.
 func (t *Transcript) tail() string {
-	start, cut := t.tailStart()
-	if !cut {
+	if !t.runCut() {
 		return string(t.buf)
+	}
+	start := max(len(t.buf)-(t.streamCap-len(ellipsis)), 0)
+	for start < len(t.buf) && !utf8.RuneStart(t.buf[start]) {
+		start++
 	}
 	return ellipsis + string(t.buf[start:])
 }
 
-// bufAppend adds a chunk to the open run, and moves the tail's cut with it.
+// bufAppend adds a chunk to the open run's builder.
 func (t *Transcript) bufAppend(s string) {
 	limit := 2 * t.streamCap
 	if len(t.buf)+len(s) <= limit {
 		t.bufReserve(len(t.buf) + len(s))
 		t.buf = append(t.buf, s...)
-		t.advanceTail()
 		return
 	}
-	// Past 2 × StreamText: keep the last StreamText bytes of buf+s, at the
-	// front of the same array. Nothing aliases buf, so moving bytes in place
-	// is safe; the copy is at most StreamText bytes, and the next one is at
-	// least StreamText bytes of input away. The kept cut moves with the bytes
-	// it points into; if they are gone it starts from the front, which the new
-	// cut — len("…") bytes in — is past anyway.
+	// Past 2 × StreamText — so the run is past the cap, and its tail is in
+	// the last StreamText bytes: keep those of buf+s, at the front of the
+	// same array. Nothing aliases buf, so moving bytes in place is safe; the
+	// copy is at most StreamText bytes, and the next one is at least
+	// StreamText bytes of input away.
 	keep := t.streamCap
 	if len(s) >= keep {
 		t.buf = t.buf[:0]
 		t.bufReserve(keep)
 		t.buf = append(t.buf, s[len(s)-keep:]...)
-		t.tailAt = 0
 	} else {
 		from := keep - len(s)
 		drop := len(t.buf) - from
 		n := copy(t.buf, t.buf[drop:])
 		t.buf = append(t.buf[:n], s...)
-		t.tailAt = max(t.tailAt-drop, 0)
 	}
-	t.bufCut = true
-	t.advanceTail()
 }
 
 // bufReserve grows buf's capacity to at least need, doubling, but never past
@@ -529,11 +490,11 @@ func (t *Transcript) bufReserve(need int) {
 // closing run both copy out of it). So a live transcript retains at most
 // 2 × StreamText of builder once one long run has closed; a child's is let go
 // when its roster row finishes (bufRelease) or with the whole transcript when
-// the row is evicted, since children are where transcripts are many.
+// the row is evicted, since children are where transcripts are many. The
+// run's length starts over with it.
 func (t *Transcript) bufReset() {
 	t.buf = t.buf[:0]
-	t.bufCut = false
-	t.tailAt = 0
+	t.runLen = 0
 }
 
 // bufRelease lets the builder's capacity go. The run must be closed.
@@ -582,7 +543,7 @@ func (t *Transcript) appendEntry(e *Entry, now time.Time) {
 		e.End = e.At
 	}
 	t.endRun(e.At)
-	e.Bytes = entryBytes(e)
+	e.Bytes = entryBytes(e, t.streamCap)
 	t.push(e)
 	t.trim()
 }
@@ -600,9 +561,8 @@ func (t *Transcript) endRun(at time.Time) {
 		// A restored window dropped the open run's entry: the run ends here
 		// as it does on the first client, with no entry to close. Its
 		// placeholder stays, at the bytes it accounts: the first model's
-		// closed entry accounts its tail, which is what its open one did.
+		// closed entry accounts what its open one did (X25).
 		t.omittedRun = 0
-		t.runLen = 0
 		t.bufReset()
 		return
 	}
@@ -616,6 +576,7 @@ func (t *Transcript) endRun(at time.Time) {
 	ne := *last
 	ne.Streaming = false
 	ne.Text = t.tail()
+	ne.Cut = t.runCut()
 	ne.End = t.openEnd
 	if ne.Kind == KindThought && ne.Open {
 		ne.Open = false
@@ -623,8 +584,10 @@ func (t *Transcript) endRun(at time.Time) {
 			ne.End = at
 		}
 	}
-	ne.Bytes = entryBytes(&ne)
-	// replaceLast re-accounts from the tail the builder still holds (bytesOf),
+	// What it accounts is what the open entry did (X25): StreamText when it
+	// is Cut, else its whole text, which is the run.
+	ne.Bytes = entryBytes(&ne, t.streamCap)
+	// replaceLast re-accounts from the run the builder still holds (bytesOf),
 	// so the builder is reset only after it.
 	t.replaceLast(&ne)
 	t.bufReset()
@@ -646,21 +609,29 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 	if t.streamOpen && t.omittedRun == kind {
 		// The run continues on the first client, in an entry the window this
 		// model was restored from dropped: nothing here to draw, but its
-		// placeholder grows as the first model's entry does, and the budget
-		// is enforced after it as after any chunk (X23).
-		t.growOmittedRun(len(text))
+		// placeholder — the ledger's last — accounts what the first model's
+		// open entry does, min(bytes streamed, StreamText) (X25): exactly,
+		// since that is the run's length alone, and the snapshot's record is
+		// the run's figure at the cut (Restore). The budget is enforced after
+		// it as after any chunk (X23).
+		t.streamed(len(text))
+		p := &t.ledger[len(t.ledger)-1]
+		t.bytes += t.runBytes() - p.Bytes
+		p.Bytes = t.runBytes()
 		t.trimBytes()
 		return
 	}
 	if t.streamOpen && t.omittedRun == 0 {
 		if last := t.lastEntry(); last != nil && last.Kind == kind {
 			// No new Entry (X24): the builder grows, the run's end moves on
-			// the transcript, and the accounting follows the tail's length.
-			// The stored entry is untouched; readers get it materialised.
-			before := t.tailLen()
+			// the transcript, and the accounting follows the run's length
+			// (X25). The stored entry is untouched; readers get it
+			// materialised.
+			before := t.runBytes()
 			t.bufAppend(text)
+			t.streamed(len(text))
 			t.openEnd = at
-			t.bytes += t.tailLen() - before
+			t.bytes += t.runBytes() - before
 			t.model.noteTouched(t, last.ID)
 			t.trimBytes()
 			return
@@ -671,7 +642,8 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 	e := &Entry{Kind: kind, At: at, End: at, Open: kind == KindThought, Streaming: true}
 	t.endRun(at)
 	t.bufAppend(text)
-	e.Bytes = t.tailLen()
+	t.streamed(len(text))
+	e.Bytes = t.runBytes()
 	t.push(e)
 	t.trim()
 	t.streamOpen = true
@@ -703,7 +675,7 @@ func (t *Transcript) upsertTool(tool *agent.ToolEvent, envelope time.Time) {
 			// Its placeholder is re-accounted to the new payload's bytes, as
 			// the first model's row is, and, as there, nothing is trimmed
 			// (X23; X5 revised). The run above it closed all the same, on both.
-			nb := entryBytes(&Entry{Kind: KindTool, Tool: tool})
+			nb := entryBytes(&Entry{Kind: KindTool, Tool: tool}, t.streamCap)
 			d := nb - t.ledger[i].Bytes
 			t.ledger[i].Bytes = nb
 			t.bytes += d
@@ -714,7 +686,7 @@ func (t *Transcript) upsertTool(tool *agent.ToolEvent, envelope time.Time) {
 			if ord, e := t.lookup(id); e != nil && e.Kind == KindTool {
 				ne := *e
 				ne.Tool = tool
-				ne.Bytes = entryBytes(&ne)
+				ne.Bytes = entryBytes(&ne, t.streamCap)
 				// An update in place never trims — today's rule: the TUI trims
 				// only on append (r2 finding 2, which revises execution amendment
 				// X5 for this one path). A trim here could drop the very row it

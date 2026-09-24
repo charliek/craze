@@ -2,15 +2,16 @@ package transcript
 
 import (
 	"slices"
+	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
 )
 
 // checkInvariants recounts the model from scratch and holds every incremental
 // structure against the recount: each transcript's byte counter against the
-// sum of its entries' Bytes, each entry's Bytes against what it retains, the
+// sum of its entries' Bytes, each entry's Bytes against what it accounts by
+// the rule (a streamed entry min(bytes streamed, StreamText), X25), the
 // EntryID → ordinal map against the deque, the tool index against the tool
 // entries, the open run against the builder, the bounds, and the roster and
 // child maps against their orders. The bounds tests call it after every fold.
@@ -62,7 +63,14 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 		if ord, ok := tr.slot[e.ID]; !ok || ord != tr.base+tr.head+i {
 			t.Fatalf("%s: the slot map says %d (%v), the deque %d", where, ord, ok, tr.base+tr.head+i)
 		}
-		want := entryBytes(e)
+		// A streamed entry accounts min(bytes streamed, StreamText) (X25):
+		// closed, StreamText when it is Cut — a tail, "…"-led and within the
+		// cap — else its text; open, the builder's whole run while it fits
+		// the cap, else the cap.
+		want := entryBytes(e, tr.streamCap)
+		if !e.Streaming && e.Cut && (len(e.Text) > tr.streamCap || !strings.HasPrefix(e.Text, ellipsis)) {
+			t.Fatalf("%s: a closed entry marked Cut with a text of %d bytes, %q…", where, len(e.Text), e.Text[:min(len(e.Text), 8)])
+		}
 		if e.Streaming {
 			if i != len(live)-1 || !tr.streamOpen {
 				t.Fatalf("%s: a streaming entry that is not the open run's last entry", where)
@@ -70,7 +78,14 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 			if e.Text != "" {
 				t.Fatalf("%s: the open entry carries text %q; it lives in the builder", where, e.Text)
 			}
-			want = tr.tailLen() + toolBytes(e.Tool) + planBytes(e.Plan)
+			run := len(tr.buf)
+			if tr.runCut() {
+				run = tr.streamCap
+			}
+			want = run + toolBytes(e.Tool) + planBytes(e.Plan)
+			if c := tr.current(e); c.Cut != tr.runCut() {
+				t.Fatalf("%s: the open entry reads Cut %v, the run is cut %v", where, c.Cut, tr.runCut())
+			}
 		}
 		// The open entry's stored Bytes is its opening's; what it accounts
 		// now is on the transcript (X24), as a reader's copy carries it.
@@ -136,21 +151,18 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 	if tr.omittedRun != 0 && (!tr.streamOpen || len(live) > 0 || tr.held() == 0 || tr.ledger[len(tr.ledger)-1].Tool != "") {
 		t.Fatalf("%s: an omitted %v run beside %d entries and %d placeholders (open %v)", tr.agent, tr.omittedRun, len(live), tr.held(), tr.streamOpen)
 	}
-	if tr.omittedRun == 0 && tr.runLen != 0 {
-		t.Fatalf("%s: no omitted run, but its length is %d", tr.agent, tr.runLen)
+	// The run's length (X25): 0 with no run open, saturated just past the cap,
+	// and, while the run fits the cap, all of the builder — which holds no
+	// more than 2 × StreamText. An omitted run holds nothing in the builder,
+	// and its placeholder accounts what the run does.
+	if !tr.streamOpen && (len(tr.buf) > 0 || tr.runLen != 0) {
+		t.Fatalf("%s: no run is open but the builder holds %d bytes of a %d-byte run", tr.agent, len(tr.buf), tr.runLen)
 	}
-	if !tr.streamOpen && (len(tr.buf) > 0 || tr.bufCut || tr.tailAt != 0) {
-		t.Fatalf("%s: no run is open but the builder holds %d bytes (cut at %d)", tr.agent, len(tr.buf), tr.tailAt)
+	if tr.runLen < 0 || tr.runLen > tr.streamCap+1 || tr.omittedRun == 0 && !tr.runCut() && tr.runLen != len(tr.buf) {
+		t.Fatalf("%s: the run is %d bytes long, the builder holds %d (cap %d)", tr.agent, tr.runLen, len(tr.buf), tr.streamCap)
 	}
-	// The kept cut against a scan from scratch: capText's, taken on buf.
-	if tr.streamOpen && tr.cutRun() {
-		start := max(len(tr.buf)-(tr.streamCap-len(ellipsis)), 0)
-		for start < len(tr.buf) && !utf8.RuneStart(tr.buf[start]) {
-			start++
-		}
-		if tr.tailAt != start {
-			t.Fatalf("%s: the kept cut is at %d, a scan finds %d", tr.agent, tr.tailAt, start)
-		}
+	if tr.omittedRun != 0 && (len(tr.buf) > 0 || tr.ledger[len(tr.ledger)-1].Bytes != tr.runBytes()) {
+		t.Fatalf("%s: the omitted run's placeholder accounts %d bytes, the run %d (builder %d)", tr.agent, tr.ledger[len(tr.ledger)-1].Bytes, tr.runBytes(), len(tr.buf))
 	}
 	if len(tr.buf) > 2*tr.streamCap {
 		t.Fatalf("%s: the builder holds %d bytes, past 2 × %d", tr.agent, len(tr.buf), tr.streamCap)

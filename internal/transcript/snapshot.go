@@ -41,14 +41,15 @@ const DefaultSnapshotBytes = 4 << 20
 //     section in Settings.Truncated.
 const ItemCap = 256 << 10
 
-// ErrSnapshotTooLarge is Snapshot's refusal: the mandatory sections alone, or
-// they and the main transcript's newest entry, encode to more than the byte
-// budget. It is never a silent drop (plan 024 §3.5). The mandatory sections'
-// text is capped (ItemCap), so what can still reach it there is the NUMBER of
-// items — asks, roster rows, todos, queue rows, catalog entries, ended asks —
-// which no cap bounds (or an id or status no agent mints at that size: the
-// strings ItemCap does not list are carried whole), and the ledger, a record
-// per entry the window omits (X23), whose count the bounds do bound.
+// ErrSnapshotTooLarge is Snapshot's refusal: the mandatory sections with the
+// main transcript's newest entry — or alone, when it holds none — encode to
+// more than the byte budget. It is never a silent drop (plan 024 §3.5). The
+// mandatory sections' text is capped (ItemCap), so what can still reach it
+// there is the NUMBER of items — asks, roster rows, todos, queue rows, catalog
+// entries, ended asks — which no cap bounds (or an id or status no agent mints
+// at that size: the strings ItemCap does not list are carried whole), and the
+// ledger, a record per entry the window omits (X23), whose count the bounds do
+// bound.
 var ErrSnapshotTooLarge = errors.New("transcript: snapshot too large for its byte budget")
 
 // Snapshot is one model at one Seq, bounded to a byte budget: what a client
@@ -134,9 +135,10 @@ type TranscriptSnap struct {
 
 // Omitted is one ledger record: an entry a snapshot's window omitted, as a
 // payload-free placeholder (X23). Bytes is its retained bytes as the model
-// the snapshot was cut from accounts them (Entry.Bytes; for the open run, its
-// tail's length), and Tool the id a tool entry answers updates under, "" for
-// any other entry. On the wire it is [bytes] or [bytes,"tool id"].
+// the snapshot was cut from accounts them (Entry.Bytes; for a streamed entry,
+// open or closed, min(bytes streamed, StreamText), X25), and Tool the id a
+// tool entry answers updates under, "" for any other entry. On the wire it is
+// [bytes] or [bytes,"tool id"].
 type Omitted struct {
 	Bytes int
 	Tool  string
@@ -175,17 +177,22 @@ type AgentRow struct {
 //
 // The filling order is the plan's: first the mandatory sections — the roster,
 // the todos, the asks, the ended list, the turn, the settings, the queue, and
-// every transcript's continuation fields — and if they alone do not fit,
-// ErrSnapshotTooLarge; then the main transcript's entries, newest first, until
-// the next would not fit, the newest one being required (ErrSnapshotTooLarge);
-// then each child's, in the order they were created, with what remains. Every
-// entry is encoded once, and the window counts the bytes the encoding will
-// have, not an estimate: the snapshot's encoding is at most budget bytes.
+// every transcript's continuation fields; then the main transcript's entries,
+// newest first, until the next would not fit, the newest one being required
+// — if the mandatory sections do not fit with it (or, when the main
+// transcript has none, alone), ErrSnapshotTooLarge; then each child's, in the
+// order they were created, with what remains. Every entry is encoded once,
+// and the window counts the bytes the encoding will have, not an estimate:
+// the snapshot's encoding is at most budget bytes.
 //
 // An entry the window leaves out is carried as its ledger record
 // (TranscriptSnap.Omitted, X23), so the mandatory sections are counted with
 // every entry as a record, and each entry taken in replaces its record — a
 // few bytes against the entry's own encoding, so the window still converges.
+// The last record taken out also takes the window's members ("windowed",
+// "dropped", "omitted") with it, which can make the whole transcript smaller
+// than the all-ledger form; so a refusal waits for the newest main entry to be
+// weighed (review r7 finding 2).
 // The ledger is budgeted like everything else: on A3's worst case it is
 // ~33,000 records and ~0.5 MB of a 4 MiB snapshot.
 func (m *Model) Snapshot(budget int) (*Snapshot, error) {
@@ -246,7 +253,7 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 	}
 
 	// (1) The mandatory sections: the envelope, the header, and every
-	// transcript at its continuation fields with no entries.
+	// transcript at its continuation fields, every entry a ledger record.
 	total := len(hdr) - 1 + len(`,"main":`) + len(`}`)
 	if len(c.subs) > 0 {
 		total += len(`,"subs":[]`) + len(c.subs) - 1
@@ -254,14 +261,25 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 	for _, w := range wins {
 		total += w.cur
 	}
-	if total > budget {
-		return nil, 0, fmt.Errorf("%w: the mandatory sections encode to %d bytes, over a budget of %d", ErrSnapshotTooLarge, total, budget)
-	}
-	// (2) The main transcript's tail, newest first; its newest entry must fit.
-	if total, err = wins[0].fill(total, budget); err != nil {
+	mandatory := total
+	// (2) The main transcript's tail, newest first; its newest entry is
+	// required. The refusal is decided with it weighed, not before: the size
+	// above is not a lower bound, because taking an entry in can shrink the
+	// encoding — the transcript's last record goes, and "windowed", "dropped"
+	// and "omitted" with it (review r7 finding 2). fill takes the entry
+	// whenever the snapshot is within the budget with it, whatever it was
+	// before.
+	main := wins[0]
+	if total, err = main.fill(total, budget); err != nil {
 		return nil, 0, err
 	}
-	if main := wins[0]; main.n > 0 && main.k == 0 {
+	switch {
+	case main.k > 0 || main.n == 0 && total <= budget:
+	case main.n == 0:
+		return nil, 0, fmt.Errorf("%w: the mandatory sections encode to %d bytes, over a budget of %d", ErrSnapshotTooLarge, total, budget)
+	case mandatory > budget:
+		return nil, 0, fmt.Errorf("%w: the mandatory sections encode to %d bytes, and to %d with the main transcript's newest entry, over a budget of %d", ErrSnapshotTooLarge, mandatory, main.over, budget)
+	default:
 		return nil, 0, fmt.Errorf("%w: the main transcript's newest entry does not fit beside %d bytes of mandatory state in a budget of %d", ErrSnapshotTooLarge, total, budget)
 	}
 	// (3) Each child in the order it was created, with what remains.
@@ -310,7 +328,10 @@ type window struct {
 	carriedRecs, carriedLen int
 	openLast                bool
 	cur                     int
-	scratch                 []byte
+	// over is the snapshot's size the next entry would have made, when fill
+	// stopped short of it: what a refusal reports.
+	over    int
+	scratch []byte
 }
 
 func newWindow(jw *jsonWriter, tc *transcriptCut, id string, sub bool) *window {
@@ -330,8 +351,9 @@ func newWindow(jw *jsonWriter, tc *transcriptCut, id string, sub bool) *window {
 }
 
 // omittedOf is the ledger record of an entry the window drops: what the model
-// accounts for it — the cut's Bytes, which for the open run is its tail's
-// length (X24's current) — and the id a tool entry answers updates under.
+// accounts for it — the cut's Bytes, which for the open run is the run's
+// current figure (X24's current, X25's min(bytes streamed, StreamText)) — and
+// the id a tool entry answers updates under.
 func omittedOf(e *Entry) Omitted {
 	return Omitted{Bytes: e.Bytes, Tool: entryToolID(e)}
 }
@@ -389,7 +411,9 @@ func (w *window) size(k, entLen, recs, recsLen int) int {
 }
 
 // fill adds entries newest first while the snapshot stays within budget; total
-// is the snapshot's size as it stands, and the result what it becomes.
+// is the snapshot's size as it stands — for the main transcript it can be over
+// the budget, which its newest entry may bring within it (Snapshot) — and the
+// result what it becomes.
 func (w *window) fill(total, budget int) (int, error) {
 	for w.k < w.n {
 		i := w.n - 1 - w.k
@@ -403,6 +427,7 @@ func (w *window) fill(total, budget int) (int, error) {
 		restLen := w.restLen - w.recLen[i]
 		next := w.size(w.k+1, w.entLen+len(b), i, restLen)
 		if total-w.cur+next > budget {
+			w.over = total - w.cur + next
 			break
 		}
 		total += next - w.cur
@@ -701,7 +726,8 @@ func capSettings(s Settings) Settings {
 // a new row as it does on the first, and later entries take the ids the first
 // model gives them (Seq, Local). The entries keep the snapshot's EntryIDs,
 // and each accounts its bytes by this model's rule (Entry.Bytes is
-// recomputed, not read).
+// recomputed, not read): a closed streamed entry StreamText when it is Cut,
+// else its text's length — exactly what the first model accounts (X25).
 //
 // A windowed snapshot's ledger (TranscriptSnap.Omitted, X23) becomes the
 // transcript's placeholders, ahead of its entries and counted in its caps, so
@@ -723,9 +749,10 @@ func capSettings(s Settings) Settings {
 // the zero id or a duplicate one, a child or roster id repeated or empty, a
 // streaming entry that is not the open run's, an omitted run with no
 // placeholder or beside entries, a negative ledger size, a tool id named by
-// two placeholders or by a placeholder and a row) is skipped, taken as closed,
-// or taken as zero, and a placeholder naming a tool a row or a newer
-// placeholder also names keeps its size and loses the id.
+// two placeholders or by a placeholder and a row, a Cut mark on a text longer
+// than StreamText, an omitted run's record over StreamText) is skipped, taken
+// as closed, taken as zero, unset or capped, and a placeholder naming a tool a
+// row or a newer placeholder also names keeps its size and loses the id.
 func Restore(s *Snapshot, o Options) *Model {
 	m := New(o)
 	if s == nil {
@@ -795,7 +822,10 @@ func (t *Transcript) restore(ts *TranscriptSnap) {
 			t.restoreRun(&e, ts.TailCut)
 		} else {
 			e.Streaming = false
-			e.Bytes = entryBytes(&e)
+			// Cut on a text longer than the cap is not a tail: it accounts
+			// what it holds.
+			e.Cut = e.Cut && len(e.Text) <= t.streamCap
+			e.Bytes = entryBytes(&e, t.streamCap)
 		}
 		ne := &e
 		t.slot[ne.ID] = t.base + len(t.ents)
@@ -817,11 +847,21 @@ func (t *Transcript) restore(ts *TranscriptSnap) {
 	}
 	if !t.streamOpen && ts.StreamOpen && !openLast && ts.OmittedRun != 0 && t.len() == 0 && t.held() > 0 {
 		// The open run's entry is the ledger's last placeholder: a stream
-		// entry, which answers no tool update.
+		// entry, which answers no tool update. Its record is the run's
+		// figure at the cut, min(bytes streamed, StreamText) (X25): the
+		// run's whole length while it fit the cap, the cap once it did not.
+		// Either way a chunk of n bytes takes it to min(figure + n,
+		// StreamText), as it takes the first model's entry, so the run's
+		// length starts from the figure (a record over the cap, which no
+		// model writes, is taken as the cap).
 		t.streamOpen = true
 		t.omittedRun = ts.OmittedRun
 		run := &t.ledger[len(t.ledger)-1]
 		run.Tool = ""
+		if run.Bytes > t.streamCap {
+			t.bytes -= run.Bytes - t.streamCap
+			run.Bytes = t.streamCap
+		}
 		t.runLen = run.Bytes
 	}
 	for i := range t.ledger {
@@ -855,7 +895,9 @@ func (t *Transcript) restore(ts *TranscriptSnap) {
 // restoreRun makes e the open run: its tail goes back into the builder, led by
 // "…" when the run's beginning was cut, so the next chunk's tail is the one
 // the first model computes from the whole run (TestRestoreContinuesEvery-
-// ContinuationState proves it at the cap).
+// ContinuationState proves it at the cap). The run's length is the text's
+// when it was not cut, and past the cap when it was: all the accounting and
+// the tail read of it (X25).
 func (t *Transcript) restoreRun(e *Entry, tailCut bool) {
 	text := e.Text
 	cut := tailCut && strings.HasPrefix(text, ellipsis)
@@ -864,12 +906,15 @@ func (t *Transcript) restoreRun(e *Entry, tailCut bool) {
 	}
 	t.bufReserve(len(text))
 	t.buf = append(t.buf[:0], text...)
-	t.bufCut = cut
-	t.tailAt = 0
-	t.advanceTail()
+	t.runLen = 0
+	t.streamed(len(text))
+	if cut {
+		t.runLen = t.streamCap + 1
+	}
 	e.Text = ""
 	e.Streaming = true
-	e.Bytes = t.tailLen()
+	e.Cut = t.runCut()
+	e.Bytes = t.bytesOf(e)
 	t.streamOpen = true
 	t.openEnd = e.End
 }

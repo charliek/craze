@@ -200,11 +200,16 @@ func TestTheAccountingCountsEveryPayloadString(t *testing.T) {
 	}
 	// An error whose text the fold read accounts that text; one it could not
 	// read is charged errValueBytes.
-	if got := entryBytes(&Entry{Text: "abc", Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}); got != 3+wantTool+wantPlan {
+	if got := entryBytes(&Entry{Text: "abc", Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}, 64); got != 3+wantTool+wantPlan {
 		t.Fatalf("entryBytes with a read error %d", got)
 	}
-	if got := entryBytes(&Entry{Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}); got != wantTool+wantPlan+errValueBytes {
+	if got := entryBytes(&Entry{Tool: &tool, Plan: &plan, Err: fmt.Errorf("x")}, 64); got != wantTool+wantPlan+errValueBytes {
 		t.Fatalf("entryBytes with an unread error %d", got)
+	}
+	// A cut stream entry's text accounts the stream cap, whatever its tail
+	// kept (X25).
+	if got := entryBytes(&Entry{Text: "…é", Cut: true}, 64); got != 64 {
+		t.Fatalf("entryBytes of a cut tail %d, want the cap", got)
 	}
 }
 
@@ -244,9 +249,11 @@ func fillStrings(v reflect.Value, n *int) int {
 // sizes (empty, one byte, around the cap, past 2 × the cap) and wherever a
 // multi-byte rune straddles the cut, including bytes that are not UTF-8 at
 // all and long runs of continuation bytes, where the cut has no rune start to
-// land on for a whole chunk or several (the kept cut of r2 finding 4); the
-// builder never holds more than 2 × the cap; and the open entry accounts
-// exactly its tail's length.
+// land on for a whole chunk or several (r2 finding 4); the builder never
+// holds more than 2 × the cap; and the entry, open and closed, accounts
+// min(bytes streamed, StreamText) and is Cut exactly when the run is longer
+// than the cap (X25) — not its tail's length, which a cut inside a rune makes
+// up to three bytes shorter.
 func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 	runes := []string{"a", "é", "⤷", "😀", "\x80", "\xe2\x82", "\n"}
 	leads := []string{"", "", "\xe2", "\xf0", "a"}
@@ -288,8 +295,8 @@ func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 				if got := tr.tail(); got != want {
 					t.Fatalf("limit %d seed %d step %d: tail %q, want %q", limit, seed, step, clip(got), clip(want))
 				}
-				if got := tr.current(tr.live()[0]).Bytes; got != len(want) {
-					t.Fatalf("limit %d: the open entry accounts %d, its tail is %d", limit, got, len(want))
+				if e := tr.current(tr.live()[0]); e.Bytes != min(whole.Len(), limit) || e.Cut != (whole.Len() > limit) {
+					t.Fatalf("limit %d: the open entry accounts %d (cut %v) after %d bytes", limit, e.Bytes, e.Cut, whole.Len())
 				}
 				if len(tr.buf) > 2*limit {
 					t.Fatalf("limit %d: the builder holds %d bytes", limit, len(tr.buf))
@@ -302,6 +309,9 @@ func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 			m.Fold(agent.Event{Type: agent.EventDone})
 			if got, want := tr.live()[0].Text, capText(whole.String(), limit); got != want {
 				t.Fatalf("limit %d seed %d: the closed entry %q, want %q", limit, seed, clip(got), clip(want))
+			}
+			if e := tr.live()[0]; e.Bytes != min(whole.Len(), limit) || e.Cut != (whole.Len() > limit) {
+				t.Fatalf("limit %d seed %d: the closed entry accounts %d (cut %v) after %d bytes", limit, seed, e.Bytes, e.Cut, whole.Len())
 			}
 			checkInvariants(t, m)
 		}

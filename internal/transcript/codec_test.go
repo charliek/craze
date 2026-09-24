@@ -462,7 +462,8 @@ const goldenAt = `"2026-09-22T10:30:45.123456789Z"`
 // byte: the header's envelope and each mandatory section (the roster, the
 // todos, the asks and their bodies, the ended list, the turn, the settings,
 // the queue) and each truncation mark, then a transcript's continuation
-// members, an entry of every kind, and a child's window. Keys are camelCase, "version" comes first, zero
+// members, an entry of every kind — a cut streamed one marked "cut" (X25),
+// closed and open — and a child's window. Keys are camelCase, "version" comes first, zero
 // values are absent, times are UTC with nanoseconds, HTML is not escaped, the
 // leaf payloads have exactly the event codec's shape, and the ledger (X23) is
 // written in its order, a record [bytes] or [bytes,"tool id"], the id escaped
@@ -536,25 +537,27 @@ func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
 			Entries: []Entry{
 				{ID: EntryID{Seq: 4}, Kind: KindUser, Text: "fix <it>", At: goldenTime, End: goldenTime, Interject: true, Bytes: 8},
 				{ID: EntryID{Seq: 5}, Kind: KindThought, Text: "hm", At: goldenTime, End: goldenTime.Add(time.Second)},
+				{ID: EntryID{Seq: 5, N: 1}, Kind: KindAssistant, Text: "…the tail", Cut: true},
 				{ID: EntryID{Seq: 6}, Kind: KindTool, Tool: &agent.ToolEvent{ID: "call-1", Status: "completed", Output: &agent.ToolOutput{ExitCode: &code}}},
 				{ID: EntryID{Seq: 7}, Kind: KindNote, Text: NoteCancelled},
 				{ID: EntryID{Seq: 8}, Kind: KindPlan, Plan: &agent.PlanEvent{ID: "plan-1", Name: "P"}},
 				{ID: EntryID{Seq: 9}, Kind: KindError, Text: "boom", Err: &agent.RemoteError{Message: "boom", Class: agent.EventErrRPC, Code: -32603}},
 				{ID: EntryID{Seq: 9, N: 1}, Kind: KindError, Text: "index write failed"},
 				{ID: EntryID{N: 2}, Kind: KindError, Err: errors.New("never read by the fold")},
-				{ID: EntryID{Seq: 10}, Kind: KindThought, Text: "…still thinking", At: goldenTime, End: goldenTime, Open: true, Streaming: true},
+				{ID: EntryID{Seq: 10}, Kind: KindThought, Text: "…still thinking", At: goldenTime, End: goldenTime, Open: true, Streaming: true, Cut: true},
 			},
 		}},
 			`{"version":1,"main":{"trimmed":true,"streamOpen":true,"tailCut":true,"todoPlanned":3,"todoDone":true,"entries":[` +
 				`{"id":"4.0","kind":"user","text":"fix <it>","at":` + goldenAt + `,"end":` + goldenAt + `,"interject":true},` +
 				`{"id":"5.0","kind":"thought","text":"hm","at":` + goldenAt + `,"end":"2026-09-22T10:30:46.123456789Z"},` +
+				`{"id":"5.1","kind":"assistant","text":"…the tail","cut":true},` +
 				`{"id":"6.0","kind":"tool","tool":{"id":"call-1","status":"completed","output":{"exitCode":0}}},` +
 				`{"id":"7.0","kind":"note","text":"cancelled"},` +
 				`{"id":"8.0","kind":"plan","plan":{"id":"plan-1","name":"P"}},` +
 				`{"id":"9.0","kind":"error","text":"boom","err":{"class":"rpc","code":-32603}},` +
 				`{"id":"9.1","kind":"error","text":"index write failed"},` +
 				`{"id":"0.2","kind":"error","text":"never read by the fold","err":{"class":"other","code":0}},` +
-				`{"id":"10.0","kind":"thought","text":"…still thinking","at":` + goldenAt + `,"end":` + goldenAt + `,"open":true,"streaming":true}]}}`},
+				`{"id":"10.0","kind":"thought","text":"…still thinking","at":` + goldenAt + `,"end":` + goldenAt + `,"open":true,"streaming":true,"cut":true}]}}`},
 		{"a child's window", Snapshot{Subs: []SubSnap{
 			{ID: "sub-1", TranscriptSnap: TranscriptSnap{Windowed: true, Dropped: 12, StreamOpen: true, OmittedRun: KindAssistant,
 				Omitted: []Omitted{{Bytes: 1234, Tool: "t-b"}, {Bytes: 0}, {Bytes: 7, Tool: "t \"<a>\""}, {Bytes: 65536}}}},

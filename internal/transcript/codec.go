@@ -33,7 +33,10 @@ import (
 //     It decodes as a *agent.RemoteError with that message, class and code,
 //     and the entry's Text as that message.
 //   - Entry.Bytes is not carried: it is the model's accounting, and Restore
-//     recomputes it by the model's own rule.
+//     recomputes it by the model's own rule — from the entry's text and
+//     Entry.Cut, which is carried ("cut", absent when false), so a closed
+//     streamed entry accounts StreamText when it is cut, as on the first
+//     model (X25).
 //   - Version is written as SnapshotVersion whatever the value holds, and a
 //     decoder refuses any other. A key it does not know is ignored.
 //
@@ -166,6 +169,7 @@ type wireEntry struct {
 	Open      bool            `json:"open,omitempty"`
 	Interject bool            `json:"interject,omitempty"`
 	Streaming bool            `json:"streaming,omitempty"`
+	Cut       bool            `json:"cut,omitempty"`
 }
 
 // wireEntryErr is an entry's error beside its text, which is the message: the
@@ -380,7 +384,7 @@ func encodeEntry(jw *jsonWriter, e *Entry) ([]byte, error) {
 	w := wireEntry{
 		ID: e.ID.String(), Kind: kind, Text: e.Text,
 		At: e.At.UTC(), End: e.End.UTC(),
-		Open: e.Open, Interject: e.Interject, Streaming: e.Streaming,
+		Open: e.Open, Interject: e.Interject, Streaming: e.Streaming, Cut: e.Cut,
 	}
 	if w.Tool, err = agent.EncodeToolEvent(e.Tool); err != nil {
 		return nil, fmt.Errorf("transcript: encode entry %v: %w", e.ID, err)
@@ -794,7 +798,7 @@ func (w *wireEntry) entry() (Entry, error) {
 	e := Entry{
 		ID: id, Kind: kind, Text: w.Text,
 		At: w.At.UTC(), End: w.End.UTC(),
-		Open: w.Open, Interject: w.Interject, Streaming: w.Streaming,
+		Open: w.Open, Interject: w.Interject, Streaming: w.Streaming, Cut: w.Cut,
 	}
 	if e.Tool, err = agent.DecodeToolEvent(w.Tool); err != nil {
 		return Entry{}, err

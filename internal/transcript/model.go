@@ -560,7 +560,8 @@ type transcriptCut struct {
 	trimmed    bool
 	streamOpen bool
 	// tailCut reports that the open entry's tail lost the run's beginning (it
-	// is led by "…"), which a restored builder has to know.
+	// is led by "…", and the entry is Cut), which a restored builder has to
+	// know.
 	tailCut     bool
 	todoPlanned int
 	todoDone    bool
@@ -647,14 +648,12 @@ func (t *Transcript) cutLocked() transcriptCut {
 		tc.omitted = append([]Omitted(nil), t.ledger[t.lhead:]...)
 	}
 	if n := len(tc.entries); t.streamOpen && n > 0 && tc.entries[n-1].Streaming {
-		// A fresh copy carrying the run's end, accounting and tail: the
-		// stored entry's End and Bytes are its opening's (X24).
-		open := *tc.entries[n-1]
-		open.End = t.openEnd
-		open.Bytes = t.bytesOf(tc.entries[n-1])
+		// A fresh copy carrying the run's end, cut, accounting and tail: the
+		// stored entry's End, Cut and Bytes are its opening's (X24).
+		open := t.current(tc.entries[n-1])
 		open.Text = t.tail()
-		_, tc.tailCut = t.tailStart()
-		tc.entries[n-1] = &open
+		tc.tailCut = open.Cut
+		tc.entries[n-1] = open
 	}
 	return tc
 }

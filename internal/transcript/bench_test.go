@@ -53,7 +53,8 @@ func BenchmarkFold(b *testing.B) {
 	// r2 finding 4's schedule: a run of 2 × StreamText continuation bytes, grown
 	// a continuation byte at a time, so the tail's cut never finds a rune
 	// start. Each chunk must cost what the ASCII chunk does, not a rescan of
-	// the ~64 KiB behind the cut.
+	// the ~64 KiB behind the cut: a chunk does no rune work at all (X25), the
+	// cut is found when the tail is read.
 	b.Run("saturated-malformed", func(b *testing.B) {
 		m := New(Options{})
 		m.Fold(next(agent.Event{Type: agent.EventText, Text: strings.Repeat("\x80", 2*DefaultBounds().StreamText)}))
