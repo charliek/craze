@@ -600,7 +600,11 @@ func (t *Transcript) cutLocked() transcriptCut {
 		omittedRun:  t.omittedRun,
 	}
 	if n := len(tc.entries); t.streamOpen && n > 0 && tc.entries[n-1].Streaming {
+		// A fresh copy carrying the run's end, accounting and tail: the
+		// stored entry's End and Bytes are its opening's (X24).
 		open := *tc.entries[n-1]
+		open.End = t.openEnd
+		open.Bytes = t.bytesOf(tc.entries[n-1])
 		open.Text = t.tail()
 		_, tc.tailCut = t.tailStart()
 		tc.entries[n-1] = &open

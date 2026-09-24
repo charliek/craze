@@ -288,7 +288,7 @@ func TestTheBuilderKeepsTodaysTail(t *testing.T) {
 				if got := tr.tail(); got != want {
 					t.Fatalf("limit %d seed %d step %d: tail %q, want %q", limit, seed, step, clip(got), clip(want))
 				}
-				if got := tr.live()[0].Bytes; got != len(want) {
+				if got := tr.current(tr.live()[0]).Bytes; got != len(want) {
 					t.Fatalf("limit %d: the open entry accounts %d, its tail is %d", limit, got, len(want))
 				}
 				if len(tr.buf) > 2*limit {

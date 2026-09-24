@@ -72,10 +72,12 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 			}
 			want = tr.tailLen() + toolBytes(e.Tool) + planBytes(e.Plan)
 		}
-		if e.Bytes != want {
-			t.Fatalf("%s: accounts %d bytes, retains %d", where, e.Bytes, want)
+		// The open entry's stored Bytes is its opening's; what it accounts
+		// now is on the transcript (X24), as a reader's copy carries it.
+		if got := tr.current(e).Bytes; got != want {
+			t.Fatalf("%s: accounts %d bytes, retains %d", where, got, want)
 		}
-		sum += e.Bytes
+		sum += tr.bytesOf(e)
 		if e.Kind == KindTool && e.Tool != nil && e.Tool.ID != "" {
 			if id, ok := tr.tools[e.Tool.ID]; !ok || id != e.ID {
 				t.Fatalf("%s: tool %q is held but the index names %v (%v)", where, e.Tool.ID, id, ok)

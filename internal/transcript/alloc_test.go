@@ -31,7 +31,8 @@ func allocsOf(n int, setup, op func()) float64 {
 
 // TestFoldAllocationsAreBounded (plan 024 §3.4, A6): what one Fold may
 // allocate on the hot path, with the builder and the maps warm — a chunk into
-// an open run ≤ 2 (the replacing Entry; the builder's growth amortised to 0),
+// an open run 0 (execution amendment X24: no replacing Entry, the run's end
+// lives on the transcript; the builder's growth amortised to 0),
 // a new entry ≤ 3, a tool upsert ≤ 3 (the updated row, and the run it closes
 // with its tail), a state delta ≤ 1 per section. The measured numbers are
 // logged.
@@ -56,13 +57,13 @@ func TestFoldAllocationsAreBounded(t *testing.T) {
 		}
 		got := testing.AllocsPerRun(4096, func() { m.Fold(next(agent.Event{Type: agent.EventText, Text: chunk})) })
 		t.Logf("a chunk into an open run: %.2f allocs", got)
-		if got > 2 {
-			t.Fatalf("a chunk into an open run allocates %.2f, the bound is 2", got)
+		if got != 0 {
+			t.Fatalf("a chunk into an open run allocates %.2f, the bound is 0 (X24)", got)
 		}
 		child := testing.AllocsPerRun(4096, func() { m.Fold(next(agent.Event{Type: agent.EventText, Agent: "sub", Text: chunk})) })
 		t.Logf("a chunk into a child's open run: %.2f allocs", child)
-		if child > 2 {
-			t.Fatalf("a chunk into a child's run allocates %.2f, the bound is 2", child)
+		if child != 0 {
+			t.Fatalf("a chunk into a child's run allocates %.2f, the bound is 0 (X24)", child)
 		}
 	})
 

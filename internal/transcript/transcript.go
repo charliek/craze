@@ -41,6 +41,20 @@ import (
 // what an earlier one looked at. buf keeps its capacity from one run to the
 // next (bufReset), so each live transcript retains at most 2 × StreamText of
 // builder; a child's is let go when its roster row finishes.
+//
+// # The open run's end (execution amendment X24)
+//
+// A chunk into the open run allocates nothing: it appends to buf and records
+// its stamp in openEnd, and the stored open entry — the one marked Streaming —
+// is left as it was when the run opened. So while a run is open that stored
+// pointer's End and Bytes are stale; the transcript holds the truth (openEnd,
+// tailLen) and the entry is never handed out as stored. Every reader gets a
+// fresh copy carrying the current end and accounting (current: Entries,
+// Entry, the cut, and through the cut History, State and the snapshot, which
+// also copies the tail in as Text), and the run's closing stores a new entry
+// with the final end and tail, as before. This took V7's one allocation per
+// chunk — a ~200-byte Entry built only to carry the new End — off the fold's
+// hot path.
 type Transcript struct {
 	mu    *sync.Mutex // the model's
 	model *Model
@@ -70,6 +84,9 @@ type Transcript struct {
 	// tailAt is where the open run's tail starts in buf once the run is past
 	// the cap: capText's cut, kept as the run grows (advanceTail).
 	tailAt int
+	// openEnd is the open run's end — its last chunk's stamp — while a run
+	// is open (X24): the stored Streaming entry's End is its first chunk's.
+	openEnd time.Time
 
 	// The todo-note dedupe (the TUI's todoPlanned / todoDone): the largest
 	// list a "planned" note was written for, and whether the "done" note has
@@ -113,11 +130,16 @@ func (t *Transcript) Agent() string { return t.agent }
 
 // Entries is every entry, oldest first: a copy of the pointer slice, so
 // nothing the caller holds changes when the model folds on. The open stream
-// entry (Streaming) has an empty Text; its text is Tail.
+// entry (Streaming) is a copy carrying the run's current End with an empty
+// Text; its text is Tail.
 func (t *Transcript) Entries() []*Entry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]*Entry(nil), t.live()...)
+	es := append([]*Entry(nil), t.live()...)
+	if n := len(es); n > 0 && es[n-1].Streaming {
+		es[n-1] = t.current(es[n-1])
+	}
+	return es
 }
 
 // Entry is the entry id names, if the transcript still holds it.
@@ -125,7 +147,10 @@ func (t *Transcript) Entry(id EntryID) (*Entry, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	_, e := t.lookup(id)
-	return e, e != nil
+	if e == nil {
+		return nil, false
+	}
+	return t.current(e), true
 }
 
 // Len is how many entries the transcript holds.
@@ -181,6 +206,30 @@ func (t *Transcript) Bytes() int {
 
 // ------------------------------------------------------ the deque, unlocked
 
+// current is e as a reader may see it: e itself, unless e is the open stream
+// entry, whose stored End and Bytes a chunk leaves stale (X24) — then a fresh
+// copy carrying the run's end and what its tail accounts. Its Text stays
+// empty; the cut puts the tail in.
+func (t *Transcript) current(e *Entry) *Entry {
+	if !e.Streaming {
+		return e
+	}
+	c := *e
+	c.End = t.openEnd
+	c.Bytes = t.bytesOf(e)
+	return &c
+}
+
+// bytesOf is what e accounts now: its Bytes, or for the open stream entry,
+// whose stored Bytes a chunk leaves stale (X24), its tail's length (X3) —
+// read before the builder is reset.
+func (t *Transcript) bytesOf(e *Entry) int {
+	if e.Streaming {
+		return t.tailLen() + toolBytes(e.Tool) + planBytes(e.Plan)
+	}
+	return e.Bytes
+}
+
 func (t *Transcript) len() int { return len(t.ents) - t.head }
 
 // live is the entries, oldest first, aliasing the backing array: the caller
@@ -222,7 +271,7 @@ func (t *Transcript) push(e *Entry) {
 // re-accounts its bytes.
 func (t *Transcript) replace(ord int, ne *Entry) {
 	i := ord - t.base
-	t.bytes += ne.Bytes - t.ents[i].Bytes
+	t.bytes += ne.Bytes - t.bytesOf(t.ents[i])
 	t.ents[i] = ne
 	t.model.noteTouched(t, ne.ID)
 }
@@ -258,7 +307,7 @@ func (t *Transcript) dropHead() {
 	e := t.ents[t.head]
 	t.ents[t.head] = nil
 	t.head++
-	t.bytes -= e.Bytes
+	t.bytes -= t.bytesOf(e)
 	delete(t.slot, e.ID)
 	if e.Kind == KindTool && e.Tool != nil && e.Tool.ID != "" {
 		if id, ok := t.tools[e.Tool.ID]; ok && id == e.ID {
@@ -475,6 +524,7 @@ func (t *Transcript) endRun(at time.Time) {
 	ne := *last
 	ne.Streaming = false
 	ne.Text = t.tail()
+	ne.End = t.openEnd
 	if ne.Kind == KindThought && ne.Open {
 		ne.Open = false
 		if !at.IsZero() {
@@ -482,8 +532,11 @@ func (t *Transcript) endRun(at time.Time) {
 		}
 	}
 	ne.Bytes = entryBytes(&ne)
-	t.bufReset()
+	// replaceLast re-accounts from the tail the builder still holds (bytesOf),
+	// so the builder is reset only after it.
 	t.replaceLast(&ne)
+	t.bufReset()
+	t.openEnd = time.Time{}
 }
 
 // closeStream ends the open run at at (the TUI's closeStream and
@@ -505,11 +558,14 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 	}
 	if t.streamOpen && t.omittedRun == 0 {
 		if last := t.lastEntry(); last != nil && last.Kind == kind {
+			// No new Entry (X24): the builder grows, the run's end moves on
+			// the transcript, and the accounting follows the tail's length.
+			// The stored entry is untouched; readers get it materialised.
+			before := t.tailLen()
 			t.bufAppend(text)
-			ne := *last
-			ne.End = at
-			ne.Bytes = t.tailLen()
-			t.replaceLast(&ne)
+			t.openEnd = at
+			t.bytes += t.tailLen() - before
+			t.model.noteTouched(t, last.ID)
 			t.trimBytes()
 			return
 		}
@@ -523,6 +579,7 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 	t.push(e)
 	t.trim()
 	t.streamOpen = true
+	t.openEnd = at
 }
 
 // upsertTool keeps one row per tool call id, replaced in place (a new Entry,

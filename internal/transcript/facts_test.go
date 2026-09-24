@@ -48,10 +48,12 @@ func (f fact) String() string {
 	return s + "}"
 }
 
-// factOf is one entry as a fact. The open stream entry's text is its
-// builder's tail, and an error value's is what a reader would draw: its
-// Error(), read here, outside the fold.
+// factOf is one entry as a fact. The open stream entry's end and text are its
+// transcript's — the run's last stamp and the builder's tail (X24) — and an
+// error value's is what a reader would draw: its Error(), read here, outside
+// the fold.
 func factOf(tr *Transcript, e *Entry) fact {
+	e = tr.current(e) // the open entry's end is the transcript's (X24)
 	f := fact{
 		Kind:      e.Kind.String(),
 		Text:      e.Text,

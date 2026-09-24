@@ -243,3 +243,95 @@ func TestASnapshotRacingTheFoldIsExactAtItsSeq(t *testing.T) {
 	t.Logf("%d takes at %d distinct Seqs: %d cuts (%d holding an open run's tail), %d snapshots restored twice, %d restored models folded to the end",
 		len(all), len(bySeq), len(all)-snapshots, openTails, restored, len(onward))
 }
+
+// TestACutBetweenChunksCarriesItsChunksEnd (execution amendment X24): a chunk
+// into the open run stores no new Entry — the run's end lives on the
+// transcript — so every reader must be handed the run as it stood when it
+// read. A cut taken between two chunks carries the first chunk's end and
+// tail, a later cut the second's, and the earlier cut's entry never changes;
+// Entries, Entry and a snapshot agree; main and a child's run alike.
+func TestACutBetweenChunksCarriesItsChunksEnd(t *testing.T) {
+	for _, who := range []string{"", "sub"} {
+		t.Run("agent="+who, func(t *testing.T) {
+			m := New(Options{})
+			tr := func() *Transcript {
+				if who == "" {
+					return m.Main
+				}
+				return m.Sub(who)
+			}
+			tc := func(c *cut) *transcriptCut {
+				if who == "" {
+					return &c.main
+				}
+				for i := range c.subs {
+					if c.subs[i].id == who {
+						return &c.subs[i].t
+					}
+				}
+				t.Fatalf("the cut has no transcript %q", who)
+				return nil
+			}
+			snapOpen := func(s *Snapshot) Entry {
+				ts := &s.Main
+				if who != "" {
+					for i := range s.Subs {
+						if s.Subs[i].ID == who {
+							ts = &s.Subs[i].TranscriptSnap
+						}
+					}
+				}
+				return ts.Entries[len(ts.Entries)-1]
+			}
+			m.Fold(agent.Event{Seq: 1, Type: agent.EventText, Agent: who, Text: "one ", At: at(1)})
+			m.Fold(agent.Event{Seq: 2, Type: agent.EventText, Agent: who, Text: "two ", At: at(2)})
+			c1 := m.cut()
+			s1, err := m.Snapshot(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			es1 := tr().Entries()
+			e1 := es1[len(es1)-1]
+			held := *tc(&c1).entries[0]
+			m.Fold(agent.Event{Seq: 3, Type: agent.EventText, Agent: who, Text: "three", At: at(3)})
+			c2 := m.cut()
+			es2 := tr().Entries()
+			byID, ok := tr().Entry(e1.ID)
+
+			first, second := tc(&c1).entries[0], tc(&c2).entries[0]
+			if !first.Streaming || !first.End.Equal(at(2)) || first.Text != "one two " || first.Bytes != len("one two ") {
+				t.Fatalf("the cut between the chunks: end %v text %q bytes %d, want the second chunk's end %v, %q, 8", first.End, first.Text, first.Bytes, at(2), "one two ")
+			}
+			if !second.End.Equal(at(3)) || second.Text != "one two three" || second.Bytes != len("one two three") || second.ID != first.ID {
+				t.Fatalf("the later cut: end %v text %q bytes %d id %v, want %v, %q, 13, %v", second.End, second.Text, second.Bytes, second.ID, at(3), "one two three", first.ID)
+			}
+			if *first != held {
+				t.Fatalf("the earlier cut's entry changed under a later chunk: %+v, was %+v", *first, held)
+			}
+			if !e1.Streaming || e1.Text != "" || !e1.End.Equal(at(2)) || e1.Bytes != 8 {
+				t.Fatalf("Entries between the chunks: %+v", *e1)
+			}
+			if e2 := es2[len(es2)-1]; e2 == e1 || !e2.End.Equal(at(3)) || e2.Bytes != 13 || !e1.End.Equal(at(2)) {
+				t.Fatalf("Entries after the next chunk: %+v (the earlier read now %+v)", *e2, *e1)
+			}
+			if !ok || !byID.End.Equal(at(3)) || byID.Bytes != 13 {
+				t.Fatalf("Entry(%v): %v %+v", e1.ID, ok, byID)
+			}
+			if o := snapOpen(s1); !o.End.Equal(at(2)) || o.Text != "one two " {
+				t.Fatalf("the snapshot between the chunks carries end %v text %q", o.End, o.Text)
+			}
+			// Restored between the chunks, the next chunk moves the restored
+			// run's end as it does the first model's.
+			r := Restore(s1, Options{})
+			r.Fold(agent.Event{Seq: 3, Type: agent.EventText, Agent: who, Text: "three", At: at(3)})
+			if h, want := r.History(), m.History(); !reflect.DeepEqual(h, want) {
+				t.Fatalf("restored between the chunks and folded on:\n got %+v\nwant %+v", h, want)
+			}
+			// The run closes with the last chunk's end and the whole tail.
+			m.Fold(agent.Event{Seq: 4, Type: agent.EventDone, Agent: who, StopReason: "end_turn"})
+			if f := facts(tr())[0]; f.Kind != "assistant" || f.Text != "one two three" || !f.End.Equal(at(3)) {
+				t.Fatalf("the closed run: %v end %v", f, f.End)
+			}
+		})
+	}
+}

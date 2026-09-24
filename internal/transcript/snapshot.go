@@ -638,4 +638,5 @@ func (t *Transcript) restoreRun(e *Entry, tailCut bool) {
 	e.Streaming = true
 	e.Bytes = t.tailLen()
 	t.streamOpen = true
+	t.openEnd = e.End
 }
