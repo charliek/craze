@@ -349,6 +349,16 @@ func Open(opts Options) (*Session, error) {
 	if h := st.Header(); s.tools.holdsKey(h.SystemPromptSHA256) || s.tools.holdsKey(h.ToolsSHA256) {
 		return nil, errDigestKey
 	}
+	// And the line as a whole, which is what reaches the disk. Every field
+	// that came from outside the harness is redacted above, one at a time, but
+	// the encoding writes `","persona_path":"` and the like between two of
+	// them, so a key spelled across that framing is in the line and in neither
+	// field (plan 026 r1): the prompt's join, one level down. Nothing here can
+	// be rewritten — the fields are what they are — so it refuses, as the
+	// digests do. An ordinary header holds no key and this changes nothing.
+	if line, err := st.HeaderLine(); err != nil || s.tools.holdsKey(string(line)) {
+		return nil, errHeaderKey
+	}
 	s.store = st
 	s.cur = m
 	s.logged = logged{model: m.id(), effort: m.effort, mode: modeAgent}

@@ -334,6 +334,14 @@ var (
 	errDigestKey = errors.New("harness: a configured provider key appears in one of this session's transcript-header " +
 		"digests; change the key, or remove that provider from the model table")
 
+	// errHeaderKey is Open's refusal of a transcript header whose encoded line
+	// holds a configured key that no single field does: one spelled across the
+	// JSON between two fields — a sub-agent's type and its persona's path, say,
+	// each of which a plugin or a repository wrote. The fields were redacted
+	// one at a time, and the line is what goes to disk.
+	errHeaderKey = errors.New("harness: a configured provider key appears in this session's transcript header, " +
+		"spanning two of its fields; change the key, or the file or directory names it spans")
+
 	// errChildPromptKey is a sub-agent's Open refusing a system prompt that a
 	// configured key is inside: in the parent's frozen prompt it was handed —
 	// a key the parent did not know when it froze it — or spanning a join the

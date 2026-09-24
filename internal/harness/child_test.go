@@ -371,6 +371,26 @@ func TestChildRoleSectionBudgetAndRedaction(t *testing.T) {
 		})
 	}
 
+	// A key spelled across the JSON between two header fields is in neither
+	// field, so redacting each alone leaves it whole in the line on disk (plan
+	// 026 r1). The control shows the line holds the text; with it as a key,
+	// Open refuses.
+	t.Run("a key across two header fields refuses Open", func(t *testing.T) {
+		c := ChildOptions{Role: "Review.\n", Type: "reviewer", PersonaPath: "/tmp/reviewer.md"}
+		key := `reviewer","persona_path":"/tmp`
+		_, control, err := childWith(t, nil, PromptExtras{}, c)
+		if err != nil {
+			t.Fatalf("control: Open = %v", err)
+		}
+		line, err := control.store.HeaderLine()
+		if err != nil || !strings.Contains(string(line), key) {
+			t.Fatalf("control: the header line %s (%v) does not hold %q, so refusing it proves nothing", line, err, key)
+		}
+		if _, child, err := childWith(t, map[string]string{"OTHER_API_KEY": key}, PromptExtras{}, c); !errors.Is(err, errHeaderKey) {
+			t.Fatalf("Open = %v, %v; want errHeaderKey", child, err)
+		}
+	})
+
 	t.Run("the role's own budget", func(t *testing.T) {
 		var role strings.Builder
 		for i := 0; role.Len() < 40<<10; i++ {

@@ -244,6 +244,12 @@ func (s *Store) Path() string { return s.path }
 // Header is the session's header line, written or not.
 func (s *Store) Header() Header { return s.t.Header }
 
+// HeaderLine is the header exactly as the first append will write it, less the
+// newline: the bytes, not the fields. A caller checking the header for text it
+// must never hold needs these, because the encoding writes framing between the
+// fields that no single field contains (plan 026 r1).
+func (s *Store) HeaderLine() ([]byte, error) { return encodeHeader(s.t.Header) }
+
 // usable is nil when an append may proceed. The caller holds mu.
 func (s *Store) usable() error {
 	if s.closed {
