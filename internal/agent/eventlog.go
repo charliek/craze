@@ -936,7 +936,8 @@ type outboxBatch struct {
 	evs   []pendingEvent
 	bytes int
 	// ticket is the receipt EnqueueTicket handed its caller, nil for a plain
-	// Enqueue: the drainer writes the batch's first sequence number into it.
+	// Enqueue: the drainer writes the batch's first sequence number into it
+	// once the whole batch is committed.
 	ticket *Ticket
 }
 
@@ -1303,19 +1304,22 @@ func (l *EventLog) publishBatch(b outboxBatch, stopped *bool) {
 	}
 	l.sem <- struct{}{}
 	defer l.release()
+	first := l.next + 1
 	for i := range b.evs {
 		p := b.evs[i]
 		b.evs[i] = pendingEvent{} // published: the batch no longer holds it
 		seq := l.next + 1
 		p.ev.Seq, p.rec.Seq = seq, seq
-		if i == 0 && b.ticket != nil {
-			// The batch's first number, written before the event is offered to
-			// anyone: a caller holding the ticket is waiting on a Flush, which
-			// cannot return until this whole batch has been committed.
-			b.ticket.seq.Store(seq)
-		}
 		l.sendOutbox(p.ev, seq, stopped)
 		l.commitLocked(p.ev, p.rec, p.remote)
+	}
+	if b.ticket != nil {
+		// The batch's first number, answered only now that the whole batch is
+		// committed (Ticket.Seq) — never while the drainer waits for the
+		// primary above, however long that is, since a number read then would
+		// name an event nothing holds yet. Still inside the boundary and ahead
+		// of commitBatch, so a Flush covering the batch always finds it.
+		b.ticket.seq.Store(first)
 	}
 }
 

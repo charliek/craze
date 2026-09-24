@@ -1271,22 +1271,66 @@ func TestEventLogOutboxUnderConcurrentPublishersFlushesAndClose(t *testing.T) {
 }
 
 // TestATicketOfABatchCommittedByCloseCarriesItsSeq is the ticket's last edge
-// (review r23, hunt A): the batch is still in the outbox when Close begins,
-// with the primary full and nobody reading it, so its number is assigned by the
-// drainer during the close and the event itself is never delivered to anyone.
-// The ticket carries the number all the same — it is stored before the event is
-// offered — so a settings change committed by a closing log still answers with
-// a revision rather than a silent 0.
+// (review r23, hunt A): the batch is in the drainer's hands when Close begins,
+// with the primary full and nobody reading it, so it is committed during the
+// close and the event itself is never delivered to anyone. The ticket carries
+// the number all the same, so a settings change committed by a closing log
+// still answers with a revision rather than a silent 0.
+//
+// And not before the commit (Ticket.Seq): held at its send to the full
+// primary, the drainer has numbered the event and committed nothing, and the
+// ticket answers 0. The hook is what makes that a barrier. Without it the read
+// raced the drainer, and a drainer that won (PR #50's CI run) found the ticket
+// already stored — it was written before the send, the promise broken.
 func TestATicketOfABatchCommittedByCloseCarriesItsSeq(t *testing.T) {
 	l := newTestLog(t, EventLogOptions{})
 	fillPrimary(t, l)
+	sending, atSend := sendingAt(primaryCap + 1)
+	l.hooks = &logHooks{outboxSending: sending}
 	tk := l.EnqueueTicket(textEvent("a settings delta"))
+	if waiting := await(t, atSend, "the drainer to offer the batch to the primary"); !waiting {
+		t.Fatal("the drainer did not wait for the primary on an open log")
+	}
 	if got := tk.Seq(); got != 0 {
 		t.Fatalf("the ticket answered %d before its batch was committed", got)
 	}
 	l.Close(context.Background())
 	if got := tk.Seq(); got != primaryCap+1 {
 		t.Fatalf("the ticket answered %d, want the number the close committed it with (%d)", got, primaryCap+1)
+	}
+}
+
+// TestATicketAnswersOnlyOnceItsWholeBatchIsCommitted: the ticket names the
+// batch's first event but answers for the batch (Ticket). With the first event
+// committed — the observer, last in the commit, has seen it — and the second
+// held at a full primary, it still answers 0; once a reader makes room, the
+// Flush covering the batch returns and the ticket names the first event.
+func TestATicketAnswersOnlyOnceItsWholeBatchIsCommitted(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	var observed atomic.Uint64
+	if err := l.Observe(func(ev Event) { observed.Store(ev.Seq) }); err != nil {
+		t.Fatal(err)
+	}
+	fillPrimary(t, l)
+	<-l.Primary() // room for the batch's first event and no more
+	sending, atSend := sendingAt(primaryCap + 2)
+	l.hooks = &logHooks{outboxSending: sending}
+	tk := l.EnqueueTicket(textEvent("first"), textEvent("second"))
+	if waiting := await(t, atSend, "the drainer to offer the batch's second event"); !waiting {
+		t.Fatal("the drainer did not wait for the primary on an open log")
+	}
+	if got := observed.Load(); got != primaryCap+1 {
+		t.Fatalf("the last commit observed is %d, want the batch's first event (%d)", got, primaryCap+1)
+	}
+	if got := tk.Seq(); got != 0 {
+		t.Fatalf("the ticket answered %d with its batch half committed", got)
+	}
+	<-l.Primary()
+	if err := flushNow(t, l); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := tk.Seq(); got != primaryCap+1 {
+		t.Fatalf("the ticket answered %d, want the batch's first event (%d)", got, primaryCap+1)
 	}
 }
 
