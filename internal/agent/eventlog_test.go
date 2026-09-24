@@ -684,6 +684,33 @@ func settleOwnersStartedSince(t *testing.T, before map[string]bool) {
 	}
 }
 
+// settleOwnerGoroutines waits until at most want owner goroutines
+// (ownerGoroutines, by creation line, so one the scheduler has not touched
+// yet still counts) are alive across the whole process. Unlike
+// settleOwnersStartedSince, it exempts nothing already alive at some
+// baseline: called with want 0 it is a process-wide leak check, so an owner
+// a different test left running is caught here rather than being folded,
+// unnoticed, into a later baseline.
+func settleOwnerGoroutines(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(logWatchdog)
+	for {
+		owners := ownerGoroutines()
+		if len(owners) <= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			ids := make([]string, 0, len(owners))
+			for id := range owners {
+				ids = append(ids, id)
+			}
+			t.Fatalf("%d owner goroutines alive process-wide, want at most %d: %v", len(owners), want, ids)
+		}
+		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestEventLogIncarnationIsAStableUUIDv7: the id NewEventLog mints is a
 // UUIDv7, the same on every call, different per log, and a name the journal
 // accepts in a file name. A given one is kept.
@@ -2411,6 +2438,11 @@ func TestEventLogAnErrorThatPublishesAndClosesWhileItIsEncodedDeadlocksNothing(t
 // counts first show the goroutines running (so the check can see them), and
 // after Close none is left.
 func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
+	// This is the dedicated, process-wide check, so it must open with a real
+	// zero, not a baseline: a baseline taken here would fold a straggler an
+	// earlier test leaked into "before" and never catch it. settleOwnerGoroutines
+	// fails with the surviving ids if one is still alive.
+	settleOwnerGoroutines(t, 0)
 	owners := ownerGoroutines()
 	settleGoroutines(t, writerFrame, 0)
 	l, w := newJournaledLog(t, EventLogOptions{})
@@ -2446,7 +2478,10 @@ func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
 	if n := l.liveOwners.Load(); n != 0 {
 		t.Fatalf("%d owner goroutines counted after Close", n)
 	}
-	settleOwnersStartedSince(t, owners)
+	// Process-wide zero again, not merely "none started since owners": the
+	// dedicated check's claim is that no owner is left behind at all, and
+	// settleOwnersStartedSince alone cannot see one that predates owners.
+	settleOwnerGoroutines(t, 0)
 	settleGoroutines(t, writerFrame, 0)
 	for _, s := range []*Subscription{live, stuck, backlog, closedOne} {
 		readAll(t, s)
