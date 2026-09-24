@@ -656,13 +656,61 @@ func TestAClearMidStreamContinuesInANewRow(t *testing.T) {
 	})
 }
 
-// TestTodoNotesAfterClearAreThePanes is execution amendment X31: the shared
-// model's todo-note dedupe is the session's and never resets, and the pane's —
-// which /clear resets — decides what the pane shows. A note the fold wrote is
-// the display; a note the pane owes that the fold did not write, which only a
-// /clear makes possible, is written by the pane, locally, at the event's At;
-// and the pane's counters never run ahead of the model's, so the fold never
-// writes a note the pane does not owe.
+// todayTodoNotes is the TUI's todo-note dedupe as it was before plan 024 —
+// noteTodos over todoPlanned and todoDone, which /clear reset — kept here as
+// the reference a pane is held to: the notes a pane that was shown these lists,
+// in this order, since its last clear draws.
+type todayTodoNotes struct {
+	planned int
+	done    bool
+	notes   []string
+}
+
+func (d *todayTodoNotes) see(todos []agent.Todo) {
+	if len(todos) == 0 {
+		return
+	}
+	closed := 0
+	for _, td := range todos {
+		if td.Status == "completed" || td.Status == "cancelled" {
+			closed++
+		}
+	}
+	if closed == len(todos) {
+		if !d.done {
+			d.done = true
+			d.notes = append(d.notes, fmt.Sprintf("tasks: %d/%d done", closed, len(todos)))
+		}
+		return
+	}
+	d.done = false
+	if len(todos) > d.planned {
+		d.planned = len(todos)
+		d.notes = append(d.notes, fmt.Sprintf("tasks: %d planned", len(todos)))
+	}
+}
+
+func (d *todayTodoNotes) clear() { *d = todayTodoNotes{} }
+
+// noteTexts is the text of every note row a pane shows, oldest first.
+func noteTexts(p *pane) []string {
+	var out []string
+	for _, r := range shownRows(p) {
+		if r.kind == "note" {
+			out = append(out, r.text)
+		}
+	}
+	return out
+}
+
+// TestTodoNotesAfterClearAreThePanes is execution amendment X31 as revised at
+// r17: the shared model's todo-note dedupe is the session's and never resets,
+// and the pane's — which /clear resets — decides what the pane shows, in both
+// directions. The pane shows exactly the notes today's dedupe would, for the
+// list todosOf chose: a note the fold wrote is the display when the pane owes
+// it, a note the pane owes that the fold did not write is written by the pane,
+// locally, at the event's At, and a note the fold wrote that the pane does not
+// owe gets no row.
 func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
 	m := sized(t)
@@ -682,25 +730,22 @@ func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 		}
 		return out
 	}
+	var today todayTodoNotes
 	step := 0
 	send := func(list []agent.Todo) {
 		t.Helper()
 		step++
-		before := len(m.shared.Main.Entries())
 		m = feed(t, m, agent.Event{Type: agent.EventTodos, Todos: list, At: base.Add(time.Duration(step) * time.Second)})
-		folded := len(m.shared.Main.Entries()) > before
-		// The invariant: the pane's counters never exceed the model's.
-		h := m.shared.History().Main
-		if m.todoPlanned > h.TodoPlanned || (m.todoDone && !h.TodoDone) {
-			t.Fatalf("step %d: the pane's dedupe (%d, %v) ran ahead of the model's (%d, %v)", step, m.todoPlanned, m.todoDone, h.TodoPlanned, h.TodoDone)
+		// Every list here is the event's own, so it is the one todosOf picks.
+		today.see(list)
+		if got := noteTexts(m.main); !slices.Equal(got, today.notes) {
+			t.Fatalf("step %d: the pane shows the notes %q, and today's dedupe %q", step, got, today.notes)
 		}
-		// So a note the fold wrote is one the pane shows.
-		if folded {
-			last := m.main.rows[len(m.main.rows)-1]
-			if last.local || last.id.IsZero() {
-				t.Fatalf("step %d: the fold wrote a note the pane did not show as its row", step)
-			}
-		}
+	}
+	clearPane := func() {
+		t.Helper()
+		m = runSlash(t, m, "/clear")
+		today.clear()
 	}
 
 	send(todos(false))
@@ -711,7 +756,7 @@ func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 	if got := notes(); len(got) != 1 {
 		t.Fatalf("a repeated list noted again: %v", got)
 	}
-	m = runSlash(t, m, "/clear")
+	clearPane()
 	send(todos(false))
 	// The pane owes the note again; the session's model has it already.
 	if got, want := notes(), []shownRow{{kind: "note", text: "tasks: 2 planned", local: true}}; !slices.Equal(got, want) {
@@ -735,10 +780,182 @@ func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 		t.Fatalf("notes %v, want %v", got, want)
 	}
 	// And after another clear, the pane owes it again and the model does not.
-	m = runSlash(t, m, "/clear")
+	clearPane()
 	send(todos(true))
 	if got, want := notes(), []shownRow{{kind: "note", text: "tasks: 2/2 done", local: true}}; !slices.Equal(got, want) {
 		t.Fatalf("notes %v, want %v", got, want)
+	}
+}
+
+// TestADelayedTodoListIsNotedOnce is the schedule review r17 found against
+// X31 as first pinned: an empty EventTodos and then a one-item list are both
+// published before the TUI consumes either. Applying the empty one,
+// refreshSnap already sees the newer list and todosOf falls back to it, so the
+// pane notes "tasks: 1 planned" from the snapshot, one event early; the next
+// event's fold writes the same note in the shared model. The pane shows it
+// once — today's dedupe over the lists todosOf chose — and the fold's note,
+// which the pane does not owe, gets no row; the events are still folded as
+// they came.
+func TestADelayedTodoListIsNotedOnce(t *testing.T) {
+	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	m := sized(t)
+	stub := m.sess.(*Stub)
+	one := []agent.Todo{{ID: "1", Content: "Read", Status: "pending"}}
+	// The session's state has moved on to the list the second event carries.
+	stub.SetTodos(one)
+	m = feed(t, m,
+		agent.Event{Type: agent.EventTodos, At: base},
+		agent.Event{Type: agent.EventTodos, Todos: one, At: base.Add(time.Second)},
+	)
+	var today todayTodoNotes
+	today.see(one) // the first event's list, as todosOf chose it
+	today.see(one) // the second's
+	if got := noteTexts(m.main); !slices.Equal(got, today.notes) || len(got) != 1 {
+		t.Fatalf("the pane shows the notes %q, want today's %q", got, today.notes)
+	}
+	if got := shownRows(m.main); !got[0].local {
+		t.Fatalf("the note is the pane's own, written from the snapshot: %v", got)
+	}
+	if f := lastFact(t, m.main, "note", "tasks: 1 planned"); !f.At.Equal(base) {
+		t.Fatalf("the pane's note is stamped %v, want the first event's %v", f.At, base)
+	}
+	// The shared model folded both events as they came: its one note is the
+	// second event's, which no row shows.
+	var notes []*transcript.Entry
+	for _, e := range m.shared.Main.Entries() {
+		if e.Kind == transcript.KindNote {
+			notes = append(notes, e)
+		}
+	}
+	if len(notes) != 1 || notes[0].Text != "tasks: 1 planned" || !notes[0].At.Equal(base.Add(time.Second)) {
+		t.Fatalf("the shared model's notes: %+v", notes)
+	}
+	if m.main.ids[notes[0].ID] != nil {
+		t.Fatal("the fold's note, which the pane does not owe, has a row")
+	}
+}
+
+// driftingErr is an error whose text changes every time it is read: Error is
+// foreign code, and nothing promises it answers the same twice.
+type driftingErr struct{ reads *int }
+
+func (e driftingErr) Error() string {
+	*e.reads++
+	if *e.reads == 1 {
+		return "the first failure"
+	}
+	return fmt.Sprintf("failure, read %d times", *e.reads)
+}
+
+// emptyErr is an error with no text, counting its reads.
+type emptyErr struct{ reads *int }
+
+func (e emptyErr) Error() string { *e.reads++; return "" }
+
+// TestAnErrorsTextIsReadOnce is review r17's first finding: an EventError's
+// text is read once, on the Update goroutine, before the fold — the row the
+// shared model draws, m.err and so the host status all say what that one
+// reading said, and Error runs exactly once per event (as it always has), under
+// no lock. An empty text draws no row, and a child's error, which nothing
+// reads, is not read at all.
+func TestAnErrorsTextIsReadOnce(t *testing.T) {
+	t.Run("a failure", func(t *testing.T) {
+		m := sized(t)
+		reads := 0
+		m = feed(t, m, agent.Event{Type: agent.EventError, Err: driftingErr{&reads}})
+		if reads != 1 {
+			t.Fatalf("Error was called %d times for one event", reads)
+		}
+		if got := texts(m, entryError); len(got) != 1 || got[0] != "the first failure" {
+			t.Fatalf("the error rows %q, want the first reading", got)
+		}
+		if m.err != "the first failure" {
+			t.Fatalf("m.err %q, want the first reading", m.err)
+		}
+		if got := m.hostInput().Err; got != "the first failure" {
+			t.Fatalf("the host status says %q, want the first reading", got)
+		}
+		if e := m.shared.Main.Entries(); e[len(e)-1].Text != "the first failure" {
+			t.Fatalf("the shared model holds %q", e[len(e)-1].Text)
+		}
+	})
+	t.Run("an empty failure", func(t *testing.T) {
+		m := sized(t)
+		reads := 0
+		m = feed(t, m, agent.Event{Type: agent.EventError, Err: emptyErr{&reads}})
+		if reads != 1 || m.err != "" || len(texts(m, entryError)) != 0 || len(m.shared.Main.Entries()) != 0 {
+			t.Fatalf("reads %d, m.err %q, rows %q, entries %d: want one read and nothing drawn",
+				reads, m.err, texts(m, entryError), len(m.shared.Main.Entries()))
+		}
+	})
+	t.Run("a child's failure", func(t *testing.T) {
+		m := withChild(t, sized(t), "task-1")
+		reads := 0
+		feed(t, m, agent.Event{Type: agent.EventError, Agent: "task-1", Err: driftingErr{&reads}})
+		if reads != 0 {
+			t.Fatalf("a child's error, which nothing draws, was read %d times", reads)
+		}
+	})
+}
+
+// TestAViewedChildTheModelEvictedKeepsItsRows is review r17's third finding:
+// the shared model evicts a finished child past the roster's bound (32
+// finished) and its transcript with it, but the TUI keeps the pane of the
+// child it is viewing (pruneSubs). That pane's rows name entries nothing holds
+// any more, so the roster fold that evicted it lets them go: they stay on
+// screen as this client's own. (The parity watch, which checks every row of
+// every pane, is what failed on this schedule.)
+func TestAViewedChildTheModelEvictedKeepsItsRows(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	stub := m.sess.(*Stub)
+	// A provider whose children stream their own transcript.
+	stub.SetProvider(agent.GrokProvider())
+	var roster []agent.SubagentInfo
+	emit := func(info agent.SubagentInfo, change string) {
+		t.Helper()
+		if i := slices.IndexFunc(roster, func(s agent.SubagentInfo) bool { return s.ID == info.ID }); i >= 0 {
+			roster[i] = info
+		} else {
+			roster = append(roster, info)
+		}
+		stub.SetSubagents(roster)
+		m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change})
+	}
+	child := func(id string, n int, done bool) agent.SubagentInfo {
+		info := agent.SubagentInfo{ID: id, ToolCallID: id, Description: "child " + id, Status: agent.SubagentRunning, Transcript: true}
+		if done {
+			info.Status = agent.SubagentCompleted
+			info.EndedAt = now.Add(time.Duration(n) * time.Second)
+		}
+		return info
+	}
+
+	emit(child("oldest", 0, false), agent.SubagentChangeSpawned)
+	m = feed(t, m, agent.Event{Type: agent.EventText, Agent: "oldest", Text: "the oldest child's work"})
+	m = openView(t, m)
+	if m.viewing != "oldest" {
+		t.Fatalf("fixture: viewing %q", m.viewing)
+	}
+	emit(child("oldest", 0, true), agent.SubagentChangeFinished)
+	for i := 1; i <= 32; i++ {
+		id := fmt.Sprintf("child-%02d", i)
+		emit(child(id, i, false), agent.SubagentChangeSpawned)
+		emit(child(id, i, true), agent.SubagentChangeFinished)
+	}
+	if m.shared.Sub("oldest") != nil {
+		t.Fatal("fixture: the shared model kept the oldest of 33 finished children")
+	}
+	p := m.subs["oldest"]
+	if m.viewing != "oldest" || p == nil {
+		t.Fatalf("the view left the evicted child: viewing %q, pane %v", m.viewing, p != nil)
+	}
+	if got, want := shownRows(p), []shownRow{{kind: "assistant", text: "the oldest child's work", local: true}}; !slices.Equal(got, want) {
+		t.Fatalf("the evicted child's pane holds %v, want its row, now this client's own: %v", got, want)
+	}
+	m.setViewportContent(true)
+	if view := plainView(m); !strings.Contains(view, "the oldest child's work") {
+		t.Fatalf("the view no longer shows the evicted child's rows:\n%s", view)
 	}
 }
 

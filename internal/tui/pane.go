@@ -133,11 +133,12 @@ func (t *pane) push(e *entry) {
 // consume is one fold's Change, for the pane that shows its Scope's transcript
 // tr (plan 024 §3.8): the entries the model dropped leave (X28), the touched
 // ones are re-read where they stand, and the appended ones get rows at the
-// tail, in order — except the user rows of a fold whose echo this client has
-// already drawn (hide, X26). Then, if a row was added, the pane's own caps
-// apply, as they always have on an append and only then: a chunk that grows a
-// row trims nothing.
-func (t *pane) consume(ch transcript.Change, tr *transcript.Transcript, hide bool) {
+// tail, in order — except those of kind hide (zero for none), which the pane
+// already shows: the user row of a started whose echo this client drew itself
+// (X26), a todo note the pane's own dedupe does not owe (X31). Then, if a row
+// was added, the pane's own caps apply, as they always have on an append and
+// only then: a chunk that grows a row trims nothing.
+func (t *pane) consume(ch transcript.Change, tr *transcript.Transcript, hide transcript.Kind) {
 	if ch.Dropped > 0 {
 		t.dropGone(tr)
 	}
@@ -149,9 +150,7 @@ func (t *pane) consume(ch transcript.Change, tr *transcript.Transcript, hide boo
 	}
 	if !ch.AppendedFrom.IsZero() {
 		for _, e := range tr.Range(ch.AppendedFrom, ch.AppendedTo) {
-			if hide && e.Kind == transcript.KindUser {
-				// The started of the turn Submit handed back: Enter drew its
-				// row, and that local twin is the display.
+			if hide != 0 && e.Kind == hide {
 				continue
 			}
 			t.showNew(tr, e, &entry{})

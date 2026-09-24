@@ -209,10 +209,11 @@ type Model struct {
 	// shared is the session's transcript as every client folding its events
 	// agrees on it (plan 024 §3.8): this client's own instance, folded from
 	// every event the primary delivers (foldEvent), made fresh with each
-	// session (setSession). foldClock is its clock (see foldClock). Both are
-	// pointers every copy of the model shares, as the panes are.
-	shared    *transcript.Model
-	foldClock *foldClock
+	// session (setSession). foldIn is what each fold takes from this client
+	// (foldInputs). Both are pointers every copy of the model shares, as the
+	// panes are.
+	shared *transcript.Model
+	foldIn *foldInputs
 	// main is the session transcript's pane. cur() returns the viewed
 	// sub-agent's pane when viewing != "", otherwise main. Both are pointers
 	// every copy of the model shares (see pane); New allocates them.
@@ -2591,19 +2592,44 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applyEvent(ev agent.Event) {
-	// The shared model folds every event first, before anything below can
-	// return early (plan 024 §3.8): every row an event draws is the fold's,
-	// and the panes show what it changed. The one thing that needs this
-	// client's own state is the echo rule, decided here before that state
-	// moves: the started of the turn Submit handed back draws no row, because
-	// the optimistic row Enter drew is its display.
-	ch := m.foldEvent(ev, m.ownStarted(ev))
 	// An event means the log is moving, which is what a hidden answer the outbox
 	// had no room for is waiting on (retryHidden) — the fast path, ahead of the
 	// beat that guarantees the retry (armHiddenRetry). It runs before the event
 	// is applied, so a hidden ask answered here is not counted twice by an
 	// answerHidden this same event causes.
 	m.retryHidden()
+	// The shared model folds every event next, before anything below can return
+	// early (plan 024 §3.8): every row an event draws is the fold's, and the
+	// panes show what it changed. What the fold takes from this client's own
+	// state is decided first, before that state moves:
+	//
+	//   - the echo rule: the started of the turn Submit handed back draws no
+	//     row, because the optimistic row Enter drew is its display;
+	//   - the todo notes: this pane's dedupe decides which note it shows (X31
+	//     revised), over the list todosOf picks after refreshSnap — today's
+	//     order — so a note the fold writes that the pane has already drawn
+	//     gets no row, and one the pane owes that the fold does not write is
+	//     the pane's own, written below;
+	//   - an error's text, read once for the row and for m.err alike.
+	var (
+		hide     transcript.Kind
+		todoNote string
+		errText  string
+	)
+	switch {
+	case m.ownStarted(ev):
+		hide = transcript.KindUser
+	case ev.Type == agent.EventTodos && ev.Agent == "":
+		m.refreshSnap()
+		todos := m.todosOf(ev)
+		m.noteTodoLifecycle(todos)
+		if todoNote = m.todoNoteOwed(todos); todoNote == "" {
+			hide = transcript.KindNote
+		}
+	case errorEvent(ev):
+		errText = ev.Err.Error()
+	}
+	ch := m.foldEvent(ev, hide, errText)
 	if ev.Type == agent.EventSubagent {
 		m.applySubagentEvent(ev)
 		return
@@ -2680,11 +2706,13 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case agent.EventTool:
 		m.refreshSnap()
 	case agent.EventTodos:
-		m.refreshSnap()
-		todos := m.todosOf(ev)
-		m.noteTodoLifecycle(todos)
-		// A todos fold appends nothing but its note, so an append is the note.
-		m.noteTodos(todos, ev.At, !ch.AppendedFrom.IsZero())
+		// A todos fold appends nothing but its note, so no append is no note:
+		// a note the pane owes that the fold did not write — which a /clear,
+		// or todosOf's fallback to a newer list, makes possible — is the
+		// pane's own, stamped at the event's At.
+		if todoNote != "" && ch.AppendedFrom.IsZero() {
+			m.main.appendLocal(entry{kind: entryNote, text: todoNote}, m.stamp(ev.At))
+		}
 	case agent.EventPermission:
 		if ev.Permission != nil {
 			m.pushCard(card{kind: cardPermission, perm: ev.Permission})
@@ -2768,7 +2796,8 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.status = statusError
 		m.confirm = nil
 		if ev.Err != nil {
-			m.err = ev.Err.Error()
+			// The text the fold drew the row with, read once.
+			m.err = errText
 		}
 	case agent.EventMeta:
 		if ev.State != nil {

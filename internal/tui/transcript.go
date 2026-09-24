@@ -162,7 +162,7 @@ func (r *entry) show(e *transcript.Entry, tr *transcript.Transcript) {
 // At, and this client's clock only for an event that carries none, which is a
 // unit test's fixture — every production event is stamped. The shared model
 // stamps its entries by the same rule (plan 024 §3.2); this is for the one row
-// the pane writes on an event's behalf (noteTodos).
+// the pane writes on an event's behalf (a todo note, todoNoteOwed).
 func (m *Model) stamp(at time.Time) time.Time {
 	if at.IsZero() {
 		return m.now()
@@ -243,20 +243,24 @@ func (m Model) displayPath(tr *pane, p string) string {
 	return filepath.Join(filepath.Base(filepath.Dir(p)), base)
 }
 
-// noteTodos is the pane's half of the todo stream's two dim notes; the panel
-// itself is the pinned home for the list. The shared model writes the notes
-// under its own dedupe, which is the session's and never resets; this one is
-// the pane's, which /clear resets, and it decides what the pane shows
-// (execution amendment X31): a note the fold wrote (folded) is the display,
-// and one the pane owes that the fold did not write — which only a /clear
-// makes possible — is written here, locally, stamped at the event's At.
+// todoNoteOwed is the pane's half of the todo stream's two dim notes — the
+// panel itself is the pinned home for the list — and the note, if any, this
+// pane owes for todos: today's dedupe over m.todoPlanned and m.todoDone, which
+// /clear resets, moved on by the list. The shared model writes the notes under
+// its own dedupe, which is the session's and never resets; the pane's decides
+// what the pane shows, in both directions (execution amendment X31, revised at
+// r17): a note the fold writes is the display only when the pane owes it, and
+// is given no row otherwise, and a note the pane owes that the fold does not
+// write is the pane's own (applyEvent).
 //
-// The pane's counters never run ahead of the model's (they start at or below
-// them, move by the same rule, and only /clear lowers them), so the fold never
-// writes a note the pane does not owe.
-func (m *Model) noteTodos(todos []agent.Todo, at time.Time, folded bool) {
+// The two do disagree. /clear lowers the pane's counters and not the model's;
+// and todos is todosOf's choice, which falls back to the snapshot for an event
+// that carries no list — where refreshSnap can already see a newer list the
+// next event carries, so the pane notes it one event early, from the
+// snapshot, and the fold notes it when that event arrives.
+func (m *Model) todoNoteOwed(todos []agent.Todo) string {
 	if len(todos) == 0 {
-		return
+		return ""
 	}
 	closed := 0
 	for _, td := range todos {
@@ -264,23 +268,19 @@ func (m *Model) noteTodos(todos []agent.Todo, at time.Time, folded bool) {
 			closed++
 		}
 	}
-	var owed string
 	if closed == len(todos) {
-		if !m.todoDone {
-			m.todoDone = true
-			owed = fmt.Sprintf("tasks: %d/%d done", closed, len(todos))
+		if m.todoDone {
+			return ""
 		}
-	} else {
-		m.todoDone = false
-		if len(todos) > m.todoPlanned {
-			m.todoPlanned = len(todos)
-			owed = fmt.Sprintf("tasks: %d planned", len(todos))
-		}
+		m.todoDone = true
+		return fmt.Sprintf("tasks: %d/%d done", closed, len(todos))
 	}
-	if owed == "" || folded {
-		return
+	m.todoDone = false
+	if len(todos) <= m.todoPlanned {
+		return ""
 	}
-	m.main.appendLocal(entry{kind: entryNote, text: owed}, m.stamp(at))
+	m.todoPlanned = len(todos)
+	return fmt.Sprintf("tasks: %d planned", len(todos))
 }
 
 func (m *Model) refreshViewport() {

@@ -29,29 +29,31 @@ import (
 // fake-agent ones, the direct-Update fixtures — is checked against a model of
 // its own, folded from exactly the events the TUI folded:
 //
-//   - P0: a shadow model folded from the recorded events alone, fold by fold,
+//   - P0: a shadow model folded from the recorded events alone, fold by fold —
+//     handed the instant and the error text the TUI's fold was handed —
 //     returns the same Change for every event and is at the same Seq, and
 //     holds the same History and State as m.shared; and at every power-of-two
 //     fold a model folded from scratch from the whole recorded prefix holds
 //     them too;
 //   - P1: every shared row of every pane shows its entry as the model holds it
 //     now — no stale row, and no row for an entry the model has let go;
-//   - P2: every entry appended in a pane's scope since that pane was made or
-//     last emptied (/clear, a receipt rebuild) — not echo-hidden, and not taken
-//     since by the pane's own cap — has exactly one row, and so has every entry
-//     re-shown by the rules for a touch with no row (X29, X30); a pane that
-//     lost a prefix to its cap draws the trim note;
+//   - P2: every pane holds exactly the rows the watch's own account says it
+//     must, row by row (paneWant): the rows of the entries each fold appended,
+//     less the echoes it hid; the rows re-shown by the rules for a touch with
+//     no row (X29, X30); the local rows written between folds; less exactly
+//     the rows the model's trims (X28) and the pane's own caps take — not one
+//     more; and every row of a child the model evicted let go (detach);
 //   - P3: a pane's shared rows are in the model's order, re-appended ones
 //     (X29) excepted;
 //   - P4: a local row carries no entry and a row that carries one is not local,
 //     so no local row is in the model — which P0's model, folded from events
 //     alone, holds exactly.
 //
-// The Change, the Seq and the rows a fold named are checked at every fold. The
-// whole of P0 to P4 is checked at every fold of the first 64, at every power of
-// two and every 256th, and at every fold while the session is small
-// (parityFullSize) — which is every fold of nearly every test; the few that
-// fill a pane to its cap stay linear. strict checks everything at every fold.
+// The Change, the Seq and P2 are checked at every fold. The whole of P0, P1,
+// P3 and P4 is checked at every fold of the first 64, at every power of two and
+// every 256th, and at every fold while the session is small (parityFullSize) —
+// which is every fold of nearly every test; the few that fill a pane to its
+// cap stay linear. strict checks everything at every fold.
 //
 // A broken rule panics in the Update that broke it, which fails that test (a
 // frame script's program reports the panic as its error), and is kept, so
@@ -77,39 +79,31 @@ type parityStats struct {
 	sampled int
 }
 
-// paritySample is one fold as the TUI made it: the event, and the instant the
-// fold's clock read, if it read one (foldClock).
+// paritySample is one fold as the TUI made it: the event, the instant the
+// fold's clock read if it read one, and the error text it was handed if the
+// event carries an error (foldInputs).
 type paritySample struct {
-	ev agent.Event
-	at time.Time
+	ev      agent.Event
+	at      time.Time
+	errText string
 }
 
 // parityRec is one shared model's record: its shadow, the events, and what
-// each of the TUI's panes must show of them.
+// each of the TUI's panes must hold.
 type parityRec struct {
 	shadow *transcript.Model
-	// replay is the instant the shadow's clock answers with: the one the TUI's
-	// fold read for the same event.
-	replay time.Time
+	// replay is what the shadow's fold is handed: the sample the TUI's fold
+	// was handed for the same event.
+	replay paritySample
 	events []paritySample
 	folds  int
 	panes  map[*pane]*paneWant
 }
 
-// paneWant is what one pane must show of its scope's entries: their ids in
-// row order — a prefix of which the pane's own cap may have taken since the
-// last whole check — which of them were re-appended (X29), and the clear mark,
-// which the watch takes itself, from the shadow, when it sees the pane emptied.
-type paneWant struct {
-	emptied int
-	order   []transcript.EntryID
-	in      map[transcript.EntryID]bool
-	re      map[transcript.EntryID]bool
-	mark    transcript.EntryID
-}
-
-func newPaneWant(emptied int) *paneWant {
-	return &paneWant{emptied: emptied, in: map[transcript.EntryID]bool{}, re: map[transcript.EntryID]bool{}}
+// replayOptions is sharedOptions over a sample the caller keeps current: a
+// model folded with it is handed, for each event, what the TUI's fold was.
+func replayOptions(s *paritySample) transcript.Options {
+	return sharedOptions(func() time.Time { return s.at }, func(error) string { return s.errText })
 }
 
 var parity = &parityWatch{recs: map[weak.Pointer[transcript.Model]]*parityRec{}}
@@ -174,7 +168,7 @@ func (w *parityWatch) rec(m *transcript.Model) *parityRec {
 		return r
 	}
 	r := &parityRec{panes: map[*pane]*paneWant{}}
-	r.shadow = transcript.New(sharedOptions(func() time.Time { return r.replay }))
+	r.shadow = transcript.New(replayOptions(&r.replay))
 	w.recs[key] = r
 	w.stats.models++
 	runtime.AddCleanup(m, func(k weak.Pointer[transcript.Model]) {
@@ -199,128 +193,353 @@ func panesOf(m *Model) map[string]*pane {
 	return out
 }
 
-func (r *parityRec) want(p *pane) *paneWant {
-	w := r.panes[p]
-	if w == nil {
-		w = newPaneWant(p.emptied)
-		r.panes[p] = w
-	}
-	return w
+// ---------------------------------------------------------------- paneWant
+
+// paneWant is the watch's own account of one pane (P2): the rows it must hold,
+// in order and by identity; the entry each shared row must show; which rows
+// were re-appended out of the model's order (X29); and the clear mark, which
+// the watch takes itself, from the shadow, when it sees the pane emptied.
+type paneWant struct {
+	emptied int
+	rows    []*entry
+	shows   map[*entry]transcript.EntryID
+	byID    map[transcript.EntryID]*entry
+	re      map[*entry]bool
+	mark    transcript.EntryID
+	from    int
 }
 
-// add puts id at the end of the list, moving it there if it is in it already.
-func (w *paneWant) add(id transcript.EntryID, re bool) {
-	if w.in[id] {
-		w.order = slices.DeleteFunc(w.order, func(x transcript.EntryID) bool { return x == id })
+// newPaneWant is the account of a pane as it stands when the watch first sees
+// it, or sees it emptied: whatever it holds by then was written outside any
+// fold, so it is all local.
+func newPaneWant(p *pane) (*paneWant, error) {
+	w := &paneWant{
+		emptied: p.emptied,
+		rows:    slices.Clone(p.rows),
+		shows:   map[*entry]transcript.EntryID{},
+		byID:    map[transcript.EntryID]*entry{},
+		re:      map[*entry]bool{},
 	}
-	w.order = append(w.order, id)
-	w.in[id] = true
-	if re {
-		w.re[id] = true
-	}
-}
-
-// keep narrows the list to the ids keep says stay.
-func (w *paneWant) keep(keep func(transcript.EntryID) bool) {
-	w.order = slices.DeleteFunc(w.order, func(id transcript.EntryID) bool {
-		if keep(id) {
-			return false
+	for _, r := range p.rows {
+		if !r.local || !r.id.IsZero() {
+			return w, fmt.Errorf("a row no fold drew names entry %v (local=%v): %+v", r.id, r.local, shownOf(r))
 		}
-		delete(w.in, id)
-		delete(w.re, id)
-		return true
-	})
+	}
+	return w, nil
 }
+
+// paneCap is the pane's row cap.
+func paneCap(p *pane) int {
+	if p.entryCap > 0 {
+		return p.entryCap
+	}
+	return maxEntries
+}
+
+func rowsText(rows []*entry, text func(*entry) int) int {
+	n := 0
+	for _, r := range rows {
+		n += text(r)
+	}
+	return n
+}
+
+func textOf(r *entry) int { return len(r.text) }
+
+// between is the account of the rows p gained and lost since the watch last
+// saw it, with no fold in between: only local rows can have been written, at
+// the tail, and only the caps can have taken rows, off the front and only as
+// many as those appends forced — the exact minimum (a pane at its row cap
+// after it dropped anything; over its text budget with the last row it
+// dropped put back).
+func (w *paneWant) between(p *pane) error {
+	got, base := p.rows, w.rows
+	d := 0
+	if len(got) > 0 {
+		for d < len(base) && base[d] != got[0] {
+			d++
+		}
+	} else {
+		d = len(base)
+	}
+	kept := len(base) - d
+	if kept > len(got) || !slices.Equal(got[:kept], base[d:]) {
+		return fmt.Errorf("between folds the pane's rows are not its last rows less a front prefix, then new local rows")
+	}
+	fresh := got[kept:]
+	for _, r := range fresh {
+		if !r.local || !r.id.IsZero() {
+			return fmt.Errorf("between folds a row naming entry %v (local=%v) was written: %+v", r.id, r.local, shownOf(r))
+		}
+	}
+	if d > 0 {
+		if len(fresh) == 0 {
+			return fmt.Errorf("between folds %d rows left the pane and none was written", d)
+		}
+		forced := len(got) == paneCap(p)
+		if p.textBudget > 0 && !forced {
+			// Put the last row dropped back: the budget must not hold then.
+			// (Exact while no row written since was dropped as well, which
+			// takes more local text between two folds than a budget holds; a
+			// sub-agent's pane gains local rows only from a receipt rebuild,
+			// which empties it and starts the account over.)
+			forced = rowsText(got, textOf)+textOf(base[d-1]) > p.textBudget
+		}
+		if !forced {
+			return fmt.Errorf("between folds %d rows left the pane off its front, and no cap forced the last of them", d)
+		}
+	}
+	if err := capsHold(p, got, textOf); err != nil {
+		return err
+	}
+	w.forget(base[:d])
+	w.rows = slices.Clone(got)
+	return nil
+}
+
+// capsHold reports a pane over its caps.
+func capsHold(p *pane, rows []*entry, text func(*entry) int) error {
+	if len(rows) > paneCap(p) {
+		return fmt.Errorf("the pane holds %d rows, over its cap of %d", len(rows), paneCap(p))
+	}
+	if p.textBudget > 0 && len(rows) > 1 && rowsText(rows, text) > p.textBudget {
+		return fmt.Errorf("the pane holds %d bytes of row text, over its budget of %d", rowsText(rows, text), p.textBudget)
+	}
+	return nil
+}
+
+// forget takes rows that left the pane out of the account's indexes.
+func (w *paneWant) forget(rows []*entry) {
+	for _, r := range rows {
+		if id, ok := w.shows[r]; ok {
+			if w.byID[id] == r {
+				delete(w.byID, id)
+			}
+			delete(w.shows, r)
+		}
+		delete(w.re, r)
+	}
+}
+
+// predicted is one row a fold's consumption must add at the tail: the entry
+// it shows, whether it was re-appended out of the model's order (X29), and a
+// scratch copy of what it must display, which its text is weighed by.
+type predicted struct {
+	id      transcript.EntryID
+	re      bool
+	scratch *entry
+}
+
+// consumed is the account of one fold's consumption by p — tr is the shadow's
+// transcript of p's scope, hide the kind the fold hid — predicted from the
+// watch's own rules and compared with p's rows exactly, row by row:
+//
+//   - the model's trims (X28): the longest front prefix whose shared rows the
+//     model no longer holds, local rows among them, then any re-appended row
+//     whose entry went;
+//   - a touch with no row: a tool is re-appended (X29), the run open at the
+//     clear continues in a row of its own (X30), anything else draws nothing;
+//   - the appended entries, less those of kind hide;
+//   - and, if any row was added, the caps over the result: rows off the front
+//     to the row cap, then to the text budget.
+func (w *paneWant) consumed(p *pane, tr *transcript.Transcript, ch transcript.Change, hide transcript.Kind) error {
+	held := func(id transcript.EntryID) bool { _, ok := tr.Entry(id); return ok }
+	list := slices.Clone(w.rows)
+	var gone []*entry
+	if ch.Dropped > 0 {
+		k := -1
+		for i, r := range list {
+			id := w.shows[r]
+			if id.IsZero() {
+				continue
+			}
+			if held(id) {
+				break
+			}
+			k = i
+		}
+		gone = append(gone, list[:k+1]...)
+		list = list[k+1:]
+		list = slices.DeleteFunc(list, func(r *entry) bool {
+			if w.re[r] && !held(w.shows[r]) {
+				gone = append(gone, r)
+				return true
+			}
+			return false
+		})
+	}
+	var adds []predicted
+	for _, id := range ch.Touched {
+		if id.IsZero() {
+			continue
+		}
+		e, ok := tr.Entry(id)
+		if !ok || w.byID[id] != nil {
+			continue
+		}
+		switch {
+		case e.Kind == transcript.KindTool:
+			adds = append(adds, predicted{id: id, re: true, scratch: &entry{}})
+		case id == w.mark && e.Streaming:
+			adds = append(adds, predicted{id: id, scratch: &entry{cont: true, contFrom: w.from, at: e.End}})
+		}
+		if id == w.mark {
+			w.mark, w.from = transcript.EntryID{}, 0
+		}
+	}
+	if !ch.AppendedFrom.IsZero() {
+		for _, e := range tr.Range(ch.AppendedFrom, ch.AppendedTo) {
+			if hide != 0 && e.Kind == hide {
+				continue
+			}
+			adds = append(adds, predicted{id: e.ID, scratch: &entry{}})
+		}
+	}
+	scratch := map[*entry]predicted{}
+	seq := list
+	for _, a := range adds {
+		e, _ := tr.Entry(a.id)
+		a.scratch.show(e, tr)
+		scratch[a.scratch] = a
+		seq = append(seq, a.scratch)
+	}
+	if len(adds) > 0 {
+		if n := len(seq) - paneCap(p); n > 0 {
+			gone = append(gone, seq[:n]...)
+			seq = seq[n:]
+		}
+		for p.textBudget > 0 && len(seq) > 1 && rowsText(seq, textOf) > p.textBudget {
+			gone = append(gone, seq[0])
+			seq = seq[1:]
+		}
+	}
+	// seq is the pane now, with each row this fold added still its scratch.
+	if len(p.rows) != len(seq) {
+		return fmt.Errorf("the pane holds %d rows, and its account %d (%d added, %d gone)", len(p.rows), len(seq), len(adds), len(gone))
+	}
+	for i, r := range seq {
+		got := p.rows[i]
+		a, isNew := scratch[r]
+		switch {
+		case !isNew && got != r:
+			return fmt.Errorf("row %d of the pane is not the row its account holds there", i)
+		case isNew && (slices.Contains(w.rows, got) || got.id != a.id || got.local):
+			return fmt.Errorf("row %d of the pane should be a new row for entry %v, and is %+v", i, a.id, shownOf(got))
+		}
+	}
+	w.forget(gone)
+	for i, r := range seq {
+		if a, isNew := scratch[r]; isNew {
+			got := p.rows[i]
+			w.shows[got] = a.id
+			w.byID[a.id] = got
+			if a.re {
+				w.re[got] = true
+			}
+		}
+	}
+	w.rows = slices.Clone(p.rows)
+	return nil
+}
+
+// detached is the account of a pane whose child the model evicted: its rows
+// stay, and every one is local now.
+func (w *paneWant) detached(p *pane) error {
+	if !slices.Equal(p.rows, w.rows) {
+		return fmt.Errorf("the pane of an evicted child lost or gained rows")
+	}
+	for _, r := range p.rows {
+		if !r.local || !r.id.IsZero() {
+			return fmt.Errorf("the pane of an evicted child still shows entry %v", r.id)
+		}
+	}
+	if len(p.ids) != 0 {
+		return fmt.Errorf("the pane of an evicted child still indexes %d entries", len(p.ids))
+	}
+	clear(w.shows)
+	clear(w.byID)
+	clear(w.re)
+	return nil
+}
+
+// ---------------------------------------------------------------- the hook
 
 // hook is foldHook: the half before the pane consumes the Change, which
 // returns the half after it.
-func (w *parityWatch) hook(m *Model, ev agent.Event, ch transcript.Change, hide bool) func() {
+func (w *parityWatch) hook(m *Model, ev agent.Event, ch transcript.Change, hide transcript.Kind) func() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	r := w.rec(m.shared)
 	r.folds++
 	w.stats.folds++
 
-	// A pane emptied since the last fold starts over. /clear marks the run it
-	// left open, which the shadow — not yet folded past the moment of the
-	// clear — holds open still.
-	live := panesOf(m)
-	for _, p := range live {
-		want := r.want(p)
-		if p.emptied == want.emptied {
+	// Every pane as it stands before this fold: what happened to it since the
+	// last one. A pane first seen, or emptied since (/clear, a receipt
+	// rebuild), starts over; /clear marks the run it left open, which the
+	// shadow — not yet folded past the moment of the clear — holds open still.
+	for scope, p := range panesOf(m) {
+		want := r.panes[p]
+		if want != nil && p.emptied == want.emptied {
+			if err := want.between(p); err != nil {
+				w.fail("before fold %d (%s), pane %q: %v", r.folds, ev.Type, scope, err)
+			}
 			continue
 		}
-		*want = *newPaneWant(p.emptied)
-		if p == m.main {
-			want.mark, _ = openRun(r.shadow.Main)
+		want, err := newPaneWant(p)
+		if err != nil {
+			w.fail("before fold %d (%s), pane %q: %v", r.folds, ev.Type, scope, err)
 		}
+		if p == m.main {
+			want.mark, want.from = openRun(r.shadow.Main)
+		}
+		r.panes[p] = want
 	}
 
-	s := paritySample{ev: ev, at: m.foldClock.at}
+	in := m.foldIn
+	s := paritySample{ev: ev, at: in.at, errText: in.errText}
 	r.events = append(r.events, s)
-	r.replay = s.at
+	r.replay = s
 	if got := r.shadow.Fold(ev); got != ch {
 		w.fail("fold %d (%s): the TUI's model changed %+v; a model folded from the same events, %+v", r.folds, ev.Type, ch, got)
 	}
 	if got, want := m.shared.Seq(), r.shadow.Seq(); got != want {
 		w.fail("fold %d (%s): the TUI's model is at seq %d, the events' at %d", r.folds, ev.Type, got, want)
 	}
-
-	// Which touched entries had a row before the pane consumed the fold: what
-	// a touch does depends on it (X29, X30).
-	var had [2]bool
-	if p := live[ch.Scope]; p != nil {
-		for i, id := range ch.Touched {
-			had[i] = !id.IsZero() && p.ids[id] != nil
-		}
-	}
 	return func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.consumed(m, r, ev, ch, hide, had)
+		w.consumed(m, r, ev, ch, hide)
 	}
 }
 
-// consumed is the half after the pane consumed the fold: the watch's own
-// account of what the pane must now show, the rows the fold named, and — when
-// it is due — the whole check.
-func (w *parityWatch) consumed(m *Model, r *parityRec, ev agent.Event, ch transcript.Change, hide bool, had [2]bool) {
-	tr := scopeOf(r.shadow, ch.Scope)
+// consumed is the half after the pane consumed the fold: the pane's rows
+// against the watch's account of them (P2), the rows the fold named (P1), the
+// panes of children the model evicted, and — when it is due — the whole check.
+func (w *parityWatch) consumed(m *Model, r *parityRec, ev agent.Event, ch transcript.Change, hide transcript.Kind) {
 	live := panesOf(m)
-	p := live[ch.Scope]
-	if ch.Entries() && p != nil && tr != nil {
-		want := r.want(p)
-		if ch.Dropped > 0 {
-			want.keep(func(id transcript.EntryID) bool { _, ok := tr.Entry(id); return ok })
+	if p, tr := live[ch.Scope], scopeOf(r.shadow, ch.Scope); ch.Entries() && p != nil && tr != nil {
+		want := r.panes[p]
+		if want == nil {
+			// Made by this fold's consumption (ensureSub).
+			want = &paneWant{emptied: p.emptied, shows: map[*entry]transcript.EntryID{},
+				byID: map[transcript.EntryID]*entry{}, re: map[*entry]bool{}}
+			r.panes[p] = want
 		}
-		for i, id := range ch.Touched {
-			if id.IsZero() {
-				continue
-			}
-			e, ok := tr.Entry(id)
-			switch {
-			case !ok, had[i]:
-			case e.Kind == transcript.KindTool:
-				want.add(id, true)
-			case id == want.mark && e.Streaming:
-				want.add(id, false)
-			}
-			if id == want.mark {
-				want.mark = transcript.EntryID{}
-			}
+		if err := want.consumed(p, tr, ch, hide); err != nil {
+			w.fail("fold %d (%s), pane %q: %v", r.folds, ev.Type, ch.Scope, err)
 		}
-		if !ch.AppendedFrom.IsZero() {
-			for _, e := range tr.Range(ch.AppendedFrom, ch.AppendedTo) {
-				if hide && e.Kind == transcript.KindUser {
-					continue
-				}
-				want.add(e.ID, false)
-			}
-		}
-		// The rows this fold named show their entries now (P1).
 		for _, id := range [...]transcript.EntryID{ch.Touched[0], ch.Touched[1], ch.AppendedFrom, ch.AppendedTo} {
 			if row := p.ids[id]; !id.IsZero() && row != nil {
 				w.checkRow(r.folds, ev, ch.Scope, row, m.shared)
+			}
+		}
+	}
+	if ev.Type == agent.EventSubagent {
+		for scope, p := range live {
+			if want := r.panes[p]; scope != "" && want != nil && r.shadow.Sub(scope) == nil {
+				if err := want.detached(p); err != nil {
+					w.fail("fold %d (%s), pane %q: %v", r.folds, ev.Type, scope, err)
+				}
 			}
 		}
 	}
@@ -391,8 +610,8 @@ func (w *parityWatch) checkRow(fold int, ev agent.Event, scope string, row *entr
 	}
 }
 
-// whole is the whole check, P0 to P4, over every transcript and every pane
-// (live, panesOf(m)).
+// whole is the whole check — P0, and P1, P3 and P4 over every pane (live,
+// panesOf(m)).
 func (w *parityWatch) whole(m *Model, r *parityRec, ev agent.Event, live map[string]*pane) {
 	w.stats.full++
 	fold := r.folds
@@ -416,10 +635,10 @@ func (w *parityWatch) whole(m *Model, r *parityRec, ev agent.Event, live map[str
 // holds the TUI's against it.
 func (w *parityWatch) fresh(m *Model, r *parityRec, ev agent.Event) {
 	w.stats.fresh++
-	var at time.Time
-	f := transcript.New(sharedOptions(func() time.Time { return at }))
+	var cur paritySample
+	f := transcript.New(replayOptions(&cur))
 	for _, s := range r.events {
-		at = s.at
+		cur = s
 		f.Fold(s.ev)
 	}
 	if got, want := m.shared.History(), f.History(); !reflect.DeepEqual(got, want) {
@@ -432,65 +651,52 @@ func (w *parityWatch) fresh(m *Model, r *parityRec, ev agent.Event) {
 	}
 }
 
-// wholePane is P1 to P4 over one pane.
+// wholePane is P1, P3 and P4 over one pane, and the account's own indexes
+// against the pane's.
 func (w *parityWatch) wholePane(m *Model, r *parityRec, ev agent.Event, scope string, p *pane) {
 	fold := r.folds
-	tr := scopeOf(m.shared, scope)
-	var shown []*entry
+	want := r.panes[p]
+	shared := 0
 	for _, row := range p.rows {
 		w.stats.rows++
 		// P4.
 		if row.local != row.id.IsZero() {
 			w.fail("fold %d (%s): pane %q holds a row marked local=%v with entry %v: %+v", fold, ev.Type, scope, row.local, row.id, shownOf(row))
 		}
-		if !row.id.IsZero() {
-			shown = append(shown, row)
+		if want != nil && row.id != want.shows[row] {
+			w.fail("fold %d (%s): pane %q has a row showing entry %v where its account says %v", fold, ev.Type, scope, row.id, want.shows[row])
 		}
-	}
-	// The index is exactly the shown rows, one row per entry (P2's "exactly").
-	if len(p.ids) != len(shown) {
-		w.fail("fold %d (%s): pane %q indexes %d rows and shows %d", fold, ev.Type, scope, len(p.ids), len(shown))
-	}
-	for _, row := range shown {
+		if row.id.IsZero() {
+			continue
+		}
+		shared++
 		if p.ids[row.id] != row {
 			w.fail("fold %d (%s): pane %q shows entry %v twice, or indexes another row for it", fold, ev.Type, scope, row.id)
 		}
 		w.checkRow(fold, ev, scope, row, m.shared)
 	}
-	if tr == nil {
+	// The index is exactly the shown rows, one row per entry.
+	if len(p.ids) != shared {
+		w.fail("fold %d (%s): pane %q indexes %d rows and shows %d", fold, ev.Type, scope, len(p.ids), shared)
+	}
+	tr := scopeOf(m.shared, scope)
+	if tr == nil || want == nil {
 		return
 	}
-	// P2: the shown rows are the expected ones, less a prefix the pane's own
-	// cap took — which the trim note then says.
-	want := r.want(p)
-	want.keep(func(id transcript.EntryID) bool { _, ok := tr.Entry(id); return ok })
-	ids := make([]transcript.EntryID, len(shown))
-	for i, row := range shown {
-		ids[i] = row.id
-	}
-	n := len(want.order) - len(ids)
-	if n < 0 || !slices.Equal(want.order[n:], ids) {
-		w.fail("fold %d (%s): pane %q shows entries %v, want %v less a prefix its cap took", fold, ev.Type, scope, ids, want.order)
-	}
-	if n > 0 && !p.trimmed {
-		w.fail("fold %d (%s): pane %q shows entries %v, want %v: %d rows are missing, and no cap trimmed the pane",
-			fold, ev.Type, scope, ids, want.order, n)
-	}
-	want.keep(func(id transcript.EntryID) bool { return p.ids[id] != nil })
 	// P3: in the model's order, re-appended rows excepted.
 	pos := map[transcript.EntryID]int{}
 	for i, e := range tr.Entries() {
 		pos[e.ID] = i
 	}
 	last := -1
-	for _, id := range ids {
-		if want.re[id] {
+	for _, row := range p.rows {
+		if row.id.IsZero() || want.re[row] {
 			continue
 		}
-		if pos[id] <= last {
-			w.fail("fold %d (%s): pane %q shows entry %v out of the model's order: %v", fold, ev.Type, scope, id, ids)
+		if pos[row.id] <= last {
+			w.fail("fold %d (%s): pane %q shows entry %v out of the model's order", fold, ev.Type, scope, row.id)
 		}
-		last = pos[id]
+		last = pos[row.id]
 	}
 }
 
@@ -885,4 +1091,107 @@ func installDelta(s agent.Snapshot) *agent.StateDelta {
 		Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), s.Commands...)},
 		Plugins:  &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), s.Plugins...)},
 	}
+}
+
+// TestTheParityWatchCountsEveryDrop is review r17's fifth finding: the watch's
+// account of a pane (paneWant) takes exactly the rows the caps and the model's
+// trims take, so a pane that loses one surviving row more than that — after a
+// trim that was legitimate — fails it, where holding the rows to a suffix of
+// the expected ones would pass it. Each case runs the pane's own code for the
+// legitimate part and plants the extra drop by hand.
+func TestTheParityWatchCountsEveryDrop(t *testing.T) {
+	local := func(p *pane, text string) { p.appendLocal(entry{kind: entryNote, text: text}, time.Time{}) }
+	account := func(t *testing.T, p *pane) *paneWant {
+		t.Helper()
+		w, err := newPaneWant(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+
+	t.Run("the row cap, between folds", func(t *testing.T) {
+		p := &pane{entryCap: 3}
+		for _, s := range []string{"a", "b", "c"} {
+			local(p, s)
+		}
+		w := account(t, p)
+		local(p, "d") // the cap takes "a"
+		if err := w.between(p); err != nil {
+			t.Fatalf("a legitimate trim failed the watch: %v", err)
+		}
+		local(p, "e") // the cap takes "b"
+		p.dropFirst(1)
+		if err := w.between(p); err == nil {
+			t.Fatal("a pane that lost a surviving row past its cap's trim passed the watch")
+		}
+	})
+
+	t.Run("the text budget, between folds", func(t *testing.T) {
+		p := &pane{entryCap: 10, textBudget: 10}
+		local(p, "aaaa")
+		local(p, "bbbb")
+		w := account(t, p)
+		local(p, "cccc") // 12 bytes: the budget takes "aaaa"
+		if err := w.between(p); err != nil {
+			t.Fatalf("a legitimate trim failed the watch: %v", err)
+		}
+		local(p, "eeee") // 12 again: "bbbb" goes, and "cccc" + "eeee" fit
+		p.dropFirst(1)   // "cccc" as well, which fitted
+		if err := w.between(p); err == nil {
+			t.Fatal("a pane that lost a row its text budget did not need to drop passed the watch")
+		}
+	})
+
+	fold := func(sm *transcript.Model, q string) transcript.Change {
+		return sm.Fold(agent.Event{Type: agent.EventCommand, Command: &agent.ExpandedCommand{
+			PluginCommand: agent.PluginCommand{Qualified: q},
+		}})
+	}
+	opts := func(b transcript.Bounds) transcript.Options {
+		o := sharedOptions(time.Now, func(err error) string { return err.Error() })
+		o.Bounds = b
+		return o
+	}
+
+	t.Run("the row cap, in a fold", func(t *testing.T) {
+		sm := transcript.New(opts(transcript.Bounds{}))
+		p := &pane{entryCap: 3}
+		w := account(t, p)
+		for i := range 4 { // the fourth row is a legitimate trim
+			ch := fold(sm, fmt.Sprintf("p:c%d", i))
+			p.consume(ch, sm.Main, 0)
+			if err := w.consumed(p, sm.Main, ch, 0); err != nil {
+				t.Fatalf("fold %d failed the watch: %v", i, err)
+			}
+		}
+		ch := fold(sm, "p:c4")
+		p.consume(ch, sm.Main, 0)
+		p.dropFirst(1)
+		if err := w.consumed(p, sm.Main, ch, 0); err == nil {
+			t.Fatal("a fold that dropped a surviving row past the cap's trim passed the watch")
+		}
+	})
+
+	t.Run("the model's trim, in a fold", func(t *testing.T) {
+		sm := transcript.New(opts(transcript.Bounds{MainEntries: 2}))
+		p := &pane{}
+		w := account(t, p)
+		for i := range 3 { // the third fold makes the model drop the first
+			ch := fold(sm, fmt.Sprintf("p:c%d", i))
+			p.consume(ch, sm.Main, 0)
+			if err := w.consumed(p, sm.Main, ch, 0); err != nil {
+				t.Fatalf("fold %d failed the watch: %v", i, err)
+			}
+		}
+		if !p.trimmed {
+			t.Fatal("fixture: the model's trim did not reach the pane")
+		}
+		ch := fold(sm, "p:c3")
+		p.consume(ch, sm.Main, 0)
+		p.dropFirst(1) // a row whose entry the model still holds
+		if err := w.consumed(p, sm.Main, ch, 0); err == nil {
+			t.Fatal("a fold that dropped a row the model still holds passed the watch")
+		}
+	})
 }

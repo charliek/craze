@@ -26,22 +26,20 @@ func (m *Model) newShared() {
 			p.detach()
 		}
 	}
-	fc := &foldClock{}
-	m.foldClock = fc
-	m.shared = transcript.New(sharedOptions(fc.now))
+	in := &foldInputs{}
+	m.foldIn = in
+	m.shared = transcript.New(sharedOptions(in.now, in.errorText))
 }
 
 // sharedOptions is how this client makes a shared model: it stamps an event
 // that carries no At with clock — only a unit test's fixture is unstamped — and
-// reads an error event's text by calling Error, which it may: the TUI folds
-// outside every publishing boundary, on its own goroutine, from the
-// publisher's own error values (X14). The parity watch makes its models with
-// it too, so they differ from m.shared in nothing but the events they fold.
-func sharedOptions(clock func() time.Time) transcript.Options {
-	return transcript.Options{
-		Clock:   clock,
-		ErrText: func(err error) string { return err.Error() },
-	}
+// takes an error event's text from errText (X14: the TUI folds outside every
+// publishing boundary, on its own goroutine, from the publisher's own error
+// values). The parity watch makes its models with it too, handing them the
+// instant and the text the TUI's fold was handed, so they differ from m.shared
+// in nothing but the events they fold.
+func sharedOptions(clock func() time.Time, errText func(error) string) transcript.Options {
+	return transcript.Options{Clock: clock, ErrText: errText}
 }
 
 // scopeOf is the transcript of sm that the pane of scope shows ("" is main),
@@ -53,53 +51,91 @@ func scopeOf(sm *transcript.Model, scope string) *transcript.Transcript {
 	return sm.Sub(scope)
 }
 
-// foldClock is the clock the shared model stamps an unstamped event with. The
-// model is shared by every copy of Model and outlives each, and a Model's clock
-// is a plain field a test may set on its copy after the model was made
-// (lateModel), so the model cannot hold any one copy's clock: foldEvent hands
-// it the folding copy's before every fold. It is read at most once per event,
-// so every row one event draws is stamped at one instant.
-type foldClock struct {
+// foldInputs is what the shared model takes from this client while it folds
+// one event, armed by foldEvent before every fold: the clock it stamps an
+// unstamped event with, and the text of the error an EventError carries.
+//
+// The model is shared by every copy of Model and outlives each, and a Model's
+// clock is a plain field a test may set on its copy after the model was made
+// (lateModel), so the model cannot hold any one copy's clock: each fold is
+// handed the folding copy's. It is read at most once per event, so every row
+// one event draws is stamped at one instant.
+//
+// The error's text is read by the caller, once, on the Update goroutine and
+// before the fold, and that one reading is the transcript row, m.err and so the
+// host status alike: Error is foreign code, which the TUI has always called
+// once per event (r17), and it is never called under the model's lock.
+type foldInputs struct {
 	clock func() time.Time
 	at    time.Time
 	read  bool
+	// errText is the armed event's error text; armed says there is one.
+	errText string
+	armed   bool
 }
 
-// begin arms the clock for one fold with the folding copy's clock.
-func (c *foldClock) begin(clock func() time.Time) {
-	c.clock, c.at, c.read = clock, time.Time{}, false
+// begin arms the inputs for one fold: the folding copy's clock, and the text
+// of the error ev carries when it is a main-session EventError (text, already
+// read), which is the only error the fold reads.
+func (in *foldInputs) begin(clock func() time.Time, ev agent.Event, text string) {
+	in.clock, in.at, in.read = clock, time.Time{}, false
+	in.armed = errorEvent(ev)
+	in.errText = text
 }
 
 // now is Model.now, read once per fold.
-func (c *foldClock) now() time.Time {
-	if !c.read {
-		c.read = true
-		if c.clock != nil {
-			c.at = c.clock()
+func (in *foldInputs) now() time.Time {
+	if !in.read {
+		in.read = true
+		if in.clock != nil {
+			in.at = in.clock()
 		} else {
-			c.at = time.Now()
+			in.at = time.Now()
 		}
 	}
-	return c.at
+	return in.at
+}
+
+// errorText is the model's Options.ErrText: the armed text, read before the
+// fold. An error the fold asks for with nothing armed — no path does — is read
+// where it stands.
+func (in *foldInputs) errorText(err error) string {
+	if in.armed {
+		return in.errText
+	}
+	return err.Error()
+}
+
+// errorEvent reports whether ev is an error the shared model reads the text
+// of: a main-session EventError carrying one (a child's is ignored, §3.3).
+func errorEvent(ev agent.Event) bool {
+	return ev.Type == agent.EventError && ev.Agent == "" && ev.Err != nil
 }
 
 // foldHook, when a test sets it, is called after every fold with the event
-// folded, its Change and the echo decision it was folded with, before the pane
-// consumes the Change; the func it returns is called once the Change has been
-// consumed. It is the parity test's window onto every fold (A11), which needs
-// both sides of the consumption. It is nil in production.
-var foldHook func(m *Model, ev agent.Event, ch transcript.Change, hide bool) (consumed func())
+// folded, its Change and the kind of appended entry it was folded to hide,
+// before the pane consumes the Change; the func it returns is called once the
+// Change has been consumed. It is the parity test's window onto every fold
+// (A11), which needs both sides of the consumption. It is nil in production.
+var foldHook func(m *Model, ev agent.Event, ch transcript.Change, hide transcript.Kind) (consumed func())
 
 // foldEvent folds one event the primary delivered into the shared model, and
-// hands what the fold changed to the pane that shows its transcript. hide is
-// the echo rule, decided from this client's state before anything moves it:
-// the event is the started of the turn Submit handed back (ownTurn), whose
-// user row Enter already drew, so the entry it appends gets no row (X26).
-func (m *Model) foldEvent(ev agent.Event, hide bool) transcript.Change {
+// hands what the fold changed to the pane that shows its transcript. Both
+// arguments besides the event are decided by the caller from this client's
+// own state, before anything moves it:
+//
+//   - hide is the kind of the entries this fold appends that get no row,
+//     because the pane already shows what they say: the started of the turn
+//     Submit handed back, whose user row Enter drew (KindUser, X26), and a todo
+//     note the pane's own dedupe does not owe (KindNote, X31 revised). Zero is
+//     none;
+//   - errText is the text of the error an EventError carries, read once
+//     (foldInputs).
+func (m *Model) foldEvent(ev agent.Event, hide transcript.Kind, errText string) transcript.Change {
 	if m.shared == nil {
 		m.newShared()
 	}
-	m.foldClock.begin(m.clock)
+	m.foldIn.begin(m.clock, ev, errText)
 	ch := m.shared.Fold(ev)
 	var consumed func()
 	if foldHook != nil {
@@ -113,10 +149,27 @@ func (m *Model) foldEvent(ev agent.Event, hide bool) transcript.Change {
 			p.consume(ch, tr, hide)
 		}
 	}
+	if ev.Type == agent.EventSubagent {
+		m.detachEvicted()
+	}
 	if consumed != nil {
 		consumed()
 	}
 	return ch
+}
+
+// detachEvicted lets go of the children the shared model no longer holds. A
+// roster fold is where the model evicts a finished child past the roster's
+// bound, and its transcript with it (§3.2 (b)); a pane this client keeps for
+// that child — pruneSubs keeps the one being viewed — would otherwise show
+// entries nothing holds. Its rows stay on screen as this client's own, as a
+// replaced session's do (pane.detach).
+func (m *Model) detachEvicted() {
+	for id, p := range m.subs {
+		if p != nil && m.shared.Sub(id) == nil {
+			p.detach()
+		}
+	}
 }
 
 // ownStarted reports whether ev is the started of the turn Submit handed back
