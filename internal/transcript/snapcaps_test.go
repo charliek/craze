@@ -126,6 +126,16 @@ func TestEveryStringOfAnOpenAskIsCapped(t *testing.T) {
 		{"a question", func(t *testing.T, h *hugeStrings) agent.Event {
 			q := &agent.QuestionEvent{}
 			fillHuge(t, h, "QuestionEvent", reflect.ValueOf(q).Elem())
+			// A sub-question's own id and the Answers map's key naming it
+			// stay whole (r6 fix) rather than being capped, so at the
+			// filler's 5 MiB they alone would blow the ask past capBudget.
+			// Shrink them to a few KiB over ItemCap: still provably NOT an
+			// ItemCap head, without dwarfing the ask's other, capped,
+			// strings.
+			q.Questions[0].ID = q.Questions[0].ID[:ItemCap+1024]
+			for k, v := range q.Answers {
+				q.Answers = map[string][]string{k[:ItemCap+1024]: v}
+			}
 			return agent.Event{Type: agent.EventQuestion, Question: q}
 		}},
 		{"an Auto plan", func(t *testing.T, h *hugeStrings) agent.Event {
@@ -147,12 +157,22 @@ func TestEveryStringOfAnOpenAskIsCapped(t *testing.T) {
 				t.Fatalf("the ask: %d open, truncated %v", len(s.Asks), len(s.Asks) == 1 && s.Asks[0].Truncated)
 			}
 			// Every string of the ask — its ID and each one the filler set in
-			// its body — is its head.
+			// its body — is its head, except a question's own sub-question
+			// ids and its Answers map keys (r6 fix): those are the ids
+			// capAnswers keys by, and stay whole rather than risk colliding
+			// two into one.
 			n := 0
 			head := func(path, str string) {
 				n++
-				if len(str) != ItemCap {
-					t.Errorf("%s: %d bytes, want its %d-byte head", path, len(str), ItemCap)
+				switch path {
+				case "Ask.Body.Question.Questions[0].ID", "Ask.Body.Question.Answers{key}":
+					if len(str) != ItemCap+1024 {
+						t.Errorf("%s: %d bytes, want it kept whole at its shrunk %d bytes (an id, r6 fix)", path, len(str), ItemCap+1024)
+					}
+				default:
+					if len(str) != ItemCap {
+						t.Errorf("%s: %d bytes, want its %d-byte head", path, len(str), ItemCap)
+					}
 				}
 			}
 			head("Ask.ID", s.Asks[0].ID)
@@ -164,8 +184,13 @@ func TestEveryStringOfAnOpenAskIsCapped(t *testing.T) {
 				if strings.HasPrefix(path, "event.Type") || str == "" {
 					return
 				}
-				if len(str) != huge {
-					t.Errorf("%s: the event's own payload was written (%d bytes)", path, len(str))
+				want := huge
+				switch path {
+				case "event.Question.Questions[0].ID", "event.Question.Answers{key}":
+					want = ItemCap + 1024 // shrunk above, r6 fix
+				}
+				if len(str) != want {
+					t.Errorf("%s: the event's own payload was written (%d bytes, want %d)", path, len(str), want)
 				}
 			})
 			t.Logf("%d strings capped; the snapshot encodes to %d bytes", n, len(b))
@@ -176,6 +201,61 @@ func TestEveryStringOfAnOpenAskIsCapped(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTwoAnswerKeysSharingAPrefixBothSurvive (r6 fix): a question's Answers
+// map with two keys over ItemCap that share a common ItemCap-length prefix —
+// the shape that used to lose one answer, since capping the keys collapsed
+// both to that shared prefix and one overwrote the other in the copy, the
+// survivor depending on Go's map order. Keys stay whole now, so both keys,
+// and both answers, are exact through a snapshot and a restore, even though
+// one answer's value is still capped (over ItemCap on its own).
+func TestTwoAnswerKeysSharingAPrefixBothSurvive(t *testing.T) {
+	prefix := strings.Repeat("k", ItemCap)
+	k1, k2 := prefix+"-a", prefix+"-b"
+	bigVal := strings.Repeat("v", huge)
+	q := &agent.QuestionEvent{
+		ID:    "ask-1",
+		Title: "two big keys",
+		Answers: map[string][]string{
+			k1: {bigVal},
+			k2: {"short"},
+		},
+	}
+	ev := agent.Event{Type: agent.EventQuestion, Question: q}
+	ev.At, ev.Seq = at(1), 1
+	m := New(Options{})
+	foldAll(t, m, true, ev)
+
+	s, b := snapshotOf(t, m, capBudget)
+	if len(s.Asks) != 1 || !s.Asks[0].Truncated {
+		t.Fatalf("the ask: %d open, truncated %v", len(s.Asks), len(s.Asks) == 1 && s.Asks[0].Truncated)
+	}
+	ans := s.Asks[0].Body.Question.Answers
+	if len(ans) != 2 {
+		t.Fatalf("%d answers, want 2 (both keys survived the cap)", len(ans))
+	}
+	if got := ans[k1]; len(got) != 1 || len(got[0]) != ItemCap {
+		t.Fatalf("k1's answer: %d values, %d bytes, want a %d-byte head", len(got), len(got), ItemCap)
+	}
+	if got := ans[k2]; len(got) != 1 || got[0] != "short" {
+		t.Fatalf("k2's answer: %v, want [short] untouched", got)
+	}
+	if st := m.State(); len(st.Asks[0].Body.Question.Answers[k1][0]) != huge {
+		t.Fatal("capping wrote the model's own answers")
+	}
+
+	r1, r2 := restoredBoth(t, s, b, Options{})
+	for _, r := range []*Model{r1, r2} {
+		st := r.State()
+		if len(st.Asks) != 1 {
+			t.Fatalf("a restored client: %d open asks, want 1", len(st.Asks))
+		}
+		rans := st.Asks[0].Body.Question.Answers
+		if len(rans) != 2 || len(rans[k1]) != 1 || len(rans[k1][0]) != ItemCap || len(rans[k2]) != 1 || rans[k2][0] != "short" {
+			t.Fatalf("a restored client's answers: %d keys", len(rans))
+		}
 	}
 }
 

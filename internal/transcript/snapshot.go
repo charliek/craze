@@ -23,8 +23,11 @@ const DefaultSnapshotBytes = 4 << 20
 // boundary, when it is longer, and what carried it is marked:
 //
 //   - every string an open ask carries — its ID and every string of its body,
-//     a permission's, a question's (answers included) or a plan's (its todos
-//     included) — marking the ask Truncated (r5 finding 1);
+//     a permission's, a question's (its answer VALUES included — each
+//     sub-question's own id and the answer map's keys are ids and stay
+//     whole, like a queue row's id: capping them can collide two into one,
+//     r6 fix) or a plan's (its todos included) — marking the ask Truncated
+//     (r5 finding 1);
 //   - a roster row's Prompt and Output, marking the row (AgentRow.Truncated);
 //   - the current turn's Text, marking Turn.Truncated (r3 finding 3: the
 //     turn's Text is otherwise mandatory and uncapped, so a multi-MiB prompt
@@ -573,10 +576,15 @@ func capPermission(c *capper, p agent.PermissionEvent) agent.PermissionEvent {
 	return p
 }
 
+// capQuestion is a question's ID and title, and each sub-question's prompt
+// and options, capped at ItemCap; each sub-question's own ID stays whole (r6
+// fix): it is the key capAnswers' map is keyed by (session.go: "Answers maps
+// each question's id..."), and capping two that share a long prefix would
+// collide them, silently dropping one's answer.
 func capQuestion(c *capper, q agent.QuestionEvent) agent.QuestionEvent {
 	q.ID, q.Title = c.str(q.ID), c.str(q.Title)
 	q.Questions = capEach(c, q.Questions, func(c *capper, qq agent.Question) agent.Question {
-		qq.ID, qq.Prompt = c.str(qq.ID), c.str(qq.Prompt)
+		qq.Prompt = c.str(qq.Prompt)
 		qq.Options = capEach(c, qq.Options, func(c *capper, o agent.Option) agent.Option {
 			o.ID, o.Label, o.Description = c.str(o.ID), c.str(o.Label), c.str(o.Description)
 			return o
@@ -587,12 +595,16 @@ func capQuestion(c *capper, q agent.QuestionEvent) agent.QuestionEvent {
 	return q
 }
 
-// capAnswers is a question's answers with every key and value capped: the
-// map itself when nothing was cut, else a copy.
+// capAnswers is a question's answers with every value capped: the map itself
+// when nothing was cut, else a copy. The keys stay whole (r6 fix): they are
+// each sub-question's id (capQuestion's own qq.ID, uncapped for the same
+// reason), and capping two that share a long prefix would collide them,
+// silently dropping one's answer — the strings ItemCap does not list are
+// carried whole, and an id is one of those.
 func capAnswers(c *capper, m map[string][]string) map[string][]string {
 	over := false
-	for k, v := range m {
-		if len(k) > ItemCap || slices.ContainsFunc(v, func(s string) bool { return len(s) > ItemCap }) {
+	for _, v := range m {
+		if slices.ContainsFunc(v, func(s string) bool { return len(s) > ItemCap }) {
 			over = true
 			break
 		}
@@ -602,7 +614,7 @@ func capAnswers(c *capper, m map[string][]string) map[string][]string {
 	}
 	out := make(map[string][]string, len(m))
 	for k, v := range m {
-		out[c.str(k)] = capEach(c, v, func(c *capper, s string) string { return c.str(s) })
+		out[k] = capEach(c, v, func(c *capper, s string) string { return c.str(s) })
 	}
 	return out
 }

@@ -147,6 +147,12 @@ func endedTurn(id string) func(agent.Event) bool {
 	}
 }
 
+func startedTurn(id string) func(agent.Event) bool {
+	return func(ev agent.Event) bool {
+		return ev.Type == agent.EventTurn && ev.Turn.Phase == agent.TurnStarted && ev.Turn.ID == id
+	}
+}
+
 // capTool is a tool report at internal/agent/tools.go's per-field caps: three
 // 8 KiB output tails, two 512 B heads, 512 B of raw input, 2 KiB of content,
 // eight locations and, with diffs, eight diffs of 64 KiB a side — the ~1 MiB
@@ -465,9 +471,14 @@ func fakeAgentBin(t *testing.T) string {
 // released (r4 finding 2): so every snapshot is cut mid-turn, before the turn's
 // ending, and the second client folds the rest of the turn from its
 // subscription — at least one record — rather than restoring a turn that had
-// already finished. Each is compared with the primary reader's fold at a
-// common Seq — the turn's settled cutoff, which the second client folds
-// through — never "at exit" (§3.6 item 7).
+// already finished. The snapshot's lower bound is the turn's own start, not
+// the first tool's seq (r6 fix): the primary reader folds the first tool
+// report on its own goroutine, which can race ahead of the observer the
+// attach snapshot is cut against, so a snapshot at the tool report's seq
+// minus one — folding it from the subscription instead — is also a valid
+// attach. Each is compared with the primary reader's fold at a common Seq —
+// the turn's settled cutoff, which the second client folds through — never
+// "at exit" (§3.6 item 7).
 func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 4*watchdog)
@@ -492,6 +503,7 @@ func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 		if err != nil || res.Turn == "" {
 			t.Fatalf("cut %d: submit: %+v, %v", cut, res, err)
 		}
+		started := first.waitFor(t, from, startedTurn(res.Turn))
 		at := first.waitFor(t, from, func(ev agent.Event) bool { return ev.Type == agent.EventTool })
 
 		type attached struct {
@@ -521,9 +533,9 @@ func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 		release()
 		ended := first.waitFor(t, at, endedTurn(res.Turn))
 		from = ended + 1
-		snapSeq, endedSeq := a.c.Attachments[0].Snapshot.Seq, first.seqAt(ended)
-		if snapSeq < first.seqAt(at) || snapSeq >= endedSeq {
-			t.Fatalf("cut %d: the snapshot is at %d, want mid-turn: at or after the first tool (%d), before the turn's ending (%d)", cut, snapSeq, first.seqAt(at), endedSeq)
+		snapSeq, startedSeq, endedSeq := a.c.Attachments[0].Snapshot.Seq, first.seqAt(started), first.seqAt(ended)
+		if snapSeq < startedSeq || snapSeq >= endedSeq {
+			t.Fatalf("cut %d: the snapshot is at %d, want mid-turn: at or after the turn's start (%d), before the turn's ending (%d)", cut, snapSeq, startedSeq, endedSeq)
 		}
 		n := cutoff(t, ctx, e)
 		first.waitSeq(t, n)
