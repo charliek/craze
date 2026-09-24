@@ -343,6 +343,57 @@ committed to the ring, the journal and every subscription with a
 the index worker's own bounded last attempt. A second `Close` is a no-op
 (`sync.Once`) and returns the first call's error.
 
+## S1c, as shipped (2026-09-24)
+
+§8 above describes the transcript model as planned, before any of it existed.
+`internal/transcript` is now the code (Plan 024, two PRs: `feature/plan-024-s1c-model`
+#50 `27c1db6`, `feature/plan-024-s1c-tui` #? `?`); this is what changed from
+the design as it went in, so a later phase reads the real thing rather than
+the proposal (the plan's §3, its execution amendments, `12` S1c).
+
+Two instances exist, both running the same `Fold` code. The **engine's** is
+folded as the first statement of `engine.observe`, ahead of the sub-agent
+guard, under a leaf `model.mu` taken **inside** the log's publishing boundary
+(lock order: the boundary → `model.mu`); `Snapshot` takes the same `model.mu`
+**outside** the boundary, so the two are never nested in the other
+direction. It is the authority a snapshot is cut from. **Every client folds
+its own** from the events it
+receives — the TUI from its primary, on its own goroutine — because SD-33
+already says the TUI is a socket client for good and must not start by
+reading the engine's memory. Entries are immutable (every mutation a new
+`*Entry`), addressed by `EntryID{Seq, N}`, and bounded (§3.2 (b)'s numbers,
+`10` SQ9). `Engine.Attach` (snapshot + cursor → live events from N+1) joined
+`Control` in process; S2 wraps it for the wire (`05`).
+
+Five places where the shipped design departs from the prose above, all
+recorded in the plan's §4 and mirrored into `12` by C9:
+
+- **A command's transcript effect is the in-process client's own row with the
+  echo hidden**, not "the engine applies a command's transcript effect
+  inside the command call and returns the entry and its `seq`": S1b's echo
+  rule already draws the user's own row synchronously on `Submit`, so PR 2
+  makes the pane skip the shared entry the fold creates for it (the started
+  of `ownTurn`) rather than routing the row through the fold at all.
+- **"The TUI keeps a render cache keyed by entry id" holds**, unchanged.
+- **Client-local entries live in the pane's display list, where today's
+  slice put them**, not in "a TUI overlay anchored after an engine entry
+  id": an anchored overlay would reorder rows relative to today's single
+  slice, which the goldens do not tolerate. The pane is `rows []rowRef`
+  (each a shared `EntryID` or a local row), maintained incrementally from
+  the fold's `Change` plus the same local-row call sites §2.4 named.
+- **The event's `At` stamps every shared row; a client's clock is a fallback
+  for a zero stamp**, not "the engine takes the injected clock: entry
+  timestamps and thought-run elapsed time come from the TUI's `m.now()`". A
+  run's `End` is the `At` of the event that closed it. The engine's instance
+  passes no clock at all (a zero `At` stays zero, since no callback may run
+  under the boundary); the TUI's passes `m.now`, used only when an event
+  arrives unstamped.
+- **`07`'s "folded inside the boundary" holds for the engine's instance;
+  clients fold their own.** Nothing folds on a pump or a subscription
+  goroutine of the engine's; every client's fold runs on that client's own
+  goroutine, from whatever the client's own subscription (in process: the
+  primary) delivers it.
+
 ## Shape of the change
 
 | PR | content | risk |

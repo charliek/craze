@@ -8,7 +8,7 @@ non-test source lines, from the reference reviews (`09`).
 | ID | status | one line |
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
-| S1 | in progress | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c in progress (Plan 024, panel-reviewed 2026-09-21)** |
+| S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #?, 2026-09-24)** |
 | S2 | not started | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
@@ -40,11 +40,14 @@ Detail in `03` and `04`. Three slices, each its own plan and PR:
   separated from frontend presence; durable craze session id and index writes
   in the engine. **Shipped under Plan 021 (panel-reviewed 2026-09-20): three
   PRs — the driver, the asks, state and identity.**
-- **S1c** — next. The render-free transcript model folded inside the
-  boundary; bounded snapshots; in-process attach with snapshot + cursor; the
-  convergence check per event kind. Its inputs from S1b are `13`'s SF-01 to
-  SF-05 (native's unpublished title, the TUI's `refreshSnap` mirror, `m.sess`,
-  the Stub's adopted ask ids, the snapshot byte bound).
+- **S1c** (complete) — the render-free `internal/transcript` model folded
+  inside the boundary (the engine's own instance, plus one per client); a
+  bounded, lossless snapshot codec; in-process attach (`Engine.Attach` on
+  `Control`) with snapshot + cursor and three pinned error paths; a
+  convergence check per event kind. The TUI became its first client with no
+  golden moved except the two rows SF-01's owner decision named. **Shipped
+  under Plan 024: two PRs — the package/engine/attach (#50, `27c1db6`), then
+  the TUI (#?, `?`).**
 
 - Size: L, about 4–5k lines plus test churn (raised after the panel: S1b is a
   driver, not a field move). S1b and S1c are the risk.
@@ -103,6 +106,25 @@ ending itself before the session closes (`12`, "Deviations", item 11). The
 permission path is still without live coverage on either platform — no agent
 this smoke could drive ever asks one, on Linux or the mac-mini — recorded as
 open, not failing, because nothing in S1b caused it.
+
+**Exit result (S1c):** shipped 2026-09-24, plan
+`024-session-control-s1c-transcript-model`, two sequential PRs from fresh
+`origin/main` — `feature/plan-024-s1c-model` (#50, `27c1db6`),
+`feature/plan-024-s1c-tui` (#?, `?`). All three exit clauses met, each
+against a named test; the criterion-by-criterion table, the execution
+amendments X1–X38, the live smoke record, and the measurements are in `12`;
+what it found and did not do is the backlog in `13`. No golden moved except
+the two rows SF-01's owner decision named (`native-echo-80x24` row 20,
+`native-mode-100x30`'s separator row, X38); `transcript_test.go`'s mixed
+assertions moved packages under their own names with no behaviour change.
+Live smoke ran on Linux (cursor, grok, native) and the mac-mini (grok,
+native; cursor skipped there, the login keychain over ssh, as every earlier
+phase found too), plus the hidden attach probe on every reachable provider,
+SAME throughout (PR 1's Linux probe, PR 2's Linux and mac-mini probes). SQ9
+is resolved (`10`); SQ15 stays open, measured but not decided. SF-01 and
+SF-03 shipped here; SF-04 stays out; SF-02 is re-pointed at S2, which also
+inherits `Engine.Attach`, `SubscribeOptions.Ctx`, the snapshot codec and its
+version, and the receipt-mode gap (`12`, "Handoff").
 
 ### S2 — control socket
 

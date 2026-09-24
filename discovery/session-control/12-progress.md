@@ -1097,33 +1097,85 @@ native ask has ever fired one.
 
 | | |
 |---|---|
-| Status | planned |
+| Status | shipped |
 | Plan | `024-session-control-s1c-transcript-model` (outside the repo, `~/.claude/plans/craze/`) |
 | Baseline | `origin/main` `2b5229b` (harness H5 PR 2 #48 merged) |
-| Branch / PRs | two sequential PRs, the second branched from `origin/main` after the first merges: `feature/plan-024-s1c-model` (PR 1), `feature/plan-024-s1c-tui` (PR 2) |
-| Merged | — |
+| Branch / PRs | two sequential PRs, the second branched from `origin/main` after the first merges: `feature/plan-024-s1c-model` (#50), `feature/plan-024-s1c-tui` (#?) |
+| Merged | PR 1 2026-09-24, `27c1db6`; PR 2 2026-09-24, `?` |
 
 ### Outcome
 
-Not yet executed. The plan builds a render-free `internal/transcript` package
-— the model, the fold, the snapshot codec, the bounds — that every client
-folds. Two instances: the **engine's**, folded as the first statement of
-`engine.observe` under a leaf `model.mu` (ahead of the sub-agent guard, so
-children reach it too), the authority a snapshot is cut from; and **each
-client's own** (SD-33: no client reads the engine's instance, the TUI folds
-from its primary like any other client). Entries are immutable — every
-mutation is a new `*Entry` — addressed by `EntryID{Seq, N}`, no packing.
-Timestamps are the event's own `At`; a client's clock is only a fallback for
-a zero stamp. Snapshots are bounded (`SnapshotBytes`, default 4 MiB) with
-continuation state (`StreamOpen`, the todo-note dedupe, `OmittedTools`) and a
-fixed filling order: mandatory sections first (per-item caps, `Truncated`,
-`ErrSnapshotTooLarge` if they alone overflow), then the main transcript's tail
-newest-first, then each child the same way. `Engine.Attach` (snapshot + cursor
-→ live events from N+1) joins the `Control` interface in process; S2 wraps it
-for the wire. PR 1 ships the package, the engine's fold and `Attach`; PR 2
-makes the TUI the first client, with its pane owning an **explicit display
-list** (not an anchored overlay) so local rows and shared-entry echoes land
-exactly where today's single slice put them, and no golden moves.
+Shipped in two PRs, each gated per commit. `internal/transcript` is a
+render-free package — the model, the fold, the snapshot codec, the bounds —
+that every client folds. Two instances exist: the **engine's**, folded as the
+first statement of `engine.observe` under a leaf `model.mu` (ahead of the
+sub-agent guard, so children reach it too), the authority a snapshot is cut
+from; and **each client's own** (SD-33: no client reads the engine's
+instance, the TUI folds from its primary like any other client). Entries are
+immutable — every mutation is a new `*Entry` — addressed by `EntryID{Seq, N}`,
+no packing. Timestamps are the event's own `At`; a client's clock is only a
+fallback for a zero stamp. Snapshots are bounded (`SnapshotBytes`, default
+4 MiB) with continuation state (`StreamOpen`, the todo-note dedupe, a
+windowed-entry ledger) and a fixed filling order: mandatory sections first
+(per-item caps, `Truncated`, `ErrSnapshotTooLarge` if they alone overflow),
+then the main transcript's tail newest-first, then each child the same way.
+`Engine.Attach` (snapshot + cursor → live events from N+1) joins the
+`Control` interface in process; S2 wraps it for the wire. PR 1 shipped the
+package, the engine's fold and `Attach` (#50, `27c1db6`); PR 2 made the TUI
+the first client, with its pane owning an **explicit display list** (not an
+anchored overlay) so local rows and shared-entry echoes land exactly where
+today's single slice put them — no golden moved except the two rows SF-01's
+owner decision named (X38) and one spinner glyph a pre-existing macOS-CI
+flake fix moved in two more (X39).
+
+**The roadmap's S1c exit** (`07`):
+
+| criterion | result | evidence |
+|---|---|---|
+| golden files byte-identical; `transcript_test.go` assertions move packages unchanged | pass | A1: `git diff --stat` on `*testdata*` across both PRs touches only H5's pre-existing row (already on `main` before this plan), `native-echo-80x24` row 20 and `native-mode-100x30`'s separator row (SF-01, X38, at C8), and `grok-subagent-rows-{80x24,100x30}`'s frozen spinner glyph `✴` → `✳` (a pre-existing macOS-CI flake fixed test-side, X39) — every other golden byte-identical; A13: the listed assertions kept / moved / split / deleted, named in both packages at T1a and C5c, the PR bodies list every one |
+| a second in-process subscriber attached mid-turn from a snapshot reproduces the first's transcript exactly | pass | A2: `TestASecondSubscriberAttachedMidTurnReproducesTheFirst`, `TestAttachOverTheFakeAgentReproducesTheFirst`, `TestAWindowedSnapshotReproducesTheSuffix` (`internal/engine/exactness_test.go`); live, PR 1's attach probe (4/4 SAME, Linux) and PR 2's V1 attach probe (3/3 SAME on Linux at the early and the tip binary, 2/2 SAME on the mac-mini) — see "Live smoke" |
+| snapshot and replay memory stay inside stated byte bounds on a worst-case session | pass | A3: `TestTheModelIsBoundedOnAWorstCaseSession`, `TestSnapshotStaysInsideItsByteBudget`, `TestMandatoryStateOverTheBudgetIsRefused`, `TestAttachOverAWorstCaseSessionFitsTheSubscription`; numbers in "Measurements" below |
+
+### What shipped per commit
+
+**PR 1 — `feature/plan-024-s1c-model`** (#50, `27c1db6`): C0 (`5c3788e`,
+roadmap docs marking S1c in progress); T1a (`9bc3e95`, the mixed
+`transcript_test.go` cases split into model-fact and render-fact halves, the
+old fold still authoritative and passing both); T1b (`6145e6d`, the five
+`breakStream()` sites and every event-driven row take the closing event's own
+`At` — X1 — no golden moved, no golden prints a duration); C1 (`97a2647` +
+review fixes `6c53ce2`, `1976bc5` — the package itself: immutable entries,
+`EntryID{Seq,N}`, the deque with incremental byte accounting, the capped
+stream builder, all 18 event kinds and every `StateDelta` section folded, the
+bounds incl. the roster rule, `Change`, the kind/section guards, convergence
+and append-only history, allocation bounds, the codec's `*RemoteError`
+plumbed to the fold (X14), X12's `ansi.Strip` transcription); C2 (`73d365f` +
+fixes `a1e985b`, `8cc1db6` (X24, an allocation-free chunk), `aeeefda`,
+`9dd830c` (X23's ledger), `5dea2e1`, `4aff2f1` (X25) — `Model.Snapshot(budget)`,
+the filling order, `ErrSnapshotTooLarge`, `Restore`, the exported codec
+wrappers, the windowed-entry ledger); C3 (`0d5aba4` — `e.model.Fold(ev)` as
+the observer's first statement, `Engine.Attach` on `Control`, the three error
+paths, `SubscribeOptions.Ctx`, the exactness test at every cut, V7 over the
+engine); C4 (`ec6e749` + fixes `6bd6b79`, `16ececb`, `9c78aa2` — the hidden
+`craze prompt --attach-probe`); three test-only commits at the tip
+(`666a7cf`, `f55b46a`, `d7c073a`) diagnosing a V5 `-race -count=20` failure (a
+test synchronisation bug, an unscheduled goroutine's missing `run` frame
+since Go 1.22 — count subscription owners from their creation, not their
+run), never retried; and one production fix (`026e21e`) for a CI
+`test (ubuntu-latest)` failure found the same way — a ticket answering before
+its whole batch committed — also never retried (memory note
+`diagnose-flakes-never-retry`).
+
+**PR 2 — `feature/plan-024-s1c-tui`** (#?, `?`):
+C5a (`1a72d21` — the pane: a display list and a render cache beside the old
+fold, the compatibility accessor, the pointer-aliasing audit); C5b
+(`02f45ac` — local rows and echo hiding written explicitly at the sites of
+§2.4, the old fold still authoritative); C5c (`aeaa59d` + fixes `ef0afb9`
+(r16), `a51ff56` (r17/r18), `d53a82a` (r18 #2) — `m.shared` folds every
+primary event, the pane consumes `Change`, the duplicate model-assertion
+tests deleted, the parity watch (A11) installed package-wide); C7 (`ec4aa17`
+— `m.sess` goes, SF-03, through one helper); C8 (`065675e` + fixes `f20bbab`
+(r19) — native's first-prompt `Title` delta, SF-01, X38's two-golden move).
 
 ### Plan review — 2026-09-21
 
@@ -1191,13 +1243,7 @@ pinned in the plan rather than left to the executor:
 - **PR 1 started before H5 PR 2 merged**; H5 PR 2 has since merged (`2b5229b`).
 - **The provider effort/speed work is Plan 025, not S1c** (§2.9).
 
-**Recorded behaviour changes (§4), will be recorded here on merge:**
-
-(i) a local row landing inside an open stream no longer ends that run; (ii)
-the main transcript's new 8 MiB retained-byte budget; (iii) a run's `End`
-comes from the closing event's own `At`, not the client's consumption time;
-(iv) the fold breaks the stream on a masked ask opening in the cancel window,
-where today it does not; (v) SF-01's title row, taken.
+Recorded behaviour changes are listed in full below, as shipped.
 
 ### Roadmap wording this plan departs from
 
@@ -1213,3 +1259,397 @@ elapsed time come from the TUI's `m.now()`" becomes "the event's `At` stamps
 every shared row; a client's clock is a fallback for a zero stamp". `07`'s
 "folded inside the boundary" holds for the engine's instance; clients fold
 their own.
+
+### Deviations from the plan
+
+The plan's execution amendments X1–X39, one paragraph each, plus two
+unnumbered decisions the plan records alongside them; none reopens a pinned
+decision. The full text and every failing schedule are in the plan.
+
+**PR 1** (`de98834..27c1db6`):
+
+1. **X1 (T1b)** — a tool's stamp. The close of the run above it and a new
+   tool row take `Tool.At` when set, else the envelope's `Event.At`, else the
+   client's clock (the engine's instance has none: a zero stamp stays zero).
+   Only unstamped test events see the difference; every production tool
+   event carries `Tool.At`.
+2. **X2 (C1)** — ids for events production never produces. `EntryID{Seq, N}`
+   names an entry by the event that created it, unique only while `Seq`
+   strictly increases. Where it does not (the convergence test's
+   re-application; PR 2's `Seq`-0 unit fixtures), entries take `{0, n}` from
+   a model-local counter and the model's own `Seq` is left alone. The zero
+   `EntryID` means "none".
+3. **X3 (C1)** — the open stream entry accounts its tail's length (≤ 64 KiB),
+   not its builder's, so a first client and a restored client trim at the
+   same moment. Superseded in scope by X25 below.
+4. **X4 (C1), revised (r2 fix)** — the builder compacts in place (a `copy`
+   within its own array, no allocation) and is kept across runs rather than
+   reallocated per run; a child's builder is released when its roster row
+   finishes; a live transcript retains at most 2× `StreamText` of builder.
+5. **X5 (C1), revised (r2 fix)** — the byte budget is enforced after every
+   append and chunk merge, **never** after an in-place tool update (a trim
+   there could drop the row just updated, and re-applying the update would
+   append it again); an in-place update can therefore exceed the budget by
+   at most one tool payload until the next append or chunk.
+6. **X6 (C1)** — `turn{ended}` clears `Turn.ID` only when it names the
+   current turn (a late ending of turn N after N+1 started is reachable); a
+   `started` keeps `Turn.Foreign`.
+7. **X7 (C1)** — `Entry.Streaming` marks the open stream entry of either
+   kind, since an assistant entry's `Open` stays false while it streams, so a
+   reader knows its text is in `Tail()`.
+8. **X8 (C1)** — asks. An opening with an empty id is never kept (it can
+   never end). The last-ended list (256 entries: id, kind, outcome, by, at —
+   no bodies) is not part of `State()`.
+9. **X9 (C1)** — child transcripts are created wherever the TUI's `ensureSub`
+   creates them: on every child-routed event (a kind a child ignores
+   included) and every roster event; a child id with no roster row is never
+   evicted.
+10. **X10 (C1)** — empty lists (todos, settings sections' lists, the queue,
+    asks) are held as nil, so projections compare equal across the codec.
+11. **X11 (C1, for PR 2), superseded by X14** — an `EventError` whose
+    `Error()` is `""` draws no row, matching today's TUI.
+12. **X12 (C1)** — the command-line note needs `sanitizeLine`, which calls
+    `ansi.Strip` from a module §3.1's depguard rule denies; the package
+    carries its own transcription (363 lines, MIT, v0.10.1, notice retained),
+    held against the TUI's own over random inputs so a future `x/ansi` bump
+    that changes the answer fails the gate.
+13. **X13 (r1)** — a sub-agent's `finished` closes the child's run at the
+    event's `At`, else the client's clock (T1b had left this one site on the
+    raw `ev.At`).
+14. **X14 (r2 fix)** — the observer's `Err` is the codec's already-built
+    `*RemoteError`: the log encodes every event once before admission, and
+    now keeps that value and hands the observer a copy of the event carrying
+    it, so the fold knows an error's text and accounts its length without
+    running an error's code under the boundary; an empty message draws
+    nothing and closes nothing. A client folding outside a boundary (the
+    TUI) passes `Options.ErrText`. Supersedes X11.
+15. **X15 (r2 fix)** — convergence at a retention cap. Below the caps every
+    state/marker row converges under re-application; at a cap, re-applying a
+    row whose effect is to append history trims the oldest entry as any new
+    history would, and a tool whose row was trimmed leaves the projection
+    (today's rule). Exactness (A2) is unaffected — the attach protocol never
+    re-delivers an event.
+16. **X16 (C2)** — `Truncated` lives on `Ask` for an open ask and on the
+    snapshot's roster row (`AgentRow.Truncated`, surfaced on the model as
+    `State.TruncatedAgents`); each capped field is cut to its head at a rune
+    boundary and cleared by the next opening or roster event.
+17. **X17 (C2)** — the snapshot carries more continuation state than first
+    drafted: the X2 id counter (`Local`), the roster's finish order
+    (`FinishSeq` per row), the ended-ask list (`Ended`, X8), each
+    transcript's `TailCut` and `OmittedRun`. `Entry.Bytes` is not on the
+    wire; `Restore` recomputes it.
+18. **X18 (C2)** — A3's model bound counts live children: 32 finished plus
+    the running ones (a running row is never evicted), so the worst case is
+    8 MiB + (32 + running) × 1 MiB — 42.95 MB against 8 + 33 MiB with one
+    child still running.
+19. **X19 (C2)** — the lock-hold bound as measured. On the worst case a
+    cut's median is 223–367 µs, fastest 162–193 µs, slowest 1.2–1.9 ms
+    (1.0–3.2 ms under `-race`, which can draw GC assist inside the section);
+    §3.4's "≤ 1 ms" holds for the median, and the test asserts the fastest
+    of 30 cuts.
+20. **X20 (C2 → r3 fix)** — the turn's text is capped in a snapshot at
+    256 KiB with `Truncated`, like an ask's body — an uncapped mandatory
+    `Turn` made every snapshot of a multi-MiB prompt `ErrSnapshotTooLarge`
+    until the next turn.
+21. **X21 (C3)** — attach's details. Any synchronous `ErrCursorUnresolvable`
+    from the snapshot's cursor is retried with a fresh snapshot (first
+    attempt + 3 retries), then `ErrAttachRaced` (`unavailable`, never
+    stored). `ErrClosed` and a context error return at once; a journal read
+    fails asynchronously only. `ErrSnapshotTooLarge` returns wrapped
+    (`failed`). `Reset` is set only from the first refusal of the client's
+    own cursor. A nil `ctx` is `context.Background()`.
+22. **X22 (C3)** — an `Omitted` record can need two re-attaches: the commit
+    order can let a client see the omission and cut its own snapshot just
+    before it, so its `Subscribe` pins the omitted record again; the second
+    re-attach is past it. Bounded at two, no livelock; the client helper
+    handles it.
+23. **X23 (owner, 2026-09-23), as built (`9dd830c`)** — a byte ledger for
+    windowed-out entries. A windowed snapshot carries, per omitted entry, its
+    retained bytes and (for a tool) its id (`TranscriptSnap.Omitted
+    []Omitted{Bytes, Tool}`); the restored model keeps them as
+    payload-free, invisible placeholders that trim exactly when the first
+    model trims the real rows, so an update to a windowed-out tool applies to
+    nothing on both models, not just the first. A dropped placeholder is not
+    counted in `Change.Dropped`.
+24. **X24 (owner, 2026-09-23)** — V7 and the chunk allocation. Rather than
+    allocate a replacement `Entry` per chunk, an open run's end and tail live
+    on the `Transcript` and are materialised into an immutable entry only
+    when read, cut or closed; V7 is re-measured both ways and reported both
+    ways, and 100,000 iterations is the budget's measure.
+25. **X25 (r7)** — a streamed entry accounts `min(bytes streamed,
+    StreamText)`, content-independent, replacing X3's exact-tail accounting
+    (which could only approximate a placeholder's size once multi-byte runes
+    were involved). `Entry.Cut` records whether a stream was cut, carried on
+    the wire, so `Restore` re-accounts a closed entry exactly.
+
+**PR 2** (`27c1db6..HEAD`), decided by the executor per the owner's
+2026-09-24 instruction not to stop and ask, each recapped here:
+
+26. **X26 (C5b)** — an interjection has no local twin to hide: its row has
+    always been drawn from the agent's broadcast, never from the send (one
+    source per entry), so the only echo the pane hides is the started user
+    row of the turn `Submit` already drew.
+27. **C5a's aliasing audit, as run** — a go/ast scan of every `func (m
+    Model)` method in `internal/tui`, transitively through `Model` methods,
+    found none that writes a row without returning `Model`, and no call site
+    discards a returned `Model`. One test relied on discarded copies
+    discarding their rows (`TestRenameWithNoTitleIsAUsageError`) and was
+    rewritten to build a model per iteration; about 18 dialog/click tests
+    paint through a fork the next `Update` overwrites before anything reads
+    it.
+28. **X27 (C5c)** — the local-row-inside-a-stream change is visible for
+    assistant text too, not only an open thought run as §3.8 assumed:
+    today's `appendEntry` ended every run for every row, so a local row used
+    to split a streaming reply into a new entry below it; now the local row
+    ends no run and the chunk grows the shared entry above it. No golden
+    reaches the schedule.
+29. **X28 (C5c)** — how a model trim reaches the pane. After a fold with
+    `Dropped > 0`, the longest front prefix of the display list whose shared
+    rows the model no longer holds leaves whole; the pane's own caps then
+    apply, only when a row was added (a chunk growing a row never trims).
+    This is how owner decision 3's 8 MiB main budget reaches the frame.
+30. **X29 (C5c)** — the `/clear` re-append rule, by kind: a touched **tool**
+    entry with no row re-appends at the tail (today's rule); a touched
+    **closed non-tool** entry with no row draws nothing (a cleared run is
+    forgotten, as today); the run open at the clear continues as X30
+    describes. Both implementers reached this independently.
+31. **X30 (C5c)** — a chunk into the run that was open at `/clear` appends a
+    continuation row showing the tail from the clear mark's offset, dated at
+    that chunk; past the 64 KiB cap the offset means nothing and the row
+    shows the whole tail.
+32. **X31 (C5c), revised after r17 (`a51ff56`)** — the todo notes after
+    `/clear`. The pane's dedupe decision is authoritative in both
+    directions: a fold note the pane does not owe gets no row (hidden by
+    kind, like an echo), and an owed note the fold did not write is the
+    pane's own local row — an empty `EventTodos` consumed after a newer list
+    reached the snapshot is the schedule that needs the second direction.
+33. **X32 (C5c)** — a child's byte budget now counts payloads, not text
+    alone (§3.2 (b)), so a tool-heavy child drops its oldest rows sooner. No
+    `subview_test.go` assertion depended on the text-only figure. Recorded
+    behaviour change beside §4 (ii).
+34. **X33 (C5c)** — a session swap (the provider picker's swap, the resume
+    picker's load) detaches the rows on screen: the new session gets a fresh
+    `m.shared`, and rows the old one drew stay as this client's own local
+    rows (`pane.detach`), exactly as today's transcript kept them.
+35. **X34 (C5c), as built** — the parity watch (A11). A test-only `foldHook`
+    (nil in production), installed package-wide, shadows every fold in
+    `internal/tui`'s whole test suite against a model folded from exactly the
+    recorded events, checking `Change`/`Seq` equality and P0–P4 (history/state
+    equality, no stale row, every entry shown once unless hidden/cleared/
+    trimmed, model order but for re-appends, no local row in the model). One
+    run: 606 models, 7,810 folds, 3,700 whole checks; four planted pane bugs
+    were each caught. After r17 the watch predicts the exact row list at
+    every fold and between folds rather than accepting any suffix once
+    `trimmed` is set; `CRAZE_PARITY_STRICT=1` runs the whole check at every
+    one of the ~7,900 folds (33 s, still green).
+36. **X35 (r17)** — an error's text is read once, before the fold.
+    `applyEvent` reads a main `EventError`'s `Error()` once and hands the
+    string to both the fold and `m.err` (`foldInputs`), so a foreign
+    `Error()` is never called twice; a child's error is never read.
+37. **X36 (r17)** — a child the model evicted (33+ finished) keeps its rows
+    as local rows: the pane is detached after the roster fold, the same
+    shape X33 uses for a session swap, so no shared row ever names an entry
+    that is gone.
+38. **X37 (r18)** — a hidden duplicate todo note still ends the run it lands
+    in. On X31's lagged schedule, the fold's own note for the next list gets
+    no row but is still an entry in the shared model, and like every entry it
+    ends the stream run it lands in: a thought or reply streaming across it
+    is drawn as two blocks where the old fold drew one. Recorded, not fixed
+    — nothing is lost or duplicated.
+39. **X38 (C8)** — SF-01 moves two goldens, not one. `native-mode-100x30`
+    (H5's plan-mode golden, added after this plan was written) moves the
+    same way `native-echo-80x24` does, on its separator row only — the same
+    consequence of the same owner decision — so it is regenerated with
+    `-update` too and both one-row diffs go in PR 2's body.
+40. **X39 (after r19)** — a pre-existing golden flake, fixed here, moves two
+    goldens by one spinner glyph. The H6 session diagnosed a macOS-CI flake
+    in `TestFrameGoldenGrokSubagentRows` (reproduced 40/40 under one-CPU
+    starvation): the agent row's `4.7k tok` is read from the live snapshot
+    (`refreshSnap`), which can run ahead of the event stream, so the
+    script's `<wait:text:4.7k tok>` could match before the wait tool's own
+    event was applied, and the golden was captured without that tool row.
+    S1c does not remove this — agent rows still come from `State()`, SF-02
+    is S2's. The fix, landed as its own test-only commit: a
+    `grok-subagent-hold` fake mode that sends nothing after its progress
+    event, a wait on the tool row before the tokens, and
+    `runFakeFrameFrozen` so the capture is deterministic — which moves
+    `grok-subagent-rows-{80x24,100x30}` by one glyph (the frozen spinner
+    frame, `✴` → `✳`), nothing else. The class — rows drawn from the live
+    snapshot racing rows drawn from events, suspected in the grok
+    SubagentView / TwoView / Cancel goldens too — is recorded for S2 in
+    `13` (SF-45).
+41. **Declined (r17 finding 4)** — a tool row re-appended after `/clear`
+    keeps the model entry's original `At`/`End` where the old fold dated a
+    new row at the update; no renderer reads a tool row's stamps, so no
+    frame differs.
+
+### The recorded behaviour changes
+
+Plan §4's list, verbatim: "No user-visible change except, all recorded: (i)
+§3.8's local-row-inside-a-stream rule; (ii) the main transcript's 8 MiB
+retained-byte budget (owner decision 3); (iii) §3.2's run-end provenance (a
+duration measures the events, not the client's consumption); (iv) §3.3's
+break on a masked ask opening in the cancel window; (v) SF-01's row if the
+owner takes it."
+
+PR 2 added, mirrored into `12` here per the plan's own instruction:
+
+- **X27** corrects (i): the change is visible for assistant text too, not
+  only an open thought run, because today's `appendEntry` ended every run for
+  every row.
+- **X32**: a child's byte budget now counts payloads, not text alone.
+- **X33**: a session swap (the provider picker, the resume picker) detaches
+  the rows on screen as this client's own local rows.
+- **X37**: a hidden duplicate todo note still ends the run it lands in, so a
+  stream across it draws as two blocks where the old fold drew one.
+- **X38**: SF-01 (v) moves two goldens (`native-echo-80x24` and
+  `native-mode-100x30`), not one.
+
+### Live smoke
+
+**PR 1 — the attach probe, Linux** (`smoke/linux/pr1-probe.md`, the PR 1 tip
+`16ececb`, `craze prompt --json --attach-probe=PATH`, a tool-using prompt
+with one follow-up, attaching from its own goroutine on the first text of
+the first turn):
+
+| provider | model | verdict | attached | retained (first client's model) |
+|---|---|---|---|---|
+| cursor | default | **SAME** | snapshot seq 6, folded 258 records to seq 264 | main 14 entries, 5,418 B |
+| grok | default | **SAME** | snapshot seq 19, folded 660 records to seq 679 | main 15 entries, 6,788 B |
+| native | `fireworks/kimi-k3` | **SAME** | snapshot seq 22, folded 240 records to seq 262 | main 10 entries, 11,780 B |
+| grok, with a sub-agent | default | **SAME** | snapshot seq 39, folded 892 records to seq 931 | main 9 entries, 6,166 B; subs 1/5 entries/4,000 B (570 child-tagged lines) |
+
+**PR 2 — V1, Linux, tmux, at the tip** (`smoke/linux/pr2/RESULTS.md`, binary
+from `065675e`; an earlier phase at the C5c binary is `EARLY.md`, all legs
+PASS there too):
+
+| # | leg | cursor | grok | native |
+|---|---|---|---|---|
+| 1 | queued follow-up drains | PASS | PASS | PASS |
+| 2 | Esc mid-turn, no idle flash | PASS | PASS | PASS |
+| 4a | interject on grok | n/a | PASS | n/a |
+| 8a | plan card: accept / reject / Esc | PASS (×3) | n/a | n/a |
+| — | sub-agent view | n/a | PASS | n/a |
+| 9 | `/model` + mode cycle + `/rename` | PASS | n/a | n/a |
+| 10 | `--continue` | PASS | n/a | n/a |
+| x27 | local row inside a stream | PASS | PASS | n/a |
+| x30 | `/clear` mid-stream | PASS | not run | n/a |
+| C8 | native title on the separator | n/a | n/a | PASS |
+| — | attach probe | PASS (SAME) | PASS (SAME) | PASS (SAME) |
+
+**PR 2 — V4, mac-mini, over ssh** (`smoke/macos/RESULTS.md`; cursor
+**NOT REACHABLE** — login keychain, as S1a/S1b/PR1 all found):
+
+| # | leg | grok | native |
+|---|---|---|---|
+| 1 | queued follow-up drains | PASS | PASS |
+| 2 | Esc mid-turn, no idle flash | PASS | PASS |
+| 4a | interject mid-turn | PASS | n/a |
+| — | sub-agent view | PASS | n/a |
+| 9 | `/model` + mode cycle + `/rename` | PASS | n/a |
+| 10 | `--continue` | PASS | PASS (native writes no row; native `--continue` errors outright, Anomaly 5) |
+| x27 | local row mid-stream | PASS | PASS |
+| x30 | `/clear` mid-stream | PASS | PASS |
+| — | native title on the separator | n/a | PASS |
+| — | attach probe | PASS (SAME) | PASS (SAME) |
+
+**V3, the journal record**: Linux tip 21/21 PASS (the early phase on the C5c
+binary: 11/11 PASS); mac-mini 17/17 PASS. No `gap` lines anywhere, every
+`closing` diag `droppedAtClose = 0`/`outboxSkippedPrimary = 0`, exactly one
+`craze_session` note per file, every ask has one opening and one ending, no
+craze-initiated meta sets `mode`/`text`.
+
+### Measurements
+
+**PR 1.** **V6** (a live 50-tool cursor session, Linux): craze's own peak RSS
+31.1 MiB baseline (`9125ec7`) vs 31.0 MiB candidate (−0.1 MiB, within
+run-to-run noise), 34.9 MiB with the probe's two extra models; the model
+retained 1,677,517 bytes (1.60 MiB) on 65 tools / 32 large edits — **4.9×
+under the 8 MiB main budget**. Owner decision 3's raise-trigger (within 4× /
+≥ 2 MiB) was not met, so `Bounds.MainBytes` stays 8 MiB. Recorded for the
+owner: this session retained ~25 KiB per tool (dominated by edit diffs), so
+the 8 MiB budget is reached after roughly 320 such tools in one session —
+past that, the oldest rows leave scroll-back behind the trim note (the
+journal keeps them).
+
+**V7** (engine-level text-delta publish, journal attached, the real fold):
+1.8–4.5 µs at 2,000 iterations × 5, 1.7–2.6 µs at 100,000 × 5 — every run
+under the 5 µs budget, after X24 made a chunk allocation-free.
+
+**A3 / X19, the four bounds, measured:** model retention worst case (5,000
+main entries at the output cap, 33 children, one still running) 42,954,787
+bytes (main 8,381,291; children 34,573,496) against the 8 + 33 MiB bound
+(X18), heap 1.34–1.49× the accounting; a 4 MiB snapshot budget encodes to
+exactly 4,194,304 bytes, one byte over windows; a 5 MiB open plan is
+`ErrSnapshotTooLarge`, 200 KiB is carried whole, 300 KiB cut to its 256 KiB
+head; the worst case's windowed ledger is 32,896 records in 494 KB; an
+attach over the worst case (41,367 events) holds a 1,000-record burst in a
+1,024 / 8 MiB subscription with no `ErrSlowConsumer`; decoding a 4 MiB
+snapshot allocates 1.66× its size and retains 0.97–0.99×. X19's lock-hold
+bound: a cut's median 223–367 µs, fastest 162–193 µs, slowest 1.2–1.9 ms
+(1.0–3.2 ms under `-race`).
+
+**PR 2.** **V5** — `go test -race -count=20` of transcript/engine/agent/tui
+at `f20bbab`: @V5@
+
+**The parity watch's coverage** (A11, X34): one run over `internal/tui`'s
+whole test suite folded 606 models across 7,810 folds, with 3,700 whole
+state/history checks (the two cap tests sampled at 1–64, powers of two, and
+every 256th fold); four planted pane bugs were each caught. The state
+mirrors (`TestTheStateMirrorsMatchTheModelWhenQuiet`) matched at 153
+quiescent checkpoints across 82 tests, with two documented exemptions (the
+Stub publishes no install delta at `Start`; native's title until C8).
+`CRAZE_PARITY_STRICT=1` runs the whole check at every one of the ~7,900
+folds — 33 s, still green.
+
+### Decisions and questions touched
+
+**SQ9** resolved (§3.2 (b) / §3.5): the model's own bounds (5,000 entries /
+8 MiB main, 1,000 / 1 MiB per child, 32 finished children, 64 KiB streamed
+text), the snapshot's 4 MiB budget with its filling order and
+`ErrSnapshotTooLarge`; rewritten in `10` by this commit. **SQ15** stays
+open: the model conflates tool events by last state per id, which is what
+SQ15's clients needed, but whether the journal or a queue conflates is
+unchanged and still measured, not decided. **SF-01** taken (native publishes
+a State-only `Title` delta; two goldens moved, X38). **SF-03** taken (`m.sess`
+gone, C7). **SF-04** stays out (§3.9: the Stub's ~265-line id-adoption
+subsystem is untouched; nothing here needed the Stub to mint). **SF-05**
+taken alongside SQ9 above. **SF-02** re-pointed at S2 (§3.9: reading settings
+from the fold changes intermediate frames, and proving them identical is
+S2's work where the whole mirror moves at once; the model folds every
+section for the snapshot and A11 proves it equal to `State()` only at
+quiescent checkpoints). No new `SD-nn`; nothing here reopens SD-33.
+
+### Handoff
+
+What S2 inherits:
+
+- **`Engine.Attach` joins `Control` in process** (§3.6): S2 wraps
+  `Attachment` in `snapshot`/`reset`/`event`/`synchronized` notifications and
+  adds the connection-local barrier `05`/SF-10 already owed (`Control.Sync`
+  returns no sequence number).
+- **`SubscribeOptions.Ctx`** makes every wait `Attach` makes cancellable (a
+  two-line `select` change, mirrored in `Observe`'s); still on the blocking
+  side of `control.go`'s list, still must not be called from the primary's
+  reader while that reader is not reading (SF-14).
+- **The snapshot codec and its version** (`SnapshotVersion = 1`,
+  `EncodeSnapshot`/`DecodeSnapshot`, the exported leaf wrappers added to
+  `internal/agent/eventcodec.go`): S2's wire schema is generated from or
+  checked against these same wrappers, so a field added to an agent type
+  reaches both codecs by one line.
+- **SF-02**, re-pointed here and above: the TUI still mirrors settings
+  through `refreshSnap()`/`State()` rather than the fold; S2 moves the whole
+  mirror at once and proves intermediate frames identical.
+- **The receipt-mode gap** (plan §4 last bullet, CodeRabbit 25): the model
+  carries no `Provider` and no session-wide tool index, so a remote client
+  cannot rebuild a receipt-mode sub-agent transcript
+  (`rebuildReceiptTranscript` reads `State().Provider` and `State().Tools`).
+  S2 decides whether the snapshot grows those fields or the receipt rows
+  become shared entries.
+- **H6 PR 3's pending `ForeignTurnInfo.Reason` fold row**: native-harness H6
+  (Plan 026, panel-reviewed, not yet executed) adds `agent.ForeignTurnInfo.Reason`
+  and its codec twin, so the shared model's foreign-turn note wording
+  (today's interjection-fallback text vs native's `subagent_wake` wording)
+  comes from the event rather than a provider flag the TUI no longer reads.
+  The `foreign_turn` fold row (§3.3) needs that field folded in when H6
+  lands; nothing here anticipates it.

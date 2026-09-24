@@ -93,6 +93,28 @@ replayed history crossing a budgeted subscriber as live delivery could trip
 progress is answered after `EventReplay{end}`, or served as a snapshot at the
 cutoff.
 
+**In process, this is `Engine.Attach` (S1c) minus the socket.** `Control.Attach`
+does the same two steps as above without a wire: a cursor if the log can
+serve it, else `Model.Snapshot(budget)` (bounded, lossless, `10` SQ9) taken
+under `model.mu` outside the boundary, then `Subscribe(After: {inc,
+snap.Seq})`. Its three error paths, pinned by the plan (`12` S1c "Deviations",
+X21–X22): a **synchronous refusal** of the cursor — the snapshot's own or the
+client's — is retried with a fresh snapshot (first attempt + 3 retries), then
+`ErrAttachRaced` (`unavailable`, nothing stored, ask again); an
+**asynchronous** failure on the subscription's own leg (`evicted`,
+`journal_behind`, a read error, possibly after a prefix was delivered) is
+answered by the client discarding everything since the snapshot and
+re-attaching with no cursor; and an **`Omitted` record** (a body over
+`MaxRecordBytes`, folded by the observer but undecodable by any subscriber)
+is the same — re-attach with no cursor, which lands at or beyond the omitted
+seq, needing at most two re-attaches because of `commitLocked`'s own commit
+order (X22). An attach during a replay is served at the cutoff and folds
+through `EventReplay{end}` like any other event, no special case — the same
+"served at the cutoff" wording above. `SubscribeOptions.Ctx` makes every wait
+`Attach` makes cancellable. S2 adds `snapshot`/`reset`/`event`/`synchronized`
+notifications over this and the connection-local barrier `Sync` doesn't give
+yet (below, "Responses and events").
+
 **Responses and events.** A command's response is ordered **after** the
 events its execution emitted on the same subscription, which follows from the
 engine applying a command's effect inside the command call (`03`). Fixtures
