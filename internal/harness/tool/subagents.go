@@ -118,7 +118,8 @@ type Persona struct {
 	AllTools bool
 	// Tools are the native tool ids the child is given when AllTools is false
 	// (MapClaudeTools), and DisallowedTools the native ids taken away from
-	// whichever set it has; an empty result is a text-only child.
+	// whichever set it has (MapClaudeDisallowed); an empty result is a
+	// text-only child.
 	Tools, DisallowedTools []string
 }
 
@@ -175,7 +176,36 @@ func droppedTool(base string) bool {
 // trimmed and an empty name is skipped. Both results are deduplicated, first
 // occurrence kept, in the list's order; both are nil when empty, and an empty
 // ids for a tools key is a text-only child.
+//
+// It is the allow list's reading. A deny list reads a restriction the other
+// way round (MapClaudeDisallowed).
 func MapClaudeTools(names []string) (ids, unknown []string) {
+	return mapClaudeNames(names, false)
+}
+
+// MapClaudeDisallowed is MapClaudeTools for a persona's disallowedTools list:
+// the same vocabulary, the same silent drops and the same unknown names, with
+// one difference that fails closed the other way. A name with a parenthesised
+// restriction — Bash(rm:*) say — takes away the whole of the tool it
+// restricts, bash, rather than being reported unknown and dropped (review r2
+// of C3a, finding 2).
+//
+// On an allow list, not granting Bash(git status:*) at all is the closed
+// reading: craze cannot honour the restriction (H3), and granting bash whole
+// would give the child more than its author wrote. On a deny list the same
+// drop is the open reading: a persona with no tools key and
+// disallowedTools: Bash(rm:*) would keep an unrestricted bash its author meant
+// to fence. Taking the whole tool away gives the child less than the author
+// wrote, which is the side craze errs on. A restricted name that is dropped
+// silently (Agent(…), WebFetch(domain:…)) stays dropped: those are tools no
+// child has anyway, so there is nothing to take away.
+func MapClaudeDisallowed(names []string) (ids, unknown []string) {
+	return mapClaudeNames(names, true)
+}
+
+// mapClaudeNames is both readings. deny is the deny list's: a known name with
+// a restriction maps to its tool's id instead of being reported unknown.
+func mapClaudeNames(names []string, deny bool) (ids, unknown []string) {
 	for _, raw := range names {
 		name := strings.TrimSpace(raw)
 		if name == "" {
@@ -189,7 +219,7 @@ func MapClaudeTools(names []string) (ids, unknown []string) {
 		id, known := claudeToolIDs[low]
 		switch {
 		case droppedTool(low):
-		case known && !restricted:
+		case known && (!restricted || deny):
 			if !slices.Contains(ids, id) {
 				ids = append(ids, id)
 			}

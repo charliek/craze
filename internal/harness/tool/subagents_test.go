@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -100,6 +101,43 @@ func TestModeGateAllowsAgentInEveryMode(t *testing.T) {
 		dec, err := g.Check(context.Background(), agentCall)
 		if d, ok := dec.(Deny); err != nil || !ok || d.Reason != "inner says no" || inner.calls() != 1 {
 			t.Fatalf("%s: decision = %#v, %v; want the inner gate's refusal", mode, dec, err)
+		}
+	}
+}
+
+// TestMapClaudeDisallowed: a deny list reads a restricted name as the whole of
+// the tool it restricts (review r2 of C3a, finding 2) — Bash(rm:*) takes bash
+// away, where the allow list reports it unknown and grants nothing — while
+// everything else is the allow list's reading: the same vocabulary, the same
+// silent drops (a restricted one included), the same unknown names, both
+// results deduplicated in order. The allow list's own reading of the same
+// names is the control that the difference is the deny mode and nothing else.
+func TestMapClaudeDisallowed(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		in                 []string
+		denyIDs, denyUnk   []string
+		allowIDs, allowUnk []string
+	}{
+		{"a restriction takes the whole tool", []string{"Bash(rm:*)"},
+			[]string{"bash"}, nil, nil, []string{"Bash(rm:*)"}},
+		{"any case, any restriction, deduplicated",
+			[]string{"Bash(rm:*)", "bash(git push:*)", "Read(./secrets/**)", "Edit", "MultiEdit(x)", "LS(/)"},
+			[]string{"bash", "read", "edit"}, nil,
+			[]string{"edit"}, []string{"Bash(rm:*)", "bash(git push:*)", "Read(./secrets/**)", "MultiEdit(x)", "LS(/)"}},
+		{"a restricted drop stays dropped", []string{"Agent(explore)", "WebFetch(domain:example.com)", "Task(x)", "mcp__x(y)"},
+			nil, nil, nil, nil},
+		{"an unknown name is unknown either way", []string{"Frobnicate", "Frobnicate(x)", "Write"},
+			[]string{"write"}, []string{"Frobnicate", "Frobnicate(x)"}, []string{"write"}, []string{"Frobnicate", "Frobnicate(x)"}},
+		{"nothing", nil, nil, nil, nil, nil},
+	} {
+		ids, unknown := MapClaudeDisallowed(tc.in)
+		if !slices.Equal(ids, tc.denyIDs) || !slices.Equal(unknown, tc.denyUnk) {
+			t.Errorf("%s: MapClaudeDisallowed(%q) = %q, %q; want %q, %q", tc.name, tc.in, ids, unknown, tc.denyIDs, tc.denyUnk)
+		}
+		ids, unknown = MapClaudeTools(tc.in)
+		if !slices.Equal(ids, tc.allowIDs) || !slices.Equal(unknown, tc.allowUnk) {
+			t.Errorf("%s: MapClaudeTools(%q) = %q, %q; want %q, %q", tc.name, tc.in, ids, unknown, tc.allowIDs, tc.allowUnk)
 		}
 	}
 }
