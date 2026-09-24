@@ -52,7 +52,7 @@ func TestEnterOpensSubagentView(t *testing.T) {
 func tallChild(t *testing.T, m Model, n int) Model {
 	t.Helper()
 	// Grok: a receipt-only provider would rebuild the view from the receipt.
-	m.sess.(*Stub).SetProvider(agent.GrokProvider())
+	stubOf(t, m).SetProvider(agent.GrokProvider())
 	m.refreshSnap()
 	tr := m.ensureSub("task-1")
 	for i := 0; i < n; i++ {
@@ -339,12 +339,12 @@ func TestParentEventsWhileViewingDoNotMoveChildViewport(t *testing.T) {
 	if m.vp.YOffset != offset {
 		t.Fatalf("a parent chunk moved the child viewport: %d -> %d", offset, m.vp.YOffset)
 	}
-	if m.main.streamOpen == false {
+	if m.main.streamOpen() == false {
 		t.Fatal("parent text should open the main stream")
 	}
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
-	if m.main.streamOpen {
+	if m.main.streamOpen() {
 		t.Fatal("parent done must close the main stream")
 	}
 	if m.viewing != "task-1" {
@@ -382,7 +382,7 @@ func TestChildEventsWhileViewingMainDoNotTouchMainState(t *testing.T) {
 	if len(m.main.pathDirs) != 0 {
 		t.Fatalf("child events must not write main pathDirs: %v", m.main.pathDirs)
 	}
-	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries) == 0 {
+	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries()) == 0 {
 		t.Fatal("child events should land on the sub transcript")
 	}
 }
@@ -434,7 +434,7 @@ func TestEvictionWhileViewedKeepsTombstoneUntilEsc(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m = openView(t, m)
-	m.sess.(*Stub).SetSubagents(nil)
+	stubOf(t, m).SetSubagents(nil)
 	m = poke(t, m)
 	if m.viewing != "task-1" {
 		t.Fatal("eviction while viewed must keep the tombstone")
@@ -485,10 +485,10 @@ func TestClearLeavesSubTranscriptsAlone(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.main.entries) != 0 {
+	if len(m.main.entries()) != 0 {
 		t.Fatal("/clear should empty main")
 	}
-	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries) == 0 {
+	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries()) == 0 {
 		t.Fatal("/clear must leave sub transcripts alone")
 	}
 }
@@ -501,13 +501,13 @@ func TestSubagentByteBudgets(t *testing.T) {
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: huge}})
 	m = tm.(Model)
 	tr := m.subs["task-1"]
-	if tr == nil || len(tr.entries) == 0 {
+	if tr == nil || len(tr.entries()) == 0 {
 		t.Fatal("expected a streamed entry")
 	}
-	if got := len(tr.entries[len(tr.entries)-1].text); got > entryTextCap {
+	if got := len(tr.entries()[len(tr.entries())-1].text); got > entryTextCap {
 		t.Fatalf("entry is %d bytes, want <= %d", got, entryTextCap)
 	}
-	if !strings.HasPrefix(tr.entries[len(tr.entries)-1].text, "…") {
+	if !strings.HasPrefix(tr.entries()[len(tr.entries())-1].text, "…") {
 		t.Fatal("a capped entry keeps a … prefix")
 	}
 
@@ -522,8 +522,8 @@ func TestSubagentByteBudgets(t *testing.T) {
 	if tr == nil {
 		t.Fatal("expected a sub transcript")
 	}
-	if len(tr.entries) > subMaxEntries {
-		t.Fatalf("entries %d, want <= %d", len(tr.entries), subMaxEntries)
+	if len(tr.entries()) > subMaxEntries {
+		t.Fatalf("entries %d, want <= %d", len(tr.entries()), subMaxEntries)
 	}
 	if !tr.trimmed {
 		t.Fatal("2000 chunks should trim")
@@ -545,14 +545,14 @@ func TestSubagentByteBudgets(t *testing.T) {
 	}
 	tr = m.subs["task-1"]
 	total := 0
-	for _, e := range tr.entries {
+	for _, e := range tr.entries() {
 		total += len(e.text)
 	}
 	if total > subTextBudget {
 		t.Fatalf("sub transcript holds %d bytes, budget %d", total, subTextBudget)
 	}
-	if !tr.trimmed || len(tr.entries) >= 60 {
-		t.Fatalf("the text budget should have trimmed: trimmed=%v entries=%d", tr.trimmed, len(tr.entries))
+	if !tr.trimmed || len(tr.entries()) >= 60 {
+		t.Fatalf("the text budget should have trimmed: trimmed=%v entries=%d", tr.trimmed, len(tr.entries()))
 	}
 }
 
@@ -651,7 +651,7 @@ func TestConsecutiveUserChunksMerge(t *testing.T) {
 	m = tm.(Model)
 	tr := m.subs["task-1"]
 	var users []string
-	for _, e := range tr.entries {
+	for _, e := range tr.entries() {
 		if e.kind == entryUser {
 			users = append(users, e.text)
 		}
@@ -680,7 +680,7 @@ func TestChildCommandLineLandsInTheChildTranscript(t *testing.T) {
 	}}})
 	m = tm.(Model)
 	var notes []string
-	for _, e := range m.subs["task-1"].entries {
+	for _, e := range m.subs["task-1"].entries() {
 		if e.kind == entryNote {
 			notes = append(notes, e.text)
 		}
@@ -689,7 +689,7 @@ func TestChildCommandLineLandsInTheChildTranscript(t *testing.T) {
 		t.Fatalf("child notes %q", notes)
 	}
 	// The main transcript is not where a child's event goes.
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if strings.Contains(e.text, "probe-plugin") {
 			t.Fatalf("the child's line reached the main transcript: %q", e.text)
 		}
@@ -702,18 +702,18 @@ func TestChildFinishedClosesChildStream(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: "partial"}})
 	m = tm.(Model)
-	if !m.subs["task-1"].streamOpen {
+	if !m.subs["task-1"].streamOpen() {
 		t.Fatal("expected an open child stream")
 	}
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 	tm, _ = m.Update(eventMsg{agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &fin,
 		SubagentChange: agent.SubagentChangeFinished,
 	}})
 	m = tm.(Model)
-	if m.subs["task-1"].streamOpen {
+	if m.subs["task-1"].streamOpen() {
 		t.Fatal("finished must close the child stream")
 	}
 }
@@ -726,7 +726,7 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 	tm, _ := m.Update(eventMsg{agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &fin,
@@ -740,7 +740,7 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	retry := fin
 	retry.Status = agent.SubagentRunning
 	retry.AttemptID = "at2"
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{retry})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{retry})
 	tm, _ = m.Update(eventMsg{agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &retry,
@@ -770,7 +770,7 @@ func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
-	m.sess.(*Stub).SetProvider(agent.CursorProvider())
+	stubOf(t, m).SetProvider(agent.CursorProvider())
 	m.refreshSnap()
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
@@ -780,7 +780,7 @@ func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	}
 	subs := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})
 	subs[0].Status = agent.SubagentCompleted
-	m.sess.(*Stub).SetSubagents(subs)
+	stubOf(t, m).SetSubagents(subs)
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
 	if m.viewing != "task-1" {

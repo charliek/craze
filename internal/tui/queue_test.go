@@ -320,7 +320,7 @@ func TestCtrlLInterjectsOnGrok(t *testing.T) {
 	}
 	// The transcript entry comes from the broadcast, not from the send.
 	m = feed(t, m, agent.Event{Type: agent.EventUser, Text: "BANANA", Interjection: true})
-	rows := strings.Join(m.main.entries[len(m.main.entries)-1].rendered, "")
+	rows := strings.Join(m.main.entries()[len(m.main.entries())-1].rendered, "")
 	if got := texts(m, entryUser); len(got) != 2 || got[1] != "BANANA" {
 		t.Fatalf("user entries %q", got)
 	}

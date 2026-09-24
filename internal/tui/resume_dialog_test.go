@@ -78,7 +78,7 @@ func TestResumePickerShowsBeforeStart(t *testing.T) {
 	if m.pickingProvider {
 		t.Fatal("the provider picker must not be up as well")
 	}
-	if m.sess != nil || m.started || len(*loaded) != 0 {
+	if m.eng != nil || m.started || len(*loaded) != 0 {
 		t.Fatal("no session may exist until a row is chosen")
 	}
 	if m.Init() != nil {
@@ -139,7 +139,7 @@ func TestResumePickerEnterLoadsTheRow(t *testing.T) {
 	if !out.replaying {
 		t.Fatal("a loaded session is replaying from the moment it is built (§3.5)")
 	}
-	if out.sess == nil {
+	if out.eng == nil {
 		t.Fatal("no session was built")
 	}
 	assertOwned(t, out)
@@ -161,7 +161,7 @@ func TestResumePickerNilLoadFallsBackToAStub(t *testing.T) {
 		Resume:      threeResumeRows(),
 		LoadSession: func(agent.Provider, sessions.Row) agent.Session { return nil },
 	})
-	if !m.pickingResume || m.sess != nil {
+	if !m.pickingResume || m.eng != nil {
 		t.Fatal("setup: no resume picker, or a session before a row was chosen")
 	}
 	assertOwned(t, m)
@@ -170,9 +170,7 @@ func TestResumePickerNilLoadFallsBackToAStub(t *testing.T) {
 	if out.pickingResume {
 		t.Fatal("setup: Enter did not confirm the row")
 	}
-	if _, ok := out.sess.(*Stub); !ok {
-		t.Fatalf("a nil LoadSession left %T, want the *Stub fallback", out.sess)
-	}
+	stubOf(t, out) // a nil LoadSession left the *Stub fallback
 	assertOwned(t, out)
 }
 
@@ -187,7 +185,7 @@ func TestResumePickerClickLoads(t *testing.T) {
 	if len(*loaded) != 1 || (*loaded)[0].SessionID != "s-3" {
 		t.Fatalf("loaded %v", *loaded)
 	}
-	if out.dialog != dialogNone || out.sess == nil {
+	if out.dialog != dialogNone || out.eng == nil {
 		t.Fatal("the click did not start the chosen session")
 	}
 	assertOwned(t, out)
@@ -204,7 +202,7 @@ func TestResumePickerSwallowsAClickOutside(t *testing.T) {
 	if !out.pickingResume || out.dialog != dialogResume {
 		t.Fatalf("the click outside closed the picker: dialog=%v picking=%v", out.dialog, out.pickingResume)
 	}
-	if out.sess != nil || len(*loaded) != 0 {
+	if out.eng != nil || len(*loaded) != 0 {
 		t.Fatal("the click outside started a session")
 	}
 }
@@ -223,7 +221,7 @@ func TestResumePickerEscQuitsClean(t *testing.T) {
 	if out.startErr != nil {
 		t.Fatalf("Esc left an exit status behind: %v", out.startErr)
 	}
-	if out.sess != nil || len(*loaded) != 0 {
+	if out.eng != nil || len(*loaded) != 0 {
 		t.Fatal("Esc started a session")
 	}
 	if cmd == nil {

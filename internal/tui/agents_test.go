@@ -358,7 +358,7 @@ func TestAgentOrderIsSpawnOrderAndStable(t *testing.T) {
 	// close up and the selection follows its id, not its index.
 	done := subs[0]
 	done.Status = agent.SubagentCompleted
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.SetSubagents([]agent.SubagentInfo{done, subs[1], subs[2]})
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
@@ -540,7 +540,7 @@ func TestFinishSeenInASnapshotBeforeItsEventKeepsTheRow(t *testing.T) {
 	subs := subagentsFromTools(tools)
 	done := subs[0]
 	done.Status = agent.SubagentCompleted
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.SetSubagents([]agent.SubagentInfo{done, subs[1]})
 	settled := finishedTaskTool("task-a", "job a")
 	stub.SetTools([]agent.ToolEvent{settled, tools[1]})

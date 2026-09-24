@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -204,7 +203,7 @@ func TestUserRowGlyphAndTextColour(t *testing.T) {
 func TestInterjectionRowGlyphAndTextColour(t *testing.T) {
 	m := themeModel(t, "craze-dark")
 	th := m.theme
-	m.addInterjection("hi there")
+	m.applyEvent(agent.Event{Type: agent.EventUser, Interjection: true, Text: "hi there"})
 	m.refreshViewport()
 	want := styleFG(th.UserMark).Render("↳ ") + styleFG(th.User).Bold(true).Render("hi there")
 	if !strings.Contains(m.View(), want) {
@@ -238,7 +237,7 @@ func TestUserRowContinuationIsUnstyled(t *testing.T) {
 func TestMarkdownHeadingAndInlineCodeColours(t *testing.T) {
 	m := themeModel(t, "craze-dark")
 	th := m.theme
-	m.appendStream(entryAssistant, "## Title\n\n`code`", time.Time{})
+	m.applyEvent(agent.Event{Type: agent.EventText, Text: "## Title\n\n`code`"})
 	m.refreshViewport()
 	view := m.View()
 	wantHeading := lipgloss.NewStyle().Foreground(th.Heading).Bold(true).Render("Title")
@@ -362,7 +361,7 @@ func TestThemeChangeRedrawsEveryEntry(t *testing.T) {
 	if before < 3 {
 		t.Fatalf("setup rendered %d entries", before)
 	}
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.renderedFor.theme != "craze-dark" {
 			t.Fatalf("entry cached against %q", e.renderedFor.theme)
 		}
@@ -373,10 +372,10 @@ func TestThemeChangeRedrawsEveryEntry(t *testing.T) {
 	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = tm.(Model)
 
-	if got := m.main.renders - before; got != len(m.main.entries) {
-		t.Fatalf("a re-theme re-rendered %d of %d entries", got, len(m.main.entries))
+	if got := m.main.renders - before; got != len(m.main.entries()) {
+		t.Fatalf("a re-theme re-rendered %d of %d entries", got, len(m.main.entries()))
 	}
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.renderedFor.theme != "craze-light" {
 			t.Fatalf("entry still cached against %q", e.renderedFor.theme)
 		}

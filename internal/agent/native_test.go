@@ -1226,6 +1226,13 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 	f.models["test/a"].push(h.step(textParts("from a")[:2], cat(textParts("")[2:], finishParts(fantasy.FinishReasonStop))))
 	out := startPrompt(s, "one")
 	await(t, h.reached, "the turn on test/a")
+	// Drained here and not asserted on: "one" is the first prompt, which now
+	// publishes its own title delta (plan 024 S1c C8, SF-01,
+	// TestNativesFirstPromptTitleIsADelta has its shape) before the turn ever
+	// reaches the harness, so it is already on the primary by the time the
+	// turn is held. Draining it here keeps the assertion below about SetModel
+	// alone, as it was before C8.
+	deltaSettled(t, s)
 	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
 		t.Fatalf("SetModel during a turn: %v", err)
 	}
@@ -1469,11 +1476,11 @@ func deltaSettled(t *testing.T, s Session) []Event {
 // TestNativeTitle: the title is the first line of the first prompt, on one
 // line, sanitized and capped, and later prompts leave it; /rename pins its own.
 //
-// What is published: a /rename is one EventMeta carrying the Title section and
-// **no Text**, so `craze prompt --json` still prints no title line for a native
-// session (plan 021 §3.8, §3.9); the title the first prompt gives the session
-// is not published at all, which is what the baseline did and what keeps it out
-// of the TUI's header a frame early (native.go's prompt).
+// What is published: the first prompt's title and a /rename are each one
+// EventMeta carrying the Title section and **no Text**, so `craze prompt
+// --json` still prints no title line for a native session either way (plan
+// 021 §3.8, §3.9; plan 024 S1c C8, SF-01 — TestNativesFirstPromptTitleIsADelta
+// below has the first prompt's delta's exact shape).
 func TestNativeTitle(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -1486,12 +1493,10 @@ func TestNativeTitle(t *testing.T) {
 	if got := s.Snapshot().Title; got != string(want) {
 		t.Fatalf("Title = %q, want %q", got, string(want))
 	}
-	// The first prompt named the session and said nothing: this is the one
-	// change to shared state a native session keeps to itself, because telling
-	// a consumer about it would put the title in the TUI's header a frame
-	// earlier than the baseline does (native.go's prompt, plan 021 C10).
-	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
-		t.Fatalf("the first prompt published titles %q, want none", titles)
+	// The first prompt named the session and said so, once, the same shape a
+	// /rename uses (SF-01, C8).
+	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 1 || titles[0] != string(want) {
+		t.Fatalf("the first prompt published titles %q, want one %q", titles, string(want))
 	}
 	if _, err := s.Prompt(context.Background(), "another"); err != nil {
 		t.Fatal(err)
@@ -1547,11 +1552,119 @@ func TestNativeTitlePinnedBeforeTheFirstPrompt(t *testing.T) {
 	if got := s.Snapshot().Title; got != "named" {
 		t.Fatalf("Title = %q, want the pinned one", got)
 	}
-	// The rename is the one title a native session reports: the pin refused the
-	// first prompt's, and the first prompt's would say nothing in any case.
+	// The rename is the one title a native session reports: titlePinned skips
+	// the first prompt's title section entirely (native.go's prompt), so it
+	// never reaches the point that would enqueue a delta of its own.
 	if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 1 || titles[0] != "named" {
 		t.Fatalf("titles %q, want only the rename", titles)
 	}
+}
+
+// TestNativesFirstPromptTitleIsADelta is A14 (plan 024 S1c C8, SF-01): the
+// first prompt's title is published as one EventMeta whose State carries only
+// Title — every other section nil, Reason/Detail/IndexErr empty — and whose
+// Text and Mode are both empty, exactly SetTitle's shape; its Cause is "",
+// because Prompt/Begin have no Command in hand to name (Engine.Submit holds
+// one but does not forward its cause into Begin). A second prompt publishes
+// no further title delta, and a /rename ahead of the first prompt pins the
+// title before the prompt's title section ever runs, so the first prompt
+// publishes nothing for it either.
+func TestNativesFirstPromptTitleIsADelta(t *testing.T) {
+	t.Run("first prompt", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		f.models["test/a"].push(answer("1"), answer("2"))
+		if _, err := s.Prompt(context.Background(), "hello there"); err != nil {
+			t.Fatal(err)
+		}
+		var titleEvs []Event
+		for _, ev := range ofType(deltaSettled(t, s), EventMeta) {
+			if ev.State != nil && ev.State.Title != nil {
+				titleEvs = append(titleEvs, ev)
+			}
+		}
+		if len(titleEvs) != 1 {
+			t.Fatalf("the first prompt published %d title deltas, want 1: %+v", len(titleEvs), titleEvs)
+		}
+		ev := titleEvs[0]
+		if got, want := *ev.State.Title, "hello there"; got != want {
+			t.Fatalf("Title = %q, want %q", got, want)
+		}
+		if ev.Text != "" {
+			t.Fatalf("Event.Text = %q, want empty", ev.Text)
+		}
+		if ev.Mode != "" {
+			t.Fatalf("Event.Mode = %q, want empty", ev.Mode)
+		}
+		if ev.Cause != "" {
+			t.Fatalf("Event.Cause = %q, want empty: the prompt has no Command in hand", ev.Cause)
+		}
+		rest := *ev.State
+		rest.Title = nil
+		if rest != (StateDelta{}) {
+			t.Fatalf("State carried more than Title: %+v", *ev.State)
+		}
+
+		// A second prompt leaves the title alone and publishes no delta for it.
+		if _, err := s.Prompt(context.Background(), "second"); err != nil {
+			t.Fatal(err)
+		}
+		if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
+			t.Fatalf("a second prompt published titles %q, want none", titles)
+		}
+	})
+
+	t.Run("pinned before the first prompt", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		if err := s.SetTitle("", "named"); err != nil {
+			t.Fatalf("SetTitle: %v", err)
+		}
+		deltaSettled(t, s) // drain the rename's own delta
+		f.models["test/a"].push(answer("ok"))
+		if _, err := s.Prompt(context.Background(), "first"); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.Snapshot().Title; got != "named" {
+			t.Fatalf("Title = %q, want the pinned one", got)
+		}
+		if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
+			t.Fatalf("the first prompt published titles %q after a pin, want none", titles)
+		}
+	})
+
+	// sol r19 finding 2: nativeTitle("\nempty title") is "" — strings.Cut
+	// stops at the leading newline and the first line is empty — so the
+	// first prompt here names nothing. It must publish no delta (a published
+	// "" would read as the title being CLEARED, which nothing here did), and
+	// the guard must still be open for the next prompt to try.
+	t.Run("an empty title publishes nothing, the next prompt's does", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.started(Options{})
+		f.models["test/a"].push(answer("1"), answer("2"))
+		if got := nativeTitle("\nempty title"); got != "" {
+			t.Fatalf("fixture: nativeTitle(%q) = %q, want empty", "\nempty title", got)
+		}
+		if _, err := s.Prompt(context.Background(), "\nempty title"); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.Snapshot().Title; got != "" {
+			t.Fatalf("Title = %q after an empty-title prompt, want empty", got)
+		}
+		if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 0 {
+			t.Fatalf("an empty-title first prompt published titles %q, want none", titles)
+		}
+
+		if _, err := s.Prompt(context.Background(), "world"); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.Snapshot().Title; got != "world" {
+			t.Fatalf("Title = %q, want %q", got, "world")
+		}
+		if titles := titleDeltas(deltaSettled(t, s)); len(titles) != 1 || titles[0] != "world" {
+			t.Fatalf("the next prompt published titles %q, want one %q", titles, "world")
+		}
+	})
 }
 
 // TestNativeWireErrorsArePhrasedWithoutTheKey runs the production model stack

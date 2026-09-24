@@ -35,7 +35,7 @@ func fastOnly(stub *Stub) []agent.ConfigOption {
 func perModelStub(t *testing.T) (Model, *Stub) {
 	t.Helper()
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.SetModelCatalogs(map[string][]agent.ConfigOption{
 		"grok":     stub.Snapshot().Config,
 		"fast":     fastOnly(stub),

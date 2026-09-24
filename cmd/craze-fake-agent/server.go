@@ -587,6 +587,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.grokSubagentNested(msg.ID)
 	case "grok-subagent-late":
 		s.grokSubagent(msg.ID, grokSubagentLate)
+	case "grok-subagent-hold":
+		s.grokSubagent(msg.ID, grokSubagentHold)
 	case "grok-subagent-cancel":
 		s.grokSubagentCancel(msg.ID, false)
 	case "grok-subagent-cancel-early":
@@ -1070,6 +1072,11 @@ const (
 	grokSubagentSingle grokSubagentMode = iota
 	grokSubagentFail
 	grokSubagentLate
+	// grokSubagentHold stops after subagent_progress and holds the turn open
+	// until it is cancelled: progress is the last thing it ever sends, so a
+	// golden of the running row has a last event to wait on instead of racing
+	// the finish the other modes send taskRunFor later.
+	grokSubagentHold
 )
 
 // grokSubagent is the one-child script: parent thought, spawn_subagent
@@ -1145,6 +1152,10 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		"tokens_used":       4740,
 		"tools_used":        []string{"list_dir"},
 	})
+	if mode == grokSubagentHold {
+		s.hang(id)
+		return
+	}
 	if mode == grokSubagentLate {
 		s.finishPrompt(id, acp.StopEndTurn)
 		time.Sleep(400 * time.Millisecond)

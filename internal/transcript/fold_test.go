@@ -804,3 +804,48 @@ func TestChangeSaysWhatTheFoldTouched(t *testing.T) {
 		t.Fatalf("a child's chunk that trimmed its named tool: %+v", c)
 	}
 }
+
+// TestRangeIsWhatAFoldAppended pins the read a client consumes a Change's
+// appended range through (plan 024 §3.8, C5c): the entries between its two
+// ends, oldest first, the open stream entry materialised as Entries gives it —
+// its current End, its text left to Tail — and nothing once an end is gone.
+func TestRangeIsWhatAFoldAppended(t *testing.T) {
+	m := New(Options{Bounds: Bounds{MainEntries: 3}})
+	c := m.Fold(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Detail: "x", IndexErr: "y"}, At: at(1), Seq: 1})
+	got := m.Main.Range(c.AppendedFrom, c.AppendedTo)
+	if len(got) != 2 || got[0].Text != "x" || got[1].Text != "y" || got[0].ID != c.AppendedFrom || got[1].ID != c.AppendedTo {
+		t.Fatalf("the range of a two-row fold: %+v", got)
+	}
+	if one := m.Main.Range(c.AppendedTo, c.AppendedTo); len(one) != 1 || one[0].Text != "y" {
+		t.Fatalf("a one-entry range: %+v", one)
+	}
+	if back := m.Main.Range(c.AppendedTo, c.AppendedFrom); back != nil {
+		t.Fatalf("a range whose end comes first: %+v", back)
+	}
+
+	// The open run: a copy with the run's current End, never the stored entry
+	// a chunk leaves stale (X24).
+	c = m.Fold(agent.Event{Type: agent.EventThought, Text: "a", At: at(2), Seq: 2})
+	m.Fold(agent.Event{Type: agent.EventThought, Text: "b", At: at(3), Seq: 3})
+	open := m.Main.Range(c.AppendedFrom, c.AppendedTo)
+	if len(open) != 1 || !open[0].Streaming || open[0].Text != "" || !open[0].End.Equal(at(3)) {
+		t.Fatalf("the open run in a range: %+v", open)
+	}
+	if e, _ := m.Main.Entry(c.AppendedFrom); *e != *open[0] {
+		t.Fatalf("the range's open entry %+v is not Entry's %+v", open[0], e)
+	}
+	if tail := m.Main.Tail(); tail != "ab" {
+		t.Fatalf("the open run's text is its tail: %q", tail)
+	}
+
+	// An end the cap has since dropped: nothing.
+	first := EntryID{1, 0}
+	m.Fold(agent.Event{Type: agent.EventDone, At: at(4), Seq: 4})
+	m.Fold(agent.Event{Type: agent.EventDone, StopReason: "cancelled", At: at(5), Seq: 5})
+	if _, held := m.Main.Entry(first); held {
+		t.Fatal("fixture: the first row is still held")
+	}
+	if gone := m.Main.Range(first, c.AppendedFrom); gone != nil {
+		t.Fatalf("a range from a dropped entry: %+v", gone)
+	}
+}

@@ -220,7 +220,7 @@ func TestPressOnAnotherBandStartsNoSelection(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = tm.(Model)
 	todos := stubTodos()
-	m.sess.(*Stub).SetTodos(todos)
+	stubOf(t, m).SetTodos(todos)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 	if m.lay.Region(regionTasks).Empty() {

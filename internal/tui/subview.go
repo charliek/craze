@@ -10,17 +10,17 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
-func (m *Model) ensureSub(id string) *transcript {
+func (m *Model) ensureSub(id string) *pane {
 	if id == "" {
-		return &m.main
+		return m.main
 	}
 	if m.subs == nil {
-		m.subs = make(map[string]*transcript)
+		m.subs = make(map[string]*pane)
 	}
 	if t := m.subs[id]; t != nil {
 		return t
 	}
-	t := &transcript{entryCap: subMaxEntries, textBudget: subTextBudget}
+	t := newSubPane()
 	m.subs[id] = t
 	return t
 }
@@ -30,7 +30,7 @@ func (m *Model) enterView(id string) {
 		return
 	}
 	if m.viewing == "" {
-		m.storeViewport(&m.main)
+		m.storeViewport(m.main)
 	} else {
 		m.storeViewport(m.cur())
 	}
@@ -91,7 +91,7 @@ func (m *Model) leaveView() {
 	m.setViewportContent(stick)
 	if !stick {
 		m.vp.SetYOffset(off)
-		m.storeViewport(&m.main)
+		m.storeViewport(m.main)
 	}
 }
 
@@ -174,10 +174,8 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 		m.agentStart[id] = m.now()
 		delete(m.agentDone, id)
 	case agent.SubagentChangeFinished:
+		// The child's run is closed by the fold, at the event's At.
 		m.noteAgentDone(id)
-		if t := m.subs[id]; t != nil {
-			t.closeStream(m.stamp(ev.At))
-		}
 	default:
 		m.noteAgentStart(id)
 	}
@@ -190,28 +188,19 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 	}
 }
 
+// applyChildEvent is a sub-agent's own event. Its rows are the fold's, in the
+// child's transcript: a reply, a thought and the prompt the parent handed it
+// stream; a tool is kept one row per call; and a command line — nothing emits
+// one against a child today, but a child's expansion belongs to the child's
+// transcript for the same reason its user block does — is a note. What is left
+// here is the pane every child event has always made, and what a child's tool
+// says about the roster.
 func (m *Model) applyChildEvent(ev agent.Event) {
 	id := ev.Agent
-	tr := m.ensureSub(id)
-	switch ev.Type {
-	case agent.EventText:
-		tr.appendStream(entryAssistant, ev.Text, ev.At, m.now())
-	case agent.EventThought:
-		tr.appendStream(entryThought, ev.Text, ev.At, m.now())
-	case agent.EventUser:
-		tr.appendStream(entryUser, ev.Text, ev.At, m.now())
-	case agent.EventCommand:
-		// Nothing emits one against a child today — craze expands on its own
-		// prompts and those are the main session's — but a child's expansion
-		// belongs to the child's transcript for the same reason its user
-		// block does, and the alternative is dropping it silently.
-		tr.addCommandLine(ev.Command, m.stamp(ev.At))
-	case agent.EventTool:
+	m.ensureSub(id)
+	if ev.Type == agent.EventTool {
 		m.refreshSnap()
 		m.noteAgentStart(id)
-		if ev.Tool != nil {
-			tr.upsertTool(ev.Tool, m.stamp(ev.At))
-		}
 	}
 }
 
@@ -223,22 +212,25 @@ func (m *Model) rebuildReceiptTranscript(id string) {
 	tr := m.ensureSub(id)
 	stick, off := tr.atBottom, tr.yOffset
 	had := tr.transcriptRows != nil
-	*tr = transcript{entryCap: subMaxEntries, textBudget: subTextBudget}
+	tr.reset()
 	now := m.now()
 	label := m.snap.Provider.Label()
 	if label == "" {
 		label = m.snap.Provider.Name
 	}
-	tr.addNote(label+" streams no sub-agent transcript; this is what its receipt carried", now)
+	// Every row is this client's own, rebuilt from the roster for a provider
+	// whose sub-agents stream nothing — the child's shared transcript is empty
+	// — so they are local rows (plan 024 §3.8).
+	tr.appendLocal(entry{kind: entryNote, text: label + " streams no sub-agent transcript; this is what its receipt carried"}, now)
 	if strings.TrimSpace(info.Prompt) != "" {
-		tr.addUser(info.Prompt, now)
+		tr.appendLocal(entry{kind: entryUser, text: info.Prompt}, now)
 	}
 	if note := receiptNote(info, m.receiptAgentID(info)); note != "" {
-		tr.addNote(note, now)
+		tr.appendLocal(entry{kind: entryNote, text: note}, now)
 	}
 	if strings.TrimSpace(info.Output) != "" {
-		tr.appendStream(entryAssistant, info.Output, now, now)
-		tr.closeStream(now)
+		// The whole reply, capped the way a streamed one is, in one row.
+		tr.appendLocal(entry{kind: entryAssistant, text: capEntryText(info.Output)}, now)
 	}
 	tr.atBottom = stick
 	tr.yOffset = off

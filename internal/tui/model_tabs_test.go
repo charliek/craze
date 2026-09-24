@@ -66,7 +66,7 @@ func cursorCatalogs() map[string][]agent.ConfigOption {
 func cursorStub(t *testing.T, current string) (Model, *Stub) {
 	t.Helper()
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.mu.Lock()
 	stub.snap.Models = []agent.ModelInfo{
 		{ID: "grok-4.6", Name: "Grok 4.6"},
@@ -215,7 +215,7 @@ func TestModelDialogTabsComeFromTheCatalog(t *testing.T) {
 // says nothing about it.
 func TestAnAdvertisedTabIsShownWhateverTheCapabilityBit(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.SetProvider(agent.GrokProvider())
 	m.refreshSnap()
 	if m.caps().FastToggle {
@@ -1285,7 +1285,7 @@ func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
 	}
 
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.mu.Lock()
 	stub.snap.Config = cloneStubConfig(cfg)
 	stub.mu.Unlock()

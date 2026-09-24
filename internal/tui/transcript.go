@@ -14,6 +14,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/textdiff"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 const (
@@ -26,7 +27,9 @@ const (
 	subMaxEntries = 1000
 	subTextBudget = 1 << 20
 	entryTextCap  = 64 << 10
-	trimmedNote   = "… earlier transcript trimmed"
+	// trimmedNote leads a pane whose oldest rows were dropped: the shared
+	// model's wording, so every client draws the same one.
+	trimmedNote = transcript.TrimmedNote
 	// outputPreviewLines is how much of a tool's output an expanded row shows.
 	outputPreviewLines = 20
 	// editCollapsedLines is how much of the first hunk a collapsed edit shows.
@@ -59,7 +62,10 @@ type renderKey struct {
 	expanded bool
 }
 
-// entry is one transcript item plus its render cache.
+// entry is one row of a pane's display list: what the row shows, and its render
+// cache (rendered, renderedFor, dirty). A shared row's display value is read
+// from the shared model's entry it shows (show); a local row's is the client's
+// own.
 type entry struct {
 	kind entryKind
 	text string
@@ -78,6 +84,22 @@ type entry struct {
 	// than from a prompt craze sent: it went into a turn already running, so
 	// it is drawn with a different mark.
 	interject bool
+	// local marks a row this client wrote for a message of its own rather than
+	// one an event drew (see pane): it is no event's, and no other client has it.
+	local bool
+	// id is the shared entry the row shows, the zero id for a local row.
+	id transcript.EntryID
+	// streaming marks the row showing the shared model's open stream entry,
+	// whose text is the model's tail and grows with every chunk.
+	streaming bool
+	// cont marks a continuation (execution amendment X30): the run that was
+	// open at /clear, shown from contFrom bytes into its text and dated at the
+	// first chunk after the clear, which is what that chunk has always drawn.
+	// Once the run is longer than the stream cap its text is a moving tail and
+	// the offset no longer names a place in it, so the row shows the whole
+	// tail (the recorded approximation).
+	cont     bool
+	contFrom int
 
 	rendered    []string
 	renderedFor renderKey
@@ -89,64 +111,58 @@ func (m Model) renderKey() renderKey {
 	return renderKey{width: m.width, theme: m.theme.Name, expanded: m.expanded}
 }
 
-// transcript is one conversation: entries, per-transcript caches, and the
-// viewport offset last painted for it. Mutation sets dirty; Model paints m.vp
-// only when this transcript is the one on screen (m.cur()).
-type transcript struct {
-	entries         []entry
-	toolLine        map[string]int
-	trimmed         bool
-	streamOpen      bool
-	pathDirs        map[string]map[string]struct{}
-	renders         int
-	transcriptRows  []string
-	transcriptPlain []string
-	yOffset         int
-	atBottom        bool
-	dirty           bool
-	// entryCap / textBudget are 0 on main (maxEntries, unlimited text).
-	entryCap   int
-	textBudget int
+// kindOf is the row kind a shared entry draws as.
+func kindOf(k transcript.Kind) entryKind {
+	switch k {
+	case transcript.KindUser:
+		return entryUser
+	case transcript.KindAssistant:
+		return entryAssistant
+	case transcript.KindThought:
+		return entryThought
+	case transcript.KindTool:
+		return entryTool
+	case transcript.KindPlan:
+		return entryPlan
+	case transcript.KindError:
+		return entryError
+	}
+	return entryNote
 }
 
-func (m *Model) cur() *transcript {
-	if m.viewing != "" {
-		if t := m.subs[m.viewing]; t != nil {
-			return t
+// show makes r display the shared entry e of tr, as it stands now: its kind,
+// its text — the model's tail for the open stream entry, whose stored text is
+// empty (X7, X24), read afresh on every touch — its payload, its span and its
+// marks. An error entry's text is the error's, which the model read through
+// Options.ErrText. A continuation keeps its own At and shows the text from its
+// offset. r is re-rendered at the next paint.
+func (r *entry) show(e *transcript.Entry, tr *transcript.Transcript) {
+	text := e.Text
+	if e.Streaming {
+		text = tr.Tail()
+	}
+	at := e.At
+	if r.cont {
+		at = r.at
+		if !e.Cut && r.contFrom <= len(text) {
+			text = text[r.contFrom:]
 		}
 	}
-	return &m.main
+	r.kind = kindOf(e.Kind)
+	r.text = text
+	r.tool, r.plan = e.Tool, e.Plan
+	r.at, r.end = at, e.End
+	r.open, r.interject, r.streaming = e.Open, e.Interject, e.Streaming
+	r.local = false
+	r.id = e.ID
+	r.dirty = true
 }
-
-// appendEntry is the only way an entry reaches the transcript, so it is also
-// where an open run ends: a note or a tool row between two chunks means they
-// are not one run, and a run that is not the last entry can never be closed.
-func (t *transcript) appendEntry(e entry, now time.Time) {
-	e.dirty = true
-	if e.at.IsZero() {
-		e.at = now
-	}
-	if e.end.IsZero() {
-		e.end = e.at
-	}
-	t.endRun(e.at)
-	t.entries = append(t.entries, e)
-	t.trimEntries()
-	t.dirty = true
-}
-
-func (m *Model) appendEntry(e entry) { m.main.appendEntry(e, m.now()) }
 
 // stamp is the time a row drawn from an event is written at: the event's own
 // At, and this client's clock only for an event that carries none, which is a
-// unit test's fixture — every production event is stamped. The row, and the End
-// of the run it closes, then say when the session reported the thing and not
-// when this client got round to consuming it, which is the instant every client
-// folding the same event agrees on (plan 024 §3.2).
-//
-// A row the client writes for a message of its own — a local failure, a theme
-// or usage note, the optimistic user row at Enter, an ask's answer notes — is
-// no event's, and keeps m.now(): the wrappers that take no time.
+// unit test's fixture — every production event is stamped. The shared model
+// stamps its entries by the same rule (plan 024 §3.2); this is for the one row
+// the pane writes on an event's behalf (a todo note, todoNoteOwed).
 func (m *Model) stamp(at time.Time) time.Time {
 	if at.IsZero() {
 		return m.now()
@@ -154,187 +170,17 @@ func (m *Model) stamp(at time.Time) time.Time {
 	return at
 }
 
-// trimEntries enforces the entry cap. Tool rows are addressed by index, so the
-// map moves with the slice and rows that fell off are forgotten.
-func (t *transcript) trimEntries() {
-	maxE := t.entryCap
-	if maxE <= 0 {
-		maxE = maxEntries
-	}
-	if len(t.entries) > maxE {
-		t.dropFirst(len(t.entries) - maxE)
-	}
-	if t.textBudget > 0 {
-		for t.rawTextLen() > t.textBudget && len(t.entries) > 1 {
-			t.dropFirst(1)
-		}
-	}
-}
-
-func (t *transcript) dropFirst(n int) {
-	if n <= 0 || n > len(t.entries) {
-		return
-	}
-	t.entries = append(t.entries[:0], t.entries[n:]...)
-	t.trimmed = true
-	t.dirty = true
-	for id, idx := range t.toolLine {
-		if idx-n < 0 {
-			delete(t.toolLine, id)
-			continue
-		}
-		t.toolLine[id] = idx - n
-	}
-}
-
-func (t *transcript) rawTextLen() int {
-	n := 0
-	for i := range t.entries {
-		n += len(t.entries[i].text)
-	}
-	return n
-}
-
-func (t *transcript) addUser(text string, now time.Time) {
-	t.appendEntry(entry{kind: entryUser, text: text}, now)
-}
-
-// addUser is addUserAt for a row the client writes itself, at its own clock.
-func (m *Model) addUser(text string) { m.addUserAt(text, m.now()) }
-
-// addUserAt writes the user block for text that went to the agent, wherever the
-// model learned of it: its own send (stamped at the client's clock), a turn the
-// engine started for a drained row or another client, or a prompt out of a
-// replayed transcript (stamped at the event's At).
-//
-// The shell context in front of that text is wire content and never display
-// content (plan 022 §3.6): the row shows the message, not the command output
-// craze attached to it — which is already on screen, in the `!` row the user
-// watched it come out of. Stripping in this one wrapper rather than at each of
-// the three callers is what makes the rule hold for every route into a user
-// row, including the ones the engine reports rather than this client sending.
-func (m *Model) addUserAt(text string, at time.Time) {
+// userText is what a user row shows of text that went to the agent. The shell
+// context in front of it is wire content and never display content (plan 022
+// §3.6): the row shows the message, not the command output craze attached to it
+// — which is already on screen, in the `!` row the user watched it come out of.
+// It is this client's own send's rule (addUser), and the shared model's for
+// every user entry it draws (agent.SplitShellContext), which is what makes the
+// rule hold for the rows the engine reports as well as the ones this client
+// sends.
+func userText(text string) string {
 	_, text = agent.SplitShellContext(text)
-	m.main.addUser(text, m.stamp(at))
-}
-
-// addInterjection is the user block for text merged into the running turn.
-// It is written from the agent's broadcast, not from the send: the ack only
-// says the text was accepted, and grok broadcasts one for an interjection it
-// could not merge as well.
-func (t *transcript) addInterjection(text string, now time.Time) {
-	if text == "" {
-		return
-	}
-	t.appendEntry(entry{kind: entryUser, text: text, interject: true}, now)
-}
-
-// addInterjection is addInterjectionAt at the client's clock.
-func (m *Model) addInterjection(text string) { m.addInterjectionAt(text, m.now()) }
-
-// addInterjectionAt strips the same block for the same reason addUserAt does.
-// An interjection's echo is the one user row craze draws from what came back
-// rather than from what it sent, and on native it is the typed spelling the
-// adapter kept beside the steer — which is still the text craze handed to
-// Interject, block and all. It is the broadcast's row, so it is stamped at the
-// broadcast's At.
-func (m *Model) addInterjectionAt(text string, at time.Time) {
-	_, text = agent.SplitShellContext(text)
-	m.main.addInterjection(text, m.stamp(at))
-}
-
-func (t *transcript) addNote(text string, now time.Time) {
-	if text == "" {
-		return
-	}
-	t.appendEntry(entry{kind: entryNote, text: text}, now)
-}
-
-func (m *Model) addNote(text string) { m.main.addNote(text, m.now()) }
-
-// addNoteAt is a note drawn from an event, stamped at its At.
-func (m *Model) addNoteAt(text string, at time.Time) { m.main.addNote(text, m.stamp(at)) }
-
-// commandLineMark leads the provenance line under a user entry craze expanded
-// a plugin command or skill into. It points down and to the right, at the entry
-// above it rather than at anything the agent said.
-const commandLineMark = "⤷ "
-
-// addCommandLine records that craze expanded something into the prompt above:
-// which entry, by the plugin:name spelling that always resolves, and whether it
-// was a command or a skill. It is a note, so it draws dim under the user block
-// like every other thing craze says about a turn rather than in it.
-//
-// The block itself is deliberately not shown. It is the plugin's whole body,
-// often pages of it, and the transcript is the conversation the user is having;
-// a headless caller that wants the text reads the command JSON line.
-func (t *transcript) addCommandLine(cmd *agent.ExpandedCommand, now time.Time) {
-	if cmd == nil {
-		return
-	}
-	name := sanitizeLine(cmd.Qualified)
-	if name == "" {
-		return
-	}
-	line := commandLineMark + name
-	if kind := sanitizeLine(cmd.Kind); kind != "" {
-		line += " (" + kind + ")"
-	}
-	t.addNote(line, now)
-}
-
-// addCommandLine is the command event's line, stamped at its At.
-func (m *Model) addCommandLine(cmd *agent.ExpandedCommand, at time.Time) {
-	m.main.addCommandLine(cmd, m.stamp(at))
-}
-
-// addPlan puts the plan cursor proposed into the transcript as a note block,
-// which is why the card itself only has to carry the three answers.
-func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {
-	if p == nil {
-		return
-	}
-	plan := *p
-	t.appendEntry(entry{kind: entryPlan, plan: &plan}, now)
-}
-
-// addPlan is the plan event's block, stamped at its At.
-func (m *Model) addPlan(p *agent.PlanEvent, at time.Time) { m.main.addPlan(p, m.stamp(at)) }
-
-func (t *transcript) addError(text string, now time.Time) {
-	if text == "" {
-		return
-	}
-	t.appendEntry(entry{kind: entryError, text: text}, now)
-}
-
-func (m *Model) addError(text string) { m.main.addError(text, m.now()) }
-
-// addErrorAt is an error row drawn from an event, stamped at its At.
-func (m *Model) addErrorAt(text string, at time.Time) { m.main.addError(text, m.stamp(at)) }
-
-// appendStream grows the open entry of the same kind, so a reply that arrives
-// in five chunks stays one entry and costs one re-render per chunk.
-func (t *transcript) appendStream(kind entryKind, text string, at, now time.Time) {
-	if text == "" {
-		return
-	}
-	if at.IsZero() {
-		at = now
-	}
-	if t.streamOpen && len(t.entries) > 0 {
-		last := &t.entries[len(t.entries)-1]
-		if last.kind == kind {
-			last.text = capEntryText(last.text + text)
-			last.end = at
-			last.dirty = true
-			t.dirty = true
-			return
-		}
-	}
-	// appendEntry ends the previous run, so the flag is raised after it.
-	t.appendEntry(entry{kind: kind, text: capEntryText(text), at: at, end: at, open: kind == entryThought}, now)
-	t.streamOpen = true
+	return text
 }
 
 func capEntryText(s string) string {
@@ -355,92 +201,9 @@ func capEntryText(s string) string {
 	return "…" + s[start:]
 }
 
-func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
-	m.main.appendStream(kind, text, at, m.now())
-}
-
-// endRun ends the open run in place, reporting whether anything changed. The
-// open run is always the last entry, which appendEntry keeps true.
-func (t *transcript) endRun(at time.Time) bool {
-	t.streamOpen = false
-	n := len(t.entries)
-	if n == 0 {
-		return false
-	}
-	e := &t.entries[n-1]
-	if e.kind != entryThought || !e.open {
-		return false
-	}
-	e.open = false
-	if !at.IsZero() {
-		e.end = at
-	}
-	e.dirty = true
-	return true
-}
-
-// closeStream ends the open run. A thought run freezes its elapsed time at the
-// first event that follows it.
-func (t *transcript) closeStream(at time.Time) {
-	if t.endRun(at) {
-		t.dirty = true
-	}
-}
-
-func (t *transcript) breakStream(now time.Time) { t.closeStream(now) }
-
-// breakStream ends the open run at the At of the event that ended it — a
-// turn's done, a foreign-turn bracket, a replay's end, an ask opening — so a
-// thought's duration measures the events and not how late this client consumed
-// the last of them (plan 024 §3.2).
-func (m *Model) breakStream(at time.Time) { m.main.breakStream(m.stamp(at)) }
-
-// upsertTool keeps one row per toolCallId, updated in place. Cursor's todo
-// writer is hidden: the todo stream owns that state.
-//
-// A tool is stamped with its own At, which is when the agent reported that
-// state of the call, and with at — the envelope's At, else the client's clock —
-// only when it carries none (plan 024 X1). That one stamp both closes the run
-// above it and dates a new row.
-func (t *transcript) upsertTool(tool *agent.ToolEvent, at time.Time) {
-	if tool == nil || tool.IsTodoTool() {
-		return
-	}
-	ev := *tool
-	t.notePath(ev)
-	if !tool.At.IsZero() {
-		at = tool.At
-	}
-	// A tool call ends the run above it either way: an update that lands in an
-	// existing row still means the thinking before it is over.
-	t.closeStream(at)
-	if tool.ID != "" {
-		if idx, ok := t.toolLine[tool.ID]; ok && idx >= 0 && idx < len(t.entries) && t.entries[idx].kind == entryTool {
-			e := &t.entries[idx]
-			e.tool = &ev
-			e.dirty = true
-			t.dirty = true
-			return
-		}
-	}
-	t.appendEntry(entry{kind: entryTool, tool: &ev, at: at}, at)
-	if tool.ID != "" {
-		if t.toolLine == nil {
-			t.toolLine = make(map[string]int)
-		}
-		t.toolLine[tool.ID] = len(t.entries) - 1
-	}
-}
-
-// upsertTool is the tool event's row. at is the event's envelope At, which
-// stamps it only when the tool carries no At of its own.
-func (m *Model) upsertTool(tool *agent.ToolEvent, at time.Time) {
-	m.main.upsertTool(tool, m.stamp(at))
-}
-
 // notePath records which directories a basename has been seen in, so a row can
 // fall back to dir/file once the basename is ambiguous.
-func (t *transcript) notePath(tool agent.ToolEvent) {
+func (t *pane) notePath(tool agent.ToolEvent) {
 	p := toolPath(&tool)
 	if p == "" {
 		return
@@ -460,16 +223,16 @@ func (t *transcript) notePath(tool agent.ToolEvent) {
 	set[dir] = struct{}{}
 	if len(set) == 2 {
 		// The basename just became ambiguous, so every row showing it redraws.
-		for i := range t.entries {
-			if t.entries[i].kind == entryTool {
-				t.entries[i].dirty = true
+		for _, e := range t.rows {
+			if e.kind == entryTool {
+				e.dirty = true
 			}
 		}
 		t.dirty = true
 	}
 }
 
-func (m Model) displayPath(tr *transcript, p string) string {
+func (m Model) displayPath(tr *pane, p string) string {
 	if p == "" {
 		return ""
 	}
@@ -480,31 +243,24 @@ func (m Model) displayPath(tr *transcript, p string) string {
 	return filepath.Join(filepath.Base(filepath.Dir(p)), base)
 }
 
-// clearTranscript drops the entries and every cache keyed off them.
-func (m *Model) clearTranscript() {
-	t := &m.main
-	t.entries = nil
-	t.toolLine = nil
-	t.pathDirs = nil
-	t.trimmed = false
-	t.streamOpen = false
-	t.dirty = true
-	m.todoPlanned = 0
-	m.todoDone = false
-	// "the plan above" is gone, so there is nothing left to offer.
-	m.retirePlanOffer()
-	// The pending shell context is keyed off these entries as much as any
-	// cache is: it describes `!` rows that are no longer on screen, and a
-	// /clear is the user saying that conversation is over (plan 022 §3.6).
-	m.dropShellContext()
-}
-
-// noteTodos turns the todo stream into the two dim transcript notes; the panel
-// itself is the pinned home for the list. The notes are the todos event's, so
-// they are stamped at its At.
-func (m *Model) noteTodos(todos []agent.Todo, at time.Time) {
+// todoNoteOwed is the pane's half of the todo stream's two dim notes — the
+// panel itself is the pinned home for the list — and the note, if any, this
+// pane owes for todos: today's dedupe over m.todoPlanned and m.todoDone, which
+// /clear resets, moved on by the list. The shared model writes the notes under
+// its own dedupe, which is the session's and never resets; the pane's decides
+// what the pane shows, in both directions (execution amendment X31, revised at
+// r17): a note the fold writes is the display only when the pane owes it, and
+// is given no row otherwise, and a note the pane owes that the fold does not
+// write is the pane's own (applyEvent).
+//
+// The two do disagree. /clear lowers the pane's counters and not the model's;
+// and todos is todosOf's choice, which falls back to the snapshot for an event
+// that carries no list — where refreshSnap can already see a newer list the
+// next event carries, so the pane notes it one event early, from the
+// snapshot, and the fold notes it when that event arrives.
+func (m *Model) todoNoteOwed(todos []agent.Todo) string {
 	if len(todos) == 0 {
-		return
+		return ""
 	}
 	closed := 0
 	for _, td := range todos {
@@ -513,24 +269,25 @@ func (m *Model) noteTodos(todos []agent.Todo, at time.Time) {
 		}
 	}
 	if closed == len(todos) {
-		if !m.todoDone {
-			m.todoDone = true
-			m.addNoteAt(fmt.Sprintf("tasks: %d/%d done", closed, len(todos)), at)
+		if m.todoDone {
+			return ""
 		}
-		return
+		m.todoDone = true
+		return fmt.Sprintf("tasks: %d/%d done", closed, len(todos))
 	}
 	m.todoDone = false
-	if len(todos) > m.todoPlanned {
-		m.todoPlanned = len(todos)
-		m.addNoteAt(fmt.Sprintf("tasks: %d planned", len(todos)), at)
+	if len(todos) <= m.todoPlanned {
+		return ""
 	}
+	m.todoPlanned = len(todos)
+	return fmt.Sprintf("tasks: %d planned", len(todos))
 }
 
 func (m *Model) refreshViewport() {
 	m.setViewportContent(m.vp.Height == 0 || m.vp.AtBottom())
 }
 
-func (m *Model) storeViewport(tr *transcript) {
+func (m *Model) storeViewport(tr *pane) {
 	tr.yOffset = m.vp.YOffset
 	tr.atBottom = m.vp.AtBottom()
 }
@@ -552,12 +309,11 @@ func (m *Model) setViewportContent(stick bool) {
 		return
 	}
 	key := m.renderKey()
-	lines := make([]string, 0, len(tr.entries)+1)
+	lines := make([]string, 0, len(tr.rows)+1)
 	if tr.trimmed {
 		lines = append(lines, renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)}))
 	}
-	for i := range tr.entries {
-		e := &tr.entries[i]
+	for _, e := range tr.rows {
 		// A shell row that is still running draws the spinner, and the cache is
 		// keyed on things that do not move while it spins, so the row is
 		// re-rendered on every rebuild until it settles. The tick is what asks
@@ -586,7 +342,7 @@ func (m *Model) setViewportContent(stick bool) {
 	m.storeViewport(tr)
 }
 
-func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
+func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 	switch e.kind {
 	case entryUser:
 		// The mark carries the colour; the two-space continuation indent is
@@ -875,7 +631,7 @@ func formatMillis(ms int) string {
 
 // ---------------------------------------------------------------- tool rows
 
-func (m *Model) renderTool(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+func (m *Model) renderTool(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	if tool == nil {
 		return nil
 	}
@@ -939,7 +695,7 @@ func (m *Model) dimRow(text string, width int) string {
 	return renderSegs(width, seg{text, styleFG(m.theme.Dim)})
 }
 
-func (m *Model) readRows(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+func (m *Model) readRows(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	rows := []string{m.toolHead(tool, "read", m.toolTarget(tr, tool), "", styleFG(m.theme.Dim), key.width)}
 	if !key.expanded || tool.Output == nil {
 		return rows
@@ -947,7 +703,7 @@ func (m *Model) readRows(tr *transcript, tool *agent.ToolEvent, key renderKey) [
 	return append(rows, m.outputRows(tool.Output.Content, key.width)...)
 }
 
-func (m *Model) editRows(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+func (m *Model) editRows(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	added, removed, truncated := diffTotals(tool.Diffs)
 	suffix, sufSt := "", styleFG(m.theme.Dim)
 	switch {
@@ -1098,7 +854,7 @@ func (m *Model) outputRows(text string, width int) []string {
 	return out
 }
 
-func (m *Model) toolTarget(tr *transcript, tool *agent.ToolEvent) string {
+func (m *Model) toolTarget(tr *pane, tool *agent.ToolEvent) string {
 	if p := m.displayPath(tr, toolPath(tool)); p != "" {
 		return p
 	}

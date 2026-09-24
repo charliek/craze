@@ -22,10 +22,11 @@ decisions `SD-nn`, open questions `SQ-n`.
 | 2026-09-19 | **S1a executed and complete**: the event log, the lossless codec, the journal, and `seq` on `craze prompt --json`. Live smoke on Linux (cursor, grok, native) and on the mac-mini (grok and native; `cursor-agent` skipped there, blocked by the login keychain over ssh). A native tool call could not be exercised on either platform until H2 gives the harness tools. Outcome, deviations, measurements and handoff in `12`. |
 | 2026-09-20 | Plan 021 (S1b) written and panel-reviewed; SD-33 (SQ12: born detached). Execution started. |
 | 2026-09-21 | **S1b executed and shipped**: the engine turn driver, the queue and send-now, the ask registry, settings as state deltas, command ids, and the durable craze session id. Three PRs (#41 `fdaaa6d`, #42 `db7686e`, #46). Live smoke on Linux (cursor, grok, native) and the mac-mini (grok, native; cursor skipped there, blocked by the login keychain over ssh, as S1a found too). Outcome, deviations, smoke tables and handoff in `12`. |
+| 2026-09-24 | **S1c executed and shipped**: the render-free `internal/transcript` model, folded inside the engine's boundary and by every client; bounded lossless snapshots; in-process attach (`Engine.Attach` on `Control`); the TUI became its first client with an explicit display list. Two PRs (`feature/plan-024-s1c-model` #50 `27c1db6`, `feature/plan-024-s1c-tui` #52, merged 2026-09-24). Live smoke on Linux (cursor, grok, native) and the mac-mini (grok, native; cursor skipped there, the login keychain over ssh again), plus a hidden attach probe on every reachable provider, SAME throughout. **S1 is now complete.** Outcome, the execution amendments, smoke tables and handoff in `12`. |
 
-**Current phase: S1c (the render-free transcript model) is in progress**
-(Plan 024, panel-reviewed 2026-09-21). S1–S5 are committed; S6–S7 are
-directional and get decided after S1–S5 are in daily use (SD-12).
+**Current phase: S1 is complete; S2 (the control socket) is next.** S1–S5
+are committed; S6–S7 are directional and get decided after S1–S5 are in
+daily use (SD-12).
 
 ## Reading order
 

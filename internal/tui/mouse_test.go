@@ -59,13 +59,18 @@ func TestClickOnTheModeChipCycles(t *testing.T) {
 		t.Fatalf("the chip should follow the mode:\n%s", plainView(next))
 	}
 
-	// Just past the chip is the hint, which is not clickable.
+	// Just past the chip is the hint, which is not clickable. A fresh model,
+	// because m.main is a pointer every Model copy shares (plan 024 §3.8):
+	// reusing the m the first click already wrote a note through would leave
+	// this case's m.vp holding a frame from before that write.
+	m = sized(t)
 	_, spans := m.statusRow2(m.lay)
 	past := spanRange(t, spans, spanMode).x1
 	if same := clickXY(t, m, past, y); same.snap.CurrentMode != "agent" {
 		t.Fatalf("a click on the separator cycled to %q", same.snap.CurrentMode)
 	}
 	// Neither is row 1, where the model span lives and V3 has not landed yet.
+	m = sized(t)
 	if same := clickXY(t, m, x, y-1); same.snap.CurrentMode != "agent" {
 		t.Fatalf("a click on row 1 cycled to %q", same.snap.CurrentMode)
 	}
@@ -177,7 +182,7 @@ func TestClickOnTheTasksHeaderCycles(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = tm.(Model)
 	todos := stubTodos()
-	m.sess.(*Stub).SetTodos(todos)
+	stubOf(t, m).SetTodos(todos)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 	if m.lay.Region(regionTasks).Empty() {

@@ -260,7 +260,7 @@ func TestFastOnSendsTheAdvertisedValue(t *testing.T) {
 	}
 	tm, cmd := m.Update(enter())
 	m = flushCmd(t, tm.(Model), cmd)
-	if got := agent.FastOption(m.sess.(*Stub).Snapshot()); got == nil || got.Current != "true" {
+	if got := agent.FastOption(stubOf(t, m).Snapshot()); got == nil || got.Current != "true" {
 		t.Fatalf("the agent was sent %+v", got)
 	}
 	if got := texts(m, entryNote); len(got) != 1 || got[0] != "fast → on" {
@@ -315,7 +315,7 @@ func TestModelDialogDrawsEveryRowAsOneLine(t *testing.T) {
 	m := sized(t)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = tm.(Model)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	// Agent sanitisation keeps \n: it is a line break in a reply, and only the
 	// rows that must not wrap fold it away.
 	stub.snap.Models = []agent.ModelInfo{{ID: "a", Name: "A\nB"}, {ID: "b", Name: "C"}}
@@ -378,7 +378,7 @@ func TestFastRowReadsWhatTheValuesMean(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := sized(t)
-			stub := m.sess.(*Stub)
+			stub := stubOf(t, m)
 			stub.snap.Config = []agent.ConfigOption{{
 				ID: "fast", Name: "Fast", Category: "model_config", Type: "select",
 				Current: "true", SelectValues: tc.values,

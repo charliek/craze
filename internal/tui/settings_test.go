@@ -43,7 +43,7 @@ func agentSetsModel(s *Stub, id string) {
 // (panel astra 15).
 func TestADelayedModeRefusalDoesNotUndoANewerChange(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.FailNextSetMode()
 	m, cmd := askMode(t, m, "plan")
 
@@ -68,7 +68,7 @@ func TestADelayedModeRefusalDoesNotUndoANewerChange(t *testing.T) {
 // with nothing newer applied: the revert happens exactly as it always did.
 func TestADelayedModeRefusalStillRevertsWhenNothingElseChanged(t *testing.T) {
 	m := sized(t)
-	m.sess.(*Stub).FailNextSetMode()
+	stubOf(t, m).FailNextSetMode()
 	m, cmd := askMode(t, m, "plan")
 	m = deliver(t, m, runCmd(cmd))
 	if got := m.snap.CurrentMode; got != "agent" {
@@ -82,7 +82,7 @@ func TestADelayedModeRefusalStillRevertsWhenNothingElseChanged(t *testing.T) {
 // shared state, not on its own optimism.
 func TestAModeRefusalThenAnotherClientsChangeEndsOnTheDelta(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.FailNextSetMode()
 	m, cmd := askMode(t, m, "plan")
 	m = deliver(t, m, runCmd(cmd))
@@ -99,7 +99,7 @@ func TestAModeRefusalThenAnotherClientsChangeEndsOnTheDelta(t *testing.T) {
 // nothing to correct it afterwards (panel astra 15).
 func TestADelayedModelRefusalDoesNotUndoANewerChange(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.FailNextSetModel()
 	m.input.SetValue("/model fast")
 	tm, cmd := m.Update(enter())
@@ -185,8 +185,8 @@ func TestAModeDeltaIsMaskedWhileAChangeOfItsOwnIsInFlight(t *testing.T) {
 	// Both answers arrive; the chip ends on what the session holds.
 	m = deliver(t, m, runCmd(first))
 	m = deliver(t, m, runCmd(second))
-	if got := m.snap.CurrentMode; got != sessionMode(m.sess.(*Stub)) {
-		t.Fatalf("the chip says %q and the session %q", got, sessionMode(m.sess.(*Stub)))
+	if got := m.snap.CurrentMode; got != sessionMode(stubOf(t, m)) {
+		t.Fatalf("the chip says %q and the session %q", got, sessionMode(stubOf(t, m)))
 	}
 }
 
@@ -220,7 +220,7 @@ func stubDeltas(t *testing.T, s *Stub) []agent.Event {
 // the option.
 func configBackedModel(t *testing.T, m Model) (Model, *Stub) {
 	t.Helper()
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.ModelConfigOption("model")
 	m.refreshSnap()
 	if agent.ModelConfigOption(m.snap) == nil {
@@ -238,7 +238,7 @@ func configBackedModel(t *testing.T, m Model) (Model, *Stub) {
 // change.
 func TestTheStubsModelOptionIsTheFirstOfItsCategory(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.mu.Lock()
 	stub.snap.Models = append(stub.snap.Models, agent.ModelInfo{ID: "composer", Name: "Composer"})
 	stub.mu.Unlock()
@@ -468,7 +468,7 @@ func TestModelDialogAnAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
 // selector.
 func twoModelSelectors(t *testing.T, m Model) (Model, *Stub) {
 	t.Helper()
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	stub.ModelConfigOption("p")
 	stub.ModelConfigOption("q")
 	m.refreshSnap()
@@ -643,7 +643,7 @@ func TestAZeroRevisionSuccessIsWrittenUnlessSomethingNewerWas(t *testing.T) {
 // they are written today, which the mode and model tests above pin.
 func TestASettingsDeltaDrawsNoRow(t *testing.T) {
 	m := sized(t)
-	before := len(m.main.entries)
+	before := len(m.main.entries())
 	title := "another client renamed it"
 	m = feed(t, m,
 		modeDelta(7, "plan"),
@@ -653,7 +653,7 @@ func TestASettingsDeltaDrawsNoRow(t *testing.T) {
 			Config: &agent.ConfigState{Options: []agent.ConfigOption{{ID: "effort", Current: "high"}}},
 		}},
 	)
-	if got := len(m.main.entries); got != before {
+	if got := len(m.main.entries()); got != before {
 		t.Fatalf("settings deltas drew %d rows:\n%q", got-before, texts(m, entryNote))
 	}
 }
@@ -664,7 +664,7 @@ func TestASettingsDeltaDrawsNoRow(t *testing.T) {
 // nothing writes it to the index as an *agent* title (A20).
 func TestRenameGoesThroughControlAndDrawsItsNote(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m.input.SetValue("/rename the flaky pty test")
 	tm, _ := m.Update(enter())
 	m = tm.(Model)
