@@ -27,12 +27,10 @@ import (
 // channel it closed.
 const logWatchdog = 10 * time.Second
 
-// The functions whose goroutines the leak checks count, as runtime.Stack
-// prints their frames.
-const (
-	ownerFrame  = "github.com/charliek/craze/internal/agent.(*Subscription).run("
-	writerFrame = "github.com/charliek/craze/internal/journal.(*Writer).run("
-)
+// writerFrame is the journal writer's function, as runtime.Stack prints its
+// frame, for the leak checks that count it by run frame. Owner goroutines are
+// counted differently: see ownerCreated below.
+const writerFrame = "github.com/charliek/craze/internal/journal.(*Writer).run("
 
 var logTestTime = time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 
@@ -608,6 +606,78 @@ func settleGoroutines(t *testing.T, frame string, want int) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("%d goroutines still run %s, want at most %d", got, frame, want)
+		}
+		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// ownerCreated is the line runtime.Stack prints under a subscription owner
+// goroutine — startOwner runs `go s.run(...)` — for the whole of its life,
+// from the go statement until it has exited. The owner's run frame is not:
+// until the scheduler first runs the goroutine, its only frame is the go
+// statement's wrapper (startOwner.gowrap1), so a count of run frames misses
+// an owner that exists and has not been scheduled yet, and a process-wide
+// "zero run frames" check can pass while an earlier test's owner is still
+// alive, unscheduled, or fail later once that owner is finally scheduled
+// (plan 024 r12; see internal/engine/attach_test.go's ownerCreated, which
+// this mirrors for this package — nothing is shared across packages).
+const ownerCreated = "\ncreated by github.com/charliek/craze/internal/agent.(*EventLog).startOwner in goroutine "
+
+// allStacks is every goroutine's stack, as runtime.Stack prints them.
+func allStacks() []byte {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return buf[:n]
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// ownerGoroutines is the ids of the subscription owner goroutines alive now,
+// scheduled yet or not (ownerCreated), across the process.
+func ownerGoroutines() map[string]bool {
+	owners := map[string]bool{}
+	for g := range strings.SplitSeq(string(allStacks()), "\n\n") {
+		id, _, ok := strings.Cut(strings.TrimPrefix(g, "goroutine "), " ")
+		if ok && strings.Contains(g, ownerCreated) {
+			owners[id] = true
+		}
+	}
+	return owners
+}
+
+// ownersStartedSince is the owner goroutines alive now that were not alive at
+// before, in no order. An owner of an earlier test's log still on its way out
+// is in before and is not one of them, and goroutine ids are never reused, so
+// what it names is exactly the owners started in between — this test's own,
+// never an earlier test's straggler.
+func ownersStartedSince(before map[string]bool) []string {
+	var started []string
+	for id := range ownerGoroutines() {
+		if !before[id] {
+			started = append(started, id)
+		}
+	}
+	return started
+}
+
+// settleOwnersStartedSince waits until no owner goroutine started since
+// before is still alive. An owner that has signalled its end still has a few
+// instructions to run before the runtime stops listing it; the wait is
+// bounded by the watchdog, so a real leak fails.
+func settleOwnersStartedSince(t *testing.T, before map[string]bool) {
+	t.Helper()
+	deadline := time.Now().Add(logWatchdog)
+	for {
+		started := ownersStartedSince(before)
+		if len(started) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("owner goroutines started since the baseline are still running: %v", started)
 		}
 		runtime.Gosched()
 		time.Sleep(time.Millisecond)
@@ -1716,7 +1786,7 @@ func TestEventLogSubscriptionsSurviveConcurrentPublishDropCloseAndLogClose(t *te
 	// wedgeAt, with the primary's buffer full behind it, blocks for good.
 	const pauseAt, closeAt, churnRounds = 100, 1000, 3
 	const wedgeAt = closeAt + primaryCap + 1
-	settleGoroutines(t, ownerFrame, 0)
+	owners := ownerGoroutines()
 	settleGoroutines(t, writerFrame, 0)
 	l, w := newJournaledLog(t, EventLogOptions{RingEvents: 256})
 	inc := l.Incarnation()
@@ -1907,7 +1977,7 @@ func TestEventLogSubscriptionsSurviveConcurrentPublishDropCloseAndLogClose(t *te
 	if n := l.liveOwners.Load(); n != 0 {
 		t.Fatalf("%d owner goroutines counted after Close", n)
 	}
-	settleGoroutines(t, ownerFrame, 0)
+	settleOwnersStartedSince(t, owners)
 	settleGoroutines(t, writerFrame, 0)
 }
 
@@ -2341,7 +2411,7 @@ func TestEventLogAnErrorThatPublishesAndClosesWhileItIsEncodedDeadlocksNothing(t
 // counts first show the goroutines running (so the check can see them), and
 // after Close none is left.
 func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
-	settleGoroutines(t, ownerFrame, 0)
+	owners := ownerGoroutines()
 	settleGoroutines(t, writerFrame, 0)
 	l, w := newJournaledLog(t, EventLogOptions{})
 	keepDrained(t, l)
@@ -2356,17 +2426,18 @@ func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
 	closedOne.Close()
 	readN(t, live, 1)
 
-	// A goroutine the scheduler has not run yet shows only its go
-	// statement's wrapper on its stack, not the function the count looks
-	// for. The owners of live and backlog have run (each delivered a record);
-	// the writer has once it has flushed.
+	// Owners are counted by their creation line, on their stack from the go
+	// statement until exit, so live's and backlog's are visible whether or
+	// not the scheduler has run them yet. The writer is still counted by its
+	// run frame, present only once the scheduler has run it, so this waits
+	// for it to flush first.
 	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
 	defer cancel()
 	if err := w.WaitFlushed(ctx, 300); err != nil {
 		t.Fatal(err)
 	}
-	if got := goroutinesRunning(ownerFrame); got < 2 {
-		t.Fatalf("%d owner goroutines running with live and backlog open, want at least 2: the count cannot see them", got)
+	if got := len(ownersStartedSince(owners)); got < 2 {
+		t.Fatalf("%d owner goroutines started since the baseline with live and backlog open, want at least 2", got)
 	}
 	if got := goroutinesRunning(writerFrame); got != 1 {
 		t.Fatalf("%d journal writers running, want 1: the count cannot see it", got)
@@ -2375,7 +2446,7 @@ func TestEventLogCloseLeavesNoOwnerOrJournalGoroutineBehind(t *testing.T) {
 	if n := l.liveOwners.Load(); n != 0 {
 		t.Fatalf("%d owner goroutines counted after Close", n)
 	}
-	settleGoroutines(t, ownerFrame, 0)
+	settleOwnersStartedSince(t, owners)
 	settleGoroutines(t, writerFrame, 0)
 	for _, s := range []*Subscription{live, stuck, backlog, closedOne} {
 		readAll(t, s)
