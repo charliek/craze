@@ -382,7 +382,7 @@ func TestChildEventsWhileViewingMainDoNotTouchMainState(t *testing.T) {
 	if len(m.main.pathDirs) != 0 {
 		t.Fatalf("child events must not write main pathDirs: %v", m.main.pathDirs)
 	}
-	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries) == 0 {
+	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries()) == 0 {
 		t.Fatal("child events should land on the sub transcript")
 	}
 }
@@ -485,10 +485,10 @@ func TestClearLeavesSubTranscriptsAlone(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.main.entries) != 0 {
+	if len(m.main.entries()) != 0 {
 		t.Fatal("/clear should empty main")
 	}
-	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries) == 0 {
+	if m.subs["task-1"] == nil || len(m.subs["task-1"].entries()) == 0 {
 		t.Fatal("/clear must leave sub transcripts alone")
 	}
 }
@@ -501,13 +501,13 @@ func TestSubagentByteBudgets(t *testing.T) {
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: huge}})
 	m = tm.(Model)
 	tr := m.subs["task-1"]
-	if tr == nil || len(tr.entries) == 0 {
+	if tr == nil || len(tr.entries()) == 0 {
 		t.Fatal("expected a streamed entry")
 	}
-	if got := len(tr.entries[len(tr.entries)-1].text); got > entryTextCap {
+	if got := len(tr.entries()[len(tr.entries())-1].text); got > entryTextCap {
 		t.Fatalf("entry is %d bytes, want <= %d", got, entryTextCap)
 	}
-	if !strings.HasPrefix(tr.entries[len(tr.entries)-1].text, "…") {
+	if !strings.HasPrefix(tr.entries()[len(tr.entries())-1].text, "…") {
 		t.Fatal("a capped entry keeps a … prefix")
 	}
 
@@ -522,8 +522,8 @@ func TestSubagentByteBudgets(t *testing.T) {
 	if tr == nil {
 		t.Fatal("expected a sub transcript")
 	}
-	if len(tr.entries) > subMaxEntries {
-		t.Fatalf("entries %d, want <= %d", len(tr.entries), subMaxEntries)
+	if len(tr.entries()) > subMaxEntries {
+		t.Fatalf("entries %d, want <= %d", len(tr.entries()), subMaxEntries)
 	}
 	if !tr.trimmed {
 		t.Fatal("2000 chunks should trim")
@@ -545,14 +545,14 @@ func TestSubagentByteBudgets(t *testing.T) {
 	}
 	tr = m.subs["task-1"]
 	total := 0
-	for _, e := range tr.entries {
+	for _, e := range tr.entries() {
 		total += len(e.text)
 	}
 	if total > subTextBudget {
 		t.Fatalf("sub transcript holds %d bytes, budget %d", total, subTextBudget)
 	}
-	if !tr.trimmed || len(tr.entries) >= 60 {
-		t.Fatalf("the text budget should have trimmed: trimmed=%v entries=%d", tr.trimmed, len(tr.entries))
+	if !tr.trimmed || len(tr.entries()) >= 60 {
+		t.Fatalf("the text budget should have trimmed: trimmed=%v entries=%d", tr.trimmed, len(tr.entries()))
 	}
 }
 
@@ -651,7 +651,7 @@ func TestConsecutiveUserChunksMerge(t *testing.T) {
 	m = tm.(Model)
 	tr := m.subs["task-1"]
 	var users []string
-	for _, e := range tr.entries {
+	for _, e := range tr.entries() {
 		if e.kind == entryUser {
 			users = append(users, e.text)
 		}
@@ -680,7 +680,7 @@ func TestChildCommandLineLandsInTheChildTranscript(t *testing.T) {
 	}}})
 	m = tm.(Model)
 	var notes []string
-	for _, e := range m.subs["task-1"].entries {
+	for _, e := range m.subs["task-1"].entries() {
 		if e.kind == entryNote {
 			notes = append(notes, e.text)
 		}
@@ -689,7 +689,7 @@ func TestChildCommandLineLandsInTheChildTranscript(t *testing.T) {
 		t.Fatalf("child notes %q", notes)
 	}
 	// The main transcript is not where a child's event goes.
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if strings.Contains(e.text, "probe-plugin") {
 			t.Fatalf("the child's line reached the main transcript: %q", e.text)
 		}

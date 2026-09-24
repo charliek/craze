@@ -146,7 +146,7 @@ func TestScrolledUpSurvivesChunkResizeThemeAndCtrlO(t *testing.T) {
 
 func TestTodoToolIsNeverAdded(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	m = toolEvent(m, &agent.ToolEvent{
 		ID: "todo-1", Kind: "other", Status: "completed",
 		Title: "Update TODOs: read, edit, vet", ToolName: "updateTodos",
@@ -169,7 +169,7 @@ func TestTodoToolIsNeverAddedRenders(t *testing.T) {
 
 func TestTodoStreamNotes(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	todos := []agent.Todo{
 		{ID: "1", Content: "Read main.go", Status: "in_progress"},
 		{ID: "2", Content: "Edit main.go", Status: "pending"},
@@ -194,7 +194,7 @@ func TestTodoStreamNotes(t *testing.T) {
 
 func TestThoughtRunCollapsesToOneRow(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	// These chunks carry no timestamps, so each entry is stamped from the clock.
 	// A clock that stands still makes "nothing was measured" exact rather than
 	// "less than the row rounds away"; the …Renders companion keeps the real one.
@@ -253,7 +253,7 @@ func TestThoughtRunCollapsesToOneRowRenders(t *testing.T) {
 // run that really did take time still says how long.
 func TestThoughtRunShowsAMeasuredDuration(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	base := time.Now()
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
 	m = tm.(Model)
@@ -289,7 +289,7 @@ func TestThoughtRunShowsAMeasuredDurationRenders(t *testing.T) {
 // the row saying "Thinking…" for the rest of the session.
 func TestThoughtRunClosesWhenANoteLandsAfterIt(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	base := time.Now()
 	m.clock = func() time.Time { return base.Add(5 * time.Second) }
 
@@ -341,7 +341,7 @@ func TestThoughtRunClosesWhenANoteLandsAfterItRenders(t *testing.T) {
 // that lands in an existing row still ends the run.
 func TestToolRowEndsTheThoughtRunAboveIt(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	tool := &agent.ToolEvent{ID: "b1", Kind: "execute", Status: "pending", Title: "Shell", RawInput: "echo hi"}
 	m = toolEvent(m, tool)
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "first"}})
@@ -366,13 +366,13 @@ func TestToolRowEndsTheThoughtRunAboveIt(t *testing.T) {
 // the fold builds it. The trim note's visibility is the …Renders companion.
 func TestEntryCapTrimsWithANote(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
-	m.main.entries = make([]entry, maxEntries)
-	for i := range m.main.entries {
-		m.main.entries[i] = entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
+	tr := m.main
+	m.main.rows = make([]*entry, maxEntries)
+	for i := range m.main.rows {
+		m.main.rows[i] = &entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
 	}
-	m.main.entries[0] = entry{kind: entryTool, tool: &agent.ToolEvent{ID: "first"}}
-	m.main.entries[maxEntries-1] = entry{kind: entryTool, tool: &agent.ToolEvent{ID: "last"}}
+	m.main.rows[0] = &entry{kind: entryTool, tool: &agent.ToolEvent{ID: "first"}}
+	m.main.rows[maxEntries-1] = &entry{kind: entryTool, tool: &agent.ToolEvent{ID: "last"}}
 	m.main.toolLine = map[string]int{"first": 0, "last": maxEntries - 1}
 	m.appendEntry(entry{kind: entryNote, text: "newest"})
 
@@ -392,9 +392,9 @@ func TestEntryCapTrimsWithANote(t *testing.T) {
 
 func TestEntryCapTrimsWithANoteRenders(t *testing.T) {
 	m := sized(t)
-	m.main.entries = make([]entry, maxEntries)
-	for i := range m.main.entries {
-		m.main.entries[i] = entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
+	m.main.rows = make([]*entry, maxEntries)
+	for i := range m.main.rows {
+		m.main.rows[i] = &entry{kind: entryNote, text: fmt.Sprintf("old %d", i)}
 	}
 	m.main.toolLine = map[string]int{"first": 0, "last": maxEntries - 1}
 	m.appendEntry(entry{kind: entryNote, text: "newest"})
@@ -573,7 +573,7 @@ func TestToolRowsClampToWidth(t *testing.T) {
 // EventDone is, and it closes the run as it always did.
 func TestOnlyTheWiresEndingClosesAStreamRun(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	m = feed(t, m, agent.Event{Type: agent.EventThought, Text: "a"})
 	m = feed(t, m, agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
 		ID: "turn-1", Phase: agent.TurnEnded, StopReason: "end_turn",
@@ -604,7 +604,7 @@ func TestModeChangeLeavesANote(t *testing.T) {
 // indistinguishable from the turn having finished on its own.
 func TestCancelledTurnLeavesANote(t *testing.T) {
 	m := sized(t)
-	tr := &m.main
+	tr := m.main
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
 	m = tm.(Model)
 	if notes := factTexts(tr, "note"); len(notes) != 1 || notes[0] != "cancelled" {
@@ -613,6 +613,7 @@ func TestCancelledTurnLeavesANote(t *testing.T) {
 
 	// A turn that ended on its own says nothing.
 	m = sized(t)
+	tr = m.main
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
 	if notes := factTexts(tr, "note"); len(notes) != 0 {

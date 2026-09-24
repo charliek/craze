@@ -164,9 +164,9 @@ func (m Model) spinnerActivity() string {
 	case exec > 0:
 		return strings.TrimSpace("Running " + firstNonEmpty(execCmd))
 	case edit > 0:
-		return strings.TrimSpace("Editing " + m.displayPath(&m.main, editPath))
+		return strings.TrimSpace("Editing " + m.displayPath(m.main, editPath))
 	case read > 0:
-		return strings.TrimSpace("Reading " + m.displayPath(&m.main, readPath))
+		return strings.TrimSpace("Reading " + m.displayPath(m.main, readPath))
 	case m.lastThought:
 		return "Thinking…"
 	}

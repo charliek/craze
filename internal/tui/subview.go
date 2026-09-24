@@ -10,17 +10,17 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
-func (m *Model) ensureSub(id string) *transcript {
+func (m *Model) ensureSub(id string) *pane {
 	if id == "" {
-		return &m.main
+		return m.main
 	}
 	if m.subs == nil {
-		m.subs = make(map[string]*transcript)
+		m.subs = make(map[string]*pane)
 	}
 	if t := m.subs[id]; t != nil {
 		return t
 	}
-	t := &transcript{entryCap: subMaxEntries, textBudget: subTextBudget}
+	t := newSubPane()
 	m.subs[id] = t
 	return t
 }
@@ -30,7 +30,7 @@ func (m *Model) enterView(id string) {
 		return
 	}
 	if m.viewing == "" {
-		m.storeViewport(&m.main)
+		m.storeViewport(m.main)
 	} else {
 		m.storeViewport(m.cur())
 	}
@@ -91,7 +91,7 @@ func (m *Model) leaveView() {
 	m.setViewportContent(stick)
 	if !stick {
 		m.vp.SetYOffset(off)
-		m.storeViewport(&m.main)
+		m.storeViewport(m.main)
 	}
 }
 
@@ -223,7 +223,7 @@ func (m *Model) rebuildReceiptTranscript(id string) {
 	tr := m.ensureSub(id)
 	stick, off := tr.atBottom, tr.yOffset
 	had := tr.transcriptRows != nil
-	*tr = transcript{entryCap: subMaxEntries, textBudget: subTextBudget}
+	tr.reset()
 	now := m.now()
 	label := m.snap.Provider.Label()
 	if label == "" {

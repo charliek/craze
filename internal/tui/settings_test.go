@@ -643,7 +643,7 @@ func TestAZeroRevisionSuccessIsWrittenUnlessSomethingNewerWas(t *testing.T) {
 // they are written today, which the mode and model tests above pin.
 func TestASettingsDeltaDrawsNoRow(t *testing.T) {
 	m := sized(t)
-	before := len(m.main.entries)
+	before := len(m.main.entries())
 	title := "another client renamed it"
 	m = feed(t, m,
 		modeDelta(7, "plan"),
@@ -653,7 +653,7 @@ func TestASettingsDeltaDrawsNoRow(t *testing.T) {
 			Config: &agent.ConfigState{Options: []agent.ConfigOption{{ID: "effort", Current: "high"}}},
 		}},
 	)
-	if got := len(m.main.entries); got != before {
+	if got := len(m.main.entries()); got != before {
 		t.Fatalf("settings deltas drew %d rows:\n%q", got-before, texts(m, entryNote))
 	}
 }

@@ -75,7 +75,7 @@ func runShellThrough(t *testing.T, m Model, draft string) Model {
 // entry with its rows joined.
 func shellRowsDrawn(m Model) []string {
 	var out []string
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.kind == entryShell {
 			out = append(out, plain(strings.Join(e.rendered, "\n")))
 		}
@@ -85,7 +85,7 @@ func shellRowsDrawn(m Model) []string {
 
 func shellEntries(m Model) int {
 	n := 0
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.kind == entryShell {
 			n++
 		}

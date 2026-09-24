@@ -14,9 +14,10 @@ import (
 // re-declares the helpers over the package's Transcript. Only the setup lines,
 // which build and drive a transcript, differ between the two packages.
 //
-// A test takes its transcript once, as tr := &m.main right after sized. That is
-// the address of a field of the test's own m variable, so tr keeps reading the
-// current model through every m = tm.(Model) and m = sized(t) that follows.
+// A test takes its transcript once, as tr := m.main right after sized. That is
+// the pane every copy of the model shares (see pane), so tr keeps reading the
+// current model through every m = tm.(Model) that follows; a test that starts
+// over with m = sized(t) is a new model, and takes its pane again.
 
 // fact is one transcript entry as the render-free model will hold it.
 type fact struct {
@@ -87,16 +88,17 @@ func factOf(e *entry) fact {
 }
 
 // facts is every entry the transcript holds, oldest first.
-func facts(tr *transcript) []fact {
-	out := make([]fact, 0, len(tr.entries))
-	for i := range tr.entries {
-		out = append(out, factOf(&tr.entries[i]))
+func facts(tr *pane) []fact {
+	entries := tr.entries()
+	out := make([]fact, 0, len(entries))
+	for i := range entries {
+		out = append(out, factOf(&entries[i]))
 	}
 	return out
 }
 
 // factsOf is the entries of one kind, oldest first.
-func factsOf(tr *transcript, kind string) []fact {
+func factsOf(tr *pane, kind string) []fact {
 	var out []fact
 	for _, f := range facts(tr) {
 		if f.Kind == kind {
@@ -108,7 +110,7 @@ func factsOf(tr *transcript, kind string) []fact {
 
 // factTexts is the text of each entry of one kind, oldest first: texts(m, kind)
 // over a transcript instead of a Model.
-func factTexts(tr *transcript, kind string) []string {
+func factTexts(tr *pane, kind string) []string {
 	var out []string
 	for _, f := range factsOf(tr, kind) {
 		out = append(out, f.Text)
@@ -117,22 +119,23 @@ func factTexts(tr *transcript, kind string) []string {
 }
 
 // trimmed reports whether the transcript has dropped entries off its front.
-func trimmed(tr *transcript) bool { return tr.trimmed }
+func trimmed(tr *pane) bool { return tr.trimmed }
 
 // streamOpen reports whether a run is open: the next chunk of the last entry's
 // kind grows that entry instead of starting one.
-func streamOpen(tr *transcript) bool { return tr.streamOpen }
+func streamOpen(tr *pane) bool { return tr.streamOpen }
 
 // toolIndexed is the tool index's lookup. ok reports whether the index holds id
 // at all, and the fact is the entry it names — the zero fact when that name
 // dangles, so a stale index entry still fails a test that expected it gone.
-func toolIndexed(tr *transcript, id string) (fact, bool) {
+func toolIndexed(tr *pane, id string) (fact, bool) {
 	idx, ok := tr.toolLine[id]
 	if !ok {
 		return fact{}, false
 	}
-	if idx < 0 || idx >= len(tr.entries) {
+	entries := tr.entries()
+	if idx < 0 || idx >= len(entries) {
 		return fact{}, true
 	}
-	return factOf(&tr.entries[idx]), true
+	return factOf(&entries[idx]), true
 }

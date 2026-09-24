@@ -59,7 +59,8 @@ type renderKey struct {
 	expanded bool
 }
 
-// entry is one transcript item plus its render cache.
+// entry is one row of a pane's display list: what the row shows, and its render
+// cache (rendered, renderedFor, dirty).
 type entry struct {
 	kind entryKind
 	text string
@@ -89,14 +90,28 @@ func (m Model) renderKey() renderKey {
 	return renderKey{width: m.width, theme: m.theme.Name, expanded: m.expanded}
 }
 
-// transcript is one conversation: entries, per-transcript caches, and the
-// viewport offset last painted for it. Mutation sets dirty; Model paints m.vp
-// only when this transcript is the one on screen (m.cur()).
-type transcript struct {
-	entries         []entry
-	toolLine        map[string]int
-	trimmed         bool
-	streamOpen      bool
+// pane is one transcript as this client displays it: the display list — every
+// row a frame draws, oldest first, each with its render cache — the rows last
+// painted from it and the viewport position they were painted at, and the facts
+// only this client keeps (pathDirs, the `!` rows). Mutation sets dirty; Model
+// paints m.vp only when this pane is the one on screen (m.cur()).
+//
+// A pane is shared, never copied. bubbletea copies Model by value on every
+// Update, and m.main and every pane in m.subs are pointers that every copy
+// holds, exactly as m.subs, m.shell and m.owner already are; so a row written
+// through any copy is written for all of them, and code must never rely on a
+// discarded Model copy discarding its rows. A value method that writes a row
+// returns the Model it wrote through, and its caller keeps that Model — the
+// descendant, never an older copy (plan 024 §3.8).
+type pane struct {
+	// rows is the display list. A row is held by pointer, so its address is
+	// its identity: it survives the append that grows the list and the trim
+	// that shifts it, and an index from an id to its row never has to be
+	// rebased.
+	rows    []*entry
+	trimmed bool
+	// pathDirs is the pane's own (notePath): the directories each basename
+	// has been seen in, from the tool rows this pane was given.
 	pathDirs        map[string]map[string]struct{}
 	renders         int
 	transcriptRows  []string
@@ -107,21 +122,32 @@ type transcript struct {
 	// entryCap / textBudget are 0 on main (maxEntries, unlimited text).
 	entryCap   int
 	textBudget int
+
+	// The old fold's, while it still writes through the pane (C5c removes them).
+	toolLine   map[string]int
+	streamOpen bool
 }
 
-func (m *Model) cur() *transcript {
+// newSubPane is a sub-agent's pane, under the tighter caps.
+func newSubPane() *pane { return &pane{entryCap: subMaxEntries, textBudget: subTextBudget} }
+
+// reset empties the pane in place, keeping its caps: it is the same *pane
+// m.subs and m.cur() hold, so it is emptied rather than replaced.
+func (t *pane) reset() { *t = pane{entryCap: t.entryCap, textBudget: t.textBudget} }
+
+func (m *Model) cur() *pane {
 	if m.viewing != "" {
 		if t := m.subs[m.viewing]; t != nil {
 			return t
 		}
 	}
-	return &m.main
+	return m.main
 }
 
 // appendEntry is the only way an entry reaches the transcript, so it is also
 // where an open run ends: a note or a tool row between two chunks means they
 // are not one run, and a run that is not the last entry can never be closed.
-func (t *transcript) appendEntry(e entry, now time.Time) {
+func (t *pane) appendEntry(e entry, now time.Time) {
 	e.dirty = true
 	if e.at.IsZero() {
 		e.at = now
@@ -130,7 +156,7 @@ func (t *transcript) appendEntry(e entry, now time.Time) {
 		e.end = e.at
 	}
 	t.endRun(e.at)
-	t.entries = append(t.entries, e)
+	t.rows = append(t.rows, &e)
 	t.trimEntries()
 	t.dirty = true
 }
@@ -156,26 +182,29 @@ func (m *Model) stamp(at time.Time) time.Time {
 
 // trimEntries enforces the entry cap. Tool rows are addressed by index, so the
 // map moves with the slice and rows that fell off are forgotten.
-func (t *transcript) trimEntries() {
+func (t *pane) trimEntries() {
 	maxE := t.entryCap
 	if maxE <= 0 {
 		maxE = maxEntries
 	}
-	if len(t.entries) > maxE {
-		t.dropFirst(len(t.entries) - maxE)
+	if len(t.rows) > maxE {
+		t.dropFirst(len(t.rows) - maxE)
 	}
 	if t.textBudget > 0 {
-		for t.rawTextLen() > t.textBudget && len(t.entries) > 1 {
+		for t.rawTextLen() > t.textBudget && len(t.rows) > 1 {
 			t.dropFirst(1)
 		}
 	}
 }
 
-func (t *transcript) dropFirst(n int) {
-	if n <= 0 || n > len(t.entries) {
+func (t *pane) dropFirst(n int) {
+	if n <= 0 || n > len(t.rows) {
 		return
 	}
-	t.entries = append(t.entries[:0], t.entries[n:]...)
+	kept := copy(t.rows, t.rows[n:])
+	// The vacated tail would otherwise keep the rows it held reachable.
+	clear(t.rows[kept:])
+	t.rows = t.rows[:kept]
 	t.trimmed = true
 	t.dirty = true
 	for id, idx := range t.toolLine {
@@ -187,15 +216,15 @@ func (t *transcript) dropFirst(n int) {
 	}
 }
 
-func (t *transcript) rawTextLen() int {
+func (t *pane) rawTextLen() int {
 	n := 0
-	for i := range t.entries {
-		n += len(t.entries[i].text)
+	for _, e := range t.rows {
+		n += len(e.text)
 	}
 	return n
 }
 
-func (t *transcript) addUser(text string, now time.Time) {
+func (t *pane) addUser(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryUser, text: text}, now)
 }
 
@@ -222,7 +251,7 @@ func (m *Model) addUserAt(text string, at time.Time) {
 // It is written from the agent's broadcast, not from the send: the ack only
 // says the text was accepted, and grok broadcasts one for an interjection it
 // could not merge as well.
-func (t *transcript) addInterjection(text string, now time.Time) {
+func (t *pane) addInterjection(text string, now time.Time) {
 	if text == "" {
 		return
 	}
@@ -243,7 +272,7 @@ func (m *Model) addInterjectionAt(text string, at time.Time) {
 	m.main.addInterjection(text, m.stamp(at))
 }
 
-func (t *transcript) addNote(text string, now time.Time) {
+func (t *pane) addNote(text string, now time.Time) {
 	if text == "" {
 		return
 	}
@@ -268,7 +297,7 @@ const commandLineMark = "⤷ "
 // The block itself is deliberately not shown. It is the plugin's whole body,
 // often pages of it, and the transcript is the conversation the user is having;
 // a headless caller that wants the text reads the command JSON line.
-func (t *transcript) addCommandLine(cmd *agent.ExpandedCommand, now time.Time) {
+func (t *pane) addCommandLine(cmd *agent.ExpandedCommand, now time.Time) {
 	if cmd == nil {
 		return
 	}
@@ -290,7 +319,7 @@ func (m *Model) addCommandLine(cmd *agent.ExpandedCommand, at time.Time) {
 
 // addPlan puts the plan cursor proposed into the transcript as a note block,
 // which is why the card itself only has to carry the three answers.
-func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {
+func (t *pane) addPlan(p *agent.PlanEvent, now time.Time) {
 	if p == nil {
 		return
 	}
@@ -301,7 +330,7 @@ func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {
 // addPlan is the plan event's block, stamped at its At.
 func (m *Model) addPlan(p *agent.PlanEvent, at time.Time) { m.main.addPlan(p, m.stamp(at)) }
 
-func (t *transcript) addError(text string, now time.Time) {
+func (t *pane) addError(text string, now time.Time) {
 	if text == "" {
 		return
 	}
@@ -315,15 +344,15 @@ func (m *Model) addErrorAt(text string, at time.Time) { m.main.addError(text, m.
 
 // appendStream grows the open entry of the same kind, so a reply that arrives
 // in five chunks stays one entry and costs one re-render per chunk.
-func (t *transcript) appendStream(kind entryKind, text string, at, now time.Time) {
+func (t *pane) appendStream(kind entryKind, text string, at, now time.Time) {
 	if text == "" {
 		return
 	}
 	if at.IsZero() {
 		at = now
 	}
-	if t.streamOpen && len(t.entries) > 0 {
-		last := &t.entries[len(t.entries)-1]
+	if t.streamOpen && len(t.rows) > 0 {
+		last := t.rows[len(t.rows)-1]
 		if last.kind == kind {
 			last.text = capEntryText(last.text + text)
 			last.end = at
@@ -361,13 +390,13 @@ func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
 
 // endRun ends the open run in place, reporting whether anything changed. The
 // open run is always the last entry, which appendEntry keeps true.
-func (t *transcript) endRun(at time.Time) bool {
+func (t *pane) endRun(at time.Time) bool {
 	t.streamOpen = false
-	n := len(t.entries)
+	n := len(t.rows)
 	if n == 0 {
 		return false
 	}
-	e := &t.entries[n-1]
+	e := t.rows[n-1]
 	if e.kind != entryThought || !e.open {
 		return false
 	}
@@ -381,13 +410,13 @@ func (t *transcript) endRun(at time.Time) bool {
 
 // closeStream ends the open run. A thought run freezes its elapsed time at the
 // first event that follows it.
-func (t *transcript) closeStream(at time.Time) {
+func (t *pane) closeStream(at time.Time) {
 	if t.endRun(at) {
 		t.dirty = true
 	}
 }
 
-func (t *transcript) breakStream(now time.Time) { t.closeStream(now) }
+func (t *pane) breakStream(now time.Time) { t.closeStream(now) }
 
 // breakStream ends the open run at the At of the event that ended it — a
 // turn's done, a foreign-turn bracket, a replay's end, an ask opening — so a
@@ -402,7 +431,7 @@ func (m *Model) breakStream(at time.Time) { m.main.breakStream(m.stamp(at)) }
 // state of the call, and with at — the envelope's At, else the client's clock —
 // only when it carries none (plan 024 X1). That one stamp both closes the run
 // above it and dates a new row.
-func (t *transcript) upsertTool(tool *agent.ToolEvent, at time.Time) {
+func (t *pane) upsertTool(tool *agent.ToolEvent, at time.Time) {
 	if tool == nil || tool.IsTodoTool() {
 		return
 	}
@@ -415,8 +444,8 @@ func (t *transcript) upsertTool(tool *agent.ToolEvent, at time.Time) {
 	// existing row still means the thinking before it is over.
 	t.closeStream(at)
 	if tool.ID != "" {
-		if idx, ok := t.toolLine[tool.ID]; ok && idx >= 0 && idx < len(t.entries) && t.entries[idx].kind == entryTool {
-			e := &t.entries[idx]
+		if idx, ok := t.toolLine[tool.ID]; ok && idx >= 0 && idx < len(t.rows) && t.rows[idx].kind == entryTool {
+			e := t.rows[idx]
 			e.tool = &ev
 			e.dirty = true
 			t.dirty = true
@@ -428,7 +457,7 @@ func (t *transcript) upsertTool(tool *agent.ToolEvent, at time.Time) {
 		if t.toolLine == nil {
 			t.toolLine = make(map[string]int)
 		}
-		t.toolLine[tool.ID] = len(t.entries) - 1
+		t.toolLine[tool.ID] = len(t.rows) - 1
 	}
 }
 
@@ -440,7 +469,7 @@ func (m *Model) upsertTool(tool *agent.ToolEvent, at time.Time) {
 
 // notePath records which directories a basename has been seen in, so a row can
 // fall back to dir/file once the basename is ambiguous.
-func (t *transcript) notePath(tool agent.ToolEvent) {
+func (t *pane) notePath(tool agent.ToolEvent) {
 	p := toolPath(&tool)
 	if p == "" {
 		return
@@ -460,16 +489,16 @@ func (t *transcript) notePath(tool agent.ToolEvent) {
 	set[dir] = struct{}{}
 	if len(set) == 2 {
 		// The basename just became ambiguous, so every row showing it redraws.
-		for i := range t.entries {
-			if t.entries[i].kind == entryTool {
-				t.entries[i].dirty = true
+		for _, e := range t.rows {
+			if e.kind == entryTool {
+				e.dirty = true
 			}
 		}
 		t.dirty = true
 	}
 }
 
-func (m Model) displayPath(tr *transcript, p string) string {
+func (m Model) displayPath(tr *pane, p string) string {
 	if p == "" {
 		return ""
 	}
@@ -482,8 +511,8 @@ func (m Model) displayPath(tr *transcript, p string) string {
 
 // clearTranscript drops the entries and every cache keyed off them.
 func (m *Model) clearTranscript() {
-	t := &m.main
-	t.entries = nil
+	t := m.main
+	t.rows = nil
 	t.toolLine = nil
 	t.pathDirs = nil
 	t.trimmed = false
@@ -530,7 +559,7 @@ func (m *Model) refreshViewport() {
 	m.setViewportContent(m.vp.Height == 0 || m.vp.AtBottom())
 }
 
-func (m *Model) storeViewport(tr *transcript) {
+func (m *Model) storeViewport(tr *pane) {
 	tr.yOffset = m.vp.YOffset
 	tr.atBottom = m.vp.AtBottom()
 }
@@ -552,12 +581,11 @@ func (m *Model) setViewportContent(stick bool) {
 		return
 	}
 	key := m.renderKey()
-	lines := make([]string, 0, len(tr.entries)+1)
+	lines := make([]string, 0, len(tr.rows)+1)
 	if tr.trimmed {
 		lines = append(lines, renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)}))
 	}
-	for i := range tr.entries {
-		e := &tr.entries[i]
+	for _, e := range tr.rows {
 		// A shell row that is still running draws the spinner, and the cache is
 		// keyed on things that do not move while it spins, so the row is
 		// re-rendered on every rebuild until it settles. The tick is what asks
@@ -586,7 +614,7 @@ func (m *Model) setViewportContent(stick bool) {
 	m.storeViewport(tr)
 }
 
-func (m *Model) renderEntry(tr *transcript, e *entry, key renderKey) []string {
+func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 	switch e.kind {
 	case entryUser:
 		// The mark carries the colour; the two-space continuation indent is
@@ -875,7 +903,7 @@ func formatMillis(ms int) string {
 
 // ---------------------------------------------------------------- tool rows
 
-func (m *Model) renderTool(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+func (m *Model) renderTool(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	if tool == nil {
 		return nil
 	}
@@ -939,7 +967,7 @@ func (m *Model) dimRow(text string, width int) string {
 	return renderSegs(width, seg{text, styleFG(m.theme.Dim)})
 }
 
-func (m *Model) readRows(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+func (m *Model) readRows(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	rows := []string{m.toolHead(tool, "read", m.toolTarget(tr, tool), "", styleFG(m.theme.Dim), key.width)}
 	if !key.expanded || tool.Output == nil {
 		return rows
@@ -947,7 +975,7 @@ func (m *Model) readRows(tr *transcript, tool *agent.ToolEvent, key renderKey) [
 	return append(rows, m.outputRows(tool.Output.Content, key.width)...)
 }
 
-func (m *Model) editRows(tr *transcript, tool *agent.ToolEvent, key renderKey) []string {
+func (m *Model) editRows(tr *pane, tool *agent.ToolEvent, key renderKey) []string {
 	added, removed, truncated := diffTotals(tool.Diffs)
 	suffix, sufSt := "", styleFG(m.theme.Dim)
 	switch {
@@ -1098,7 +1126,7 @@ func (m *Model) outputRows(text string, width int) []string {
 	return out
 }
 
-func (m *Model) toolTarget(tr *transcript, tool *agent.ToolEvent) string {
+func (m *Model) toolTarget(tr *pane, tool *agent.ToolEvent) string {
 	if p := m.displayPath(tr, toolPath(tool)); p != "" {
 		return p
 	}

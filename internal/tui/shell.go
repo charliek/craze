@@ -99,9 +99,9 @@ func (m *Model) finishShell(msg shellDoneMsg) {
 	if m.shell.keepsContext(msg.gen) {
 		m.keepShellResult(msg.cmd, msg.res)
 	}
-	t := &m.main
-	for i := len(t.entries) - 1; i >= 0; i-- {
-		e := &t.entries[i]
+	t := m.main
+	for i := len(t.rows) - 1; i >= 0; i-- {
+		e := t.rows[i]
 		if e.shell == nil || e.shell.gen != msg.gen {
 			continue
 		}

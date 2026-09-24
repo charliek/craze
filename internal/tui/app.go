@@ -210,10 +210,11 @@ type Model struct {
 	// elapsed counts from.
 	sessStart time.Time
 
-	// main is the session transcript. cur() returns the viewed sub-agent
-	// transcript when viewing != "", otherwise main.
-	main      transcript
-	subs      map[string]*transcript
+	// main is the session transcript's pane. cur() returns the viewed
+	// sub-agent's pane when viewing != "", otherwise main. Both are pointers
+	// every copy of the model shares (see pane); New allocates them.
+	main      *pane
+	subs      map[string]*pane
 	viewing   string
 	tombstone *agent.SubagentInfo
 
@@ -867,6 +868,10 @@ func New(cfg Config) Model {
 		term:  newTerminalColors(io.Discard),
 		owner: &sessionOwner{},
 		shell: newShellController(),
+		// Allocated here, not on first use, so every copy of this model holds
+		// the same panes from the start (see pane).
+		main: &pane{},
+		subs: make(map[string]*pane),
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: cfg.Loading,
 		// Turn 1 is the session before the first prompt: every event has an
@@ -1599,9 +1604,9 @@ func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
 	if !m.sel.empty() {
 		return m.copySelection()
 	}
-	entries := m.cur().entries
-	for i := len(entries) - 1; i >= 0; i-- {
-		if e := &entries[i]; e.kind == entryAssistant && e.text != "" {
+	rows := m.cur().rows
+	for i := len(rows) - 1; i >= 0; i-- {
+		if e := rows[i]; e.kind == entryAssistant && e.text != "" {
 			return m, copyText(e.text, "copied last reply")
 		}
 	}

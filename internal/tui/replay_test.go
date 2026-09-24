@@ -398,7 +398,7 @@ func TestReplayRendersTheRestoredTranscript(t *testing.T) {
 	if m.main.streamOpen {
 		t.Fatal("the replay left a stream open under the restored note")
 	}
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.open {
 			t.Fatalf("entry %q is still open after the replay ended", e.text)
 		}
@@ -832,10 +832,10 @@ func TestRenameBeforeTheSessionIsUpIsRefused(t *testing.T) {
 }
 
 func TestRenameWithNoTitleIsAUsageError(t *testing.T) {
-	m, stub := loadedStub(t, &fakeIndex{})
-	m.replaying = false
-	m = deliver(t, m, startedMsg{})
 	for _, args := range []string{"", "   ", "\a"} {
+		m, stub := loadedStub(t, &fakeIndex{})
+		m.replaying = false
+		m = deliver(t, m, startedMsg{})
 		next := runSlash(t, m, strings.TrimRight("/rename "+args, " "))
 		if got := texts(next, entryError); len(got) != 1 || got[0] != "usage: /rename <title>" {
 			t.Fatalf("/rename %q: error entries %q", args, got)

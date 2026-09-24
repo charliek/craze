@@ -665,7 +665,7 @@ func TestTranscriptPageUpStaysPut(t *testing.T) {
 
 func texts(m Model, kind entryKind) []string {
 	var out []string
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.kind == kind {
 			out = append(out, e.text)
 		}
@@ -677,7 +677,7 @@ func texts(m Model, kind entryKind) []string {
 // per element and its rendered rows joined.
 func toolRows(m Model) []string {
 	var out []string
-	for _, e := range m.main.entries {
+	for _, e := range m.main.entries() {
 		if e.kind == entryTool {
 			out = append(out, plain(strings.Join(e.rendered, "\n")))
 		}
@@ -2001,8 +2001,8 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.main.entries) != 0 {
-		t.Fatalf("clear left entries %+v", m.main.entries)
+	if len(m.main.entries()) != 0 {
+		t.Fatalf("clear left entries %+v", m.main.entries())
 	}
 	if len(m.main.toolLine) != 0 {
 		t.Fatalf("clear left toolLine %+v", m.main.toolLine)
@@ -2367,7 +2367,7 @@ func TestPlanImplementChainsSetModeThenPrompt(t *testing.T) {
 	}
 	// The note is written before the turn it explains.
 	note, user := -1, -1
-	for i, e := range m.main.entries {
+	for i, e := range m.main.entries() {
 		if e.kind == entryNote && strings.HasPrefix(e.text, "mode → agent") {
 			note = i
 		}
@@ -2494,8 +2494,8 @@ func TestPlanImplementFailureDoesNotReviveAClearedPlan(t *testing.T) {
 	m.input.SetValue("/clear")
 	tm, _ = m.Update(enter())
 	m = tm.(Model)
-	if len(m.main.entries) != 0 {
-		t.Fatalf("/clear should have emptied the transcript: %d entries", len(m.main.entries))
+	if len(m.main.entries()) != 0 {
+		t.Fatalf("/clear should have emptied the transcript: %d entries", len(m.main.entries()))
 	}
 	msg := runCmd(cmd)
 	if _, ok := msg.(planImplementFailedMsg); !ok {

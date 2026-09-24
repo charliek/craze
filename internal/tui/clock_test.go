@@ -52,7 +52,7 @@ func thoughtAt(agentID string, at time.Time) agent.Event {
 
 // lastFact is the newest entry of kind whose text is text ("" matches any),
 // failing the test when there is none.
-func lastFact(t *testing.T, tr *transcript, kind, text string) fact {
+func lastFact(t *testing.T, tr *pane, kind, text string) fact {
 	t.Helper()
 	got := factsOf(tr, kind)
 	for i := len(got) - 1; i >= 0; i-- {
@@ -65,7 +65,7 @@ func lastFact(t *testing.T, tr *transcript, kind, text string) fact {
 }
 
 // closedThought is the thought run the case opened, which must be closed.
-func closedThought(t *testing.T, tr *transcript) fact {
+func closedThought(t *testing.T, tr *pane) fact {
 	t.Helper()
 	thoughts := factsOf(tr, "thought")
 	if len(thoughts) != 1 {
@@ -256,7 +256,7 @@ func TestARunEndsAtTheClosingEventsOwnTime(t *testing.T) {
 	for _, tc := range closingCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			m := lateModel(t)
-			tr := &m.main
+			tr := m.main
 			if tc.prelude != nil {
 				m = feed(t, m, tc.prelude(clockBase.Add(-time.Second))...)
 			}
@@ -282,7 +282,7 @@ func TestAnUnstampedClosingEventFallsBackToTheClock(t *testing.T) {
 	for _, tc := range closingCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			m := lateModel(t)
-			tr := &m.main
+			tr := m.main
 			if tc.prelude != nil {
 				m = feed(t, m, tc.prelude(time.Time{})...)
 			}
@@ -386,7 +386,7 @@ func TestAChildCommandLineIsStampedByItsEvent(t *testing.T) {
 	if f := lastFact(t, tr, "note", "⤷ probe-plugin:probe-echo (command)"); !f.At.Equal(closedAt) {
 		t.Fatalf("the child's command line is stamped %v, want %v", f.At, closedAt)
 	}
-	if got := factsOf(&m.main, "note"); len(got) != 0 {
+	if got := factsOf(m.main, "note"); len(got) != 0 {
 		t.Fatalf("the child's line reached the main transcript: %v", got)
 	}
 }
@@ -433,7 +433,7 @@ func TestAChildFinishedIsStampedByItsEvent(t *testing.T) {
 func TestALocalRowKeepsTheClientsClock(t *testing.T) {
 	t.Run("usage error", func(t *testing.T) {
 		m := lateModel(t)
-		tr := &m.main
+		tr := m.main
 		m = runSlash(t, m, "/rename")
 		if f := lastFact(t, tr, "error", "usage: /rename <title>"); !f.At.Equal(m.now()) {
 			t.Fatalf("the usage error is stamped %v, want the clock's %v", f.At, m.now())
@@ -441,7 +441,7 @@ func TestALocalRowKeepsTheClientsClock(t *testing.T) {
 	})
 	t.Run("the user row at Enter", func(t *testing.T) {
 		m := lateModel(t)
-		tr := &m.main
+		tr := m.main
 		m = startTurn(t, m, "typed here")
 		if f := lastFact(t, tr, "user", "typed here"); !f.At.Equal(m.now()) {
 			t.Fatalf("the optimistic user row is stamped %v, want the clock's %v", f.At, m.now())
@@ -455,7 +455,7 @@ func TestALocalRowKeepsTheClientsClock(t *testing.T) {
 // answer is stamped at this client's clock, not at the ending event's At.
 func TestAnAskNoteKeepsTheClientsClock(t *testing.T) {
 	m := lateModel(t)
-	tr := &m.main
+	tr := m.main
 	m = feed(t, m,
 		agent.Event{Type: agent.EventQuestion, Question: stubQuestion(), At: clockBase},
 		agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
