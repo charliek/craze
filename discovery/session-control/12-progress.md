@@ -1100,8 +1100,8 @@ native ask has ever fired one.
 | Status | shipped |
 | Plan | `024-session-control-s1c-transcript-model` (outside the repo, `~/.claude/plans/craze/`) |
 | Baseline | `origin/main` `2b5229b` (harness H5 PR 2 #48 merged) |
-| Branch / PRs | two sequential PRs, the second branched from `origin/main` after the first merges: `feature/plan-024-s1c-model` (#50), `feature/plan-024-s1c-tui` (#?) |
-| Merged | PR 1 2026-09-24, `27c1db6`; PR 2 2026-09-24, `?` |
+| Branch / PRs | two sequential PRs, the second branched from `origin/main` after the first merges: `feature/plan-024-s1c-model` (#50), `feature/plan-024-s1c-tui` (#52) |
+| Merged | PR 1 2026-09-24, `27c1db6`; PR 2 #52, merged 2026-09-24 (rebased onto `origin/main` `f5c3cfd`, H6 PR 1 #51) |
 
 ### Outcome
 
@@ -1166,16 +1166,29 @@ run), never retried; and one production fix (`026e21e`) for a CI
 its whole batch committed — also never retried (memory note
 `diagnose-flakes-never-retry`).
 
-**PR 2 — `feature/plan-024-s1c-tui`** (#?, `?`):
-C5a (`1a72d21` — the pane: a display list and a render cache beside the old
+**PR 2 — `feature/plan-024-s1c-tui`** (#52, merged 2026-09-24): C5a
+(`bf8272c` — the pane: a display list and a render cache beside the old
 fold, the compatibility accessor, the pointer-aliasing audit); C5b
-(`02f45ac` — local rows and echo hiding written explicitly at the sites of
-§2.4, the old fold still authoritative); C5c (`aeaa59d` + fixes `ef0afb9`
-(r16), `a51ff56` (r17/r18), `d53a82a` (r18 #2) — `m.shared` folds every
+(`446dc88` — local rows and echo hiding written explicitly at the sites of
+§2.4, the old fold still authoritative); C5c (`8b4620b` + fixes `624eae8`
+(r16), `5c770b8` (r17/r18), `4e3df13` (r18 #2) — `m.shared` folds every
 primary event, the pane consumes `Change`, the duplicate model-assertion
-tests deleted, the parity watch (A11) installed package-wide); C7 (`ec4aa17`
-— `m.sess` goes, SF-03, through one helper); C8 (`065675e` + fixes `f20bbab`
-(r19) — native's first-prompt `Title` delta, SF-01, X38's two-golden move).
+tests deleted, the parity watch (A11) installed package-wide); C7
+(`375919e` — `m.sess` goes, SF-03, through one helper); C8 (`bee8547` +
+fixes `0f7730a` (r19) — native's first-prompt `Title` delta, SF-01, X38's
+two-golden move); and, after the branch rebased onto `origin/main` `f5c3cfd`
+(H6 PR 1 #51), one further test-only commit (`83e58e3`, H6's own diagnosis —
+X39: `grok-subagent-hold` plus a wait on the tool row before the tokens,
+moving `grok-subagent-rows-{80x24,100x30}` by one spinner glyph). This
+docs commit (C9) is `c6f17ec`, landed before the rebase pulled `83e58e3` on
+top of it. The SHAs above are the rebased history; the pre-rebase SHAs
+(`1a72d21`, `02f45ac`, `aeaa59d`, `ef0afb9`, `a51ff56`, `ec4aa17`,
+`d53a82a`, `065675e`, `f20bbab`, `abeaed9`) name the same commits' content
+and are what the smoke and soak artifacts below were built from. After the
+rebase, the full gate (`make lint && make test && make test-race && make
+build && make test-cli`), `go test -cpu=1 -count=2` on
+`./internal/{tui,transcript,agent}/...`, and `go test -race -count=5
+./internal/tui/...` all passed at `83e58e3`.
 
 ### Plan review — 2026-09-21
 
@@ -1382,7 +1395,7 @@ decision. The full text and every failing schedule are in the plan.
     were involved). `Entry.Cut` records whether a stream was cut, carried on
     the wire, so `Restore` re-accounts a closed entry exactly.
 
-**PR 2** (`27c1db6..HEAD`), decided by the executor per the owner's
+**PR 2** (`feature/plan-024-s1c-tui`, #52), decided by the executor per the owner's
 2026-09-24 instruction not to stop and ask, each recapped here:
 
 26. **X26 (C5b)** — an interjection has no local twin to hide: its row has
@@ -1417,7 +1430,7 @@ decision. The full text and every failing schedule are in the plan.
     continuation row showing the tail from the clear mark's offset, dated at
     that chunk; past the 64 KiB cap the offset means nothing and the row
     shows the whole tail.
-32. **X31 (C5c), revised after r17 (`a51ff56`)** — the todo notes after
+32. **X31 (C5c), revised after r17 (`5c770b8`)** — the todo notes after
     `/clear`. The pane's dedupe decision is authoritative in both
     directions: a fold note the pane does not owe gets no row (hidden by
     kind, like an echo), and an owed note the fold did not write is the
@@ -1469,7 +1482,8 @@ decision. The full text and every failing schedule are in the plan.
     script's `<wait:text:4.7k tok>` could match before the wait tool's own
     event was applied, and the golden was captured without that tool row.
     S1c does not remove this — agent rows still come from `State()`, SF-02
-    is S2's. The fix, landed as its own test-only commit: a
+    is S2's. The fix, landed as its own test-only commit (`83e58e3`, after
+    the branch rebased onto `origin/main` `f5c3cfd`/H6 PR 1 #51): a
     `grok-subagent-hold` fake mode that sends nothing after its progress
     event, a wait on the tool row before the tokens, and
     `runFakeFrameFrozen` so the capture is deterministic — which moves
@@ -1519,9 +1533,10 @@ the first turn):
 | native | `fireworks/kimi-k3` | **SAME** | snapshot seq 22, folded 240 records to seq 262 | main 10 entries, 11,780 B |
 | grok, with a sub-agent | default | **SAME** | snapshot seq 39, folded 892 records to seq 931 | main 9 entries, 6,166 B; subs 1/5 entries/4,000 B (570 child-tagged lines) |
 
-**PR 2 — V1, Linux, tmux, at the tip** (`smoke/linux/pr2/RESULTS.md`, binary
-from `065675e`; an earlier phase at the C5c binary is `EARLY.md`, all legs
-PASS there too):
+**PR 2 — V1, Linux, tmux** (`smoke/linux/pr2/RESULTS.md`, binary from
+`065675e` — the pre-rebase commit, the same code as `bee8547` before H6
+PR 1 (#51) was merged under it; an earlier phase at the C5c binary is
+`EARLY.md`, all legs PASS there too):
 
 | # | leg | cursor | grok | native |
 |---|---|---|---|---|
@@ -1537,8 +1552,9 @@ PASS there too):
 | C8 | native title on the separator | n/a | n/a | PASS |
 | — | attach probe | PASS (SAME) | PASS (SAME) | PASS (SAME) |
 
-**PR 2 — V4, mac-mini, over ssh** (`smoke/macos/RESULTS.md`; cursor
-**NOT REACHABLE** — login keychain, as S1a/S1b/PR1 all found):
+**PR 2 — V4, mac-mini, over ssh** (`smoke/macos/RESULTS.md`, the same
+`065675e` darwin binary as V1's; cursor **NOT REACHABLE** — login keychain,
+as S1a/S1b/PR1 all found):
 
 | # | leg | grok | native |
 |---|---|---|---|
@@ -1561,10 +1577,12 @@ craze-initiated meta sets `mode`/`text`.
 
 ### Measurements
 
-**PR 1.** **V6** (a live 50-tool cursor session, Linux): craze's own peak RSS
-31.1 MiB baseline (`9125ec7`) vs 31.0 MiB candidate (−0.1 MiB, within
-run-to-run noise), 34.9 MiB with the probe's two extra models; the model
-retained 1,677,517 bytes (1.60 MiB) on 65 tools / 32 large edits — **4.9×
+**PR 1.** **V6** (a live 66-tool cursor session, Linux — 66 tools for both
+the baseline and the candidate run, 65 with the probe's two extra models
+attached): craze's own peak RSS 31.1 MiB baseline (`9125ec7`) vs 31.0 MiB
+candidate (−0.1 MiB, within run-to-run noise), 34.9 MiB with the probe's two
+extra models; the model retained 1,677,517 bytes (1.60 MiB) on 65 tools / 32
+large edits — **4.9×
 under the 8 MiB main budget**. Owner decision 3's raise-trigger (within 4× /
 ≥ 2 MiB) was not met, so `Bounds.MainBytes` stays 8 MiB. Recorded for the
 owner: this session retained ~25 KiB per tool (dominated by edit diffs), so
@@ -1589,8 +1607,16 @@ snapshot allocates 1.66× its size and retains 0.97–0.99×. X19's lock-hold
 bound: a cut's median 223–367 µs, fastest 162–193 µs, slowest 1.2–1.9 ms
 (1.0–3.2 ms under `-race`).
 
-**PR 2.** **V5** — `go test -race -count=20` of transcript/engine/agent/tui
-at `f20bbab`: @V5@
+**PR 2.** **V2** (`--json` parity against the `6581e0a` baseline harness, 103
+scenarios) at `f20bbab` (pre-rebase; the same code as `0f7730a` before H6
+PR 1 (#51) was merged under it): 102/103 SAME by bytes, 103/103 by content
+(`sigint-between-turns`, the documented unordered-pair race, calibrated —
+`v2/README.md` "PR 2 at `f20bbab`").
+
+**V5** — `go test -race -count=20 -timeout 60m` of `internal/transcript`,
+`engine`, `agent` and `tui` at `f20bbab` (pre-rebase; the same code as
+`0f7730a`): all pass — transcript 477 s, engine 305 s, agent 1,111 s, tui
+1,118 s; no failure, nothing retried.
 
 **The parity watch's coverage** (A11, X34): one run over `internal/tui`'s
 whole test suite folded 606 models across 7,810 folds, with 3,700 whole

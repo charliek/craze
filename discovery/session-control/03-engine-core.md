@@ -347,7 +347,8 @@ the index worker's own bounded last attempt. A second `Close` is a no-op
 
 §8 above describes the transcript model as planned, before any of it existed.
 `internal/transcript` is now the code (Plan 024, two PRs: `feature/plan-024-s1c-model`
-#50 `27c1db6`, `feature/plan-024-s1c-tui` #? `?`); this is what changed from
+#50 `27c1db6`, `feature/plan-024-s1c-tui` #52, merged 2026-09-24); this is
+what changed from
 the design as it went in, so a later phase reads the real thing rather than
 the proposal (the plan's §3, its execution amendments, `12` S1c).
 
