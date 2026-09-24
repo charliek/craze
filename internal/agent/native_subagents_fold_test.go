@@ -66,6 +66,13 @@ func TestNativeRosterMatchesFoldedEvents(t *testing.T) {
 		o.NewModel = func(modeltable.Resolved) (fantasy.LanguageModel, error) { return r, nil }
 		o.Now = func() time.Time { return time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC) }
 	})
+	// The test's two readers are its own (review r8, finding 4): stop ends the
+	// primary's, which nothing else can — EventLog.Primary is never closed —
+	// and readers joins both. Close comes first and the stop after it, so the
+	// primary is still being read while Close drains what it publishes; the
+	// fold's reader ends with its subscription.
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
 	t.Cleanup(func() {
 		closed := make(chan struct{})
 		go func() {
@@ -76,6 +83,17 @@ func TestNativeRosterMatchesFoldedEvents(t *testing.T) {
 		case <-closed:
 		case <-time.After(contractWait):
 			t.Errorf("Close at cleanup did not return within %v", contractWait)
+		}
+		close(stop)
+		joined := make(chan struct{})
+		go func() {
+			readers.Wait()
+			close(joined)
+		}()
+		select {
+		case <-joined:
+		case <-time.After(contractWait):
+			t.Errorf("the test's readers did not return within %v of Close", contractWait)
 		}
 	})
 	if err := s.Start(context.Background()); err != nil {
@@ -90,24 +108,29 @@ func TestNativeRosterMatchesFoldedEvents(t *testing.T) {
 	}
 	t.Cleanup(sub.Close)
 	m := transcript.New(transcript.Options{ErrText: func(err error) string { return err.Error() }})
-	go func() {
+	readers.Go(func() {
 		for rec := range sub.Records() {
 			if ev, err := rec.Event(); err == nil {
 				m.Fold(ev)
 			}
 		}
-	}()
+	})
 	// The primary's one reader: what each child streamed, and the seq of each
-	// turn's ending.
+	// turn's ending. It reads until the cleanup stops it, after Close.
 	var pmu sync.Mutex
 	var primary []agent.Event
-	go func() {
-		for ev := range s.Events() {
-			pmu.Lock()
-			primary = append(primary, ev)
-			pmu.Unlock()
+	readers.Go(func() {
+		for {
+			select {
+			case ev := <-s.Events():
+				pmu.Lock()
+				primary = append(primary, ev)
+				pmu.Unlock()
+			case <-stop:
+				return
+			}
 		}
-	}()
+	})
 	streamed := func() []agent.Event {
 		pmu.Lock()
 		defer pmu.Unlock()

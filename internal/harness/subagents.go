@@ -27,7 +27,8 @@ import (
 // # The registry and its lock
 //
 // live holds the children that are registered: running, or on their way to
-// it. regMu guards it, sealed and nothing else. It is a leaf: it is never held
+// it. regMu guards it, sealed and the keys of the children the running turn
+// has retired (spent), and nothing else. It is a leaf: it is never held
 // across a child's Open, Run or Close, nor across a sink call; the only lock
 // taken under it is the modes box's, to read or set the mode (s.mu → regMu →
 // modes.mu for SetMode, regMu → modes.mu for a registration; never the other
@@ -128,6 +129,10 @@ type subagents struct {
 	regMu  sync.Mutex
 	sealed bool                    // Close has begun: no child registers from here
 	live   map[string]*childHandle // the registered children, by id
+	// spent are the keys of the children the running turn has retired, kept
+	// until the turn detaches (childKeys, review r8): a call's ToolFinished
+	// follows its child's retirement and carries what the child wrote.
+	spent []string
 
 	// seams are the runner's test seams, set before the first turn; zero is
 	// production.
@@ -181,9 +186,48 @@ func newSubagents(s *Session) *subagents {
 
 // attach makes t the turn this runner's calls report to, for the turn's life,
 // and returns what detaches it (Run defers it, as it does the todo list's).
+// The detach forgets the keys of the children the turn retired: every call of
+// the turn, and so every ToolFinished that could carry a child's text, has
+// returned by then (childKeys).
 func (r *subagents) attach(t *turn) (release func()) {
 	r.turn.Store(&turnLink{emit: t.emitLocked, sink: t.sink, model: t.model})
-	return func() { r.turn.Store(nil) }
+	return func() {
+		r.turn.Store(nil)
+		r.regMu.Lock()
+		r.spent = nil
+		r.regMu.Unlock()
+	}
+}
+
+// childKeys are the keys of this session's sub-agents that Session.Redact
+// covers besides its own (review r8, finding 1): every registered child's once
+// it has opened — a child is still registered when its SubagentFinished
+// reaches the sink — and every child's the running turn has retired, since
+// the call's ToolFinished, which the adapter publishes after sanitizing, holds
+// the child's text and comes after the retirement. A child that never opened
+// knows none.
+//
+// regMu is taken to copy the handles and the retired keys, and released before
+// any handle's lock or any child's key lock is taken: each is a leaf, none is
+// held across another or across a sink. A nil runner — a sub-agent's — has
+// none.
+func (r *subagents) childKeys() []string {
+	if r == nil {
+		return nil
+	}
+	r.regMu.Lock()
+	handles := make([]*childHandle, 0, len(r.live))
+	for _, h := range r.live {
+		handles = append(handles, h)
+	}
+	keys := slices.Clone(r.spent)
+	r.regMu.Unlock()
+	for _, h := range handles {
+		if child := h.session(); child != nil {
+			keys = append(keys, child.tools.knownKeys()...)
+		}
+	}
+	return keys
 }
 
 // setMode is SetMode's critical section under the registry lock: set the
@@ -263,6 +307,13 @@ func (h *childHandle) isClosing() bool {
 	return h.closing
 }
 
+// session is the child attached to this handle, nil before it opened.
+func (h *childHandle) session() *Session {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sess
+}
+
 // acquire takes a slot, waiting for one while the call's context is live and
 // the session is not closing, and reports whether it holds one (step 1). A
 // slot won while the context or closing is also ready is given back: a
@@ -311,14 +362,27 @@ func (r *subagents) register(id string, cancel context.CancelCauseFunc) (*childH
 	return h, mode, true
 }
 
-// retire removes a child from the registry once its call is done with it.
+// retire removes a child from the registry once its call is done with it,
+// and keeps its keys for the rest of the running turn (childKeys). They are
+// read before regMu is taken: a child's key lock is a leaf, never taken under
+// the registry's, and a child's keys are those of its Open — nothing switches
+// a child's model, which is the only way a session learns one.
 func (r *subagents) retire(h *childHandle) {
 	if r.seams.retiring != nil {
 		r.seams.retiring(h.id)
 	}
+	var keys []string
+	if child := h.session(); child != nil {
+		keys = child.tools.knownKeys()
+	}
 	r.regMu.Lock()
 	defer r.regMu.Unlock()
 	delete(r.live, h.id)
+	for _, k := range keys {
+		if !slices.Contains(r.spent, k) {
+			r.spent = append(r.spent, k)
+		}
+	}
 }
 
 // isClosed reports whether ch is closed, without waiting.

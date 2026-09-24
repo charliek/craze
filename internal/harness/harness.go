@@ -78,6 +78,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 )
 
@@ -680,7 +681,39 @@ func (s *Session) PromptSHA256() string { return s.store.Header().SystemPromptSH
 // it has returned and before the Run it was redacting for: two calls cannot
 // be made one from out here, and the caller that cares holds the prompt path
 // between them.
-func (s *Session) Redact(text string) string { return s.tools.widest().String(text) }
+//
+// It covers the session's sub-agents' keys too (plan 026 §3.9, review r8,
+// finding 1): a child that opened after the environment gained a key knows
+// one its parent does not, and the adapter publishes what the child wrote —
+// its roster row, its lifecycle, the failure its call returns — through this
+// redactor, after sanitizing, which can put a key the runner's union could not
+// see back together. So every registered child's keys are covered — a child
+// is still registered when its SubagentFinished reaches the sink — and so are
+// those of every child the running turn has retired, until that turn ends:
+// the call's ToolFinished follows the retirement and carries the child's
+// text (subagents.childKeys). One replacer over them all, never two in turn
+// (subagents.union says why).
+func (s *Session) Redact(text string) string { return s.redactor().String(text) }
+
+// Redactor is Redact taken once: a function over the keys Redact covers now,
+// which takes no lock when it is applied. A caller that redacts inside a lock
+// of its own, where Redact's — the toolset's and the runner's registry's —
+// may not be taken, takes it before that lock (the adapter's roster and task
+// rows, plan 026 §3.9, review r8). It cannot cover a key learned after it was
+// taken: Redact's own limit, for one call.
+func (s *Session) Redactor() func(string) string { return s.redactor().String }
+
+// redactor is the replacer Redact applies: the widest one while no sub-agent
+// knows a key the session does not, and otherwise one over both sessions'
+// keys together. The toolset's lock and the runner's are each taken alone
+// (knownKeys, widest, childKeys): both are leaves.
+func (s *Session) redactor() *redact.Replacer {
+	keys, kids := s.tools.knownKeys(), s.subs.childKeys()
+	if !slices.ContainsFunc(kids, func(k string) bool { return !slices.Contains(keys, k) }) {
+		return s.tools.widest()
+	}
+	return redact.New(append(keys, kids...)...)
+}
 
 // Close ends the session: it cancels a live Run and waits for it to return —
 // by which time a partial answer has been persisted, interrupted — then

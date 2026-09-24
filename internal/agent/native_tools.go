@@ -292,6 +292,27 @@ func nativeTaskOf(req harness.ToolRequest, safe nativeSafe) *TaskInfo {
 	}
 }
 
+// resafeTask puts an agent row's own texts through safe again — its title, its
+// raw input, and its task's description, prompt, type and model — with the
+// caps toolCalled and the stamps gave them, before the row is published once
+// more (plan 026 §3.9, review r8, finding 2). They were redacted when they
+// arrived, with the keys known then; a key the parent learned since — a
+// SetModel that resolved one while the child ran — or one only the child knows,
+// which the redactor covers once the child is registered, would otherwise go
+// out again in every later publication of the row. safe is taken before toolMu
+// and applying it is pure, so this runs inside the merge (apply). A row it
+// has already been through, with no key learned since, is unchanged.
+func resafeTask(t *ToolEvent, safe nativeSafe) {
+	t.Title = safe.text(t.Title)
+	t.RawInput = truncateUTF8(safe.text(t.RawInput), rawInputCap)
+	if task := t.Task; task != nil {
+		task.Description = truncateUTF8(safe.text(task.Description), subagentDescCap)
+		task.Prompt = truncateUTF8(safe.text(task.Prompt), taskPromptCap)
+		task.SubagentType = truncateUTF8(safe.text(task.SubagentType), subagentTypeCap)
+		task.Model = truncateUTF8(safe.text(task.Model), subagentModelCap)
+	}
+}
+
 // toolProgress keeps a running call's output: the whole of what it has
 // produced so far, not a delta, as the tail an expanded row draws and the
 // head a collapsed one previews. It is published without blocking —
@@ -317,23 +338,24 @@ func (s *nativeSession) toolProgress(owner string, e harness.ToolProgress) {
 // The parent's agent row is closed as a task (plan 026 §3.9): its status and
 // duration, and Receipt, which for native means "the lifecycle is complete and
 // Model is final" — the row's model is shown only for a receipt
-// (transcript.go's taskRows; panel P15). A call that started a child takes
-// both from the child's roster row, which went terminal before this event
-// (SubagentFinished precedes the call's ToolFinished, §3.9); one that never
-// started a child — a refused type, a failed Open, a call aborted while it
-// waited for a slot — takes them from its own result and duration. The roster
-// is read before the row is merged, one lock and then the other, never one
-// inside the other (panel P17).
+// (transcript.go's taskRows; panel P15). A call that started a child had its
+// row stamped with the child's status, duration and model when the child
+// finished (subagentFinished; SubagentFinished precedes the call's
+// ToolFinished, §3.9), and keeps them: nothing here reads the roster, which may
+// have evicted the child since (review r8, finding 3). One that never started
+// a child — a refused type, a failed Open, a call aborted while it waited for
+// a slot — takes them from its own result and duration.
 func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 	res := e.Result
 	status, ms := taskStatusOf(res), int(e.Duration.Milliseconds())
-	if owner == "" && s.isTaskRow(e.ID) {
-		if c, ok := s.childOfCall(e.ID); ok && c.Status != SubagentRunning {
-			status, ms = c.Status, c.DurationMs
-		}
+	task := owner == "" && s.isTaskRow(e.ID)
+	var safe nativeSafe
+	if task {
 		// A failed agent call's text is the child's last output, which a model
-		// wrote: the task payload's discipline, as toolCalled's (P38).
-		safe := nativeSafe{red: s.redactor()}
+		// wrote: the task payload's discipline, as toolCalled's (P38). The
+		// redactor still covers the child's keys, retired as it is (harness's
+		// Session.Redact: a child's are kept for the rest of its turn).
+		safe = nativeSafe{red: s.redactor()}
 		res.Text, res.Content = safe.text(res.Text), safe.text(res.Content)
 	}
 	s.publishTool(owner, e.ID, func(t *ToolEvent) {
@@ -377,10 +399,13 @@ func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 		if out != (ToolOutput{}) {
 			t.Output = &out
 		}
-		if owner == "" && t.Task != nil {
+		if task && t.Task != nil {
 			// merge copied the Task before handing it here (P5).
-			t.Task.Status = status
-			t.Task.DurationMs = max(ms, 0)
+			resafeTask(t, safe)
+			if t.Task.Status == "" { // no child finished for this call
+				t.Task.Status = status
+				t.Task.DurationMs = max(ms, 0)
+			}
 			t.Task.Receipt = true
 		}
 	})
@@ -426,7 +451,10 @@ func (s *nativeSession) settleTools() { s.settleSet("", toolCancelled) }
 // its calls never reported an ending, and the child has ended.
 func (s *nativeSession) settleChildTools(child, status string) { s.settleSet(child, status) }
 
-// settleSet is settleTools for owner's set, to status.
+// settleSet is settleTools for owner's set, to status. An agent row it
+// settles is published again, so its own texts go through the redactor again
+// first (resafeTask, review r8): it is taken before toolMu, once, and only for
+// the parent's set, the one set that holds agent rows.
 func (s *nativeSession) settleSet(owner, status string) {
 	s.toolMu.Lock()
 	var ids []string
@@ -434,10 +462,22 @@ func (s *nativeSession) settleSet(owner, status string) {
 		ids = append([]string(nil), set.order...)
 	}
 	s.toolMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	var safe nativeSafe
+	if owner == "" {
+		safe = nativeSafe{red: s.redactor()}
+	}
 	for _, id := range ids {
 		// The in-flight test happens under the merge lock: a terminal
 		// update that lands between the scan and the merge wins.
-		if t, changed := s.mergeTool(owner, id, true, func(t *ToolEvent) { t.Status = status }); changed {
+		if t, changed := s.mergeTool(owner, id, true, func(t *ToolEvent) {
+			if t.Task != nil && safe.red != nil {
+				resafeTask(t, safe)
+			}
+			t.Status = status
+		}); changed {
 			s.emit(Event{Type: EventTool, Agent: owner, Tool: &t})
 		}
 	}

@@ -29,8 +29,8 @@ import (
 // the adapter's own locks: s.mu → rosterMu → the log's outbox, and nothing
 // else is ever taken under it — never toolMu, whose sets the roster's
 // evictions drop in a section of their own (panel P17), never s.mu, and never
-// the harness's redactor, which every payload has been through before the
-// lock is taken.
+// the harness's locks: the redactor a section applies is taken before the
+// section, and applying it takes no lock (redactor).
 //
 // Every EventSubagent is ENQUEUED (log.Enqueue: the outbox mutex is a strict
 // leaf) inside the rosterMu section that made the change it reports, so the
@@ -69,18 +69,36 @@ import (
 // is enqueued, which is where the fold runs it; an evicted child's tool rows go
 // with it, dropped under toolMu once rosterMu is released.
 //
-// # Payloads (panel P9, P30, P38)
+// # Payloads (panel P9, P30, P38; review r8)
 //
 // A roster, lifecycle or task payload is text the runner redacted as it built
 // the event (with the parent's and the child's keys together), and the adapter
-// redacts it again with the session's own widest redactor — a key the parent
+// redacts it again with the session's widest redactor — every key the parent
+// knows now and every key its children know, one that only a child learned
+// included (harness.Session.Redact; review r8, finding 1) — so a key the parent
 // learned while the event waited for the parent turn's lock is covered here
-// (review r4) — sanitizes it and redacts it once more (nativeSafe), because
-// sanitizing can put a key back together; then capSubagent caps it, which
-// neither un-sanitizes nor rebuilds anything (a cut only removes). A child's
-// streamed text and thought are the parent's contract exactly: raw model
-// output, sanitized and not redacted (harness/events.go). A child's tool events
-// were redacted by its own dispatcher and are merged like the parent's.
+// (review r4); sanitizes it and redacts it once more (nativeSafe), because
+// sanitizing can put a key back together, a child's that the runner's union
+// could not see split included; then capSubagent caps it, which neither
+// un-sanitizes nor rebuilds anything (a cut only removes).
+//
+// That is done to the WHOLE row, in every section that publishes it, and not
+// only to the fields the event brought (review r8, finding 2): a row keeps its
+// description, prompt and activity from event to event, and a key the parent
+// learns after they were redacted — a SetModel that resolves one while the
+// child runs — would otherwise ride out again in the next progress or finished
+// payload, and in the snapshot. The redactor is taken before rosterMu, and
+// applying it is pure (redactor), so the section takes no lock of the
+// harness's. The row keeps what the section redacted it to, which is what its
+// payload carries: the snapshot and the fold still agree. The parent's agent
+// row is held to the same rule in every section that republishes it
+// (resafeTask). What no section can cover is a key learned after its redactor
+// was taken, while its payload waits: X14's accepted residual.
+//
+// A child's streamed text and thought are the parent's contract exactly: raw
+// model output, sanitized and not redacted (harness/events.go). A child's tool
+// events were redacted by its own dispatcher and are merged like the
+// parent's.
 
 // diagSubagentUsage is the journal diag the parent's unpersisted sub-agent
 // usage is written as (plan 026 §3.7, panel P40).
@@ -100,11 +118,15 @@ type nativeChild struct {
 	finish uint64
 }
 
-// redactor is the session's widest redactor — every key it knows now, the
-// ones learned after Open included (harness.Session.Redact) — or none before
-// Start. It takes s.mu for the read alone, and is called with no lock of the
-// adapter's held: s.mu is never taken under toolMu or rosterMu, which
-// Snapshot takes under it.
+// redactor is the session's widest redactor as it is now — every key the
+// session knows, the ones learned after Open included, and every key its
+// sub-agents know (harness.Session.Redactor; review r8, finding 1) — or none
+// before Start. It is TAKEN with no lock of the adapter's held: it takes s.mu
+// for the read, and the harness's own leaf locks to gather the keys, and s.mu
+// is never taken under toolMu or rosterMu, which Snapshot takes under it. The
+// function it returns is pure — applying it takes no lock at all — so a
+// section under rosterMu or toolMu applies one taken before it (review r8,
+// finding 2).
 func (s *nativeSession) redactor() func(string) string {
 	s.mu.Lock()
 	hs := s.hs
@@ -112,12 +134,15 @@ func (s *nativeSession) redactor() func(string) string {
 	if hs == nil {
 		return func(text string) string { return text }
 	}
-	return hs.Redact
+	return hs.Redactor()
 }
 
 // safeSubagent puts every text field of info through safe and then caps it
 // (the file's "Payloads"). ID and ToolCallID are craze's own — the runner's
-// UUID and the harness's t<turn>.<step>.<n> — and pass as they are.
+// UUID and the harness's t<turn>.<step>.<n> — and pass as they are. It is pure,
+// so a section applies it under rosterMu, to the row, before the row's payload
+// is cloned and enqueued; over a row it has already been through, with no key
+// learned since, it changes nothing.
 func safeSubagent(info *SubagentInfo, safe nativeSafe) {
 	info.Description = safe.text(info.Description)
 	info.SubagentType = safe.text(info.SubagentType)
@@ -140,6 +165,9 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 	if e.ID == "" {
 		return
 	}
+	// Taken before any lock: the child is registered with the harness by now,
+	// so it covers a key only the child knows (redactor).
+	safe := nativeSafe{red: s.redactor()}
 	info := SubagentInfo{
 		ID:           e.ID,
 		ToolCallID:   e.CallID,
@@ -151,7 +179,6 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 		StartedAt:    wallClock(e.At, s.Now),
 		Transcript:   true,
 	}
-	safeSubagent(&info, nativeSafe{red: s.redactor()})
 	// The child's tool rows get their set before the child exists for anyone:
 	// it cannot stream before this returns (the runner runs it after).
 	s.openChildTools(e.ID)
@@ -163,17 +190,22 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 	if _, again := s.roster[e.ID]; !again {
 		s.rosterOrder = append(s.rosterOrder, e.ID)
 	}
-	s.roster[e.ID] = &nativeChild{info: info}
-	s.enqueueRosterLocked(SubagentChangeSpawned, info)
+	row := &nativeChild{info: info}
+	s.roster[e.ID] = row
+	safeSubagent(&row.info, safe)
+	s.enqueueRosterLocked(SubagentChangeSpawned, row.info)
+	info = cloneSubagent(row.info) // what spawned said, for what follows it
 	s.rosterMu.Unlock()
 	s.flushRoster()
 
 	if info.Prompt != "" {
 		s.emit(Event{Type: EventUser, Agent: e.ID, Text: info.Prompt})
 	}
-	// Task-only: nothing else about the row changes, which is why the merge
-	// compares Task and copies it before this writes through it (P5).
+	// Task-only but for the row's own texts, which go through the redactor
+	// that now covers the child (resafeTask): that is why the merge compares
+	// Task and copies it before this writes through it (P5).
 	s.stampTool("", e.CallID, func(t *ToolEvent) {
+		resafeTask(t, safe)
 		if t.Task == nil {
 			t.Task = &TaskInfo{}
 		}
@@ -211,7 +243,7 @@ func (s *nativeSession) subagentEvent(e harness.SubagentEvent) {
 			activity = safe.text(c.Request.Tool)
 		}
 		used := safe.text(c.Request.Tool)
-		s.subagentProgress(id, func(info *SubagentInfo) {
+		s.subagentProgress(id, safe, func(info *SubagentInfo) {
 			info.ToolCalls++
 			info.Activity = activity
 			info.ToolsUsed = tailStrings(append(slices.Clone(info.ToolsUsed), used), subagentToolsUsedCap)
@@ -226,7 +258,7 @@ func (s *nativeSession) subagentEvent(e harness.SubagentEvent) {
 	case harness.StepDone:
 		tokens := int(c.Usage.Input + c.Usage.Output)
 		if tokens > 0 {
-			s.subagentProgress(id, func(info *SubagentInfo) { info.TokensUsed += tokens })
+			s.subagentProgress(id, nativeSafe{red: s.redactor()}, func(info *SubagentInfo) { info.TokensUsed += tokens })
 		}
 	case harness.Retrying, harness.Todos, harness.Steered, harness.Diag:
 		// Dropped, by name. A retry discards what its step streamed, which the
@@ -240,8 +272,11 @@ func (s *nativeSession) subagentEvent(e harness.SubagentEvent) {
 
 // subagentProgress applies apply to child id's running row and, when a field
 // a consumer reads changed, enqueues EventSubagent{progress} in the same
-// section. apply's inputs are already safe; the row is capped again after it.
-func (s *nativeSession) subagentProgress(id string, apply func(*SubagentInfo)) {
+// section. The whole row is then put through safe, taken before the lock
+// (review r8, finding 2): the payload carries the description, the prompt and
+// the activity it kept from earlier events, and a key the parent learned since
+// they were redacted is redacted in them here, before they go out again.
+func (s *nativeSession) subagentProgress(id string, safe nativeSafe, apply func(*SubagentInfo)) {
 	s.rosterMu.Lock()
 	defer s.rosterMu.Unlock()
 	row := s.roster[id]
@@ -250,7 +285,7 @@ func (s *nativeSession) subagentProgress(id string, apply func(*SubagentInfo)) {
 	}
 	prev := cloneSubagent(row.info)
 	apply(&row.info)
-	capSubagent(&row.info)
+	safeSubagent(&row.info, safe)
 	if sameSubagentFull(prev, row.info) {
 		return
 	}
@@ -259,15 +294,26 @@ func (s *nativeSession) subagentProgress(id string, apply func(*SubagentInfo)) {
 
 // subagentFinished is a child ending: its open tool rows settled to its
 // outcome, its row terminal and EventSubagent{finished} in one section with the
-// eviction that may follow, the evicted children's tool rows dropped, and the
-// barrier.
+// eviction that may follow, the evicted children's tool rows dropped, the
+// barrier, and the parent's agent row stamped with how the child ended.
+//
+// The stamp is why the call's ToolFinished needs nothing of the roster (review
+// r8, finding 3): the child's status, its duration — EndedAt − StartedAt, the
+// row's own — and its final model go on the agent row here, while the roster
+// row is certainly there, and the ToolFinished only closes the row with its
+// receipt. A roster that has evicted the row by then — thirty-two more children
+// finishing between the child's end and its call's return — no longer holds
+// them, and the row closed with the call's own duration instead, measured from
+// its ToolCalled, the delay and all.
 func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 	if e.ID == "" {
 		return
 	}
+	// Taken before any lock, while the child is still registered with the
+	// harness: it covers a key only the child knows (redactor).
 	safe := nativeSafe{red: s.redactor()}
 	status := finishStatus(e.Status)
-	errText, output, model := safe.text(e.Error), safe.text(e.Text), safe.text(e.Model)
+	model := safe.text(e.Model)
 	tokens := int(e.Usage.Input + e.Usage.Output)
 
 	// Settled, and published directly, before the roster's finished is
@@ -290,8 +336,8 @@ func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 	}
 	info := &row.info
 	info.Status = status
-	info.Error = errText
-	info.Output = output
+	info.Error = e.Error // raw: the section's safeSubagent below redacts it with the rest
+	info.Output = e.Text
 	if model != "" {
 		info.Model = model
 	}
@@ -303,19 +349,32 @@ func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 	info.ToolCalls = e.ToolCalls
 	info.Turns = e.Steps
 	info.TokensUsed = tokens
-	capSubagent(info)
+	// The whole row, not only what this event brought (review r8, finding 2).
+	safeSubagent(info, safe)
 	s.finishSeq++
 	row.finish = s.finishSeq
 	s.enqueueRosterLocked(SubagentChangeFinished, *info)
+	done := cloneSubagent(*info)
 	evicted := s.evictFinishedLocked(e.ID)
 	s.rosterMu.Unlock()
 
 	s.dropChildTools(evicted)
 	s.flushRoster()
+	// After the barrier, so the agent row says the child ended only once its
+	// finished has committed; published like the stamp at spawn, the row's own
+	// texts redacted again (resafeTask).
+	s.stampTool("", done.ToolCallID, func(t *ToolEvent) {
+		resafeTask(t, safe)
+		if t.Task == nil {
+			t.Task = &TaskInfo{}
+		}
+		t.Task.Status, t.Task.DurationMs, t.Task.Model = done.Status, done.DurationMs, done.Model
+	})
 }
 
 // enqueueRosterLocked enqueues the roster change change of info, cloned under
-// the lock (the file's comment). rosterMu is held.
+// the lock (the file's comment). info is a row the same section has put
+// through safeSubagent whole (the file's "Payloads"). rosterMu is held.
 func (s *nativeSession) enqueueRosterLocked(change string, info SubagentInfo) {
 	payload := cloneSubagent(info)
 	s.log.Enqueue(Event{Type: EventSubagent, Subagent: &payload, SubagentChange: change, At: s.Now()})
@@ -404,19 +463,6 @@ func (s *nativeSession) rosterRows() []SubagentInfo {
 		out = append(out, cloneSubagent(s.roster[id].info))
 	}
 	return out
-}
-
-// childOfCall is the roster row of the child the parent's call callID started,
-// cloned, and whether there is one.
-func (s *nativeSession) childOfCall(callID string) (SubagentInfo, bool) {
-	s.rosterMu.Lock()
-	defer s.rosterMu.Unlock()
-	for _, id := range s.rosterOrder {
-		if row := s.roster[id]; row.info.ToolCallID == callID {
-			return cloneSubagent(row.info), true
-		}
-	}
-	return SubagentInfo{}, false
 }
 
 // noteSubagentUsage journals what the parent's step spent on sub-agents when

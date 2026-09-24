@@ -16,7 +16,9 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1312,6 +1314,63 @@ def requests_of(server: SSEFixture, prompt: str) -> list[RecordedRequest]:
 def tool_results(request: RecordedRequest) -> dict[str, str]:
     """A request's tool results by call id."""
     return {m["tool_call_id"]: m["content"] for m in request.messages if m.get("role") == "tool"}
+
+
+@pytest.mark.parametrize("routed", [True, False], ids=["route", "script"])
+def test_sse_fixture_answers_in_recorded_order(fixture_server: SSEFixture, routed: bool) -> None:
+    """The fixture's record of its requests and its answers to them agree on
+    the order (review r8, finding 5), for a route's queue and the script alike.
+
+    Two requests race: the first is held inside the route's predicate -- a
+    test's own code, which the fixture runs outside its lock -- until the
+    second has been answered. Whichever is recorded first must be the one given
+    the first step. Recorded before its predicate ran and given its step after,
+    in a second critical section, the held request was recorded first and
+    answered with the second step. A predicate that owns neither request sends
+    both to the script, which the same split broke the same way.
+    """
+    first_in = threading.Event()
+    second_answered = threading.Event()
+
+    def holds_the_first(request: RecordedRequest) -> bool:
+        if request.body.get("tag") == "first":
+            first_in.set()
+            second_answered.wait(timeout=10)
+        return routed
+
+    steps = [answer("step 0"), answer("step 1")]
+    fixture_server.route(holds_the_first, steps if routed else [])
+    if not routed:
+        fixture_server.set_script(steps)
+
+    replies: dict[str, str] = {}
+
+    def post(tag: str) -> None:
+        body = json.dumps({"tag": tag, "messages": [{"role": "user", "content": "race"}]}).encode("utf-8")
+        request = urllib.request.Request(
+            fixture_server.base_url + "/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            replies[tag] = response.read().decode("utf-8")
+
+    first = threading.Thread(target=post, args=("first",))
+    first.start()
+    assert first_in.wait(timeout=10), "the first request never reached its predicate"
+    post("second")  # answered while the first is held in its predicate
+    second_answered.set()
+    first.join(timeout=10)
+    assert not first.is_alive(), "the first request was never answered"
+
+    def step_of(reply: str) -> str:
+        return next(s for s in ("step 0", "step 1") if s in reply)
+
+    recorded = [r.body["tag"] for r in fixture_server.requests]
+    assert sorted(recorded) == ["first", "second"], recorded
+    assert [step_of(replies[tag]) for tag in recorded] == ["step 0", "step 1"], (recorded, replies)
+    assert fixture_server.unscripted == 0
 
 
 def test_native_agent_fans_out_to_two_children(

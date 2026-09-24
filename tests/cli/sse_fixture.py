@@ -267,17 +267,24 @@ class SSEFixture:
                 auth = self.headers.get("Authorization", "")
                 record = RecordedRequest(self.path, auth, body)
                 with fixture._lock:
-                    n = len(fixture.requests)
-                    fixture.requests.append(record)
-                    mode = fixture._mode
                     routes = list(fixture._routes)
                 # Which route owns the request is decided outside the lock,
                 # for the reason a callable step runs outside it: a predicate
-                # is a test's own code. The route's step is then taken under
-                # the lock, so two requests of one route -- a child's, sent
-                # while its siblings stream -- never take the same step.
+                # is a test's own code.
                 owner = next((r for r in routes if r.predicate(record)), None)
+                # Then the request is recorded and its step taken in ONE
+                # critical section, after its predicate (review r8, finding
+                # 5), for a route and the script alike: recorded before the
+                # predicate and answered in a second section, a request held
+                # in its predicate was recorded ahead of one that then took
+                # the earlier step, so .requests and the answers disagreed on
+                # the order. Now .requests is the order the steps were handed
+                # out in, and two requests of one route -- a child's, sent
+                # while its siblings stream -- still never take the same step.
                 with fixture._lock:
+                    n = len(fixture.requests)
+                    fixture.requests.append(record)
+                    mode = fixture._mode
                     step = fixture._take_step_locked(owner)
                 # A scripted entry may be a function of the request that took
                 # it, which is how a step answers with something only the

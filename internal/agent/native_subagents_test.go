@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -799,14 +800,40 @@ func TestNativeSubagentRace(t *testing.T) {
 // the parent's tool calls, two children's whole lives each on its own
 // goroutine, snapshots — and Close landing in the middle. Under -race it is
 // the audit above the sink's switch, checked.
+//
+// The middle is forced (review r8, finding 6), never left to the scheduler,
+// which could run Close before any worker and leave every publication
+// suppressed: each worker opens its rows — its call running, its child spawned
+// — and waits at the gate, so the work is live before Close begins; the gate
+// opens with a hold armed on the log, which parks the first publication
+// admitted after it inside the log's in-flight region (the admitting hook);
+// Close begins only once one is parked there, while the others run on; and the
+// parked one is let go only once Close is seen waiting for it (closeWaits).
+// So a live publication spans the transition, and its worker finishes its
+// work across it.
 func TestNativeSinkIsConcurrent(t *testing.T) {
-	s, _ := taskSink(t, nil)
+	var armed atomic.Bool
+	parked := newLogHold(t, &armed)
+	closeWaiting := make(chan struct{})
+	var seen sync.Once
+	s, _ := taskSink(t, &logHooks{
+		admitting: func(kind admitKind) {
+			if kind == admitPublish {
+				parked.hold()
+			}
+		},
+		closeWaits: func(int) { seen.Do(func() { close(closeWaiting) }) },
+	})
 	at := time.Now()
-	var wg sync.WaitGroup
+	gate := make(chan struct{})
+	var opened, wg sync.WaitGroup
 	for c := range 8 {
+		opened.Add(1)
 		wg.Go(func() {
 			id := fmt.Sprintf("t1.1.%d", c)
 			s.sink(harness.ToolStarted{ID: id, Step: 1, Tool: "bash", Kind: tool.KindExecute})
+			opened.Done()
+			<-gate
 			for p := range 20 {
 				s.sink(harness.ToolProgress{ID: id, Output: strings.Repeat("o", p+1)})
 			}
@@ -814,10 +841,13 @@ func TestNativeSinkIsConcurrent(t *testing.T) {
 		})
 	}
 	for k := range 2 {
+		opened.Add(1)
 		wg.Go(func() {
 			id, call := fmt.Sprintf("kid%d", k), fmt.Sprintf("t1.1.a%d", k)
 			startAgentRow(t, s, call, "task", "do it")
 			childLife(s, id, call, at)
+			opened.Done()
+			<-gate
 			for range 50 {
 				s.sink(harness.SubagentEvent{ID: id, Event: harness.TextDelta{Text: "x"}})
 				s.sink(harness.SubagentEvent{ID: id, Event: harness.StepDone{Usage: harness.Usage{Output: 1}}})
@@ -831,11 +861,21 @@ func TestNativeSinkIsConcurrent(t *testing.T) {
 			_ = s.Snapshot()
 		}
 	})
+	opened.Wait()
+	if snap := s.Snapshot(); len(snap.Subagents) != 2 || len(snap.Tools) != 10 {
+		t.Fatalf("control: before Close the roster holds %d children and the parent %d rows; want 2 and 10, all live",
+			len(snap.Subagents), len(snap.Tools))
+	}
+	armed.Store(true)
+	close(gate)
+	await(t, parked.held, "a publication parked in the log, its worker mid-work")
 	closed := make(chan struct{})
 	go func() {
 		_ = s.Close()
 		close(closed)
 	}()
+	await(t, closeWaiting, "Close, waiting for the parked publication")
+	close(parked.release)
 	wg.Wait()
 	await(t, closed, "Close, landing among them")
 	for _, row := range s.Snapshot().Subagents {
@@ -935,6 +975,226 @@ func TestSubagentCanaryRedaction(t *testing.T) {
 			t.Fatalf("the roster Output %q; want the key redacted", out)
 		}
 	})
+}
+
+// learnableEnv is the fixture's environment behind a lock of its own, so a
+// case can give it a key while the harness reads it from other goroutines — a
+// child's Open, a SetModel's resolve.
+type learnableEnv struct {
+	mu  sync.Mutex
+	env map[string]string
+}
+
+func newLearnableEnv(f *nativeFixture) *learnableEnv {
+	e := &learnableEnv{env: maps.Clone(f.env)}
+	f.getenv = e.get
+	return e
+}
+
+func (e *learnableEnv) get(k string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.env[k]
+}
+
+func (e *learnableEnv) set(k, v string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.env[k] = v
+}
+
+// TestSubagentChildOnlyKeyRedacted (review r8, finding 1): after the parent
+// opened — so it never learns it — and before its two children open, which
+// do, the environment gains a key. One child answers with it and one fails
+// after streaming it, each spelling it split by a zero-width space, which no
+// redactor sees — the runner's union included — and the sanitizer puts back
+// together. The adapter's last redaction covers the children's keys: a child
+// is registered when its finished reaches the sink, and a retired child's keys
+// stay covered for the rest of its turn, which is when its call's ToolFinished
+// arrives. So the key is in neither roster Output, nor any roster payload, nor
+// the failed call's row — which shows that child's last output — nor any other
+// event, encoded or not (what --json projects), nor the journal. The children's
+// streamed text is the parent's contract, raw and sanitized, and does hold it:
+// the control that the sanitizer rebuilds it. Redacted with the parent's keys
+// alone, the rebuilt key went out in all of them.
+func TestSubagentChildOnlyKeyRedacted(t *testing.T) {
+	const childKey = "sk-only-the-children-know-it"
+	split := childKey[:6] + zeroWidthSpace + childKey[6:]
+	f, r := routedNative(t)
+	env := newLearnableEnv(f)
+	dir := filepath.Join(t.TempDir(), "journal")
+	s := f.started(Options{JournalDir: dir})
+	jw := journalOf(t, s.log)
+	inc := s.Incarnation()
+	w := newNativeWatcher(t, s)
+	env.set("NATIVE_NOKEY_KEY", childKey)
+	a := r["test/a"]
+	a.route("go", callsStep(agentCall(t, "a1", "answers", "answer with it"), agentCall(t, "a2", "fails", "fail with it")),
+		answer("noted"))
+	a.route("answer with it", answer("the key is ", split))
+	a.route("fail with it", reply(textParts("partial "+split), errorParts(errors.New("down"))))
+	if _, err := s.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	w.waitType(EventDone)
+	if s.hs.Redact(childKey) != childKey {
+		t.Fatal("control: the parent learned the key; only its children may know it")
+	}
+	evs := w.events()
+	var streamed strings.Builder
+	for _, ev := range evs {
+		if ev.Type == EventText && ev.Agent != "" {
+			streamed.WriteString(ev.Text)
+		}
+	}
+	if !strings.Contains(streamed.String(), childKey) {
+		t.Fatalf("control: the children streamed %q; want the key the sanitizer rebuilds from the split", streamed.String())
+	}
+
+	snap := s.Snapshot()
+	if len(snap.Subagents) != 2 {
+		t.Fatalf("the roster holds %v; want the two children", ids(snap.Subagents))
+	}
+	for _, row := range snap.Subagents {
+		if !strings.Contains(row.Output, redact.Marker) || len(nativeLeaks(row, childKey)) != 0 {
+			t.Fatalf("the roster row %+v; want the key in its Output redacted", row)
+		}
+	}
+	for _, ev := range evs {
+		if ev.Type == EventText || ev.Type == EventThought {
+			continue // raw model output, by contract (the control above)
+		}
+		if found := nativeLeaks(ev, childKey); len(found) != 0 {
+			t.Fatalf("a %s event leaks the key at %v: %+v", ev.Type, found, ev)
+		}
+		body, err := EncodeEvent(ev)
+		if err != nil {
+			t.Fatalf("encoding a %s event: %v", ev.Type, err)
+		}
+		if strings.Contains(body, childKey) {
+			t.Fatalf("the encoded %s event holds the key: %s", ev.Type, body)
+		}
+	}
+	failed := lastWhere(evs, func(ev Event) bool { return isParentRowDone(ev, "t1.1.2") })
+	if failed < 0 || evs[failed].Tool.Status != toolFailed || evs[failed].Tool.Output == nil ||
+		!strings.Contains(evs[failed].Tool.Output.Content, "partial "+redact.Marker) {
+		t.Fatalf("the failed call's row closed as %+v; want it failed, showing the child's last output with the key redacted", evs[failed].Tool)
+	}
+
+	closeJournaled(t, s, jw)
+	for _, l := range assertOneJournal(t, dir, jw, inc) {
+		if l["eventType"] == string(EventText) || l["eventType"] == string(EventThought) {
+			continue
+		}
+		if strings.Contains(fmt.Sprint(l), childKey) {
+			t.Fatalf("a journal line holds the key: %v", l)
+		}
+	}
+}
+
+// TestSubagentPayloadsRedactedWhole (review r8, finding 2): a child is spawned
+// with a call whose description and prompt hold a key nobody knows yet, so its
+// spawned payload carries the key as it is (the control). While the child is
+// held mid-step the environment gains the key and the parent's SetModel
+// resolves it; then the child's step ends and it finishes. Every roster
+// payload from then on — its progress and its finished, which carry the
+// description and the prompt it kept from its spawn — and every publication of
+// its call's row from then on — the stamp at its finish, the ToolFinished,
+// carrying the title, the raw input and the task they kept — is redacted whole
+// with the redactor of that moment: the key is in none of them, nor in the
+// snapshot, and the marker stands where it was. Redacting only what each event
+// brought sent the kept fields out again as they were.
+func TestSubagentPayloadsRedactedWhole(t *testing.T) {
+	const learned = "sk-learned-after-the-spawn"
+	f, r := routedNative(t)
+	env := newLearnableEnv(f)
+	s := f.started(Options{})
+	w := newNativeWatcher(t, s)
+	a := r["test/a"]
+	prompt := "use " + learned + " to check"
+	child := newHeld(t)
+	a.route("go", callsStep(agentCall(t, "a1", "check "+learned, prompt)), answer("ok"))
+	a.route(prompt, child.step(openTextParts("half "), closeTextParts("done")))
+	out := startPrompt(s, "go")
+	await(t, child.reached, "the child mid-step")
+	spawned := w.wait("the spawned event", func(ev Event) bool {
+		return ev.Type == EventSubagent && ev.SubagentChange == SubagentChangeSpawned
+	})
+	if !strings.Contains(spawned.Subagent.Prompt, learned) || !strings.Contains(spawned.Subagent.Description, learned) {
+		t.Fatalf("control: the spawned payload is %+v; want the key as it was, unknown to everyone then", spawned.Subagent)
+	}
+	env.set("NATIVE_NOKEY_KEY", learned)
+	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	if s.hs.Redact(learned) != redact.Marker {
+		t.Fatal("control: the SetModel did not resolve the key")
+	}
+	close(child.release)
+	if got := await(t, out, "the turn"); got.err != nil {
+		t.Fatalf("Prompt: %v", got.err)
+	}
+	w.waitType(EventDone)
+
+	evs := w.events()
+	id := spawned.Subagent.ID
+	progress := indexWhere(evs, 0, func(ev Event) bool { return isRoster(ev, id, SubagentChangeProgress) })
+	finished := indexWhere(evs, 0, func(ev Event) bool { return isRoster(ev, id, SubagentChangeFinished) })
+	done := indexWhere(evs, 0, func(ev Event) bool { return isParentRowDone(ev, "t1.1.1") })
+	if !ascending(progress, finished, done) {
+		t.Fatalf("the child's first progress %d, its finished %d and the call's row closed %d; want them in that order",
+			progress, finished, done)
+	}
+	// Nothing the child has published since the key was learned says it:
+	// every event from its first step's progress on, which the release let go.
+	for _, ev := range evs[progress:] {
+		if found := nativeLeaks(ev, learned); len(found) != 0 {
+			t.Fatalf("a %s event (%s) published after the key was learned leaks it at %v: %+v", ev.Type, ev.SubagentChange, found, ev)
+		}
+	}
+	if found := nativeLeaks(s.Snapshot(), learned); len(found) != 0 {
+		t.Fatalf("the snapshot leaks the key at %v", found)
+	}
+	if fin := evs[finished].Subagent; !strings.Contains(fin.Prompt, redact.Marker) || !strings.Contains(fin.Description, redact.Marker) {
+		t.Fatalf("the finished payload is %+v; want its kept prompt and description redacted", fin)
+	}
+	if row := evs[done].Tool; !strings.Contains(row.Title, redact.Marker) || !strings.Contains(row.RawInput, redact.Marker) ||
+		!strings.Contains(row.Task.Prompt, redact.Marker) || !strings.Contains(row.Task.Description, redact.Marker) {
+		t.Fatalf("the call's row closed as %+v (task %+v); want its kept texts redacted", row, row.Task)
+	}
+}
+
+// TestNativeTaskRowKeepsItsChildAfterEviction (review r8, finding 3): a child
+// finishes 1.5 s after it started, on a model other than the one it started
+// on, and thirty-two more children finish before its call's ToolFinished
+// arrives, so the roster has evicted its row by then; the ToolFinished itself
+// says the call took 90 s, the delay included. The agent row still closes with
+// the child's own duration and its final model, under its receipt: they were
+// stamped on the row when the child finished. Looked up in the roster at the
+// ToolFinished, an evicted child left the row the call's own 90 s and the model
+// it started on.
+func TestNativeTaskRowKeepsItsChildAfterEviction(t *testing.T) {
+	s, w := taskSink(t, nil)
+	at := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	startAgentRow(t, s, "t1.1.1", "first", "go first")
+	s.sink(harness.SubagentStarted{ID: "first", CallID: "t1.1.1", Type: "general-purpose", Description: "first",
+		Prompt: "go first", Model: "test/a", At: at})
+	s.sink(harness.SubagentFinished{ID: "first", Status: harness.SubagentCompleted, Text: "done first",
+		Model: "test/b", Provider: "test", WireModel: "wire-b", Steps: 1, At: at.Add(1500 * time.Millisecond)})
+	for i := 1; i <= subagentFinishedCap; i++ {
+		id := fmt.Sprintf("c%02d", i)
+		childLife(s, id, fmt.Sprintf("t1.1.%d", i+1), at)
+		finishChild(s, id, at.Add(time.Duration(1+i)*time.Second))
+	}
+	if slices.ContainsFunc(s.Snapshot().Subagents, func(row SubagentInfo) bool { return row.ID == "first" }) {
+		t.Fatal("control: the first child is still in the roster; the case needs it evicted")
+	}
+	s.sink(harness.ToolFinished{ID: "t1.1.1", Result: tool.Result{Text: "done first"}, Duration: 90 * time.Second})
+	row := w.wait("the agent row, closed", func(ev Event) bool { return isParentRowDone(ev, "t1.1.1") }).Tool
+	if task := row.Task; task == nil || task.AgentID != "first" || task.Status != SubagentCompleted ||
+		task.DurationMs != 1500 || task.Model != "test/b" || !task.Receipt {
+		t.Fatalf("the agent row closed with task %+v; want the child's 1500 ms and its final model, under its receipt", row.Task)
+	}
 }
 
 // TestNativeSubagentUsageJournaledWhenUnsaved (A9, panel P40): the parent's

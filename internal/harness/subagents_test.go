@@ -2421,6 +2421,72 @@ func TestSubagentRedactsAKeyLearnedWhileTheChildRuns(t *testing.T) {
 	}
 }
 
+// TestRedactCoversItsSubagentsKeys (review r8, finding 1): after the parent
+// opened — so it never learns it — and before its child opens, which does, the
+// environment gains a key. The parent's Redact covers it while the child is
+// registered, and a Redactor taken then goes on covering it; once the child
+// has retired, it is still covered for the rest of the turn that ran it — the
+// parent's next step, which the call's ToolFinished precedes — and no longer
+// once that turn has ended, since the parent never learned it. A Redactor
+// taken before the child opened does not cover it: it is the keys of the
+// moment it was taken. The adapter redacts what a child wrote with this after
+// sanitizing, which can rebuild a key of the child's that no redactor saw
+// split; the parent's keys alone let it through.
+func TestRedactCoversItsSubagentsKeys(t *testing.T) {
+	const childKey = "sk-only-the-child-knows-it"
+	f := newRouted(t)
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	envMu.Lock()
+	env["NOKEY_API_KEY"] = childKey
+	envMu.Unlock()
+	before := s.Redactor()
+	if s.Redact(childKey) != childKey {
+		t.Fatal("control: the parent learned the key")
+	}
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	w := newWorker()
+	var nextStep string // the parent's Redact at its step after the call
+	a.route("go", callStep(agentPart(t, "a1", task("scan", "scan it"))),
+		func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+			nextStep = s.Redact(childKey)
+			answerWith("ok")(ctx, yield)
+		})
+	a.route("scan it", w.step(openText("half"), finishText()))
+	var ev events
+	out := start(context.Background(), s, "go", ev.sink)
+	await(t, w.reached, "the child mid-step")
+	if kids := k.all(); len(kids) != 1 || kids[0].Redact(childKey) != redact.Marker {
+		t.Fatal("control: the child did not learn the key")
+	}
+	during, taken := s.Redact(childKey), s.Redactor()
+	close(w.release)
+	if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", got.res, got.err)
+	}
+	settled(t, s)
+	switch {
+	case during != redact.Marker:
+		t.Fatalf("while the child ran, the parent's Redact gave %q; want the child's key redacted", during)
+	case taken(childKey) != redact.Marker:
+		t.Fatal("a Redactor taken while the child ran does not cover its key")
+	case nextStep != redact.Marker:
+		t.Fatalf("at the parent's next step, the child retired, Redact gave %q; want its key covered for the turn", nextStep)
+	case s.Redact(childKey) != childKey:
+		t.Fatal("after the turn the parent's Redact still covers the child's key, which the parent never learned")
+	case before(childKey) != childKey:
+		t.Fatal("a Redactor taken before the child opened covers its key: it is not the keys of its moment")
+	}
+}
+
 // TestSubagentRefusesAKeyInItsHome (review r4): after the parent opened — so
 // the parent never learns it — and before its child opens, which would, the
 // environment gains a key that is part of the harness home's path. Every

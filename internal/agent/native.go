@@ -1271,8 +1271,10 @@ func nativeTitle(prompt string) string {
 //   - the three sub-agent events: rosterMu for the roster and its enqueue (the
 //     outbox mutex, a leaf beneath it), toolMu for the child's set in sections
 //     of its own, never nested, and the log's Flush with no lock held. The
-//     payloads are redacted before rosterMu is taken: the harness's redactor
-//     is read under s.mu (redactor), then called with nothing held.
+//     redactor is taken before rosterMu or toolMu is — read under s.mu, its
+//     keys gathered under the harness's own leaf locks (redactor) — and then
+//     applied inside the section, to the whole payload, where applying it
+//     takes no lock (review r8).
 //
 // s.mu, when a case takes it, is taken alone: never under toolMu or rosterMu,
 // which Snapshot takes under s.mu, one after the other.
