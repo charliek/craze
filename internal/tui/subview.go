@@ -229,16 +229,19 @@ func (m *Model) rebuildReceiptTranscript(id string) {
 	if label == "" {
 		label = m.snap.Provider.Name
 	}
-	tr.addNote(label+" streams no sub-agent transcript; this is what its receipt carried", now)
+	// Every row is this client's own, rebuilt from the roster for a provider
+	// whose sub-agents stream nothing — the child's shared transcript is empty
+	// — so they are local rows (plan 024 §3.8).
+	tr.appendLocal(entry{kind: entryNote, text: label + " streams no sub-agent transcript; this is what its receipt carried"}, now)
 	if strings.TrimSpace(info.Prompt) != "" {
-		tr.addUser(info.Prompt, now)
+		tr.appendLocal(entry{kind: entryUser, text: info.Prompt}, now)
 	}
 	if note := receiptNote(info, m.receiptAgentID(info)); note != "" {
-		tr.addNote(note, now)
+		tr.appendLocal(entry{kind: entryNote, text: note}, now)
 	}
 	if strings.TrimSpace(info.Output) != "" {
-		tr.appendStream(entryAssistant, info.Output, now, now)
-		tr.closeStream(now)
+		// The whole reply, capped the way a streamed one is, in one row.
+		tr.appendLocal(entry{kind: entryAssistant, text: capEntryText(info.Output)}, now)
 	}
 	tr.atBottom = stick
 	tr.yOffset = off

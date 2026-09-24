@@ -2261,7 +2261,11 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 				m.maskCards()
 			}
 		} else {
-			m.beginTurn(res.Turn, text, m.now())
+			// The optimistic row: this client's own send, drawn at Enter and
+			// at its own clock, before any event about the turn exists. The
+			// started that follows is its echo (applyTurnStarted).
+			m.addUser(text)
+			m.beginTurn(res.Turn)
 			m.ownTurn = res.Turn
 		}
 		if fromRow == "" {
@@ -2291,10 +2295,11 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 // The first prompt's index seed used to be here; it is the engine's now, which
 // is what makes it happen for a turn no client started (plan 021 §3.8).
 //
-// at stamps the user row: the client's clock for its own send, the started
-// event's At for a turn the model learned of from the log.
-func (m *Model) beginTurn(id, text string, at time.Time) {
-	m.addUserAt(text, at)
+// The turn's user row is the caller's, because the two draw it down different
+// paths: Submit's answer draws the optimistic row, a local one at the client's
+// clock (addUser), and a started draws the shared row, at the event's At
+// (addUserAt). The caller writes it first.
+func (m *Model) beginTurn(id string) {
 	m.status = statusWorking
 	// A new turn: whatever a cancel masked belonged to the turn before it.
 	m.cardMask, m.cardMasking = "", false
@@ -2610,7 +2615,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// A prompt out of the restored transcript, which craze never sent
 			// and therefore never wrote. The session coalesces a multi-chunk
 			// one into a single event, so this is one user block per prompt.
-			m.addUserAt(ev.Text, ev.At)
+			m.addUserAt(ev.Text, ev.At, false)
 			return
 		}
 		// A live main-session echo. grok and gx send one for every prompt the
@@ -3015,6 +3020,11 @@ func cardAskID(c card) string {
 // another client's prompt — is a turn the model has applied nothing for yet, so
 // it draws its row like any other (§3.4).
 //
+// The row half of that rule is the pane's to decide: every started reaches it
+// as the shared user row it is, and the skipped one arrives with hide set, so
+// the pane gives it no row — the optimistic row Enter drew is the display
+// (plan 024 §3.8). The rest of the skip is the model's, and is here.
+//
 // The id is matched rather than a flag consumed, and ownTurn can hold at most one
 // id, so no started can be skipped for the wrong turn and none can leave ownTurn
 // standing. Two arguments, both about the engine:
@@ -3032,19 +3042,20 @@ func cardAskID(c card) string {
 // reserve and the publish, where the enqueue is dropped with everything else at
 // the cut. The program is quitting; nothing reads it again.
 func (m *Model) applyTurnStarted(ev agent.Event) {
-	if id := ev.Turn.ID; id != "" {
-		if id == m.ownTurn {
-			m.ownTurn = ""
-			return
-		}
-		if id == m.nextTurn {
-			// The pending successor, arriving in its place. Nothing was applied
-			// for it, so it is drawn like any other started; what the marker did
-			// was keep the model working until this moment.
-			m.nextTurn = ""
-		}
+	id := ev.Turn.ID
+	own := id != "" && id == m.ownTurn
+	m.addUserAt(ev.Turn.Text, ev.At, own)
+	if own {
+		m.ownTurn = ""
+		return
 	}
-	m.beginTurn(ev.Turn.ID, ev.Turn.Text, ev.At)
+	if id != "" && id == m.nextTurn {
+		// The pending successor, arriving in its place. Nothing was applied
+		// for it, so it is drawn like any other started; what the marker did
+		// was keep the model working until this moment.
+		m.nextTurn = ""
+	}
+	m.beginTurn(id)
 	if ev.Turn.Origin == agent.TurnOriginSendNow && ev.Cause != "" && ev.Cause == m.armedDraft {
 		// The send-now this client armed from its composer, firing: it takes that
 		// draft with it if the composer still holds it, and the marker goes with

@@ -79,6 +79,9 @@ type entry struct {
 	// than from a prompt craze sent: it went into a turn already running, so
 	// it is drawn with a different mark.
 	interject bool
+	// local marks a row this client wrote for a message of its own rather than
+	// one an event drew (see pane): it is no event's, and no other client has it.
+	local bool
 
 	rendered    []string
 	renderedFor renderKey
@@ -90,78 +93,14 @@ func (m Model) renderKey() renderKey {
 	return renderKey{width: m.width, theme: m.theme.Name, expanded: m.expanded}
 }
 
-// pane is one transcript as this client displays it: the display list — every
-// row a frame draws, oldest first, each with its render cache — the rows last
-// painted from it and the viewport position they were painted at, and the facts
-// only this client keeps (pathDirs, the `!` rows). Mutation sets dirty; Model
-// paints m.vp only when this pane is the one on screen (m.cur()).
+// ---------------------------------------------------------------- the old fold
 //
-// A pane is shared, never copied. bubbletea copies Model by value on every
-// Update, and m.main and every pane in m.subs are pointers that every copy
-// holds, exactly as m.subs, m.shell and m.owner already are; so a row written
-// through any copy is written for all of them, and code must never rely on a
-// discarded Model copy discarding its rows. A value method that writes a row
-// returns the Model it wrote through, and its caller keeps that Model — the
-// descendant, never an older copy (plan 024 §3.8).
-type pane struct {
-	// rows is the display list. A row is held by pointer, so its address is
-	// its identity: it survives the append that grows the list and the trim
-	// that shifts it, and an index from an id to its row never has to be
-	// rebased.
-	rows    []*entry
-	trimmed bool
-	// pathDirs is the pane's own (notePath): the directories each basename
-	// has been seen in, from the tool rows this pane was given.
-	pathDirs        map[string]map[string]struct{}
-	renders         int
-	transcriptRows  []string
-	transcriptPlain []string
-	yOffset         int
-	atBottom        bool
-	dirty           bool
-	// entryCap / textBudget are 0 on main (maxEntries, unlimited text).
-	entryCap   int
-	textBudget int
-
-	// The old fold's, while it still writes through the pane (C5c removes them).
-	toolLine   map[string]int
-	streamOpen bool
-}
-
-// newSubPane is a sub-agent's pane, under the tighter caps.
-func newSubPane() *pane { return &pane{entryCap: subMaxEntries, textBudget: subTextBudget} }
-
-// reset empties the pane in place, keeping its caps: it is the same *pane
-// m.subs and m.cur() hold, so it is emptied rather than replaced.
-func (t *pane) reset() { *t = pane{entryCap: t.entryCap, textBudget: t.textBudget} }
-
-func (m *Model) cur() *pane {
-	if m.viewing != "" {
-		if t := m.subs[m.viewing]; t != nil {
-			return t
-		}
-	}
-	return m.main
-}
-
-// appendEntry is the only way an entry reaches the transcript, so it is also
-// where an open run ends: a note or a tool row between two chunks means they
-// are not one run, and a run that is not the last entry can never be closed.
-func (t *pane) appendEntry(e entry, now time.Time) {
-	e.dirty = true
-	if e.at.IsZero() {
-		e.at = now
-	}
-	if e.end.IsZero() {
-		e.end = e.at
-	}
-	t.endRun(e.at)
-	t.rows = append(t.rows, &e)
-	t.trimEntries()
-	t.dirty = true
-}
-
-func (m *Model) appendEntry(e entry) { m.main.appendEntry(e, m.now()) }
+// From here to noteTodos is the old fold: the rows the session's events draw,
+// written through appendShared, and the edits it makes to the shared rows
+// already drawn — a chunk growing the open run, a tool updated in place, a run
+// closed. The event-driven wrappers stamp at the event's At. C5c replaces it
+// with the shared model's Change, all but notePath and displayPath: pathDirs is
+// the pane's own, fed from the tool rows it is given.
 
 // stamp is the time a row drawn from an event is written at: the event's own
 // At, and this client's clock only for an event that carries none, which is a
@@ -172,7 +111,7 @@ func (m *Model) appendEntry(e entry) { m.main.appendEntry(e, m.now()) }
 //
 // A row the client writes for a message of its own — a local failure, a theme
 // or usage note, the optimistic user row at Enter, an ask's answer notes — is
-// no event's, and keeps m.now(): the wrappers that take no time.
+// no event's, and keeps m.now(): the local wrappers that take no time (pane.go).
 func (m *Model) stamp(at time.Time) time.Time {
 	if at.IsZero() {
 		return m.now()
@@ -180,33 +119,9 @@ func (m *Model) stamp(at time.Time) time.Time {
 	return at
 }
 
-// trimEntries enforces the entry cap. Tool rows are addressed by index, so the
-// map moves with the slice and rows that fell off are forgotten.
-func (t *pane) trimEntries() {
-	maxE := t.entryCap
-	if maxE <= 0 {
-		maxE = maxEntries
-	}
-	if len(t.rows) > maxE {
-		t.dropFirst(len(t.rows) - maxE)
-	}
-	if t.textBudget > 0 {
-		for t.rawTextLen() > t.textBudget && len(t.rows) > 1 {
-			t.dropFirst(1)
-		}
-	}
-}
-
-func (t *pane) dropFirst(n int) {
-	if n <= 0 || n > len(t.rows) {
-		return
-	}
-	kept := copy(t.rows, t.rows[n:])
-	// The vacated tail would otherwise keep the rows it held reachable.
-	clear(t.rows[kept:])
-	t.rows = t.rows[:kept]
-	t.trimmed = true
-	t.dirty = true
+// rebaseToolLine moves the tool index down with a list that lost its first n
+// rows, and forgets the rows that fell off: the index is by position.
+func (t *pane) rebaseToolLine(n int) {
 	for id, idx := range t.toolLine {
 		if idx-n < 0 {
 			delete(t.toolLine, id)
@@ -216,46 +131,43 @@ func (t *pane) dropFirst(n int) {
 	}
 }
 
-func (t *pane) rawTextLen() int {
-	n := 0
-	for _, e := range t.rows {
-		n += len(e.text)
-	}
-	return n
-}
-
-func (t *pane) addUser(text string, now time.Time) {
-	t.appendEntry(entry{kind: entryUser, text: text}, now)
-}
-
-// addUser is addUserAt for a row the client writes itself, at its own clock.
-func (m *Model) addUser(text string) { m.addUserAt(text, m.now()) }
-
-// addUserAt writes the user block for text that went to the agent, wherever the
-// model learned of it: its own send (stamped at the client's clock), a turn the
-// engine started for a drained row or another client, or a prompt out of a
-// replayed transcript (stamped at the event's At).
-//
-// The shell context in front of that text is wire content and never display
-// content (plan 022 §3.6): the row shows the message, not the command output
-// craze attached to it — which is already on screen, in the `!` row the user
-// watched it come out of. Stripping in this one wrapper rather than at each of
-// the three callers is what makes the rule hold for every route into a user
-// row, including the ones the engine reports rather than this client sending.
-func (m *Model) addUserAt(text string, at time.Time) {
+// userText is what a user row shows of text that went to the agent. The shell
+// context in front of it is wire content and never display content (plan 022
+// §3.6): the row shows the message, not the command output craze attached to it
+// — which is already on screen, in the `!` row the user watched it come out of.
+// Every route into a user row goes through it — this client's own send
+// (addUser), a turn the engine started or a replayed prompt (addUserAt), and an
+// interjection's broadcast (addInterjectionAt) — which is what makes the rule
+// hold for the rows the engine reports as well as the ones this client sends.
+func userText(text string) string {
 	_, text = agent.SplitShellContext(text)
-	m.main.addUser(text, m.stamp(at))
+	return text
+}
+
+// addUser is a user row an event drew. hide is the echo rule (appendShared).
+func (t *pane) addUser(text string, now time.Time, hide bool) {
+	t.appendShared(entry{kind: entryUser, text: text}, now, hide)
+}
+
+// addUserAt writes the user block for text the session reports went to the
+// agent — a turn the engine started, for a drained row, an armed send-now or
+// another client, or a prompt out of a replayed transcript — stamped at the
+// event's At. hide is set for the one started whose row this client already
+// drew at Enter (applyTurnStarted), which the pane gives no row.
+func (m *Model) addUserAt(text string, at time.Time, hide bool) {
+	m.main.addUser(userText(text), m.stamp(at), hide)
 }
 
 // addInterjection is the user block for text merged into the running turn.
 // It is written from the agent's broadcast, not from the send: the ack only
 // says the text was accepted, and grok broadcasts one for an interjection it
-// could not merge as well.
+// could not merge as well. So it has no local twin and nothing to hide: the
+// broadcast's row is the display (plan 024 X26).
 func (t *pane) addInterjection(text string, now time.Time) {
 	if text == "" {
 		return
 	}
-	t.appendEntry(entry{kind: entryUser, text: text, interject: true}, now)
+	t.appendShared(entry{kind: entryUser, text: text, interject: true}, now, false)
 }
 
 // addInterjection is addInterjectionAt at the client's clock.
@@ -268,18 +180,16 @@ func (m *Model) addInterjection(text string) { m.addInterjectionAt(text, m.now()
 // Interject, block and all. It is the broadcast's row, so it is stamped at the
 // broadcast's At.
 func (m *Model) addInterjectionAt(text string, at time.Time) {
-	_, text = agent.SplitShellContext(text)
-	m.main.addInterjection(text, m.stamp(at))
+	m.main.addInterjection(userText(text), m.stamp(at))
 }
 
+// addNote is a note an event drew.
 func (t *pane) addNote(text string, now time.Time) {
 	if text == "" {
 		return
 	}
-	t.appendEntry(entry{kind: entryNote, text: text}, now)
+	t.appendShared(entry{kind: entryNote, text: text}, now, false)
 }
-
-func (m *Model) addNote(text string) { m.main.addNote(text, m.now()) }
 
 // addNoteAt is a note drawn from an event, stamped at its At.
 func (m *Model) addNoteAt(text string, at time.Time) { m.main.addNote(text, m.stamp(at)) }
@@ -324,20 +234,19 @@ func (t *pane) addPlan(p *agent.PlanEvent, now time.Time) {
 		return
 	}
 	plan := *p
-	t.appendEntry(entry{kind: entryPlan, plan: &plan}, now)
+	t.appendShared(entry{kind: entryPlan, plan: &plan}, now, false)
 }
 
 // addPlan is the plan event's block, stamped at its At.
 func (m *Model) addPlan(p *agent.PlanEvent, at time.Time) { m.main.addPlan(p, m.stamp(at)) }
 
+// addError is an error row an event drew.
 func (t *pane) addError(text string, now time.Time) {
 	if text == "" {
 		return
 	}
-	t.appendEntry(entry{kind: entryError, text: text}, now)
+	t.appendShared(entry{kind: entryError, text: text}, now, false)
 }
-
-func (m *Model) addError(text string) { m.main.addError(text, m.now()) }
 
 // addErrorAt is an error row drawn from an event, stamped at its At.
 func (m *Model) addErrorAt(text string, at time.Time) { m.main.addError(text, m.stamp(at)) }
@@ -361,8 +270,8 @@ func (t *pane) appendStream(kind entryKind, text string, at, now time.Time) {
 			return
 		}
 	}
-	// appendEntry ends the previous run, so the flag is raised after it.
-	t.appendEntry(entry{kind: kind, text: capEntryText(text), at: at, end: at, open: kind == entryThought}, now)
+	// The append ends the previous run, so the flag is raised after it.
+	t.appendShared(entry{kind: kind, text: capEntryText(text), at: at, end: at, open: kind == entryThought}, now, false)
 	t.streamOpen = true
 }
 
@@ -389,7 +298,7 @@ func (m *Model) appendStream(kind entryKind, text string, at time.Time) {
 }
 
 // endRun ends the open run in place, reporting whether anything changed. The
-// open run is always the last entry, which appendEntry keeps true.
+// open run is always the last entry, which the pane's append keeps true.
 func (t *pane) endRun(at time.Time) bool {
 	t.streamOpen = false
 	n := len(t.rows)
@@ -452,7 +361,7 @@ func (t *pane) upsertTool(tool *agent.ToolEvent, at time.Time) {
 			return
 		}
 	}
-	t.appendEntry(entry{kind: entryTool, tool: &ev, at: at}, at)
+	t.appendShared(entry{kind: entryTool, tool: &ev, at: at}, at, false)
 	if tool.ID != "" {
 		if t.toolLine == nil {
 			t.toolLine = make(map[string]int)
@@ -507,25 +416,6 @@ func (m Model) displayPath(tr *pane, p string) string {
 		return base
 	}
 	return filepath.Join(filepath.Base(filepath.Dir(p)), base)
-}
-
-// clearTranscript drops the entries and every cache keyed off them.
-func (m *Model) clearTranscript() {
-	t := m.main
-	t.rows = nil
-	t.toolLine = nil
-	t.pathDirs = nil
-	t.trimmed = false
-	t.streamOpen = false
-	t.dirty = true
-	m.todoPlanned = 0
-	m.todoDone = false
-	// "the plan above" is gone, so there is nothing left to offer.
-	m.retirePlanOffer()
-	// The pending shell context is keyed off these entries as much as any
-	// cache is: it describes `!` rows that are no longer on screen, and a
-	// /clear is the user saying that conversation is over (plan 022 §3.6).
-	m.dropShellContext()
 }
 
 // noteTodos turns the todo stream into the two dim transcript notes; the panel

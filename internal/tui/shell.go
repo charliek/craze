@@ -116,8 +116,9 @@ func (m *Model) finishShell(msg shellDoneMsg) {
 	}
 	// The row is gone — /clear took it, or the entry cap trimmed it — and the
 	// output is still the answer to something the user asked for, so it is
-	// written again rather than dropped.
-	t.appendEntry(entry{
+	// written again rather than dropped. It is a local row like the one it
+	// replaces.
+	t.appendLocal(entry{
 		kind: entryShell,
 		text: msg.res.out,
 		shell: &shellEntry{
@@ -145,7 +146,7 @@ type shellEntry struct {
 	start error
 }
 
-// addShell opens the row for a command that has just started.
+// addShell opens the row for a command that has just started: a local row.
 func (m *Model) addShell(gen int, cmd string) {
 	m.appendEntry(entry{kind: entryShell, shell: &shellEntry{gen: gen, cmd: cmd}})
 }
