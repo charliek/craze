@@ -24,6 +24,10 @@ import (
 // (plan 022 §3.4). The harness reads no file for either; both arrive as data
 // in Options.Prompt, resolved once, before Open.
 //
+// A sub-agent's prompt has a third part, its role, rendered after both with a
+// budget of its own (child.go, plan 026 §3.2). A parent's prompt never has
+// one, so nothing here changes for it.
+//
 // Open calls both once and the session sends the result, unchanged, with
 // every request: it holds no clock, no git state, and nothing else that
 // changes between requests, so every request in a session starts with the
@@ -404,8 +408,13 @@ var framingTexts = []string{"project and user instructions", "skills and command
 // so is what it answers — an instruction file can already say anything in its
 // own voice, and the rule that matters is that craze never fetches for it
 // (R5, §3.4's confinement).
-func escapeFraming(text string) string {
-	if !containsFold(text, framingTexts) {
+func escapeFraming(text string) string { return escapeFramingOf(text, framingTexts) }
+
+// escapeFramingOf is escapeFraming against words, lowercased: the headings
+// the text is quoted under and every one before it. A sub-agent's role is
+// escaped against its own section's heading as well (child.go).
+func escapeFramingOf(text string, words []string) string {
+	if !containsFold(text, words) {
 		return text // the common case: no line can match, so nothing is split
 	}
 	lines := strings.Split(text, "\n")
@@ -414,7 +423,7 @@ func escapeFraming(text string) string {
 		if i+1 < len(lines) {
 			next = lines[i+1]
 		}
-		if forgesFraming(line, next) {
+		if forgesFraming(line, next, words) {
 			lines[i] = `\` + line
 		}
 	}
@@ -433,13 +442,13 @@ func containsFold(text string, words []string) bool {
 }
 
 // forgesFraming reports whether line, followed by next, reads as one of
-// craze's headings: up to three leading spaces (four would be an indented
-// code block), a run of hashes, optional space, and then craze's words, with
-// or without the closing hashes a heading may carry — or the same words with
-// no hashes at all under a line of = or -, which is markdown's other heading.
-// The comparison is case-insensitive and matches a prefix, so a heading with
-// anything appended to craze's words is escaped too.
-func forgesFraming(line, next string) bool {
+// craze's headings, whose words are words: up to three leading spaces (four
+// would be an indented code block), a run of hashes, optional space, and then
+// craze's words, with or without the closing hashes a heading may carry — or
+// the same words with no hashes at all under a line of = or -, which is
+// markdown's other heading. The comparison is case-insensitive and matches a
+// prefix, so a heading with anything appended to craze's words is escaped too.
+func forgesFraming(line, next string, words []string) bool {
 	i := 0
 	for i < len(line) && line[i] == ' ' {
 		i++
@@ -455,7 +464,7 @@ func forgesFraming(line, next string) bool {
 	rest = strings.TrimLeft(rest[hashes:], " \t")
 	low := strings.ToLower(rest)
 	matched := false
-	for _, w := range framingTexts {
+	for _, w := range words {
 		if strings.HasPrefix(low, w) {
 			matched = true
 			break

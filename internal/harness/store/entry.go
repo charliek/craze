@@ -152,15 +152,25 @@ type modeChangeLine struct {
 // was written under. The tool profile and the tools array's hash do the same
 // for the tool contract; both are optional, and absent for a session with no
 // tools, so a header without them reads as it always has.
+//
+// A sub-agent's header also links it to its parent: the parent's session id,
+// the harness id of the agent call that started it, the agent type it ran as
+// and the persona file that defined it (plan 026 §3.2). All four are
+// optional, absent for every other session, and a header written before them
+// reads as it always has.
 type Header struct {
 	Version            int
-	ID                 string // the session id, a UUID
+	ID                 string // the session id: a UUID, or the one a sub-agent's runner minted
 	Timestamp          time.Time
 	Cwd                string
 	CrazeVersion       string
 	SystemPromptSHA256 string // hex
 	ToolProfile        string // "" for none
 	ToolsSHA256        string // hex; "" for none
+	ParentSession      string // "" for a session no other started
+	ParentToolCall     string // the parent's harness call id; "" for none
+	SubagentType       string // "" for none
+	PersonaPath        string // "" for none, and for a built-in agent type
 }
 
 type headerLine struct {
@@ -173,6 +183,10 @@ type headerLine struct {
 	SystemPromptSHA256 string `json:"system_prompt_sha256"`
 	ToolProfile        string `json:"tool_profile,omitempty"`
 	ToolsSHA256        string `json:"tools_sha256,omitempty"`
+	ParentSession      string `json:"parent_session,omitempty"`
+	ParentToolCall     string `json:"parent_tool_call,omitempty"`
+	SubagentType       string `json:"subagent_type,omitempty"`
+	PersonaPath        string `json:"persona_path,omitempty"`
 }
 
 func formatTime(t time.Time) string { return t.UTC().Format(timeLayout) }
@@ -188,6 +202,10 @@ func encodeHeader(h Header) ([]byte, error) {
 		SystemPromptSHA256: h.SystemPromptSHA256,
 		ToolProfile:        h.ToolProfile,
 		ToolsSHA256:        h.ToolsSHA256,
+		ParentSession:      h.ParentSession,
+		ParentToolCall:     h.ParentToolCall,
+		SubagentType:       h.SubagentType,
+		PersonaPath:        h.PersonaPath,
 	})
 }
 
@@ -218,6 +236,10 @@ func decodeHeader(line []byte) (Header, error) {
 		SystemPromptSHA256: hl.SystemPromptSHA256,
 		ToolProfile:        hl.ToolProfile,
 		ToolsSHA256:        hl.ToolsSHA256,
+		ParentSession:      hl.ParentSession,
+		ParentToolCall:     hl.ParentToolCall,
+		SubagentType:       hl.SubagentType,
+		PersonaPath:        hl.PersonaPath,
 	}, nil
 }
 

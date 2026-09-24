@@ -181,9 +181,11 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	// The session's todo store reaches this turn's sink only through here
 	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
 	// once Run returns, the same way modes and the steer box are handed a
-	// fixed reference at the start rather than looked up each time.
-	release := s.tools.todos.attach(t.emitLocked)
-	defer release()
+	// fixed reference at the start rather than looked up each time. A
+	// sub-agent has no todo list (plan 026 §3.2).
+	if s.tools.todos != nil {
+		defer s.tools.todos.attach(t.emitLocked)()
+	}
 	// And the session's asker tells this turn, and no other, of a plan the
 	// person approved (asker.go).
 	if s.tools.asker != nil {

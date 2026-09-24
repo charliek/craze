@@ -68,6 +68,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"uuid"
 
 	"charm.land/fantasy"
@@ -114,10 +115,24 @@ type Options struct {
 	// Now stamps the header and every entry; nil means time.Now.
 	Now func() time.Time
 
+	// SessionID is the session's id when the caller has one, and "" for a
+	// fresh UUID. A sub-agent's runner mints its child's id before the child
+	// opens, so the parent knows it before the child writes anything (plan 026
+	// §3.2). It names the file, so it must be usable in a file name: New
+	// refuses one with a path separator or a control character in it.
+	SessionID string
+	// ParentSession, ParentToolCall, SubagentType and PersonaPath link a
+	// sub-agent's transcript to the session and the agent call that started it,
+	// and record which agent type it ran as and the file that defined it. The
+	// header carries each only when it is set (plan 026 §3.2).
+	ParentSession  string
+	ParentToolCall string
+	SubagentType   string
+	PersonaPath    string
+
 	// Test seams, settable only inside the package; zero means production.
-	sessionID string
-	entryID   func() string
-	openFile  func(name string, flag int, perm os.FileMode) (file, error)
+	entryID  func() string
+	openFile func(name string, flag int, perm os.FileMode) (file, error)
 }
 
 // file is what the store needs of its descriptor: the seam a test counts
@@ -171,9 +186,14 @@ func New(opts Options) (*Store, error) {
 	if s.openFile == nil {
 		s.openFile = openOSFile
 	}
-	id := opts.sessionID
-	if id == "" {
+	id := opts.SessionID
+	switch {
+	case id == "":
 		id = uuid.NewV4().String()
+	case strings.ContainsAny(id, `/\`) || strings.ContainsFunc(id, unicode.IsControl):
+		// The id is spliced into the file's name (sessionPath): a separator
+		// would file the transcript somewhere else.
+		return nil, fmt.Errorf("store: session id %q cannot name a file", id)
 	}
 	cwd := filepath.Clean(opts.Workspace)
 	sum := sha256.Sum256([]byte(opts.SystemPrompt))
@@ -185,6 +205,10 @@ func New(opts Options) (*Store, error) {
 		CrazeVersion:       opts.CrazeVersion,
 		SystemPromptSHA256: hex.EncodeToString(sum[:]),
 		ToolProfile:        opts.ToolProfile,
+		ParentSession:      opts.ParentSession,
+		ParentToolCall:     opts.ParentToolCall,
+		SubagentType:       opts.SubagentType,
+		PersonaPath:        opts.PersonaPath,
 	}
 	if len(opts.Tools) > 0 {
 		sum := sha256.Sum256(opts.Tools)
@@ -210,7 +234,8 @@ func (s *Store) stamp() time.Time {
 
 // ID, Path and Header read what New fixed, so they take no lock.
 
-// ID is the session id: a UUID, in the header and the file name.
+// ID is the session id, in the header and the file name: a UUID, or the
+// caller's own (Options.SessionID).
 func (s *Store) ID() string { return s.t.Header.ID }
 
 // Path is where the transcript is, or will be once a turn is written.

@@ -95,13 +95,20 @@ type Options struct {
 	// Mode is the mode the session starts in: "" or "agent" (implement),
 	// "plan" or "ask". Anything else is ErrUnknownMode and refuses Open. A
 	// session opened in plan mode creates its plan file and tells the model
-	// at its first step (reminders.go, plan 023 §3.1).
+	// at its first step (reminders.go, plan 023 §3.1). A sub-agent's mode is
+	// Child.Mode, and this is not read.
 	Mode string
 	// Asker is how the session's tools reach a person: ask_user_question and
 	// exit_plan_mode block on it (tool.Asker, plan 023 §3.4). The adapter in
 	// internal/agent hands in one over craze's ask registry; nil is nobody to
-	// ask, and both tools then answer at once that nobody answered.
+	// ask, and both tools then answer at once that nobody answered. A
+	// sub-agent has nobody to ask, and this is not read.
 	Asker Asker
+	// Child opens the session as a sub-agent of another (child.go, plan 026
+	// §3.2); nil is an ordinary session. Only the runner that starts children
+	// sets it, and fills the rest of these Options with the parent's own
+	// values.
+	Child *ChildOptions
 	// NewModel builds a model's client; nil is llm.New. It is the test seam:
 	// a test hands in a scripted fantasy.LanguageModel.
 	NewModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
@@ -154,6 +161,10 @@ type Session struct {
 	// lock, so a turn reading it at a step boundary and a SetMode from the UI
 	// never wait on each other. Fixed at Open, never nil.
 	modes *modes
+
+	// child is set for a sub-agent's session (Options.Child), fixed at Open:
+	// its mode never changes (SetMode), and it starts no sub-agent of its own.
+	child bool
 
 	mu      sync.Mutex
 	table   *modeltable.Table
@@ -217,15 +228,23 @@ type logged struct {
 // fall back to another model (plan 018 §3.8). A key anywhere in the table,
 // used or not, that is too short to redact from tool output fails it
 // (modeltable.ErrKeyTooShort, plan 019 §3.8).
+//
+// With Options.Child set it opens a sub-agent (child.go, plan 026 §3.2): the
+// runner's id, the parent's links in the header, a filtered toolset, the
+// parent's frozen prompt with a role section after it, the parent's mode and
+// no plan file, nobody to ask, and the parent's path locks. A key inside that
+// prompt refuses it (errChildPromptKey).
 func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
 	}
+	child := opts.Child
 	s := &Session{
 		getenv:   opts.Getenv,
 		newModel: opts.NewModel,
 		newAgent: defaultAgent,
 		table:    opts.Table,
+		child:    child != nil,
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
@@ -234,7 +253,16 @@ func Open(opts Options) (*Session, error) {
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return llm.New(r) }
 	}
 
-	mode, err := normalizeMode(opts.Mode)
+	modeID, asker := opts.Mode, opts.Asker
+	if child != nil {
+		// A child's id is its runner's, so the parent can name it before it
+		// writes anything; one that minted none has nothing to give it.
+		if child.ID == "" {
+			return nil, errors.New("harness: a sub-agent's session needs the id its runner minted")
+		}
+		modeID, asker = child.Mode, nil
+	}
+	mode, err := normalizeMode(modeID)
 	if err != nil {
 		return nil, err
 	}
@@ -254,11 +282,11 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, opts.Asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, child, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
-	st, err := store.New(store.Options{
+	sopts := store.Options{
 		Home: opts.Home,
 		// The real working directory: the header records it and the prompt
 		// names it, and openTools has refused one whose path holds a provider
@@ -269,7 +297,21 @@ func Open(opts Options) (*Session, error) {
 		ToolProfile:  s.tools.profile,
 		Tools:        s.tools.wire,
 		Now:          opts.Now,
-	})
+	}
+	if child != nil {
+		// The header goes to disk as it is. The type and the persona's path
+		// come from files a plugin or a repository wrote, so they are redacted
+		// as the prompt's extras are; the two ids are the runner's own, and
+		// are redacted alike because one rule is simpler to check than two.
+		// The session id cannot be: it names the file.
+		red := s.tools.redactor()
+		sopts.SessionID = child.ID
+		sopts.ParentSession = red.String(child.ParentSession)
+		sopts.ParentToolCall = red.String(child.ParentCall)
+		sopts.SubagentType = red.String(child.Type)
+		sopts.PersonaPath = red.String(child.PersonaPath)
+	}
+	st, err := store.New(sopts)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
@@ -297,6 +339,14 @@ func Open(opts Options) (*Session, error) {
 	// working directory's does (errPlanPathKey): redacting it would leave the
 	// model a path that opens nothing. A key the session learns later is
 	// refused with the switch that brought it (toolset.resolve).
+	//
+	// A sub-agent has no plan file at all (plan 026 §3.2): nothing is adopted
+	// or created, the gate's plan path stays "", and in plan mode every edit
+	// it attempts is refused.
+	if child != nil {
+		s.modes = newChildModes(mode, s.tools.modeGate)
+		return s, nil
+	}
 	plan := store.PlanPath(st.Path())
 	if err := s.tools.adoptPlanPath(plan); err != nil {
 		return nil, err
@@ -431,7 +481,15 @@ func (s *Session) SetEffort(level string) error {
 // only file an edit-kind call may touch in that mode — and a failure to
 // create it fails the switch and leaves the mode alone, as a model that
 // cannot be built leaves SetModel's alone. After Close it is ErrClosed.
+//
+// A sub-agent's mode is its parent's and fixed at Open: SetMode on one is
+// ErrChildMode, whatever id it names, and changes nothing. The parent's later
+// switches reach a running child through its gate instead, and only ever
+// tighten it (tool.NewChildModeGate, plan 026 §3.5).
 func (s *Session) SetMode(id string) error {
+	if s.child {
+		return ErrChildMode
+	}
 	mode, err := normalizeMode(id)
 	if err != nil {
 		return err

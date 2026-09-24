@@ -49,7 +49,8 @@ type toolset struct {
 	// todos is the session's todo list (todos.go, plan 023 §3.4), reached
 	// through the dispatcher's fixed Env.Todos; a turn attaches to it for its
 	// own life (turn.go's Run) so Write's one emit lands on the running
-	// turn's sink.
+	// turn's sink. nil for a sub-agent, which has no todo_write (plan 026
+	// §3.2).
 	todos *sessionTodos
 	// asker is the caller's asker under the session's watch (asker.go), or
 	// nil when the session was opened with none.
@@ -57,9 +58,13 @@ type toolset struct {
 	profile string      // the profile's name, which the header records
 	specs   []tool.Spec // the profile's tools' specs, in the order the model is offered them
 	byID    map[string]tool.Spec
-	wire    []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash
+	wire    []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash; nil when there are none
 	system  string // the frozen system prompt
 	d       *tool.Dispatcher
+	// locks is Env.Locks: the session's own path-lock table, or, for a
+	// sub-agent, its parent's, so a parent's and its children's edits of one
+	// file serialize (plan 026 §3.2). Fixed at Open.
+	locks *tool.PathLocks
 
 	// planPath is the session's plan file, which every plan-mode reminder
 	// hands the model verbatim (reminders.go). It is held here for one reason:
@@ -117,7 +122,16 @@ type toolset struct {
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, seams toolSeams) (*toolset, error) {
+//
+// child is non-nil for a sub-agent (child.go, plan 026 §3.2), and changes
+// five things: the profile's tools are filtered before anything is built from
+// them (ChildOptions.keeps); the system prompt is the parent's frozen string,
+// or the child's own under another profile, with the role section after it
+// (withChildRole); the gate is a child's (tool.NewChildModeGate); the
+// path-lock table is the parent's; and there is no todo list and no sweep —
+// the parent's Open swept, and a fan-out would otherwise walk the directory
+// once per child.
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, child *ChildOptions, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -126,7 +140,10 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	for i, k := range keys {
 		vals[i] = k.Reveal()
 	}
-	ts := &toolset{keys: vals, closing: make(chan struct{}), todos: newSessionTodos()}
+	ts := &toolset{keys: vals, closing: make(chan struct{})}
+	if child == nil {
+		ts.todos = newSessionTodos()
+	}
 	slices.Sort(ts.keys)
 	ts.red.Store(redact.New(ts.keys...))
 	if holdsAKey(workspace, ts.keys) {
@@ -147,8 +164,16 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	ts.profile = p.Name
 	ts.byID = make(map[string]tool.Spec, len(p.Tools))
 	red := ts.redactor()
+	// tools are the profile's tools this session offers: all of them, or a
+	// child's filtered set. The same list feeds the specs below and the
+	// dispatcher, so a tool the filter drops is neither offered nor run.
+	var tools []tool.Tool
 	for _, t := range p.Tools {
 		s := t.Spec()
+		if !child.keeps(s.ID) {
+			continue
+		}
+		tools = append(tools, t)
 		// bash's description names the machine's temporary directory, which
 		// comes from the environment. These specs are what the bridge offers
 		// the model, so the hash below is of exactly what is sent.
@@ -170,8 +195,16 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// the same bytes; a profile that uses array or union types should hash the
 	// normalized form instead, or the digest will describe something slightly
 	// different from what was sent.
-	if ts.wire, err = tool.SpecsJSON(ts.specs); err != nil {
-		return nil, fmt.Errorf("harness: %w", err)
+	//
+	// A text-only child has no tools at all, and its requests carry no tools
+	// array — every provider driver omits an empty one — so it has no bytes to
+	// hash either: wire stays nil, and its header records the profile its
+	// prompt was written for and no tools_sha256, the store's rule for a
+	// session with no tools (plan 026 §3.2).
+	if child == nil || len(ts.specs) > 0 {
+		if ts.wire, err = tool.SpecsJSON(ts.specs); err != nil {
+			return nil, fmt.Errorf("harness: %w", err)
+		}
 	}
 	// The profile's text, and the caller's extras rendered after it and
 	// redacted. With no extras this is the profile's text alone, byte for
@@ -183,7 +216,23 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// learned later (errFrozenKey) and by the transcript header's hash: both
 	// read this one field, and neither needed a line of its own for the
 	// extras.
-	if ts.system, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red); err != nil {
+	//
+	// A sub-agent whose model resolves the profile its parent's prompt was
+	// written for is handed that prompt, frozen, and adds only its role: the
+	// parent's bytes are its prefix by construction, where re-rendering the
+	// extras under this child's redactor could differ from them if a key had
+	// appeared between the two Opens (plan 026 §3.2, panel GLM 12). One on
+	// another profile renders its own from the clone of the extras it was
+	// given, and adds its role to that.
+	if child != nil && child.BaseSystem != "" && child.BaseProfile == p.Name {
+		ts.system, err = withChildRole(child.BaseSystem, child.Role, red)
+	} else {
+		ts.system, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red)
+		if err == nil && child != nil {
+			ts.system, err = withChildRole(ts.system, child.Role, red)
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -194,29 +243,46 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// The session's mode wraps the gate it would otherwise use — the test
 	// seam's, or AllowAll — rather than replacing it: a call the mode allows
 	// is still the inner gate's to judge, which is how H3's evaluator will
-	// slot in underneath (plan 023 §3.1).
-	ts.modeGate = tool.NewModeGate(mode, seams.gate)
+	// slot in underneath (plan 023 §3.1). A child's is the same gate over the
+	// same inner one, with its parent's pushed strictness (plan 026 §3.5).
+	if child != nil {
+		ts.modeGate = tool.NewChildModeGate(mode, child.Strictness, seams.gate)
+	} else {
+		ts.modeGate = tool.NewModeGate(mode, seams.gate)
+	}
+	ts.locks = &tool.PathLocks{}
+	if child != nil && child.Locks != nil {
+		ts.locks = child.Locks
+	}
 	env := tool.Env{
 		Workspace: workspace,
 		Home:      home,
 		Redactor:  red,
 		Environ:   tool.ChildEnviron(os.Environ(), keyNames),
-		Locks:     &tool.PathLocks{},
+		Locks:     ts.locks,
 		Closing:   ts.closing,
-		Todos:     ts.todos,
+	}
+	// Set only when there is one, so a child's Env.Todos is a nil interface
+	// rather than an interface around a nil store: todo_write tests the
+	// former.
+	if ts.todos != nil {
+		env.Todos = ts.todos
 	}
 	// The caller's asker is wrapped, so the session sees a plan approved
 	// (asker.go). With none, Env.Asker stays a nil interface — not a wrapper
-	// around nothing — which is what the ask tools test for.
+	// around nothing — which is what the ask tools test for. Open hands a
+	// child none.
 	if asker != nil {
 		ts.asker = &watchedAsker{inner: asker}
 		env.Asker = ts.asker
 	}
-	ts.d, err = tool.NewDispatcher(tool.Options{Tools: p.Tools, Gate: ts.modeGate, Env: env})
+	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
-	_, _ = tool.Sweep(home, time.Now())
+	if child == nil {
+		_, _ = tool.Sweep(home, time.Now())
+	}
 	return ts, nil
 }
 
@@ -267,6 +333,15 @@ var (
 	// with a marker in it is not a digest.
 	errDigestKey = errors.New("harness: a configured provider key appears in one of this session's transcript-header " +
 		"digests; change the key, or remove that provider from the model table")
+
+	// errChildPromptKey is a sub-agent's Open refusing a system prompt that a
+	// configured key is inside: in the parent's frozen prompt it was handed —
+	// a key the parent did not know when it froze it — or spanning a join the
+	// role section made. withChildRole says why neither can be redacted. The
+	// runner reports it to the parent's model as a failed sub-agent (plan 026
+	// §3.2).
+	errChildPromptKey = errors.New("harness: a configured provider key is inside the sub-agent's system prompt — in the " +
+		"parent's prompt it starts from, or spanning the join with its role; change the key, or remove that provider from the model table")
 )
 
 // holdsAKey reports whether text contains any of keys.

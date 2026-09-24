@@ -107,6 +107,15 @@ Your turn should only end with either ask_user_question to clarify requirements 
 
 	// askReminderExit is ask mode left for agent mode, the plan exit's twin.
 	askReminderExit = "You have exited ask mode. You can now make edits, run tools, and take actions."
+
+	// childPlanReminder is a sub-agent's plan mode, craze's own (plan 026
+	// §3.5). A child has no plan file, so every text above that names one
+	// would hand it "``", and none of them may reach it: it replaces the
+	// transition notice, the standing reminder and their alternation alike.
+	// It names bash's rule too, because in plan mode the gate lets a command
+	// through and the reminder is the only thing that carries the rule.
+	childPlanReminder = "The agent that started you is in plan mode: do not edit or write any file (every such call is denied). " +
+		"Read, search, and run only commands that change nothing."
 )
 
 // modes is a session's mode: what the gate enforces, what the model has been
@@ -119,8 +128,12 @@ Your turn should only end with either ask_user_question to clarify requirements 
 // tool goroutines; the two are set together, so a call judged after a switch
 // is judged under the mode the next boundary will announce.
 type modes struct {
-	planPath string   // the session's plan file; fixed at Open
+	planPath string   // the session's plan file; fixed at Open, "" for a sub-agent
 	gate     modeGate // the enforcement side (tool.ModeGate)
+	// child marks a sub-agent's modes (newChildModes): its mode never
+	// changes, it has no plan file, and in plan mode it reads
+	// childPlanReminder and nothing that names a plan path.
+	child bool
 
 	mu    sync.Mutex
 	mode  string // the mode now: what the gate judges by
@@ -142,6 +155,16 @@ func newModes(mode, plan string, gate modeGate) *modes {
 	m := &modes{planPath: plan, gate: gate, mode: mode, told: modeAgent}
 	gate.SetPlanPath(plan)
 	gate.SetMode(mode)
+	return m
+}
+
+// newChildModes starts a sub-agent in mode, its parent's, with no plan file:
+// the gate's plan path stays "", so in plan mode every edit is refused (plan
+// 026 §3.2). The model is told the mode at its first step boundary, as any
+// session opened in plan or ask mode is.
+func newChildModes(mode string, gate modeGate) *modes {
+	m := newModes(mode, "", gate)
+	m.child = true
 	return m
 }
 
@@ -199,6 +222,15 @@ func (m *modes) reminderFor(step int, carried string) (pendingReminder, bool) {
 	}
 
 	switch {
+	case m.child && mode == modePlan:
+		// A sub-agent's plan mode bypasses transition, planEntryText and
+		// planText, every one of which would name a plan file it does not
+		// have. The text never alternates, so nothing counts; otherwise it is
+		// composed when any plan reminder would be.
+		if mode == told && step > 0 {
+			return pendingReminder{}, false
+		}
+		return pendingReminder{text: childPlanReminder, mode: mode, gen: gen}, true
 	case mode != told:
 		return pendingReminder{text: m.transition(mode, told), mode: mode, gen: gen, counts: mode == modePlan}, true
 	case step > 0:
