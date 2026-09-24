@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -95,7 +96,23 @@ func scopeRank(scope string) int {
 // typeKey is how agent type names compare: folded onto one line, as the
 // description shows them, and case-insensitively, so Claude Code's Explore
 // and Plan find the built-ins (plan 026 §3.4).
-func typeKey(name string) string { return strings.ToLower(foldLine(name)) }
+//
+// Case-insensitively in strings.EqualFold's sense, not strings.ToLower's: each
+// rune becomes the least rune of its simple case-folding orbit, so two names
+// EqualFold calls equal have one key. Lowering alone leaves Σ and ς apart —
+// both survive agentTypes, and the lower-precedence one answers to its own
+// spelling (review r2 of C3a).
+func typeKey(name string) string { return strings.Map(foldRune, foldLine(name)) }
+
+// foldRune is r's representative under simple case folding: the least rune of
+// the orbit unicode.SimpleFold walks from r.
+func foldRune(r rune) rune {
+	least := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		least = min(least, f)
+	}
+	return least
+}
 
 // agentTypes is the list a session offers: personas and the built-ins merged
 // in precedence order — project, built-in, user, plugin; within a scope, the

@@ -108,6 +108,22 @@ func TestAgentTypePrecedence(t *testing.T) {
 		t.Error("a persona claiming the built-in scope resolved")
 	}
 
+	// Names compare as strings.EqualFold does, not by lowering: Σ, σ and ς are
+	// one name, so the project's wins whichever the model sends (review r2 of
+	// C3a), and the user's spelling of it is not a second type.
+	sigma := agentTypes([]tool.Persona{
+		{Name: "Σ", Description: "the project's", Scope: tool.PersonaProject},
+		{Name: "ς", Description: "the user's", Scope: tool.PersonaUser},
+	})
+	if n := len(sigma) - len(builtinTypes); n != 1 {
+		t.Errorf("Σ and ς are %d types; want one", n)
+	}
+	for _, name := range []string{"Σ", "σ", "ς"} {
+		if p, err := resolveAgentType(sigma, name); err != nil || p.Description != "the project's" {
+			t.Errorf("resolve %q = %q, %v; want the project's", name, p.Description, err)
+		}
+	}
+
 	// No aliasing either way.
 	personas[0].Tools[0] = "bash"
 	got, _ := resolveAgentType(types, "reviewer")
