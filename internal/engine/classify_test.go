@@ -79,6 +79,8 @@ func classifyTable() []classifyCase {
 		{"agent.ErrAskUnavailable", agent.ErrAskUnavailable, "unavailable", true},
 		{"agent.ErrSetUnavailable", agent.ErrSetUnavailable, "unavailable", true},
 		{"ErrUnavailable", ErrUnavailable, "unavailable", true},
+		// Attach outrun by the ring (attach.go): nothing registered, ask again.
+		{"ErrAttachRaced", fmt.Errorf("%w: 4 snapshots refused", ErrAttachRaced), "unavailable", true},
 		{"ErrBadRequest", ErrBadRequest, "bad_request", false},
 		{"ErrUnknownCommand", ErrUnknownCommand, "unknown_command", false},
 		{"agent.ErrQueueFull", agent.ErrQueueFull, "queue_full", false},
@@ -159,6 +161,7 @@ func engineSentinels() map[string]error {
 		"ErrSetOutcomeUnknown": ErrSetOutcomeUnknown,
 		"ErrIndexWrite":        ErrIndexWrite,
 		"ErrCommandAborted":    ErrCommandAborted,
+		"ErrAttachRaced":       ErrAttachRaced,
 	}
 }
 
@@ -199,7 +202,10 @@ func agentSentinels() map[string]error {
 //   - ErrClosed, ErrLogClosing, ErrSlowConsumer, ErrFlushGaveUp and
 //     ErrObserverSet are the event log's own, about a subscription, a flush or
 //     an observer — never a command's answer (a command refused for room is
-//     told so with one of the three Unavailable sentinels above).
+//     told so with one of the three Unavailable sentinels above). Subscribe
+//     and Attach return ErrClosed on a closed log, and a subscription ends
+//     with it or ErrSlowConsumer, but neither takes a Command: no receipt is
+//     ever stored for them.
 //   - ErrAgentExited is the transport's. A command that runs into it ran, and
 //     its failure is a real one: "failed" is exactly right for it, and it
 //     needs no row.

@@ -414,6 +414,12 @@ func classify(err error) classification {
 		return classification{code: "aborted", stored: true}
 	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
 		return classification{code: "unavailable"}
+	case errors.Is(err, ErrAttachRaced):
+		// An attach the log outran: every fresh snapshot's cursor refused
+		// because the ring moved past it. Nothing was registered and nothing
+		// ran, and asking again is the answer — ErrUnavailable's case exactly,
+		// a log under a burst, so its code and never stored.
+		return classification{code: "unavailable"}
 	case errors.Is(err, ErrBadRequest):
 		return classification{code: "bad_request", stored: true}
 	case errors.Is(err, ErrUnknownCommand):
@@ -454,14 +460,19 @@ func Code(err error) string { return classify(err).code }
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
 // Ask, Answer, SetTitle, State, NewClientID and Events wait on nothing: no
-// channel, no provider call, no Publish. Start, Subscribe, Interject, Cancel,
-// Stop, Set, Sync and Close block and belong on a goroutine that is not the
-// primary's reader — a tea.Cmd. Subscribe is among
+// channel, no provider call, no Publish. Start, Subscribe, Attach, Interject,
+// Cancel, Stop, Set, Sync and Close block and belong on a goroutine that is
+// not the primary's reader — a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
-// can free. Interject is the one exception in use today: the TUI calls it from
-// Update, as it always has.
+// can free. Attach is among them for the same reason — it subscribes — and it
+// is cancellable by its ctx in every wait it makes (the boundary's through
+// agent.SubscribeOptions.Ctx), which releases a caller but frees no slot: a
+// client that attaches keeps its primary drained from another goroutine while
+// it does (plan 024 §3.6). Interject is
+// the one exception in use today: the TUI calls it from Update, as it always
+// has.
 //
 // A send-now is the one command whose provider call the engine makes for the
 // caller: Submit arms it and returns at once, and the cancel that makes room
@@ -479,6 +490,11 @@ type Control interface {
 	// the engine: the outbox may still be publishing after a turn's ending.
 	Events() <-chan agent.Event
 	Subscribe(agent.SubscribeOptions) (*agent.Subscription, error)
+	// Attach is a client's way in mid-session: a snapshot of the engine's
+	// transcript model and a subscription from the event after it, or a
+	// subscription from the client's own cursor when the log can serve it
+	// (attach.go). It blocks, and ctx bounds every wait it makes.
+	Attach(ctx context.Context, o AttachOptions) (*Attachment, error)
 	State() State
 	NewClientID() string
 

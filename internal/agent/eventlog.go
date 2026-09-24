@@ -260,6 +260,16 @@ type SubscribeOptions struct {
 	// so a record the reader has taken never counts; at worst a subscription
 	// holds its budget plus the one record it is blocked sending.
 	MaxBytes int
+	// Ctx, when set, bounds the one wait Subscribe makes: for the publishing
+	// boundary, which a publisher holds while it waits for room in the
+	// primary (plan 024 §3.6). Ending it there returns Ctx.Err() with nothing
+	// registered and no goroutine started, and so does a Ctx already ended when
+	// the boundary is acquired. It is consulted nowhere else: not by the
+	// cutoff, not by the subscription once Subscribe has returned it (Close
+	// ends that), and not by the file leg of its replay. nil waits as a
+	// publisher with no ctx does — until the boundary is free or the log
+	// closes.
+	Ctx context.Context
 }
 
 // EventSource is a session that can be subscribed to beside its primary
@@ -1459,15 +1469,22 @@ func (l *EventLog) Observe(fn func(Event)) error {
 // with nothing skipped. A cursor that cannot be served whole is refused here,
 // synchronously, as ErrCursorUnresolvable, and nothing is registered.
 //
-// It waits for the boundary with no ctx, like a publisher with none: while
-// the primary is wedged it waits, and closing the log releases it with
-// ErrClosed. The cutoff is taken inside the boundary: the last seq N, and a
+// It waits for the boundary, like a publisher: while the primary is wedged
+// it waits, closing the log releases it with ErrClosed, and o.Ctx, when set,
+// releases it with Ctx.Err() — the one place Ctx is consulted, so a caller
+// that must not wait on a primary only its own goroutine can drain has a way
+// out (plan 024 §3.6). Either way nothing is registered and no owner is
+// started. The cutoff is taken inside the boundary: the last seq N, and a
 // pin on every ring record in (After.Seq, N] — references to immutable
 // records, which the ring may evict afterwards without touching the pinned
 // copies — and live delivery begins at N+1.
 func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 	o.MaxItems = orDefault(o.MaxItems, defaultSubscribeItems)
 	o.MaxBytes = orDefault(o.MaxBytes, defaultSubscribeBytes)
+	var cancelled <-chan struct{}
+	if o.Ctx != nil {
+		cancelled = o.Ctx.Done()
+	}
 	if h := l.hooks; h != nil && h.admitting != nil {
 		h.admitting(admitSubscribe)
 	}
@@ -1475,11 +1492,19 @@ func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 	case l.sem <- struct{}{}:
 	case <-l.closed:
 		return nil, ErrClosed
+	case <-cancelled:
+		return nil, o.Ctx.Err()
 	}
 	defer l.release()
+	// A select picks at random among ready cases, so the boundary can be won
+	// after the log closed or the caller gave up; either way nothing is
+	// registered, and a Ctx that had already ended is refused every time
+	// rather than one time in two.
 	select {
 	case <-l.closed:
 		return nil, ErrClosed
+	case <-cancelled:
+		return nil, o.Ctx.Err()
 	default:
 	}
 	n := l.next

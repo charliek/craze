@@ -2068,6 +2068,93 @@ func TestEventLogAWedgedPrimaryHoldsNeitherNotesNorCloseAndCloseReleasesSubscrib
 	assertRun(t, "the journal", fileRecords(t, w), 1, primaryCap)
 }
 
+// TestEventLogSubscribeHonoursItsCtxWhileWaitingForTheBoundary is plan 024
+// §3.6's SubscribeOptions.Ctx over the same wedge: a Subscribe waiting behind
+// a publisher blocked on the full primary returns its ctx's error once the ctx
+// ends — with nothing registered and no owner started — and the publisher is
+// untouched by it. A ctx that had already ended is refused even when the
+// boundary is free, every time (the check after the boundary is won; without
+// it the select would register one call in two). And a ctx is consulted for
+// that wait alone: one that ends after Subscribe returned ends nothing.
+func TestEventLogSubscribeHonoursItsCtxWhileWaitingForTheBoundary(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	fillPrimary(t, l)
+	hook, inside := insideAt(primaryCap + 1)
+	arrivals := make(chan admitKind, 2)
+	l.hooks = &logHooks{beforePrimarySend: hook, admitting: func(k admitKind) { arrivals <- k }}
+	published := make(chan bool, 1)
+	go func() { published <- l.Publish(context.Background(), nil, textEvent("wedged")) }()
+	await(t, inside, "the publisher to block on the full primary")
+	if k := await(t, arrivals, "the publisher's arrival"); k != admitPublish {
+		t.Fatalf("the first arrival was %v", k)
+	}
+
+	type subResult struct {
+		s   *Subscription
+		err error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan subResult, 1)
+	go func() {
+		s, err := l.Subscribe(SubscribeOptions{Ctx: ctx})
+		got <- subResult{s, err}
+	}()
+	if k := await(t, arrivals, "the Subscribe's arrival"); k != admitSubscribe {
+		t.Fatalf("the second arrival was %v, want the Subscribe", k)
+	}
+	select {
+	case r := <-got:
+		t.Fatalf("the Subscribe returned (%v) while the boundary was held", r.err)
+	default:
+	}
+	cancel()
+	if r := await(t, got, "the cancelled Subscribe"); r.s != nil || !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("the cancelled Subscribe returned %v, %v; want nil, context.Canceled", r.s, r.err)
+	}
+	if n := l.liveOwners.Load(); n != 0 {
+		t.Fatalf("%d subscription owners run after a cancelled Subscribe", n)
+	}
+
+	// The publisher never knew: one read makes room and it commits.
+	<-l.Primary()
+	if !await(t, published, "the wedged publisher") {
+		t.Fatal("the wedged publisher returned false")
+	}
+	l.hooks = nil
+	registered := func() int {
+		l.sem <- struct{}{}
+		defer l.release()
+		return len(l.subs)
+	}
+	if n := registered(); n != 0 {
+		t.Fatalf("%d subscriptions are registered after a cancelled Subscribe", n)
+	}
+
+	// Already ended, with the boundary free: refused every time.
+	ended, end := context.WithCancel(context.Background())
+	end()
+	for i := range 64 {
+		if s, err := l.Subscribe(SubscribeOptions{Ctx: ended}); s != nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("attempt %d with an ended ctx and a free boundary: %v, %v", i, s, err)
+		}
+	}
+	if n, owners := registered(), l.liveOwners.Load(); n != 0 || owners != 0 {
+		t.Fatalf("%d subscriptions registered and %d owners running after the ended ctx's attempts", n, owners)
+	}
+
+	// Consulted for the wait alone.
+	drainPrimary(l)
+	later, endLater := context.WithCancel(context.Background())
+	s := mustSubscribe(t, l, SubscribeOptions{Ctx: later})
+	endLater()
+	publishWithin(t, l, textEvent("after"))
+	if texts := recordTexts(t, readN(t, s, 1)); texts[0] != "after" || s.Err() != nil {
+		t.Fatalf("a subscription whose ctx ended after it was opened got %q, err %v", texts, s.Err())
+	}
+	s.Close()
+}
+
 // TestEventLogClosingCountsEveryPublishInFlightAtTheCutoff: the closing
 // diag's droppedAtClose counts every publish that was in flight when Close
 // cut off, not only the one holding the boundary. With the primary full, A
