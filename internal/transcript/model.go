@@ -459,7 +459,12 @@ type State struct {
 	// Replaying is true inside a session/load replay bracket.
 	Replaying bool
 	// Tools is every tool's last state by id: the payload of each tool entry
-	// a transcript still holds under its id. nil when there is none.
+	// a transcript still holds under its id. nil when there is none. A model
+	// restored from a windowed snapshot holds no payload for a tool whose row
+	// the window omitted (its placeholder carries only an id and a size, X23),
+	// so its Tools is the first model's restricted to the rows it shares with
+	// it: the exactness of a windowed restore is the suffix, the non-tool
+	// state, and the tools of the suffix (plan 024 §3.5, X23).
 	Tools map[ToolKey]*agent.ToolEvent
 	// TruncatedAgents names the roster rows whose Prompt or Output the
 	// snapshot this model was restored from carried only the head of (over
@@ -560,11 +565,11 @@ type transcriptCut struct {
 	todoPlanned int
 	todoDone    bool
 	// The window a restored transcript carries (Transcript.windowed and the
-	// rest): what the snapshot it came from omitted. omitted is shared, not
-	// copied: nothing writes it after Restore.
+	// rest): what the snapshot it came from omitted. omitted is the ledger's
+	// live placeholders (X23), copied: the fold re-accounts them in place.
 	windowed   bool
 	dropped    int
-	omitted    map[string]EntryID
+	omitted    []Omitted
 	omittedRun Kind
 }
 
@@ -636,8 +641,10 @@ func (t *Transcript) cutLocked() transcriptCut {
 		todoDone:    t.todoDone,
 		windowed:    t.windowed,
 		dropped:     t.dropped,
-		omitted:     t.omitted,
 		omittedRun:  t.omittedRun,
+	}
+	if t.held() > 0 {
+		tc.omitted = append([]Omitted(nil), t.ledger[t.lhead:]...)
 	}
 	if n := len(tc.entries); t.streamOpen && n > 0 && tc.entries[n-1].Streaming {
 		// A fresh copy carrying the run's end, accounting and tail: the

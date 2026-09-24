@@ -39,8 +39,10 @@ import (
 //
 // The object is the header — the version, the envelope and the mandatory
 // sections with their truncation marks (ItemCap) — then "main" and "subs",
-// each transcript an object of its continuation members and its "entries". The transcripts are written member
-// by member (appendTranscript: appendScalars, appendToolMember, encodeEntry)
+// each transcript an object of its continuation members, its ledger
+// ("omitted", X23: [bytes] or [bytes,"tool id"] per omitted entry, oldest
+// first) and its "entries". The transcripts are written member by member
+// (appendTranscript: appendScalars, appendOmitted, encodeEntry)
 // rather than through a struct, so Snapshot's window can count the length each
 // entry and member adds, with the same functions, and hold the encoding to its
 // byte budget exactly.
@@ -181,16 +183,41 @@ type wireSnapshotIn struct {
 }
 
 type wireTranscriptIn struct {
-	Trimmed      bool              `json:"trimmed"`
-	Windowed     bool              `json:"windowed"`
-	Dropped      int               `json:"dropped"`
-	StreamOpen   bool              `json:"streamOpen"`
-	TailCut      bool              `json:"tailCut"`
-	TodoPlanned  int               `json:"todoPlanned"`
-	TodoDone     bool              `json:"todoDone"`
-	OmittedRun   string            `json:"omittedRun"`
-	OmittedTools map[string]string `json:"omittedTools"`
-	Entries      []wireEntry       `json:"entries"`
+	Trimmed     bool          `json:"trimmed"`
+	Windowed    bool          `json:"windowed"`
+	Dropped     int           `json:"dropped"`
+	StreamOpen  bool          `json:"streamOpen"`
+	TailCut     bool          `json:"tailCut"`
+	TodoPlanned int           `json:"todoPlanned"`
+	TodoDone    bool          `json:"todoDone"`
+	OmittedRun  string        `json:"omittedRun"`
+	Omitted     []wireOmitted `json:"omitted"`
+	Entries     []wireEntry   `json:"entries"`
+}
+
+// wireOmitted is one ledger record as a decoder reads it: [bytes] or
+// [bytes,"tool id"], bytes a non-negative integer.
+type wireOmitted Omitted
+
+func (w *wireOmitted) UnmarshalJSON(b []byte) error {
+	var parts []json.RawMessage
+	if err := json.Unmarshal(b, &parts); err != nil {
+		return fmt.Errorf("omitted entry %s: %w", b, err)
+	}
+	if len(parts) < 1 || len(parts) > 2 || string(parts[0]) == "null" {
+		return fmt.Errorf("omitted entry %s is not [bytes] or [bytes, tool id]", b)
+	}
+	var r Omitted
+	if err := json.Unmarshal(parts[0], &r.Bytes); err != nil || r.Bytes < 0 {
+		return fmt.Errorf("omitted entry %s: its size is not a non-negative integer", b)
+	}
+	if len(parts) == 2 {
+		if err := json.Unmarshal(parts[1], &r.Tool); err != nil || string(parts[1]) == "null" {
+			return fmt.Errorf("omitted entry %s: its tool id is not a string", b)
+		}
+	}
+	*w = wireOmitted(r)
+	return nil
 }
 
 type wireSubIn struct {
@@ -487,27 +514,25 @@ func plainJSON(s string) bool {
 }
 
 // appendTranscript writes one transcript's object: its scalar members, its
-// omitted tools (keys sorted, as encoding/json writes a map) and its entries.
+// ledger (in order) and its entries.
 func appendTranscript(jw *jsonWriter, b []byte, sc transcriptScalars, ts *TranscriptSnap) ([]byte, error) {
 	if _, err := kindName(sc.omittedRun); err != nil {
 		return nil, err
 	}
 	b = append(b, '{')
 	b, n := appendScalars(b, sc)
-	if len(ts.OmittedTools) > 0 {
-		b = append(b, `"omittedTools":{`...)
-		ids := make([]string, 0, len(ts.OmittedTools))
-		for tid := range ts.OmittedTools {
-			ids = append(ids, tid)
-		}
-		slices.Sort(ids)
-		for i, tid := range ids {
+	if len(ts.Omitted) > 0 {
+		b = append(b, `"omitted":[`...)
+		for i, r := range ts.Omitted {
+			if r.Bytes < 0 {
+				return nil, fmt.Errorf("transcript: encode snapshot: an omitted entry of %d bytes", r.Bytes)
+			}
 			if i > 0 {
 				b = append(b, ',')
 			}
-			b = appendToolMember(b, tid, ts.OmittedTools[tid])
+			b = appendOmitted(b, r)
 		}
-		b = append(b, "},"...)
+		b = append(b, "],"...)
 		n++
 	}
 	if len(ts.Entries) > 0 {
@@ -532,17 +557,39 @@ func appendTranscript(jw *jsonWriter, b []byte, sc transcriptScalars, ts *Transc
 	return b, nil
 }
 
-// appendToolMember writes one OmittedTools member: the tool id and the
-// EntryID of the row the window dropped.
-func appendToolMember(b []byte, tid string, eid EntryID) []byte {
-	b = appendJSONString(b, tid)
-	b = append(b, ':')
-	return appendJSONString(b, eid.String())
+// appendOmitted writes one ledger record (X23): [bytes], or [bytes,"tool id"]
+// for a tool entry.
+func appendOmitted(b []byte, r Omitted) []byte {
+	b = append(b, '[')
+	b = strconv.AppendInt(b, int64(r.Bytes), 10)
+	if r.Tool != "" {
+		b = append(b, ',')
+		b = appendJSONString(b, r.Tool)
+	}
+	return append(b, ']')
 }
 
-// toolMemberLen is len(appendToolMember(nil, tid, eid)).
-func toolMemberLen(tid string, eid EntryID) int {
-	return jsonStringLen(tid) + 1 + jsonStringLen(eid.String())
+// omittedLen is len(appendOmitted(nil, r)).
+func omittedLen(r Omitted) int {
+	n := 2 + intLen(r.Bytes)
+	if r.Tool != "" {
+		n += 1 + jsonStringLen(r.Tool)
+	}
+	return n
+}
+
+// intLen is len(strconv.Itoa(v)).
+func intLen(v int) int {
+	n := 1
+	if v < 0 {
+		n++
+		v = -v // an int's minimum is not a size anything accounts
+	}
+	for v >= 10 {
+		v /= 10
+		n++
+	}
+	return n
 }
 
 // kindNames is Kind.String's inverse over the kinds there are.
@@ -718,14 +765,10 @@ func (w *wireTranscriptIn) transcript() (TranscriptSnap, error) {
 	if ts.OmittedRun, err = parseKind(w.OmittedRun); err != nil {
 		return ts, err
 	}
-	if len(w.OmittedTools) > 0 {
-		ts.OmittedTools = make(map[string]EntryID, len(w.OmittedTools))
-		for tid, raw := range w.OmittedTools {
-			id, err := parseEntryID(raw)
-			if err != nil {
-				return ts, err
-			}
-			ts.OmittedTools[tid] = id
+	if len(w.Omitted) > 0 {
+		ts.Omitted = make([]Omitted, len(w.Omitted))
+		for i, r := range w.Omitted {
+			ts.Omitted[i] = Omitted(r)
 		}
 	}
 	if len(w.Entries) > 0 {

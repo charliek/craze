@@ -87,6 +87,36 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 	if len(tr.slot) != len(live) {
 		t.Fatalf("%s: the slot map has %d ids for %d entries", tr.agent, len(tr.slot), len(live))
 	}
+	// The ledger (X23): its placeholders are counted with the entries, each
+	// tool id it names is indexed at it and held by no row, and the index
+	// names nothing else.
+	if tr.lhead > len(tr.ledger) || tr.held() == 0 && (tr.ledger != nil || tr.lhead != 0 || tr.ptools != nil) {
+		t.Fatalf("%s: the ledger is %d long from %d (index %v)", tr.agent, len(tr.ledger), tr.lhead, tr.ptools)
+	}
+	if slices.ContainsFunc(tr.ledger[:tr.lhead], func(r Omitted) bool { return r != Omitted{} }) {
+		t.Fatalf("%s: a dropped placeholder is still in the ledger", tr.agent)
+	}
+	named := 0
+	for i := tr.lhead; i < len(tr.ledger); i++ {
+		r := tr.ledger[i]
+		if r.Bytes < 0 {
+			t.Fatalf("%s: placeholder %d accounts %d bytes", tr.agent, i, r.Bytes)
+		}
+		sum += r.Bytes
+		if r.Tool == "" {
+			continue
+		}
+		named++
+		if j, ok := tr.ptools[r.Tool]; !ok || j != i {
+			t.Fatalf("%s: placeholder %d names tool %q, the index says %d (%v)", tr.agent, i, r.Tool, j, ok)
+		}
+		if _, held := tr.tools[r.Tool]; held {
+			t.Fatalf("%s: tool %q is both held and a placeholder", tr.agent, r.Tool)
+		}
+	}
+	if named != len(tr.ptools) {
+		t.Fatalf("%s: %d placeholders name a tool, the index has %d", tr.agent, named, len(tr.ptools))
+	}
 	if sum != tr.bytes {
 		t.Fatalf("%s: the counter says %d bytes, a recount %d", tr.agent, tr.bytes, sum)
 	}
@@ -97,18 +127,17 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 		}
 	}
 	// A restored window can have dropped the open run's entry (omittedRun):
-	// the run is open with no entry of its own, in a transcript that has
-	// drawn nothing since.
+	// the run is open with no entry of its own — its placeholder is the
+	// ledger's last, naming no tool — in a transcript that has drawn nothing
+	// since.
 	if open := len(live) > 0 && live[len(live)-1].Streaming; tr.streamOpen != (open || tr.omittedRun != 0) {
 		t.Fatalf("%s: streamOpen %v, but the last entry streaming is %v (omitted run %v)", tr.agent, tr.streamOpen, open, tr.omittedRun)
 	}
-	if tr.omittedRun != 0 && (!tr.streamOpen || len(live) > 0) {
-		t.Fatalf("%s: an omitted %v run beside %d entries (open %v)", tr.agent, tr.omittedRun, len(live), tr.streamOpen)
+	if tr.omittedRun != 0 && (!tr.streamOpen || len(live) > 0 || tr.held() == 0 || tr.ledger[len(tr.ledger)-1].Tool != "") {
+		t.Fatalf("%s: an omitted %v run beside %d entries and %d placeholders (open %v)", tr.agent, tr.omittedRun, len(live), tr.held(), tr.streamOpen)
 	}
-	for tid := range tr.omitted {
-		if _, held := tr.tools[tid]; held {
-			t.Fatalf("%s: tool %q is both held and omitted", tr.agent, tid)
-		}
+	if tr.omittedRun == 0 && tr.runLen != 0 {
+		t.Fatalf("%s: no omitted run, but its length is %d", tr.agent, tr.runLen)
 	}
 	if !tr.streamOpen && (len(tr.buf) > 0 || tr.bufCut || tr.tailAt != 0) {
 		t.Fatalf("%s: no run is open but the builder holds %d bytes (cut at %d)", tr.agent, len(tr.buf), tr.tailAt)
@@ -126,12 +155,12 @@ func checkTranscript(t testing.TB, tr *Transcript) {
 	if len(tr.buf) > 2*tr.streamCap {
 		t.Fatalf("%s: the builder holds %d bytes, past 2 × %d", tr.agent, len(tr.buf), tr.streamCap)
 	}
-	if len(live) > tr.maxEntries {
-		t.Fatalf("%s: %d entries, the bound is %d", tr.agent, len(live), tr.maxEntries)
+	if tr.count() > tr.maxEntries {
+		t.Fatalf("%s: %d entries and %d placeholders, the bound is %d", tr.agent, len(live), tr.held(), tr.maxEntries)
 	}
 	// The budget holds but for what tool updates in place have added since it
 	// was last enforced: an update in place never trims (upsertTool).
-	if tr.bytes-tr.grown > tr.maxBytes && len(live) > 1 {
+	if tr.bytes-tr.grown > tr.maxBytes && tr.count() > 1 {
 		t.Fatalf("%s: %d bytes (%d of them grown in place) over %d entries, the bound is %d", tr.agent, tr.bytes, tr.grown, len(live), tr.maxBytes)
 	}
 	if slices.ContainsFunc(tr.ents[:tr.head], func(e *Entry) bool { return e != nil }) {

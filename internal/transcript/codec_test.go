@@ -410,7 +410,17 @@ func TestSnapshotCodecRefusesWhatItCannotRead(t *testing.T) {
 		`{"version":1,"main":{"entries":[{"id":"1.0","kind":"hologram"}]}}`,
 		`{"version":1,"main":{"entries":[{"id":"one"}]}}`,
 		`{"version":1,"main":{"entries":[{"id":"1.x"}]}}`,
-		`{"version":1,"main":{"omittedTools":{"t":"7"}}}`,
+		`{"version":1,"main":{"omitted":{"t":"7"}}}`,
+		`{"version":1,"main":{"omitted":[7]}}`,
+		`{"version":1,"main":{"omitted":[[]]}}`,
+		`{"version":1,"main":{"omitted":[null]}}`,
+		`{"version":1,"main":{"omitted":[[null]]}}`,
+		`{"version":1,"main":{"omitted":[[-1]]}}`,
+		`{"version":1,"main":{"omitted":[[1.5]]}}`,
+		`{"version":1,"main":{"omitted":[["7"]]}}`,
+		`{"version":1,"main":{"omitted":[[7,8]]}}`,
+		`{"version":1,"main":{"omitted":[[7,null]]}}`,
+		`{"version":1,"main":{"omitted":[[7,"t","u"]]}}`,
 		`{"version":1,"main":{"omittedRun":"hologram"}}`,
 		`{"version":1,"main":{"entries":[{"id":"1.0","kind":"tool","tool":{"id":7}}]}}`,
 		`{"version":1,"subs":[{"id":"c","entries":[{"id":"2"}]}],"main":{}}`,
@@ -426,6 +436,9 @@ func TestSnapshotCodecRefusesWhatItCannotRead(t *testing.T) {
 	}
 	if _, err := EncodeSnapshot(&Snapshot{Version: SnapshotVersion, Main: TranscriptSnap{OmittedRun: Kind(99)}}); err == nil {
 		t.Fatal("an unknown omitted run kind was written")
+	}
+	if _, err := EncodeSnapshot(&Snapshot{Version: SnapshotVersion, Main: TranscriptSnap{Omitted: []Omitted{{Bytes: -1}}}}); err == nil {
+		t.Fatal("an omitted entry of negative size was written")
 	}
 	if _, err := EncodeSnapshot(nil); err == nil {
 		t.Fatal("a nil snapshot was written")
@@ -451,8 +464,9 @@ const goldenAt = `"2026-09-22T10:30:45.123456789Z"`
 // the queue) and each truncation mark, then a transcript's continuation
 // members, an entry of every kind, and a child's window. Keys are camelCase, "version" comes first, zero
 // values are absent, times are UTC with nanoseconds, HTML is not escaped, the
-// leaf payloads have exactly the event codec's shape, and omitted tools are
-// written in key order. A change here is a change to what S2 sends, and
+// leaf payloads have exactly the event codec's shape, and the ledger (X23) is
+// written in its order, a record [bytes] or [bytes,"tool id"], the id escaped
+// as any string is. A change here is a change to what S2 sends, and
 // SnapshotVersion says whether it is compatible.
 func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
 	code := 0
@@ -543,13 +557,14 @@ func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
 				`{"id":"10.0","kind":"thought","text":"…still thinking","at":` + goldenAt + `,"end":` + goldenAt + `,"open":true,"streaming":true}]}}`},
 		{"a child's window", Snapshot{Subs: []SubSnap{
 			{ID: "sub-1", TranscriptSnap: TranscriptSnap{Windowed: true, Dropped: 12, StreamOpen: true, OmittedRun: KindAssistant,
-				OmittedTools: map[string]EntryID{"t-b": {Seq: 20}, "t-a": {Seq: 31, N: 1}}}},
-			{ID: "sub-2", TranscriptSnap: TranscriptSnap{Entries: []Entry{{ID: EntryID{Seq: 40}, Kind: KindAssistant, Text: "done"}}}},
+				Omitted: []Omitted{{Bytes: 1234, Tool: "t-b"}, {Bytes: 0}, {Bytes: 7, Tool: "t \"<a>\""}, {Bytes: 65536}}}},
+			{ID: "sub-2", TranscriptSnap: TranscriptSnap{Windowed: true, Dropped: 1, Omitted: []Omitted{{Bytes: 9}},
+				Entries: []Entry{{ID: EntryID{Seq: 40}, Kind: KindAssistant, Text: "done"}}}},
 			{ID: "sub-3"},
 		}},
 			`{"version":1,"main":{},"subs":[` +
-				`{"id":"sub-1","windowed":true,"dropped":12,"streamOpen":true,"omittedRun":"assistant","omittedTools":{"t-a":"31.1","t-b":"20.0"}},` +
-				`{"id":"sub-2","entries":[{"id":"40.0","kind":"assistant","text":"done"}]},` +
+				`{"id":"sub-1","windowed":true,"dropped":12,"streamOpen":true,"omittedRun":"assistant","omitted":[[1234,"t-b"],[0],[7,"t \"<a>\""],[65536]]},` +
+				`{"id":"sub-2","windowed":true,"dropped":1,"omitted":[[9]],"entries":[{"id":"40.0","kind":"assistant","text":"done"}]},` +
 				`{"id":"sub-3"}]}`},
 	} {
 		tc.s.Version = SnapshotVersion

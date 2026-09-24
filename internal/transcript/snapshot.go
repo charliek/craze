@@ -44,7 +44,8 @@ const ItemCap = 256 << 10
 // text is capped (ItemCap), so what can still reach it there is the NUMBER of
 // items — asks, roster rows, todos, queue rows, catalog entries, ended asks —
 // which no cap bounds (or an id or status no agent mints at that size: the
-// strings ItemCap does not list are carried whole).
+// strings ItemCap does not list are carried whole), and the ledger, a record
+// per entry the window omits (X23), whose count the bounds do bound.
 var ErrSnapshotTooLarge = errors.New("transcript: snapshot too large for its byte budget")
 
 // Snapshot is one model at one Seq, bounded to a byte budget: what a client
@@ -113,13 +114,29 @@ type TranscriptSnap struct {
 	// transcript's), so a repeated todo list draws no second note.
 	TodoPlanned int
 	TodoDone    bool
-	// OmittedTools names the tool rows the window dropped, by tool id: an
-	// update to one of them applies to nothing on the restored model.
+	// Omitted is the ledger (execution amendment X23): one record per entry
+	// the window omitted, oldest first — the restored model's placeholders,
+	// its own ledger's carried forward first when the model was itself
+	// restored. Restore puts them at the head of the transcript, counted in
+	// its entry cap and byte budget, so the restored model trims them exactly
+	// when the first model trims the real rows; an update to a tool whose
+	// placeholder remains draws nothing and re-accounts it.
+	Omitted []Omitted
 	// OmittedRun is the kind of the open run's entry when the window dropped
 	// it too (a child that fitted nothing, mid-stream): the run's next chunks
-	// apply to nothing until something ends it.
-	OmittedTools map[string]EntryID
-	OmittedRun   Kind
+	// draw nothing, and grow its placeholder — the ledger's last — until
+	// something ends it.
+	OmittedRun Kind
+}
+
+// Omitted is one ledger record: an entry a snapshot's window omitted, as a
+// payload-free placeholder (X23). Bytes is its retained bytes as the model
+// the snapshot was cut from accounts them (Entry.Bytes; for the open run, its
+// tail's length), and Tool the id a tool entry answers updates under, "" for
+// any other entry. On the wire it is [bytes] or [bytes,"tool id"].
+type Omitted struct {
+	Bytes int
+	Tool  string
 }
 
 // SubSnap is one child's transcript in a snapshot.
@@ -161,6 +178,13 @@ type AgentRow struct {
 // then each child's, in the order they were created, with what remains. Every
 // entry is encoded once, and the window counts the bytes the encoding will
 // have, not an estimate: the snapshot's encoding is at most budget bytes.
+//
+// An entry the window leaves out is carried as its ledger record
+// (TranscriptSnap.Omitted, X23), so the mandatory sections are counted with
+// every entry as a record, and each entry taken in replaces its record — a
+// few bytes against the entry's own encoding, so the window still converges.
+// The ledger is budgeted like everything else: on A3's worst case it is
+// ~33,000 records and ~0.5 MB of a 4 MiB snapshot.
 func (m *Model) Snapshot(budget int) (*Snapshot, error) {
 	s, _, err := m.snapshotSized(budget)
 	return s, err
@@ -258,7 +282,7 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 // of its n entries are in, and cur is the encoded size of its object as it
 // stands. Every size it counts is the length of bytes the encoder writes —
 // each entry encoded once, by the encoder's own encodeEntry, and the members
-// written by its own appendScalars and appendToolMember — so the sum is the
+// written by its own appendScalars and appendOmitted — so the sum is the
 // encoding's length, not an estimate.
 type window struct {
 	jw  *jsonWriter
@@ -272,40 +296,41 @@ type window struct {
 	// encodings' lengths.
 	ents   []Entry
 	entLen int
-	// toolLen is, per entry oldest first, the length of the "id":"entry"
-	// member the entry adds to OmittedTools when the window drops it (0 for
-	// none); restTools and restLen sum it over the entries not included.
-	toolLen            []int
-	restTools, restLen int
-	// carried is what a restored transcript's own window already omits.
-	carriedTools, carriedLen int
-	openLast                 bool
-	cur                      int
-	scratch                  []byte
+	// recLen is, per entry oldest first, the length of the ledger record the
+	// entry becomes when the window drops it (X23: every entry becomes one);
+	// restLen sums it over the entries not included, which are the oldest
+	// n - k.
+	recLen  []int
+	restLen int
+	// carried is what a restored transcript's own ledger already holds,
+	// ahead of every record this window adds: its count and encoded length.
+	carriedRecs, carriedLen int
+	openLast                bool
+	cur                     int
+	scratch                 []byte
 }
 
 func newWindow(jw *jsonWriter, tc *transcriptCut, id string, sub bool) *window {
 	w := &window{jw: jw, tc: tc, id: id, sub: sub, n: len(tc.entries)}
 	w.openLast = tc.streamOpen && w.n > 0 && tc.entries[w.n-1].Streaming
-	seen := make(map[string]bool, len(tc.omitted))
-	for tid, eid := range tc.omitted {
-		seen[tid] = true
-		w.carriedTools++
-		w.carriedLen += toolMemberLen(tid, eid)
+	w.carriedRecs = len(tc.omitted)
+	for _, r := range tc.omitted {
+		w.carriedLen += omittedLen(r)
 	}
-	w.toolLen = make([]int, w.n)
+	w.recLen = make([]int, w.n)
 	for i, e := range tc.entries {
-		tid := entryToolID(e)
-		if tid == "" || seen[tid] {
-			continue
-		}
-		seen[tid] = true
-		w.toolLen[i] = toolMemberLen(tid, e.ID)
-		w.restTools++
-		w.restLen += w.toolLen[i]
+		w.recLen[i] = omittedLen(omittedOf(e))
+		w.restLen += w.recLen[i]
 	}
-	w.cur = w.size(0, 0, w.restTools, w.restLen)
+	w.cur = w.size(0, 0, w.n, w.restLen)
 	return w
+}
+
+// omittedOf is the ledger record of an entry the window drops: what the model
+// accounts for it — the cut's Bytes, which for the open run is its tail's
+// length (X24's current) — and the id a tool entry answers updates under.
+func omittedOf(e *Entry) Omitted {
+	return Omitted{Bytes: e.Bytes, Tool: entryToolID(e)}
 }
 
 // entryToolID is the id a tool entry answers updates under, "" for none.
@@ -338,16 +363,16 @@ func (w *window) scalars(k int) transcriptScalars {
 }
 
 // size is the encoded length of the transcript's object with the newest k
-// entries in (their encodings entLen bytes long) and tools omitted tool
-// members (toolsLen bytes) beside the carried ones: the scalar members as the
-// encoder writes them, then OmittedTools and Entries, each member followed by
-// a comma but the last.
-func (w *window) size(k, entLen, tools, toolsLen int) int {
+// entries in (their encodings entLen bytes long) and recs ledger records
+// (recsLen bytes) after the carried ones: the scalar members as the encoder
+// writes them, then Omitted and Entries, each member followed by a comma but
+// the last.
+func (w *window) size(k, entLen, recs, recsLen int) int {
 	var members int
 	w.scratch, members = appendScalars(w.scratch[:0], w.scalars(k))
 	sum := len(w.scratch) // each scalar member with its comma
-	if t := w.carriedTools + tools; t > 0 {
-		sum += len(`"omittedTools":{}`) + w.carriedLen + toolsLen + t - 1 + 1
+	if r := w.carriedRecs + recs; r > 0 {
+		sum += len(`"omitted":[]`) + w.carriedLen + recsLen + r - 1 + 1
 		members++
 	}
 	if k > 0 {
@@ -370,12 +395,10 @@ func (w *window) fill(total, budget int) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		tools, toolsLen := w.restTools, w.restLen
-		if w.toolLen[i] > 0 {
-			tools--
-			toolsLen -= w.toolLen[i]
-		}
-		next := w.size(w.k+1, w.entLen+len(b), tools, toolsLen)
+		// Taking entry i in takes its ledger record out: the record is far
+		// shorter than the entry's encoding, so the window still converges.
+		restLen := w.restLen - w.recLen[i]
+		next := w.size(w.k+1, w.entLen+len(b), i, restLen)
 		if total-w.cur+next > budget {
 			break
 		}
@@ -384,7 +407,7 @@ func (w *window) fill(total, budget int) (int, error) {
 		w.k++
 		w.entLen += len(b)
 		w.ents = append(w.ents, e)
-		w.restTools, w.restLen = tools, toolsLen
+		w.restLen = restLen
 	}
 	return total, nil
 }
@@ -408,16 +431,11 @@ func (w *window) snap() TranscriptSnap {
 			ts.Entries[w.k-1-i] = e
 		}
 	}
-	if t := w.carriedTools + w.restTools; t > 0 {
-		ts.OmittedTools = make(map[string]EntryID, t)
-		for tid, eid := range w.tc.omitted {
-			ts.OmittedTools[tid] = eid
-		}
-		for i := range w.n - w.k {
-			if w.toolLen[i] > 0 {
-				e := w.tc.entries[i]
-				ts.OmittedTools[e.Tool.ID] = e.ID
-			}
+	if r := w.carriedRecs + w.n - w.k; r > 0 {
+		ts.Omitted = make([]Omitted, 0, r)
+		ts.Omitted = append(ts.Omitted, w.tc.omitted...)
+		for _, e := range w.tc.entries[:w.n-w.k] {
+			ts.Omitted = append(ts.Omitted, omittedOf(e))
 		}
 	}
 	return ts
@@ -667,12 +685,21 @@ func capSettings(s Settings) Settings {
 // the snapshotted model for the entries it retained, and folding the events
 // after s.Seq gives what the first model gives folding them — the next chunk
 // of an open run grows its tail (StreamOpen, TailCut), a repeated todo list
-// draws no second note, an update to a tool whose row the window dropped
-// applies to nothing (OmittedTools), an update to a tool the model itself
-// trimmed appends a new row as it does on the first, and later entries take
-// the ids the first model gives them (Seq, Local). The entries keep the
-// snapshot's EntryIDs, and each accounts its bytes by this model's rule
-// (Entry.Bytes is recomputed, not read).
+// draws no second note, an update to a tool the model itself trimmed appends
+// a new row as it does on the first, and later entries take the ids the first
+// model gives them (Seq, Local). The entries keep the snapshot's EntryIDs,
+// and each accounts its bytes by this model's rule (Entry.Bytes is
+// recomputed, not read).
+//
+// A windowed snapshot's ledger (TranscriptSnap.Omitted, X23) becomes the
+// transcript's placeholders, ahead of its entries and counted in its caps, so
+// this model trims exactly when the first one does: while a tool's
+// placeholder remains, an update to it draws nothing (the first model updates
+// the row this one never had) and re-accounts the placeholder; once the trim
+// has dropped it — when the first model drops the row and forgets the id — an
+// update appends a new row on both. A placeholder is never read: the
+// projections and every reader hold the real entries only, and a windowed
+// restore equals the first model on its suffix (see State.Tools).
 //
 // o is as for New; its Incarnation is replaced by the snapshot's, and its
 // Bounds must be the first model's for the two to trim alike (DefaultBounds
@@ -682,7 +709,11 @@ func capSettings(s Settings) Settings {
 // payloads by pointer, which nothing writes — and s may be dropped after it.
 // It never fails: what is inconsistent in a hand-built snapshot (an entry with
 // the zero id or a duplicate one, a child or roster id repeated or empty, a
-// streaming entry that is not the open run's) is skipped or taken as closed.
+// streaming entry that is not the open run's, an omitted run with no
+// placeholder or beside entries, a negative ledger size, a tool id named by
+// two placeholders or by a placeholder and a row) is skipped, taken as closed,
+// or taken as zero, and a placeholder naming a tool a row or a newer
+// placeholder also names keeps its size and loses the id.
 func Restore(s *Snapshot, o Options) *Model {
 	m := New(o)
 	if s == nil {
@@ -762,23 +793,49 @@ func (t *Transcript) restore(ts *TranscriptSnap) {
 			t.tools[tid] = ne.ID
 		}
 	}
-	if !t.streamOpen && ts.StreamOpen && !openLast && ts.OmittedRun != 0 {
+	// The ledger: placeholders at the head, the model's own copy (s's is the
+	// caller's).
+	if len(ts.Omitted) > 0 {
+		t.ledger = make([]Omitted, len(ts.Omitted))
+		for i, r := range ts.Omitted {
+			r.Bytes = max(r.Bytes, 0)
+			t.ledger[i] = r
+			t.bytes += r.Bytes
+		}
+	}
+	if !t.streamOpen && ts.StreamOpen && !openLast && ts.OmittedRun != 0 && t.len() == 0 && t.held() > 0 {
+		// The open run's entry is the ledger's last placeholder: a stream
+		// entry, which answers no tool update.
 		t.streamOpen = true
 		t.omittedRun = ts.OmittedRun
+		run := &t.ledger[len(t.ledger)-1]
+		run.Tool = ""
+		t.runLen = run.Bytes
 	}
-	if len(ts.OmittedTools) > 0 {
-		t.omitted = make(map[string]EntryID, len(ts.OmittedTools))
-		for tid, eid := range ts.OmittedTools {
-			// A row this transcript holds answers its own updates.
-			if _, held := t.tools[tid]; tid != "" && !held {
-				t.omitted[tid] = eid
-			}
+	for i := range t.ledger {
+		tid := t.ledger[i].Tool
+		if tid == "" {
+			continue
 		}
+		// A row this transcript holds answers its own updates; of two
+		// placeholders naming one id, the newer does (neither happens in a
+		// snapshot a model cut: a model holds one row per tool id).
+		if _, held := t.tools[tid]; held {
+			t.ledger[i].Tool = ""
+			continue
+		}
+		if t.ptools == nil {
+			t.ptools = make(map[string]int)
+		}
+		if j, ok := t.ptools[tid]; ok {
+			t.ledger[j].Tool = ""
+		}
+		t.ptools[tid] = i
 	}
 	// What updates in place added since the first model last enforced its
 	// budget is not known here, and only its invariant reads it (grown): the
 	// next append or chunk trims on both models alike.
-	if t.len() > 1 && t.bytes > t.maxBytes {
+	if t.count() > 1 && t.bytes > t.maxBytes {
 		t.grown = t.bytes - t.maxBytes
 	}
 }

@@ -97,17 +97,36 @@ type Transcript struct {
 	// The window, set only by Restore from a snapshot that omitted older
 	// entries to fit its byte budget (plan 024 §3.5), and carried forward by
 	// this model's own snapshots. windowed and dropped say so and how many.
-	// omitted maps the id of every tool whose row the window dropped to that
-	// row's EntryID: an update to one of them applies to nothing — the first
-	// client updates a row this one never had, and the suffix the two share is
-	// unchanged. It is written by Restore alone, so a cut shares it. omittedRun
-	// is the kind of the open run's entry when the window dropped that too (a
-	// child that fitted nothing, mid-stream): its next chunks of that kind
-	// apply to nothing, and whatever ends the run clears it.
-	windowed   bool
-	dropped    int
-	omitted    map[string]EntryID
+	windowed bool
+	dropped  int
+	// The ledger (execution amendment X23): one payload-free placeholder per
+	// entry the window omitted and the first model still holds, oldest first,
+	// live from lhead — its retained bytes as the first model accounts them,
+	// and a tool's id. The placeholders sit at the head of the transcript,
+	// before every real entry, and are counted in its entry cap and byte
+	// budget exactly as the first model's real rows are (count, bytes), so
+	// the trim drops them — oldest first, one at a time — exactly when the
+	// first model drops the real rows. No reader ever sees one: live(), and so
+	// Entries, Entry, Len, History, State and the pane, hold the real entries
+	// only. ptools indexes the placeholders that name a tool (the tool id to
+	// its index in ledger): an update to one draws nothing and re-accounts the
+	// placeholder's bytes to the new payload's, as the first model re-accounts
+	// its row; the id is forgotten when the placeholder is dropped, so a later
+	// update appends a new row on both models. The ledger is never compacted
+	// (only Restore fills it; it shrinks from the head and is let go when
+	// empty), and a cut copies its live part.
+	//
+	// omittedRun is the kind of the open run's entry when the window dropped
+	// that too (a child that fitted nothing, mid-stream): its placeholder is
+	// the ledger's last, its next chunks of that kind draw nothing and grow
+	// the placeholder's bytes as the first model's tail grows (see
+	// growOmittedRun for the one approximation), and whatever ends the run
+	// clears it. runLen is that run's length as far as it is known.
+	ledger     []Omitted
+	lhead      int
+	ptools     map[string]int
 	omittedRun Kind
+	runLen     int
 }
 
 func newTranscript(m *Model, agentID string, maxEntries, maxBytes int) *Transcript {
@@ -197,7 +216,8 @@ func (t *Transcript) StreamOpen() bool {
 	return t.streamOpen
 }
 
-// Bytes is the retained bytes the transcript accounts for.
+// Bytes is the retained bytes the transcript accounts for, a restored
+// window's placeholders included (X23): what its byte budget is held to.
 func (t *Transcript) Bytes() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -231,6 +251,13 @@ func (t *Transcript) bytesOf(e *Entry) int {
 }
 
 func (t *Transcript) len() int { return len(t.ents) - t.head }
+
+// held is how many placeholders the ledger holds (X23).
+func (t *Transcript) held() int { return len(t.ledger) - t.lhead }
+
+// count is what the entry cap counts: the real entries and the placeholders
+// before them — as many as the first model's real rows (X23).
+func (t *Transcript) count() int { return t.len() + t.held() }
 
 // live is the entries, oldest first, aliasing the backing array: the caller
 // holds the lock and copies before letting go of it.
@@ -279,9 +306,10 @@ func (t *Transcript) replace(ord int, ne *Entry) {
 func (t *Transcript) replaceLast(ne *Entry) { t.replace(t.base+len(t.ents)-1, ne) }
 
 // trim is today's trimEntries over the deque: the entry cap, then the byte
-// budget, each dropping from the front.
+// budget, each dropping from the front. Both count a restored window's
+// placeholders (X23), which are the front.
 func (t *Transcript) trim() {
-	for t.len() > t.maxEntries {
+	for t.count() > t.maxEntries {
 		t.dropHead()
 	}
 	t.trimBytes()
@@ -292,7 +320,7 @@ func (t *Transcript) trim() {
 // and every chunk, never after a tool update in place (upsertTool), and it is
 // where the budget is enforced again: grown starts over.
 func (t *Transcript) trimBytes() {
-	for t.bytes > t.maxBytes && t.len() > 1 {
+	for t.bytes > t.maxBytes && t.count() > 1 {
 		t.dropHead()
 	}
 	t.grown = 0
@@ -302,8 +330,13 @@ func (t *Transcript) trimBytes() {
 // tool index's name for it, so a later update to that id appends a new row. A
 // named tool's row going takes that tool's last state out of the state
 // projection (State().Tools), so the fold's Change says the state changed (r2
-// finding 6).
+// finding 6). A restored window's placeholders are older than every real
+// entry, so they go first (dropPlaceholder).
 func (t *Transcript) dropHead() {
+	if t.held() > 0 {
+		t.dropPlaceholder()
+		return
+	}
 	e := t.ents[t.head]
 	t.ents[t.head] = nil
 	t.head++
@@ -326,6 +359,62 @@ func (t *Transcript) dropHead() {
 		t.base += t.head
 		t.head = 0
 	}
+}
+
+// dropPlaceholder is dropHead for the oldest placeholder (X23): the first
+// model drops the real row it stands for at this same fold. Its bytes leave
+// the counter, a tool's id leaves the index — so a later update to it appends
+// a new row, as it does on the first model, which forgot the id with its row
+// — and the transcript is Trimmed, as the first model's is.
+//
+// How the fold reports it: a placeholder is not an entry any reader was given
+// (a client's display list never held one), so it is not counted in
+// Change.Dropped, which says how many of the entries a client holds left the
+// front; and the Change's Scope is not set by it. A placeholder that named a
+// tool sets Change.State, as the first model's dropped tool row does: the
+// state projection here never held that tool (State().Tools holds real rows
+// only), but "may have changed" stays the conservative answer and matches the
+// first model's Change.
+func (t *Transcript) dropPlaceholder() {
+	i := t.lhead
+	r := t.ledger[i]
+	t.ledger[i] = Omitted{} // a cut copies the ledger, so nothing else holds it
+	t.lhead++
+	t.bytes -= r.Bytes
+	if r.Tool != "" {
+		if j, ok := t.ptools[r.Tool]; ok && j == i {
+			delete(t.ptools, r.Tool)
+		}
+		t.model.fc.state = true
+	}
+	t.trimmed = true
+	if t.lhead == len(t.ledger) {
+		t.ledger, t.lhead, t.ptools = nil, 0, nil
+	}
+}
+
+// growOmittedRun accounts a chunk of n bytes into an open run whose entry the
+// window omitted (omittedRun): its placeholder — the ledger's last — follows
+// the first model's open entry, which accounts its tail's length (X3).
+//
+// The one approximation X23 records: the first model's tail, once the run is
+// longer than StreamText, is "…" and the run's last bytes from the first rune
+// start at or after its cut, so its length is StreamText less up to three
+// bytes when the cut lands inside a multi-byte rune — which only the run's
+// bytes say, and this model does not have them. The placeholder starts at the
+// first model's exact figure (the snapshot's) and accounts min(run,
+// StreamText) from there, the run's length being that figure plus every chunk
+// since: exact while the run fits the cap, and past it whenever the first
+// model's cut lands on a rune start (always, for ASCII); otherwise it can
+// differ from the first model's by up to three bytes. So a byte-budget
+// trim can come one fold apart on the two models only when multi-byte text
+// streams at the cap in a child the window emptied.
+func (t *Transcript) growOmittedRun(n int) {
+	i := len(t.ledger) - 1
+	t.runLen = min(t.runLen+n, t.streamCap+1) // saturated: only min(·, cap) is read
+	nb := min(t.runLen, t.streamCap)
+	t.bytes += nb - t.ledger[i].Bytes
+	t.ledger[i].Bytes = nb
 }
 
 // ---------------------------------------------------------- the builder
@@ -509,8 +598,11 @@ func (t *Transcript) endRun(at time.Time) {
 	}
 	if t.omittedRun != 0 {
 		// A restored window dropped the open run's entry: the run ends here
-		// as it does on the first client, with no entry to close.
+		// as it does on the first client, with no entry to close. Its
+		// placeholder stays, at the bytes it accounts: the first model's
+		// closed entry accounts its tail, which is what its open one did.
 		t.omittedRun = 0
+		t.runLen = 0
 		t.bufReset()
 		return
 	}
@@ -553,7 +645,11 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 	at = t.model.stamp(at)
 	if t.streamOpen && t.omittedRun == kind {
 		// The run continues on the first client, in an entry the window this
-		// model was restored from dropped: nothing here to grow.
+		// model was restored from dropped: nothing here to draw, but its
+		// placeholder grows as the first model's entry does, and the budget
+		// is enforced after it as after any chunk (X23).
+		t.growOmittedRun(len(text))
+		t.trimBytes()
 		return
 	}
 	if t.streamOpen && t.omittedRun == 0 {
@@ -599,11 +695,19 @@ func (t *Transcript) upsertTool(tool *agent.ToolEvent, envelope time.Time) {
 	// existing row still means the thinking before it is over.
 	t.closeStream(at)
 	if tool.ID != "" {
-		if _, ok := t.omitted[tool.ID]; ok {
-			// The row is one the window this model was restored from dropped:
-			// the first client updates it in place, and this one has nothing
-			// to update — the suffix the two share is unchanged (plan 024
-			// §3.5). The run above it closed all the same, on both.
+		if i, ok := t.ptools[tool.ID]; ok {
+			// The row is one the window this model was restored from dropped,
+			// and the first client still holds it (its placeholder remains):
+			// the first client updates it in place, and this one has no row to
+			// update — the suffix the two share is unchanged (plan 024 §3.5).
+			// Its placeholder is re-accounted to the new payload's bytes, as
+			// the first model's row is, and, as there, nothing is trimmed
+			// (X23; X5 revised). The run above it closed all the same, on both.
+			nb := entryBytes(&Entry{Kind: KindTool, Tool: tool})
+			d := nb - t.ledger[i].Bytes
+			t.ledger[i].Bytes = nb
+			t.bytes += d
+			t.grown += d
 			return
 		}
 		if id, ok := t.tools[tool.ID]; ok {

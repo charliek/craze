@@ -408,6 +408,22 @@ func TestTheModelIsBoundedOnAWorstCaseSession(t *testing.T) {
 	// The same session snapshots inside the default budget.
 	s, bb := snapshotOf(t, m, 0)
 	t.Logf("its default snapshot: %d bytes, main %d of %d entries", len(bb), len(s.Main.Entries), m.Main.len())
+	// The ledger's share of it (X23): every omitted entry's record.
+	records, ledger := 0, 0
+	for _, ts := range transcriptsOf(s) {
+		records += len(ts.Omitted)
+		if len(ts.Omitted) > 0 {
+			lb, err := appendTranscript(newJSONWriter(), nil, transcriptScalars{}, &TranscriptSnap{Omitted: ts.Omitted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger += len(lb) - len(`{}`)
+		}
+	}
+	t.Logf("its ledger: %d records in %d bytes of the snapshot (main %d records)", records, ledger, len(s.Main.Omitted))
+	if ledger > len(bb)/4 {
+		t.Fatalf("the ledger takes %d of the snapshot's %d bytes", ledger, len(bb))
+	}
 
 	// When the running child finishes too, the roster holds 33 finished rows,
 	// one past its cap: the oldest finish goes with its transcript, and the

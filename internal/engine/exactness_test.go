@@ -620,17 +620,26 @@ func (f *subFold) foldThrough(t *testing.T, seq uint64) {
 // omitted leaves the restored model's rows unchanged, while the first client
 // updates its own row (§3.5).
 //
-// OPEN OWNER QUESTION (C2's implementer, not decided here): §3.5's "an update
-// to a tool the window omitted applies to nothing" stops reproducing the first
-// client once the FIRST model trims that omitted row — it forgets the id and a
-// later update appends a new row there, while the restored model, which never
-// forgets an omitted id, still applies it to nothing. The owner is choosing
-// between a byte ledger of the omitted entries (exact) and recording the
-// divergence. So every schedule here updates the omitted tool while the first
-// model still holds its row (nothing is trimmed: a few KiB against 8 MiB); a
-// follow-up commit extends this test once that is decided.
+// Then the first client trims the omitted rows (execution amendment X23: the
+// snapshot's ledger keeps a placeholder per omitted entry, which the restored
+// model trims exactly when the first model trims the real row) — by its
+// entry cap in one run, by its byte budget in the other — and at every step
+// the restored model is still its suffix, says Trimmed when it does, and
+// accounts the same bytes: once the first omitted tool's row is trimmed, an
+// update to it appends a new row on both; an update to an omitted tool whose
+// row the first client still holds draws nothing on the restored model; and
+// after that update the trims keep coming at the same folds until the last
+// omitted row is gone, when an update to it appends too.
 func TestAWindowedSnapshotReproducesTheSuffix(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*watchdog)
+	for _, by := range []string{"count", "bytes"} {
+		t.Run("the first client trims by "+by, func(t *testing.T) {
+			windowedSnapshotReproducesTheSuffix(t, by)
+		})
+	}
+}
+
+func windowedSnapshotReproducesTheSuffix(t *testing.T, by string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*watchdog)
 	defer cancel()
 	stub := tui.NewStubNoPrimary()
 	stub.Clock = traceClock()
@@ -680,17 +689,23 @@ func TestAWindowedSnapshotReproducesTheSuffix(t *testing.T) {
 		try.Sub.Close()
 	}
 	s := a.Snapshot
-	if !s.Main.Windowed || len(s.Subs) != 1 || len(s.Subs[0].Entries) != 0 || s.Subs[0].OmittedRun != transcript.KindThought || len(s.Main.OmittedTools) == 0 {
-		t.Fatalf("the window: main %d entries (windowed %v, omitted %v), child %d (run %v)",
-			len(s.Main.Entries), s.Main.Windowed, s.Main.OmittedTools, len(s.Subs[0].Entries), s.Subs[0].OmittedRun)
+	var omitted []string // the omitted tools, oldest first
+	for _, r := range s.Main.Omitted {
+		if r.Tool != "" {
+			omitted = append(omitted, r.Tool)
+		}
 	}
-	omitted := ""
-	for tid := range s.Main.OmittedTools {
-		omitted = tid
+	if !s.Main.Windowed || len(s.Subs) != 1 || len(s.Subs[0].Entries) != 0 || s.Subs[0].OmittedRun != transcript.KindThought || len(omitted) < 2 {
+		t.Fatalf("the window: main %d entries (windowed %v, omitted %v), child %d (run %v)",
+			len(s.Main.Entries), s.Main.Windowed, s.Main.Omitted, len(s.Subs[0].Entries), s.Subs[0].OmittedRun)
 	}
 	c := engine.AdoptAttachment(e, engine.AttachOptions{}, a)
 	t.Cleanup(c.Close)
 
+	// check folds both clients to the engine's cutoff and holds the restored
+	// one to the first's suffix (DiffSuffix), and — the ledger (X23) — to its
+	// Trimmed and its accounted bytes in every transcript, which agree only if
+	// the restored model counts what the first model's rows count.
 	check := func(what string) {
 		t.Helper()
 		n := cutoff(t, ctx, e)
@@ -703,6 +718,13 @@ func TestAWindowedSnapshotReproducesTheSuffix(t *testing.T) {
 		}
 		if d := engine.DiffSuffix(first.model, c.Model, false); d != "" {
 			t.Fatalf("%s: %s", what, d)
+		}
+		fh, ch := first.model.History(), c.Model.History()
+		if fh.Main.Trimmed != ch.Main.Trimmed || first.model.Main.Bytes() != c.Model.Main.Bytes() ||
+			first.model.Sub("sub").Bytes() != c.Model.Sub("sub").Bytes() {
+			t.Fatalf("%s: the restored client trimmed %v and accounts %d bytes (child %d), the first %v and %d (child %d)", what,
+				ch.Main.Trimmed, c.Model.Main.Bytes(), c.Model.Sub("sub").Bytes(),
+				fh.Main.Trimmed, first.model.Main.Bytes(), first.model.Sub("sub").Bytes())
 		}
 	}
 	check("restored")
@@ -717,15 +739,15 @@ func TestAWindowedSnapshotReproducesTheSuffix(t *testing.T) {
 	check("a new tool closes the main run")
 
 	before := engine.ViewOf(c.Model)
-	stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: omitted, Status: "completed"}})
+	stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: omitted[0], Status: "completed"}})
 	check("an update to an omitted tool")
 	after := engine.ViewOf(c.Model)
 	after.State.Seq = before.State.Seq
 	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("an update to the omitted tool %q changed the restored model", omitted)
+		t.Fatalf("an update to the omitted tool %q changed the restored model", omitted[0])
 	}
-	if ts := first.model.State().Tools[transcript.ToolKey{ID: omitted}]; ts == nil || ts.Status != "completed" {
-		t.Fatalf("the first client did not update its own row of %q: %+v", omitted, ts)
+	if ts := first.model.State().Tools[transcript.ToolKey{ID: omitted[0]}]; ts == nil || ts.Status != "completed" {
+		t.Fatalf("the first client did not update its own row of %q: %+v", omitted[0], ts)
 	}
 	stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "new", Status: "completed"}})
 	check("an update to a kept tool")
@@ -735,5 +757,66 @@ func TestAWindowedSnapshotReproducesTheSuffix(t *testing.T) {
 	check("a new run in the child")
 	if got := c.Model.Sub("sub").Len(); got != 2 {
 		t.Fatalf("the child's entries after its omitted run: %d", got)
+	}
+	if first.model.Main.Trimmed() {
+		t.Fatal("the first client trimmed before the omitted tool's update")
+	}
+
+	// X23: the first client trims the omitted rows, oldest first.
+	held := func(id string) bool { return first.model.State().Tools[transcript.ToolKey{ID: id}] != nil }
+	last := omitted[len(omitted)-1]
+	rows := 0
+	// trimTo emits rows until the first client no longer holds id: by count,
+	// tool rows in batches well inside a subscription's buffer, up to the one
+	// that takes the transcript one past its 5,000-entry cap — so each trim
+	// drops the oldest row alone; by bytes, rows of 1 MiB up to the one that
+	// takes it one byte over its 8 MiB budget, to the same end.
+	trimTo := func(id string) {
+		t.Helper()
+		for held(id) {
+			switch by {
+			case "count":
+				need := transcript.DefaultBounds().MainEntries - first.model.Main.Len() + 1
+				for range min(max(need, 1), 400) {
+					rows++
+					stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: fmt.Sprintf("row-%d", rows), Status: "completed"}})
+				}
+			default:
+				rows++
+				id := fmt.Sprintf("row-%d", rows)
+				pad := transcript.DefaultBounds().MainBytes - first.model.Main.Bytes() + 1 - len(id) - len("completed")
+				pad = max(min(pad, 1<<20), 0)
+				stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: id, Status: "completed", RawInput: strings.Repeat("p", pad)}})
+			}
+			check(fmt.Sprintf("%d rows", rows))
+			if rows > 20000 {
+				t.Fatalf("%d rows never trimmed %q", rows, id)
+			}
+		}
+	}
+	trimTo(omitted[0])
+	if !first.model.Main.Trimmed() || !held(last) {
+		t.Fatalf("the first client trimmed %v, holds %q %v: want the first omitted row trimmed alone", first.model.Main.Trimmed(), last, held(last))
+	}
+	stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: omitted[0], Status: "late"}})
+	check("an update to the trimmed omitted tool")
+	for i, h := range []transcript.History{first.model.History(), c.Model.History()} {
+		es := h.Main.Entries
+		if l := es[len(es)-1]; l.Kind != transcript.KindTool || l.Tool.ID != omitted[0] || l.Tool.Status != "late" {
+			t.Fatalf("client %d: the update to the trimmed tool %q did not append its row", i, omitted[0])
+		}
+	}
+	n := c.Model.Main.Len()
+	stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: last, Status: "grown", RawInput: strings.Repeat("g", 2000)}})
+	check("an update to a held omitted tool")
+	if c.Model.Main.Len() != n || first.model.State().Tools[transcript.ToolKey{ID: last}].Status != "grown" {
+		t.Fatalf("an update to %q, held by the first client alone, drew a row on the restored one", last)
+	}
+	trimTo(last)
+	stub.Emit(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: last, Status: "done"}})
+	check("an update to the last omitted tool, trimmed")
+	es := c.Model.History().Main.Entries
+	if l := es[len(es)-1]; l.Kind != transcript.KindTool || l.Tool.ID != last || l.Tool.Status != "done" {
+		t.Fatalf("the update to the trimmed tool %q did not append its row", last)
 	}
 }

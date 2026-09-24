@@ -340,14 +340,15 @@ func TestRestoreContinuesEveryContinuationState(t *testing.T) {
 		// The budget of the snapshot without the tool's row.
 		full, _ := snapshotOf(t, m, 1<<40)
 		s, b := snapshotOf(t, m, encodedLen(t, windowedTo(full, 2)))
-		if len(s.Main.Entries) != 2 || s.Main.OmittedTools["early"] != (EntryID{Seq: 1}) {
-			t.Fatalf("the window: %d entries, omitted %v", len(s.Main.Entries), s.Main.OmittedTools)
+		if len(s.Main.Entries) != 2 || !reflect.DeepEqual(s.Main.Omitted, []Omitted{{Bytes: m.Main.live()[0].Bytes, Tool: "early"}}) {
+			t.Fatalf("the window: %d entries, omitted %v", len(s.Main.Entries), s.Main.Omitted)
 		}
 		r1, r2 := restoredBoth(t, s, b, Options{})
 		update := agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "early", Status: "completed"}, At: at(5), Seq: 4}
 		for i, r := range []*Model{r1, r2} {
 			before := viewOf(r)
 			r.Fold(update)
+			checkInvariants(t, r)
 			after := viewOf(r)
 			after.S.Seq = before.S.Seq
 			if !reflect.DeepEqual(before, after) {
@@ -357,6 +358,12 @@ func TestRestoreContinuesEveryContinuationState(t *testing.T) {
 		m.Fold(update)
 		if got := factsOf(m.Main, "tool"); len(got) != 1 || m.Main.live()[0].Tool.Status != "completed" {
 			t.Fatalf("the first model updates its own row: %v", facts(m.Main))
+		}
+		// Its placeholder is re-accounted as the first model's row is (X23).
+		for i, r := range []*Model{r1, r2} {
+			if r.Main.Bytes() != m.Main.Bytes() || r.Main.ledger[0].Bytes != m.Main.live()[0].Bytes {
+				t.Fatalf("twin %d accounts %d bytes (placeholder %d), the first model %d (row %d)", i, r.Main.Bytes(), r.Main.ledger[0].Bytes, m.Main.Bytes(), m.Main.live()[0].Bytes)
+			}
 		}
 	})
 
@@ -449,9 +456,10 @@ func TestRestoreContinuesEveryContinuationState(t *testing.T) {
 // windowOf is an independent statement of the window rule, for the tests to
 // hold Snapshot to: full's transcript (from an unwindowed snapshot) with only
 // its newest k entries — Windowed when any is dropped, Dropped counting them,
-// OmittedTools naming the dropped tool rows (the oldest row of an id first),
-// OmittedRun the open run's kind when its entry is dropped, TailCut only while
-// that entry is in.
+// Omitted the ledger (X23): full's own records, then one per dropped entry,
+// oldest first, its Bytes as the model accounts it and a tool's id; OmittedRun
+// the open run's kind when its entry is dropped, TailCut only while that
+// entry is in.
 func windowOf(full TranscriptSnap, k int) TranscriptSnap {
 	n := len(full.Entries)
 	d := n - k
@@ -467,24 +475,27 @@ func windowOf(full TranscriptSnap, k int) TranscriptSnap {
 	if w.OmittedRun == 0 && openLast && k == 0 {
 		w.OmittedRun = full.Entries[n-1].Kind
 	}
-	w.OmittedTools = nil
-	add := func(tid string, id EntryID) {
-		if w.OmittedTools == nil {
-			w.OmittedTools = make(map[string]EntryID)
-		}
-		if _, ok := w.OmittedTools[tid]; !ok {
-			w.OmittedTools[tid] = id
-		}
-	}
-	for tid, id := range full.OmittedTools {
-		add(tid, id)
-	}
+	w.Omitted = append([]Omitted(nil), full.Omitted...)
 	for i := range d {
-		if tid := entryToolID(&full.Entries[i]); tid != "" {
-			add(tid, full.Entries[i].ID)
+		e := &full.Entries[i]
+		tid := ""
+		if e.Kind == KindTool && e.Tool != nil {
+			tid = e.Tool.ID
 		}
+		w.Omitted = append(w.Omitted, Omitted{Bytes: e.Bytes, Tool: tid})
 	}
 	return w
+}
+
+// omittedTools is the tool ids a ledger names, oldest first.
+func omittedTools(ts TranscriptSnap) []string {
+	var out []string
+	for _, r := range ts.Omitted {
+		if r.Tool != "" {
+			out = append(out, r.Tool)
+		}
+	}
+	return out
 }
 
 // transcriptsOf is a snapshot's transcripts in filling order.
@@ -614,6 +625,15 @@ func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 // model updates its row), while an update to a kept tool updates both; and a
 // child the window emptied mid-run lets that run's chunks go by until
 // something ends it, then draws what the first model draws.
+//
+// Then (X23) the first model trims the omitted rows — by its entry cap, and
+// by its byte budget, in two more runs of the same schedule — and the
+// restored model drops their placeholders at the same folds: once the
+// omitted tool's row is gone from the first model, another update to it
+// appends a new row on both; an update to an omitted tool whose row the
+// first model still holds draws nothing on the restored model, and the trims
+// after it still come at the same folds; and so on until every placeholder
+// has gone.
 func TestWindowedRestoreContinuesTheSuffix(t *testing.T) {
 	var evs []agent.Event
 	for i := range 6 {
@@ -629,8 +649,32 @@ func TestWindowedRestoreContinuesTheSuffix(t *testing.T) {
 		agent.Event{Type: agent.EventThought, Text: "main thinks", At: at(13)},
 	)
 	evs = sequenced(evs)
-	m := New(Options{})
+	probe := New(Options{})
+	foldAll(t, probe, false, evs...)
+	for _, cfg := range []struct {
+		name string
+		o    Options
+	}{
+		{"nothing trims", Options{}},
+		// The first model holds 13 main entries at the cut and 14 after the
+		// first phase, so the rows after it trim.
+		{"the first model trims by count", Options{Bounds: Bounds{MainEntries: 15}}},
+		// Room for the first phase's new tool and chunk, and not for a row
+		// after it.
+		{"the first model trims by bytes", Options{Bounds: Bounds{MainBytes: probe.Main.bytes + 60}}},
+	} {
+		t.Run(cfg.name, func(t *testing.T) {
+			windowedRestoreContinues(t, evs, cfg.o)
+		})
+	}
+}
+
+func windowedRestoreContinues(t *testing.T, evs []agent.Event, o Options) {
+	m := New(o)
 	foldAll(t, m, true, evs...)
+	if m.Main.trimmed {
+		t.Fatal("the fixture trims before the cut")
+	}
 	full, fb := snapshotOf(t, m, 1<<40)
 	// A budget that keeps the main transcript's newest four entries and none
 	// of the child's.
@@ -647,19 +691,17 @@ func TestWindowedRestoreContinuesTheSuffix(t *testing.T) {
 	}
 	s, b := snapshotOf(t, m, budget)
 	assertTheWindowIsTight(t, "the fixture", full, s, budget)
-	if !s.Main.Windowed || len(s.Subs[0].Entries) != 0 || s.Subs[0].OmittedRun != KindThought || len(s.Main.OmittedTools) == 0 {
+	if !s.Main.Windowed || len(s.Subs[0].Entries) != 0 || s.Subs[0].OmittedRun != KindThought || len(omittedTools(s.Main)) == 0 {
 		t.Fatalf("the fixture's window: main %d entries (windowed %v, omitted %v), child %d (run %v)",
-			len(s.Main.Entries), s.Main.Windowed, s.Main.OmittedTools, len(s.Subs[0].Entries), s.Subs[0].OmittedRun)
+			len(s.Main.Entries), s.Main.Windowed, s.Main.Omitted, len(s.Subs[0].Entries), s.Subs[0].OmittedRun)
 	}
-	omitted := ""
-	for tid := range s.Main.OmittedTools {
-		omitted = tid
-	}
-	r1, r2 := restoredBoth(t, s, b, Options{})
+	omitted := omittedTools(s.Main)
+	r1, r2 := restoredBoth(t, s, b, o)
 
 	// assertSuffix: the restored model's entries are the first model's newest,
 	// equal and under the same ids; Windowed is set; the state agrees but for
-	// the tools whose rows only the first model holds.
+	// the tools whose rows only the first model holds; and (X23,
+	// assertSuffixOf) it counts and accounts what the first model does.
 	assertSuffix := func(what string) {
 		t.Helper()
 		want := m.History()
@@ -690,7 +732,7 @@ func TestWindowedRestoreContinuesTheSuffix(t *testing.T) {
 			if !reflect.DeepEqual(ws, gs) {
 				t.Fatalf("%s (twin %d): the states differ:\nwant %+v\n got %+v", what, i, ws, gs)
 			}
-			checkInvariants(t, r)
+			assertSuffixOf(t, fmt.Sprintf("%s (twin %d)", what, i), m, r)
 		}
 	}
 	assertSuffix("restored")
@@ -700,19 +742,23 @@ func TestWindowedRestoreContinuesTheSuffix(t *testing.T) {
 		t.Helper()
 		seq++
 		ev.Seq = seq
+		ev.At = at(int(seq))
 		m.Fold(ev)
 		r1.Fold(ev)
 		r2.Fold(ev)
 		assertSuffix(what)
 	}
-	fold("a chunk into the main run", agent.Event{Type: agent.EventThought, Text: " more", At: at(20)})
-	fold("a chunk into the child's omitted run", agent.Event{Type: agent.EventThought, Agent: "sub", Text: " more", At: at(21)})
+	fold("a chunk into the main run", agent.Event{Type: agent.EventThought, Text: " more"})
+	fold("a chunk into the child's omitted run", agent.Event{Type: agent.EventThought, Agent: "sub", Text: " more"})
 	if got := r1.Sub("sub").Len(); got != 0 {
 		t.Fatalf("a chunk into an omitted run drew %d entries", got)
 	}
-	fold("a new tool closes the main run", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "new", Status: "pending"}, At: at(22)})
+	fold("a new tool closes the main run", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "new", Status: "pending"}})
+	if m.Main.trimmed {
+		t.Fatal("the first model trimmed before the omitted tool's update")
+	}
 	before := []modelView{viewOf(r1), viewOf(r2)}
-	fold("an update to an omitted tool", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: omitted, Status: "completed"}, At: at(23)})
+	fold("an update to an omitted tool", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: omitted[0], Status: "completed"}})
 	for i, r := range []*Model{r1, r2} {
 		after := viewOf(r)
 		after.S.Seq = before[i].S.Seq
@@ -720,16 +766,73 @@ func TestWindowedRestoreContinuesTheSuffix(t *testing.T) {
 			t.Fatalf("an update to an omitted tool changed the restored model (twin %d)", i)
 		}
 	}
-	if ts := m.State().Tools[ToolKey{ID: omitted}]; ts == nil || ts.Status != "completed" {
-		t.Fatalf("the first model updates its own row of %q: %+v", omitted, ts)
+	if ts := m.State().Tools[ToolKey{ID: omitted[0]}]; ts == nil || ts.Status != "completed" {
+		t.Fatalf("the first model updates its own row of %q: %+v", omitted[0], ts)
 	}
-	fold("an update to a kept tool", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "new", Status: "completed"}, At: at(24)})
-	fold("a tool ends the child's omitted run", agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c1"}, At: at(25)})
-	fold("a new run in the child", agent.Event{Type: agent.EventText, Agent: "sub", Text: "after", At: at(26)})
+	fold("an update to a kept tool", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "new", Status: "completed"}})
+	fold("a tool ends the child's omitted run", agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c1"}})
+	fold("a new run in the child", agent.Event{Type: agent.EventText, Agent: "sub", Text: "after"})
 	if got := r1.Sub("sub").Len(); got != 2 {
 		t.Fatalf("the child's entries after its omitted run: %d", got)
 	}
-	fold("an update to the child's omitted tool", agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c0", Status: "done"}, At: at(27)})
+	fold("an update to the child's omitted tool", agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c0", Status: "done"}})
+	if o.Bounds.MainEntries == 0 && o.Bounds.MainBytes == 0 {
+		if m.Main.trimmed || r1.Main.held() == 0 {
+			t.Fatal("nothing should trim at the default bounds")
+		}
+		return
+	}
+
+	// X23: rows until the first model has trimmed the first omitted tool's row
+	// — dropping its placeholder on the restored model at the same fold —
+	// while the last omitted tool's row is still held.
+	last := omitted[len(omitted)-1]
+	row := 0
+	nextRow := func() agent.Event {
+		row++
+		return agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Detail: fmt.Sprintf("row %d %s", row, strings.Repeat("d", 250))}}
+	}
+	for m.Main.tools[omitted[0]] != (EntryID{}) {
+		fold("a row before the trim", nextRow())
+		if row > 50 {
+			t.Fatal("the rows never trim the first omitted tool's row")
+		}
+	}
+	if _, ok := r1.Main.ptools[omitted[0]]; ok || !r1.Main.trimmed {
+		t.Fatalf("the restored model keeps the placeholder of %q the first model trimmed", omitted[0])
+	}
+	if _, ok := m.Main.tools[last]; !ok || len(omitted) < 2 {
+		t.Fatalf("the fixture trims every omitted tool at once (%v)", omitted)
+	}
+	// An update to the first model's trimmed tool appends on both; one to a
+	// tool whose row it still holds draws nothing here and re-accounts.
+	fold("an update to the trimmed omitted tool", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: omitted[0], Status: "late"}})
+	for i, r := range []*Model{m, r1, r2} {
+		if e := r.Main.lastEntry(); e.Kind != KindTool || e.Tool.ID != omitted[0] || e.Tool.Status != "late" {
+			t.Fatalf("model %d: the update to a trimmed tool did not append its row", i)
+		}
+	}
+	held := r1.Main.Len()
+	fold("an update to a held omitted tool", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: last, Status: "grown", RawInput: strings.Repeat("g", 900)}})
+	if r1.Main.Len() != held {
+		t.Fatal("an update to a tool whose placeholder remains drew a row")
+	}
+	// Rows after the update: the trims keep coming at the same folds, until
+	// the last placeholder — the updated tool's — goes, and an update to it
+	// appends too.
+	for r1.Main.held() > 0 {
+		fold("a row after the update", nextRow())
+		if row > 100 {
+			t.Fatal("the rows never trim every placeholder")
+		}
+	}
+	if _, ok := m.Main.tools[last]; ok {
+		t.Fatalf("the first model holds %q with no placeholder left", last)
+	}
+	fold("an update to the last omitted tool, trimmed", agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: last, Status: "done"}})
+	if e := r2.Main.lastEntry(); e.Kind != KindTool || e.Tool.ID != last {
+		t.Fatal("the update to the last trimmed tool did not append its row")
+	}
 }
 
 // TestASnapshotsEncodingIsUnchangedByLaterFolds (A6, GLM 2): a snapshot's
