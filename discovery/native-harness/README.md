@@ -27,9 +27,10 @@ these documents, one per roadmap phase.
 | 2026-09-20/21 | H4 complete: PR 3 (#43, `be05da9`) landed the composer shell mode, its process runner, and shell output carried to the agent with the next prompt; live smoke round-tripped on cursor and on native (`fireworks/kimi-k3`), with grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live; H5 is next |
 | 2026-09-21 | Plan 023 (H5) planned and panel-reviewed: modes, the plan and question tools, todos; decisions D-49..D-53 |
 | 2026-09-21/22 | H5 complete: PR 1 (#45, `b0ea4c4`) landed the harness side — the mode gate, the plan file, reminders, and the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`); PR 2 (#48, `feature/plan-023-h5-modes`) switched modes on in the adapter, the CLI, and the TUI, with the plan-offer eligible for a turn with no assistant text; live smoke: the first real `exit_plan_mode` on a live model behaved as designed |
+| 2026-09-24 | Plan 026 (H6) planned and panel-reviewed: sub-agents run in-process (D-54, superseding D-10), the `agent` tool (kind `task`), personas, per-child cancel, and background children across three PRs; decisions D-54..D-59; not yet executed |
 
-**H0, H1, H2, H4 and H5 are complete; H6 is next — H3 (approval) still
-comes after H8 (D-48).**
+**H0, H1, H2, H4 and H5 are complete; H6 is planned (Plan 026, in
+progress, not yet executed) — H3 (approval) still comes after H8 (D-48).**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
 The harness is built in this repository as a hidden side quest beside the

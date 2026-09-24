@@ -12,7 +12,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
 | H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #48 (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
-| H6 | not started | sub-agents: child-process agent tool, depth 1, derived permissions, personas from workspace and imported agents |
+| H6 | in progress | sub-agents: in-process `harness.Session` children, the `agent` tool (kind `task`), personas, per-child cancel, background children — Plan 026, three PRs, planned not executed |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
 | HL | unscheduled | own the turn loop — see D-40's triggers |
@@ -550,13 +550,43 @@ Follow-ups:
   (§4, §9; `10-open-questions.md` already lists these three);
 - `--json` has no field for a plan's body (X22.7).
 
-H6 (sub-agents) is next; its gate is nothing — a child-process `agent` tool,
-event tagging, cancel propagation, and personas from workspace and imported
-agents.
+H6 (sub-agents) is next; its gate is nothing — planned as Plan 026: an
+in-process `agent` tool, event tagging, per-child cancel, and personas from
+workspace, user, and plugin sources.
 
 ### H6 — sub-agents
 
-- Child-process `agent` tool, event tagging, cancel propagation, personas.
+**Planned (Plan 026, 2026-09-24): FINAL after the S1c seam review and the
+panel — not yet executed.** Three PRs, each auto-merged after
+`/git-commands:watch-pr` shows it green: PR 1
+(`feature/plan-026-h6-subagents`, foreground sub-agents end to end), PR 2
+(`feature/plan-026-h6-stop`, per-child cancel), PR 3
+(`feature/plan-026-h6-background`, background children and the wake).
+Decisions D-54..D-59.
+
+- **In-process** (D-54, supersedes D-10): a child is a second
+  `harness.Session`, as grok-build, opencode, codex and crush all run their
+  own sub-agents. This closes Q8. The latency numbers that were to decide
+  it, measured on this plan's `9125ec7` baseline
+  (`026-native-harness-h6-subagents/latency/`):
+
+  | | Linux | mac-mini |
+  |---|---|---|
+  | local start before the first provider byte (median, n=10) | 18.5 ms | 7.7 ms |
+  | one fresh TLS handshake | 80–145 ms | 80–145 ms |
+  | resident memory per child | ~25 MB | ~16 MB bare start |
+  | time to first token, for comparison | 0.65–2 s | 0.65–2 s |
+
+  The decision rested on surface, orphans, live tokens and per-child
+  cancel, not on latency; the process path stays behind the runner's seam,
+  triggered only by a child crash or leak seen in practice, or
+  session-control S4 wanting children as separately attachable hosts.
+- The `agent` tool (kind `task`, D-55); personas from three sources in their
+  own namespace (D-56); a child that inherits the parent's mode and is only
+  ever tightened by a later switch, never loosened (D-57); model and effort
+  resolved per call through an optional `[subagents]` tier map (D-58);
+  per-child cancel in PR 2, and background children — a session-level wake
+  through the existing foreign-turn machinery — in PR 3 (D-59).
 - **Exit**: a task fanned out to two children with both transcripts in the
   sub-agent view.
 
@@ -597,7 +627,8 @@ live smoke (C14); see `08-decisions.md`.
 
 settings.json translation · hooks · MCP and plugin `.mcp.json` · native
 marketplace installer · ACP server binary · ChatGPT-plan (codex) auth ·
-background bash with auto-background · in-process sub-agents · sandboxing ·
+background bash with auto-background · the process-based sub-agent runner
+(D-54's fallback, triggered by a crash/leak or S4) · sandboxing ·
 flipping the provider to visible · lazy loading of nested instruction files
 (deferred out of H4 by D-47) · `paths:` gating of rules (deferred out of H4
 by D-47).

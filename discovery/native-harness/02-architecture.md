@@ -181,5 +181,6 @@ harness cannot do yet instead of drawing empty surfaces:
 | Interject | H2 (D-34) |
 | Modes | H5 (D-34) |
 | Todos, AskCards, PlanCards | H5 |
-| SubagentRows, SubagentTranscript | H6 |
+| SubagentRows, SubagentTranscript | H6 PR 1 |
+| SubagentCancel | H6 PR 2 |
 | FastToggle | never (cursor-only) |

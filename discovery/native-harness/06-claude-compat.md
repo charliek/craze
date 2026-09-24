@@ -148,6 +148,68 @@ boolean is the default plus one diagnostic line.
 | `commands` | project and user commands | the same | — |
 | `plugins` | every plugin row | the same | — |
 
+## Personas (H6)
+
+**Status: planned (Plan 026), not built.** Discovery follows the same seam
+as skills and commands (`contentSources` / `resolveNativeSources`, D-45), in
+a new `PluginKindAgent`, from three sources, first wins:
+
+1. the workspace chain's `.claude/agents/*.md`, innermost first (layout
+   field `Agents`);
+2. `UserRoot`'s `agents/*.md` (`UserAgents`);
+3. an installed-and-enabled plugin's `agents/*.md`, read in `rootEntries`
+   after its commands and skills, named `plugin:name`.
+
+Precedence is grok's: **project > built-in > user > plugin**. There are
+three built-ins, owned by the harness rather than discovery:
+`general-purpose` (every child tool, the default `subagent_type`),
+`explore` (`read`, `grep`, `glob`, read-only search), and `plan` (the same
+three tools, a read-only architect). A user persona named like a built-in
+is skipped with one diagnostic; plugin names are qualified (`plugin:name`)
+and cannot collide.
+
+**A namespace of their own**, not `d.out` (the menu/catalog projection that
+also feeds cursor's discovery). Personas share discovery's file-reading
+protections — confinement, symlink rules, the byte caps — but not its
+dedupe or its projections: they are keyed `agent:<name>` in a set of their
+own, so a command, a skill, and an agent of the same name coexist; they
+never resolve through the slash-menu name resolver and never reach the
+frozen catalog, so adding one leaves the menu and the prompt bytes
+unchanged. They have their own file budget, 128 files and 1 MiB, separate
+from plugins' skill/command budget (256 files), so the persona files
+installed on a machine cannot crowd out a later plugin's skills.
+
+**Parsing** is an agent-only frontmatter reader (sharing the shared
+line-splitter skills already use) for `tools`, `disallowedTools` (both
+spellings), `model`, and `effort`. `tools` and `disallowedTools` take three
+syntaxes, all found among installed plugins: a comma string
+(`tools: Read, Glob`), a flow sequence (`tools: ["Read", "Grep"]`), or a
+block list of `- Read` lines — the split is parenthesis-aware, since
+`Agent(a, b, c)` has commas inside a single item. **It fails closed**: a
+`tools:` key that is present but parses to nothing gives a text-only child
+plus a diagnostic; the absence of `tools:` is the only way to get every
+child tool (an explicit `AllTools bool`, never a nil slice). The body,
+capped at 32 KiB, is the persona's role text; `color`, `skills`,
+`initialPrompt`, `permissionMode`, `maxTurns`, `isolation`, `background`,
+`hooks`, and `mcpServers` are ignored, each silently.
+
+**Tool names.** Claude's tool names map to native ids case-insensitively
+(`Read→read`, `Write→write`, `Edit`/`MultiEdit`→`edit`, `Bash→bash`,
+`Glob→glob`, `Grep→grep`, `LS→read`); native ids pass through verbatim;
+`Agent`, `Agent(…)`, `Task`/`Task*`, `TodoWrite`, `AskUserQuestion`,
+`ExitPlanMode`, `WebFetch`, `WebSearch`, `NotebookEdit`/`NotebookRead`,
+`KillShell`, `BashOutput`, `Workflow`, `Skill`, and any MCP name are dropped
+silently. This mapping, and the shadowing of built-in names, run in the
+**adapter** at discovery time — the harness has no diagnostic channel of
+its own for it (a new `Options.Warn func(string)` carries a runtime
+fall-through, such as a persona model that does not resolve, back to the
+adapter to journal). `disallowedTools` is subtracted after mapping.
+
+**`[compat.claude] agents`** (default true, `ClaudeCompat.NoAgents`) turns
+off all three sources at once, plugin pass included — unlike
+`skills`/`commands`, which leave a plugin's own rows alone and gate only
+the workspace and user ones.
+
 ## Not built in H4
 
 `craze import claude`; lazy loading; `paths:` gating; `--plugin-dir` or
