@@ -212,7 +212,10 @@ const (
 // to open: that call's result says why.
 //
 // Type is the agent type the call resolved to; Description and Prompt are
-// the call's, the prompt exactly as the child was sent it. Model and Effort
+// the call's, the prompt as the child was sent it — unless the parent learned
+// a key while this event was being delivered, which the prompt sent is
+// redacted of and this one is not (review r4: the runner redacts the prompt
+// it sends once more, after this event). Model and Effort
 // are the alias and effort the child runs on (§3.6), and Mode the mode it
 // opened in, its parent's then (§3.5). The three texts from the call are
 // redacted of every provider key; the rest are the model table's and craze's

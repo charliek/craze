@@ -1202,6 +1202,72 @@ func TestStopVersusParentCancelPrecedence(t *testing.T) {
 	}
 }
 
+// TestSubagentArbitratesLast (review r4): the user stops a child, its
+// SubagentFinished is delivered with the parent still live, and then — while
+// the call's retirement waits for regMu, as it does behind a SetMode or a
+// Close walking the registry; here a seam barrier holds it there — the
+// parent's cause lands. The call still reads aborted, carrying the step the
+// child was billed for: the arbitration is the runner's last act, after the
+// child's Close, its retirement and the slot's release. One made once
+// Finished was delivered saw the live parent and kept the stop.
+func TestSubagentArbitratesLast(t *testing.T) {
+	for _, late := range []string{"the parent's cancel", "Close"} {
+		t.Run(late, func(t *testing.T) {
+			f := newRouted(t)
+			s := f.open(f.options())
+			a := f.routers["test/a"]
+			w := newWorker()
+			a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))))
+			a.route("a long task", callStep(globPart("g1")), w.step(openText("half done"), finishText()))
+			retiring, retire := make(chan struct{}), make(chan struct{})
+			s.subs.seams.retiring = func(string) {
+				close(retiring)
+				select {
+				case <-retire:
+				case <-time.After(waitTimeout):
+					t.Errorf("the call's retirement was never let go")
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var ev events
+			out := start(ctx, s, "go", ev.sink)
+			await(t, w.reached, "the child mid-step")
+			if !stopChild(s, of[SubagentStarted](ev.list())[0].ID) {
+				t.Fatal("the child was not registered")
+			}
+			await(t, retiring, "the call's retirement")
+			if fin := of[SubagentFinished](ev.list()); len(fin) != 1 || fin[0].Status != SubagentCancelled {
+				t.Fatalf("control: SubagentFinished = %+v; want the stopped child's, delivered before the retirement", fin)
+			}
+			closed := make(chan error, 1)
+			switch late {
+			case "the parent's cancel":
+				cancel()
+			case "Close":
+				go func() { closed <- s.Close() }()
+				await(t, s.tools.closing, "Close's signal")
+			}
+			close(retire)
+			got := await(t, out, "the turn")
+			if got.err != nil || got.res.StopReason != StopCancelled {
+				t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+			}
+			res := callResult(t, ev.list(), "t1.1.1")
+			if res.Class != tool.ClassAborted || res.Text != tool.AbortedText || res.Child == nil ||
+				res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+				t.Fatalf("the call = %+v; want aborted, carrying the first step's usage: the parent's cause outranks the stop", res)
+			}
+			if late == "Close" {
+				if err := await(t, closed, "Close"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			settled(t, s)
+		})
+	}
+}
+
 // TestAgentResultTable (A8): what the parent's model reads for each way a
 // child can end (§3.7's table), the two max_turn_requests rows told apart by
 // the doom-loop guard's Diag. Every row carries the child's usage.
@@ -1374,8 +1440,11 @@ func TestAgentUnknownModelOrEffort(t *testing.T) {
 // child two makes no progress until child one is held mid-step — its first
 // step waits, in its own provider stream and so outside the parent turn's
 // lock, on child one's reached barrier — and child one is let go only once
-// child two has finished. Run one after the other, child two's wait runs out
-// and fails the test.
+// child two has finished. Run one after the other, child two first, child
+// two's wait runs out and fails the test; child one first, child one waits
+// for a release only child two gives, and the turn's watchdog context — a
+// bound on the wall clock, never a synchronisation — cancels it and fails the
+// test rather than leaving it to hang (review r4).
 func TestSubagentEventOrder(t *testing.T) {
 	f := newRouted(t)
 	s := f.open(f.options())
@@ -1402,8 +1471,13 @@ func TestSubagentEventOrder(t *testing.T) {
 			close(w.release) // the second is done: let the first go on
 		}
 	}
-	if res, err := s.Run(context.Background(), "fan out", sink); err != nil || res.StopReason != StopEndTurn {
-		t.Fatalf("Run = %+v, %v", res, err)
+	// Generous: past child two's own bound, so a child-two-first regression
+	// fails on that wait's message rather than this one.
+	watchdog, cancel := context.WithTimeout(context.Background(), 3*waitTimeout)
+	defer cancel()
+	if res, err := s.Run(watchdog, "fan out", sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v (the watchdog: %v); want end_turn — a watchdog that fired means one child waited on the other: they did not run at once",
+			res, err, watchdog.Err())
 	}
 	evs := ev.list()
 	for _, st := range of[SubagentStarted](evs) {
@@ -1926,6 +2000,137 @@ func TestSubagentLifecycleModelRedacted(t *testing.T) {
 	if res := callResult(t, evs, "t1.1.1"); res.Text != "done" || res.Child == nil || res.Child.Model != "keyed/"+redact.Marker {
 		t.Fatalf("the call = %+v; want the child's answer, its usage on the keyed model, redacted", res)
 	}
+}
+
+// TestSubagentRedactsAKeyLearnedWhileTheChildRuns (review r4): the parent and
+// its children open knowing the same keys; while two children wait in their
+// providers, the environment gains a distinct key and the parent's SetModel
+// succeeds, resolving it — the parent's Redact covers it from then on, and no
+// child ever learns it. The children then stream it: one in its answer, the
+// other in the partial output of a failure. The runner builds its replacer
+// where each string is used, from the keys both sessions know then, so the
+// key reaches none of SubagentFinished, the calls' results, the parent's tool
+// entry or its next request, which the running turn sends with the redactor
+// it began with. A replacer built once, when the child opened, knows only the
+// keys of that moment and lets it through all four.
+func TestSubagentRedactsAKeyLearnedWhileTheChildRuns(t *testing.T) {
+	const learned = "sk-learned-while-a-child-ran"
+	f := newRouted(t)
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	answers, fails := newWorker(), newWorker()
+	withKey := []fantasy.StreamPart{{Type: fantasy.StreamPartTypeTextDelta, ID: "0", Delta: learned}}
+	a.route("go", callStep(
+		agentPart(t, "a1", task("answer", "answer with it")),
+		agentPart(t, "a2", task("fail", "fail with it"))),
+		answerWith("ok"))
+	a.route("answer with it", answers.step(openText("the key is "), cat(withKey, finishText())))
+	a.route("fail with it", fails.step(openText("partial "), cat(withKey, errorPart(errors.New("down")))))
+	var ev events
+	out := start(context.Background(), s, "go", ev.sink)
+	await(t, answers.reached, "the answering child in its provider")
+	await(t, fails.reached, "the failing child in its provider")
+	envMu.Lock()
+	env["NOKEY_API_KEY"] = learned
+	envMu.Unlock()
+	if err := s.SetModel("test/a"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	if s.Redact(learned) != redact.Marker {
+		t.Fatal("control: the parent's SetModel did not resolve the new key")
+	}
+	if kids := k.all(); len(kids) != 2 || kids[0].Redact(learned) == redact.Marker || kids[1].Redact(learned) == redact.Marker {
+		t.Fatal("control: a child learned the new key; both opened before the environment had it")
+	}
+	close(answers.release)
+	close(fails.release)
+	if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", got.res, got.err)
+	}
+	evs := ev.list()
+	for _, st := range of[SubagentStarted](evs) {
+		fin := finishedOf(t, evs, st.ID)
+		if found := leaks(fin, learned); len(found) != 0 || !strings.Contains(fin.Text, redact.Marker) {
+			t.Fatalf("SubagentFinished = %+v (leaks at %v); want the key redacted", fin, found)
+		}
+	}
+	for id, want := range map[string]string{"t1.1.1": "the key is " + redact.Marker, "t1.1.2": "partial " + redact.Marker} {
+		res := callResult(t, evs, id)
+		if found := leaks(res, learned); len(found) != 0 || !strings.HasSuffix(res.Text, want) {
+			t.Fatalf("call %s = %+v (leaks at %v); want it ending %q", id, res, found, want)
+		}
+	}
+	toolEntry := transcript(t, s).Entries[2]
+	if text := messageText(toolEntry.Message); toolEntry.Message.Role != fantasy.MessageRoleTool ||
+		strings.Contains(text, learned) || !strings.Contains(text, redact.Marker) {
+		t.Fatalf("the parent's tool entry (%s) holds the key, or not its marker: %s", toolEntry.Message.Role, text)
+	}
+	if next := a.requests("go"); len(next) != 2 || strings.Contains(requestText(next[1], false), learned) {
+		t.Fatalf("the parent's %d requests; want two, the second without the key", len(next))
+	}
+}
+
+// TestSubagentRefusesAKeyInItsHome (review r4): after the parent opened — so
+// the parent never learns it — and before its child opens, which would, the
+// environment gains a key that is part of the harness home's path. Every
+// spill path the child's calls write, and the one its parent's truncation of
+// its answer writes, begins with that home, and that path joins the answer
+// after the runner's last redaction, where the parent's keys alone redact it.
+// So the child's Open refuses, as the parent's does through its plan path:
+// the call fails with the refusal, and nothing of the child is written or
+// sent — no transcript, no spill file, no request.
+func TestSubagentRefusesAKeyInItsHome(t *testing.T) {
+	f := newRouted(t)
+	homeKey := filepath.Join(filepath.Base(filepath.Dir(f.home)), filepath.Base(f.home))
+	if len(homeKey) < modeltable.MinKeyLen || strings.Contains(f.workspace, homeKey) {
+		t.Fatalf("control: %q is not a key only the home's path holds", homeKey)
+	}
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	envMu.Lock()
+	env["NOKEY_API_KEY"] = homeKey
+	envMu.Unlock()
+	if s.Redact(homeKey) == redact.Marker {
+		t.Fatal("control: the parent learned the key")
+	}
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	a.route("go", callStep(agentPart(t, "a1", task("homed", "never runs"))), answerWith("ok"))
+	a.route("never runs", answerWith("ran"))
+	var ev events
+	if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+	}
+	res := callResult(t, ev.list(), "t1.1.1")
+	if want := "The sub-agent failed: " + errChildHomeKey.Error() + "."; res.Text != want || res.Class != tool.ClassToolError || res.Child != nil {
+		t.Fatalf("the call = %+v; want %q, tool_error, no usage", res, want)
+	}
+	if len(k.all()) != 0 || len(of[SubagentStarted](ev.list())) != 0 || len(a.requests("never runs")) != 0 {
+		t.Fatal("a child that never opened was reported, or sent a request")
+	}
+	if n := transcripts(t, f.home); n != 1 {
+		t.Fatalf("%d transcripts under the home; want the parent's alone", n)
+	}
+	if spills, err := os.ReadDir(filepath.Join(f.home, tool.SpillDir)); (err != nil && !errors.Is(err, fs.ErrNotExist)) || len(spills) != 0 {
+		t.Fatalf("the spill directory holds %d files (%v); want none", len(spills), err)
+	}
+	settled(t, s)
 }
 
 // TestChildGateTightensWithParentMode (A3, panel P13, P37, P50): the parent

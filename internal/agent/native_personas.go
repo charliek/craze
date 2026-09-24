@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/harness"
@@ -113,23 +112,12 @@ func personaScope(plugin string) string {
 }
 
 // personaKey is what the persona set deduplicates by: "agent:" and the name it
-// is offered under, compared as the harness compares agent types — case
-// folding in strings.EqualFold's sense (the harness's typeKey), so two names
-// the model could not tell apart are one persona here too, the first read
-// winning. For the ASCII class names are held to this is lowercasing by
-// another route; it is written as the fold so it cannot drift from the
-// harness if that class ever widens.
-func personaKey(name string) string { return "agent:" + strings.Map(foldCase, name) }
-
-// foldCase is r's representative under simple case folding: the least rune of
-// the orbit unicode.SimpleFold walks from r (the harness's foldRune).
-func foldCase(r rune) rune {
-	least := r
-	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-		least = min(least, f)
-	}
-	return least
-}
+// is offered under, keyed as the harness keys agent types
+// (harness.AgentTypeKey), so two names the model could not tell apart are one
+// persona here too, the first read winning. For the ASCII class names are
+// held to this is lowercasing by another route; it is the harness's own key so
+// the two cannot drift if that class ever widens.
+func personaKey(name string) string { return "agent:" + harness.AgentTypeKey(name) }
 
 // readAgentDir reads one persona directory — agents/*.md, flat, in lexical
 // order — under the id and root its entries are filed by. dir is "" when there

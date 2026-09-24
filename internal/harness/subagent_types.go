@@ -93,16 +93,19 @@ func scopeRank(scope string) int {
 	return -1
 }
 
-// typeKey is how agent type names compare: folded onto one line, as the
-// description shows them, and case-insensitively, so Claude Code's Explore
-// and Plan find the built-ins (plan 026 §3.4).
+// AgentTypeKey is how agent type names compare: two names are one type when
+// their keys are equal. A name is folded onto one line, as the description
+// shows it, and case-insensitively, so Claude Code's Explore and Plan find the
+// built-ins (plan 026 §3.4). It is the one definition: the adapter
+// deduplicates the personas it reads by it, so it and the harness's
+// resolution can never disagree about which names are one.
 //
 // Case-insensitively in strings.EqualFold's sense, not strings.ToLower's: each
 // rune becomes the least rune of its simple case-folding orbit, so two names
 // EqualFold calls equal have one key. Lowering alone leaves Σ and ς apart —
 // both survive agentTypes, and the lower-precedence one answers to its own
 // spelling (review r2 of C3a).
-func typeKey(name string) string { return strings.Map(foldRune, foldLine(name)) }
+func AgentTypeKey(name string) string { return strings.Map(foldRune, foldLine(name)) }
 
 // foldRune is r's representative under simple case folding: the least rune of
 // the orbit unicode.SimpleFold walks from r.
@@ -117,7 +120,7 @@ func foldRune(r rune) rune {
 // agentTypes is the list a session offers: personas and the built-ins merged
 // in precedence order — project, built-in, user, plugin; within a scope, the
 // caller's order, which for the workspace is innermost first — with each name
-// once, the first to claim it winning, compared by typeKey. So a project
+// once, the first to claim it winning, compared by AgentTypeKey. So a project
 // persona shadows a built-in, a built-in shadows a user persona (which the
 // adapter has already dropped with a diagnostic; this is the defensive half),
 // and a plugin's, named plugin:name, cannot collide with a bare name.
@@ -140,7 +143,7 @@ func agentTypes(personas []tool.Persona) []tool.Persona {
 	for _, scope := range ranked {
 		for _, p := range scope {
 			p.Name = foldLine(p.Name)
-			key := typeKey(p.Name)
+			key := AgentTypeKey(p.Name)
 			if key == "" || seen[key] {
 				continue
 			}
@@ -175,7 +178,7 @@ const (
 )
 
 // resolveAgentType is the agent type named name in types (agentTypes), matched
-// by typeKey; "" is the default, general-purpose, as the tool's Prepare
+// by AgentTypeKey; "" is the default, general-purpose, as the tool's Prepare
 // already made it. A name no type has is a *callError of class invalid_input
 // listing the types there are, in the order the description lists them,
 // within 1 KiB (plan 026 §3.4): "Unknown agent type `x`. Available types: a,
@@ -184,9 +187,9 @@ func resolveAgentType(types []tool.Persona, name string) (tool.Persona, error) {
 	if strings.TrimSpace(name) == "" {
 		name = tool.DefaultAgentType
 	}
-	key := typeKey(name)
+	key := AgentTypeKey(name)
 	for _, p := range types {
-		if typeKey(p.Name) == key {
+		if AgentTypeKey(p.Name) == key {
 			p.Tools, p.DisallowedTools = slices.Clone(p.Tools), slices.Clone(p.DisallowedTools)
 			return p, nil
 		}

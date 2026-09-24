@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -137,13 +138,14 @@ type toolset struct {
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
 //
 // child is non-nil for a sub-agent (child.go, plan 026 §3.2), and changes
-// five things: the profile's tools are filtered before anything is built from
-// them (ChildOptions.keeps); the system prompt is the parent's frozen string,
-// or the child's own under another profile, with the role section after it
-// (withChildRole); the gate is a child's (tool.NewChildModeGate); the
-// path-lock table is the parent's; and there is no todo list and no sweep —
-// the parent's Open swept, and a fan-out would otherwise walk the directory
-// once per child.
+// six things: a home whose path holds a key it knows is refused
+// (errChildHomeKey); the profile's tools are filtered before anything is
+// built from them (ChildOptions.keeps); the system prompt is the parent's
+// frozen string, or the child's own under another profile, with the role
+// section after it (withChildRole); the gate is a child's
+// (tool.NewChildModeGate); the path-lock table is the parent's; and there is
+// no todo list and no sweep — the parent's Open swept, and a fan-out would
+// otherwise walk the directory once per child.
 //
 // A session that is not a child merges personas with the built-in agent types
 // (agentTypes), and, when its profile has the agent tool, offers it with this
@@ -168,6 +170,14 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	ts.red.Store(redact.New(ts.keys...))
 	if holdsAKey(workspace, ts.keys) {
 		return nil, errWorkspaceKey
+	}
+	// A sub-agent's home begins every spill path of its calls and of its
+	// parent's truncation of its answer, and the parent redacts that path with
+	// its own keys alone (review r4). The raw home and the spill directory as
+	// joined, so a key spanning the join is refused too. The parent refuses its
+	// own through its plan path, the same home's (adoptPlanPath, resolve).
+	if child != nil && (holdsAKey(home, ts.keys) || holdsAKey(filepath.Join(home, tool.SpillDir), ts.keys)) {
+		return nil, errChildHomeKey
 	}
 
 	build := seams.profiles
@@ -358,6 +368,17 @@ var (
 	errPlanPathKey = errors.New("harness: the plan file's path contains a configured provider key; " +
 		"move the craze directory, or change the key")
 
+	// errChildHomeKey is errPlanPathKey's twin for a sub-agent: its Open's
+	// refusal of a harness home whose path holds a key the child knows (review
+	// r4). The home begins the path of every spill file the child's calls
+	// write and of the one its parent's truncation of its answer writes, and
+	// that path joins the answer after the runner's last redaction, where the
+	// parent redacts it with the parent's keys alone; the parent refuses a key
+	// in the same home through its plan path. The runner reports it to the
+	// parent's model as a failed sub-agent.
+	errChildHomeKey = errors.New("harness: the path of the directory sub-agents save full tool output in contains " +
+		"a configured provider key; move the craze directory, or change the key")
+
 	// errFrozenKey is resolve's refusal of a switch whose provider key is in
 	// what this session already sends unredacted: the system prompt, anywhere
 	// in the encoded tools — both frozen when it opened (D-30) — or the plan
@@ -456,9 +477,9 @@ func (ts *toolset) widest() *redact.Replacer {
 
 // knownKeys are the keys widest redacts — every key the session knows — as a
 // copy the caller owns. The sub-agent runner builds one replacer over its
-// parent's and its child's together from them (review r3): a Replacer does
-// not expose its keys, and two replacers run one after the other are not one
-// over the union (runChild says why).
+// parent's and its child's together from them, at each use (review r3, r4): a
+// Replacer does not expose its keys, and two replacers run one after the
+// other are not one over the union (subagents.union says why).
 func (ts *toolset) knownKeys() []string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()

@@ -290,7 +290,8 @@ type logged struct {
 // runner's id, the parent's links in the header, a filtered toolset, the
 // parent's frozen prompt with a role section after it, the parent's mode and
 // no plan file, nobody to ask, and the parent's path locks. A key inside that
-// prompt refuses it (errChildPromptKey).
+// prompt refuses it (errChildPromptKey), as does one in its home's path, which
+// begins every spill path of its calls (errChildHomeKey).
 func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")

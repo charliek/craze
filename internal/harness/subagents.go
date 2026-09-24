@@ -56,6 +56,10 @@ import (
 //     closing latch: a Close that signalled while the child was opening is
 //     honoured by the child it could not yet reach.
 //
+// The call's last word — the final arbitration of its outcome and the
+// redaction of its result (settle) — is deferred before step 1, so it runs
+// after everything the steps defer, any of which can wait (review r4).
+//
 // No event is emitted while a call waits for a slot: its row is the call's
 // own, running, and no sub-agent exists yet.
 //
@@ -128,13 +132,14 @@ type subagents struct {
 }
 
 // subagentSeams are the points a test needs to reach inside a call: to fail
-// the child's Open, to know a call is waiting for a slot or holds one, and to
-// see the child session a call opened.
+// the child's Open, to know a call is waiting for a slot or holds one, to see
+// the child session a call opened, and to hold a call in its retirement.
 type subagentSeams struct {
 	open     func(Options) (*Session, error) // opens a child; nil is Open
 	waiting  func(tool.SubagentCall)         // the call found no free slot and is about to wait for one
 	acquired func(tool.SubagentCall)         // the call holds a slot, rechecked, and is about to register
 	opened   func(id string, child *Session) // the child opened and is attached, before it runs
+	retiring func(id string)                 // the call is about to take regMu to retire its child
 }
 
 // turnLink is what a call needs of the turn it runs in: the turn's locked
@@ -305,6 +310,9 @@ func (r *subagents) register(id string, cancel context.CancelCauseFunc) (*childH
 
 // retire removes a child from the registry once its call is done with it.
 func (r *subagents) retire(h *childHandle) {
+	if r.seams.retiring != nil {
+		r.seams.retiring(h.id)
+	}
 	r.regMu.Lock()
 	defer r.regMu.Unlock()
 	delete(r.live, h.id)
@@ -329,7 +337,7 @@ func abortedResult() tool.Result {
 // Run is tool.Subagents: one agent call, from the refusals that need no
 // child to the child's result (see the file's comment for the slot's life).
 // It never returns before the child it opened has run and closed.
-func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) tool.Result {
+func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.Result) {
 	parent := r.s
 	switch {
 	case parent.child:
@@ -364,6 +372,11 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) tool.Result
 		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassInvalidInput}
 	}
 
+	// The call's last word, deferred before anything else the call defers so
+	// that it runs after all of it (settle, review r4).
+	var c childCall
+	defer func() { res = r.settle(ctx, &c, res) }()
+
 	// Steps 1–3: a slot, its release deferred at once, and the recheck.
 	if !r.acquire(ctx, call) {
 		return abortedResult()
@@ -387,16 +400,28 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) tool.Result
 	if !ok {
 		return abortedResult()
 	}
+	c.h = h
 	defer r.retire(h)
-	return r.runChild(ctx, childCtx, link, call, persona, alias, effort, h, mode)
+	return r.runChild(ctx, childCtx, link, call, persona, alias, effort, &c, mode)
+}
+
+// childCall is what a registered call's last word (settle) needs of it, set
+// as the call learns it.
+type childCall struct {
+	h     *childHandle // the registered child's handle; nil before registration
+	child *Session     // the child, once opened; nil before, and for one whose Open failed
+	// completed: the child's turn ended on its own, so its outcome stands
+	// whatever cause lands after (decide's first rule).
+	completed bool
 }
 
 // runChild is steps 5 and 6 and the child's turn: open it, defer its Close,
 // attach it, report it started, run it, and answer. ctx is the call's and
-// childCtx the child's own.
+// childCtx the child's own. The answer is the child's own, raw: settle
+// arbitrates and redacts it once everything the call defers has run.
 func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call tool.SubagentCall,
-	persona tool.Persona, alias, effort string, h *childHandle, mode string) tool.Result {
-	parent := r.s
+	persona tool.Persona, alias, effort string, c *childCall, mode string) tool.Result {
+	parent, h := r.s, c.h
 	all, ids := childToolSet(persona, parent.tools.offered)
 	open := r.seams.open
 	if open == nil {
@@ -410,11 +435,11 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
 	}))
 	if err != nil {
-		if ctx.Err() != nil || isClosed(parent.tools.closing) || h.isClosing() {
-			return abortedResult()
-		}
-		return failedResult(parent.Redact(err.Error()), "")
+		// Aborted instead when the parent is gone by the time the call
+		// returns (settle).
+		return failedResult(err.Error(), "")
 	}
+	c.child = child
 	// Step 5: closed before the retirement and the release, whatever happens
 	// from here — a panic included.
 	defer func() { _ = child.Close() }()
@@ -426,32 +451,30 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 	if r.seams.opened != nil {
 		r.seams.opened(h.id, child)
 	}
-
-	// Everything the runner reports of this call is redacted first, with one
-	// replacer over the union of the parent's keys — every one it knows, as
-	// Session.Redact — and the child's, which can hold one more when the
-	// environment gained a key between the two Opens. The prompt goes to the
-	// child's model, its transcript and SubagentStarted, and Run sends and
-	// persists a prompt as it is given, which is right for text a person typed
-	// and wrong for text a model wrote (§3.9, panel P9). One pass, never the
-	// parent's and then the child's (review r3): a replacer covers every byte
-	// of overlapping occurrences only of its own keys, so a parent's key that
-	// begins a longer key of the child's would leave, after the first pass's
-	// marker, the rest of the longer key for the second pass not to recognise.
-	red := redact.New(append(parent.tools.knownKeys(), child.tools.knownKeys()...)...)
-	prompt := red.String(call.Prompt)
 	child.mu.Lock()
 	ran := child.cur.id()
 	child.mu.Unlock()
 
-	// The model's names are the table's, which is text like any other; the
-	// dispatcher redacts them on the result (Result.Child), and these events
-	// never pass through it (review r3).
+	// Everything the runner reports of this call is redacted first, each
+	// string by a replacer built where it is used (union). The model's names
+	// are the table's, which is text like any other; the dispatcher redacts
+	// them on the result (Result.Child), and these events never pass through
+	// it (review r3).
 	started := time.Now()
+	red := r.union(child)
 	link.emit(SubagentStarted{
-		ID: h.id, CallID: call.ID, Type: red.String(persona.Name), Description: red.String(call.Description), Prompt: prompt,
-		Model: red.String(alias), Effort: red.String(effort), Mode: mode, At: parent.now(),
+		ID: h.id, CallID: call.ID, Type: red.String(persona.Name), Description: red.String(call.Description),
+		Prompt: red.String(call.Prompt), Model: red.String(alias), Effort: red.String(effort), Mode: mode, At: parent.now(),
 	})
+	// The prompt goes to the child's model and its transcript, and Run sends
+	// and persists a prompt as it is given, which is right for text a person
+	// typed and wrong for text a model wrote (§3.9, panel P9). It is redacted
+	// again, from the call's own text, by a replacer built after Started was
+	// delivered: that can wait on the parent's turn lock and its sink, and a
+	// key the parent learned meanwhile must not reach the child's model. It is
+	// Started's prompt unless the parent learned a key in that window, which
+	// this one is redacted of and Started's is not.
+	prompt := r.union(child).String(call.Prompt)
 	var obs childObserver
 	res, runErr := runTurn(childCtx, child, prompt, func(ev Event) {
 		obs.observe(ev)
@@ -462,39 +485,92 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 		parentGone: ctx.Err() != nil || isClosed(parent.tools.closing) || h.isClosing(),
 		stopped:    errors.Is(context.Cause(childCtx), errStoppedByUser),
 	}.decide(&obs)
+	c.completed = out.status == SubagentCompleted
 
 	// Finished says the child has ended and closed: its Close is idempotent,
 	// and the deferred one then does nothing.
 	_ = child.Close()
 	usage, calls, steps := obs.totals()
+	red = r.union(child)
 	link.emit(SubagentFinished{
 		ID: h.id, Status: out.status, Error: red.String(out.errText), Text: red.String(out.text), Usage: usage,
 		Model: red.String(ran.Alias), Provider: red.String(ran.Provider), WireModel: red.String(ran.WireModel),
 		ToolCalls: calls, Steps: steps, Duration: time.Since(started), At: parent.now(),
 	})
-	// Delivering Finished can block — on the parent's turn lock and on its
-	// sink — and the parent's call can be cancelled, or its session begin to
-	// close, meanwhile (review r3). A child that did not finish on its own —
-	// stopped, failed or cancelled — then reads aborted, as decide would have
-	// had it if the cause had landed first; a child that finished keeps its
-	// outcome, which is persisted (decide's first rule, X6).
-	if out.status != SubagentCompleted && (ctx.Err() != nil || isClosed(parent.tools.closing) || h.isClosing()) {
-		out.result = abortedResult()
-	}
-	// The result is redacted with the same replacer: its text is the child's,
-	// which can hold the key the child learned and the parent does not know,
-	// and the agent tool and the dispatcher redact with the parent's alone
-	// (review r3).
-	out.result.Text = red.String(out.result.Text)
 	// The child's usage, observed, rides on the result whichever way it
 	// ended: the parent's step records it per model (§3.7). The model names
-	// are the child's, redacted like the text; the dispatcher redacts them
+	// are the child's; settle redacts them with the text, and the dispatcher
 	// again with the rest.
-	out.result.Child = &tool.ChildUsage{Provider: red.String(ran.Provider), Model: red.String(ran.Alias), WireModel: red.String(ran.WireModel), Usage: tool.Usage{
+	out.result.Child = &tool.ChildUsage{Provider: ran.Provider, Model: ran.Alias, WireModel: ran.WireModel, Usage: tool.Usage{
 		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
 		CacheRead: usage.CacheRead, CacheCreation: usage.CacheCreation,
 	}}
 	return out.result
+}
+
+// union is one replacer over every key the parent knows now — installed and
+// pending, the ones Session.Redact covers — and every key child knows, which
+// can be one more when the environment gained a key between the two Opens; a
+// nil child, one that never opened, adds none.
+//
+// It is built at each use and never kept (review r4). The parent learns a key
+// whenever its SetModel resolves one, and a child runs as long as it runs: a
+// replacer kept from the child's Open would miss a key the parent learned
+// meanwhile and let it through everything the runner reports after — the
+// child's answer, which the parent's own dispatcher then redacts with the
+// narrower redactor its running turn keeps.
+//
+// One pass, never the parent's and then the child's (review r3): a replacer
+// covers every byte of overlapping occurrences only of its own keys, so a
+// parent's key that begins a longer key of the child's would leave, after the
+// first pass's marker, the rest of the longer key for the second pass not to
+// recognise.
+func (r *subagents) union(child *Session) *redact.Replacer {
+	keys := r.s.tools.knownKeys()
+	if child != nil {
+		keys = append(keys, child.tools.knownKeys()...)
+	}
+	return redact.New(keys...)
+}
+
+// settle is a registered call's last word, the runner's outermost deferred
+// function (review r4): it runs after the child's Close, its retirement and
+// the slot's release, any of which can wait — the retirement on regMu, which
+// a SetMode or a Close holds while it walks the registry — so nothing but the
+// return stands between it and the call's result.
+//
+//   - It arbitrates last. A child that did not finish on its own — stopped,
+//     failed, cancelled, or never opened — reads aborted, its usage kept,
+//     when the call's context is done, the session is closing or a Close has
+//     latched the child by now: decide would have had it so had the cause
+//     landed before the child's Run returned, and one that lands before the
+//     call returns is no later as far as the parent can tell. A child that
+//     finished keeps its outcome, which is persisted (decide's first rule,
+//     X6). A cause that lands after the return — while the agent tool caps an
+//     error, or the dispatcher finishes the call — meets any tool's race with
+//     a cancel, which is inherent.
+//   - It redacts the result, its text and the model names on its usage, with
+//     a replacer built here (union): the text is the child's, which can hold
+//     a key the child learned and the parent does not know, or one the parent
+//     learned while the child ran, and the agent tool and the dispatcher
+//     redact with the parent's installed keys alone (reviews r3, r4).
+//
+// A call that never registered has no child to settle: its result is a
+// refusal or aborted as it stands.
+func (r *subagents) settle(ctx context.Context, c *childCall, res tool.Result) tool.Result {
+	if c.h == nil {
+		return res
+	}
+	if !c.completed && (ctx.Err() != nil || isClosed(r.s.tools.closing) || c.h.isClosing()) {
+		res = tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted, Child: res.Child}
+	}
+	red := r.union(c.child)
+	res.Text = red.String(res.Text)
+	if u := res.Child; u != nil {
+		res.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
+			WireModel: red.String(u.WireModel), Usage: u.Usage}
+	}
+	return res
 }
 
 // runTurn is the child's Run, with a panic that unwinds through it recovered
