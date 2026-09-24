@@ -12,7 +12,15 @@ import (
 // allocsOf is the mean number of heap allocations op makes, over n runs, with
 // setup run before each and not counted: testing.AllocsPerRun for an op whose
 // state has to be put back between runs. It runs on one P, as AllocsPerRun
-// does, so no other goroutine's allocation is counted.
+// does.
+//
+// One P does not make the count the op's alone: MemStats.Mallocs is the
+// process's, and the runtime's own goroutines — and one an earlier test left
+// behind — still run and allocate between the two reads. So the mean is taken
+// as AllocsPerRun takes it, by integer division: a stray allocation in 512 runs
+// is a remainder and drops out, where a float mean read 3.002 against a bound
+// of 3 and failed (macOS CI, PR #51: logged "3.00", "the bound is 3"); an op
+// that really allocates once more every run still counts in full.
 func allocsOf(n int, setup, op func()) float64 {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	var before, after runtime.MemStats
@@ -26,7 +34,7 @@ func allocsOf(n int, setup, op func()) float64 {
 		runtime.ReadMemStats(&after)
 		total += after.Mallocs - before.Mallocs
 	}
-	return float64(total) / float64(n)
+	return float64(total / uint64(n))
 }
 
 // TestFoldAllocationsAreBounded (plan 024 §3.4, A6): what one Fold may
