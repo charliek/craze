@@ -573,6 +573,11 @@ func TestNativeCancelDuringACommandEventReturns(t *testing.T) {
 	// Start publishes exactly one event — its install delta, seq 1, taken off
 	// the primary below — and the fill then takes seqs 2..primaryCap+1, so the
 	// expansion's event is the next number.
+	//
+	// titlePinned is set here too: SF-01's first-prompt title delta (C8) is
+	// not this test's subject and would take a seq of its own, racing the
+	// command event for primaryCap+2 instead of leaving it the next number.
+	s.titlePinned = true
 	hook, inside := insideAt(primaryCap + 2)
 	abandoned := make(chan struct{})
 	var once sync.Once

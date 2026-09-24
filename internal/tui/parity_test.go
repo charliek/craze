@@ -969,14 +969,17 @@ func paritySessionSwap(t *testing.T) {
 // model, config, commands and plugins, the todo list, the sub-agent roster, and
 // m.queue — equals what the shared model folded from the stream.
 //
-// Two documented exemptions, both of the session and neither of the fold:
+// One documented exemption, of the session and not the fold: the Stub
+// publishes no install delta at Start, where the live session and native both
+// do (live.go installDeltaLocked, native.go's Start): its start-up catalog is
+// test set-up, like its Set* helpers. The stub cases publish that delta
+// themselves, as a live session's Start would.
 //
-//   - the Stub publishes no install delta at Start, where the live session and
-//     native both do (live.go installDeltaLocked, native.go's Start): its
-//     start-up catalog is test set-up, like its Set* helpers. The stub cases
-//     publish that delta themselves, as a live session's Start would;
-//   - native's title: native sets it from the first prompt without publishing
-//     it (SF-01). C8 publishes it and removes the exemption.
+// native's title was a second exemption until C8 (SF-01): native set it from
+// the first prompt without publishing it, so the TUI's mirror had it and the
+// stream did not. C8 publishes it as a delta, the fold picks it up like any
+// other Settings.Title (fold.go), and the native case below proves the two
+// agree instead of excepting the field.
 func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 	check := func(t *testing.T, m Model, when string, exempt ...string) {
 		t.Helper()
@@ -1073,14 +1076,12 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		// the title native took from the first prompt.
 		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 		m = pumpSettled(t, m)
-		// SF-01: native names the session from its first prompt without
-		// publishing the name, so the TUI's mirror has it and the stream does
-		// not. C8 publishes it: then this exemption, and the two lines that
-		// say it is in force, go.
-		if m.snap.Title != "hello" || m.shared.State().Settings.Title != "" {
-			t.Fatalf("SF-01 is no longer what this exempts: the TUI's title %q, the model's %q", m.snap.Title, m.shared.State().Settings.Title)
+		// SF-01, C8: the first prompt's title is a delta now, so the fold has
+		// it too — no exemption, the same check as every other case.
+		if m.snap.Title != "hello" || m.shared.State().Settings.Title != "hello" {
+			t.Fatalf("the TUI's title %q, the model's %q, want both %q", m.snap.Title, m.shared.State().Settings.Title, "hello")
 		}
-		check(t, m, "after a mode change", "Title")
+		check(t, m, "after a mode change")
 	})
 }
 
