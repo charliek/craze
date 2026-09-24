@@ -53,11 +53,15 @@ type promptOpts struct {
 	ask        bool
 	plan       bool
 	json       bool
-	text       string
-	stdout     io.Writer
-	stderr     io.Writer
-	stdin      io.Reader
-	cmd        *cobra.Command
+	// attachProbePath is --attach-probe's value, hidden (plan 024 §5 row C4):
+	// "" is the flag's own off state, which newAttachProbe turns into a nil
+	// *attachProbe so every other call site is a no-op.
+	attachProbePath string
+	text            string
+	stdout          io.Writer
+	stderr          io.Writer
+	stdin           io.Reader
+	cmd             *cobra.Command
 	// foreignMax overrides foreignTurnMax. Zero is the real bound; the tests
 	// that drive the give-up path set a short one, because a minute of waiting
 	// is not a test anyone runs.
@@ -67,6 +71,10 @@ type promptOpts struct {
 	// nil for a test that drives finishRun over a session alone, where every
 	// event was published directly and there is nothing asynchronous to wait for.
 	eng *engine.Engine
+	// probe is the attach probe --attach-probe built, nil with the flag
+	// absent (newAttachProbe). It is set once drive has an engine to attach
+	// to.
+	probe *attachProbe
 	// beforeGiveUp and beforeDrainGiveUp are test seams, nil in production: each
 	// runs on the run's own goroutine in the gap between deciding to give a wait
 	// up and looking at what is actually true — the gap in which the claim can
@@ -121,6 +129,12 @@ func newPromptCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.plan, "plan", false, "set session mode to plan after session/new")
 	cmd.Flags().BoolVar(&o.json, "json", false, "write only JSON events to stdout")
 	registerProviderFlag(cmd, &o.provider)
+	// --attach-probe is internal (plan 024 §5 row C4): it folds the session
+	// through engine.Attach on a goroutine of its own and compares that fold
+	// to the primary's, writing SAME or DIFF to PATH. Hidden and undocumented;
+	// its absence leaves the command's behaviour exactly as it was.
+	cmd.Flags().StringVar(&o.attachProbePath, "attach-probe", "", "internal: compare an Attach fold to the primary, writing SAME/DIFF to PATH")
+	_ = cmd.Flags().MarkHidden("attach-probe")
 	return cmd
 }
 
@@ -230,6 +244,7 @@ func (o *promptOpts) run() (retErr error) {
 // can drive the edges a real agent cannot be asked for.
 func (o *promptOpts) drive(ctx context.Context, eng *engine.Engine, text string) (retErr error) {
 	o.eng = eng
+	o.probe = newAttachProbe(ctx, o.attachProbePath, eng, o.stderr)
 	var inRun atomic.Bool
 	inRun.Store(true)
 	defer inRun.Store(false)
@@ -715,6 +730,7 @@ func (o *promptOpts) flushEvents(sess agent.Session, queue *[]string) (bool, err
 // outside a turn craze prompted — during a foreign turn, or between turns —
 // is still the agent waiting on an answer, so every reader goes through here.
 func (o *promptOpts) consume(ev agent.Event, queue *[]string) (bool, error) {
+	o.probe.onEvent(ev)
 	if err := o.writeEvent(ev); err != nil {
 		return false, err
 	}
