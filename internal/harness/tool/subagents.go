@@ -50,10 +50,11 @@ type SubagentCall struct {
 // once its ctx is done. Result.Child carries the child's usage whenever a
 // child ran. Run never returns a Go error, like every Prepared.Run.
 //
-// The dispatcher redacts the result as it redacts every tool's, and truncates
-// it only when it is not an error: plan 026 §3.7's "one length cap, on both
-// paths" has the agent tool cap an error's text itself, redacted first,
-// through Truncate.
+// Run cuts the result itself, a success and an error alike — plan 026 §3.7's
+// "one length cap, on both paths" — through TruncateRedacted, with the keys
+// its session and the child know (review r6). The agent tool's spec is
+// Truncate None, so the dispatcher only redacts the result, as it redacts
+// every tool's.
 type Subagents interface {
 	Run(ctx context.Context, call SubagentCall) Result
 }

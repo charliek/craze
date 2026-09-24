@@ -161,8 +161,8 @@ func TestProfile(t *testing.T) {
 		"edit":  {tool.KindEdit, false, false, tool.Head},
 		"write": {tool.KindEdit, false, false, tool.Head},
 		// plan 026 §3.3: a child may edit, so not ReadOnly; fanned out, so
-		// Parallel; its answer's start is its answer, so Head.
-		"agent": {tool.KindTask, false, true, tool.Head},
+		// Parallel; the runner cuts its answer itself, so None (review r6).
+		"agent": {tool.KindTask, false, true, tool.None},
 		// plan 023 §3.4's table: the two that block on a person are not
 		// Parallel, and all three change nothing.
 		"todo_write":        {tool.KindTodo, true, true, tool.Head},

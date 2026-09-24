@@ -2,8 +2,11 @@ package opencode
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -67,7 +70,8 @@ func newAgentFixture(t *testing.T, sub tool.Subagents) *fixture {
 }
 
 // TestAgentSpec (A5): the tool's contract — id agent, kind task, parallel, not
-// read-only (a child may edit), head truncation; description and prompt
+// read-only (a child may edit), no truncation by the dispatcher (the runner
+// cuts the answer itself, review r6); description and prompt
 // required, and subagent_type, model and effort optional strings, with no
 // run_in_background declared until background children exist (plan 026 PR 3).
 // Its description opens with the alias sentence, says the five things §3.3
@@ -80,8 +84,8 @@ func TestAgentSpec(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := a.Spec()
-	if s.ID != "agent" || s.Kind != tool.KindTask || !s.Parallel || s.ReadOnly || s.Truncate != tool.Head {
-		t.Fatalf("spec = id %q kind %q parallel %v readOnly %v truncate %d; want agent, task, parallel, not read-only, head",
+	if s.ID != "agent" || s.Kind != tool.KindTask || !s.Parallel || s.ReadOnly || s.Truncate != tool.None {
+		t.Fatalf("spec = id %q kind %q parallel %v readOnly %v truncate %d; want agent, task, parallel, not read-only, none",
 			s.ID, s.Kind, s.Parallel, s.ReadOnly, s.Truncate)
 	}
 	if !slices.Equal(s.Required, []string{"description", "prompt"}) {
@@ -212,35 +216,36 @@ func TestAgentPrepare(t *testing.T) {
 	}
 }
 
-// TestAgentErrorResultIsCapped (plan 026 §3.7, panel P8): the dispatcher cuts
-// only a result that is not an error, so the agent tool cuts a failed child's
-// answer itself, through the same truncator and at the same limits: its head
-// kept, the whole text — redacted before it is written, as the dispatcher's
-// spill files are — in a spill file named for the call, and the class and the
-// child's usage kept. The control is a short error, which comes back whole.
-func TestAgentErrorResultIsCapped(t *testing.T) {
+// TestAgentResultIsNotCutAgain (plan 026 §3.7, review r6): the runner cuts a
+// child's answer itself, a success and an error alike, so the agent tool and
+// the dispatcher hand it on as the runner answered — longer than the limits
+// here, and still whole, with no spill file of their own — and apply only the
+// dispatcher's redaction, to the text and to the spill path the runner's
+// Truncation names. An error keeps its class, and both keep the child's
+// usage.
+func TestAgentResultIsNotCutAgain(t *testing.T) {
 	child := &tool.ChildUsage{Provider: "test", Model: "test/a", WireModel: "wire-a", Usage: tool.Usage{Input: 10, Output: 5}}
-	long := "The sub-agent failed: gone.\n\nIts last output was:\n" + keyA + "\n" + strings.Repeat(strings.Repeat("z", 59)+"\n", 1024)
-	sub := &fakeSubagents{res: tool.Result{Text: long, IsError: true, Class: tool.ClassToolError, Child: child}}
-	f := newAgentFixture(t, sub)
-	_, res := f.call(t, "agent", `{"description":"d","prompt":"p"}`)
-	if !res.IsError || res.Class != tool.ClassToolError || res.Child == nil || *res.Child != *child {
-		t.Fatalf("result: error %v, class %q, usage %+v; want tool_error with the child's usage", res.IsError, res.Class, res.Child)
-	}
-	if len(res.Text) > tool.MaxBytes+1024 || res.Trunc.Spill == "" || !strings.HasPrefix(res.Text, "The sub-agent failed: gone.") ||
-		!strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) || strings.Contains(res.Text, keyA) {
-		t.Fatalf("result: %d bytes, spill %q; want the head of it, redacted, naming its spill file", len(res.Text), res.Trunc.Spill)
-	}
-	b, err := os.ReadFile(res.Trunc.Spill)
-	if err != nil || strings.Contains(string(b), keyA) || !strings.Contains(string(b), redact.Marker) || len(b) < len(long)-len(keyA) {
-		t.Fatalf("the spill file (%v) holds %d bytes; want the whole text, redacted", err, len(b))
-	}
-
-	sub.res.Text = "The sub-agent failed: gone."
-	_, res = f.call(t, "agent", `{"description":"d","prompt":"p"}`)
-	failed(t, res, tool.ClassToolError, "The sub-agent failed: gone.")
-	if res.Trunc.Spill != "" {
-		t.Fatalf("control: a short error was spilled to %s", res.Trunc.Spill)
+	long := "the answer\n" + keyA + "\n" + strings.Repeat(strings.Repeat("z", 59)+"\n", 1024)
+	spill := "/craze/" + keyA + "/tool-output/tool_t1"
+	trunc := tool.Truncation{KeptBytes: 1, TotalBytes: 2, KeptLines: 1, TotalLines: 2, Spill: spill}
+	for _, class := range []tool.ErrorClass{"", tool.ClassToolError} {
+		sub := &fakeSubagents{res: tool.Result{Text: long, IsError: class != "", Class: class, Child: child, Trunc: trunc}}
+		f := newAgentFixture(t, sub)
+		_, res := f.call(t, "agent", `{"description":"d","prompt":"p"}`)
+		if res.IsError != (class != "") || res.Class != class || res.Child == nil || *res.Child != *child {
+			t.Fatalf("class %q: error %v, class %q, usage %+v; want the runner's, with the child's usage", class, res.IsError, res.Class, res.Child)
+		}
+		if want := strings.ReplaceAll(long, keyA, redact.Marker); res.Text != want {
+			t.Fatalf("class %q: %d bytes; want the runner's %d, redacted and not cut again", class, len(res.Text), len(want))
+		}
+		wantTrunc := trunc
+		wantTrunc.Spill = strings.ReplaceAll(spill, keyA, redact.Marker)
+		if res.Trunc != wantTrunc {
+			t.Fatalf("class %q: truncation %+v; want the runner's, its spill path redacted: %+v", class, res.Trunc, wantTrunc)
+		}
+		if spills, err := os.ReadDir(filepath.Join(f.env.Home, tool.SpillDir)); (err != nil && !errors.Is(err, fs.ErrNotExist)) || len(spills) != 0 {
+			t.Fatalf("class %q: the spill directory holds %d files (%v); want none", class, len(spills), err)
+		}
 	}
 }
 

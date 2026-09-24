@@ -56,9 +56,11 @@ import (
 //     closing latch: a Close that signalled while the child was opening is
 //     honoured by the child it could not yet reach.
 //
-// The call's last word — the final arbitration of its outcome and the
-// redaction of its result (settle) — is deferred before step 1, so it runs
-// after everything the steps defer, any of which can wait (review r4).
+// The call's last word — the redaction and the truncation of its result, and
+// then, last of all, the final arbitration of its outcome (settle) — is
+// deferred before step 1, so it runs after everything the steps defer, any of
+// which can wait (review r4); and the arbitration follows every step of its
+// own that can (review r6).
 //
 // No event is emitted while a call waits for a slot: its row is the call's
 // own, running, and no sub-agent exists yet.
@@ -373,9 +375,9 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.R
 	}
 
 	// The call's last word, deferred before anything else the call defers so
-	// that it runs after all of it (settle, review r4).
+	// that it runs after all of it (settle, reviews r4 and r6).
 	var c childCall
-	defer func() { res = r.settle(ctx, &c, res) }()
+	defer func() { res = r.settle(ctx, call.ID, &c, res) }()
 
 	// Steps 1–3: a slot, its release deferred at once, and the recheck.
 	if !r.acquire(ctx, call) {
@@ -417,8 +419,9 @@ type childCall struct {
 
 // runChild is steps 5 and 6 and the child's turn: open it, defer its Close,
 // attach it, report it started, run it, and answer. ctx is the call's and
-// childCtx the child's own. The answer is the child's own, raw: settle
-// arbitrates and redacts it once everything the call defers has run.
+// childCtx the child's own. The answer is the child's own, raw and whole:
+// settle redacts it, cuts it and arbitrates it once everything the call
+// defers has run.
 func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call tool.SubagentCall,
 	persona tool.Persona, alias, effort string, c *childCall, mode string) tool.Result {
 	parent, h := r.s, c.h
@@ -460,6 +463,21 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 	// are the table's, which is text like any other; the dispatcher redacts
 	// them on the result (Result.Child), and these events never pass through
 	// it (review r3).
+	//
+	// Started and Finished are redacted as they are built, and each then waits
+	// for the parent turn's lock and its sink before the adapter has it. A key
+	// the parent learns in that wait is the limit Session.Redact states — a
+	// switch that lands after a text was redacted and before it is used cannot
+	// be covered — and the adapter redacts every lifecycle payload again (C5),
+	// which covers a distinct key. It cannot repair a key that extends one
+	// already replaced: a prompt holding sk-abcdefgh-new-secret, redacted
+	// while only sk-abcdefgh was known, keeps -new-secret after the marker
+	// once the parent learns the longer key, since neither whole key occurs
+	// any more. An accepted residual (review r6, finding 3): it needs a key
+	// learned mid-call that extends a known one, with the call's text holding
+	// the longer. The prompt the child is sent is redacted afresh from the
+	// call's own text (below), and the call's result in settle, so a key
+	// learned while Started or Finished waited reaches neither.
 	started := time.Now()
 	red := r.union(child)
 	link.emit(SubagentStarted{
@@ -536,39 +554,61 @@ func (r *subagents) union(child *Session) *redact.Replacer {
 // settle is a registered call's last word, the runner's outermost deferred
 // function (review r4): it runs after the child's Close, its retirement and
 // the slot's release, any of which can wait — the retirement on regMu, which
-// a SetMode or a Close holds while it walks the registry — so nothing but the
-// return stands between it and the call's result.
+// a SetMode or a Close holds while it walks the registry. It finishes the
+// result the call built — the child's answer, or its failure with its last
+// output — in this order (review r6):
 //
-//   - It arbitrates last. A child that did not finish on its own — stopped,
-//     failed, cancelled, or never opened — reads aborted, its usage kept,
-//     when the call's context is done, the session is closing or a Close has
-//     latched the child by now: decide would have had it so had the cause
-//     landed before the child's Run returned, and one that lands before the
-//     call returns is no later as far as the parent can tell. A child that
-//     finished keeps its outcome, which is persisted (decide's first rule,
-//     X6). A cause that lands after the return — while the agent tool caps an
-//     error, or the dispatcher finishes the call — meets any tool's race with
-//     a cancel, which is inherent.
-//   - It redacts the result, its text and the model names on its usage, with
-//     a replacer built here (union): the text is the child's, which can hold
-//     a key the child learned and the parent does not know, or one the parent
-//     learned while the child ran, and the agent tool and the dispatcher
-//     redact with the parent's installed keys alone (reviews r3, r4).
+//  1. It redacts the text, with a replacer built here (union): the text is
+//     the child's, which can hold a key the child learned and the parent does
+//     not know, or one the parent learned while the child ran, and the
+//     dispatcher redacts with the parent's installed keys alone (reviews r3,
+//     r4).
+//  2. It cuts the text, a success and an error alike (§3.7's one cap), with
+//     the shared truncator at its limits: the head kept, and the whole text,
+//     redacted, in a spill file under the parent's home named for the call,
+//     whose path and notice a fresh union redacts as they are added. The
+//     dispatcher's cut of a success, and the agent tool's of an error, added
+//     that path after the runner's last redaction, redacted by the parent's
+//     installed keys or by none: a key spelled across the path's fixed part,
+//     or one the parent learned that its home holds, reached the parent's
+//     model. The agent tool's spec is Truncate None, so nothing cuts the
+//     answer twice.
+//  3. It redacts the whole text once more, and the spill path, with a fresh
+//     union: a key spelled across the notice, or across the path and the
+//     text beside it, is replaced — which can leave the path one that opens
+//     nothing, a key on the wire being the worse of the two. The model names
+//     on the usage are redacted with them.
+//  4. It arbitrates, last, after everything above that can wait — each union
+//     takes both sessions' key locks, which a SetModel holds while it
+//     resolves a key, and the cut writes a file — and nothing that can wait
+//     follows it (review r6: a cause that landed while a union waited was
+//     missed by an arbitration made before it). A child that did not finish
+//     on its own — stopped, failed, cancelled, or never opened — reads
+//     aborted, its usage kept, when the call's context is done, the session
+//     is closing or a Close has latched the child by now: decide would have
+//     had it so had the cause landed before the child's Run returned, and one
+//     that lands before the call returns is no later as far as the parent can
+//     tell. A child that finished keeps its outcome, which is persisted
+//     (decide's first rule, X6). A cause that lands after the return — while
+//     the dispatcher finishes the call — meets any tool's race with a cancel,
+//     which is inherent.
 //
 // A call that never registered has no child to settle: its result is a
-// refusal or aborted as it stands.
-func (r *subagents) settle(ctx context.Context, c *childCall, res tool.Result) tool.Result {
+// refusal or aborted as it stands, and short.
+func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res tool.Result) tool.Result {
 	if c.h == nil {
 		return res
 	}
-	if !c.completed && (ctx.Err() != nil || isClosed(r.s.tools.closing) || c.h.isClosing()) {
-		res = tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted, Child: res.Child}
-	}
+	res.Text = r.union(c.child).String(res.Text)
+	res.Text, res.Trunc = tool.TruncateRedacted(r.s.base.home, callID, res.Text, tool.Head, r.union(c.child))
 	red := r.union(c.child)
-	res.Text = red.String(res.Text)
+	res.Text, res.Trunc.Spill = red.String(res.Text), red.String(res.Trunc.Spill)
 	if u := res.Child; u != nil {
 		res.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
 			WireModel: red.String(u.WireModel), Usage: u.Usage}
+	}
+	if !c.completed && (ctx.Err() != nil || isClosed(r.s.tools.closing) || c.h.isClosing()) {
+		res = tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted, Child: res.Child}
 	}
 	return res
 }
@@ -578,8 +618,8 @@ func (r *subagents) settle(ctx context.Context, c *childCall, res tool.Result) t
 // for any other failure: the child closed, its SubagentFinished failed, and
 // the call's result a tool_error that carries the child's observed usage —
 // which the parent's step records (subagent_usage) — and goes through the
-// agent tool's cap. Left to the dispatcher's recovery, outside the runner,
-// the result lost both: a fresh error with no usage, and no cap.
+// runner's cap (settle). Left to the dispatcher's recovery, outside the
+// runner, the result lost both: a fresh error with no usage, and no cap.
 func runTurn(ctx context.Context, child *Session, prompt string, sink func(Event)) (res Result, err error) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -778,8 +818,8 @@ func completedResult(stop, text string, doomStopped bool) tool.Result {
 }
 
 // failedResult is a failed child's answer (§3.7): an error, class tool_error,
-// saying what failed, with the child's last output when it had some. The
-// agent tool caps it, as the dispatcher caps a success (§3.7's one cap).
+// saying what failed, with the child's last output when it had some. settle
+// cuts it, as it cuts a success (§3.7's one cap, review r6).
 func failedResult(msg, last string) tool.Result {
 	text := subagentFailed + strings.TrimSuffix(strings.TrimSpace(msg), ".") + "."
 	return tool.Result{Text: withLastOutput(text, last), IsError: true, Class: tool.ClassToolError}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -510,7 +511,7 @@ func TestAgentSlotReleasedOnEveryPath(t *testing.T) {
 
 	t.Run("a panic during Run", func(t *testing.T) {
 		// The runner recovers the panic itself (review r3): the call fails
-		// like any other failed child, capped by the agent tool and carrying
+		// like any other failed child, capped by the runner and carrying
 		// the child's usage, which the parent's step records. A panic's value
 		// can be any size; this one is twice the cap.
 		f := newRouted(t)
@@ -1268,6 +1269,99 @@ func TestSubagentArbitratesLast(t *testing.T) {
 	}
 }
 
+// TestSubagentArbitratesAfterItsUnions (review r6): the user stops a child,
+// its SubagentFinished is delivered with the parent still live, and the
+// parent's key lock is held as settle begins — a SetModel holds it while it
+// resolves a key; here the call's retirement seam takes it — so settle's
+// union waits on it. Once the call's goroutine is seen waiting there, the
+// parent's cause lands, and only then is the lock let go. The call reads
+// aborted, carrying the step the child was billed for: the arbitration comes
+// after every union and the cut. One made before the first union saw the live
+// parent and kept the stop.
+func TestSubagentArbitratesAfterItsUnions(t *testing.T) {
+	for _, late := range []string{"the parent's cancel", "Close"} {
+		t.Run(late, func(t *testing.T) {
+			f := newRouted(t)
+			s := f.open(f.options())
+			a := f.routers["test/a"]
+			w := newWorker()
+			a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))))
+			a.route("a long task", callStep(globPart("g1")), w.step(openText("half done"), finishText()))
+			held := make(chan struct{})
+			s.subs.seams.retiring = func(string) {
+				s.tools.mu.Lock() // the test lets it go, once the cause has landed
+				close(held)
+			}
+			// A failure while the lock is held must not leave the call, and
+			// the cleanup's Close behind it, waiting on it for ever.
+			unlock := sync.OnceFunc(s.tools.mu.Unlock)
+			defer func() {
+				if isClosed(held) {
+					unlock()
+				}
+			}()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var ev events
+			out := start(ctx, s, "go", ev.sink)
+			await(t, w.reached, "the child mid-step")
+			if !stopChild(s, of[SubagentStarted](ev.list())[0].ID) {
+				t.Fatal("the child was not registered")
+			}
+			await(t, held, "the parent's key lock, taken in the call's retirement")
+			if fin := of[SubagentFinished](ev.list()); len(fin) != 1 || fin[0].Status != SubagentCancelled {
+				t.Fatalf("control: SubagentFinished = %+v; want the stopped child's, delivered before the retirement", fin)
+			}
+			waitFor(t, func() bool { return waitingOnMutexIn("harness.(*subagents).settle(", "harness.(*toolset).knownKeys(") },
+				"settle's union waiting on the parent's key lock")
+			closed := make(chan error, 1)
+			switch late {
+			case "the parent's cancel":
+				cancel()
+			case "Close":
+				go func() { closed <- s.Close() }()
+				await(t, s.tools.closing, "Close's signal")
+			}
+			unlock()
+			got := await(t, out, "the turn")
+			if got.err != nil || got.res.StopReason != StopCancelled {
+				t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+			}
+			res := callResult(t, ev.list(), "t1.1.1")
+			if res.Class != tool.ClassAborted || res.Text != tool.AbortedText || res.Child == nil ||
+				res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+				t.Fatalf("the call = %+v; want aborted, carrying the first step's usage: the parent's cause outranks the stop", res)
+			}
+			if late == "Close" {
+				if err := await(t, closed, "Close"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			settled(t, s)
+		})
+	}
+}
+
+// waitingOnMutexIn reports whether some goroutine is parked on a sync.Mutex
+// with every one of frames on its stack, as runtime.Stack prints them.
+func waitingOnMutexIn(frames ...string) bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
+		if strings.Contains(g, "[sync.Mutex.Lock") && !slices.ContainsFunc(frames, func(f string) bool { return !strings.Contains(g, f) }) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAgentResultTable (A8): what the parent's model reads for each way a
 // child can end (§3.7's table), the two max_turn_requests rows told apart by
 // the doom-loop guard's Diag. Every row carries the child's usage.
@@ -1343,8 +1437,9 @@ func TestAgentResultTable(t *testing.T) {
 }
 
 // TestAgentResultTruncated (A8): a child's 60 KiB answer reaches the parent
-// through the dispatcher's head truncation, with the whole of it in a spill
-// file named for the call.
+// through the runner's head truncation, cut once — the dispatcher does not cut
+// it again (review r6) — with the whole of it in a spill file named for the
+// call.
 func TestAgentResultTruncated(t *testing.T) {
 	f := newRouted(t)
 	s := f.open(f.options())
@@ -1357,8 +1452,9 @@ func TestAgentResultTruncated(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := callResult(t, ev.list(), "t1.1.1")
-	if res.IsError || res.Trunc.Spill == "" || len(res.Text) > tool.MaxBytes+1024 || !strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) {
-		t.Fatalf("the call: error %v, %d bytes, spill %q; want a head-truncated success naming its spill file", res.IsError, len(res.Text), res.Trunc.Spill)
+	if res.IsError || res.Trunc.Spill == "" || len(res.Text) > tool.MaxBytes+1024 || !strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) ||
+		strings.Count(res.Text, "Full output saved to: ") != 1 {
+		t.Fatalf("the call: error %v, %d bytes, spill %q; want a success head-truncated once, naming its spill file", res.IsError, len(res.Text), res.Trunc.Spill)
 	}
 	if b, err := os.ReadFile(res.Trunc.Spill); err != nil || string(b) != long || filepath.Base(res.Trunc.Spill) != "tool_t1.1.1" {
 		t.Fatalf("the spill file %s holds %d bytes (%v); want the whole answer", res.Trunc.Spill, len(b), err)
@@ -1366,9 +1462,10 @@ func TestAgentResultTruncated(t *testing.T) {
 }
 
 // TestAgentErrorResultTruncated (A8, panel P8): a child that streams 60 KiB
-// and then fails is an error the dispatcher would not cut; the agent tool
-// cuts it through the same truncator, keeping its class and the child's
-// usage, with the whole text — redacted — in a spill file.
+// and then fails is an error the dispatcher would not cut; the runner cuts it
+// through the same truncator as a success, once (review r6), keeping its
+// class and the child's usage, with the whole text — redacted — in a spill
+// file named for the call.
 func TestAgentErrorResultTruncated(t *testing.T) {
 	f := newRouted(t)
 	s := f.open(f.options())
@@ -1382,16 +1479,101 @@ func TestAgentErrorResultTruncated(t *testing.T) {
 	}
 	res := callResult(t, ev.list(), "t1.1.1")
 	if !res.IsError || res.Class != tool.ClassToolError || res.Trunc.Spill == "" || len(res.Text) > tool.MaxBytes+1024 ||
-		!strings.HasPrefix(res.Text, "The sub-agent failed: ") || !strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) {
-		t.Fatalf("the call: error %v, class %q, %d bytes, spill %q; want a truncated tool_error naming its spill file",
+		!strings.HasPrefix(res.Text, "The sub-agent failed: ") || !strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) ||
+		strings.Count(res.Text, "Full output saved to: ") != 1 {
+		t.Fatalf("the call: error %v, class %q, %d bytes, spill %q; want a tool_error truncated once, naming its spill file",
 			res.IsError, res.Class, len(res.Text), res.Trunc.Spill)
 	}
 	if res.Child == nil || res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
 		t.Fatalf("the call's usage = %+v; want the one finished step's", res.Child)
 	}
 	b, err := os.ReadFile(res.Trunc.Spill)
-	if err != nil || !strings.HasPrefix(string(b), "The sub-agent failed: ") || !strings.HasSuffix(string(b), "Its last output was:\n"+long) {
-		t.Fatalf("the spill file holds %d bytes (%v); want the whole error text", len(b), err)
+	if err != nil || !strings.HasPrefix(string(b), "The sub-agent failed: ") || !strings.HasSuffix(string(b), "Its last output was:\n"+long) ||
+		filepath.Base(res.Trunc.Spill) != "tool_t1.1.1" {
+		t.Fatalf("the spill file %s holds %d bytes (%v); want the whole error text", res.Trunc.Spill, len(b), err)
+	}
+}
+
+// TestSubagentTruncationRedactsWithBothSessionsKeys (review r6): after the
+// parent opened — so the parent never learns it — and before its children
+// open, which do, the environment gains a key that is a fragment of every
+// spill path's fixed part, /tool-output/tool_. It is in neither the home nor
+// the spill directory as joined, so the children open (errChildHomeKey's
+// check passes), and each answers 60 KiB: one a success, one a failure after
+// streaming it. Each answer is cut, and the spill path the cut adds holds the
+// key; the runner cuts both itself and redacts what the cut adds with both
+// sessions' keys, so the key is in neither call's Result.Text, nor its
+// Trunc.Spill, nor the parent's tool entry, nor the parent's next request. The
+// dispatcher's cut of the success, and the agent tool's of the failure, added
+// the path after the runner's last redaction, with the parent's keys alone or
+// none. The spill files themselves are written, whole, at the real path.
+func TestSubagentTruncationRedactsWithBothSessionsKeys(t *testing.T) {
+	const spillKey = "/" + tool.SpillDir + "/tool_"
+	f := newRouted(t)
+	if strings.Contains(f.home, spillKey) || strings.Contains(filepath.Join(f.home, tool.SpillDir), spillKey) {
+		t.Fatalf("control: the home %q already holds %q", f.home, spillKey)
+	}
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	envMu.Lock()
+	env["NOKEY_API_KEY"] = spillKey
+	envMu.Unlock()
+	if s.Redact(spillKey) == redact.Marker {
+		t.Fatal("control: the parent learned the key")
+	}
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	answer := strings.Repeat(strings.Repeat("x", 59)+"\n", 1024) // 60 KiB
+	partial := strings.Repeat(strings.Repeat("y", 59)+"\n", 1024)
+	a.route("go", callStep(
+		agentPart(t, "a1", task("answer", "answer a lot")),
+		agentPart(t, "a2", task("fail", "fail after a lot"))),
+		answerWith("ok"))
+	a.route("answer a lot", answerWith(answer))
+	a.route("fail after a lot", reply(openText(partial), errorPart(errors.New("gone"))))
+	var ev events
+	if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+	}
+	if kids := k.all(); len(kids) != 2 || kids[0].Redact(spillKey) != redact.Marker || kids[1].Redact(spillKey) != redact.Marker {
+		t.Fatal("control: a child did not learn the key")
+	}
+	evs := ev.list()
+	for id, want := range map[string]struct {
+		isErr bool
+		body  string
+	}{"t1.1.1": {false, answer}, "t1.1.2": {true, partial}} {
+		res := callResult(t, evs, id)
+		if res.IsError != want.isErr || res.Trunc.Spill == "" || !strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) ||
+			strings.Count(res.Text, "Full output saved to: ") != 1 {
+			t.Fatalf("call %s: error %v, %d bytes, spill %q; want error %v, truncated once, naming its spill path",
+				id, res.IsError, len(res.Text), res.Trunc.Spill, want.isErr)
+		}
+		if strings.Contains(res.Text, spillKey) || strings.Contains(res.Trunc.Spill, spillKey) || !strings.Contains(res.Trunc.Spill, redact.Marker) {
+			t.Fatalf("call %s: the spill path reads %q; want the key in neither it nor the text, redacted", id, res.Trunc.Spill)
+		}
+		if found := leaks(res, spillKey); len(found) != 0 {
+			t.Fatalf("call %s leaks the key at %v", id, found)
+		}
+		b, err := os.ReadFile(filepath.Join(f.home, tool.SpillDir, "tool_"+id))
+		if err != nil || !strings.HasSuffix(string(b), want.body) {
+			t.Fatalf("the spill file of %s holds %d bytes (%v); want the whole of its text", id, len(b), err)
+		}
+	}
+	toolEntry := transcript(t, s).Entries[2]
+	if text := messageText(toolEntry.Message); toolEntry.Message.Role != fantasy.MessageRoleTool ||
+		strings.Contains(text, spillKey) || !strings.Contains(text, redact.Marker) {
+		t.Fatalf("the parent's tool entry (%s) holds the key, or not its marker: %.300s", toolEntry.Message.Role, text)
+	}
+	if next := a.requests("go"); len(next) != 2 || strings.Contains(requestText(next[1], false), spillKey) {
+		t.Fatalf("the parent's %d requests; want two, the second without the key", len(next))
 	}
 }
 
@@ -1887,7 +2069,7 @@ func TestSubagentCanaryRedaction(t *testing.T) {
 // transcript's prompt, SubagentFinished, the call's result or the parent's
 // next request. Redacting with the parent's keys and then the child's leaves
 // the suffix behind the first marker; and a result redacted by the parent's
-// keys alone — the agent tool's and the dispatcher's — leaves it too.
+// keys alone — the dispatcher's — leaves it too.
 func TestSubagentRedactsWithBothSessionsKeys(t *testing.T) {
 	const (
 		oldKey = "sk-abcdefgh"
@@ -2082,12 +2264,12 @@ func TestSubagentRedactsAKeyLearnedWhileTheChildRuns(t *testing.T) {
 // TestSubagentRefusesAKeyInItsHome (review r4): after the parent opened — so
 // the parent never learns it — and before its child opens, which would, the
 // environment gains a key that is part of the harness home's path. Every
-// spill path the child's calls write, and the one its parent's truncation of
-// its answer writes, begins with that home, and that path joins the answer
-// after the runner's last redaction, where the parent's keys alone redact it.
-// So the child's Open refuses, as the parent's does through its plan path:
-// the call fails with the refusal, and nothing of the child is written or
-// sent — no transcript, no spill file, no request.
+// spill path the child's calls write, and the one the runner's cut of its
+// answer writes, begins with that home, and each is redacted where it is
+// added (review r6) — a path that then opens nothing. So the child's Open
+// refuses, as the parent's does through its plan path: the call fails with
+// the refusal, and nothing of the child is written or sent — no transcript,
+// no spill file, no request.
 func TestSubagentRefusesAKeyInItsHome(t *testing.T) {
 	f := newRouted(t)
 	homeKey := filepath.Join(filepath.Base(filepath.Dir(f.home)), filepath.Base(f.home))

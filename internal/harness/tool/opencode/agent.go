@@ -69,8 +69,14 @@ func newAgent() (tool.Tool, error) {
 		// A child may edit, so the call is not ReadOnly; ask mode still lets it
 		// through, by name (tool.ModeGate), and binds the child instead.
 		ReadOnly: false,
-		// The result is the child's final message: its start is its answer.
-		Truncate: tool.Head,
+		// The runner cuts the child's answer itself, a success and an error
+		// alike, keeping its start, at the shared truncator's limits, and
+		// redacts what that adds with the parent's keys and the child's
+		// together (review r6): the dispatcher's cut would add the spill path
+		// after the runner's last redaction, with the parent's installed keys
+		// alone to redact it. None, so the dispatcher never cuts the answer a
+		// second time.
+		Truncate: tool.None,
 	}}, nil
 }
 
@@ -138,13 +144,13 @@ func (c *agentCall) Request() tool.Request {
 // the call blocks until the child has ended (owner decision 7), and a cancel
 // reaches the child through ctx.
 //
-// An error result is capped here, through the dispatcher's own truncator and
-// at its limits (plan 026 §3.7, panel P8): the dispatcher truncates only a
-// result that is not an error, and a failed child's answer carries its last
-// output, which can be as long as any answer. The text is redacted first, so
-// the spill file holds the redacted form, as the dispatcher's does; the
-// dispatcher then redacts the whole result, the notice and the spill path
-// included. The class and the child's usage are kept.
+// The answer comes back as the runner cut it (plan 026 §3.7's one cap, on
+// both paths): a success and a failed child's error alike, which carries its
+// last output and can be as long as any answer, are truncated there, with the
+// spill path and the notice redacted by the keys of both sessions (review
+// r6). The spec's Truncate is None, so the dispatcher only redacts it, the
+// spill path included, as it redacts every tool's result; the class and the
+// child's usage are the runner's.
 func (c *agentCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil {
 		return aborted()
@@ -152,13 +158,5 @@ func (c *agentCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Subagents == nil {
 		return tool.Result{Text: noSubagentsText, IsError: true, Class: tool.ClassToolError}
 	}
-	res := env.Subagents.Run(ctx, c.call)
-	if res.IsError {
-		text := res.Text
-		if env.Redactor != nil {
-			text = env.Redactor.String(text)
-		}
-		res.Text, res.Trunc = tool.Truncate(env.Home, c.call.ID, text, tool.Head)
-	}
-	return res
+	return env.Subagents.Run(ctx, c.call)
 }

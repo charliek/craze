@@ -59,9 +59,20 @@ const truncatedHint = "The tool call succeeded but the output was truncated. "
 //
 // Truncate redacts nothing: text should be redacted already, and the spill
 // path it adds is not. The Dispatcher, which calls the same code, redacts
-// that path where it is added.
+// that path where it is added; TruncateRedacted is the same for a caller.
 func Truncate(home, id, text string, dir Direction) (string, Truncation) {
 	return truncate(home, id, text, dir, limits{MaxLines, MaxBytes}, nil)
+}
+
+// TruncateRedacted is Truncate with what it adds — the spill path, in the
+// notice and in Truncation.Spill, and the notice's own words — passed through
+// red, as the Dispatcher's truncation passes them through its redactor. text
+// should be redacted already, by red or a wider replacer: the spill file
+// holds it as it is. The sub-agent runner cuts a child's answer with it,
+// whose keys are the parent's and the child's together (plan 026 §3.7,
+// review r6).
+func TruncateRedacted(home, id, text string, dir Direction, red *redact.Replacer) (string, Truncation) {
+	return truncate(home, id, text, dir, limits{MaxLines, MaxBytes}, red)
 }
 
 // truncate is Truncate, with the path it shows — in the notice and in

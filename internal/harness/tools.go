@@ -171,11 +171,13 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if holdsAKey(workspace, ts.keys) {
 		return nil, errWorkspaceKey
 	}
-	// A sub-agent's home begins every spill path of its calls and of its
-	// parent's truncation of its answer, and the parent redacts that path with
-	// its own keys alone (review r4). The raw home and the spill directory as
-	// joined, so a key spanning the join is refused too. The parent refuses its
-	// own through its plan path, the same home's (adoptPlanPath, resolve).
+	// A sub-agent's home begins every spill path of its calls and of the
+	// runner's cut of its answer (review r4). Each is redacted where it is
+	// added — the child's by its own keys, the runner's by both sessions'
+	// (review r6) — and a redacted path opens nothing, so a key in it refuses
+	// the child, as the parent refuses its own through its plan path, the same
+	// home's (adoptPlanPath, resolve). The raw home and the spill directory as
+	// joined, so a key spanning the join is refused too.
 	if child != nil && (holdsAKey(home, ts.keys) || holdsAKey(filepath.Join(home, tool.SpillDir), ts.keys)) {
 		return nil, errChildHomeKey
 	}
@@ -371,11 +373,11 @@ var (
 	// errChildHomeKey is errPlanPathKey's twin for a sub-agent: its Open's
 	// refusal of a harness home whose path holds a key the child knows (review
 	// r4). The home begins the path of every spill file the child's calls
-	// write and of the one its parent's truncation of its answer writes, and
-	// that path joins the answer after the runner's last redaction, where the
-	// parent redacts it with the parent's keys alone; the parent refuses a key
-	// in the same home through its plan path. The runner reports it to the
-	// parent's model as a failed sub-agent.
+	// write and of the one the runner's cut of its answer writes; each path is
+	// redacted where it is added (review r6), and a redacted path is one the
+	// model cannot open, so the answer is the plan path's — refuse, and say
+	// what to do; the parent refuses a key in the same home through its plan
+	// path. The runner reports it to the parent's model as a failed sub-agent.
 	errChildHomeKey = errors.New("harness: the path of the directory sub-agents save full tool output in contains " +
 		"a configured provider key; move the craze directory, or change the key")
 
