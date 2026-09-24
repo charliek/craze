@@ -25,9 +25,8 @@ const noSubagentsText = "Sub-agents are not available in this session."
 // adds the agent types and models it offers after it (the harness's
 // decorator); the static text is what this profile's specs pin.
 //
-// The profile does not register it yet (plan 026 §5, C3a): it is built and
-// tested here, and no session offers it until the runner that answers it
-// exists.
+// The profile offers it after write (Profile), opencode's own place for its
+// task tool; the harness's runner answers it (plan 026 §3.8).
 func newAgent() (tool.Tool, error) {
 	desc, err := description("agent", nil)
 	if err != nil {
@@ -138,6 +137,14 @@ func (c *agentCall) Request() tool.Request {
 // Run hands the call to the session's runner and returns what it answers:
 // the call blocks until the child has ended (owner decision 7), and a cancel
 // reaches the child through ctx.
+//
+// An error result is capped here, through the dispatcher's own truncator and
+// at its limits (plan 026 §3.7, panel P8): the dispatcher truncates only a
+// result that is not an error, and a failed child's answer carries its last
+// output, which can be as long as any answer. The text is redacted first, so
+// the spill file holds the redacted form, as the dispatcher's does; the
+// dispatcher then redacts the whole result, the notice and the spill path
+// included. The class and the child's usage are kept.
 func (c *agentCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil {
 		return aborted()
@@ -145,5 +152,13 @@ func (c *agentCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Subagents == nil {
 		return tool.Result{Text: noSubagentsText, IsError: true, Class: tool.ClassToolError}
 	}
-	return env.Subagents.Run(ctx, c.call)
+	res := env.Subagents.Run(ctx, c.call)
+	if res.IsError {
+		text := res.Text
+		if env.Redactor != nil {
+			text = env.Redactor.String(text)
+		}
+		res.Text, res.Trunc = tool.Truncate(env.Home, c.call.ID, text, tool.Head)
+	}
+	return res
 }

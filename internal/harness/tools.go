@@ -148,8 +148,10 @@ type toolset struct {
 // A session that is not a child merges personas with the built-in agent types
 // (agentTypes), and, when its profile has the agent tool, offers it with this
 // session's types and models after its description (describedTool, plan 026
-// §3.3); a child has no agent tool, and personas are not read for it.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, personas []tool.Persona, child *ChildOptions, seams toolSeams) (*toolset, error) {
+// §3.3); a child has no agent tool, and personas are not read for it. subs is
+// the session's sub-agent runner, which the agent tool hands its calls to
+// (Env.Subagents); nil for a child, whose Env.Subagents stays a nil interface.
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -313,6 +315,12 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if asker != nil {
 		ts.asker = &watchedAsker{inner: asker}
 		env.Asker = ts.asker
+	}
+	// The same rule for the runner: a child has none, and its agent tool —
+	// which it is never offered anyway — would read a nil interface and say
+	// sub-agents are not available (plan 026 §3.2).
+	if subs != nil {
+		env.Subagents = subs
 	}
 	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})
 	if err != nil {

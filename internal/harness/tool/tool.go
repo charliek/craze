@@ -200,8 +200,9 @@ type Result struct {
 	// path it ended by — a failure and a cancel included, since a billed step
 	// is billed however the child ended. The harness records it on the step's
 	// tool entry as subagent_usage, priced by its own model rather than the
-	// parent's, which stamps that entry. nil for every other tool, and for an
-	// agent call that never opened a child.
+	// parent's, which stamps that entry; the dispatcher redacts its three
+	// names, in a copy, as it does every outward string. nil for every other
+	// tool, and for an agent call that never opened a child.
 	Child *ChildUsage
 }
 

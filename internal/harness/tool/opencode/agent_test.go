@@ -13,10 +13,9 @@ import (
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
-// The agent tool (plan 026 §3.3, §7 A5). It is built and tested here but the
-// profile does not register it until the runner that answers it exists
-// (C3b), so these tests build a dispatcher over it alone, with a fake runner
-// behind Env.Subagents.
+// The agent tool (plan 026 §3.3, §7 A5). The runner that answers it is the
+// harness's, which this package cannot import, so these tests build a
+// dispatcher over the tool alone, with a fake runner behind Env.Subagents.
 
 // fakeSubagents is a runner that records every call it is handed and answers
 // each with res.
@@ -73,8 +72,8 @@ func newAgentFixture(t *testing.T, sub tool.Subagents) *fixture {
 // run_in_background declared until background children exist (plan 026 PR 3).
 // Its description opens with the alias sentence, says the five things §3.3
 // lists, renders with nothing left to fill, ends in one newline like every
-// other, and names no tool the harness lacks. The profile does not offer it
-// yet (C3a), which is what keeps specs.golden where it is.
+// other, and names no tool the harness lacks. The profile offers it right
+// after write, where opencode offers its task tool (C3b, plan 026 §5).
 func TestAgentSpec(t *testing.T) {
 	a, err := newAgent()
 	if err != nil {
@@ -128,8 +127,8 @@ func TestAgentSpec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(names(p), "agent") {
-		t.Fatal("the profile offers the agent tool before a runner exists to answer it")
+	if got := names(p); slices.Index(got, "agent") != slices.Index(got, "write")+1 || slices.Index(got, "write") < 0 {
+		t.Fatalf("the profile offers %q; want agent right after write", got)
 	}
 }
 
@@ -210,6 +209,38 @@ func TestAgentPrepare(t *testing.T) {
 	}
 	if n := len(sub.seen()); n != 0 {
 		t.Fatalf("the runner was handed %d refused calls", n)
+	}
+}
+
+// TestAgentErrorResultIsCapped (plan 026 §3.7, panel P8): the dispatcher cuts
+// only a result that is not an error, so the agent tool cuts a failed child's
+// answer itself, through the same truncator and at the same limits: its head
+// kept, the whole text — redacted before it is written, as the dispatcher's
+// spill files are — in a spill file named for the call, and the class and the
+// child's usage kept. The control is a short error, which comes back whole.
+func TestAgentErrorResultIsCapped(t *testing.T) {
+	child := &tool.ChildUsage{Provider: "test", Model: "test/a", WireModel: "wire-a", Usage: tool.Usage{Input: 10, Output: 5}}
+	long := "The sub-agent failed: gone.\n\nIts last output was:\n" + keyA + "\n" + strings.Repeat(strings.Repeat("z", 59)+"\n", 1024)
+	sub := &fakeSubagents{res: tool.Result{Text: long, IsError: true, Class: tool.ClassToolError, Child: child}}
+	f := newAgentFixture(t, sub)
+	_, res := f.call(t, "agent", `{"description":"d","prompt":"p"}`)
+	if !res.IsError || res.Class != tool.ClassToolError || res.Child == nil || *res.Child != *child {
+		t.Fatalf("result: error %v, class %q, usage %+v; want tool_error with the child's usage", res.IsError, res.Class, res.Child)
+	}
+	if len(res.Text) > tool.MaxBytes+1024 || res.Trunc.Spill == "" || !strings.HasPrefix(res.Text, "The sub-agent failed: gone.") ||
+		!strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) || strings.Contains(res.Text, keyA) {
+		t.Fatalf("result: %d bytes, spill %q; want the head of it, redacted, naming its spill file", len(res.Text), res.Trunc.Spill)
+	}
+	b, err := os.ReadFile(res.Trunc.Spill)
+	if err != nil || strings.Contains(string(b), keyA) || !strings.Contains(string(b), redact.Marker) || len(b) < len(long)-len(keyA) {
+		t.Fatalf("the spill file (%v) holds %d bytes; want the whole text, redacted", err, len(b))
+	}
+
+	sub.res.Text = "The sub-agent failed: gone."
+	_, res = f.call(t, "agent", `{"description":"d","prompt":"p"}`)
+	failed(t, res, tool.ClassToolError, "The sub-agent failed: gone.")
+	if res.Trunc.Spill != "" {
+		t.Fatalf("control: a short error was spilled to %s", res.Trunc.Spill)
 	}
 }
 

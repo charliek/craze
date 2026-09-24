@@ -377,7 +377,8 @@ func (d *Dispatcher) redactRequest(r Request) Request {
 
 // redactResult returns a copy of r with every outward text field redacted
 // (plan 019 §3.8), the spill path of a tool that truncated itself included:
-// it is built from the harness's home, which is text like any other.
+// it is built from the harness's home, which is text like any other; and the
+// model names a sub-agent's usage carries (Child).
 func (d *Dispatcher) redactResult(r Result) Result {
 	red := d.redactor()
 	r.Text = red.String(r.Text)
@@ -394,6 +395,16 @@ func (d *Dispatcher) redactResult(r Result) Result {
 			edits[i] = FileEdit{Path: red.String(ed.Path), Old: red.String(ed.Old), New: red.String(ed.New)}
 		}
 		r.Edits = edits
+	}
+	// A sub-agent's usage names the model it ran on, and the harness writes
+	// those names into the parent's transcript (subagent_usage, plan 026
+	// §3.7), where they would be durable: they are the table's values, but a
+	// model table is text like any other. A copy, so the tool's own value is
+	// never written to.
+	if r.Child != nil {
+		c := *r.Child
+		c.Provider, c.Model, c.WireModel = red.String(c.Provider), red.String(c.Model), red.String(c.WireModel)
+		r.Child = &c
 	}
 	return r
 }

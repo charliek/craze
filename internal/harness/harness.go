@@ -51,6 +51,17 @@
 // before its next step, the model reads it, and the step that saw it writes it
 // to the transcript. Whatever no step persisted comes back in
 // Result.Unanswered (steer.go, plan 019 §3.10).
+//
+// # Sub-agents
+//
+// The agent tool starts a sub-agent: a second Session, opened in-process as
+// the parent's child (child.go), which runs one turn on the call's goroutine
+// and answers the call with its final message (subagents.go, plan 026). At
+// most four run at once per session; a call blocks until its child has run
+// and closed, so the turn outlives every child it started. The child's own
+// events reach Run's sink wrapped in SubagentEvent, from the child's turn,
+// which makes the sink concurrent while children run (see Run). Close tells
+// the children it is closing before it joins its turn.
 package harness
 
 import (
@@ -191,6 +202,20 @@ type Session struct {
 	// its mode never changes (SetMode), and it starts no sub-agent of its own.
 	child bool
 
+	// subs is the sub-agent runner (subagents.go, plan 026 §3.8): the
+	// registry of this session's live children, the cap on them, and the
+	// running turn they report to. The agent tool reaches it through the
+	// dispatcher's Env.Subagents. nil for a sub-agent, which starts none.
+	// Fixed at Open.
+	subs *subagents
+	// base is what a child inherits of the Options this session was opened
+	// with and keeps nowhere else (plan 026 §3.2); zero for a sub-agent.
+	// Fixed at Open.
+	base childBase
+	// now is Options.Now, defaulted: the clock a sub-agent's lifecycle
+	// events are stamped with, as the transcript is.
+	now func() time.Time
+
 	// matchModel and warn are Options.MatchModel and Options.Warn, read only
 	// by a sub-agent's model and effort resolution (subagent_models.go, plan
 	// 026 §3.6). Neither is defaulted here: matchModel's nil behaviour (exact
@@ -279,12 +304,27 @@ func Open(opts Options) (*Session, error) {
 		child:      child != nil,
 		matchModel: opts.MatchModel,
 		warn:       opts.Warn,
+		now:        opts.Now,
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
 	}
 	if s.newModel == nil {
 		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return llm.New(r) }
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	// A session that is not a sub-agent can start them: its runner exists
+	// before its tools, which hand it to the agent tool (Env.Subagents), and
+	// reads the rest of the session only when a call arrives, by which time
+	// Open has returned it. A child gets neither: depth is 1 (plan 026 §3.2).
+	if child == nil {
+		s.subs = newSubagents(s)
+		s.base = childBase{
+			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
+			prompt: opts.Prompt.clone(), seams: opts.tools,
+		}
 	}
 
 	modeID, asker := opts.Mode, opts.Asker
@@ -316,7 +356,7 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.Personas, child, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.Personas, child, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -529,7 +569,15 @@ func (s *Session) SetEffort(level string) error {
 // A sub-agent's mode is its parent's and fixed at Open: SetMode on one is
 // ErrChildMode, whatever id it names, and changes nothing. The parent's later
 // switches reach a running child through its gate instead, and only ever
-// tighten it (tool.NewChildModeGate, plan 026 §3.5).
+// tighten it (tool.NewChildModeGate, plan 026 §3.5): the switch raises every
+// registered child's strictness in the same critical section that sets the
+// mode, under the runner's registry lock, and a child's registration reads
+// the mode under that lock too — so a child is either registered before the
+// switch and raised by it, or registered after it and opened in the new mode,
+// and a round trip such as agent → ask → agent can never slip between two of
+// a child's checks unseen (panel P50). The lock order is s.mu → regMu →
+// modes.mu, and registration's regMu → modes.mu; nothing takes them the other
+// way round.
 func (s *Session) SetMode(id string) error {
 	if s.child {
 		return ErrChildMode
@@ -555,7 +603,7 @@ func (s *Session) SetMode(id string) error {
 	if s.closed {
 		return ErrClosed
 	}
-	s.modes.set(mode)
+	s.subs.setMode(mode, s.modes.set)
 	return nil
 }
 
@@ -646,17 +694,22 @@ func (s *Session) Redact(text string) string { return s.tools.widest().String(te
 // already cancelled for another reason: either way a running command is
 // killed at once, not given its grace, so Close returns within the tools'
 // close bound — about 3 s — even after a cancel (plan 019 §3.9, §7.7).
+//
+// A session's sub-agents are told first (plan 026 §3.8, panel P3): Close
+// seals the runner's registry, so no child registers after it, and signals
+// every registered child's closing — the child's own cancel with
+// tool.ErrClosing and its own closing channel, without waiting for either —
+// before it cancels and joins its own turn. A cause is fixed by the first
+// cancel, and the adapter's Close cancels the turn ordinarily before it calls
+// this one, which reaches a child through its context first; without the
+// signal the child's closing channel would stay open until the child itself
+// closed, after its commands had had their grace. The children are joined by
+// the join of the turn: an agent call returns only once its child has run and
+// closed, and the turn only once its calls have.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		cancel, done := s.cancel, s.done
-		s.mu.Unlock()
-		if cancel != nil {
-			cancel(errClosing)
-		}
-		s.tools.close()
-		if cancel != nil {
+		s.subs.closeChildren()
+		if done := s.signalClose(); done != nil {
 			<-done
 		}
 		if err := s.store.Close(); err != nil {
@@ -664,4 +717,29 @@ func (s *Session) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+// signalClose is the first half of Close, and does not wait (plan 026 §3.8):
+// the session is marked closed, so no turn begins from here; a live turn is
+// cancelled with tool.ErrClosing; and the tools' closing channel is closed,
+// which reaches a call whose turn was already cancelled for another reason.
+// It returns the live turn's done channel, which Close waits on, or nil when
+// no turn was running — read in the same critical section that marks the
+// session closed, so a turn cannot begin between the two (begin checks closed
+// under the same lock, and registers its cancel there).
+//
+// It is idempotent and safe from any goroutine, and takes no lock but s.mu,
+// briefly: a parent's Close calls it on each of its children, through their
+// registry handles, while the children's own turns may still be running, and
+// the runner's deferred Close of each child calls it again.
+func (s *Session) signalClose() (done chan struct{}) {
+	s.mu.Lock()
+	s.closed = true
+	cancel, done := s.cancel, s.done
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel(errClosing)
+	}
+	s.tools.close()
+	return done
 }

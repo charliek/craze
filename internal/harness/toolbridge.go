@@ -457,10 +457,44 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	t.emit(Diag{Kind: DiagSynthesized, Fields: map[string]string{
 		"step": strconv.Itoa(t.step), "calls": strconv.Itoa(len(announced)), "aborted": strconv.Itoa(aborts),
 	}})
+	// A child that ran for one of these calls was billed whether or not its
+	// step finished, so its usage is written with the results as it is on a
+	// finished step's tool entry (plan 026 §3.7).
 	_, err = t.store.AppendStep(nil,
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
-		&store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true})
+		&store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true,
+			SubagentUsage: subagentUsage(announced)})
 	return true, err
+}
+
+// subagentUsage is what the sub-agents of calls spent, one row per model —
+// provider, alias and wire id together — in the order the first call that
+// ran on each was placed, each row the sum of every such child's usage (plan
+// 026 §3.7). A call's usage is its result's Child, which the runner fills from
+// the StepDones it observed, so a child that failed or was cancelled counts
+// for every step it was billed for; a child that spent nothing adds no row,
+// and calls with no child give nil. mu is held.
+func subagentUsage(calls []*toolCall) []store.ModelUsage {
+	var rows []store.ModelUsage
+	for _, c := range calls {
+		if c.res == nil || c.res.Child == nil || c.res.Child.Usage == (tool.Usage{}) {
+			continue
+		}
+		ch := c.res.Child
+		u := store.Usage{Input: ch.Usage.Input, Output: ch.Usage.Output, Reasoning: ch.Usage.Reasoning,
+			CacheRead: ch.Usage.CacheRead, CacheCreation: ch.Usage.CacheCreation}
+		i := slices.IndexFunc(rows, func(r store.ModelUsage) bool {
+			return r.Provider == ch.Provider && r.Model == ch.Model && r.WireModel == ch.WireModel
+		})
+		if i < 0 {
+			rows = append(rows, store.ModelUsage{Provider: ch.Provider, Model: ch.Model, WireModel: ch.WireModel})
+			i = len(rows) - 1
+		}
+		r := &rows[i].Usage
+		r.Input, r.Output, r.Reasoning = r.Input+u.Input, r.Output+u.Output, r.Reasoning+u.Reasoning
+		r.CacheRead, r.CacheCreation = r.CacheRead+u.CacheRead, r.CacheCreation+u.CacheCreation
+	}
+	return rows
 }
 
 // pairable reports whether calls can be answered pairably: every provider

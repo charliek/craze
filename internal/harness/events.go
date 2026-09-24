@@ -13,13 +13,17 @@ import (
 //   - the answer: TextDelta, ThoughtDelta;
 //   - tool calls: ToolStarted, ToolCalled, ToolProgress, ToolFinished;
 //   - the turn's course: StepDone, Steered, Retrying, Diag;
-//   - the harness's own state, projected: Todos.
+//   - the harness's own state, projected: Todos;
+//   - sub-agents (plan 026 §3.9): SubagentStarted, SubagentEvent — one of a
+//     child's own events, wrapped — and SubagentFinished.
 //
 // Every field is a plain value that survives a JSON round trip, so a
-// journal can record exactly what the sink was handed (plan 019 §3.5). Text
-// from a tool — a result, a request, progress — is redacted of every
-// provider key (plan 019 §3.8); text from the model is raw, and the adapter
-// sanitizes it before a terminal sees it.
+// journal can record exactly what the sink was handed (plan 019 §3.5);
+// SubagentEvent's one interface field holds another of these. Text from a
+// tool — a result, a request, progress — is redacted of every provider key
+// (plan 019 §3.8); text from the model is raw, and the adapter sanitizes it
+// before a terminal sees it. A child's events keep the contract they had in
+// the child: its text raw, its tools' text redacted by its own dispatcher.
 //
 // A tool call is identified by its ID, the harness's own "t<turn>.<step>.<n>":
 // unique in the session, and the name of the call's spill file. The
@@ -127,6 +131,13 @@ type StepDone struct {
 	Saved            bool
 	Entries          []string
 	SaveError        string
+	// SubagentUsage is what the step's sub-agents spent, a row per model
+	// (plan 026 §3.7): the rows its tool entry carries as subagent_usage when
+	// it is Saved, and reported here whether or not it was, so a consumer can
+	// keep a durable record of the ones no entry holds — an append that failed
+	// (SaveError), or a step refused for its call ids — which the transcript
+	// never will (panel P40). nil for a step with no sub-agent.
+	SubagentUsage []ModelUsage
 }
 
 // Steered reports a steer the turn accepted (Session.Steer): text the user
@@ -193,20 +204,86 @@ const (
 	DiagDoomLoop = "doom_loop"
 )
 
-func (TextDelta) isEvent()    {}
-func (ThoughtDelta) isEvent() {}
-func (ToolStarted) isEvent()  {}
-func (ToolCalled) isEvent()   {}
-func (ToolProgress) isEvent() {}
-func (ToolFinished) isEvent() {}
-func (StepDone) isEvent()     {}
-func (Steered) isEvent()      {}
-func (Retrying) isEvent()     {}
-func (Diag) isEvent()         {}
-func (Todos) isEvent()        {}
+// SubagentStarted reports that the agent call CallID (its ToolStarted.ID)
+// opened a sub-agent: a child session with the id ID, which names its
+// transcript and tags every SubagentEvent and the SubagentFinished of it
+// (plan 026 §3.9). It is emitted once the child has opened, and never for a
+// call that waited for a slot and then did not get one, or whose child failed
+// to open: that call's result says why.
+//
+// Type is the agent type the call resolved to; Description and Prompt are
+// the call's, the prompt exactly as the child was sent it. Model and Effort
+// are the alias and effort the child runs on (§3.6), and Mode the mode it
+// opened in, its parent's then (§3.5). The three texts from the call are
+// redacted of every provider key; the rest are the model table's and craze's
+// own words. At is the parent's clock (Options.Now).
+type SubagentStarted struct {
+	ID, CallID, Type, Description, Prompt, Model, Effort, Mode string
+	At                                                         time.Time
+}
+
+// SubagentEvent is one of the child ID's own events, exactly as the child's
+// turn handed it to its sink: its text and thinking raw, its tool events
+// redacted by its own dispatcher (plan 026 §3.9). Event is never another
+// SubagentEvent: a sub-agent starts none of its own.
+type SubagentEvent struct {
+	ID    string
+	Event Event
+}
+
+// SubagentFinished reports that the child ID has ended and been closed. It
+// comes after every SubagentEvent of that child and before the parent's
+// ToolFinished for the call that started it (plan 026 §3.9).
+//
+// Status is SubagentCompleted, SubagentFailed or SubagentCancelled; Error is
+// what failed, "" otherwise. Text is the child's final message — its last
+// step's text that had any — or, for one that failed or was stopped, its last
+// output; Error and Text are redacted. Usage is observed: the sum of the
+// child's StepDone usages, so every step it was billed for counts, however it
+// ended (§3.7). Provider, Model and WireModel name the model it ran on;
+// ToolCalls counts its announced tool calls and Steps its finished steps.
+// Duration runs from its SubagentStarted, and At is the parent's clock.
+type SubagentFinished struct {
+	ID, Status, Error, Text    string
+	Usage                      Usage
+	Model, Provider, WireModel string
+	ToolCalls, Steps           int
+	Duration                   time.Duration
+	At                         time.Time
+}
+
+// The statuses a SubagentFinished reports. A child that finished its turn —
+// cut off, refused and stopped by a limit included, which its result
+// explains — completed; one whose turn failed, or that could not run, failed;
+// one its parent's cancel or close, or the user, stopped cancelled.
+const (
+	SubagentCompleted = "completed"
+	SubagentFailed    = "failed"
+	SubagentCancelled = "cancelled"
+)
+
+func (TextDelta) isEvent()        {}
+func (ThoughtDelta) isEvent()     {}
+func (ToolStarted) isEvent()      {}
+func (ToolCalled) isEvent()       {}
+func (ToolProgress) isEvent()     {}
+func (ToolFinished) isEvent()     {}
+func (StepDone) isEvent()         {}
+func (Steered) isEvent()          {}
+func (Retrying) isEvent()         {}
+func (Diag) isEvent()             {}
+func (Todos) isEvent()            {}
+func (SubagentStarted) isEvent()  {}
+func (SubagentEvent) isEvent()    {}
+func (SubagentFinished) isEvent() {}
 
 // Usage is a step's or a turn's token counts: input, output, reasoning, and
 // the prompt-cache reads and writes, which show whether a provider's prefix
 // cache hit. It is the transcript's own shape (store.Usage), so what a turn
 // reports and what it records cannot drift apart.
 type Usage = store.Usage
+
+// ModelUsage is one model's row of sub-agent usage (StepDone.SubagentUsage):
+// the transcript's own shape (store.ModelUsage), as Usage is, so what a step
+// reports and what its tool entry records cannot drift apart.
+type ModelUsage = store.ModelUsage

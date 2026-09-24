@@ -102,7 +102,7 @@ func TestChildSessionToolsAndHeader(t *testing.T) {
 			Role: "You review diffs.", AllTools: true, Mode: "agent",
 		}))
 		equal(t, "the parent's tools", specIDs(parent),
-			[]string{"bash", "read", "glob", "grep", "edit", "write", "todo_write", "ask_user_question", "exit_plan_mode"})
+			[]string{"bash", "read", "glob", "grep", "edit", "write", "agent", "todo_write", "ask_user_question", "exit_plan_mode"})
 		equal(t, "the child's tools", specIDs(child), childTools)
 
 		a := f.models["test/a"]
