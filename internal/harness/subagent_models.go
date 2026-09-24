@@ -76,7 +76,7 @@ func (s *Session) resolveChildModel(in childModelInput, warn func(string)) (alia
 		got, recognized := s.resolveModelValue(c.raw, in.ParentAlias)
 		if !recognized {
 			if c.required {
-				return "", unknownModelError(c.raw, s.table)
+				return "", unknownModelError(s.quoteRaw(c.raw), s.table)
 			}
 			warnLine(warn, fmt.Sprintf("%s %q does not name a model, a tier, or \"inherit\"; falling through to the next default", c.label, c.raw))
 			continue
@@ -114,7 +114,7 @@ func (s *Session) resolveChildEffort(alias, callEffort, personaEffort, parentAli
 	}
 	if callEffort != "" {
 		if !slices.Contains(m.Efforts, callEffort) {
-			return "", effortNotOfferedError(callEffort, alias, m.Efforts)
+			return "", effortNotOfferedError(s.quoteRaw(callEffort), alias, m.Efforts)
 		}
 		return callEffort, nil
 	}
@@ -284,6 +284,19 @@ func capJoin(items []string, keep int) string {
 		return strings.Join(items, ", ")
 	}
 	return strings.Join(items[:keep], ", ") + fmt.Sprintf(", … and %d more", len(items)-keep)
+}
+
+// quoteRaw is a value the parent's model sent, made safe to quote back in a
+// refusal before anything shortens it: redacted, folded onto one line, and
+// redacted again. The refusals cut a long value (cutRawValue), and a cut made
+// first can leave all but the last byte of a known key, which no later pass
+// recognises (review r9); folding comes between the two passes because
+// collapsing a whitespace run can itself spell a key out. What it returns is
+// cut afterwards by the refusal's own renderer, and cutting redacted text can
+// shorten a marker but never rebuild a key.
+func (s *Session) quoteRaw(raw string) string {
+	red := s.tools.widest()
+	return red.String(strings.Join(strings.Fields(red.String(raw)), " "))
 }
 
 // cutRawValue is raw folded to one line — its whitespace runs, newlines

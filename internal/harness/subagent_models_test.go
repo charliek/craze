@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/harness/redact"
 )
 
 // resolverSession is a *Session built only far enough for
@@ -19,7 +20,43 @@ func resolverSession(t *testing.T, tiers map[string]string, defaultModel, defaul
 	t.Helper()
 	f := newFixture(t, "http://127.0.0.1:0")
 	f.table.Subagents = modeltable.Subagents{Model: defaultModel, Effort: defaultEffort, Tiers: tiers}
-	return &Session{table: f.table, getenv: f.getenv, matchModel: matchModel}
+	// A toolset holding nothing but the redactor over the fixture's keys: the
+	// refusals quote the call's raw value back redacted (quoteRaw).
+	ts := &toolset{keys: []string{canary, canaryOther}}
+	ts.red.Store(redact.New(ts.keys...))
+	return &Session{table: f.table, getenv: f.getenv, matchModel: matchModel, tools: ts}
+}
+
+// TestRefusalQuotesNoKeyFragment (review r9): a refusal quotes the call's raw
+// model or effort back, cut to a bound, and a key straddling the cut must not
+// survive as a fragment. The value is padded so the cut falls one byte short
+// of the key's end; redacting before cutting leaves the marker, cutting first
+// would leave every byte of the key but its last. (The marker itself may be
+// cut; a shortened marker rebuilds nothing.) A key spelled across a newline
+// run, which folding collapses to one space, is caught by the second pass.
+func TestRefusalQuotesNoKeyFragment(t *testing.T) {
+	s := resolverSession(t, nil, "", "", nil)
+	raw := strings.Repeat("x", unknownModelRawCap-len(canary)+1) + canary
+	fragment := canary[:len(canary)-1]
+	for name, err := range map[string]error{
+		"unknown model": func() error {
+			_, err := s.resolveChildModel(childModelInput{Call: raw, ParentAlias: "test/a"}, nil)
+			return err
+		}(),
+		"effort": func() error { _, err := s.resolveChildEffort("test/a", raw, "", "test/a", "", nil); return err }(),
+	} {
+		if err == nil || strings.Contains(err.Error(), fragment) || !strings.Contains(err.Error(), "xxxx") {
+			t.Errorf("%s refusal = %v; want the value quoted with no fragment of the key", name, err)
+		}
+	}
+
+	// canary with a newline run inside it: folding makes it the key.
+	folded := resolverSession(t, nil, "", "", nil)
+	folded.tools.red.Store(redact.New("sk-canary not-a-secret"))
+	_, err := folded.resolveChildEffort("test/a", "sk-canary\n\n  not-a-secret", "", "test/a", "", nil)
+	if err == nil || strings.Contains(err.Error(), "not-a-secret") {
+		t.Errorf("effort refusal = %v; want the key folding spelled out redacted", err)
+	}
 }
 
 // collectWarn is a warn func that records every line it is given, in order.
