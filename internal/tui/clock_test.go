@@ -401,7 +401,7 @@ func TestAChildFinishedIsStampedByItsEvent(t *testing.T) {
 		closedAt := clockBase.Add(closedAfter)
 		m = feed(t, m, thoughtAt("task-1", clockBase))
 		tr := m.ensureSub("task-1")
-		m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+		stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 		m = feed(t, m, agent.Event{
 			Type: agent.EventSubagent, Subagent: &fin, SubagentChange: agent.SubagentChangeFinished, At: closedAt,
 		})
@@ -414,7 +414,7 @@ func TestAChildFinishedIsStampedByItsEvent(t *testing.T) {
 		m := withChild(t, lateModel(t), "task-1")
 		m = feed(t, m, thoughtAt("task-1", clockBase))
 		tr := m.ensureSub("task-1")
-		m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+		stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 		m = feed(t, m, agent.Event{
 			Type: agent.EventSubagent, Subagent: &fin, SubagentChange: agent.SubagentChangeFinished,
 		})

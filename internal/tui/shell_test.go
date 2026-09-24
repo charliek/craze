@@ -127,7 +127,7 @@ func TestShellModeIsTheDraftAndTheQueueEditor(t *testing.T) {
 // the wire either.
 func TestShellLeadingSpaceGoesToTheAgent(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m = typeEnter(t, m, " !important")
 	if got := stub.Prompts(); len(got) != 1 || got[0] != "!important" {
 		t.Fatalf("prompts %q, want one \"!important\"", got)
@@ -186,7 +186,7 @@ func TestShellEnterRefusalsKeepTheDraft(t *testing.T) {
 	t.Run("a card is open", func(t *testing.T) {
 		m := sized(t)
 		m.yolo = false
-		m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
+		m = cardEvent(t, m, stubOf(t, m), agent.Event{
 			Type: agent.EventPermission,
 			Permission: &agent.PermissionEvent{
 				ID: "perm-1", Tool: "Shell",
@@ -224,7 +224,7 @@ func TestShellEnterRefusalsKeepTheDraft(t *testing.T) {
 // TestShellBareBangRunsNothing: `!` alone is the mode and not a command.
 func TestShellBareBangRunsNothing(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m.input.SetValue("!")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
@@ -321,7 +321,7 @@ func TestShellCtrlCKillsOnlyTheCommand(t *testing.T) {
 	base := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 	m := hangWorking(t)
 	m.clock = func() time.Time { return base }
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m, marker, done := runningShell(t, m)
 
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -361,7 +361,7 @@ func TestShellCtrlCKillsOnlyTheCommand(t *testing.T) {
 // queue edit, the slash menu, a pending send-now and the turn itself.
 func TestShellEscKillsFromTheFirstRung(t *testing.T) {
 	m := hangWorking(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m, marker, done := runningShell(t, m)
 
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -417,7 +417,7 @@ func TestShellEscUnderALayerKeepsItsEarlierMeaning(t *testing.T) {
 		// Ctrl+C is the way out here.
 		m, marker, done := runningShell(t, sized(t))
 		m.yolo = false
-		m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
+		m = cardEvent(t, m, stubOf(t, m), agent.Event{
 			Type: agent.EventQuestion, Question: stubQuestion(),
 		})
 		if !m.cardOpen() {
@@ -445,7 +445,7 @@ func TestShellEscUnderALayerKeepsItsEarlierMeaning(t *testing.T) {
 // there rather than falling through to the turn's cancel.
 func TestShellEscClearsTheDraftAndNeverCancelsTheTurn(t *testing.T) {
 	m := hangWorking(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m.input.SetValue("!rm -rf nothing")
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = tm.(Model)

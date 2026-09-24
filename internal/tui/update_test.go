@@ -151,7 +151,7 @@ func TestEnterEmptyDoesNotSend(t *testing.T) {
 // and it is the only claim the test makes about it.
 func TestEnterSendsAndFollowUp(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m = pumpEnter(t, m, "hello")
 	if m.status != statusWorking {
 		t.Fatalf("status %s", m.status)
@@ -294,7 +294,7 @@ func TestCtrlCStateMachine(t *testing.T) {
 	t.Run("working with a pending permission cancels once", func(t *testing.T) {
 		m := hangWorking(t)
 		m.clock = func() time.Time { return base }
-		m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
+		m = cardEvent(t, m, stubOf(t, m), agent.Event{
 			Type: agent.EventPermission,
 			Permission: &agent.PermissionEvent{
 				ID:      "perm-1",
@@ -565,7 +565,7 @@ func TestEnterDuringAForeignTurnTheModelHasNotSeenQueuesInstead(t *testing.T) {
 func TestPermissionOverlayKeys(t *testing.T) {
 	m := sized(t)
 	m.yolo = false
-	m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
+	m = cardEvent(t, m, stubOf(t, m), agent.Event{
 		Type: agent.EventPermission,
 		Permission: &agent.PermissionEvent{
 			ID:   "perm-1",
@@ -588,7 +588,7 @@ func TestPermissionOverlayKeys(t *testing.T) {
 		t.Fatal("overlay should clear")
 	}
 	// The answer goes out in this same update, not in a command that runs later.
-	calls := m.sess.(*Stub).Calls()
+	calls := stubOf(t, m).Calls()
 	if len(calls) != 1 || calls[0].Method != "permission" || calls[0].Option != "opt-once" {
 		t.Fatalf("allow once sent %+v", calls)
 	}
@@ -689,7 +689,7 @@ func withOverlay(t *testing.T) Model {
 	t.Helper()
 	m := sized(t)
 	m.yolo = false
-	m = cardEvent(t, m, m.sess.(*Stub), agent.Event{
+	m = cardEvent(t, m, stubOf(t, m), agent.Event{
 		Type: agent.EventPermission,
 		Permission: &agent.PermissionEvent{
 			ID:   "perm-1",
@@ -758,7 +758,7 @@ func TestAltEnterInsertsNewline(t *testing.T) {
 		t.Fatalf("alt+enter sent a prompt, status %s", m.status)
 	}
 	// The claim is taken inside Update, so a send would already be recorded.
-	if n := turnsStarted(m.sess.(*Stub)); n != 0 {
+	if n := turnsStarted(stubOf(t, m)); n != 0 {
 		t.Fatalf("alt+enter started %d turns", n)
 	}
 	_ = cmd
@@ -1142,7 +1142,7 @@ func TestModelDialogAppliesModelEffortAndFast(t *testing.T) {
 		got[0] != "model → fast" || got[1] != "effort → high" || got[2] != "fast → on" {
 		t.Fatalf("notes %v", got)
 	}
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	snap := stub.Snapshot()
 	if snap.CurrentModel != "fast" {
 		t.Fatalf("model %q", snap.CurrentModel)
@@ -1196,7 +1196,7 @@ func TestModelDialogStepFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := sized(t)
-			stub := m.sess.(*Stub)
+			stub := stubOf(t, m)
 			m.input.SetValue("/model")
 			tm, _ := m.Update(enter())
 			m = tm.(Model)
@@ -1238,7 +1238,7 @@ func TestModelDialogStepFailures(t *testing.T) {
 // have.
 func TestModelDialogStaleFailureKeepsTheNewerChoice(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	if got := agent.EffortOption(m.snap); got == nil || got.Current != "medium" {
 		t.Fatalf("effort starts at %+v", got)
 	}
@@ -1512,7 +1512,7 @@ func TestModeAnswersSettleInAnyOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := sized(t)
-			stub := m.sess.(*Stub)
+			stub := stubOf(t, m)
 			var cmds [2]tea.Cmd
 			var answers [2]tea.Msg
 			m, cmds[0] = askMode(t, m, "plan")
@@ -1556,7 +1556,7 @@ func TestModeAnswersSettleInAnyOrder(t *testing.T) {
 // the agent refused something the user asked for.
 func TestStaleModeRefusalLeavesTheNewerRequestAlone(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m, planCmd := askMode(t, m, "plan")
 	m, askCmd := askMode(t, m, "ask")
 
@@ -1595,7 +1595,7 @@ func TestStaleModeRefusalLeavesTheNewerRequestAlone(t *testing.T) {
 // unrelated update then flicks the chip to a mode the user has already left.
 func TestModeAnswerForARepeatedModeIsNotTheNewerRequests(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m, first := askMode(t, m, "plan")
 	m, second := askMode(t, m, "ask")
 	m, third := askMode(t, m, "plan")
@@ -1633,7 +1633,7 @@ func TestModeAnswerForARepeatedModeIsNotTheNewerRequests(t *testing.T) {
 // and no later event is owed to correct it.
 func TestAgentModeArrivingBeforeTheAnswerIsNotMasked(t *testing.T) {
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	m, cmd := askMode(t, m, "plan")
 	applied := runCmd(cmd)
 	if got := sessionMode(stub); got != "plan" {
@@ -1808,10 +1808,7 @@ func inFlightTools() []agent.ToolEvent {
 
 func applyInFlight(t *testing.T, m Model, tools []agent.ToolEvent) Model {
 	t.Helper()
-	stub, ok := m.sess.(*Stub)
-	if !ok {
-		t.Fatalf("sess is %T, want *Stub", m.sess)
-	}
+	stub := stubOf(t, m)
 	stub.SetTools(tools)
 	subs := subagentsFromTools(tools)
 	if len(subs) > 0 {
@@ -2245,7 +2242,7 @@ func TestPlanOfferCleared(t *testing.T) {
 			return tm.(Model)
 		}},
 		{"the agent changes the mode", func(t *testing.T, m Model) Model {
-			if _, err := m.sess.SetMode(context.Background(), "", "agent"); err != nil {
+			if _, err := stubOf(t, m).SetMode(context.Background(), "", "agent"); err != nil {
 				t.Fatal(err)
 			}
 			return feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "agent"})
@@ -2388,7 +2385,7 @@ func TestPlanImplementChainsSetModeThenPrompt(t *testing.T) {
 
 func TestPlanImplementSetModeFailureSendsNoPrompt(t *testing.T) {
 	m := planOfferModel(t)
-	m.sess.(*Stub).FailNextSetMode()
+	stubOf(t, m).FailNextSetMode()
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	msg := runCmd(cmd)
@@ -2488,7 +2485,7 @@ func TestPlanImplementDropsAnAnswerForAFinishedTurn(t *testing.T) {
 // nothing to put back — the plan it described is no longer on screen.
 func TestPlanImplementFailureDoesNotReviveAClearedPlan(t *testing.T) {
 	m := planOfferModel(t)
-	m.sess.(*Stub).FailNextSetMode()
+	stubOf(t, m).FailNextSetMode()
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
 	m.input.SetValue("/clear")

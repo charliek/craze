@@ -190,10 +190,7 @@ func TestShellContextLeadsAnInterjection(t *testing.T) {
 // user writes next.
 func TestShellContextIsNotThePlanOffersSend(t *testing.T) {
 	m := planOfferModel(t)
-	stub, ok := m.sess.(*Stub)
-	if !ok {
-		t.Fatalf("the plan-offer fixture session is %T", m.sess)
-	}
+	stub := stubOf(t, m)
 	before := len(stub.Prompts())
 	m = plantShellResult(m, "git status --short", " M a.go\n")
 

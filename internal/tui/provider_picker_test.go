@@ -25,8 +25,15 @@ func pickerFactory(t *testing.T) func(agent.Provider) agent.Session {
 }
 
 // assertOwned fails unless m.eng and the owner every copy of m shares hold the
-// same engine, and that engine wraps m.sess. The exit tails close the owner's,
-// so a session assigned around setSession is one that no exit path would close.
+// same engine, and — when there is one — that engine actually wraps a session
+// rather than an empty seam. The exit tails close the owner's, so a session
+// assigned around setSession is one that no exit path would close.
+//
+// The second check used to compare m.eng.Session() against the model's own
+// m.sess mirror (SF-03): every setSession assignment wrote the two together,
+// so the only way they could differ was an engine built around no session at
+// all. m.sess is gone, so the same claim — the engine is not wrapping a nil —
+// is now checked against the one place a session can still be read from.
 func assertOwned(t *testing.T, m Model) {
 	t.Helper()
 	if m.owner == nil {
@@ -35,8 +42,8 @@ func assertOwned(t *testing.T, m Model) {
 	if got := m.owner.current(); got != m.eng {
 		t.Fatalf("the owner holds %T %p, m.eng is %T %p", got, got, m.eng, m.eng)
 	}
-	if m.eng != nil && m.eng.Session() != m.sess {
-		t.Fatalf("the engine wraps %T %p, m.sess is %T %p", m.eng.Session(), m.eng.Session(), m.sess, m.sess)
+	if m.eng != nil && m.eng.Session() == nil {
+		t.Fatal("the engine wraps no session")
 	}
 }
 
@@ -103,7 +110,7 @@ func TestProviderPickerShowsBeforeStart(t *testing.T) {
 	if !m.pickingProvider || m.dialog != dialogProvider {
 		t.Fatalf("picker dialog=%v picking=%v", m.dialog, m.pickingProvider)
 	}
-	if m.started || m.sess != nil {
+	if m.started || m.eng != nil {
 		t.Fatal("session must not exist until a row is chosen")
 	}
 	assertOwned(t, m)
@@ -141,7 +148,7 @@ func TestProviderLockedSkipsPicker(t *testing.T) {
 	if called != 1 {
 		t.Fatalf("factory called %d times", called)
 	}
-	if m.sess == nil {
+	if m.eng == nil {
 		t.Fatal("locked path must construct immediately")
 	}
 	assertOwned(t, m)
@@ -164,10 +171,12 @@ func TestProviderPickerEnterStartsSelected(t *testing.T) {
 		t.Fatal("picker still open after enter")
 	}
 	assertOwned(t, m)
-	// The copy from before the swap still has no session of its own, and
-	// reaches the new one through the owner it shares: that copy is the one
-	// Run holds, and all it has after a recovered panic.
-	if before.sess != nil || before.owner.current() != m.eng {
+	// The copy from before the swap still has no engine of its own — before.eng
+	// was nil together with the now-deleted before.sess, both zeroed by the same
+	// setSession call, so asking for one is asking for the other — and reaches
+	// the new one through the owner it shares: that copy is the one Run holds,
+	// and all it has after a recovered panic.
+	if before.eng != nil || before.owner.current() != m.eng {
 		t.Fatal("the pre-swap copy does not see the picked session through its owner")
 	}
 	msg := runCmd(cmd)
@@ -217,7 +226,7 @@ func TestProviderPickerNilFactoryFallsBackToAStub(t *testing.T) {
 		Provider:   agent.CursorProvider(),
 		NewSession: func(agent.Provider) agent.Session { return nil },
 	})
-	if !m.pickingProvider || m.sess != nil {
+	if !m.pickingProvider || m.eng != nil {
 		t.Fatal("setup: no picker, or a session before a row was chosen")
 	}
 	tm, _ := m.Update(enter())
@@ -225,9 +234,7 @@ func TestProviderPickerNilFactoryFallsBackToAStub(t *testing.T) {
 	if m.pickingProvider {
 		t.Fatal("setup: Enter did not confirm the row")
 	}
-	if _, ok := m.sess.(*Stub); !ok {
-		t.Fatalf("a nil factory left %T, want the *Stub fallback", m.sess)
-	}
+	stubOf(t, m) // a nil factory left the *Stub fallback
 	assertOwned(t, m)
 }
 
@@ -707,7 +714,7 @@ func TestProviderPickerClickMovesHighlight(t *testing.T) {
 		if !out.pickingProvider || out.dialog != dialogProvider {
 			t.Fatalf("click on %q closed the picker", name)
 		}
-		if out.sess != nil {
+		if out.eng != nil {
 			t.Fatalf("click on %q started a session", name)
 		}
 	}
@@ -824,7 +831,7 @@ func TestProviderPickerShortBoxClickSelectsTheVisibleRow(t *testing.T) {
 		if !out.pickingProvider || out.dialog != dialogProvider {
 			t.Fatalf("click on %q closed the picker", want.name)
 		}
-		if out.sess != nil {
+		if out.eng != nil {
 			t.Fatalf("click on %q started a session", want.name)
 		}
 	}

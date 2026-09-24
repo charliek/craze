@@ -799,7 +799,7 @@ func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 func TestADelayedTodoListIsNotedOnce(t *testing.T) {
 	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
 	m := sized(t)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	one := []agent.Todo{{ID: "1", Content: "Read", Status: "pending"}}
 	// The session's state has moved on to the list the second event carries.
 	stub.SetTodos(one)
@@ -908,7 +908,7 @@ func TestAnErrorsTextIsReadOnce(t *testing.T) {
 func TestAViewedChildTheModelEvictedKeepsItsRows(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
-	stub := m.sess.(*Stub)
+	stub := stubOf(t, m)
 	// A provider whose children stream their own transcript.
 	stub.SetProvider(agent.GrokProvider())
 	var roster []agent.SubagentInfo

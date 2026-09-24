@@ -886,7 +886,7 @@ func parityEveryKind(t *testing.T) {
 		agent.Event{Type: "no-such-kind"},
 	)
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 	feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &fin, SubagentChange: agent.SubagentChangeFinished, At: foldAt(10)})
 }
 
@@ -985,7 +985,7 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 
 	t.Run("a stub session, publishing as a live session does", func(t *testing.T) {
 		m := sized(t)
-		stub := m.sess.(*Stub)
+		stub := stubOf(t, m)
 		stub.Emit(agent.Event{Type: agent.EventMeta, State: installDelta(stub.Snapshot())})
 		m = pumpSettled(t, m)
 		check(t, m, "started")

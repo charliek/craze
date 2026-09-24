@@ -52,7 +52,7 @@ func TestEnterOpensSubagentView(t *testing.T) {
 func tallChild(t *testing.T, m Model, n int) Model {
 	t.Helper()
 	// Grok: a receipt-only provider would rebuild the view from the receipt.
-	m.sess.(*Stub).SetProvider(agent.GrokProvider())
+	stubOf(t, m).SetProvider(agent.GrokProvider())
 	m.refreshSnap()
 	tr := m.ensureSub("task-1")
 	for i := 0; i < n; i++ {
@@ -434,7 +434,7 @@ func TestEvictionWhileViewedKeepsTombstoneUntilEsc(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m = openView(t, m)
-	m.sess.(*Stub).SetSubagents(nil)
+	stubOf(t, m).SetSubagents(nil)
 	m = poke(t, m)
 	if m.viewing != "task-1" {
 		t.Fatal("eviction while viewed must keep the tombstone")
@@ -706,7 +706,7 @@ func TestChildFinishedClosesChildStream(t *testing.T) {
 		t.Fatal("expected an open child stream")
 	}
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 	tm, _ = m.Update(eventMsg{agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &fin,
@@ -726,7 +726,7 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{fin})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
 	tm, _ := m.Update(eventMsg{agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &fin,
@@ -740,7 +740,7 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	retry := fin
 	retry.Status = agent.SubagentRunning
 	retry.AttemptID = "at2"
-	m.sess.(*Stub).SetSubagents([]agent.SubagentInfo{retry})
+	stubOf(t, m).SetSubagents([]agent.SubagentInfo{retry})
 	tm, _ = m.Update(eventMsg{agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &retry,
@@ -770,7 +770,7 @@ func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
-	m.sess.(*Stub).SetProvider(agent.CursorProvider())
+	stubOf(t, m).SetProvider(agent.CursorProvider())
 	m.refreshSnap()
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
@@ -780,7 +780,7 @@ func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	}
 	subs := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})
 	subs[0].Status = agent.SubagentCompleted
-	m.sess.(*Stub).SetSubagents(subs)
+	stubOf(t, m).SetSubagents(subs)
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
 	if m.viewing != "task-1" {

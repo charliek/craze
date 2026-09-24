@@ -148,7 +148,7 @@ func TestSpinnerVisibilityAndText(t *testing.T) {
 		t.Fatalf("a sub-agent wins: %q", got)
 	}
 
-	m.sess.(*Stub).SetTools(nil)
+	stubOf(t, m).SetTools(nil)
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)
 	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "hm"}})

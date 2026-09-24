@@ -163,15 +163,10 @@ type Model struct {
 	// eng is the engine the model drives its session through: admission, the
 	// message queue and its verbs, send-now, cancel, the asks, the settings,
 	// and — since C12 — the session index and the durable session id (plan 021
-	// §3.4, §3.6, §3.8). sess is the engine's own session, the raw provider
-	// seam, and **no production path calls anything on it at all**: the index
-	// was the last thing the model did for itself, and the engine does it now.
-	// It is kept because an engine the model could not build leaves the session
-	// to be closed all the same (engErr), and because the tests reach for the
-	// session they handed in. Both are assigned only in setSession, which
-	// records the engine in owner too.
-	eng  *engine.Engine
-	sess agent.Session
+	// §3.4, §3.6, §3.8). No production path reaches past it for the session
+	// underneath — the engine's own methods are the only way in — and it is
+	// assigned only in setSession, which records it in owner too.
+	eng *engine.Engine
 	// client is this model's client id on eng, minted once per engine, and
 	// cmdSeq numbers its commands from 1, so every mutating command it sends
 	// names itself and the events it caused can be told from another client's
@@ -726,9 +721,9 @@ func (o *sessionOwner) current() *engine.Engine {
 }
 
 // setSession is the only way the model's session is assigned: it wraps s in the
-// engine that drives it and writes m.eng, m.sess and the owner together, so the
-// three can never name different sessions and a new assignment site cannot
-// forget either the engine or the owner.
+// engine that drives it and writes m.eng and the owner together, so the two
+// can never name different sessions and a new assignment site cannot forget
+// either one.
 //
 // The engine is built here rather than in tui.Config because Config.Session
 // stays an agent.Session: internal/cli hands the TUI a provider session, the
@@ -767,7 +762,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// after this cannot put itself back (shellController.disown).
 	m.shell.disown()
 	m.dropShellContext()
-	m.eng, m.sess, m.engErr = nil, nil, nil
+	m.eng, m.engErr = nil, nil
 	// A new session is a new transcript: the shared model is folded from its
 	// events alone.
 	m.newShared()
@@ -794,10 +789,9 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	})
 	if err != nil {
 		m.engErr = err
-		m.sess = s
 		return
 	}
-	m.eng, m.sess = eng, eng.Session()
+	m.eng = eng
 	m.client = eng.NewClientID()
 	// A new client, so a new order: a chain still running on the engine this
 	// replaced orders nothing on this one.

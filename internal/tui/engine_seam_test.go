@@ -19,6 +19,23 @@ import (
 // 021 §3.1, §3.4): who owns the engine and closes it, and the echo rule — which
 // EventTurn{started} the model skips and which it draws.
 
+// stubOf is the one way a test reaches the *Stub a model's engine wraps: the
+// model itself keeps no session of its own (plan 024 §3.9 SF-03) — m.eng.Session()
+// is the only session left to ask for, and it fails the test rather than the
+// caller's next line when there is no engine, or the engine wraps something
+// other than a Stub.
+func stubOf(t *testing.T, m Model) *Stub {
+	t.Helper()
+	if m.eng == nil {
+		t.Fatal("the model has no engine")
+	}
+	stub, ok := m.eng.Session().(*Stub)
+	if !ok {
+		t.Fatalf("the engine wraps %T, want *Stub", m.eng.Session())
+	}
+	return stub
+}
+
 // closeCounter is a session that counts the Closes it was given, so a test can say
 // that closing the engine closed the session, and exactly once from each caller.
 type closeCounter struct {
