@@ -49,6 +49,17 @@ type contentLayout struct {
 	// that knew one filename of its own would be a loader the owner could not
 	// relocate by changing this table.
 	UserInstructions []string
+	// Agents is the persona directory at a chain directory, one <name>.md per
+	// persona (plan 026 §3.4); UserAgents is the same relative to the user
+	// root, and PluginAgents relative to an installed plugin's root. They are
+	// read only when contentSources.Personas says so, and what they hold never
+	// joins the commands and skills (native_personas.go): a persona is a type
+	// the agent tool can start, not an entry of the slash menu or the prompt's
+	// catalog. A further source — .grok/agents, an imported tree — is a change
+	// to this table and to nothing downstream.
+	Agents       string
+	UserAgents   string
+	PluginAgents string
 }
 
 // claudeLayout is that convention, the whole of it, in one place.
@@ -72,6 +83,9 @@ func claudeLayout() contentLayout {
 		UserSkills:       "skills",
 		UserRules:        "rules",
 		UserInstructions: []string{"CLAUDE.md"},
+		Agents:           filepath.Join(".claude", "agents"),
+		UserAgents:       "agents",
+		PluginAgents:     "agents",
 	}
 }
 
@@ -94,6 +108,15 @@ type contentSources struct {
 	// Plugins is which plugin sources the scan runs: Claude's installed and
 	// enabled plugins today (decision 5 — no --plugin-dir for native).
 	Plugins PluginScan
+	// Personas turns on the persona pass (plan 026 §3.4): the layout's Agents
+	// at every chain directory, UserAgents under the user root, and
+	// PluginAgents in every plugin root the Plugins scan reads. It is one flag
+	// over all three because the owner's switch for personas ([compat.claude]
+	// agents) is one switch over all three, a plugin's included — where the
+	// switches for skills and commands leave a plugin's rows to the plugins
+	// switch. Where each directory is stays the layout's; whether any of them
+	// is read is this.
+	Personas bool
 	// Home is what the plugin readers resolve their caches under, and what "~/"
 	// means in a user-level instruction import. It is not where UserRoot comes
 	// from once this struct exists: a relocated UserRoot with an empty Home is
@@ -121,10 +144,11 @@ func (s contentSources) workspace() string {
 func resolveNativeSources(workspace, home string) contentSources {
 	home = strings.TrimSpace(home)
 	src := contentSources{
-		Chain:   repoChain(workspace),
-		Layout:  claudeLayout(),
-		Plugins: PluginScan{ClaudePlugins: true},
-		Home:    home,
+		Chain:    repoChain(workspace),
+		Layout:   claudeLayout(),
+		Plugins:  PluginScan{ClaudePlugins: true},
+		Personas: true,
+		Home:     home,
 	}
 	if home != "" {
 		src.UserRoot = filepath.Join(home, ".claude")

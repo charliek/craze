@@ -81,9 +81,13 @@ func TestResolveNativeSources(t *testing.T) {
 			UserSkills:       "skills",
 			UserRules:        "rules",
 			UserInstructions: []string{"CLAUDE.md"},
+			Agents:           filepath.Join(".claude", "agents"),
+			UserAgents:       "agents",
+			PluginAgents:     "agents",
 		},
-		Plugins: PluginScan{ClaudePlugins: true},
-		Home:    home,
+		Plugins:  PluginScan{ClaudePlugins: true},
+		Personas: true,
+		Home:     home,
 	}
 	if got := resolveNativeSources(repo, home); !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources %+v, want %+v", got, want)

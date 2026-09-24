@@ -27,9 +27,15 @@ const (
 // PluginKindCommand and PluginKindSkill are the two shapes a plugin ships. They
 // differ in how they are named, described and — from C2 on — expanded, so the
 // kind travels with the entry rather than being inferred from its path.
+//
+// PluginKindAgent is a third shape, a persona (plan 026 §3.4), and it is never
+// a PluginEntry: native reads it into a list of its own (agentEntry,
+// native_personas.go), because a persona is a type the agent tool can start,
+// not a row of the slash menu or of the prompt's catalog.
 const (
 	PluginKindCommand = "command"
 	PluginKindSkill   = "skill"
+	PluginKindAgent   = "agent"
 )
 
 // PluginEntry is one command or skill a plugin ships, found on disk by the
@@ -159,6 +165,21 @@ type pluginDiscovery struct {
 	seen        map[string]struct{}
 	nFiles      int
 	out         []PluginEntry
+
+	// agents is the persona list, native's alone (plan 026 §3.4, panel astra 9
+	// and CodeRabbit 2), and the four fields after it are its bookkeeping. It
+	// shares this run's reading rules — the symlink refusals, the per-file
+	// ceiling, the reserved ids, the plugin roots — and nothing else: its own
+	// name set (agentSeen, "agent:<name>"), so a command, a skill and a persona
+	// of one name all stay; its own os.SameFile list; and its own budget of
+	// maxAgentFiles files and maxAgentBytes bytes, so the persona files a
+	// machine has installed cannot eat a later plugin's skills. It is never
+	// out: nothing in it reaches the menu, the name resolver or the catalog.
+	agents      []agentEntry
+	agentSeen   map[string]struct{}
+	agentFiles  []os.FileInfo
+	nAgentFiles int
+	agentBytes  int64
 }
 
 func (d *pluginDiscovery) note(format string, args ...any) {
@@ -519,6 +540,11 @@ func absOrSelf(path string) string {
 // a command and a skill of one name the way cursor's loader does. The files are
 // read under the run's own parse option, never a fresh zero value: which
 // reading a plugin gets is the scan's decision, not this function's.
+//
+// A native scan with personas on also reads the plugin's persona directory,
+// after the commands and skills (plan 026 §3.4). Those go to the run's persona
+// list and never into what this returns, so the entries — and cursor's scan,
+// whose parse option never asks for the pass — are exactly what they were.
 func (d *pluginDiscovery) rootEntries(id, root string) []PluginEntry {
 	var out []PluginEntry
 	add := func(e PluginEntry, ok bool) {
@@ -542,6 +568,9 @@ func (d *pluginDiscovery) rootEntries(id, root string) []PluginEntry {
 			add(parsePluginSkill(path, data, d.parse))
 		}
 	}
+	if d.parse.Native && d.parse.Agents != "" {
+		d.readAgentDir(pluginSubdir(root, d.parse.Agents), id, root)
+	}
 	return out
 }
 
@@ -559,8 +588,15 @@ type pluginParseOpts struct {
 	Native bool
 	// Warn, when set, takes one line for each file refused for its name. It is
 	// native's alone: a project whose skill directory is called "my skill"
-	// would otherwise wonder why the menu is short.
+	// would otherwise wonder why the menu is short. A persona file refused for
+	// its name, or whose role was cut, is said here too.
 	Warn func(string)
+	// Agents is the plugin-relative persona directory (the layout's
+	// PluginAgents) rootEntries reads after a plugin's commands and skills,
+	// with Native, when personas are on; "" is no persona pass, which is the
+	// zero value every provider that loads its own content gets (plan 026
+	// §3.4).
+	Agents string
 }
 
 // badName is that line. Both the name and the path are quoted: the

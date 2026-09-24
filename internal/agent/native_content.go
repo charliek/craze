@@ -69,6 +69,18 @@ func discoverNative(src contentSources, warn func(string)) []PluginEntry {
 	return newNativeScan(src, warn).run()
 }
 
+// discoverNativeContent is discoverNative with the persona list the same run
+// read beside the entries (plan 026 §3.4): the workspace chain's, then the
+// user root's, then each plugin's, in the order the entries' own sources run.
+// The two lists share nothing but the reading rules: the personas are never
+// among the entries, so the menu and the catalog built from those are exactly
+// what a run without a single persona file builds.
+func discoverNativeContent(src contentSources, warn func(string)) ([]PluginEntry, []agentEntry) {
+	n := newNativeScan(src, warn)
+	entries := n.run()
+	return entries, n.d.agents
+}
+
 // redactNativeEntries runs the session's redactor over the fields of a
 // discovered entry that are carried rather than used, and returns entries. The
 // expansion path redacts the block it sends (nativeBlock), which is the body
@@ -128,6 +140,13 @@ func newNativeScan(src contentSources, warn func(string)) *nativeScan {
 	// source too: a plugin command hard-linked to a project command, or one
 	// file exposed by two plugin roots, is one entry that costs one file.
 	n.d.dedupeFiles = true
+	// The plugin persona pass, which rootEntries runs after a plugin's commands
+	// and skills only when this names a directory: personas on, and the
+	// layout's plugin-relative name (plan 026 §3.4). Off, rootEntries reads a
+	// plugin exactly as it did before personas existed.
+	if src.Personas {
+		n.d.parse.Agents = src.Layout.PluginAgents
+	}
 	return n
 }
 
@@ -183,6 +202,16 @@ func (n *nativeScan) scanChain() {
 			n.readSkillDirs(nativeSubdir(dir, rel), nativeProjectID, dir)
 		}
 	}
+	// The chain's personas, innermost first like everything else it offers, so
+	// a subdirectory's persona of a name wins over the repository root's
+	// (plan 026 §3.4). Their own list and budget: where they are read in this
+	// walk decides nothing about the commands and skills above.
+	if n.src.Personas {
+		for i := len(n.src.Chain) - 1; i >= 0; i-- {
+			dir := n.src.Chain[i]
+			n.d.readAgentDir(nativeSubdir(dir, n.src.Layout.Agents), nativeProjectID, dir)
+		}
+	}
 }
 
 // nativeSubdir is one of the layout's names under a directory, or "" when
@@ -218,6 +247,9 @@ func (n *nativeScan) scanUserRoot() {
 	}
 	n.readCommands(nativeSubdir(root, n.src.Layout.UserCommands), nativeUserID, root)
 	n.walkUserSkills(nativeSubdir(root, n.src.Layout.UserSkills), 0)
+	if n.src.Personas {
+		n.d.readAgentDir(nativeSubdir(root, n.src.Layout.UserAgents), nativeUserID, root)
+	}
 }
 
 // readCommands reads one flat command directory: commands/*.md and nothing

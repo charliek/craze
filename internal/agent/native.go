@@ -644,11 +644,12 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	// the redactor every content diagnostic goes through (contentWarn), and —
 	// through the memo above — the redactor Open builds for what it freezes.
 	keys := nativeTableKeys(table, hopts.Getenv)
+	red := redact.New(keys...)
 	content := loadNativeContent(
 		resolveNativeSources(hopts.Workspace, s.contentHome()),
 		s.opts.Compat,
 		keys,
-		s.contentWarn(redact.New(keys...)),
+		s.contentWarn(red),
 	)
 	// Only where the seam left it alone, so that tweak keeps its last word on
 	// every field of harness.Options (NewNative). The assignment cannot simply
@@ -667,6 +668,22 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	// keeps it; in every real build tweak is nil and this is the asker.
 	if hopts.Asker == nil {
 		hopts.Asker = nativeAsker{s: s}
+	}
+	// The sub-agent seams (plan 026 §3.4, §3.6), each left to tweak's last word
+	// like the two above: the personas this reading found, already mapped to
+	// native tool ids; a child's model matched the way --model was above; and
+	// the lane the harness reports a persona's or the default's unresolved
+	// model or effort on, journaled (native_personas.go). opened is how that
+	// lane reaches the session's own redactor once Open has returned it.
+	if hopts.Personas == nil {
+		hopts.Personas = content.personas
+	}
+	if hopts.MatchModel == nil {
+		hopts.MatchModel = nativeModelMatcher(table)
+	}
+	var opened atomic.Pointer[harness.Session]
+	if hopts.Warn == nil {
+		hopts.Warn = s.subagentWarn(red, &opened)
 	}
 
 	// The last look at closed before anything is opened. A Close racing Start
@@ -689,6 +706,7 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	if err != nil {
 		return nil, nil, none, phraseSetupError(err, table, hopts.Model)
 	}
+	opened.Store(hs)
 	return hs, table, content, nil
 }
 
