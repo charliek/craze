@@ -1,0 +1,260 @@
+package harness
+
+// Sub-agent model and effort resolution (plan 026 §3.6). C3b's runner calls
+// resolveChildModel and, once it has an alias, resolveChildEffort, before
+// opening the child (Options.Child, child.go): the pair travels on
+// SubagentStarted (a later commit) as the alias and effort the child
+// actually runs on.
+//
+// Both errors' text is read by the parent model, not logged: resolveChildModel's
+// "Unknown model" and resolveChildEffort's "Effort ... is not offered" are
+// the agent tool's result verbatim (§3.7's `tool_error` row), so their
+// wording is fixed by the plan and is not framed as a Go error ("harness: ",
+// a lowercase sentence) the way the rest of the package's errors are.
+
+import (
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
+	"github.com/charliek/craze/internal/harness/modeltable"
+)
+
+// childModelInput is what resolveChildModel needs to pick a sub-agent's
+// model: the call's own `model`, if any, and the persona's `model:`, if any.
+// The third candidate, the configured default, is read off the table itself
+// (Table.Subagents.Model), so it needs no field here.
+//
+// ParentAlias and ParentEffort are the RUNNING TURN's model and effort
+// (turn.model, via t.model.r.Alias / t.model.effort), not the session's
+// current one (Session.cur): a SetModel mid-turn must not move a sub-agent
+// call that turn already made (plan 026 §3.6, panel CodeRabbit 12).
+type childModelInput struct {
+	Call, Persona             string
+	ParentAlias, ParentEffort string
+}
+
+// resolveChildModel picks a sub-agent's model, first hit wins: the call's
+// `model`, the persona's `model:`, the table's configured `subagents.model`,
+// then the parent's own (plan 026 §3.6). warn is Session.warn normally;
+// tests may hand in their own to capture what would have been journalled.
+//
+// Each candidate is read the same way (resolveModelValue): "inherit" is the
+// parent's model; a recognised tier name — a BuiltinTiers name or a key
+// under [subagents.tiers] — maps through the table's tier map, and an
+// unmapped tier is the parent's model; anything else is matched as an alias
+// (Session.matchModel, the adapter's `--model` normalisation). A candidate
+// that resolves to a model whose provider has no key is treated as
+// unresolved too: Open would only fail on it later, and content — a
+// persona's or the default's choice — is not allowed to fail the call for a
+// key it does not control.
+//
+// The call is the one candidate a failure to resolve is fatal for: an
+// unrecognised value is the "Unknown model" error, naming every alias and
+// tier the table has; one with no key errors naming the provider (never the
+// key). A persona or default candidate that fails either way falls through
+// to the next one with a single warn line, because content is not the
+// model's choice.
+func (s *Session) resolveChildModel(in childModelInput, warn func(string)) (alias string, err error) {
+	type candidate struct {
+		raw      string
+		label    string
+		required bool
+	}
+	candidates := []candidate{
+		{in.Call, "the call's model", true},
+		{in.Persona, "the persona's model", false},
+		{s.table.Subagents.Model, "the configured sub-agent default model", false},
+	}
+	for _, c := range candidates {
+		if c.raw == "" {
+			continue
+		}
+		got, recognized := s.resolveModelValue(c.raw, in.ParentAlias)
+		if !recognized {
+			if c.required {
+				return "", unknownModelError(c.raw, s.table)
+			}
+			warnLine(warn, fmt.Sprintf("%s %q does not name a model, a tier, or \"inherit\"; falling through to the next default", c.label, c.raw))
+			continue
+		}
+		if _, rerr := s.table.Resolve(got, s.getenv); rerr != nil {
+			if c.required {
+				return "", fmt.Errorf("%s %q: %w", c.label, c.raw, rerr)
+			}
+			warnLine(warn, fmt.Sprintf("%s %q resolves to %q, which has no usable API key; falling through to the next default", c.label, c.raw, got))
+			continue
+		}
+		return got, nil
+	}
+	// The parent's own model: already open and resolved once this turn, so
+	// it is not re-checked against the fall-through rules above.
+	return in.ParentAlias, nil
+}
+
+// resolveChildEffort picks a sub-agent's effort once its model (alias, from
+// resolveChildModel) is known, first hit wins: the call's `effort`, the
+// persona's `effort:`, the table's configured `subagents.effort`, the
+// parent's own effort — but only when the child ends up running the
+// parent's own model, since an effort level from one model means nothing on
+// another — then alias's default_effort (plan 026 §3.6).
+//
+// A call effort alias does not offer is the "Effort ... is not offered"
+// error. A persona or default effort it does not offer falls through with a
+// warn line. alias with no effort control (no Efforts at all) resolves to
+// "", and a call effort on it fails the same way, its list read as "none".
+func (s *Session) resolveChildEffort(alias, callEffort, personaEffort, parentAlias, parentEffort string, warn func(string)) (string, error) {
+	m, ok := s.table.Models[alias]
+	if !ok {
+		// Unreachable: resolveChildModel only ever returns a table alias.
+		return "", fmt.Errorf("harness: sub-agent model %q is not in the table", alias)
+	}
+	if callEffort != "" {
+		if !slices.Contains(m.Efforts, callEffort) {
+			return "", effortNotOfferedError(callEffort, alias, m.Efforts)
+		}
+		return callEffort, nil
+	}
+	if personaEffort != "" {
+		if slices.Contains(m.Efforts, personaEffort) {
+			return personaEffort, nil
+		}
+		warnLine(warn, fmt.Sprintf("the persona's effort %q is not offered by %q; falling through to the next default", personaEffort, alias))
+	}
+	if s.table.Subagents.Effort != "" {
+		if slices.Contains(m.Efforts, s.table.Subagents.Effort) {
+			return s.table.Subagents.Effort, nil
+		}
+		warnLine(warn, fmt.Sprintf("the configured sub-agent default effort %q is not offered by %q; falling through to the next default", s.table.Subagents.Effort, alias))
+	}
+	if alias == parentAlias && parentEffort != "" {
+		return parentEffort, nil
+	}
+	return m.DefaultEffort, nil
+}
+
+// resolveModelValue reads one candidate's raw `model` text the way §3.6
+// describes: "inherit" is parentAlias; a recognised tier name maps through
+// the table's tiers, an unmapped one resolving to parentAlias; anything else
+// is matched as an alias. recognized is false only in the last case, when
+// nothing matches.
+func (s *Session) resolveModelValue(raw, parentAlias string) (alias string, recognized bool) {
+	if strings.EqualFold(raw, "inherit") {
+		return parentAlias, true
+	}
+	if tierAlias, isTier := s.tierAlias(raw); isTier {
+		if tierAlias == "" {
+			return parentAlias, true
+		}
+		return tierAlias, true
+	}
+	return s.matchModelAlias(raw)
+}
+
+// tierAlias is what tier name raw maps to in the table: the mapped alias
+// when [subagents.tiers] has it (case-insensitively, its keys already being
+// lowercase by validateSubagents), else "" with isTier true when raw is one
+// of BuiltinTiers (recognised, but unmapped, so the caller falls back to the
+// parent's model), else isTier false when raw is not a tier name at all.
+func (s *Session) tierAlias(raw string) (alias string, isTier bool) {
+	lower := strings.ToLower(raw)
+	if a, ok := s.table.Subagents.Tiers[lower]; ok {
+		return a, true
+	}
+	for _, t := range modeltable.BuiltinTiers {
+		if t == lower {
+			return "", true
+		}
+	}
+	return "", false
+}
+
+// matchModelAlias is raw matched against the table's aliases: Session.matchModel
+// (the adapter's `--model` normalisation) when set, else an exact,
+// case-sensitive alias match, which is what Options.MatchModel's doc
+// promises for a nil matcher.
+func (s *Session) matchModelAlias(raw string) (alias string, ok bool) {
+	if s.matchModel != nil {
+		return s.matchModel(raw)
+	}
+	if _, ok := s.table.Models[raw]; ok {
+		return raw, true
+	}
+	return "", false
+}
+
+// warnLine calls warn with msg when warn is not nil; resolveChildModel and
+// resolveChildEffort's shared "nil discards" rule (Options.Warn's doc).
+func warnLine(warn func(string), msg string) {
+	if warn != nil {
+		warn(msg)
+	}
+}
+
+// unknownModelCap bounds the "Unknown model" error like §3.4's unknown-type
+// text (system.go's fitRows): the parent model gets back something it can
+// read whole, however large the table or the tier map.
+const unknownModelCap = 1024
+
+// unknownModelError is a call's `model` naming neither a table alias, a
+// recognised tier, nor "inherit": every alias and every configured tier
+// mapping, so the parent's model can retry with a name that exists (plan 026
+// §3.6). raw is never omitted: the model needs to see what it sent to
+// correct it.
+func unknownModelError(raw string, table *modeltable.Table) error {
+	aliases := table.Aliases() // sorted
+	var tierParts []string
+	for _, name := range slices.Sorted(maps.Keys(table.Subagents.Tiers)) {
+		tierParts = append(tierParts, fmt.Sprintf("%s → %s", name, table.Subagents.Tiers[name]))
+	}
+	tiers := "none configured"
+	if len(tierParts) > 0 {
+		tiers = strings.Join(tierParts, ", ")
+	}
+	msg := fmt.Sprintf("Unknown model `%s`. Models: %s; tiers: %s. Omit `model` to use the parent's.",
+		raw, strings.Join(aliases, ", "), tiers)
+	if len(msg) <= unknownModelCap {
+		return errors.New(msg)
+	}
+	return errors.New(capModelList(raw, aliases, tiers))
+}
+
+// capModelList is unknownModelError's message with as many aliases, from the
+// front, as fit unknownModelCap, plus a count of what was left out — the
+// tiers clause is never dropped, since it is usually the shorter half and a
+// tier name is what a persona is most likely to have sent.
+func capModelList(raw string, aliases []string, tiers string) string {
+	suffix := fmt.Sprintf("; tiers: %s. Omit `model` to use the parent's.", tiers)
+	prefix := fmt.Sprintf("Unknown model `%s`. Models: ", raw)
+	for keep := len(aliases); keep >= 0; keep-- {
+		more := ""
+		if keep < len(aliases) {
+			more = fmt.Sprintf(", … and %d more", len(aliases)-keep)
+		}
+		msg := prefix + strings.Join(aliases[:keep], ", ") + more + suffix
+		if len(msg) <= unknownModelCap {
+			return msg
+		}
+	}
+	// Unreachable while the budget is hundreds of bytes and the two fixed
+	// sentences are shorter than that; here so the loop cannot fall through.
+	return prefix + "…" + suffix
+}
+
+// effortNotOfferedError is a call's `effort` alias does not offer, naming
+// what it does (plan 026 §3.6). An empty Efforts (no effort control at all)
+// reads as "none".
+func effortNotOfferedError(effort, alias string, efforts []string) error {
+	list := "none"
+	if len(efforts) > 0 {
+		list = strings.Join(efforts, ", ")
+	}
+	// Built into a variable, then wrapped, like unknownModelError: this
+	// sentence is the model-facing text itself (§3.6), not a Go-style
+	// lowercase, unpunctuated error, so it is deliberately not a literal
+	// fmt.Errorf format string (which staticcheck's ST1005 would flag).
+	msg := fmt.Sprintf("Effort `%s` is not offered by `%s`. Its efforts: %s.", effort, alias, list)
+	return errors.New(msg)
+}

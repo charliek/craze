@@ -122,6 +122,20 @@ type Options struct {
 	// passed in so the harness does not import craze's version package.
 	Version string
 
+	// MatchModel is the adapter's `--model` normalisation (case, spaces, a
+	// display name; internal/agent.MatchModel), handed in at Open so the
+	// harness itself never imports internal/agent. It resolves a sub-agent
+	// call's `model` field to a table alias (subagent_models.go, plan 026
+	// §3.6); nothing else in the harness uses it. nil is exact alias match
+	// only: a call's `model` must name a table alias byte for byte.
+	MatchModel func(raw string) (alias string, ok bool)
+	// Warn is a diagnostic channel for runtime fall-throughs that are not
+	// errors: a sub-agent persona's or the configured default's model or
+	// effort that does not resolve, so resolution moves on to the next
+	// candidate instead of failing the call (subagent_models.go, plan 026
+	// §3.6). nil discards; the adapter journals what it is handed.
+	Warn func(string)
+
 	// tools are the tool set's test seams (tools.go); zero is production.
 	tools toolSeams
 }
@@ -165,6 +179,13 @@ type Session struct {
 	// child is set for a sub-agent's session (Options.Child), fixed at Open:
 	// its mode never changes (SetMode), and it starts no sub-agent of its own.
 	child bool
+
+	// matchModel and warn are Options.MatchModel and Options.Warn, read only
+	// by a sub-agent's model and effort resolution (subagent_models.go, plan
+	// 026 §3.6). Neither is defaulted here: matchModel's nil behaviour (exact
+	// alias match) and warn's (discard) are handled where each is called.
+	matchModel func(raw string) (alias string, ok bool)
+	warn       func(string)
 
 	mu      sync.Mutex
 	table   *modeltable.Table
@@ -240,11 +261,13 @@ func Open(opts Options) (*Session, error) {
 	}
 	child := opts.Child
 	s := &Session{
-		getenv:   opts.Getenv,
-		newModel: opts.NewModel,
-		newAgent: defaultAgent,
-		table:    opts.Table,
-		child:    child != nil,
+		getenv:     opts.Getenv,
+		newModel:   opts.NewModel,
+		newAgent:   defaultAgent,
+		table:      opts.Table,
+		child:      child != nil,
+		matchModel: opts.MatchModel,
+		warn:       opts.Warn,
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv

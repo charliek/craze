@@ -681,6 +681,75 @@ func TestImportKeepsAManualToolProfile(t *testing.T) {
 	}
 }
 
+// TestImportPreservesSubagents: gx has no concept of sub-agent defaults or
+// tiers, so an existing [subagents] section survives a merge untouched, the
+// same way a manual provider or model does (plan 026 §3.6, decision 3).
+func TestImportPreservesSubagents(t *testing.T) {
+	existing := existingTable()
+	existing.Subagents = modeltable.Subagents{
+		Model:  "fireworks/kimi-k3",
+		Effort: "high",
+		Tiers: map[string]string{
+			"opus": "local/model",
+			"crew": "openrouter/minimax-m3",
+		},
+	}
+	if err := existing.Validate(); err != nil {
+		t.Fatalf("existingTable with Subagents is invalid: %v", err)
+	}
+
+	got, _, err := Import(fixture, existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Subagents, existing.Subagents) {
+		t.Fatalf("Subagents = %+v, want it kept as %+v", got.Subagents, existing.Subagents)
+	}
+	// The caller's table is not written through, and its own map is not
+	// aliased by the merged one.
+	before := existingTable()
+	before.Subagents = modeltable.Subagents{
+		Model: "fireworks/kimi-k3", Effort: "high",
+		Tiers: map[string]string{"opus": "local/model", "crew": "openrouter/minimax-m3"},
+	}
+	if !reflect.DeepEqual(existing, before) {
+		t.Error("Import modified the existing table's Subagents")
+	}
+	got.Subagents.Tiers["opus"] = "changed"
+	if existing.Subagents.Tiers["opus"] != "local/model" {
+		t.Fatal("the merged table's Tiers map aliases the caller's")
+	}
+	got.Subagents.Tiers["opus"] = "local/model" // restore before Save below
+
+	// It survives a Save/Load round trip too, the way TestImportKeepsAManualToolProfile
+	// pins a manual tool_profile.
+	dir := filepath.Join(t.TempDir(), "native")
+	if err := modeltable.Save(dir, got); err != nil {
+		t.Fatal(err)
+	}
+	back, err := modeltable.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := modeltable.Subagents{
+		Model: "fireworks/kimi-k3", Effort: "high",
+		Tiers: map[string]string{"opus": "local/model", "crew": "openrouter/minimax-m3"},
+	}
+	if !reflect.DeepEqual(back.Subagents, want) {
+		t.Fatalf("after Save/Load, Subagents = %+v, want %+v", back.Subagents, want)
+	}
+
+	// No existing table at all: Import still produces the zero value, not a
+	// panic on a nil Tiers map.
+	fresh, _, err := Import(fixture, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fresh.Subagents, modeltable.Subagents{}) {
+		t.Fatalf("Subagents with no existing table = %+v, want the zero value", fresh.Subagents)
+	}
+}
+
 func TestImportDefaultModelRule(t *testing.T) {
 	const two = okProvider + `
 [model."ok/a"]

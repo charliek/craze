@@ -693,6 +693,10 @@ func nilIfEmpty(s []string) []string {
 
 // clone deep-copies t so the merge never writes through to the caller's
 // table. Warnings are not carried: they described the load that produced t.
+//
+// Subagents is copied whole and never otherwise touched by Import: gx has no
+// concept of sub-agent defaults or tiers, so an existing [subagents] section
+// survives every import untouched (plan 026 §3.6, decision 3).
 func clone(t *modeltable.Table) *modeltable.Table {
 	out := &modeltable.Table{Providers: map[string]modeltable.Provider{}, Models: map[string]modeltable.Model{}}
 	if t == nil {
@@ -706,6 +710,11 @@ func clone(t *modeltable.Table) *modeltable.Table {
 	for alias, m := range t.Models {
 		m.Efforts = slices.Clone(m.Efforts)
 		out.Models[alias] = m
+	}
+	out.Subagents = modeltable.Subagents{
+		Model:  t.Subagents.Model,
+		Effort: t.Subagents.Effort,
+		Tiers:  maps.Clone(t.Subagents.Tiers),
 	}
 	return out
 }

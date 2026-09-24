@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -80,6 +81,15 @@ var toolProfiles = []string{"opencode"}
 // default first.
 func ToolProfiles() []string { return slices.Clone(toolProfiles) }
 
+// BuiltinTiers are the Claude-style tier names a sub-agent's `model` and a
+// persona's `model:` recognise even with no [subagents.tiers] configured
+// (plan 026 §3.6, owner decision 3): an unmapped one resolves to the
+// parent's own model, so a persona that says "opus" still works on a machine
+// with no tier map. The owner may add more tier names of their own under
+// [subagents.tiers]; these four are always recognised, matched
+// case-insensitively.
+var BuiltinTiers = []string{"fable", "opus", "sonnet", "haiku"}
+
 // The modes Save writes: the directory and the key file private, the model
 // file shareable.
 const (
@@ -98,6 +108,12 @@ type Table struct {
 	// select, which may differ from the wire id).
 	Providers map[string]Provider
 	Models    map[string]Model
+	// Subagents is models.toml's optional [subagents] section (plan 026
+	// §3.6): a sub-agent's configured default model and effort, and what the
+	// Claude-style tier names mean in this table. Its zero value is "no
+	// section": a child defaults to the parent's own model and effort, and
+	// only BuiltinTiers are recognised, each unmapped.
+	Subagents Subagents
 	// Warnings are problems Load fixed on its own, for the caller to print:
 	// today only a providers.toml found readable by others and tightened. A
 	// warning names a path and a mode, never file contents. Save ignores it.
@@ -138,7 +154,24 @@ type Model struct {
 	Source      string
 }
 
-// Resolved is everything the llm factory needs to build one model's client.
+// Subagents is one Table's [subagents] section (plan 026 §3.6): what a
+// sub-agent call's `model` and `effort` fall back to when neither the call
+// nor its persona names one, and what a tier name resolves to in this table.
+// Model and every Tiers value, when set, are aliases in the same Table;
+// Validate checks this. The zero value means the section was absent.
+type Subagents struct {
+	// Model is the alias a child defaults to; "" is the parent's own model.
+	Model string
+	// Effort is the effort a child defaults to; "" means it is worked out at
+	// resolution, from the child's actual model (harness.Session's
+	// resolveChildEffort), not fixed here.
+	Effort string
+	// Tiers maps a tier name (lowercase, [a-z0-9-]+) to an alias. A tier not
+	// in this map, including every one of BuiltinTiers by default, resolves
+	// to the parent's own model rather than failing. nil means the owner
+	// configured none.
+	Tiers map[string]string
+}
 type Resolved struct {
 	Alias           string
 	ProviderID      string
@@ -175,9 +208,22 @@ type providerEntry struct {
 }
 
 type modelsDoc struct {
-	Version      int                   `toml:"version"`
-	DefaultModel string                `toml:"default_model"`
-	Models       map[string]modelEntry `toml:"models,omitempty"`
+	Version      int    `toml:"version"`
+	DefaultModel string `toml:"default_model"`
+	// Subagents is nil whenever Table.Subagents is its zero value, so a
+	// table with no sub-agent configuration saves byte-identically to a
+	// models.toml written before this section existed (plan 026 §3.6).
+	Subagents *subagentsDoc         `toml:"subagents,omitempty"`
+	Models    map[string]modelEntry `toml:"models,omitempty"`
+}
+
+// subagentsDoc is [subagents]'s on-disk shape. Tiers is a free-form map (any
+// key decodes), so decodeStrict's unknown-key check only ever fires on
+// Model, Effort or a key that is not one of the three.
+type subagentsDoc struct {
+	Model  string            `toml:"model,omitempty"`
+	Effort string            `toml:"effort,omitempty"`
+	Tiers  map[string]string `toml:"tiers,omitempty"`
 }
 
 type modelEntry struct {
@@ -302,6 +348,7 @@ func load(dir string, forImport bool) (*Table, error) {
 		DefaultModel: md.DefaultModel,
 		Providers:    make(map[string]Provider, len(pd.Providers)),
 		Models:       make(map[string]Model, len(md.Models)),
+		Subagents:    subagentsFromDoc(md.Subagents),
 		Warnings:     warnings,
 	}
 	for id, e := range pd.Providers {
@@ -443,7 +490,28 @@ func (t *Table) encodeModels() ([]byte, error) {
 		// the reverse) is a compile error rather than a field Save drops.
 		entries[alias] = modelEntry(m)
 	}
-	return encodeFile(modelsHeader, &modelsDoc{Version: Version, DefaultModel: t.DefaultModel}, "models", entries)
+	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents)}
+	return encodeFile(modelsHeader, top, "models", entries)
+}
+
+// subagentsFromDoc is the empty Subagents when d is nil (no [subagents] in
+// the file), else its fields, with a present-but-empty tiers table folded to
+// nil like every other map here (nilIfEmpty's map counterpart).
+func subagentsFromDoc(d *subagentsDoc) Subagents {
+	if d == nil {
+		return Subagents{}
+	}
+	return Subagents{Model: d.Model, Effort: d.Effort, Tiers: nilIfEmptyMap(d.Tiers)}
+}
+
+// subagentsToDoc is nil exactly when s is Subagents' zero value, so Save
+// omits [subagents] entirely rather than writing an empty table (decision 2:
+// a table with no sub-agent configuration saves byte-identically to today).
+func subagentsToDoc(s Subagents) *subagentsDoc {
+	if s.Model == "" && s.Effort == "" && len(s.Tiers) == 0 {
+		return nil
+	}
+	return &subagentsDoc{Model: s.Model, Effort: s.Effort, Tiers: s.Tiers}
 }
 
 // encodeFile renders header, then top (a doc whose map is nil: the top-level
@@ -503,6 +571,9 @@ func validate(t *Table, pfile, mfile string, read crossFile) error {
 	if _, ok := t.Models[t.DefaultModel]; !ok {
 		return &FileError{File: mfile, Key: "default_model",
 			Reason: fmt.Sprintf("%q is not a model in %s", t.DefaultModel, ModelsFile)}
+	}
+	if err := validateSubagents(mfile, t.Subagents, t.Models); err != nil {
+		return err
 	}
 	return nil
 }
@@ -741,4 +812,57 @@ func nilIfEmpty(s []string) []string {
 		return nil
 	}
 	return s
+}
+
+// nilIfEmptyMap is nilIfEmpty for a TOML table: a Table reads the same
+// whether a file wrote an empty `[subagents.tiers]` or left it out.
+func nilIfEmptyMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// tierKeyPattern is the format a [subagents.tiers] key must match: lowercase
+// letters, digits and hyphens, so it reads as a bare word in the resolved
+// model's error text and so a tier name is always ready to compare against a
+// caller's value case-insensitively without a second normalisation step.
+var tierKeyPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// validateSubagents checks Subagents against the rules Load enforces
+// (decision 1): Model, when set, and every Tiers value must be an alias in
+// models; a Tiers key must match tierKeyPattern and its value must not be
+// empty; Effort, when set together with Model, must be one of that model's
+// efforts. Effort set with Model absent is not checked here — resolution
+// checks it against whichever model the child actually ends up on
+// (harness.Session.resolveChildEffort, plan 026 §3.6).
+func validateSubagents(file string, s Subagents, models map[string]Model) error {
+	at := func(key, reason string) error {
+		return &FileError{File: file, Table: "subagents", Key: key, Reason: reason}
+	}
+	if s.Model != "" {
+		m, ok := models[s.Model]
+		if !ok {
+			return at("model", fmt.Sprintf("%q is not a model in %s", s.Model, ModelsFile))
+		}
+		if s.Effort != "" && !slices.Contains(m.Efforts, s.Effort) {
+			return at("effort", fmt.Sprintf("%q is not offered by %q", s.Effort, s.Model))
+		}
+	}
+	for _, tier := range slices.Sorted(maps.Keys(s.Tiers)) {
+		tierAt := func(reason string) error {
+			return &FileError{File: file, Table: "subagents.tiers", Key: tier, Reason: reason}
+		}
+		if !tierKeyPattern.MatchString(tier) {
+			return tierAt("a tier name must match [a-z0-9-]+")
+		}
+		alias := s.Tiers[tier]
+		if strings.TrimSpace(alias) == "" {
+			return tierAt("missing: name an alias in " + ModelsFile)
+		}
+		if _, ok := models[alias]; !ok {
+			return tierAt(fmt.Sprintf("%q is not a model in %s", alias, ModelsFile))
+		}
+	}
+	return nil
 }
