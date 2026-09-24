@@ -85,6 +85,34 @@ linters:
               desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern (plan 021 §3.1)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the engine speaks to agent.Session alone; a provider transport below that seam is not its concern (plan 021 §3.1)"
+        # The transcript model's import boundary (plan 024 §3.1): the fold every
+        # client runs over the event stream, and the engine runs inside the
+        # event log's publishing boundary, so it is render-free and knows no
+        # client, no transport and no terminal. It imports internal/agent and
+        # the standard library; internal/agent never imports it. One glob
+        # covers its tests as well as its sources, because they are held to
+        # the same boundary and depguard ORs file patterns (a bare $test token
+        # beside it would reach every test file in the module — see
+        # engine-test below).
+        transcript:
+          list-mode: lax
+          files:
+            - "**/internal/transcript/**"
+          deny:
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the transcript model is every client's, so no client package is its concern; the TUI imports it, never the reverse (plan 024 §3.1)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the transcript model is every client's, so no client package is its concern (plan 024 §3.1)"
+            - pkg: github.com/charliek/craze/internal/engine
+              desc: "the engine folds the model; the model knows nothing of the engine that holds one of its instances (plan 024 §3.1)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the model folds agent.Events; the wire protocol below that seam is not its concern (plan 024 §3.1)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the model folds agent.Events; a provider transport below that seam is not its concern (plan 024 §3.1)"
+            - pkg: github.com/charmbracelet
+              desc: "the model is render-free: how anything draws is a client's, and a terminal library has no place in a fold that runs inside the log's boundary (plan 024 §3.1)"
+            - pkg: charm.land
+              desc: "the model is render-free and provider-free (plan 024 §3.1)"
         engine-test:
           list-mode: lax
           files:

@@ -9,6 +9,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/journal"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 // ChainPolicy is what a settled turn does to the queue behind it. It is the
@@ -122,11 +123,31 @@ type launch struct {
 // snapshot (plan 021 §3.8). The engine does not author those; it serialises the
 // calls that cause them (settings.go).
 //
-// The observer runs inside the log's publishing boundary and takes only
-// e.obsMu, a leaf that guards the two flags it keeps.
+// The observer runs inside the log's publishing boundary and takes leaves
+// only, one after another and never one inside another: the transcript model's
+// own mutex, in its first statement (e.model.Fold); then e.obsMu, which guards
+// the two flags it keeps; then the index writer's (idx.post). So the order is
+// **the boundary → model.mu** (and the boundary → each of the other two), and
+// the other direction never happens: Snapshot takes model.mu with the boundary
+// never held and releases it before it returns — a snapshot is a value — so
+// Attach enters Subscribe, which waits for the boundary, holding no lock at all
+// (attach.go, and TestAttachWhileAPublisherHoldsTheBoundary). model.mu is
+// nested with neither e.obsMu nor the index's, and **e.mu and model.mu are
+// never nested, in either order**: nothing that holds e.mu folds or snapshots
+// (an event enqueued under e.mu is committed, and folded, by the outbox's
+// drainer on a goroutine that holds nothing of the engine's), and the fold
+// calls nothing of the engine's.
 type Engine struct {
 	sess agent.Session
 	log  *agent.EventLog
+	// model is the engine's instance of the transcript model (plan 024 §3.1):
+	// folded from the observer, once per committed event and in Seq order,
+	// inside the publishing boundary, so it is always a complete folded prefix
+	// of the committed sequence — equal to it once the observer returns. It is
+	// what Attach cuts a snapshot from. Built in New with the default bounds, no
+	// clock (a zero At stays zero: nothing is called back under the boundary)
+	// and the log's incarnation, and never replaced; its mutex is its own.
+	model *transcript.Model
 	// asks is the session's ask registry: the engine holds it so that a client
 	// can list and answer through Control without reaching around to the seam.
 	// It has a mutex of its own, and **e.mu and registry.mu are never nested, in
@@ -234,6 +255,13 @@ type hooks struct {
 	// and the barriers a duplicate's schedule turns on. Like the rest of these
 	// they are in place before the table exists and never assigned afterwards.
 	receipts *receiptHooks
+	// attachSnapshotted runs on an Attach's own goroutine each time it has cut
+	// a fresh snapshot, with the snapshot's Seq and the attempt (0 for the
+	// first), after the model's lock is released and before Subscribe is
+	// called: the gap in which the ring can move past the snapshot (attach.go).
+	// The event log's own seams are internal/agent's, so this is the barrier an
+	// engine test has there; it holds no lock, so a hook may publish.
+	attachSnapshotted func(seq uint64, attempt int)
 }
 
 // New builds the engine for sess. The session must own an event log
@@ -290,6 +318,9 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		rh = h.receipts
 	}
 	e.receipts = newReceiptTable(rh)
+	// Before the observer is installed, which is what folds it: every committed
+	// event from the first reaches it.
+	e.model = transcript.New(transcript.Options{Incarnation: e.log.Incarnation()})
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
@@ -544,15 +575,20 @@ func (e *Engine) reportIndexErr(cause, msg string) {
 }
 
 // observe is the log's observer. It runs inside the publishing boundary, once
-// per committed event, so it does nothing but note what the driver and the
-// index worker have to look at again and wake them: it takes no lock but its
-// own two leaves, does no I/O, and calls neither the log nor the session. It is
-// the seed of S1c's fold.
+// per committed event, so it does nothing but fold the event into the
+// transcript model and note what the driver and the index worker have to look
+// at again and wake them: it takes no lock but its own leaves (the model's
+// mutex and e.obsMu), does no I/O, and calls neither the log nor the session.
 //
-// A sub-agent's event is never the main session's news: the TUI has always
+// The fold is the first statement, ahead of the sub-agent guard (plan 024
+// §3.1): every child event and every roster event reaches the model, which
+// routes them to the child's transcript and the roster itself. The guard is
+// right for what follows it and wrong for the fold — a sub-agent's event is
+// never the main session's news for the engine's flags: the TUI has always
 // routed those away before any of this ran (applyEvent), and a sub-agent
 // finishing is not this session being used.
 func (e *Engine) observe(ev agent.Event) {
+	e.model.Fold(ev)
 	if ev.Agent != "" || ev.Type == agent.EventSubagent {
 		return
 	}

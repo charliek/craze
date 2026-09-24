@@ -1092,3 +1092,124 @@ event kind — `eventJSON`'s default silently drops an unknown kind — so H3,
 which is the first phase after S1b to add a native ask, must decide and build
 its own `--json` line for a native ask ending; none exists today because no
 native ask has ever fired one.
+
+## S1c — the transcript model
+
+| | |
+|---|---|
+| Status | planned |
+| Plan | `024-session-control-s1c-transcript-model` (outside the repo, `~/.claude/plans/craze/`) |
+| Baseline | `origin/main` `2b5229b` (harness H5 PR 2 #48 merged) |
+| Branch / PRs | two sequential PRs, the second branched from `origin/main` after the first merges: `feature/plan-024-s1c-model` (PR 1), `feature/plan-024-s1c-tui` (PR 2) |
+| Merged | — |
+
+### Outcome
+
+Not yet executed. The plan builds a render-free `internal/transcript` package
+— the model, the fold, the snapshot codec, the bounds — that every client
+folds. Two instances: the **engine's**, folded as the first statement of
+`engine.observe` under a leaf `model.mu` (ahead of the sub-agent guard, so
+children reach it too), the authority a snapshot is cut from; and **each
+client's own** (SD-33: no client reads the engine's instance, the TUI folds
+from its primary like any other client). Entries are immutable — every
+mutation is a new `*Entry` — addressed by `EntryID{Seq, N}`, no packing.
+Timestamps are the event's own `At`; a client's clock is only a fallback for
+a zero stamp. Snapshots are bounded (`SnapshotBytes`, default 4 MiB) with
+continuation state (`StreamOpen`, the todo-note dedupe, `OmittedTools`) and a
+fixed filling order: mandatory sections first (per-item caps, `Truncated`,
+`ErrSnapshotTooLarge` if they alone overflow), then the main transcript's tail
+newest-first, then each child the same way. `Engine.Attach` (snapshot + cursor
+→ live events from N+1) joins the `Control` interface in process; S2 wraps it
+for the wire. PR 1 ships the package, the engine's fold and `Attach`; PR 2
+makes the TUI the first client, with its pane owning an **explicit display
+list** (not an anchored overlay) so local rows and shared-entry echoes land
+exactly where today's single slice put them, and no golden moves.
+
+### Plan review — 2026-09-21
+
+| reviewer | result |
+|---|---|
+| Codex, `gpt-6-astra`, high effort | 28 findings (10 blocker) |
+| CodeRabbit | 27 findings (3 blocker) |
+| GLM 5.3 | 14 findings (1 blocker) |
+| `craze-harness-modes` session (seam review) | no objections, two cautions |
+
+The reviewers found the same holes independently, which is why the fixes are
+pinned in the plan rather than left to the executor:
+
+1. Every entry is immutable; every mutation is a new `*Entry` (a tool update,
+   a closed run, a chunk) — a snapshot copies pointers to entries that will
+   never change again.
+2. No arbitrary code runs under the boundary: `Err` is held and its text read
+   outside it; the engine's instance carries no clock.
+3. The cost claims are pinned concretely — a deque, incremental byte
+   accounting, a 2× stream builder, `Snapshot`'s critical section bounded and
+   tested (≤ 1 ms worst case).
+4. The snapshot carries continuation state and a stated four-window filling
+   order, tested at the exact edges.
+5. Bounds count retained bytes (text plus payload strings), not text alone.
+6. `EntryID` is `{Seq, N}`, never a packed integer.
+7. Attach's three error paths are pinned: a synchronous refusal after a fresh
+   snapshot retries with a fresh snapshot; an asynchronous file-leg failure
+   discards the prefix and re-attaches; an `Omitted` record re-attaches with
+   no cursor. `SubscribeOptions.Ctx` makes `Attach` cancellable.
+8. Convergence is a property of the state projection, not of history; history
+   stays append-only.
+9. Ask endings create no shared entry; every non-`Auto` opening breaks the
+   run, a recorded behaviour change.
+10. The pane owns an explicit display list, not an anchored overlay.
+11. Parity compares at matching sequence prefixes, never against the live
+    engine.
+12. The clock rule (a run's `End` from the closing event's own `At`) is its
+    own production commit (T1b), probed alone before anything else moves.
+13. T1a precedes C1 so the package copies test assertions in their final
+    form.
+14. C5 is three commits with a named consumer inventory and a stated
+    pointer-aliasing rule for bubbletea's `Model` copies.
+15. SF-02 is deferred to S2 (below); SF-01 stands alone as the owner's
+    decision.
+16. A2 (the exactness test) runs at every cut of a recorded, bounded trace.
+17. Several corrections of fact in the plan's §2 held after all three
+    reviewers checked the file:line claims (bar items 25–27, also corrected).
+18. From the harness session: children are depth 1; a `Mode` delta with an
+    empty `Event.Mode` inside a replay bracket is a plain section
+    replacement; native's plan approval ends the turn `end_turn`.
+19. §10 names what is environment-provided; PR 2 branches only after H5 PR 2
+    merged, for `app.go`'s sake too.
+
+**Owner decisions as taken (2026-09-21):**
+
+- **SF-01 — yes.** C8, in PR 2, publishes native's first-prompt title as a
+  State-only `Title` delta; nothing else changes. `native-echo-80x24` row 20
+  moves from `─ craze ─` to `─ hello ─`.
+- **Auto-merge — yes**, under the gauntlet's rules (each PR merges once
+  `/git-commands:watch-pr` is green and every real bot finding has a
+  disposition on its thread).
+- **The TUI's main transcript takes the 8 MiB retained-byte budget it lacks
+  today**, with a V6 check in PR 1 that raises it to 32 MiB before PR 2's C5c
+  if a real session's retained bytes come within 4× of it.
+- **PR 1 started before H5 PR 2 merged**; H5 PR 2 has since merged (`2b5229b`).
+- **The provider effort/speed work is Plan 025, not S1c** (§2.9).
+
+**Recorded behaviour changes (§4), will be recorded here on merge:**
+
+(i) a local row landing inside an open stream no longer ends that run; (ii)
+the main transcript's new 8 MiB retained-byte budget; (iii) a run's `End`
+comes from the closing event's own `At`, not the client's consumption time;
+(iv) the fold breaks the stream on a masked ask opening in the cancel window,
+where today it does not; (v) SF-01's title row, taken.
+
+### Roadmap wording this plan departs from
+
+Per the plan's §4 last bullet: `03` §8's "the engine applies a command's
+transcript effect inside the command call and returns the entry and its
+`seq`" is superseded by S1b's echo rule and this plan's display list (the
+in-process client draws its own row and hides the echo); "the TUI keeps a
+render cache keyed by entry id" holds; "client-local entries live in a TUI
+overlay anchored after an engine entry id" becomes "in the pane's display
+list, where today's slice put them" (an anchored overlay would reorder rows);
+"the engine takes the injected clock: entry timestamps and thought-run
+elapsed time come from the TUI's `m.now()`" becomes "the event's `At` stamps
+every shared row; a client's clock is a fallback for a zero stamp". `07`'s
+"folded inside the boundary" holds for the engine's instance; clients fold
+their own.

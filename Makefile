@@ -30,15 +30,17 @@ test:
 # clipboard seams and leaked command goroutines, the host Hub's per-reporter
 # workers, the native harness (its turn runner persists from stream
 # callbacks while cancel and Close run on other goroutines; the whole tree is
-# named, so each harness package is raced as it lands), and the session
+# named, so each harness package is raced as it lands), the session
 # journal (one writer goroutine owns the file while Append, Note, Close and
 # live readers arrive from others, and its tests stall that writer on
-# purpose). Packages run concurrently, so the wall clock is about the slowest
+# purpose), and the transcript model (the engine folds it inside the log's
+# boundary while snapshots are cut from other goroutines; plan 024 §3.4).
+# Packages run concurrently, so the wall clock is about the slowest
 # of them. CI runs this same target, so a local pass and a CI pass mean the
 # same thing; the two flakes that reached main in 2026-09 only ever showed
 # under -race.
 test-race:
-	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/...
+	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

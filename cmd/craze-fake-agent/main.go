@@ -137,6 +137,11 @@ Environment:
                        session/prompt. hang and hang-ack stay silent, by the
                        same house rule that keeps their behaviour otherwise
                        unchanged.
+  CRAZE_FAKE_GATE=<path>  tasks stops after its first tool_call until it has
+                       read one byte from <path>, a FIFO: the test writes one
+                       byte per turn to release it, so it can act while the
+                       turn is known to be in progress. Unset, tasks runs
+                       straight through.
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in

@@ -137,6 +137,23 @@ func (t *transcript) appendEntry(e entry, now time.Time) {
 
 func (m *Model) appendEntry(e entry) { m.main.appendEntry(e, m.now()) }
 
+// stamp is the time a row drawn from an event is written at: the event's own
+// At, and this client's clock only for an event that carries none, which is a
+// unit test's fixture — every production event is stamped. The row, and the End
+// of the run it closes, then say when the session reported the thing and not
+// when this client got round to consuming it, which is the instant every client
+// folding the same event agrees on (plan 024 §3.2).
+//
+// A row the client writes for a message of its own — a local failure, a theme
+// or usage note, the optimistic user row at Enter, an ask's answer notes — is
+// no event's, and keeps m.now(): the wrappers that take no time.
+func (m *Model) stamp(at time.Time) time.Time {
+	if at.IsZero() {
+		return m.now()
+	}
+	return at
+}
+
 // trimEntries enforces the entry cap. Tool rows are addressed by index, so the
 // map moves with the slice and rows that fell off are forgotten.
 func (t *transcript) trimEntries() {
@@ -182,9 +199,13 @@ func (t *transcript) addUser(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryUser, text: text}, now)
 }
 
-// addUser writes the user block for text that went to the agent, wherever the
-// model learned of it: its own send, a turn the engine started for a drained
-// row or another client, or a prompt out of a replayed transcript.
+// addUser is addUserAt for a row the client writes itself, at its own clock.
+func (m *Model) addUser(text string) { m.addUserAt(text, m.now()) }
+
+// addUserAt writes the user block for text that went to the agent, wherever the
+// model learned of it: its own send (stamped at the client's clock), a turn the
+// engine started for a drained row or another client, or a prompt out of a
+// replayed transcript (stamped at the event's At).
 //
 // The shell context in front of that text is wire content and never display
 // content (plan 022 §3.6): the row shows the message, not the command output
@@ -192,9 +213,9 @@ func (t *transcript) addUser(text string, now time.Time) {
 // watched it come out of. Stripping in this one wrapper rather than at each of
 // the three callers is what makes the rule hold for every route into a user
 // row, including the ones the engine reports rather than this client sending.
-func (m *Model) addUser(text string) {
+func (m *Model) addUserAt(text string, at time.Time) {
 	_, text = agent.SplitShellContext(text)
-	m.main.addUser(text, m.now())
+	m.main.addUser(text, m.stamp(at))
 }
 
 // addInterjection is the user block for text merged into the running turn.
@@ -208,14 +229,18 @@ func (t *transcript) addInterjection(text string, now time.Time) {
 	t.appendEntry(entry{kind: entryUser, text: text, interject: true}, now)
 }
 
-// addInterjection strips the same block for the same reason addUser does. An
-// interjection's echo is the one user row craze draws from what came back
+// addInterjection is addInterjectionAt at the client's clock.
+func (m *Model) addInterjection(text string) { m.addInterjectionAt(text, m.now()) }
+
+// addInterjectionAt strips the same block for the same reason addUserAt does.
+// An interjection's echo is the one user row craze draws from what came back
 // rather than from what it sent, and on native it is the typed spelling the
 // adapter kept beside the steer — which is still the text craze handed to
-// Interject, block and all.
-func (m *Model) addInterjection(text string) {
+// Interject, block and all. It is the broadcast's row, so it is stamped at the
+// broadcast's At.
+func (m *Model) addInterjectionAt(text string, at time.Time) {
 	_, text = agent.SplitShellContext(text)
-	m.main.addInterjection(text, m.now())
+	m.main.addInterjection(text, m.stamp(at))
 }
 
 func (t *transcript) addNote(text string, now time.Time) {
@@ -226,6 +251,9 @@ func (t *transcript) addNote(text string, now time.Time) {
 }
 
 func (m *Model) addNote(text string) { m.main.addNote(text, m.now()) }
+
+// addNoteAt is a note drawn from an event, stamped at its At.
+func (m *Model) addNoteAt(text string, at time.Time) { m.main.addNote(text, m.stamp(at)) }
 
 // commandLineMark leads the provenance line under a user entry craze expanded
 // a plugin command or skill into. It points down and to the right, at the entry
@@ -255,7 +283,10 @@ func (t *transcript) addCommandLine(cmd *agent.ExpandedCommand, now time.Time) {
 	t.addNote(line, now)
 }
 
-func (m *Model) addCommandLine(cmd *agent.ExpandedCommand) { m.main.addCommandLine(cmd, m.now()) }
+// addCommandLine is the command event's line, stamped at its At.
+func (m *Model) addCommandLine(cmd *agent.ExpandedCommand, at time.Time) {
+	m.main.addCommandLine(cmd, m.stamp(at))
+}
 
 // addPlan puts the plan cursor proposed into the transcript as a note block,
 // which is why the card itself only has to carry the three answers.
@@ -267,7 +298,8 @@ func (t *transcript) addPlan(p *agent.PlanEvent, now time.Time) {
 	t.appendEntry(entry{kind: entryPlan, plan: &plan}, now)
 }
 
-func (m *Model) addPlan(p *agent.PlanEvent) { m.main.addPlan(p, m.now()) }
+// addPlan is the plan event's block, stamped at its At.
+func (m *Model) addPlan(p *agent.PlanEvent, at time.Time) { m.main.addPlan(p, m.stamp(at)) }
 
 func (t *transcript) addError(text string, now time.Time) {
 	if text == "" {
@@ -277,6 +309,9 @@ func (t *transcript) addError(text string, now time.Time) {
 }
 
 func (m *Model) addError(text string) { m.main.addError(text, m.now()) }
+
+// addErrorAt is an error row drawn from an event, stamped at its At.
+func (m *Model) addErrorAt(text string, at time.Time) { m.main.addError(text, m.stamp(at)) }
 
 // appendStream grows the open entry of the same kind, so a reply that arrives
 // in five chunks stays one entry and costs one re-render per chunk.
@@ -354,19 +389,31 @@ func (t *transcript) closeStream(at time.Time) {
 
 func (t *transcript) breakStream(now time.Time) { t.closeStream(now) }
 
-func (m *Model) breakStream() { m.main.breakStream(m.now()) }
+// breakStream ends the open run at the At of the event that ended it — a
+// turn's done, a foreign-turn bracket, a replay's end, an ask opening — so a
+// thought's duration measures the events and not how late this client consumed
+// the last of them (plan 024 §3.2).
+func (m *Model) breakStream(at time.Time) { m.main.breakStream(m.stamp(at)) }
 
 // upsertTool keeps one row per toolCallId, updated in place. Cursor's todo
 // writer is hidden: the todo stream owns that state.
-func (t *transcript) upsertTool(tool *agent.ToolEvent, now time.Time) {
+//
+// A tool is stamped with its own At, which is when the agent reported that
+// state of the call, and with at — the envelope's At, else the client's clock —
+// only when it carries none (plan 024 X1). That one stamp both closes the run
+// above it and dates a new row.
+func (t *transcript) upsertTool(tool *agent.ToolEvent, at time.Time) {
 	if tool == nil || tool.IsTodoTool() {
 		return
 	}
 	ev := *tool
 	t.notePath(ev)
+	if !tool.At.IsZero() {
+		at = tool.At
+	}
 	// A tool call ends the run above it either way: an update that lands in an
 	// existing row still means the thinking before it is over.
-	t.closeStream(tool.At)
+	t.closeStream(at)
 	if tool.ID != "" {
 		if idx, ok := t.toolLine[tool.ID]; ok && idx >= 0 && idx < len(t.entries) && t.entries[idx].kind == entryTool {
 			e := &t.entries[idx]
@@ -376,7 +423,7 @@ func (t *transcript) upsertTool(tool *agent.ToolEvent, now time.Time) {
 			return
 		}
 	}
-	t.appendEntry(entry{kind: entryTool, tool: &ev, at: tool.At}, now)
+	t.appendEntry(entry{kind: entryTool, tool: &ev, at: at}, at)
 	if tool.ID != "" {
 		if t.toolLine == nil {
 			t.toolLine = make(map[string]int)
@@ -385,7 +432,11 @@ func (t *transcript) upsertTool(tool *agent.ToolEvent, now time.Time) {
 	}
 }
 
-func (m *Model) upsertTool(tool *agent.ToolEvent) { m.main.upsertTool(tool, m.now()) }
+// upsertTool is the tool event's row. at is the event's envelope At, which
+// stamps it only when the tool carries no At of its own.
+func (m *Model) upsertTool(tool *agent.ToolEvent, at time.Time) {
+	m.main.upsertTool(tool, m.stamp(at))
+}
 
 // notePath records which directories a basename has been seen in, so a row can
 // fall back to dir/file once the basename is ambiguous.
@@ -449,8 +500,9 @@ func (m *Model) clearTranscript() {
 }
 
 // noteTodos turns the todo stream into the two dim transcript notes; the panel
-// itself is the pinned home for the list.
-func (m *Model) noteTodos(todos []agent.Todo) {
+// itself is the pinned home for the list. The notes are the todos event's, so
+// they are stamped at its At.
+func (m *Model) noteTodos(todos []agent.Todo, at time.Time) {
 	if len(todos) == 0 {
 		return
 	}
@@ -463,14 +515,14 @@ func (m *Model) noteTodos(todos []agent.Todo) {
 	if closed == len(todos) {
 		if !m.todoDone {
 			m.todoDone = true
-			m.addNote(fmt.Sprintf("tasks: %d/%d done", closed, len(todos)))
+			m.addNoteAt(fmt.Sprintf("tasks: %d/%d done", closed, len(todos)), at)
 		}
 		return
 	}
 	m.todoDone = false
 	if len(todos) > m.todoPlanned {
 		m.todoPlanned = len(todos)
-		m.addNote(fmt.Sprintf("tasks: %d planned", len(todos)))
+		m.addNoteAt(fmt.Sprintf("tasks: %d planned", len(todos)), at)
 	}
 }
 
