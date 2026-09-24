@@ -319,9 +319,10 @@ func (o *promptOpts) finishRun(sess agent.Session, decisions *[]string, retErr e
 	// Each sweep is preceded by the barrier that makes "enqueued" mean
 	// "delivered": what the engine authored on the way out — a signal's queue
 	// removals above all — is published asynchronously, and a non-blocking read
-	// has nothing to wait for (syncEvents).
+	// has nothing to wait for (syncEvents). The last step is --attach-probe's
+	// cleanup, a no-op without the flag (settleAttachProbe).
 	for _, step := range []func(agent.Session, *[]string) (bool, error){
-		o.syncEvents, o.flushEvents, o.syncEvents, o.drainSubagents,
+		o.syncEvents, o.flushEvents, o.syncEvents, o.drainSubagents, o.settleAttachProbe,
 	} {
 		r, err := step(sess, decisions)
 		if r {
