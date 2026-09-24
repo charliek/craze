@@ -251,7 +251,10 @@ func textOf(r *entry) int { return len(r.text) }
 // the tail, and only the caps can have taken rows, off the front and only as
 // many as those appends forced — the exact minimum (a pane at its row cap
 // after it dropped anything; over its text budget with the last row it
-// dropped put back).
+// dropped put back). The caps hold after an append, which is when the pane
+// enforces them; with nothing appended the rows must be exactly the ones the
+// watch last saw, and they may stand over the text budget: a shared row grows
+// in place, chunk by chunk, and the pane trims on an append only (review r18).
 func (w *paneWant) between(p *pane) error {
 	got, base := p.rows, w.rows
 	d := 0
@@ -289,8 +292,10 @@ func (w *paneWant) between(p *pane) error {
 			return fmt.Errorf("between folds %d rows left the pane off its front, and no cap forced the last of them", d)
 		}
 	}
-	if err := capsHold(p, got, textOf); err != nil {
-		return err
+	if len(fresh) > 0 {
+		if err := capsHold(p, got, textOf); err != nil {
+			return err
+		}
 	}
 	w.forget(base[:d])
 	w.rows = slices.Clone(got)

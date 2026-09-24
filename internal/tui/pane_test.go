@@ -898,6 +898,77 @@ func TestAnErrorsTextIsReadOnce(t *testing.T) {
 	})
 }
 
+// rosterFixture drives a roster of children that stream transcripts of their
+// own (grok's provider) through real roster events, the stub's roster kept as
+// the session keeps it.
+type rosterFixture struct {
+	t      *testing.T
+	m      Model
+	stub   *Stub
+	now    time.Time
+	roster []agent.SubagentInfo
+}
+
+func newRosterFixture(t *testing.T) *rosterFixture {
+	t.Helper()
+	f := &rosterFixture{t: t, now: time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)}
+	f.m = agentModel(t, &f.now)
+	f.stub = stubOf(t, f.m)
+	f.stub.SetProvider(agent.GrokProvider())
+	return f
+}
+
+// child is id's roster row: running, or finished n seconds in.
+func (f *rosterFixture) child(id string, n int, done bool) agent.SubagentInfo {
+	info := agent.SubagentInfo{ID: id, ToolCallID: id, Description: "child " + id, Status: agent.SubagentRunning, Transcript: true}
+	if done {
+		info.Status = agent.SubagentCompleted
+		info.EndedAt = f.now.Add(time.Duration(n) * time.Second)
+	}
+	return info
+}
+
+func (f *rosterFixture) emit(info agent.SubagentInfo, change string) {
+	f.t.Helper()
+	if i := slices.IndexFunc(f.roster, func(s agent.SubagentInfo) bool { return s.ID == info.ID }); i >= 0 {
+		f.roster[i] = info
+	} else {
+		f.roster = append(f.roster, info)
+	}
+	f.stub.SetSubagents(f.roster)
+	f.m = feed(f.t, f.m, agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change})
+}
+
+func (f *rosterFixture) feed(evs ...agent.Event) {
+	f.t.Helper()
+	f.m = feed(f.t, f.m, evs...)
+}
+
+// viewAndEvict spawns id, lets write fill its transcript, opens its view,
+// finishes it and then 32 more children, so the shared model — which keeps 32
+// finished — evicts it while the view is still open on it.
+func (f *rosterFixture) viewAndEvict(id string, write func()) {
+	f.t.Helper()
+	f.emit(f.child(id, 0, false), agent.SubagentChangeSpawned)
+	write()
+	f.m = openView(f.t, f.m)
+	if f.m.viewing != id {
+		f.t.Fatalf("fixture: viewing %q", f.m.viewing)
+	}
+	f.emit(f.child(id, 0, true), agent.SubagentChangeFinished)
+	for i := 1; i <= 32; i++ {
+		other := fmt.Sprintf("child-%02d", i)
+		f.emit(f.child(other, i, false), agent.SubagentChangeSpawned)
+		f.emit(f.child(other, i, true), agent.SubagentChangeFinished)
+	}
+	if f.m.shared.Sub(id) != nil {
+		f.t.Fatalf("fixture: the shared model kept %s, the oldest of 33 finished children", id)
+	}
+	if f.m.viewing != id || f.m.subs[id] == nil {
+		f.t.Fatalf("the view left the evicted child: viewing %q, pane %v", f.m.viewing, f.m.subs[id] != nil)
+	}
+}
+
 // TestAViewedChildTheModelEvictedKeepsItsRows is review r17's third finding:
 // the shared model evicts a finished child past the roster's bound (32
 // finished) and its transcript with it, but the TUI keeps the pane of the
@@ -906,56 +977,75 @@ func TestAnErrorsTextIsReadOnce(t *testing.T) {
 // screen as this client's own. (The parity watch, which checks every row of
 // every pane, is what failed on this schedule.)
 func TestAViewedChildTheModelEvictedKeepsItsRows(t *testing.T) {
-	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
-	m := agentModel(t, &now)
-	stub := stubOf(t, m)
-	// A provider whose children stream their own transcript.
-	stub.SetProvider(agent.GrokProvider())
-	var roster []agent.SubagentInfo
-	emit := func(info agent.SubagentInfo, change string) {
-		t.Helper()
-		if i := slices.IndexFunc(roster, func(s agent.SubagentInfo) bool { return s.ID == info.ID }); i >= 0 {
-			roster[i] = info
-		} else {
-			roster = append(roster, info)
-		}
-		stub.SetSubagents(roster)
-		m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change})
-	}
-	child := func(id string, n int, done bool) agent.SubagentInfo {
-		info := agent.SubagentInfo{ID: id, ToolCallID: id, Description: "child " + id, Status: agent.SubagentRunning, Transcript: true}
-		if done {
-			info.Status = agent.SubagentCompleted
-			info.EndedAt = now.Add(time.Duration(n) * time.Second)
-		}
-		return info
-	}
-
-	emit(child("oldest", 0, false), agent.SubagentChangeSpawned)
-	m = feed(t, m, agent.Event{Type: agent.EventText, Agent: "oldest", Text: "the oldest child's work"})
-	m = openView(t, m)
-	if m.viewing != "oldest" {
-		t.Fatalf("fixture: viewing %q", m.viewing)
-	}
-	emit(child("oldest", 0, true), agent.SubagentChangeFinished)
-	for i := 1; i <= 32; i++ {
-		id := fmt.Sprintf("child-%02d", i)
-		emit(child(id, i, false), agent.SubagentChangeSpawned)
-		emit(child(id, i, true), agent.SubagentChangeFinished)
-	}
-	if m.shared.Sub("oldest") != nil {
-		t.Fatal("fixture: the shared model kept the oldest of 33 finished children")
-	}
-	p := m.subs["oldest"]
-	if m.viewing != "oldest" || p == nil {
-		t.Fatalf("the view left the evicted child: viewing %q, pane %v", m.viewing, p != nil)
-	}
+	f := newRosterFixture(t)
+	f.viewAndEvict("oldest", func() {
+		f.feed(agent.Event{Type: agent.EventText, Agent: "oldest", Text: "the oldest child's work"})
+	})
+	p := f.m.subs["oldest"]
 	if got, want := shownRows(p), []shownRow{{kind: "assistant", text: "the oldest child's work", local: true}}; !slices.Equal(got, want) {
 		t.Fatalf("the evicted child's pane holds %v, want its row, now this client's own: %v", got, want)
 	}
-	m.setViewportContent(true)
-	if view := plainView(m); !strings.Contains(view, "the oldest child's work") {
+	f.m.setViewportContent(true)
+	if view := plainView(f.m); !strings.Contains(view, "the oldest child's work") {
 		t.Fatalf("the view no longer shows the evicted child's rows:\n%s", view)
+	}
+}
+
+// TestAChildSpawnedAgainGrowsPastItsKeptRows is review r18's schedule: the
+// view is kept on a child whose rows hold all but 100 bytes of a sub-agent
+// pane's text budget; the shared model evicts it, and those rows become this
+// client's own; the same id is spawned again, and its new run streams a
+// 50-byte chunk — a new row, which the budget still fits — and then 100 bytes
+// more in the same run. The pane now stands 50 bytes over its budget, which
+// is allowed: its caps run on an append, not on a row growing in place, as
+// they always have. The session goes on, and the pane keeps every row.
+func TestAChildSpawnedAgainGrowsPastItsKeptRows(t *testing.T) {
+	f := newRosterFixture(t)
+	// Sixteen runs, of alternating kinds so that none merges into the next,
+	// none longer than a streamed entry's cap: 1 MiB less 100 bytes of text.
+	sizes := make([]int, 16)
+	for i := range sizes {
+		sizes[i] = entryTextCap
+	}
+	sizes[15] -= 100
+	f.viewAndEvict("oldest", func() {
+		for i, n := range sizes {
+			kind := agent.EventText
+			if i%2 == 1 {
+				kind = agent.EventThought
+			}
+			f.feed(agent.Event{Type: kind, Agent: "oldest", Text: strings.Repeat(string(rune('a'+i)), n)})
+		}
+	})
+	p := f.m.subs["oldest"]
+	kept := len(p.rows)
+	if kept != len(sizes) || p.rawTextLen() != subTextBudget-100 {
+		t.Fatalf("fixture: the evicted child's pane holds %d rows and %d bytes", kept, p.rawTextLen())
+	}
+
+	f.emit(f.child("oldest", 40, false), agent.SubagentChangeSpawned)
+	f.feed(agent.Event{Type: agent.EventThought, Agent: "oldest", Text: strings.Repeat("y", 50)})
+	if len(p.rows) != kept+1 || p.trimmed {
+		t.Fatalf("a chunk the budget fits trimmed the pane: %d rows, trimmed %v", len(p.rows), p.trimmed)
+	}
+	f.feed(agent.Event{Type: agent.EventThought, Agent: "oldest", Text: strings.Repeat("z", 100)})
+	if got := p.rawTextLen(); got != subTextBudget+50 || len(p.rows) != kept+1 {
+		t.Fatalf("the grown run left the pane with %d rows and %d bytes, want %d and the budget plus 50",
+			len(p.rows), got, kept+1)
+	}
+	// The next event: the pane, over its budget by a row grown in place, is as
+	// the watch last saw it.
+	f.feed(agent.Event{Type: agent.EventText, Text: "the parent carries on"})
+	if len(p.rows) != kept+1 {
+		t.Fatalf("the pane lost rows to nothing: %d, want %d", len(p.rows), kept+1)
+	}
+	for _, r := range p.rows[:kept] {
+		if !r.local || !r.id.IsZero() {
+			t.Fatalf("a row of the evicted child's transcript names entry %v", r.id)
+		}
+	}
+	if last := p.rows[kept]; last.local || last.text != strings.Repeat("y", 50)+strings.Repeat("z", 100) {
+		t.Fatalf("the new run's row: %+v", shownOf(last))
 	}
 }
 
