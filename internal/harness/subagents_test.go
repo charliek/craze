@@ -1577,6 +1577,74 @@ func TestSubagentTruncationRedactsWithBothSessionsKeys(t *testing.T) {
 	}
 }
 
+// TestSubagentAbortTextRedacted (review r7, finding 1): after the parent
+// opened — so the parent never learns it — and before its child opens, which
+// does, the environment gains a key equal to the tool contract's aborted text,
+// Tool execution aborted, which the key floor lets through. The parent is
+// cancelled while the child is mid-step, and the call reads aborted, carrying
+// the step the child was billed for: its text, the key itself, is redacted
+// with both sessions' keys like every other text the runner returns, so the
+// key reaches neither the parent's ToolFinished nor its tool entry. The final
+// arbitration swapped the raw text in after the runner's last redaction, and
+// the dispatcher redacts with the parent's keys alone.
+func TestSubagentAbortTextRedacted(t *testing.T) {
+	const abortKey = tool.AbortedText
+	f := newRouted(t)
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	envMu.Lock()
+	env["NOKEY_API_KEY"] = abortKey
+	envMu.Unlock()
+	if s.Redact(abortKey) == redact.Marker {
+		t.Fatal("control: the parent learned the key")
+	}
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	w := newWorker()
+	a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))))
+	a.route("a long task", callStep(globPart("g1")), w.step(openText("half done"), finishText()))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ev events
+	out := start(ctx, s, "go", ev.sink)
+	await(t, w.reached, "the child mid-step")
+	if kids := k.all(); len(kids) != 1 || kids[0].Redact(abortKey) != redact.Marker {
+		t.Fatal("control: the child did not learn the key")
+	}
+	cancel()
+	if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopCancelled {
+		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+	}
+	evs := ev.list()
+	res := callResult(t, evs, "t1.1.1")
+	if res.Class != tool.ClassAborted || !res.IsError || res.Text != redact.Marker || res.Child == nil ||
+		res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+		t.Fatalf("the call = %+v; want aborted, its text redacted, carrying the first step's usage", res)
+	}
+	for _, fin := range of[ToolFinished](evs) {
+		if found := leaks(fin, abortKey); len(found) != 0 {
+			t.Fatalf("the parent's ToolFinished for %s leaks the key at %v", fin.ID, found)
+		}
+	}
+	var toolEntries []string
+	for _, e := range transcript(t, s).Entries {
+		if e.Type == store.TypeMessage && e.Message.Role == fantasy.MessageRoleTool {
+			toolEntries = append(toolEntries, messageText(e.Message))
+		}
+	}
+	if len(toolEntries) != 1 || strings.Contains(toolEntries[0], abortKey) || !strings.Contains(toolEntries[0], redact.Marker) {
+		t.Fatalf("the parent's tool entries %q; want the call's one, with the key redacted", toolEntries)
+	}
+	settled(t, s)
+}
+
 // TestAgentUnknownModelOrEffort (§3.6): a call naming a model or an effort
 // that does not resolve is invalid_input with the list to choose from, before
 // any slot is taken or any child opened; so is an unknown type.
@@ -1608,6 +1676,98 @@ func TestAgentUnknownModelOrEffort(t *testing.T) {
 	}
 	if took.Load() != 0 || len(k.all()) != 0 || len(of[SubagentStarted](evs)) != 0 {
 		t.Fatalf("a refused call took a slot (%d) or opened a child (%d)", took.Load(), len(k.all()))
+	}
+	settled(t, s)
+}
+
+// TestAgentRefusalCapped (review r7, finding 2): a refusal the runner returns
+// before any child registers goes through the cut a child's answer does. A
+// call's effort is the model's own text, quoted back in its refusal, so it is
+// folded to one line and cut there, as the unknown-model text cuts its raw
+// value: an effort of 60 KiB, and one of more than 2000 lines, each come back
+// as one short line the truncator leaves alone. A model alias is the table's
+// text, quoted whole: one of 60 KiB, and one of more than 2000 lines, make
+// refusals past the cap, which the runner cuts at 50 KiB or 2000 lines with
+// the whole refusal in a spill file named for the call. Every result is
+// within the cap in the parent's ToolFinished, its tool entry and its next
+// request. The runner returned these refusals before its cut was deferred,
+// and nothing after it cuts an error.
+func TestAgentRefusalCapped(t *testing.T) {
+	wideAlias := "wide/" + strings.Repeat("m", 60<<10)
+	tallAlias := "tall/" + strings.Repeat("m\n", tool.MaxLines) + "m"
+	f := newRouted(t)
+	for _, alias := range []string{wideAlias, tallAlias} {
+		f.table.Models[alias] = modeltable.Model{Provider: "test", WireModel: "wire-a", Efforts: []string{"low"}, DefaultEffort: "low"}
+	}
+	s := f.open(f.options())
+	k := watchKids(s)
+	a := f.routers["test/a"]
+	a.route("go", callStep(
+		agentPart(t, "a1", task("wide effort", "p", "effort", strings.Repeat("x", 60<<10))),
+		agentPart(t, "a2", task("tall effort", "p", "effort", strings.Repeat("x\n", tool.MaxLines)+"x")),
+		agentPart(t, "a3", task("wide model", "p", "model", wideAlias, "effort", "ultra")),
+		agentPart(t, "a4", task("tall model", "p", "model", tallAlias, "effort", "ultra"))), answerWith("ok"))
+	var ev events
+	if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+	}
+	within := func(text string) bool {
+		return len(text) <= tool.MaxBytes+1024 && strings.Count(text, "\n")+1 <= tool.MaxLines+8
+	}
+	evs := ev.list()
+	for _, id := range []string{"t1.1.1", "t1.1.2"} {
+		res := callResult(t, evs, id)
+		if res.Class != tool.ClassInvalidInput || !strings.HasPrefix(res.Text, "Effort `x") ||
+			!strings.HasSuffix(res.Text, "…` is not offered by `test/a`. Its efforts: low, high.") ||
+			len(res.Text) > 1024 || strings.Contains(res.Text, "\n") || res.Trunc.Spill != "" {
+			t.Fatalf("call %s: %q (class %q, spill %q); want invalid_input, one short line quoting the effort folded and cut",
+				id, res.Text, res.Class, res.Trunc.Spill)
+		}
+	}
+	for id, alias := range map[string]string{"t1.1.3": wideAlias, "t1.1.4": tallAlias} {
+		res := callResult(t, evs, id)
+		if res.Class != tool.ClassInvalidInput || !within(res.Text) ||
+			res.Trunc.Spill == "" || strings.Count(res.Text, "Full output saved to: "+res.Trunc.Spill) != 1 {
+			t.Fatalf("call %s: class %q, %d bytes in %d lines, spill %q; want invalid_input, cut once, naming its spill file",
+				id, res.Class, len(res.Text), strings.Count(res.Text, "\n")+1, res.Trunc.Spill)
+		}
+		b, err := os.ReadFile(res.Trunc.Spill)
+		if want := "Effort `ultra` is not offered by `" + alias + "`. Its efforts: low."; err != nil || string(b) != want ||
+			filepath.Base(res.Trunc.Spill) != "tool_"+id {
+			t.Fatalf("the spill file %s holds %d bytes (%v); want the whole refusal", res.Trunc.Spill, len(b), err)
+		}
+	}
+	resultsOf := func(m fantasy.Message) (out []string) {
+		for _, p := range m.Content {
+			if r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p); ok {
+				text, _ := outputText(r.Output)
+				out = append(out, text)
+			}
+		}
+		return out
+	}
+	var stored, sent []string
+	for _, e := range transcript(t, s).Entries {
+		if e.Type == store.TypeMessage && e.Message.Role == fantasy.MessageRoleTool {
+			stored = append(stored, resultsOf(e.Message)...)
+		}
+	}
+	next := a.requests("go")
+	if len(next) != 2 {
+		t.Fatalf("the parent sent %d requests; want two", len(next))
+	}
+	for _, m := range next[1].Prompt {
+		if m.Role == fantasy.MessageRoleTool {
+			sent = append(sent, resultsOf(m)...)
+		}
+	}
+	for what, texts := range map[string][]string{"the parent's tool entry": stored, "the parent's next request": sent} {
+		if len(texts) != 4 || slices.ContainsFunc(texts, func(text string) bool { return !within(text) }) {
+			t.Fatalf("%s holds %d results; want the four calls', each within the cap", what, len(texts))
+		}
+	}
+	if len(k.all()) != 0 || len(of[SubagentStarted](evs)) != 0 {
+		t.Fatalf("a refused call opened a child (%d)", len(k.all()))
 	}
 	settled(t, s)
 }

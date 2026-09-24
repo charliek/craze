@@ -60,7 +60,8 @@ import (
 // then, last of all, the final arbitration of its outcome (settle) — is
 // deferred before step 1, so it runs after everything the steps defer, any of
 // which can wait (review r4); and the arbitration follows every step of its
-// own that can (review r6).
+// own that can (review r6). It is deferred before the call's first return, so
+// a refusal that needs no slot goes through it too (review r7).
 //
 // No event is emitted while a call waits for a slot: its row is the call's
 // own, running, and no sub-agent exists yet.
@@ -340,6 +341,16 @@ func abortedResult() tool.Result {
 // child to the child's result (see the file's comment for the slot's life).
 // It never returns before the child it opened has run and closed.
 func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.Result) {
+	// The call's last word (settle, reviews r4, r6 and r7), deferred first:
+	// before anything else the call defers, so that it runs after all of it,
+	// and before the first return, so that every result the call returns — a
+	// refusal that needs no child included — is redacted and cut by it. Only
+	// the agent tool cuts nothing (its Truncate is None), and the dispatcher
+	// never cuts an error: a refusal quoting 60 KiB of what the model sent
+	// reached the model whole (review r7, finding 2).
+	var c childCall
+	defer func() { res = r.settle(ctx, call.ID, &c, res) }()
+
 	parent := r.s
 	switch {
 	case parent.child:
@@ -373,11 +384,6 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.R
 	if err != nil {
 		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassInvalidInput}
 	}
-
-	// The call's last word, deferred before anything else the call defers so
-	// that it runs after all of it (settle, reviews r4 and r6).
-	var c childCall
-	defer func() { res = r.settle(ctx, call.ID, &c, res) }()
 
 	// Steps 1–3: a slot, its release deferred at once, and the recheck.
 	if !r.acquire(ctx, call) {
@@ -551,18 +557,20 @@ func (r *subagents) union(child *Session) *redact.Replacer {
 	return redact.New(keys...)
 }
 
-// settle is a registered call's last word, the runner's outermost deferred
-// function (review r4): it runs after the child's Close, its retirement and
-// the slot's release, any of which can wait — the retirement on regMu, which
-// a SetMode or a Close holds while it walks the registry. It finishes the
-// result the call built — the child's answer, or its failure with its last
-// output — in this order (review r6):
+// settle is every call's last word, the runner's outermost deferred function
+// (review r4): it runs after the child's Close, its retirement and the slot's
+// release, any of which can wait — the retirement on regMu, which a SetMode or
+// a Close holds while it walks the registry. It finishes the result the call
+// built — the child's answer, its failure with its last output, or a result
+// the call returned before any child registered, a refusal or aborted — in
+// this order (review r6):
 //
 //  1. It redacts the text, with a replacer built here (union): the text is
 //     the child's, which can hold a key the child learned and the parent does
 //     not know, or one the parent learned while the child ran, and the
 //     dispatcher redacts with the parent's installed keys alone (reviews r3,
-//     r4).
+//     r4). A call with no child has the parent's keys alone, every one it
+//     knows (union of none).
 //  2. It cuts the text, a success and an error alike (§3.7's one cap), with
 //     the shared truncator at its limits: the head kept, and the whole text,
 //     redacted, in a spill file under the parent's home named for the call,
@@ -572,33 +580,36 @@ func (r *subagents) union(child *Session) *redact.Replacer {
 //     installed keys or by none: a key spelled across the path's fixed part,
 //     or one the parent learned that its home holds, reached the parent's
 //     model. The agent tool's spec is Truncate None, so nothing cuts the
-//     answer twice.
+//     answer twice — nor anything else the call returns: a refusal made
+//     before registration is cut here too, since nothing after the runner
+//     would cut it (review r7, finding 2).
 //  3. It redacts the whole text once more, and the spill path, with a fresh
 //     union: a key spelled across the notice, or across the path and the
 //     text beside it, is replaced — which can leave the path one that opens
 //     nothing, a key on the wire being the worse of the two. The model names
-//     on the usage are redacted with them.
+//     on the usage are redacted with them, and so is the aborted result the
+//     arbitration can pick, prepared here: the tool contract's text is fixed,
+//     but a key can equal it, and one the child alone knew went out raw when
+//     the arbitration swapped it in after this pass (review r7, finding 1).
 //  4. It arbitrates, last, after everything above that can wait — each union
 //     takes both sessions' key locks, which a SetModel holds while it
-//     resolves a key, and the cut writes a file — and nothing that can wait
-//     follows it (review r6: a cause that landed while a union waited was
-//     missed by an arbitration made before it). A child that did not finish
-//     on its own — stopped, failed, cancelled, or never opened — reads
-//     aborted, its usage kept, when the call's context is done, the session
-//     is closing or a Close has latched the child by now: decide would have
-//     had it so had the cause landed before the child's Run returned, and one
-//     that lands before the call returns is no later as far as the parent can
-//     tell. A child that finished keeps its outcome, which is persisted
-//     (decide's first rule, X6). A cause that lands after the return — while
-//     the dispatcher finishes the call — meets any tool's race with a cancel,
-//     which is inherent.
+//     resolves a key, and the cut writes a file — and it only picks one of
+//     the two results prepared: nothing that can wait follows it (review r6:
+//     a cause that landed while a union waited was missed by an arbitration
+//     made before it). A child that did not finish on its own — stopped,
+//     failed, cancelled, or never opened — reads aborted, its usage kept,
+//     when the call's context is done, the session is closing or a Close has
+//     latched the child by now: decide would have had it so had the cause
+//     landed before the child's Run returned, and one that lands before the
+//     call returns is no later as far as the parent can tell. A child that
+//     finished keeps its outcome, which is persisted (decide's first rule,
+//     X6). A cause that lands after the return — while the dispatcher
+//     finishes the call — meets any tool's race with a cancel, which is
+//     inherent.
 //
-// A call that never registered has no child to settle: its result is a
-// refusal or aborted as it stands, and short.
+// A call that never registered has no child to arbitrate: its result is a
+// refusal or aborted as it stands, redacted and cut.
 func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res tool.Result) tool.Result {
-	if c.h == nil {
-		return res
-	}
 	res.Text = r.union(c.child).String(res.Text)
 	res.Text, res.Trunc = tool.TruncateRedacted(r.s.base.home, callID, res.Text, tool.Head, r.union(c.child))
 	red := r.union(c.child)
@@ -607,8 +618,12 @@ func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res
 		res.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
 			WireModel: red.String(u.WireModel), Usage: u.Usage}
 	}
+	if c.h == nil {
+		return res
+	}
+	aborted := tool.Result{Text: red.String(tool.AbortedText), IsError: true, Class: tool.ClassAborted, Child: res.Child}
 	if !c.completed && (ctx.Err() != nil || isClosed(r.s.tools.closing) || c.h.isClosing()) {
-		res = tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted, Child: res.Child}
+		return aborted
 	}
 	return res
 }

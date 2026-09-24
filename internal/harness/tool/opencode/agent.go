@@ -148,9 +148,10 @@ func (c *agentCall) Request() tool.Request {
 // both paths): a success and a failed child's error alike, which carries its
 // last output and can be as long as any answer, are truncated there, with the
 // spill path and the notice redacted by the keys of both sessions (review
-// r6). The spec's Truncate is None, so the dispatcher only redacts it, the
-// spill path included, as it redacts every tool's result; the class and the
-// child's usage are the runner's.
+// r6), and so is every refusal the runner makes before a child exists, which
+// can quote what the model sent (review r7). The spec's Truncate is None, so
+// the dispatcher only redacts it, the spill path included, as it redacts
+// every tool's result; the class and the child's usage are the runner's.
 func (c *agentCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil {
 		return aborted()

@@ -288,7 +288,8 @@ func capJoin(items []string, keep int) string {
 
 // cutRawValue is raw folded to one line — its whitespace runs, newlines
 // included, collapsed to single spaces — and cut at a rune boundary with "…"
-// past unknownModelRawCap (review r5, finding 8).
+// past unknownModelRawCap (review r5, finding 8). The unknown effort's text
+// quotes the call's effort through it as well (review r7).
 func cutRawValue(raw string) string {
 	folded := strings.Join(strings.Fields(raw), " ")
 	if len(folded) <= unknownModelRawCap {
@@ -304,6 +305,12 @@ func cutRawValue(raw string) string {
 // effortNotOfferedError is a call's `effort` alias does not offer, naming
 // what it does (plan 026 §3.6). An empty Efforts (no effort control at all)
 // reads as "none".
+//
+// effort is the call's own, which the model may have sent any size and any
+// shape, so it is folded to one line and cut (cutRawValue), as the unknown
+// model's raw value is: the refusal stays one short line the model reads
+// whole, rather than one the runner's cut then shortens to 50 KiB (review r7,
+// finding 2). alias and the list are the table's.
 func effortNotOfferedError(effort, alias string, efforts []string) error {
 	list := "none"
 	if len(efforts) > 0 {
@@ -313,6 +320,6 @@ func effortNotOfferedError(effort, alias string, efforts []string) error {
 	// sentence is the model-facing text itself (§3.6), not a Go-style
 	// lowercase, unpunctuated error, so it is deliberately not a literal
 	// fmt.Errorf format string (which staticcheck's ST1005 would flag).
-	msg := fmt.Sprintf("Effort `%s` is not offered by `%s`. Its efforts: %s.", effort, alias, list)
+	msg := fmt.Sprintf("Effort `%s` is not offered by `%s`. Its efforts: %s.", cutRawValue(effort), alias, list)
 	return errors.New(msg)
 }
