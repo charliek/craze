@@ -393,22 +393,78 @@ func DiffSuffix(first, restored *transcript.Model, canonical bool) string {
 // primaryCap is internal/agent's primary buffer: the 257th unread event waits.
 const primaryCap = 256
 
-// Frames the leak checks count, as runtime.Stack prints them.
-const (
-	ownerFrame  = "github.com/charliek/craze/internal/agent.(*Subscription).run("
-	attachFrame = "github.com/charliek/craze/internal/engine.(*Engine).Attach("
-)
+// attachFrame is Attach as runtime.Stack prints its frame, for the checks that
+// no goroutine is still in it: a goroutine in Attach has been scheduled, so
+// the frame is on its stack.
+const attachFrame = "github.com/charliek/craze/internal/engine.(*Engine).Attach("
 
-// goroutinesRunning counts the goroutines with frame on their stack.
-func goroutinesRunning(frame string) int {
+// ownerCreated is the line runtime.Stack prints under a subscription's owner
+// goroutine — agent's startOwner runs `go s.run(...)` — for the whole of its
+// life, from the go statement until it has exited. The owner's run frame is
+// not: until the scheduler first runs the goroutine, its only frame is the go
+// statement's wrapper (startOwner.gowrap1), so a count of run frames misses an
+// owner that exists and has not been scheduled yet. Counting run frames before
+// and after an attach flaked that way (plan 024 V5): the rig's own owner,
+// started by newRigHooked's Subscribe and never read from, was unscheduled at
+// the first count and running at the second — "1 after, 0 before" with
+// nothing leaked.
+const ownerCreated = "\ncreated by github.com/charliek/craze/internal/agent.(*EventLog).startOwner in goroutine "
+
+// allStacks is every goroutine's stack, as runtime.Stack prints them.
+func allStacks() []byte {
 	buf := make([]byte, 1<<16)
 	for {
 		n := runtime.Stack(buf, true)
 		if n < len(buf) {
-			return bytes.Count(buf[:n], []byte(frame))
+			return buf[:n]
 		}
 		buf = make([]byte, 2*len(buf))
 	}
+}
+
+// goroutinesRunning counts the goroutines with frame on their stack.
+func goroutinesRunning(frame string) int {
+	return bytes.Count(allStacks(), []byte(frame))
+}
+
+// ownerGoroutines is the ids of the subscription owner goroutines alive now,
+// scheduled yet or not (ownerCreated), across the process.
+func ownerGoroutines() map[string]bool {
+	owners := map[string]bool{}
+	for g := range strings.SplitSeq(string(allStacks()), "\n\n") {
+		id, _, ok := strings.Cut(strings.TrimPrefix(g, "goroutine "), " ")
+		if ok && strings.Contains(g, ownerCreated) {
+			owners[id] = true
+		}
+	}
+	return owners
+}
+
+// ownerBaseline is ownerGoroutines before a leak check, which must see the
+// rig's own subscription's owner: a check that cannot see an owner the test
+// knows is there proves nothing about one it hopes is not.
+func ownerBaseline(t *testing.T) map[string]bool {
+	t.Helper()
+	owners := ownerGoroutines()
+	if len(owners) == 0 {
+		t.Fatal("no subscription owner goroutine is visible, not even the rig's own: the leak check cannot see them")
+	}
+	return owners
+}
+
+// ownersStartedSince is the owner goroutines alive now that were not alive at
+// before, in no order. An owner of an earlier test's log still on its way out
+// is in before and is not one of them, and goroutine ids are never reused, so
+// what it names is exactly the owners started in between: none of these tests
+// runs anything else that subscribes, so any it names is the attach's.
+func ownersStartedSince(before map[string]bool) []string {
+	var started []string
+	for id := range ownerGoroutines() {
+		if !before[id] {
+			started = append(started, id)
+		}
+	}
+	return started
 }
 
 // watchdogCtx is a context the watchdog ends: a wait under it that fails is a
@@ -642,7 +698,7 @@ func TestAttachRetriesWhenTheRingMovedPastTheSnapshot(t *testing.T) {
 			r.publish(repeatEvent(textOf(8, "c"), 9)...)
 		}})
 		r.publish(textOf(10, "x"))
-		owners := goroutinesRunning(ownerFrame)
+		owners := ownerBaseline(t)
 		a, err := r.e.Attach(watchdogCtx(t), AttachOptions{})
 		if a != nil || !errors.Is(err, ErrAttachRaced) || Code(err) != "unavailable" || !gateRefusal(err) {
 			t.Fatalf("four refusals in a row: %v, %v (code %q)", a, err, Code(err))
@@ -650,8 +706,8 @@ func TestAttachRetriesWhenTheRingMovedPastTheSnapshot(t *testing.T) {
 		if fmt.Sprint(seen) != "[0 1 2 3]" {
 			t.Fatalf("attempts %v, want the first and three retries", seen)
 		}
-		if got := goroutinesRunning(ownerFrame); got > owners {
-			t.Fatalf("%d subscription owners run after a raced attach, %d before", got, owners)
+		if started := ownersStartedSince(owners); len(started) != 0 {
+			t.Fatalf("a raced attach left subscription owners running: goroutines %v", started)
 		}
 		// Nothing was registered, so the log's next commits reach only the
 		// rig's own subscription and the attach can simply be asked again.
@@ -825,7 +881,7 @@ func TestAttachIsCancellableWithThePrimaryFull(t *testing.T) {
 	snapped := make(chan uint64, 1)
 	r := newRigHooked(t, Options{}, agent.EventLogOptions{}, &hooks{attachSnapshotted: func(seq uint64, _ int) { snapped <- seq }})
 	parked := parkTheDrainer(t, r)
-	owners := goroutinesRunning(ownerFrame)
+	owners := ownerBaseline(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -848,14 +904,14 @@ func TestAttachIsCancellableWithThePrimaryFull(t *testing.T) {
 	if got := goroutinesRunning(attachFrame); got != 0 {
 		t.Fatalf("%d goroutines are still in Attach", got)
 	}
-	if got := goroutinesRunning(ownerFrame); got > owners {
-		t.Fatalf("%d subscription owners run after a cancelled attach, %d before", got, owners)
+	if started := ownersStartedSince(owners); len(started) != 0 {
+		t.Fatalf("a cancelled attach left subscription owners running: goroutines %v", started)
 	}
 
 	<-r.e.Events()
 	r.until(func(ev agent.Event) bool { return ev.Seq == parked })
-	if got := goroutinesRunning(ownerFrame); got > owners {
-		t.Fatalf("%d subscription owners run once the log moved on, %d before: the cancelled attach registered one", got, owners)
+	if started := ownersStartedSince(owners); len(started) != 0 {
+		t.Fatalf("subscription owners run once the log moved on that did not before (goroutines %v): the cancelled attach registered one", started)
 	}
 }
 
@@ -892,7 +948,7 @@ func TestAttachCancelledWhileItsSnapshotIsCutSubscribesNothing(t *testing.T) {
 		cancel()
 	}})
 	at := r.publish(textOf(10, "x"), textOf(10, "y"))
-	owners := goroutinesRunning(ownerFrame)
+	owners := ownerBaseline(t)
 
 	a, err := r.e.Attach(ctx, AttachOptions{})
 	if a != nil || !errors.Is(err, context.Canceled) {
@@ -908,8 +964,8 @@ func TestAttachCancelledWhileItsSnapshotIsCutSubscribesNothing(t *testing.T) {
 		t.Fatalf("%d goroutines are still in Attach", got)
 	}
 	r.publish(textOf(10, "after"))
-	if got := goroutinesRunning(ownerFrame); got > owners {
-		t.Fatalf("%d subscription owners run after a cancelled attach, %d before: it registered one", got, owners)
+	if started := ownersStartedSince(owners); len(started) != 0 {
+		t.Fatalf("a cancelled attach left subscription owners running (goroutines %v): it registered one", started)
 	}
 }
 
