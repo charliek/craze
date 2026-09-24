@@ -191,12 +191,17 @@ func (t *Transcript) Len() int {
 }
 
 // Tail is the open stream entry's text so far — at most StreamText bytes, led
-// by "…" once the beginning was dropped — or "" when no run is open. It
-// copies: the pane calls it once per chunk, the fold never does.
+// by "…" once the beginning was dropped — or "" when no run is open, or while
+// the open run is a placeholder (omittedRun, X23): the window this model was
+// restored from dropped its entry along with the rest of the child, so buf
+// holds nothing of it and runLen is the ledger placeholder's own bookkeeping,
+// not text — a reader must see nothing, the same "" that Entries and History
+// already give it (r8: buf empty and runLen past the cap once made this
+// "…"). It copies: the pane calls it once per chunk, the fold never does.
 func (t *Transcript) Tail() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.streamOpen {
+	if !t.streamOpen || t.omittedRun != 0 {
 		return ""
 	}
 	return t.tail()

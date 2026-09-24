@@ -370,6 +370,33 @@ func TestACutRunTheWindowOmittedKeepsTheVisibleSuffix(t *testing.T) {
 	}
 }
 
+// assertOmittedRunHidden fails unless m's "sub" child, whose open run is a
+// placeholder, shows nothing of it to a reader: Tail() is "" — never "…",
+// however far runLen has grown past the cap while buf stays empty (r8) — and
+// neither Entries() nor History() hold an entry for the run, the same
+// nothing a client held before it ever opened.
+func assertOmittedRunHidden(t *testing.T, what string, m *Model) {
+	t.Helper()
+	tr := m.Sub("sub")
+	if tr == nil {
+		t.Fatalf("%s: no sub transcript", what)
+	}
+	if got := tr.Tail(); got != "" {
+		t.Fatalf("%s: Tail() is %q, want \"\" while the run is a placeholder", what, got)
+	}
+	if n := tr.Len(); n != 0 {
+		t.Fatalf("%s: Len() is %d, want 0 while the run is a placeholder", what, n)
+	}
+	if es := tr.Entries(); len(es) != 0 {
+		t.Fatalf("%s: Entries() holds %d, want 0 while the run is a placeholder", what, len(es))
+	}
+	for _, sh := range m.History().Subs {
+		if sh.ID == "sub" && len(sh.Entries) != 0 {
+			t.Fatalf("%s: History() holds %d entries for sub, want 0 while the run is a placeholder", what, len(sh.Entries))
+		}
+	}
+}
+
 // TestAnOmittedRunsPlaceholderFollowsItsTail (X23, X25): a child the window
 // emptied mid-run keeps the run as its last placeholder, whose bytes are the
 // first model's open entry's chunk by chunk, exactly — min(bytes streamed,
@@ -377,7 +404,9 @@ func TestACutRunTheWindowOmittedKeepsTheVisibleSuffix(t *testing.T) {
 // whose cut lands inside a rune alike (X23's approximation is gone). The
 // run's placeholder is never trimmed while it is open, and closing the run
 // keeps it at what it accounts; the restored model is the first's suffix
-// throughout.
+// throughout. Throughout — before growth, past the cap, and after a fresh
+// snapshot + restore mid-run — the placeholder stays invisible to every
+// reader (r8: Tail(), Entries() and History() never show it).
 func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 	for _, unit := range []string{"ab", "é", "😀", "a😀é"} {
 		t.Run(unit, func(t *testing.T) {
@@ -397,6 +426,8 @@ func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 				t.Fatalf("the window: child run %v, ledger %v", s.Subs[0].OmittedRun, s.Subs[0].Omitted)
 			}
 			r1, r2 := restoredBoth(t, s, b, o)
+			assertOmittedRunHidden(t, "restored, before growth", r1)
+			assertOmittedRunHidden(t, "restored, before growth", r2)
 			seq := len(evs)
 			shorter := false
 			for i := range 3 * limit {
@@ -413,6 +444,7 @@ func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 					if got := tr.ledger[len(tr.ledger)-1].Bytes; got != want || tr.bytes != first.bytes {
 						t.Fatalf("twin %d after %d chunks: the run's placeholder accounts %d bytes (%d in all), the first model's entry %d (%d)", j, i+1, got, tr.bytes, want, first.bytes)
 					}
+					assertOmittedRunHidden(t, fmt.Sprintf("twin %d after %d chunks", j, i+1), r)
 				}
 			}
 			// The multi-byte units cut inside a rune: the first model's tail is
@@ -420,6 +452,24 @@ func TestAnOmittedRunsPlaceholderFollowsItsTail(t *testing.T) {
 			// all the same.
 			if shorter != (unit != "ab") {
 				t.Fatalf("a tail shorter than the run's accounting: %v", shorter)
+			}
+			// runLen is now well past the cap on both twins (3 * limit units
+			// streamed into a run capped at limit): Tail() before this point
+			// proved "" up to the cap, and every chunk since has kept growing it
+			// past. A fresh snapshot + restore mid-run — the ledger's the whole
+			// story again, nothing carried in buf — must still hide it (r8: this
+			// is exactly where a stale runLen over an empty buf showed "…").
+			for j, r := range []*Model{r1, r2} {
+				full2, _ := snapshotOf(t, r, 1<<40)
+				s2, b2 := snapshotOf(t, r, encodedLen(t, windowedTo(full2, 1, 0)))
+				if s2.Subs[0].OmittedRun != KindThought {
+					t.Fatalf("twin %d re-snapshot: child run %v, want %v", j, s2.Subs[0].OmittedRun, KindThought)
+				}
+				r3, r4 := restoredBoth(t, s2, b2, o)
+				assertOmittedRunHidden(t, fmt.Sprintf("twin %d after a re-snapshot and restore", j), r3)
+				assertOmittedRunHidden(t, fmt.Sprintf("twin %d after a re-snapshot and restore", j), r4)
+				assertSuffixOf(t, fmt.Sprintf("twin %d re-restored", j), m, r3)
+				assertSuffixOf(t, fmt.Sprintf("twin %d re-restored", j), m, r4)
 			}
 			seq++
 			closing := sequencedAt(agent.Event{Type: agent.EventTool, Agent: "sub", Tool: &agent.ToolEvent{ID: "c1"}, At: at(seq)}, seq)
