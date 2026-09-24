@@ -1,0 +1,11 @@
+Claude Code calls this tool `Agent` (formerly `Task`); grok calls it `task`.
+
+Start a sub-agent: a separate agent with its own context and tools, which does one task and returns its result to you.
+
+Delegate work that is self-contained and would otherwise fill your context with intermediate steps: a broad search of the codebase, research that takes many reads, or a change you can describe completely. Choose the agent type that fits the task from the agent types listed below.
+
+- Several agent calls in one message run in parallel. Start independent tasks together, in one message.
+- The sub-agent cannot see this conversation. Write a prompt that stands on its own: the goal, what you already know, the files and names that matter, whether to change code or only report, and what to return.
+- The result is the sub-agent's final message. Do not redo the work it did.
+- Leave `model` and `effort` out unless the task needs a different model or effort; the models you can choose are listed below.
+- Do not use it to read a single file or to run one search: the read, grep and glob tools do that directly, and faster.

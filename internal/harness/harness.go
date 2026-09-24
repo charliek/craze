@@ -104,6 +104,17 @@ type Options struct {
 	// ask, and both tools then answer at once that nobody answered. A
 	// sub-agent has nobody to ask, and this is not read.
 	Asker Asker
+	// Personas are the agent types the adapter found in persona files — the
+	// workspace's .claude/agents chain, ~/.claude/agents and installed
+	// plugins' agents/ — with their tools already mapped to native ids
+	// (tool.MapClaudeTools) and a user persona that would shadow a built-in
+	// already dropped (plan 026 §3.4). The session merges them with its own
+	// built-ins (BuiltinAgentTypes) in precedence order, lists them in the
+	// agent tool's description, and resolves a call's subagent_type against
+	// that one list. Like Prompt it is data, taken once at Open; nil offers
+	// the built-ins alone. A sub-agent has no agent tool, and this is not read
+	// for one.
+	Personas []Persona
 	// Child opens the session as a sub-agent of another (child.go, plan 026
 	// §3.2); nil is an ordinary session. Only the runner that starts children
 	// sets it, and fills the rest of these Options with the parent's own
@@ -305,7 +316,7 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, child, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.Personas, child, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

@@ -85,7 +85,7 @@ type ChildOptions struct {
 // todo list and the two tools that block on a person, because a child has
 // neither and nobody to ask. agent is filtered by name before any profile
 // registers it, so the rule holds the day one does.
-var childWithheld = []string{"agent", "todo_write", "ask_user_question", tool.ExitPlanModeTool}
+var childWithheld = []string{tool.AgentTool, "todo_write", "ask_user_question", tool.ExitPlanModeTool}
 
 // keeps reports whether a session opened with c offers the tool with id:
 // every tool for an ordinary session (c nil), and for a child every tool but

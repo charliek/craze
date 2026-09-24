@@ -259,7 +259,7 @@ func renderCatalog(rows []CatalogRow, red *redact.Replacer) string {
 	if len(blocks) == 0 {
 		return ""
 	}
-	return catalogHeading + "\n\n" + catalogPreamble + "\n" + fitRows(blocks)
+	return catalogHeading + "\n\n" + catalogPreamble + "\n" + fitRows(blocks, 0, maxCatalogRows)
 }
 
 // renderRow is one row's block of lines, or "" when the row cannot be listed.
@@ -305,28 +305,33 @@ func renderRow(r CatalogRow, red *redact.Replacer) string {
 	return b.String()
 }
 
-// fitRows is as many of blocks, from the front, as maxCatalogRows holds, with
-// a last line counting what was left out. The count is inside the budget
-// because it grows with the number dropped, so the loop asks what fits with
-// the line that would then be written, not without it.
-func fitRows(blocks []string) string {
+// fitRows is as many of blocks, from the front, as limit holds, with a last
+// line counting what was left out: the blocks that did not fit, and hidden,
+// the ones a caller could not list at all (the agent tool's tail drops a row
+// too long to be read whole, and counts it here). The count is inside the
+// budget because it grows with the number dropped, so the loop asks what fits
+// with the line that would then be written, not without it. The catalog hides
+// nothing and passes maxCatalogRows.
+func fitRows(blocks []string, hidden, limit int) string {
 	total := 0
 	for _, b := range blocks {
 		total += len(b)
 	}
-	if total <= maxCatalogRows {
-		return strings.Join(blocks, "")
-	}
-	for keep := len(blocks) - 1; keep >= 0; keep-- {
-		total -= len(blocks[keep])
-		more := fmt.Sprintf("… and %d more\n", len(blocks)-keep)
-		if total+len(more) <= maxCatalogRows {
+	for keep := len(blocks); keep >= 0; keep-- {
+		if keep < len(blocks) {
+			total -= len(blocks[keep])
+		}
+		more := ""
+		if n := len(blocks) - keep + hidden; n > 0 {
+			more = fmt.Sprintf("… and %d more\n", n)
+		}
+		if total+len(more) <= limit {
 			return strings.Join(blocks[:keep], "") + more
 		}
 	}
 	// Unreachable while the budget is kilobytes and the line is bytes; it is
 	// here so the function has no case that returns more than the budget.
-	return fmt.Sprintf("… and %d more\n", len(blocks))
+	return fmt.Sprintf("… and %d more\n", len(blocks)+hidden)
 }
 
 // cutToBudget is text within limit bytes, with truncatedLine in place of what

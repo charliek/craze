@@ -65,6 +65,19 @@ type toolset struct {
 	// sub-agent, its parent's, so a parent's and its children's edits of one
 	// file serialize (plan 026 §3.2). Fixed at Open.
 	locks *tool.PathLocks
+	// types are the agent types the session's agent tool offers: the
+	// caller's personas and the built-ins merged in precedence order, each
+	// name once (agentTypes, plan 026 §3.4). The tool's description lists them
+	// and a call's subagent_type resolves against them — one list, so the type
+	// a call gets is the one the model was shown. nil for a sub-agent, which
+	// has no agent tool. Fixed at Open.
+	types []tool.Persona
+	// offered are the profile's tools a child may be given, in the profile's
+	// order: what a type's tools resolve out of (childToolSet), both in the
+	// description and for the child the runner opens, so the tools a type is
+	// listed with are the tools its child gets. nil for a sub-agent. Fixed at
+	// Open.
+	offered []string
 
 	// planPath is the session's plan file, which every plan-mode reminder
 	// hands the model verbatim (reminders.go). It is held here for one reason:
@@ -131,7 +144,12 @@ type toolset struct {
 // path-lock table is the parent's; and there is no todo list and no sweep —
 // the parent's Open swept, and a fan-out would otherwise walk the directory
 // once per child.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, child *ChildOptions, seams toolSeams) (*toolset, error) {
+//
+// A session that is not a child merges personas with the built-in agent types
+// (agentTypes), and, when its profile has the agent tool, offers it with this
+// session's types and models after its description (describedTool, plan 026
+// §3.3); a child has no agent tool, and personas are not read for it.
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, personas []tool.Persona, child *ChildOptions, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -164,6 +182,17 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	ts.profile = p.Name
 	ts.byID = make(map[string]tool.Spec, len(p.Tools))
 	red := ts.redactor()
+	// The agent types and the tools a child may be given (toolset.types,
+	// toolset.offered): only a session that can start children has either.
+	if child == nil {
+		ts.types = agentTypes(personas)
+		every := &ChildOptions{AllTools: true}
+		for _, t := range p.Tools {
+			if id := t.Spec().ID; every.keeps(id) {
+				ts.offered = append(ts.offered, id)
+			}
+		}
+	}
 	// tools are the profile's tools this session offers: all of them, or a
 	// child's filtered set. The same list feeds the specs below and the
 	// dispatcher, so a tool the filter drops is neither offered nor run.
@@ -172,6 +201,15 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		s := t.Spec()
 		if !child.keeps(s.ID) {
 			continue
+		}
+		// The agent tool is offered with this session's agent types and models
+		// after its own description (plan 026 §3.3). It is wrapped before its
+		// spec is read for anything else, so the spec offered, the tools array
+		// the header hashes and the dispatcher's tool are the one decorated
+		// tool. A child never gets here: keeps withheld the tool from it.
+		if s.ID == tool.AgentTool {
+			t = &describedTool{Tool: t, tail: agentTail(ts.types, ts.offered, table, getenv, red)}
+			s = t.Spec()
 		}
 		tools = append(tools, t)
 		// bash's description names the machine's temporary directory, which

@@ -41,11 +41,16 @@ const (
 	// KindAsk is a call that blocks on the person: ask_user_question and
 	// exit_plan_mode (plan 023 §3.4). Its own kind for the same reason.
 	KindAsk Kind = "ask"
+	// KindTask is a call that runs a sub-agent: the agent tool (plan 026
+	// §3.3). "task" is grok-build's word for its own spawn_subagent, and the
+	// adapter draws a task-kind call as the TUI's existing task row
+	// (ToolEvent.Task); discovery's 05 guessed "think" before the design.
+	KindTask Kind = "task"
 )
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo, KindAsk:
+	case KindRead, KindEdit, KindExecute, KindSearch, KindTodo, KindAsk, KindTask:
 		return true
 	}
 	return false
@@ -190,6 +195,14 @@ type Result struct {
 	Content  string      // read: the text a card may expand
 	Edits    []FileEdit  // edit, write: the adapter diffs them
 	Trunc    Truncation
+	// Child is what a sub-agent spent, for the agent tool alone (plan 026
+	// §3.7): the sum of its steps' usage and the model they ran on, on every
+	// path it ended by — a failure and a cancel included, since a billed step
+	// is billed however the child ended. The harness records it on the step's
+	// tool entry as subagent_usage, priced by its own model rather than the
+	// parent's, which stamps that entry. nil for every other tool, and for an
+	// agent call that never opened a child.
+	Child *ChildUsage
 }
 
 // ExecOutput is a command's outcome, for its card.
@@ -281,6 +294,13 @@ type Env struct {
 	// reads. The dispatcher sets it per call (SetPlanPath), since a session
 	// learns it only once its transcript is named. "" is no plan file.
 	PlanPath string
+	// Subagents runs the agent tool's calls (plan 026 §3.1): the harness's
+	// runner, which opens a child session per call, behind the same kind of
+	// narrow seam as Todos and Asker, since this package may not import the
+	// harness. nil when the session starts no sub-agents — a sub-agent's own
+	// session, whose depth is 1, or a build that wired no runner — and the
+	// agent tool then answers with a tool_error result.
+	Subagents Subagents
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken

@@ -28,6 +28,15 @@ const (
 // there is no plan to present (panel correction 17).
 const ExitPlanModeTool = "exit_plan_mode"
 
+// AgentTool is the id of the tool that starts a sub-agent (plan 026 §3.3).
+// ModeGate knows the name for the opposite reason it knows exit_plan_mode's:
+// it is allowed by name in every mode, ahead of the mode's rules. The agent
+// tool is not ReadOnly — a child may edit — so ask mode would otherwise refuse
+// it for that alone, but the call itself changes nothing: the child inherits
+// the parent's mode (plan 026 §3.5), and its gate refuses what the mode
+// forbids, call by call.
+const AgentTool = "agent"
+
 // The refusals, grok-build's word for word (plan_mode.rs:325-371), with
 // craze's plan path spliced in. They are what the model reads back as the
 // call's error result, so each says what the rule is rather than that a rule
@@ -121,6 +130,10 @@ func Raise(s *atomic.Int32, mode string) {
 //     carries the rule.
 //   - ask: a call that is not ReadOnly is refused.
 //   - any mode but plan: exit_plan_mode is refused by name.
+//   - every mode: agent is allowed by name, ahead of all of the above, and
+//     goes inward like any call the mode allows (plan 026 §3.3, panel GLM 8).
+//     The restriction reaches the child instead: it runs in its parent's mode
+//     and is tightened by the parent's later switches (NewChildModeGate).
 //
 // The mode is read atomically on every call, so SetMode is effective at once:
 // the next call whose Check reaches the read is judged under the new mode,
@@ -213,6 +226,15 @@ func (g *ModeGate) PlanPath() string { return *g.planPath.Load() }
 
 // Check is the Gate.
 func (g *ModeGate) Check(ctx context.Context, req Request) (Decision, error) {
+	// By exact name, before the mode is read: the plan branch would otherwise
+	// judge the call by its kind and ask mode by ReadOnly, and neither says
+	// anything about a call that only starts an agent the mode then binds. A
+	// sub-agent's gate never sees one — a child is not offered the tool, and
+	// the dispatcher refuses a call to a tool it does not have before any gate
+	// runs — so the rule is the parent's in practice.
+	if req.Tool == AgentTool {
+		return g.inner.Check(ctx, req)
+	}
 	mode, raised := g.judgedMode()
 	if mode != ModePlan && req.Tool == ExitPlanModeTool {
 		return Deny{Reason: planDisabledText}, nil

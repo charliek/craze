@@ -47,10 +47,12 @@ const truncatedHint = "The tool call succeeded but the output was truncated. "
 // from the head or the tail, up to both limits, with opencode's notice of
 // what was cut; the full text is written to a spill file under home, named
 // from id, and the notice says where (truncate.ts:87-139, less its Task-tool
-// variant: craze has no Task tool). If the spill file cannot be written the
-// text is cut all the same, and the notice says the rest was not saved:
-// failing the call instead could make the model repeat a command that
-// already had its effect.
+// variant, which tells the model to have an explore agent read the spill
+// file: craze has sub-agents now, the agent tool, and the variant stays out
+// all the same, so a truncated result never invites a child just to read it —
+// plan 026 §3.3). If the spill file cannot be written the text is cut all the
+// same, and the notice says the rest was not saved: failing the call instead
+// could make the model repeat a command that already had its effect.
 //
 // A single line longer than MaxBytes keeps nothing of itself, as in
 // opencode. dir must be Head or Tail; None returns text as it is.

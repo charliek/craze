@@ -288,3 +288,25 @@ Deliberate differences in behaviour:
 | todo_write returns no id with an item                             | each item carries its id                                                                       | the model needs it to patch a row |
 | the list and an id are unbounded                                  | 64 items of 200 bytes, a 64-byte id, 256 KiB and 256 updates a call                            | the list rides in every event |
 | exit_plan_mode requires enter_plan_mode                           | there is no enter_plan_mode: the person enters plan mode                                       | plan 023 section 4 |
+
+
+A tool of craze's own
+---------------------
+
+The agent tool (agent.go and descriptions/agent.txt; plan 026 section 3.3)
+is neither opencode's nor grok-build's, and its description is craze's own
+wording. It opens with one sentence naming the tool as Claude Code and
+grok-build do ("Claude Code calls this tool `Agent` (formerly `Task`); grok
+calls it `task`."), the pattern of the three tools above (D-53). Its id is
+agent where opencode's and grok-build's are task, because in craze's TUI
+"tasks" are the todo list. Its first three parameters -- description,
+prompt and subagent_type -- are the names opencode's task tool and Claude
+Code's Agent tool share; model and effort are craze's own, a choice per
+call as codex makes it. Each session appends the agent types and models it
+offers to the description (the harness's decorator); the text here is what
+testdata/specs.golden pins once the profile registers the tool.
+
+opencode's truncation hint for an agent that has its task tool
+(truncate.ts, "Use the Task tool to have explore agent process this file")
+is not ported: a truncated result never invites a sub-agent just to read
+it.
