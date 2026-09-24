@@ -541,11 +541,22 @@ func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 		{Type: agent.EventThought, Agent: "sub \"<&>\" é ", Text: strings.Repeat("th", 300), At: at(4)},
 		{Type: agent.EventText, Text: strings.Repeat("reply ", 100), At: at(5)},
 	})
+	// Mandatory sections carried as heads, with their marks (r5): a requeued
+	// row, a todo, a catalog and an open question's title past ItemCap.
+	over := strings.Repeat("o", ItemCap+100)
+	capped := sequenced(append(sessionScript(),
+		agent.Event{Type: agent.EventQueue, Queue: &agent.QueuedPrompt{ID: "q-big", Text: over}, QueueChange: agent.QueueQueued, At: at(20)},
+		agent.Event{Type: agent.EventTodos, Todos: []agent.Todo{{ID: "t", Content: over, Status: "pending"}}, At: at(21)},
+		agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Commands: &agent.CommandsState{Commands: []agent.CommandInfo{{Name: "c", Description: over}}}}, At: at(22)},
+		agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-big", Title: over}, At: at(23)},
+		agent.Event{Type: agent.EventText, Text: "after", At: at(24)},
+	))
 	scripts := map[string]struct {
 		evs []agent.Event
 		o   Options
 	}{
 		"session":       {append(sessionScript(), laterScript(len(sessionScript()))...), Options{}},
+		"capped":        {capped, Options{}},
 		"race":          {raceScript(700), Options{Bounds: raceBounds}},
 		"escaped ids":   {odd, Options{}},
 		"session, open": {sessionScript(), Options{}},
@@ -554,6 +565,9 @@ func TestTheWindowCountsTheEncodingExactly(t *testing.T) {
 		m := New(sc.o)
 		foldAll(t, m, false, sc.evs...)
 		full, fb := snapshotOf(t, m, 1<<40)
+		if name == "capped" && (!full.TodosTruncated || len(full.TruncatedQueue) != 1 || !full.Settings.Truncated.Commands || !full.Asks[len(full.Asks)-1].Truncated) {
+			t.Fatalf("capped: the marks are missing: todos %v, queue %v, settings %+v", full.TodosTruncated, full.TruncatedQueue, full.Settings.Truncated)
+		}
 		prev := -1
 		refused := 0
 		for budget := 1; budget <= len(fb)+64; budget += max(1, len(fb)/200) {

@@ -466,9 +466,12 @@ func Code(err error) string { return classify(err).code }
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
-// can free. Attach is among them for the same reason — it subscribes — and it
-// is cancellable by its ctx in every wait it makes (the boundary's through
-// agent.SubscribeOptions.Ctx), which releases a caller but frees no slot: a
+// can free. Attach is among them for the same reason — it subscribes — and its
+// ctx bounds every wait that can be unbounded: the wait for the log's boundary
+// (through agent.SubscribeOptions.Ctx), and a ctx that ends while a snapshot is
+// cut ends the attach before it subscribes. The model's mutex is held for at
+// most one fold or one snapshot cut (X19), so acquiring it is not a context
+// wait. Cancelling releases a caller but frees no slot: a
 // client that attaches keeps its primary drained from another goroutine while
 // it does (plan 024 §3.6). Interject is
 // the one exception in use today: the TUI calls it from Update, as it always
@@ -493,7 +496,9 @@ type Control interface {
 	// Attach is a client's way in mid-session: a snapshot of the engine's
 	// transcript model and a subscription from the event after it, or a
 	// subscription from the client's own cursor when the log can serve it
-	// (attach.go). It blocks, and ctx bounds every wait it makes.
+	// (attach.go). It blocks, and ctx bounds every wait that can be unbounded
+	// — the log's boundary; the model's mutex, held for one fold or one cut at
+	// most, is not a context wait.
 	Attach(ctx context.Context, o AttachOptions) (*Attachment, error)
 	State() State
 	NewClientID() string

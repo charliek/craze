@@ -841,6 +841,26 @@ func (s *server) tool(id json.RawMessage) {
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
 }
 
+// awaitGate is CRAZE_FAKE_GATE's whole definition: with a path set, it blocks
+// until it has read one byte from it — a FIFO the test writes once per turn to
+// let the turn go on. Opening a FIFO for reading waits for its writer and the
+// read waits for the byte, so the barrier has no delay in it. An empty path
+// (the knob unset), a path that cannot be opened and a writer that closes
+// without writing all return at once. Only tasks uses it, after its first
+// tool_call.
+func awaitGate(path string) {
+	if path == "" {
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	var b [1]byte
+	_, _ = f.Read(b[:])
+}
+
 func (s *server) tasks(id json.RawMessage) {
 	s.update(fakeSessionID, map[string]any{
 		"sessionUpdate": acp.UpdateToolCall,
@@ -849,6 +869,7 @@ func (s *server) tasks(id json.RawMessage) {
 		"title":         "Subagent research",
 		"status":        "pending",
 	})
+	awaitGate(os.Getenv("CRAZE_FAKE_GATE"))
 	s.update(fakeSessionID, map[string]any{
 		"sessionUpdate": acp.UpdateToolCall,
 		"toolCallId":    "sh-1",

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -855,6 +856,60 @@ func TestAttachIsCancellableWithThePrimaryFull(t *testing.T) {
 	r.until(func(ev agent.Event) bool { return ev.Seq == parked })
 	if got := goroutinesRunning(ownerFrame); got > owners {
 		t.Fatalf("%d subscription owners run once the log moved on, %d before: the cancelled attach registered one", got, owners)
+	}
+}
+
+// doneWatch is a context that counts the calls to Done made once watch is set:
+// Subscribe reads ctx.Done() first thing, and Attach's own checks read only
+// Err, so a count of zero proves Subscribe was never entered.
+type doneWatch struct {
+	context.Context
+	watch atomic.Bool
+	dones atomic.Int32
+}
+
+func (c *doneWatch) Done() <-chan struct{} {
+	if c.watch.Load() {
+		c.dones.Add(1)
+	}
+	return c.Context.Done()
+}
+
+// TestAttachCancelledWhileItsSnapshotIsCutSubscribesNothing (r4 finding 1): a
+// ctx that ends while the snapshot is being cut — cancelled from the hook
+// between Snapshot and Subscribe, with no publisher anywhere near the boundary,
+// so Subscribe would admit at once — ends the attach with ctx's error before
+// Subscribe is entered: nothing is registered, no goroutine is left in Attach,
+// and the log's next commits reach only the rig's own subscription.
+func TestAttachCancelledWhileItsSnapshotIsCutSubscribesNothing(t *testing.T) {
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &doneWatch{Context: base}
+	var snapped []uint64
+	r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, &hooks{attachSnapshotted: func(seq uint64, _ int) {
+		snapped = append(snapped, seq)
+		ctx.watch.Store(true)
+		cancel()
+	}})
+	at := r.publish(textOf(10, "x"), textOf(10, "y"))
+	owners := goroutinesRunning(ownerFrame)
+
+	a, err := r.e.Attach(ctx, AttachOptions{})
+	if a != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("an attach cancelled while its snapshot was cut returned %+v, %v; want nil, context.Canceled", a, err)
+	}
+	if fmt.Sprint(snapped) != fmt.Sprint([]uint64{at}) {
+		t.Fatalf("snapshots cut at %v, want one at %d", snapped, at)
+	}
+	if n := ctx.dones.Load(); n != 0 {
+		t.Fatalf("Subscribe was entered after the cancel (ctx.Done read %d times)", n)
+	}
+	if got := goroutinesRunning(attachFrame); got != 0 {
+		t.Fatalf("%d goroutines are still in Attach", got)
+	}
+	r.publish(textOf(10, "after"))
+	if got := goroutinesRunning(ownerFrame); got > owners {
+		t.Fatalf("%d subscription owners run after a cancelled attach, %d before: it registered one", got, owners)
 	}
 }
 

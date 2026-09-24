@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -86,6 +87,13 @@ type Model struct {
 	finishSeq uint64
 
 	todos []agent.Todo
+	// todosTruncated and queueTruncated are the marks a snapshot this model
+	// was restored from left on the todo list and on queue rows by id (State's
+	// TodosTruncated and TruncatedQueue); a model folded from the event stream
+	// never sets them, and the event that replaces the list or the row clears
+	// its mark.
+	todosTruncated bool
+	queueTruncated map[string]bool
 	// asks are the open asks and ended the last-ended list, each keyed by
 	// id in the order they opened or ended (keyedList): no scan under the
 	// boundary, however many asks are open.
@@ -115,11 +123,11 @@ type Ask struct {
 	Body agent.AskBody
 	At   time.Time
 	// Truncated reports that the snapshot this model was restored from carried
-	// only the head of the body's text — a plan's Plan or Overview, a
-	// question's prompts and options, a permission's tool text over ItemCap
-	// (plan 024 §3.5) — so a client can say so. A model folded from the event
-	// stream never sets it; a new opening of the same id replaces the ask
-	// whole.
+	// only the head of some text of the ask — any string its body carries (a
+	// plan's, a question's, a permission's, every one of them) or its ID, over
+	// ItemCap (plan 024 §3.5) — so a client can say so. A model folded from
+	// the event stream never sets it; a new opening of the same id replaces the
+	// ask whole.
 	Truncated bool
 }
 
@@ -164,6 +172,19 @@ type Settings struct {
 	Plugins            []agent.PluginCommand
 	// SendNow is the engine's armed send-now; Armed false means none.
 	SendNow agent.SendNowState
+	// Truncated names the sections the snapshot this model was restored from
+	// carried only the head of some string of (over ItemCap, plan 024 §3.5),
+	// so a client can say so. A model folded from the event stream never sets
+	// it; the next delta that carries a section replaces it whole and clears
+	// that section's mark.
+	Truncated SettingsTruncated
+}
+
+// SettingsTruncated is Settings' truncation mark, one per section.
+type SettingsTruncated struct {
+	Title, Mode, Model        bool
+	Config, Commands, Plugins bool
+	SendNow                   bool
 }
 
 // New builds an empty model.
@@ -423,7 +444,18 @@ type State struct {
 	// Agents is the roster, in the order the rows first appeared.
 	Agents []agent.SubagentInfo
 	Todos  []agent.Todo
-	Turn   Turn
+	// TodosTruncated reports that the snapshot this model was restored from
+	// carried only the head of some todo's text (over ItemCap, plan 024 §3.5);
+	// never so for a model folded from the event stream. The next todo list
+	// replaces the list whole and clears it.
+	TodosTruncated bool
+	// TruncatedQueue names the queue rows whose Text the snapshot this model
+	// was restored from carried only the head of (over ItemCap); nil when
+	// there is none, which is always so for a model folded from the event
+	// stream. The next queue event for a row replaces or removes it and takes
+	// it out of this set.
+	TruncatedQueue map[string]bool
+	Turn           Turn
 	// Replaying is true inside a session/load replay bracket.
 	Replaying bool
 	// Tools is every tool's last state by id: the payload of each tool entry
@@ -510,6 +542,10 @@ type cut struct {
 	replaying   bool
 	settings    Settings
 	queue       []agent.QueuedPrompt
+	// todosTruncated and queueTruncated are the model's marks (the map is
+	// the cut's own copy).
+	todosTruncated bool
+	queueTruncated map[string]bool
 }
 
 type transcriptCut struct {
@@ -572,6 +608,10 @@ func (m *Model) cutLocked() cut {
 		settings:    m.settings,
 		queue:       append([]agent.QueuedPrompt(nil), m.queue...),
 	}
+	c.todosTruncated = m.todosTruncated
+	if len(m.queueTruncated) > 0 {
+		c.queueTruncated = maps.Clone(m.queueTruncated)
+	}
 	if len(m.subOrder) > 0 {
 		c.subs = make([]subCut, 0, len(m.subOrder))
 		for _, id := range m.subOrder {
@@ -621,6 +661,15 @@ func (c *cut) state() State {
 		Todos:     c.todos,
 		Turn:      c.turn,
 		Replaying: c.replaying,
+	}
+	s.TodosTruncated = c.todosTruncated
+	for _, q := range c.queue {
+		if c.queueTruncated[q.ID] {
+			if s.TruncatedQueue == nil {
+				s.TruncatedQueue = make(map[string]bool)
+			}
+			s.TruncatedQueue[q.ID] = true
+		}
 	}
 	if len(s.Asks) == 0 {
 		s.Asks = nil

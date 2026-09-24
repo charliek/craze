@@ -38,8 +38,8 @@ import (
 //     decoder refuses any other. A key it does not know is ignored.
 //
 // The object is the header — the version, the envelope and the mandatory
-// sections — then "main" and "subs", each transcript an object of its
-// continuation members and its "entries". The transcripts are written member
+// sections with their truncation marks (ItemCap) — then "main" and "subs",
+// each transcript an object of its continuation members and its "entries". The transcripts are written member
 // by member (appendTranscript: appendScalars, appendToolMember, encodeEntry)
 // rather than through a struct, so Snapshot's window can count the length each
 // entry and member adds, with the same functions, and hold the encoding to its
@@ -79,12 +79,14 @@ type wireHeader struct {
 	FinishSeq   uint64            `json:"finishSeq,omitempty"`
 	Agents      []wireAgentRow    `json:"agents,omitempty"`
 	Todos       []json.RawMessage `json:"todos,omitempty"`
+	TodosCut    bool              `json:"todosTruncated,omitempty"`
 	Asks        []wireAsk         `json:"asks,omitempty"`
 	Ended       []wireAskEnding   `json:"ended,omitempty"`
 	Turn        *wireTurn         `json:"turn,omitempty"`
 	Replaying   bool              `json:"replaying,omitempty"`
 	Settings    *wireSettings     `json:"settings,omitempty"`
 	Queue       []json.RawMessage `json:"queue,omitempty"`
+	QueueCut    []string          `json:"truncatedQueue,omitempty"`
 }
 
 type wireAgentRow struct {
@@ -136,6 +138,18 @@ type wireSettings struct {
 	Commands json.RawMessage `json:"commands,omitempty"`
 	Plugins  json.RawMessage `json:"plugins,omitempty"`
 	SendNow  json.RawMessage `json:"sendNow,omitempty"`
+	// Truncated is Settings.Truncated, absent when no section is marked.
+	Truncated *wireSettingsTruncated `json:"truncated,omitempty"`
+}
+
+type wireSettingsTruncated struct {
+	Title    bool `json:"title,omitempty"`
+	Mode     bool `json:"mode,omitempty"`
+	Model    bool `json:"model,omitempty"`
+	Config   bool `json:"config,omitempty"`
+	Commands bool `json:"commands,omitempty"`
+	Plugins  bool `json:"plugins,omitempty"`
+	SendNow  bool `json:"sendNow,omitempty"`
 }
 
 type wireEntry struct {
@@ -230,6 +244,8 @@ func encodeHeader(jw *jsonWriter, s *Snapshot) ([]byte, error) {
 		Local:       s.Local,
 		FinishSeq:   s.FinishSeq,
 		Replaying:   s.Replaying,
+		TodosCut:    s.TodosTruncated,
+		QueueCut:    s.TruncatedQueue,
 	}
 	var err error
 	fail := func(what string, e error) error {
@@ -315,8 +331,12 @@ func encodeSettings(s *Settings) (*wireSettings, error) {
 			return nil, err
 		}
 	}
+	if t := s.Truncated; t != (SettingsTruncated{}) {
+		w.Truncated = &wireSettingsTruncated{Title: t.Title, Mode: t.Mode, Model: t.Model,
+			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, SendNow: t.SendNow}
+	}
 	if w.Title == "" && w.Mode == "" && w.Model == "" &&
-		w.Config == nil && w.Commands == nil && w.Plugins == nil && w.SendNow == nil {
+		w.Config == nil && w.Commands == nil && w.Plugins == nil && w.SendNow == nil && w.Truncated == nil {
 		return nil, nil
 	}
 	return w, nil
@@ -572,6 +592,10 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 		FinishSeq:   w.FinishSeq,
 		Replaying:   w.Replaying,
 	}
+	s.TodosTruncated = w.TodosCut
+	if len(w.QueueCut) > 0 {
+		s.TruncatedQueue = w.QueueCut
+	}
 	for _, r := range w.Agents {
 		info, err := agent.DecodeSubagentInfo(r.Info)
 		if err != nil {
@@ -645,6 +669,10 @@ func DecodeSnapshot(data []byte) (*Snapshot, error) {
 
 func decodeSettings(w *wireSettings) (Settings, error) {
 	s := Settings{Title: w.Title, Mode: w.Mode, Model: w.Model}
+	if t := w.Truncated; t != nil {
+		s.Truncated = SettingsTruncated{Title: t.Title, Mode: t.Mode, Model: t.Model,
+			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, SendNow: t.SendNow}
+	}
 	c, err := agent.DecodeConfigState(w.Config)
 	if err != nil {
 		return s, err

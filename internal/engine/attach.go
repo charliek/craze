@@ -120,10 +120,15 @@ type Attachment struct {
 // It blocks: Subscribe waits for the publishing boundary, which a publisher
 // holds while it waits for room in the primary. So it belongs on a goroutine
 // that is not the primary's reader (Control's contract), and ctx bounds every
-// wait it makes — the boundary through agent.SubscribeOptions.Ctx, and the
-// attempts between. A cancelled attach registers nothing and leaves no goroutine
-// behind. The model's mutex is released before Subscribe is called, and Attach
-// holds no lock of its own when it enters it (the rule above).
+// wait that can be unbounded: the wait for the log's boundary, through
+// agent.SubscribeOptions.Ctx. ctx is consulted before each snapshot and again
+// after it, before Subscribe, so a ctx that ends while a snapshot is cut ends
+// the attach there. Taking the model's mutex for the cut is not a context
+// wait: the mutex is held for at most one fold or one snapshot cut (X19: a
+// cut's median is ~0.3 ms on the worst-case session), so it is acquired
+// unconditionally. A cancelled attach registers nothing and leaves no
+// goroutine behind. The model's mutex is released before Subscribe is called,
+// and Attach holds no lock of its own when it enters it (the rule above).
 func (e *Engine) Attach(ctx context.Context, o AttachOptions) (*Attachment, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -157,6 +162,11 @@ func (e *Engine) Attach(ctx context.Context, o AttachOptions) (*Attachment, erro
 		}
 		if h := e.hooks; h != nil && h.attachSnapshotted != nil {
 			h.attachSnapshotted(snap.Seq, attempt)
+		}
+		// A ctx that ended while the snapshot was cut ends the attach here,
+		// before Subscribe: nothing is registered (r4 finding 1).
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		sub, err := subscribe(agent.Cursor{Incarnation: snap.Incarnation, Seq: snap.Seq})
 		if err == nil {

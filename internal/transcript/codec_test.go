@@ -448,8 +448,8 @@ const goldenAt = `"2026-09-22T10:30:45.123456789Z"`
 // TestSnapshotCodecPinsTheWireShape (A7) pins one body per section byte for
 // byte: the header's envelope and each mandatory section (the roster, the
 // todos, the asks and their bodies, the ended list, the turn, the settings,
-// the queue), then a transcript's continuation members, an entry of every
-// kind, and a child's window. Keys are camelCase, "version" comes first, zero
+// the queue) and each truncation mark, then a transcript's continuation
+// members, an entry of every kind, and a child's window. Keys are camelCase, "version" comes first, zero
 // values are absent, times are UTC with nanoseconds, HTML is not escaped, the
 // leaf payloads have exactly the event codec's shape, and omitted tools are
 // written in key order. A change here is a change to what S2 sends, and
@@ -473,6 +473,8 @@ func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
 				`{"info":{"id":"sub-2","status":"completed","toolsUsed":["Read"]},"finish":2,"truncated":true}],"main":{}}`},
 		{"the todos", Snapshot{Todos: []agent.Todo{{ID: "1", Content: "write", Status: "completed"}, {ID: "2", Content: "test", Status: "pending"}}},
 			`{"version":1,"todos":[{"id":"1","content":"write","status":"completed"},{"id":"2","content":"test","status":"pending"}],"main":{}}`},
+		{"the todos, truncated", Snapshot{Todos: []agent.Todo{{ID: "1", Content: "wr"}}, TodosTruncated: true},
+			`{"version":1,"todos":[{"id":"1","content":"wr"}],"todosTruncated":true,"main":{}}`},
 		{"the asks", Snapshot{Asks: []Ask{
 			{ID: "perm-1", Kind: agent.AskPermission, At: goldenTime, Body: agent.AskBody{Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "Shell",
 				Options: []agent.PermissionOption{{OptionID: "once", Name: "Allow", Kind: "allow_once"}}}}},
@@ -505,8 +507,16 @@ func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
 				`"commands":{"commands":[{"name":"review","description":"look it over"}]},` +
 				`"plugins":{"plugins":[{"plugin":"p","bare":"b","qualified":"p:b","kind":"skill"}]},` +
 				`"sendNow":{"armed":true,"text":"now","fromRow":"q-2","turn":"turn-3"}},"main":{}}`},
+		{"the settings' truncation marks", Snapshot{Settings: Settings{Truncated: SettingsTruncated{
+			Title: true, Mode: true, Model: true, Config: true, Commands: true, Plugins: true, SendNow: true}}},
+			`{"version":1,"settings":{"truncated":{"title":true,"mode":true,"model":true,"config":true,"commands":true,"plugins":true,"sendNow":true}},"main":{}}`},
+		{"one section's truncation mark", Snapshot{Settings: Settings{Commands: []agent.CommandInfo{{Name: "review", Description: "lo"}},
+			Truncated: SettingsTruncated{Commands: true}}},
+			`{"version":1,"settings":{"commands":{"commands":[{"name":"review","description":"lo"}]},"truncated":{"commands":true}},"main":{}}`},
 		{"the queue", Snapshot{Queue: []agent.QueuedPrompt{{ID: "q-1", Text: "next", QueuedAt: goldenTime, Version: 2}}},
 			`{"version":1,"queue":[{"id":"q-1","text":"next","queuedAt":` + goldenAt + `,"version":2}],"main":{}}`},
+		{"the queue, a row truncated", Snapshot{Queue: []agent.QueuedPrompt{{ID: "q-1", Text: "ne"}, {ID: "q-2", Text: "after"}}, TruncatedQueue: []string{"q-1"}},
+			`{"version":1,"queue":[{"id":"q-1","text":"ne"},{"id":"q-2","text":"after"}],"truncatedQueue":["q-1"],"main":{}}`},
 		{"the main transcript: its continuation and an entry of every kind", Snapshot{Main: TranscriptSnap{
 			Trimmed: true, StreamOpen: true, TailCut: true, TodoPlanned: 3, TodoDone: true,
 			Entries: []Entry{

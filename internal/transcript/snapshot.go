@@ -19,18 +19,32 @@ const SnapshotVersion = 1
 const DefaultSnapshotBytes = 4 << 20
 
 // ItemCap is the per-item cap of a snapshot's mandatory sections (plan 024
-// §3.5): an open ask's body text — a plan's Plan and Overview, a question's
-// prompts and its options' labels and descriptions, a permission's tool text
-// — a roster row's Prompt and Output, and the current turn's Text are each
-// carried as their head, cut back to a rune boundary, when they are longer,
-// and the ask, row or turn is marked Truncated (r3 finding 3: the turn's Text
-// is otherwise mandatory and uncapped, so a multi-MiB prompt makes every
-// snapshot ErrSnapshotTooLarge until the next turn).
+// §3.5). Each of these strings is carried as its head, cut back to a rune
+// boundary, when it is longer, and what carried it is marked:
+//
+//   - every string an open ask carries — its ID and every string of its body,
+//     a permission's, a question's (answers included) or a plan's (its todos
+//     included) — marking the ask Truncated (r5 finding 1);
+//   - a roster row's Prompt and Output, marking the row (AgentRow.Truncated);
+//   - the current turn's Text, marking Turn.Truncated (r3 finding 3: the
+//     turn's Text is otherwise mandatory and uncapped, so a multi-MiB prompt
+//     makes every snapshot ErrSnapshotTooLarge until the next turn);
+//   - every string of every todo, marking Snapshot.TodosTruncated;
+//   - a queue row's Text, naming the row in Snapshot.TruncatedQueue (r5
+//     finding 2: agent.PromptQueue.PushFront, a requeued interjection, is not
+//     held to the queue's 32 KiB limit);
+//   - every string of every settings section — the title, mode and model, the
+//     config, command and plugin catalogs, the send-now — marking that
+//     section in Settings.Truncated.
 const ItemCap = 256 << 10
 
 // ErrSnapshotTooLarge is Snapshot's refusal: the mandatory sections alone, or
 // they and the main transcript's newest entry, encode to more than the byte
-// budget. It is never a silent drop (plan 024 §3.5).
+// budget. It is never a silent drop (plan 024 §3.5). The mandatory sections'
+// text is capped (ItemCap), so what can still reach it there is the NUMBER of
+// items — asks, roster rows, todos, queue rows, catalog entries, ended asks —
+// which no cap bounds (or an id or status no agent mints at that size: the
+// strings ItemCap does not list are carried whole).
 var ErrSnapshotTooLarge = errors.New("transcript: snapshot too large for its byte budget")
 
 // Snapshot is one model at one Seq, bounded to a byte budget: what a client
@@ -58,10 +72,14 @@ type Snapshot struct {
 	Agents    []AgentRow
 	FinishSeq uint64
 	// Todos, Asks (open, in the order they opened), Turn, Replaying,
-	// Settings and Queue are the model's state (State), each ask capped at
-	// ItemCap.
-	Todos []agent.Todo
-	Asks  []Ask
+	// Settings and Queue are the model's state (State), their strings capped
+	// at ItemCap. TodosTruncated marks a todo list carried as heads (State's
+	// TodosTruncated), and TruncatedQueue names, in queue order, the rows
+	// whose Text was (State's TruncatedQueue); an ask, the turn and the
+	// settings carry their own marks.
+	Todos          []agent.Todo
+	TodosTruncated bool
+	Asks           []Ask
 	// Ended is the last-ended ask list (Model.EndedAsks), carried so a
 	// restored model's list and its later evictions are the first one's.
 	Ended     []AskEnding
@@ -69,6 +87,8 @@ type Snapshot struct {
 	Replaying bool
 	Settings  Settings
 	Queue     []agent.QueuedPrompt
+	// TruncatedQueue is described with Todos above.
+	TruncatedQueue []string
 }
 
 // TranscriptSnap is one transcript in a snapshot: a suffix of its entries and
@@ -121,6 +141,12 @@ type AgentRow struct {
 // encoding (EncodeSnapshot) — envelope and metadata included; budget <= 0 is
 // DefaultSnapshotBytes (plan 024 §3.5).
 //
+// The mandatory sections' text is carried as at most its ItemCap head, marked
+// where it was cut (ItemCap), so no one oversized string makes every snapshot
+// fail. What can still put the mandatory sections over the budget is an
+// unbounded NUMBER of items — asks, roster rows, todos, queue rows, catalog
+// entries — and that is ErrSnapshotTooLarge, never a drop.
+//
 // Under the model's lock it only takes the cut: pointer copies of the entries,
 // the roster and the asks, and each open run's tail (≤ StreamText). Everything
 // else runs after the lock is released — the per-item caps, every call to an
@@ -158,13 +184,15 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 		Seq:         c.seq,
 		Local:       c.local,
 		FinishSeq:   c.finishSeq,
-		Todos:       c.todos,
 		Ended:       c.ended,
 		Turn:        capTurn(c.turn),
 		Replaying:   c.replaying,
-		Settings:    c.settings,
-		Queue:       c.queue,
+		Settings:    capSettings(c.settings),
 	}
+	var tc capper
+	s.Todos = capEach(&tc, c.todos, capTodo)
+	s.TodosTruncated = c.todosTruncated || tc.cut
+	s.Queue, s.TruncatedQueue = capQueue(c.queue, c.queueTruncated)
 	if len(c.agents) > 0 {
 		s.Agents = make([]AgentRow, len(c.agents))
 		for i, r := range c.agents {
@@ -452,58 +480,184 @@ func capTurn(t Turn) Turn {
 	return t
 }
 
-// capAsk is an open ask with its body's text capped at ItemCap: the payload
-// is copied only where something is cut, so the event's own is never written.
-func capAsk(a Ask) Ask {
-	cut := false
-	if p := a.Body.Plan; p != nil && (len(p.Plan) > ItemCap || len(p.Overview) > ItemCap) {
-		cp := *p
-		cp.Plan, _ = headOf(cp.Plan, ItemCap)
-		cp.Overview, _ = headOf(cp.Overview, ItemCap)
-		a.Body.Plan, cut = &cp, true
-	}
-	if q := a.Body.Question; q != nil && questionOverCap(q) {
-		cp := *q
-		cp.Questions = slices.Clone(q.Questions)
-		for i := range cp.Questions {
-			qq := &cp.Questions[i]
-			qq.Prompt, _ = headOf(qq.Prompt, ItemCap)
-			if optionsOverCap(qq.Options) {
-				qq.Options = slices.Clone(qq.Options)
-				for j := range qq.Options {
-					o := &qq.Options[j]
-					o.Label, _ = headOf(o.Label, ItemCap)
-					o.Description, _ = headOf(o.Description, ItemCap)
-				}
-			}
+// capper caps strings at ItemCap and remembers whether it cut any.
+type capper struct{ cut bool }
+
+func (c *capper) str(s string) string {
+	h, cut := headOf(s, ItemCap)
+	c.cut = c.cut || cut
+	return h
+}
+
+// capEach is s with f applied to each element, and cut when f cut any: s
+// itself when nothing was cut (nil stays nil, empty stays empty), else a copy
+// — the elements are the event's own, and never written.
+func capEach[E any](c *capper, s []E, f func(*capper, E) E) []E {
+	var out []E
+	for i := range s {
+		var ec capper
+		e := f(&ec, s[i])
+		if !ec.cut {
+			continue
 		}
-		a.Body.Question, cut = &cp, true
+		if out == nil {
+			out = slices.Clone(s)
+		}
+		out[i] = e
+		c.cut = true
 	}
-	if p := a.Body.Permission; p != nil && len(p.Tool) > ItemCap {
-		cp := *p
-		cp.Tool, _ = headOf(cp.Tool, ItemCap)
-		a.Body.Permission, cut = &cp, true
+	if out == nil {
+		return s
 	}
-	a.Truncated = a.Truncated || cut
+	return out
+}
+
+// capAsk is an open ask with its ID and every string of its body capped at
+// ItemCap (r5 finding 1): the payload is copied only where something is cut,
+// so the event's own is never written. The strings are agent's payload
+// types' own, field by field; TestEveryStringOfAnOpenAskIsCapped fills each
+// one reachable from an ask by reflection, so a string field added to them
+// later and not capped here fails it.
+func capAsk(a Ask) Ask {
+	var c capper
+	a.ID = c.str(a.ID)
+	if p := a.Body.Permission; p != nil {
+		a.Body.Permission = capPtr(&c, p, capPermission)
+	}
+	if q := a.Body.Question; q != nil {
+		a.Body.Question = capPtr(&c, q, capQuestion)
+	}
+	if p := a.Body.Plan; p != nil {
+		a.Body.Plan = capPtr(&c, p, capPlan)
+	}
+	a.Truncated = a.Truncated || c.cut
 	return a
 }
 
-func questionOverCap(q *agent.QuestionEvent) bool {
-	for i := range q.Questions {
-		if len(q.Questions[i].Prompt) > ItemCap || optionsOverCap(q.Questions[i].Options) {
-			return true
-		}
+// capPtr is *p capped by f: p itself when nothing was cut, else a pointer to
+// the capped copy.
+func capPtr[T any](c *capper, p *T, f func(*capper, T) T) *T {
+	var pc capper
+	v := f(&pc, *p)
+	if !pc.cut {
+		return p
 	}
-	return false
+	c.cut = true
+	return &v
 }
 
-func optionsOverCap(opts []agent.Option) bool {
-	for i := range opts {
-		if len(opts[i].Label) > ItemCap || len(opts[i].Description) > ItemCap {
-			return true
+func capPermission(c *capper, p agent.PermissionEvent) agent.PermissionEvent {
+	p.ID, p.Tool = c.str(p.ID), c.str(p.Tool)
+	p.Options = capEach(c, p.Options, func(c *capper, o agent.PermissionOption) agent.PermissionOption {
+		o.OptionID, o.Name, o.Kind = c.str(o.OptionID), c.str(o.Name), c.str(o.Kind)
+		return o
+	})
+	return p
+}
+
+func capQuestion(c *capper, q agent.QuestionEvent) agent.QuestionEvent {
+	q.ID, q.Title = c.str(q.ID), c.str(q.Title)
+	q.Questions = capEach(c, q.Questions, func(c *capper, qq agent.Question) agent.Question {
+		qq.ID, qq.Prompt = c.str(qq.ID), c.str(qq.Prompt)
+		qq.Options = capEach(c, qq.Options, func(c *capper, o agent.Option) agent.Option {
+			o.ID, o.Label, o.Description = c.str(o.ID), c.str(o.Label), c.str(o.Description)
+			return o
+		})
+		return qq
+	})
+	q.Answers = capAnswers(c, q.Answers)
+	return q
+}
+
+// capAnswers is a question's answers with every key and value capped: the
+// map itself when nothing was cut, else a copy.
+func capAnswers(c *capper, m map[string][]string) map[string][]string {
+	over := false
+	for k, v := range m {
+		if len(k) > ItemCap || slices.ContainsFunc(v, func(s string) bool { return len(s) > ItemCap }) {
+			over = true
+			break
 		}
 	}
-	return false
+	if !over {
+		return m
+	}
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		out[c.str(k)] = capEach(c, v, func(c *capper, s string) string { return c.str(s) })
+	}
+	return out
+}
+
+func capPlan(c *capper, p agent.PlanEvent) agent.PlanEvent {
+	p.ID, p.Name = c.str(p.ID), c.str(p.Name)
+	p.Overview, p.Plan = c.str(p.Overview), c.str(p.Plan)
+	p.Todos = capEach(c, p.Todos, capTodo)
+	return p
+}
+
+func capTodo(c *capper, t agent.Todo) agent.Todo {
+	t.ID, t.Content, t.Status = c.str(t.ID), c.str(t.Content), c.str(t.Status)
+	return t
+}
+
+// capQueue is the queue with each row's Text capped at ItemCap (r5 finding 2),
+// and the ids, in queue order, of the rows cut here or already marked (a
+// model restored from a snapshot that cut them). q is the cut's own copy.
+func capQueue(q []agent.QueuedPrompt, marked map[string]bool) ([]agent.QueuedPrompt, []string) {
+	var ids []string
+	for i := range q {
+		var c capper
+		q[i].Text = c.str(q[i].Text)
+		if c.cut || marked[q[i].ID] {
+			ids = append(ids, q[i].ID)
+		}
+	}
+	return q, ids
+}
+
+// capSettings is the settings with every string of every section capped at
+// ItemCap, each section that was cut marked in Truncated (r5 finding 2). A
+// mark already set is kept, as capTurn keeps Turn.Truncated.
+func capSettings(s Settings) Settings {
+	t := &s.Truncated
+	one := func(v *string, mark *bool) {
+		var c capper
+		*v = c.str(*v)
+		*mark = *mark || c.cut
+	}
+	one(&s.Title, &t.Title)
+	one(&s.Mode, &t.Mode)
+	one(&s.Model, &t.Model)
+	var c capper
+	s.Config = capEach(&c, s.Config, func(c *capper, o agent.ConfigOption) agent.ConfigOption {
+		o.ID, o.Name, o.Category = c.str(o.ID), c.str(o.Name), c.str(o.Category)
+		o.Type, o.Current = c.str(o.Type), c.str(o.Current)
+		o.SelectValues = capEach(c, o.SelectValues, func(c *capper, v agent.SelectValue) agent.SelectValue {
+			v.Value, v.Name = c.str(v.Value), c.str(v.Name)
+			return v
+		})
+		return o
+	})
+	t.Config = t.Config || c.cut
+	c = capper{}
+	s.Commands = capEach(&c, s.Commands, func(c *capper, cm agent.CommandInfo) agent.CommandInfo {
+		cm.Name, cm.Description = c.str(cm.Name), c.str(cm.Description)
+		return cm
+	})
+	t.Commands = t.Commands || c.cut
+	c = capper{}
+	s.Plugins = capEach(&c, s.Plugins, func(c *capper, p agent.PluginCommand) agent.PluginCommand {
+		p.Plugin, p.Bare, p.Display = c.str(p.Plugin), c.str(p.Bare), c.str(p.Display)
+		p.Qualified, p.Description, p.Kind = c.str(p.Qualified), c.str(p.Description), c.str(p.Kind)
+		return p
+	})
+	t.Plugins = t.Plugins || c.cut
+	c = capper{}
+	sn := &s.SendNow
+	sn.Text, sn.FromRow, sn.Turn = c.str(sn.Text), c.str(sn.FromRow), c.str(sn.Turn)
+	t.SendNow = t.SendNow || c.cut
+	return s
 }
 
 // ------------------------------------------------------------------ Restore
@@ -555,6 +709,7 @@ func Restore(s *Snapshot, o Options) *Model {
 		m.agents[id] = rosterRow{info: r.Info, finish: r.Finish, truncated: r.Truncated}
 	}
 	m.todos = nilIfEmpty(slices.Clone(s.Todos))
+	m.todosTruncated = s.TodosTruncated
 	for _, a := range s.Asks {
 		m.asks.upsert(a)
 	}
@@ -568,6 +723,15 @@ func Restore(s *Snapshot, o Options) *Model {
 	m.replaying = s.Replaying
 	m.settings = s.Settings
 	m.queue = nilIfEmpty(slices.Clone(s.Queue))
+	for _, id := range s.TruncatedQueue {
+		if !slices.ContainsFunc(m.queue, func(q agent.QueuedPrompt) bool { return q.ID == id }) {
+			continue
+		}
+		if m.queueTruncated == nil {
+			m.queueTruncated = make(map[string]bool)
+		}
+		m.queueTruncated[id] = true
+	}
 	return m
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -131,6 +132,13 @@ func (p *primaryReader) waitSeq(t *testing.T, seq uint64) {
 	if last := p.evs[len(p.evs)-1].Seq; last != seq {
 		t.Fatalf("the primary reader is at %d, past the cutoff %d: something published after the session went quiet", last, seq)
 	}
+}
+
+// seqAt is the Seq of the event at index i.
+func (p *primaryReader) seqAt(i int) uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.evs[i].Seq
 }
 
 func endedTurn(id string) func(agent.Event) bool {
@@ -450,16 +458,21 @@ func fakeAgentBin(t *testing.T) string {
 // TestAttachOverTheFakeAgentReproducesTheFirst (A2): a real live session over
 // cmd/craze-fake-agent, through a real engine. A primary reader folds from seq
 // 1 on a goroutine of its own, the whole time. At eight cuts — each turn's
-// first tool report, as the primary reader folds it, so the attach lands in the
-// middle of a turn the agent is still streaming — a second client attaches from
-// a goroutine of its own (the primary keeps being read) and folds its
-// subscription. Each is compared with the primary reader's fold at a common
-// Seq — the turn's settled cutoff, which the second client folds through —
-// never "at exit" (§3.6 item 7).
+// first tool report, as the primary reader folds it — a second client attaches
+// from a goroutine of its own (the primary keeps being read) and folds its
+// subscription. The fixture is held there, after its first tool, by the fake
+// agent's gate (CRAZE_FAKE_GATE) until the attach has returned, and only then
+// released (r4 finding 2): so every snapshot is cut mid-turn, before the turn's
+// ending, and the second client folds the rest of the turn from its
+// subscription — at least one record — rather than restoring a turn that had
+// already finished. Each is compared with the primary reader's fold at a
+// common Seq — the turn's settled cutoff, which the second client folds
+// through — never "at exit" (§3.6 item 7).
 func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 4*watchdog)
 	defer cancel()
+	release := fakeAgentGate(t, ctx)
 	sess := agent.New(agent.Options{
 		Binary: fakeAgentBin(t), ExtraArgs: []string{"-script=tasks"},
 		Workspace: t.TempDir(), Stderr: io.Discard,
@@ -500,13 +513,20 @@ func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 			}
 		}()
 
-		from = first.waitFor(t, at, endedTurn(res.Turn)) + 1
-		n := cutoff(t, ctx, e)
-		first.waitSeq(t, n)
+		// The fixture is held after this tool until the attach has returned.
 		a := <-ready
 		if a.err != nil {
 			t.Fatalf("cut %d: attach: %v", cut, a.err)
 		}
+		release()
+		ended := first.waitFor(t, at, endedTurn(res.Turn))
+		from = ended + 1
+		snapSeq, endedSeq := a.c.Attachments[0].Snapshot.Seq, first.seqAt(ended)
+		if snapSeq < first.seqAt(at) || snapSeq >= endedSeq {
+			t.Fatalf("cut %d: the snapshot is at %d, want mid-turn: at or after the first tool (%d), before the turn's ending (%d)", cut, snapSeq, first.seqAt(at), endedSeq)
+		}
+		n := cutoff(t, ctx, e)
+		first.waitSeq(t, n)
 		target <- n
 		if err := <-folded; err != nil {
 			t.Fatalf("cut %d: the second client folding through %d: %v", cut, n, err)
@@ -520,8 +540,48 @@ func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 		if got := a.c.Seq(); got != n {
 			t.Fatalf("cut %d: the second client is at %d, the first at %d", cut, got, n)
 		}
+		if a.c.Folded[0] < 1 {
+			t.Fatalf("cut %d: the second client folded nothing after its snapshot at %d", cut, snapSeq)
+		}
 		t.Logf("cut %d: attached at seq %d (snapshot), compared at %d, the second client folded %d records", cut, a.c.Attachments[0].Snapshot.Seq, n, a.c.Folded[0])
 		a.c.Close()
+	}
+}
+
+// fakeAgentGate points the fake agent's CRAZE_FAKE_GATE at a fresh FIFO and
+// returns what releases one held turn: it writes the one byte the fixture
+// waits for. Opening the FIFO waits for the fake to be at its gate, so the
+// write is done on a goroutine and bounded by ctx, the watchdog.
+func fakeAgentGate(t *testing.T, ctx context.Context) func() {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_GATE", fifo)
+	return func() {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+			if err != nil {
+				done <- err
+				return
+			}
+			_, err = w.Write([]byte{1})
+			if cerr := w.Close(); err == nil {
+				err = cerr
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("releasing the fake agent's gate: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatalf("releasing the fake agent's gate: %v", ctx.Err())
+		}
 	}
 }
 

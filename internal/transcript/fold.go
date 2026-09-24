@@ -169,6 +169,8 @@ func childTool(t *Transcript, ev agent.Event) {
 // TUI's fallback to its snapshot for an empty one reads the same list.
 func foldTodos(m *Model, ev agent.Event) {
 	m.todos = nilIfEmpty(ev.Todos)
+	// The event carries the list whole, so a head a snapshot truncated is gone.
+	m.todosTruncated = false
 	m.Main.noteTodos(ev.Todos, ev.At)
 	m.fc.state = true
 }
@@ -359,6 +361,8 @@ func foldQueue(m *Model, ev agent.Event) {
 	default:
 		return
 	}
+	// The row is replaced whole or gone, so a head a snapshot truncated is too.
+	delete(m.queueTruncated, q.ID)
 	m.fc.state = true
 }
 
@@ -459,7 +463,8 @@ func (m *Model) evictFinished(keep string) {
 // -------------------------------------------------------------------- meta
 
 // deltaField is one field of agent.StateDelta: a section — a full replacement
-// into Settings, nil meaning untouched — or a report, which is news and not
+// into Settings, nil meaning untouched, which also clears the section's
+// truncation mark (Settings.Truncated) — or a report, which is news and not
 // mirrored state. TestFoldClassifiesEveryStateDeltaSection holds this table
 // against the struct's fields in both directions.
 type deltaField struct {
@@ -475,36 +480,43 @@ var deltaFields = []deltaField{
 	{name: "Title", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.Title != nil {
 			m.settings.Title = *st.Title
+			m.settings.Truncated.Title = false
 		}
 	}},
 	{name: "Mode", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.Mode != nil {
 			m.settings.Mode = *st.Mode
+			m.settings.Truncated.Mode = false
 		}
 	}},
 	{name: "Model", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.Model != nil {
 			m.settings.Model = *st.Model
+			m.settings.Truncated.Model = false
 		}
 	}},
 	{name: "Config", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.Config != nil {
 			m.settings.Config = nilIfEmpty(st.Config.Options)
+			m.settings.Truncated.Config = false
 		}
 	}},
 	{name: "Commands", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.Commands != nil {
 			m.settings.Commands = nilIfEmpty(st.Commands.Commands)
+			m.settings.Truncated.Commands = false
 		}
 	}},
 	{name: "Plugins", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.Plugins != nil {
 			m.settings.Plugins = nilIfEmpty(st.Plugins.Plugins)
+			m.settings.Truncated.Plugins = false
 		}
 	}},
 	{name: "SendNow", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
 		if st.SendNow != nil {
 			m.settings.SendNow = *st.SendNow
+			m.settings.Truncated.SendNow = false
 		}
 	}},
 	// Reason names what happened to a send-now; alone it draws nothing, and
