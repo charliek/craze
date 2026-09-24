@@ -196,6 +196,82 @@ func TestResolveChildModelUnknownCapsTheList(t *testing.T) {
 	}
 }
 
+// TestResolveChildModelUnknownCapsTheTierList (review r5, finding 8): a
+// table with about 150 configured tiers, all mapping to one alias, makes the
+// tier clause alone exceed unknownModelCap even though the alias list is
+// tiny — capModelList used to leave that clause whole and return an
+// oversized message. The cap now holds, with a count of what the tier
+// clause left out, and the alias list and the fixed suffix survive because
+// they were never what forced the cut.
+func TestResolveChildModelUnknownCapsTheTierList(t *testing.T) {
+	tiers := make(map[string]string, 150)
+	for i := range 150 {
+		tiers[fmt.Sprintf("tier-%03d", i)] = "test/a"
+	}
+	tbl := &modeltable.Table{
+		DefaultModel: "test/a",
+		Providers:    map[string]modeltable.Provider{"p": {Driver: modeltable.DriverOpenAICompat, BaseURL: "http://x", EnvKeys: []string{"X"}}},
+		Models: map[string]modeltable.Model{
+			"test/a": {Provider: "p", WireModel: "test-a"},
+		},
+		Subagents: modeltable.Subagents{Tiers: tiers},
+	}
+	err := unknownModelError("nope", tbl)
+	if err == nil {
+		t.Fatal("err = nil")
+	}
+	msg := err.Error()
+	if len(msg) > unknownModelCap {
+		t.Fatalf("message is %d bytes, want at most %d", len(msg), unknownModelCap)
+	}
+	if !strings.Contains(msg, "Models: test/a;") {
+		t.Fatalf("message = %q, want the tiny alias list kept whole", msg)
+	}
+	if !strings.Contains(msg, "… and ") || !strings.Contains(msg, "more") {
+		t.Fatalf("message = %q, want a count of the tiers left out", msg)
+	}
+	if !strings.Contains(msg, "Omit `model` to use the parent's.") {
+		t.Fatalf("message = %q, the fixed suffix must survive the cap", msg)
+	}
+}
+
+// TestResolveChildModelUnknownCapsTheRawValue (review r5, finding 8): a call
+// `model` value on its own can be longer than unknownModelCap. The message
+// still fits, the offending value is folded to one line and cut rather than
+// dropped, and the alias/tier clauses — small here — survive whole because
+// they were never what forced the cut.
+func TestResolveChildModelUnknownCapsTheRawValue(t *testing.T) {
+	tbl := &modeltable.Table{
+		DefaultModel: "test/a",
+		Providers:    map[string]modeltable.Provider{"p": {Driver: modeltable.DriverOpenAICompat, BaseURL: "http://x", EnvKeys: []string{"X"}}},
+		Models: map[string]modeltable.Model{
+			"test/a": {Provider: "p", WireModel: "test-a"},
+		},
+		Subagents: modeltable.Subagents{Tiers: map[string]string{"opus": "test/a"}},
+	}
+	raw := strings.Repeat("x\n", 1<<10) // 2 KiB, all newlines between the x's
+	err := unknownModelError(raw, tbl)
+	if err == nil {
+		t.Fatal("err = nil")
+	}
+	msg := err.Error()
+	if len(msg) > unknownModelCap {
+		t.Fatalf("message is %d bytes, want at most %d", len(msg), unknownModelCap)
+	}
+	if strings.Contains(msg, raw) {
+		t.Fatalf("message = %q, want the 2 KiB raw value cut, not quoted whole", msg)
+	}
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("message = %q, want the raw value folded to one line", msg)
+	}
+	if !strings.Contains(msg, "…") {
+		t.Fatalf("message = %q, want the cut raw value marked", msg)
+	}
+	if !strings.Contains(msg, "Models: test/a; tiers: opus → test/a. Omit `model` to use the parent's.") {
+		t.Fatalf("message = %q, want the small alias and tier clauses kept whole", msg)
+	}
+}
+
 // TestResolveChildEffortMatrix covers §3.6's effort precedence: call,
 // persona, the configured default, then the parent's own effort — but only
 // when the child runs the parent's model — then the model's default.

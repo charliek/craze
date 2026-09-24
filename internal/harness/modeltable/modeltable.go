@@ -853,6 +853,14 @@ func validateSubagents(file string, s Subagents, models map[string]Model) error 
 		tierAt := func(reason string) error {
 			return &FileError{File: file, Table: "subagents.tiers", Key: tier, Reason: reason}
 		}
+		// review r5, finding 1: resolveModelValue checks "inherit" before it
+		// ever consults [subagents.tiers] (it always means the parent's
+		// model), so a mapping filed under that key could never be used.
+		// Checked case-insensitively, ahead of tierKeyPattern, so every
+		// spelling gets this reason rather than "must match [a-z0-9-]+".
+		if strings.EqualFold(tier, "inherit") {
+			return tierAt(`"inherit" always means the parent's model; a tier cannot be named that`)
+		}
 		if !tierKeyPattern.MatchString(tier) {
 			return tierAt("a tier name must match [a-z0-9-]+")
 		}

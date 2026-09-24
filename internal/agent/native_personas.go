@@ -173,12 +173,25 @@ func (d *pluginDiscovery) readAgentFile(path string) ([]byte, bool) {
 	return data, true
 }
 
-// addAgent is the persona set: first wins on personaKey. The chain is read
-// innermost first, then the user root, then the plugins, so a project persona
-// beats a user one of the same name here — which is also the harness's
-// precedence between the two.
+// addAgent adds e to the scan's persona list, in the order its three sources
+// are read: the chain innermost first, then the user root, then the plugins.
+//
+// Its dedupe is scoped to one source (review r5, finding 5): the key is
+// e.Plugin (nativeProjectID, nativeUserID, or the plugin's own id) plus
+// personaKey, so two files that parse to the same name within the same
+// source still collapse to the first, in that source's own read order — a
+// project chain's subdirectory beating its root, say (TestNativePersonaSources,
+// "the chain is innermost first"). A name repeated *across* sources now
+// reaches nativePersonas as more than one entry, because deciding between
+// them here was the bug: first wins on personaKey alone claimed a name for
+// whichever source the scan reached first, before nativePersonas's key gate
+// had any say, so a project persona whose path held a configured key still
+// claimed the name at scan time and only got dropped afterwards — by which
+// point a valid user persona of that same name had already lost the claim
+// and was gone from the list entirely. Cross-source precedence is decided
+// once, in nativePersonas, over every persona that survives the key gate.
 func (d *pluginDiscovery) addAgent(e agentEntry) {
-	key := personaKey(e.personaName())
+	key := e.Plugin + ":" + personaKey(e.personaName())
 	if d.agentSeen == nil {
 		d.agentSeen = make(map[string]struct{})
 	}
@@ -476,6 +489,12 @@ func cutComment(s string) string {
 //     could map. A tools key that maps to nothing — empty, unreadable, or
 //     every name dropped — is a text-only child, with a line: it fails closed.
 //     Only a file with no tools key gets every tool (AllTools).
+//   - Same-name precedence is decided here too, on personaKey, first (surviving)
+//     wins in agents's scan order (review r5, finding 5): a candidate claims
+//     its name only once it has cleared every gate above, so a project
+//     persona dropped for holding a configured key can never suppress a
+//     valid user persona of that same name the way it could when addAgent
+//     claimed the name at scan time, before either gate had run.
 //
 // warn is the scan's lane (contentWarn), which redacts. The result is in the
 // scan's order, and nil when empty.
@@ -484,6 +503,7 @@ func nativePersonas(agents []agentEntry, keys []string, warn func(string)) []har
 		warn = func(string) {}
 	}
 	builtins := harness.BuiltinAgentTypes()
+	seen := make(map[string]struct{})
 	var out []harness.Persona
 	for _, a := range agents {
 		name := a.personaName()
@@ -498,6 +518,11 @@ func nativePersonas(agents []agentEntry, keys []string, warn func(string)) []har
 				continue
 			}
 		}
+		key := personaKey(name)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		p := harness.Persona{
 			Name:        name,
 			Description: a.Description,

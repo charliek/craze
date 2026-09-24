@@ -899,43 +899,69 @@ func TestValidateSubagentsFailures(t *testing.T) {
 		name             string
 		subagents        Subagents
 		file, table, key string
+		// wantReason, when set, is a substring the FileError's Reason must
+		// contain, so a case is pinned to its own rule and not just any
+		// rejection at the same key (used by the "inherit" cases below,
+		// which would otherwise also satisfy tierKeyPattern's generic
+		// reason for the upper-case spelling).
+		wantReason string
 	}{
 		{
-			"model unknown",
-			Subagents{Model: "nope"},
-			ModelsFile, "subagents", "model",
+			name: "model unknown", subagents: Subagents{Model: "nope"},
+			file: ModelsFile, table: "subagents", key: "model",
 		},
 		{
-			"effort not offered when model is set",
-			Subagents{Model: "openrouter/minimax-m3", Effort: "high"}, // that model has no Efforts
-			ModelsFile, "subagents", "effort",
+			name:      "effort not offered when model is set",
+			subagents: Subagents{Model: "openrouter/minimax-m3", Effort: "high"}, // that model has no Efforts
+			file:      ModelsFile, table: "subagents", key: "effort",
 		},
 		{
-			"tier key bad format",
-			Subagents{Tiers: map[string]string{"Opus": "fireworks/kimi-k3"}},
-			ModelsFile, "subagents.tiers", "Opus",
+			name:      "tier key bad format",
+			subagents: Subagents{Tiers: map[string]string{"Opus": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "Opus",
 		},
 		{
-			"tier key with an underscore",
-			Subagents{Tiers: map[string]string{"my_tier": "fireworks/kimi-k3"}},
-			ModelsFile, "subagents.tiers", "my_tier",
+			// review r5, finding 1: "inherit" always means the parent's model
+			// (resolveModelValue checks it before ever consulting
+			// [subagents.tiers]), so a mapping under that key could never be
+			// used.
+			name:      "tier key is inherit",
+			subagents: Subagents{Tiers: map[string]string{"inherit": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "inherit",
+			wantReason: "parent's model",
 		},
 		{
-			"tier value empty",
-			Subagents{Tiers: map[string]string{"opus": ""}},
-			ModelsFile, "subagents.tiers", "opus",
+			// Case-insensitively: an upper-case spelling is caught by the same
+			// rule, not just tierKeyPattern's generic "must match [a-z0-9-]+".
+			name:      "tier key is inherit in another case",
+			subagents: Subagents{Tiers: map[string]string{"INHERIT": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "INHERIT",
+			wantReason: "parent's model",
 		},
 		{
-			"tier value unknown",
-			Subagents{Tiers: map[string]string{"opus": "nope"}},
-			ModelsFile, "subagents.tiers", "opus",
+			name:      "tier key with an underscore",
+			subagents: Subagents{Tiers: map[string]string{"my_tier": "fireworks/kimi-k3"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "my_tier",
+		},
+		{
+			name:      "tier value empty",
+			subagents: Subagents{Tiers: map[string]string{"opus": ""}},
+			file:      ModelsFile, table: "subagents.tiers", key: "opus",
+		},
+		{
+			name:      "tier value unknown",
+			subagents: Subagents{Tiers: map[string]string{"opus": "nope"}},
+			file:      ModelsFile, table: "subagents.tiers", key: "opus",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl := validTable()
 			tbl.Subagents = tc.subagents
-			wantFileError(t, tbl.Validate(), tc.file, tc.table, tc.key)
+			fe := wantFileError(t, tbl.Validate(), tc.file, tc.table, tc.key)
+			if tc.wantReason != "" && !strings.Contains(fe.Reason, tc.wantReason) {
+				t.Fatalf("reason = %q, want it to contain %q", fe.Reason, tc.wantReason)
+			}
 		})
 	}
 

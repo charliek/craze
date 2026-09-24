@@ -744,6 +744,35 @@ func TestNativePersonaIdentity(t *testing.T) {
 	}
 }
 
+// TestNativePersonaKeyGateBeforeNameClaim (review r5, finding 5): a project
+// persona whose *path* holds a configured provider key must not claim its
+// name before the key gate drops it — a valid, lower-precedence persona of
+// that same name then stays offered, rather than discovery having already
+// discarded it as a duplicate. The reviewer's exact case: a project file
+// named after the canary key (so its path holds it), with frontmatter name
+// "review", and a clean "review" persona in the user root. Without the fix,
+// addAgent's scan-time dedupe let the project file claim "review" first, the
+// key gate then dropped it, and the user's "review" was already gone —
+// leaving no "review" persona offered at all.
+func TestNativePersonaKeyGateBeforeNameClaim(t *testing.T) {
+	f := contentTree(t,
+		map[string]string{
+			".claude/agents/" + nativeCanary + ".md": personaDoc("review", "the project's, but its path holds a key"),
+		},
+		map[string]string{
+			".claude/agents/review.md": personaDoc("review", "the user's own, and clean"),
+		})
+	got, lines := f.discoverPersonas(ClaudeCompat{}, nativeCanary)
+	wantPersonas(t, got, "review")
+	if got[0].Description != "the user's own, and clean" {
+		t.Fatalf("review is %+v, want the user's", got[0])
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, `"review" not offered`) || !strings.Contains(joined, "contains a configured provider key") {
+		t.Fatalf("diagnostics %q, want one line about the dropped project persona", lines)
+	}
+}
+
 // TestNativePersonaUnmappedNames: names craze cannot map, in either list, are
 // one line per persona naming them, and the names it can map still map.
 func TestNativePersonaUnmappedNames(t *testing.T) {

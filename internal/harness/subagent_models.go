@@ -18,6 +18,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
@@ -195,8 +196,20 @@ func warnLine(warn func(string), msg string) {
 
 // unknownModelCap bounds the "Unknown model" error like §3.4's unknown-type
 // text (system.go's fitRows): the parent model gets back something it can
-// read whole, however large the table or the tier map.
+// read whole, however large the table, the tier map, or the raw value it
+// sent (review r5, finding 8).
 const unknownModelCap = 1024
+
+// unknownModelRawCap bounds the raw value quoted inside "Unknown model
+// `...`" once capModelList has to shorten something (review r5, finding 8).
+// The original cap only ever trimmed the alias list, so a raw call value on
+// its own — the one part of this message craze does not choose the length
+// of — could still make the whole thing oversized, and so could the tier
+// clause once [subagents.tiers] holds enough entries. raw is folded to one
+// line first (an embedded newline would make the message hard to read long
+// before it is oversized), then cut at a rune boundary with "…", the same
+// way cutRole in native_personas.go cuts an over-budget persona body.
+const unknownModelRawCap = 200
 
 // unknownModelError is a call's `model` naming neither a table alias, a
 // recognised tier, nor "inherit": every alias and every configured tier
@@ -218,29 +231,74 @@ func unknownModelError(raw string, table *modeltable.Table) error {
 	if len(msg) <= unknownModelCap {
 		return errors.New(msg)
 	}
-	return errors.New(capModelList(raw, aliases, tiers))
+	return errors.New(capModelList(raw, aliases, tierParts))
 }
 
-// capModelList is unknownModelError's message with as many aliases, from the
-// front, as fit unknownModelCap, plus a count of what was left out — the
-// tiers clause is never dropped, since it is usually the shorter half and a
-// tier name is what a persona is most likely to have sent.
-func capModelList(raw string, aliases []string, tiers string) string {
-	suffix := fmt.Sprintf("; tiers: %s. Omit `model` to use the parent's.", tiers)
-	prefix := fmt.Sprintf("Unknown model `%s`. Models: ", raw)
-	for keep := len(aliases); keep >= 0; keep-- {
-		more := ""
-		if keep < len(aliases) {
-			more = fmt.Sprintf(", … and %d more", len(aliases)-keep)
+// capModelList is unknownModelError's message cut to fit unknownModelCap,
+// however large raw, aliases or tierParts are (review r5, finding 8: the
+// original only ever trimmed aliases, so a long raw value or a large tier
+// map could still exceed the cap on their own).
+//
+// raw is folded and cut first (cutRawValue, unknownModelRawCap): it is the
+// one input craze does not otherwise bound. The tier clause is then tried at
+// its full length before anything is cut from it — it is usually the shorter
+// half, and a tier name is what a persona is most likely to have sent — with
+// aliases cut first, from the front, the same "… and N more" shape as
+// before; only once dropping every alias still does not fit does the tier
+// clause give way too, the same way.
+func capModelList(raw string, aliases, tierParts []string) string {
+	prefix := fmt.Sprintf("Unknown model `%s`. Models: ", cutRawValue(raw))
+	for tierKeep := len(tierParts); tierKeep >= 0; tierKeep-- {
+		tiers := "none configured"
+		if len(tierParts) > 0 {
+			tiers = capJoin(tierParts, tierKeep)
 		}
-		msg := prefix + strings.Join(aliases[:keep], ", ") + more + suffix
-		if len(msg) <= unknownModelCap {
-			return msg
+		suffix := fmt.Sprintf("; tiers: %s. Omit `model` to use the parent's.", tiers)
+		for aliasKeep := len(aliases); aliasKeep >= 0; aliasKeep-- {
+			msg := prefix + capJoin(aliases, aliasKeep) + suffix
+			if len(msg) <= unknownModelCap {
+				return msg
+			}
 		}
 	}
-	// Unreachable while the budget is hundreds of bytes and the two fixed
-	// sentences are shorter than that; here so the loop cannot fall through.
-	return prefix + "…" + suffix
+	// Unreachable: cutRawValue bounds raw to unknownModelRawCap bytes, and
+	// the two fixed sentences plus that cap are within unknownModelCap even
+	// with every alias and every tier dropped; here so the loop cannot fall
+	// through.
+	return prefix + "; tiers: none configured. Omit `model` to use the parent's."
+}
+
+// capJoin is items joined from the front, keep of them, plus a count of what
+// was left out — the same shape for the alias list and, since review r5's
+// finding 8, the tier list too. keep <= 0 is "" for an empty items (nothing
+// to count) and "… and N more" for a non-empty one, never a bare comma with
+// nothing before it.
+func capJoin(items []string, keep int) string {
+	if keep <= 0 {
+		if len(items) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("… and %d more", len(items))
+	}
+	if keep >= len(items) {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:keep], ", ") + fmt.Sprintf(", … and %d more", len(items)-keep)
+}
+
+// cutRawValue is raw folded to one line — its whitespace runs, newlines
+// included, collapsed to single spaces — and cut at a rune boundary with "…"
+// past unknownModelRawCap (review r5, finding 8).
+func cutRawValue(raw string) string {
+	folded := strings.Join(strings.Fields(raw), " ")
+	if len(folded) <= unknownModelRawCap {
+		return folded
+	}
+	cut := unknownModelRawCap
+	for cut > 0 && !utf8.RuneStart(folded[cut]) {
+		cut--
+	}
+	return folded[:cut] + "…"
 }
 
 // effortNotOfferedError is a call's `effort` alias does not offer, naming
