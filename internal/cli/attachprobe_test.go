@@ -286,6 +286,323 @@ func TestAttachProbeAForeignTurnGiveUpWritesError(t *testing.T) {
 	}
 }
 
+// TestAttachProbeRefusesAPathThatIsNotARegularFile is r10's finding 1 at its
+// source: PATH already a FIFO with no reader. Opening it to write waits for a
+// reader for good, beyond any context's reach, and a probe that did so would
+// hold the command in its cleanup's join. The probe refuses such a PATH before
+// anything else — on stderr, the flag's documented error path — and runs no
+// probe at all, so the command finishes in its normal time with its own
+// status, and the FIFO is left as it was. Both the run that reaches a
+// comparison (text, then the chain's clean last ending) and the run that never
+// attaches (no text ever: cleanup's own direct write) are held to it.
+func TestAttachProbeRefusesAPathThatIsNotARegularFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		turn stubTurn
+	}{
+		{name: "a completed comparison", turn: textTurn("hello")},
+		{name: "no text", turn: endTurn()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			o := stubOpts(&stdout, &stderr)
+			path := filepath.Join(t.TempDir(), "probe.fifo")
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			o.attachProbePath = path
+
+			if err := runChainWithin(t, o, newStubSession(t, tc.turn), "go"); err != nil {
+				t.Fatalf("the refused probe changed the run's status: %v", err)
+			}
+			if o.probe != nil {
+				t.Fatal("a probe was built over a FIFO")
+			}
+			want := "craze: --attach-probe: " + path + " is not a regular file (mode p"
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr %q, want the refusal %q…", stderr.String(), want)
+			}
+			if fi, err := os.Lstat(path); err != nil || fi.Mode().Type() != os.ModeNamedPipe {
+				t.Fatalf("the FIFO at PATH was not left as it was: %v, %v", fi, err)
+			}
+		})
+	}
+}
+
+// TestAttachProbeReplacesAFIFOThatAppearsLater is the other half of r10's
+// finding 1: PATH passes the probe's check, and is a FIFO with no reader by the
+// time the probe writes it. The probe never opens PATH — it renames a regular
+// file of its own over it — so nothing waits: the command finishes in its
+// normal time, nothing is said on stderr, and PATH is the probe's file. The
+// comparison's write (on the goroutine) and cleanup's direct write (no text
+// ever) are held to it each.
+func TestAttachProbeReplacesAFIFOThatAppearsLater(t *testing.T) {
+	t.Run("a completed comparison", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		o := stubOpts(&stdout, &stderr)
+		path := filepath.Join(t.TempDir(), "probe.txt")
+		o.attachProbePath = path
+		// The FIFO appears once the probe has attached, and the chain's last
+		// turn is let through only after that: so the comparison is made, and
+		// written, over a FIFO.
+		entered := make(chan struct{})
+		made := make(chan error, 1)
+		var once sync.Once
+		setAttachProbeAttached(t, func(context.Context) {
+			once.Do(func() {
+				made <- syscall.Mkfifo(path, 0o600)
+				close(entered)
+			})
+		})
+
+		s := newStubSession(t, textTurn("hello"), heldUntil(entered, endTurn()))
+		if err := runChainWithin(t, o, s, "go", "follow-up"); err != nil {
+			t.Fatalf("the probe changed the run's status: %v", err)
+		}
+		mustMake(t, made)
+		body := readRegularProbeFile(t, path)
+		if line := strings.SplitN(body, "\n", 2)[0]; line != "SAME" {
+			t.Fatalf("the probe file's first line = %q, want SAME:\n%s", line, body)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr %q, want nothing", stderr.String())
+		}
+	})
+
+	t.Run("no text", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		o := stubOpts(&stdout, &stderr)
+		path := filepath.Join(t.TempDir(), "probe.txt")
+		o.attachProbePath = path
+		// The FIFO appears inside the only turn, after the probe was built
+		// and before cleanup writes "never attached" directly.
+		made := make(chan error, 1)
+		turn := endTurn()
+		turn.before = func() { made <- syscall.Mkfifo(path, 0o600) }
+
+		if err := runChainWithin(t, o, newStubSession(t, turn), "go"); err != nil {
+			t.Fatalf("the probe changed the run's status: %v", err)
+		}
+		mustMake(t, made)
+		body := readRegularProbeFile(t, path)
+		if line := strings.SplitN(body, "\n", 2)[0]; line != "ERROR: never attached" {
+			t.Fatalf("the probe file's first line = %q, want ERROR: never attached:\n%s", line, body)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr %q, want nothing", stderr.String())
+		}
+	})
+}
+
+// TestAttachProbeAnOmissionPastTheCommonSeqIsNeverActedOn is r10's finding 2
+// as a schedule. The probe attaches at S, mid-chain; the reader is held just
+// short of the chain's last ending n (on the write of the last turn's text,
+// which it has already folded); the ending n is committed, and an oversized
+// child event behind it, n+1, reaches every subscription as an Omitted record.
+// The attached fold is handed all of it while the reader is still held, so the
+// omission arrives with the ending n it is behind waiting, unfolded, for the
+// reader's progress. Only then is the reader let go.
+//
+// The omission is past the common seq: it must wait in sequence and, once n is
+// the limit, never be acted on. A fold that discards what it holds for it and
+// re-attaches is cut past n and has nothing comparable to say. The verdict is
+// SAME at n, with no re-attach.
+func TestAttachProbeAnOmissionPastTheCommonSeqIsNeverActedOn(t *testing.T) {
+	const (
+		maxRecord = 16 << 10
+		marker    = "the last turn's text, held on its write"
+	)
+	entered := make(chan struct{})
+	var once sync.Once
+	setAttachProbeAttached(t, func(context.Context) { once.Do(func() { close(entered) }) })
+	omissions := make(chan uint64, 8)
+	setAttachProbeReceived(t, func(rec agent.Record, ok bool) {
+		if ok && rec.Omitted != nil {
+			select {
+			case omissions <- rec.Seq:
+			default:
+			}
+		}
+	})
+
+	out := &heldWriter{marker: []byte(marker), held: make(chan struct{}), release: make(chan struct{})}
+	var stderr bytes.Buffer
+	o := &promptOpts{json: true, stdout: out, stderr: &stderr, foreignMax: 100 * time.Millisecond}
+	path := filepath.Join(t.TempDir(), "probe.txt")
+	o.attachProbePath = path
+
+	// The last turn waits for the probe's attach, so S is before it.
+	last := textTurn(marker)
+	s := newStubSessionOn(t, agent.EventLogOptions{MaxRecordBytes: maxRecord}, textTurn("hello"), heldUntil(entered, last))
+	// Registered after the session's cleanup, so it runs first: a failing test
+	// never leaves the reader held while the session closes.
+	t.Cleanup(out.let)
+
+	// The test's own subscription, from before the first event: the barrier
+	// for the chain's last ending.
+	watch, err := s.log.Subscribe(agent.SubscribeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watch.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go", "follow-up") }()
+
+	select {
+	case <-out.held:
+	case <-time.After(stubWatchdog):
+		t.Fatal("the reader never reached the last turn's text")
+	}
+	n := awaitLastEnding(t, watch)
+	s.emit(agent.Event{Type: agent.EventThought, Agent: "sub-1", Text: strings.Repeat("o", 2*maxRecord)})
+	select {
+	case seq := <-omissions:
+		if seq != n+1 {
+			t.Fatalf("the attached fold was handed an omission at seq %d, want %d: right behind the last ending", seq, n+1)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the attached fold was never handed the omission")
+	}
+	out.let()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the probe changed the run's status: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never ended")
+	}
+
+	body := readProbeFile(t, path)
+	lines := strings.Split(body, "\n")
+	if lines[0] != "SAME" {
+		t.Fatalf("the probe file's first line = %q, want SAME:\n%s", lines[0], body)
+	}
+	if got := firstSeq(t, body); got != n {
+		t.Fatalf("first was handed over at seq %d, the chain's last ending is %d", got, n)
+	}
+	snap, k, to, r := parseAttachedLine(t, lines[1])
+	if to != n || snap >= n || snap+k != n {
+		t.Fatalf("attached: snapshot %d, folded %d to %d; want a snapshot before %d folded up to it:\n%s", snap, k, to, n, body)
+	}
+	if r != 0 {
+		t.Fatalf("re-attached %d times for an omission past the common seq:\n%s", r, body)
+	}
+}
+
+// TestAttachProbeASubscriptionFailurePastTheCommonSeqIsNeverActedOn is the
+// same schedule for the attached fold's subscription ending with an error —
+// the log dropping it as a slow consumer — after it has delivered through the
+// chain's last ending n. The probe's budget is shrunk to budget records (the
+// whole chain after the attach is well under it, so nothing is dropped before
+// n). The reader is held just short of n, as above; the attached fold is held
+// the moment it takes n; budget+2 events are published behind n, which
+// overflows the budget whatever the subscription's owner had taken, so once
+// the publishes return the log has dropped it (the drop is decided inside the
+// publish). The fold is let go, and Records closes with ErrSlowConsumer while
+// the reader is still held. Only then is the reader let go.
+//
+// The failure is past n: queued behind the last record delivered, it must
+// never be acted on once n is the limit. A fold that discards what it holds
+// for it and re-attaches is cut past n, with nothing comparable to say. The
+// verdict is SAME at n, with no re-attach.
+func TestAttachProbeASubscriptionFailurePastTheCommonSeqIsNeverActedOn(t *testing.T) {
+	const (
+		budget = 16
+		marker = "the last turn's text, held on its write"
+	)
+	setAttachProbeMaxItems(t, budget)
+	entered := make(chan struct{})
+	var once sync.Once
+	setAttachProbeAttached(t, func(context.Context) { once.Do(func() { close(entered) }) })
+	atEnding := make(chan uint64, 1)
+	closed := make(chan struct{}, 1)
+	letFold := make(chan struct{})
+	var letOnce sync.Once
+	let := func() { letOnce.Do(func() { close(letFold) }) }
+	// heldOnce is the hook's own: it runs only on the probe's goroutine.
+	heldOnce := false
+	setAttachProbeReceived(t, func(rec agent.Record, ok bool) {
+		switch {
+		case !ok:
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		case !heldOnce && isLastEnding(rec):
+			// Held with n taken from Records and not yet queued: nothing
+			// reads the subscription until the test lets the fold go.
+			heldOnce = true
+			atEnding <- rec.Seq
+			<-letFold
+		}
+	})
+
+	out := &heldWriter{marker: []byte(marker), held: make(chan struct{}), release: make(chan struct{})}
+	var stderr bytes.Buffer
+	o := &promptOpts{json: true, stdout: out, stderr: &stderr, foreignMax: 100 * time.Millisecond}
+	path := filepath.Join(t.TempDir(), "probe.txt")
+	o.attachProbePath = path
+
+	s := newStubSession(t, textTurn("hello"), heldUntil(entered, textTurn(marker)))
+	// Registered after the session's cleanup, so they run first: a failing
+	// test never leaves the reader or the fold held while the session closes.
+	t.Cleanup(out.let)
+	t.Cleanup(let)
+
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, "go", "follow-up") }()
+
+	select {
+	case <-out.held:
+	case <-time.After(stubWatchdog):
+		t.Fatal("the reader never reached the last turn's text")
+	}
+	var n uint64
+	select {
+	case n = <-atEnding:
+	case <-time.After(stubWatchdog):
+		t.Fatal("the attached fold was never handed the chain's last ending")
+	}
+	for range budget + 2 {
+		s.emit(agent.Event{Type: agent.EventThought, Agent: "sub-1", Text: "x"})
+	}
+	let()
+	select {
+	case <-closed:
+	case <-time.After(stubWatchdog):
+		t.Fatal("the attached fold's subscription was never dropped")
+	}
+	out.let()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the probe changed the run's status: %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never ended")
+	}
+
+	body := readProbeFile(t, path)
+	lines := strings.Split(body, "\n")
+	if lines[0] != "SAME" {
+		t.Fatalf("the probe file's first line = %q, want SAME:\n%s", lines[0], body)
+	}
+	if got := firstSeq(t, body); got != n {
+		t.Fatalf("first was handed over at seq %d, the chain's last ending is %d", got, n)
+	}
+	snap, k, to, r := parseAttachedLine(t, lines[1])
+	if to != n || snap >= n || snap+k != n {
+		t.Fatalf("attached: snapshot %d, folded %d to %d; want a snapshot before %d folded up to it:\n%s", snap, k, to, n, body)
+	}
+	if r != 0 {
+		t.Fatalf("re-attached %d times for a failure past the common seq:\n%s", r, body)
+	}
+}
+
 // TestAttachProbeASnapshotPastTheCommonSeqIsNotCompared is the late attach:
 // an attachment cut after the seq the reader handed over is never compared —
 // views from different seqs say nothing (plan 024 §3.6 item 7) — however
@@ -355,6 +672,165 @@ func setAttachProbeAttached(t *testing.T, hook func(context.Context)) {
 	prev := attachProbeAttached
 	attachProbeAttached = hook
 	t.Cleanup(func() { attachProbeAttached = prev })
+}
+
+// setAttachProbeReceived installs the probe's received-record hook for one
+// test, the same way.
+func setAttachProbeReceived(t *testing.T, hook func(agent.Record, bool)) {
+	t.Helper()
+	prev := attachProbeReceived
+	attachProbeReceived = hook
+	t.Cleanup(func() { attachProbeReceived = prev })
+}
+
+// setAttachProbeMaxItems sets the probe's subscription budget for one test.
+func setAttachProbeMaxItems(t *testing.T, n int) {
+	t.Helper()
+	prev := attachProbeMaxItems
+	attachProbeMaxItems = n
+	t.Cleanup(func() { attachProbeMaxItems = prev })
+}
+
+// newStubSessionOn is newStubSession over a log built with opts: a small
+// MaxRecordBytes, so an event can be oversized without being megabytes.
+func newStubSessionOn(t *testing.T, opts agent.EventLogOptions, turns ...stubTurn) *stubSession {
+	t.Helper()
+	log := agent.NewEventLog(opts)
+	s := &stubSession{
+		log:    log,
+		asks:   agent.NewAskRegistry(log, nil),
+		closed: make(chan struct{}),
+		turns:  turns,
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// textTurn is a turn that says text and ends end_turn: the first EventText is
+// what starts the probe.
+func textTurn(text string) stubTurn {
+	return stubTurn{
+		emit: []agent.Event{
+			{Type: agent.EventText, Text: text},
+			{Type: agent.EventDone, StopReason: "end_turn"},
+		},
+		res: agent.Result{StopReason: "end_turn"},
+	}
+}
+
+// heldUntil is turn, run only once gate is closed — the probe's attach hook
+// closes it — or, should it never be, after the watchdog, so the run ends and
+// the test says why instead of hanging.
+func heldUntil(gate <-chan struct{}, turn stubTurn) stubTurn {
+	turn.before = func() {
+		select {
+		case <-gate:
+		case <-time.After(stubWatchdog):
+		}
+	}
+	return turn
+}
+
+// runChainWithin is runChain on a goroutine of its own, failing the test if
+// it has not returned within the watchdog: a run held by the probe fails with
+// a reason rather than hanging the package.
+func runChainWithin(t *testing.T, o *promptOpts, s *stubSession, text string, followUps ...string) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- runChain(o, context.Background(), s, text, followUps...) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never ended: the probe held the command")
+		return nil
+	}
+}
+
+// mustMake is the FIFO a hook made, reported: a hook that never ran, or a
+// mkfifo that failed, would leave nothing for the test to be about.
+func mustMake(t *testing.T, made <-chan error) {
+	t.Helper()
+	select {
+	case err := <-made:
+		if err != nil {
+			t.Fatalf("mkfifo: %v", err)
+		}
+	default:
+		t.Fatal("the FIFO was never made")
+	}
+}
+
+// readRegularProbeFile is readProbeFile for a PATH that may be a FIFO: it is
+// checked with Lstat first, since reading a FIFO would wait for a writer.
+func readRegularProbeFile(t *testing.T, path string) string {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("the probe file: %v", err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Fatalf("PATH is %s, not the probe's regular file", fi.Mode())
+	}
+	return readProbeFile(t, path)
+}
+
+// heldWriter is a run's stdout that holds the run's reader, once, on the write
+// that carries marker, until let is called; held is closed as the hold begins.
+// consume folds an event into the probe's first client before it writes it,
+// so a reader held here has folded that event and nothing after it. Only the
+// reader writes, so fired needs no lock.
+type heldWriter struct {
+	buf     bytes.Buffer
+	marker  []byte
+	fired   bool
+	held    chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *heldWriter) Write(p []byte) (int, error) {
+	if !w.fired && bytes.Contains(p, w.marker) {
+		w.fired = true
+		close(w.held)
+		<-w.release
+	}
+	return w.buf.Write(p)
+}
+
+// let releases the hold; it may be called more than once.
+func (w *heldWriter) let() { w.once.Do(func() { close(w.release) }) }
+
+// awaitLastEnding reads sub until the chain's last ending — a turn ended with
+// no successor and nothing queued — and returns its seq.
+func awaitLastEnding(t *testing.T, sub *agent.Subscription) uint64 {
+	t.Helper()
+	timeout := time.After(stubWatchdog)
+	for {
+		select {
+		case rec, ok := <-sub.Records():
+			if !ok {
+				t.Fatalf("the test's subscription closed: %v", sub.Err())
+			}
+			if isLastEnding(rec) {
+				return rec.Seq
+			}
+		case <-timeout:
+			t.Fatal("the chain's last ending was never committed")
+		}
+	}
+}
+
+// isLastEnding says rec is the chain's last ending: a turn ended with no
+// successor and nothing queued, the event the reader hands the comparison
+// over at. An omitted record, or one that does not decode, is not.
+func isLastEnding(rec agent.Record) bool {
+	if rec.Omitted != nil {
+		return false
+	}
+	ev, err := rec.Event()
+	return err == nil && ev.Type == agent.EventTurn && ev.Turn != nil &&
+		ev.Turn.Phase == agent.TurnEnded && ev.Turn.Next == "" && ev.Turn.Pending == 0
 }
 
 // setAttachProbeSettle shortens the cleanup's bounded wait for one test.

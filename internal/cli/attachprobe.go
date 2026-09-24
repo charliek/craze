@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -42,6 +43,22 @@ var attachProbeSettle = 20 * time.Second
 // when it is built.
 var attachProbeAttached func(ctx context.Context)
 
+// attachProbeReceived is a test seam, nil in production: the probe's
+// goroutine calls it with every receive from its subscription's Records, as it
+// takes it and before it does anything with it — a record (ok), or Records
+// closing (!ok, rec zero). A test waits there for the moment a record — an
+// Omitted one above all — or the subscription's end has reached the attached
+// fold, or holds the fold there, rather than guessing at either with a sleep.
+// A probe reads it once, when it is built.
+var attachProbeReceived func(rec agent.Record, ok bool)
+
+// attachProbeMaxItems is a test seam, 0 in production (the log's default,
+// 1,024 records): the probe's subscription budget in records, on every attach
+// it makes (engine.AttachOptions.MaxItems). A test shrinks it to have the log
+// drop the attached fold's subscription as a slow consumer at a moment it
+// chooses. A probe reads it once, when it is built.
+var attachProbeMaxItems int
+
 // attachProbe is `craze prompt --attach-probe=PATH` (plan 024 §5 row C4,
 // hidden): a second, independent fold of the engine's own model, compared
 // against the CLI's own read of the primary at a common seq. It follows
@@ -75,10 +92,13 @@ type attachProbe struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// settle and attached are attachProbeSettle and attachProbeAttached as
-	// they stood when the probe was built.
+	// settle, attached, received and maxItems are attachProbeSettle,
+	// attachProbeAttached, attachProbeReceived and attachProbeMaxItems as they
+	// stood when the probe was built.
 	settle   time.Duration
 	attached func(context.Context)
+	received func(agent.Record, bool)
+	maxItems int
 
 	// The reader's own, touched only on drive's goroutine.
 	//
@@ -138,8 +158,20 @@ type probeAttach struct {
 // no-op, so the two call sites prompt.go carries (consume's onEvent and
 // finishRun's settleAttachProbe) cost nothing when the flag was not given: no
 // fold, no goroutine, no attach, no file.
+//
+// It is nil, too, when path already exists as anything but a regular file — a
+// FIFO, a device, a directory, a symlink (Lstat: never followed, never
+// opened). That is refused before anything else, on stderr — the flag's one
+// error path — and no probe runs: PATH is only ever replaced by a regular file
+// (writeProbeFile), and a destination that is not one is a mistake to report,
+// not a file to overwrite (r10 finding 1). Any other Lstat error is left to the
+// write, which reports it the same way.
 func newAttachProbe(ctx context.Context, path string, eng *engine.Engine, stderr io.Writer) *attachProbe {
 	if path == "" {
+		return nil
+	}
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+		fmt.Fprintf(stderr, "craze: --attach-probe: %s is not a regular file (mode %s); no probe run\n", path, fi.Mode())
 		return nil
 	}
 	pctx, cancel := context.WithCancel(ctx)
@@ -152,6 +184,8 @@ func newAttachProbe(ctx context.Context, path string, eng *engine.Engine, stderr
 		cancel:   cancel,
 		settle:   attachProbeSettle,
 		attached: attachProbeAttached,
+		received: attachProbeReceived,
+		maxItems: attachProbeMaxItems,
 		first: transcript.New(transcript.Options{
 			ErrText: func(e error) string { return e.Error() },
 		}),
@@ -356,11 +390,39 @@ func (p *attachProbe) loop() {
 // go on (a.fatal), or once the probe's context ended (stopped) — whatever it
 // has been handed by then.
 //
-// An Omitted record, or a subscription that closed with an error, discards
-// the fold and re-attaches with no cursor, bounded by
-// attachProbeReattachBound, exactly as C3's AttachClient does.
+// An Omitted record, or Records closing with an error other than the log's own
+// close (agent.ErrSlowConsumer, say), discards the fold and re-attaches with
+// no cursor, bounded by attachProbeReattachBound, exactly as C3's AttachClient
+// does — but only once it is next under the same limit an ordinary record
+// waits for. Each waits in sequence, like any record: an omission in pending
+// at its own seq, and a subscription's failure as a marker behind the last
+// record it delivered, at the first seq it will never deliver (failedAt). One
+// past the reader's progress may turn out to be past n, and a fold that
+// discarded the prefix it holds up to n for it would re-attach past n, and so
+// have nothing comparable to say (r10 finding 2). Once n is the limit, neither
+// is ever acted on beyond it; one at or before n still restarts the fold. The
+// log closing (agent.ErrClosed) is no failure a re-attach can mend, and ends
+// the fold at once.
 func (p *attachProbe) fold(a *probeAttach) (target *probeTarget, stopped bool) {
 	var pending []agent.Record
+	// failed is why the current subscription ended, "" while it runs, and
+	// failedAt the seq its marker stands at: one past the last record it
+	// delivered — pending's last, or the last the model folded (or was
+	// restored at) when nothing is pending.
+	var failed string
+	var failedAt uint64
+	// restart discards the fold, pending and a failure's marker included —
+	// none of it is anything the next attachment's subscription will follow on
+	// from — and re-attaches.
+	restart := func(reason string) {
+		pending, failed, failedAt = nil, "", 0
+		if len(a.reattached) >= attachProbeReattachBound {
+			a.fatal = fmt.Sprintf("ERROR: gave up after %d re-attaches (last: %s)", len(a.reattached), reason)
+			return
+		}
+		a.reattached = append(a.reattached, reason)
+		p.attach(a)
+	}
 	for a.fatal == "" {
 		if p.ctx.Err() != nil {
 			return target, true
@@ -369,9 +431,15 @@ func (p *attachProbe) fold(a *probeAttach) (target *probeTarget, stopped bool) {
 		if target != nil {
 			limit = target.n
 		}
+		restarted := false
 		for len(pending) > 0 && pending[0].Seq <= limit {
 			rec := pending[0]
 			pending = pending[1:]
+			if rec.Omitted != nil {
+				restarted = true
+				restart(fmt.Sprintf("omitted %d", rec.Seq))
+				break
+			}
 			ev, err := rec.Event()
 			if err != nil {
 				a.fatal = fmt.Sprintf("ERROR: decode seq %d: %v", rec.Seq, err)
@@ -380,33 +448,42 @@ func (p *attachProbe) fold(a *probeAttach) (target *probeTarget, stopped bool) {
 			a.model.Fold(ev)
 			a.folded++
 		}
+		if !restarted && failed != "" && len(pending) == 0 && failedAt <= limit {
+			// The marker is next, and the limit needs what the subscription
+			// will never deliver.
+			restarted = true
+			restart(failed)
+		}
+		if restarted {
+			continue
+		}
 		if target != nil && a.model.Seq() >= target.n {
 			return target, false
 		}
+		records := a.sub.Records()
+		if failed != "" {
+			// Closed, and a closed channel is always ready: wait on the
+			// reader's progress, its hand-over or the context instead.
+			records = nil
+		}
 		select {
-		case rec, ok := <-a.sub.Records():
-			var reason string
-			switch {
-			case ok && rec.Omitted == nil:
+		case rec, ok := <-records:
+			if p.received != nil {
+				p.received(rec, ok)
+			}
+			if ok {
 				pending = append(pending, rec)
 				continue
-			case ok:
-				reason = fmt.Sprintf("omitted %d", rec.Seq)
-			default:
-				err := a.sub.Err()
-				if errors.Is(err, agent.ErrClosed) {
-					a.fatal = fmt.Sprintf("ERROR: the event log closed under the attached fold at seq %d", a.model.Seq())
-					continue
-				}
-				reason = fmt.Sprint(err)
 			}
-			pending = nil
-			if len(a.reattached) >= attachProbeReattachBound {
-				a.fatal = fmt.Sprintf("ERROR: gave up after %d re-attaches (last: %s)", len(a.reattached), reason)
+			err := a.sub.Err()
+			if errors.Is(err, agent.ErrClosed) {
+				a.fatal = fmt.Sprintf("ERROR: the event log closed under the attached fold at seq %d", a.model.Seq())
 				continue
 			}
-			a.reattached = append(a.reattached, reason)
-			p.attach(a)
+			failed, failedAt = fmt.Sprint(err), a.model.Seq()+1
+			if len(pending) > 0 {
+				failedAt = pending[len(pending)-1].Seq + 1
+			}
 		case <-p.progressed:
 		case t := <-p.target:
 			target = &t
@@ -478,8 +555,9 @@ func (p *attachProbe) attach(a *probeAttach) bool {
 }
 
 // attachOnce attaches with no cursor, on the probe's own context, and
-// Restores the snapshot it is handed. AttachOptions{} always asks for a
-// snapshot (no cursor to honour), so unlike C3's AttachClient — whose adopt
+// Restores the snapshot it is handed. AttachOptions with no Cursor always asks
+// for a snapshot (no cursor to honour; MaxItems is only the subscription's
+// budget, attachProbeMaxItems), so unlike C3's AttachClient — whose adopt
 // keeps the model when a resumed cursor is honoured — this never needs that
 // branch: every attach the probe makes, first or re-attach alike, is with no
 // cursor (plan 024 §3.6 items 3 and 6).
@@ -489,7 +567,7 @@ func (p *attachProbe) attach(a *probeAttach) bool {
 // execution amendment X23's windowing is for a session whose backlog since
 // the cut outgrew a snapshot's budget, not a fresh attach's own cut).
 func (p *attachProbe) attachOnce() (*transcript.Model, *agent.Subscription, string) {
-	a, err := p.eng.Attach(p.ctx, engine.AttachOptions{})
+	a, err := p.eng.Attach(p.ctx, engine.AttachOptions{MaxItems: p.maxItems})
 	if err != nil {
 		return nil, nil, "ERROR: attach: " + err.Error()
 	}
@@ -531,8 +609,9 @@ func (a *probeAttach) attachedLine() string {
 // It reads p.att, so it runs on the goroutine or, after the join, in cleanup.
 //
 // The probe never writes to stdout or stderr except, from cleanup, a failure to
-// write PATH itself — an IO error — and only because the flag was given (the
-// hard stop: with the flag absent the command's behaviour is exactly today's).
+// write PATH itself — an IO error — or, from newAttachProbe, a PATH it refuses,
+// and only because the flag was given (the hard stop: with the flag absent the
+// command's behaviour is exactly today's).
 func (p *attachProbe) writeFile(line string, t probeTarget) error {
 	a := &p.att
 	var buf bytes.Buffer
@@ -551,7 +630,38 @@ func (p *attachProbe) writeFile(line string, t probeTarget) error {
 	}
 	buf.WriteString(t.retained)
 	buf.WriteString("\n")
-	return os.WriteFile(p.path, buf.Bytes(), 0o600)
+	return writeProbeFile(p.path, buf.Bytes())
+}
+
+// writeProbeFile puts data at path without ever opening path: a regular
+// temporary file created beside it — so on the same file system — is written,
+// closed and renamed over it. Opening path itself for writing waits for good
+// on a FIFO with no reader, and no context reaches a blocked open or write, so
+// cleanup's cancel could not end it and its join would wait for ever (r10
+// finding 1); a file created new and a rename never wait on whatever path is.
+// newAttachProbe refuses a path that is not a regular file up front; this is
+// what keeps one that becomes a FIFO afterwards from blocking all the same. The
+// temporary file is created 0600, the mode PATH has always been written with,
+// and is removed again when anything fails.
+func writeProbeFile(path string, data []byte) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // retainedLine is the plan's V6 measurement: the first client's model size
