@@ -33,7 +33,9 @@ from sse_fixture import (
     call_step,
     parallel_step,
     plan_path_in,
+    prompt_is,
     sse_call_chunks,
+    user_prompt,
     write_native_config,
 )
 
@@ -1263,3 +1265,270 @@ def gone(pid: int, marker: str, timeout: float = 10) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"pid {pid} ({marker}) is still running after the cancel")
+
+
+# --- Plan 026 C5: sub-agents, end to end -----------------------------------
+#
+# The parent calls the agent tool and the harness runs a real child session
+# against the same fixture. Children run at once, so each child's requests are
+# answered from a route of its own (SSEFixture.route, matched on the request
+# body: the child's first user message is its task), and the parent's from the
+# script. What is checked is what leaves craze: the `--json` lines -- subagent
+# lines and the child's own, tagged with its id -- and the requests the children
+# sent.
+
+# The tools a child is offered: the profile's, less agent, todo_write,
+# ask_user_question and exit_plan_mode (plan 026 §3.2), in the profile's order.
+CHILD_TOOLS = ["bash", "read", "glob", "grep", "edit", "write"]
+
+
+def agent_call(call_id: str, description: str, prompt: str, **more: str) -> ToolCall:
+    """One agent call in a parent's step."""
+    return ToolCall(call_id, "agent", json.dumps({"description": description, "prompt": prompt, **more}))
+
+
+def subagent_lines(events: list[dict]) -> dict[str, list[dict]]:
+    """The subagent lines by child id, each child's in order."""
+    out: dict[str, list[dict]] = {}
+    for e in events:
+        if e.get("type") == "subagent":
+            out.setdefault(e["id"], []).append(e)
+    return out
+
+
+def child_of(lines: dict[str, list[dict]], description: str) -> tuple[str, list[dict]]:
+    """The id and the subagent lines of the child whose description it is."""
+    for cid, own in lines.items():
+        if own[0].get("description") == description:
+            return cid, own
+    raise AssertionError(f"no child described {description!r} among {lines}")
+
+
+def requests_of(server: SSEFixture, prompt: str) -> list[RecordedRequest]:
+    """The requests of the turn whose prompt is prompt: a child's are its task's."""
+    return [r for r in server.requests if user_prompt(r) == prompt]
+
+
+def tool_results(request: RecordedRequest) -> dict[str, str]:
+    """A request's tool results by call id."""
+    return {m["tool_call_id"]: m["content"] for m in request.messages if m.get("role") == "tool"}
+
+
+def test_native_agent_fans_out_to_two_children(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Two agent calls in one step start two children that run at once; each
+    child's task, tools and answer are its own; the parent reads both answers
+    (plan 026 A6, A11).
+
+    The `--json` stream prints, per child, a subagent line when it spawns,
+    progress lines, and a finished line last carrying the row whole -- its id,
+    the parent's call, its type, its model, its answer -- and the child's own
+    lines tagged with its id: its task as a user line, its tool rows, its text.
+    The parent's two agent calls are task-kind tool lines whose task names
+    their child once they have finished.
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    one, two = "Read notes.txt and say what it holds.", "Say hello."
+    fixture_server.set_script(
+        [
+            parallel_step(agent_call("a1", "read the notes", one), agent_call("a2", "say hello", two)),
+            answer("both children answered"),
+        ]
+    )
+    fixture_server.route(prompt_is(one), [call_step("read", {"filePath": "notes.txt"}), answer("the notes say alpha")])
+    fixture_server.route(prompt_is(two), [answer("hello")])
+
+    proc = run_native(craze_bin, craze_home, ws, "fan out", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert joined([e for e in events if "agent" not in e], "text") == "both children answered"
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    assert CANARY not in proc.stdout and CANARY not in proc.stderr
+    assert fixture_server.unscripted == 0 and fixture_server.script_remaining == 0
+
+    lines = subagent_lines(events)
+    assert len(lines) == 2, lines
+    answers = {}
+    for description, task, call, answer_text in (
+        ("read the notes", one, "t1.1.1", "the notes say alpha"),
+        ("say hello", two, "t1.1.2", "hello"),
+    ):
+        cid, own = child_of(lines, description)
+        assert own[0]["event"] == "spawned" and own[-1]["event"] == "finished", own
+        assert all(e["event"] == "progress" for e in own[1:-1]), own
+        fin = own[-1]
+        assert fin["status"] == "completed" and fin["output"] == answer_text, fin
+        assert fin["toolCallId"] == call and fin["subagentType"] == "general-purpose", fin
+        assert fin["model"] == "fixture-model" and fin["transcript"] is True, fin
+
+        mine = [e for e in events if e.get("agent") == cid]
+        assert mine[0] == {"type": "user", "seq": mine[0]["seq"], "text": task, "agent": cid}, mine[0]
+        assert joined(mine, "text") == answer_text, mine
+        answers[call] = answer_text
+
+        # The child's lines all fall between its spawn and its finish, and the
+        # parent's line for the call that ran it closes after them all.
+        seqs = [e["seq"] for e in mine]
+        assert own[0]["seq"] < min(seqs) and max(seqs) < fin["seq"], (own, seqs)
+        rows = [e for e in events if e.get("type") == "tool" and "agent" not in e and e.get("id") == call]
+        assert rows[-1]["seq"] > fin["seq"], (rows[-1], fin)
+        last = rows[-1]
+        assert last["kind"] == "task" and last["status"] == "completed", last
+        assert last["task"]["agentId"] == cid and last["task"]["model"] == "fixture-model", last
+
+    child_rows = [e for e in events if e.get("type") == "tool" and e.get("agent")]
+    assert {e["name"] for e in child_rows} == {"read"}, child_rows
+    assert all(e["agent"] == child_of(lines, "read the notes")[0] for e in child_rows), child_rows
+
+    # The wire: two parent requests, the reading child's two and the other's
+    # one; the parent's second carries each child's answer as its call's result.
+    assert len(requests_of(fixture_server, "fan out")) == 2
+    assert len(requests_of(fixture_server, one)) == 2 and len(requests_of(fixture_server, two)) == 1
+    results = tool_results(requests_of(fixture_server, "fan out")[-1])
+    assert results == {"a1": answers["t1.1.1"], "a2": answers["t1.1.2"]}, results
+
+
+def test_native_agent_child_failure(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A child whose provider fails is a failed sub-agent, not a failed turn
+    (plan 026 §3.7): its finished line says failed and why, the parent's call
+    for it fails with the runner's text, and the parent's model reads that and
+    answers. The route with no steps is the provider failing: the fixture
+    answers the child's request with its 400.
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    task = "Look at the notes."
+    fixture_server.set_script(
+        [call_step("agent", {"description": "look", "prompt": task}, call_id="a1"), answer("the child failed")]
+    )
+    fixture_server.route(prompt_is(task), [])
+
+    proc = run_native(craze_bin, craze_home, ws, "delegate", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    assert CANARY not in proc.stdout and CANARY not in proc.stderr
+    assert fixture_server.unscripted == 1
+
+    ((cid, own),) = subagent_lines(events).items()
+    fin = own[-1]
+    assert fin["event"] == "finished" and fin["status"] == "failed", fin
+    assert "no scripted response" in fin["error"], fin
+    call = [e for e in events if e.get("type") == "tool" and "agent" not in e and e.get("id") == "t1.1.1"][-1]
+    assert call["status"] == "failed" and call["task"]["status"] == "failed" and call["task"]["agentId"] == cid, call
+    result = tool_results(requests_of(fixture_server, "delegate")[-1])["a1"]
+    assert result.startswith("The sub-agent failed:"), result
+
+
+def test_native_agent_child_tools_on_the_wire(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A child's request offers the profile's tools less the four a child never
+    gets -- agent, todo_write, ask_user_question and exit_plan_mode -- while the
+    parent's offers all of them (plan 026 §3.2, A1), and its system prompt ends
+    in the sub-agent role section, which the parent's has not.
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    task = "Answer at once."
+    fixture_server.set_script(
+        [call_step("agent", {"description": "at once", "prompt": task}, call_id="a1"), answer("done")]
+    )
+    fixture_server.route(prompt_is(task), [answer("answered")])
+
+    proc = run_native(craze_bin, craze_home, ws, "go", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (child,) = requests_of(fixture_server, task)
+    parent = requests_of(fixture_server, "go")[0]
+    assert child.tool_names == CHILD_TOOLS, child.tool_names
+    assert "agent" in parent.tool_names and "todo_write" in parent.tool_names, parent.tool_names
+    assert "# Your role as a sub-agent" in system_text(child)
+    assert "# Your role as a sub-agent" not in system_text(parent)
+
+
+def test_native_agent_workspace_persona(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A persona the workspace defines in .claude/agents/x.md is an agent type
+    the parent can call by name (plan 026 §3.4, A10): the child runs with the
+    persona's body as its role and only the tools it names, mapped to native
+    ids, and its subagent lines carry the type.
+    """
+    ws = tool_workspace(tmp_path)
+    (ws / ".claude" / "agents").mkdir(parents=True)
+    (ws / ".claude" / "agents" / "x.md").write_text(
+        "---\nname: x\ndescription: reads the notes and nothing else\ntools: Read\n---\n"
+        "You are X, who only ever reads the notes.\n",
+        encoding="utf-8",
+    )
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    task = "Read the notes as X."
+    fixture_server.set_script(
+        [call_step("agent", {"description": "as x", "prompt": task, "subagent_type": "x"}, call_id="a1"), answer("done")]
+    )
+    fixture_server.route(prompt_is(task), [answer("X read them")])
+
+    proc = run_native(craze_bin, craze_home, ws, "go", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (child,) = requests_of(fixture_server, task)
+    assert child.tool_names == ["read"], child.tool_names
+    assert "You are X, who only ever reads the notes." in system_text(child)
+    ((_, own),) = subagent_lines(parse_events(proc.stdout)).items()
+    assert {e["subagentType"] for e in own} == {"x"}, own
+    assert own[-1]["status"] == "completed" and own[-1]["output"] == "X read them", own[-1]
+
+
+@pytest.mark.parametrize(
+    ("mode", "call", "denial"),
+    [
+        (
+            "--plan",
+            call_step("write", {"filePath": "notes.txt", "content": "beta\n"}),
+            "Rejected: file edits are not allowed — the agent that started you is in plan mode.",
+        ),
+        (
+            "--ask",
+            call_step("bash", {"command": "echo hi > notes.txt"}),
+            "Rejected: ask mode is read-only - no edits, writes, or shell commands.",
+        ),
+    ],
+    ids=["plan", "ask"],
+)
+def test_native_agent_plan_and_ask_children(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture, mode: str, call: Step, denial: str
+) -> None:
+    """A child inherits its parent's mode (plan 026 §3.5, A3): under --plan a
+    child's write is denied with the child's own text -- it has no plan file to
+    write to -- and under --ask its command is denied as read-only; the child
+    reads the denial, answers, and the workspace is untouched.
+    """
+    ws = tool_workspace(tmp_path)
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    task = "Change the notes."
+    fixture_server.set_script(
+        [call_step("agent", {"description": "change", "prompt": task}, call_id="a1"), answer("the child could not")]
+    )
+    fixture_server.route(prompt_is(task), [call, answer("I was not allowed")])
+
+    before = tree(ws)
+    proc = run_native(craze_bin, craze_home, ws, mode, "delegate", timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    events = parse_events(proc.stdout)
+    assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}, events[-3:]
+    first, second = requests_of(fixture_server, task)
+    assert tool_results(second) == {call.calls[0].id: denial}, tool_results(second)
+    ((cid, own),) = subagent_lines(events).items()
+    assert own[-1]["status"] == "completed" and own[-1]["output"] == "I was not allowed", own[-1]
+    rows = [e for e in events if e.get("type") == "tool" and e.get("agent") == cid]
+    assert rows and rows[-1]["status"] == "failed", rows
+    assert tree(ws) == before, f"{mode} let a child change the workspace"
+    assert first.tool_names == CHILD_TOOLS, first.tool_names

@@ -310,7 +310,10 @@ func GxProvider() Provider {
 // D-34). H5 brings the rest: ask_user_question and exit_plan_mode open a
 // question and a plan ask on the session's registry, todo_write fills the
 // tasks panel, and the harness's three modes turn the chip, `/plan` `/ask`
-// `/agent`, Shift+Tab and `--plan`/`--ask` on (plan 023 §3.4, §3.6).
+// `/agent`, Shift+Tab and `--plan`/`--ask` on (plan 023 §3.4, §3.6). H6's
+// sub-agents turn on the row band and the child view (plan 026 §3.9): the
+// adapter keeps a roster in Snapshot().Subagents and streams each child's own
+// events tagged with its id (native_subagents.go).
 //
 // The mode table and the implement prompt are cursor's: native's ids are the
 // same three words, so craze's canonical mode commands (`/plan`, `--ask`, the
@@ -329,12 +332,14 @@ func NativeProvider() Provider {
 		modeKinds:       cursorModeKinds,
 		implementPrompt: cursorImplementPrompt,
 		capabilities: Capabilities{
-			Effort:    true,
-			Interject: true,
-			Modes:     true,
-			Todos:     true,
-			AskCards:  true,
-			PlanCards: true,
+			Effort:             true,
+			Interject:          true,
+			Modes:              true,
+			Todos:              true,
+			AskCards:           true,
+			PlanCards:          true,
+			SubagentRows:       true,
+			SubagentTranscript: true,
 		},
 	}
 }
