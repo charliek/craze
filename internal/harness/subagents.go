@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -35,8 +37,9 @@ import (
 //
 // Every step that can fail comes after the step that undoes it is deferred,
 // so a failed Open, a panic the dispatcher recovers outside the runner
-// (dispatch.go's run), a cancel and a Close each give back exactly what they
-// took:
+// (dispatch.go's run) — one unwinding through the child's own Run is the
+// runner's to recover (runTurn) — a cancel and a Close each give back exactly
+// what they took:
 //
 //  1. the slot is acquired by a select on the semaphore, the call's context
 //     and the session's closing channel; one won while either of the other two
@@ -94,7 +97,9 @@ const (
 	subagentLastOutput = "Its last output was:\n"
 	subagentStopped    = "The user stopped this sub-agent before it finished."
 	// subagentPanicked is the Error of the SubagentFinished a child's panic
-	// leaves behind; the call's result is the dispatcher's, which recovers it.
+	// leaves behind. The call's result is the runner's own failure, which
+	// names the panic's value (childPanic; review r3): the event's error is a
+	// row's label, and a panic's value can be any size.
 	subagentPanicked = "the sub-agent panicked"
 	// subagentNested refuses an agent call inside a sub-agent: depth is 1
 	// (§3.2). A child is never offered the tool, so this is the guard behind
@@ -422,44 +427,33 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 		r.seams.opened(h.id, child)
 	}
 
-	// Everything the runner reports of the call's own text is redacted first,
-	// with the parent's keys and then the child's: the prompt goes to the
+	// Everything the runner reports of this call is redacted first, with one
+	// replacer over the union of the parent's keys — every one it knows, as
+	// Session.Redact — and the child's, which can hold one more when the
+	// environment gained a key between the two Opens. The prompt goes to the
 	// child's model, its transcript and SubagentStarted, and Run sends and
 	// persists a prompt as it is given, which is right for text a person typed
-	// and wrong for text a model wrote (§3.9, panel P9).
-	red := func(text string) string { return child.Redact(parent.Redact(text)) }
-	prompt := red(call.Prompt)
+	// and wrong for text a model wrote (§3.9, panel P9). One pass, never the
+	// parent's and then the child's (review r3): a replacer covers every byte
+	// of overlapping occurrences only of its own keys, so a parent's key that
+	// begins a longer key of the child's would leave, after the first pass's
+	// marker, the rest of the longer key for the second pass not to recognise.
+	red := redact.New(append(parent.tools.knownKeys(), child.tools.knownKeys()...)...)
+	prompt := red.String(call.Prompt)
 	child.mu.Lock()
 	ran := child.cur.id()
 	child.mu.Unlock()
 
+	// The model's names are the table's, which is text like any other; the
+	// dispatcher redacts them on the result (Result.Child), and these events
+	// never pass through it (review r3).
 	started := time.Now()
 	link.emit(SubagentStarted{
-		ID: h.id, CallID: call.ID, Type: red(persona.Name), Description: red(call.Description), Prompt: prompt,
-		Model: alias, Effort: effort, Mode: mode, At: parent.now(),
+		ID: h.id, CallID: call.ID, Type: red.String(persona.Name), Description: red.String(call.Description), Prompt: prompt,
+		Model: red.String(alias), Effort: red.String(effort), Mode: mode, At: parent.now(),
 	})
 	var obs childObserver
-	finished := func(status, errText, text string) {
-		usage, calls, steps := obs.totals()
-		link.emit(SubagentFinished{
-			ID: h.id, Status: status, Error: errText, Text: red(text), Usage: usage,
-			Model: ran.Alias, Provider: ran.Provider, WireModel: ran.WireModel,
-			ToolCalls: calls, Steps: steps, Duration: time.Since(started), At: parent.now(),
-		})
-	}
-	// A panic that unwinds through the child's turn — which the dispatcher
-	// recovers, outside the runner — still leaves the child closed first, as
-	// the deferred Close would, and its lifecycle finished: every started
-	// child has its SubagentFinished.
-	reported := false
-	defer func() {
-		if !reported {
-			_ = child.Close()
-			finished(SubagentFailed, subagentPanicked, obs.lastOutput())
-		}
-	}()
-
-	res, runErr := child.Run(childCtx, prompt, func(ev Event) {
+	res, runErr := runTurn(childCtx, child, prompt, func(ev Event) {
 		obs.observe(ev)
 		link.sink(SubagentEvent{ID: h.id, Event: ev})
 	})
@@ -468,21 +462,62 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 		parentGone: ctx.Err() != nil || isClosed(parent.tools.closing) || h.isClosing(),
 		stopped:    errors.Is(context.Cause(childCtx), errStoppedByUser),
 	}.decide(&obs)
-	// The child's usage, observed, rides on the result whichever way it
-	// ended: the parent's step records it per model (§3.7). The model names
-	// are the child's; the dispatcher redacts them with the rest.
-	usage, _, _ := obs.totals()
-	out.result.Child = &tool.ChildUsage{Provider: ran.Provider, Model: ran.Alias, WireModel: ran.WireModel, Usage: tool.Usage{
-		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
-		CacheRead: usage.CacheRead, CacheCreation: usage.CacheCreation,
-	}}
+
 	// Finished says the child has ended and closed: its Close is idempotent,
 	// and the deferred one then does nothing.
 	_ = child.Close()
-	reported = true
-	finished(out.status, red(out.errText), out.text)
+	usage, calls, steps := obs.totals()
+	link.emit(SubagentFinished{
+		ID: h.id, Status: out.status, Error: red.String(out.errText), Text: red.String(out.text), Usage: usage,
+		Model: red.String(ran.Alias), Provider: red.String(ran.Provider), WireModel: red.String(ran.WireModel),
+		ToolCalls: calls, Steps: steps, Duration: time.Since(started), At: parent.now(),
+	})
+	// Delivering Finished can block — on the parent's turn lock and on its
+	// sink — and the parent's call can be cancelled, or its session begin to
+	// close, meanwhile (review r3). A child that did not finish on its own —
+	// stopped, failed or cancelled — then reads aborted, as decide would have
+	// had it if the cause had landed first; a child that finished keeps its
+	// outcome, which is persisted (decide's first rule, X6).
+	if out.status != SubagentCompleted && (ctx.Err() != nil || isClosed(parent.tools.closing) || h.isClosing()) {
+		out.result = abortedResult()
+	}
+	// The result is redacted with the same replacer: its text is the child's,
+	// which can hold the key the child learned and the parent does not know,
+	// and the agent tool and the dispatcher redact with the parent's alone
+	// (review r3).
+	out.result.Text = red.String(out.result.Text)
+	// The child's usage, observed, rides on the result whichever way it
+	// ended: the parent's step records it per model (§3.7). The model names
+	// are the child's, redacted like the text; the dispatcher redacts them
+	// again with the rest.
+	out.result.Child = &tool.ChildUsage{Provider: red.String(ran.Provider), Model: red.String(ran.Alias), WireModel: red.String(ran.WireModel), Usage: tool.Usage{
+		Input: usage.Input, Output: usage.Output, Reasoning: usage.Reasoning,
+		CacheRead: usage.CacheRead, CacheCreation: usage.CacheCreation,
+	}}
 	return out.result
 }
+
+// runTurn is the child's Run, with a panic that unwinds through it recovered
+// as its error, a childPanic (review r3). The runner then answers the call as
+// for any other failure: the child closed, its SubagentFinished failed, and
+// the call's result a tool_error that carries the child's observed usage —
+// which the parent's step records (subagent_usage) — and goes through the
+// agent tool's cap. Left to the dispatcher's recovery, outside the runner,
+// the result lost both: a fresh error with no usage, and no cap.
+func runTurn(ctx context.Context, child *Session, prompt string, sink func(Event)) (res Result, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			res, err = Result{}, childPanic{value: v}
+		}
+	}()
+	return child.Run(ctx, prompt, sink)
+}
+
+// childPanic is a panic recovered from a child's turn (runTurn), as the error
+// decide reads.
+type childPanic struct{ value any }
+
+func (p childPanic) Error() string { return fmt.Sprintf("it panicked: %v", p.value) }
 
 // childOpenOptions are the Options a child of s opens with (§3.2): the
 // parent's own values, its extras cloned, with the child's model and effort
@@ -612,7 +647,8 @@ type decided struct {
 //  3. otherwise a stop by the user alone is not an error: the stop's text and
 //     what the child had got to;
 //  4. otherwise a failure is an error with its message and the child's last
-//     output;
+//     output — a panic recovered from its turn (childPanic) included, whose
+//     SubagentFinished says only that it panicked;
 //  5. and a cancel nobody claims is aborted.
 func (o subagentOutcome) decide(obs *childObserver) decided {
 	last := obs.lastOutput()
@@ -627,7 +663,11 @@ func (o subagentOutcome) decide(obs *childObserver) decided {
 	case o.stopped:
 		return decided{result: tool.Result{Text: withLastOutput(subagentStopped, last)}, status: SubagentCancelled, text: last}
 	case o.err != nil:
-		return decided{result: failedResult(o.err.Error(), last), status: SubagentFailed, errText: o.err.Error(), text: last}
+		errText := o.err.Error()
+		if errors.As(o.err, new(childPanic)) {
+			errText = subagentPanicked
+		}
+		return decided{result: failedResult(o.err.Error(), last), status: SubagentFailed, errText: errText, text: last}
 	}
 	return decided{result: abortedResult(), status: SubagentCancelled, text: last}
 }

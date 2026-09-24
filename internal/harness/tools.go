@@ -454,6 +454,17 @@ func (ts *toolset) widest() *redact.Replacer {
 	return ts.red.Load()
 }
 
+// knownKeys are the keys widest redacts — every key the session knows — as a
+// copy the caller owns. The sub-agent runner builds one replacer over its
+// parent's and its child's together from them (review r3): a Replacer does
+// not expose its keys, and two replacers run one after the other are not one
+// over the union (runChild says why).
+func (ts *toolset) knownKeys() []string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return slices.Clone(ts.keys)
+}
+
 // resolve takes the keys the table resolves now and, when one of them is new
 // to the session, prepares the redactor over all of them — the ones it had
 // included — for the next turn to adopt. A session learns a key this way

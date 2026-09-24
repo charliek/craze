@@ -509,21 +509,36 @@ func TestAgentSlotReleasedOnEveryPath(t *testing.T) {
 	})
 
 	t.Run("a panic during Run", func(t *testing.T) {
+		// The runner recovers the panic itself (review r3): the call fails
+		// like any other failed child, capped by the agent tool and carrying
+		// the child's usage, which the parent's step records. A panic's value
+		// can be any size; this one is twice the cap.
 		f := newRouted(t)
 		s := f.open(f.options())
 		k := watchKids(s)
 		a := f.routers["test/a"]
 		a.route("go", callStep(agentPart(t, "a1", task("explodes", "persist then panic"))), answerWith("ok"))
+		huge := strings.Repeat("\nand again", tool.MaxBytes/5)
 		a.route("persist then panic",
 			callStep(textParts("first"), globPart("g1")),
-			func(context.Context, func(fantasy.StreamPart) bool) { panic("the child's model exploded") })
+			func(context.Context, func(fantasy.StreamPart) bool) { panic("the child's model exploded" + huge) })
 		var ev events
 		if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
 			t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
 		}
 		res := callResult(t, ev.list(), "t1.1.1")
-		if res.Class != tool.ClassToolError || !strings.Contains(res.Text, `tool "agent" panicked: the child's model exploded`) {
-			t.Fatalf("the call = %+v; want the dispatcher's recovered panic", res)
+		if res.Class != tool.ClassToolError || !strings.HasPrefix(res.Text, "The sub-agent failed: it panicked: the child's model exploded\nand again\n") {
+			t.Fatalf("the call = %.200q (class %q); want the runner's recovered panic, a failed sub-agent", res.Text, res.Class)
+		}
+		if res.Trunc.Spill == "" || len(res.Text) > tool.MaxBytes+1024 || !strings.Contains(res.Text, "Full output saved to: "+res.Trunc.Spill) {
+			t.Fatalf("the call: %d bytes, spill %q; want the panic's value capped, with its spill file", len(res.Text), res.Trunc.Spill)
+		}
+		if res.Child == nil || res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+			t.Fatalf("the call's usage = %+v; want the one step the child was billed for", res.Child)
+		}
+		rows := []ModelUsage{{Provider: "test", Model: "test/a", WireModel: "wire-a", Usage: oneStep(1)}}
+		if toolEntry := transcript(t, s).Entries[2]; toolEntry.Message.Role != fantasy.MessageRoleTool || !reflect.DeepEqual(toolEntry.SubagentUsage, rows) {
+			t.Fatalf("the parent's tool entry (%s) carries rows %+v; want %+v", toolEntry.Message.Role, toolEntry.SubagentUsage, rows)
 		}
 		kid := k.all()[0]
 		if !storeClosed(kid.store) {
@@ -1081,6 +1096,68 @@ func TestStopVersusParentCancelPrecedence(t *testing.T) {
 			}
 		})
 	}
+	for _, late := range []string{"the parent's cancel", "Close"} {
+		t.Run(late+" while a stopped child's SubagentFinished is delivered", func(t *testing.T) {
+			// Review r3's schedule: the stop alone has decided the call — no
+			// final step was persisted — and the parent's cause lands while the
+			// parent's sink holds SubagentFinished, before the call returns.
+			// The child never finished on its own, so the cause still outranks
+			// the stop, and the call keeps the step the child was billed for.
+			f := newRouted(t)
+			s := f.open(f.options())
+			a := f.routers["test/a"]
+			w := newWorker()
+			a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))))
+			a.route("a long task", callStep(globPart("g1")), w.step(openText("half done"), finishText()))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			delivering, delivered := make(chan struct{}), make(chan struct{})
+			var ev events
+			sink := func(e Event) {
+				ev.sink(e)
+				if _, ok := e.(SubagentFinished); ok {
+					close(delivering)
+					select {
+					case <-delivered:
+					case <-time.After(waitTimeout):
+						t.Errorf("SubagentFinished's delivery was never let go")
+					}
+				}
+			}
+			out := start(ctx, s, "go", sink)
+			await(t, w.reached, "the child mid-step")
+			if !stopChild(s, of[SubagentStarted](ev.list())[0].ID) {
+				t.Fatal("the child was not registered")
+			}
+			await(t, delivering, "SubagentFinished's delivery")
+			closed := make(chan error, 1)
+			switch late {
+			case "the parent's cancel":
+				cancel()
+			case "Close":
+				go func() { closed <- s.Close() }()
+				await(t, s.tools.closing, "Close's signal")
+			}
+			close(delivered)
+			got := await(t, out, "the turn")
+			if got.err != nil || got.res.StopReason != StopCancelled {
+				t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+			}
+			if fin := of[SubagentFinished](ev.list())[0]; fin.Status != SubagentCancelled || fin.Usage != oneStep(1) {
+				t.Fatalf("SubagentFinished = %+v; want cancelled, with the first step's usage", fin)
+			}
+			res := callResult(t, ev.list(), "t1.1.1")
+			if res.Class != tool.ClassAborted || res.Text != tool.AbortedText || res.Child == nil ||
+				res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+				t.Fatalf("the call = %+v; want aborted, carrying the first step's usage: the parent's cause outranks the stop", res)
+			}
+			if late == "Close" {
+				if err := await(t, closed, "Close"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
 	for _, late := range []string{"a stop", "the parent's cancel"} {
 		t.Run(late+" after the final step", func(t *testing.T) {
 			f := newRouted(t)
@@ -1292,15 +1369,32 @@ func TestAgentUnknownModelOrEffort(t *testing.T) {
 // every one of the child's events comes before its SubagentFinished; and that
 // comes before the parent's ToolFinished for the call. Two children, one held
 // while the other runs to its end, so their events interleave.
+//
+// The interleaving is forced, not left to Fantasy's scheduling (review r3):
+// child two makes no progress until child one is held mid-step — its first
+// step waits, in its own provider stream and so outside the parent turn's
+// lock, on child one's reached barrier — and child one is let go only once
+// child two has finished. Run one after the other, child two's wait runs out
+// and fails the test.
 func TestSubagentEventOrder(t *testing.T) {
 	f := newRouted(t)
 	s := f.open(f.options())
 	a := f.routers["test/a"]
 	w := newWorker()
+	afterOneHeld := func(next step) step {
+		return func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+			select {
+			case <-w.reached:
+			case <-time.After(waitTimeout):
+				t.Errorf("child two ran while child one was not held mid-step: the children did not interleave")
+			}
+			next(ctx, yield)
+		}
+	}
 	a.route("fan out", callStep(agentPart(t, "a1", task("first", "child one")), agentPart(t, "a2", task("second", "child two"))),
 		answerWith("done"))
 	a.route("child one", callStep(textParts("looking"), globPart("g1")), w.step(openText("one "), finishText()))
-	a.route("child two", callStep(textParts("searching"), globPart("g2")), answerWith("two"))
+	a.route("child two", afterOneHeld(callStep(textParts("searching"), globPart("g2"))), answerWith("two"))
 	var ev events
 	sink := func(e Event) {
 		ev.sink(e)
@@ -1343,6 +1437,17 @@ func TestSubagentEventOrder(t *testing.T) {
 	if slices.IndexFunc(evs, func(e Event) bool { f, ok := e.(SubagentFinished); return ok && f.ID == two.ID }) >
 		slices.IndexFunc(evs, func(e Event) bool { f, ok := e.(SubagentFinished); return ok && f.ID == one.ID }) {
 		t.Fatal("control: the first child finished before the second; the schedule did not interleave them")
+	}
+	// And the first had begun before the second streamed anything.
+	text := func(id, want string) func(Event) bool {
+		return func(e Event) bool {
+			se, ok := e.(SubagentEvent)
+			d, isText := se.Event.(TextDelta)
+			return ok && se.ID == id && isText && d.Text == want
+		}
+	}
+	if looking, searching := slices.IndexFunc(evs, text(one.ID, "looking")), slices.IndexFunc(evs, text(two.ID, "searching")); looking < 0 || searching < looking {
+		t.Fatalf("control: the first child's text is event %d and the second's %d; want the first's before the second's", looking, searching)
 	}
 }
 
@@ -1695,6 +1800,131 @@ func TestSubagentCanaryRedaction(t *testing.T) {
 	}
 	if fin := finishedOf(t, evs, echo.ID); !strings.Contains(fin.Text, redact.Marker) {
 		t.Fatalf("SubagentFinished.Text = %q; want the key redacted", fin.Text)
+	}
+}
+
+// TestSubagentRedactsWithBothSessionsKeys (review r3): the parent opens
+// knowing one key; the environment's value then becomes a longer key that
+// begins with it, which the child, opening later, learns and the parent does
+// not. An agent call's description and prompt hold the longer key, and two
+// children stream it: one that answers and one that fails. The runner redacts
+// with one replacer over both sessions' keys, so the longer key wins whole —
+// no fragment of it survives in SubagentStarted, the child's request, its
+// transcript's prompt, SubagentFinished, the call's result or the parent's
+// next request. Redacting with the parent's keys and then the child's leaves
+// the suffix behind the first marker; and a result redacted by the parent's
+// keys alone — the agent tool's and the dispatcher's — leaves it too.
+func TestSubagentRedactsWithBothSessionsKeys(t *testing.T) {
+	const (
+		oldKey = "sk-abcdefgh"
+		newKey = "sk-abcdefgh-new-secret"
+		suffix = "new-secret"
+	)
+	f := newRouted(t)
+	env := map[string]string{"TEST_API_KEY": oldKey, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	envMu.Lock()
+	env["TEST_API_KEY"] = newKey
+	envMu.Unlock()
+	k := watchKids(s)
+	prompt := "use the key " + newKey + " to check"
+	if got := s.Redact(prompt); got != "use the key "+redact.Marker+"-"+suffix+" to check" {
+		t.Fatalf("control: the parent redacts the prompt to %q; want its own key's marker and the suffix after it", got)
+	}
+	sent := "use the key " + redact.Marker + " to check"
+	a := f.routers["test/a"]
+	a.route("go", callStep(
+		agentPart(t, "a1", task("scan "+newKey, prompt)),
+		agentPart(t, "a2", task("fail", "fail loudly"))),
+		answerWith("ok"))
+	a.route(sent, answerWith("the key is "+newKey+"."))
+	a.route("fail loudly", reply(openText("partial "+newKey), errorPart(errors.New("down"))))
+	var ev events
+	if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+	}
+	evs := ev.list()
+	checker, failer := startedWith(t, evs, sent), startedWith(t, evs, "fail loudly")
+	if kid := k.get(checker.ID); kid.Redact(newKey) != redact.Marker {
+		t.Fatal("control: the child did not learn the new key")
+	}
+	requests := a.requests(sent)
+	if len(requests) == 0 {
+		t.Fatal("the child's prompt was not sent as one marker")
+	}
+	for _, c := range requests {
+		if strings.Contains(requestText(c, true), suffix) {
+			t.Fatalf("the child's request holds the key's suffix:\n%s", requestText(c, true))
+		}
+	}
+	if tr := transcript(t, k.get(checker.ID)); messageText(tr.Entries[0].Message) != sent {
+		t.Fatalf("the child's transcript opens with %q; want %q", messageText(tr.Entries[0].Message), sent)
+	}
+	for _, st := range []SubagentStarted{checker, failer} {
+		fin := finishedOf(t, evs, st.ID)
+		for _, e := range []Event{st, fin} {
+			if found := leaks(e, suffix); len(found) != 0 {
+				t.Fatalf("%T leaks the key's suffix at %v: %+v", e, found, e)
+			}
+		}
+		if !strings.Contains(fin.Text, redact.Marker) {
+			t.Fatalf("SubagentFinished.Text = %q; want the key redacted", fin.Text)
+		}
+	}
+	for id, want := range map[string]string{"t1.1.1": "the key is " + redact.Marker + ".", "t1.1.2": "partial " + redact.Marker} {
+		res := callResult(t, evs, id)
+		if found := leaks(res, suffix); len(found) != 0 || !strings.HasSuffix(res.Text, want) {
+			t.Fatalf("call %s = %+v (leaks at %v); want it ending %q", id, res, found, want)
+		}
+	}
+	if toolEntry := transcript(t, s).Entries[2]; strings.Contains(messageText(toolEntry.Message), suffix) {
+		t.Fatalf("the parent's tool entry holds the key's suffix: %s", messageText(toolEntry.Message))
+	}
+	if next := a.requests("go"); len(next) != 2 || strings.Contains(requestText(next[1], false), suffix) {
+		t.Fatalf("the parent's %d requests; want two, the second without the key's suffix", len(next))
+	}
+}
+
+// TestSubagentLifecycleModelRedacted (review r3): a child whose model's names
+// hold a key — its alias, its provider's id and its wire id, each text from
+// the model table — is reported with them redacted in SubagentStarted and
+// SubagentFinished, which never pass through the dispatcher, as the call's
+// result reports them on its usage.
+func TestSubagentLifecycleModelRedacted(t *testing.T) {
+	f := newRouted(t)
+	alias, provider, wire := "keyed/"+canary, "keyed-"+canary, "wire-"+canary
+	f.table.Providers[provider] = f.table.Providers["test"]
+	f.table.Models[alias] = modeltable.Model{Provider: provider, WireModel: wire}
+	f.routers[alias] = &router{provider: provider, wire: wire, queues: map[string][]step{}, calls: map[string][]fantasy.Call{}}
+	s := f.open(f.options())
+	a := f.routers["test/a"]
+	a.route("go", callStep(agentPart(t, "a1", task("keyed", "on the keyed model", "model", alias))), answerWith("ok"))
+	f.routers[alias].route("on the keyed model", answerWith("done"))
+	var ev events
+	if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+	}
+	evs := ev.list()
+	st := startedWith(t, evs, "on the keyed model")
+	fin := finishedOf(t, evs, st.ID)
+	for _, e := range []Event{st, fin} {
+		if found := leaks(e, canary); len(found) != 0 {
+			t.Fatalf("%T leaks the key at %v", e, found)
+		}
+	}
+	if st.Model != "keyed/"+redact.Marker || fin.Status != SubagentCompleted || fin.Model != "keyed/"+redact.Marker ||
+		fin.Provider != "keyed-"+redact.Marker || fin.WireModel != "wire-"+redact.Marker {
+		t.Fatalf("SubagentStarted.Model %q, SubagentFinished %+v; want the keyed model's names, redacted", st.Model, fin)
+	}
+	if res := callResult(t, evs, "t1.1.1"); res.Text != "done" || res.Child == nil || res.Child.Model != "keyed/"+redact.Marker {
+		t.Fatalf("the call = %+v; want the child's answer, its usage on the keyed model, redacted", res)
 	}
 }
 
