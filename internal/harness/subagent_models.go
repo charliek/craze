@@ -295,7 +295,8 @@ func capJoin(items []string, keep int) string {
 // cut afterwards by the refusal's own renderer, and cutting redacted text can
 // shorten a marker but never rebuild a key.
 func (s *Session) quoteRaw(raw string) string {
-	red := s.tools.widest()
+	// Session.Redact's set, the children's keys included (review r10).
+	red := s.redactor()
 	return red.String(strings.Join(strings.Fields(red.String(raw)), " "))
 }
 

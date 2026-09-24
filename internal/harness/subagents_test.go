@@ -2487,6 +2487,57 @@ func TestRedactCoversItsSubagentsKeys(t *testing.T) {
 	}
 }
 
+// TestRefusalAfterAChildRetiredQuotesNoFragment (review r10): a child learns a
+// key the parent never does and retires; at the parent's next step a call
+// quotes that key in an effort the model does not offer, padded so the
+// refusal's cut would fall one byte short of the key's end. The refusal is
+// redacted with Session.Redact's set — the retired child's key covered until
+// the turn ends — before anything cuts it, so no fragment of the key reaches
+// the call's result. With the parent's keys alone, all but its last byte would.
+func TestRefusalAfterAChildRetiredQuotesNoFragment(t *testing.T) {
+	const childKey = "sk-only-the-child-knows-it"
+	f := newRouted(t)
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var envMu sync.Mutex
+	opts := f.options()
+	opts.Getenv = func(k string) string {
+		envMu.Lock()
+		defer envMu.Unlock()
+		return env[k]
+	}
+	s := f.open(opts)
+	envMu.Lock()
+	env["NOKEY_API_KEY"] = childKey
+	envMu.Unlock()
+	if s.Redact(childKey) != childKey {
+		t.Fatal("control: the parent learned the key")
+	}
+	effort := strings.Repeat("x", unknownModelRawCap-len(childKey)+1) + childKey
+	a := f.routers["test/a"]
+	a.route("go",
+		callStep(agentPart(t, "a1", task("scan", "scan it"))),
+		callStep(agentPart(t, "a2", task("again", "scan it again", "effort", effort))),
+		answerWith("done"))
+	a.route("scan it", answerWith("ok"))
+	var ev events
+	if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
+	}
+	settled(t, s)
+	var refusal string
+	for _, e := range ev.list() {
+		if fin, ok := e.(ToolFinished); ok && fin.ID == "t1.2.1" {
+			refusal = fin.Result.Text
+		}
+	}
+	if !strings.Contains(refusal, "is not offered by") {
+		t.Fatalf("control: the second call's result is %q; want the effort refusal", refusal)
+	}
+	if strings.Contains(refusal, childKey[:len(childKey)-1]) {
+		t.Fatalf("the refusal holds a fragment of the retired child's key: %q", refusal)
+	}
+}
+
 // TestSubagentRefusesAKeyInItsHome (review r4): after the parent opened — so
 // the parent never learns it — and before its child opens, which would, the
 // environment gains a key that is part of the harness home's path. Every

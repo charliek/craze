@@ -614,7 +614,12 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 // first pass's marker, the rest of the longer key for the second pass not to
 // recognise.
 func (r *subagents) union(child *Session) *redact.Replacer {
-	keys := r.s.tools.knownKeys()
+	// The session-wide set Session.Redact covers — the parent's keys, every
+	// registered child's and a retired child's until the turn ends — not the
+	// parent's alone: a refusal with no child of its own can still quote a key
+	// only an earlier child of this turn learned, and the adapter's wider pass
+	// would find it already cut (review r10).
+	keys := append(r.s.tools.knownKeys(), r.childKeys()...)
 	if child != nil {
 		keys = append(keys, child.tools.knownKeys()...)
 	}
