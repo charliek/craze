@@ -103,8 +103,10 @@ swallowed option can make a client believe it took effect (shed's own rule:
 
 ## `hello`
 
-`hello` opens the connection. Every other method before it is refused
-`bad_request`, reason `hello_required`.
+`hello` opens the connection. A method protocol 1 does not know is refused
+`-32601`, reason `unknown_method`, whether or not `hello` has run yet — that
+check comes first. Any method protocol 1 *does* know, sent before `hello`, is
+refused `bad_request`, reason `hello_required`.
 
 ```json
 {"jsonrpc":"2.0","id":"1","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"fakehost-wire"}}}
@@ -114,7 +116,7 @@ swallowed option can make a client believe it took effect (shed's own rule:
 |---|---|
 | `protocols` | every protocol version the client speaks, e.g. `[1]` |
 | `client.kind` | required, e.g. `"tui"`, `"shed"` |
-| `client.name`, `client.version` | optional, for logs |
+| `client.name`, `client.version` | optional, free-form; the server logs nothing a client sends — only the client id it assigns and the resume outcome |
 | `client.capabilities` | the client's own capability set; empty in protocol 1 |
 | `resume` | `{clientId, token}` to take back a client id this host minted (see [Client ids and resume](#client-ids-and-resume)) |
 | `auth` | reserved for S6's scopes; absent or `null` |
@@ -192,8 +194,14 @@ other answer means the outcome of a command sent before the disconnect is
 unknown, and a client must re-read state (`session.state`) rather than
 resend it under a fresh id (which risks running it twice).
 
-`retryHorizon` is the size and age bound of the host's command-id table: a
-resend within it is answered from the table; past it, `unknown_command`.
+`retryHorizon` is the size and age bound of the host's command-id table,
+which holds one stored answer per command id that actually reached the
+engine — every code except `unavailable`, `not_accepting`, `in_progress` and
+`stale_model` (`protocol.Retry`), which the engine never stores because
+nothing ran under that id. A resend of one of those four is evaluated fresh
+every time, not answered from the table. A resend of a command whose answer
+**is** stored, within the horizon, gets that stored answer back; past it,
+`unknown_command`.
 
 ## Sessions and the roster
 
@@ -242,12 +250,12 @@ same `commandId` is how a client asks "did that happen?" — see
 | `session.detach` | | `subscription` | `{}` | ends this connection's attachment; the reply is its terminal acknowledgement |
 | `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings` | a read, not a cut of the stream |
 | `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot, main or one child's, no subscription |
-| `session.sync` | | — | `seq` | the reply barrier with no command (below) |
+| `session.sync` | | — | `seq` | the reply barrier with no command ([below](#the-reply-barrier)) |
 | `session.prompt` | ✓ | `text?`, `fromRow?`, `mode` (`queue`\|`send_now`\|`interject`) | `turn`+`text` \| `queued` \| `armed` \| `{}` | `mode: interject` with `fromRow` is refused `-32602`, reason `bad_request` — interject takes text alone |
 | `session.cancel` | ✓ | `turnId?` | `outcome`, `turn`, `reported` | with no `turnId`, cancels **the current turn** — craze's own or the agent's, whichever holds the session when the host validates the call (see [The foreign turn](#the-foreign-turn)); a named turn that is not current is `stale_turn` |
 | `session.disarm` | ✓ | — | `{}` | takes back an armed send-now, leaving its text queued |
 | `session.queue.add` | ✓ | `text` | `row` | |
-| `session.queue.edit` | ✓ | `rowId`, `text`, `expectedVersion?` | `{}` | a stale `expectedVersion` is `stale_version`: two editors never silently overwrite each other |
+| `session.queue.edit` | ✓ | `rowId`, `text`, `expectedVersion?` | `{}` | `expectedVersion` is optional: given and stale, the edit is refused `stale_version` — the check-and-edit that stops two editors from silently overwriting each other; **omitted, the edit is unconditional** and can overwrite a concurrent edit |
 | `session.queue.remove` | ✓ | `rowId` | `row` | |
 | `session.queue.clear` | ✓ | — | `removed[]` | every row removed, in queue order |
 | `session.set` | ✓ | `setting{kind, id?, value, forModel?}` | `value`, `rev` | `rev` is the seq of the state delta that carried the change, `0` if it could not be learned |
@@ -263,6 +271,32 @@ Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
 foreign-turn policy, no socket client's concern), `Start`/`Close` (a host's
 own lifecycle), a bare `Subscribe` (attach subsumes it) and `NewClientID`
 (`hello` does that).
+
+### The reply barrier
+
+Every mutating method's reply, and `session.sync`'s own (it is the barrier
+with no command), waits for the **event barrier** before it is queued: the
+log's committed head at the moment of the call, forwarded to this
+connection's attachment — or the attachment's terminal acknowledgement, if it
+ends first — so a client is never handed a reply before the events the
+command caused. `seq` (`session.sync`'s result, and every state read's) is
+that committed head.
+
+What happens to a reply already admitted, but not yet past this barrier,
+differs by how the engine's turn at being "the session" ends:
+
+- An **ordinary end** (the session closes on its own — `session.stop`, the
+  provider exiting, an error) drains normally: every admitted reply is still
+  written, in order, once its barrier clears, and the connection closes only
+  once nothing is owed.
+- An **engine replacement** (the host is handed a new session to serve,
+  S4/`session/load`) is not drained. The connection becomes **terminal-only**
+  from that instant: every ordinary line still queued — a handler's reply, an
+  event, a plain `reset` — is dropped, and only the one terminal line
+  survives (an attached connection's `reset{session_replaced}`, or a claimed
+  detach's `{}`). A handler still running when this happens replies to
+  nobody; its client learns the outcome only by resending after a fresh
+  `hello` (`resumed: false`).
 
 ### `session.snapshot`
 
@@ -288,7 +322,7 @@ A notification has no `id` and carries its subscription id in `params`.
 |---|---|---|
 | `event` | `subscription`, `seq`, `event` | one committed event; `event` is the record's body **verbatim** — the same JSON the lossless event codec wrote, never re-encoded |
 | `synchronized` | `subscription`, `seq` | the stream has delivered through this attachment's cutoff — shed's "ready" for the *stream* (not to be confused with `ready`, the *session*'s readiness). Sent once per attachment |
-| `ready` | `subscription`, `session`, `startFailed`, `err?` | the session's start has finished (`startFailed: false`) or failed (`true`, `err` the text); sent once, only on an attachment made **before** readiness (`when: "now"`, or a `when: "ready"` attach that raced the start). `session` is the final [info document](#the-session-info-document) — catalogs and provider session id included |
+| `ready` | `subscription`, `session`, `startFailed`, `err?` | the session's start has finished (`startFailed: false`) or failed (`true`, `err` the text); owed once, only to an attachment made **before** readiness (`when: "now"`, or a `when: "ready"` attach that raced the start) — but not delivered if that subscription resets before its position reaches the seq the start completed at, and not owed at all if the session closes without ever starting (that attachment ends `reset{session_closed}` instead, with no `ready`). `session` is the final [info document](#the-session-info-document) — catalogs and provider session id included |
 | `reset` | `subscription`, `reason` | the subscription is over (below) |
 
 A `reset` is a notification, not a gap: nothing is ever silently lost. Every
@@ -297,10 +331,10 @@ reason and what a client does about it:
 | reason | cause | what a client does |
 |---|---|---|
 | `slow_consumer` | the client fell behind its own budget | after readiness: re-attach **with** its cursor — the log answers from the ring or the journal, or refuses and a snapshot follows. Before readiness: re-attach `when: "ready"`, with **no** cursor |
-| `omitted` | a record no client could ever fold (over the per-record limit) | re-attach with **no** cursor |
+| `omitted` | a record no client could ever fold (over the per-record limit) | re-attach with **no** cursor — unless this `omitted` is itself the session's closing reset (an unfoldable record in the final tail): the connection then ends exactly as `session_closed` ends it, and there is nothing to re-attach to |
 | `replay_failed` | the journal leg of a cursor replay failed asynchronously | discard everything folded since the cursor; re-attach with no cursor |
-| `session_replaced` | the host swapped its engine for a new session | the connection closes; reconnect, say `hello` afresh (the old token is void) and attach the new session |
-| `session_closed` | the session is over; its final records were delivered first | the connection closes; there is nothing to reconnect to |
+| `session_replaced` | the host swapped its engine for a new session | the connection closes ([terminal-only from the swap](#the-reply-barrier): no ordinary reply queued before it survives); reconnect, say `hello` afresh (the old token is void) and attach the new session |
+| `session_closed` | the session is over; its final records were delivered first — or, if the journal's tail could not be read, the contiguous prefix of them the host still had | the connection closes; there is nothing to reconnect to |
 
 ## Attach, resume, and snapshots
 
@@ -329,19 +363,63 @@ stored — safe to retry). A start that already failed is answered
 
 `when: "now"` attaches immediately, the start included: the reply answers
 `ready: false` while the session is still starting, the subscription
-receives the start as ordinary live events, and exactly one `ready`
-notification follows once the gate opens. This is what lets a client watch a
-session start.
+receives the start as ordinary live events, and the host owes this
+attachment one `ready` notification once the gate opens — delivered once the
+subscription's position reaches the seq the start completed at. If this
+subscription resets before that point (a slow consumer, a replay failure),
+the `ready` is dropped, not resent later; and if the session closes without
+ever starting, no `ready` is owed at all — this attachment ends
+`reset{session_closed}` instead. This is what lets a client watch a session
+start.
 
 ### The reply
+
+A real instance, from the fixtures
+(`internal/fakehost/testdata/wire/01-hello-attach-snapshot.ndjson`), a fresh
+attach with no cursor — `session` is the [info
+document](#the-session-info-document) below, and `snapshot` is
+`transcript.EncodeSnapshot`'s JSON, embedded raw:
 
 ```json
 {"jsonrpc":"2.0","id":"2","result":{
   "subscription":"s-1",
-  "session":{"...": "the session info document"},
+  "session":{
+    "sessionId":"session-fake-1",
+    "providerSessionId":"stub-session-1",
+    "incarnation":"INCARNATION-1",
+    "hostId":"0123456789ab",
+    "workspace":"/work",
+    "provider":{"name":"","label":"cursor"},
+    "catalogs":{
+      "models":[{"id":"grok","name":"Grok"},{"id":"fast","name":"Fast"}],
+      "modes":[
+        {"id":"agent","name":"Agent","description":"Full agent capabilities with tool access"},
+        {"id":"plan","name":"Plan","description":"Read-only mode for planning and designing before implementation"},
+        {"id":"ask","name":"Ask","description":"Q&A mode - no edits or command execution"}
+      ]
+    },
+    "capabilities":{"interject":false,"subagentCancel":false,"subagentBackground":false,"modes":true,"effort":true,"fastToggle":true,"subagentRows":true,"subagentTranscript":false,"todos":true,"askCards":true,"planCards":true,"parameterizedPicker":true,"cancel":true,"approvals":true,"historyCursor":true,"stop":false},
+    "retryHorizon":{"commands":1024,"ageMs":600000}
+  },
   "ready":true,
   "after":{"incarnation":"INCARNATION-1","seq":1},
-  "snapshot":{"...": "transcript.EncodeSnapshot's JSON, embedded raw"}
+  "snapshot":{
+    "version":1,
+    "incarnation":"INCARNATION-1",
+    "seq":1,
+    "settings":{
+      "mode":"agent",
+      "model":"grok",
+      "config":{
+        "options":[
+          {"id":"effort","name":"Effort","category":"thought_level","type":"select","current":"medium","selectValues":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"high","name":"High"}]},
+          {"id":"fast","name":"Fast","category":"model_config","type":"select","current":"false","selectValues":[{"value":"false","name":"Off"},{"value":"true","name":"Fast"}]}
+        ]
+      },
+      "commands":{"commands":[{"name":"research","description":"Agent-advertised command"}]}
+    },
+    "main":{}
+  }
 }}
 ```
 
@@ -386,10 +464,18 @@ resend a command whose earlier attempt it cannot rule out having run.
 A client bounds how many times it will re-attach within one "episode" (a
 connection loss and its resulting resets, resends and retries) — 8
 re-attaches, counted from every reset, reconnect and retried refusal, reset
-to zero the moment the stream reaches `synchronized` again. Past the bound,
+to zero the moment the stream reaches `synchronized` again
+(`ReattachesPerEpisode`).
+
+That is the **stream's** bound. Getting a connection back at all is bounded
+separately, in attempts and time: a reconnect episode makes at most 3 dial
+attempts, and ends 10 s after the loss, whichever comes first
+(`remote.Options.Redials`/`RedialWindow`) — every dial, handshake and resend
+of an in-flight command bounded by what is left of it. Past either bound,
 a client gives up on this attempt and surfaces the outcome as unknown
 (`resume_lost` or `disconnected` — see [Errors](#errors-and-retry)) rather than
-looping forever against a host that keeps resetting it.
+looping forever against a host that keeps resetting it, or that it cannot
+reach at all.
 
 ### Bounded history is `session.snapshot`, not pages
 
@@ -413,11 +499,15 @@ until then.
   "hostId":"0123456789ab",
   "workspace":"/work",
   "provider":{"name":"","label":"cursor"},
-  "catalogs":{"models":[{"id":"grok","name":"Grok"}],"modes":[{"id":"agent","name":"Agent","description":"..."}]},
-  "capabilities":{"...": "the session capability set, below"},
+  "catalogs":{"models":[{"id":"grok","name":"Grok"}],"modes":[{"id":"agent","name":"Agent","description":"Full agent capabilities with tool access"}]},
+  "capabilities":{"interject":false,"subagentCancel":false,"subagentBackground":false,"modes":true,"effort":true,"fastToggle":true,"subagentRows":true,"subagentTranscript":false,"todos":true,"askCards":true,"planCards":true,"parameterizedPicker":true,"cancel":true,"approvals":true,"historyCursor":true,"stop":false},
   "retryHorizon":{"commands":1024,"ageMs":600000}
 }
 ```
+
+Every field above is real (drawn from the same fixture as [the attach
+reply](#the-reply)); `capabilities`' fields are documented in full under
+[Capabilities](#capabilities) below.
 
 | field | |
 |---|---|
@@ -559,7 +649,15 @@ still behaves correctly.
 | `not_accepting` | did not run — a gate refusal | yes |
 | `in_progress` | still running under this exact id | yes (mandatory: it is the safe way to learn the answer once it lands) |
 | `stale_model` | did not run — refused before the provider was asked, because the session had already left the model the change was bound to | yes, once the session is back on that model — it is judged fresh, never as a replay of the refusal |
-| every other code | **ran** (or is this command's own stored answer) | no — a resend replays the stored answer; send a **new** `commandId` for another attempt |
+| every other code | **ran** (or is this command's own stored answer) — *when* the id ever reached the engine | no — a resend replays the stored answer; send a **new** `commandId` for another attempt |
+
+That "ran" column is only true once a `commandId` has reached the engine.
+`bad_request`, `unknown_session` and `unsupported` can also be returned
+before that — a malformed request, an unknown session, or an unsupported
+method are refused by the socket layer itself (`internal/control/dispatch.go`,
+`handlers.go`), with no command receipt at all. Resending one of those is
+just resending the same malformed or unsupported request, never a replay of
+a stored answer.
 
 `aborted` is the one exception worth calling out: the command ran, but its
 outcome cannot be vouched for (a caller's context ended mid-flight, a call
@@ -622,20 +720,27 @@ craze's own codes directly and does not need this table.
 | `unknown_ask` | `UnknownApproval` | craze's "ask" is shed's "approval" |
 | `already_submitted` | `AlreadySubmitted` | |
 | `already_resolved` | `AlreadyResolved` | |
-| `not_accepting` | `NotAccepting` | |
+| `not_accepting` | `NotAccepting` | did not run — a gate refusal; `protocol.Retry` is true, and craze resends the **same** `commandId`, which is exactly `NotAccepting`'s own posture: "not yet, try later" |
 | `foreign_turn` | `NotAccepting` | "the session will not take this send-now right now" is exactly `NotAccepting`'s posture |
-| `in_progress` | `NotAccepting` | a resend of a command still running reads the same way to a caller: "not yet, try later" |
-| `unavailable` | `Unavailable` | |
-| `unsupported` | `Failed` | reachable only if a client ignored a capability that was already `false`; `LaneError` has no dedicated variant for it |
-| `stale_version` | `BadRequest` | about this command's own arguments (an edit against a row version that moved), the same posture as a malformed request |
-| `stale_turn` | `BadRequest` | a cancel naming a turn that is no longer current — likewise about the command's own arguments |
-| `stale_model` | `BadRequest` | refused before the provider was ever asked, about the command's own arguments |
+| `in_progress` | `NotAccepting` | did not run under a new attempt — it is this command's own attempt, still running; `protocol.Retry` is true (mandatory: it is the safe way to learn the answer). A resend of a command still running reads the same way to a caller: "not yet, try later" |
+| `stale_model` | `NotAccepting` | did not run — refused before the provider was ever asked, because the session had already left the model the change was bound to. `protocol.Retry` is true: craze resends the **same** `commandId` once the session is back on that model, judged fresh, never as a replay. This is not an argument error — `NotAccepting`'s "will not take this right now" is the closer shed posture, and it is the closest fit shed has, not an exact one: a shed caller should still consult craze's own `data.code` (and `protocol.Retry`) rather than assume shed's `NotAccepting` alone carries the "resend once the model comes back" rule |
+| `unavailable` | `Unavailable` | did not run — a gate refusal; `protocol.Retry` is true, and `LaneError::Unavailable`'s own doc ("nothing to talk to… quiet") already reads as retryable rather than terminal |
+| `unsupported` | `Failed` | reachable by ignoring a capability already `false`, **or** by sending a method protocol 1 does not know at all (`unknown_method`, no capability involved); `LaneError` has no dedicated variant for either |
+| `stale_version` | `BadRequest` | about this command's own arguments (an edit against a row version that moved), the same posture as a malformed request; `protocol.Retry` is false — it ran (was refused) and a resend replays that refusal |
+| `stale_turn` | `BadRequest` | a cancel naming a turn that is no longer current — likewise about the command's own arguments; `protocol.Retry` is false |
 | `queue_full`, `text_too_long`, `prompt_in_flight`, `prompt_cancelled`, `unknown_row`, `unknown_command`, `unknown_subagent`, `aborted`, `failed`, `index_write` | `Failed` | no `LaneError` variant models a queue, a row, a sub-agent or "ran but the outcome cannot be vouched for"; the craze code's own text, kept in `Failed`'s string, is what a shed client actually shows |
 | *(unused)* | `Unauthorized` | protocol 1 has no authentication (`hello.auth` is reserved for S6); no craze code maps to it today |
 
 ## The gate table
 
-What every method answers in every state the engine can be in. This table is
+What each of `internal/engine`'s own gated commands answers in every state
+the engine can be in — the table's columns are its mutating methods (every
+one but `session.stop`, unsupported on every host in protocol 1). It is not
+every method protocol 1 defines: reads (`session.state`, `session.snapshot`,
+`sessions.list`, `asks.list`, `asks.get`), the attachment methods
+(`session.attach`, `session.detach`), `hello`, and the methods a host never
+serves are answered as their own sections above describe, not by this table.
+This table is
 rendered mechanically from `internal/engine`'s own
 `TestTheGateTableIsTheEngines` — the same test that drives every cell through
 the real engine — by `gateTableMarkdown()`, and
@@ -688,15 +793,20 @@ Every method, notification and shared document has a hand-written [JSON
 Schema](https://json-schema.org/) (2020-12) file, embedded in
 `internal/protocol` and checked by reflection against the Go wire types both
 ways (`TestSchemaCoversEveryWireField`) — a field the code sends that the
-schema does not describe, or vice versa, fails the build. The event and
-snapshot codecs' own hand-shaped wire structs get the same treatment in
-`internal/agent` (`TestEventSchemaCoversTheCodec`) and `internal/transcript`
+schema does not describe, or vice versa, fails the build — with one named
+exception: `session.create` is reserved for the hub (S4) and has no params,
+result, or schema file of its own; a host answers it `unsupported`, reason
+`hub_only`, like `session.connect`. The event and snapshot codecs' own
+hand-shaped wire structs get the same treatment in `internal/agent`
+(`TestEventSchemaCoversTheCodec`) and `internal/transcript`
 (`TestSnapshotSchemaCoversTheCodec`), since this package cannot import
 either.
 
 The copy published here, under `reference/protocol/schema/`, is byte-for-byte
 the same as the one `internal/protocol` embeds
-(`TestPublishedSchemaIsTheEmbedded` fails the build otherwise). Every file's
+(`TestPublishedSchemaIsTheEmbedded` fails the build otherwise — it walks both
+directories recursively, so a file or directory added on either side, at any
+depth, fails the build, not only one added directly under `schema/`). Every file's
 `$id` is `https://charliek.github.io/craze/reference/protocol/schema/<name>`,
 so a `$ref` between files resolves at this URL exactly as it does against the
 embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
@@ -718,8 +828,12 @@ right token, a wrong one, and one aged past its bound. Every line is
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections). `TestWireFixtures` replays
-every one of them byte for byte, validated against the schema above as it
-sends or reads each line.
+every one of them byte for byte, validating every line against the schema
+above as it sends or reads it — except a c2s line fixture 10 marks
+`"invalid": true`: deliberately not a well-formed request of a method
+protocol 1 defines with today's params (an unknown method, or a field no
+schema allows), sent as it stands and held to no request schema, since it is
+designed never to pass one.
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`

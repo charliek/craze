@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -44,11 +45,20 @@ func moduleRoot(t *testing.T) string {
 // published spec can never drift from what the code actually checks fixtures
 // and instances against. -update rewrites the published copy from the
 // embedded one instead of failing.
+//
+// The tree comparison (walkNames, below) walks BOTH sides recursively, not
+// just their top-level entries: a file or a directory added on either side,
+// at any depth, is a difference this test catches, not one it skips over. A
+// top-level os.ReadDir on the published side used to miss precisely that —
+// an added subdirectory, and everything under it, was invisible to it.
 func TestPublishedSchemaIsTheEmbedded(t *testing.T) {
 	dir := filepath.Join(moduleRoot(t), "docs", "reference", "protocol", "schema")
 	names := protocol.SchemaNames()
 
 	if *updatePublished {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -63,18 +73,19 @@ func TestPublishedSchemaIsTheEmbedded(t *testing.T) {
 		}
 	}
 
-	published, err := os.ReadDir(dir)
+	embeddedTree, err := walkNames(protocol.SchemaFS())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("reading %s: %v (run with -update to create it)", dir, err)
 	}
-	var publishedNames []string
-	for _, e := range published {
-		if !e.IsDir() {
-			publishedNames = append(publishedNames, e.Name())
-		}
+	publishedTree, err := walkNames(os.DirFS(dir))
+	if err != nil {
+		t.Fatalf("walking %s: %v", dir, err)
 	}
-	if diff := diffStrings(names, publishedNames); diff != "" {
-		t.Fatalf("docs/reference/protocol/schema/ does not hold exactly the embedded schema's files (run with -update):\n%s", diff)
+	if diff := diffStrings(embeddedTree, publishedTree); diff != "" {
+		t.Fatalf("docs/reference/protocol/schema/ does not hold exactly the embedded schema's tree, at any depth (run with -update):\n%s", diff)
 	}
 
 	for _, name := range names {
@@ -90,6 +101,35 @@ func TestPublishedSchemaIsTheEmbedded(t *testing.T) {
 			t.Errorf("docs/reference/protocol/schema/%s differs from the embedded schema (run with -update)", name)
 		}
 	}
+}
+
+// walkNames is every entry of fsys, at ANY depth, as a sorted list of tagged
+// paths — "f:name" for a file, "d:name" for a directory — so an entry added
+// anywhere in the tree, file or directory, shows up as a difference (and one
+// that changes kind, file to directory or back, does too). fs.WalkDir
+// descends every directory it is not told to skip, which is what makes this
+// recursive where a bare ReadDir of the root is not.
+func walkNames(fsys fs.FS) ([]string, error) {
+	var names []string
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == "." {
+			return nil
+		}
+		tag := "f:"
+		if d.IsDir() {
+			tag = "d:"
+		}
+		names = append(names, tag+path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // diffStrings is "" when got and want hold the same set of names, else a
