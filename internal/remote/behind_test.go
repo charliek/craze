@@ -159,6 +159,8 @@ func TestACommandReplyArrivesWhileTheStreamIsUnread(t *testing.T) {
 	if n := s.QueuedBytes(); n > bound {
 		t.Fatalf("the stream holds %d bytes, over its bound of %d", n, bound)
 	}
+	// The reader posts its detach (X21): it may go out after the reply.
+	tp.await(t, "the fall's detach", func() bool { return len(tp.sent(protocol.MethodSessionDetach)) > 0 })
 	if n := len(tp.sent(protocol.MethodSessionDetach)); n != 1 {
 		t.Fatalf("the premise: the stream fell behind and detached (%d detaches)", n)
 	}

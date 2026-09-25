@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -49,10 +50,22 @@ import (
 // never overlap: two attempts in flight would let the first run and the second
 // be refused, and the refusal would say "nothing ran".
 //
-// WIRE ORDER (X18 3). Each command is numbered at its first send
-// (command.seq); a reconnect resends in that order, and sends everything it
-// holds before it publishes the connection, so no new command, retry or
-// wait-out overtakes a resend on it.
+// A resend that in_progress or busy answered waits out its backoff (command
+// .waiting) before its next attempt: nothing — a reconnect's publication
+// included — sends it while the backoff runs (X21), and only the caller's
+// context bounds how long it waits on a host that stays at its cap.
+//
+// WIRE ORDER (X18 3, X21). Each command is numbered when the first byte of its
+// first attempt is written, under the connection's write lock (command.seq):
+// the order of the numbers is the order on the wire, and an attempt that
+// wrote nothing numbers nothing. A reconnect resends in that order — a
+// command never written after every one that was, in the order it was issued
+// — and sends everything it holds before it publishes the connection, so no
+// new command, retry or wait-out overtakes a resend on it.
+//
+// A command is sized against the host it is sent to: one over the inbound
+// limit of the host a reconnect reached (its hello's) is never claimed, and
+// resolves "not run" with ErrRequestTooLarge — not a byte was written (X21).
 
 // CommandOptions shape one Command.
 type CommandOptions struct {
@@ -70,7 +83,14 @@ type command struct {
 	id     string
 	method string
 	params json.RawMessage // with its commandId
-	done   chan cmdResult  // one answer at a time, to the caller
+	// size is its request line at its longest (the longest request id),
+	// without the newline: what a host's inbound limit is held against.
+	size int
+	done chan cmdResult // one answer at a time, to the caller
+	// seq is the command's place in wire order: numbered, under the write
+	// lock, when the first byte of its first attempt is written
+	// (Client.wireOrder); 0 until then.
+	seq atomic.Uint64
 
 	// Guarded by Client.mu.
 	//
@@ -84,14 +104,13 @@ type command struct {
 	// resent says the attempt went out for a command that may already have
 	// run under this identity — a resend after a resume — so an in_progress
 	// answer is its first execution still running, which the client waits out
-	// itself.
+	// itself. waiting says that wait-out's backoff is running: the command
+	// is sent again when it runs out, and not before (X21).
 	want    bool
 	out     bool
 	attempt int
 	resent  bool
-	// seq is the command's place in wire order: numbered at its first send
-	// (Client.wireOrder), 0 before it.
-	seq uint64
+	waiting bool
 	// ranUnder is the client identity the command may have run under, 0 when
 	// it cannot have run at all; unanswered counts its attempts that may have
 	// reached a host and have no answer — one on a connection that went first
@@ -162,13 +181,16 @@ func (c *Client) Command(ctx context.Context, method string, params, result any,
 	}
 	// Sized before it is remembered, with the longest request id there is:
 	// a command over the host's inbound limit is never sent at all.
-	if l, err := protocol.MarshalLine(protocol.Request{JSONRPC: protocol.JSONRPCVersion,
-		ID: json.RawMessage(longestRequestID), Method: method, Params: raw}); err != nil {
+	l, err := protocol.MarshalLine(protocol.Request{JSONRPC: protocol.JSONRPCVersion,
+		ID: json.RawMessage(longestRequestID), Method: method, Params: raw})
+	if err != nil {
 		return id, err
-	} else if len(l)-1 > c.maxLine() {
+	}
+	size := len(l) - 1
+	if size > c.maxLine() {
 		return id, ErrRequestTooLarge
 	}
-	cmd := &command{id: id, method: method, params: raw, done: make(chan cmdResult, 1), want: true}
+	cmd := &command{id: id, method: method, params: raw, size: size, done: make(chan cmdResult, 1), want: true}
 	c.mu.Lock()
 	if c.err != nil {
 		err := c.err
@@ -255,19 +277,21 @@ func (c *Client) attempt(cmd *command) { _ = c.attemptOn(cmd, nil) }
 // attemptOn sends cmd on via — the connection a reconnect is adopting — or,
 // via nil, on the current one: THE one place a command is sent, so the resend
 // rule and one-attempt-at-a-time are checked here, under Client.mu. It sends
-// nothing while an attempt is outstanding (out), or once the caller has its
-// answer or has gone. A command that may have run under another identity than
-// the client's now is resolved outcome-unknown (resume_lost) instead; one that
-// may have run under this one is a resend (resent): an in_progress answer to
-// it is its first execution still running, which the client waits out and
-// resends. With no connection (the client is reconnecting) it sends nothing:
-// the reconnect sends it before it publishes the next one. A stopped client
-// resolves it. errUnsent says not a byte of it was written, and it is held
-// again exactly as it stood before.
+// nothing while an attempt is outstanding (out) or a wait-out's backoff runs
+// (waiting), or once the caller has its answer or has gone. A command that may
+// have run under another identity than the client's now is resolved
+// outcome-unknown (resume_lost) instead; one that may have run under this one
+// is a resend (resent): an in_progress answer to it is its first execution
+// still running, which the client waits out and resends. With no connection
+// (the client is reconnecting) it sends nothing: the reconnect sends it before
+// it publishes the next one. A stopped client resolves it, and so does a
+// connection whose host reads less than it (ErrRequestTooLarge: nothing is
+// written). errUnsent says not a byte of it was written, and it is held again
+// exactly as it stood before; ErrConnectionLost that some may have been.
 func (c *Client) attemptOn(cmd *command, via *wire) error {
 	c.mu.Lock()
 	switch {
-	case cmd.gone || cmd.resolved || !cmd.want || cmd.out:
+	case cmd.gone || cmd.resolved || !cmd.want || cmd.out || cmd.waiting:
 		c.mu.Unlock()
 		return nil
 	case c.err != nil:
@@ -287,23 +311,37 @@ func (c *Client) attemptOn(cmd *command, via *wire) error {
 		c.mu.Unlock()
 		return nil
 	}
+	if cmd.size > w.maxLine {
+		// The host this connection reached reads less than the command
+		// (its hello's limit, smaller than the one it was sized against):
+		// it is never claimed, and nothing of it is written (X21).
+		cmd.resolved = true
+		cmd.deliver(cmdResult{err: c.tooLarge(cmd, w.maxLine)})
+		c.mu.Unlock()
+		return ErrRequestTooLarge
+	}
 	cmd.out = true
 	cmd.attempt++
 	cmd.unanswered++
 	cmd.resent = cmd.ranUnder != 0
 	ran := cmd.ranUnder
 	cmd.ranUnder = c.identity
-	if cmd.seq == 0 {
-		c.wireOrder++
-		cmd.seq = c.wireOrder
-	}
 	n := cmd.attempt
 	c.mu.Unlock()
+	if h := c.hooks.claimed; h != nil {
+		h(cmd.id)
+	}
 	// A failed send is a connection going, and the reconnect decides what
 	// becomes of the attempt: it stays out, as one that may have reached the
 	// host — unless not a byte of it was written, when it is held for the
-	// next connection exactly as it stood before.
-	_, err := c.send(w, cmd.method, cmd.params, func(resp *protocol.Response, err error) { c.commandReply(cmd, n, resp, err) })
+	// next connection exactly as it stood before. Its place in wire order is
+	// taken when its first byte is (X21).
+	_, err := c.send(w, cmd.method, cmd.params, func(resp *protocol.Response, err error) { c.commandReply(cmd, n, resp, err) },
+		func() {
+			if cmd.seq.Load() == 0 {
+				cmd.seq.Store(c.wireOrder.Add(1))
+			}
+		})
 	if errors.Is(err, errUnsent) {
 		c.mu.Lock()
 		if cmd.attempt == n && cmd.out {
@@ -331,6 +369,28 @@ func (c *Client) resolveLocked(cmd *command, reason protocol.Reason) {
 	cmd.deliver(cmdResult{err: err})
 }
 
+// tooLarge is why cmd, over the inbound limit (limit bytes) of the host a
+// connection reached, is settled without an attempt: not run, with why — a
+// *TooLargeError — when no earlier attempt of it may have run; outcome unknown
+// (resume_lost) when one may have, since the resumed connection cannot carry
+// its resend. c.mu is held.
+func (c *Client) tooLarge(cmd *command, limit int) error {
+	if cmd.ranUnder != 0 {
+		return &OutcomeUnknownError{Method: cmd.method, CommandID: cmd.id, Reason: protocol.ReasonResumeLost}
+	}
+	return &TooLargeError{Method: cmd.method, CommandID: cmd.id, Size: cmd.size, Limit: limit}
+}
+
+// waitedOut is a wait-out's backoff having run out: the command is held
+// again, and sent on the connection calls go to — or, while the client
+// reconnects, by the reconnect's publication.
+func (c *Client) waitedOut(cmd *command) {
+	c.mu.Lock()
+	cmd.waiting = false
+	c.mu.Unlock()
+	c.attempt(cmd)
+}
+
 // commandReply is attempt n's reply, on its connection's reader; err says the
 // connection went first, and then the reconnect decides (the attempt stays
 // out until it counts it lost, unanswered for good).
@@ -356,9 +416,11 @@ func (c *Client) commandReply(cmd *command, n int, resp *protocol.Response, err 
 			// commands in flight, which answers before the receipts table is
 			// asked and so says nothing of the first execution: neither is
 			// the command's answer. Wait it out and resend the same id
-			// (§3.14, §3.6).
+			// (§3.14, §3.6) — once the backoff has run, and not before: a
+			// reconnect's publication passes a waiting command over (X21).
 			cmd.backoff = min(max(2*cmd.backoff, retryBackoffMin), retryBackoffMax)
-			time.AfterFunc(cmd.backoff, func() { c.attempt(cmd) })
+			cmd.waiting = true
+			time.AfterFunc(cmd.backoff, func() { c.waitedOut(cmd) })
 			return
 		}
 		if protocol.Retry(code) && code != protocol.CodeInProgress && cmd.unanswered == 0 {

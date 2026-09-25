@@ -49,18 +49,23 @@
 // # Goroutines and locks
 //
 // A connection has one reader goroutine (Client.read); the stream's work —
-// its notifications and its own attach replies, the re-attaches it writes —
-// runs on it, in the order the host wrote them, and it never waits for the
-// stream's caller: an item that finds no room in the stream's queue makes
-// the stream fall behind (attach.go), so replies, resets and the
-// connection's end are always read. A lost connection starts one reconnect
-// goroutine, which opens the next connection, re-attaches on it before its
-// reader starts, sends every command held, in wire order, and only then hands
-// it over. Client.mu guards the client's state (the connection, the hello,
-// the commands); Stream.mu the stream's, and the stream's queue has its own
-// lock, taken under Stream.mu and never the other way; Client.mu and
-// Stream.mu are never held together, nor any lock across I/O. Close joins
-// every goroutine the client started.
+// its notifications and its own attach replies — runs on it, in the order the
+// host wrote them, and it never waits for the stream's caller: an item that
+// finds no room in the stream's queue makes the stream fall behind
+// (attach.go). Nor does it ever write: a re-attach or a detach it decides on
+// is posted to the connection's writer goroutine, which runs them in order
+// (Client.post). So replies, resets and the connection's end are always read,
+// even while a caller's write holds the connection's write lock on a full
+// socket. A lost connection starts one reconnect goroutine, which opens the
+// next connection, re-attaches on it before its reader starts, sends every
+// command held, in wire order, and only then hands it over — every write of
+// it bounded by the episode, and the connection it adopts closed by Close
+// (reconnect.go). Client.mu guards the client's state (the connection, the
+// hello, the commands); Stream.mu the stream's, and the stream's queue has its
+// own lock, taken under Stream.mu and never the other way; Client.mu and
+// Stream.mu are never held together, nor any lock across I/O but a
+// connection's write lock, which takes no other. Close joins every goroutine
+// the client started.
 //
 // # Import boundary
 //

@@ -14,15 +14,20 @@ import (
 // says hello{resume: {clientId, token}}, re-attaches its stream, and only then
 // sends its commands again:
 //
-//  1. REDIAL, bounded (X18 5): an episode — from the loss until a connection
-//     is adopted — makes at most Options.Redials attempts and ends
-//     Options.RedialWindow after the loss (3 and 10 s); each dial and
-//     handshake is bounded by what is left of it, and at most Redials attempts
-//     are made within any RedialWindow across episodes. Past that the client
-//     stops (ErrDisconnected): every command still waiting resolves
-//     ErrOutcomeUnknown, reason disconnected, and the stream hands up an Error
-//     item. A failed attempt waits Options.RedialBackoff, doubling, before the
-//     next.
+//  1. REDIAL, bounded (X18 5, X21): an episode — from the loss until a
+//     connection is adopted — makes at most Options.Redials attempts and ends
+//     Options.RedialWindow after the loss (3 and 10 s); each dial, handshake
+//     and write of it — the adoption's re-attach and resends included — is
+//     bounded by what is left of it (a write that runs out fails its attempt,
+//     as a lost connection does), and at most Redials attempts are made within
+//     any RedialWindow across episodes. The one wait it does not bound is the
+//     adoption's for its re-attach's reply (X20: a when: "ready" attach may
+//     wait out a slow load): the episode's clock stops meanwhile. Past that
+//     the client stops (ErrDisconnected): every command still waiting
+//     resolves ErrOutcomeUnknown, reason disconnected, and the stream hands up
+//     an Error item. A failed attempt waits Options.RedialBackoff, doubling,
+//     before the next. Close closes the connection being adopted too, so
+//     nothing of an episode outlives it.
 //  2. HELLO. With the token — unless the stream saw reset{session_replaced}
 //     (the old token is void; §3.4) or the host refused it (bad_token), when
 //     the hello is a fresh one. The host answers resumed: true (the same client
@@ -50,7 +55,8 @@ import (
 //     (the stored answer comes back, or in_progress, waited out), and those
 //     that waited for a connection — is sent in wire order (X18 3), all of
 //     them before the connection is published: a command, retry or wait-out
-//     that comes meanwhile is held, and sent after them.
+//     that comes meanwhile is held, and sent after them. A command whose
+//     wait-out's backoff is running is not held: its backoff sends it (X21).
 //
 // A stream that saw reset{session_closed} is over, and so is the session: the
 // host closes the connection, which is not redialled (ErrSessionEnded).
@@ -77,17 +83,62 @@ func (c *Client) lost(w *wire) {
 	go c.reconnect()
 }
 
+// episode is a reconnect episode's bound (step 1): RedialWindow from the
+// loss, its clock stopped while an adoption waits for its re-attach's reply
+// (X20, X21). ctx ends once it is spent, or with the client. It is the
+// reconnect goroutine's alone.
+type episode struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	timer  *time.Timer
+	// end is when it is spent, while its clock runs; left is what was left
+	// of it when the clock stopped (halted).
+	end    time.Time
+	left   time.Duration
+	halted bool
+}
+
+func (c *Client) newEpisode() *episode {
+	ctx, cancel := context.WithCancel(c.ctx)
+	return &episode{ctx: ctx, cancel: cancel, end: time.Now().Add(c.opts.RedialWindow),
+		timer: time.AfterFunc(c.opts.RedialWindow, cancel)}
+}
+
+// spent says the episode is over: its time is up, or the client stopped.
+func (e *episode) spent() bool { return e.ctx.Err() != nil || !time.Now().Before(e.end) }
+
+// halt stops the episode's clock, unless it is spent already; run starts it
+// again with what was left.
+func (e *episode) halt() {
+	if e.timer.Stop() {
+		e.left, e.halted = time.Until(e.end), true
+	}
+}
+
+func (e *episode) run() {
+	if e.halted {
+		e.halted = false
+		e.end = time.Now().Add(e.left)
+		e.timer.Reset(e.left)
+	}
+}
+
+func (e *episode) close() {
+	e.timer.Stop()
+	e.cancel()
+}
+
 // reconnect is one reconnect episode: it redials until a connection is
 // adopted, the episode is spent, or the client stops.
 func (c *Client) reconnect() {
 	defer c.wg.Done()
-	// The episode's own context: every dial, handshake and backoff of it ends
+	// Every dial, handshake, write and backoff of the episode ends with it:
 	// RedialWindow after the loss, or with the client.
-	ep, cancel := context.WithTimeout(c.ctx, c.opts.RedialWindow)
-	defer cancel()
+	ep := c.newEpisode()
+	defer ep.close()
 	backoff := time.Duration(0)
 	for attempt := 1; ; attempt++ {
-		if attempt > c.opts.Redials || ep.Err() != nil || !c.redialAllowed() {
+		if attempt > c.opts.Redials || ep.spent() || !c.redialAllowed() {
 			if c.ctx.Err() == nil {
 				c.terminate(ErrDisconnected)
 			}
@@ -97,7 +148,7 @@ func (c *Client) reconnect() {
 			t := time.NewTimer(backoff)
 			select {
 			case <-t.C:
-			case <-ep.Done():
+			case <-ep.ctx.Done():
 				t.Stop()
 				continue
 			}
@@ -108,7 +159,7 @@ func (c *Client) reconnect() {
 			resume = &protocol.Resume{ClientID: c.hello.ClientID, Token: c.hello.Token}
 		}
 		c.mu.Unlock()
-		w, h, err := c.open(ep, resume)
+		w, h, err := c.open(ep.ctx, ep.end, resume)
 		if err == nil && c.adopt(ep, w, h, resume) {
 			return
 		}
@@ -148,16 +199,20 @@ func (c *Client) redialAllowed() bool {
 
 // adopt makes w — dialled, its hello (asking to resume resume, nil for a
 // fresh one) answered h, its reader not started — the connection calls go to
-// (steps 2–4 above); ep is the episode, which bounds its sessions.list. false
-// says w went before it could be adopted, and the reconnect redials; true says
-// it was adopted, or the client stopped meanwhile.
-func (c *Client) adopt(ep context.Context, w *wire, h protocol.HelloResult, resume *protocol.Resume) bool {
+// (steps 2–4 above); ep is the episode, which bounds its sessions.list and
+// every write it makes. false says w went before it could be adopted, and the
+// reconnect redials; true says it was adopted, or the client stopped
+// meanwhile.
+func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *protocol.Resume) bool {
 	c.mu.Lock()
 	if c.err != nil {
 		c.mu.Unlock()
 		_ = w.nc.Close()
 		return true
 	}
+	// Close closes w from here on, whatever it is blocked in (X21).
+	c.adopting = w
+	defer c.adopted(w)
 	// Resumed only as the host says so, and only as the client it asked to
 	// be, with the token it sent, on the host that minted it: an answer that
 	// resumed something else — or anything, to a hello that asked for
@@ -192,41 +247,62 @@ func (c *Client) adopt(ep context.Context, w *wire, h protocol.HelloResult, resu
 	s := c.stream
 	c.mu.Unlock()
 
+	sid := ""
+	if s != nil && fresh {
+		// A fresh client may be speaking to another session (a replaced
+		// engine): the host serves one, and says which.
+		var list protocol.SessionsListResult
+		err := c.exchange(ep.ctx, ep.end, w, func() error {
+			return c.syncCall(w, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list)
+		})
+		var e *Error
+		switch {
+		case err == nil && len(list.Sessions) == 1:
+			sid = list.Sessions[0].SessionID
+		case err != nil && !errors.As(err, &e):
+			// The connection failed under the exchange, or the host broke
+			// the protocol: redial.
+			_ = w.nc.Close()
+			return false
+		}
+	}
+	// Every write the adoption makes — the re-attach here, the resends at
+	// publication, and whatever the reader posts meanwhile — ends with the
+	// episode: a host that answers and then stops reading fails the
+	// attempt, and cannot keep a command waiting past the episode (X21).
+	_ = w.nc.SetWriteDeadline(ep.end)
 	var reattached <-chan struct{}
 	if s != nil {
-		sid := ""
-		if fresh {
-			// A fresh client may be speaking to another session (a replaced
-			// engine): the host serves one, and says which.
-			var list protocol.SessionsListResult
-			err := c.exchange(ep, w, func() error {
-				return c.syncCall(w, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list)
-			})
-			var e *Error
-			switch {
-			case err == nil && len(list.Sessions) == 1:
-				sid = list.Sessions[0].SessionID
-			case err != nil && !errors.As(err, &e):
-				// The connection failed under the exchange, or the host broke
-				// the protocol: redial.
-				_ = w.nc.Close()
-				return false
-			}
-		}
 		reattached = s.reconnected(w, !fresh, sid)
 	}
 	c.mu.Lock()
 	c.startReaderLocked(w)
 	c.mu.Unlock()
 	if reattached != nil {
+		// The re-attach's reply may take minutes (a when: "ready" attach
+		// during a slow load, X20): the episode's clock, and its bound on
+		// writes, stop until the wait ends — however it ends, so a redial
+		// after it has what was left — and then apply again, to a write
+		// already blocked too.
+		ep.halt()
+		_ = w.nc.SetWriteDeadline(time.Time{})
+		var gone, stopped bool
 		select {
 		case <-reattached:
 		case <-w.gone:
-			return false
+			gone = true
 		case <-c.ctx.Done():
+			stopped = true
+		}
+		ep.run()
+		switch {
+		case stopped:
 			_ = w.nc.Close()
 			return true
+		case gone:
+			return false
 		}
+		_ = w.nc.SetWriteDeadline(ep.end)
 	}
 	// The stream has re-attached on the session the host serves now (or
 	// stopped, or owes a re-attach with no cursor once its caller drains).
@@ -236,10 +312,21 @@ func (c *Client) adopt(ep context.Context, w *wire, h protocol.HelloResult, resu
 	return c.publish(w)
 }
 
+// adopted is adopt having returned: w, published or given up, is no longer
+// the reconnect's to close.
+func (c *Client) adopted(w *wire) {
+	c.mu.Lock()
+	if c.adopting == w {
+		c.adopting = nil
+	}
+	c.mu.Unlock()
+}
+
 // publish sends every command held — in wire order, the resends first — on
 // w, and makes w the connection calls go to once none is left: a command
 // registered, retried or waited out meanwhile finds no connection and is held,
 // so the next round sends it, and nothing overtakes a resend on w (X18 3).
+// Its writes carry the episode's deadline, which it lifts as it publishes w.
 // false says w went first.
 func (c *Client) publish(w *wire) bool {
 	for {
@@ -257,14 +344,21 @@ func (c *Client) publish(w *wire) bool {
 			return false
 		default:
 		}
-		var held []*command
+		// Held: waiting for a connection, and not for its wait-out's backoff,
+		// which sends it when it runs out (X21).
+		type heldCmd struct {
+			cmd *command
+			seq uint64
+		}
+		var held []heldCmd
 		for _, cmd := range c.cmds {
-			if cmd.want && !cmd.out && !cmd.resolved && !cmd.gone {
-				held = append(held, cmd)
+			if cmd.want && !cmd.out && !cmd.waiting && !cmd.resolved && !cmd.gone {
+				held = append(held, heldCmd{cmd, cmd.seq.Load()})
 			}
 		}
 		if len(held) == 0 {
-			c.cur = w
+			_ = w.nc.SetWriteDeadline(time.Time{})
+			c.cur, c.adopting = w, nil
 			c.changedLocked()
 			c.mu.Unlock()
 			if h := c.hooks.published; h != nil {
@@ -273,10 +367,10 @@ func (c *Client) publish(w *wire) bool {
 			return true
 		}
 		c.mu.Unlock()
-		// Wire order: the order of first sends; a command never sent goes
-		// after every one that was, in the order it was issued (c.cmds is in
-		// mint order, and the sort is stable).
-		slices.SortStableFunc(held, func(a, b *command) int {
+		// Wire order: the order of first writes; a command never written
+		// goes after every one that was, in the order it was issued (c.cmds
+		// is in mint order, and the sort is stable).
+		slices.SortStableFunc(held, func(a, b heldCmd) int {
 			switch {
 			case a.seq == b.seq:
 				return 0
@@ -289,10 +383,16 @@ func (c *Client) publish(w *wire) bool {
 			}
 			return 1
 		})
-		for _, cmd := range held {
-			if errors.Is(c.attemptOn(cmd, w), errUnsent) {
-				// w is going (its reader is on its way out): the command is
-				// held again, and the next connection sends it.
+		for _, x := range held {
+			err := c.attemptOn(x.cmd, w)
+			if h := c.hooks.resent; h != nil {
+				h(x.cmd.id)
+			}
+			if errors.Is(err, ErrConnectionLost) {
+				// w is going — it was gone already, or a write failed or ran
+				// out of the episode (its reader is on its way out): the
+				// command is held again if none of it was written, and the
+				// next connection sends it.
 				<-w.gone
 				return false
 			}

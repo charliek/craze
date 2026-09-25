@@ -72,6 +72,30 @@ func (e *OutcomeUnknownError) Error() string {
 // Is makes errors.Is(err, ErrOutcomeUnknown) true.
 func (e *OutcomeUnknownError) Is(target error) bool { return target == ErrOutcomeUnknown }
 
+// TooLargeError is a command the client settled not run because the host a
+// reconnect reached reads shorter lines than the one it was sized against
+// (hello's limits.inboundLine): not a byte of it was written (X21).
+// errors.Is(err, ErrNotRun) and errors.Is(err, ErrRequestTooLarge) are both
+// true of it.
+type TooLargeError struct {
+	Method    string
+	CommandID string
+	// Size is the command's request line, at its longest; Limit the host's
+	// inbound limit, both in bytes.
+	Size, Limit int
+}
+
+func (e *TooLargeError) Error() string {
+	return fmt.Sprintf("remote: %s (command %s) did not run: it is %d bytes, over the %d the host now reached reads",
+		e.Method, e.CommandID, e.Size, e.Limit)
+}
+
+// Is makes errors.Is(err, ErrNotRun) and errors.Is(err, ErrRequestTooLarge)
+// true.
+func (e *TooLargeError) Is(target error) bool {
+	return target == ErrNotRun || target == ErrRequestTooLarge
+}
+
 // The client's own errors.
 var (
 	// ErrClosed is a call on a client that has been closed, or whose
@@ -92,7 +116,8 @@ var (
 	ErrConnectionLost = errors.New("remote: the connection was lost before the reply")
 	// ErrNotRun answers a command the client settled knowing it did not run:
 	// it was never sent (it waited for a connection), or its last answer said
-	// nothing ran, and the client stopped before another attempt.
+	// nothing ran, and the client stopped before another attempt. A
+	// *TooLargeError is ErrNotRun too.
 	ErrNotRun = errors.New("remote: the command did not run: the client stopped before it was sent")
 	// ErrAlreadyAttached is an Attach on a client whose stream is still open:
 	// a connection holds one attachment (SQ14).

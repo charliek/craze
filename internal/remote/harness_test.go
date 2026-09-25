@@ -394,7 +394,13 @@ type tap struct {
 	// sent, after it is held to the schema).
 	rewriteIn  func(l wireLine) [][]byte
 	rewriteOut func(l wireLine) []byte
-	changed    chan struct{}
+	// stallOut, when set, makes a line the client is writing for which it
+	// returns true block as a write to a full socket does — until the
+	// connection is closed or its write deadline passes, when it fails
+	// having written nothing: a host that has stopped reading. The line is
+	// recorded as sent, and never reaches the host.
+	stallOut func(l wireLine) bool
+	changed  chan struct{}
 }
 
 func newTap(t *testing.T) *tap {
@@ -449,7 +455,8 @@ func (tp *tap) dial(ctx context.Context, path string) (net.Conn, error) {
 	}
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
-	c := &tapConn{Conn: nc, tp: tp, idx: len(tp.conns), methods: map[string]string{}}
+	c := &tapConn{Conn: nc, tp: tp, idx: len(tp.conns), methods: map[string]string{},
+		closed: make(chan struct{}), wdlMoved: make(chan struct{})}
 	tp.conns = append(tp.conns, c)
 	tp.changedLocked()
 	return c, nil
@@ -526,6 +533,12 @@ func (tp *tap) setRewriteOut(f func(wireLine) []byte) {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	tp.rewriteOut = f
+}
+
+func (tp *tap) setStallOut(f func(wireLine) bool) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.stallOut = f
 }
 
 // connCount is how many connections the tap has opened.
@@ -611,6 +624,63 @@ type tapConn struct {
 	rbuf []byte
 	out  []byte
 	rerr error
+	// closed is closed by Close; wdl is the write deadline last set (zero:
+	// none), and wdlMoved is closed and replaced whenever one is set.
+	closed    chan struct{}
+	closeOnce sync.Once
+	dmu       sync.Mutex
+	wdl       time.Time
+	wdlMoved  chan struct{}
+}
+
+func (c *tapConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func (c *tapConn) SetDeadline(t time.Time) error {
+	c.setWriteDeadline(t)
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *tapConn) SetWriteDeadline(t time.Time) error {
+	c.setWriteDeadline(t)
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *tapConn) setWriteDeadline(t time.Time) {
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	c.wdl = t
+	close(c.wdlMoved)
+	c.wdlMoved = make(chan struct{})
+}
+
+// stall is a write to a full socket: it blocks until the connection is
+// closed or its write deadline — whatever it is set to meanwhile — passes,
+// and then fails as a socket's write does, having written nothing.
+func (c *tapConn) stall() error {
+	for {
+		c.dmu.Lock()
+		dl, moved := c.wdl, c.wdlMoved
+		c.dmu.Unlock()
+		var expired <-chan time.Time
+		var timer *time.Timer
+		if !dl.IsZero() {
+			timer = time.NewTimer(time.Until(dl))
+			expired = timer.C
+		}
+		select {
+		case <-c.closed:
+			return net.ErrClosed
+		case <-expired:
+			return os.ErrDeadlineExceeded
+		case <-moved:
+			if timer != nil {
+				timer.Stop()
+			}
+		}
+	}
 }
 
 func (c *tapConn) Write(b []byte) (int, error) {
@@ -630,8 +700,11 @@ func (c *tapConn) Write(b []byte) (int, error) {
 	c.tp.mu.Lock()
 	c.tp.lines = append(c.tp.lines, l)
 	c.tp.changedLocked()
-	hold, rewrite := c.tp.holdOut, c.tp.rewriteOut
+	hold, rewrite, stall := c.tp.holdOut, c.tp.rewriteOut, c.tp.stallOut
 	c.tp.mu.Unlock()
+	if stall != nil && stall(l) {
+		return 0, c.stall()
+	}
 	if hold != nil {
 		if ch := hold(l); ch != nil {
 			<-ch

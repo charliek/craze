@@ -501,20 +501,27 @@ func TestAnOversizedLineIsFatalEverywhere(t *testing.T) {
 	})
 }
 
-// TestAMalformedLineDropsTheConnection (X18 7; astra r9 7): a line from the
-// host that breaks the protocol — not JSON, or a reply with neither result nor
-// error — is never skipped nor taken as an answer: the connection is dropped,
-// and the command whose reply it owed is settled by the resend rule — resent
-// under its id after the resume, its stored answer coming back; the host ran
-// it once.
+// TestAMalformedLineDropsTheConnection (X18 7, X21; astra r9 7, r11 further
+// 2): a line from the host that breaks the protocol — not JSON, a reply with
+// neither result nor error, a reply whose id is neither a number nor a string
+// (the command's reply, its id replaced) — is never skipped nor taken as an
+// answer, nor left unmatched: the connection is dropped, and the command whose
+// reply it owed is settled by the resend rule — resent under its id after the
+// resume, its stored answer coming back; the host ran it once.
 func TestAMalformedLineDropsTheConnection(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		edit func(l wireLine) [][]byte
+		edit func(t *testing.T, l wireLine) [][]byte
 	}{
-		{"not JSON", func(l wireLine) [][]byte { return [][]byte{[]byte("not a message"), l.raw} }},
-		{"a reply with neither result nor error", func(l wireLine) [][]byte {
+		{"not JSON", func(_ *testing.T, l wireLine) [][]byte { return [][]byte{[]byte("not a message"), l.raw} }},
+		{"a reply with neither result nor error", func(_ *testing.T, l wireLine) [][]byte {
 			return [][]byte{[]byte(`{"jsonrpc":"2.0","id":` + l.id + `}`)}
+		}},
+		{"a reply whose id is an array", func(t *testing.T, l wireLine) [][]byte {
+			return [][]byte{withMember(t, l.raw, "["+l.id+"]", "id")}
+		}},
+		{"a reply whose id is null", func(t *testing.T, l wireLine) [][]byte {
+			return [][]byte{withMember(t, l.raw, "null", "id")}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -524,7 +531,7 @@ func TestAMalformedLineDropsTheConnection(t *testing.T) {
 			tp.setRewriteIn(func(l wireLine) [][]byte {
 				var out [][]byte
 				if l.conn == 0 && l.method == protocol.MethodQueueAdd && l.resp != nil {
-					once.Do(func() { out = tc.edit(l) })
+					once.Do(func() { out = tc.edit(t, l) })
 				}
 				return out
 			})
