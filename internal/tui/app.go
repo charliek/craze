@@ -564,6 +564,14 @@ type Model struct {
 	cancelled    bool
 	prompted     bool
 	sessProvider string
+
+	// foreignEnded counts the foreign-turn endings this model has applied,
+	// which is what names the agent's turn Esc stops (foreignEpisode).
+	// foreignNoted is the episode whose cancelled note is drawn, 0 for none,
+	// so Esc pressed again on the same turn draws no second one
+	// (applyForeignCancelled, plan 026 X48).
+	foreignEnded uint64
+	foreignNoted uint64
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -1352,14 +1360,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case foreignCancelledMsg:
-		// The agent's own turn was cancelled and publishes no EventDone, so
-		// the note is this model's to draw — but only while no craze turn is
-		// current (plan 026 X44's pin): in SF-48's race the cancel landed on a
-		// drained craze turn, whose synthetic ending draws its own note, and a
-		// second one would be wrong.
-		if m.status != statusWorking {
-			m.main.appendLocal(entry{kind: entryNote, text: stopCancelled}, m.stamp(m.now()))
-		}
+		// The engine accepted a cancel Esc made on the agent's own turn: what
+		// it cancelled decides the note and the cancelled state (X48).
+		m.applyForeignCancelled(msg)
 		return m, nil
 
 	case clipboardDoneMsg:
@@ -2341,7 +2344,8 @@ func (m *Model) beginTurn(id string) {
 // because the cancel it asked for is made by the engine and answers every
 // request the session was holding just the same.
 //
-// The mask goes up for a cancel with no turn of craze's own too, keyed to the
+// The mask goes up for a cancel with no turn of craze's own too — cards with
+// nothing working, or the agent's own turn (cancelForeignTurn) — keyed to the
 // empty turn id and cleared by the next beginTurn. That is safe now that the
 // mask cannot swallow a live ask (maskDrops), and it is what stops an opening
 // already in flight at that Esc from flashing a card up for the one Update
@@ -2591,24 +2595,36 @@ func (m Model) foreignTurnStoppable() bool {
 // cancel that names no turn. Success is reported as foreignCancelledMsg, which
 // draws the note: a wake publishes no EventDone, so nothing else will.
 //
+// The cards are masked first, as cancelTurn masks them (plan 026 X48): the
+// cancel answers every request the session holds, so an ask the agent's turn
+// opened whose opening has not reached the model yet is one this cancel
+// resolves, and without the mask it would flash a card up — taking the
+// keyboard, and a host's blocked status with it — until its ending arrived.
+//
+// The message carries what the handler needs to settle it by what was
+// cancelled rather than by what the display shows when it lands (X48): the
+// engine's CancelResult.Turn, the foreign episode this Esc was pressed on, and
+// the turn the model was on.
+//
 // Residual (SF-48): a cancel that names no turn lands on whatever is current,
 // so a craze turn the owed drain claimed between the key and the engine's
-// section is cancelled instead of the agent's — and then its own synthetic
-// ending draws the note, which is why the message's handler draws none while a
-// craze turn is current.
+// section is cancelled instead of the agent's. The engine says so — Turn names
+// that craze turn — and its own ending draws the note.
 func (m Model) cancelForeignTurn() (tea.Model, tea.Cmd) {
+	m.maskCards()
 	eng := m.eng
 	if eng == nil {
 		return m, nil
 	}
 	c := m.nextCmd()
+	episode, seq := m.foreignEpisode(), m.turnSeq
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		res, err := eng.Cancel(ctx, c, "")
 		switch {
 		case err == nil:
-			return foreignCancelledMsg{}
+			return foreignCancelledMsg{turn: res.Turn, episode: episode, seq: seq}
 		case errors.Is(err, engine.ErrNotAccepting), errors.Is(err, engine.ErrStaleTurn):
 			return nil
 		case res.Reported:
@@ -2620,7 +2636,59 @@ func (m Model) cancelForeignTurn() (tea.Model, tea.Cmd) {
 
 // foreignCancelledMsg says the engine accepted the cancel of a turn the agent
 // ran on its own (cancelForeignTurn).
-type foreignCancelledMsg struct{}
+//
+// turn is the engine's CancelResult.Turn: "" when the cancel was held with no
+// turn of craze's own current, so what it stopped was the agent's turn; a
+// craze turn's id when it landed on one instead (SF-48). episode is the
+// model's foreignEpisode when Esc was pressed, and seq its turnSeq.
+type foreignCancelledMsg struct {
+	turn    string
+	episode uint64
+	seq     int
+}
+
+// foreignEpisode names the agent's turn the model's flag says is running: one
+// more than the foreign-turn endings it has applied. It is counted from the
+// endings rather than the openings so that a flag a refresh read ahead of its
+// opening bracket — refreshSnap on any event reads the session's state as it
+// is now — is already the new episode, and never the one before it, whose
+// note may be drawn. It starts at 1, so 0 can mean "no note drawn".
+//
+// The limit is the model's own view: a turn that ended and a next one that
+// started while the model's flag stayed up, both brackets still in the
+// channel, are one episode to it — as they are on screen.
+func (m Model) foreignEpisode() uint64 { return m.foreignEnded + 1 }
+
+// applyForeignCancelled settles a foreign cancel by what the engine says it
+// cancelled (plan 026 X48), never by the display's status when the answer
+// lands — which can be a craze turn started after the cancel, or the idle a
+// cancelled craze turn's ending left.
+//
+//   - A craze turn (turn != ""): that turn's own ending draws its note and
+//     settles its state, as any cancelled craze turn's does. Nothing here.
+//   - The agent's turn (turn == ""): nothing else will draw the note — a wake
+//     publishes no EventDone — so this draws it, once per foreign episode:
+//     Esc pressed again on the same turn, while the first cancel is in flight
+//     or after it returned with the turn still running, is another accepted
+//     cancel and no second note. The note is a row, and rows are written
+//     whichever turn is current (applyTurnEnded), so a follow-up that started
+//     meanwhile does not suppress it.
+//
+// And the cancelled state a host reads (m.cancelled) is set as a craze turn's
+// cancel sets it — only for the turn the model is on: a craze turn that began
+// after this Esc owns it now, and its own ending says how it went.
+func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
+	if msg.turn != "" {
+		return
+	}
+	if msg.episode != m.foreignNoted {
+		m.main.appendLocal(entry{kind: entryNote, text: stopCancelled}, m.stamp(m.now()))
+		m.foreignNoted = msg.episode
+	}
+	if msg.seq == m.turnSeq {
+		m.cancelled = true
+	}
+}
 
 // requestQuit closes the engine, which closes the session — answering every card
 // still queued with its cancelled outcome on the way out — and stops the driver
@@ -2759,6 +2827,11 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// Either bracket ends the run above it, and the start heads what
 		// follows with the note that stops the reply reading as an answer to
 		// the last thing the user said: both the fold's.
+		if ev.ForeignTurn == nil || !ev.ForeignTurn.Running {
+			// The agent's turn is over, so the next one is another episode
+			// (foreignEpisode). A nil payload closes the run, as the fold's.
+			m.foreignEnded++
+		}
 		m.refreshSnap()
 		return
 	case agent.EventText:
