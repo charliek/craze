@@ -54,6 +54,11 @@ keeps its slot until it leaves the band, and the rows below close up. Past
 the cap the band ends in `… +n more`; the viewed sub-agent always keeps a
 visible row, taking the last one when it would otherwise fall behind the cap.
 
+On a provider that can stop one child (native today), `Delete` or
+`Backspace` on the selected **running** row stops just that child; the turn
+goes on and the parent reads that the user stopped it. On any other row —
+grok, cursor, or a finished row — the key goes to the composer as before.
+
 ## Resuming a session
 
 `--resume` opens a **resume** picker in place of the provider dialog: rows
@@ -142,6 +147,7 @@ off.
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
 | `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
+| `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native only); on any other row or provider the key falls through as if unhandled |
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
@@ -355,23 +361,30 @@ went with it. A `/name` inside a command's output is output and nothing else —
 
 `Enter` while the rows have the keyboard (`↓` from the composer, then `↑`/`↓`
 to the row) — or a click on the row — opens that sub-agent in the main area,
-read-only. Grok streams a sub-agent's own session, so its
+read-only. Grok and native each stream a sub-agent's own session, so its
 transcript is the child's own prompt, thoughts, tool calls and replies,
 rendered by the same machinery as the main one. Cursor streams no sub-agent
 transcript, so the view is what its `cursor/task` receipt carried: a note
 saying so, the prompt, a `model · duration · agent id` line once the receipt
 landed, and the output when there is one. There is no composer here — you
-cannot prompt, message or stop a sub-agent from craze.
+cannot prompt or message a sub-agent from craze. On native,
+`Delete`/`Backspace` in a running child's view stops it (see the banner
+below); a grok or cursor sub-agent cannot be stopped from craze.
 
 The composer's top rule carries the chip `(model) description` —
 `(grok-4.6) List directory files` — and the input line is replaced by the
 banner:
 
 - running: `○ @explore · read-only · esc to return`, with `· tab next agent`
-  when more than one row is visible
+  when more than one row is visible, and, on native, a further
+  ` · del to stop` at the tail's end — the full banner then reads exactly
+  `○ @general-purpose · read-only · esc to return · tab next agent · del to
+  stop`
 - finished: `✓ @explore · completed · esc to return`, in the warning colour
   so the end is unmistakable (`✗ failed` / `– cancelled`, with the error when
-  there is one; the `esc to return` half never truncates away)
+  there is one; the `esc to return` half never truncates away) — a child the
+  user stopped on native reads exactly `– @general-purpose · cancelled ·
+  stopped by the user · esc to return`
 - cursor: `○ @task · receipt only · esc to return` while it runs, then the
   same warning-coloured finish line with `· receipt only` kept:
   `✓ @task · completed · receipt only · esc to return`
@@ -423,6 +436,36 @@ session transcript — by default
 craze. Ask mode denies every edit, write and shell command.
 Accepting the plan card ends the turn and arms the offer above, even when
 the model said nothing else in that turn.
+
+### Sub-agent models
+
+On native, `~/.craze/native/models.toml` (or `$CRAZE_HOME/native/` when the
+home is relocated) may carry an optional `[subagents]` section: a default
+`model` and `effort` for children, and a `[subagents.tiers]` map from
+Claude's tier names (`fable`, `opus`, `sonnet`, `haiku`) to native aliases.
+The parent's `agent` tool call resolves a child's model and effort in this
+order — the call's own `model`/`effort`, then the persona's, then
+`[subagents]`'s default, then the parent's own running model and effort —
+and `model` (on the call, a persona, or `[subagents]`) may also be `inherit`,
+which always means the parent's model. A tier name with no entry in
+`[subagents.tiers]` means the parent's model too, so a persona that says
+`model: opus` still works with no tier map configured at all. Every alias
+named in `[subagents]` or `[subagents.tiers]` must already be a model in the
+same `models.toml`; `inherit` itself is refused as a tier key, since a tier
+mapping to `inherit` could never be reached. For example:
+
+```toml
+[subagents]
+model  = ""   # optional default for children; "" = the parent's
+effort = ""   # optional default effort
+[subagents.tiers]   # optional: what a Claude tier name means here
+opus   = "fireworks/kimi-k3"
+sonnet = "glm-5.3"
+haiku  = "fireworks/deepseek-v4-flash"
+```
+
+The `agent` tool runs at most four children at once; a fifth call waits for
+a slot to free.
 
 ## Cards
 
@@ -678,7 +721,9 @@ card arriving closes it; nothing else is bound while it is up.
 On a provider that shows the band, `panels and views` gains the sub-agent view
 keys — `enter on a row` to open one, `esc, ←` to return, and
 `tab, shift+tab` to switch while inside — and the `↑ ↓` row reads
-`sub-agent rows, or a list inside a dialog`.
+`sub-agent rows, or a list inside a dialog`. On native, `panels and views`
+also gains `del, backspace — stop the selected running sub-agent, or the one
+in view`.
 
 ## Mouse
 
