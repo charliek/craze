@@ -226,6 +226,11 @@ type hooks struct {
 	// beforeReserve runs on an attach just before it calls reserve: a test
 	// that blocks in it holds the attach there, past a replacement.
 	beforeReserve func()
+	// reserved runs on an attach right after reserve has installed its
+	// pending attachment, before it does anything else: a test that blocks
+	// in it holds a pending attachment on the connection, past a
+	// replacement, with nothing yet done about it but reserve itself.
+	reserved func(sub string)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.

@@ -71,6 +71,11 @@ type TestHooks struct {
 	// BeforeReserve runs on an attach just before it calls reserve: a test
 	// that blocks in it holds the attach there, past a replacement.
 	BeforeReserve func()
+	// Reserved runs on an attach right after reserve has installed its
+	// pending attachment, before it does anything else, with the
+	// attachment's subscription id: a test that blocks in it holds a
+	// pending attachment on the connection, past a replacement.
+	Reserved func(sub string)
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -97,6 +102,7 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		beforeReply:    h.BeforeReply,
 		detaching:      h.Detaching,
 		beforeReserve:  h.BeforeReserve,
+		reserved:       h.Reserved,
 	}
 	if stall > 0 {
 		s.stall = stall

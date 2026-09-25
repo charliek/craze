@@ -159,6 +159,9 @@ func (c *conn) sessionAttach(b *bound, info protocol.MethodInfo, req *request) o
 	if a == nil {
 		return o
 	}
+	if h := c.srv.hooks.reserved; h != nil {
+		h(a.id)
+	}
 	res, att, o := c.attach(a, b.eng, p)
 	if att == nil {
 		c.abandon(a, nil)

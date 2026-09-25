@@ -1213,6 +1213,111 @@ func TestNothingFollowsAReplacedConnectionsDetachAcknowledgement(t *testing.T) {
 	}
 }
 
+// TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine (§3.6, §3.7; plan 027
+// X16 9, X19, X22; r14-c7c findings 1-2): the review's remaining schedule,
+// the mirror image of TestNothingFollowsAReplacedConnectionsDetachAcknowledgement
+// above. D1 claims the connection's one attachment and queues its {} BEFORE
+// the replacement this time — unsealed, since the connection is not replaced
+// yet — and the writer holds it off the socket. Duplicate D2 wakes behind it
+// (D1's commit closed the old attachment in the same conn.mu section that
+// queued the {}) and pauses of its own before it would push its ordinary
+// reply. A then reserves the now-free attachment — old.state is attClosed,
+// so reserve allows it — installing a pending one, and pauses right after
+// (Reserved), before it does anything else. Only then is the engine
+// replaced: with nothing live or closing to send a reset for, and A's
+// pending attachment owed no reply of its own, conn.replace must abandon A's
+// attachment and seal the outbox in that same conn.mu section — before D2 or
+// A resume — or D2's ordinary push (never routed through the seal-aware
+// conn.enqueue: it never claimed the attachment) joins the queue behind
+// D1's held line. The wire must show exactly D1's {}, then EOF: nothing of
+// A's or D2's.
+func TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine(t *testing.T) {
+	writer, d2Reply, reserving := newHold(), newHold(), newHold()
+	var pauseReserved atomic.Bool
+	var detach atomic.Value // D1's request id, once sent
+	h := newHost(t, withOnClose(writer.release), withOnClose(d2Reply.release), withOnClose(reserving.release),
+		withHooks(control.TestHooks{
+			BeforeWrite: func(line []byte) {
+				var resp struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				if id, _ := detach.Load().(string); id != "" && json.Unmarshal(line, &resp) == nil && resp.Method == "" && string(resp.ID) == id {
+					writer.wait()
+				}
+			},
+			BeforeReply: func(method string) {
+				if method == protocol.MethodSessionDetach {
+					d2Reply.wait()
+				}
+			},
+			Reserved: func(string) {
+				if pauseReserved.Load() {
+					reserving.wait()
+				}
+			},
+		}))
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+
+	id1, line1 := a.encode(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
+	detach.Store(id1)
+	a.write(line1)
+	await(t, writer.entered, "D1's {} to be queued, unsealed, and held off the socket")
+
+	a.send(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
+	await(t, d2Reply.entered, "D2 to wake behind D1 and pause before its own ordinary reply")
+
+	pauseReserved.Store(true)
+	a.send(protocol.MethodSessionAttach, attachParams(h))
+	await(t, reserving.entered, "A to pause right after reserve, with a pending attachment installed")
+
+	h.srv.SetEngine(startedEngine(t))
+
+	d2Reply.release()
+	reserving.release()
+	waitFor(t, "D2 and A to resolve while the writer still holds D1's {}", func() bool { return h.srv.Handlers() == 0 })
+
+	// D1's line is already dequeued (held in the writer, off o.q): if
+	// conn.replace sealed the outbox at once, D2's ordinary push found it
+	// sealed and never joined the queue, and A's own attach reply — its
+	// context already cancelled by the abandon — was never queued either.
+	if q := h.srv.Queued(); q != 0 {
+		t.Fatalf("%d line(s) queued behind D1's held {}: the outbox was not sealed at once", q)
+	}
+
+	writer.release()
+	ok[protocol.Empty](t, a.reply(id1))
+	a.expectClosed()
+	select {
+	case <-writer.entered:
+	default:
+		t.Fatal("the premise: the writer was never held on D1's {}")
+	}
+}
+
+// TestAPendingAttachmentIsAbandonedByAReplacement is a negative control for
+// conn.replace's pending-attachment abandonment (plan 027 X16 9, X19, X22;
+// r14-c7c finding 2, item 1): an attach paused right after reserve, then
+// released with NO replacement, still attaches normally — the abandonment
+// fires only once the connection is actually replaced, never otherwise.
+func TestAPendingAttachmentIsAbandonedByAReplacement(t *testing.T) {
+	reserving := newHold()
+	h := newHost(t, withOnClose(reserving.release), withHooks(control.TestHooks{Reserved: func(string) { reserving.wait() }}))
+	a := h.dial()
+	a.sayHello(nil)
+	id := a.send(protocol.MethodSessionAttach, attachParams(h))
+	await(t, reserving.entered, "the attach to pause right after reserve")
+	reserving.release()
+	r := ok[protocol.AttachResult](t, a.reply(id))
+	if r.Subscription != "s-1" {
+		t.Fatalf("the attach paused right after reserve, released without a replacement: %+v", r)
+	}
+	a.note(protocol.NotifySynchronized)
+}
+
 // TestReserveOnlyRefusesOnceReplaced is a negative control for reserve's new
 // guard (plan 027 X22; r12-c7b finding 3, item 1): an attach paused right
 // before reserve, then released with NO replacement, still attaches normally

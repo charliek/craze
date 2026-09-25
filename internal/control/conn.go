@@ -228,29 +228,54 @@ func (c *conn) endLocked(reason string) {
 }
 
 // replace is its engine being replaced (§3.6, astra 14; Server.SetEngine): the
-// connection admits nothing more; an attachment still open ends with
-// reset{session_replaced} (its subscription is closed here, and its forwarder
-// sends the reset — whatever reset it was about to send: replaced is read in
-// the same conn.mu section that queues it, forward.go's queueReset) — unless a
-// detach has claimed the attachment's end, whose reply is its acknowledgement
-// instead; and the connection closes as soon as that acknowledgement is on the
-// socket (astra r10 8) — at once when there is none. A handler still running
-// keeps the engine it captured, and its reply goes nowhere: once the reset is
-// queued the outbox is sealed, and every later line is dropped at its push
-// (astra r8 7).
+// connection admits nothing more; a live or closing attachment whose end
+// nobody has claimed ends with reset{session_replaced} (its subscription is
+// closed here, and its forwarder sends the reset — whatever reset it was
+// about to send: replaced is read in the same conn.mu section that queues it,
+// forward.go's queueReset) — unless a detach has already claimed the
+// attachment's end, whose reply is its acknowledgement instead. A PENDING
+// attachment (reserved, not yet answered: reserve installed it, but no
+// forwarder runs for it and no detach can claim it) is owed neither, so it is
+// abandoned outright, right here, and never keeps replacedDoneLocked false
+// (plan 027 X16 9, X19, X22). Either way, once nothing is left that owes this
+// connection a terminal line — no attachment at all, one already closed, or
+// one just abandoned as pending — the outbox is sealed AT ONCE, in the same
+// conn.mu section: what it already holds (a claimed detach's `{}` queued
+// before the replacement, earlier replies) is still written, but nothing
+// later is admitted. A handler still running keeps the engine it captured,
+// and its reply goes nowhere either way: once a terminal line is queued (or
+// this seals with none owed) the outbox is sealed, and every later line is
+// dropped at its push (astra r8 7). The connection closes as soon as that
+// terminal line, if any, is on the socket (astra r10 8) — at once when there
+// is none.
 func (c *conn) replace() {
 	c.ending.Store(true)
 	c.mu.Lock()
 	c.replaced = true
 	var sub *agent.Subscription
 	var cancel func()
-	if a := c.att; a != nil && a.state != attClosed {
-		sub, cancel = a.sub, a.cancel
+	if a := c.att; a != nil {
+		switch a.state {
+		case attPending:
+			cancel = a.cancel
+			a.state = attClosed
+			a.changedLocked()
+		case attLive, attClosing:
+			// Its terminal line is still to come — the forwarder's own
+			// reset{session_replaced} (queueReset), or, if a detach has
+			// already claimed its end, that detach's own `{}`
+			// (sessionDetach's sealIfReplaced enqueue) — and whichever one
+			// seals the outbox itself once it is queued.
+			sub, cancel = a.sub, a.cancel
+		}
+	}
+	if c.att == nil || c.att.state == attClosed {
+		c.out.seal()
 	}
 	c.mu.Unlock()
 	if cancel != nil {
 		// Ends a pending attach's wait, and a push its forwarder is blocked
-		// in, so neither holds the reset back.
+		// in, so neither holds a terminal line back.
 		cancel()
 	}
 	if sub != nil {
@@ -576,6 +601,21 @@ func (o *outbox) offer(b []byte, done func(), limit int, seal bool) (<-chan stru
 	default:
 	}
 	return nil, nil
+}
+
+// seal makes the outbox admit nothing more, with no line of its own to queue
+// (conn.replace, for a replacement that owes no terminal line of its
+// own — no reset, no claimed detach's reply — to seal behind instead): a
+// no-op once already sealed or closed. It may be called under conn.mu, same
+// as offer.
+func (o *outbox) seal() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.sealed || o.closed {
+		return
+	}
+	o.sealed = true
+	o.wakeLocked()
 }
 
 // push queues b within the ordinary budget, waiting — under no lock — for
