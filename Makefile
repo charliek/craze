@@ -10,6 +10,7 @@ build:
 	mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/craze ./cmd/craze
 	go build -o bin/craze-fake-agent ./cmd/craze-fake-agent
+	go build -o bin/craze-fake-host ./cmd/craze-fake-host
 
 # The go list check below is one half of craze's import boundary: internal/tui
 # and internal/cli must not import internal/acp. The other half is the
@@ -45,7 +46,7 @@ test:
 # same thing; the two flakes that reached main in 2026-09 only ever showed
 # under -race.
 test-race:
-	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/...
+	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

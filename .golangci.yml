@@ -217,6 +217,22 @@ linters:
               desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern, in a test either (plan 027 §3.14)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern, in a test either (plan 027 §3.14)"
+        # The fake host (plan 027 §3.11): the in-process twin of
+        # cmd/craze-fake-host, wrapping the real control server (internal/control)
+        # around an engine over tui.Stub, for the executable wire fixtures. It
+        # is allowed the two packages it wraps and denied the client and
+        # transport packages the fixtures must stay agnostic of.
+        fakehost:
+          list-mode: lax
+          files:
+            - "**/internal/fakehost/**"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the fake host is a test double for the wire fixtures, not a CLI client (plan 027 §3.11)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the fake host speaks the control socket's wire over a Stub; the ACP wire below the session seam is not its concern (plan 027 §3.11)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the fake host speaks the control socket's wire over a Stub; a provider transport below the session seam is not its concern (plan 027 §3.11)"
   exclusions:
     presets:
       - std-error-handling

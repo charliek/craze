@@ -96,6 +96,21 @@ type Stub struct {
 	// built; assigning it afterwards changes nothing.
 	NoPrimary bool
 
+	// InstallOnStart makes Start publish one install delta carrying every
+	// section of the snapshot — title, mode, model, config, commands, plugins
+	// — exactly as the live session's installDeltaLocked does (live.go:798-808).
+	// Default off, so an ordinary Stub's Start is byte-for-byte what it always
+	// was: a new session emits nothing, and a load's replay bracket carries no
+	// install. On, it mirrors where the live session enqueues it relative to a
+	// load's replay bracket: enqueued (not flushed, live.go:723) before Start
+	// returns for a new session, or after every replayed event but before
+	// EventReplay{end} for a load (live.go:927), flushed first so the install
+	// is committed ahead of that bracket's own emit (live.go's flushDelta
+	// before its EventReplay{end}). Set before Start, like Replay.
+	// internal/fakehost's fake host is the one caller that turns it on, so its
+	// wire fixtures carry the install every real client would see.
+	InstallOnStart bool
+
 	// Replay is the transcript Start hands back before the session is up, as
 	// a loaded session's replay does. Start emits agent.EventReplay{start},
 	// then each of these with Replayed set, then agent.EventReplay{end} —
@@ -448,6 +463,7 @@ func (s *Stub) DelayStart(d time.Duration) {
 func (s *Stub) Start(context.Context) error {
 	s.mu.Lock()
 	d := s.startDelay
+	install := s.InstallOnStart
 	// nil Replay is "this is a new session"; a non-nil Replay is "this is a
 	// load", empty or not. append flattens both to nil, so the distinction has
 	// to be taken before it: the live session brackets a session/load whose
@@ -455,6 +471,12 @@ func (s *Stub) Start(context.Context) error {
 	// Config.Loading would otherwise sit in the restoring state forever.
 	loaded := s.Replay != nil
 	replay := append([]agent.Event(nil), s.Replay...)
+	if !loaded && install {
+		// live.go:723: enqueued under the same lock that finished the
+		// snapshot, and NOT flushed — a new session's Start may not wait on
+		// the primary's reader.
+		s.enqueueDeltaLocked("", s.installStateLocked())
+	}
 	s.mu.Unlock()
 	if d > 0 {
 		time.Sleep(d)
@@ -470,8 +492,36 @@ func (s *Stub) Start(context.Context) error {
 		ev.Replayed = true
 		s.emit(ev)
 	}
+	if install {
+		// live.go:927: after every replayed event, before EventReplay{end} —
+		// the load's install is unconditional and overrules whatever the
+		// replay itself said.
+		s.mu.Lock()
+		s.enqueueDeltaLocked("", s.installStateLocked())
+		s.mu.Unlock()
+		// live.go's flushDelta, called for the same reason: EventReplay{end}
+		// means "the restored snapshot is installed", so the delta that says
+		// what was installed has to be committed ahead of it. Bounded by the
+		// Stub's own close, like every other flush here.
+		_ = s.log.Flush(context.Background(), s.closed)
+	}
 	s.emit(agent.Event{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayEnd}})
 	return nil
+}
+
+// installStateLocked is the StateDelta InstallOnStart publishes: every
+// section of the current snapshot, mirroring live.go's installDeltaLocked
+// (live.go:798-808). s.mu is held.
+func (s *Stub) installStateLocked() *agent.StateDelta {
+	title, mode, model := s.snap.Title, s.snap.CurrentMode, s.snap.CurrentModel
+	return &agent.StateDelta{
+		Title:    &title,
+		Mode:     &mode,
+		Model:    &model,
+		Config:   &agent.ConfigState{Options: cloneStubConfig(s.snap.Config)},
+		Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), s.snap.Commands...)},
+		Plugins:  &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), s.snap.Plugins...)},
+	}
 }
 
 func (s *Stub) Events() <-chan agent.Event { return s.log.Primary() }
