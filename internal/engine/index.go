@@ -99,6 +99,11 @@ import (
 // first attempt failed, so a session whose first write lost its race could go
 // unindexed however many turns it ran.
 //
+// An attempt in flight is itself owed at close, with or without an opportunity
+// behind it (finish), and a touch that meets one before there is a row is
+// retained behind it rather than dropped (touch): plan 027 §3.7, SF-15 and
+// SF-16.
+//
 // All of it lives under this file's own mutex, a LEAF: it is taken to merge, to
 // take and to record a result, never across the Upsert itself, and never while
 // e.mu, s.mu, registry.mu or the receipts table's mutex is held.
@@ -219,11 +224,20 @@ type indexWriter struct {
 	// that reaches the first prompt while it is parked does not write a second
 	// row. seedDone is that attempt's completion, closed once its result has
 	// been recorded and whatever it owes is back in the slot; it is nil when no
-	// attempt is in flight. The worker's exit waits on it (finish, r30 finding
-	// 2), because an attempt on a CLIENT's goroutine is the one piece of owed
-	// work the slot cannot show on its own.
+	// attempt is in flight. The worker's exit waits on it whenever it is set
+	// (finish; r30 finding 2, and plan 027 §3.7 / SF-15), because an attempt on
+	// a CLIENT's goroutine is the one piece of owed work the slot cannot show on
+	// its own.
 	seeding  bool
 	seedDone chan struct{}
+	// touchAfterSeed is a touch that met the attempt in flight with no row yet
+	// (plan 027 §3.7 / SF-16): the row that attempt is creating is the one it
+	// would have touched. It is RETAINED here rather than dropped, and handed
+	// back to pending when the attempt ends (writeSeed), so the row's UpdatedAt
+	// is the turn's end and not the seed's slightly earlier instant. It is kept
+	// out of pending itself because a worker pass would take it straight back
+	// and spin on it for as long as the seed is parked.
+	touchAfterSeed bool
 	// seedNext is the ONE retained seed opportunity — the earliest prompt that
 	// has arrived and not yet been attempted — with the text and cause of the
 	// turn it belongs to. See the file's doc comment, and admitSeedLocked.
@@ -439,19 +453,33 @@ func (w *indexWriter) begin(work indexWork) <-chan struct{} {
 //
 // # The seed on somebody else's goroutine
 //
-// There is one piece of owed work the slot cannot show, and it is what r30
-// finding 2 is about: a seed in flight on a CLIENT's goroutine (Submit's own
-// inline write) with a retained opportunity behind it. That opportunity only
-// reaches the slot if the attempt FAILS, and by then the worker would be gone,
-// so a session that ran two prompts could end up with no row at all. So when an
-// opportunity is retained, the exit waits for the attempt in flight too, inside
-// the same bound: a failure hands the retained seed over and it becomes this
-// last write, and a success means there is a row already and nothing is owed.
+// There is one piece of owed work the slot cannot show: a seed in flight on a
+// CLIENT's goroutine (Submit's own inline write). It is owed whether or not
+// anything is retained behind it, so the exit waits for ANY attempt in flight,
+// inside the same bound (plan 027 §3.7, SF-15):
+//
+//   - With an opportunity retained behind it (r30 finding 2), that opportunity
+//     only reaches the slot if the attempt FAILS, and by then the worker would
+//     be gone, so a session that ran two prompts could end up with no row at
+//     all. A failure hands the retained seed over and it becomes this last
+//     write; a success means there is a row already and nothing is owed.
+//   - A LONE attempt, with nothing retained, is the session's first row. The
+//     TUI could never close under one (its Update is inside that very Submit),
+//     but a server's handler goroutine can be writing it when the engine
+//     closes, and a quit then left the session out of --continue. It is waited
+//     for exactly as the other: the write is the caller's, and the exit simply
+//     does not return before it lands or the bound runs out.
+//
+// The attempt in flight may also be the worker's OWN — inFlight is then a pass
+// that claimed a seed — and it is owed just the same: it is waited for as
+// inFlight, inside the one bound, where before a quit with nothing else owed
+// abandoned it at once.
 //
 // After the bound everything is abandoned, and a failure that lands later is
 // harmless: recording it takes the leaf mutex and kicks a channel that is never
-// closed (kick), so it neither blocks nor panics — the opportunity simply
-// returns to a slot nobody will drain again.
+// closed (kick), so it neither blocks nor panics — the opportunity, and a touch
+// retained behind the attempt (SF-16), simply return to a slot nobody will
+// drain again.
 func (w *indexWriter) finish(inFlight <-chan struct{}) {
 	if w.beforeFinish != nil {
 		w.beforeFinish()
@@ -488,23 +516,27 @@ func (w *indexWriter) finish(inFlight <-chan struct{}) {
 	}
 }
 
-// owed reports whether the worker still has to write something before it may
-// exit: work in the slot that is not a plain touch, or a retained seed
-// opportunity — which is owed whether it is waiting for the worker or waiting
-// on an attempt in flight that may yet fail and hand it over.
+// owed reports whether the worker still has to write, or see written, something
+// before it may exit: work in the slot that is not a plain touch; a retained
+// seed opportunity — owed whether it is waiting for the worker or waiting on an
+// attempt in flight that may yet fail and hand it over; or a seed attempt in
+// flight on ANY goroutine, with or without an opportunity behind it (plan 027
+// §3.7, SF-15). A plain touch on its own, retained behind a seed or not, is
+// still never owed.
 func (w *indexWriter) owed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.pending.mustWrite() || w.seedNext
+	return w.pending.mustWrite() || w.seedNext || w.seeding
 }
 
-// activeSeed is the completion of a seed attempt in flight when an opportunity
-// is retained behind it, and nil when there is nothing to wait for: no
-// opportunity retained, or none in flight to hand it over (finish).
+// activeSeed is the completion of a seed attempt in flight, on whichever
+// goroutine it runs, and nil when none is (finish). It no longer asks whether an
+// opportunity is retained behind the attempt: a lone attempt is the session's
+// first row, and the exit waits for it too (plan 027 §3.7, SF-15).
 func (w *indexWriter) activeSeed() <-chan struct{} {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.seedNext {
+	if !w.seeding {
 		return nil
 	}
 	return w.seedDone
@@ -578,9 +610,22 @@ func (w *indexWriter) knownRow() {
 // touch bumps the row's UpdatedAt, and is a no-op until a row exists: a turn
 // the agent ran on its own before craze ever sent a prompt must not conjure a
 // titleless row.
+//
+// The one exception is a touch that meets a seed attempt in flight (plan 027
+// §3.7, SF-16). A turn's end can reach here while its own first prompt is still
+// being written — inside Upsert on the submitting client's goroutine, or
+// claimed and not yet there — and dropping it left the row carrying the seed's
+// instant, a few milliseconds before the turn it records ended. So it is
+// RETAINED (touchAfterSeed) in the same locked section that finds no row, and
+// the attempt hands it back when it ends (writeSeed). The attempt clears
+// seeding under this same mutex, so a touch either sees it in flight and is
+// retained, or sees what it came to.
 func (w *indexWriter) touch(cause string) {
 	w.mu.Lock()
 	row := w.row
+	if !row && w.seeding {
+		w.touchAfterSeed = true
+	}
 	w.mu.Unlock()
 	if !row {
 		return
@@ -638,9 +683,15 @@ func (w *indexWriter) seed(cause, prompt string) bool {
 // A failure with nothing retained owes nothing: the next turn to start admits
 // its own opportunity.
 //
+// A touch that met this attempt with no row yet (touch, SF-16) is handed back
+// to pending whatever the attempt came to, with a kick: after a success it now
+// has the row to touch, and after a failure the next pass's touch finds what it
+// finds — no row, and it writes nothing, or a retry retained here that it rides
+// behind and is subsumed by.
+//
 // The completion is closed LAST, after the result is recorded and the retained
-// opportunity is back in the slot, so a worker exit that waits on it (finish)
-// finds everything this attempt owes already there.
+// opportunity and touch are back in the slot, so a worker exit that waits on it
+// (finish) finds everything this attempt owes already there.
 //
 // All of that bookkeeping is a DEFER keyed on ok, so it runs on the way out of
 // a PANIC too (r31 finding 3): sessions.Store.Upsert, the snapshot, the hidden
@@ -658,7 +709,7 @@ func (w *indexWriter) writeSeed(cause, prompt string) (ok bool) {
 		w.seeding = false
 		done := w.seedDone
 		w.seedDone = nil
-		retry := false
+		handOn := false
 		if ok {
 			// A row, named by the first prompt: a retained opportunity is a RETRY
 			// and nothing more, so it is discarded rather than written as a second,
@@ -666,10 +717,15 @@ func (w *indexWriter) writeSeed(cause, prompt string) (ok bool) {
 			w.seeded = true
 			w.seedNext, w.seedText, w.seedCause = false, "", ""
 		} else {
-			retry = w.seedNext
+			handOn = w.seedNext
+		}
+		if w.touchAfterSeed {
+			w.touchAfterSeed = false
+			w.pending.touch = true
+			handOn = true
 		}
 		w.mu.Unlock()
-		if retry {
+		if handOn {
 			w.kick()
 		}
 		if done != nil {

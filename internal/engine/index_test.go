@@ -547,8 +547,8 @@ func overlappingSeeds(t *testing.T, r *rig, idx *fakeIndex, entered <-chan struc
 	}()
 	await(t, entered, "A's seed to park in Upsert")
 	// A's turn runs and ends while its caller is still inside that write. The
-	// touch it owes finds no row and writes nothing, so the session is still
-	// unindexed.
+	// touch it owes finds no row yet and writes nothing — it is retained behind
+	// A's attempt (SF-16) — so the session is still unindexed.
 	r.until(lastEnding)
 
 	b = Command{Client: a.Client, ID: "2"}
@@ -867,6 +867,219 @@ func TestASucceededSeedDiscardsTheRetainedOne(t *testing.T) {
 	}
 }
 
+// loneInlineSeed parks ONE Submit's inline seed inside Upsert and lets its turn
+// end, with the worker's bound set to closeWait and its exit barrier in place.
+// It checks the schedule is the one SF-15 is about: an attempt in flight on the
+// submitting client's goroutine and no opportunity retained behind it. The
+// caller releases the write.
+func loneInlineSeed(t *testing.T, closeWait time.Duration) (r *rig, idx *fakeIndex, release func(), finishing, submitted <-chan struct{}) {
+	t.Helper()
+	idx = newFakeIndex()
+	entered, release := idx.parkAt(1)
+	t.Cleanup(release)
+	r = indexed(t, idx, "018f-the-thread")
+	// Both written here and never again; the worker reads them only after the
+	// stop the caller signals by closing the engine (writerOn's own reasoning).
+	r.e.idx.closeWait = closeWait
+	fin := make(chan struct{})
+	r.e.idx.beforeFinish = func() { close(fin) }
+
+	submitted = submitting(t, r, "the first prompt")
+	await(t, entered, "the seed to park in Upsert")
+	// The turn runs and ends with its caller still inside that write, so the
+	// seed is the only thing of this session's left in flight.
+	r.until(lastEnding)
+	r.e.idx.mu.Lock()
+	seeding, retained := r.e.idx.seeding, r.e.idx.seedNext
+	r.e.idx.mu.Unlock()
+	if !seeding || retained {
+		t.Fatalf("the schedule is seeding=%v retained=%v, want a lone attempt in flight", seeding, retained)
+	}
+	return r, idx, release, fin, submitted
+}
+
+// TestCloseWaitsForALoneInlineSeed is SF-15 (plan 027 §3.7, A14). The worker's
+// exit waited for an inline seed only when an opportunity was retained behind
+// it (r30 finding 2): owed() was the slot or a retained seed, and a LONE
+// attempt on a client's goroutine was neither. The TUI could never close under
+// one — its Update is inside that very Submit — but a server's handler
+// goroutine is exactly a client still writing the session's first row when the
+// engine closes, and the session then had no row for --continue to find.
+//
+// Both halves of the one bound: released while the exit waits, the row is there
+// by the time Close returns; held past it, Close returns AT the bound — not at
+// once, and not later — and the write that lands afterwards is harmless.
+func TestCloseWaitsForALoneInlineSeed(t *testing.T) {
+	t.Run("written within the bound", func(t *testing.T) {
+		// The bound is past the watchdog: what this half is about is that the
+		// exit waits at all, and TestCloseAbandonsALastWriteNothingCanInterrupt
+		// is about the bound.
+		r, idx, release, finishing, submitted := loneInlineSeed(t, watchdog)
+
+		closed := make(chan error, 1)
+		go func() { closed <- r.e.Close() }()
+		await(t, finishing, "the worker's exit to begin with the seed still in flight")
+		release()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatalf("close: %v", err)
+			}
+		case <-time.After(watchdog):
+			t.Fatal("Close never returned with a lone inline seed in flight")
+		}
+
+		// By the time Close has RETURNED the row is there: that is the whole
+		// claim. It is the only row — the turn's end touch retained behind the
+		// seed (SF-16) is a plain touch, and a plain touch is never owed.
+		rows := idx.all()
+		if len(rows) != 1 {
+			t.Fatalf("%d rows when Close returned, want the lone seed's: %+v", len(rows), rows)
+		}
+		if got, want := rows[0], wrote("018f-the-thread", "the first prompt", sessions.TitleKindFallback); got != want {
+			t.Fatalf("the seed wrote %+v, want %+v", got, want)
+		}
+		await(t, submitted, "the Submit to return once its write is let go")
+	})
+
+	t.Run("abandoned at the bound", func(t *testing.T) {
+		// The production bound, and a seed held past it.
+		r, idx, release, _, submitted := loneInlineSeed(t, indexCloseWait)
+
+		closed := make(chan time.Duration, 1)
+		go func() {
+			start := time.Now()
+			if err := r.e.Close(); err != nil {
+				t.Errorf("close: %v", err)
+			}
+			closed <- time.Since(start)
+		}()
+		var took time.Duration
+		select {
+		case took = <-closed:
+		case <-time.After(watchdog):
+			t.Fatal("Close waited past its bound for a seed nothing can interrupt")
+		}
+		// The exit's timer starts inside Close, so a Close that waited for the
+		// seed cannot have returned sooner than the bound; one that returned
+		// sooner never waited for it.
+		if took < indexCloseWait {
+			t.Fatalf("Close returned after %s, inside the %s bound: it did not wait for the lone seed", took, indexCloseWait)
+		}
+		if n := idx.count(); n != 0 {
+			t.Fatalf("a seed held in Upsert recorded %d rows", n)
+		}
+
+		// Abandoned, not lost: the write lands on its own goroutine afterwards,
+		// and recording it neither blocks nor panics on a worker that is gone.
+		release()
+		await(t, submitted, "the Submit to return once its write is let go")
+		idx.waitRows(t, 1)
+		r.e.idx.mu.Lock()
+		seeding, done := r.e.idx.seeding, r.e.idx.seedDone
+		r.e.idx.mu.Unlock()
+		if seeding || done != nil {
+			t.Fatalf("the late write left seeding=%v seedDone=%v", seeding, done != nil)
+		}
+	})
+}
+
+// TestATouchMeetingASeedIsKept is SF-16 (plan 027 §3.7, A14). A turn's end
+// reached while its own first prompt's seed was still INSIDE Upsert found no
+// row and was dropped, so the row kept the seed's instant — a few milliseconds
+// before the turn it records ended, and wrong for --resume's order. The touch is
+// now retained behind the attempt and written once the seed lands.
+//
+// The fake stands for UpdatedAt by ORDER: a row's UpdatedAt is its last write's,
+// and the seed's write had begun — it was parked inside Upsert — before the
+// turn ended. So the row's UpdatedAt is at or after the turn's end exactly when
+// a write that BEGAN after it (a second call, where only one had been made when
+// the turn ended) landed on the row after the seed.
+func TestATouchMeetingASeedIsKept(t *testing.T) {
+	seedRow := wrote("018f-the-thread", "the first prompt", sessions.TitleKindFallback)
+	touchRow := wrote("018f-the-thread", "", sessions.TitleKindNone)
+
+	// The schedule FORCED, on the writer alone: the touch's pass runs on the
+	// test's goroutine while the seed is parked on another, so it is certain
+	// the one met the other.
+	t.Run("the schedule", func(t *testing.T) {
+		idx := newFakeIndex()
+		entered, release := idx.parkAt(1)
+		t.Cleanup(release)
+		w, _ := writerOn(t, idx)
+
+		// Submit's own seed: admitted and claimed, then written on the
+		// client's goroutine.
+		if !w.admitSeed("c-1/1", "the first prompt") {
+			t.Fatal("the first prompt's seed was not claimed")
+		}
+		landed := make(chan bool, 1)
+		go func() { landed <- w.writeSeed("c-1/1", "the first prompt") }()
+		await(t, entered, "the seed to park inside Upsert")
+
+		// The turn ends: the observer posts its touch, and a worker pass takes
+		// it. Nothing serves this writer, so the post's own kick is drained here
+		// and the next kick can only be the one the seed owes.
+		w.post(indexWork{touch: true})
+		<-w.wake
+		w.runPending(w.take())
+		if n := idx.tries(); n != 1 {
+			t.Fatalf("%d writes with the seed still parked, want only the seed's: a touch has no row yet", n)
+		}
+
+		release()
+		select {
+		case ok := <-landed:
+			if !ok {
+				t.Fatal("the seed did not land")
+			}
+		case <-time.After(watchdog):
+			t.Fatal("the seed never came back once let go")
+		}
+		select {
+		case <-w.wake:
+		default:
+			t.Fatal("the seed ended without waking the worker for the touch retained behind it")
+		}
+		work := w.take()
+		if !work.touch {
+			t.Fatalf("the worker's next pass owes %+v, want the touch the seed met", work)
+		}
+		w.runPending(work)
+
+		rows := idx.all()
+		if len(rows) != 2 || rows[0] != seedRow || rows[1] != touchRow {
+			t.Fatalf("the writes are %+v, want the seed and then the turn's end touch", rows)
+		}
+	})
+
+	// The same, end to end: a Submit's inline seed, its turn's end on the
+	// observer, and the worker's own passes, whichever order it runs them in.
+	t.Run("on the engine", func(t *testing.T) {
+		idx := newFakeIndex()
+		entered, release := idx.parkAt(1)
+		t.Cleanup(release)
+		r := indexed(t, idx, "018f-the-thread")
+
+		submitted := submitting(t, r, "the first prompt")
+		await(t, entered, "the seed to park in Upsert")
+		r.until(lastEnding)
+		// The turn's end is committed, so the observer has posted its touch.
+		r.sync()
+		if n := idx.tries(); n != 1 {
+			t.Fatalf("%d writes with the seed still parked, want only the seed's", n)
+		}
+
+		release()
+		await(t, submitted, "the Submit to return once its write is let go")
+		idx.waitRows(t, 2)
+		rows := idx.all()
+		if len(rows) != 2 || rows[0] != seedRow || rows[1] != touchRow {
+			t.Fatalf("the writes are %+v, want the seed and then the turn's end touch", rows)
+		}
+	})
+}
+
 // indexErr accepts the state delta that reports a failed index write; cause,
 // when set, is the command it must name.
 func indexErr(cause string) func(agent.Event) bool {
@@ -973,13 +1186,13 @@ func TestARetriedClaimsFailedSeedNamesItsCommandToo(t *testing.T) {
 // FORCED with beforeInlineSeed: the submitter is held between the launch and
 // its write, the turn runs and ends, and only then is the seed written. No
 // write can precede the seed — a touch never conjures a row — and the seed still
-// creates the row. Whether a touch FOLLOWS is the worker's timing, which this
-// test does not force (r.sync flushes the event log, not the index worker): a
-// worker that took the touch before the seed landed found no row and dropped it
-// (one row, what CI saw); one that woke after it writes it (two). Here the seed
-// is written after the turn's end, so the dropped touch costs no recency. The
-// narrower case — a touch taken while the seed is INSIDE Upsert, which keeps the
-// seed's slightly earlier timestamp — is recorded in `12` for S2, not fixed.
+// creates the row. The touch FOLLOWS it whichever the worker's timing (r.sync
+// flushes the event log, not the index worker): the seed was claimed before the
+// turn was launched, so a worker that takes the touch before the seed lands
+// finds the attempt in flight and retains the touch behind it (SF-16, plan 027
+// §3.7), and one that wakes after it finds the row. Before SF-16 the first of
+// those dropped it (one row, what CI saw). TestATouchMeetingASeedIsKept is the
+// same rule with the seed INSIDE Upsert.
 func TestATurnEndingBeforeItsSeedWritesTheSeedFirst(t *testing.T) {
 	idx := newFakeIndex()
 	atHook, letGo := make(chan struct{}), make(chan struct{})
@@ -996,7 +1209,9 @@ func TestATurnEndingBeforeItsSeedWritesTheSeedFirst(t *testing.T) {
 	}
 	close(letGo)
 	await(t, done, "the submit to return")
-	idx.waitRows(t, 1)
+	// Both, before Close: a touch handed back by the seed and not yet taken
+	// is a plain touch, which a close may drop.
+	idx.waitRows(t, 2)
 	if err := r.e.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -1004,24 +1219,21 @@ func TestATurnEndingBeforeItsSeedWritesTheSeedFirst(t *testing.T) {
 	if got := rows[0]; got.TitleKind != sessions.TitleKindFallback || got.Title != "a prompt" {
 		t.Fatalf("the first write was %+v, want the first prompt's fallback row", got)
 	}
-	switch len(rows) {
-	case 1:
-	case 2:
-		if got := rows[1]; got.TitleKind != sessions.TitleKindNone || got.Title != "" {
-			t.Fatalf("the write after the seed was %+v, want a touch", got)
-		}
-	default:
-		t.Fatalf("%d rows, want the seed and at most one touch: %+v", len(rows), rows)
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want the seed and then one touch: %+v", len(rows), rows)
+	}
+	if got := rows[1]; got.TitleKind != sessions.TitleKindNone || got.Title != "" {
+		t.Fatalf("the write after the seed was %+v, want a touch", got)
 	}
 }
 
 // seededTurn runs one turn whose seed is on the record before the turn can end.
 // A submit admits its seed, launches the turn and only then writes the seed, so
 // a turn that ends at once can reach its end-of-turn touch while there is still
-// no row — and a touch with no row writes nothing, by design. That is harmless
-// (the seed's own later write carries the newer UpdatedAt) but it makes "seed,
-// then touch" a race for a test that counts writes. Holding the turn until the
-// seed has landed makes it the order.
+// no row. That touch is retained behind the seed and written after it (SF-16,
+// TestATouchMeetingASeedIsKept), but holding the turn until the seed has landed
+// keeps the tests that count writes off that path altogether: their touch is an
+// ordinary pass on a row that already exists.
 func seededTurn(t *testing.T, r *rig, idx *fakeIndex, text string) {
 	t.Helper()
 	turn := r.s.script(held())
