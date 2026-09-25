@@ -146,6 +146,12 @@ type Capabilities struct {
 	// without cancelling it. Grok has it; cursor's only mid-turn path is a
 	// second prompt, which cancels.
 	Interject bool
+	// SubagentCancel is the stop of one running sub-agent, the rest of the
+	// turn going on (plan 026 §3.10): the session implements
+	// SubagentCanceller, and the TUI offers Backspace/Delete on a running row
+	// and in a running child's view, with its banner hint and help line. Native
+	// has it; neither grok nor cursor has a per-child stop on the wire.
+	SubagentCancel bool
 }
 
 // SkillScan is where a provider's on-disk skills come from: SKILL.md trees
@@ -313,7 +319,8 @@ func GxProvider() Provider {
 // `/agent`, Shift+Tab and `--plan`/`--ask` on (plan 023 §3.4, §3.6). H6's
 // sub-agents turn on the row band and the child view (plan 026 §3.9): the
 // adapter keeps a roster in Snapshot().Subagents and streams each child's own
-// events tagged with its id (native_subagents.go).
+// events tagged with its id (native_subagents.go); and the user can stop one of
+// them while the turn goes on (SubagentCancel, §3.10).
 //
 // The mode table and the implement prompt are cursor's: native's ids are the
 // same three words, so craze's canonical mode commands (`/plan`, `--ask`, the
@@ -340,6 +347,7 @@ func NativeProvider() Provider {
 			PlanCards:          true,
 			SubagentRows:       true,
 			SubagentTranscript: true,
+			SubagentCancel:     true,
 		},
 	}
 }

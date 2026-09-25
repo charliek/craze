@@ -115,6 +115,9 @@ func (m *Model) switchView(delta int) {
 }
 
 func (m Model) handleViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if stopped, next := m.stopViewKey(msg); stopped { // subcancel.go
+		return next, nil
+	}
 	switch msg.Type {
 	case tea.KeyCtrlY:
 		return m.copySelectionOrLastReply()
@@ -356,6 +359,7 @@ func (m Model) subagentBanner() string {
 		if len(m.visibleAgents()) > 1 {
 			tail = " · tab next agent"
 		}
+		tail += m.stopBannerHint()
 	} else {
 		// A finished sub-agent gets the Warn banner on both providers; the
 		// receipt note stays so the cursor view still says what it holds.

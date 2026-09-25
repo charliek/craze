@@ -83,6 +83,7 @@ func (m Model) helpKeyLines() []helpLine {
 			helpLine{key: "↑ ↓ pgup pgdn", desc: "scroll inside a sub-agent"},
 			helpLine{key: "tab, shift+tab", desc: "switch sub-agent while in the view"},
 		)
+		out = append(out, m.stopHelpLines()...)
 	}
 	out = append(out,
 		helpLine{key: "click the model", desc: "model dialog, from status row 1"},

@@ -103,6 +103,7 @@ var simpleFrameKeys = map[string]tea.KeyMsg{
 	"esc":       {Type: tea.KeyEsc},
 	"tab":       {Type: tea.KeyTab},
 	"backspace": {Type: tea.KeyBackspace},
+	"delete":    {Type: tea.KeyDelete},
 	"space":     {Type: tea.KeyRunes, Runes: []rune{' '}},
 	"up":        {Type: tea.KeyUp},
 	"down":      {Type: tea.KeyDown},

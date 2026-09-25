@@ -171,7 +171,7 @@ In a key script, literal text is typed rune by rune and anything in angle
 brackets is a token:
 
 ```text
-<enter> <esc> <tab> <backspace> <space> <up> <down> <left> <right>
+<enter> <esc> <tab> <backspace> <delete> <space> <up> <down> <left> <right>
 <pgup> <pgdn> <shift-tab> <alt-enter> <ctrl-a>..<ctrl-z> <lt>
 <wheel-up> <wheel-down> <click:X,Y> <resize:COLS,ROWS> <sleep:250ms>
 <press:X,Y> <motion:X,Y> <release:X,Y> <drag:X1,Y1,X2,Y2> <dblclick:X,Y>

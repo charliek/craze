@@ -275,19 +275,10 @@ func storeClosed(st *store.Store) bool {
 	return errors.Is(err, store.ErrClosed)
 }
 
-// stopChild cancels the registered child id's context with errStoppedByUser:
-// PR 2's CancelSubagent, reached here through the registry (plan 026 §3.10).
-// It reports whether id was registered.
-func stopChild(s *Session, id string) bool {
-	s.subs.regMu.Lock()
-	h := s.subs.live[id]
-	s.subs.regMu.Unlock()
-	if h == nil {
-		return false
-	}
-	h.cancel(errStoppedByUser)
-	return true
-}
+// stopChild is the user's stop of child id, through the public method (plan
+// 026 §3.10): Session.CancelSubagent. It reports whether the stop was taken —
+// the child registered and its turn not yet ended.
+func stopChild(s *Session, id string) bool { return s.CancelSubagent(id) == nil }
 
 // settled checks that s's runner holds no slot and no registered child.
 func settled(t *testing.T, s *Session) {
@@ -1342,6 +1333,76 @@ func TestSubagentArbitratesAfterItsUnions(t *testing.T) {
 	}
 }
 
+// TestSubagentArbitratesAfterTheHandleLock (review r12, finding 2): the user
+// stops a child, and the stop alone decides its finished row with the parent
+// still live. As the call's last word begins — the child closed and retired,
+// so nothing of the call's own takes the handle's lock again but the
+// arbitration — the test takes that lock, as a second stop of the child holds
+// it while it cancels, so settle's read of the handle's closing latch waits
+// on it. Once the call's goroutine is seen parked there, the parent's context
+// is cancelled, and only then is the lock let go. The call reads aborted,
+// carrying the step the child was billed for: the reads that cannot wait come
+// after the one that can. One that read the parent's context before the latch
+// saw it live and kept the stop.
+func TestSubagentArbitratesAfterTheHandleLock(t *testing.T) {
+	f := newRouted(t)
+	s := f.open(f.options())
+	a := f.routers["test/a"]
+	w := newWorker()
+	a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))))
+	a.route("a long task", callStep(globPart("g1")), w.step(openText("half done"), finishText()))
+	settling, held := make(chan struct{}), make(chan struct{})
+	s.subs.seams.settling = func(string) {
+		close(settling)
+		select {
+		case <-held:
+		case <-time.After(waitTimeout):
+			t.Errorf("the handle's lock was never taken")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ev events
+	out := start(ctx, s, "go", ev.sink)
+	await(t, w.reached, "the child mid-step")
+	id := of[SubagentStarted](ev.list())[0].ID
+	// The handle, copied out while the child is registered, as a stop does.
+	s.subs.regMu.Lock()
+	h := s.subs.live[id]
+	s.subs.regMu.Unlock()
+	if h == nil || !stopChild(s, id) {
+		t.Fatal("the child was not registered")
+	}
+	await(t, settling, "the call's last word")
+	if n := registered(s); n != 0 {
+		t.Fatalf("control: %d children registered as the call settles; want its child retired", n)
+	}
+	if fin := of[SubagentFinished](ev.list()); len(fin) != 1 || fin[0].Status != SubagentCancelled || fin[0].Error != "stopped by the user" {
+		t.Fatalf("control: SubagentFinished = %+v; want the stop's row, decided with the parent live", fin)
+	}
+	h.mu.Lock() // the second stop's hold, let go once the cause has landed
+	// A failure while the lock is held must not leave the call, and the
+	// cleanup's Close behind it, waiting on it for ever.
+	unlock := sync.OnceFunc(h.mu.Unlock)
+	defer unlock()
+	close(held)
+	parked := []string{"harness.(*subagents).settle(", "harness.(*childHandle).isClosing("}
+	waitFor(t, func() bool { return waitingOnMutexIn(parked...) },
+		"settle's read of the handle's closing latch waiting on its lock")
+	cancel()
+	unlock()
+	got := await(t, out, "the turn")
+	if got.err != nil || got.res.StopReason != StopCancelled {
+		t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+	}
+	res := callResult(t, ev.list(), "t1.1.1")
+	if res.Class != tool.ClassAborted || res.Text != tool.AbortedText || res.Child == nil ||
+		res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+		t.Fatalf("the call = %+v; want aborted, carrying the first step's usage: the parent's cancel outranks the stop", res)
+	}
+	settled(t, s)
+}
+
 // waitingOnMutexIn reports whether some goroutine is parked on a sync.Mutex
 // with every one of frames on its stack, as runtime.Stack prints them.
 func waitingOnMutexIn(frames ...string) bool {
@@ -1360,6 +1421,535 @@ func waitingOnMutexIn(frames ...string) bool {
 		}
 	}
 	return false
+}
+
+// stopRow is §3.7's result for a child the user stopped, having got to last.
+func stopRow(last string) string {
+	return "The user stopped this sub-agent before it finished.\n\nIts last output was:\n" + last
+}
+
+// toolResultsSent are the tool results a request carried, by the provider's
+// call id: each one's text, and whether it was an error.
+func toolResultsSent(call fantasy.Call) (texts map[string]string, errs map[string]bool) {
+	texts, errs = map[string]string{}, map[string]bool{}
+	for _, m := range call.Prompt {
+		for _, p := range m.Content {
+			if r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p); ok {
+				texts[r.ToolCallID], errs[r.ToolCallID] = outputText(r.Output)
+			}
+		}
+	}
+	return texts, errs
+}
+
+// TestCancelSubagentStopsOneChild (A12, §3.10): two children in one step, both
+// held mid-step, and the user stops the first through Session.CancelSubagent.
+// Only the first stops: its SubagentFinished is cancelled and says who stopped
+// it, with what it had streamed and the step it was billed for, while the
+// second is still held. Let go, the second completes as if nothing happened,
+// and the parent's turn goes on: its next request carries both results — the
+// first §3.7's stop row, not an error — and it ends end_turn.
+func TestCancelSubagentStopsOneChild(t *testing.T) {
+	f := newRouted(t)
+	s := f.open(f.options())
+	a := f.routers["test/a"]
+	w1, w2 := newWorker(), newWorker()
+	a.route("fan out", callStep(agentPart(t, "a1", task("first", "child one")), agentPart(t, "a2", task("second", "child two"))),
+		answerWith("carried on"))
+	// The first spends a step before it is held, so its stop has usage to
+	// carry.
+	a.route("child one", callStep(globPart("g1")), w1.step(openText("half ", "done"), finishText()))
+	a.route("child two", w2.step(openText("answer two"), finishText()))
+	var ev events
+	finished := make(chan SubagentFinished, 2)
+	sink := func(e Event) {
+		ev.sink(e)
+		if fin, ok := e.(SubagentFinished); ok {
+			finished <- fin
+		}
+	}
+	out := start(context.Background(), s, "fan out", sink)
+	await(t, w1.reached, "the first child mid-step")
+	await(t, w2.reached, "the second child mid-step")
+	one, two := startedWith(t, ev.list(), "child one"), startedWith(t, ev.list(), "child two")
+	if err := s.CancelSubagent(one.ID); err != nil {
+		t.Fatalf("CancelSubagent(the first child) = %v; want nil", err)
+	}
+	fin := await(t, finished, "the stopped child's SubagentFinished")
+	if fin.ID != one.ID || fin.Status != SubagentCancelled || fin.Error != "stopped by the user" || fin.Text != "half done" ||
+		fin.Usage != oneStep(1) {
+		t.Fatalf("SubagentFinished = %+v; want the first child's: cancelled, stopped by the user, its partial text and one step's usage", fin)
+	}
+	// Its step waits for its release or its own context, and it has not been
+	// released: a step already returned is a stop that reached it too. That it
+	// was not reached later either is its answer below.
+	if isClosed(w2.exited) {
+		t.Fatal("the second child's step ended with the first's stop")
+	}
+	close(w2.release)
+	got := await(t, out, "the fan-out turn")
+	if got.err != nil || got.res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want the parent's turn to carry on to end_turn", got.res, got.err)
+	}
+	evs := ev.list()
+	if fin := finishedOf(t, evs, two.ID); fin.Status != SubagentCompleted || fin.Error != "" || fin.Text != "answer two" {
+		t.Fatalf("the second child finished %+v; want completed with its answer", fin)
+	}
+	stopped := stopRow("half done")
+	if res := callResult(t, evs, "t1.1.1"); res.Text != stopped || res.IsError || res.Class != "" || res.Child == nil ||
+		res.Child.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+		t.Fatalf("the first call = %+v; want %q, not an error, with the step it was billed for", res, stopped)
+	}
+	if res := callResult(t, evs, "t1.1.2"); res.Text != "answer two" || res.IsError {
+		t.Fatalf("the second call = %+v; want its child's answer", res)
+	}
+	next := a.requests("fan out")
+	if len(next) != 2 {
+		t.Fatalf("the parent sent %d requests; want two", len(next))
+	}
+	texts, errs := toolResultsSent(next[1])
+	if texts["a1"] != stopped || errs["a1"] || texts["a2"] != "answer two" || errs["a2"] {
+		t.Fatalf("the parent's next request carried %q (errors %v); want the stop's row and the second answer, neither an error", texts, errs)
+	}
+	settled(t, s)
+}
+
+// TestCancelSubagentRacesFinish (A12, §3.10): a stop that meets no running
+// child is refused with ErrNoSuchSubagent and changes nothing — one that lands
+// after the child's turn has ended, before or after its call retires it; an id
+// never issued; one sent to a sub-agent's own session — and a second stop of a
+// running child is taken and changes nothing more. The handle's ended latch is
+// forced through the runner's ended seam: a stop of a child that failed on its
+// own, once its end is latched and before the runner reads how it ended, is
+// refused, and the child is still reported failed. (A stop between the
+// child's Run returning and that latch is taken and changes nothing either:
+// TestCancelSubagentClaimsOnlyACancel.)
+func TestCancelSubagentRacesFinish(t *testing.T) {
+	t.Run("a stop after the child's end, before its retirement", func(t *testing.T) {
+		f := newRouted(t)
+		s := f.open(f.options())
+		a := f.routers["test/a"]
+		a.route("go", callStep(agentPart(t, "a1", task("quick", "a quick task"))), answerWith("next"))
+		a.route("a quick task", answerWith("the final answer"))
+		stops := make(chan error, 1)
+		s.subs.seams.retiring = func(id string) {
+			// The call still holds its child registered: the refusal is the
+			// latch's, set when the child's Run returned.
+			if n := registered(s); n != 1 {
+				t.Errorf("%d children registered in the retirement; want the one being retired", n)
+			}
+			stops <- s.CancelSubagent(id)
+		}
+		var ev events
+		if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("Run = %+v, %v; want end_turn", res, err)
+		}
+		if err := await(t, stops, "the stop in the retirement"); !errors.Is(err, ErrNoSuchSubagent) {
+			t.Fatalf("a stop after the child's end = %v; want ErrNoSuchSubagent", err)
+		}
+		if fin := of[SubagentFinished](ev.list()); len(fin) != 1 || fin[0].Status != SubagentCompleted || fin[0].Error != "" {
+			t.Fatalf("SubagentFinished = %+v; want one, completed, with no error", fin)
+		}
+		if res := callResult(t, ev.list(), "t1.1.1"); res.Text != "the final answer" || res.IsError {
+			t.Fatalf("the call = %+v; want the child's answer, unchanged", res)
+		}
+		settled(t, s)
+	})
+	t.Run("a stop after the retirement", func(t *testing.T) {
+		f := newRouted(t)
+		s := f.open(f.options())
+		a := f.routers["test/a"]
+		a.route("go", callStep(agentPart(t, "a1", task("quick", "a quick task"))), answerWith("next"))
+		a.route("a quick task", answerWith("the final answer"))
+		var ev events
+		if _, err := s.Run(context.Background(), "go", ev.sink); err != nil {
+			t.Fatal(err)
+		}
+		id := of[SubagentStarted](ev.list())[0].ID
+		if err := s.CancelSubagent(id); !errors.Is(err, ErrNoSuchSubagent) {
+			t.Fatalf("a stop of a retired child = %v; want ErrNoSuchSubagent", err)
+		}
+		if fin := of[SubagentFinished](ev.list()); len(fin) != 1 || fin[0].Status != SubagentCompleted {
+			t.Fatalf("SubagentFinished = %+v; want one, completed", fin)
+		}
+	})
+	t.Run("an id never issued", func(t *testing.T) {
+		f := newRouted(t)
+		s := f.open(f.options())
+		if err := s.CancelSubagent("no-such-child"); !errors.Is(err, ErrNoSuchSubagent) {
+			t.Fatalf("a stop with no child at all = %v; want ErrNoSuchSubagent", err)
+		}
+		a := f.routers["test/a"]
+		w := newWorker()
+		a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))), answerWith("next"))
+		a.route("a long task", w.step(openText("working"), finishText()))
+		var ev events
+		out := start(context.Background(), s, "go", ev.sink)
+		await(t, w.reached, "the child mid-step")
+		for _, id := range []string{"no-such-child", "", "t1.1.1"} {
+			if err := s.CancelSubagent(id); !errors.Is(err, ErrNoSuchSubagent) {
+				t.Fatalf("CancelSubagent(%q) with another child running = %v; want ErrNoSuchSubagent", id, err)
+			}
+		}
+		close(w.release)
+		if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopEndTurn {
+			t.Fatalf("Run = %+v, %v; want end_turn", got.res, got.err)
+		}
+		if res := callResult(t, ev.list(), "t1.1.1"); res.Text != "working" || res.IsError {
+			t.Fatalf("the running child's call = %+v; want its own answer: the refused stops changed nothing", res)
+		}
+		settled(t, s)
+	})
+	t.Run("on a sub-agent's own session", func(t *testing.T) {
+		f := newRouted(t)
+		s := f.open(f.options())
+		k := watchKids(s)
+		a := f.routers["test/a"]
+		w := newWorker()
+		a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))), answerWith("next"))
+		a.route("a long task", w.step(openText("working"), finishText()))
+		var ev events
+		out := start(context.Background(), s, "go", ev.sink)
+		await(t, w.reached, "the child mid-step")
+		id := of[SubagentStarted](ev.list())[0].ID
+		child := k.get(id)
+		for _, target := range []string{id, "no-such-child"} {
+			if err := child.CancelSubagent(target); !errors.Is(err, ErrNoSuchSubagent) {
+				t.Fatalf("the child's own CancelSubagent(%q) = %v; want ErrNoSuchSubagent: a sub-agent has none", target, err)
+			}
+		}
+		close(w.release)
+		if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopEndTurn {
+			t.Fatalf("Run = %+v, %v; want end_turn", got.res, got.err)
+		}
+		if fin := finishedOf(t, ev.list(), id); fin.Status != SubagentCompleted {
+			t.Fatalf("SubagentFinished = %+v; want completed", fin)
+		}
+	})
+	t.Run("two stops of one running child", func(t *testing.T) {
+		f := newRouted(t)
+		s := f.open(f.options())
+		a := f.routers["test/a"]
+		w := newWorker()
+		w.ignoreCancel = true // both stops land before the child sees either
+		a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))), answerWith("next"))
+		a.route("a long task", w.step(openText("half done"), finishText()))
+		var ev events
+		out := start(context.Background(), s, "go", ev.sink)
+		await(t, w.reached, "the child mid-step")
+		id := of[SubagentStarted](ev.list())[0].ID
+		for i := range 2 {
+			if err := s.CancelSubagent(id); err != nil {
+				t.Fatalf("stop %d of a running child = %v; want nil", i+1, err)
+			}
+		}
+		close(w.release)
+		if got := await(t, out, "the turn"); got.err != nil || got.res.StopReason != StopEndTurn {
+			t.Fatalf("Run = %+v, %v; want end_turn", got.res, got.err)
+		}
+		evs := ev.list()
+		if fin := of[SubagentFinished](evs); len(fin) != 1 || fin[0].Status != SubagentCancelled || fin[0].Error != "stopped by the user" {
+			t.Fatalf("SubagentFinished = %+v; want one, cancelled, stopped by the user", fin)
+		}
+		results := 0
+		for _, tf := range of[ToolFinished](evs) {
+			if tf.ID == "t1.1.1" {
+				results++
+			}
+		}
+		if res := callResult(t, evs, "t1.1.1"); results != 1 || res.Text != stopRow("half done") || res.IsError {
+			t.Fatalf("%d results for the call, the first %+v; want one, the stop's row", results, res)
+		}
+		settled(t, s)
+	})
+	t.Run("a failed child stopped after its Run returned is still failed", func(t *testing.T) {
+		f := newRouted(t)
+		s := f.open(f.options())
+		a := f.routers["test/a"]
+		a.route("go", callStep(agentPart(t, "a1", task("doomed", "fail on your own"))), answerWith("next"))
+		a.route("fail on your own", callStep(textParts("looking"), globPart("g1")),
+			reply(openText("half an answer"), errorPart(errors.New("the provider hung up"))))
+		stops := make(chan error, 1)
+		// The seam runs once the child's Run has returned its failure and its
+		// end is latched, before the runner reads its context's cause: the
+		// latch refuses the stop, which changes nothing. (Nor would a stop
+		// taken before the latch make the failure a stop: decide lets a stop
+		// claim only a turn that ended cancelled.)
+		s.subs.seams.ended = func(id string) { stops <- s.CancelSubagent(id) }
+		var ev events
+		if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+		}
+		if err := await(t, stops, "the stop after the child's Run"); !errors.Is(err, ErrNoSuchSubagent) {
+			t.Fatalf("a stop after the child's Run returned = %v; want ErrNoSuchSubagent", err)
+		}
+		fin := of[SubagentFinished](ev.list())
+		if len(fin) != 1 || fin[0].Status != SubagentFailed || !strings.Contains(fin[0].Error, "the provider hung up") {
+			t.Fatalf("SubagentFinished = %+v; want one, failed on the provider", fin)
+		}
+		res := callResult(t, ev.list(), "t1.1.1")
+		if res.Class != tool.ClassToolError || !strings.HasPrefix(res.Text, "The sub-agent failed: ") ||
+			!strings.HasSuffix(res.Text, "Its last output was:\nhalf an answer") {
+			t.Fatalf("the call = %q (class %q); want the child's failure with its last output, not a stop", res.Text, res.Class)
+		}
+		settled(t, s)
+	})
+}
+
+// TestCancelSubagentClaimsOnlyACancel (review r12, finding 1; §3.10): a stop
+// that lands after the child's Run has returned and before the runner latches
+// its end — the returned seam, between the two — is taken, and changes
+// nothing: a stop claims only a turn that ended cancelled. A child whose
+// provider failed, or whose turn panicked, is still failed, and one that
+// completed keeps its answer; none reads stopped by the user.
+func TestCancelSubagentClaimsOnlyACancel(t *testing.T) {
+	for _, ending := range []string{"a provider failure", "a panic", "a completed turn"} {
+		t.Run(ending, func(t *testing.T) {
+			f := newRouted(t)
+			s := f.open(f.options())
+			a := f.routers["test/a"]
+			a.route("go", callStep(agentPart(t, "a1", task("racing", "end on your own"))), answerWith("next"))
+			switch ending {
+			case "a provider failure":
+				a.route("end on your own", callStep(textParts("looking"), globPart("g1")),
+					reply(openText("half an answer"), errorPart(errors.New("the provider hung up"))))
+			case "a panic":
+				a.route("end on your own", callStep(textParts("first"), globPart("g1")),
+					func(context.Context, func(fantasy.StreamPart) bool) { panic("the child's model exploded") })
+			case "a completed turn":
+				a.route("end on your own", answerWith("the final answer"))
+			}
+			stops := make(chan error, 1)
+			// The seam runs once the child's Run has returned and before its end
+			// is latched: the stop is taken — nil, which the latch would refuse —
+			// and cancels the child's context with the user's cause before the
+			// runner reads it.
+			s.subs.seams.returned = func(id string) { stops <- s.CancelSubagent(id) }
+			var ev events
+			if res, err := s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+				t.Fatalf("Run = %+v, %v; want the parent to carry on", res, err)
+			}
+			if err := await(t, stops, "the stop between the child's Run and its latch"); err != nil {
+				t.Fatalf("a stop before the child's end is latched = %v; want nil, taken", err)
+			}
+			evs := ev.list()
+			fins := of[SubagentFinished](evs)
+			if len(fins) != 1 {
+				t.Fatalf("SubagentFinished = %+v; want one", fins)
+			}
+			fin, res := fins[0], callResult(t, evs, "t1.1.1")
+			if fin.Error == "stopped by the user" || strings.HasPrefix(res.Text, "The user stopped this sub-agent") {
+				t.Fatalf("SubagentFinished = %+v, the call = %.200q; want neither to read stopped: the stop came after the child's own ending",
+					fin, res.Text)
+			}
+			switch ending {
+			case "a provider failure":
+				if fin.Status != SubagentFailed || !strings.Contains(fin.Error, "the provider hung up") {
+					t.Fatalf("SubagentFinished = %+v; want failed on the provider", fin)
+				}
+				if res.Class != tool.ClassToolError || !strings.HasPrefix(res.Text, "The sub-agent failed: ") ||
+					!strings.Contains(res.Text, "the provider hung up") || !strings.HasSuffix(res.Text, "Its last output was:\nhalf an answer") {
+					t.Fatalf("the call = %q (class %q); want the provider's failure with the child's last output", res.Text, res.Class)
+				}
+			case "a panic":
+				if fin.Status != SubagentFailed || fin.Error != "the sub-agent panicked" || fin.Usage != oneStep(1) {
+					t.Fatalf("SubagentFinished = %+v; want failed, panicked, with one step's usage", fin)
+				}
+				if res.Class != tool.ClassToolError || !strings.HasPrefix(res.Text, "The sub-agent failed: it panicked: the child's model exploded") {
+					t.Fatalf("the call = %q (class %q); want the recovered panic, a failed sub-agent", res.Text, res.Class)
+				}
+			case "a completed turn":
+				if fin.Status != SubagentCompleted || fin.Error != "" || fin.Text != "the final answer" {
+					t.Fatalf("SubagentFinished = %+v; want completed with its answer", fin)
+				}
+				if res.Text != "the final answer" || res.IsError {
+					t.Fatalf("the call = %+v; want the child's answer, kept", res)
+				}
+			}
+			if res.Child == nil {
+				t.Fatalf("the call = %+v; want the child's usage on it", res)
+			}
+			settled(t, s)
+		})
+	}
+}
+
+// TestCancelSubagentDuringClose (§3.10, §3.8): Close first, then a stop. The
+// stop is taken while the child still runs and refused once it has ended —
+// either is right — and either way Close outranks it: the call is aborted,
+// the finished row does not say the user stopped the child, Close returns nil
+// and the child's transcript is closed. (TestStopVersusParentCancelPrecedence's
+// "stop, then Close" is the other order.)
+func TestCancelSubagentDuringClose(t *testing.T) {
+	for _, when := range []string{"the child still running", "the child already ended"} {
+		t.Run(when, func(t *testing.T) {
+			f := newRouted(t)
+			s := f.open(f.options())
+			k := watchKids(s)
+			a := f.routers["test/a"]
+			w := newWorker()
+			a.route("go", callStep(agentPart(t, "a1", task("long", "a long task"))))
+			a.route("a long task", w.step(openText("half done"), finishText()))
+			stops := make(chan error, 1)
+			if when == "the child already ended" {
+				// Close's signal ends the child; the stop lands the instant its
+				// Run has returned.
+				s.subs.seams.ended = func(id string) { stops <- s.CancelSubagent(id) }
+			} else {
+				w.ignoreCancel = true // the child runs on until the test lets it go
+			}
+			var ev events
+			out := start(context.Background(), s, "go", ev.sink)
+			await(t, w.reached, "the child mid-step")
+			id := of[SubagentStarted](ev.list())[0].ID
+			closed := make(chan error, 1)
+			go func() { closed <- s.Close() }()
+			// Close has signalled its children before it closes this channel.
+			await(t, s.tools.closing, "Close's signal")
+			var err error
+			if when == "the child still running" {
+				err = s.CancelSubagent(id)
+				close(w.release)
+			} else {
+				err = await(t, stops, "the stop after the child's end")
+			}
+			if want := map[string]error{"the child still running": nil, "the child already ended": ErrNoSuchSubagent}[when]; !errors.Is(err, want) {
+				t.Fatalf("the stop after Close's signal = %v; want %v", err, want)
+			}
+			if err := await(t, closed, "Close"); err != nil {
+				t.Fatalf("Close = %v", err)
+			}
+			if got := await(t, out, "the closed turn"); got.err != nil || got.res.StopReason != StopCancelled {
+				t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+			}
+			if res := callResult(t, ev.list(), "t1.1.1"); res.Class != tool.ClassAborted || res.Text != tool.AbortedText {
+				t.Fatalf("the call = %+v; want aborted: a closing session outranks a stop", res)
+			}
+			if fin := finishedOf(t, ev.list(), id); fin.Status != SubagentCancelled || fin.Error != "" {
+				t.Fatalf("SubagentFinished = %+v; want cancelled by the close, not stopped by the user", fin)
+			}
+			if kid := k.get(id); kid == nil || !storeClosed(kid.store) {
+				t.Fatal("the child's store is still open after Close")
+			}
+			settled(t, s)
+		})
+	}
+}
+
+// TestCancelSubagentRace (§3.10; the gate runs it under -race): the stop
+// against everything it can meet at once. Each round holds one child mid-step
+// and then lets go together, from one barrier, several stops of it from as
+// many goroutines, the child's own finish and — every other round — the
+// parent's cancel. Whatever order they land in, the invariants hold: one
+// SubagentFinished for the child and one result for its call, which is its
+// answer, the stop's row or aborted; the stop's row only when a stop was
+// taken, aborted only when the parent was cancelled, and the finished row's
+// status and error agreeing with the result; a refused stop came after the
+// child's end (its handle's ended latch was set); and nothing is left behind —
+// no slot, no registered child, no goroutine.
+func TestCancelSubagentRace(t *testing.T) {
+	const rounds, stoppers = 40, 4
+	f := newRouted(t)
+	a := f.routers["test/a"]
+	baseline := goroutines()
+	for round := range rounds {
+		s := f.open(f.options())
+		prompt, job := fmt.Sprintf("race %d", round), fmt.Sprintf("the task of round %d", round)
+		w := newWorker()
+		a.route(prompt, callStep(agentPart(t, "a1", task("racing", job))), answerWith("after the race"))
+		a.route(job, w.step(openText("partial"), finishText()))
+		ctx, cancel := context.WithCancel(context.Background())
+		var ev events
+		out := start(ctx, s, prompt, ev.sink)
+		await(t, w.reached, "the child mid-step")
+		id := of[SubagentStarted](ev.list())[0].ID
+		s.subs.regMu.Lock()
+		h := s.subs.live[id]
+		s.subs.regMu.Unlock()
+
+		begin := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make([]error, stoppers)
+		endedAtRefusal := make([]bool, stoppers)
+		for i := range stoppers {
+			wg.Go(func() {
+				<-begin
+				errs[i] = s.CancelSubagent(id)
+				if errs[i] != nil {
+					h.mu.Lock()
+					endedAtRefusal[i] = h.ended
+					h.mu.Unlock()
+				}
+			})
+		}
+		wg.Go(func() { <-begin; close(w.release) })
+		parentCancelled := round%2 == 1
+		if parentCancelled {
+			wg.Go(func() { <-begin; cancel() })
+		}
+		close(begin)
+		wg.Wait()
+		got := await(t, out, "the round's turn")
+		cancel()
+		if got.err != nil || (!parentCancelled && got.res.StopReason != StopEndTurn) {
+			t.Fatalf("round %d: Run = %+v, %v", round, got.res, got.err)
+		}
+
+		taken := 0
+		for i, err := range errs {
+			switch {
+			case err == nil:
+				taken++
+			case !errors.Is(err, ErrNoSuchSubagent):
+				t.Fatalf("round %d: stop %d = %v; want nil or ErrNoSuchSubagent", round, i, err)
+			case !endedAtRefusal[i]:
+				t.Fatalf("round %d: stop %d was refused while the child had not ended", round, i)
+			}
+		}
+		evs := ev.list()
+		var fins []SubagentFinished
+		for _, fin := range of[SubagentFinished](evs) {
+			if fin.ID == id {
+				fins = append(fins, fin)
+			}
+		}
+		results := 0
+		for _, tf := range of[ToolFinished](evs) {
+			if tf.ID == "t1.1.1" {
+				results++
+			}
+		}
+		if len(fins) != 1 || results != 1 {
+			t.Fatalf("round %d: %d SubagentFinished and %d results for the call; want one of each", round, len(fins), results)
+		}
+		fin, res := fins[0], callResult(t, evs, "t1.1.1")
+		switch {
+		case res.Text == "partial" && !res.IsError:
+			if fin.Status != SubagentCompleted || fin.Error != "" {
+				t.Fatalf("round %d: the call answered, the child finished %+v", round, fin)
+			}
+		case res.Text == stopRow("partial") && !res.IsError:
+			if taken == 0 || fin.Status != SubagentCancelled || fin.Error != "stopped by the user" {
+				t.Fatalf("round %d: the stop's row with %d stops taken, the child finished %+v", round, taken, fin)
+			}
+		case res.Class == tool.ClassAborted && res.Text == tool.AbortedText:
+			// The finished row is decide's, the call's result settle's, last
+			// (X13): a stop that decided the child alone, and a parent's cancel
+			// that landed after its SubagentFinished went out, leave a row that
+			// says the user stopped it and a call the parent's cause aborted.
+			stoppedRow := fin.Error == "stopped by the user" && taken > 0
+			if !parentCancelled || fin.Status != SubagentCancelled || (fin.Error != "" && !stoppedRow) {
+				t.Fatalf("round %d: aborted (parent cancelled %v, %d stops taken), the child finished %+v", round, parentCancelled, taken, fin)
+			}
+		default:
+			t.Fatalf("round %d: the call = %+v; want the answer, the stop's row or aborted", round, res)
+		}
+		settled(t, s)
+		if err := s.Close(); err != nil {
+			t.Fatalf("round %d: Close = %v", round, err)
+		}
+	}
+	waitFor(t, func() bool { return goroutines() <= baseline }, fmt.Sprintf("the goroutines to return to %d", baseline))
 }
 
 // TestAgentResultTable (A8): what the parent's model reads for each way a

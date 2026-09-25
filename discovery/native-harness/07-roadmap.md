@@ -12,7 +12,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
 | H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #48 (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
-| H6 | in progress | sub-agents: in-process `harness.Session` children, the `agent` tool (kind `task`), personas, per-child cancel, background children — Plan 026, three PRs, planned not executed |
+| H6 | in progress | foreground complete (PR 1 #51, merged `f5c3cfd`: sub-agents end to end; PR 2 `feature/plan-026-h6-stop`: stop one sub-agent); background children are PR 3 |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
 | HL | unscheduled | own the turn loop — see D-40's triggers |
@@ -550,19 +550,19 @@ Follow-ups:
   (§4, §9; `10-open-questions.md` already lists these three);
 - `--json` has no field for a plan's body (X22.7).
 
-H6 (sub-agents) is next; its gate is nothing — planned as Plan 026: an
-in-process `agent` tool, event tagging, per-child cancel, and personas from
-workspace, user, and plugin sources.
+H6 (sub-agents) is in progress: PR 1 (#51, `f5c3cfd`) shipped the in-process
+`agent` tool, event tagging, and personas from workspace, user, and plugin
+sources; PR 2 (`feature/plan-026-h6-stop`) adds per-child cancel; background
+children are PR 3.
 
 ### H6 — sub-agents
 
-**Planned (Plan 026, 2026-09-24): FINAL after the S1c seam review and the
-panel — not yet executed.** Three PRs, each auto-merged after
-`/git-commands:watch-pr` shows it green: PR 1
-(`feature/plan-026-h6-subagents`, foreground sub-agents end to end), PR 2
-(`feature/plan-026-h6-stop`, per-child cancel), PR 3
-(`feature/plan-026-h6-background`, background children and the wake).
-Decisions D-54..D-59.
+**FINAL after the S1c seam review and the panel (2026-09-24); foreground
+complete.** Three PRs, each auto-merged after `/git-commands:watch-pr` shows
+it green: PR 1 (`feature/plan-026-h6-subagents`, foreground sub-agents end to
+end) **merged as #51, `f5c3cfd`**; PR 2 (`feature/plan-026-h6-stop`,
+per-child cancel) ships the stop; PR 3 (`feature/plan-026-h6-background`,
+background children and the wake) is next. Decisions D-54..D-59.
 
 - **In-process** (D-54, supersedes D-10): a child is a second
   `harness.Session`, as grok-build, opencode, codex and crush all run their
@@ -589,6 +589,20 @@ Decisions D-54..D-59.
   through the existing foreign-turn machinery — in PR 3 (D-59).
 - **Exit**: a task fanned out to two children with both transcripts in the
   sub-agent view.
+
+**Exit result:** the criterion above was met live, on both Linux and the
+mac-mini (PR 1's V1). PR 2 adds per-child stop, verified live on both
+platforms; PR 3 (background children) is what remains.
+
+Live smoke, both PRs (plan artifacts, outside the repo — see
+`026-native-harness-h6-subagents/smoke/pr{1,2}-*.md`):
+
+| # | what | platforms | result |
+|---|---|---|---|
+| V1 (PR 1) | exit criterion: two children fanned out, both transcripts in the sub-agent view | Linux, mac-mini | pass |
+| V3 (PR 1) | Esc mid-fan-out kills both children's `sleep 30`, nothing left running | Linux, mac-mini | pass |
+| V7 (PR 1) | `craze prompt --json`: subagent and child-tagged lines, `done end_turn` | Linux, mac-mini | pass |
+| V9 (PR 2) | Delete/Backspace stops one running child, from its row and from its view, native only; grok's row and view fall through with no `del to stop` hint | native: Linux, mac-mini; grok fall-through: Linux | pass |
 
 ### H7 — resume and compaction
 

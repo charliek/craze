@@ -80,6 +80,28 @@ import (
 // has ended — and drops even a late progress snapshot — before its Run
 // returns; and Finished before the parent's ToolFinished for the call, which
 // follows the call's return.
+//
+// # Stopping one child (§3.10)
+//
+// Session.CancelSubagent is the user's stop of one child: a lookup under
+// regMu, released before anything else, and one cancel of the child's context
+// with errStoppedByUser, made under the handle's own lock — no wait, no child
+// turn lock, no sink, no event. What the stop comes to is the runner's to say,
+// through the same precedence as any other cause (decide, then settle): a child
+// whose turn ended on its own keeps its outcome, a parent's cancel or a closing
+// session outranks the stop, a child whose Run failed stays failed, and the
+// stop alone is §3.7's not-an-error row.
+//
+// Two different things keep a stop to the ending it caused (review r12). The
+// handle's ended latch, set under that same lock once the child's Run has
+// returned and before the runner reads the cause its outcome turns on, bounds
+// when a stop is taken: from the latch on, a stop is refused with nothing
+// changed (ErrNoSuchSubagent). It is not one step with Run's return, so a stop
+// can still land between the two, and is taken. decide is what makes that
+// harmless: a stop claims only an ending that is a cancel, which with the
+// parent live nothing but a stop can have caused, so a child that completed
+// keeps its answer and one whose Run failed stays failed, whatever stop landed
+// after (§3.10: a stop racing the finish is harmless).
 
 // maxChildren is how many sub-agents one session runs at once (owner decision
 // 7): a fifth call waits for a slot. Fantasy's own five parallel tool slots
@@ -88,10 +110,18 @@ import (
 const maxChildren = 4
 
 // errStoppedByUser is the cause a child's context is cancelled with when the
-// user stops that one child (plan 026 §3.10: PR 2's CancelSubagent). A parent
-// cancel or close outranks it (subagentOutcome), and on its own it is a stop,
-// not a failure: the parent's model reads what the child had got to.
+// user stops that one child (plan 026 §3.10: Session.CancelSubagent). A parent
+// cancel or close outranks it (subagentOutcome), it claims only a turn that
+// ended cancelled (decide), and then it is a stop, not a failure: the parent's
+// model reads what the child had got to, and the child's SubagentFinished says
+// who stopped it (subagentStoppedLabel).
 var errStoppedByUser = errors.New("harness: the user stopped this sub-agent")
+
+// ErrNoSuchSubagent is CancelSubagent's refusal (plan 026 §3.10): this session
+// has no child by that id whose turn is still running — the id was never
+// issued, the child's turn has ended, or the session is a sub-agent's, which
+// starts none. Nothing was changed.
+var ErrNoSuchSubagent = errors.New("harness: no such sub-agent")
 
 // The texts the parent's model reads for a child that did not simply answer
 // (§3.7's table). They are craze's own words, fixed by the plan.
@@ -104,6 +134,15 @@ const (
 	subagentFailed     = "The sub-agent failed: "
 	subagentLastOutput = "Its last output was:\n"
 	subagentStopped    = "The user stopped this sub-agent before it finished."
+	// subagentStoppedLabel is the Error of the SubagentFinished a child the
+	// user stopped leaves behind (§3.10): the finished row says who stopped it,
+	// which its status, cancelled, cannot. The call's result is subagentStopped,
+	// which is not an error (§3.7) — unless the parent's cancel or its close
+	// lands after the row went out and before the call returns, when settle
+	// answers the call aborted and the row, already delivered, still says what
+	// ended the child (X13's one arbitration point is the call's, not the
+	// row's).
+	subagentStoppedLabel = "stopped by the user"
 	// subagentPanicked is the Error of the SubagentFinished a child's panic
 	// leaves behind. The call's result is the runner's own failure, which
 	// names the panic's value (childPanic; review r3): the event's error is a
@@ -141,13 +180,18 @@ type subagents struct {
 
 // subagentSeams are the points a test needs to reach inside a call: to fail
 // the child's Open, to know a call is waiting for a slot or holds one, to see
-// the child session a call opened, and to hold a call in its retirement.
+// the child session a call opened, to act the instant the child's Run has
+// returned and again once its end is latched, to hold a call in its
+// retirement, and to act as its last word begins.
 type subagentSeams struct {
 	open     func(Options) (*Session, error) // opens a child; nil is Open
 	waiting  func(tool.SubagentCall)         // the call found no free slot and is about to wait for one
 	acquired func(tool.SubagentCall)         // the call holds a slot, rechecked, and is about to register
 	opened   func(id string, child *Session) // the child opened and is attached, before it runs
+	returned func(id string)                 // the child's Run returned; its end is not yet latched, and a stop is still taken
+	ended    func(id string)                 // the child's Run returned and its end is latched; its cause is not yet read
 	retiring func(id string)                 // the call is about to take regMu to retire its child
+	settling func(id string)                 // a registered call's last word (settle) begins: its child closed, retired, its slot given back
 }
 
 // turnLink is what a call needs of the turn it runs in: the turn's locked
@@ -168,14 +212,17 @@ type childHandle struct {
 	// regMu (tool.Raise), and read by the child's gate at every check.
 	strictness atomic.Int32
 	// cancel is the child's context's: the runner's own, derived from the
-	// call's. A close cancels it with tool.ErrClosing; PR 2's per-child stop
-	// cancels it with errStoppedByUser.
+	// call's. A close cancels it with tool.ErrClosing (signalClose); the user's
+	// stop of this one child cancels it with errStoppedByUser, under mu, and
+	// only while the child's end is not latched (stop).
 	cancel context.CancelCauseFunc
 
-	// mu guards the closing latch and the opened session, which Close's
-	// signal and the runner's attach set from two goroutines.
+	// mu guards the two latches and the opened session, which Close's signal,
+	// a stop and the runner set from their own goroutines. A leaf: nothing is
+	// taken under it but the context package's own locks, in stop's cancel.
 	mu      sync.Mutex
 	closing bool     // the latch: a Close has signalled this child, opened or not
+	ended   bool     // the latch: the child's Run has returned, or it never ran; a stop is refused (stop)
 	sess    *Session // the child, once opened and attached; nil before
 }
 
@@ -314,6 +361,99 @@ func (h *childHandle) session() *Session {
 	return h.sess
 }
 
+// CancelSubagent stops one of this session's sub-agents — the child
+// SubagentStarted named id — and nothing else of the session (plan 026
+// §3.10). It cancels the child's context with errStoppedByUser and returns: it
+// waits for nothing, takes no turn's lock and calls no sink, so a caller on the
+// UI's own goroutine may make it. What the stop comes to is reported as the
+// child's SubagentFinished and its call's result, by §3.8's precedence as the
+// runner builds it (decide, then settle):
+//
+//   - a child whose turn had ended on its own keeps its outcome — a stop that
+//     lands after its final step was persisted, before its Run returned,
+//     included;
+//   - the parent's cancel or a closing session outranks the stop: aborted;
+//   - a stop claims only a turn that ended cancelled, which with the parent
+//     live nothing but a stop can have done, and it is then not an error: the
+//     finished row is cancelled, its Error "stopped by the user", and the
+//     parent's model reads what the child had got to (§3.7);
+//   - a child whose Run failed — its provider, a panic, a failed save — is
+//     failed, whatever stop landed.
+//
+// It is idempotent: a second stop of a child still running returns nil and
+// changes nothing — the first cause stands. It answers ErrNoSuchSubagent,
+// having changed nothing, for an id never issued; for a child whose end the
+// runner has latched, just after its Run returned (the handle's ended latch,
+// stop); and on a sub-agent's own session, which has no runner. A stop that
+// lands between the child's Run returning and that latch is taken — it returns
+// nil — and changes nothing: the ending it meets completed or failed, which
+// decide never gives a stop, or was a cancel already made — the parent's
+// cancel or a Close, which outrank it, or an earlier stop's, whose cause
+// stands (§3.10: a stop racing the finish is harmless).
+//
+// Against Close: Close signals every registered child's closing, a cancel of
+// the same context with tool.ErrClosing, and whichever of the two causes
+// reaches the context first, the child is aborted — decide reads the handle's
+// closing latch as the parent gone, and settle, the call's last act, reads it
+// again. A stop during a Close returns nil, or ErrNoSuchSubagent once the
+// child's end is latched; either is right, and neither changes what the call
+// answers.
+//
+// A child still opening is registered already, and a stop reaches the context
+// its turn will run under, though no client knows its id yet (SubagentStarted
+// follows the Open): its turn starts cancelled and reads stopped, and an Open
+// that fails keeps its failure, which the stop cannot have caused.
+func (s *Session) CancelSubagent(id string) error {
+	r := s.subs
+	if r == nil {
+		return ErrNoSuchSubagent
+	}
+	// The handle is copied out and regMu released before its own lock is
+	// taken: the two are never held together (childKeys, closeChildren).
+	r.regMu.Lock()
+	h := r.live[id]
+	r.regMu.Unlock()
+	if h == nil || !h.stop() {
+		return ErrNoSuchSubagent
+	}
+	return nil
+}
+
+// stop cancels the child's context with errStoppedByUser unless its end has
+// been latched, and reports whether it did (CancelSubagent). The cancel is
+// made holding mu, the lock end latches under, so a stop is wholly before the
+// latch — a cause the runner then reads — or after it, and refused. The latch
+// bounds when a stop is taken, not what it comes to: it follows the child's
+// Run returning rather than being one step with it, so a stop can land in
+// between and be taken; decide lets a stop claim only a turn that ended
+// cancelled, so a child that completed or failed keeps its outcome, and that
+// stop has changed nothing (review r12).
+//
+// Holding mu across the cancel is safe: a context's cancel takes only the
+// context package's own locks — each context's, parent before child — and runs
+// none of craze's code on the caller's goroutine (an AfterFunc's function is
+// started on a goroutine of its own, context.go's afterFuncCtx.cancel), so
+// nothing it does can come back for mu. A second stop cancels a context
+// already cancelled, which changes nothing: the first cause stands.
+func (h *childHandle) stop() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ended {
+		return false
+	}
+	h.cancel(errStoppedByUser)
+	return true
+}
+
+// end latches the child's end: its Run has returned, or it never ran, and a
+// stop from here on is refused (stop). It bounds when a stop is taken; what a
+// stop taken before it comes to is decide's.
+func (h *childHandle) end() {
+	h.mu.Lock()
+	h.ended = true
+	h.mu.Unlock()
+}
+
 // acquire takes a slot, waiting for one while the call's context is live and
 // the session is not closing, and reports whether it holds one (step 1). A
 // slot won while the context or closing is also ready is given back: a
@@ -367,10 +507,15 @@ func (r *subagents) register(id string, cancel context.CancelCauseFunc) (*childH
 // read before regMu is taken: a child's key lock is a leaf, never taken under
 // the registry's, and a child's keys are those of its Open — nothing switches
 // a child's model, which is the only way a session learns one.
+//
+// Before regMu it latches the child's end, for a child that never ran — its
+// Open failed, or its attach was refused — and so never reached the runner's
+// own latch after its Run (runChild): a stop from here on is refused.
 func (r *subagents) retire(h *childHandle) {
 	if r.seams.retiring != nil {
 		r.seams.retiring(h.id)
 	}
+	h.end()
 	var keys []string
 	if child := h.session(); child != nil {
 		keys = child.tools.knownKeys()
@@ -568,9 +713,29 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 		obs.observe(ev)
 		link.sink(SubagentEvent{ID: h.id, Event: ev})
 	})
+	if r.seams.returned != nil {
+		r.seams.returned(h.id)
+	}
+	// The child's end, latched before the cause its outcome turns on is read
+	// (§3.10): a stop from here is refused (childHandle.stop). The latch bounds
+	// when a stop is taken, not what one comes to: a stop that landed since
+	// runTurn returned was taken, and decide keeps it from relabelling this
+	// ending — a stop claims only a turn that ended cancelled, so a child that
+	// completed or failed on its own keeps its outcome (review r12).
+	h.end()
+	if r.seams.ended != nil {
+		r.seams.ended(h.id)
+	}
+	// The handle's closing latch is read before the call's context and the
+	// session's closing channel: it takes the handle's lock, which a stop can
+	// hold, and the reads that cannot wait come last, so a cause that lands
+	// while it waits is seen (settle's rule, review r12). This picks the
+	// finished row; settle reads all three again, in the same order, and its
+	// answer is the call's final word.
+	closing := h.isClosing()
 	out := subagentOutcome{
 		res: res, err: runErr,
-		parentGone: ctx.Err() != nil || isClosed(parent.tools.closing) || h.isClosing(),
+		parentGone: closing || ctx.Err() != nil || isClosed(parent.tools.closing),
 		stopped:    errors.Is(context.Cause(childCtx), errStoppedByUser),
 	}.decide(&obs)
 	c.completed = out.status == SubagentCompleted
@@ -676,9 +841,19 @@ func (r *subagents) union(child *Session) *redact.Replacer {
 //     finishes the call — meets any tool's race with a cancel, which is
 //     inherent.
 //
+// The arbitration's own reads keep step 4's rule (review r12): the handle's
+// closing latch first, since it takes the handle's lock, which a second stop
+// of the child can hold while it cancels; the call's context and the session's
+// closing channel last, since they wait for nothing. A parent's cancel that
+// landed while the latch's read waited was missed by a check that had read the
+// context before it.
+//
 // A call that never registered has no child to arbitrate: its result is a
 // refusal or aborted as it stands, redacted and cut.
 func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res tool.Result) tool.Result {
+	if c.h != nil && r.seams.settling != nil {
+		r.seams.settling(c.h.id)
+	}
 	res.Text = r.union(c.child).String(res.Text)
 	res.Text, res.Trunc = tool.TruncateRedacted(r.s.base.home, callID, res.Text, tool.Head, r.union(c.child))
 	red := r.union(c.child)
@@ -691,7 +866,13 @@ func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res
 		return res
 	}
 	aborted := tool.Result{Text: red.String(tool.AbortedText), IsError: true, Class: tool.ClassAborted, Child: res.Child}
-	if !c.completed && (ctx.Err() != nil || isClosed(r.s.tools.closing) || c.h.isClosing()) {
+	if c.completed {
+		return res
+	}
+	// The one read that can wait comes first; nothing that can follows the
+	// last two.
+	closing := c.h.isClosing()
+	if closing || ctx.Err() != nil || isClosed(r.s.tools.closing) {
 		return aborted
 	}
 	return res
@@ -844,12 +1025,27 @@ type decided struct {
 //     outcome already persisted (turn.go's finish);
 //  2. otherwise the parent's cancel or close outranks everything: aborted,
 //     the tool contract, whatever else also happened to the child;
-//  3. otherwise a stop by the user alone is not an error: the stop's text and
-//     what the child had got to;
+//  3. otherwise a stop by the user claims the ending when it is a cancel —
+//     Run returned no error, and every such ending that was not a cancel is
+//     rule 1's — and is not an error: the stop's text and what the child had
+//     got to, and a SubagentFinished whose error says who stopped it (§3.10);
 //  4. otherwise a failure is an error with its message and the child's last
 //     output — a panic recovered from its turn (childPanic) included, whose
-//     SubagentFinished says only that it panicked;
+//     SubagentFinished says only that it panicked — whatever stop landed;
 //  5. and a cancel nobody claims is aborted.
+//
+// Rule 3 asks for a cancel because that is the one ending a stop can cause
+// (review r12). A child's context is cancelled only by the parent (the call's
+// context, parentGone), by a Close (the handle's closing latch, parentGone)
+// or by a stop; and a turn whose context was cancelled ends cancelled with no
+// error — unless its final step was already persisted, rule 1, or saving its
+// interrupted step failed, which is an error (turn.go's finish). So a
+// cancelled ending with the parent live is the stop's doing, and no other
+// ending is a stop's: a provider's failure or a panic is the child's own, a
+// failed save — even of a step a stop interrupted — is a failure the parent's
+// model must read as one, and a stop that landed after any of them — between
+// runTurn's return and the handle's ended latch, where one is still taken
+// (childHandle.stop) — cannot relabel it.
 func (o subagentOutcome) decide(obs *childObserver) decided {
 	last := obs.lastOutput()
 	switch {
@@ -860,8 +1056,9 @@ func (o subagentOutcome) decide(obs *childObserver) decided {
 		return decided{result: completedResult(o.res.StopReason, last, doom), status: SubagentCompleted, text: last}
 	case o.parentGone:
 		return decided{result: abortedResult(), status: SubagentCancelled, text: last}
-	case o.stopped:
-		return decided{result: tool.Result{Text: withLastOutput(subagentStopped, last)}, status: SubagentCancelled, text: last}
+	case o.stopped && o.err == nil:
+		return decided{result: tool.Result{Text: withLastOutput(subagentStopped, last)}, status: SubagentCancelled,
+			errText: subagentStoppedLabel, text: last}
 	case o.err != nil:
 		errText := o.err.Error()
 		if errors.As(o.err, new(childPanic)) {

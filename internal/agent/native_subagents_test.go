@@ -1303,3 +1303,87 @@ func TestNativeSubagentFailedAndUnstarted(t *testing.T) {
 		t.Fatalf("the refused call's agent row is %+v (task %+v)", got, got.Task)
 	}
 }
+
+// TestNativeCancelSubagent (A12, §3.10): the stop through the session. A
+// native child is held mid-answer and the session's CancelSubagent stops it;
+// the parent's turn goes on to its own answer. The child's roster row goes
+// cancelled with the Error "stopped by the user" and what it had streamed, in
+// the order the adapter publishes every child's life — spawned, its user line,
+// its own events, finished, then the parent's row for the call — and the
+// parent's agent row is stamped cancelled; Snapshot().Subagents is the last
+// payload published. An id never issued, a stop before any turn, and a second
+// stop of the child once it has finished are ErrNoSuchSubagent.
+func TestNativeCancelSubagent(t *testing.T) {
+	f, r := routedNative(t)
+	s := f.started(Options{})
+	w := newNativeWatcher(t, s)
+	if err := s.CancelSubagent("never-issued"); !errors.Is(err, ErrNoSuchSubagent) {
+		t.Fatalf("a stop before any turn = %v; want ErrNoSuchSubagent", err)
+	}
+	a := r["test/a"]
+	child := newHeld(t)
+	a.route("go", callsStep(agentCall(t, "a1", "a long task", "the task")), answer("carried on"))
+	a.route("the task", child.step(openTextParts("half ", "done"), closeTextParts(" and the rest")))
+	out := startPrompt(s, "go")
+	await(t, child.reached, "the child mid-answer")
+	id := w.wait("the child's spawned", func(ev Event) bool {
+		return ev.Type == EventSubagent && ev.SubagentChange == SubagentChangeSpawned
+	}).Subagent.ID
+	if err := s.CancelSubagent("never-issued"); !errors.Is(err, ErrNoSuchSubagent) {
+		t.Fatalf("a stop of an id never issued = %v; want ErrNoSuchSubagent", err)
+	}
+	if err := s.CancelSubagent(id); err != nil {
+		t.Fatalf("CancelSubagent(the running child) = %v; want nil", err)
+	}
+	if got := await(t, out, "the parent's turn"); got.err != nil {
+		t.Fatalf("Prompt = %+v, %v; want the parent's turn to carry on", got.res, got.err)
+	}
+	w.waitType(EventDone)
+	evs := w.events()
+	spawned := indexWhere(evs, 0, func(ev Event) bool { return isRoster(ev, id, SubagentChangeSpawned) })
+	user := indexWhere(evs, 0, func(ev Event) bool { return ev.Type == EventUser && ev.Agent == id })
+	first := indexWhere(evs, 0, func(ev Event) bool { return ev.Agent == id && ev.Type != EventUser })
+	last := lastWhere(evs, func(ev Event) bool { return ev.Agent == id })
+	finished := indexWhere(evs, 0, func(ev Event) bool { return isRoster(ev, id, SubagentChangeFinished) })
+	done := indexWhere(evs, 0, func(ev Event) bool { return isParentRowDone(ev, "t1.1.1") })
+	if !ascending(spawned, user, first) || !ascending(last, finished, done) {
+		t.Fatalf("spawned %d, user %d, first child event %d, last %d, finished %d, the call's row done %d; want them in that order",
+			spawned, user, first, last, finished, done)
+	}
+	fin := *evs[finished].Subagent
+	if fin.Status != SubagentCancelled || fin.Error != "stopped by the user" || fin.Output != "half done" || fin.ToolCallID != "t1.1.1" {
+		t.Fatalf("the stopped child's finished row is %+v; want cancelled, stopped by the user, with what it had streamed", fin)
+	}
+	row := evs[lastWhere(evs, func(ev Event) bool { return ev.Type == EventTool && ev.Agent == "" && ev.Tool.ID == "t1.1.1" })].Tool
+	if toolStatusInFlight(row.Status) || row.Task == nil || row.Task.Status != SubagentCancelled || row.Task.AgentID != id || !row.Task.Receipt {
+		t.Fatalf("the agent row ended as %+v (task %+v); want it closed and stamped cancelled", row, row.Task)
+	}
+	snap := s.Snapshot()
+	if len(snap.Subagents) != 1 || !sameSubagentFull(snap.Subagents[0], fin) {
+		t.Fatalf("Snapshot().Subagents = %+v; want the finished payload %+v", snap.Subagents, fin)
+	}
+	if err := s.CancelSubagent(id); !errors.Is(err, ErrNoSuchSubagent) {
+		t.Fatalf("a stop of the finished child = %v; want ErrNoSuchSubagent", err)
+	}
+}
+
+// TestSubagentCancelIsNativeOnly (§3.10): the per-child stop is the native
+// session's alone. The ACP session does not implement SubagentCanceller — the
+// engine answers ErrUnsupported for it — and neither grok, gx nor cursor
+// advertises SubagentCancel, so the TUI never offers the key there.
+func TestSubagentCancelIsNativeOnly(t *testing.T) {
+	if _, ok := any((*session)(nil)).(SubagentCanceller); ok {
+		t.Fatal("the ACP session implements SubagentCanceller; no ACP agent has a per-child stop")
+	}
+	if _, ok := any((*nativeSession)(nil)).(SubagentCanceller); !ok {
+		t.Fatal("the native session does not implement SubagentCanceller")
+	}
+	for _, p := range []Provider{CursorProvider(), GrokProvider(), GxProvider()} {
+		if p.Capabilities().SubagentCancel {
+			t.Fatalf("%s advertises SubagentCancel", p.Name())
+		}
+	}
+	if !NativeProvider().Capabilities().SubagentCancel {
+		t.Fatal("native does not advertise SubagentCancel")
+	}
+}

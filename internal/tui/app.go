@@ -1963,6 +1963,9 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
 		m.focusComposer()
 		return false, m
 	}
+	if stopped, next := m.stopRowKey(msg, items); stopped { // subcancel.go
+		return true, next
+	}
 	switch msg.Type {
 	case tea.KeyUp:
 		switch {

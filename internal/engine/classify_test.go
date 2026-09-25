@@ -52,6 +52,9 @@ func classifyTable() []classifyCase {
 		{"agent.ErrBadAnswer", agent.ErrBadAnswer, "bad_request", false},
 		{"agent.ErrAlreadyResolved", agent.ErrAlreadyResolved, "already_resolved", false},
 		{"agent.ErrUnknownAsk", agent.ErrUnknownAsk, "unknown_ask", false},
+		// A stop of a sub-agent the session holds no running child for (plan 026
+		// §3.10): about the resource named, like unknown_ask, and stored.
+		{"agent.ErrNoSuchSubagent", agent.ErrNoSuchSubagent, "unknown_subagent", false},
 		{"ErrCommandAborted", ErrCommandAborted, "aborted", false},
 		{"ErrSetOutcomeUnknown", setOutcomeUnknown(context.Canceled), "aborted", false},
 		{"errNotRun (a Set that never ran)", notRun(context.Canceled), "unavailable", true},
@@ -172,6 +175,7 @@ func agentSentinels() map[string]error {
 		"ErrBadAnswer":        agent.ErrBadAnswer,
 		"ErrAlreadyResolved":  agent.ErrAlreadyResolved,
 		"ErrUnknownAsk":       agent.ErrUnknownAsk,
+		"ErrNoSuchSubagent":   agent.ErrNoSuchSubagent,
 		"ErrAskUnavailable":   agent.ErrAskUnavailable,
 		"ErrQueueFull":        agent.ErrQueueFull,
 		"ErrQueueTextTooLong": agent.ErrQueueTextTooLong,
