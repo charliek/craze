@@ -516,6 +516,20 @@ func (e *Engine) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error
 // "Identity"). It waits on nothing — the table's mutex is a leaf.
 func (e *Engine) NewClientID() string { return e.receipts.newClient() }
 
+// ReleaseClient says a minted client's connection has gone (plan 027 §3.6): the
+// client stays answerable — its receipts, its mark, a resume's ClaimClient — and
+// becomes retirable once it has been released for the table's age bound and
+// holds no entry, open or completed (receipts.go's "Clients: released, claimed
+// and retired"). It is idempotent, an id the table does not know is a no-op, and
+// it waits on nothing.
+func (e *Engine) ReleaseClient(id string) { e.receipts.release(id) }
+
+// ClaimClient takes a released client back, for a connection that resumed it
+// (plan 027 §3.6): it is live again, and never retired while it stays so. It is
+// ErrUnknownClient for an id this engine never minted or has retired, and a
+// no-op for a client that was never released. It waits on nothing.
+func (e *Engine) ClaimClient(id string) error { return e.receipts.claim(id) }
+
 // Sync returns once every event enqueued before the call has been delivered.
 func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) }
 
@@ -1031,7 +1045,10 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 			// refusal by the agent's own turn puts it back (restoreLocked).
 			l.t.row = from
 			started = append(started, l)
-			return SubmitResult{Turn: l.t.id}, nil
+			// The text the turn started with, read in this section: a row's
+			// own text when the prompt came from one, which another client may
+			// have edited since this one looked (SubmitResult.Text).
+			return SubmitResult{Turn: l.t.id, Text: l.t.text}, nil
 		}
 		if mode == SubmitSendNow {
 			res, turn, err := e.armLocked(c, text, fromRow)

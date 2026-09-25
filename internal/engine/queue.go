@@ -118,26 +118,37 @@ func (e *Engine) Unqueue(c Command, id string) (agent.QueuedPrompt, error) {
 	})
 }
 
-// ClearQueue empties the queue, head first, and answers with how many rows went.
-// Each is its own removal event, so a client can say where every follow-up went.
-func (e *Engine) ClearQueue(c Command) (int, error) {
+// ClearQueue empties the queue, head first, and answers with the rows that went,
+// in queue order. Each is its own removal event, so a client can say where every
+// follow-up went.
+//
+// The answer is the rows and not a count because a client that shows the clear
+// from its result has to know WHICH rows it took: one another client added that
+// this client had not folded yet went too, and must not flash back into view
+// until its own removal arrives (plan 027 §3.12's result overlays, astra r2 10).
+// The slice is the caller's own, never the queue's, and a resend gets a copy of
+// its own as well (cloneReceiptResult). A clear of an empty queue answers an
+// empty, non-nil slice; a refusal answers nil.
+func (e *Engine) ClearQueue(c Command) ([]agent.QueuedPrompt, error) {
 	hash := receiptHash("ClearQueue")
-	return withSyncReceipt(e.receipts, c, hash, func() (int, error) {
+	return withSyncReceipt(e.receipts, c, hash, func() ([]agent.QueuedPrompt, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		defer e.syncFenceLocked()
 		if err := e.refusalLocked(); err != nil {
-			return 0, err
+			return nil, err
 		}
 		if !e.log.OutboxRoom() {
-			return 0, ErrUnavailable
+			return nil, ErrUnavailable
 		}
 		qevs := e.queue.Clear()
 		batch := make([]agent.Event, 0, len(qevs))
+		rows := make([]agent.QueuedPrompt, 0, len(qevs))
 		for _, qev := range qevs {
 			batch = append(batch, e.stamp(qev.Event(), c.Cause()))
+			rows = append(rows, qev.Prompt)
 		}
 		e.log.Enqueue(batch...)
-		return len(qevs), nil
+		return rows, nil
 	})
 }

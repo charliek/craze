@@ -455,8 +455,8 @@ func TestWakeFencedAtClaimAndValidation(t *testing.T) {
 		fr.queue("d")
 		fr.queue("e")
 		fr.want("rows again", true, "up", "foreign")
-		if n, err := fr.e.ClearQueue(Command{}); err != nil || n != 2 {
-			t.Fatalf("clear: %d, %v", n, err)
+		if rows, err := fr.e.ClearQueue(Command{}); err != nil || len(rows) != 2 {
+			t.Fatalf("clear: %d, %v", len(rows), err)
 		}
 		fr.want("the queue cleared", false, "down")
 		if n := len(fr.s.prompts()); n != 0 {

@@ -527,8 +527,8 @@ func TestEveryDisarmPathSaysWhy(t *testing.T) {
 	t.Run("the row it named went with a cleared queue", func(t *testing.T) {
 		r := newRig(t, Options{})
 		turn, _ := arm(t, r)
-		if n, err := r.e.ClearQueue(Command{}); err != nil || n != 1 {
-			t.Fatalf("clear answered %d, %v", n, err)
+		if rows, err := r.e.ClearQueue(Command{}); err != nil || len(rows) != 1 {
+			t.Fatalf("clear answered %+v, %v", rows, err)
 		}
 		r.sync()
 		turn.release()
