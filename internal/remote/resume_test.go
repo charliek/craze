@@ -79,15 +79,24 @@ func TestAKilledConnectionResumesSilently(t *testing.T) {
 	if tp.connCount() != 2 {
 		t.Fatalf("%d connections, want 2", tp.connCount())
 	}
-	// The re-attach carried the cursor: the last event handed up before the
-	// kill, in the stream's incarnation.
+	// The re-attach carried the cursor: exactly the last event the stream
+	// held when the connection went — every event the host wrote on it, the
+	// client having read them all — in the stream's incarnation (X18 4).
 	att := tp.sent(protocol.MethodSessionAttach)
 	if len(att) != 2 || att[1].conn != 1 {
 		t.Fatalf("%d attach requests", len(att))
 	}
+	var lastHeld uint64
+	for _, l := range tp.received(func(l wireLine) bool { return l.conn == 0 && l.method == protocol.NotifyEvent }) {
+		var p protocol.EventParams
+		if err := json.Unmarshal(l.params, &p); err != nil {
+			t.Fatal(err)
+		}
+		lastHeld = max(lastHeld, p.Seq)
+	}
 	re := attachParams(t, att[1])
-	if re.Cursor == nil || re.Cursor.Incarnation != after.Incarnation || re.Cursor.Seq <= after.Seq {
-		t.Fatalf("the re-attach's cursor: %+v (the first attach was after %+v)", re.Cursor, after)
+	if want := (protocol.Cursor{Incarnation: after.Incarnation, Seq: lastHeld}); lastHeld <= after.Seq || re.Cursor == nil || *re.Cursor != want {
+		t.Fatalf("the re-attach's cursor: %+v, want %+v (the first attach was after %+v)", re.Cursor, want, after)
 	}
 	// Sent twice under one id — the second after the re-attach is answered —
 	// and run once.

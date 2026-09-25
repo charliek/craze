@@ -77,9 +77,10 @@ var (
 	// ErrClosed is a call on a client that has been closed, or whose
 	// connection is gone for good.
 	ErrClosed = errors.New("remote: the client is closed")
-	// ErrDisconnected is why a client stopped when its redials were spent
-	// (Options.Redials within Options.RedialWindow): the stream's final Error
-	// item carries it, and calls made after it fail with it.
+	// ErrDisconnected is why a client stopped when a reconnect episode was
+	// spent (Options.Redials attempts, or Options.RedialWindow since the
+	// loss): the stream's final Error item carries it, and calls made after it
+	// fail with it.
 	ErrDisconnected = errors.New("remote: disconnected: the redials are spent")
 	// ErrSessionEnded is why a client stopped once its stream saw
 	// reset{session_closed} and the host closed the connection: there is no

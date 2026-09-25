@@ -105,15 +105,19 @@ func (l *logSink) wait(t *testing.T, subs ...string) string {
 // test hooks live in its own package's tests, so every schedule here is made
 // from the client's side (the tap) and the engine's public seams.
 type hostConfig struct {
-	engine  engine.Options
-	noStart bool
-	session func(*tui.Stub) agent.Session
+	engine    engine.Options
+	noStart   bool
+	session   func(*tui.Stub) agent.Session
+	workspace string
 }
 
 type hostOpt func(*hostConfig)
 
 func withoutStart() hostOpt                   { return func(c *hostConfig) { c.noStart = true } }
 func withIndex(o engine.IndexOptions) hostOpt { return func(c *hostConfig) { c.engine.Index = o } }
+
+// withWorkspace is the host's workspace, which every info document carries.
+func withWorkspace(ws string) hostOpt { return func(c *hostConfig) { c.workspace = ws } }
 
 // host is a server on a socket in front of an engine over a Stub.
 type host struct {
@@ -140,7 +144,7 @@ func shortDir(t *testing.T) string {
 
 func newHost(t *testing.T, opts ...hostOpt) *host {
 	t.Helper()
-	cfg := hostConfig{}
+	cfg := hostConfig{workspace: "/work"}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -162,7 +166,7 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 			t.Fatal(err)
 		}
 	}
-	h.srv = control.New(control.Options{Log: h.logs.log, Workspace: "/work", Clock: h.clock.now})
+	h.srv = control.New(control.Options{Log: h.logs.log, Workspace: cfg.workspace, Clock: h.clock.now})
 	h.srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {
@@ -379,6 +383,8 @@ type tap struct {
 	dialGate chan struct{}
 	dialHeld chan struct{}
 	dialFail error
+	// dialTo, when set, is where every dial goes instead of the path asked.
+	dialTo string
 	// holdOut, when set, holds a line the client is writing for which it
 	// returns true, until the channel it returns is closed.
 	holdOut func(l wireLine) <-chan struct{}
@@ -429,6 +435,9 @@ func (tp *tap) dial(ctx context.Context, path string) (net.Conn, error) {
 	}
 	tp.mu.Lock()
 	fail := tp.dialFail
+	if tp.dialTo != "" {
+		path = tp.dialTo
+	}
 	tp.mu.Unlock()
 	if fail != nil {
 		return nil, fail
@@ -469,6 +478,13 @@ func (tp *tap) failDials(err error) {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	tp.dialFail = err
+}
+
+// redirect sends every later dial to path.
+func (tp *tap) redirect(path string) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.dialTo = path
 }
 
 func (tp *tap) dialCount() int {
@@ -526,6 +542,18 @@ func (tp *tap) sent(method string) []wireLine {
 	var out []wireLine
 	for _, l := range tp.lines {
 		if l.out && l.method == method {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// sentOn is every request the client wrote with method on connection conn,
+// in order.
+func (tp *tap) sentOn(conn int, method string) []wireLine {
+	var out []wireLine
+	for _, l := range tp.sent(method) {
+		if l.conn == conn {
 			out = append(out, l)
 		}
 	}
@@ -831,6 +859,21 @@ func dialClient(t *testing.T, path string, tp *tap, o remote.Options) *remote.Cl
 
 func tryDial(t *testing.T, path string, tp *tap, o remote.Options) (*remote.Client, error) {
 	t.Helper()
+	return tryDialHooked(t, path, tp, o, remote.TestHooks{})
+}
+
+// dialHooked is dialClient with the client's schedule hooks h in place.
+func dialHooked(t *testing.T, path string, tp *tap, o remote.Options, h remote.TestHooks) *remote.Client {
+	t.Helper()
+	c, err := tryDialHooked(t, path, tp, o, h)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return c
+}
+
+func tryDialHooked(t *testing.T, path string, tp *tap, o remote.Options, h remote.TestHooks) (*remote.Client, error) {
+	t.Helper()
 	o.Dial = tp.dial
 	if o.Client.Kind == "" {
 		o.Client = protocol.ClientInfo{Kind: "test", Name: "remote_test"}
@@ -840,7 +883,7 @@ func tryDial(t *testing.T, path string, tp *tap, o remote.Options) (*remote.Clie
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), watchdog)
 	defer cancel()
-	c, err := remote.Dial(ctx, path, o)
+	c, err := remote.DialForTest(ctx, path, o, h)
 	if err != nil {
 		return nil, err
 	}
@@ -1045,4 +1088,59 @@ func outcomeUnknown(t *testing.T, err error, reason protocol.Reason) {
 	if !oe.Reason.ClientSide() {
 		t.Fatalf("the reason %s is not a client-side one", oe.Reason)
 	}
+}
+
+// refusedLine is the host's reply l rewritten into a refusal of code and
+// reason, with l's id: what the client reads in its place.
+func refusedLine(t *testing.T, l wireLine, code protocol.Code, reason protocol.Reason) []byte {
+	t.Helper()
+	b, err := json.Marshal(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(l.id),
+		Error: &protocol.Error{Code: protocol.RPCRefused, Message: "refused by the tap",
+			Data: protocol.ErrorData{Code: code, Reason: reason}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// blackHole is a Unix socket that accepts every connection and reads it, and
+// never writes a byte: a host that never answers hello.
+func blackHole(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(shortDir(t), "b")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		_ = l.Close()
+		mu.Lock()
+		for _, nc := range conns {
+			_ = nc.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			nc, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, nc)
+			mu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = io.Copy(io.Discard, nc)
+			}()
+		}
+	}()
+	return path
 }

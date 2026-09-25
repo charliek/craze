@@ -53,9 +53,12 @@ func attachReply(t *testing.T, tp *tap, l wireLine) protocol.AttachResult {
 	return res
 }
 
-// TestASlowConsumerAfterReadinessReattachesWithItsCursor (§3.4): a
+// TestASlowConsumerAfterReadinessReattachesWithItsCursor (§3.4, X18 4): a
 // subscription dropped slow_consumer once the session is ready is re-attached
-// WITH the stream's cursor, {incarnation, last seq handed up}; the host
+// WITH the stream's cursor — exactly {incarnation, the last seq it holds}: the
+// small event, received and queued though not yet handed out, and not the
+// record the host dropped the subscription on (C7a sends the reset without
+// it) — while the ResumeState cursor stays the last one handed out; the host
 // answers from its journal and ring — here the dropped record has left the
 // ring by the time the held re-attach arrives, so the head is the journal's —
 // and the stream goes on with no Restore, no gap and no duplicate.
@@ -65,7 +68,6 @@ func TestASlowConsumerAfterReadinessReattachesWithItsCursor(t *testing.T) {
 	h := newHost(t, withLog(lo))
 	tp := newTap(t)
 	release := make(chan struct{})
-	t.Cleanup(func() { closeOnce(release) })
 	tp.setHoldOut(func(l wireLine) <-chan struct{} {
 		if isAttach(l) && withCursor(l) {
 			return release
@@ -73,15 +75,30 @@ func TestASlowConsumerAfterReadinessReattachesWithItsCursor(t *testing.T) {
 		return nil
 	})
 	c := dialClient(t, h.path, tp, remote.Options{})
+	// Registered after the client, so it runs before the client's Close: a
+	// failure while the re-attach is held lets it go before Close waits for
+	// the reader it is held on.
+	t.Cleanup(func() { closeOnce(release) })
 	s := attach(t, c, remote.AttachOptions{Budget: smallBudget})
 	after := nextKind(t, s, remote.KindAttached).Reply.After
 	nextKind(t, s, remote.KindSynchronized)
 	h.text("small")
+	smallSeq := h.head()
+	// The small event is on the wire before the record that drops the
+	// subscription is published: the stream holds it when the reset comes.
+	tp.await(t, "the small event", func() bool {
+		return len(tp.received(func(l wireLine) bool {
+			var p protocol.EventParams
+			return l.method == protocol.NotifyEvent && json.Unmarshal(l.params, &p) == nil && p.Seq == smallSeq
+		})) == 1
+	})
 	h.text(big)
-	bigSeq := h.head()
 	tp.await(t, "the re-attach", func() bool { return len(tp.sent(protocol.MethodSessionAttach)) == 2 })
 	if h.dropped() != 1 {
 		t.Fatalf("the premise: the host dropped %d subscriptions slow", h.dropped())
+	}
+	if st := c.ResumeState(); st.Cursor == nil || *st.Cursor != after {
+		t.Fatalf("the persisted cursor before anything is read: %+v, want the attach's after %+v", st.Cursor, after)
 	}
 	// While the re-attach is held, the dropped record leaves the ring.
 	h.text("s1")
@@ -99,8 +116,11 @@ func TestASlowConsumerAfterReadinessReattachesWithItsCursor(t *testing.T) {
 	}
 	re := tp.sent(protocol.MethodSessionAttach)[1]
 	p := attachParams(t, re)
-	if p.Cursor == nil || p.Cursor.Incarnation != after.Incarnation || p.Cursor.Seq < after.Seq || p.Cursor.Seq >= bigSeq {
-		t.Fatalf("the re-attach's cursor: %+v, want the last seq handed up before %d", p.Cursor, bigSeq)
+	if want := (protocol.Cursor{Incarnation: after.Incarnation, Seq: smallSeq}); p.Cursor == nil || *p.Cursor != want {
+		t.Fatalf("the re-attach's cursor: %+v, want %+v, the last seq the stream held", p.Cursor, want)
+	}
+	if st, last := c.ResumeState(), contiguous(t, after.Seq+1, items); st.Cursor == nil || st.Cursor.Seq != last {
+		t.Fatalf("the persisted cursor: %+v, want the last seq handed out, %d", st.Cursor, last)
 	}
 	if r := attachReply(t, tp, re); r.Snapshot != nil || r.Reset != "" || r.After != *p.Cursor {
 		t.Fatalf("the re-attach's reply: after %+v, snapshot %v, reset %q", r.After, r.Snapshot != nil, r.Reset)

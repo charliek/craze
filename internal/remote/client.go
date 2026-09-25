@@ -42,8 +42,12 @@ type Options struct {
 	// Dial opens the transport to path. nil dials a Unix socket. A test's
 	// seam: it may wrap the connection.
 	Dial func(ctx context.Context, path string) (net.Conn, error)
-	// Redials bounds reconnection (plan 027 §3.14): at most Redials dial
-	// attempts within any RedialWindow; the next one gives up — outstanding
+	// Redials and RedialWindow bound reconnection (plan 027 §3.14, X18 5): a
+	// reconnect episode — from the loss until a connection is adopted — makes
+	// at most Redials attempts and ends RedialWindow after the loss, every
+	// dial and handshake bounded by what is left of it; and at most Redials
+	// attempts are made within any RedialWindow, across episodes too (a
+	// connection that keeps dropping). Then the client gives up: outstanding
 	// commands resolve ErrOutcomeUnknown (reason disconnected) and the stream
 	// hands up an Error item carrying ErrDisconnected. Zero values are 3
 	// within 10 s.
@@ -54,14 +58,17 @@ type Options struct {
 	// 100 ms.
 	RedialBackoff time.Duration
 	// HandshakeTimeout bounds a connection's opening exchange — the hub hop
-	// and hello. Zero is 30 s.
+	// and hello — and a reconnect's sessions.list, within what is left of
+	// the reconnect episode. Zero is 30 s.
 	HandshakeTimeout time.Duration
-	// StreamBytes bounds the stream's items not yet read by Next, in bytes
-	// (an event's body, a snapshot): a reader that finds no room waits, so a
-	// consumer that stops reading backs the connection up and the host drops
-	// the subscription slow_consumer, as it would a socket nobody reads. One
-	// item always fits in an empty queue. Zero is 16 MiB, the longest line a
-	// host writes.
+	// StreamBytes bounds the stream's items not yet read by Next, in bytes:
+	// an honest estimate of what each retains encoded (an event's body, a
+	// snapshot, an info document, an error's text). The connection's reader
+	// never waits for room (X18 8): an item that finds none makes the stream
+	// a local slow consumer — it queues nothing more, detaches its
+	// subscription, and once Next has drained the queue re-attaches with its
+	// cursor, as after the host's reset{slow_consumer}. One item always fits
+	// in an empty queue. Zero is 16 MiB, the longest line a host writes.
 	StreamBytes int
 }
 
@@ -120,6 +127,10 @@ type Client struct {
 	done chan struct{}
 	// hello is the host's last hello answer.
 	hello protocol.HelloResult
+	// hostID is the endpoint.hostId of the host that minted the client id
+	// held now (the first hello's, then each fresh one's): a resumed: true
+	// from another host is not a resume (X18 2).
+	hostID string
 	// identity counts the client ids this client has held: it moves on every
 	// hello that did not resume (a fresh id). A command that may have run
 	// under one identity is never sent under another — resumed: true is the
@@ -128,6 +139,9 @@ type Client struct {
 	// nextCmd is the next command id to mint. It never goes back, across
 	// client ids either, so no id is ever reused (the host allows gaps).
 	nextCmd uint64
+	// wireOrder numbers commands' first sends (command.seq): a reconnect
+	// resends in that order (X18 3).
+	wireOrder uint64
 	// cmds is every command whose caller is waiting, in mint order.
 	cmds []*command
 	// stream is the open stream (Attach), nil when none.
@@ -140,6 +154,35 @@ type Client struct {
 	// ended says the stream saw reset{session_closed}: the session is over,
 	// and a lost connection is not redialled.
 	ended bool
+	// unresumed says a resume was lost and the stream has not re-attached
+	// since: its session and cursor may be another engine's, so the next
+	// reconnect asks sessions.list and re-attaches with no cursor even if its
+	// own hello resumes (the fresh client a failed reconnect was given).
+	unresumed bool
+
+	// hooks are the tests' schedule points (export_test.go), nil in
+	// production and set before the client starts.
+	hooks hooks
+}
+
+// hooks are schedule points for the package's tests: each runs, when set, on
+// the goroutine that reaches it.
+type hooks struct {
+	// registered runs on Command once the command is registered, before its
+	// caller's first attempt; attempted once that attempt has returned.
+	registered func(commandID string)
+	attempted  func(commandID string)
+	// replied runs on the reader once a command's reply has been handled;
+	// retrying on Command once it has taken an answer it retries by code,
+	// before its backoff.
+	replied  func(commandID string)
+	retrying func(commandID string)
+	// published runs on the reconnect once it has published the connection
+	// it adopted (after its resends).
+	published func()
+	// closing runs on Stream.Close once it has taken the subscription it
+	// detaches, before it sends anything.
+	closing func()
 }
 
 // wire is one connection: its reader's framing, its writer's lock, and the
@@ -186,6 +229,11 @@ func (w *wire) take(id string) replyFunc {
 // A hello the host refuses is its *Error (a *VersionError for
 // protocol_version, with the versions it speaks).
 func Dial(ctx context.Context, path string, opts Options) (*Client, error) {
+	return dial(ctx, path, opts, hooks{})
+}
+
+// dial is Dial with the tests' hooks in place.
+func dial(ctx context.Context, path string, opts Options, h hooks) (*Client, error) {
 	if opts.Client.Kind == "" {
 		opts.Client.Kind = "remote"
 	}
@@ -206,7 +254,7 @@ func Dial(ctx context.Context, path string, opts Options) (*Client, error) {
 	}
 	cctx, cancel := context.WithCancel(context.Background())
 	c := &Client{path: path, opts: opts, ctx: cctx, cancel: cancel,
-		changed: make(chan struct{}), done: make(chan struct{}), nextCmd: 1, identity: 1}
+		changed: make(chan struct{}), done: make(chan struct{}), nextCmd: 1, identity: 1, hooks: h}
 	var resume *protocol.Resume
 	if r := opts.Resume; r != nil {
 		if r.ClientID != "" {
@@ -214,13 +262,14 @@ func Dial(ctx context.Context, path string, opts Options) (*Client, error) {
 		}
 		c.nextCmd = max(r.NextCommand, 1)
 	}
-	w, h, err := c.open(ctx, resume)
+	w, hr, err := c.open(ctx, resume)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 	c.mu.Lock()
-	c.hello = h
+	c.hello = hr
+	c.hostID = hr.Endpoint.HostID
 	c.cur = w
 	c.startReaderLocked(w)
 	c.mu.Unlock()
@@ -233,7 +282,9 @@ func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 }
 
 // open dials and runs the opening exchange (handshake) on a new connection,
-// whose reader is not started: the caller starts it.
+// whose reader is not started: the caller starts it. The dial and the
+// exchange end with ctx — a reconnect's is its episode, whose deadline bounds
+// them both.
 func (c *Client) open(ctx context.Context, resume *protocol.Resume) (*wire, protocol.HelloResult, error) {
 	var none protocol.HelloResult
 	dial := c.opts.Dial
@@ -255,27 +306,40 @@ func (c *Client) open(ctx context.Context, resume *protocol.Resume) (*wire, prot
 		}
 	}
 	w := newWire(nc)
-	// The exchange is bounded, and ends with ctx (the caller's, or the
-	// client's life): closing the connection ends a read or write in flight.
-	stop := context.AfterFunc(ctx, func() { _ = nc.Close() })
-	_ = nc.SetDeadline(time.Now().Add(c.opts.HandshakeTimeout))
-	h, err := c.handshake(w, resume)
-	stopped := stop()
-	_ = nc.SetDeadline(time.Time{})
-	if err == nil && !stopped {
-		err = ctx.Err()
-	}
+	var h protocol.HelloResult
+	err = c.exchange(ctx, w, func() error {
+		var err error
+		h, err = c.handshake(w, resume)
+		return err
+	})
 	if err != nil {
 		_ = nc.Close()
-		if ctx.Err() != nil {
-			return nil, none, ctx.Err()
-		}
 		return nil, none, err
 	}
 	if h.Limits.InboundLine > 0 {
 		w.maxLine = h.Limits.InboundLine
 	}
 	return w, h, nil
+}
+
+// exchange runs fn — synchronous calls on w, whose reader has not started —
+// bounded by the handshake timeout and by ctx: its deadline, when sooner, is
+// the connection's, and its end closes the connection, which ends a read or
+// write in flight. It is ctx.Err() once ctx has ended.
+func (c *Client) exchange(ctx context.Context, w *wire, fn func() error) error {
+	deadline := time.Now().Add(c.opts.HandshakeTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	stop := context.AfterFunc(ctx, func() { _ = w.nc.Close() })
+	_ = w.nc.SetDeadline(deadline)
+	err := fn()
+	stopped := stop()
+	_ = w.nc.SetDeadline(time.Time{})
+	if !stopped || (err != nil && ctx.Err() != nil) {
+		return ctx.Err()
+	}
+	return err
 }
 
 // handshake is a connection's opening exchange (§3.2, §3.3): the hub hop when
@@ -327,7 +391,10 @@ func helloFailed(err error) error {
 }
 
 // syncCall is one call on a connection whose reader is not running: it writes
-// the request and reads lines until its reply, ignoring anything else.
+// the request and reads lines until its reply, passing over a notification or
+// another request's reply. A line over the 16 MiB a host may write, or one
+// that is not a message at all, is fatal to the exchange, as it is to a
+// running connection (X18 7): the caller drops the connection.
 func (c *Client) syncCall(w *wire, method string, params, result any) error {
 	raw, err := paramsJSON(params)
 	if err != nil {
@@ -345,14 +412,14 @@ func (c *Client) syncCall(w *wire, method string, params, result any) error {
 	}
 	for {
 		b, err := w.lr.ReadLine()
-		if errors.Is(err, protocol.ErrLineTooLong) {
-			continue
+		if err != nil {
+			return fmt.Errorf("remote: reading %s's reply: %w", method, err)
 		}
+		m, err := parseLine(b)
 		if err != nil {
 			return err
 		}
-		m, ok := parseLine(b)
-		if !ok || m.isNotification() || string(m.ID) != id {
+		if !m.isReply() || string(m.ID) != id {
 			continue
 		}
 		return decodeReply(m.response(), result)
@@ -421,30 +488,16 @@ func (c *Client) startReaderLocked(w *wire) {
 }
 
 // read is a connection's one reader: it demultiplexes replies (by request id)
-// and notifications (to the stream), in the order the host wrote them. When
-// the connection ends — EOF, a read error, or a line over the 16 MiB a host
-// may write — every reply it owed is told so, and the client reconnects.
+// and notifications (to the stream), in the order the host wrote them, and it
+// never waits for the stream's caller (the queue takes or refuses at once,
+// X18 8), so a reply, a reset and the connection's end are always read. When
+// the connection ends — EOF, a read error, a line over the 16 MiB a host may
+// write, or a line that breaks the protocol (X18 7) — every reply it owed is
+// told so, and the client reconnects: a command whose reply it owed is then
+// settled by the resend rule (command.go).
 func (c *Client) read(w *wire) {
 	defer c.wg.Done()
-	for {
-		line, err := w.lr.ReadLine()
-		if err != nil {
-			break
-		}
-		m, ok := parseLine(line)
-		if !ok {
-			// Not a JSON object: nothing a host writes. Ignored, as anything
-			// the client does not know is.
-			continue
-		}
-		switch {
-		case m.isNotification():
-			c.notification(w, m.Method, m.Params)
-		case m.Method == "" && len(m.ID) > 0:
-			if fn := w.take(string(m.ID)); fn != nil {
-				fn(m.response(), nil)
-			}
-		}
+	for c.dispatch(w) {
 	}
 	_ = w.nc.Close()
 	w.mu.Lock()
@@ -465,6 +518,30 @@ func (c *Client) read(w *wire) {
 	c.lost(w)
 }
 
+// dispatch reads and routes one line of w's; false says the connection is
+// done — it ended, or the host broke the protocol.
+func (c *Client) dispatch(w *wire) bool {
+	line, err := w.lr.ReadLine()
+	if err != nil {
+		return false
+	}
+	m, err := parseLine(line)
+	if err != nil {
+		return false
+	}
+	switch {
+	case m.isNotification():
+		return c.notification(w, m.Method, m.Params) == nil
+	case m.isReply():
+		if fn := w.take(string(m.ID)); fn != nil {
+			fn(m.response(), nil)
+		}
+	}
+	// A request from the host: protocol 1 defines none, and a client ignores
+	// what it does not know.
+	return true
+}
+
 // inMsg is one line a host wrote, decoded as far as routing needs: a reply
 // (an id, no method) or a notification (a method, no id). Unknown members are
 // ignored.
@@ -476,34 +553,55 @@ type inMsg struct {
 	Error  *protocol.Error `json:"error"`
 }
 
-func parseLine(b []byte) (inMsg, bool) {
+// errMalformed is a line a host wrote that breaks the protocol (X18 7): not a
+// JSON object, members of the wrong type, neither a reply nor a notification,
+// a reply with neither or both of result and error, or a notification of
+// protocol 1's whose params do not decode. The connection is dropped.
+var errMalformed = errors.New("remote: the host wrote a malformed line")
+
+// parseLine decodes one line as a message, or says it is malformed.
+func parseLine(b []byte) (inMsg, error) {
 	var m inMsg
 	if err := json.Unmarshal(b, &m); err != nil {
-		return inMsg{}, false
+		return inMsg{}, fmt.Errorf("%w: %w", errMalformed, err)
 	}
-	return m, true
+	switch {
+	case m.Method == "" && len(m.ID) == 0:
+		return inMsg{}, fmt.Errorf("%w: neither a reply nor a notification", errMalformed)
+	case m.isReply() && (len(m.Result) > 0) == (m.Error != nil):
+		return inMsg{}, fmt.Errorf("%w: a reply needs one of result and error", errMalformed)
+	}
+	return m, nil
 }
 
 func (m inMsg) isNotification() bool { return m.Method != "" && len(m.ID) == 0 }
+
+func (m inMsg) isReply() bool { return m.Method == "" && len(m.ID) > 0 }
 
 func (m inMsg) response() *protocol.Response {
 	return &protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: m.ID, Result: m.Result, Error: m.Error}
 }
 
 // notification routes one notification to the stream. A method protocol 1
-// does not name is ignored (tolerant inbound, §3.2).
-func (c *Client) notification(w *wire, method string, params json.RawMessage) {
+// does not name is ignored (tolerant inbound, §3.2); params of one it names
+// that do not decode break the protocol (errMalformed).
+func (c *Client) notification(w *wire, method string, params json.RawMessage) error {
 	switch method {
 	case protocol.NotifyEvent, protocol.NotifySynchronized, protocol.NotifyReady, protocol.NotifyReset:
 	default:
-		return
+		return nil
+	}
+	n, err := decodeNotice(method, params)
+	if err != nil {
+		return err
 	}
 	c.mu.Lock()
 	s := c.stream
 	c.mu.Unlock()
 	if s != nil {
-		s.note(w, method, params)
+		s.note(w, n)
 	}
+	return nil
 }
 
 // decodeReply is a reply's result decoded into result (nil: ignored), or its
@@ -570,9 +668,11 @@ func (c *Client) wire(ctx context.Context) (*wire, error) {
 // session.state, session.snapshot, session.sync, asks.list, asks.get) or
 // session.detach — and decodes its result into result (nil: ignored). A
 // refusal is an *Error. While the client reconnects, the call waits for the
-// connection; one whose connection goes before its reply is ErrConnectionLost
-// and may be sent again. Commands go through Command (their ids and resends
-// are the client's), attaches through Attach, and hello is the client's own.
+// connection — as does one found gone before a byte of it was written; one
+// whose connection goes after it was sent, before its reply, is
+// ErrConnectionLost and may be sent again. Commands go through Command (their
+// ids and resends are the client's), attaches through Attach, and hello is the
+// client's own.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
 	if info, ok := protocol.Method(method); ok && info.Mutating {
 		return fmt.Errorf("remote: %s is a command: use Command", method)
@@ -583,11 +683,46 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 	case protocol.MethodSessionAttach:
 		return fmt.Errorf("remote: %s is Attach's", method)
 	}
-	raw, err := paramsJSON(params)
-	if err != nil {
-		return err
+	for {
+		w, err := c.wire(ctx)
+		if err != nil {
+			return err
+		}
+		err = c.callOn(ctx, w, method, params, result)
+		if !errors.Is(err, errUnsent) {
+			return err
+		}
+		// w was gone before a byte was written — its reader had not yet
+		// handed it to the reconnect: wait for the next connection, as a
+		// call made while the client reconnects does.
+		if err := c.awaitNot(ctx, w); err != nil {
+			return err
+		}
 	}
-	w, err := c.wire(ctx)
+}
+
+// awaitNot waits until w is no longer the connection calls go to.
+func (c *Client) awaitNot(ctx context.Context, w *wire) error {
+	for {
+		c.mu.Lock()
+		if c.cur != w || c.err != nil {
+			c.mu.Unlock()
+			return nil
+		}
+		ch := c.changed
+		c.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// callOn is Call on w alone, never on another connection: a w that is gone
+// already is errUnsent, one that goes before its reply ErrConnectionLost.
+func (c *Client) callOn(ctx context.Context, w *wire, method string, params, result any) error {
+	raw, err := paramsJSON(params)
 	if err != nil {
 		return err
 	}

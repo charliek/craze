@@ -16,12 +16,16 @@
 //     request id, on the connection's one reader, which demultiplexes replies
 //     by id and hands notifications to the stream. Inbound is tolerant:
 //     unknown fields, unknown notification methods and unknown event kinds
-//     (the stream never decodes an event) are ignored, never an error. A line
-//     may be up to 16 MiB, the longest a host writes; a request longer than
-//     the host's inbound limit is never sent.
+//     (the stream never decodes an event) are ignored, never an error; a line
+//     that breaks the protocol (not a message, a reply with neither result nor
+//     error, params that do not decode) drops the connection. A line may be up
+//     to 16 MiB, the longest a host writes, and a longer one drops the
+//     connection wherever it comes, hello included; a request longer than the
+//     host's inbound limit is never sent.
 //   - Command sends a mutating method with a commandId the client mints —
 //     per client from 1, never reused — and remembers it, its method and its
-//     params until its answer is handed over. Retry by code
+//     params until its answer is handed over; one attempt of it is on the
+//     wire at a time (command.go). Retry by code
 //     (CommandOptions.Retry) resends the SAME id on unavailable,
 //     not_accepting, in_progress and stale_model, and never on any other code
 //     (protocol.Retry). A refusal is an *Error: the host's code, reason,
@@ -30,11 +34,12 @@
 //   - Attach puts the client on its session's stream, which folds nothing
 //     and turns each reset into a re-attach by §3.4's table (attach.go).
 //   - When the connection is lost it redials, resumes, re-attaches with its
-//     cursor, and resends its commands — ONLY IF the host answered resumed:
-//     true (reconnect.go, command.go's resend rule): after resumed: false
-//     nothing that may have run is resent, and it resolves ErrOutcomeUnknown,
-//     reason resume_lost. Redials are bounded; once they are spent the
-//     client stops, reason disconnected.
+//     cursor, and resends its commands, in wire order — ONLY IF the host
+//     answered resumed: true for the same client, token and host
+//     (reconnect.go, command.go's resend rule): after a resume loss nothing
+//     that may have run is resent, and it resolves ErrOutcomeUnknown, reason
+//     resume_lost. A reconnect episode is bounded in attempts and time; once
+//     it is spent the client stops, reason disconnected.
 //   - ResumeState is what a caller persists so a new process can Dial from it
 //     and Attach from its cursor (A4).
 //
@@ -45,12 +50,17 @@
 //
 // A connection has one reader goroutine (Client.read); the stream's work —
 // its notifications and its own attach replies, the re-attaches it writes —
-// runs on it, in the order the host wrote them. A lost connection starts one
-// reconnect goroutine, which opens the next connection, re-attaches on it
-// before its reader starts, and hands it over. Client.mu guards the client's
-// state (the connection, the hello, the commands); Stream.mu the stream's;
-// neither is ever held while the other is taken, across I/O, or while an
-// item waits for room. Close joins every goroutine the client started.
+// runs on it, in the order the host wrote them, and it never waits for the
+// stream's caller: an item that finds no room in the stream's queue makes
+// the stream fall behind (attach.go), so replies, resets and the
+// connection's end are always read. A lost connection starts one reconnect
+// goroutine, which opens the next connection, re-attaches on it before its
+// reader starts, sends every command held, in wire order, and only then hands
+// it over. Client.mu guards the client's state (the connection, the hello,
+// the commands); Stream.mu the stream's, and the stream's queue has its own
+// lock, taken under Stream.mu and never the other way; Client.mu and
+// Stream.mu are never held together, nor any lock across I/O. Close joins
+// every goroutine the client started.
 //
 // # Import boundary
 //

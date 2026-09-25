@@ -17,7 +17,7 @@ import (
 // says:
 //
 //	slow_consumer, after readiness   re-attach WITH its cursor {incarnation,
-//	                                 last seq handed up}: the host answers from
+//	                                 last seq it holds}: the host answers from
 //	                                 its ring or journal (no item), or refuses
 //	                                 the cursor and sends a snapshot (Restore)
 //	slow_consumer, before readiness  re-attach when: "ready" with NO cursor: a
@@ -30,21 +30,35 @@ import (
 //	session_closed                   an End item; the stream stops
 //
 // "Before readiness" is: the first reply said ready: false and no ready has
-// arrived since. A reset reason protocol 1 does not name is re-attached with no
-// cursor. Re-attaches are bounded at protocol.ReattachesPerEpisode (8) per
-// episode — reset, reconnect and retried re-attaches alike — the count starting
-// again whenever the stream reaches synchronized; past the bound it hands up an
-// Error item and stops. It checks that each event's seq follows the last one
-// it handed up: a hole or a duplicate is an Error item, never swallowed.
+// been queued since. A reset reason protocol 1 does not name is re-attached
+// with no cursor. Re-attaches are bounded at protocol.ReattachesPerEpisode (8)
+// per episode — reset, reconnect, fallen-behind and retried re-attaches alike
+// — the count starting again whenever the stream reaches synchronized; past
+// the bound it hands up an Error item and stops. It checks that each event's
+// seq follows the last one it holds, and that synchronized's is the last one
+// it holds: a hole or a duplicate is an Error item, never swallowed.
 //
-// The stream's work runs on the connection's reader, in wire order — the
-// attach replies included, which are the stream's own and never a caller's —
-// so a re-attach is written there and its reply read in turn. Items wait in a
-// byte-bounded queue for Next; a reader that finds it full waits, which backs
-// the socket up, and the host drops a subscription that falls behind
-// slow_consumer — the one mechanism, as for a socket nobody reads. A caller
-// therefore reads the stream while it waits for a command: the host writes a
-// command's reply after its events (§3.6).
+// THE CURSOR (X18 4). The stream's position — {inc, last} — is the last event
+// it holds, received and queued for Next (which hands them up in order), or
+// the last attach's after: a re-attach with a cursor carries it, so nothing
+// is replayed twice and nothing skipped. Stream.Cursor, which ResumeState
+// persists, is the last one Next has handed OUT: what a caller has folded.
+//
+// A LOCAL SLOW CONSUMER (X18 8). The stream's work runs on the connection's
+// reader, in wire order — the attach replies included, which are the stream's
+// own and never a caller's — so a re-attach is written there and its reply
+// read in turn; and the reader never waits for Next. Items go to a
+// byte-bounded queue (Options.StreamBytes); an item that finds no room is not
+// queued, and the stream FALLS BEHIND: it queues nothing more of that
+// subscription's, detaches it on its own connection, and once the host has
+// answered the detach and the caller has drained the queue (Next), it
+// re-attaches as after the host's reset{slow_consumer} — with its cursor after
+// readiness, when: "ready" with none before (and with none for a Restore that
+// found no room, whose snapshot is the only way on). That re-attach counts in
+// the episode. So a caller that stops reading while it waits for a command
+// still gets the command's reply, and a reset or the connection's end is
+// still read; a caller that reads again gets every event, in order, from the
+// re-attach.
 
 // Kind is what an Item is.
 type Kind int
@@ -106,21 +120,58 @@ type Item struct {
 	Ready *protocol.ReadyParams
 	// Err is why an Error item stopped the stream.
 	Err error
+
+	// cost is what the item counts in its queue (size, taken as it is
+	// queued).
+	cost int
 }
 
-// size is what an item counts against the stream's byte bound.
+// What an item counts besides its payloads: itemOverhead for its fields and
+// its place in the queue; replyOverhead and readyOverhead for what an attach
+// reply's and a ready's encoding adds to their strings and documents (member
+// names, ready, after's seq).
+const (
+	itemOverhead  = 64
+	replyOverhead = 128
+	readyOverhead = 96
+)
+
+// size is what an item counts against the stream's byte bound: an honest
+// estimate of every payload it retains, as encoded — an event's body, a
+// reply's snapshot and info document (catalogs and all), a ready's, an
+// error's text, result and cause (X18 8).
 func (it Item) size() int {
-	n := 64 + len(it.Body)
-	if it.Reply != nil {
-		n += len(it.Reply.Snapshot)
+	n := itemOverhead + len(it.Body)
+	if r := it.Reply; r != nil {
+		n += replyOverhead + len(r.Subscription) + len(r.After.Incarnation) + len(r.Reset) + len(r.Snapshot) + infoSize(&r.Session)
+	}
+	if r := it.Ready; r != nil {
+		n += readyOverhead + len(r.Subscription) + len(r.Err) + infoSize(&r.Session)
+	}
+	if it.Err != nil {
+		n += len(it.Err.Error())
+		var e *Error
+		if errors.As(it.Err, &e) {
+			n += len(e.Result) + len(e.Cause)
+		}
 	}
 	return n
 }
 
+// infoSize is an info document's size, encoded.
+func infoSize(s *protocol.SessionInfo) int {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return 0
+	}
+	return len(b)
+}
+
 // The stream's own errors, as Error items carry them.
 var (
-	// ErrStreamGap is an event whose seq does not follow the last one handed
-	// up: a hole, or a duplicate.
+	// ErrStreamGap is an event whose seq does not follow the last one the
+	// stream holds, or a synchronized that is not at it: a hole, or a
+	// duplicate.
 	ErrStreamGap = errors.New("remote: the stream's seqs do not follow on")
 	// ErrReattachBound is a stream that re-attached protocol
 	// .ReattachesPerEpisode times without reaching synchronized.
@@ -156,9 +207,14 @@ type Stream struct {
 	// sessionID is the session attached (it changes only when a reconnect
 	// finds the host serving another).
 	sessionID string
+	// w is the connection the stream's attach requests go on: the latest's,
+	// or the one a reconnect is adopting.
+	w *wire
 	// sub is the live subscription, "" while there is none: before a reply,
-	// after a reset or a lost connection.
-	sub string
+	// after a reset, a lost connection or a fall behind; subW is the
+	// connection it lives on, the one its detach goes to and no other (X18 6).
+	sub  string
+	subW *wire
 	// tag numbers the attach requests: a reply to another than the latest
 	// is stale. cursor is the cursor the latest carried (nil: none), and
 	// params the latest's params, which a retried re-attach sends again.
@@ -166,7 +222,7 @@ type Stream struct {
 	cursor *protocol.Cursor
 	params protocol.AttachParams
 	// inc and last are the stream's position: the incarnation and the seq of
-	// the last event handed up (or the attach's after).
+	// the last event it holds (or the attach's after).
 	inc  string
 	last uint64
 	// started says the first attach has been answered; ready says the
@@ -179,19 +235,37 @@ type Stream struct {
 	// synchronized.
 	episode int
 	// reconnecting is closed once a reconnect's re-attach has been answered
-	// (or the stream has stopped): the reconnect sends its commands then.
+	// (or the stream has stopped or fallen behind): the reconnect sends its
+	// commands then.
 	reconnecting chan struct{}
 	// done says the stream has handed up its last item, or was closed.
 	done bool
 	// delivered is the cursor of the last item Next handed out (ResumeState).
 	delivered *protocol.Cursor
+	// behind is the re-attach a fallen-behind stream owes, nil when none.
+	behind *behind
+}
+
+// behind is a stream that fell behind its caller (a local slow consumer): the
+// re-attach it owes once its caller has drained.
+type behind struct {
+	// cursor says the re-attach may carry the stream's cursor (once ready); a
+	// Restore that found no room, or a resume loss meanwhile, says not.
+	cursor bool
+	// need is the size of the item that found no room: the re-attach waits
+	// until one like it would fit.
+	need int
+	// detaching says the abandoned subscription's detach is unanswered: the
+	// host's one place on the connection is not free yet.
+	detaching bool
 }
 
 // Attach attaches the client to its session (§3.4) and returns the stream,
 // whose first item is the attach reply (KindAttached). A client holds one
 // stream at a time (SQ14): ErrAlreadyAttached until the last one has ended or
-// been closed. A refused attach is its *Error. If the connection goes before
-// the reply, the reconnect sends the attach again.
+// been closed. A refused attach is its *Error, and a malformed reply an error
+// too (the connection, whose host broke the protocol, is dropped). If the
+// connection goes before the reply, the reconnect sends the attach again.
 func (c *Client) Attach(ctx context.Context, o AttachOptions) (*Stream, error) {
 	if o.SessionID == "" {
 		var list protocol.SessionsListResult
@@ -226,7 +300,7 @@ func (c *Client) Attach(ctx context.Context, o AttachOptions) (*Stream, error) {
 		// Not already sent by a reconnect that ran while this waited for
 		// the connection.
 		p := s.firstParams()
-		tag := s.prepareLocked(p)
+		tag := s.prepareLocked(w, p)
 		s.mu.Unlock()
 		s.send(w, tag, p)
 	} else {
@@ -260,13 +334,14 @@ func (s *Stream) cursorLocked() *protocol.Cursor {
 	return &protocol.Cursor{Incarnation: s.inc, Seq: s.last}
 }
 
-// prepareLocked makes p the latest attach request and numbers it; s.mu is
-// held.
-func (s *Stream) prepareLocked(p protocol.AttachParams) int {
+// prepareLocked makes p, to go on w, the latest attach request and numbers
+// it; s.mu is held.
+func (s *Stream) prepareLocked(w *wire, p protocol.AttachParams) int {
 	s.tag++
 	s.params = p
 	s.cursor = p.Cursor
-	s.sub = ""
+	s.sub, s.subW = "", nil
+	s.w = w
 	return s.tag
 }
 
@@ -317,9 +392,11 @@ func (s *Stream) settleReconnectLocked() {
 // reconnected is the reconnect's re-attach (reconnect.go, step 3), on the new
 // connection w before its reader starts: with the stream's cursor after
 // resumed: true once the session is ready, and with none otherwise (sid, when
-// not "", is the session the host now serves). The channel it returns is
-// closed once the re-attach has been answered, or the stream has stopped; nil
-// when there is nothing to wait for.
+// not "", is the session the host now serves). A stream that fell behind is
+// re-attached here only if its caller has drained; otherwise its re-attach
+// waits for that (kick), on w. The channel it returns is closed once the
+// re-attach has been answered, or the stream has stopped; nil when there is
+// nothing to wait for.
 func (s *Stream) reconnected(w *wire, resumed bool, sid string) <-chan struct{} {
 	s.mu.Lock()
 	if s.done {
@@ -328,6 +405,21 @@ func (s *Stream) reconnected(w *wire, resumed bool, sid string) <-chan struct{} 
 	}
 	if sid != "" {
 		s.sessionID = sid
+	}
+	s.w = w
+	s.sub, s.subW = "", nil
+	withCursor := resumed && s.ready
+	if b := s.behind; b != nil {
+		// The subscription it abandoned went with its connection, and
+		// after a resume loss its cursor is no longer the way on.
+		b.detaching = false
+		b.cursor = b.cursor && resumed
+		if !s.q.roomFor(b.need) {
+			s.mu.Unlock()
+			return nil
+		}
+		withCursor = withCursor && b.cursor
+		s.behind = nil
 	}
 	if it, ok := s.countLocked("a reconnect"); !ok {
 		s.mu.Unlock()
@@ -338,12 +430,12 @@ func (s *Stream) reconnected(w *wire, resumed bool, sid string) <-chan struct{} 
 	switch {
 	case !s.started:
 		p = s.firstParams()
-	case resumed && s.ready:
+	case withCursor:
 		p = s.reattachParams(s.cursorLocked())
 	default:
 		p = s.reattachParams(nil)
 	}
-	tag := s.prepareLocked(p)
+	tag := s.prepareLocked(w, p)
 	ch := make(chan struct{})
 	s.reconnecting = ch
 	s.mu.Unlock()
@@ -372,7 +464,7 @@ func (s *Stream) reply(w *wire, tag int, resp *protocol.Response, err error) {
 		p := s.params
 		var tag int
 		if retry {
-			tag = s.prepareLocked(p)
+			tag = s.prepareLocked(w, p)
 		}
 		s.mu.Unlock()
 		if ended {
@@ -381,55 +473,92 @@ func (s *Stream) reply(w *wire, tag int, resp *protocol.Response, err error) {
 		if retry {
 			s.send(w, tag, p)
 		}
-		s.hand(items)
+		if len(items) > 0 {
+			s.finish(items...)
+		}
 		return
 	}
-	var res protocol.AttachResult
-	if err := json.Unmarshal(resp.Result, &res); err != nil {
-		s.stopLocked()
+	res, err := decodeAttach(resp.Result)
+	if err != nil {
+		// The host broke the protocol (X18 7): the connection is dropped —
+		// the host's attachment, which the client cannot name, goes with it
+		// — and Attach, when this was its reply, is answered; a re-attach is
+		// made again by the reconnect.
+		first := !s.started
+		if first {
+			s.stopLocked()
+		}
 		s.mu.Unlock()
-		s.detachStray(w, resp.Result)
-		s.hand([]Item{{Kind: KindError, Err: fmt.Errorf("remote: decoding the attach reply: %w", err)}})
+		_ = w.nc.Close()
+		if first {
+			s.answerFirst(fmt.Errorf("remote: the attach reply: %w", err))
+		}
 		return
 	}
-	var items []Item
-	s.sub = res.Subscription
 	switch {
 	case !s.started:
+		// The first item: the queue is empty, and one item always fits.
+		s.q.offer(Item{Kind: KindAttached, Reply: res})
 		s.started = true
 		s.inc, s.last = res.After.Incarnation, res.After.Seq
 		s.ready, s.readyOwed = res.Ready, !res.Ready
-		items = append(items, Item{Kind: KindAttached, Reply: &res})
+		s.sub, s.subW = res.Subscription, w
+		s.settleReconnectLocked()
+		s.mu.Unlock()
+		s.answerFirst(nil)
+		return
 	case res.Snapshot != nil:
+		s.sub, s.subW = res.Subscription, w
+		it := Item{Kind: KindRestore, Reply: res}
+		if !s.q.offer(it) {
+			// A snapshot is the only way on from here: the re-attach, once
+			// the caller has drained, carries no cursor.
+			s.fellBehindLocked(false, it)
+			return
+		}
 		s.inc, s.last = res.After.Incarnation, res.After.Seq
-		items = append(items, Item{Kind: KindRestore, Reply: &res})
 	case s.cursor == nil || res.After != *s.cursor:
 		// No snapshot, and not the cursor it was given: the stream cannot say
 		// where it stands.
 		err := fmt.Errorf("%w: a re-attach with cursor %v went on from %v with no snapshot", ErrStreamGap, s.cursor, res.After)
 		s.stopLocked()
-		s.sub = ""
 		sid := s.sessionID
 		s.mu.Unlock()
 		s.detachThen(w, sid, res.Subscription, Item{Kind: KindError, Err: err})
 		return
+	default:
+		s.sub, s.subW = res.Subscription, w
 	}
 	if res.Ready && !s.ready {
-		s.ready = true
 		if s.readyOwed {
 			// The ready notification went with the attachment it was owed
 			// to: this reply is the news that the session is up.
+			it := Item{Kind: KindReady, Ready: &protocol.ReadyParams{Subscription: res.Subscription, Session: res.Session}}
+			if !s.q.offer(it) {
+				// Still owed, and still before readiness as far as the
+				// caller knows: the re-attach's reply will carry it.
+				s.fellBehindLocked(false, it)
+				return
+			}
 			s.readyOwed = false
-			items = append(items, Item{Kind: KindReady, Ready: &protocol.ReadyParams{Subscription: res.Subscription, Session: res.Session}})
 		}
+		s.ready = true
 	}
-	first := len(items) > 0 && items[0].Kind == KindAttached
 	s.settleReconnectLocked()
 	s.mu.Unlock()
-	s.hand(items)
-	if first {
-		s.answerFirst(nil)
+}
+
+// decodeAttach is an attach reply's result, or why it is not one: it must
+// name its subscription and where the stream continues.
+func decodeAttach(raw json.RawMessage) (*protocol.AttachResult, error) {
+	var res protocol.AttachResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, err
 	}
+	if res.Subscription == "" || res.After.Incarnation == "" {
+		return nil, errors.New("no subscription, or no after")
+	}
+	return &res, nil
 }
 
 // answerFirst hands Attach its answer; there is only ever one.
@@ -444,7 +573,8 @@ func (s *Stream) answerFirst(err error) {
 // returns; for a re-attach, the table's — start_failed stops the stream (after
 // the Ready item it is owed), a closed session ends it as session_closed does
 // (ended), a code protocol.Retry allows sends the same re-attach again
-// (counted), and anything else stops it. s.mu is held.
+// (counted), and anything else stops it. The items it returns are the
+// stream's last. s.mu is held.
 func (s *Stream) refusedLocked(e *Error) (items []Item, retry, ended bool) {
 	if !s.started {
 		s.stopLocked()
@@ -474,76 +604,117 @@ func (s *Stream) refusedLocked(e *Error) (items []Item, retry, ended bool) {
 	return []Item{{Kind: KindError, Err: e}}, false, false
 }
 
-// note is one notification for the stream, on w's reader. One for another
-// subscription than the live one is ignored.
-func (s *Stream) note(w *wire, method string, params json.RawMessage) {
-	var sub struct {
-		Subscription string `json:"subscription"`
-	}
-	if json.Unmarshal(params, &sub) != nil {
-		return
-	}
-	s.mu.Lock()
-	if s.done || s.sub == "" || sub.Subscription != s.sub {
-		s.mu.Unlock()
-		return
-	}
-	var items []Item
+// notice is one notification of the stream's, decoded.
+type notice struct {
+	method string
+	sub    string
+	seq    uint64
+	body   json.RawMessage
+	ready  *protocol.ReadyParams
+	reason protocol.ResetReason
+}
+
+// decodeNotice decodes a notification protocol 1 names; params that do not
+// decode as its own break the protocol (errMalformed).
+func decodeNotice(method string, params json.RawMessage) (notice, error) {
+	n := notice{method: method}
+	var err error
 	switch method {
 	case protocol.NotifyEvent:
 		var p protocol.EventParams
-		var bad error
-		switch err := json.Unmarshal(params, &p); {
-		case err != nil:
-			bad = fmt.Errorf("remote: decoding an event: %w", err)
-		case p.Seq != s.last+1:
-			bad = fmt.Errorf("%w: event %d after %d", ErrStreamGap, p.Seq, s.last)
-		}
-		if bad != nil {
-			// Never swallowed: the stream stops, its attachment detached.
-			s.stopLocked()
-			s.sub = ""
-			sid := s.sessionID
-			s.mu.Unlock()
-			s.detachThen(w, sid, sub.Subscription, Item{Kind: KindError, Err: bad})
-			return
-		}
-		s.last = p.Seq
-		items = append(items, Item{Kind: KindEvent, Seq: p.Seq, Body: p.Event})
+		err = json.Unmarshal(params, &p)
+		n.sub, n.seq, n.body = p.Subscription, p.Seq, p.Event
 	case protocol.NotifySynchronized:
 		var p protocol.SynchronizedParams
-		_ = json.Unmarshal(params, &p)
-		s.episode = 0
-		items = append(items, Item{Kind: KindSynchronized, Seq: p.Seq})
+		err = json.Unmarshal(params, &p)
+		n.sub, n.seq = p.Subscription, p.Seq
 	case protocol.NotifyReady:
 		var p protocol.ReadyParams
-		_ = json.Unmarshal(params, &p)
-		s.ready = true
-		if s.readyOwed {
-			s.readyOwed = false
-			items = append(items, Item{Kind: KindReady, Ready: &p})
-		}
+		err = json.Unmarshal(params, &p)
+		n.sub, n.ready = p.Subscription, &p
 	case protocol.NotifyReset:
 		var p protocol.ResetParams
-		_ = json.Unmarshal(params, &p)
-		s.resetLocked(w, p.Reason)
+		err = json.Unmarshal(params, &p)
+		n.sub, n.reason = p.Subscription, p.Reason
+	}
+	if err != nil {
+		return notice{}, fmt.Errorf("%w: %s's params: %w", errMalformed, method, err)
+	}
+	return n, nil
+}
+
+// note is one notification for the stream, on w's reader. One for another
+// subscription than the live one is ignored.
+func (s *Stream) note(w *wire, n notice) {
+	s.mu.Lock()
+	if s.done || s.sub == "" || n.sub != s.sub {
+		s.mu.Unlock()
+		return
+	}
+	switch n.method {
+	case protocol.NotifyEvent:
+		if n.seq != s.last+1 {
+			s.brokenLocked(w, fmt.Errorf("%w: event %d after %d", ErrStreamGap, n.seq, s.last))
+			return
+		}
+		it := Item{Kind: KindEvent, Seq: n.seq, Body: n.body}
+		if !s.q.offer(it) {
+			s.fellBehindLocked(s.ready, it)
+			return
+		}
+		s.last = n.seq
+	case protocol.NotifySynchronized:
+		if n.seq != s.last {
+			// The cutoff is the last event of the attachment's replay: one
+			// the stream does not hold is a hole (X18 4).
+			s.brokenLocked(w, fmt.Errorf("%w: synchronized at %d, the last event held %d", ErrStreamGap, n.seq, s.last))
+			return
+		}
+		it := Item{Kind: KindSynchronized, Seq: n.seq}
+		if !s.q.offer(it) {
+			s.fellBehindLocked(s.ready, it)
+			return
+		}
+		s.episode = 0
+	case protocol.NotifyReady:
+		if s.readyOwed {
+			it := Item{Kind: KindReady, Ready: n.ready}
+			if !s.q.offer(it) {
+				s.fellBehindLocked(false, it)
+				return
+			}
+			s.readyOwed = false
+		}
+		s.ready = true
+	case protocol.NotifyReset:
+		s.resetLocked(w, n.reason)
 		return
 	}
 	s.mu.Unlock()
-	s.hand(items)
+}
+
+// brokenLocked stops the stream for err — never swallowed — its live
+// attachment detached on w before the Error item is handed up; s.mu is held,
+// and released here.
+func (s *Stream) brokenLocked(w *wire, err error) {
+	sub, sid := s.sub, s.sessionID
+	s.stopLocked()
+	s.sub, s.subW = "", nil
+	s.mu.Unlock()
+	s.detachThen(w, sid, sub, Item{Kind: KindError, Err: err})
 }
 
 // resetLocked is the live subscription's reset (§3.4's table, above); s.mu is
 // held, and released here.
 func (s *Stream) resetLocked(w *wire, reason protocol.ResetReason) {
-	s.sub = ""
+	s.sub, s.subW = "", nil
 	var cursor *protocol.Cursor
 	switch reason {
 	case protocol.ResetSessionClosed:
 		s.stopLocked()
 		s.mu.Unlock()
 		s.c.sessionEnded()
-		s.hand([]Item{{Kind: KindEnd}})
+		s.finish(Item{Kind: KindEnd})
 		return
 	case protocol.ResetSessionReplaced:
 		// The host closes this connection; the reconnect's hello is a fresh
@@ -558,11 +729,79 @@ func (s *Stream) resetLocked(w *wire, reason protocol.ResetReason) {
 	}
 	if it, ok := s.countLocked(string(reason)); !ok {
 		s.mu.Unlock()
-		s.hand([]Item{it})
+		s.finish(it)
 		return
 	}
 	p := s.reattachParams(cursor)
-	tag := s.prepareLocked(p)
+	tag := s.prepareLocked(w, p)
+	s.mu.Unlock()
+	s.send(w, tag, p)
+}
+
+// fellBehindLocked is item it having found no room: the caller has stopped
+// reading (X18 8). The stream queues nothing more of its live subscription's,
+// detaches it on the connection it lives on, and owes a re-attach (kick) —
+// with its cursor if cursor says it may; s.mu is held, and released here.
+func (s *Stream) fellBehindLocked(cursor bool, it Item) {
+	sub, sw, sid := s.sub, s.subW, s.sessionID
+	s.sub, s.subW = "", nil
+	b := &behind{cursor: cursor, need: it.size(), detaching: sub != "" && sw != nil}
+	s.behind = b
+	// A reconnect waiting on this re-attach goes on: the stream re-attaches
+	// once its caller has drained, not before.
+	s.settleReconnectLocked()
+	s.mu.Unlock()
+	if !b.detaching {
+		return
+	}
+	answered := func(ok bool) {
+		s.mu.Lock()
+		if s.behind == b {
+			b.detaching = false
+		}
+		s.mu.Unlock()
+		if ok {
+			s.kick()
+		}
+	}
+	// Any answer frees the host's place: a detach of an attachment that has
+	// already ended on its own is answered after its reset. A connection that
+	// goes first takes the attachment with it, and the reconnect re-attaches.
+	raw, err := paramsJSON(protocol.DetachParams{SessionID: sid, Subscription: sub})
+	if err == nil {
+		_, err = s.c.send(sw, protocol.MethodSessionDetach, raw, func(_ *protocol.Response, err error) { answered(err == nil) })
+	}
+	if err != nil {
+		answered(false)
+	}
+}
+
+// kick makes the re-attach a fallen-behind stream owes, once the host has
+// answered its detach and its caller has drained the queue (itemQueue
+// .roomFor), on the connection its attach requests go on — counted in the
+// episode, as a reset's is. It is called whenever one of those may have
+// become true: Next took an item, the detach was answered; a reconnect checks
+// for itself.
+func (s *Stream) kick() {
+	s.mu.Lock()
+	b := s.behind
+	if s.done || b == nil || b.detaching || s.w == nil || !s.q.roomFor(b.need) {
+		s.mu.Unlock()
+		return
+	}
+	s.behind = nil
+	if it, ok := s.countLocked("a caller that fell behind"); !ok {
+		s.mu.Unlock()
+		s.finish(it)
+		return
+	}
+	var cursor *protocol.Cursor
+	if b.cursor && s.ready {
+		cursor = s.cursorLocked()
+	}
+	p := s.reattachParams(cursor)
+	w := s.w
+	tag := s.prepareLocked(w, p)
 	s.mu.Unlock()
 	s.send(w, tag, p)
 }
@@ -597,36 +836,23 @@ func (s *Stream) detachStray(w *wire, result json.RawMessage) {
 	}
 }
 
-// hand queues items for Next, in order: a terminal one (End, Error) last of
-// all and never waiting for room, and the stream is dropped from its client.
-func (s *Stream) hand(items []Item) {
-	for _, it := range items {
-		if it.Kind == KindEnd || it.Kind == KindError {
-			s.finish(it)
-			return
-		}
-		s.q.push(it)
-	}
-}
-
-// finish hands up the stream's last item and lets the client attach again.
-func (s *Stream) finish(it Item) {
-	s.q.finish(&it)
+// finish hands up the stream's last items, whatever the bound, closes its
+// queue to anything more, and lets the client attach again. A queue closed
+// already takes none of them.
+func (s *Stream) finish(items ...Item) {
+	s.q.finish(items...)
 	s.c.dropStream(s)
 }
 
-// fail stops the stream with err: the client stopped, or a request could
-// not be made.
+// fail stops the stream with err: the client stopped, or a request could not
+// be made. It closes the queue whatever the stream's state (X18 8): a stream
+// that had stopped but not yet handed up its last item hands up this one.
 func (s *Stream) fail(err error) {
 	s.mu.Lock()
-	if s.done {
-		s.mu.Unlock()
-		return
-	}
-	started := s.started
+	first := !s.done && !s.started
 	s.stopLocked()
 	s.mu.Unlock()
-	if !started {
+	if first {
 		s.answerFirst(err)
 	}
 	s.finish(Item{Kind: KindError, Err: err})
@@ -658,7 +884,11 @@ func (s *Stream) Next(ctx context.Context) (Item, error) {
 			s.delivered = &protocol.Cursor{Incarnation: s.delivered.Incarnation, Seq: it.Seq}
 		}
 	}
+	behind := s.behind != nil
 	s.mu.Unlock()
+	if behind {
+		s.kick()
+	}
 	return it, nil
 }
 
@@ -683,8 +913,12 @@ func (s *Stream) SessionID() string {
 }
 
 // Close detaches the stream (session.detach, whose reply is the attachment's
-// terminal acknowledgement) and drops what Next had not handed out. A stream
-// already over closes with nothing sent.
+// terminal acknowledgement) and drops what Next had not handed out. The
+// detach goes to the connection the subscription lives on and nowhere else
+// (X18 6): a subscription whose connection has gone went with it, and nothing
+// is sent — never on a later connection, whose subscription ids start again
+// and may name another stream's. A stream already over closes with nothing
+// sent.
 func (s *Stream) Close(ctx context.Context) error {
 	s.mu.Lock()
 	if s.done {
@@ -693,16 +927,24 @@ func (s *Stream) Close(ctx context.Context) error {
 		s.c.dropStream(s)
 		return nil
 	}
-	sub, sid := s.sub, s.sessionID
-	s.sub = ""
+	sub, sw, sid := s.sub, s.subW, s.sessionID
+	s.sub, s.subW = "", nil
 	s.stopLocked()
 	s.mu.Unlock()
 	s.q.drop()
 	s.c.dropStream(s)
-	if sub == "" {
+	if h := s.c.hooks.closing; h != nil {
+		h()
+	}
+	if sub == "" || sw == nil {
 		return nil
 	}
-	return s.c.Call(ctx, protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid, Subscription: sub}, nil)
+	err := s.c.callOn(ctx, sw, protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid, Subscription: sub}, nil)
+	if errors.Is(err, ErrConnectionLost) {
+		// Gone with its connection, or going: nothing is left to detach.
+		return nil
+	}
+	return err
 }
 
 // dropStream forgets s as the client's stream.
@@ -732,10 +974,11 @@ func (c *Client) voidTokenForReplacement() {
 
 // ------------------------------------------------------------------ queue
 
-// itemQueue holds a stream's items for Next, bounded in bytes: a push that
-// finds no room waits, and one item always fits in an empty queue. finish
-// appends the last item whatever the bound and closes the queue to pushes;
-// drop empties it and closes it to both.
+// itemQueue holds a stream's items for Next, bounded in bytes (Item.size),
+// and never makes its writer wait: offer takes an item only if there is room —
+// one always fits in an empty queue — and says so. finish appends the last
+// items whatever the bound and closes the queue to more; drop empties it and
+// closes it to both.
 type itemQueue struct {
 	mu      sync.Mutex
 	items   []Item
@@ -755,38 +998,46 @@ func (q *itemQueue) changedLocked() {
 	q.changed = make(chan struct{})
 }
 
-// push queues it, waiting for room; false once the queue is closed.
-func (q *itemQueue) push(it Item) bool {
-	n := it.size()
-	for {
-		q.mu.Lock()
-		if q.closed {
-			q.mu.Unlock()
-			return false
-		}
-		if len(q.items) == 0 || q.bytes+n <= q.max {
-			q.items = append(q.items, it)
-			q.bytes += n
-			q.changedLocked()
-			q.mu.Unlock()
-			return true
-		}
-		ch := q.changed
-		q.mu.Unlock()
-		<-ch
+// offer queues it if there is room, and never waits: false says there was
+// none. A closed queue takes nothing and says true — its stream hands up
+// nothing more.
+func (q *itemQueue) offer(it Item) bool {
+	it.cost = it.size()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return true
 	}
+	if len(q.items) > 0 && q.bytes+it.cost > q.max {
+		return false
+	}
+	q.items = append(q.items, it)
+	q.bytes += it.cost
+	q.changedLocked()
+	return true
 }
 
-// finish queues the last item, if any, and closes the queue to pushes.
-func (q *itemQueue) finish(it *Item) {
+// roomFor says a fallen-behind stream's caller has drained enough for it to
+// re-attach: the queue is empty, or at most half full with room for an item of
+// need bytes — so the re-attach is not at once behind again.
+func (q *itemQueue) roomFor(need int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.closed || len(q.items) == 0 || (q.bytes <= q.max/2 && q.bytes+need <= q.max)
+}
+
+// finish queues the last items, whatever the bound, and closes the queue to
+// more; a closed queue takes none.
+func (q *itemQueue) finish(items ...Item) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
 		return
 	}
-	if it != nil {
-		q.items = append(q.items, *it)
-		q.bytes += it.size()
+	for _, it := range items {
+		it.cost = it.size()
+		q.items = append(q.items, it)
+		q.bytes += it.cost
 	}
 	q.closed = true
 	q.changedLocked()
@@ -799,6 +1050,13 @@ func (q *itemQueue) drop() {
 	q.items, q.bytes = nil, 0
 	q.closed, q.dropped = true, true
 	q.changedLocked()
+}
+
+// queued is the bytes the queue counts now.
+func (q *itemQueue) queued() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.bytes
 }
 
 // pop is the next item, waiting for one; ErrStreamClosed once the queue is
@@ -814,9 +1072,10 @@ func (q *itemQueue) pop(ctx context.Context) (Item, error) {
 			it := q.items[0]
 			q.items[0] = Item{}
 			q.items = q.items[1:]
-			q.bytes -= it.size()
+			q.bytes -= it.cost
 			q.changedLocked()
 			q.mu.Unlock()
+			it.cost = 0
 			return it, nil
 		}
 		if q.closed {
