@@ -2675,8 +2675,12 @@ func (m Model) foreignEpisode() uint64 { return m.foreignEnded + 1 }
 //     meanwhile does not suppress it.
 //
 // And the cancelled state a host reads (m.cancelled) is set as a craze turn's
-// cancel sets it — only for the turn the model is on: a craze turn that began
-// after this Esc owns it now, and its own ending says how it went.
+// cancel sets it — only for the turn and the foreign episode the model is on:
+// a craze turn that began after this Esc owns it now, and its own ending says
+// how it went; and a wake that started after the one this Esc stopped is
+// another episode, which a late answer must not mark cancelled (CodeRabbit on
+// #54: foreign turns do not advance turnSeq). The episode matches while it
+// runs (foreignEpisode) or once it has ended (foreignEnded names it then).
 func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 	if msg.turn != "" {
 		return
@@ -2685,7 +2689,9 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 		m.main.appendLocal(entry{kind: entryNote, text: stopCancelled}, m.stamp(m.now()))
 		m.foreignNoted = msg.episode
 	}
-	if msg.seq == m.turnSeq {
+	sameEpisode := m.snap.ForeignTurn && msg.episode == m.foreignEpisode() ||
+		!m.snap.ForeignTurn && msg.episode == m.foreignEnded
+	if msg.seq == m.turnSeq && sameEpisode {
 		m.cancelled = true
 	}
 }
@@ -2831,6 +2837,12 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// The agent's turn is over, so the next one is another episode
 			// (foreignEpisode). A nil payload closes the run, as the fold's.
 			m.foreignEnded++
+		} else {
+			// A new turn of the agent's starts with nothing cancelled: its
+			// ending reads as it went, not as an earlier Esc left the flag
+			// (a late answer for a previous episode cannot set it either,
+			// applyForeignCancelled).
+			m.cancelled = false
 		}
 		m.refreshSnap()
 		return

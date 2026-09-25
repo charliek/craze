@@ -335,6 +335,45 @@ func TestAForeignCancelIsACancellationToTheHost(t *testing.T) {
 	}
 }
 
+// TestALateForeignCancelAnswerLeavesTheNextWakeAlone (CodeRabbit on #54): Esc
+// stops wake 1, but its answer reaches the model only after wake 1 ended and
+// wake 2 began — foreign turns do not advance turnSeq, so the turn check alone
+// passed it. The answer still draws wake 1's note, but wake 2 is another
+// episode: the host reads it running and, once it ends on its own, a finished
+// turn — not the cancellation of the wake before it.
+func TestALateForeignCancelAnswerLeavesTheNextWakeAlone(t *testing.T) {
+	m, stub := wakeRunning(t, "wake-1")
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	answer := foreignCancelAnswer(t, cmd)
+	endWake(stub, "wake-1")
+	m = pumpSettled(t, m)
+	startWake(stub, "wake-2")
+	m = pumpSettled(t, m)
+	if !m.snap.ForeignTurn {
+		t.Fatal("setup: the model has not seen wake 2")
+	}
+
+	tm, _ = m.Update(answer)
+	m = tm.(Model)
+	if n := cancelledNotes(m); n != 1 {
+		t.Fatalf("%d cancelled notes, want wake 1's one: %q", n, texts(m, entryNote))
+	}
+	if m.cancelled {
+		t.Fatal("a late answer for wake 1 marked wake 2 cancelled")
+	}
+	if s, _ := host.Derive(m.hostInput()); s.Kind != host.Working || s.Detail != host.DetailForeignTurn {
+		t.Fatalf("the host reads %+v while wake 2 runs", s)
+	}
+	endWake(stub, "wake-2")
+	m = pumpSettled(t, m)
+	// Idle, and not cancelled: the Stub was never prompted, so its idle reads
+	// ready; the claim is only that wake 1's Esc does not speak for wake 2.
+	if s, _ := host.Derive(m.hostInput()); s.Kind != host.Idle || s.Detail == host.DetailCancelled {
+		t.Fatalf("the host reads %+v after wake 2 ended on its own, want idle and not %q", s, host.DetailCancelled)
+	}
+}
+
 // TestEscOnAForeignTurnMasksAnOpeningItsCancelAnswered (astra r20 finding 4):
 // the wake opens an ask whose opening has not reached the model when Esc
 // stops the wake. The cancel answers the ask where it lies, and the cards are
