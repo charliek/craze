@@ -3,6 +3,8 @@ package control_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,21 +145,171 @@ func TestTheByteBudgetBoundsAPeerThatNeverReads(t *testing.T) {
 	}
 }
 
-// TestAWriterThatMakesNoProgressIsClosed (§3.7): a writer that writes nothing
-// for the stall bound closes its connection; the session and every other
-// connection are untouched. The bound is 60 s; a test seam lowers it.
-func TestAWriterThatMakesNoProgressIsClosed(t *testing.T) {
-	h := newHost(t, withStall(200*time.Millisecond))
-	bigTranscript(h, 8)
-	a := h.dial()
-	a.sayHello(nil)
-	for range 4 {
-		a.send(protocol.MethodSessionSnapshot, snapshotParams(h, 0))
+// pipeListener is a listener over in-memory pipes (net.Pipe), which move
+// exactly the bytes the peer reads: dial hands the server one end, wrapped so
+// the time the server closes it is known, and returns the other.
+type pipeListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+// servePipes serves a pipeListener on srv until the test ends.
+func servePipes(t *testing.T, srv *control.Server) *pipeListener {
+	t.Helper()
+	l := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(l) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), watchdog)
+		defer cancel()
+		_ = srv.Close(ctx)
+		if err := <-served; err != nil {
+			t.Errorf("serve pipes: %v", err)
+		}
+	})
+	return l
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
 	}
-	h.logs.wait(t, "conn 1 close", "write stalled")
+}
+
+func (l *pipeListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr { return testAddr{} }
+
+// dial connects a pipe and returns the peer's end and when the server closed
+// its own.
+func (l *pipeListener) dial(t *testing.T) (net.Conn, <-chan time.Time) {
+	t.Helper()
+	server, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	tc := &timedConn{Conn: server, closed: make(chan time.Time, 1)}
+	select {
+	case l.conns <- tc:
+	case <-time.After(watchdog):
+		t.Fatal("the server did not accept the pipe")
+	}
+	return peer, tc.closed
+}
+
+// timedConn is the server's end of a pipe: it records when it was closed.
+type timedConn struct {
+	net.Conn
+	closed chan time.Time
+	once   sync.Once
+}
+
+func (c *timedConn) Close() error {
+	c.once.Do(func() { c.closed <- time.Now() })
+	return c.Conn.Close()
+}
+
+type testAddr struct{}
+
+func (testAddr) Network() string { return "test" }
+func (testAddr) String() string  { return "test" }
+
+// TestAWriterThatMakesNoProgressIsClosed (§3.7; astra r5): a writer that
+// moves no byte for the stall bound closes its connection — measured from the
+// LAST BYTE THAT MOVED, never from the start of a write: a peer that reads a
+// few bytes of a reply and then stops is closed one bound after those bytes,
+// not two. The session and every other connection are untouched. The bound is
+// 60 s; a test seam lowers it. The peer is a pipe, so the bytes it reads are
+// exactly the bytes that moved.
+func TestAWriterThatMakesNoProgressIsClosed(t *testing.T) {
+	const stall = 500 * time.Millisecond
+	h := newHost(t, withStall(stall))
+	peer, closed := servePipes(t, h.srv).dial(t)
+	_ = peer.SetDeadline(time.Now().Add(watchdog))
+	lr := protocol.NewLineReader(peer, protocol.OutboundLineMax)
+	if _, err := peer.Write(requestLine(t, "1", protocol.MethodHello, helloParams(nil))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lr.ReadLine(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Write(requestLine(t, "2", protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)})); err != nil {
+		t.Fatal(err)
+	}
+	// Ten bytes of the reply move, and then none.
+	if _, err := io.ReadFull(peer, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	moved := time.Now()
+	select {
+	case at := <-closed:
+		if since := at.Sub(moved); since < stall/2 || since >= stall*3/2 {
+			t.Fatalf("closed %s after the last byte moved; the bound is %s", since, stall)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("the stalled connection was never closed")
+	}
+	h.logs.wait(t, "close", "write stalled")
 	b := h.dial()
 	b.sayHello(nil)
 	ok[protocol.QueueAddResult](t, queueAdd(b, b.cmd(), "untouched"))
+}
+
+// failingListener fails every Accept with a transient error until it is
+// closed.
+type failingListener struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.done:
+		return nil, net.ErrClosed
+	default:
+		return nil, errors.New("too many open files")
+	}
+}
+
+func (l *failingListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *failingListener) Addr() net.Addr { return testAddr{} }
+
+// TestCloseHonoursItsDeadlineDuringAcceptBackoff (astra r5 6): an accept loop
+// waiting out its backoff after a transient accept failure is woken by Close,
+// so Close returns by its deadline — here long before the backoff, raised to
+// a minute by a test seam, would have ended.
+func TestCloseHonoursItsDeadlineDuringAcceptBackoff(t *testing.T) {
+	logs := newLogSink()
+	srv := control.NewForTest(control.Options{Log: logs.log}, control.TestHooks{}, 0, 0)
+	srv.SetAcceptBackoff(time.Minute, time.Minute)
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(&failingListener{done: make(chan struct{})}) }()
+	logs.wait(t, "control: accept:", "retrying in 1m0s")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() { closed <- srv.Close(ctx) }()
+	select {
+	case err := <-closed:
+		if err != nil || ctx.Err() != nil {
+			t.Fatalf("Close: %v, with its context %v: want nil before its deadline", err, ctx.Err())
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close waited out the accept loop's backoff")
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("Serve after Close: %v", err)
+	}
 }
 
 // TestTheCommandCapAnswersBusy (§3.6, astra 7): past CommandsPerHost commands

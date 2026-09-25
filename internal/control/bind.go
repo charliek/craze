@@ -2,6 +2,7 @@ package control
 
 import (
 	"errors"
+	"time"
 
 	"github.com/charliek/craze/internal/engine"
 )
@@ -60,7 +61,8 @@ import (
 //
 // The index is bounded as the table is. A current-incarnation token lives
 // exactly as long as its binding: added with it at a fresh hello, kept across
-// resumes, dropped with it when its client is found retired. When the engine
+// resumes, dropped with it when its client is found retired or its binding has
+// gone without a connection for the idle bound ("Lifetime"). When the engine
 // is replaced, the table is cleared and the replaced engine's tokens stay as
 // the PREVIOUS generation — so its clients meeting a collision with the new
 // engine's ids are told resumed: false, and a previous token presented under
@@ -80,11 +82,36 @@ import (
 // secrecy is the client's own state's file permissions either way, and the
 // index is an ordinary map keyed by it.
 //
-// A binding is dropped when its client is found retired, and every binding
-// when the engine is replaced (SetEngine); a released binding is otherwise
-// kept, since only the engine knows when its client retires and a resume must
-// find it until then. So the table holds one small entry per client the engine
-// has minted and not been seen to retire.
+// # Lifetime (plan 027 X13, astra r5)
+//
+// A binding lives while a connection holds it, and for a bounded time after:
+//
+//   - a binding with NO CONNECTION for Server.idle — twice the engine's
+//     receipts age bound (RetryHorizon.Age, 10 min), so 20 min — is dropped,
+//     with its token. The release time is recorded at the compare-and-release
+//     (unbind), on the server's clock (Options.Clock), and every release is
+//     appended to Server.released, oldest first. The drop is lazy: each hello
+//     (bind) and each unbind pops the releases that have aged out off the
+//     front, and drops a binding only if that release is still its latest —
+//     no connection since, the same generation, the same binding (a resume in
+//     between re-binds it, and a later release appends a fresh entry). So the
+//     work is bounded by the releases popped, and the list holds only the
+//     releases of the last 20 min;
+//   - a binding is also dropped when its client is found retired (a resume
+//     whose ClaimClient fails), and every binding when the engine is replaced
+//     (SetEngine), the released list with them.
+//
+// Why 20 min, and why without an engine call: the engine retires a released
+// client once it has waited out receiptAge holding no entry, so by twice that
+// the client is normally retired and its binding could only answer resumed:
+// false anyway. A client with a command that ran longer than that is not yet
+// retired, and loses its binding all the same: its later resume is answered
+// resumed: false with a fresh id, and the client resolves its outstanding
+// commands as outcome-unknown — honest, and never a second execution, since
+// the fresh id's commands are new ones. So neither the table nor the index
+// grows with the history of clients that never come back: both hold the live
+// bindings plus the releases of the last 20 min (and one replaced engine's
+// tokens, above).
 
 // binding is one client id's place in the table.
 type binding struct {
@@ -92,6 +119,17 @@ type binding struct {
 	conn  *conn
 	gen   uint64
 	token string
+}
+
+// releaseRecord is one compare-and-release, as Server.released keeps it: the
+// binding released, at which generation, when (the server's clock), and the
+// id it is filed under. A binding's generation is released at most once, so
+// {b, gen} with no connection since says the release is still its latest.
+type releaseRecord struct {
+	client string
+	b      *binding
+	gen    uint64
+	at     time.Time
 }
 
 // tokenOwner is what an issued token names: its client id, and the
@@ -140,6 +178,9 @@ func (s *Server) bind(c *conn, resume *resumeReq) (b *bound, resumed bool, old *
 	if eng == nil {
 		return nil, false, nil, errNotReady
 	}
+	// First, so a resume presenting a binding that has idled out finds it
+	// gone, as it would had anything else run the drop first.
+	s.dropIdleLocked()
 	// A connection already closing gets nothing: its cleanup may have run,
 	// and a binding made now would name a connection nobody will release.
 	// close sets closing before its cleanup takes bindMu, and this is read
@@ -202,6 +243,7 @@ func (s *Server) unbind(c *conn) {
 	}
 	s.bindMu.Lock()
 	defer s.bindMu.Unlock()
+	defer s.dropIdleLocked()
 	b := c.bound
 	if b == nil {
 		return
@@ -211,5 +253,51 @@ func (s *Server) unbind(c *conn) {
 		return
 	}
 	cur.conn = nil
+	s.released = append(s.released, releaseRecord{client: b.client, b: cur, gen: cur.gen, at: s.opts.Clock()})
 	b.eng.ReleaseClient(b.client)
+}
+
+// dropIdleLocked drops every binding, and its token, that has had no
+// connection for the idle bound ("Lifetime"): it pops the aged releases off
+// the front of the released list and drops each binding whose latest release
+// that still is. Its work is the releases it pops. bindMu is held.
+func (s *Server) dropIdleLocked() {
+	if len(s.released) == 0 {
+		return
+	}
+	now := s.opts.Clock()
+	n := 0
+	for _, r := range s.released {
+		if now.Sub(r.at) < s.idle {
+			break
+		}
+		n++
+		if cur := s.binds[r.client]; cur == r.b && cur.conn == nil && cur.gen == r.gen {
+			delete(s.binds, r.client)
+			delete(s.tokens, cur.token)
+		}
+	}
+	if n > 0 {
+		clear(s.released[:n])
+		s.released = s.released[n:]
+	}
+}
+
+// movedOn reports whether b's binding has moved on since a handler was
+// admitted under it: a resume transferred the client (the binding's
+// generation is newer than b's), or the engine b was bound to is no longer the
+// one served (a replacement cleared the table). A mutating command checks it
+// just before its engine call (conn.command) and does not run if so (astra r5
+// 3). A plain release — the connection closed, the binding's connection
+// cleared, its generation unchanged — is NOT moving on: losing the connection
+// does not cancel an admitted command (§3.6, 03 §7), so the command runs and
+// its receipt answers the client's resend after a resume.
+func (s *Server) movedOn(b *bound) bool {
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	if s.eng != b.eng {
+		return true
+	}
+	cur := s.binds[b.client]
+	return cur != nil && cur.gen != b.gen
 }

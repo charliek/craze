@@ -25,8 +25,9 @@
 //     socket. Every outbound byte counts against WriterQueueBytes (32 MiB),
 //     ResetReserveBytes (1 KiB) of which only a final reset may use; a line
 //     that fits an empty queue always gets in; every wait on the queue ends
-//     when the connection closes. A write that makes no progress for the stall
-//     bound (60 s) closes the connection; the session is untouched.
+//     when the connection closes. A writer that moves no byte for the stall
+//     bound (60 s, from the last byte that moved) closes the connection; the
+//     session is untouched.
 //
 // A read-side EOF is half-close (astra 11): no more requests. Admitted
 // requests complete and their replies are written, and the connection closes
@@ -40,7 +41,13 @@
 // TRANSFER) and supersedes the old one; a connection's close releases its
 // client only if the binding still names that connection and its generation
 // (compare-and-release), so a superseded connection's late cleanup releases
-// nothing. See bind.go.
+// nothing. A superseded or closing connection admits nothing more: its reader
+// stops. A command admitted before a transfer re-checks its binding just
+// before the engine call and does not run once the binding has moved on (a
+// newer generation, or another engine); one whose connection merely closed
+// still runs (§3.6). A binding with no connection for twice the
+// receipts table's age bound (20 min) is dropped with its token, so neither
+// grows with clients that never come back. See bind.go.
 //
 // # Locks
 //

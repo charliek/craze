@@ -34,8 +34,9 @@ const watchdog = 10 * time.Second
 // client built on internal/protocol's framing (not internal/remote). Every
 // line the client reads is held to the schema (wiretest).
 
-// clock is the receipts table's clock (engine.Options.ReceiptClock): the wall
-// clock plus an offset a test moves past the table's age bound.
+// clock is the receipts table's clock (engine.Options.ReceiptClock) and the
+// binding table's (control.Options.Clock): the wall clock plus an offset a
+// test moves past the tables' age bounds.
 type clock struct{ offset atomic.Int64 }
 
 func (c *clock) now() time.Time { return time.Now().Add(time.Duration(c.offset.Load())) }
@@ -182,6 +183,7 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 	}
 	cfg.opts.Log = h.logs.log
 	cfg.opts.Workspace = "/work"
+	cfg.opts.Clock = h.clock.now
 	h.srv = control.NewForTest(cfg.opts, cfg.hooks, cfg.stall, cfg.maxLine)
 	if !cfg.noSet {
 		h.srv.SetEngine(h.eng)
@@ -248,22 +250,36 @@ func (c *client) send(method string, params any) string {
 // connection — returned.
 func (c *client) trySend(method string, params any) (string, error) {
 	c.t.Helper()
+	id, line := c.encode(method, params)
+	_ = c.nc.SetWriteDeadline(time.Now().Add(watchdog))
+	_, err := c.nc.Write(line)
+	return id, err
+}
+
+// encode is the next request as a line, newline included, and its id: sent
+// as far as the client's bookkeeping goes, for the caller to write.
+func (c *client) encode(method string, params any) (string, []byte) {
+	c.t.Helper()
 	c.mu.Lock()
 	c.nextID++
 	id := strconv.Itoa(c.nextID)
 	c.methods[id] = method
 	c.mu.Unlock()
+	return id, requestLine(c.t, id, method, params)
+}
+
+// requestLine is one request as the wire carries it, newline included.
+func requestLine(t *testing.T, id, method string, params any) []byte {
+	t.Helper()
 	raw, err := json.Marshal(params)
 	if err != nil {
-		c.t.Fatal(err)
+		t.Fatal(err)
 	}
 	line, err := protocol.MarshalLine(protocol.Request{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(id), Method: method, Params: raw})
 	if err != nil {
-		c.t.Fatal(err)
+		t.Fatal(err)
 	}
-	_ = c.nc.SetWriteDeadline(time.Now().Add(watchdog))
-	_, err = c.nc.Write(line)
-	return id, err
+	return line
 }
 
 // sendRaw writes a line as it is, a newline appended; method is what its

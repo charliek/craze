@@ -119,15 +119,35 @@ func (c *conn) params(b *bound, info protocol.MethodInfo, req *request, p any, c
 // barrier follows it, success or error. A barrier that fails because the log
 // is closing never turns the command's answer into another: the reply carries
 // the command's own result (§3.7).
+//
+// Just before the engine call, the binding it was admitted under must not have
+// moved on (Server.movedOn): if a resume has since transferred the client to
+// another connection (a newer generation), or the engine was replaced, the
+// command does not run under the client id this connection held (astra r5 3)
+// — no reply is owed (the connection is closing), the receipts table never
+// sees its id, and the client's resend on its resumed connection runs it once.
+// A plain release is not moving on: a connection that merely closed still
+// runs the command it admitted — losing the connection does not cancel an
+// admitted command (§3.6) — and its receipt answers the resend. A command that
+// reached the engine keeps running, detached, whatever happens after.
 func (c *conn) command(b *bound, method string, run func() outcome) outcome {
+	if h := c.srv.hooks.beforeCommand; h != nil {
+		h(method)
+	}
 	if !c.srv.admitCommand() {
 		return refusal(refused(protocol.CodeUnavailable, protocol.ReasonBusy,
 			"the host has %d commands in flight; resend the same commandId", protocol.CommandsPerHost))
 	}
-	o := func() outcome {
+	o, ran := func() (outcome, bool) {
 		defer c.srv.commandDone()
-		return run()
+		if c.srv.movedOn(b) {
+			return outcome{}, false
+		}
+		return run(), true
 	}()
+	if !ran {
+		return outcome{}
+	}
 	if h := c.srv.hooks.beforeBarrier; h != nil {
 		h(method)
 	}

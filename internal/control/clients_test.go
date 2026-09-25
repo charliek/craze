@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
@@ -366,4 +367,258 @@ func TestATokenFromAnotherHostIsNotBadToken(t *testing.T) {
 	if hy := y.sayHello(a.resume()); !hy.Resumed || hy.ClientID != ha.ClientID {
 		t.Fatalf("the holder's own resume after a stranger's: %+v", hy)
 	}
+}
+
+// queued is how many rows of the engine's queue carry text.
+func queued(h *host, text string) int {
+	n := 0
+	for _, q := range h.eng.State().Queue {
+		if q.Text == text {
+			n++
+		}
+	}
+	return n
+}
+
+// closeOnce closes ch unless it is closed already.
+func closeOnce(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+}
+
+// TestASupersededConnectionAdmitsNothingMore (astra r5 3): once a resume has
+// transferred a client to a new connection, the old one runs nothing more
+// under the client id it held — not a request its reader had already
+// buffered, and not a request admitted before the transfer that had not yet
+// reached the engine. The client's resend on its new connection runs such a
+// command once.
+func TestASupersededConnectionAdmitsNothingMore(t *testing.T) {
+	t.Run("its reader admits no line it had buffered", func(t *testing.T) {
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		var acquires, commands atomic.Int32
+		h := newHost(t, withHooks(control.TestHooks{
+			// A is the first connection. Its second acquire is the one after
+			// hello: the reader is held there with the rest buffered.
+			BeforeAcquire: func(conn uint64) {
+				if conn == 1 && acquires.Add(1) == 2 {
+					close(reached)
+					<-release
+				}
+			},
+			BeforeCommand: func(string) { commands.Add(1) },
+		}))
+		t.Cleanup(func() { closeOnce(release) })
+		a := h.dial()
+		// hello and three commands in ONE write: the reader's first read
+		// buffers all four lines; it answers hello and is held before it
+		// takes the slot for the next.
+		_, lines := a.encode(protocol.MethodHello, helloParams(nil))
+		for range 3 {
+			_, line := a.encode(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: a.cmd(), Text: "from a"})
+			lines = append(lines, line...)
+		}
+		a.write(lines)
+		await(t, reached, "A's reader before its second acquire")
+		a.hello = ok[protocol.HelloResult](t, a.read())
+
+		b := h.dial()
+		if hb := b.sayHello(a.resume()); !hb.Resumed || hb.ClientID != a.hello.ClientID {
+			t.Fatalf("the resume: %+v", hb)
+		}
+		a.expectEOF()
+		closeOnce(release)
+
+		// Close joins A's reader and waits out every handler: whatever A was
+		// going to admit, it has by then.
+		ctx, cancel := context.WithTimeout(context.Background(), watchdog)
+		defer cancel()
+		if err := h.srv.Close(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n := commands.Load(); n != 0 {
+			t.Fatalf("A's reader admitted %d buffered commands after it was superseded", n)
+		}
+		if n := queued(h, "from a"); n != 0 {
+			t.Fatalf("%d of A's buffered commands reached the engine after it was superseded", n)
+		}
+	})
+
+	t.Run("an admitted command not yet at the engine does not run", func(t *testing.T) {
+		held := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		var arm atomic.Bool
+		h := newHost(t, withHooks(control.TestHooks{BeforeCommand: func(string) {
+			if arm.Load() {
+				once.Do(func() {
+					close(held)
+					<-release
+				})
+			}
+		}}))
+		t.Cleanup(func() { closeOnce(release) })
+		a := h.dial()
+		a.sayHello(nil)
+		arm.Store(true)
+		a.send(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: "1", Text: "from a"})
+		await(t, held, "A's command before its engine call")
+
+		b := h.dial()
+		if hb := b.sayHello(a.resume()); !hb.Resumed || hb.ClientID != a.hello.ClientID {
+			t.Fatalf("the resume: %+v", hb)
+		}
+		a.expectEOF()
+		closeOnce(release)
+		waitFor(t, "A's handler to return", func() bool { return h.srv.Handlers() == 0 })
+		if n := queued(h, "from a"); n != 0 {
+			t.Fatalf("A's command ran after A was superseded: %d rows", n)
+		}
+		// Its id was never used: the resend on B runs it, and a second resend
+		// is answered from the receipts table.
+		ok[protocol.QueueAddResult](t, queueAdd(b, "1", "from a"))
+		ok[protocol.QueueAddResult](t, queueAdd(b, "1", "from a"))
+		if n := queued(h, "from a"); n != 1 {
+			t.Fatalf("the resends ran %d times, want once", n)
+		}
+	})
+
+	// The other side of the re-check (§3.6, 03 §7): a connection that merely
+	// closes — released, with no resume — has not moved on, so a command it
+	// admitted still runs, once, and its receipt answers the resend after a
+	// later resume.
+	t.Run("an admitted command whose connection merely closed still runs", func(t *testing.T) {
+		gates := map[string]chan struct{}{
+			protocol.MethodQueueAdd:        make(chan struct{}),
+			protocol.MethodSessionSetTitle: make(chan struct{}),
+		}
+		arrived := make(chan string, len(gates))
+		var arm atomic.Bool
+		h := newHost(t, withHooks(control.TestHooks{BeforeCommand: func(method string) {
+			if gate, held := gates[method]; held && arm.Load() {
+				arrived <- method
+				<-gate
+			}
+		}}))
+		t.Cleanup(func() {
+			for _, gate := range gates {
+				closeOnce(gate)
+			}
+		})
+		a := h.dial()
+		ha := a.sayHello(nil)
+		arm.Store(true)
+		a.send(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: "1", Text: "from a"})
+		a.send(protocol.MethodSessionSetTitle, protocol.SetTitleParams{SessionID: sid(h), CommandID: "2", Title: "renamed"})
+		for range gates {
+			select {
+			case <-arrived:
+			case <-time.After(watchdog):
+				t.Fatal("both commands before their engine calls")
+			}
+		}
+		// The peer goes away. A full close is noticed only when a write fails
+		// (X12 13): the SetTitle runs and its reply's write is that failure,
+		// which closes the connection and releases its client — plainly, with
+		// no resume. The queue.add is still held before its engine call.
+		a.close()
+		closeOnce(gates[protocol.MethodSessionSetTitle])
+		h.logs.wait(t, "conn 1 close", "client "+ha.ClientID+":", "write failed")
+
+		closeOnce(gates[protocol.MethodQueueAdd])
+		waitFor(t, "the held command to return", func() bool { return h.srv.Handlers() == 0 })
+		if n := queued(h, "from a"); n != 1 {
+			t.Fatalf("the command admitted before a plain close ran %d times, want once", n)
+		}
+		// A later resume's resend is answered from its receipt: the same row,
+		// never a second one.
+		b := h.dial()
+		if hb := b.sayHello(a.resume()); !hb.Resumed || hb.ClientID != ha.ClientID {
+			t.Fatalf("the resume: %+v", hb)
+		}
+		row, err := agent.DecodeQueuedPrompt(ok[protocol.QueueAddResult](t, queueAdd(b, "1", "from a")).Row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := h.eng.State(); queued(h, "from a") != 1 || st.Queue[0].ID != row.ID {
+			t.Fatalf("the resend's row %s, the queue %+v: want the stored row, once", row.ID, st.Queue)
+		}
+	})
+}
+
+// TestABindingIdleForTwiceTheHorizonIsDropped (plan 027 X13, astra r5): a
+// binding with no connection for twice the receipts table's age bound is
+// dropped with its token, so neither the table nor the token index grows with
+// every client that never comes back — and a binding just under the bound
+// still resumes. The drop does not wait for the engine: a client whose command
+// is still running (so not retired) loses its binding all the same, and its
+// resume is answered resumed: false with a fresh id.
+func TestABindingIdleForTwiceTheHorizonIsDropped(t *testing.T) {
+	t.Run("clients that never come back are forgotten", func(t *testing.T) {
+		h := newHost(t)
+		idle := 2 * h.eng.State().RetryHorizon.Age
+		const gone = 5
+		for range gone {
+			c := h.dial()
+			hc := c.sayHello(nil)
+			c.close()
+			h.logs.wait(t, "close", "client "+hc.ClientID+":")
+		}
+		if binds, tokens := h.srv.Bindings(); binds != gone || tokens != gone {
+			t.Fatalf("before the bound: %d bindings and %d tokens, want %d of each", binds, tokens, gone)
+		}
+		h.clock.advance(idle)
+		x := h.dial()
+		x.sayHello(nil)
+		if binds, tokens := h.srv.Bindings(); binds != 1 || tokens != 1 {
+			t.Fatalf("past the bound: %d bindings and %d tokens, want the new client's alone", binds, tokens)
+		}
+	})
+
+	t.Run("just under the bound it resumes, at the bound it does not", func(t *testing.T) {
+		h := newHost(t)
+		idle := 2 * h.eng.State().RetryHorizon.Age
+		held, releaseSet := h.stub.HoldNextSet()
+		t.Cleanup(releaseSet)
+		// A Set parked in the session keeps its client from retiring (an open
+		// reservation is an entry), so only the binding's own bound is at work.
+		a := h.dial()
+		ha := a.sayHello(nil)
+		a.send(protocol.MethodSessionSet, protocol.SetParams{SessionID: sid(h), CommandID: "1",
+			Setting: protocol.Setting{Kind: protocol.SettingModel, Value: "fast"}})
+		await(t, held, "the Set to park in the session")
+		// Its client moves to b, which goes away cleanly: released now.
+		b := h.dial()
+		if hb := b.sayHello(a.resume()); !hb.Resumed {
+			t.Fatalf("the first resume: %+v", hb)
+		}
+		b.close()
+		h.logs.wait(t, "conn 2 close", "client "+ha.ClientID+":")
+
+		h.clock.advance(idle - time.Second)
+		c := h.dial()
+		if hc := c.sayHello(a.resume()); !hc.Resumed || hc.ClientID != ha.ClientID {
+			t.Fatalf("just under the bound: %+v, want resumed %s", hc, ha.ClientID)
+		}
+		c.close()
+		h.logs.wait(t, "conn 3 close", "client "+ha.ClientID+":")
+
+		h.clock.advance(idle)
+		d := h.dial()
+		hd := d.sayHello(a.resume())
+		if hd.Resumed || hd.ClientID == ha.ClientID || hd.Token == ha.Token {
+			t.Fatalf("at the bound: %+v, want resumed: false with a fresh id", hd)
+		}
+		if binds, tokens := h.srv.Bindings(); binds != 1 || tokens != 1 {
+			t.Fatalf("at the bound: %d bindings and %d tokens, want the fresh client's alone", binds, tokens)
+		}
+		// The server dropped the binding; the engine had not retired the
+		// client, whose Set is still running.
+		if err := h.eng.ClaimClient(ha.ClientID); err != nil {
+			t.Fatalf("the engine retired the client: %v", err)
+		}
+	})
 }

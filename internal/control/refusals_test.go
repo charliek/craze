@@ -120,7 +120,12 @@ func TestEveryRefusalPath(t *testing.T) {
 		rpc            int
 	}{
 		{"not JSON", "", `{not json`, protocol.RPCParseError},
+		// A line that starts like a batch and is not JSON is not JSON: the
+		// batch check sees only the first byte, and validity comes first.
+		{"a batch that is not JSON", "", `[garbage`, protocol.RPCParseError},
+		{"an unclosed array", "", `[`, protocol.RPCParseError},
 		{"a batch", "", `[{"jsonrpc":"2.0","id":1,"method":"session.state","params":{}}]`, protocol.RPCInvalidRequest},
+		{"a valid array of anything", "", `[1, "two"]`, protocol.RPCInvalidRequest},
 		{"not an object", "", `42`, protocol.RPCInvalidRequest},
 		{"no id", "", `{"jsonrpc":"2.0","method":"session.state","params":{}}`, protocol.RPCInvalidRequest},
 		{"an object id", "", `{"jsonrpc":"2.0","id":{"x":1},"method":"session.state"}`, protocol.RPCInvalidRequest},

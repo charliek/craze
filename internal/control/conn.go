@@ -76,6 +76,12 @@ func (c *conn) read() {
 		}
 		line, err := lr.ReadLine()
 		switch {
+		case err == nil && !c.admitting():
+			// Superseded or closing while the line was read: the line — one
+			// the reader had buffered before the socket closed — is no
+			// request of this connection's any more. The reader stops.
+			c.release()
+			return
 		case err == nil:
 			c.dispatch(line)
 		case errors.Is(err, protocol.ErrLineTooLong):
@@ -97,8 +103,13 @@ func (c *conn) read() {
 }
 
 // acquire takes an admission slot, waiting while every one is taken; false
-// once the connection has closed.
+// once the connection is closing or superseded (admitting), checked after the
+// slot is taken, so a slot that came free as the connection was superseded
+// admits nothing (astra r5 3).
 func (c *conn) acquire() bool {
+	if h := c.srv.hooks.beforeAcquire; h != nil {
+		h(c.id)
+	}
 	select {
 	case c.slots <- struct{}{}:
 	default:
@@ -114,7 +125,22 @@ func (c *conn) acquire() bool {
 	c.mu.Lock()
 	c.inflight++
 	c.mu.Unlock()
+	if !c.admitting() {
+		c.release()
+		return false
+	}
 	return true
+}
+
+// admitting reports whether the connection may still admit a request: it is
+// neither closing nor superseded. A transfer marks a connection superseded
+// under bindMu before it is closed, so from that moment its reader admits
+// nothing more, whatever it had buffered. It stops NEW requests only: a
+// request already admitted is held back from the engine only if its binding
+// has moved on (conn.command), and one on a connection that merely closed
+// still runs.
+func (c *conn) admitting() bool {
+	return !c.closing.Load() && !c.superseded.Load()
 }
 
 // release gives a slot back: its reply is written, or will never be. The
@@ -159,6 +185,12 @@ func (c *conn) subscriptionLiveLocked() bool { return false }
 // bound measures progress rather than the time a whole 16 MiB line takes.
 const writeChunk = 64 << 10
 
+// writeAttempts is how many attempts the stall bound is cut into: each socket
+// write waits at most a writeAttempts'th of it (a second, of 60 s) before the
+// writer looks at its progress again, so bytes that moved are noticed within
+// one attempt of moving.
+const writeAttempts = 60
+
 // write is the connection's one writer: it drains the outbox in order and
 // gives each line's bytes back to the budget once they are on the socket.
 func (c *conn) write() {
@@ -187,25 +219,40 @@ func (c *conn) write() {
 // errStalled is a write that made no progress for the stall bound.
 var errStalled = errors.New("write stalled: the peer is not reading")
 
-// writeLine writes b whole. Each chunk's write gets a fresh deadline of the
-// stall bound; a deadline that passes having written part of a chunk is
-// progress and gets another, and one that passes having written nothing
-// closes the connection — the session is untouched (§3.7).
+// writeLine writes b whole, or fails once no byte of it has moved for the
+// stall bound — measured from the last byte that moved, never from the start
+// of a write (astra r5): each socket write gets a short deadline (a
+// writeAttempts'th of the bound, and never past the bound's end), the time
+// of the last write that moved bytes is kept, and a write that times out
+// closes the connection once the bound has passed since then — the session is
+// untouched (§3.7). Progress is noticed when its write returns, so the close
+// comes between the bound and the bound plus one attempt after the last byte
+// moved (60–61 s in production).
 func (c *conn) writeLine(b []byte) error {
+	stall := c.srv.stall
+	attempt := max(stall/writeAttempts, time.Millisecond)
+	last := time.Now()
 	for len(b) > 0 {
 		chunk := b[:min(len(b), writeChunk)]
-		_ = c.nc.SetWriteDeadline(time.Now().Add(c.srv.stall))
+		deadline := time.Now().Add(attempt)
+		if end := last.Add(stall); end.Before(deadline) {
+			deadline = end
+		}
+		_ = c.nc.SetWriteDeadline(deadline)
 		n, err := c.nc.Write(chunk)
 		b = b[n:]
+		if n > 0 {
+			last = time.Now()
+		}
 		if err == nil {
 			continue
 		}
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
-			if n > 0 {
-				continue
+			if time.Since(last) >= stall {
+				return errStalled
 			}
-			return errStalled
+			continue
 		}
 		return errors.New("write failed: " + err.Error())
 	}

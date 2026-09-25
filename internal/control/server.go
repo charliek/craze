@@ -55,6 +55,12 @@ type Options struct {
 	// Tokens is where resume tokens (128 bits each) and a minted HostID come
 	// from; nil is crypto/rand. A fixture's source is deterministic.
 	Tokens io.Reader
+	// Clock is the binding table's clock: how long a binding with no
+	// connection is kept (bind.go, "Lifetime") is measured on it. nil is
+	// time.Now, which is what every host runs on. It is the seam a test moves
+	// past the bound with, as engine.Options.ReceiptClock is the receipts
+	// table's; a test hands both the same clock.
+	Clock func() time.Time
 }
 
 // Budget is a subscription budget: the event log's SubscribeOptions MaxItems
@@ -70,12 +76,18 @@ var DefaultMaxBudget = Budget{MaxItems: 4 * 1024, MaxBytes: 4 * (8 << 20)}
 
 // The server's own bounds.
 const (
-	// writeStall is how long a writer may make no progress before its
-	// connection is closed (§3.7).
+	// writeStall is how long a writer may go with no byte moving before its
+	// connection is closed (§3.7), measured from the last byte that moved
+	// (conn.writeLine).
 	writeStall = 60 * time.Second
 	// commandTimeout bounds each blocking command — Interject, Cancel and Set
 	// — on its server-owned context (§3.6). The non-waiting verbs take none.
 	commandTimeout = 30 * time.Second
+	// acceptBackoffMin and acceptBackoffMax bound the accept loop's wait after
+	// a transient accept failure, doubling from the one to the other, as
+	// net/http's accept loop does.
+	acceptBackoffMin = 5 * time.Millisecond
+	acceptBackoffMax = time.Second
 )
 
 // Server is the control socket's server: one session (SetEngine), any number
@@ -88,30 +100,41 @@ type Server struct {
 	pid       int
 	maxBudget Budget
 
-	// Bounds a test may lower (export_test.go); fixed before Serve.
-	stall   time.Duration
-	maxLine int
-	hooks   hooks
+	// Bounds a test may move (export_test.go); fixed before Serve.
+	stall      time.Duration
+	maxLine    int
+	backoffMin time.Duration
+	backoffMax time.Duration
+	hooks      hooks
 
-	// bindMu guards the engine, the binding table, the token index and every
-	// conn's bound state (bind.go). A leaf above the receipts table's.
+	// bindMu guards the engine, the binding table, the token index, the
+	// released list and every conn's bound state (bind.go). A leaf above the
+	// receipts table's.
 	bindMu sync.Mutex
 	eng    *engine.Engine
 	// crazeID and incarnation are the engine's durable session id and its
-	// log's incarnation, read once when it is set.
+	// log's incarnation, read once when it is set; idle is how long a binding
+	// of its may go with no connection before it is dropped: twice its
+	// receipts table's age bound (bind.go, "Lifetime").
 	crazeID     string
 	incarnation string
+	idle        time.Duration
 	binds       map[string]*binding
 	// tokens indexes every resume token this server has issued and still
 	// remembers — the current engine's and the previous one's — by token, to
 	// the client id it names and the incarnation it was issued in (bind.go).
 	tokens map[string]tokenOwner
+	// released is every release of the current engine's bindings, oldest
+	// first, for the lazy drop of the idle ones (bind.go, "Lifetime").
+	released []releaseRecord
 
 	connMu    sync.Mutex
 	conns     map[*conn]struct{}
 	listeners map[net.Listener]struct{}
 	closed    bool
-	nextConn  uint64
+	// done is closed when closed is set: it ends the accept loops' backoff.
+	done     chan struct{}
+	nextConn uint64
 
 	// transport counts the goroutines Close joins: accept loops, readers and
 	// writers. handlers counts the ones it does not (package doc, "Close").
@@ -127,6 +150,9 @@ type Server struct {
 // hooks are test barriers, nil in production and set before Serve
 // (export_test.go).
 type hooks struct {
+	// beforeAcquire runs on a reader before it takes each admission slot,
+	// with the connection's id.
+	beforeAcquire func(conn uint64)
 	// admissionFull runs on a reader that found every admission slot taken,
 	// just before it waits for one.
 	admissionFull func()
@@ -135,6 +161,10 @@ type hooks struct {
 	beforeUnbind func(client string)
 	// beforeBind runs in hello before the binding section (bindMu).
 	beforeBind func()
+	// beforeCommand runs on a handler that is about to run a mutating
+	// command, before the host-wide cap and the binding's re-check, with the
+	// method.
+	beforeCommand func(method string)
 	// beforeBarrier runs on a handler after its command returned and before
 	// the reply barrier's SyncSeq, with the method.
 	beforeBarrier func(method string)
@@ -146,17 +176,23 @@ type hooks struct {
 // New builds a server. It serves nothing until SetEngine and Serve.
 func New(o Options) *Server {
 	s := &Server{
-		opts:      o,
-		hostID:    o.HostID,
-		version:   o.CrazeVersion,
-		pid:       o.PID,
-		maxBudget: o.MaxBudget,
-		stall:     writeStall,
-		maxLine:   protocol.OutboundLineMax,
-		binds:     map[string]*binding{},
-		tokens:    map[string]tokenOwner{},
-		conns:     map[*conn]struct{}{},
-		listeners: map[net.Listener]struct{}{},
+		opts:       o,
+		hostID:     o.HostID,
+		version:    o.CrazeVersion,
+		pid:        o.PID,
+		maxBudget:  o.MaxBudget,
+		stall:      writeStall,
+		maxLine:    protocol.OutboundLineMax,
+		backoffMin: acceptBackoffMin,
+		backoffMax: acceptBackoffMax,
+		binds:      map[string]*binding{},
+		tokens:     map[string]tokenOwner{},
+		conns:      map[*conn]struct{}{},
+		listeners:  map[net.Listener]struct{}{},
+		done:       make(chan struct{}),
+	}
+	if s.opts.Clock == nil {
+		s.opts.Clock = time.Now
 	}
 	if s.opts.Tokens == nil {
 		s.opts.Tokens = rand.Reader
@@ -218,9 +254,11 @@ func (s *Server) newToken() (string, error) {
 // sends every attached connection reset{session_replaced} first.)
 func (s *Server) SetEngine(e *engine.Engine) {
 	var crazeID, incarnation string
+	var idle time.Duration
 	if e != nil {
 		st := e.State()
 		crazeID, incarnation = st.CrazeSessionID, st.Incarnation
+		idle = 2 * st.RetryHorizon.Age
 	}
 	s.bindMu.Lock()
 	if s.eng == e {
@@ -229,9 +267,10 @@ func (s *Server) SetEngine(e *engine.Engine) {
 	}
 	replaced := s.eng != nil
 	outgoing := s.incarnation
-	s.eng, s.crazeID, s.incarnation = e, crazeID, incarnation
+	s.eng, s.crazeID, s.incarnation, s.idle = e, crazeID, incarnation, idle
 	if replaced {
 		s.binds = map[string]*binding{}
+		s.released = nil
 		for tok, o := range s.tokens {
 			if o.incarnation != outgoing {
 				delete(s.tokens, tok)
@@ -284,10 +323,17 @@ func (s *Server) Serve(l net.Listener) error {
 				return err
 			}
 			// Transient (EMFILE, ECONNABORTED, …): wait and go on, as
-			// net/http's accept loop does.
-			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
+			// net/http's accept loop does. Close ends the wait, so the
+			// loop never holds Close past its deadline (astra r5 6).
+			backoff = min(max(2*backoff, s.backoffMin), s.backoffMax)
 			s.logf("control: accept: %v; retrying in %s", err, backoff)
-			time.Sleep(backoff)
+			wait := time.NewTimer(backoff)
+			select {
+			case <-wait.C:
+			case <-s.done:
+				wait.Stop()
+				return nil
+			}
 			continue
 		}
 		backoff = 0
@@ -358,7 +404,10 @@ func (s *Server) liveConns() []*conn {
 // nowhere. It is idempotent; a later call waits the same way.
 func (s *Server) Close(ctx context.Context) error {
 	s.connMu.Lock()
-	s.closed = true
+	if !s.closed {
+		s.closed = true
+		close(s.done)
+	}
 	ls := make([]net.Listener, 0, len(s.listeners))
 	for l := range s.listeners {
 		ls = append(ls, l)

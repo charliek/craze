@@ -26,13 +26,17 @@ var envelopeMembers = []string{"jsonrpc", "id", "method", "params"}
 // it: -32700 for a line that is not JSON and -32600 for a batch, a value that
 // is not an object, or an object that is not a request. The id is echoed
 // whenever it could be read, and is null otherwise.
+//
+// Validity is decided first: protocol.IsBatch looks only at the first byte, so
+// "[garbage" is a line that is not JSON (-32700), and only a VALID array is a
+// batch (-32600).
 func parseRequest(line []byte) (*request, json.RawMessage, *protocol.Error) {
-	if protocol.IsBatch(line) {
-		return nil, nil, invalidRequest("a batch: protocol 1 takes one request per line")
-	}
 	if !json.Valid(line) {
 		return nil, nil, &protocol.Error{Code: protocol.RPCParseError, Message: "not JSON",
 			Data: protocol.ErrorData{Code: protocol.CodeBadRequest, Reason: protocol.ReasonBadRequest}}
+	}
+	if protocol.IsBatch(line) {
+		return nil, nil, invalidRequest("a batch: protocol 1 takes one request per line")
 	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(line, &m); err != nil {

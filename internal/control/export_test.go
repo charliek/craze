@@ -5,6 +5,9 @@ import "time"
 // TestHooks are the server's barriers for tests outside the package (control_test):
 // the hooks of the same names (server.go), set before Serve.
 type TestHooks struct {
+	// BeforeAcquire runs on a reader before it takes each admission slot, with
+	// the connection's id (the order the server accepted it in, from 1).
+	BeforeAcquire func(conn uint64)
 	// AdmissionFull runs on a reader that found every admission slot taken.
 	AdmissionFull func()
 	// BeforeUnbind runs on a closing connection's cleanup before its
@@ -12,6 +15,9 @@ type TestHooks struct {
 	BeforeUnbind func(client string)
 	// BeforeBind runs in hello before the binding section.
 	BeforeBind func()
+	// BeforeCommand runs on a handler about to run a mutating command, before
+	// the host-wide cap and the binding's re-check.
+	BeforeCommand func(method string)
 	// BeforeBarrier runs on a handler after its command returned and before
 	// the reply barrier.
 	BeforeBarrier func(method string)
@@ -24,9 +30,11 @@ type TestHooks struct {
 func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Server {
 	s := New(o)
 	s.hooks = hooks{
+		beforeAcquire: h.BeforeAcquire,
 		admissionFull: h.AdmissionFull,
 		beforeUnbind:  h.BeforeUnbind,
 		beforeBind:    h.BeforeBind,
+		beforeCommand: h.BeforeCommand,
 		beforeBarrier: h.BeforeBarrier,
 		outboxFull:    h.OutboxFull,
 	}
@@ -37,6 +45,18 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		s.maxLine = maxLine
 	}
 	return s
+}
+
+// SetAcceptBackoff sets the accept loop's backoff bounds (5 ms and 1 s in
+// production), before Serve.
+func (s *Server) SetAcceptBackoff(lo, hi time.Duration) { s.backoffMin, s.backoffMax = lo, hi }
+
+// Bindings is how many bindings the table holds and how many tokens the index
+// holds.
+func (s *Server) Bindings() (binds, tokens int) {
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	return len(s.binds), len(s.tokens)
 }
 
 // OutboxHighWater is the most bytes any live connection's outbox has held.
