@@ -74,6 +74,7 @@ var (
 	// ErrClosed ends a subscription that was closed, by its own Close or by
 	// its log's, and is what Subscribe returns on a closed log. It is not
 	// acp.ErrClosed: that one is an agent connection ending under a turn.
+	// Subscription.Rest tells the two closes apart.
 	ErrClosed = errors.New("agent: event log closed")
 	// ErrSlowConsumer ends a subscription whose reader fell further behind
 	// than its buffer allows. The log never waits for a subscriber, so one
@@ -97,6 +98,18 @@ var (
 	// done treats the barrier as an ordering nicety, so this is a fact about the
 	// wait and not about the record.
 	ErrFlushGaveUp = errors.New("agent: the flush was given up: its session is closing")
+	// ErrRestUnavailable is Subscription.Rest's answer for a subscription whose
+	// replay was still reading its head from the journal file when the log's
+	// Close ended it — waiting for the writer, part-way through the range, or not
+	// yet begun. What it had not delivered is partly in a file it no longer
+	// reads, so any tail it could hand back would be a suffix posing as the
+	// whole, and it hands back none (plan 027 §3.7).
+	ErrRestUnavailable = errors.New("agent: no closing tail: the subscription's journal replay was outstanding when its log closed")
+	// ErrNoRest is Subscription.Rest's answer for a subscription that did not
+	// end by its log's Close — a detach (its own Close), ErrSlowConsumer, a
+	// replay that could not be served, a hole — or has not ended yet. Only a log
+	// closing under a subscription leaves it records it owes and cannot deliver.
+	ErrNoRest = errors.New("agent: no closing tail: the subscription did not end by its log's close, or has not ended")
 	// ErrObserverSet refuses a second Observe. The observer is one per log, set
 	// before the session publishes anything, because it runs inside the
 	// publishing boundary and two of them would be a fan-out with no budget.
@@ -451,6 +464,10 @@ type EventLog struct {
 	ring     recordRing      // recent records, oldest first
 	subs     []*Subscription // subscriptions offered each record; a terminated one is swept lazily
 	observer func(Event)     // Observe's, nil when unset; runs at commit
+	// committed is next again, stored beside it in commitLocked: the log's
+	// committed head, readable without the boundary. It is what FlushSeq answers
+	// with once its Flush has returned (plan 027 §3.6).
+	committed atomic.Uint64
 
 	// inflightMu guards the in-flight region's state (see above): closing,
 	// set once by Close, after which no publisher is admitted; inflight, the
@@ -560,6 +577,15 @@ type logHooks struct {
 	// record with seq. A subscription keeps the hooks its log had when it
 	// was opened.
 	delivered func(seq uint64)
+	// sending runs in a subscription's owner just before it blocks handing the
+	// record with seq to Records: the record's charge is already released
+	// (handOver) and it is not delivered yet — the record a Rest keeps first.
+	sending func(seq uint64)
+	// ownerStarts runs first thing in a subscription's owner goroutine, before
+	// it delivers anything, with the subscription's kill: a test holds it there
+	// until the subscription has ended, standing in for an owner the scheduler
+	// had not yet run when its log closed.
+	ownerStarts func(kill <-chan struct{})
 	// outboxAdmitting runs in the drainer just before it waits for the boundary
 	// with a batch of events events.
 	outboxAdmitting func(events int)
@@ -889,6 +915,7 @@ func omittedError(err error) string {
 // remote is used for nothing else, and dropped with the call.
 func (l *EventLog) commitLocked(ev Event, rec Record, remote *RemoteError) {
 	l.next = rec.Seq
+	l.committed.Store(rec.Seq)
 	l.ring.push(rec)
 	dropped := 0
 	kept := l.subs[:0]
@@ -1199,6 +1226,30 @@ func (l *EventLog) Flush(ctx context.Context, done <-chan struct{}) error {
 	}
 }
 
+// FlushSeq is Flush with the sequence number the barrier reached: once Flush
+// returns nil, the log's committed head read at that moment. It is the socket
+// server's reply barrier (plan 027 §3.6) — a handler that ran a mutating command
+// learns the seq S its subscription has to deliver up to before the command's
+// reply may follow it on the wire.
+//
+// The seq is ≥ every seq of every event enqueued before the call, and of every
+// Publish that had returned before it: the drainer commits a batch (commitLocked
+// stores the head) before it advances the running total a Flush compares
+// (commitBatch runs after publishBatch), and a direct Publish commits before it
+// returns. It may be higher — whatever else was committed meanwhile — which a
+// barrier only ever waits a little longer for.
+//
+// Its errors are Flush's, with seq 0: ErrLogClosing once Close has begun,
+// ErrFlushGaveUp when done closes first, ctx.Err() when ctx ends first. It
+// blocks exactly as Flush does, so the same rule holds: never from the
+// primary's reader unless another goroutine is reading.
+func (l *EventLog) FlushSeq(ctx context.Context, done <-chan struct{}) (uint64, error) {
+	if err := l.Flush(ctx, done); err != nil {
+		return 0, err
+	}
+	return l.committed.Load(), nil
+}
+
 // unpark takes w off the waiter list. It reports w's answer when the drainer
 // answered it in the very instant ctx ended: an answered waiter is no longer
 // listed, and its answer is already in its channel, so the truth is preferred to
@@ -1481,7 +1532,7 @@ func (l *EventLog) Observe(fn func(Event)) error {
 // started. The cutoff is taken inside the boundary: the last seq N, and a
 // pin on every ring record in (After.Seq, N] — references to immutable
 // records, which the ring may evict afterwards without touching the pinned
-// copies — and live delivery begins at N+1.
+// copies — and live delivery begins at N+1. N is the subscription's Cutoff.
 func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 	o.MaxItems = orDefault(o.MaxItems, defaultSubscribeItems)
 	o.MaxBytes = orDefault(o.MaxBytes, defaultSubscribeBytes)
@@ -1541,6 +1592,7 @@ func (l *EventLog) Subscribe(o SubscribeOptions) (*Subscription, error) {
 		pinned, pinnedBytes = l.ring.copyOut(skip, count), bytes
 	}
 	s := l.newSubscription(o.MaxItems, o.MaxBytes, pinnedBytes)
+	s.cutoff = n
 	l.sweepLocked()
 	l.subs = append(l.subs, s)
 	l.startOwner(s, head, pinned, prev)
@@ -1914,6 +1966,13 @@ func (l *EventLog) endOpenAttemptsLocked(now time.Time) {
 //     with ErrClosed and its owner goroutine waited for; and the journal closed,
 //     waiting at most its own bound (500 ms) and at most until ctx ends.
 //
+// Ending a subscription does not wait for its reader, so what it had accepted
+// and not yet delivered — the session's closing records among them, the
+// synthetic `closing` ending and the asks' endings this very Close committed —
+// never reaches its Records. It is not dropped either: the owner keeps it, in
+// order, and the subscription's Rest hands it back once Records has closed
+// (plan 027 §3.7), which is how a forwarder delivers a session's last words.
+//
 // Every phase is bounded with nobody reading the primary, and none of them
 // leaves a goroutine behind. It is idempotent: a second call returns once the
 // first has finished. It is safe on a log never published to, and on one whose
@@ -1929,7 +1988,7 @@ func (l *EventLog) Close(ctx context.Context) {
 		l.awaitInFlight()
 		subs := l.cutoffLocked()
 		for _, s := range subs {
-			s.terminate(ErrClosed)
+			s.closedByLog()
 		}
 		// Every owner's blocking point selects on its subscription's kill,
 		// which is closed by now for every subscription there is: the ones
@@ -2055,6 +2114,12 @@ func (l *EventLog) ownerDone() {
 // the live buffer, in order. Publishers only append to the live buffer,
 // without blocking; a buffer that would overflow ends the subscription with
 // ErrSlowConsumer instead of making a publisher wait.
+//
+// The end never waits for the reader, so a subscription usually ends with
+// records it had accepted and not delivered. They are discarded with it —
+// except when its log's Close is what ended it: then they are the session's
+// closing records, which a client is owed, and the owner keeps them for Rest
+// (plan 027 §3.7).
 type Subscription struct {
 	log      *EventLog
 	hooks    *logHooks // the log's test seams when it was opened; nil in production
@@ -2063,6 +2128,9 @@ type Subscription struct {
 	notify   chan struct{} // capacity 1: the live buffer has something new
 	maxItems int
 	maxBytes int
+	// cutoff is the head Subscribe read inside the boundary (Cutoff). It is set
+	// before the owner starts and never written again, so it needs no lock.
+	cutoff uint64
 
 	// mu guards the rest. It is a leaf: publishers take it inside the
 	// boundary, and nothing holding it waits on anything.
@@ -2072,25 +2140,90 @@ type Subscription struct {
 	bytes     int      // their bytes, plus the pinned replay's not yet being sent
 	cause     error    // the first terminal cause
 	err       error    // cause, published once the owner has stopped
+	// byLog says the first terminal cause was the log's Close (closedByLog),
+	// which is the one ending Rest answers for. A detach ends with the same
+	// ErrClosed, so the cause alone cannot say which it was.
+	byLog bool
+	// rest and restErr are Rest's answer, recorded by finish once the owner has
+	// stopped, for a subscription ended by its log's Close: what it had
+	// accepted and not delivered, in order, or why no whole tail can be given.
+	rest    []Record
+	restErr error
 }
 
 // Records is the subscription's stream. It is closed when the subscription
-// ends, and Err then says why.
+// ends, and Err then says why — and Rest, after the log's Close, what it
+// accepted and never delivered.
 func (s *Subscription) Records() <-chan Record { return s.out }
 
 // Err is why the subscription ended: ErrClosed, ErrSlowConsumer, or an
 // ErrCursorUnresolvable from its replay. It is stored before Records is
-// closed and never changes after; before that it is nil.
+// closed and never changes after; before that it is nil. ErrClosed is the
+// answer both for a detach (Close) and for the log's own Close: Rest is what
+// tells them apart.
 func (s *Subscription) Err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
 }
 
-// Close ends the subscription with ErrClosed. It only marks it and signals
-// the owner, never taking the log's boundary, so it cannot block behind a
-// wedged primary. It is idempotent, and does nothing to a subscription that
-// already ended.
+// Cutoff is the log's head when the subscription registered: the last seq
+// committed then, read inside the boundary with the pin (Subscribe), 0 on a log
+// that had committed nothing. Live delivery begins after it, so the record whose
+// Seq equals the cutoff is the end of the catch-up — the replay, for a cursor
+// subscription, runs to it — and a cutoff equal to the start position (the
+// cursor's Seq, or the cutoff itself for a live-only subscription) means there
+// was nothing to replay. It is the socket forwarder's `synchronized` point
+// (plan 027 §3.4). It never changes, and reading it takes no lock.
+func (s *Subscription) Cutoff() uint64 { return s.cutoff }
+
+// Rest is what the subscription had accepted and not yet delivered when its
+// log's Close ended it (plan 027 §3.7): exactly the undelivered tail, in order —
+// contiguous after the last record Records delivered, or after the start
+// position (the cursor, or the cutoff for a live-only subscription) when it
+// delivered nothing. It is how a forwarder delivers a session's closing records,
+// the ones the log committed while it closed and ended the subscription before
+// any reader could take them.
+//
+// It answers from the subscription's own retained undelivered state, never from
+// the ring: the ring may have evicted records a subscription with a larger
+// budget still holds, and a journal-backed replay's head predates the ring
+// altogether. For the same reason a subscription whose journal leg was
+// outstanding at the close — waiting for the writer, part-way through the file,
+// or not yet begun — is ErrRestUnavailable: the rest of its head is in a file it
+// no longer reads, and a suffix is never presented as the whole tail. A tail
+// that is not contiguous is a bug, and is an error rather than a partial answer.
+//
+// It is meaningful once Records has closed: the tail is recorded before the
+// close, as Err is, so a reader that has seen the channel closed reads the final
+// answer. Before that, and for a subscription that ended any other way — a
+// detach, ErrSlowConsumer, a replay that could not be served, a hole — it is
+// ErrNoRest. An empty tail is nil with a nil error. It may be called more than
+// once and from any goroutine, and hands out a copy each time, each record
+// detached as Records hands them out.
+func (s *Subscription) Rest() ([]Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.err == nil || !s.byLog:
+		return nil, ErrNoRest
+	case s.restErr != nil:
+		return nil, s.restErr
+	case len(s.rest) == 0:
+		return nil, nil
+	}
+	out := make([]Record, len(s.rest))
+	for i, r := range s.rest {
+		out[i] = r.detached()
+	}
+	return out, nil
+}
+
+// Close ends the subscription with ErrClosed: a detach. It only marks it and
+// signals the owner, never taking the log's boundary, so it cannot block behind
+// a wedged primary. It is idempotent, and does nothing to a subscription that
+// already ended. What the subscription had not delivered is discarded — its
+// reader asked for nothing more — so Rest is ErrNoRest for it.
 func (s *Subscription) Close() { s.terminate(ErrClosed) }
 
 // terminate ends the subscription with cause unless it has already ended.
@@ -2098,6 +2231,19 @@ func (s *Subscription) terminate(cause error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.endLocked(cause)
+}
+
+// closedByLog is the log's Close ending the subscription: ErrClosed, as a
+// detach, and marked as ended by the log's close when — and only when — that is
+// its first terminal cause, which is what leaves the owner's undelivered tail
+// for Rest.
+func (s *Subscription) closedByLog() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cause == nil {
+		s.byLog = true
+	}
+	s.endLocked(ErrClosed)
 }
 
 // endLocked sets the terminal cause and closes kill, unless the subscription
@@ -2157,12 +2303,79 @@ func (s *Subscription) offer(rec Record) offerResult {
 // before closing Records.
 func (s *Subscription) run(head *headRange, pinned []Record, prev uint64) {
 	defer s.log.ownerDone()
-	s.finish(s.pump(head, pinned, prev))
+	if h := s.hooks; h != nil && h.ownerStarts != nil {
+		h.ownerStarts(s.kill)
+	}
+	t := ownerTail{prev: prev}
+	err := s.pump(head, pinned, &t)
+	s.finish(err, &t)
+}
+
+// ownerTail is what the owner holds of its stream outside the live buffer, and
+// where it stands: what Rest is built from when the log's Close ends the
+// subscription (plan 027 §3.7). Only the owner's goroutine touches it — pump
+// writes it and finish reads it, one after the other — so it needs no lock.
+type ownerTail struct {
+	// prev is the seq the reader has: the last record delivered, or the start
+	// position — the cursor, or the cutoff for a live-only subscription.
+	prev uint64
+	// sending is the record the owner was handing to Records when it stopped,
+	// if hasSending: taken from the pin or the batch, and neither delivered nor
+	// in the live buffer. Its charge against the budget was already released
+	// (handOver), so it is accounted for here and nowhere else.
+	sending    Record
+	hasSending bool
+	// local is the unsent remainder of what the owner had in hand: its ring pin,
+	// or its live batch. Only one of the two can be non-empty, because the owner
+	// is in one phase at a time — it takes its first live batch only once the
+	// pin is spent — so one field holds whichever it was.
+	local []Record
+	// journal says the owner stopped with the journal leg of its replay
+	// outstanding (headRange.serve, its wait included) — or not yet begun.
+	journal bool
+}
+
+// stopped records what the owner had in hand when a send did not deliver rec:
+// rec itself, then rest, the remainder of the pin or the batch it came from.
+func (t *ownerTail) stopped(rec Record, rest []Record) {
+	t.sending, t.hasSending, t.local = rec, true, rest
+}
+
+// closing is the undelivered tail as Rest hands it out: the record being sent,
+// the rest of the pin or batch, then live, the live buffer — checked to follow
+// prev one seq at a time, the way send checks a record before delivering it.
+// A journal leg still outstanding is ErrRestUnavailable, and a hole is an error:
+// nothing here is ever a partial tail.
+func (t *ownerTail) closing(live []Record) ([]Record, error) {
+	if t.journal {
+		return nil, ErrRestUnavailable
+	}
+	n := len(t.local) + len(live)
+	if t.hasSending {
+		n++
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	tail := make([]Record, 0, n)
+	if t.hasSending {
+		tail = append(tail, t.sending)
+	}
+	tail = append(append(tail, t.local...), live...)
+	next := t.prev + 1
+	for _, rec := range tail {
+		if rec.Seq != next {
+			return nil, fmt.Errorf("%w: the closing tail has seq %d where %d follows the last delivered", errNotContiguous, rec.Seq, next)
+		}
+		next++
+	}
+	return tail, nil
 }
 
 // pump delivers the replay and then the live buffer until the subscription
-// ends, and returns why it did. prev is the seq the reader already has: the
-// cursor, or the cutoff for a live-only subscription.
+// ends, and returns why it did. t.prev starts as the seq the reader already
+// has — the cursor, or the cutoff for a live-only subscription — and pump keeps
+// t describing what it holds, so that finish can build Rest from it.
 //
 // The replay is in two parts, in sequence order: the head the ring no longer
 // holds, streamed from the journal file, and then the ring records the cutoff
@@ -2172,17 +2385,23 @@ func (s *Subscription) run(head *headRange, pinned []Record, prev uint64) {
 // and a subscription that kept within its budget must not be dropped for a
 // record its reader already has. A record from the file was never charged —
 // the range is streamed, never held — so it has nothing to release.
-func (s *Subscription) pump(head *headRange, pinned []Record, prev uint64) error {
+func (s *Subscription) pump(head *headRange, pinned []Record, t *ownerTail) error {
 	if head != nil {
-		if err := head.serve(s, &prev); err != nil {
+		// Outstanding until serve returns nil: whatever stops it — the end
+		// arriving in its wait, part-way through the file, or before the
+		// owner was ever scheduled — leaves the rest of the head unread.
+		t.journal = true
+		if err := head.serve(s, &t.prev); err != nil {
 			return err
 		}
+		t.journal = false
 	}
 	for i := range pinned {
 		rec := pinned[i]
 		pinned[i] = Record{} // handed over: the pin no longer holds it
 		s.handOver(0, rec.size())
-		if err := s.send(rec, &prev); err != nil {
+		if err := s.send(rec, &t.prev); err != nil {
+			t.stopped(rec, pinned[i+1:])
 			return err
 		}
 	}
@@ -2208,7 +2427,8 @@ func (s *Subscription) pump(head *headRange, pinned []Record, prev uint64) error
 			rec := batch[i]
 			batch[i] = Record{}
 			s.handOver(1, rec.size())
-			if err := s.send(rec, &prev); err != nil {
+			if err := s.send(rec, &t.prev); err != nil {
+				t.stopped(rec, batch[i+1:])
 				return err
 			}
 		}
@@ -2227,7 +2447,8 @@ func (s *Subscription) handOver(items, bytes int) {
 
 // send delivers one record, unless the subscription ends first. A record that
 // does not follow the last one delivered ends it instead: a hole is never
-// delivered silently.
+// delivered silently. A record the end kept from Records — the kill arm — is not
+// lost to the caller: pump keeps it first in the owner's tail (ownerTail).
 func (s *Subscription) send(rec Record, prev *uint64) error {
 	if rec.Seq != *prev+1 {
 		return fmt.Errorf("%w: seq %d after %d", errNotContiguous, rec.Seq, *prev)
@@ -2236,6 +2457,9 @@ func (s *Subscription) send(rec Record, prev *uint64) error {
 	case <-s.kill:
 		return s.terminal()
 	default:
+	}
+	if h := s.hooks; h != nil && h.sending != nil {
+		h.sending(rec.Seq)
 	}
 	select {
 	case s.out <- rec.detached():
@@ -2251,11 +2475,18 @@ func (s *Subscription) send(rec Record, prev *uint64) error {
 
 // finish records why the subscription ended, then closes Records: the error
 // is stored before the close, so a reader that sees the channel closed reads
-// the final Err.
-func (s *Subscription) finish(err error) {
+// the final Err. For a subscription its log's Close ended, the owner's
+// undelivered tail is recorded in the same section, so the same reader reads
+// the final Rest too (plan 027 §3.7); for any other ending it is discarded,
+// with the live buffer, as it always was. Nothing can be offered to the live
+// buffer by now: an ended subscription refuses every offer (offer).
+func (s *Subscription) finish(err error, t *ownerTail) {
 	s.mu.Lock()
 	s.endLocked(err)
 	s.err = s.cause
+	if s.byLog {
+		s.rest, s.restErr = t.closing(s.live)
+	}
 	s.live = nil
 	s.mu.Unlock()
 	close(s.out)

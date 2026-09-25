@@ -1334,6 +1334,193 @@ func TestATicketAnswersOnlyOnceItsWholeBatchIsCommitted(t *testing.T) {
 	}
 }
 
+// flushSeqNow is FlushSeq from the test's own goroutine, which must return.
+func flushSeqNow(t *testing.T, l *EventLog) (uint64, error) {
+	t.Helper()
+	var seq uint64
+	var err error
+	within(t, "FlushSeq", func() { seq, err = l.FlushSeq(context.Background(), nil) })
+	return seq, err
+}
+
+// TestFlushSeqCoversEverySeqEnqueuedBeforeIt is the reply barrier's seq (plan
+// 027 §3.6): producers enqueue batches while others publish directly, and every
+// FlushSeq a goroutine calls after its own batch — or its own direct publish —
+// answers a seq at or past every seq that goroutine had handed the log. A
+// batch's seqs are read twice over: from its own ticket, at the call, and from a
+// subscription that saw the whole run, afterwards, by text, which is also how a
+// direct publish's seq is found. Under -race it is the proof that the committed
+// head is read without the boundary safely.
+func TestFlushSeqCoversEverySeqEnqueuedBeforeIt(t *testing.T) {
+	const producers, batches, each = 6, 40, 3
+	const direct, directEach = 2, 60
+	const total = producers*batches*each + direct*directEach
+	l := newTestLog(t, EventLogOptions{})
+	keepDrained(t, l)
+	s := mustSubscribe(t, l, SubscribeOptions{MaxItems: total})
+
+	// answers[g] is goroutine g's FlushSeq answer for each text it handed over:
+	// every event of a batch, keyed by its own text, is owed that batch's answer.
+	answers := make([]map[string]uint64, producers+direct)
+	var wg sync.WaitGroup
+	for p := range producers {
+		answers[p] = map[string]uint64{}
+		wg.Go(func() {
+			for b := range batches {
+				evs := batchTexts(p, b, each)
+				ticket := l.EnqueueTicket(evs...)
+				seq, err := l.FlushSeq(context.Background(), nil)
+				if err != nil {
+					t.Errorf("producer %d, batch %d: FlushSeq: %v", p, b, err)
+					return
+				}
+				first := ticket.Seq()
+				if first == 0 {
+					t.Errorf("producer %d, batch %d: FlushSeq returned before the batch was committed", p, b)
+					return
+				}
+				if last := first + each - 1; seq < last {
+					t.Errorf("producer %d, batch %d: FlushSeq answered %d, below its batch's last seq %d", p, b, seq, last)
+					return
+				}
+				for _, ev := range evs {
+					answers[p][ev.Text] = seq
+				}
+			}
+		})
+	}
+	for d := range direct {
+		g := producers + d
+		answers[g] = map[string]uint64{}
+		wg.Go(func() {
+			for i := range directEach {
+				text := fmt.Sprintf("d%d-%d", d, i)
+				if !l.Publish(context.Background(), nil, textEvent(text)) {
+					t.Errorf("direct %d: publish %d returned false", d, i)
+					return
+				}
+				seq, err := l.FlushSeq(context.Background(), nil)
+				if err != nil {
+					t.Errorf("direct %d, publish %d: FlushSeq: %v", d, i, err)
+					return
+				}
+				answers[g][text] = seq
+			}
+		})
+	}
+	waitDone(t, &wg)
+	if t.Failed() {
+		return
+	}
+
+	recs := readN(t, s, total)
+	assertRun(t, "the whole run", recs, 1, total)
+	seqOf := make(map[string]uint64, total)
+	for i, text := range recordTexts(t, recs) {
+		seqOf[text] = recs[i].Seq
+	}
+	checked := 0
+	for g, byText := range answers {
+		for text, answer := range byText {
+			seq, ok := seqOf[text]
+			if !ok {
+				t.Fatalf("goroutine %d: %q is not in the record", g, text)
+			}
+			if seq > answer {
+				t.Fatalf("goroutine %d: %q was committed as seq %d, past the %d its FlushSeq answered", g, text, seq, answer)
+			}
+			checked++
+		}
+	}
+	if checked != total {
+		t.Fatalf("%d events checked, want all %d", checked, total)
+	}
+}
+
+// TestFlushSeqWithNothingOutstandingIsTheHeadAtOnce: with nothing in the outbox
+// FlushSeq parks nothing and answers the committed head as it is — 0 on a log
+// that has committed nothing, the last direct publish's seq after some, and the
+// last enqueued event's once a batch has been flushed.
+func TestFlushSeqWithNothingOutstandingIsTheHeadAtOnce(t *testing.T) {
+	l := newTestLog(t, EventLogOptions{})
+	parked := make(chan uint64, 1)
+	l.hooks = &logHooks{flushParked: func(target uint64) { parked <- target }}
+	keepDrained(t, l)
+
+	if seq, err := flushSeqNow(t, l); seq != 0 || err != nil {
+		t.Fatalf("FlushSeq on a log that has committed nothing: (%d, %v), want (0, nil)", seq, err)
+	}
+	for i := range 5 {
+		publishWithin(t, l, textEvent(fmt.Sprint(i+1)))
+	}
+	if seq, err := flushSeqNow(t, l); seq != 5 || err != nil {
+		t.Fatalf("FlushSeq after five direct publishes: (%d, %v), want (5, nil)", seq, err)
+	}
+	select {
+	case target := <-parked:
+		t.Fatalf("a FlushSeq parked for %d with an empty outbox", target)
+	default:
+	}
+	if _, _, _, _, started := outboxState(l); started {
+		t.Fatal("a FlushSeq with nothing enqueued started the drainer")
+	}
+
+	l.Enqueue(textEvent("6"), textEvent("7"))
+	if seq, err := flushSeqNow(t, l); seq != 7 || err != nil {
+		t.Fatalf("FlushSeq after a batch of two: (%d, %v), want (7, nil)", seq, err)
+	}
+	if seq, err := flushSeqNow(t, l); seq != 7 || err != nil {
+		t.Fatalf("FlushSeq with the outbox empty again: (%d, %v), want (7, nil)", seq, err)
+	}
+}
+
+// TestFlushSeqOnceCloseHasBegunIsErrLogClosingAndZero is Flush's close rule with
+// the seq: a FlushSeq already parked when Close begins is answered with the head
+// the at-close commit reached, which covers its batch; one that arrives while
+// Close runs — here from inside Close, once the outbox is committed — or after
+// it is ErrLogClosing with seq 0, at once.
+func TestFlushSeqOnceCloseHasBegunIsErrLogClosingAndZero(t *testing.T) {
+	type answer struct {
+		seq uint64
+		err error
+	}
+	l, w := newJournaledLog(t, EventLogOptions{})
+	fillPrimary(t, l)
+	sending, atSend := sendingAt(primaryCap + 1)
+	parked := make(chan uint64, 1)
+	during := make(chan answer, 1)
+	l.hooks = &logHooks{
+		outboxSending: sending,
+		flushParked:   func(target uint64) { parked <- target },
+		outboxDrained: func() {
+			seq, err := l.FlushSeq(context.Background(), nil)
+			during <- answer{seq, err}
+		},
+	}
+
+	l.Enqueue(textEvent("p1"), textEvent("p2"), textEvent("p3"))
+	if waiting := await(t, atSend, "the drainer to block on the full primary"); !waiting {
+		t.Fatal("the drainer did not wait for the primary before the cut")
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		seq, err := l.FlushSeq(context.Background(), nil)
+		answered <- answer{seq, err}
+	}()
+	await(t, parked, "the FlushSeq to park")
+
+	closeLog(t, l, w)
+	if a := await(t, answered, "the parked FlushSeq"); a.err != nil || a.seq != primaryCap+3 {
+		t.Fatalf("the parked FlushSeq answered (%d, %v), want (%d, nil): the at-close commit covered its batch", a.seq, a.err, primaryCap+3)
+	}
+	if a := await(t, during, "the FlushSeq inside Close"); !errors.Is(a.err, ErrLogClosing) || a.seq != 0 {
+		t.Fatalf("a FlushSeq while Close runs answered (%d, %v), want (0, ErrLogClosing)", a.seq, a.err)
+	}
+	if seq, err := flushSeqNow(t, l); !errors.Is(err, ErrLogClosing) || seq != 0 {
+		t.Fatalf("a FlushSeq after Close answered (%d, %v), want (0, ErrLogClosing)", seq, err)
+	}
+}
+
 // BenchmarkEventLogPublishObserved is V7: S1a's publish benchmark with an
 // observer set, so the two runs side by side say what the observer costs on the
 // hot path. Budget, as in V7: a text delta with the journal attached under 5 µs.

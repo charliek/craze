@@ -210,6 +210,9 @@ func agentSentinels() map[string]error {
 //     and Attach return ErrClosed on a closed log, and a subscription ends
 //     with it or ErrSlowConsumer, but neither takes a Command: no receipt is
 //     ever stored for them.
+//   - ErrNoRest and ErrRestUnavailable are Subscription.Rest's answers about
+//     a subscription's closing tail (plan 027 §3.7) — read by the socket
+//     server's forwarder after its log closed, never a command's answer.
 //   - ErrAgentExited is the transport's. A command that runs into it ran, and
 //     its failure is a real one: "failed" is exactly right for it, and it
 //     needs no row.
@@ -219,7 +222,9 @@ var agentSentinelsNotClassified = []string{
 	"ErrClosed",
 	"ErrFlushGaveUp",
 	"ErrLogClosing",
+	"ErrNoRest",
 	"ErrObserverSet",
+	"ErrRestUnavailable",
 	"ErrSlowConsumer",
 }
 

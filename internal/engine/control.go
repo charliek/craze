@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/journal"
 )
 
 // Command names one mutating command: the client that issued it and that
@@ -465,10 +466,12 @@ func Code(err error) string { return classify(err).code }
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
-// Ask, Answer, CancelSubagent, SetTitle, State, NewClientID and Events wait on
-// nothing: no channel, no provider call, no Publish. Start, Subscribe, Attach,
-// Interject, Cancel, Stop, Set, Sync and Close block and belong on a goroutine that is
-// not the primary's reader — a tea.Cmd. Subscribe is among
+// Ask, Answer, CancelSubagent, SetTitle, State, NewClientID, Events, Ready and
+// Note wait on nothing: no channel, no provider call, no Publish (Ready hands
+// out a channel and never waits on it). Start, Subscribe, Attach, Interject,
+// Cancel, Stop, Set, Sync, SyncSeq and Close block and belong on a goroutine
+// that is not the primary's reader — a tea.Cmd; Sync and SyncSeq wait for the
+// outbox's drainer, which waits for that reader. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
@@ -587,6 +590,18 @@ type Control interface {
 	// primary. It must not be called from the primary's reader unless another
 	// goroutine is reading.
 	Sync(ctx context.Context) error
+	// SyncSeq is Sync that also answers with the log's committed head at that
+	// moment, ≥ the seq of every event enqueued before the call: the socket
+	// server's reply barrier (plan 027 §3.6). It blocks as Sync does, under the
+	// same rule about the primary's reader, and fails as Sync does, with seq 0.
+	SyncSeq(ctx context.Context) (uint64, error)
+	// Ready is closed once the start has run, whatever it came to, or once the
+	// engine has closed, whichever is first (plan 027 §3.6). It waits on
+	// nothing: State says what the start came to.
+	Ready() <-chan struct{}
+	// Note writes a journal-only note into the session's journal — the socket
+	// server's connection diags (plan 027 §3.7) — and waits on nothing.
+	Note(n journal.Note)
 	Close() error
 }
 

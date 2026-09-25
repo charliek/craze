@@ -285,6 +285,11 @@ type Engine struct {
 	closeOnce sync.Once
 	closeErr  error
 
+	// ready is Ready's channel, closed once, by readyOnce, from Started or Close
+	// — whichever comes first.
+	ready     chan struct{}
+	readyOnce sync.Once
+
 	// hooks are test seams; nil in production.
 	hooks *hooks
 }
@@ -372,6 +377,7 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		rearm:    make(chan struct{}, 1),
 		setWake:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
+		ready:    make(chan struct{}),
 		hooks:    h,
 	}
 	// Optional, like the Clocked below: a session that never starts a turn of
@@ -470,7 +476,13 @@ func (e *Engine) Start(ctx context.Context) error {
 //     is the caller's to get right — the TUI names the engine on the message its
 //     start command reports with, and ignores one for an engine it no longer
 //     holds (app.go's startedMsg and staleFor).
+//
+// Every call closes Ready, whatever the start came to and whichever way this
+// returns — the second call and a call on a closed engine included — after the
+// state is written and e.mu released, so a waiter that wakes on Ready reads
+// the start's outcome in State.
 func (e *Engine) Started(err error) {
+	defer e.markReady()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Starting → idle is an activity the fence reads (a queue can only be owed a
@@ -506,6 +518,32 @@ func (e *Engine) NewClientID() string { return e.receipts.newClient() }
 
 // Sync returns once every event enqueued before the call has been delivered.
 func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) }
+
+// SyncSeq is Sync with the seq it reached: the log's committed head once
+// everything enqueued before the call is committed (agent.EventLog.FlushSeq),
+// and so ≥ every event any command that returned before it caused. It is the
+// socket server's reply barrier (plan 027 §3.6): a handler that ran a command
+// waits for its client's subscription to deliver up to this seq before it
+// queues the reply. It blocks as Sync does, under the same rule.
+func (e *Engine) SyncSeq(ctx context.Context) (uint64, error) { return e.log.FlushSeq(ctx, nil) }
+
+// Ready is closed once the session's start has run — Started, whatever it came
+// to — or once the engine has closed, whichever is first, and never again. It
+// is what an attach that waits for readiness (`when: "ready"`) and the `ready`
+// notification wait on (plan 027 §3.4, §3.6); State then says what the start
+// came to, and a closed engine is ready at once, so no waiter waits on one. It
+// waits on nothing.
+func (e *Engine) Ready() <-chan struct{} { return e.ready }
+
+// markReady closes Ready, once.
+func (e *Engine) markReady() { e.readyOnce.Do(func() { close(e.ready) }) }
+
+// Note writes a journal-only note into the session's journal — the socket
+// server's per-connection diag notes (plan 027 §3.7) — through the log, so it
+// is refused after the log's Close exactly as the log's own notes are
+// (agent.EventLog.Note). It waits on nothing, takes no lock of the engine's, and
+// writes nothing without a journal.
+func (e *Engine) Note(n journal.Note) { e.log.Note(n) }
 
 // Asks is every ask the session is holding, in the order they were opened. It
 // waits on nothing and takes no lock of the engine's: the registry is its own
@@ -636,6 +674,9 @@ func (e *Engine) Close() error {
 		}
 		e.log.Enqueue(batch...)
 		e.mu.Unlock()
+		// Closed admits nothing from here, so a start this engine never had
+		// can no longer come: nobody waits for one (Ready).
+		e.markReady()
 		e.closeErr = e.sess.Close()
 		close(e.done)
 		e.wg.Wait()
