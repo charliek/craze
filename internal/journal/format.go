@@ -136,6 +136,12 @@ const (
 	// are the id and whether it was carried in from a loaded row or minted
 	// here.
 	DiagCrazeSession = "craze_session"
+	// DiagControlConn is one control-socket connection opening or closing
+	// (plan 027 §3.7), written by internal/control through Control.Note: the
+	// connection's number, its client id once bound, the peer's pid and uid
+	// when known, and — on close — why it ended. Nothing a client sent is in
+	// it, and never a resume token.
+	DiagControlConn = "control_conn"
 )
 
 // diagNoteTooLarge replaces a note that stays over MaxRecordBytes even with

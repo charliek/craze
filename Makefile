@@ -37,13 +37,15 @@ test:
 # boundary while snapshots are cut from other goroutines; plan 024 §3.4), and
 # the control-socket wire (plan 027 §5: each package the plan adds joins in
 # the commit that creates it, ahead of the server and client that run its
-# framing on every connection's goroutines).
+# framing on every connection's goroutines), and the control-socket server
+# (a reader, a writer and a handler per request on every connection, the
+# binding table's transfers racing its releases, and Close racing all of it).
 # Packages run concurrently, so the wall clock is about the slowest
 # of them. CI runs this same target, so a local pass and a CI pass mean the
 # same thing; the two flakes that reached main in 2026-09 only ever showed
 # under -race.
 test-race:
-	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/...
+	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

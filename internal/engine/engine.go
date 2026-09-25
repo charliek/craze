@@ -50,6 +50,13 @@ type Options struct {
 	// which is what a new session and a row written before crazeId existed both
 	// want.
 	CrazeSessionID string
+	// ReceiptClock is the command-id table's clock (receipts.go): how long a
+	// result is answerable and how long a released client waits before it can
+	// be retired are measured on it. nil is time.Now, which is what every host
+	// runs on. It is the seam a test outside this package moves past the
+	// table's age bound with, instead of waiting ten minutes — the socket
+	// server's client-lifecycle tests (plan 027 §3.6, A12).
+	ReceiptClock func() time.Time
 }
 
 // foreignRetryTick is how often a turn held by ChainPolicy.RetryForeignTurn
@@ -408,6 +415,14 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if h != nil {
 		rh = h.receipts
 	}
+	if opts.ReceiptClock != nil && (rh == nil || rh.now == nil) {
+		withClock := receiptHooks{}
+		if rh != nil {
+			withClock = *rh
+		}
+		withClock.now = opts.ReceiptClock
+		rh = &withClock
+	}
 	e.receipts = newReceiptTable(rh)
 	// Before the observer is installed, which is what folds it: every committed
 	// event from the first reaches it.
@@ -565,6 +580,24 @@ func (e *Engine) markReady() { e.readyOnce.Do(func() { close(e.ready) }) }
 // (agent.EventLog.Note). It waits on nothing, takes no lock of the engine's, and
 // writes nothing without a journal.
 func (e *Engine) Note(n journal.Note) { e.log.Note(n) }
+
+// TranscriptSnapshot is one bounded snapshot of the engine's transcript model,
+// with no subscription: session.snapshot (plan 027 §3.4, bounded history). With
+// agentID "" it is the snapshot an attach cuts (transcript.Model.Snapshot);
+// with a child's id, that child's window is filled right after the main
+// transcript's newest entry (transcript.Model.SnapshotFor), and an id the model
+// names no child or roster row by is an error wrapping agent.ErrNoSuchSubagent
+// (unknown_subagent). budget <= 0 is transcript.DefaultSnapshotBytes; a budget
+// the mandatory sections do not fit is transcript.ErrSnapshotTooLarge, wrapped.
+//
+// It is a read and changes nothing. It takes the model's mutex for the cut
+// alone — held for at most one fold or one cut, never a context wait — and
+// builds the snapshot after releasing it, so it waits on nothing a client could
+// be holding; it may not be called from inside the log's publishing boundary
+// (the observer), which nothing but the engine's own fold runs in.
+func (e *Engine) TranscriptSnapshot(agentID string, budget int) (*transcript.Snapshot, error) {
+	return e.model.SnapshotFor(agentID, budget)
+}
 
 // Asks is every ask the session is holding, in the order they were opened. It
 // waits on nothing and takes no lock of the engine's: the registry is its own

@@ -262,6 +262,7 @@ type CatalogMode struct {
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
+	SubagentBackground  bool `json:"subagentBackground"`
 	Modes               bool `json:"modes"`
 	Effort              bool `json:"effort"`
 	FastToggle          bool `json:"fastToggle"`

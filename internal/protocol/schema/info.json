@@ -85,6 +85,7 @@
       "properties": {
         "interject": {"type": "boolean"},
         "subagentCancel": {"type": "boolean"},
+        "subagentBackground": {"type": "boolean"},
         "modes": {"type": "boolean"},
         "effort": {"type": "boolean"},
         "fastToggle": {"type": "boolean"},
@@ -99,7 +100,7 @@
         "historyCursor": {"type": "boolean"},
         "stop": {"type": "boolean"}
       },
-      "required": ["interject", "subagentCancel", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
+      "required": ["interject", "subagentCancel", "subagentBackground", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
       "additionalProperties": false
     },
     "connectionCapabilities": {
