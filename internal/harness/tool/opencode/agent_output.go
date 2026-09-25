@@ -86,12 +86,16 @@ func (c *agentOutputCall) Request() tool.Request {
 }
 
 // Run hands the call to the session's runner, which answers from the result's
-// delivery state and waits only for a child still running.
+// delivery state and waits only for a child still running. A call cancelled
+// before it got here is handed over too, and the runner answers it aborted at
+// once: redacted, as its every answer is, with every child's keys, where an
+// aborted made here would go out under the parent's alone (astra r17). Only a
+// session with no runner, and so no child, answers aborted here.
 func (c *agentOutputCall) Run(ctx context.Context, env tool.Env) tool.Result {
-	if ctx.Err() != nil {
-		return aborted()
-	}
 	if env.Subagents == nil {
+		if ctx.Err() != nil {
+			return aborted()
+		}
 		return tool.Result{Text: noSubagentsText, IsError: true, Class: tool.ClassToolError}
 	}
 	return env.Subagents.Output(ctx, c.call)

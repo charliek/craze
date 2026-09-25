@@ -581,14 +581,17 @@ func (r *subagents) Output(ctx context.Context, call tool.OutputCall) tool.Resul
 	return res
 }
 
-// output is Output's answer before its last redaction (Output).
+// output is Output's answer before its last redaction (Output). A call whose
+// context is done when it arrives — agent_output hands over a cancelled call
+// rather than answer it itself (astra r17) — is aborted at once, before any
+// lookup or wait.
 func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Result {
 	parent := r.s
 	switch {
-	case parent.child:
-		return tool.Result{Text: subagentNested, IsError: true, Class: tool.ClassToolError}
 	case ctx.Err() != nil:
 		return abortedResult()
+	case parent.child:
+		return tool.Result{Text: subagentNested, IsError: true, Class: tool.ClassToolError}
 	}
 	link := r.turn.Load()
 	if link == nil {

@@ -1647,14 +1647,19 @@ func withChildKey(b *bg, env map[string]string, mu *sync.Mutex, key func(id stri
 // child opens — so the child learns it, and the parent never does — the
 // environment gains a key equal to one of agent_output's fixed answers:
 // already included, already delivered, still running, the refusal of an
-// unknown id, or aborted. The call that answers it answers the marker, and
+// unknown id, or aborted — while it waits, or with its context done on entry
+// (astra r17). The call that answers it answers the marker, and
 // the key reaches neither the parent's ToolFinished nor its transcript: the
 // dispatcher and the tool entry redact with the parent's keys alone.
 func TestAgentOutputRepliesRedacted(t *testing.T) {
+	gated := make(chan struct{}, 1) // the gated case's agent_output call is at the gate
 	for _, c := range []struct {
 		name  string
 		key   func(id string) string
 		class tool.ErrorClass
+		// gated: the session's gate holds an agent_output call, after the
+		// dispatcher's own check of its context, until that context is done.
+		gated bool
 		// drive runs the turn that makes the call, on a session whose child id
 		// is held by w, and returns the call's harness id and the turn's events.
 		drive func(t *testing.T, b *bg, w *worker, id string) (string, []Event)
@@ -1734,11 +1739,45 @@ func TestAgentOutputRepliesRedacted(t *testing.T) {
 				return "t2.1.1", ev.list()
 			},
 		},
+		{
+			// astra r17: the turn is cancelled after the dispatcher checked the
+			// call's context and before the tool's Run does, so the call is
+			// done on entry — and its aborted answer is the runner's, redacted
+			// with the child's key, not one the tool makes itself.
+			name:  "aborted on entry",
+			key:   func(string) string { return tool.AbortedText },
+			class: tool.ClassAborted,
+			gated: true,
+			drive: func(t *testing.T, b *bg, _ *worker, id string) (string, []Event) {
+				b.routers["test/a"].route("go", callStep(outputPart(t, "o1", id, 600000)), answerWith("never"))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var ev events
+				out := start(ctx, b.s, "next", ev.sink)
+				await(t, gated, "the agent_output call at the gate, past the dispatcher's own check")
+				cancel()
+				if got := await(t, out, "the cancelled turn"); got.err != nil || got.res.StopReason != StopCancelled {
+					t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+				}
+				return "t2.1.1", ev.list()
+			},
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
 			var mu sync.Mutex
-			b := openBG(t, withEnv(env, &mu))
+			b := openBG(t, withEnv(env, &mu), func(o *Options) {
+				if !c.gated {
+					return
+				}
+				o.tools.gate = tool.GateFunc(func(ctx context.Context, req tool.Request) (tool.Decision, error) {
+					if req.Tool == tool.AgentOutputTool {
+						gated <- struct{}{}
+						<-ctx.Done()
+					}
+					return tool.Allow{}, nil
+				})
+			})
 			withChildKey(b, env, &mu, c.key)
 			ws, ids := b.spawn(t, "child one")
 			key := c.key(ids[0])
@@ -2106,12 +2145,20 @@ func TestBackgroundRegistrationRacesClose(t *testing.T) {
 // and before its end is latched — taken, where the latch would refuse it. A
 // stop claims only a cancelled ending, so the child stays failed: its finish
 // and its result say its provider failed, never that the user stopped it,
-// and the failure is what the parent's model is delivered.
+// and the failure is what the parent's model is delivered. The worker, its
+// end latched, is held from publishing until the spawning turn has returned
+// (astra r17), so the result is pending for the next turn to deliver: that
+// turn's own step two never takes it up, whichever goroutine runs first.
 func TestBackgroundFailureRacesAStop(t *testing.T) {
 	b := openBG(t)
 	a := b.routers["test/a"]
 	stops := make(chan error, 1)
 	b.s.subs.seams.returned = func(id string) { stops <- b.s.CancelSubagent(id) }
+	spawned := make(chan struct{})
+	b.s.subs.seams.ended = func(string) { <-spawned }
+	// A failure must not leave the worker, and the cleanup's Close, held.
+	letGo := sync.OnceFunc(func() { close(spawned) })
+	defer letGo()
 	a.route("go", callStep(bgPart(t, "a1", "racing", "end on your own")), answerWith("started"))
 	a.route("end on your own", callStep(textParts("looking"), globPart("g1")),
 		reply(openText("half an answer"), errorPart(errors.New("the provider hung up"))))
@@ -2119,6 +2166,7 @@ func TestBackgroundFailureRacesAStop(t *testing.T) {
 	if res, err := b.s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
 		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
 	}
+	letGo()
 	id := startedWith(t, ev.list(), "end on your own").ID
 	if err := await(t, stops, "the stop between the child's Run and its latch"); err != nil {
 		t.Fatalf("the stop = %v; want nil, taken before the latch", err)

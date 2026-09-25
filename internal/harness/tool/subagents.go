@@ -95,7 +95,9 @@ const (
 // Output answers an agent_output call: the result of a background child —
 // delivered once, whichever way — or why there is none to give now. It waits
 // only for a child still running, up to call.Wait; like Run it never returns
-// a Go error, and it returns aborted once ctx is done. Its text is capped
+// a Go error, and it returns aborted once ctx is done — at once for a ctx
+// done when it is called, which agent_output hands it rather than answer
+// itself, so the runner's redaction covers that answer too. Its text is capped
 // already (the result was cut when the child finished), so the agent_output
 // tool's spec is Truncate None as well.
 type Subagents interface {

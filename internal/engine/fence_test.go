@@ -563,9 +563,9 @@ func TestAnOwedDrainOutlivesTheAgentsTurn(t *testing.T) {
 type fenceMethod struct {
 	// site: it reads the session's flag or claims (e.sess.ForeignTurn, Begin).
 	// mutates: it changes an input of the fence — calls a mutator of e.queue, or
-	// assigns e.activity, e.cur, e.cancelsInFlight or e.stopped.
+	// assigns e.activity, e.cur, e.cancelsInFlight, e.stopped or e.closed.
 	// locks: it takes e.mu. raises, syncs: it calls raiseFenceLocked, and defers
-	// syncFenceLocked. closes: it sets e.closed.
+	// syncFenceLocked. closes: it sets e.closed (a mutation too).
 	site, mutates, locks, raises, syncs, closes bool
 	// calls is every method of the receiver it calls, closures and go and defer
 	// statements included.
@@ -614,7 +614,9 @@ func parseEngineMethods(t *testing.T) map[string]*fenceMethod {
 			assigned := func(x ast.Expr) {
 				switch s := selector(x, recv); {
 				case s == "closed":
-					m.closes = true
+					// closed is an input of the fence too (astra r18): a method
+					// that sets it is held to the sync, unless it is Close.
+					m.closes, m.mutates = true, true
 				case slices.Contains(fenceFields, s):
 					m.mutates = true
 				}
@@ -666,9 +668,9 @@ func parseEngineMethods(t *testing.T) map[string]*fenceMethod {
 //     defer its sync, and they are exactly the doc's sections;
 //   - every method that takes e.mu and reaches a change to an input of the fence
 //     — a mutator of e.queue, or an assignment to e.activity, e.cur,
-//     e.cancelsInFlight or e.stopped — must defer the sync; Close alone may
-//     raise it instead, because it sets e.closed and the fence never comes down
-//     again;
+//     e.cancelsInFlight, e.stopped or e.closed — must defer the sync; Close
+//     alone, by name, may raise it instead, because it sets e.closed and the
+//     fence never comes down again;
 //   - and every method that changes such an input without taking e.mu is reached
 //     only from such sections: it has a caller in the package, and each caller
 //     is held to the same rules.
@@ -730,7 +732,7 @@ func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
 			}
 		}
 		// Close alone may raise instead of syncing: it sets closed, for good.
-		if reaches(name, mutation, map[string]bool{}) && !m.syncs && (!m.closes || !m.raises) {
+		if reaches(name, mutation, map[string]bool{}) && !m.syncs && (name != "Close" || !m.closes || !m.raises) {
 			t.Errorf("%s takes e.mu and changes what the fence reads, and does not defer its sync", name)
 		}
 	}
