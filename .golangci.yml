@@ -179,6 +179,44 @@ linters:
               desc: "the control server speaks to engine.Control alone; the ACP wire is not its concern, in a test either (plan 027 §3.7)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the control server speaks to engine.Control alone; a provider transport is not its concern, in a test either (plan 027 §3.7)"
+        # The control socket's Go client (plan 027 §3.14): it speaks
+        # internal/protocol to a host over a socket and needs nothing else of
+        # craze — above all not the server it talks to (internal/control), and
+        # no client package (tui, cli: PR 4's remote.Session is what a client
+        # builds on it) or provider transport. Split in two as control's rule
+        # is: its tests run the real server in front of an engine over
+        # tui.Stub, so $test files answer to remote-test, which allows
+        # internal/control and internal/tui and still denies the rest.
+        remote:
+          list-mode: lax
+          files:
+            - "**/internal/remote/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/charliek/craze/internal/control
+              desc: "the client must not import the server it talks to: it speaks internal/protocol over a socket (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the protocol client serves every client uniformly; a client package builds on it, never the reverse (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the protocol client serves every client uniformly; a client package builds on it, never the reverse (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern (plan 027 §3.14)"
+        remote-test:
+          list-mode: lax
+          files:
+            # One glob that is already both — under internal/remote and named
+            # _test.go — because depguard ORs positive patterns (engine-test
+            # above says why a bare $test would reach every test file).
+            - "**/internal/remote/**_test.go"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the protocol client's tests drive a real server over tui.Stub, never a CLI client (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern, in a test either (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern, in a test either (plan 027 §3.14)"
   exclusions:
     presets:
       - std-error-handling
