@@ -35,7 +35,7 @@ func (l *stallListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nc, err
 	}
-	c := &stallConn{Conn: nc, l: l}
+	c := &stallConn{Conn: nc, l: l, closed: make(chan struct{})}
 	l.mu.Lock()
 	l.conns[c] = struct{}{}
 	l.mu.Unlock()
@@ -77,8 +77,14 @@ func (l *stallListener) state() (time.Time, chan struct{}) {
 // dropAll closes every connection accepted so far, as a network drop would:
 // no detach, no FIN the server's reader can see as a half-close — just gone.
 // The set is cleared first, so a later dropAll only touches what is live
-// then.
-func (l *stallListener) dropAll() {
+// then. It closes each through the stallConn wrapper (Close), not the raw
+// net.Conn, so a write of its own stalled on this listener wakes at once
+// (Write's closed case) instead of sleeping out whatever stall remains; the
+// count returned is how many it closed, for a caller (Host.DropConnections)
+// that waits for the server's own count of open connections to fall by that
+// many — proof its cleanup, unbind included, has actually run for each one,
+// not just that the socket is gone.
+func (l *stallListener) dropAll() int {
 	l.mu.Lock()
 	conns := make([]*stallConn, 0, len(l.conns))
 	for c := range l.conns {
@@ -87,8 +93,9 @@ func (l *stallListener) dropAll() {
 	l.conns = map[*stallConn]struct{}{}
 	l.mu.Unlock()
 	for _, c := range conns {
-		_ = c.Conn.Close()
+		_ = c.Close()
 	}
+	return len(conns)
 }
 
 func (l *stallListener) forget(c *stallConn) {
@@ -100,10 +107,16 @@ func (l *stallListener) forget(c *stallConn) {
 // stallConn is one accepted connection: an ordinary net.Conn (every method
 // but Write and Close promoted) whose Write waits out its listener's stall,
 // if one is active, before writing a byte — so a whole line the server's
-// writer goroutine sends is delayed as one, never split mid-line.
+// writer goroutine sends is delayed as one, never split mid-line. closed is
+// closed once, by Close, so a Write already waiting out a stall wakes at
+// once when the connection closes, rather than only at the stall's deadline
+// or a resume (fixture: stall_writes then quit, C9a review item 5).
 type stallConn struct {
 	net.Conn
 	l *stallListener
+
+	closeOnce sync.Once
+	closed    chan struct{}
 }
 
 func (c *stallConn) Write(b []byte) (int, error) {
@@ -123,6 +136,12 @@ func (c *stallConn) Write(b []byte) (int, error) {
 			// Re-check: a stall (not a resume) may have replaced it with a
 			// new, later deadline.
 		case <-timer.C:
+		case <-c.closed:
+			timer.Stop()
+			// The connection is closing: writing now fails at once (the
+			// socket is already closed, or closing), instead of waiting out
+			// a stall nothing still wants — a wedged host.Quit's whole point.
+			return c.Conn.Write(b)
 		}
 	}
 	return c.Conn.Write(b)
@@ -130,5 +149,6 @@ func (c *stallConn) Write(b []byte) (int, error) {
 
 func (c *stallConn) Close() error {
 	c.l.forget(c)
+	c.closeOnce.Do(func() { close(c.closed) })
 	return c.Conn.Close()
 }

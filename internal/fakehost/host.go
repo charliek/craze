@@ -226,11 +226,12 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // reads it from stdin NDJSON ({"name": "...", ...}) and as a wire fixture's
 // "op" lines script it (wire_test.go). The base list is the brief's: text,
 // thought, tool, permission, question, plan, end, foreign_turn, stall_writes,
-// drop_connections, restart, quit. Beyond it, the fixtures need four more:
+// drop_connections, restart, quit. Beyond it, the fixtures need five more:
 // resume_writes (stall_writes's deterministic counterpart, fixture 4: see
 // StallWrites), spawn_subagent (fixture 11's child), oversized_event
-// (fixture 12's omitted record) and advance_clock (fixture 13's retired
-// client, past the binding table's idle bound).
+// (fixture 12's omitted record), advance_clock (fixture 13's retired
+// client, past the binding table's idle bound) and hang_next (fixture 9's
+// prompt, kept from racing its own reply: see HangNext).
 
 // Text emits an EventText, agent "" for the main session.
 func (h *Host) Text(agentID, text string) {
@@ -317,13 +318,48 @@ func (h *Host) StallWrites(d time.Duration) { h.listener().stall(d) }
 // way to end one, instead of waiting out StallWrites's own duration.
 func (h *Host) ResumeWrites() { h.listener().resume() }
 
+// dropConnectionsWait bounds DropConnections' wait for the server to finish
+// releasing what it dropped: generous next to how fast a closed socket's
+// read error actually reaches control.conn.close (microseconds), so hitting
+// it at all means something else is wrong, not that the wait itself is
+// underprovisioned.
+const dropConnectionsWait = 5 * time.Second
+
 // DropConnections closes every connection the server has accepted so far, as
-// a network drop would (fixture 13).
-func (h *Host) DropConnections() { h.listener().dropAll() }
+// a network drop would (fixture 13), and does not return until the server
+// has finished releasing every one of their bindings: dropAll only closes
+// the raw sockets, and control.Server's own cleanup (conn.close, unbind
+// among it) runs asynchronously on each connection's reader as it notices —
+// so a script's following advance_clock, run the instant this returns, always
+// measures idleness from a release that has already happened, rather than
+// racing that cleanup and sometimes recording it after the clock has already
+// moved (C9a review item 2; control.Server.OpenConns is the accessor this
+// polls).
+func (h *Host) DropConnections() {
+	before := h.srv.OpenConns()
+	n := h.listener().dropAll()
+	target := before - n
+	deadline := time.Now().Add(dropConnectionsWait)
+	for h.srv.OpenConns() > target && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+}
 
 // Restart replaces the engine with a fresh incarnation of the same session
 // (fixture 3).
 func (h *Host) Restart() error { return h.newIncarnation() }
+
+// HangNext arms the Stub's next prompt to open a turn that stays open until
+// EndTurn cancels it, instead of completing on its own (fixture 9's "seen by
+// both", C9a review item 3): the Stub's ordinary echo — its whole run, text
+// and done included — is one asynchronous continuation the engine starts
+// once the prompt's turn opens, and the reply's barrier only waits for the
+// turn's OPENING to reach the client's own subscription, not for that
+// continuation to finish, so nothing about their relative order on the wire
+// is guaranteed. Hung instead, nothing follows the turn's started event on
+// any subscription until this script says so (EndTurn) — armed before the
+// prompt is sent, so it is in effect before the engine can claim it.
+func (h *Host) HangNext() { h.currentStub().HangNext() }
 
 // SpawnSubagent registers a running child (fixture 11).
 func (h *Host) SpawnSubagent(id string) {
@@ -446,6 +482,8 @@ func (h *Host) Do(raw json.RawMessage) error {
 		h.Plan(p.ID, p.PlanName, p.Overview, p.Plan, p.Todos)
 	case "end":
 		h.EndTurn()
+	case "hang_next":
+		h.HangNext()
 	case "foreign_turn":
 		h.ForeignTurn(p.ID, p.Text, p.Reason, p.Running != nil && *p.Running)
 	case "stall_writes":

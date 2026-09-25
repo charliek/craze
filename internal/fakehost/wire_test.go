@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -105,22 +106,260 @@ func (m *incarnations) learn(real string) {
 	m.toReal[ph] = real
 }
 
-// toWire replaces every known real incarnation in b with its placeholder,
-// for a line the host produced (s2c) on its way into the fixture.
+// toWire replaces the real incarnation named by every JSON member literally
+// called "incarnation" — at any depth: the attach reply's after.incarnation,
+// a cursor's, the info document's, a snapshot's — with its placeholder, for
+// a line the host produced (s2c) on its way into the fixture. It never
+// touches any other byte of the line (C9a review item 4): a fixture's own
+// event text that happens to spell a real incarnation's UUID, or the literal
+// string "INCARNATION-1", is carried through unchanged, since neither is the
+// value of a member named "incarnation".
 func (m *incarnations) toWire(b []byte) []byte {
-	for real, ph := range m.toPlaceholder {
-		b = bytes.ReplaceAll(b, []byte(real), []byte(ph))
-	}
-	return b
+	return m.rewrite(b, func(raw []byte) []byte {
+		for real, ph := range m.toPlaceholder {
+			raw = bytes.ReplaceAll(raw, []byte(real), []byte(ph))
+		}
+		return raw
+	})
 }
 
-// fromWire replaces every known placeholder in b with its real incarnation,
-// for a fixture's c2s line on its way to the host.
+// fromWire replaces every known placeholder named by an "incarnation" member
+// with its real incarnation, for a fixture's c2s line on its way to the
+// host — the same confinement as toWire, and for the same reason: a c2s
+// line's own params carry a cursor's incarnation (fixtures 2–4), never
+// anywhere else a placeholder could appear.
 func (m *incarnations) fromWire(b []byte) []byte {
-	for ph, real := range m.toReal {
-		b = bytes.ReplaceAll(b, []byte(ph), []byte(real))
+	return m.rewrite(b, func(raw []byte) []byte {
+		for ph, real := range m.toReal {
+			raw = bytes.ReplaceAll(raw, []byte(ph), []byte(real))
+		}
+		return raw
+	})
+}
+
+// rewrite runs rewriteIncarnations and panics on its error: every line this
+// package ever hands it is one JSON value the host itself wrote or the
+// fixture is about to send (both schema-checked besides), so a parse
+// failure here is a bug in this file, not a fixture's — panicking finds it
+// far faster than a silent pass-through would.
+func (m *incarnations) rewrite(b []byte, sub func([]byte) []byte) []byte {
+	out, err := rewriteIncarnations(b, sub)
+	if err != nil {
+		panic(fmt.Sprintf("fakehost: rewriting incarnations: %v", err))
 	}
-	return b
+	return out
+}
+
+// rewriteIncarnations parses b as one JSON value (compact, as
+// protocol.MarshalLine produces: no whitespace, but none is assumed) and
+// returns a copy with sub applied to the raw bytes (quotes included) of
+// every string value of an object member literally named "incarnation", at
+// any depth — an exact structural match, never a substring match against the
+// whole line (C9a review item 4). Every other byte, member names, other
+// values, punctuation, is copied verbatim, so a line with no "incarnation"
+// member anywhere comes back byte-identical, and one substitution changes
+// only the bytes inside its own pair of quotes: byte-exact replay survives
+// the round trip (toWire then fromWire, or the reverse) even though the
+// value itself changes length (a UUID is 36 bytes, "INCARNATION-1" is 14).
+func rewriteIncarnations(b []byte, sub func([]byte) []byte) ([]byte, error) {
+	w := &jsonWalker{b: b, sub: sub}
+	if err := w.parseValue(); err != nil {
+		return nil, err
+	}
+	w.skipWS()
+	if w.i != len(w.b) {
+		return nil, fmt.Errorf("trailing bytes at %d", w.i)
+	}
+	return w.out.Bytes(), nil
+}
+
+// jsonWalker is rewriteIncarnations' one recursive-descent pass over b: it
+// copies every byte to out as it goes, except that object's method
+// substitutes a member named "incarnation"'s string value through sub
+// instead of copying it. It does not interpret JSON otherwise — a string's
+// content is never unescaped, only scanned for its own closing quote (so an
+// escaped backslash or quote is skipped two bytes at a time, correctly,
+// without decoding it) — since every byte not itself substituted must come
+// back exactly as it went in.
+type jsonWalker struct {
+	b   []byte
+	i   int
+	out bytes.Buffer
+	sub func([]byte) []byte
+}
+
+func (w *jsonWalker) skipWS() {
+	for w.i < len(w.b) {
+		switch w.b[w.i] {
+		case ' ', '\t', '\n', '\r':
+			w.out.WriteByte(w.b[w.i])
+			w.i++
+		default:
+			return
+		}
+	}
+}
+
+// parseValue copies one JSON value (object, array, string, or any other
+// scalar — number, true, false, null) at the current position to out.
+func (w *jsonWalker) parseValue() error {
+	w.skipWS()
+	if w.i >= len(w.b) {
+		return errors.New("unexpected end of JSON")
+	}
+	switch w.b[w.i] {
+	case '{':
+		return w.parseObject()
+	case '[':
+		return w.parseArray()
+	case '"':
+		raw, err := w.scanString()
+		if err != nil {
+			return err
+		}
+		w.out.Write(raw)
+		return nil
+	default:
+		return w.parseScalar()
+	}
+}
+
+// scanString returns one string token's raw bytes (quotes included,
+// contents still escaped) and advances past it, without writing to out: the
+// caller decides whether to copy it verbatim or substitute it.
+func (w *jsonWalker) scanString() ([]byte, error) {
+	start := w.i
+	if w.i >= len(w.b) || w.b[w.i] != '"' {
+		return nil, fmt.Errorf("expected string at byte %d", w.i)
+	}
+	w.i++
+	for {
+		if w.i >= len(w.b) {
+			return nil, errors.New("unterminated string")
+		}
+		switch w.b[w.i] {
+		case '\\':
+			// The escaped byte, whatever it is (including a \u escape's
+			// leading 'u'): never '"' or '\\' itself, so skipping it two
+			// bytes at a time can never mistake it for the closing quote,
+			// and a \u escape's four hex digits are then read as ordinary
+			// bytes next — never '"' or '\\' either.
+			w.i += 2
+		case '"':
+			w.i++
+			return w.b[start:w.i], nil
+		default:
+			w.i++
+		}
+	}
+}
+
+// parseScalar copies a number, true, false, or null verbatim: everything up
+// to the next structural byte or whitespace.
+func (w *jsonWalker) parseScalar() error {
+	start := w.i
+	for w.i < len(w.b) {
+		switch w.b[w.i] {
+		case ',', '}', ']', ' ', '\t', '\n', '\r':
+			goto done
+		}
+		w.i++
+	}
+done:
+	if w.i == start {
+		return fmt.Errorf("empty value at byte %d", start)
+	}
+	w.out.Write(w.b[start:w.i])
+	return nil
+}
+
+func (w *jsonWalker) parseArray() error {
+	w.out.WriteByte('[')
+	w.i++
+	w.skipWS()
+	if w.i < len(w.b) && w.b[w.i] == ']' {
+		w.out.WriteByte(']')
+		w.i++
+		return nil
+	}
+	for {
+		if err := w.parseValue(); err != nil {
+			return err
+		}
+		w.skipWS()
+		if w.i >= len(w.b) {
+			return errors.New("unterminated array")
+		}
+		switch w.b[w.i] {
+		case ',':
+			w.out.WriteByte(',')
+			w.i++
+			w.skipWS()
+		case ']':
+			w.out.WriteByte(']')
+			w.i++
+			return nil
+		default:
+			return fmt.Errorf("expected , or ] at byte %d", w.i)
+		}
+	}
+}
+
+// parseObject copies an object, substituting through sub the string value of
+// every member literally named "incarnation" — the one place this walker's
+// pass differs from a byte-for-byte copy.
+func (w *jsonWalker) parseObject() error {
+	w.out.WriteByte('{')
+	w.i++
+	w.skipWS()
+	if w.i < len(w.b) && w.b[w.i] == '}' {
+		w.out.WriteByte('}')
+		w.i++
+		return nil
+	}
+	for {
+		w.skipWS()
+		keyRaw, err := w.scanString()
+		if err != nil {
+			return err
+		}
+		w.out.Write(keyRaw)
+		var key string
+		if err := json.Unmarshal(keyRaw, &key); err != nil {
+			return fmt.Errorf("member name %s: %w", keyRaw, err)
+		}
+		w.skipWS()
+		if w.i >= len(w.b) || w.b[w.i] != ':' {
+			return fmt.Errorf("expected : at byte %d", w.i)
+		}
+		w.out.WriteByte(':')
+		w.i++
+		w.skipWS()
+		if key == "incarnation" && w.i < len(w.b) && w.b[w.i] == '"' {
+			raw, err := w.scanString()
+			if err != nil {
+				return err
+			}
+			w.out.Write(w.sub(raw))
+		} else if err := w.parseValue(); err != nil {
+			return err
+		}
+		w.skipWS()
+		if w.i >= len(w.b) {
+			return errors.New("unterminated object")
+		}
+		switch w.b[w.i] {
+		case ',':
+			w.out.WriteByte(',')
+			w.i++
+		case '}':
+			w.out.WriteByte('}')
+			w.i++
+			return nil
+		default:
+			return fmt.Errorf("expected , or } at byte %d", w.i)
+		}
+	}
 }
 
 // fixtureConn is one connection the runner opened, named by the fixture's

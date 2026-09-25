@@ -522,6 +522,23 @@ func (s *Server) liveConns() []*conn {
 	return out
 }
 
+// OpenConns is how many connections are accepted and not yet forgotten: a
+// connection's whole close (conn.close) — its unbind's compare-and-release
+// among them — has already run for every one missing from this count, since
+// forget is the last thing close does. Production-harmless: a read of connMu
+// with no effect on the server's own behavior, exposed as the smallest seam
+// a caller outside this package has for waiting until a connection it closed
+// out-of-band (internal/fakehost's DropConnections wraps the listener, not
+// this Server, so it has no other way to observe the cleanup its close
+// triggers) has actually finished releasing its binding, rather than racing
+// a later clock advance against that cleanup's own goroutine (plan 027 C9a
+// review item 2).
+func (s *Server) OpenConns() int {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return len(s.conns)
+}
+
 // Close closes every listener and connection — and so every subscription —
 // and joins every transport goroutine, the forwarders included, then waits for
 // the handlers — which it does not join — until ctx ends (package doc,

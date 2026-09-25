@@ -88,8 +88,10 @@ fixture is not flaky before committing it.
    payload (replayed, same result) and then with a different one
    (`bad_request`).
 9. `09-prompt-seen-by-both` — two connections attached to the same session;
-   one sends `session.prompt`, and the other's subscription carries every
-   event the turn produced.
+   one sends `session.prompt`, and BOTH its own subscription and the other
+   connection's carry every event the turn produced, plus its own reply — a
+   `hang_next` op keeps the turn open (never racing its own automatic echo
+   against the reply's barrier) until an `end` op closes it.
 10. `10-refusals` — a command before `hello` (`hello_required`), an unknown
     `sessionId` (`unknown_session`), an unknown method (`unknown_method`),
     and an unknown params field (`unknown_field`).
