@@ -272,11 +272,16 @@ what its three workers do, so a later phase reads the real thing rather than
 the proposal (Plan 021 §3.1–§3.8, its execution amendments, and the package
 doc comments on `engine.Engine`, `receiptTable` and the index worker).
 
-**Lock order.** `e.mu → s.mu`: the engine calls exactly two things on the
-session while holding `e.mu`, both leaf on the session's side and waiting on
-nothing — `Begin` and the accessor `ForeignTurn()`. `e.mu → the outbox
-mutex`: every engine-authored event is `Enqueue`d in the locked section that
-made the change it describes. `registry.mu → the outbox mutex`, the same
+**Lock order.** `e.mu → s.mu`: the engine calls exactly three things on the
+session while holding `e.mu`, all leaf on `s.mu` and none waiting on anything —
+`Begin`, the accessor `ForeignTurn()`, and, for a session that has one, the
+admission fence's `FenceUp`/`FenceDown` (`agent.AdmissionFence`, Plan 026 PR
+3): a session that can start a turn of its own (native's wake) refuses to while
+it is up, and the engine keeps it up whenever it is not idle — raised before
+every read of the flag, every `Begin` and every cancel's validation, and
+brought back to what the engine is at the end of each such section.
+`e.mu → the outbox mutex`: every engine-authored event is `Enqueue`d in the
+locked section that made the change it describes. `registry.mu → the outbox mutex`, the same
 shape one layer down for the ask registry. **`s.mu → the outbox mutex`**:
 every settings delta is enqueued by the *session*, under `s.mu`, in the
 section that mutates its own snapshot (§3.8) — the engine does not author
@@ -291,6 +296,15 @@ never across one — C12's index I/O inside `Submit`/`SetTitle` would otherwise
 block every client's commands (PR 3's r24 finding). `e.mu` and `registry.mu`
 are never held across a blocking call — a provider call, `Session.Cancel`, a
 continuation, `Publish`, `Flush`, file I/O — and never nested in each other.
+
+**Reading a refusal's ending (Plan 026 PR 3, SF-21).** A synthetic
+`foreign_turn` ending with `next=""` and `pending>0` now means one of two
+things: the turn's queued row was restored and the engine is idle and will
+drain it, or the engine is stalled in its error state (a foreign-turn refusal
+of text a client held itself); a client tells them apart by the activity, or
+by the `queued` at position 0 carrying the ended turn's own cause just before
+the ending, which only a restoration emits. The restoring `queued` and the
+ending are one batch, so they are adjacent in `seq`.
 
 **The workers.** Three, each engine-owned and joined by `Close`:
 

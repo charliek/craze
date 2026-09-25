@@ -463,32 +463,70 @@ func TestADrainedFirstPromptIsSeededByTheWorker(t *testing.T) {
 // its turn by the time the seed runs, so the failure cannot be its return
 // value. It goes out as a StateDelta{IndexErr} naming the command that caused
 // it — one per failure, which is what a client draws its one error row from.
+//
+// The report and the turn's ending come in either order: runOwn launches the
+// turn before it makes the inline seed (r31 finding 1), so a Submit whose own
+// goroutine is descheduled between the two lets a turn as short as the fake's
+// end first. The test once waited for the report and then for an ending after
+// it, and failed on a loaded CI runner (plan 026 X47); the second schedule is
+// now forced through beforeInlineSeed.
 func TestAFailedSeedIsReportedOnceWithItsCause(t *testing.T) {
-	idx := newFakeIndex()
-	boom := errors.New("craze: no home directory to save the session index in")
-	idx.setErr(boom)
-	r := indexed(t, idx, "")
-	c := Command{Client: r.e.NewClientID(), ID: "1"}
-	if _, err := r.e.Submit(c, "a prompt", SubmitQueue, ""); err != nil {
-		t.Fatalf("a failing index refused the prompt: %v", err)
-	}
-	got := r.until(func(ev agent.Event) bool {
-		return ev.Type == agent.EventMeta && ev.State != nil && ev.State.IndexErr != ""
-	})
-	last := got[len(got)-1]
-	if last.State.IndexErr != boom.Error() {
-		t.Fatalf("the delta carries %q, want the store's own message", last.State.IndexErr)
-	}
-	if last.Cause != c.Cause() {
-		t.Fatalf("the delta names %q, want the command that caused the write (%q)", last.Cause, c.Cause())
-	}
-	// One report per failure, not one per event: nothing else on the record up
-	// to the turn's ending carries an IndexErr.
-	rest := r.until(lastEnding)
-	for _, ev := range rest {
-		if ev.Type == agent.EventMeta && ev.State != nil && ev.State.IndexErr != "" {
-			t.Fatalf("a second report for one failed write: %s", describe(rest))
-		}
+	for _, tc := range []struct {
+		name      string
+		endsFirst bool // hold the Submit's inline seed until the turn has ended
+	}{{"the report as it comes", false}, {"the turn ending first", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := newFakeIndex()
+			boom := errors.New("craze: no home directory to save the session index in")
+			idx.setErr(boom)
+			ended := make(chan struct{})
+			var h *hooks
+			if tc.endsFirst {
+				h = &hooks{beforeInlineSeed: func(string) { <-ended }}
+			}
+			r := indexedHooked(t, idx, "", h)
+			c := Command{Client: r.e.NewClientID(), ID: "1"}
+			submitted := make(chan struct{})
+			go func() {
+				defer close(submitted)
+				if _, err := r.e.Submit(c, "a prompt", SubmitQueue, ""); err != nil {
+					t.Errorf("a failing index refused the prompt: %v", err)
+				}
+			}()
+			if !tc.endsFirst {
+				close(ended)
+			}
+			// Everything up to the later of the two: the report and the turn's
+			// ending, in whichever order they came.
+			var reports []agent.Event
+			sawEnding := false
+			got := r.until(func(ev agent.Event) bool {
+				if ev.Type == agent.EventMeta && ev.State != nil && ev.State.IndexErr != "" {
+					reports = append(reports, ev)
+				}
+				if lastEnding(ev) {
+					sawEnding = true
+					if tc.endsFirst {
+						close(ended)
+					}
+				}
+				return sawEnding && len(reports) > 0
+			})
+			<-submitted
+			// One report per failure, not one per event.
+			if len(reports) != 1 {
+				t.Fatalf("%d reports for one failed write: %s", len(reports), describe(got))
+			}
+			if got := reports[0].State.IndexErr; got != boom.Error() {
+				t.Fatalf("the delta carries %q, want the store's own message", got)
+			}
+			if reports[0].Cause != c.Cause() {
+				t.Fatalf("the delta names %q, want the command that caused the write (%q)", reports[0].Cause, c.Cause())
+			}
+			if tc.endsFirst && !lastEnding(got[len(got)-2]) {
+				t.Fatalf("the forced schedule did not put the ending first: %s", describe(got))
+			}
+		})
 	}
 }
 

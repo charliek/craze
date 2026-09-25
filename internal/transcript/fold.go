@@ -266,14 +266,14 @@ func foldDone(m *Model, ev agent.Event) {
 
 // foldForeignTurn is either end of a turn the agent ran on its own. Either
 // closes the run — a nil payload too, as the TUI's does — and the start heads
-// what follows with a note.
+// what follows with a note worded by the bracket's Reason (noteForForeignTurn).
 func foldForeignTurn(m *Model, ev agent.Event) {
 	at := m.stamp(ev.At)
 	m.turn.Foreign = ev.ForeignTurn
 	m.fc.state = true
 	m.Main.closeStream(at)
 	if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
-		m.Main.addNote(NoteForeignTurn, at)
+		m.Main.addNote(noteForForeignTurn(ev.ForeignTurn.Reason), at)
 	}
 }
 

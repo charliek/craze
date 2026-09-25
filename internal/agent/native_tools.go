@@ -404,7 +404,13 @@ func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 			resafeTask(t, safe)
 			if t.Task.Status == "" { // no child finished for this call
 				t.Task.Status = status
-				t.Task.DurationMs = max(ms, 0)
+				// A background call's row is final here (plan 026 §3.11, X33)
+				// and carries no duration: the call returned as soon as its
+				// child had started, so its own duration is the spawn's — a
+				// millisecond or none — and the child's is on its roster row.
+				if !t.Task.Background {
+					t.Task.DurationMs = max(ms, 0)
+				}
 			}
 			t.Task.Receipt = true
 		}

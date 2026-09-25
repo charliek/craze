@@ -507,6 +507,9 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 		}, At: at}},
 		{"a foreign turn started", Event{Type: EventForeignTurn, ForeignTurn: &ForeignTurnInfo{ID: "p-9", Text: "hi", Running: true}, At: at}},
 		{"a foreign turn ended", Event{Type: EventForeignTurn, ForeignTurn: &ForeignTurnInfo{ID: "p-9"}, At: at}},
+		{"a native wake started", Event{Type: EventForeignTurn, ForeignTurn: &ForeignTurnInfo{
+			ID: "wake-1", Text: "sub-agent result", Reason: ReasonSubagentWake, Running: true}, At: at}},
+		{"a native wake ended", Event{Type: EventForeignTurn, ForeignTurn: &ForeignTurnInfo{ID: "wake-1", Reason: ReasonSubagentWake}, At: at}},
 		{"the replay's start", Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}, At: at}},
 		{"a replayed text", Event{Type: EventText, Text: "from history", Replayed: true, At: at}},
 		{"the replay's end", Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}, At: at}},

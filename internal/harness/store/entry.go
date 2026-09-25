@@ -96,14 +96,21 @@ type ModelUsage struct {
 // model, plus these rows on every entry that owns them, whatever its role,
 // each priced by its row's model; a child's own transcript is a record, never
 // added into its parent's cost, so nothing is counted twice.
+//
+// SubagentResults marks a user entry that holds the results of background
+// sub-agents (plan 026 §3.11) rather than what a person typed: a child wrote
+// its text, so a replay redacts it with the turn's redactor as it redacts a
+// tool result (the harness's history), where a person's prompt is replayed as
+// it was written. Such an entry carries its results' SubagentUsage too.
 type MessageEntry struct {
-	Message       fantasy.Message
-	Model         Model
-	Effort        string
-	Usage         *Usage
-	StopReason    string
-	Interrupted   bool // a partial step, cut short by a cancel or an error
-	SubagentUsage []ModelUsage
+	Message         fantasy.Message
+	Model           Model
+	Effort          string
+	Usage           *Usage
+	StopReason      string
+	Interrupted     bool // a partial step, cut short by a cancel or an error
+	SubagentUsage   []ModelUsage
+	SubagentResults bool
 }
 
 // Entry is one line after the header, as written or read back. Type selects
@@ -149,6 +156,10 @@ type messageLine struct {
 	// without it is written byte for byte as before and an older craze
 	// reading one with it ignores the key (plan 026 §3.7).
 	SubagentUsage []ModelUsage `json:"subagent_usage,omitempty"`
+	// SubagentResults is additive in the same way (plan 026 §3.11): only an
+	// entry of background results carries it, and an older craze reading one
+	// ignores it, replaying the entry as a plain user message.
+	SubagentResults bool `json:"subagent_results,omitempty"`
 }
 
 type modelChangeLine struct {
@@ -279,16 +290,17 @@ func encodeEntry(e Entry) ([]byte, error) {
 	switch e.Type {
 	case TypeMessage:
 		return json.Marshal(messageLine{
-			envelope:      env,
-			Message:       e.Message,
-			Provider:      e.Model.Provider,
-			Model:         e.Model.Alias,
-			WireModel:     e.Model.WireModel,
-			Effort:        e.Effort,
-			Usage:         e.Usage,
-			StopReason:    e.StopReason,
-			Interrupted:   e.Interrupted,
-			SubagentUsage: e.SubagentUsage,
+			envelope:        env,
+			Message:         e.Message,
+			Provider:        e.Model.Provider,
+			Model:           e.Model.Alias,
+			WireModel:       e.Model.WireModel,
+			Effort:          e.Effort,
+			Usage:           e.Usage,
+			StopReason:      e.StopReason,
+			Interrupted:     e.Interrupted,
+			SubagentUsage:   e.SubagentUsage,
+			SubagentResults: e.SubagentResults,
 		})
 	case TypeModelChange:
 		return json.Marshal(modelChangeLine{
@@ -340,13 +352,14 @@ func decodeEntry(line []byte) (Entry, error) {
 			return Entry{}, errors.New("message has no role")
 		}
 		e.MessageEntry = MessageEntry{
-			Message:       ml.Message,
-			Model:         Model{Provider: ml.Provider, Alias: ml.Model, WireModel: ml.WireModel},
-			Effort:        ml.Effort,
-			Usage:         ml.Usage,
-			StopReason:    ml.StopReason,
-			Interrupted:   ml.Interrupted,
-			SubagentUsage: ml.SubagentUsage,
+			Message:         ml.Message,
+			Model:           Model{Provider: ml.Provider, Alias: ml.Model, WireModel: ml.WireModel},
+			Effort:          ml.Effort,
+			Usage:           ml.Usage,
+			StopReason:      ml.StopReason,
+			Interrupted:     ml.Interrupted,
+			SubagentUsage:   ml.SubagentUsage,
+			SubagentResults: ml.SubagentResults,
 		}
 	case TypeModelChange:
 		var mc modelChangeLine

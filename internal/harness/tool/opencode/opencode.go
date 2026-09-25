@@ -42,8 +42,10 @@ func Profile() (tool.Profile, error) {
 	// cache prefix, so a tool is added at its place in it, never at the end.
 	//
 	// agent, right after write, is craze's sub-agent tool at the place
-	// opencode gives its own task tool (plan 026 §3.3, §5 C3b). The three
-	// after it are grok-build's tools (plan 023 §3.4, D-53), each at the place
+	// opencode gives its own task tool (plan 026 §3.3, §5 C3b), and
+	// agent_output, which reads a background agent call's result, follows it
+	// (§3.11). The three after them are grok-build's tools (plan 023 §3.4,
+	// D-53), each at the place
 	// opencode gives its own counterpart — question, todo and plan — with one
 	// difference: opencode offers its question tool first of all, and here it
 	// follows the six, so that a session's requests still open with the tools
@@ -56,6 +58,7 @@ func Profile() (tool.Profile, error) {
 		newEdit,
 		newWrite,
 		newAgent,
+		newAgentOutput,
 		newTodoWrite,
 		newAskUserQuestion,
 		newExitPlanMode,

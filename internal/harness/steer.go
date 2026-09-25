@@ -181,6 +181,12 @@ type splice struct {
 // then it hands the step an input with every steer and every reminder
 // re-inserted at its own index.
 //
+// At every step, the first included, and under the same condition, it also
+// takes up the background sub-agents' results waiting to be delivered
+// (takeResults, plan 026 §3.11): one user part of their own, spliced after the
+// steers and re-inserted like them, but never a steer — it is not reported,
+// not bounded by the steer cap, and never comes back in Result.Unanswered.
+//
 // The steers are skipped at the first step: its input is the prompt Run was
 // called with, and a steer accepted before it has a whole turn ahead of it to
 // be taken up in. The reminder is not, and this is why prepareStep no longer
@@ -204,24 +210,27 @@ func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOpt
 				t.emit(Steered{Text: text})
 			}
 		}
+		t.takeResults(o.StepNumber, o.Messages)
 		t.remind(o.StepNumber, o.Messages)
 	}
-	if len(t.spliced) == 0 && len(t.reminders) == 0 {
+	if len(t.spliced) == 0 && len(t.reminders) == 0 && len(t.internal) == 0 {
 		return ctx, fantasy.PrepareStepResult{}, nil
 	}
 	return ctx, fantasy.PrepareStepResult{Messages: t.spliceInto(o.Messages)}, nil
 }
 
-// spliceInto is base with every steer and every reminder re-inserted at the
-// index it was recorded at, in the order they were taken up; base — Fantasy's
-// own slice — is never written to. The indices of each collection are
-// non-decreasing, because base only ever grows at its end, so one pass places
-// them all; where a reminder and a steer share an index the reminder comes
-// first, since it was placed there first (the turn's own reminder sits right
-// after the prompt, before any steer). mu is held.
+// spliceInto is base with every steer, every reminder and every part of
+// background results re-inserted at the index it was recorded at, in the
+// order they were taken up; base — Fantasy's own slice — is never written to.
+// The indices of each collection are non-decreasing, because base only ever
+// grows at its end, so one pass places them all; where they share an index the
+// reminder comes first, since it was placed there first (the turn's own
+// reminder sits right after the prompt, before any steer), then the steers,
+// then the results (plan 026 §3.11), as a step's append writes them. mu is
+// held.
 func (t *turn) spliceInto(base []fantasy.Message) []fantasy.Message {
-	out := make([]fantasy.Message, 0, len(base)+len(t.spliced)+len(t.reminders))
-	rem, next := 0, 0
+	out := make([]fantasy.Message, 0, len(base)+len(t.spliced)+len(t.reminders)+len(t.internal))
+	rem, next, in := 0, 0, 0
 	for i := 0; i <= len(base); i++ {
 		for rem < len(t.reminders) && t.reminders[rem].at <= i {
 			out = append(out, t.reminders[rem].msg)
@@ -231,17 +240,24 @@ func (t *turn) spliceInto(base []fantasy.Message) []fantasy.Message {
 			out = append(out, t.spliced[next].msg)
 			next++
 		}
+		for in < len(t.internal) && t.internal[in].at <= i {
+			out = append(out, t.internal[in].msg)
+			in++
+		}
 		if i < len(base) {
 			out = append(out, base[i])
 		}
 	}
-	// An index past the end cannot happen today (base grows); a steer or a
-	// reminder would still go out rather than be silently dropped.
+	// An index past the end cannot happen today (base grows); a steer, a
+	// reminder or a result would still go out rather than be silently dropped.
 	for ; rem < len(t.reminders); rem++ {
 		out = append(out, t.reminders[rem].msg)
 	}
 	for ; next < len(t.spliced); next++ {
 		out = append(out, t.spliced[next].msg)
+	}
+	for ; in < len(t.internal); in++ {
+		out = append(out, t.internal[in].msg)
 	}
 	return out
 }

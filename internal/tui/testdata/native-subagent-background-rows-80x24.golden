@@ -1,0 +1,24 @@
+❯ go                                                                            
+✓ agent  Scan the repo  echo                                                    
+started the scan in the background                                              
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+✳ Waiting for 1 sub-agent · 0s                                                  
+─────────────────────────────────────────────────────────────────────────── go ─
+❯ message  / for commands                                                       
+────────────────────────────────────────────────────────────────────────────────
+ws │ native │ Echo │ 0m                                                         
+◆ agent · shift+tab · ▸▸ bypass permissions on · ← 1 agent                      
+  ○ general-purpose  Scan the repo  bg · 0s · 15 tok                            

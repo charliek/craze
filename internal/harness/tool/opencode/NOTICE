@@ -304,7 +304,14 @@ prompt and subagent_type -- are the names opencode's task tool and Claude
 Code's Agent tool share; model and effort are craze's own, a choice per
 call as codex makes it. Each session appends the agent types and models it
 offers to the description (the harness's decorator); the text here is what
-testdata/specs.golden pins once the profile registers the tool.
+testdata/specs.golden pins once the profile registers the tool. Its
+run_in_background parameter is Claude Code's name for the same request (plan
+026 section 3.11).
+
+The agent_output tool (agent_output.go and descriptions/agent_output.txt;
+plan 026 section 3.11), which reads a background agent call's result by the
+sub-agent's id, is craze's own as well, in name and wording; its wait_ms is
+codex's wait_agent shape (a default of 30 s, at most 600 s).
 
 opencode's truncation hint for an agent that has its task tool
 (truncate.ts, "Use the Task tool to have explore agent process this file")

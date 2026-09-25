@@ -452,7 +452,7 @@ func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 		t.Fatalf("native is hidden=%v inProcess=%v label %q", p.Hidden(), p.InProcess(), p.DisplayName())
 	}
 	want := Capabilities{Effort: true, Interject: true, Modes: true, Todos: true, AskCards: true, PlanCards: true,
-		SubagentRows: true, SubagentTranscript: true, SubagentCancel: true}
+		SubagentRows: true, SubagentTranscript: true, SubagentCancel: true, SubagentBackground: true}
 	if got := p.Capabilities(); got != want {
 		t.Fatalf("Capabilities = %+v, want %+v", got, want)
 	}

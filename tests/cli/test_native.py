@@ -683,7 +683,7 @@ def test_native_tool_loop_read_grep_edit_bash(
     assert (ws / "notes.txt").read_text(encoding="utf-8") == "beta\n"
 
     # The wire's own view of the same loop. The first request offers the
-    # profile's ten tools in its registry order (opencode.Profile), and the
+    # profile's eleven tools in its registry order (opencode.Profile), and the
     # last one carries every call's result back, each tied to its call id.
     first, last = fixture_server.requests[0], fixture_server.requests[-1]
     assert first.tool_names == [
@@ -694,6 +694,7 @@ def test_native_tool_loop_read_grep_edit_bash(
         "edit",
         "write",
         "agent",
+        "agent_output",
         "todo_write",
         "ask_user_question",
         "exit_plan_mode",

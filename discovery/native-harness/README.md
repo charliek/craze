@@ -29,10 +29,10 @@ these documents, one per roadmap phase.
 | 2026-09-21/22 | H5 complete: PR 1 (#45, `b0ea4c4`) landed the harness side — the mode gate, the plan file, reminders, and the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`); PR 2 (#48, `feature/plan-023-h5-modes`) switched modes on in the adapter, the CLI, and the TUI, with the plan-offer eligible for a turn with no assistant text; live smoke: the first real `exit_plan_mode` on a live model behaved as designed |
 | 2026-09-24 | Plan 026 (H6) planned and panel-reviewed: sub-agents run in-process (D-54, superseding D-10), the `agent` tool (kind `task`), personas, per-child cancel, and background children across three PRs; decisions D-54..D-59; not yet executed |
 | 2026-09-24 | H6 foreground complete — PR 1 (#51) shipped in-process sub-agents end to end; PR 2 (`feature/plan-026-h6-stop`) adds per-child stop: Delete/Backspace on a running native row or in its view, `Control.CancelSubagent`; PR 3 (background children) next |
+| 2026-09-25 | H6 complete — PR 3 (`feature/plan-026-h6-background`) ships background children: `run_in_background`, `agent_output`, the session-level wake bracketed as a foreign turn (`ForeignTurnInfo.Reason`, `agent.AdmissionFence`), the `bg` row marker, and SF-21 closed (a drained row refused by the wake is restored) |
 
-**H0, H1, H2, H4 and H5 are complete; H6's foreground half is done (Plan
-026, PR 1 #51 and PR 2's per-child stop) — its background children (PR 3)
-are next, and H3 (approval) still comes after H8 (D-48).**
+**H0, H1, H2, H4, H5 and H6 are complete (Plan 026: PR 1 #51, PR 2 #53, and
+PR 3's background children) — H3 (approval) still comes after H8 (D-48).**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
 The harness is built in this repository as a hidden side quest beside the

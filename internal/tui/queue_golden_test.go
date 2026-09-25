@@ -9,7 +9,13 @@ import (
 )
 
 // queueTwoKeys queues two messages during the fake's long turn.
-const queueTwoKeys = "<wait:idle>go the long way<enter><wait:working>" +
+//
+// It waits for the tool row every queue golden shows before it types:
+// `working` is true the moment the turn is claimed, before the agent has said
+// anything, so a script that typed straight after it raced the agent's first
+// two updates, and a starved run captured a frame without them (the race
+// TestFrameGoldenQueueSendNowConfirm100x30 met first).
+const queueTwoKeys = "<wait:idle>go the long way<enter><wait:working><wait:text:Execute sleep && echo step1>" +
 	"Reply with PINEAPPLE<enter>Reply with MANGO<enter>"
 
 // runQueueFrame is the golden runner for a turn in progress: the clock and the

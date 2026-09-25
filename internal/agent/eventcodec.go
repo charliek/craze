@@ -516,6 +516,7 @@ type wirePluginCommand struct {
 type wireForeignTurn struct {
 	ID      string `json:"id,omitempty"`
 	Text    string `json:"text,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 	Running bool   `json:"running,omitempty"`
 }
 

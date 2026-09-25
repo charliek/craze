@@ -614,6 +614,60 @@ func TestTheQueueIsKeyedByID(t *testing.T) {
 	}
 }
 
+// TestARestoredRowIsTheHeadAgain folds the exact sequence the engine emits when
+// the drained head of a two-row queue is refused because the agent is running a
+// turn of its own (engine.TestRefusedDrainedRowRunsAfterWake's record, SF-21):
+// the row goes back as the row it was, `queued` at position 0 ahead of the
+// refusal's ending in one batch. The fold's queue has it first again, with its
+// own id, version and queued time, and the ending — whose wire shape did not
+// change — still draws the refusal's one error row (SF-47). The row's drain
+// afterwards takes it by id.
+func TestARestoredRowIsTheHeadAgain(t *testing.T) {
+	m := New(Options{})
+	two := agent.QueuedPrompt{ID: "q-1", Text: "two", QueuedAt: at(1)}
+	edited := two
+	edited.Text, edited.Version = "two edited", 1
+	three := agent.QueuedPrompt{ID: "q-2", Text: "three", QueuedAt: at(2)}
+	q := func(p agent.QueuedPrompt, change agent.QueueChange, pos, sec int) agent.Event {
+		return agent.Event{Type: agent.EventQueue, Queue: &p, QueueChange: change, QueuePos: pos, At: at(sec)}
+	}
+	turn := func(tu agent.TurnInfo, sec int) agent.Event {
+		return agent.Event{Type: agent.EventTurn, Turn: &tu, At: at(sec)}
+	}
+	refusal := agent.ErrForeignTurn.Error()
+	foldAll(t, m, true,
+		turn(agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted, Text: "one", Origin: agent.TurnOriginSubmit}, 0),
+		q(two, agent.QueueQueued, 0, 1),
+		q(three, agent.QueueQueued, 1, 2),
+		q(edited, agent.QueueEdited, 0, 3),
+		agent.Event{Type: agent.EventText, Text: "echo: one", At: at(4)},
+		agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: at(4)},
+		q(edited, agent.QueueSent, 0, 5),
+		turn(agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: "end_turn", Next: "turn-2", Pending: 1}, 5),
+		turn(agent.TurnInfo{ID: "turn-2", Phase: agent.TurnStarted, Text: "two edited", Origin: agent.TurnOriginDrain}, 5),
+		// The restoring settlement's one batch.
+		q(edited, agent.QueueQueued, 0, 6),
+		turn(agent.TurnInfo{
+			ID: "turn-2", Phase: agent.TurnEnded, Synthetic: true,
+			Err: refusal, ErrClass: agent.EventErrForeignTurn, Pending: 2,
+		}, 6),
+	)
+	st := m.State()
+	if len(st.Queue) != 2 || st.Queue[0] != edited || st.Queue[1] != three {
+		t.Fatalf("the queue after the restore is %+v, want the restored row first as it was, then %+v", st.Queue, three)
+	}
+	if st.Turn.ID != "" {
+		t.Fatalf("the refused turn is still current: %+v", st.Turn)
+	}
+	if got := factTexts(m.Main, "error"); !slices.Equal(got, []string{refusal}) {
+		t.Fatalf("the refusal's rows: %q", got)
+	}
+	foldAll(t, m, true, q(edited, agent.QueueSent, 0, 7))
+	if st := m.State(); len(st.Queue) != 1 || st.Queue[0] != three {
+		t.Fatalf("the restored row's drain: %+v", st.Queue)
+	}
+}
+
 func TestCommandLines(t *testing.T) {
 	cases := []struct {
 		name string
@@ -649,6 +703,36 @@ func TestSanitizeLineFastPathMatchesTheFullOne(t *testing.T) {
 		if got, want := sanitizeLine(s), full(s); got != want {
 			t.Fatalf("sanitizeLine(%q) = %q, the full path %q", s, got, want)
 		}
+	}
+}
+
+// TestForeignTurnReasonPicksNote (plan 026 §3.11): the note a foreign turn's
+// start draws is worded by the bracket's Reason — the native wake's own for
+// agent.ReasonSubagentWake, today's for "" — and a reason this build does not
+// know (the session-control session's condition: S2 publishes reason as an
+// open string) renders today's wording rather than nothing or a failure. The
+// ending carries no note whatever its reason.
+func TestForeignTurnReasonPicksNote(t *testing.T) {
+	for _, c := range []struct{ reason, want string }{
+		{agent.ReasonSubagentWake, NoteSubagentWake},
+		{"", NoteForeignTurn},
+		{"a_reason_from_a_newer_build", NoteForeignTurn},
+	} {
+		m := New(Options{})
+		foldAll(t, m, true,
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft", Reason: c.reason, Running: true}, At: at(1)},
+			agent.Event{Type: agent.EventText, Text: "b", At: at(2)},
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft", Reason: c.reason}, At: at(3)},
+		)
+		if got := factTexts(m.Main, "note"); !slices.Equal(got, []string{c.want}) {
+			t.Fatalf("reason %q: notes %q, want [%q]", c.reason, got, c.want)
+		}
+		if f := m.State().Turn.Foreign; f == nil || f.Running || f.Reason != c.reason {
+			t.Fatalf("reason %q: the turn's Foreign is %+v", c.reason, f)
+		}
+	}
+	if NoteSubagentWake != "sub-agent finished — the agent continues" {
+		t.Fatalf("NoteSubagentWake = %q", NoteSubagentWake)
 	}
 }
 

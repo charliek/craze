@@ -62,6 +62,13 @@
 // events reach Run's sink wrapped in SubagentEvent, from the child's turn,
 // which makes the sink concurrent while children run (see Run). Close tells
 // the children it is closing before it joins its turn.
+//
+// A session opened with Options.Background runs a call that asks for it in
+// the background (background.go, plan 026 §3.11): the call returns once the
+// child has started, the child reports to the session's sink (Options.Sink),
+// and its result is delivered to the model once — at a running turn's next
+// step boundary, at the start of the next turn, by Wake, a turn of its own, or
+// by the agent_output tool — never through the steer box.
 package harness
 
 import (
@@ -158,6 +165,34 @@ type Options struct {
 	// candidate instead of failing the call (subagent_models.go, plan 026
 	// §3.6). nil discards; the adapter journals what it is handed.
 	Warn func(string)
+
+	// Background lets the agent tool start a sub-agent in the background
+	// when the model asks for it (run_in_background, plan 026 §3.11): the call
+	// returns once the child has started, the child runs on for the session's
+	// life, and its result is delivered to the parent's model later — at a step
+	// boundary of a running turn, at the start of the next one, by Wake, or by
+	// an agent_output call. False, the default, runs every agent call in the
+	// foreground, run_in_background or not, which is what a session nobody
+	// wakes (headless `craze prompt`) needs. Not read for a sub-agent.
+	Background bool
+	// Sink is the session's own sink, beside each Run's (plan 026 §3.11): a
+	// background child outlives the turn that started it, so its own events
+	// (wrapped in SubagentEvent), its SubagentFinished and, at Close, a
+	// SubagentUndelivered for a result never delivered come here. It is
+	// entered concurrently — each child's events from the child's turn, under
+	// that turn's lock and nothing of the parent's, and a child's end from the
+	// goroutine that ran it, with no lock of the harness's held — and must
+	// not block for long, nor call Close. nil discards. Not read for a
+	// sub-agent.
+	Sink func(Event)
+	// OnPending is called whenever a background child's result becomes
+	// waiting to be delivered (HasPending): the child finished, or a result
+	// taken for a turn that then wrote nothing was given back. It is called
+	// with no lock of the harness's held, so it may call the session's
+	// methods (HasPending), but it must return at once: the caller that
+	// delivers — Wake — belongs on a goroutine of the caller's own, which this
+	// only signals. nil is none. Not read for a sub-agent.
+	OnPending func()
 
 	// tools are the tool set's test seams (tools.go); zero is production.
 	tools toolSeams
@@ -323,6 +358,7 @@ func Open(opts Options) (*Session, error) {
 	// Open has returned it. A child gets neither: depth is 1 (plan 026 §3.2).
 	if child == nil {
 		s.subs = newSubagents(s)
+		s.subs.background, s.subs.sink, s.subs.onPending = opts.Background, opts.Sink, opts.OnPending
 		s.base = childBase{
 			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
 			prompt: opts.Prompt.clone(), seams: opts.tools,
@@ -740,12 +776,21 @@ func (s *Session) redactor() *redact.Replacer {
 // closed, after its commands had had their grace. The children are joined by
 // the join of the turn: an agent call returns only once its child has run and
 // closed, and the turn only once its calls have.
+//
+// Background children (plan 026 §3.11) are signalled with the rest, and
+// joined after the turn: Close cancels the session's background context, then
+// waits for every background child's goroutine to have closed the child and
+// settled its result. Then it reports, once each, every background result
+// that was never delivered — as a SubagentUndelivered through Options.Sink,
+// the only record of what those children spent — before the transcript
+// closes. Nothing delivers a result after that.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.subs.closeChildren()
 		if done := s.signalClose(); done != nil {
 			<-done
 		}
+		s.subs.closeBackground()
 		if err := s.store.Close(); err != nil {
 			s.closeErr = fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}

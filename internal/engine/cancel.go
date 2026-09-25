@@ -21,7 +21,10 @@ import (
 // because a reserved turn is always a claimed one (plan 017's rule), and never
 // on a later prompt, because there cannot be one. When it returns the hold is
 // released and the driver passes again: a turn that came back meanwhile
-// settles then, with its successor decided in the same step.
+// settles then, with its successor decided in the same step. A turn the session
+// would start of its own — native's wake — is held off by the same promise
+// through the session's admission fence, which is raised before the cancel is
+// validated and stays up while the hold does (engine.go's admission fence).
 //
 // With no turn of craze's own the cancel is accepted only when there is
 // something for it to do: an ask the agent is waiting on, or a turn the agent
@@ -85,10 +88,15 @@ func (e *Engine) Stop(ctx context.Context, c Command) error {
 	})
 }
 
-// holdCancel validates a cancel and takes its hold, in one section.
+// holdCancel validates a cancel and takes its hold, in one section. The fence
+// raised in holdCancelLocked stays up for as long as the hold does (a cancel in
+// flight is one of the things it stands for); a refused cancel lowers it again
+// on the way out.
 func (e *Engine) holdCancel(turn string, stop bool, asks int, cause string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.syncFenceLocked()
+	e.raiseFenceLocked()
 	return e.holdCancelLocked(turn, stop, asks, cause)
 }
 
@@ -100,7 +108,12 @@ func (e *Engine) holdCancel(turn string, stop bool, asks int, cause string) (str
 // asks is how many asks were pending when the caller looked, read outside e.mu
 // (Cancel). It is consulted only for a cancel with no turn of craze's own, and
 // never for a stop.
+//
+// The admission fence goes up first, before anything is validated: a turn the
+// session could start of its own must not start between the validation and the
+// session's cancel, which would land on it. The caller's section syncs it.
 func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string) (string, error) {
+	e.raiseFenceLocked()
 	if e.closed {
 		return "", ErrNotAccepting
 	}
@@ -111,7 +124,7 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string
 	if turn != "" && turn != id {
 		return "", ErrStaleTurn
 	}
-	if !stop && id == "" && asks == 0 && !e.sess.ForeignTurn() {
+	if !stop && id == "" && asks == 0 && !e.foreignLocked() {
 		// Nothing of craze's own is running, the agent is holding no ask and is
 		// running no turn of its own: there is nothing to cancel, and a cancel
 		// written now could only reach whatever starts next.
@@ -131,6 +144,12 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string
 		// A mandatory completion: the rows are gone whether or not the outbox
 		// reports room.
 		e.log.Enqueue(batch...)
+	}
+	if e.cur != nil {
+		// The cancel is validated against the current turn (id is its id): if the
+		// agent's own turn refuses it, it ends as the cancel the user asked for and
+		// its row is not put back (cancelledRefusalLocked, the session-control R1).
+		e.cur.cancelAsked = true
 	}
 	e.cancelsInFlight++
 	return id, nil
@@ -213,6 +232,10 @@ func (e *Engine) releaseHold(id, cause string, out agent.CancelOutcome, cancelEr
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		// The pass below may settle and claim a successor, all with the fence up;
+		// the release lowers it only if that leaves the engine idle.
+		defer e.syncFenceLocked()
+		e.raiseFenceLocked()
 		e.cancelsInFlight--
 		if err := cancelErr; err != nil {
 			switch armed := e.armed != nil && e.armed.turn == id; {

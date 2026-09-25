@@ -56,6 +56,14 @@ func (m Model) showSubagentTranscript() bool {
 	return m.caps().SubagentTranscript
 }
 
+// showSubagentBackground is the row band's `bg` marker's gate (plan 026
+// §3.11, X29): the provider's background children are its own to present.
+// grok's children carry SubagentInfo.Background too, and their rows do not
+// move.
+func (m Model) showSubagentBackground() bool {
+	return m.caps().SubagentBackground
+}
+
 func (m Model) showTodos() bool {
 	return m.caps().Todos
 }

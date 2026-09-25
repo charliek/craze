@@ -59,10 +59,30 @@ type frameRouter struct {
 	mu     sync.Mutex
 	queues map[string][]frameStep
 	holds  map[string][]fantasy.StreamPart
+	// wakes answers a wake's requests (plan 026 §3.11), whose last user
+	// message is the delivered result rather than a prompt anyone typed
+	// (routeWake).
+	wakes []frameStep
+	// calls is every request the router was sent, in order (requests).
+	calls []fantasy.Call
 	// asked, when set, is told each prompt the first time a request for it
 	// arrives.
 	asked func(prompt string)
 	seen  map[string]bool
+}
+
+// routeWake queues steps for the session's wakes, in order.
+func (m *frameRouter) routeWake(steps ...frameStep) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.wakes = append(m.wakes, steps...)
+}
+
+// requests is every request the router has been sent, cloned.
+func (m *frameRouter) requests() []fantasy.Call {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]fantasy.Call(nil), m.calls...)
 }
 
 func newFrameRouter(provider, wire string) *frameRouter {
@@ -98,12 +118,15 @@ func (m *frameRouter) Stream(ctx context.Context, call fantasy.Call) (fantasy.St
 		}
 	}
 	m.mu.Lock()
+	m.calls = append(m.calls, call)
 	first := !m.seen[key]
 	m.seen[key] = true
 	asked := m.asked
 	var next frameStep
 	if q := m.queues[key]; len(q) > 0 {
 		next, m.queues[key] = q[0], q[1:]
+	} else if strings.HasPrefix(key, "<subagent_result") && len(m.wakes) > 0 {
+		next, m.wakes = m.wakes[0], m.wakes[1:]
 	} else if before, ok := m.holds[key]; ok {
 		next = func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
 			for _, p := range before {

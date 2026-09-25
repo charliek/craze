@@ -210,6 +210,7 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 		Prompt:       e.Prompt,
 		StartedAt:    wallClock(e.At, s.Now),
 		Transcript:   true,
+		Background:   e.Background,
 	}
 	// The child's tool rows get their set before the child exists for anyone:
 	// it cannot stream before this returns (the runner runs it after).
@@ -236,6 +237,13 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 	// Task-only but for the row's own texts, which go through the redactor
 	// that now covers the child (resafeTask): that is why the merge compares
 	// Task and copies it before this writes through it (P5).
+	//
+	// A background child's row is final at its acknowledgement (plan 026
+	// §3.11, X33): the call returns as soon as the child has started, so
+	// this stamp — inside the call, before its ToolFinished — is the row's
+	// one chance to carry the child's identity and model, and it marks the
+	// task as background; the child's outcome lives in its roster row and in
+	// the result a later turn delivers, never in a stamp after the call.
 	s.stampTool("", e.CallID, func(t *ToolEvent) {
 		resafeTask(t, safe)
 		if t.Task == nil {
@@ -243,6 +251,9 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 		}
 		t.Task.AgentID = info.ID
 		t.Task.Model = info.Model
+		if e.Background {
+			t.Task.Background = true
+		}
 	})
 }
 
@@ -337,6 +348,14 @@ func (s *nativeSession) subagentProgress(id string, safe nativeSafe, apply func(
 // finishing between the child's end and its call's return — no longer holds
 // them, and the row closed with the call's own duration instead, measured from
 // its ToolCalled, the delay and all.
+//
+// A background child's finish stamps nothing (plan 026 §3.11, X33; F5): its
+// call's row closed with the acknowledgement long ago, and a stamp here would
+// republish a parent tool row outside its turn — possibly in the middle of a
+// later turn's reply, whose stream run the fold's upsert would close — or,
+// for a child that finished before the call even returned, merge a running
+// row's snapshot and publish it after the ToolFinished that closed the row.
+// The roster row is where a background child's outcome is read.
 func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 	if e.ID == "" {
 		return
@@ -392,6 +411,9 @@ func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 
 	s.dropChildTools(evicted)
 	s.flushRoster()
+	if done.Background {
+		return
+	}
 	// After the barrier, so the agent row says the child ended only once its
 	// finished has committed; published like the stamp at spawn, the row's own
 	// texts redacted again (resafeTask).
@@ -511,15 +533,39 @@ func (s *nativeSession) noteSubagentUsage(e harness.StepDone) {
 		return
 	}
 	red := s.redactor()
-	for start := 0; start < len(e.SubagentUsage); start += subagentUsageRowsPerNote {
-		end := min(start+subagentUsageRowsPerNote, len(e.SubagentUsage))
-		fields := map[string]any{
-			"step":       e.Step,
-			"save_error": red(e.SaveError),
-			"rows":       len(e.SubagentUsage),
-		}
+	s.noteUsageRows(e.SubagentUsage, red, func() map[string]any {
+		return map[string]any{"step": e.Step, "save_error": red(e.SaveError)}
+	})
+}
+
+// subagentUndelivered journals a background child whose result was never
+// delivered to the model (harness.SubagentUndelivered, plan 026 §3.11, astra
+// r14): what it spent has no entry to live in, so it goes to the journal as a
+// subagent_usage note of noteSubagentUsage's shape, with the child's id, its
+// type and undelivered: true beside the rows — and one note even when it
+// spent nothing, so the child is on the record. It arrives during Close,
+// after the session's done has closed: nothing is published, and the log
+// still accepts notes until it closes, which native's Close does last.
+func (s *nativeSession) subagentUndelivered(e harness.SubagentUndelivered) {
+	if e.ID == "" {
+		return
+	}
+	red := s.redactor()
+	s.noteUsageRows(e.Usage, red, func() map[string]any {
+		return map[string]any{"subagent": e.ID, "type": red(e.Type), "undelivered": true}
+	})
+}
+
+// noteUsageRows writes rows as subagent_usage notes of at most
+// subagentUsageRowsPerNote each, the numbered per-row fields beside base's,
+// which is built afresh for every note. No rows is one note of base alone.
+func (s *nativeSession) noteUsageRows(rows []harness.ModelUsage, red func(string) string, base func() map[string]any) {
+	for start := 0; start == 0 || start < len(rows); start += subagentUsageRowsPerNote {
+		end := min(start+subagentUsageRowsPerNote, len(rows))
+		fields := base()
+		fields["rows"] = len(rows)
 		for i := start; i < end; i++ {
-			r, n := e.SubagentUsage[i], strconv.Itoa(i+1)
+			r, n := rows[i], strconv.Itoa(i+1)
 			fields["provider_"+n] = red(r.Provider)
 			fields["model_"+n] = red(r.Model)
 			fields["wire_model_"+n] = red(r.WireModel)
