@@ -99,6 +99,14 @@ func newDetTokens() *detTokens { return &detTokens{r: rand.New(rand.NewSource(1)
 
 func (d *detTokens) Read(p []byte) (int, error) { return d.r.Read(p) }
 
+// dropHooks are DropConnections' test seams (host_test.go), both run with the
+// accept gate shut: closed once every connection is closed, before the wait;
+// drained once the wait has succeeded, before the gate reopens. Nil is none;
+// a test sets them before calling DropConnections, on the same goroutine.
+type dropHooks struct {
+	closed, drained func()
+}
+
 // Host is the fake host (plan 027 §3.11): the real control.Server serving the
 // real engine over a tui.Stub, on one caller-supplied listener. Restart
 // replaces the engine with a fresh incarnation of the same durable session,
@@ -110,6 +118,9 @@ type Host struct {
 
 	srv *control.Server
 	ln  *stallListener
+
+	// drop is DropConnections' test seams (host_test.go).
+	drop dropHooks
 
 	mu   sync.Mutex
 	stub *tui.Stub
@@ -155,6 +166,14 @@ func (h *Host) newIncarnation() error {
 	if err := eng.Start(context.Background()); err != nil {
 		return err
 	}
+	// The install delta Start enqueued (InstallOnStart) is committed by the
+	// log's drainer, on its own goroutine: committed here, before any op can
+	// publish, so it is always the incarnation's first event rather than
+	// wherever the drainer happens to land among the ops' direct publishes.
+	if err := syncLog(eng); err != nil {
+		_ = eng.Close()
+		return err
+	}
 	h.mu.Lock()
 	old := h.eng
 	h.stub, h.eng = stub, eng
@@ -162,6 +181,34 @@ func (h *Host) newIncarnation() error {
 	h.srv.SetEngine(eng)
 	if old != nil {
 		go func() { _ = old.Close() }()
+	}
+	return nil
+}
+
+// syncWait bounds syncLog's flush: generous next to how long the drainer
+// takes to commit what an op enqueued (microseconds; the Stub's log has no
+// primary, so no reader can hold it up), so hitting it at all means
+// something is wedged, and it is reported as an error rather than a hang.
+const syncWait = 10 * time.Second
+
+// syncLog commits everything eng's log has enqueued so far (engine.Sync, the
+// log's Flush barrier). Events reach the log two ways: the Stub's own emits
+// publish directly and are committed before they return, while a delta the
+// Stub enqueues (InstallOnStart's install) and every ending the ask registry
+// writes (a cancelled turn's asks: EndTurn) go through the log's outbox and
+// are committed by its drainer, on its own goroutine. Unflushed, the two race
+// for seqs: whether an enqueued event lands before or after the next op's
+// direct publish is the scheduler's choice, and a fixture's entry ids — each
+// one a seq — move with it (-cpu=1 turned fixture 11's install delta from
+// first to last). So the Host flushes after the engine's start and after
+// every op (Do): each op's enqueued events are committed before the op
+// returns, and the seq order is the script's order whatever the scheduler
+// does.
+func syncLog(eng *engine.Engine) error {
+	ctx, cancel := context.WithTimeout(context.Background(), syncWait)
+	defer cancel()
+	if err := eng.Sync(ctx); err != nil {
+		return fmt.Errorf("fakehost: committing the log's enqueued events: %w", err)
 	}
 	return nil
 }
@@ -231,7 +278,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // StallWrites), spawn_subagent (fixture 11's child), oversized_event
 // (fixture 12's omitted record), advance_clock (fixture 13's retired
 // client, past the binding table's idle bound) and hang_next (fixture 9's
-// prompt, kept from racing its own reply: see HangNext).
+// prompt, kept from racing its own reply: see HangNext). Do is what runs an
+// op to completion — the op, then the log flushed (syncLog) — so a caller
+// that needs the script's seq order goes through Do, as both of those do.
 
 // Text emits an EventText, agent "" for the main session.
 func (h *Host) Text(agentID, text string) {
@@ -335,49 +384,55 @@ const dropConnectionsWait = 5 * time.Second
 // racing that cleanup and sometimes recording it after the clock has already
 // moved.
 //
-// It does not wait for OpenConns to reach zero: a client that reconnects
-// while this wait is still running (its own retry, not this op's concern)
-// creates a new accepted connection this call never dropped and is not
-// responsible for, and OpenConns includes it — waiting for bare zero would
-// make this op fail on a reconnect that has nothing wrong with it (C9b). Nor
-// does it wait for "before minus dropped": a count of connections open when
-// dropAll ran can be satisfied by an unrelated connection's own close
-// finishing first, while the one this call dropped is still mid-cleanup
-// (C9a review item 2). Instead it tracks how many connections the listener
-// has accepted since dropAll's snapshot (acceptedTotal minus that snapshot)
-// and waits for OpenConns to fall to that count — re-read every iteration,
-// so a reconnect during the wait raises the target along with OpenConns
-// instead of being mistaken for a connection still mid-cleanup. This
-// assumes OpenConns never again drops below that count once reached: true
-// as long as nothing this call did NOT accept closes on its own during the
-// wait, which holds for every wire fixture and the binary's single-client
-// use.
+// The mechanism is the listener's accept gate, not arithmetic (C10c): for
+// the whole op the gate is shut, so no connection is handed to the server —
+// a client that redials meanwhile waits, as it would in the kernel's
+// backlog, and is accepted only once the gate reopens. With nothing new
+// able to arrive, "every connection this call dropped is forgotten" is
+// exactly OpenConns() == 0: no count of accepted or closed connections to
+// get wrong, and no reconnect to mistake for, or offset against, a
+// connection still mid-cleanup (C9a review item 2, C9b, r23 finding b). The
+// one connection that can be in flight past the gate — handed to the
+// server's accept loop just before the gate shut, and not yet registered —
+// is still in dropAll's set, so it is closed too, and the wait counts it
+// until the loop is back in Accept (stallListener.handoffPending, read
+// before OpenConns so no registration falls between the two reads).
 //
-// If the deadline passes with a connection this call dropped still not
-// forgotten, it returns an error instead of returning silently: the fixture
-// runner fails the test on it, and the binary prints it to stderr
-// (cmd/craze-fake-host's Do loop).
+// If the deadline passes with a connection still not forgotten, it returns
+// an error instead of returning silently: the fixture runner fails the test
+// on it, and the binary prints it to stderr (cmd/craze-fake-host's Do
+// loop). The gate reopens either way.
 func (h *Host) DropConnections() error {
 	l := h.listener()
-	snapshot := l.dropAll()
-	remaining := func() int {
-		n := h.srv.OpenConns() - int(l.acceptedTotal()-snapshot)
-		if n < 0 {
-			n = 0
-		}
-		return n
+	l.shutGate()
+	defer l.openGate()
+	l.dropAll()
+	if f := h.drop.closed; f != nil {
+		f()
 	}
-	return waitForOpenConnsZero(dropConnectionsWait, remaining)
+	remaining := func() int {
+		n := 0
+		if l.handoffPending() {
+			n = 1
+		}
+		return n + h.srv.OpenConns()
+	}
+	if err := waitForOpenConnsZero(dropConnectionsWait, remaining); err != nil {
+		return err
+	}
+	if f := h.drop.drained; f != nil {
+		f()
+	}
+	return nil
 }
 
 // waitForOpenConnsZero is DropConnections' wait, factored out so a unit test
 // can hand it a stub openConns that never reaches zero — a connection that
 // never finishes closing — without needing a real one to actually hang
 // forever (host_test.go's TestDropConnectionsErrorsOnStuckConnection).
-// openConns need not be the server's raw OpenConns: DropConnections hands it
-// a closure already adjusted for connections accepted after the drop's
-// snapshot (never negative), so this loop's own "reaches zero" contract
-// stays the same either way.
+// DropConnections hands it the server's OpenConns plus a connection the
+// server's accept loop may hold unregistered (never negative), so this
+// loop's own "reaches zero" contract stays the same either way.
 func waitForOpenConnsZero(wait time.Duration, openConns func() int) error {
 	deadline := time.Now().Add(wait)
 	for {
@@ -491,12 +546,25 @@ type opQuestion struct {
 
 // Do runs one op from its wire bytes ({"name": "...", ...}): the NDJSON
 // dispatch cmd/craze-fake-host's stdin loop and a wire fixture's "op" lines
-// both use.
+// both use. Every op but quit (which has closed the engine) ends with the
+// current engine's log flushed (syncLog): whatever the op enqueued is
+// committed before Do returns, so the next op's events always follow it.
 func (h *Host) Do(raw json.RawMessage) error {
 	var p opParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return fmt.Errorf("fakehost: op: %w", err)
 	}
+	if err := h.do(p); err != nil {
+		return err
+	}
+	if p.Name == "quit" {
+		return nil
+	}
+	return syncLog(h.currentEngine())
+}
+
+// do is Do's dispatch: one op, not yet flushed.
+func (h *Host) do(p opParams) error {
 	switch p.Name {
 	case "text":
 		text := p.Text

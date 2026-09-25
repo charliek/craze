@@ -7,7 +7,8 @@ import (
 )
 
 // stallListener wraps a net.Listener so the Host can hold up every byte its
-// server writes (StallWrites) or drop every connection it has accepted so far
+// server writes (StallWrites) or drop every connection it has accepted so far,
+// behind an accept gate that holds any redial until the drop is over
 // (DropConnections) — the two seams the wire fixtures need for a
 // slow_consumer reset and a retired client, from the host side, with no
 // assertion ever made on a duration (plan 027 §3.11's determinism; see
@@ -24,31 +25,133 @@ type stallListener struct {
 	// still wants — resume's whole point.
 	wake  chan struct{}
 	conns map[*stallConn]struct{}
-	// accepted is every connection this listener has ever accepted,
-	// monotonic — incremented in the same critical section Accept uses to
-	// add the connection to conns, so a snapshot of it taken under the same
-	// lock (dropAll) is consistent with which connections that snapshot's
-	// conns actually holds. DropConnections' wait uses it to tell a
-	// connection accepted after a drop (a reconnecting client) from one the
-	// drop is actually responsible for closing.
-	accepted int64
+
+	// shut is the accept gate (DropConnections): non-nil while the gate is
+	// shut, and closed when it reopens. While it is shut, a connection the
+	// wrapped listener accepts is held in Accept — never handed to the
+	// server, never in conns — until it reopens: a client that dials during a
+	// drop waits, exactly as it would in the kernel's backlog, and the server
+	// counts nothing new until the drop is over.
+	shut chan struct{}
+	// held is how many connections Accept is holding at the shut gate, and
+	// onHeld (a test's seam, host_test.go) runs each time one is held.
+	held   int
+	onHeld func()
+	// handedOff is true from the moment Accept hands a connection to the
+	// server until the server's accept loop calls Accept again. The loop
+	// (control.Server.Serve) registers each connection it is handed — its
+	// OpenConns count — before it asks for the next one, on the same
+	// goroutine, so false means every connection this listener ever handed
+	// over is already counted by OpenConns, and with the gate shut none can be
+	// handed over next. handoffPending reads it for DropConnections' wait.
+	handedOff bool
+	// closed is closed by Close, so a connection held at the shut gate is
+	// dropped then instead of waiting on a gate nothing will reopen.
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func newStallListener(l net.Listener) *stallListener {
-	return &stallListener{Listener: l, wake: make(chan struct{}), conns: map[*stallConn]struct{}{}}
+	return &stallListener{
+		Listener: l,
+		wake:     make(chan struct{}),
+		conns:    map[*stallConn]struct{}{},
+		closed:   make(chan struct{}),
+	}
 }
 
+// Accept is the wrapped listener's, with the gate between it and the server:
+// a connection accepted while the gate is shut is handed over only once it
+// reopens (or dropped, if the listener closes first).
 func (l *stallListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	// The server is back for another connection: the last one handed over is
+	// registered (handedOff's comment).
+	l.handedOff = false
+	l.mu.Unlock()
 	nc, err := l.Listener.Accept()
 	if err != nil {
 		return nc, err
 	}
 	c := &stallConn{Conn: nc, l: l, closed: make(chan struct{})}
+	for {
+		l.mu.Lock()
+		shut := l.shut
+		if shut == nil {
+			l.conns[c] = struct{}{}
+			l.handedOff = true
+			l.mu.Unlock()
+			return c, nil
+		}
+		l.held++
+		onHeld := l.onHeld
+		l.mu.Unlock()
+		if onHeld != nil {
+			onHeld()
+		}
+		select {
+		case <-shut:
+			l.mu.Lock()
+			l.held--
+			l.mu.Unlock()
+		case <-l.closed:
+			l.mu.Lock()
+			l.held--
+			l.mu.Unlock()
+			_ = nc.Close()
+			return nil, net.ErrClosed
+		}
+	}
+}
+
+// Close closes the wrapped listener and drops a connection held at the shut
+// gate (Accept), so control.Server.Close never waits on a drop's gate.
+func (l *stallListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return l.Listener.Close()
+}
+
+// shutGate shuts the accept gate: from here until openGate, no connection is
+// handed to the server (Accept). Idempotent.
+func (l *stallListener) shutGate() {
 	l.mu.Lock()
-	l.conns[c] = struct{}{}
-	l.accepted++
+	if l.shut == nil {
+		l.shut = make(chan struct{})
+	}
 	l.mu.Unlock()
-	return c, nil
+}
+
+// openGate reopens it, handing over whatever Accept held meanwhile, one at a
+// time as the server asks. Idempotent.
+func (l *stallListener) openGate() {
+	l.mu.Lock()
+	if l.shut != nil {
+		close(l.shut)
+		l.shut = nil
+	}
+	l.mu.Unlock()
+}
+
+// handoffPending reports whether a connection has been handed to the server
+// that its OpenConns may not count yet (handedOff).
+func (l *stallListener) handoffPending() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.handedOff
+}
+
+// heldAtGate is how many connections Accept is holding at the shut gate.
+func (l *stallListener) heldAtGate() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.held
+}
+
+// setOnHeld installs a test's onHeld seam; set before the gate shuts.
+func (l *stallListener) setOnHeld(f func()) {
+	l.mu.Lock()
+	l.onHeld = f
+	l.mu.Unlock()
 }
 
 // stall holds up every Write on every connection this listener has accepted,
@@ -89,41 +192,20 @@ func (l *stallListener) state() (time.Time, chan struct{}) {
 // then. It closes each through the stallConn wrapper (Close), not the raw
 // net.Conn, so a write of its own stalled on this listener wakes at once
 // (Write's closed case) instead of sleeping out whatever stall remains.
-// Host.DropConnections waits on control.Server.OpenConns falling to the
-// number of connections accepted after the snapshot this returns —
-// proof every dropped connection's cleanup, unbind included, has actually
-// run, not just that its socket is gone — rather than on any count of
-// closed connections this call itself makes, since a connection open when
-// dropAll ran can finish closing on its own and be mistaken for one of
-// these (C9a review item 2). The snapshot is taken under the same lock that
-// clears conns, so it is exactly "every connection accepted up to and
-// including this call" — a connection accepted after this point (a client
-// that reconnects while DropConnections is still waiting, C9b) is never one
-// this call is responsible for, and must not be dropped or waited on.
-func (l *stallListener) dropAll() int64 {
+// Host.DropConnections calls it with the accept gate shut, so the set it
+// closes is every connection the server has been handed, and none can join
+// it until the gate reopens.
+func (l *stallListener) dropAll() {
 	l.mu.Lock()
 	conns := make([]*stallConn, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
 	l.conns = map[*stallConn]struct{}{}
-	snapshot := l.accepted
 	l.mu.Unlock()
 	for _, c := range conns {
 		_ = c.Close()
 	}
-	return snapshot
-}
-
-// acceptedTotal is the number of connections this listener has ever
-// accepted, monotonic. DropConnections re-reads it during its wait: the
-// difference between this and dropAll's snapshot is how many connections
-// have been accepted since the drop — reconnects the drop is not
-// responsible for and must not wait on.
-func (l *stallListener) acceptedTotal() int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.accepted
 }
 
 func (l *stallListener) forget(c *stallConn) {

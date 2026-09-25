@@ -2,11 +2,14 @@ package fakehost
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/protocol"
 )
 
 // TestStallWritesWakesOnQuit is C9a review item 5: a writer stalled inside
@@ -93,13 +96,7 @@ func TestStallWritesWakesOnQuit(t *testing.T) {
 
 // TestDropConnectionsErrorsOnStuckConnection is C9a review item 2's
 // loud-failure half: if a connection never finishes closing, DropConnections
-// must return an error, not return silently once its deadline passes. A
-// negative control forcing the count-based bug this replaces — an unrelated
-// connection's own close satisfying a "before minus dropped" target while
-// the one DropConnections dropped is still mid-cleanup — needs two
-// connections closing on independently scheduled goroutines racing this
-// wait, a schedule the synchronous, single-threaded wire fixture runner (one
-// op at a time, run() in wire_test.go) cannot force; this test instead
+// must return an error, not return silently once its deadline passes. It
 // exercises the wait DropConnections itself uses (waitForOpenConnsZero)
 // directly, with a stub openConns that never reports zero, standing in for
 // that stuck connection.
@@ -129,4 +126,155 @@ func TestDropConnectionsWaitsForZero(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("waitForOpenConnsZero took %s to notice openConns reached zero", elapsed)
 	}
+}
+
+// TestDropConnectionsHoldsARedial is r23 finding (b): a client that redials
+// while DropConnections runs must neither fail the op nor let it return
+// before the connection it dropped is forgotten. Client A holds c-1; the drop
+// closes it, and B dials in the middle of the drop — after A's socket is
+// closed, possibly before A's cleanup has run. The listener's accept gate
+// holds B (onHeld), so the wait's OpenConns() == 0 is reached with B still
+// outside the server (drained's check), and B is served only after the op
+// returns. Then the clock moves to the binding table's idle bound (twice the
+// receipts' 10-minute age, fixture 13's advance) and B resumes c-1: a fresh
+// id, resumed false, says A's release was recorded before the advance —
+// i.e. before DropConnections returned. A release that ran after the drop
+// returned (the arithmetic's early return) would be recorded at the
+// advanced clock, too recent to idle out, and the resume would take.
+func TestDropConnectionsHoldsARedial(t *testing.T) {
+	h, socket := serveTestHost(t)
+	a := dialTestClient(t, socket)
+	first := a.hello(t, nil)
+	if first.ClientID != "c-1" || first.Resumed {
+		t.Fatalf("A's hello: clientId %q resumed %v, want c-1, false", first.ClientID, first.Resumed)
+	}
+
+	l := h.listener()
+	held := make(chan struct{}, 1)
+	l.setOnHeld(func() {
+		select {
+		case held <- struct{}{}:
+		default:
+		}
+	})
+	var b *testClient
+	h.drop.closed = func() {
+		b = dialTestClient(t, socket)
+		select {
+		case <-held:
+		case <-time.After(fixtureTimeout):
+			t.Fatal("B's redial was never held at the accept gate")
+		}
+	}
+	h.drop.drained = func() {
+		if n := h.srv.OpenConns(); n != 0 {
+			t.Fatalf("OpenConns = %d when the drop's wait ended, want 0", n)
+		}
+		if n := l.heldAtGate(); n != 1 {
+			t.Fatalf("%d connection(s) held at the gate when the drop's wait ended, want B's 1", n)
+		}
+	}
+	if err := h.DropConnections(); err != nil {
+		t.Fatalf("DropConnections: %v", err)
+	}
+
+	h.AdvanceClock(20 * time.Minute)
+	got := b.hello(t, &protocol.Resume{ClientID: first.ClientID, Token: first.Token})
+	if got.Resumed || got.ClientID != "c-2" {
+		t.Fatalf("B's resume of c-1: clientId %q resumed %v, want c-2, false — A's release was not recorded before DropConnections returned", got.ClientID, got.Resumed)
+	}
+}
+
+// serveTestHost builds a Host serving a fresh Unix socket, closed with the
+// test, and waits until Serve has installed its listener.
+func serveTestHost(t *testing.T) (*Host, string) {
+	t.Helper()
+	h, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("", "czfh-t-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s")
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- h.Serve(l) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), fixtureTimeout)
+		defer cancel()
+		_ = h.Close(ctx)
+		<-served
+	})
+	deadline := time.Now().Add(fixtureTimeout)
+	for h.listener() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("Serve never installed its listener")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return h, socket
+}
+
+// testClient is a raw NDJSON client: enough to say hello.
+type testClient struct {
+	nc net.Conn
+	lr *protocol.LineReader
+}
+
+func dialTestClient(t *testing.T, socket string) *testClient {
+	t.Helper()
+	nc, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = nc.Close() })
+	return &testClient{nc: nc, lr: protocol.NewLineReader(nc, protocol.OutboundLineMax)}
+}
+
+// hello says hello, resuming resume when it is non-nil, and returns the
+// host's result; a refusal, or no reply within fixtureTimeout, fails t.
+func (c *testClient) hello(t *testing.T, resume *protocol.Resume) protocol.HelloResult {
+	t.Helper()
+	params, err := json.Marshal(protocol.HelloParams{
+		Protocols: []int{protocol.ProtocolVersion},
+		Client:    protocol.ClientInfo{Kind: "test", Name: "fakehost-host-test"},
+		Resume:    resume,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := protocol.MarshalLine(protocol.Request{
+		JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(`"1"`), Method: protocol.MethodHello, Params: params,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.nc.Write(line); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if err := c.nc.SetReadDeadline(time.Now().Add(fixtureTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := c.lr.ReadLine()
+	if err != nil {
+		t.Fatalf("read hello reply: %v", err)
+	}
+	var resp protocol.Response
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode hello reply: %v: %s", err, raw)
+	}
+	if resp.Error != nil {
+		t.Fatalf("hello refused: %s", raw)
+	}
+	var res protocol.HelloResult
+	if err := json.Unmarshal(resp.Result, &res); err != nil {
+		t.Fatalf("decode hello result: %v: %s", err, raw)
+	}
+	return res
 }

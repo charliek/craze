@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -50,7 +51,8 @@ const (
 // tui.NewStubNoPrimary() (so nothing needs to drain the primary for Publish
 // to proceed); each subscriber is a raw client that says hello, attaches
 // (when: "now") and drains its socket on its own goroutine for the whole
-// benchmark. subs=4+stalled adds one more attachment that reads its attach
+// benchmark, and after the timed loop must be proven to have received every
+// event through the log's head (benchClient.awaitLive). subs=4+stalled adds one more attachment that reads its attach
 // reply and its first synchronized notification, then never reads again: its
 // subscription is driven to slow_consumer during setup, outside the timer,
 // so the timed loop measures that Publish's cost does not grow with a
@@ -169,36 +171,99 @@ func runPublishWithSocketSubscribers(b *testing.B, subs int, stalled bool) {
 		}
 	}
 
-	// SubscribersDropped (used above to drive the stall) is a log-wide
-	// count: a draining subscriber can overflow and be dropped too, during
-	// the rapid 1 MiB setup publishes or during the timed loop itself,
-	// which would satisfy that check without the STALLED client being the
-	// one actually dropped, and would silently measure fewer live
-	// subscribers than the sub-benchmark names. Verify precisely instead of
-	// trusting the count: the stalled client specifically must have been
-	// reset slow_consumer, and every draining subscriber must have stayed
-	// live for the whole benchmark (none of them ever saw a reset).
+	// The timer has stopped (b.Loop). SubscribersDropped (used above to drive
+	// the stall) is a log-wide count: a draining subscriber can overflow and
+	// be dropped too, during the rapid 1 MiB setup publishes or during the
+	// timed loop itself — the very last publish included — which would
+	// satisfy that check without the STALLED client being the one actually
+	// dropped, and would silently measure fewer live subscribers than the
+	// sub-benchmark names. Verify precisely instead of trusting the count:
+	// the stalled client specifically must have been reset slow_consumer, and
+	// every draining subscriber must have stayed live to the end — proved,
+	// not sampled (r23 finding c): the log's committed head is read, and each
+	// draining subscriber is waited on, with a deadline, until it has either
+	// received the event at that seq (live: every event the loop published
+	// reached it) or a reset (dropped: the benchmark fails). A reset still in
+	// flight when the loop ended — its forwarder yet to deliver it — is
+	// therefore waited for, never missed by a check made too early.
+	ctx, cancel := context.WithTimeout(context.Background(), benchLiveWait)
+	head, err := log.FlushSeq(ctx, nil)
+	cancel()
+	if err != nil {
+		b.Fatalf("reading the log's committed head: %v", err)
+	}
 	if stalled {
-		reason := sc.readReset(b, time.Now().Add(5*time.Second))
+		reason := sc.readReset(b, time.Now().Add(benchLiveWait))
 		if reason != protocol.ResetSlowConsumer {
 			b.Fatalf("stalled client's reset reason = %q, want %q", reason, protocol.ResetSlowConsumer)
 		}
 	}
 	for i, c := range conns {
-		if r, ok := c.resetSeen(); ok {
-			b.Fatalf("draining subscriber %d saw reset{%s}; it should have stayed live for the whole benchmark", i, r)
+		if err := c.awaitLive(head, benchLiveWait); err != nil {
+			b.Fatalf("draining subscriber %d did not stay live through seq %d: %v", i, head, err)
 		}
 	}
+}
+
+// benchReadTimeout bounds every socket read a benchClient makes
+// (deadlineReader), so a wedged read fails the benchmark rather than hanging
+// it: a drain idles only between setup and the timed loop and between the
+// liveness check and teardown, both far shorter. benchLiveWait bounds each
+// post-loop wait — the committed head, the stalled client's reset, each
+// draining subscriber's catch-up to the head — generous next to how long a
+// drainer takes to work through what it is behind by when the loop ends.
+const (
+	benchReadTimeout = 30 * time.Second
+	benchLiveWait    = 30 * time.Second
+)
+
+// deadlineReader is a benchClient's socket as its LineReader reads it: every
+// Read gets a deadline — benchReadTimeout from now, or the tighter cap a
+// caller sets (readReset's) — so no read can block forever (r23 finding c).
+// It is set per underlying Read, not per line: the LineReader's buffer takes
+// whatever the socket has, many lines at a time when a drainer is behind, so
+// the drain's hot loop pays for it per read, never per event. Only the one
+// goroutine that reads the client touches it.
+type deadlineReader struct {
+	nc  *net.UnixConn
+	cap time.Time
+}
+
+func (r *deadlineReader) Read(p []byte) (int, error) {
+	d := time.Now().Add(benchReadTimeout)
+	if !r.cap.IsZero() && r.cap.Before(d) {
+		d = r.cap
+	}
+	if err := r.nc.SetReadDeadline(d); err != nil {
+		return 0, err
+	}
+	return r.nc.Read(p)
 }
 
 // benchClient is a minimal raw NDJSON client for the publish benchmark: no
 // schema checking (the timed loop never touches the wire; only setup and the
 // drain goroutines do) — just enough to hello, attach and read notifications.
+// Every read it makes has a deadline (deadlineReader).
 type benchClient struct {
 	nc     *net.UnixConn
+	rd     *deadlineReader
 	lr     *protocol.LineReader
 	nextID int
-	reset  atomic.Value // protocol.ResetReason, set once if drain ever sees a reset notification
+
+	// What drain has seen, for awaitLive: seq is the seq of the last event
+	// notification it read; want is the seq awaitLive waits for, and reached
+	// closes once seq has reached it; reset holds a reset notification's
+	// reason, and resetCh closes when one arrives; exited closes when drain
+	// returns, exitErr (written before) saying why.
+	seq       atomic.Uint64
+	want      atomic.Uint64
+	reached   chan struct{}
+	reachOnce sync.Once
+	reset     atomic.Value // protocol.ResetReason
+	resetCh   chan struct{}
+	resetOnce sync.Once
+	exited    chan struct{}
+	exitErr   error
 }
 
 // resetSeen reports whether drain ever saw a reset notification on this
@@ -211,15 +276,43 @@ func (c *benchClient) resetSeen() (protocol.ResetReason, bool) {
 	return v.(protocol.ResetReason), true
 }
 
+// awaitLive waits until drain has read the event at seq — every event up to
+// the log's head has reached this subscriber, so it stayed live — and fails
+// if a reset arrives instead, drain exits first, or wait passes. want is
+// stored before seq is read, and drain stores seq before it reads want, so
+// one of the two always sees the other's: no wake-up is lost between them.
+func (c *benchClient) awaitLive(seq uint64, wait time.Duration) error {
+	c.want.Store(seq)
+	if r, ok := c.resetSeen(); ok {
+		return fmt.Errorf("saw reset{%s}", r)
+	}
+	if c.seq.Load() >= seq {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-c.reached:
+	case <-c.resetCh:
+	case <-c.exited:
+		return fmt.Errorf("its drain exited at seq %d: %v", c.seq.Load(), c.exitErr)
+	case <-timer.C:
+		return fmt.Errorf("it read only through seq %d within %s", c.seq.Load(), wait)
+	}
+	if r, ok := c.resetSeen(); ok {
+		return fmt.Errorf("saw reset{%s}", r)
+	}
+	return nil
+}
+
 // readReset reads notifications until it finds a reset, returning its
 // reason, or fails the benchmark once deadline passes — a client that was
-// never actually reset must not hang the benchmark waiting for one.
+// never actually reset must not hang the benchmark waiting for one. The
+// deadline caps every read it makes (deadlineReader.cap).
 func (c *benchClient) readReset(b *testing.B, deadline time.Time) protocol.ResetReason {
 	b.Helper()
-	if err := c.nc.SetReadDeadline(deadline); err != nil {
-		b.Fatalf("SetReadDeadline: %v", err)
-	}
-	defer func() { _ = c.nc.SetReadDeadline(time.Time{}) }()
+	c.rd.cap = deadline
+	defer func() { c.rd.cap = time.Time{} }()
 	for {
 		raw, err := c.lr.ReadLine()
 		if err != nil {
@@ -246,7 +339,16 @@ func dialBenchClient(b *testing.B, path string) *benchClient {
 	if err != nil {
 		b.Fatalf("dial: %v", err)
 	}
-	return &benchClient{nc: nc.(*net.UnixConn), lr: protocol.NewLineReader(nc, protocol.OutboundLineMax)}
+	uc := nc.(*net.UnixConn)
+	rd := &deadlineReader{nc: uc}
+	return &benchClient{
+		nc:      uc,
+		rd:      rd,
+		lr:      protocol.NewLineReader(rd, protocol.OutboundLineMax),
+		reached: make(chan struct{}),
+		resetCh: make(chan struct{}),
+		exited:  make(chan struct{}),
+	}
 }
 
 // call sends one request and returns its reply, failing on a refusal.
@@ -332,18 +434,23 @@ func benchAttach(b *testing.B, c *benchClient, sessionID string, budget *protoco
 // that was supposed to keep draining, in particular) is recorded on c via
 // c.reset rather than acted on here: the connection stays open after a
 // reset that does not end the session (control/forward.go), so drain keeps
-// reading, and the caller checks c.resetSeen() once the benchmark is done.
+// reading; resetCh wakes an awaitLive already waiting. Each event
+// notification's seq is recorded on c (c.seq), and reached closes once it
+// has reached the seq awaitLive waits for. Every read has a deadline
+// (deadlineReader), so a drain whose socket goes quiet for benchReadTimeout
+// exits — never blocking the benchmark for ever — and says why (exitErr,
+// then exited).
 //
-// Past the first line, a line is fully decoded only when it might be a
-// reset: a cheap byte scan first, json.Unmarshal only on what that scan
-// flags. A reset is rare (only when this subscriber is actually being
+// Past the first line, a line is never fully decoded unless it might be a
+// reset. An event notification's seq is read straight from its fixed prefix
+// (eventSeq: a prefix match and a bounded scan, never the event body), and
+// only a line that is not an event is scanned for the reset marker and then
+// decoded. A reset is rare (only when this subscriber is actually being
 // dropped) next to the flood of ordinary event lines the timed loop
 // produces, and decoding every one of those unconditionally is expensive
 // enough on its own to starve this reader loop — a self-inflicted overflow
 // the benchmark cannot tell apart from the real thing this check is
-// supposed to catch. Discarding an ordinary line un-decoded, as the
-// original drain did, is what keeps this loop cheap enough to actually
-// keep up.
+// supposed to catch.
 func drain(c *benchClient, synced chan<- bool) {
 	sent := false
 	send := func(ok bool) {
@@ -354,9 +461,15 @@ func drain(c *benchClient, synced chan<- bool) {
 		synced <- ok
 	}
 	defer send(false)
+	var err error
+	defer func() {
+		c.exitErr = err
+		close(c.exited)
+	}()
 	first := true
 	for {
-		raw, err := c.lr.ReadLine()
+		var raw []byte
+		raw, err = c.lr.ReadLine()
 		if err != nil {
 			return
 		}
@@ -368,6 +481,13 @@ func drain(c *benchClient, synced chan<- bool) {
 			}
 			continue
 		}
+		if seq, ok := eventSeq(raw); ok {
+			c.seq.Store(seq)
+			if w := c.want.Load(); w != 0 && seq >= w {
+				c.reachOnce.Do(func() { close(c.reached) })
+			}
+			continue
+		}
 		if !bytes.Contains(raw, resetMethodMarker) {
 			continue
 		}
@@ -375,10 +495,13 @@ func drain(c *benchClient, synced chan<- bool) {
 		if json.Unmarshal(raw, &n) != nil || n.Method != protocol.NotifyReset {
 			continue
 		}
+		reason := protocol.ResetReason("(undecodable)")
 		var p protocol.ResetParams
 		if json.Unmarshal(n.Params, &p) == nil {
-			c.reset.Store(p.Reason)
+			reason = p.Reason
 		}
+		c.reset.Store(reason)
+		c.resetOnce.Do(func() { close(c.resetCh) })
 	}
 }
 
@@ -388,3 +511,43 @@ func drain(c *benchClient, synced chan<- bool) {
 // never inserts whitespace) — drain's cheap pre-filter before paying for a
 // full decode.
 var resetMethodMarker = []byte(`"method":"reset"`)
+
+// eventLinePrefix is how every event notification's line begins, up to its
+// subscription id (the forwarder's notification[EventParams], fields in
+// declaration order, no whitespace), and eventSeqMarker what follows that
+// id: the id is a short server-minted string, so the seq sits within the
+// first few dozen bytes of the line, whatever the event's own size.
+var (
+	eventLinePrefix = []byte(`{"jsonrpc":"2.0","method":"event","params":{"subscription":"`)
+	eventSeqMarker  = []byte(`","seq":`)
+)
+
+// eventSeq is an event notification line's seq, read without decoding the
+// line: false for any line that is not an event notification. A line whose
+// shape it does not recognise is never counted as progress, so a change to
+// the wire shape shows up as awaitLive's loud timeout, not a false pass.
+func eventSeq(raw []byte) (uint64, bool) {
+	if !bytes.HasPrefix(raw, eventLinePrefix) {
+		return 0, false
+	}
+	rest := raw[len(eventLinePrefix):]
+	window := rest
+	if len(window) > 128 {
+		window = window[:128]
+	}
+	i := bytes.Index(window, eventSeqMarker)
+	if i < 0 {
+		return 0, false
+	}
+	rest = rest[i+len(eventSeqMarker):]
+	var seq uint64
+	n := 0
+	for n < len(rest) && rest[n] >= '0' && rest[n] <= '9' {
+		seq = seq*10 + uint64(rest[n]-'0')
+		n++
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return seq, true
+}
