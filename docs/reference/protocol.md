@@ -295,8 +295,12 @@ differs by how the engine's turn at being "the session" ends:
   event, a plain `reset` — is dropped, and only the one terminal line
   survives (an attached connection's `reset{session_replaced}`, or a claimed
   detach's `{}`). A handler still running when this happens replies to
-  nobody; its client learns the outcome only by resending after a fresh
-  `hello` (`resumed: false`).
+  nobody; its client never resends it. A reconnect's fresh `hello` answering
+  `resumed: false` means this exact command may have already run under the
+  old identity, so resending it under a new one risks running it twice; the
+  command instead resolves outcome-unknown (`resume_lost`), and the client
+  re-reads state (`session.state`, the attach snapshot) to learn what
+  actually happened (`internal/remote/reconnect.go:354-373`).
 
 ### `session.snapshot`
 
@@ -471,11 +475,15 @@ That is the **stream's** bound. Getting a connection back at all is bounded
 separately, in attempts and time: a reconnect episode makes at most 3 dial
 attempts, and ends 10 s after the loss, whichever comes first
 (`remote.Options.Redials`/`RedialWindow`) — every dial, handshake and resend
-of an in-flight command bounded by what is left of it. Past either bound,
-a client gives up on this attempt and surfaces the outcome as unknown
-(`resume_lost` or `disconnected` — see [Errors](#errors-and-retry)) rather than
-looping forever against a host that keeps resetting it, or that it cannot
-reach at all.
+of an in-flight command bounded by what is left of it. That 10 s is the
+episode's own clock, not a wall-clock deadline: it pauses while the adopting
+connection waits for a `when: "ready"` re-attach's reply (a slow load can
+take longer than 10 s) and runs again once that reply arrives or another
+write starts, so the episode's total wall time can exceed 10 s while its
+clock stays within budget. Past either bound, a client gives up on this
+attempt and surfaces the outcome as unknown (`resume_lost` or `disconnected`
+— see [Errors](#errors-and-retry)) rather than looping forever against a host
+that keeps resetting it, or that it cannot reach at all.
 
 ### Bounded history is `session.snapshot`, not pages
 
@@ -721,7 +729,7 @@ craze's own codes directly and does not need this table.
 | `already_submitted` | `AlreadySubmitted` | |
 | `already_resolved` | `AlreadyResolved` | |
 | `not_accepting` | `NotAccepting` | did not run — a gate refusal; `protocol.Retry` is true, and craze resends the **same** `commandId`, which is exactly `NotAccepting`'s own posture: "not yet, try later" |
-| `foreign_turn` | `NotAccepting` | "the session will not take this send-now right now" is exactly `NotAccepting`'s posture |
+| `foreign_turn` | `NotAccepting` | "the session will not take this send-now right now" is exactly `NotAccepting`'s posture, but unlike `not_accepting` and `in_progress`, `protocol.Retry` is **false**: retrying under the same `commandId` after the foreign turn ends replays the stored `foreign_turn` refusal rather than trying again, so a later attempt needs a **new** `commandId` |
 | `in_progress` | `NotAccepting` | did not run under a new attempt — it is this command's own attempt, still running; `protocol.Retry` is true (mandatory: it is the safe way to learn the answer). A resend of a command still running reads the same way to a caller: "not yet, try later" |
 | `stale_model` | `NotAccepting` | did not run — refused before the provider was ever asked, because the session had already left the model the change was bound to. `protocol.Retry` is true: craze resends the **same** `commandId` once the session is back on that model, judged fresh, never as a replay. This is not an argument error — `NotAccepting`'s "will not take this right now" is the closer shed posture, and it is the closest fit shed has, not an exact one: a shed caller should still consult craze's own `data.code` (and `protocol.Retry`) rather than assume shed's `NotAccepting` alone carries the "resend once the model comes back" rule |
 | `unavailable` | `Unavailable` | did not run — a gate refusal; `protocol.Retry` is true, and `LaneError::Unavailable`'s own doc ("nothing to talk to… quiet") already reads as retryable rather than terminal |
@@ -804,9 +812,17 @@ either.
 
 The copy published here, under `reference/protocol/schema/`, is byte-for-byte
 the same as the one `internal/protocol` embeds
-(`TestPublishedSchemaIsTheEmbedded` fails the build otherwise — it walks both
-directories recursively, so a file or directory added on either side, at any
-depth, fails the build, not only one added directly under `schema/`). Every file's
+(`TestPublishedSchemaIsTheEmbedded` fails the build otherwise — it walks the
+published copy recursively, so a file or directory added anywhere under
+`reference/protocol/schema/`, at any depth, fails the build, not only one
+added directly under it). The embedded side (`//go:embed schema/*.json`) is
+flat by construction: the glob matches files directly under `schema/` only,
+so a subdirectory or a non-`.json` file added there is silently left out of
+the embed rather than failing anything — `TestSchemaSourceHasNoNestedFiles`
+guards that assumption on the *source* directory itself
+(`internal/protocol/schema/`, read straight off disk with `os.ReadDir`, not
+through the embed), so a nested or non-`.json` file added there fails the
+build too. Every file's
 `$id` is `https://charliek.github.io/craze/reference/protocol/schema/<name>`,
 so a `$ref` between files resolves at this URL exactly as it does against the
 embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),

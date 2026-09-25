@@ -24,6 +24,14 @@ type stallListener struct {
 	// still wants — resume's whole point.
 	wake  chan struct{}
 	conns map[*stallConn]struct{}
+	// accepted is every connection this listener has ever accepted,
+	// monotonic — incremented in the same critical section Accept uses to
+	// add the connection to conns, so a snapshot of it taken under the same
+	// lock (dropAll) is consistent with which connections that snapshot's
+	// conns actually holds. DropConnections' wait uses it to tell a
+	// connection accepted after a drop (a reconnecting client) from one the
+	// drop is actually responsible for closing.
+	accepted int64
 }
 
 func newStallListener(l net.Listener) *stallListener {
@@ -38,6 +46,7 @@ func (l *stallListener) Accept() (net.Conn, error) {
 	c := &stallConn{Conn: nc, l: l, closed: make(chan struct{})}
 	l.mu.Lock()
 	l.conns[c] = struct{}{}
+	l.accepted++
 	l.mu.Unlock()
 	return c, nil
 }
@@ -80,22 +89,41 @@ func (l *stallListener) state() (time.Time, chan struct{}) {
 // then. It closes each through the stallConn wrapper (Close), not the raw
 // net.Conn, so a write of its own stalled on this listener wakes at once
 // (Write's closed case) instead of sleeping out whatever stall remains.
-// Host.DropConnections waits on control.Server.OpenConns reaching zero
-// afterward — proof every dropped connection's cleanup, unbind included, has
-// actually run, not just that its socket is gone — rather than on any count
-// this returns, since a connection open when dropAll ran can finish closing
-// on its own and be mistaken for one of these (C9a review item 2).
-func (l *stallListener) dropAll() {
+// Host.DropConnections waits on control.Server.OpenConns falling to the
+// number of connections accepted after the snapshot this returns —
+// proof every dropped connection's cleanup, unbind included, has actually
+// run, not just that its socket is gone — rather than on any count of
+// closed connections this call itself makes, since a connection open when
+// dropAll ran can finish closing on its own and be mistaken for one of
+// these (C9a review item 2). The snapshot is taken under the same lock that
+// clears conns, so it is exactly "every connection accepted up to and
+// including this call" — a connection accepted after this point (a client
+// that reconnects while DropConnections is still waiting, C9b) is never one
+// this call is responsible for, and must not be dropped or waited on.
+func (l *stallListener) dropAll() int64 {
 	l.mu.Lock()
 	conns := make([]*stallConn, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
 	l.conns = map[*stallConn]struct{}{}
+	snapshot := l.accepted
 	l.mu.Unlock()
 	for _, c := range conns {
 		_ = c.Close()
 	}
+	return snapshot
+}
+
+// acceptedTotal is the number of connections this listener has ever
+// accepted, monotonic. DropConnections re-reads it during its wait: the
+// difference between this and dropAll's snapshot is how many connections
+// have been accepted since the drop — reconnects the drop is not
+// responsible for and must not wait on.
+func (l *stallListener) acceptedTotal() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.accepted
 }
 
 func (l *stallListener) forget(c *stallConn) {

@@ -1,6 +1,7 @@
 package control_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,26 @@ import (
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/tui"
+)
+
+// drainerMaxItems and drainerMaxBytes are the subscription budget every
+// non-stalled subscriber attaches with (and the server's own MaxBudget
+// ceiling, raised to match) — deliberately far above agent.EventLog's
+// production default (1024 items, 8 MiB, defaultSubscribeItems/Bytes): a
+// b.Loop() calibrated for the usual ~1s runs log.Publish (a fast, in-process,
+// non-blocking buffer offer) fast enough to queue upwards of a million
+// records in that time, and the default budget overflows well before a real
+// forwarder-plus-socket-plus-client chain — genuinely fast, just not
+// enqueue-fast — can drain it, ending the "healthy" subscription as
+// slow_consumer for real (V7 finding 2). This budget only needs enough
+// slack that draining stays ahead of production on THIS machine's
+// enqueue rate long enough to matter, not to survive an unbounded run.
+// subs=4+stalled's stalled client attaches with its own separate, small
+// budget (MaxItems: 4) specifically to force ITS overflow — this constant
+// is for the subscribers that must never be dropped.
+const (
+	drainerMaxItems = 1 << 20
+	drainerMaxBytes = 256 << 20
 )
 
 // BenchmarkPublishWithSocketSubscribers is V7 (plan 027 §8, §9 R7): Publish's
@@ -73,7 +95,7 @@ func runPublishWithSocketSubscribers(b *testing.B, subs int, stalled bool) {
 		b.Fatalf("engine.Start: %v", err)
 	}
 
-	srv := control.New(control.Options{Workspace: "/bench"})
+	srv := control.New(control.Options{Workspace: "/bench", MaxBudget: control.Budget{MaxItems: drainerMaxItems, MaxBytes: drainerMaxBytes}})
 	srv.SetEngine(eng)
 	path := filepath.Join(dir, "s")
 	l, err := net.Listen("unix", path)
@@ -107,19 +129,22 @@ func runPublishWithSocketSubscribers(b *testing.B, subs int, stalled bool) {
 	for range subs {
 		c := dialBenchClient(b, path)
 		benchHello(b, c)
-		benchAttach(b, c, sessionID, nil)
-		synced := make(chan struct{})
+		benchAttach(b, c, sessionID, &protocol.AttachBudget{MaxItems: drainerMaxItems, MaxBytes: drainerMaxBytes})
+		synced := make(chan bool, 1)
 		wg.Add(1)
 		go func(c *benchClient) {
 			defer wg.Done()
 			drain(c, synced)
 		}(c)
-		<-synced
+		if !<-synced {
+			b.Fatal("a drain goroutine exited before its first synchronized notification")
+		}
 		conns = append(conns, c)
 	}
 
+	var sc *benchClient
 	if stalled {
-		sc := dialBenchClient(b, path)
+		sc = dialBenchClient(b, path)
 		defer func() { _ = sc.nc.Close() }()
 		benchHello(b, sc)
 		benchAttach(b, sc, sessionID, &protocol.AttachBudget{MaxItems: 4})
@@ -143,6 +168,27 @@ func runPublishWithSocketSubscribers(b *testing.B, subs int, stalled bool) {
 			b.Fatal("Publish returned false")
 		}
 	}
+
+	// SubscribersDropped (used above to drive the stall) is a log-wide
+	// count: a draining subscriber can overflow and be dropped too, during
+	// the rapid 1 MiB setup publishes or during the timed loop itself,
+	// which would satisfy that check without the STALLED client being the
+	// one actually dropped, and would silently measure fewer live
+	// subscribers than the sub-benchmark names. Verify precisely instead of
+	// trusting the count: the stalled client specifically must have been
+	// reset slow_consumer, and every draining subscriber must have stayed
+	// live for the whole benchmark (none of them ever saw a reset).
+	if stalled {
+		reason := sc.readReset(b, time.Now().Add(5*time.Second))
+		if reason != protocol.ResetSlowConsumer {
+			b.Fatalf("stalled client's reset reason = %q, want %q", reason, protocol.ResetSlowConsumer)
+		}
+	}
+	for i, c := range conns {
+		if r, ok := c.resetSeen(); ok {
+			b.Fatalf("draining subscriber %d saw reset{%s}; it should have stayed live for the whole benchmark", i, r)
+		}
+	}
 }
 
 // benchClient is a minimal raw NDJSON client for the publish benchmark: no
@@ -152,6 +198,46 @@ type benchClient struct {
 	nc     *net.UnixConn
 	lr     *protocol.LineReader
 	nextID int
+	reset  atomic.Value // protocol.ResetReason, set once if drain ever sees a reset notification
+}
+
+// resetSeen reports whether drain ever saw a reset notification on this
+// client's connection, and its reason.
+func (c *benchClient) resetSeen() (protocol.ResetReason, bool) {
+	v := c.reset.Load()
+	if v == nil {
+		return "", false
+	}
+	return v.(protocol.ResetReason), true
+}
+
+// readReset reads notifications until it finds a reset, returning its
+// reason, or fails the benchmark once deadline passes — a client that was
+// never actually reset must not hang the benchmark waiting for one.
+func (c *benchClient) readReset(b *testing.B, deadline time.Time) protocol.ResetReason {
+	b.Helper()
+	if err := c.nc.SetReadDeadline(deadline); err != nil {
+		b.Fatalf("SetReadDeadline: %v", err)
+	}
+	defer func() { _ = c.nc.SetReadDeadline(time.Time{}) }()
+	for {
+		raw, err := c.lr.ReadLine()
+		if err != nil {
+			b.Fatalf("reading for reset{slow_consumer}: %v", err)
+		}
+		var n protocol.Notification
+		if json.Unmarshal(raw, &n) != nil {
+			continue
+		}
+		if n.Method != protocol.NotifyReset {
+			continue
+		}
+		var p protocol.ResetParams
+		if err := json.Unmarshal(n.Params, &p); err != nil {
+			b.Fatalf("decode reset params: %v", err)
+		}
+		return p.Reason
+	}
 }
 
 func dialBenchClient(b *testing.B, path string) *benchClient {
@@ -236,11 +322,38 @@ func benchAttach(b *testing.B, c *benchClient, sessionID string, budget *protoco
 	return ar
 }
 
-// drain reads every line c gets and discards it, until the connection
+// drain reads every line c gets, discarding events, until the connection
 // closes. The attach point is always the snapshot's head here (no cursor),
-// so the very first notification is synchronized (§3.4); synced closes once
-// it has been seen, which is what setup waits on before starting the timer.
-func drain(c *benchClient, synced chan struct{}) {
+// so the very first notification is synchronized (§3.4); synced receives
+// exactly once — true once it has been seen (what setup waits on before
+// starting the timer), or false on any exit that never saw one, so a drain
+// that dies before its first synchronized can never hang setup's <-synced.
+// A reset seen at any point (a slow_consumer drop reaching a subscriber
+// that was supposed to keep draining, in particular) is recorded on c via
+// c.reset rather than acted on here: the connection stays open after a
+// reset that does not end the session (control/forward.go), so drain keeps
+// reading, and the caller checks c.resetSeen() once the benchmark is done.
+//
+// Past the first line, a line is fully decoded only when it might be a
+// reset: a cheap byte scan first, json.Unmarshal only on what that scan
+// flags. A reset is rare (only when this subscriber is actually being
+// dropped) next to the flood of ordinary event lines the timed loop
+// produces, and decoding every one of those unconditionally is expensive
+// enough on its own to starve this reader loop — a self-inflicted overflow
+// the benchmark cannot tell apart from the real thing this check is
+// supposed to catch. Discarding an ordinary line un-decoded, as the
+// original drain did, is what keeps this loop cheap enough to actually
+// keep up.
+func drain(c *benchClient, synced chan<- bool) {
+	sent := false
+	send := func(ok bool) {
+		if sent {
+			return
+		}
+		sent = true
+		synced <- ok
+	}
+	defer send(false)
 	first := true
 	for {
 		raw, err := c.lr.ReadLine()
@@ -251,8 +364,27 @@ func drain(c *benchClient, synced chan struct{}) {
 			first = false
 			var n protocol.Notification
 			if json.Unmarshal(raw, &n) == nil && n.Method == protocol.NotifySynchronized {
-				close(synced)
+				send(true)
 			}
+			continue
+		}
+		if !bytes.Contains(raw, resetMethodMarker) {
+			continue
+		}
+		var n protocol.Notification
+		if json.Unmarshal(raw, &n) != nil || n.Method != protocol.NotifyReset {
+			continue
+		}
+		var p protocol.ResetParams
+		if json.Unmarshal(n.Params, &p) == nil {
+			c.reset.Store(p.Reason)
 		}
 	}
 }
+
+// resetMethodMarker is the substring a reset notification's line always
+// contains (Notification's field order puts "method" right after
+// "jsonrpc", and encoding/json's Marshal — protocol.MarshalLine's own —
+// never inserts whitespace) — drain's cheap pre-filter before paying for a
+// full decode.
+var resetMethodMarker = []byte(`"method":"reset"`)

@@ -327,35 +327,57 @@ const dropConnectionsWait = 5 * time.Second
 
 // DropConnections closes every connection the server has accepted so far, as
 // a network drop would (fixture 13), and does not return until the server
-// has forgotten every connection it has ever accepted: dropAll only closes
-// the raw sockets, and control.Server's own cleanup (conn.close, unbind
-// among it) runs asynchronously on each connection's reader as it notices —
-// so a script's following advance_clock, run the instant this returns, always
+// has forgotten every one of THOSE connections: dropAll only closes the raw
+// sockets, and control.Server's own cleanup (conn.close, unbind among it)
+// runs asynchronously on each connection's reader as it notices — so a
+// script's following advance_clock, run the instant this returns, always
 // measures idleness from a release that has already happened, rather than
 // racing that cleanup and sometimes recording it after the clock has already
 // moved.
 //
-// It waits for OpenConns to reach zero, not "before minus dropped": a
-// count of connections open when dropAll ran can be satisfied by an
-// unrelated connection's own close finishing first, while the one this call
-// dropped is still mid-cleanup (C9a review item 2). Zero is unambiguous
-// only because this op assumes no connection is accepted while it runs —
-// true of every wire fixture and of the binary's single-client use — so
-// nothing can raise OpenConns back off zero once every dropped connection's
-// cleanup has actually finished.
+// It does not wait for OpenConns to reach zero: a client that reconnects
+// while this wait is still running (its own retry, not this op's concern)
+// creates a new accepted connection this call never dropped and is not
+// responsible for, and OpenConns includes it — waiting for bare zero would
+// make this op fail on a reconnect that has nothing wrong with it (C9b). Nor
+// does it wait for "before minus dropped": a count of connections open when
+// dropAll ran can be satisfied by an unrelated connection's own close
+// finishing first, while the one this call dropped is still mid-cleanup
+// (C9a review item 2). Instead it tracks how many connections the listener
+// has accepted since dropAll's snapshot (acceptedTotal minus that snapshot)
+// and waits for OpenConns to fall to that count — re-read every iteration,
+// so a reconnect during the wait raises the target along with OpenConns
+// instead of being mistaken for a connection still mid-cleanup. This
+// assumes OpenConns never again drops below that count once reached: true
+// as long as nothing this call did NOT accept closes on its own during the
+// wait, which holds for every wire fixture and the binary's single-client
+// use.
 //
-// If the deadline passes with a connection still not forgotten, it returns
-// an error instead of returning silently: the fixture runner fails the test
-// on it, and the binary prints it to stderr (cmd/craze-fake-host's Do loop).
+// If the deadline passes with a connection this call dropped still not
+// forgotten, it returns an error instead of returning silently: the fixture
+// runner fails the test on it, and the binary prints it to stderr
+// (cmd/craze-fake-host's Do loop).
 func (h *Host) DropConnections() error {
-	h.listener().dropAll()
-	return waitForOpenConnsZero(dropConnectionsWait, h.srv.OpenConns)
+	l := h.listener()
+	snapshot := l.dropAll()
+	remaining := func() int {
+		n := h.srv.OpenConns() - int(l.acceptedTotal()-snapshot)
+		if n < 0 {
+			n = 0
+		}
+		return n
+	}
+	return waitForOpenConnsZero(dropConnectionsWait, remaining)
 }
 
 // waitForOpenConnsZero is DropConnections' wait, factored out so a unit test
 // can hand it a stub openConns that never reaches zero — a connection that
 // never finishes closing — without needing a real one to actually hang
 // forever (host_test.go's TestDropConnectionsErrorsOnStuckConnection).
+// openConns need not be the server's raw OpenConns: DropConnections hands it
+// a closure already adjusted for connections accepted after the drop's
+// snapshot (never negative), so this loop's own "reaches zero" contract
+// stays the same either way.
 func waitForOpenConnsZero(wait time.Duration, openConns func() int) error {
 	deadline := time.Now().Add(wait)
 	for {

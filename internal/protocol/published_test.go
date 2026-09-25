@@ -178,20 +178,34 @@ func join(ss []string) string {
 	return out
 }
 
-// TestPublishedSchemaFSHasNoSubdirectories guards the assumption
-// TestPublishedSchemaIsTheEmbedded makes: every embedded schema file sits
-// directly under schema/, none nested.
-func TestPublishedSchemaFSHasNoSubdirectories(t *testing.T) {
-	err := fs.WalkDir(protocol.SchemaFS(), ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() && path != "." {
-			t.Fatalf("unexpected subdirectory in the embedded schema: %s", path)
-		}
-		return nil
-	})
+// TestSchemaSourceHasNoNestedFiles guards the assumption
+// TestPublishedSchemaIsTheEmbedded's recursive walk relies on: `//go:embed
+// schema/*.json` (schema.go) matches files directly under schema/ only —
+// never recursively — so a subdirectory, or a non-.json file, added under
+// internal/protocol/schema/ is silently left OUT of the embed rather than
+// failing the build. protocol.SchemaFS() can therefore never show a nested
+// entry regardless of what actually sits on disk under schema/, which makes
+// walking it a tautology, not a check. This reads the source directory
+// itself straight off disk with os.ReadDir — never through the embed — so a
+// nested or stray file there fails the gate even though it would be
+// invisible to SchemaFS() and to TestPublishedSchemaIsTheEmbedded's
+// embedded-side walk.
+func TestSchemaSourceHasNoNestedFiles(t *testing.T) {
+	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
+	}
+	dir = filepath.Join(dir, "schema")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			t.Fatalf("unexpected subdirectory in %s: %s (go:embed schema/*.json would silently drop it)", dir, e.Name())
+		}
+		if filepath.Ext(e.Name()) != ".json" {
+			t.Fatalf("unexpected non-.json file in %s: %s (go:embed schema/*.json would silently drop it)", dir, e.Name())
+		}
 	}
 }
