@@ -195,6 +195,9 @@ type hooks struct {
 	// closing runs on Stream.Close once it has taken the subscription it
 	// detaches, before it sends anything.
 	closing func()
+	// starting runs on a reconnect once its re-attach, if the stream owes
+	// one, is written, before the connection's reader starts.
+	starting func()
 	// pausing runs on a reconnect once its re-attach is written and the
 	// connection's reader started, before the episode's clock stops for the
 	// re-attach's reply; spent is closed once the episode is spent.
@@ -301,8 +304,8 @@ func dial(ctx context.Context, path string, opts Options, h hooks) (*Client, err
 	c.hello = hr
 	c.hostID = hr.Endpoint.HostID
 	c.cur = w
-	c.startReaderLocked(w)
 	c.mu.Unlock()
+	c.startReader(w)
 	return c, nil
 }
 
@@ -545,32 +548,29 @@ func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFu
 	return id, nil
 }
 
-// startReaderLocked starts w's reader; c.mu is held (so Close, which sets err
-// under it before it waits, never misses one).
-func (c *Client) startReaderLocked(w *wire) {
-	if c.err != nil {
-		_ = w.nc.Close()
-		close(w.gone)
-		return
+// startReader starts w's reader, under c.mu (so Close, which sets err under it
+// before it waits, never misses one) — unless the client has stopped: then no
+// reader will ever read w, and it is hung up at once, every reply it owes
+// told so as its reader would have told them, so nothing waits on a reply
+// that cannot come (an attach's hold, C8d; astra r15 4).
+func (c *Client) startReader(w *wire) {
+	c.mu.Lock()
+	stopped := c.err != nil
+	if !stopped {
+		c.wg.Add(1)
+		go c.read(w)
 	}
-	c.wg.Add(1)
-	go c.read(w)
+	c.mu.Unlock()
+	if stopped {
+		c.hangUp(w)
+	}
 }
 
-// read is a connection's one reader: it demultiplexes replies (by request id)
-// and notifications (to the stream), in the order the host wrote them. It
-// never waits for the stream's caller (the queue takes or refuses at once,
-// X18 8), and it never writes — what it would write it posts (X21) — so a
-// reply, a reset and the connection's end are always read, whoever holds the
-// connection's write lock and however full its outbound side is. When
-// the connection ends — EOF, a read error, a line over the 16 MiB a host may
-// write, or a line that breaks the protocol (X18 7) — every reply it owed is
-// told so, and the client reconnects: a command whose reply it owed is then
-// settled by the resend rule (command.go).
-func (c *Client) read(w *wire) {
-	defer c.wg.Done()
-	for c.dispatch(w) {
-	}
+// hangUp is w's end — its reader's, or its adoption's when its reader never
+// started: w is closed and dead (nothing more is sent on it), every reply it
+// owed is told so — ErrConnectionLost, or why the client stopped — and gone
+// is closed.
+func (c *Client) hangUp(w *wire) {
 	_ = w.nc.Close()
 	w.mu.Lock()
 	w.dead = true
@@ -587,6 +587,23 @@ func (c *Client) read(w *wire) {
 		fn(nil, lost)
 	}
 	close(w.gone)
+}
+
+// read is a connection's one reader: it demultiplexes replies (by request id)
+// and notifications (to the stream), in the order the host wrote them. It
+// never waits for the stream's caller (the queue takes or refuses at once,
+// X18 8), and it never writes — what it would write it posts (X21) — so a
+// reply, a reset and the connection's end are always read, whoever holds the
+// connection's write lock and however full its outbound side is. When
+// the connection ends — EOF, a read error, a line over the 16 MiB a host may
+// write, or a line that breaks the protocol (X18 7) — every reply it owed is
+// told so, and the client reconnects: a command whose reply it owed is then
+// settled by the resend rule (command.go).
+func (c *Client) read(w *wire) {
+	defer c.wg.Done()
+	for c.dispatch(w) {
+	}
+	c.hangUp(w)
 	c.lost(w)
 }
 
@@ -595,6 +612,28 @@ func (c *Client) read(w *wire) {
 // posted in the order it was posted: the reader never writes (X21). It is
 // called on w's reader, whose own count keeps the wait group above zero.
 func (c *Client) post(w *wire, fn func()) {
+	c.enqueue(w, fn)
+	if h := c.hooks.posted; h != nil {
+		h()
+	}
+}
+
+// postFromCaller is post from a caller's goroutine, which the wait group does
+// not count (Stream.Close's detach, C8d): the writer it may start is counted
+// under c.mu, so Close, which sets err under it before it waits, never misses
+// it. false says the client has stopped, and nothing was posted.
+func (c *Client) postFromCaller(w *wire, fn func()) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return false
+	}
+	c.enqueue(w, fn)
+	return true
+}
+
+// enqueue appends fn to w's posted writes, starting w's writer if none runs.
+func (c *Client) enqueue(w *wire, fn func()) {
 	w.mu.Lock()
 	w.posted = append(w.posted, fn)
 	start := !w.posting
@@ -603,9 +642,6 @@ func (c *Client) post(w *wire, fn func()) {
 	if start {
 		c.wg.Add(1)
 		go c.writePosted(w)
-	}
-	if h := c.hooks.posted; h != nil {
-		h()
 	}
 }
 

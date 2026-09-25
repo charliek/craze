@@ -91,8 +91,10 @@ func (c *Client) lost(w *wire) {
 // loss. Its clock stops while an adoption waits for its re-attach's reply
 // (X20, X23) and runs again for as long as a write on the connection being
 // adopted is in progress (C8c): only the wait for a reply is unbounded, never
-// a write. ctx ends once it is spent, or with the client. The reconnect
-// goroutine drives it; the adopted connection's writes (send) report to it.
+// a write — not even one still in progress as the connection is published,
+// which keeps the episode's end as its deadline until it returns (C8d). ctx
+// ends once it is spent, or with the client. The reconnect goroutine drives
+// it; the adopted connection's writes (send) report to it.
 type episode struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -111,6 +113,10 @@ type episode struct {
 	w       *wire
 	waiting bool
 	inWrite bool
+	// lifting is a connection published while one of its writes was in
+	// progress: that write keeps the episode's end as its deadline, which is
+	// lifted once it has returned (lift).
+	lifting *wire
 }
 
 func (c *Client) newEpisode() *episode {
@@ -188,6 +194,12 @@ func (e *episode) writing(w *wire, on bool) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if !on && e.lifting == w {
+		// w was published while this write was in progress: now it has
+		// returned, w's writes have no deadline.
+		e.lifting = nil
+		_ = w.nc.SetWriteDeadline(time.Time{})
+	}
 	if e.w != w {
 		return
 	}
@@ -230,6 +242,21 @@ func (e *episode) runLocked() {
 	if e.w != nil {
 		_ = e.w.nc.SetWriteDeadline(e.end)
 	}
+}
+
+// lift is the adoption publishing w: its writes are no longer the episode's
+// to bound. Its write deadline goes at once — or, while one of its writes is
+// in progress, only once that write has returned (writing): publication, and
+// the reconnect's end after it, never unbound a write already under way, which
+// ends by the episode's end at the latest (C8d; astra r15 2).
+func (e *episode) lift(w *wire) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.w == w && e.inWrite {
+		e.lifting = w
+		return
+	}
+	_ = w.nc.SetWriteDeadline(time.Time{})
 }
 
 func (e *episode) close() {
@@ -387,9 +414,12 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 	if s != nil {
 		reattached = s.reconnected(w, !fresh, sid)
 	}
-	c.mu.Lock()
-	c.startReaderLocked(w)
-	c.mu.Unlock()
+	if h := c.hooks.starting; h != nil {
+		h()
+	}
+	// A client closed meanwhile starts no reader: w is hung up, and the
+	// re-attach's reply callback told so, releasing its hold (C8d).
+	c.startReader(w)
 	if reattached != nil {
 		if h := c.hooks.pausing; h != nil {
 			h(ep.ctx.Done())
@@ -431,7 +461,7 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 	c.mu.Lock()
 	c.unresumed = false
 	c.mu.Unlock()
-	return c.publish(w)
+	return c.publish(ep, w)
 }
 
 // adopted is adopt having returned: w, published or given up, is no longer
@@ -448,9 +478,10 @@ func (c *Client) adopted(w *wire) {
 // w, and makes w the connection calls go to once none is left: a command
 // registered, retried or waited out meanwhile finds no connection and is held,
 // so the next round sends it, and nothing overtakes a resend on w (X18 3).
-// Its writes carry the episode's deadline, which it lifts as it publishes w.
-// false says w went first.
-func (c *Client) publish(w *wire) bool {
+// Its writes carry ep's deadline, which it lifts as it publishes w — once a
+// write still in progress has returned, if one is (episode.lift). false says
+// w went first.
+func (c *Client) publish(ep *episode, w *wire) bool {
 	for {
 		c.mu.Lock()
 		if c.err != nil {
@@ -479,7 +510,7 @@ func (c *Client) publish(w *wire) bool {
 			}
 		}
 		if len(held) == 0 {
-			_ = w.nc.SetWriteDeadline(time.Time{})
+			ep.lift(w)
 			c.cur, c.adopting = w, nil
 			c.changedLocked()
 			c.mu.Unlock()

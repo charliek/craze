@@ -68,9 +68,11 @@ import (
 // stream is over, is never written — so a re-attach posted before a Close and
 // still queued dies with the stream. Each request that may put or leave an
 // attachment of the stream's in the host's one place is held until answered
-// (hold): an attach once written, a detach of a subscription given up. Close
-// returns once none is left, so a replacement stream attaching after it finds
-// the place free.
+// (hold): an attach once written, a detach of a subscription given up, and
+// Close's own detach (C8d). Close returns once none is left — every Close,
+// concurrent or retried — so a replacement stream attaching after it finds
+// the place free; it never writes (its detach is posted to the connection's
+// writer), and every wait of it ends with its context (C8d).
 
 // Kind is what an Item is.
 type Kind int
@@ -265,10 +267,10 @@ type Stream struct {
 // hold is one request of the stream's that may put, or leave, an attachment
 // of the stream's in the host's one place on its connection until it is
 // answered (C8c): an attach once it is written, and a detach of a
-// subscription the stream gave up (it fell behind, broke, or never wanted
-// it). A Close returns once none is left, so a closed stream holds nothing on
-// the host and a replacement's attach finds the place free. live says it
-// counts in Stream.holds; guarded by Stream.mu.
+// subscription the stream gave up (it fell behind, broke, never wanted it,
+// or was closed, C8d). A Close returns once none is left, so a closed stream
+// holds nothing on the host and a replacement's attach finds the place free.
+// live says it counts in Stream.holds; guarded by Stream.mu.
 type hold struct{ live bool }
 
 // newHoldLocked is a new hold, counted; s.mu is held.
@@ -1067,16 +1069,32 @@ func (s *Stream) SessionID() string {
 // Close returns once the host holds nothing of the stream's (C8c; astra r13
 // 3): an attach it had posted and not yet written is never written (admit);
 // one already written is waited for, and the attachment it made detached; a
-// detach of a subscription it gave up is waited for. So a replacement's
-// attach, made once Close has returned, finds the connection's one place
-// free. That wait ends with ctx (ctx.Err(); the detaches are still made).
+// detach of a subscription it gave up is waited for — and so is its own
+// detach, which holds the stream like those (C8d). So a replacement's attach,
+// made once Close has returned, finds the connection's one place free.
+//
+// Close never writes: its detach is posted to the connection's writer, and
+// every wait it makes ends with ctx (C8d; astra r15 3), however long the
+// connection's writes are held — a host that has stopped reading. A Close
+// whose ctx ends first returns ctx.Err() with its detach, or another request
+// of the stream's, still owed: it still goes out (a detach, or an attach's
+// answer and its stray detach) and is still held, and until it is answered
+// the host may still hold the attachment — an Attach meanwhile may be refused
+// already_attached. A retried Close sends nothing again: it waits for those —
+// every Close does, concurrent ones too — and returns nil once the host has
+// answered them or their connection has gone.
 func (s *Stream) Close(ctx context.Context) error {
 	s.mu.Lock()
 	over := s.done
 	sub, sw, sid := s.sub, s.subW, s.sessionID
+	var dh *hold
 	if !over {
 		s.sub, s.subW = "", nil
 		s.stopLocked()
+		if sub != "" && sw != nil {
+			// The host holds the attachment until it answers the detach.
+			dh = s.newHoldLocked()
+		}
 	}
 	var idle <-chan struct{}
 	if s.holds > 0 {
@@ -1088,30 +1106,73 @@ func (s *Stream) Close(ctx context.Context) error {
 	s.mu.Unlock()
 	s.q.drop()
 	s.c.dropStream(s)
-	var err error
+	var detached <-chan error
 	if !over {
 		if h := s.c.hooks.closing; h != nil {
 			h()
 		}
-		if sub != "" && sw != nil {
-			err = s.c.callOn(ctx, sw, protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid, Subscription: sub}, nil)
+		if dh != nil {
+			detached = s.detachOwn(sw, sid, sub, dh)
+		}
+	}
+	if idle == nil {
+		return nil
+	}
+	select {
+	case <-idle:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-detached:
+		// Its answer comes before its hold goes (a nil channel: none made).
+		return err
+	default:
+		return nil
+	}
+}
+
+// detachOwn is Close's detach of sub, the live subscription on sw, posted to
+// sw's writer; h holds the stream until the host answers it or sw goes (C8d;
+// astra r15, further). What becomes of it — the host's refusal, or nil once it
+// is answered or its connection has gone with the attachment — comes on the
+// channel it returns, before h is released.
+func (s *Stream) detachOwn(sw *wire, sid, sub string, h *hold) <-chan error {
+	res := make(chan error, 1)
+	var once sync.Once
+	done := func(err error) {
+		once.Do(func() {
 			if errors.Is(err, ErrConnectionLost) {
 				// Gone with its connection, or going: nothing is left to
 				// detach.
 				err = nil
 			}
-		}
+			res <- err
+			s.release(h)
+		})
 	}
-	if idle != nil {
-		select {
-		case <-idle:
-		case <-ctx.Done():
+	raw, err := paramsJSON(protocol.DetachParams{SessionID: sid, Subscription: sub})
+	if err != nil {
+		done(err)
+		return res
+	}
+	posted := s.c.postFromCaller(sw, func() {
+		_, err := s.c.send(sw, protocol.MethodSessionDetach, raw, func(resp *protocol.Response, err error) {
 			if err == nil {
-				err = ctx.Err()
+				err = decodeReply(resp, nil)
 			}
+			done(err)
+		}, writeHooks{})
+		if err != nil {
+			done(err)
 		}
+	})
+	if !posted {
+		// The client has stopped: its connections are closed, and the
+		// attachment went with them.
+		done(nil)
 	}
-	return err
+	return res
 }
 
 // dropStream forgets s as the client's stream.

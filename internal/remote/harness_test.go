@@ -522,6 +522,17 @@ func (tp *tap) killConn(i int) {
 	_ = c.Close()
 }
 
+// writeDeadline is the write deadline the client last set on connection i
+// (zero: none).
+func (tp *tap) writeDeadline(i int) time.Time {
+	tp.mu.Lock()
+	c := tp.conns[i]
+	tp.mu.Unlock()
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	return c.wdl
+}
+
 // setRewriteIn and setHoldOut install the tap's hooks.
 func (tp *tap) setRewriteIn(f func(wireLine) [][]byte) {
 	tp.mu.Lock()

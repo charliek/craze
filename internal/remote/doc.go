@@ -54,9 +54,11 @@
 // finds no room in the stream's queue makes the stream fall behind
 // (attach.go). Nor does it ever write: a re-attach or a detach it decides on
 // is posted to the connection's writer goroutine, which runs them in order
-// (Client.post). So replies, resets and the connection's end are always read,
-// even while a caller's write holds the connection's write lock on a full
-// socket. A lost connection starts one reconnect goroutine, which opens the
+// (Client.post) — as is Stream.Close's own detach, so a Close waits for
+// nothing but answers, bounded by its context. So replies, resets and the
+// connection's end are always read, even while a caller's write holds the
+// connection's write lock on a full socket. A lost connection starts one
+// reconnect goroutine, which opens the
 // next connection, re-attaches on it before its reader starts, sends every
 // command held, in wire order, and only then hands it over — every write of
 // it bounded by the episode, even one made while the episode's clock is

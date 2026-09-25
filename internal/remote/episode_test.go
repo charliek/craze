@@ -3,6 +3,7 @@ package remote_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -276,5 +277,156 @@ func TestAReattachWaitDoesNotSpendTheEpisode(t *testing.T) {
 				t.Fatalf("the re-attach's items: %v", k)
 			}
 		})
+	}
+}
+
+// TestPublicationNeverUnboundsAWriteInFlight (C8d; astra r15 2, the review's
+// schedule): no command is held, and the reconnect's re-attach is refused
+// retryably (the tap's unavailable), so the stream writes it again while the
+// adoption waits for its reply; the caller closes the stream meanwhile, which
+// ends that wait, and the adoption publishes the connection with the retry's
+// write still under way. That write keeps the episode's end as its deadline
+// until it returns, and only then is the deadline lifted:
+//   - the write stalls (a host that has stopped reading): it fails by the
+//     episode's end — never unbounded — so the Close waiting for it returns,
+//     and the connection it failed on is redialled;
+//   - the write goes through: the connection's later writes have no deadline,
+//     so a call made past the episode's end is answered on it.
+func TestPublicationNeverUnboundsAWriteInFlight(t *testing.T) {
+	const window = time.Second
+	for _, stalls := range []bool{true, false} {
+		name := "the write stalls"
+		if !stalls {
+			name = "the write goes through"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHost(t)
+			tp := newTap(t)
+			t.Cleanup(tp.releaseDials)
+			published := make(chan struct{}, 1)
+			c := dialHooked(t, h.path, tp, remote.Options{RedialWindow: window}, remote.TestHooks{
+				Published: func() {
+					select {
+					case published <- struct{}{}:
+					default:
+					}
+				},
+			})
+			through := make(chan struct{})
+			t.Cleanup(func() { closeOnce(through) })
+			s := attach(t, c, remote.AttachOptions{})
+			nextKind(t, s, remote.KindAttached)
+			nextKind(t, s, remote.KindSynchronized)
+			tp.setRewriteIn(func(l wireLine) [][]byte {
+				if l.conn == 1 && l.resp != nil && l.method == protocol.MethodSessionAttach {
+					return [][]byte{refusedLine(t, l, protocol.CodeUnavailable, protocol.ReasonNotReady)}
+				}
+				return nil
+			})
+			retries := func() int { return len(tp.sentOn(1, protocol.MethodSessionAttach)) - 1 }
+			isRetry := func(l wireLine) bool {
+				return l.conn == 1 && l.method == protocol.MethodSessionAttach && retries() == 1
+			}
+			if stalls {
+				tp.setStallOut(isRetry)
+			} else {
+				tp.setHoldOut(func(l wireLine) <-chan struct{} {
+					if isRetry(l) {
+						return through
+					}
+					return nil
+				})
+			}
+			held := tp.holdDials()
+			tp.kill()
+			await(t, held, "the redial")
+			lost := time.Now()
+			tp.releaseDials()
+			tp.await(t, "the retried re-attach's write", func() bool { return retries() == 1 })
+			ctx := tctx(t)
+			closed := make(chan error, 1)
+			go func() { closed <- s.Close(ctx) }()
+			recv(t, published)
+			if stalls {
+				select {
+				case err := <-closed:
+					if err != nil {
+						t.Fatalf("Close: %v", err)
+					}
+				case <-time.After(time.Until(lost.Add(3 * window))):
+					t.Fatalf("Close still waits %s after the loss: the write under way as the connection was published is unbounded", 3*window)
+				}
+				tp.await(t, "the redial of the connection the write failed on", func() bool { return tp.connCount() == 3 })
+				return
+			}
+			dl := tp.writeDeadline(1)
+			if dl.IsZero() {
+				t.Fatal("publication lifted the deadline of the write under way")
+			}
+			closeOnce(through)
+			if err := recv(t, closed); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			<-time.After(time.Until(dl.Add(50 * time.Millisecond)))
+			if err := c.Call(tctx(t), protocol.MethodSessionState, protocol.StateParams{SessionID: h.sid()}, nil); err != nil {
+				t.Fatalf("a call past the episode's end: %v", err)
+			}
+			if n := tp.connCount(); n != 2 {
+				t.Fatalf("%d connections: the published connection's writes kept the episode's deadline past it", n)
+			}
+			if dl := tp.writeDeadline(1); !dl.IsZero() {
+				t.Fatalf("the published connection's write deadline is %v, want none", dl)
+			}
+		})
+	}
+}
+
+// TestAnAdoptionWhoseReaderNeverStartsOwesNothing (C8d; astra r15 4, the
+// review's schedule): the reconnect writes its re-attach — which the stream
+// holds until it is answered — and the client is closed before the
+// connection's reader starts (the Starting hook holds the adoption there). No
+// reader will ever read that connection, so it is hung up as its reader would
+// have hung it up: every reply it owed is told so, the re-attach's hold is
+// released, and a Stream.Close with no deadline returns.
+func TestAnAdoptionWhoseReaderNeverStartsOwesNothing(t *testing.T) {
+	h := newHost(t)
+	tp := newTap(t)
+	starting, proceed := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { closeOnce(proceed) })
+	var once sync.Once
+	c := dialHooked(t, h.path, tp, remote.Options{}, remote.TestHooks{
+		Starting: func() {
+			once.Do(func() {
+				close(starting)
+				hold(tp, proceed, "the adoption's release")
+			})
+		},
+	})
+	s := attach(t, c, remote.AttachOptions{})
+	nextKind(t, s, remote.KindAttached)
+	nextKind(t, s, remote.KindSynchronized)
+	tp.kill()
+	await(t, starting, "the adoption, its re-attach written")
+	if n := len(tp.sentOn(1, protocol.MethodSessionAttach)); n != 1 {
+		t.Fatalf("the premise: %d re-attaches written before the reader starts, want 1", n)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close(ctx) }()
+	stopped := make(chan error, 1)
+	go func() { stopped <- c.Close() }()
+	await(t, c.Done(), "the client to stop")
+	close(proceed)
+	if err := recv(t, stopped); err != nil {
+		t.Fatalf("Client.Close: %v", err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Stream.Close: %v", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatalf("Stream.Close still waits %s after Client.Close returned: the re-attach's hold leaked", watchdog)
 	}
 }

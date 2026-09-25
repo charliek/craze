@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,16 +149,24 @@ func holdingCaller(t *testing.T, tp *tap, c *remote.Client, sid string, release 
 }
 
 // closedOnceDetached closes old — once a Close whose context ends first has
-// said it waits (ctx.Err()) — and checks that it returned only after the host
-// had answered the detach that frees its place, and that nothing of the old
-// stream's (an attach, a detach) was written after it returned. It returns
-// the number of lines recorded when it returned.
+// said it waits (ctx.Err()), returning in time (C8d: never held by the
+// connection) — and checks that it returned only after the host had answered
+// the detach that frees its place, and that nothing of the old stream's (an
+// attach, a detach) was written after it returned. It returns the number of
+// lines recorded when it returned.
 func closedOnceDetached(t *testing.T, tp *tap, old *remote.Stream, released func()) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := old.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Close, the host still holding the stream's attachment: %v; want it to wait, until its context ended", err)
+	timedOut := make(chan error, 1)
+	go func() { timedOut <- old.Close(ctx) }()
+	select {
+	case err := <-timedOut:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close, the host still holding the stream's attachment: %v; want it to wait, until its context ended", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatalf("Close has not returned %s after its context ended: it waits on the connection", watchdog)
 	}
 	released()
 	type result struct {
@@ -318,6 +327,153 @@ func TestCloseWaitsForAFallenBehindDetach(t *testing.T) {
 	nothingAfter(t, tp, closedAt)
 	h.text("still attached")
 	until(t, s, isText(t, "still attached"))
+}
+
+// TestCloseIsBoundedByItsContext (C8d; astra r15 3): the host has stopped
+// reading — a caller's write holds the connection, or Close's own detach is
+// held on its way out — when the caller closes a live stream. Close never
+// writes: its detach is posted to the connection's writer, and a Close whose
+// context ends returns ctx.Err() in time, its detach still owed. Once the
+// connection is free the detach goes out, and a retried Close returns only
+// once the host has answered it; a replacement stream attaches, and nothing of
+// the old stream's reaches the host after its Close returned.
+func TestCloseIsBoundedByItsContext(t *testing.T) {
+	for _, caller := range []bool{true, false} {
+		name := "a caller's write holds the connection"
+		if !caller {
+			name = "the detach's own write is held"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHost(t)
+			tp := newTap(t)
+			c := dialClient(t, h.path, tp, remote.Options{})
+			release := make(chan struct{})
+			t.Cleanup(func() { closeOnce(release) })
+			old := attach(t, c, remote.AttachOptions{})
+			nextKind(t, old, remote.KindAttached)
+			nextKind(t, old, remote.KindSynchronized)
+			released := func() { closeOnce(release) }
+			if caller {
+				called := holdingCaller(t, tp, c, h.sid(), release)
+				released = func() {
+					closeOnce(release)
+					if err := recv(t, called); err != nil {
+						t.Fatalf("the caller's call: %v", err)
+					}
+				}
+			} else {
+				tp.setHoldOut(func(l wireLine) <-chan struct{} {
+					if l.method == protocol.MethodSessionDetach {
+						return release
+					}
+					return nil
+				})
+			}
+			closedAt := closedOnceDetached(t, tp, old, released)
+			s := attach(t, c, remote.AttachOptions{SessionID: h.sid()})
+			nextKind(t, s, remote.KindAttached)
+			nextKind(t, s, remote.KindSynchronized)
+			nothingAfter(t, tp, closedAt)
+			h.text("still attached")
+			until(t, s, isText(t, "still attached"))
+		})
+	}
+}
+
+// TestEveryCloseWaitsForTheDetach (C8d; astra r15, further): Close's detach
+// of the live subscription holds the stream until the host answers it or the
+// connection goes, and the tap holds the detach's write. A second Close —
+// concurrent, one whose context ends and then a retry — sends nothing and
+// waits for the same detach, never returning while the host still holds the
+// attachment:
+//   - answered: once the detach goes through and the host has answered it,
+//     every Close returns, and a replacement stream attaches;
+//   - the connection goes first, and the attachment with it: every Close
+//     returns, and a replacement stream attaches on the next connection.
+//
+// Neither replacement is refused already_attached.
+func TestEveryCloseWaitsForTheDetach(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		name := "answered"
+		if gone {
+			name = "the connection goes"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHost(t)
+			tp := newTap(t)
+			c := dialClient(t, h.path, tp, remote.Options{})
+			detaching := make(chan struct{})
+			t.Cleanup(func() { closeOnce(detaching) })
+			old := attach(t, c, remote.AttachOptions{})
+			nextKind(t, old, remote.KindAttached)
+			nextKind(t, old, remote.KindSynchronized)
+			// ended is the detach answered — as the client reads the host's
+			// answer, before it handles it — or its connection gone.
+			var ended atomic.Bool
+			tp.setRewriteIn(func(l wireLine) [][]byte {
+				if l.resp != nil && l.method == protocol.MethodSessionDetach {
+					ended.Store(true)
+				}
+				return nil
+			})
+			tp.setHoldOut(func(l wireLine) <-chan struct{} {
+				if l.method == protocol.MethodSessionDetach {
+					return detaching
+				}
+				return nil
+			})
+			type result struct {
+				err   error
+				ended bool
+			}
+			closing := func() <-chan result {
+				ctx := tctx(t)
+				ch := make(chan result, 1)
+				go func() {
+					err := old.Close(ctx)
+					ch <- result{err, ended.Load()}
+				}()
+				return ch
+			}
+			first := closing()
+			tp.await(t, "the detach's write", func() bool { return len(tp.sent(protocol.MethodSessionDetach)) == 1 })
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if err := old.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("a concurrent Close, the host still holding the attachment: %v; want it to wait, until its context ended", err)
+			}
+			retried := closing()
+			if gone {
+				ended.Store(true)
+				tp.killConn(0)
+			} else {
+				closeOnce(detaching)
+			}
+			for i, ch := range []<-chan result{first, retried} {
+				r := recv(t, ch)
+				if r.err != nil {
+					t.Fatalf("Close %d: %v", i+1, r.err)
+				}
+				if !r.ended {
+					t.Fatalf("Close %d returned while the host still held the attachment: before the detach was answered, or its connection had gone", i+1)
+				}
+			}
+			if n := len(tp.sent(protocol.MethodSessionDetach)); n != 1 {
+				t.Fatalf("%d detaches written, want Close's one", n)
+			}
+			closeOnce(detaching)
+			if !gone {
+				if a := tp.received(func(l wireLine) bool { return l.method == protocol.MethodSessionDetach }); len(a) != 1 || errorCode(a[0]) != "" {
+					t.Fatalf("the host's answers to the detach: %d", len(a))
+				}
+			}
+			s := attach(t, c, remote.AttachOptions{SessionID: h.sid()})
+			nextKind(t, s, remote.KindAttached)
+			nextKind(t, s, remote.KindSynchronized)
+			h.text("still attached")
+			until(t, s, isText(t, "still attached"))
+		})
+	}
 }
 
 // TestAMalformedAttachReplyAnswersAttach (X18 7; astra r9 7): the host
