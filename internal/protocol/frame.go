@@ -53,8 +53,13 @@ func NewLineReader(r io.Reader, max int) *LineReader {
 // returns ErrLineTooLong; the next call reads the line after it. A last line
 // the stream ends without a "\n" is returned as a line all the same — a peer
 // that half-closes after its final request still gets its reply (§3.7) — and
-// the call after it returns io.EOF. A read error other than io.EOF is
-// returned as it is, and what was read of the line is dropped.
+// the call after it returns io.EOF. This EOF tolerance is deliberately kept,
+// not a gap: it costs nothing, because a line this reader accepted but a real
+// host would never have sent unterminated — a truncated JSON object — still
+// fails at decode with -32700 (plan 027 X10). Every line a well-behaved host
+// writes ends in "\n"; only a peer that goes away mid-line relies on this
+// path at all. A read error other than io.EOF is returned as it is, and what
+// was read of the line is dropped.
 func (l *LineReader) ReadLine() ([]byte, error) {
 	var line []byte
 	over := false
@@ -118,9 +123,12 @@ func trimLineEnd(line []byte) []byte {
 // U+2029, never occurs in one, because encoding/json escapes those in every
 // string it writes. So an event notification carries Record.Body byte for
 // byte (§3.3), and a server only ever embeds codec output, never hand-built
-// JSON (plan 027 X6). The limit on an outbound line (OutboundLineMax) is the
-// caller's to hold: a reply over it becomes failed, reason response_too_large
-// (§3.2).
+// JSON (plan 027 X6). Neither MarshalLine nor WriteLine enforces the 16 MiB
+// outbound limit (OutboundLineMax) — that check, and the failed/
+// response_too_large replacement it performs on a reply over it (§3.2, plan
+// 027 X10), live in internal/control: (*conn).send in dispatch.go measures
+// the marshaled line against srv.maxLine (protocol.OutboundLineMax) and
+// re-marshals a refusal in its place before writing.
 func MarshalLine(v any) ([]byte, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)

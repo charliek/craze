@@ -135,7 +135,13 @@ func (g *gateRig) beforeCancel(string) {
 
 // beforeSessionClose is BeforeSessionClose: it parks Close after e.mu is
 // released and before Session.Close, for the "closing" row's cut, and is a
-// no-op for every other row.
+// no-op for every other row. closeEntered is buffered (capacity 1) so this
+// send never blocks: if the cut's await(closeEntered) already gave up (its
+// own watchdog fired before Close reached this point) and t.Cleanup has
+// since closed closeRelease, this goroutine still has somewhere to put its
+// signal and goes straight on to receive from closeRelease, instead of
+// blocking forever on a send nobody is left to receive — which would in turn
+// hang the Cleanup that joins it (g.bg.Wait).
 func (g *gateRig) beforeSessionClose() {
 	if !g.holdClose {
 		return
@@ -670,7 +676,7 @@ func newGateRig(t *testing.T, row gateRow, opts gateOpts) *gateRig {
 		entered:      make(chan struct{}, 8),
 		release:      make(chan struct{}),
 		returned:     make(chan string, 16),
-		closeEntered: make(chan struct{}),
+		closeEntered: make(chan struct{}, 1),
 		closeRelease: make(chan struct{}),
 	}
 	e, err := engine.NewForGateTable(g.stub, engine.Options{Chain: engine.ChainPolicy{RetryForeignTurn: row.retry}},
