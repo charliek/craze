@@ -228,6 +228,11 @@ var errStalled = errors.New("write stalled: the peer is not reading")
 // untouched (§3.7). Progress is noticed when its write returns, so the close
 // comes between the bound and the bound plus one attempt after the last byte
 // moved (60–61 s in production).
+//
+// A deadline that cannot be set is a failed write (plan 027 X15, astra r6 5):
+// nothing is written without one in place, since a write with none could
+// block forever on a peer that stops reading, where the stall bound never
+// looks. The connection closes as for any failed write.
 func (c *conn) writeLine(b []byte) error {
 	stall := c.srv.stall
 	attempt := max(stall/writeAttempts, time.Millisecond)
@@ -238,7 +243,9 @@ func (c *conn) writeLine(b []byte) error {
 		if end := last.Add(stall); end.Before(deadline) {
 			deadline = end
 		}
-		_ = c.nc.SetWriteDeadline(deadline)
+		if err := c.nc.SetWriteDeadline(deadline); err != nil {
+			return errors.New("write failed: its deadline could not be set: " + err.Error())
+		}
 		n, err := c.nc.Write(chunk)
 		b = b[n:]
 		if n > 0 {

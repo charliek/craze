@@ -2,6 +2,7 @@ package control_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,15 +193,26 @@ func (l *pipeListener) Addr() net.Addr { return testAddr{} }
 // its own.
 func (l *pipeListener) dial(t *testing.T) (net.Conn, <-chan time.Time) {
 	t.Helper()
+	tc := &timedConn{closed: make(chan time.Time, 1)}
+	peer := l.dialWrapped(t, func(server net.Conn) net.Conn {
+		tc.Conn = server
+		return tc
+	})
+	return peer, tc.closed
+}
+
+// dialWrapped connects a pipe, hands the server its end as wrap returns it,
+// and returns the peer's end.
+func (l *pipeListener) dialWrapped(t *testing.T, wrap func(net.Conn) net.Conn) net.Conn {
+	t.Helper()
 	server, peer := net.Pipe()
 	t.Cleanup(func() { _ = peer.Close() })
-	tc := &timedConn{Conn: server, closed: make(chan time.Time, 1)}
 	select {
-	case l.conns <- tc:
+	case l.conns <- wrap(server):
 	case <-time.After(watchdog):
 		t.Fatal("the server did not accept the pipe")
 	}
-	return peer, tc.closed
+	return peer
 }
 
 // timedConn is the server's end of a pipe: it records when it was closed.
@@ -258,6 +271,78 @@ func TestAWriterThatMakesNoProgressIsClosed(t *testing.T) {
 	b := h.dial()
 	b.sayHello(nil)
 	ok[protocol.QueueAddResult](t, queueAdd(b, b.cmd(), "untouched"))
+}
+
+// noDeadlineConn is the server's end of a pipe whose SetWriteDeadline fails
+// once armed, leaving the pipe open — a net.Conn that cannot install a write
+// deadline. It counts the writes made after it was armed.
+type noDeadlineConn struct {
+	net.Conn
+	armed  atomic.Bool
+	writes atomic.Int32
+}
+
+func (c *noDeadlineConn) SetWriteDeadline(t time.Time) error {
+	if c.armed.Load() {
+		return errors.New("write deadlines are not supported")
+	}
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *noDeadlineConn) Write(b []byte) (int, error) {
+	if c.armed.Load() {
+		c.writes.Add(1)
+	}
+	return c.Conn.Write(b)
+}
+
+// TestAWriteDeadlineThatCannotBeSetClosesTheConnection (plan 027 X15, astra r6
+// 5): a SetWriteDeadline that fails is a failed write — the connection closes
+// and its client is released — and nothing is written with no deadline in
+// place, where a peer that stops reading could block the writer forever. A
+// Unix socket's never fails so; the server takes any net.Listener, and a
+// wrapper stands in for one whose conn does.
+func TestAWriteDeadlineThatCannotBeSetClosesTheConnection(t *testing.T) {
+	h := newHost(t)
+	nd := &noDeadlineConn{}
+	peer := servePipes(t, h.srv).dialWrapped(t, func(server net.Conn) net.Conn {
+		nd.Conn = server
+		return nd
+	})
+	_ = peer.SetDeadline(time.Now().Add(watchdog))
+	lr := protocol.NewLineReader(peer, protocol.OutboundLineMax)
+	if _, err := peer.Write(requestLine(t, "1", protocol.MethodHello, helloParams(nil))); err != nil {
+		t.Fatal(err)
+	}
+	line, err := lr.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp protocol.Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatal(err)
+	}
+	hello := ok[protocol.HelloResult](t, &resp)
+
+	nd.armed.Store(true)
+	if _, err := peer.Write(requestLine(t, "2", protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)})); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := lr.ReadLine(); !errors.Is(err, io.EOF) {
+		t.Fatalf("read %q, %v: want the host to close the connection", line, err)
+	}
+	if n := nd.writes.Load(); n != 0 {
+		t.Fatalf("%d writes with no deadline in place", n)
+	}
+	h.logs.wait(t, "close", "client "+hello.ClientID+":", "write failed", "deadline")
+
+	// Released: nobody resumes it, and it retires once released for the age
+	// bound, holding nothing — a client still bound never would.
+	h.clock.advance(pastRetirement)
+	b := h.dial()
+	if hb := b.sayHello(&protocol.Resume{ClientID: hello.ClientID, Token: hello.Token}); hb.Resumed || hb.ClientID == hello.ClientID {
+		t.Fatalf("the client of the closed connection was never released: %+v", hb)
+	}
 }
 
 // failingListener fails every Accept with a transient error until it is

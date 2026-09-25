@@ -44,10 +44,11 @@
 // nothing. A superseded or closing connection admits nothing more: its reader
 // stops. A command admitted before a transfer re-checks its binding just
 // before the engine call and does not run once the binding has moved on (a
-// newer generation, or another engine); one whose connection merely closed
-// still runs (§3.6). A binding with no connection for twice the
-// receipts table's age bound (20 min) is dropped with its token, so neither
-// grows with clients that never come back. See bind.go.
+// newer generation, a binding dropped since — X15 — or another engine); one
+// whose connection merely closed, its binding still in the table, still runs
+// (§3.6). A binding with no connection for twice the receipts table's age
+// bound (20 min) is dropped with its token, so neither grows with clients that
+// never come back. See bind.go.
 //
 // # Locks
 //

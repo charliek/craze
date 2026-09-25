@@ -99,7 +99,12 @@ import (
 //     releases of the last 20 min;
 //   - a binding is also dropped when its client is found retired (a resume
 //     whose ClaimClient fails), and every binding when the engine is replaced
-//     (SetEngine), the released list with them.
+//     (SetEngine), the released list with them;
+//   - a command admitted under a binding that has since been dropped does not
+//     run (movedOn, X15): the drop erased the generation that would say
+//     whether a resume had taken the client over, so a missing binding counts
+//     as moved on. The command did not run, and the client's later resume is
+//     answered resumed: false, so it resolves the command outcome-unknown.
 //
 // Why 20 min, and why without an engine call: the engine retires a released
 // client once it has waited out receiptAge holding no entry, so by twice that
@@ -285,13 +290,22 @@ func (s *Server) dropIdleLocked() {
 
 // movedOn reports whether b's binding has moved on since a handler was
 // admitted under it: a resume transferred the client (the binding's
-// generation is newer than b's), or the engine b was bound to is no longer the
-// one served (a replacement cleared the table). A mutating command checks it
-// just before its engine call (conn.command) and does not run if so (astra r5
-// 3). A plain release — the connection closed, the binding's connection
-// cleared, its generation unchanged — is NOT moving on: losing the connection
-// does not cancel an admitted command (§3.6, 03 §7), so the command runs and
-// its receipt answers the client's resend after a resume.
+// generation is newer than b's), the binding is gone from the table on the
+// same engine (dropped: idle for the bound, "Lifetime", or its client found
+// retired), or the engine b was bound to is no longer the one served (a
+// replacement cleared the table). A mutating command checks it just before its
+// engine call (conn.command) and does not run if so (astra r5 3).
+//
+// A missing binding counts as moved on (plan 027 X15, astra r6 1): the drop
+// erases the generation that would say whether a resume had taken the client
+// over, and no handler pauses for the idle bound between its admission and its
+// engine call, so refusing is the conservative, honest answer — the command
+// did not run, and a later resume is answered resumed: false, so the client
+// resolves it as outcome-unknown. A plain release — the connection closed,
+// the binding still in the table, its connection cleared, its generation
+// unchanged — is NOT moving on: losing the connection does not cancel an
+// admitted command (§3.6, 03 §7), so the command runs and its receipt answers
+// the client's resend after a resume.
 func (s *Server) movedOn(b *bound) bool {
 	s.bindMu.Lock()
 	defer s.bindMu.Unlock()
@@ -299,5 +313,5 @@ func (s *Server) movedOn(b *bound) bool {
 		return true
 	}
 	cur := s.binds[b.client]
-	return cur != nil && cur.gen != b.gen
+	return cur == nil || cur.gen != b.gen
 }

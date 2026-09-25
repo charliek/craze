@@ -549,6 +549,71 @@ func TestASupersededConnectionAdmitsNothingMore(t *testing.T) {
 	})
 }
 
+// TestADroppedBindingStopsAHeldHandler (plan 027 X15, astra r6 1): a command
+// held before its engine call on a connection whose client a resume then took
+// over does not run once that binding has idled out and been dropped — the
+// drop erases the transfer's generation, so a missing binding counts as moved
+// on. A Set parked in the session keeps an open reservation, so the engine
+// never retires the client: were the held command let through, it would reach
+// the engine and run.
+func TestADroppedBindingStopsAHeldHandler(t *testing.T) {
+	held := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	var arm atomic.Bool
+	h := newHost(t, withHooks(control.TestHooks{BeforeCommand: func(method string) {
+		if method == protocol.MethodQueueAdd && arm.Load() {
+			once.Do(func() {
+				close(held)
+				<-gate
+			})
+		}
+	}}))
+	t.Cleanup(func() { closeOnce(gate) })
+	idle := 2 * h.eng.State().RetryHorizon.Age
+	setHeld, releaseSet := h.stub.HoldNextSet()
+	t.Cleanup(releaseSet)
+
+	a := h.dial()
+	ha := a.sayHello(nil)
+	a.send(protocol.MethodSessionSet, protocol.SetParams{SessionID: sid(h), CommandID: "1",
+		Setting: protocol.Setting{Kind: protocol.SettingModel, Value: "fast"}})
+	await(t, setHeld, "the Set to park in the session")
+	arm.Store(true)
+	a.send(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: "2", Text: "from a"})
+	await(t, held, "A's command before its engine call")
+
+	// B takes the client over, superseding A, and goes away cleanly.
+	b := h.dial()
+	if hb := b.sayHello(a.resume()); !hb.Resumed || hb.ClientID != ha.ClientID {
+		t.Fatalf("the resume: %+v", hb)
+	}
+	a.expectEOF()
+	b.close()
+	h.logs.wait(t, "conn 2 close", "client "+ha.ClientID+":")
+
+	// Past the idle bound, a hello drops the binding.
+	h.clock.advance(idle)
+	c := h.dial()
+	c.sayHello(nil)
+	if binds, tokens := h.srv.Bindings(); binds != 1 || tokens != 1 {
+		t.Fatalf("past the bound: %d bindings and %d tokens, want the new client's alone", binds, tokens)
+	}
+
+	// A's held command is let go: the Set's handler is all that is left.
+	closeOnce(gate)
+	waitFor(t, "A's queue.add handler to return", func() bool { return h.srv.Handlers() == 1 })
+	if n := queued(h, "from a"); n != 0 {
+		t.Fatalf("A's command ran under a dropped binding its client had moved on from: %d rows", n)
+	}
+	// The client's resume is answered resumed: false — its command's outcome
+	// is unknown to it, and nothing ran twice.
+	d := h.dial()
+	if hd := d.sayHello(a.resume()); hd.Resumed || hd.ClientID == ha.ClientID {
+		t.Fatalf("a resume of the dropped binding: %+v, want resumed: false with a fresh id", hd)
+	}
+}
+
 // TestABindingIdleForTwiceTheHorizonIsDropped (plan 027 X13, astra r5): a
 // binding with no connection for twice the receipts table's age bound is
 // dropped with its token, so neither the table nor the token index grows with
