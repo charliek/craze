@@ -375,38 +375,401 @@ func TestAnArmedRowSurvivesTheChainPolicysClear(t *testing.T) {
 	}
 }
 
-// TestARefusedTurnEndsSyntheticallyAndKeepsTheQueue is the TUI's row for a
-// refusal: the session emits nothing for it, so the engine authors the ending;
-// the state is an error; and the queue is left alone, because a refusal reached
-// nothing — only a turn that ran and failed clears it.
-func TestARefusedTurnEndsSyntheticallyAndKeepsTheQueue(t *testing.T) {
-	for _, refusal := range []error{agent.ErrForeignTurn, agent.ErrPromptInFlight} {
-		t.Run(refusal.Error(), func(t *testing.T) {
-			r := newRig(t, Options{})
+// The three tests below are what was TestARefusedTurnEndsSyntheticallyAndKeeps-
+// TheQueue, split by plan 026 PR 3 (C8b, SF-21) because its first case changed
+// meaning. A refusal emits nothing, so in every case the engine authors the
+// ending, and it is the same shape in every case — synthetic, the refusal's class
+// and text, no successor. What differs is what the refusal reached: a turn the
+// agent's own turn refused whose text came from a queued row reached nothing and
+// still has a row to go back to; anything else is the TUI's error state, with the
+// queue left alone because a refusal reached nothing — only a turn that ran and
+// failed clears it.
+
+// restoreRig is a rig under the TUI's policy whose driver makes a restored row's
+// recheck only when the test sends a tick, and which reports every continuation
+// that comes back and every pass the driver makes (ticked says a tick caused it).
+func restoreRig(t *testing.T) (*rig, chan<- time.Time, <-chan string, <-chan bool) {
+	t.Helper()
+	ticks := make(chan time.Time)
+	returned := make(chan string, 16)
+	// Never full in these tests, and never waited on by the driver if it were: a
+	// pass the test does not wait for must not hold the driver.
+	passes := make(chan bool, 64)
+	h := &hooks{
+		retryTick:    ticks,
+		turnReturned: func(id string) { returned <- id },
+		drivePassed: func(ticked bool) {
+			select {
+			case passes <- ticked:
+			default:
+			}
+		},
+	}
+	return newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, h), ticks, returned, passes
+}
+
+// awaitPass waits for the driver to finish a pass; ticked says which kind: one a
+// tick caused, or one a kick did. Passes of the other kind are skipped.
+func awaitPass(t *testing.T, passes <-chan bool, ticked bool) {
+	t.Helper()
+	for {
+		select {
+		case got := <-passes:
+			if got == ticked {
+				return
+			}
+		case <-time.After(watchdog):
+			t.Fatalf("the driver made no pass (ticked=%v) in %s", ticked, watchdog)
+		}
+	}
+}
+
+// sameRow is a queued row's whole identity: id, text, version and queued time.
+func sameRow(a, b agent.QueuedPrompt) bool {
+	return a.ID == b.ID && a.Text == b.Text && a.Version == b.Version && a.QueuedAt.Equal(b.QueuedAt)
+}
+
+// wantRestored checks what a restoring settlement leaves: the engine idle and
+// not failed, nothing current, and the queue — as State and as the engine's own
+// transcript model (what Attach snapshots) both hold it — exactly want, the
+// restored row first as the row it was.
+func (r *rig) wantRestored(turn string, want ...agent.QueuedPrompt) {
+	r.t.Helper()
+	st := r.e.State()
+	if st.Activity != ActivityIdle || st.Err != "" || st.Turn != "" || st.Cancelled || st.SendNow != nil {
+		r.t.Fatalf("state after a restoring settlement: %+v", st)
+	}
+	for _, q := range []struct {
+		name string
+		rows []agent.QueuedPrompt
+	}{{"State", st.Queue}, {"the model", r.e.model.State().Queue}} {
+		ok := len(q.rows) == len(want)
+		for i := 0; ok && i < len(want); i++ {
+			ok = sameRow(q.rows[i], want[i])
+		}
+		if !ok {
+			r.t.Fatalf("%s's queue after the restore is %+v, want %+v", q.name, q.rows, want)
+		}
+	}
+	if !errors.Is(r.e.TurnErr(turn), agent.ErrForeignTurn) {
+		r.t.Fatalf("the refused turn's own error: %v", r.e.TurnErr(turn))
+	}
+}
+
+// wantRestoreEvents checks the restoring settlement's two events in got: the
+// row's `queued` at position 0, as the row it was, then the ending in today's
+// refusal shape, both carrying the refused turn's own cause.
+func wantRestoreEvents(t *testing.T, got []agent.Event, turn string, row agent.QueuedPrompt, pending int, cause string) {
+	t.Helper()
+	for i, ev := range got {
+		if !ended(turn)(ev) {
+			continue
+		}
+		if i == 0 {
+			break
+		}
+		q := got[i-1]
+		if q.Type != agent.EventQueue || q.QueueChange != agent.QueueQueued || q.QueuePos != 0 || !sameRow(*q.Queue, row) || q.Cause != cause {
+			t.Fatalf("the event before %s's ending is %+v (cause %q), want the row %+v queued at 0 with cause %q", turn, q, q.Cause, row, cause)
+		}
+		end := ev.Turn
+		if !end.Synthetic || end.ErrClass != agent.EventErrForeignTurn || end.Err != agent.ErrForeignTurn.Error() ||
+			end.StopReason != "" || end.Next != "" || end.Pending != pending || ev.Cause != cause {
+			t.Fatalf("the restoring ending: %+v (cause %q)", end, ev.Cause)
+		}
+		return
+	}
+	t.Fatalf("no restoring settlement for %s in %s", turn, describe(got))
+}
+
+// TestRefusedDrainedRowRunsAfterWake is SF-21's fix (plan 026 §3.11, §7 A14,
+// X32). The TUI's drain took the head of the queue and the session refused it
+// because the agent was running a turn of its own. Nothing reached the agent, so
+// the row is still the user's message: it goes back to the head as the row it
+// was — its id, its version (an edit made it 1 here), its queued time — in the
+// same batch as the ending and ahead of it; the engine is idle, not failed; and
+// the row runs once the agent's turn is over, with the rest of the queue behind
+// it. The ending itself is the refusal's, unchanged on the wire (SF-47).
+//
+// The settlement that puts the row back takes nothing — the session's flag can
+// lag its client's refusal, and a claim there and then would be refused again as
+// fast as the two could go — and asks for a paced recheck of its own (astra
+// r14's blocker). So the row runs wherever the agent's turn ends relative to the
+// settlement, and those are the three schedules:
+//
+//   - before the settlement: the agent's turn starts and ends while the refused
+//     claim is out, and the kick its end gave the driver is spent on a pass that
+//     finds the continuation still out. Nothing else is coming; the
+//     restoration's own tick drains the row.
+//   - during the recheck's delay: the row is back and its tick not yet sent, and
+//     the end's kick drains it. The tick is never sent at all.
+//   - after the recheck: the tick's pass finds the agent's turn still running,
+//     drains nothing and arms nothing further; the end's kick drains it.
+func TestRefusedDrainedRowRunsAfterWake(t *testing.T) {
+	const (
+		before = "before the settlement"
+		during = "during the recheck's delay"
+		after  = "after the recheck"
+	)
+	for _, schedule := range []string{before, during, after} {
+		t.Run(schedule, func(t *testing.T) {
+			r, ticks, returned, passes := restoreRig(t)
 			first := r.s.script(held())
 			r.submit("one")
 			await(t, first.opened, "the first turn to open")
-			r.submit("two")
+			two := r.submit("two").Queued
 			r.submit("three")
-			r.s.script(&script{refuse: refusal})
+			if err := r.e.EditQueued(Command{}, two.ID, "two edited", nil); err != nil {
+				t.Fatal(err)
+			}
+			rows := r.e.State().Queue
+			if len(rows) != 2 || rows[0].ID != two.ID || rows[0].Version != 1 {
+				t.Fatalf("the queue before the drain: %+v", rows)
+			}
+			refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+			r.sync()
 			first.release()
-			got := r.until(ended("turn-2"))
-			want := agent.ClassifyEventErr(refusal)
-			last := got[len(got)-1].Turn
-			if !last.Synthetic || last.ErrClass != want || last.Err != refusal.Error() || last.Next != "" || last.Pending != 1 {
-				t.Fatalf("the refusal's ending: %+v", last)
+			await(t, refusal.refusing, "the drained claim to reach its refusal")
+			awaitTurn(t, returned, "turn-1")
+
+			if schedule == before {
+				r.s.setForeign(true)
+				r.s.setForeign(false)
+				awaitPass(t, passes, false)
+			} else {
+				// The session catches up with the client that refused the claim.
+				r.s.setForeignSilently(true)
 			}
-			st := r.e.State()
-			if st.Activity != ActivityError || st.Err != refusal.Error() || len(st.Queue) != 1 || st.Queue[0].Text != "three" {
-				t.Fatalf("state: %+v", st)
+			close(refusal.gate)
+			awaitTurn(t, returned, "turn-2")
+			r.sync()
+			r.wantRestored("turn-2", rows...)
+			r.wantPrompts("one", "two edited")
+
+			switch schedule {
+			case before:
+				// The one wake-up the agent's turn gave is gone: only the tick
+				// can drain the row, and nothing drains it before the tick.
+				tick(t, ticks, returned)
+			case during:
+				r.s.setForeign(false)
+			case after:
+				tick(t, ticks, returned)
+				awaitPass(t, passes, true)
+				r.e.mu.Lock()
+				again := r.e.recheck
+				r.e.mu.Unlock()
+				if again {
+					t.Fatal("a recheck that found the agent's turn running armed another")
+				}
+				r.wantPrompts("one", "two edited")
+				r.wantRestored("turn-2", rows...)
+				r.s.setForeign(false)
 			}
-			// Nothing drains from an error; the next direct submit clears it
-			// and runs ahead of the queue, which then carries on.
-			r.submit("four")
 			r.until(lastEnding)
-			r.wantPrompts("one", "two", "four", "three")
+			wantRestoreEvents(t, r.seen, "turn-2", rows[0], 2, "")
+			var foreign []string
+			if schedule == before {
+				foreign = []string{`foreign running=true`, `foreign running=false`}
+			}
+			record := append([]string{
+				`started turn-1 submit "one"`,
+				`queue queued "two"`,
+				`queue queued "three"`,
+				`queue edited "two edited"`,
+				`text "echo: one"`,
+				`done end_turn`,
+				`queue sent "two edited"`,
+				`ended turn-1 stop="end_turn" next="turn-2" pending=1`,
+				`started turn-2 drain "two edited"`,
+			}, foreign...)
+			record = append(record,
+				`queue queued "two edited"`,
+				`ended turn-2 stop="" next="" pending=2 synthetic class=foreign_turn`,
+			)
+			if schedule != before {
+				record = append(record, `foreign running=false`)
+			}
+			record = append(record,
+				`queue sent "two edited"`,
+				`started turn-3 drain "two edited"`,
+				`text "echo: two edited"`,
+				`done end_turn`,
+				`queue sent "three"`,
+				`ended turn-3 stop="end_turn" next="turn-4" pending=0`,
+				`started turn-4 drain "three"`,
+				`text "echo: three"`,
+				`done end_turn`,
+				`ended turn-4 stop="end_turn" next="" pending=0`,
+			)
+			r.wantShapes(r.seen, record...)
+			r.wantPrompts("one", "two edited", "two edited", "three")
 		})
 	}
+}
+
+// TestRefusedRowSourcedTurnRestoresItsRow is SF-21 for the two other ways a
+// turn's text comes from a queued row: a Submit that names the row, and a
+// send-now armed from one. Each claim reaches Begin while the session's flag
+// still reads clear — the lag between a client that knows of the agent's turn
+// and a session that does not yet — and is refused; the row goes back to the head
+// as the row it was, its `queued` and the ending carrying the command that
+// started the turn, and it runs once the agent's turn is over.
+func TestRefusedRowSourcedTurnRestoresItsRow(t *testing.T) {
+	t.Run("a submit from a row", func(t *testing.T) {
+		r, _, returned, _ := restoreRig(t)
+		row := r.queue("the row")
+		behind := r.queue("behind it")
+		refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+		c := Command{Client: r.e.NewClientID(), ID: "1"}
+		res, err := r.e.Submit(c, "the row", SubmitQueue, row.ID)
+		if err != nil || res.Turn != "turn-1" {
+			t.Fatalf("the submit from a row answered %+v, %v", res, err)
+		}
+		await(t, refusal.refusing, "the claim to reach its refusal")
+		r.s.setForeignSilently(true)
+		close(refusal.gate)
+		awaitTurn(t, returned, "turn-1")
+		r.sync()
+		r.wantRestored("turn-1", row, behind)
+		r.s.setForeign(false)
+		r.until(lastEnding)
+		wantRestoreEvents(t, r.seen, "turn-1", row, 2, c.Cause())
+		r.wantShapes(r.seen,
+			`queue queued "the row"`,
+			`queue queued "behind it"`,
+			`queue sent "the row"`,
+			`started turn-1 submit "the row"`,
+			`queue queued "the row"`,
+			`ended turn-1 stop="" next="" pending=2 synthetic class=foreign_turn`,
+			`foreign running=false`,
+			`queue sent "the row"`,
+			`started turn-2 drain "the row"`,
+			`text "echo: the row"`,
+			`done end_turn`,
+			`queue sent "behind it"`,
+			`ended turn-2 stop="end_turn" next="turn-3" pending=0`,
+			`started turn-3 drain "behind it"`,
+			`text "echo: behind it"`,
+			`done end_turn`,
+			`ended turn-3 stop="end_turn" next="" pending=0`,
+		)
+		r.wantPrompts("the row", "the row", "behind it")
+	})
+	t.Run("an armed send from a row", func(t *testing.T) {
+		r, _, returned, _ := restoreRig(t)
+		// A turn that stops cancelled when the test lets it, and takes its cancel
+		// without acting on it: the send-now's cancel leaves the settlement a
+		// clean stop, cancelled, which fires the send (as in
+		// TestAnArmedRowSurvivesTheChainPolicysClear).
+		turn := r.s.script(stopping(held(), stopCancelled))
+		r.submit("one")
+		await(t, turn.opened, "the turn to open")
+		row := r.queue("the row")
+		behind := r.queue("a follow-up")
+		r.ignoreCancels()
+		refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+		c := Command{Client: r.e.NewClientID(), ID: "1"}
+		if res, err := r.e.Submit(c, "the row", SubmitSendNow, row.ID); err != nil || !res.Armed {
+			t.Fatalf("the send-now answered %+v, %v", res, err)
+		}
+		r.until(armedNow)
+		turn.release()
+		await(t, refusal.refusing, "the send's claim to reach its refusal")
+		awaitTurn(t, returned, "turn-1")
+		r.s.setForeignSilently(true)
+		close(refusal.gate)
+		awaitTurn(t, returned, "turn-2")
+		r.sync()
+		r.wantRestored("turn-2", row, behind)
+		r.s.setForeign(false)
+		got := r.until(lastEnding)
+		wantRestoreEvents(t, r.seen, "turn-2", row, 2, c.Cause())
+		r.wantShapes(got,
+			`text "echo: one"`,
+			`done cancelled`,
+			`queue sent "the row"`,
+			`ended turn-1 stop="cancelled" next="turn-2" pending=1`,
+			`started turn-2 send_now "the row"`,
+			`queue queued "the row"`,
+			`ended turn-2 stop="" next="" pending=2 synthetic class=foreign_turn`,
+			`foreign running=false`,
+			`queue sent "the row"`,
+			`started turn-3 drain "the row"`,
+			`text "echo: the row"`,
+			`done end_turn`,
+			`queue sent "a follow-up"`,
+			`ended turn-3 stop="end_turn" next="turn-4" pending=0`,
+			`started turn-4 drain "a follow-up"`,
+			`text "echo: a follow-up"`,
+			`done end_turn`,
+			`ended turn-4 stop="end_turn" next="" pending=0`,
+		)
+		r.wantPrompts("one", "the row", "the row", "a follow-up")
+	})
+}
+
+// TestADirectSubmitRefusedByAForeignTurnKeepsTheQueue is the TUI's row for a
+// foreign-turn refusal of text a client held itself: there is no row to put
+// back, so it is today's ending. The session emits nothing for it, so the engine
+// authors the ending; the state is an error; and the queue is left alone,
+// because a refusal reached nothing — only a turn that ran and failed clears it.
+func TestADirectSubmitRefusedByAForeignTurnKeepsTheQueue(t *testing.T) {
+	r := newRig(t, Options{})
+	r.queue("three")
+	r.s.script(&script{refuse: agent.ErrForeignTurn})
+	res := r.submit("two")
+	if res.Turn != "turn-1" {
+		t.Fatalf("the submit answered %+v, want the turn it started", res)
+	}
+	got := r.until(ended("turn-1"))
+	last := got[len(got)-1].Turn
+	if !last.Synthetic || last.ErrClass != agent.EventErrForeignTurn || last.Err != agent.ErrForeignTurn.Error() || last.Next != "" || last.Pending != 1 {
+		t.Fatalf("the refusal's ending: %+v", last)
+	}
+	st := r.e.State()
+	if st.Activity != ActivityError || st.Err != agent.ErrForeignTurn.Error() || len(st.Queue) != 1 || st.Queue[0].Text != "three" {
+		t.Fatalf("state: %+v", st)
+	}
+	// Nothing drains from an error; the next direct submit clears it and runs
+	// ahead of the queue, which then carries on.
+	r.submit("four")
+	r.until(lastEnding)
+	r.wantPrompts("two", "four", "three")
+}
+
+// TestAPromptInFlightRefusalEndsSyntheticallyAndKeepsTheQueue is the TUI's row
+// for the other refusal, ErrPromptInFlight, of a drained row: the session emits
+// nothing for it, so the engine authors the ending; the state is an error; and
+// the queue is left alone, because a refusal reached nothing — only a turn that
+// ran and failed clears it. The drained row is not put back: that is the
+// foreign-turn refusal's settlement, and this one is a claim the session held
+// for another prompt of craze's own.
+func TestAPromptInFlightRefusalEndsSyntheticallyAndKeepsTheQueue(t *testing.T) {
+	refusal := agent.ErrPromptInFlight
+	r := newRig(t, Options{})
+	first := r.s.script(held())
+	r.submit("one")
+	await(t, first.opened, "the first turn to open")
+	r.submit("two")
+	r.submit("three")
+	r.s.script(&script{refuse: refusal})
+	first.release()
+	got := r.until(ended("turn-2"))
+	want := agent.ClassifyEventErr(refusal)
+	last := got[len(got)-1].Turn
+	if !last.Synthetic || last.ErrClass != want || last.Err != refusal.Error() || last.Next != "" || last.Pending != 1 {
+		t.Fatalf("the refusal's ending: %+v", last)
+	}
+	st := r.e.State()
+	if st.Activity != ActivityError || st.Err != refusal.Error() || len(st.Queue) != 1 || st.Queue[0].Text != "three" {
+		t.Fatalf("state: %+v", st)
+	}
+	// Nothing drains from an error; the next direct submit clears it and runs
+	// ahead of the queue, which then carries on.
+	r.submit("four")
+	r.until(lastEnding)
+	r.wantPrompts("one", "two", "four", "three")
 }
 
 // retryRig is a rig whose driver takes a refused claim again only when the test

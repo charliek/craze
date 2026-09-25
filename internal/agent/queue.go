@@ -91,12 +91,13 @@ func (q *PromptQueue) Add(text string, now time.Time) (QueuedPrompt, QueueEvent,
 }
 
 // PushFront puts text at the head, ahead of everything already waiting, and
-// is the one way in that neither cap bounds. It carries text the user typed
-// into a running turn that the turn could not answer — an interjection the
-// harness accepted and no step wrote down (plan 019 §3.10) — and a cap must
-// not be the reason typed text vanishes: it has nowhere else to go, since
-// refusing here would drop it rather than hand it back. Nothing else uses it;
-// everything a user queues by hand goes through Add.
+// is one of the two ways in that neither cap bounds (Restore, below, is the
+// other). It carries text the user typed into a running turn that the turn
+// could not answer — an interjection the harness accepted and no step wrote
+// down (plan 019 §3.10) — and a cap must not be the reason typed text
+// vanishes: it has nowhere else to go, since refusing here would drop it
+// rather than hand it back. Nothing else uses it; everything a user queues by
+// hand goes through Add.
 //
 // From the head the row is an ordinary queued message: the drain takes it as
 // the next turn, an edit or a cancel reaches it, and an error clears it with
@@ -106,6 +107,24 @@ func (q *PromptQueue) PushFront(text string, now time.Time) QueueEvent {
 	defer q.mu.Unlock()
 	q.seq++
 	p := QueuedPrompt{ID: fmt.Sprintf("q-%d", q.seq), Text: text, QueuedAt: now}
+	q.items = append([]QueuedPrompt{p}, q.items...)
+	return QueueEvent{Prompt: p, Change: QueueQueued, Pos: 0}
+}
+
+// Restore puts a row that left the queue back at the head, as the row it was:
+// its own id, Version and QueuedAt, where PushFront would mint a new one. It
+// carries a row whose turn the session refused because the agent was running
+// one of its own (the engine's restoring settlement, SF-21): nothing reached
+// the agent, so the row is still the user's message, waiting, and a client that
+// drew it — or edited it by id — must find the same row again.
+//
+// Like PushFront it is bounded by neither cap, for the same reason: the text was
+// already admitted once, and a cap must not be the reason it vanishes. The id
+// was minted by this queue, so no later Add can mint it again; the caller
+// restores only a row it took out itself, so it is not in the queue twice.
+func (q *PromptQueue) Restore(p QueuedPrompt) QueueEvent {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.items = append([]QueuedPrompt{p}, q.items...)
 	return QueueEvent{Prompt: p, Change: QueueQueued, Pos: 0}
 }

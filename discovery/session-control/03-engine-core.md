@@ -272,11 +272,16 @@ what its three workers do, so a later phase reads the real thing rather than
 the proposal (Plan 021 §3.1–§3.8, its execution amendments, and the package
 doc comments on `engine.Engine`, `receiptTable` and the index worker).
 
-**Lock order.** `e.mu → s.mu`: the engine calls exactly two things on the
-session while holding `e.mu`, both leaf on the session's side and waiting on
-nothing — `Begin` and the accessor `ForeignTurn()`. `e.mu → the outbox
-mutex`: every engine-authored event is `Enqueue`d in the locked section that
-made the change it describes. `registry.mu → the outbox mutex`, the same
+**Lock order.** `e.mu → s.mu`: the engine calls exactly three things on the
+session while holding `e.mu`, all leaf on `s.mu` and none waiting on anything —
+`Begin`, the accessor `ForeignTurn()`, and, for a session that has one, the
+admission fence's `FenceUp`/`FenceDown` (`agent.AdmissionFence`, Plan 026 PR
+3): a session that can start a turn of its own (native's wake) refuses to while
+it is up, and the engine keeps it up whenever it is not idle — raised before
+every read of the flag, every `Begin` and every cancel's validation, and
+brought back to what the engine is at the end of each such section.
+`e.mu → the outbox mutex`: every engine-authored event is `Enqueue`d in the
+locked section that made the change it describes. `registry.mu → the outbox mutex`, the same
 shape one layer down for the ask registry. **`s.mu → the outbox mutex`**:
 every settings delta is enqueued by the *session*, under `s.mu`, in the
 section that mutates its own snapshot (§3.8) — the engine does not author

@@ -636,10 +636,10 @@ func (e *Engine) SetTitle(c Command, title string) error {
 		if refused != nil {
 			return refused
 		}
-		// Outside e.mu: the engine calls exactly two things on the seam with its
-		// own lock held (Begin and ForeignTurn, engine.go), and this needs to be
-		// neither of them — it takes the session's lock and the outbox's, both
-		// briefly, and waits on nothing either way.
+		// Outside e.mu: the engine calls exactly three things on the seam with
+		// its own lock held (Begin, ForeignTurn and the admission fence,
+		// engine.go), and this needs to be none of them — it takes the session's
+		// lock and the outbox's, both briefly, and waits on nothing either way.
 		if err := e.sess.SetTitle(c.Cause(), title); err != nil {
 			return err
 		}

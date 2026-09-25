@@ -65,6 +65,12 @@ type turn struct {
 	text   string
 	origin string
 	cause  string
+	// row is the queued row the turn's text came from, as it stood when it was
+	// taken — the head a drain or a settlement's successor popped, the row a
+	// Submit named, the row an armed send re-took — and nil for text a client
+	// held itself. A refusal by the agent's own turn puts it back as it was
+	// (restoreLocked, SF-21).
+	row *agent.QueuedPrompt
 	// returned says the continuation has come back with res and err. A turn
 	// settles once it has and no cancel is in flight.
 	returned bool
@@ -106,11 +112,43 @@ type launch struct {
 //
 // e.mu guards everything below it. It is never held across a call that
 // blocks — a provider call, Session.Cancel, a continuation, Publish, Flush,
-// file I/O — and the engine calls exactly two things on the session while
-// holding it, both of which take the session's own mutex briefly and wait on
-// nothing: Begin, and the leaf accessor ForeignTurn. So the order is
-// e.mu → s.mu, and it cannot cycle, because a session never calls the engine:
-// it reports through Result, through events, and through the log's observer.
+// file I/O — and the engine calls exactly three things on the session while
+// holding it, all of which take the session's own mutex briefly and wait on
+// nothing: Begin, the leaf accessor ForeignTurn, and — for a session that has
+// one — the admission fence's FenceUp and FenceDown (agent.AdmissionFence),
+// which record a state and never call back. So the order is e.mu → s.mu, and it
+// cannot cycle, because a session never calls the engine: it reports through
+// Result, through events, and through the log's observer.
+//
+// # The admission fence
+//
+// A session that can start a turn of its own — native's wake — must not start
+// one in the gap between the engine reading ForeignTurn and calling Begin, nor
+// while a cancel the engine validated is still on its way to the session: the
+// cancel promises to land on the turn it was validated for or on none (cancel.go),
+// and a turn the session started in that gap would be the one it landed on. The
+// engine's own admissions are fenced by e.mu and the hold; the session's are
+// fenced by agent.AdmissionFence, which the engine keeps up whenever it is not
+// idle (fenceWantLocked).
+//
+// Every section that reads ForeignTurn, calls Begin or validates a cancel raises
+// it first (raiseFenceLocked) and brings it to what the engine now is on the way
+// out (syncFenceLocked, deferred after the unlock is, so it runs first and still
+// under e.mu: a Begin that panics and every early return leave it balanced).
+// The call sites and the sections that reach them are these — a grep for
+// "e.sess.ForeignTurn()" and "e.sess.Begin(" in this package lists every site,
+// and TestEveryForeignReadAndClaimIsFenced holds the code to the list:
+//
+//   - ForeignTurn: canStartLocked (from submit's canSubmitLocked and nextLocked),
+//     submit's send-now gate, retryLocked, holdCancelLocked's validation, and
+//     owedDrainLocked, which raises the fence itself before it reads.
+//   - Begin: claimLocked (from submit's reserveLocked and nextLocked) and
+//     retryLocked.
+//   - The sections: submit's, holdCancel's (Cancel and Stop; the send-now arm is
+//     inside submit's), and every one that runs passLocked or settleLocked —
+//     runTurn's, drive's, releaseHold's, GiveUp's and GiveUpDrain's. Close raises
+//     it for good. Started and every queue verb only sync it: they read neither,
+//     but change what the fence should be.
 //
 // Under e.mu the engine also calls EventLog.Enqueue, whose mutex is a leaf.
 // That is the point of the outbox: every event the engine authors is enqueued
@@ -185,6 +223,16 @@ type Engine struct {
 	cancelled       bool
 	err             string
 	startFailed     bool
+	// fence is the session's agent.AdmissionFence, nil for a session without
+	// one; it is set in newEngine and never written again. fenced is what the
+	// engine last told it, so every call it makes is a transition (the type
+	// assertion's nil makes both of them inert).
+	fence  agent.AdmissionFence
+	fenced bool
+	// recheck says a restoring settlement has put a refused row back and its
+	// paced recheck is owed: the driver's tick is armed for it (rearm), and the
+	// tick's pass is that recheck, whatever it finds. Only a tick clears it.
+	recheck bool
 
 	obsMu     sync.Mutex
 	replaying bool
@@ -213,8 +261,11 @@ type Engine struct {
 	// are level-triggered: each re-reads the state under e.mu, so two kicks
 	// collapsed into one lose nothing.
 	kick chan struct{}
-	done chan struct{}
-	wg   sync.WaitGroup
+	// rearm asks the driver to arm its tick and make no pass now: a restoring
+	// settlement's paced recheck (restoreLocked). One slot, like kick.
+	rearm chan struct{}
+	done  chan struct{}
+	wg    sync.WaitGroup
 
 	closeOnce sync.Once
 	closeErr  error
@@ -236,8 +287,14 @@ type hooks struct {
 	// given back, so a hook may close the engine.
 	turnReturned func(turn string)
 	// retryTick, when set, stands in for the driver's timer: a refused claim is
-	// taken again when the test sends on it, and at no other time.
+	// taken again, and a restored row's recheck is made, when the test sends on
+	// it, and at no other time.
 	retryTick <-chan time.Time
+	// drivePassed runs on the driver's goroutine after each of its passes, once
+	// what the pass claimed is launched and before it arms its tick, with e.mu
+	// released: the barrier a test waits on to know a kick, or a tick (ticked),
+	// has been spent.
+	drivePassed func(ticked bool)
 	// beforeRunSet runs on the settings worker's own goroutine between taking a
 	// request out of the queue (takeSet) and the locked section that decides
 	// whether to run it and claims it (runSet) — the one gap in which a request
@@ -297,9 +354,15 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		craze:    craze,
 		activity: ActivityStarting,
 		kick:     make(chan struct{}, 1),
+		rearm:    make(chan struct{}, 1),
 		setWake:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
 		hooks:    h,
+	}
+	// Optional, like the Clocked below: a session that never starts a turn of
+	// its own has no fence, and every fence call is then a no-op.
+	if f, ok := sess.(agent.AdmissionFence); ok {
+		e.fence = f
 	}
 	e.idx = newIndexWriter(opts.Index, craze, sess.Snapshot, e.reportIndexErr)
 	// The session's clock, not the wall's: the Stub's is injected, and every
@@ -395,6 +458,10 @@ func (e *Engine) Start(ctx context.Context) error {
 func (e *Engine) Started(err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Starting → idle is an activity the fence reads (a queue can only be owed a
+	// drain from idle); it is inert today, since nothing queues while starting,
+	// and kept so that no section changing an input of the fence skips it.
+	defer e.syncFenceLocked()
 	if e.closed || e.activity != ActivityStarting {
 		return
 	}
@@ -531,6 +598,9 @@ func (e *Engine) Close() error {
 		e.mu.Lock()
 		e.closed = true
 		e.activity = ActivityClosing
+		// Up for good: nothing is admitted again, and a session that could start a
+		// turn of its own must not start one under a closing engine either.
+		e.raiseFenceLocked()
 		var batch []agent.Event
 		if t := e.cur; t != nil {
 			// The turn that was running has ended, and this is the only place
@@ -692,6 +762,77 @@ func (e *Engine) canSubmitLocked() bool {
 	return e.canStartLocked()
 }
 
+// raiseFenceLocked puts the session's admission fence up, if it is not up
+// already. It is the first thing every section that reads ForeignTurn, calls
+// Begin or validates a cancel does (the Engine doc's list), so a turn the session
+// could start of its own is either already running when the engine looks — and
+// the engine queues behind it — or cannot start until the engine is idle again.
+func (e *Engine) raiseFenceLocked() {
+	if e.fence == nil || e.fenced {
+		return
+	}
+	e.fence.FenceUp()
+	e.fenced = true
+}
+
+// syncFenceLocked brings the fence to what the engine now is, calling the
+// session only on a transition. Every section that raised it syncs it on the
+// way out, deferred after the unlock is deferred so it runs first and under
+// e.mu, and so does every section that changes what fenceWantLocked reads: a
+// queue verb that removes the last row lowers it at once. Nothing lowers it
+// between a settled turn and its successor, which are one section.
+func (e *Engine) syncFenceLocked() {
+	if e.fence == nil {
+		return
+	}
+	switch want := e.fenceWantLocked(); {
+	case want && !e.fenced:
+		e.fence.FenceUp()
+		e.fenced = true
+	case !want && e.fenced:
+		e.fence.FenceDown()
+		e.fenced = false
+	}
+}
+
+// fenceWantLocked is whether the fence should be up: whenever the engine is not
+// idle. A turn of its own is current, a cancel it validated is still on its way
+// to the session, or a drain is owed; and a stopped or closed engine keeps it up
+// for good — nothing will be admitted again, GiveUpDrain's abandonment included,
+// and nothing may start behind a client that has been told so. An error state,
+// starting and replaying keep it up for none of these reasons, and lower it: a
+// failed turn owes nothing (astra's round-4 pin).
+func (e *Engine) fenceWantLocked() bool {
+	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || e.owedDrainLocked()
+}
+
+// owedDrainLocked is a drain owed at the end of the turn the agent is running
+// now: the engine is idle with rows queued, nothing of its own is current or
+// being cancelled, it admits, and the agent holds the session — so the
+// observer's kick at that turn's end (Running:false) is what drains the head.
+// The fence stays up across it, so that the end of one turn the session started
+// itself is not followed by another before the user's queued row has run (plan
+// 026's F3).
+//
+// The foreign-turn term is what tells an owed drain from an idle queue. The
+// Queue verb adds rows while idle and never starts a turn (queue.go), and a
+// fence held over such a queue would hold off every turn the session could start
+// of its own, for good, with nothing on either side left to move (astra r14).
+// So an idle queue with the agent's session free keeps it down, and a queue left
+// behind a failed turn does too.
+//
+// The flag is read with the fence up, as every read of it is: the section's own
+// fence is raised first. In a section that had not raised it — a queue verb, on
+// an idle engine with rows — that is one FenceUp and one FenceDown in the same
+// section, which a session can only take as "look again".
+func (e *Engine) owedDrainLocked() bool {
+	if e.activity != ActivityIdle || e.queue.Len() == 0 || e.cur != nil || e.cancelsInFlight > 0 || e.refusalLocked() != nil {
+		return false
+	}
+	e.raiseFenceLocked()
+	return e.sess.ForeignTurn()
+}
+
 // Submit admits a prompt: it starts a turn now, queues the text, or — in
 // send-now mode behind a running turn — arms the send and cancels that turn.
 //
@@ -741,6 +882,10 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 	res, err := func() (SubmitResult, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		// Before the foreign check and the claim below (the Engine doc's
+		// admission fence), and back to what the engine is on every way out.
+		defer e.syncFenceLocked()
+		e.raiseFenceLocked()
 		if err := e.refusalLocked(); err != nil {
 			return SubmitResult{}, err
 		}
@@ -772,6 +917,7 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 			// from it: a row taken first would be gone from a queue whose event
 			// stream still shows it waiting.
 			var take func() []agent.Event
+			var from *agent.QueuedPrompt
 			if fromRow != "" {
 				row, ok := e.rowLocked(fromRow)
 				if !ok {
@@ -779,8 +925,12 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 				}
 				text = row.Text
 				take = func() []agent.Event { return e.takeRowLocked(fromRow, c.Cause()) }
+				from = &row
 			}
 			l := e.reserveLocked(text, origin, c.Cause(), take)
+			// The row the turn's text came from, as it stood when it was taken: a
+			// refusal by the agent's own turn puts it back (restoreLocked).
+			l.t.row = from
 			started = append(started, l)
 			return SubmitResult{Turn: l.t.id}, nil
 		}
@@ -1003,6 +1153,8 @@ func (e *Engine) runTurn(l launch) {
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		defer e.syncFenceLocked()
+		e.raiseFenceLocked()
 		l.t.res, l.t.err, l.t.returned = res, err, true
 		next = e.passLocked()
 	}()
@@ -1015,6 +1167,13 @@ func (e *Engine) runTurn(l launch) {
 // something may have changed: the observer saw a foreign turn end, a
 // continuation came back, a cancel released its hold. A missed re-check here is
 // a queue that never drains with no error anywhere.
+//
+// Its tick is armed for two things, both paced by time rather than by events: a
+// claim refused under ChainPolicy.RetryForeignTurn (retryDue), and a restored
+// row's recheck (recheck). A restoring settlement asks for the second through
+// rearm, which arms the tick and makes no pass: a pass there and then would take
+// the row it just put back while the session's flag may still lag its client's
+// refusal, and be refused again, as fast as the session could refuse.
 func (e *Engine) drive() {
 	defer e.wg.Done()
 	var tick <-chan time.Time
@@ -1024,37 +1183,10 @@ func (e *Engine) drive() {
 			timer.Stop()
 		}
 	}()
-	for {
-		ticked := false
-		select {
-		case <-e.kick:
-		case <-tick:
-			ticked = true
-		case <-e.done:
-			return
-		}
-		var next []launch
-		retrying := false
-		func() {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			if ticked && e.cur != nil && e.cur.retry {
-				// Only a tick makes a refused claim due. A kick says the state
-				// may have changed; it does not say time has passed, and a
-				// refusal with nothing else to wait for is paced by time alone.
-				e.cur.retryDue = true
-			}
-			next = e.passLocked()
-			retrying = e.cur != nil && e.cur.retry
-		}()
-		e.run(next)
-		tick = nil
-		if !retrying {
-			continue
-		}
+	arm := func() {
 		if h := e.hooks; h != nil && h.retryTick != nil {
 			tick = h.retryTick
-			continue
+			return
 		}
 		if timer == nil {
 			timer = time.NewTimer(foreignRetryTick)
@@ -1062,6 +1194,51 @@ func (e *Engine) drive() {
 			timer.Reset(foreignRetryTick)
 		}
 		tick = timer.C
+	}
+	for {
+		ticked := false
+		select {
+		case <-e.kick:
+		case <-e.rearm:
+			arm()
+			continue
+		case <-tick:
+			ticked = true
+		case <-e.done:
+			return
+		}
+		var next []launch
+		again := false
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			defer e.syncFenceLocked()
+			e.raiseFenceLocked()
+			if ticked {
+				if e.cur != nil && e.cur.retry {
+					// Only a tick makes a refused claim due. A kick says the state
+					// may have changed; it does not say time has passed, and a
+					// refusal with nothing else to wait for is paced by time alone.
+					e.cur.retryDue = true
+				}
+				// This pass is a restored row's recheck, whatever else the tick was
+				// armed for: it drains the row if a turn may start, and one that
+				// finds the agent's turn still running arms nothing further — that
+				// turn's end, or any later pass, drains it. A restoration during
+				// this very pass asks again.
+				e.recheck = false
+			}
+			next = e.passLocked()
+			again = e.cur != nil && e.cur.retry || e.recheck
+		}()
+		e.run(next)
+		if h := e.hooks; h != nil && h.drivePassed != nil {
+			h.drivePassed(ticked)
+		}
+		tick = nil
+		if again {
+			arm()
+		}
 	}
 }
 
@@ -1137,6 +1314,10 @@ func (e *Engine) GiveUp(c Command, turn string) error {
 		err := func() error {
 			e.mu.Lock()
 			defer e.mu.Unlock()
+			// The settlement below decides a successor, which reads the flag and
+			// claims.
+			defer e.syncFenceLocked()
+			e.raiseFenceLocked()
 			if e.closed {
 				return ErrNotAccepting
 			}
@@ -1202,6 +1383,10 @@ func (e *Engine) GiveUpDrain(c Command) (turn string, pending int, err error) {
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
+			// The pass reads the flag and may claim; an abandonment sets stopped,
+			// which keeps the fence up for good.
+			defer e.syncFenceLocked()
+			e.raiseFenceLocked()
 			if e.closed {
 				ferr = ErrNotAccepting
 				return
@@ -1293,7 +1478,9 @@ func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.E
 			l := e.claimLocked(text, agent.TurnOriginSendNow, a.cause)
 			if a.from != "" {
 				// Here and nowhere earlier, so the row is taken exactly once and
-				// a send that never fired lost nothing.
+				// a send that never fired lost nothing. The turn keeps the row as
+				// it was read, for a refusal to put back (restoreLocked).
+				l.t.row = &from
 				before = append(before, e.takeRowLocked(a.from, a.cause)...)
 			}
 			return &l, before, nil
@@ -1307,6 +1494,9 @@ func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.E
 	}
 	if head, ok := e.headLocked(); ok {
 		l := e.claimLocked(head.Text, agent.TurnOriginDrain, "")
+		// Captured before the pop, whole — id, text, version, queued time — so a
+		// refusal puts back the row it took and not a new one (restoreLocked).
+		l.t.row = &head
 		if qev, popped := e.queue.Pop(); popped {
 			before = append(before, e.stamp(qev.Event(), ""))
 		}
@@ -1322,12 +1512,14 @@ func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.E
 // successor.
 //
 // It is one transaction. In order: the steers the turn accepted and could not
-// answer go back to the head of the queue; the armed send-now is decided, and
-// disarmed here if this turn is not one it can fire after; the activity is set
-// and the chain policy's verdict on the queue is taken; the successor, if there
-// is one — the armed send first, else the head of the queue — is claimed and its
-// row taken; *then* the policy's clear runs, so it can never take the row the
-// armed send just claimed with it; and one batch is enqueued — the queue's
+// answer go back to the head of the queue; a turn whose queued row the agent's
+// own turn refused ends there, with its row put back (restoreLocked, SF-21); the
+// armed send-now is decided, and disarmed here if this turn is not one it can
+// fire after; the activity is set and the chain policy's verdict on the queue is
+// taken; the successor, if there is one — the armed send first, else the head of
+// the queue — is claimed and its row taken; *then* the policy's clear runs, so it
+// can never take the row the armed send just claimed with it; and one batch is
+// enqueued — the queue's
 // events, then the turn's ended with Next and Pending, then the disarm delta if
 // there is one, then the successor's started. So an ended is always preceded by
 // everything its settlement produced and followed only by its successor, and
@@ -1355,6 +1547,9 @@ func (e *Engine) settleLocked(t *turn) []launch {
 	// vanishes when it has nowhere else to go (§3.5).
 	for i := len(t.res.Unanswered) - 1; i >= 0; i-- {
 		batch = append(batch, e.stamp(e.queue.PushFront(t.res.Unanswered[i], e.now()).Event(), ""))
+	}
+	if e.restoresLocked(t) {
+		return e.restoreLocked(t, batch)
 	}
 
 	info := &agent.TurnInfo{ID: t.id, Phase: agent.TurnEnded}
@@ -1458,6 +1653,72 @@ func (e *Engine) settleLocked(t *turn) []launch {
 	}
 	e.log.Enqueue(batch...)
 	return next
+}
+
+// restoresLocked says t's ending is the restoring one (SF-21): its text came
+// from a queued row, and the session refused it because the agent was running a
+// turn of its own. Nothing reached the agent, so the row is still the user's
+// message, waiting — a refusal must not be the reason it is lost, nor the reason
+// the queue behind it stops.
+//
+// Only under the TUI's policy and on an engine that still admits. Under
+// ChainPolicy.RetryForeignTurn a refusal reaches here only when the client gave
+// up waiting (GiveUp) or stopped, and the turn then ends as the refusal it was;
+// a stopped engine runs nothing again, so there is nothing to put a row back
+// for. A refusal of text the client held itself, and ErrPromptInFlight, keep the
+// ordinary settlement: an error, with the queue left as it was.
+func (e *Engine) restoresLocked(t *turn) bool {
+	return t.row != nil && errors.Is(t.err, agent.ErrForeignTurn) && !e.opts.Chain.RetryForeignTurn && !e.stopped
+}
+
+// restoreLocked is the restoring settlement: t's row goes back to the head of
+// the queue as the row it was — its own id, version and queued time
+// (agent.PromptQueue.Restore) — and the engine is idle, not failed. batch holds
+// what the settlement has already produced (the turn's unanswered steers).
+//
+// The ending keeps the wire shape every refusal has: synthetic, the refusal's
+// class and text, no successor, and Pending counting the row it put back — so a
+// client's fold draws the same error row it always has (SF-47 is the softer
+// note). The row's `queued`, at position 0 and carrying the turn's own cause,
+// goes in the same batch ahead of the ending, where the steers go.
+//
+// It claims no successor, neither the head nor an armed send: the session's
+// flag can lag its client's refusal (grok's client knows of the agent's turn
+// before the session does), so a claim now would be refused again, and put back
+// again, as fast as the two could go. A send armed against this turn stays armed
+// and fires on the next pass that can start one, ahead of the row, as it would
+// have from the settlement; one armed against another turn goes, as it does from
+// any settlement.
+//
+// And it asks for a paced recheck of its own (rearm → the driver's tick): the
+// agent's turn can have ended, and the kick its end gave the driver been spent on
+// a pass that found this turn's continuation still out, before this settlement
+// ran. Then nothing else would ever drain the row. The tick's pass drains it if a
+// turn may start; if the agent's turn is still running, that turn's end does.
+func (e *Engine) restoreLocked(t *turn, batch []agent.Event) []launch {
+	batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
+	e.cur = nil
+	e.activity = ActivityIdle
+	e.cancelled = false
+	e.rememberErrLocked(t)
+	info := &agent.TurnInfo{
+		ID: t.id, Phase: agent.TurnEnded, Synthetic: true,
+		Err: t.err.Error(), ErrClass: agent.ClassifyEventErr(t.err),
+		Pending: e.queue.Len(),
+	}
+	batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: info}, t.cause))
+	if a := e.armed; a != nil && a.turn != t.id {
+		if ev, ok := e.disarmLocked(agent.SendNowOtherTurn, "", ""); ok {
+			batch = append(batch, ev)
+		}
+	}
+	e.log.Enqueue(batch...)
+	e.recheck = true
+	select {
+	case e.rearm <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 const (

@@ -22,6 +22,13 @@ import (
 // They refuse everything refusalLocked refuses, the removals as much as the
 // additions: a stopped or closing engine's record is closed, and a queue nothing
 // will ever drain is not a queue. Stop has cleared it by then in any case.
+//
+// Each syncs the session's admission fence on the way out (syncFenceLocked,
+// deferred after the unlock), because the queue is one of the things it reads: a
+// row added while the agent runs a turn of its own is a drain owed at that
+// turn's end and puts the fence up, and removing the last row takes it down at
+// once. A row added with the agent's session free leaves it down: Queue starts no
+// turn, so nothing would ever take it down again.
 
 // Queue puts text at the back of the queue. It never starts a turn.
 func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
@@ -29,6 +36,7 @@ func (e *Engine) Queue(c Command, text string) (agent.QueuedPrompt, error) {
 	return withSyncReceipt(e.receipts, c, hash, func() (agent.QueuedPrompt, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		defer e.syncFenceLocked()
 		if err := e.refusalLocked(); err != nil {
 			return agent.QueuedPrompt{}, err
 		}
@@ -65,6 +73,7 @@ func (e *Engine) EditQueued(c Command, id, text string, expectedVersion *int) er
 	return withSyncReceiptErr(e.receipts, c, hash, func() error {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		defer e.syncFenceLocked()
 		if err := e.refusalLocked(); err != nil {
 			return err
 		}
@@ -93,6 +102,7 @@ func (e *Engine) Unqueue(c Command, id string) (agent.QueuedPrompt, error) {
 	return withSyncReceipt(e.receipts, c, hash, func() (agent.QueuedPrompt, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		defer e.syncFenceLocked()
 		if err := e.refusalLocked(); err != nil {
 			return agent.QueuedPrompt{}, err
 		}
@@ -115,6 +125,7 @@ func (e *Engine) ClearQueue(c Command) (int, error) {
 	return withSyncReceipt(e.receipts, c, hash, func() (int, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
+		defer e.syncFenceLocked()
 		if err := e.refusalLocked(); err != nil {
 			return 0, err
 		}
