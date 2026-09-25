@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Sub-agents (plan 026 §3.1). The agent tool (opencode's profile) prepares a
@@ -38,7 +39,37 @@ type SubagentCall struct {
 	// candidates of the runner's resolution, which falls back to the type's,
 	// the configured default's and the parent's own (plan 026 §3.6).
 	Model, Effort string
+	// Background is the call's run_in_background: the model asks for the
+	// child to run in the background, the call returning at once and the
+	// result delivered when it finishes (plan 026 §3.11). It is a request: a
+	// session that runs no background children runs the call in the
+	// foreground and answers with the result, as if it were false.
+	Background bool
 }
+
+// OutputCall is one agent_output call as the tool prepared it (plan 026
+// §3.11): the background child whose result the model wants, and how long to
+// wait for one still running.
+type OutputCall struct {
+	// CallID is the harness's id for the agent_output call (Call.ID,
+	// "t<turn>.<step>.<n>"), which names the step it runs in: a result it
+	// takes is delivered by that step's append, or given back when the step
+	// writes nothing.
+	CallID string
+	// ID is the sub-agent's id as the agent call's acknowledgement named it,
+	// trimmed; the model's text, which may name nothing.
+	ID string
+	// Wait bounds the wait for a child still running: from 0 (look, and do not
+	// wait) to AgentOutputMaxWait.
+	Wait time.Duration
+}
+
+// agent_output's wait: the default and the most a call may ask for (plan 026
+// §3.11, codex's wait_agent shape).
+const (
+	AgentOutputDefaultWait = 30 * time.Second
+	AgentOutputMaxWait     = 600 * time.Second
+)
 
 // Subagents runs a sub-agent for the agent tool (plan 026 §3.1, §3.8).
 //
@@ -55,8 +86,21 @@ type SubagentCall struct {
 // its session and the child know (review r6). The agent tool's spec is
 // Truncate None, so the dispatcher only redacts the result, as it redacts
 // every tool's.
+//
+// A call with Background set, in a session that runs background children
+// (plan 026 §3.11), returns once the child has started, with an
+// acknowledgement naming it and no usage; the child's result is delivered to
+// the parent later, and Output is how the model asks for it sooner.
+//
+// Output answers an agent_output call: the result of a background child —
+// delivered once, whichever way — or why there is none to give now. It waits
+// only for a child still running, up to call.Wait; like Run it never returns
+// a Go error, and it returns aborted once ctx is done. Its text is capped
+// already (the result was cut when the child finished), so the agent_output
+// tool's spec is Truncate None as well.
 type Subagents interface {
 	Run(ctx context.Context, call SubagentCall) Result
+	Output(ctx context.Context, call OutputCall) Result
 }
 
 // Usage is a sub-agent's token counts: the tool package's own shape, since
@@ -141,15 +185,16 @@ var claudeToolIDs = map[string]string{
 
 // droppedTools are the names, lowercased, a persona's list may hold that are
 // dropped without a word: Claude Code's tools craze has no counterpart for, or
-// withholds from every child by design — starting another agent, the todo
-// list, asking the person, leaving plan mode — and the native ids of those
-// four, since a list may be written in either vocabulary. Every name starting
-// "task" and every MCP name ("mcp__…") is dropped as well (droppedTool).
+// withholds from every child by design — starting another agent or reading a
+// background one's result, the todo list, asking the person, leaving plan mode
+// — and the native ids of those five, since a list may be written in either
+// vocabulary. Every name starting "task" and every MCP name ("mcp__…") is
+// dropped as well (droppedTool).
 var droppedTools = []string{
 	AgentTool, "todowrite", "askuserquestion", "exitplanmode",
 	"webfetch", "websearch", "notebookedit", "notebookread",
 	"killshell", "bashoutput", "workflow", "skill",
-	"todo_write", "ask_user_question", ExitPlanModeTool,
+	"todo_write", "ask_user_question", ExitPlanModeTool, AgentOutputTool,
 }
 
 // droppedTool reports whether a persona's tool name, lowercased and without

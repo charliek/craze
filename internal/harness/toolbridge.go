@@ -341,8 +341,12 @@ func (t *turn) settle(result func(*toolCall) tool.Result) {
 // bad reports a step that cannot be persisted at all: a call whose provider
 // id is empty or repeats another's cannot be paired with its result (plan
 // 019 §3.6). None of its calls ran (runTool); each is settled invalid_input.
-// mu is held.
-func (t *turn) stepResults(step fantasy.StepResult, open []fantasy.ToolCallPart) (results *fantasy.Message, bad bool) {
+//
+// answered are the recorded calls whose own result — the one Fantasy recorded
+// from running it — is in results, rather than one the runner wrote for a
+// call that did not run: what an agent_output call's reservation commits by
+// (plan 026 §3.11). mu is held.
+func (t *turn) stepResults(step fantasy.StepResult, open []fantasy.ToolCallPart) (results *fantasy.Message, bad bool, answered []*toolCall) {
 	finish := step.FinishReason
 	defer t.settle(func(c *toolCall) tool.Result {
 		// A call begun and never completed: under an abnormal finish, the
@@ -362,10 +366,10 @@ func (t *turn) stepResults(step fantasy.StepResult, open []fantasy.ToolCallPart)
 		for i, oc := range open {
 			t.finishCall(recorded[i], badIDsResult(t, oc.ToolName))
 		}
-		return nil, true
+		return nil, true, nil
 	}
 	if len(open) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
 
 	ran := map[string]fantasy.ToolResultPart{}
@@ -381,6 +385,7 @@ func (t *turn) stepResults(step fantasy.StepResult, open []fantasy.ToolCallPart)
 	for i, oc := range open {
 		if r, ok := ran[oc.ToolCallID]; ok {
 			parts = append(parts, r)
+			answered = append(answered, recorded[i])
 			continue
 		}
 		// A call the guard refused is answered with the guard's own text,
@@ -404,7 +409,7 @@ func (t *turn) stepResults(step fantasy.StepResult, open []fantasy.ToolCallPart)
 			"step": strconv.Itoa(t.step), "finish": string(finish), "calls": strconv.Itoa(unrun),
 		}})
 	}
-	return &fantasy.Message{Role: fantasy.MessageRoleTool, Content: parts}, false
+	return &fantasy.Message{Role: fantasy.MessageRoleTool, Content: parts}, false, answered
 }
 
 // synthesizeStep persists the step a cancel or a failure cut short after it
@@ -441,10 +446,12 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	}
 	results := make([]fantasy.MessagePart, 0, len(announced))
 	aborts := 0
+	var answered []*toolCall // the calls whose own recorded result is written (stepResults)
 	for _, c := range announced {
 		parts = append(parts, fantasy.ToolCallPart{ToolCallID: c.callID, ToolName: c.name, Input: c.input})
 		if c.output != nil {
 			results = append(results, fantasy.ToolResultPart{ToolCallID: c.callID, Output: c.output, ClientMetadata: metadata(c.id)})
+			answered = append(answered, c)
 			continue
 		}
 		aborts++
@@ -459,12 +466,35 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	}})
 	// A child that ran for one of these calls was billed whether or not its
 	// step finished, so its usage is written with the results as it is on a
-	// finished step's tool entry (plan 026 §3.7).
-	_, err = t.store.AppendStep(nil,
+	// finished step's tool entry (plan 026 §3.7) — and a background result an
+	// agent_output call read, only when its own result is written here
+	// (§3.11). The step's request carried the background results its
+	// boundary took up, and they lead the append as they would a finished
+	// step's; the user's steers do not, and go back to them (Unanswered), as
+	// before.
+	writes := func(c *toolCall) bool { return slices.Contains(answered, c) }
+	leading, lead := t.internalEntries()
+	entries, err := t.store.AppendStep(leading,
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
 		&store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true,
-			SubagentUsage: subagentUsage(announced)})
+			SubagentUsage: subagentUsage(announced, writes)})
+	if err == nil {
+		t.wrote(entries, lead, true, outputCalls(answered))
+	}
 	return true, err
+}
+
+// outputCalls are the harness ids of the agent_output calls among answered:
+// the calls whose own result a written tool entry holds, and so the ones
+// whose reservations it commits (plan 026 §3.11).
+func outputCalls(answered []*toolCall) []string {
+	var ids []string
+	for _, c := range answered {
+		if c.name == tool.AgentOutputTool {
+			ids = append(ids, c.id)
+		}
+	}
+	return ids
 }
 
 // subagentUsage is what the sub-agents of calls spent, one row per model —
@@ -474,13 +504,36 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 // the StepDones it observed, so a child that failed or was cancelled counts
 // for every step it was billed for; a child that spent nothing adds no row,
 // and calls with no child give nil. mu is held.
-func subagentUsage(calls []*toolCall) []store.ModelUsage {
-	var rows []store.ModelUsage
+//
+// written says whether an agent_output call's result counts (plan 026
+// §3.11): its Child is a background child's usage, which belongs to the entry
+// that delivers the result — the tool entry holding that call's own result —
+// and to no other, so a StepDone, whose rows a restore would deliver again,
+// counts none (nil), and an entry counts only the calls whose results it
+// writes. An agent call's child counts wherever it ran, as it always has.
+func subagentUsage(calls []*toolCall, written func(*toolCall) bool) []store.ModelUsage {
+	var children []*tool.ChildUsage
 	for _, c := range calls {
-		if c.res == nil || c.res.Child == nil || c.res.Child.Usage == (tool.Usage{}) {
+		if c.res == nil || c.res.Child == nil {
 			continue
 		}
-		ch := c.res.Child
+		if c.name == tool.AgentOutputTool && (written == nil || !written(c)) {
+			continue
+		}
+		children = append(children, c.res.Child)
+	}
+	return mergeUsage(children)
+}
+
+// mergeUsage is children's usage as rows per model (subagentUsage), in the
+// order each model first appears; a child that spent nothing adds no row, and
+// no row at all is nil.
+func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
+	var rows []store.ModelUsage
+	for _, ch := range children {
+		if ch == nil || ch.Usage == (tool.Usage{}) {
+			continue
+		}
 		u := store.Usage{Input: ch.Usage.Input, Output: ch.Usage.Output, Reasoning: ch.Usage.Reasoning,
 			CacheRead: ch.Usage.CacheRead, CacheCreation: ch.Usage.CacheCreation}
 		i := slices.IndexFunc(rows, func(r store.ModelUsage) bool {

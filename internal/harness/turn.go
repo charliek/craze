@@ -135,10 +135,47 @@ type Result struct {
 // A model or effort switch made since the last turn (SetModel, SetEffort) is
 // handed to the store first, so it is written just ahead of this turn's
 // prompt.
+//
+// In a session with background sub-agents (Options.Background, plan 026
+// §3.11), every result waiting to be delivered — and every one a failed wake
+// set aside — is taken up at the turn's first step, after the prompt, and one
+// that becomes ready while the turn runs at its next step boundary: as a user
+// part of their own, written with the step as an entry of results, never a
+// steer. A result a step took up and did not write is given back when the
+// turn ends, before Run returns; Options.OnPending is then called if one went
+// back to waiting.
 func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Result, error) {
 	if strings.TrimSpace(text) == "" {
 		return Result{}, ErrEmptyPrompt
 	}
+	return s.run(ctx, text, false, sink)
+}
+
+// Wake runs a turn of the session's own (plan 026 §3.11): Run with no prompt
+// of the caller's, whose user message is the background sub-agents' results
+// waiting to be delivered as it begins — each in its wrapper, in the order
+// they finished — so the model reacts to its children without the user
+// typing. It takes every pending result (never a suspended one), persists
+// them as the turn's user entry — marked as results and carrying their usage
+// — and is otherwise Run: the same history, reminders, tools, steers and
+// ending, and a result that becomes ready while it runs is taken up at its
+// next step boundary. A result it takes and does not write is set aside
+// (suspended), whatever ended it — an error, a cancel, or a clean stop that
+// persisted nothing — so a wake that keeps failing cannot wake again: the next
+// turn a person starts delivers it, or agent_output.
+//
+// It returns ErrNothingPending, having written and emitted nothing, when no
+// result was waiting as it began; ErrInTurn while a turn runs, and ErrClosed
+// after Close, as Run does. The caller owns when to call it: typically when
+// Options.OnPending has said a result is waiting and no turn of its own is
+// running or about to start.
+func (s *Session) Wake(ctx context.Context, sink func(Event)) (Result, error) {
+	return s.run(ctx, "", true, sink)
+}
+
+// run is Run and Wake, one implementation (see both). For a wake text is
+// empty until the results it takes are known.
+func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Event)) (Result, error) {
 	if sink == nil {
 		sink = func(Event) {}
 	}
@@ -146,7 +183,37 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	if err != nil {
 		return Result{}, err
 	}
+	// The turn's reservations of background results are settled once it has
+	// ended, on every path — after the interrupted answer is saved (finish),
+	// and on a return before the model was asked or a panic too — and before
+	// the session is released; whoever is told a result is waiting again is
+	// told once it has been, holding no lock.
+	gave := false
+	defer func() {
+		if gave {
+			s.subs.notifyPending(false)
+		}
+	}()
 	defer s.end()
+	defer func() { gave = s.subs.restoreTurn(number) }()
+
+	user := store.MessageEntry{Model: m.id(), Effort: m.effort}
+	var held []string
+	if wake {
+		// Taken under the runner's lock now the session is claimed, owned by
+		// the wake's first step (P47) before anything is sent.
+		b := s.subs.reserve(owner{turn: number, step: 1, wake: true}, false)
+		if b == nil {
+			// Nothing was waiting: no turn was, and its number is not spent.
+			// The session is still claimed, so no other turn has begun.
+			s.mu.Lock()
+			s.turns--
+			s.mu.Unlock()
+			return Result{}, ErrNothingPending
+		}
+		text, held = b.text, b.ids
+		user.SubagentUsage, user.SubagentResults = b.rows, true
+	}
 
 	if err := s.record(m, changes); err != nil {
 		return Result{}, err
@@ -157,23 +224,23 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 	// them — and the replay would send it to the model, the newly switched
 	// one included. The same places are redacted as when a step is persisted
 	// (redactCalls, redactResults): a tool call's arguments and a tool
-	// result's text, never the model's own text or reasoning.
+	// result's text, never the model's own text or reasoning — and the text
+	// of an entry of background results, which a child wrote (plan 026
+	// §3.11), never a person's prompt.
 	//
 	// It leaves the transcript on disk as it was written; and with no key in
 	// the history — every other turn of every other session — it changes
 	// nothing at all, so the request's bytes, and the provider's prefix
 	// cache, are what they would have been.
-	history := redactHistory(s.tools.redactor(), s.store.Context(m.id()))
+	msgs, results := s.store.ContextWithResults(m.id())
+	history := redactHistory(s.tools.redactor(), msgs, results)
 	// A prompt still held is an earlier turn's that produced nothing. It is
 	// not in history, so this turn's request never sent it; written ahead of
 	// this turn's answer, it would put in the transcript what the model never
 	// saw.
 	s.store.DiscardHeldUsers()
-	if err := s.store.AppendUser(store.MessageEntry{
-		Message: fantasy.NewUserMessage(text), // byte for byte what Fantasy sends for Prompt
-		Model:   m.id(),
-		Effort:  m.effort,
-	}); err != nil {
+	user.Message = fantasy.NewUserMessage(text) // byte for byte what Fantasy sends for Prompt
+	if err := s.store.AppendUser(user); err != nil {
 		return Result{}, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
 
@@ -187,6 +254,9 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 		steers:  &s.steers,
 		modes:   s.modes,
 		logMode: s.recordMode,
+		subs:    s.subs,
+		wake:    wake,
+		held:    held,
 	}
 	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
 	// The session's todo store reaches this turn's sink only through here
@@ -366,6 +436,19 @@ type turn struct {
 	steers  *steerbox
 	spliced []splice // the steers taken up, in order, each at a fixed index
 	written int      // how many of spliced an AppendStep has written
+
+	// The background sub-agents' results this turn delivers (delivery.go,
+	// plan 026 §3.11): subs is the session's runner, nil for a sub-agent's;
+	// wake says the turn is a wake, whose prompt is results; internal are the
+	// parts of results its steps took up, a collection of their own and never
+	// the steer box's; held are the results a wake was started with, which
+	// its user entry carries, and heldWritten says an append has written it.
+	// Under mu, but for the two fixed ones.
+	subs        *subagents
+	wake        bool
+	internal    []internalPart
+	held        []string
+	heldWritten bool
 
 	// The mode's reminders (reminders.go, plan 023 §3.3): modes is the
 	// session's box, which has its own lock; the rest is this turn's, under
@@ -591,11 +674,13 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 	// What the step's sub-agents spent, a row per model (plan 026 §3.7): on
 	// the step's tool entry below, and on its StepDone whatever becomes of the
 	// append — a step refused for its ids or whose save fails is persisted
-	// nowhere, and the report is then the only record (panel P40).
-	children := subagentUsage(t.list)
-	done.SubagentUsage = children
+	// nowhere, and the report is then the only record (panel P40). A
+	// background result an agent_output call read is not among them: it is
+	// given back unless this append writes the call's result, and would then
+	// be counted again by whatever delivers it (§3.11).
+	done.SubagentUsage = subagentUsage(t.list, nil)
 
-	results, bad := t.stepResults(step, open)
+	results, bad, answered := t.stepResults(step, open)
 	if bad {
 		t.badIDs = true
 		t.emit(Diag{Kind: DiagBadToolCalls, Fields: map[string]string{
@@ -617,9 +702,12 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 			// The children's usage rides on the entry that holds their results,
 			// each row priced by its own model; the entry itself is stamped with
 			// the parent's model and carries no plain usage, which that model's
-			// rate would price (plan 026 §3.7).
+			// rate would price (plan 026 §3.7). A background result's rides on
+			// it when an agent_output call's own result here delivers it
+			// (§3.11).
+			writes := func(c *toolCall) bool { return slices.Contains(answered, c) }
 			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort,
-				SubagentUsage: children}
+				SubagentUsage: subagentUsage(t.list, writes)}
 		}
 		// The mode this step's request announced is handed over first, so the
 		// store writes the mode_change ahead of this step's own entries
@@ -628,11 +716,14 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		t.modeChangeHeld()
 		// The steers no step has written yet lead the append: this is the
 		// first step that could write them, and the transcript then holds
-		// them exactly where this step's request had them.
-		ids, err := t.store.AppendStep(t.steerEntries(), entry, toolEntry)
+		// them exactly where this step's request had them — and so do the
+		// background results the step's requests carried (§3.11).
+		leading, lead := t.leadingEntries()
+		ids, err := t.store.AppendStep(leading, entry, toolEntry)
 		switch {
 		case err == nil:
 			t.written = len(t.spliced)
+			t.wrote(ids, lead, toolEntry != nil, outputCalls(answered))
 			done.Saved, done.Entries = true, ids
 			// The conversation now holds the step the model read the notice
 			// in, so the mode is told for good (plan 023 §3.3).
@@ -772,13 +863,20 @@ func (t *turn) saveInterrupted(cancelled bool) error {
 	if t.text.Len() == 0 && t.reasoning.Len() == 0 {
 		return nil
 	}
-	err := t.store.AppendAssistant(store.MessageEntry{
+	// The background results the cut step's request carried lead the answer,
+	// as they would a finished step's, and commit when it is written (plan 026
+	// §3.11); its steers do not, and go back to the user.
+	leading, lead := t.internalEntries()
+	ids, err := t.store.AppendAnswer(leading, store.MessageEntry{
 		Message:     streamed(t.reasoning.String(), t.text.String()),
 		Model:       t.model.id(),
 		Effort:      t.model.effort,
 		StopReason:  stop,
 		Interrupted: true,
 	})
+	if err == nil {
+		t.wrote(ids, lead, false, nil)
+	}
 	if errors.Is(err, store.ErrNoOutput) {
 		return nil
 	}
@@ -930,15 +1028,39 @@ func redactResults(red *redact.Replacer, m fantasy.Message) fantasy.Message {
 }
 
 // redactHistory is msgs with every provider key gone from the tool calls'
-// arguments and the tool results' text (see Run). A message holding none is
-// carried over as it is, parts and all, so the bytes a provider sees do not
-// change; msgs itself, which the store owns, is never written to.
-func redactHistory(red *redact.Replacer, msgs []fantasy.Message) []fantasy.Message {
+// arguments and the tool results' text (see Run), and from the text of every
+// message results marks as an entry of background sub-agents' results (plan
+// 026 §3.11, astra r14): a child wrote it, as a tool wrote a result, so a key
+// the session learned after it was committed must not go out in a later
+// request. results is msgs' marks, message for message
+// (store.ContextWithResults). A message holding none is carried over as it
+// is, parts and all, so the bytes a provider sees do not change — a person's
+// prompt among them, which is never marked; msgs itself, which the store
+// owns, is never written to.
+func redactHistory(red *redact.Replacer, msgs []fantasy.Message, results []bool) []fantasy.Message {
 	out := slices.Clone(msgs)
 	for i, m := range out {
-		out[i] = redactResults(red, redactCalls(red, m))
+		m = redactResults(red, redactCalls(red, m))
+		if i < len(results) && results[i] {
+			m = redactText(red, m)
+		}
+		out[i] = m
 	}
 	return out
+}
+
+// redactText is m with every provider key redacted from its text parts; m
+// itself when they hold none.
+func redactText(red *redact.Replacer, m fantasy.Message) fantasy.Message {
+	return mapParts(m, func(p fantasy.MessagePart) (fantasy.MessagePart, bool) {
+		if tp, ok := fantasy.AsMessagePart[fantasy.TextPart](p); ok {
+			if s := red.String(tp.Text); s != tp.Text {
+				tp.Text = s
+				return tp, true
+			}
+		}
+		return p, false
+	})
 }
 
 // mapParts is m with f applied to each part, f reporting whether it changed

@@ -226,12 +226,28 @@ func (t *Transcript) Context(current Model) []fantasy.Message {
 // The parts themselves are shared with the transcript, as Fantasy's part
 // values are; a caller must not mutate their ProviderOptions maps.
 func (t *Transcript) ContextAt(leaf string, current Model) ([]fantasy.Message, error) {
+	msgs, _, err := t.contextAt(leaf, current)
+	return msgs, err
+}
+
+// ContextWithResults is Context, and beside it, message for message, whether
+// each is an entry of background sub-agents' results (MessageEntry's
+// SubagentResults): what a caller replaying the history needs to redact such
+// an entry as it redacts a tool result, since a child wrote it (plan 026
+// §3.11). The messages are exactly Context's.
+func (t *Transcript) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
+	msgs, results, _ := t.contextAt(t.Leaf(), current) // the leaf is always known
+	return msgs, results
+}
+
+// contextAt is ContextAt, with each message's SubagentResults mark beside it.
+func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, []bool, error) {
 	if leaf == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	i, ok := t.index[leaf]
 	if !ok {
-		return nil, fmt.Errorf("%w %q", ErrUnknownEntry, leaf)
+		return nil, nil, fmt.Errorf("%w %q", ErrUnknownEntry, leaf)
 	}
 	var path []int
 	for {
@@ -243,6 +259,7 @@ func (t *Transcript) ContextAt(leaf string, current Model) ([]fantasy.Message, e
 		i = t.index[parent] // check guaranteed it exists and comes earlier
 	}
 	var msgs []fantasy.Message
+	var results []bool
 	dropped := false // the message before this one was an assistant message replayed as nothing
 	for k := len(path) - 1; k >= 0; k-- {
 		e := &t.Entries[path[k]]
@@ -260,6 +277,7 @@ func (t *Transcript) ContextAt(leaf string, current Model) ([]fantasy.Message, e
 		dropped = !keep
 		if keep {
 			msgs = append(msgs, m)
+			results = append(results, e.SubagentResults)
 		}
 	}
 	for len(msgs) > 0 {
@@ -269,9 +287,9 @@ func (t *Transcript) ContextAt(leaf string, current Model) ([]fantasy.Message, e
 		if !unanswered {
 			break
 		}
-		msgs = msgs[:len(msgs)-1]
+		msgs, results = msgs[:len(msgs)-1], results[:len(results)-1]
 	}
-	return msgs, nil
+	return msgs, results, nil
 }
 
 // replayed is e's message as a request to current sends it: a copy with its

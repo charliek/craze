@@ -37,6 +37,13 @@ const ExitPlanModeTool = "exit_plan_mode"
 // forbids, call by call.
 const AgentTool = "agent"
 
+// AgentOutputTool is the id of the tool that reads a background sub-agent's
+// result (plan 026 §3.11). Unlike agent it needs no rule of the gate's — it is
+// ReadOnly, so every mode lets it through — and it is named here beside agent
+// because the two go together: a child is given neither (MapClaudeTools drops
+// both, and the harness withholds both).
+const AgentOutputTool = "agent_output"
+
 // The refusals, grok-build's word for word (plan_mode.rs:325-371), with
 // craze's plan path spliced in. They are what the model reads back as the
 // call's error result, so each says what the rule is rather than that a rule

@@ -146,7 +146,7 @@ func TestProfile(t *testing.T) {
 	if p.Name != Name || Name != "opencode" {
 		t.Fatalf("profile name = %q", p.Name)
 	}
-	if got := names(p); !slices.Equal(got, []string{"bash", "read", "glob", "grep", "edit", "write", "agent", "todo_write", "ask_user_question", "exit_plan_mode"}) {
+	if got := names(p); !slices.Equal(got, []string{"bash", "read", "glob", "grep", "edit", "write", "agent", "agent_output", "todo_write", "ask_user_question", "exit_plan_mode"}) {
 		t.Fatalf("tools = %q, want opencode's registry order", got)
 	}
 	want := map[string]struct {
@@ -163,6 +163,9 @@ func TestProfile(t *testing.T) {
 		// plan 026 §3.3: a child may edit, so not ReadOnly; fanned out, so
 		// Parallel; the runner cuts its answer itself, so None (review r6).
 		"agent": {tool.KindTask, false, true, tool.None},
+		// plan 026 §3.11: reads a background child's result, changing nothing;
+		// the runner cut the result when it became deliverable, so None.
+		"agent_output": {tool.KindRead, true, true, tool.None},
 		// plan 023 §3.4's table: the two that block on a person are not
 		// Parallel, and all three change nothing.
 		"todo_write":        {tool.KindTodo, true, true, tool.Head},

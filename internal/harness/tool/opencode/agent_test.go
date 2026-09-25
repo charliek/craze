@@ -38,6 +38,9 @@ func (f *fakeSubagents) Run(ctx context.Context, c tool.SubagentCall) tool.Resul
 	return f.res
 }
 
+// Output is the runner's other half, which the agent tool never calls.
+func (f *fakeSubagents) Output(context.Context, tool.OutputCall) tool.Result { return tool.Result{} }
+
 func (f *fakeSubagents) seen() []tool.SubagentCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -72,8 +75,8 @@ func newAgentFixture(t *testing.T, sub tool.Subagents) *fixture {
 // TestAgentSpec (A5): the tool's contract — id agent, kind task, parallel, not
 // read-only (a child may edit), no truncation by the dispatcher (the runner
 // cuts the answer itself, review r6); description and prompt
-// required, and subagent_type, model and effort optional strings, with no
-// run_in_background declared until background children exist (plan 026 PR 3).
+// required, and subagent_type, model and effort optional strings, and
+// run_in_background an optional boolean (§3.11).
 // Its description opens with the alias sentence, says the five things §3.3
 // lists, renders with nothing left to fill, ends in one newline like every
 // other, and names no tool the harness lacks. The profile offers it right
@@ -92,12 +95,16 @@ func TestAgentSpec(t *testing.T) {
 		t.Fatalf("required = %q, want description and prompt", s.Required)
 	}
 	params := slices.Sorted(maps.Keys(s.Parameters))
-	if !slices.Equal(params, []string{"description", "effort", "model", "prompt", "subagent_type"}) {
-		t.Fatalf("parameters = %q; want exactly description, prompt, subagent_type, model and effort", params)
+	if !slices.Equal(params, []string{"description", "effort", "model", "prompt", "run_in_background", "subagent_type"}) {
+		t.Fatalf("parameters = %q; want exactly description, prompt, subagent_type, model, effort and run_in_background", params)
 	}
 	for name, p := range s.Parameters {
-		if typ := p.(map[string]any)["type"]; typ != "string" {
-			t.Errorf("%s is a %v, want a string", name, typ)
+		want := "string"
+		if name == "run_in_background" {
+			want = "boolean"
+		}
+		if typ := p.(map[string]any)["type"]; typ != want {
+			t.Errorf("%s is a %v, want a %s", name, typ, want)
 		}
 	}
 
@@ -136,12 +143,13 @@ func TestAgentSpec(t *testing.T) {
 	}
 }
 
-// TestRunInBackgroundTolerated (A5): Claude Code's run_in_background, which the
-// tool does not declare, is accepted like any unknown key and the call runs in
-// the foreground: the runner is handed the call at once, on the call's live
-// context, and its result is the call's — its usage included, which the
-// dispatcher carries through. The same holds with the key false, absent, or
-// beside another unknown one. The call the runner gets is the model's
+// TestRunInBackgroundTolerated (A5): Claude Code's run_in_background is
+// declared, and the tool hands it to the runner as Background, which decides
+// what it comes to (§3.11); this fake runner answers in the foreground either
+// way: the runner is handed the call at once, on the call's live context, and
+// its result is the call's — its usage included, which the dispatcher carries
+// through. The same holds with the key false, absent, or beside an unknown
+// one. The call the runner gets is the model's
 // arguments, trimmed, with the default type filled in; an explicit null for an
 // optional field reads as an omission.
 func TestRunInBackgroundTolerated(t *testing.T) {
@@ -168,7 +176,7 @@ func TestRunInBackgroundTolerated(t *testing.T) {
 		t.Fatalf("the runner was handed %d calls (live %v), want %d, each on a live context", len(calls), sub.live, len(inputs))
 	}
 	for i, c := range calls {
-		want := tool.SubagentCall{ID: calls[i].ID, Description: "scan the repo", Prompt: "List the packages.", Type: tool.DefaultAgentType}
+		want := tool.SubagentCall{ID: calls[i].ID, Description: "scan the repo", Prompt: "List the packages.", Type: tool.DefaultAgentType, Background: i == 0}
 		if c != want || c.ID == "" {
 			t.Fatalf("call %d reached the runner as %+v, want %+v", i, c, want)
 		}
@@ -213,6 +221,34 @@ func TestAgentPrepare(t *testing.T) {
 	}
 	if n := len(sub.seen()); n != 0 {
 		t.Fatalf("the runner was handed %d refused calls", n)
+	}
+}
+
+// TestRunInBackgroundMustBeBoolean (§3.11): run_in_background is a JSON
+// boolean — a string, a number or an object is invalid_input naming the field,
+// and never reaches the runner — while null reads as false, like the absent
+// key (the controls).
+func TestRunInBackgroundMustBeBoolean(t *testing.T) {
+	sub := &fakeSubagents{res: tool.Result{Text: "ran"}}
+	f := newAgentFixture(t, sub)
+	for _, bad := range []string{`"true"`, `1`, `{}`, `[true]`} {
+		_, res := f.call(t, "agent", `{"description":"d","prompt":"p","run_in_background":`+bad+`}`)
+		if !res.IsError || res.Class != tool.ClassInvalidInput || !strings.Contains(res.Text, "run_in_background must be a boolean") {
+			t.Errorf("run_in_background %s: result %+v, want invalid_input naming the field", bad, res)
+		}
+	}
+	if n := len(sub.seen()); n != 0 {
+		t.Fatalf("the runner was handed %d refused calls", n)
+	}
+	for _, in := range []string{`{"description":"d","prompt":"p","run_in_background":null}`, `{"description":"d","prompt":"p"}`} {
+		if _, res := f.call(t, "agent", in); ok(t, res) != "ran" {
+			t.Fatalf("%s: result %q", in, res.Text)
+		}
+	}
+	for i, c := range sub.seen() {
+		if c.Background {
+			t.Fatalf("call %d reached the runner in the background; null and absent are false", i)
+		}
 	}
 }
 

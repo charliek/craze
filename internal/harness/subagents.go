@@ -42,9 +42,10 @@ import (
 // runner's to recover (runTurn) — a cancel and a Close each give back exactly
 // what they took:
 //
-//  1. the slot is acquired by a select on the semaphore, the call's context
-//     and the session's closing channel; one won while either of the other two
-//     is also ready is given back, and the call is aborted;
+//  1. the slot is taken by occupancy (take): at once when one is free, or by
+//     waiting on a change of occupancy, the call's context and the session's
+//     closing channel; one won while either of the other two is also ready
+//     is given back, and the call is aborted;
 //  2. its release is deferred at once;
 //  3. the context and closing are checked again;
 //  4. the child is registered — refused, and the call aborted, once Close has
@@ -102,6 +103,15 @@ import (
 // parent live nothing but a stop can have caused, so a child that completed
 // keeps its answer and one whose Run failed stays failed, whatever stop landed
 // after (§3.10: a stop racing the finish is harmless).
+//
+// # Background children (§3.11)
+//
+// A call that asks for the background, in a session opened with
+// Options.Background, takes a slot the same way — one of the same four, never
+// waiting for one — opens its child on the call's goroutine and returns once
+// the child has started; the child's turn runs on a goroutine of the runner's,
+// under the session's context rather than the call's, and its result waits in
+// a delivery state until the parent's model has read it once (background.go).
 
 // maxChildren is how many sub-agents one session runs at once (owner decision
 // 7): a fifth call waits for a slot. Fantasy's own five parallel tool slots
@@ -159,11 +169,30 @@ const (
 
 // subagents is a session's runner. See the file's comment.
 type subagents struct {
-	s     *Session      // the parent: this runner's session, fixed
-	slots chan struct{} // the cap: a slot is a value in it, taken by a send
+	s *Session // the parent: this runner's session, fixed
+	// slots are the slots held, a value each: its length is always fg+bg. It
+	// is sent to and received from only under regMu, with fg or bg, so it
+	// never blocks there; it is a channel so that its length can be read
+	// without the lock.
+	slots chan struct{}
 	// turn is the running turn, attached for its life (attach): the sink and
 	// the model a call's children report to and start from.
 	turn atomic.Pointer[turnLink]
+
+	// background, sink and onPending are Options.Background, Options.Sink and
+	// Options.OnPending, fixed at Open (plan 026 §3.11).
+	background bool
+	sink       func(Event)
+	onPending  func()
+	// bgCtx is every background child's context's parent: the session's, not
+	// a turn's or a call's, so a turn's cancel never reaches one;
+	// closeBackground cancels it with errClosing. workers counts the
+	// background children's goroutines, each added under regMu before it
+	// starts and only while the registry is unsealed (launch), so Close's
+	// Wait never meets an Add.
+	bgCtx    context.Context
+	bgCancel context.CancelCauseFunc
+	workers  sync.WaitGroup
 
 	regMu  sync.Mutex
 	sealed bool                    // Close has begun: no child registers from here
@@ -172,6 +201,18 @@ type subagents struct {
 	// until the turn detaches (childKeys, review r8): a call's ToolFinished
 	// follows its child's retirement and carries what the child wrote.
 	spent []string
+	// fg and bg are the slots held by foreground and by background children;
+	// changed is closed, and replaced, on every take and every release, which
+	// is what a foreground call waiting for a slot waits on (take).
+	fg, bg  int
+	changed chan struct{}
+	// results are the background children's results, by id, in their
+	// delivery states (background.go); order is their ids in launch order,
+	// and finished counts the ones that have left running, numbering them in
+	// the order they finished.
+	results  map[string]*bgResult
+	order    []string
+	finished int
 
 	// seams are the runner's test seams, set before the first turn; zero is
 	// production.
@@ -192,16 +233,23 @@ type subagentSeams struct {
 	ended    func(id string)                 // the child's Run returned and its end is latched; its cause is not yet read
 	retiring func(id string)                 // the call is about to take regMu to retire its child
 	settling func(id string)                 // a registered call's last word (settle) begins: its child closed, retired, its slot given back
+	// outputWaiting: an agent_output call found its child running and is about
+	// to wait for it, holding no lock.
+	outputWaiting func(id string)
 }
 
 // turnLink is what a call needs of the turn it runs in: the turn's locked
 // emit, for the lifecycle events, its sink itself, for the children's own
 // events, and its model, which a child's model and effort resolve against
-// (§3.6: the running turn's, not the session's current one).
+// (§3.6: the running turn's, not the session's current one). number and wake
+// are the turn's number and whether it is a wake: what an agent_output call's
+// reservation is owned by (§3.11).
 type turnLink struct {
-	emit  func(Event)
-	sink  func(Event)
-	model model
+	emit   func(Event)
+	sink   func(Event)
+	model  model
+	number int
+	wake   bool
 }
 
 // childHandle is one registered child: what Close and SetMode reach it by.
@@ -228,16 +276,20 @@ type childHandle struct {
 
 // newSubagents is s's runner, with every slot free and nothing registered.
 func newSubagents(s *Session) *subagents {
-	return &subagents{s: s, slots: make(chan struct{}, maxChildren), live: map[string]*childHandle{}}
+	r := &subagents{s: s, slots: make(chan struct{}, maxChildren), live: map[string]*childHandle{},
+		changed: make(chan struct{}), results: map[string]*bgResult{}}
+	r.bgCtx, r.bgCancel = context.WithCancelCause(context.Background())
+	return r
 }
 
 // attach makes t the turn this runner's calls report to, for the turn's life,
 // and returns what detaches it (Run defers it, as it does the todo list's).
 // The detach forgets the keys of the children the turn retired: every call of
 // the turn, and so every ToolFinished that could carry a child's text, has
-// returned by then (childKeys).
+// returned by then (childKeys). A background child's keys are its result's
+// until that is delivered, and the detach does not touch them.
 func (r *subagents) attach(t *turn) (release func()) {
-	r.turn.Store(&turnLink{emit: t.emitLocked, sink: t.sink, model: t.model})
+	r.turn.Store(&turnLink{emit: t.emitLocked, sink: t.sink, model: t.model, number: t.number, wake: t.wake})
 	return func() {
 		r.turn.Store(nil)
 		r.regMu.Lock()
@@ -252,7 +304,11 @@ func (r *subagents) attach(t *turn) (release func()) {
 // reaches the sink — and every child's the running turn has retired, since
 // the call's ToolFinished, which the adapter publishes after sanitizing, holds
 // the child's text and comes after the retirement. A child that never opened
-// knows none.
+// knows none. And every background child's whose result has not been
+// delivered (plan 026 §3.11, astra r14): the result waits, with the child's
+// text in it, for however many turns, and its keys go with it — into spent
+// once it is committed, for the rest of the turn that delivered it — whatever
+// an unrelated turn's detach forgets.
 //
 // regMu is taken to copy the handles and the retired keys, and released before
 // any handle's lock or any child's key lock is taken: each is a leaf, none is
@@ -268,6 +324,9 @@ func (r *subagents) childKeys() []string {
 		handles = append(handles, h)
 	}
 	keys := slices.Clone(r.spent)
+	for _, res := range r.results {
+		keys = append(keys, res.keys...)
+	}
 	r.regMu.Unlock()
 	for _, h := range handles {
 		if child := h.session(); child != nil {
@@ -454,36 +513,122 @@ func (h *childHandle) end() {
 	h.mu.Unlock()
 }
 
-// acquire takes a slot, waiting for one while the call's context is live and
-// the session is not closing, and reports whether it holds one (step 1). A
-// slot won while the context or closing is also ready is given back: a
-// select picks among ready cases at random, and a cancelled call must not
-// start a child because the semaphore happened to win.
-func (r *subagents) acquire(ctx context.Context, call tool.SubagentCall) bool {
+// slotOutcome is what a call's attempt at a slot came to (take).
+type slotOutcome int
+
+const (
+	slotTaken   slotOutcome = iota // the call holds a slot: its release is the call's
+	slotBusy                       // every slot is held and waiting could not free one: busyText
+	slotAborted                    // the call's context is done or the session is closing
+)
+
+// busyText answers a call that found every slot held with nothing to wait for
+// (plan 026 §3.11): a background call, which never waits, or a foreground one
+// when every holder is a background child, which does not end with a step.
+// Something the model can act on, so an error it reads, not an abort.
+var busyText = fmt.Sprintf("All %d sub-agent slots are in use; wait for one with agent_output or stop one.", maxChildren)
+
+// busyResult is busyText as a call's result.
+func busyResult() tool.Result {
+	return tool.Result{Text: busyText, IsError: true, Class: tool.ClassToolError}
+}
+
+// take takes a slot for a call, foreground or background, by occupancy (plan
+// 026 §3.11, panel CodeRabbit 10, astra r2-15). Four slots are shared by both
+// kinds:
+//
+//   - a background call takes one if one is free, and otherwise fails fast
+//     (slotBusy): it never waits;
+//   - a foreground call takes one if one is free; if none is and every holder
+//     is a background child, it fails fast as well, since nothing it could
+//     wait for ends with its step; otherwise it waits — for a change of
+//     occupancy, its context or the session's closing — and judges again at
+//     every change, since the holder that leaves may be the last foreground
+//     one, or a background call may take the slot one gave back.
+//
+// Reading the occupancy and taking the change signal it waits on are one
+// regMu section (astra r14, P26), so a release between the two cannot be
+// missed. A slot won while the context or closing is also done is given back
+// and the call aborted (step 1's rule, P2): a select picks among ready cases
+// at random, and a cancelled call must not start a child because a slot
+// happened to free. The waiting seam is told once, when the call first waits.
+func (r *subagents) take(ctx context.Context, call tool.SubagentCall, background bool) slotOutcome {
 	closing := r.s.tools.closing
-	select {
-	case r.slots <- struct{}{}:
-	default:
-		if r.seams.waiting != nil {
+	for waited := false; ; waited = true {
+		r.regMu.Lock()
+		if r.fg+r.bg < maxChildren {
+			r.holdLocked(background)
+			r.regMu.Unlock()
+			break
+		}
+		if background || r.fg == 0 {
+			r.regMu.Unlock()
+			if ctx.Err() != nil || isClosed(closing) {
+				return slotAborted // a cancelled call reads aborted, the tool contract, whatever else is true
+			}
+			return slotBusy
+		}
+		changed := r.changed
+		r.regMu.Unlock()
+		if !waited && r.seams.waiting != nil {
 			r.seams.waiting(call)
 		}
 		select {
-		case r.slots <- struct{}{}:
+		case <-changed:
 		case <-ctx.Done():
-			return false
+			return slotAborted
 		case <-closing:
-			return false
+			return slotAborted
 		}
 	}
 	if ctx.Err() != nil || isClosed(closing) {
-		r.release()
-		return false
+		r.releaseSlot(background)
+		return slotAborted
 	}
-	return true
+	return slotTaken
 }
 
-// release gives a slot back.
-func (r *subagents) release() { <-r.slots }
+// holdLocked counts a slot taken by a call of the given kind and signals the
+// change. regMu is held, and a slot is free.
+func (r *subagents) holdLocked(background bool) {
+	if background {
+		r.bg++
+	} else {
+		r.fg++
+	}
+	r.slots <- struct{}{}
+	r.changedLocked()
+}
+
+// releaseSlot gives back a slot a call of the given kind held, and signals
+// the change: a foreground call waiting for a slot judges again.
+func (r *subagents) releaseSlot(background bool) {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	if background {
+		r.bg--
+	} else {
+		r.fg--
+	}
+	<-r.slots
+	r.changedLocked()
+}
+
+// changedLocked wakes every waiter on the occupancy: the channel they hold is
+// closed, and the next waiter takes a new one. regMu is held.
+func (r *subagents) changedLocked() {
+	close(r.changed)
+	r.changed = make(chan struct{})
+}
+
+// acquire takes a foreground slot and reports whether the call holds one: the
+// slot protocol's step 1 (take), with a busy and an aborted call alike false.
+func (r *subagents) acquire(ctx context.Context, call tool.SubagentCall) bool {
+	return r.take(ctx, call, false) == slotTaken
+}
+
+// release gives a foreground slot back.
+func (r *subagents) release() { r.releaseSlot(false) }
 
 // register adds a child under id and returns its handle and the mode it
 // opens in — the parent's, read under regMu so a SetMode is wholly before or
@@ -523,6 +668,12 @@ func (r *subagents) retire(h *childHandle) {
 	r.regMu.Lock()
 	defer r.regMu.Unlock()
 	delete(r.live, h.id)
+	r.spendLocked(keys)
+}
+
+// spendLocked keeps keys for the rest of the running turn (spent), each once.
+// regMu is held.
+func (r *subagents) spendLocked(keys []string) {
 	for _, k := range keys {
 		if !slices.Contains(r.spent, k) {
 			r.spent = append(r.spent, k)
@@ -594,8 +745,18 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.R
 		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassInvalidInput}
 	}
 
+	// A call that asks for the background, in a session that runs background
+	// children, goes its own way from here (background.go, §3.11); anywhere
+	// else it is an ordinary call, and blocks until its child has ended.
+	if call.Background && r.background {
+		return r.runBackground(ctx, link, call, persona, alias, effort, &c)
+	}
+
 	// Steps 1–3: a slot, its release deferred at once, and the recheck.
-	if !r.acquire(ctx, call) {
+	switch r.take(ctx, call, false) {
+	case slotBusy:
+		return busyResult()
+	case slotAborted:
 		return abortedResult()
 	}
 	defer r.release()
@@ -630,6 +791,28 @@ type childCall struct {
 	// completed: the child's turn ended on its own, so its outcome stands
 	// whatever cause lands after (decide's first rule).
 	completed bool
+	// final: the call's answer is final whatever cause lands after — a
+	// background call's acknowledgement, which says the child started; the
+	// child is the session's from then on, not the call's (§3.11).
+	final bool
+}
+
+// openChild is step 5's Open: the child session for h, with the parent's own
+// Options and the call's type, model, effort and mode (§3.2).
+func (r *subagents) openChild(h *childHandle, call tool.SubagentCall, persona tool.Persona, alias, effort, mode string) (*Session, error) {
+	parent := r.s
+	all, ids := childToolSet(persona, parent.tools.offered)
+	open := r.seams.open
+	if open == nil {
+		open = Open
+	}
+	return open(parent.childOpenOptions(alias, effort, &ChildOptions{
+		ID: h.id, ParentSession: parent.ID(), ParentCall: call.ID,
+		Type: persona.Name, PersonaPath: persona.Path, Role: persona.Role,
+		AllTools: all, Tools: ids,
+		BaseSystem: parent.system, BaseProfile: parent.tools.profile,
+		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
+	}))
 }
 
 // runChild is steps 5 and 6 and the child's turn: open it, defer its Close,
@@ -640,18 +823,7 @@ type childCall struct {
 func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call tool.SubagentCall,
 	persona tool.Persona, alias, effort string, c *childCall, mode string) tool.Result {
 	parent, h := r.s, c.h
-	all, ids := childToolSet(persona, parent.tools.offered)
-	open := r.seams.open
-	if open == nil {
-		open = Open
-	}
-	child, err := open(parent.childOpenOptions(alias, effort, &ChildOptions{
-		ID: h.id, ParentSession: parent.ID(), ParentCall: call.ID,
-		Type: persona.Name, PersonaPath: persona.Path, Role: persona.Role,
-		AllTools: all, Tools: ids,
-		BaseSystem: parent.system, BaseProfile: parent.tools.profile,
-		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
-	}))
+	child, err := r.openChild(h, call, persona, alias, effort, mode)
 	if err != nil {
 		// Aborted instead when the parent is gone by the time the call
 		// returns (settle).
@@ -866,7 +1038,11 @@ func (r *subagents) settle(ctx context.Context, callID string, c *childCall, res
 		return res
 	}
 	aborted := tool.Result{Text: red.String(tool.AbortedText), IsError: true, Class: tool.ClassAborted, Child: res.Child}
-	if c.completed {
+	// A background call's acknowledgement is final (§3.11): it says the child
+	// started, which it did, and the child is the session's, not the call's —
+	// a turn cancelled right after the spawn must not read "aborted" of a child
+	// that runs on.
+	if c.completed || c.final {
 		return res
 	}
 	// The one read that can wait comes first; nothing that can follows the

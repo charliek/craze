@@ -75,6 +75,13 @@ var (
 	// The adapter serializes turns itself, so it never reaches a user.
 	ErrInTurn = errors.New("harness: a turn is already running")
 
+	// ErrNothingPending is Wake's answer when no background sub-agent's result
+	// was waiting to be delivered as it began (plan 026 §3.11): nothing was
+	// written, no event was emitted, and the session is as it was. A result
+	// set aside by a failed wake (suspended) does not count; the next turn the
+	// user starts delivers it.
+	ErrNothingPending = errors.New("harness: no sub-agent result is waiting to be delivered")
+
 	// ErrNotInTurn is Steer's refusal when there is no running turn to merge
 	// the text into: the session is idle, the turn has settled its steers, or
 	// the token names a turn that has since ended. Nothing is changed, so the

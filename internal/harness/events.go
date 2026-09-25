@@ -15,7 +15,9 @@ import (
 //   - the turn's course: StepDone, Steered, Retrying, Diag;
 //   - the harness's own state, projected: Todos;
 //   - sub-agents (plan 026 §3.9): SubagentStarted, SubagentEvent — one of a
-//     child's own events, wrapped — and SubagentFinished.
+//     child's own events, wrapped — and SubagentFinished; and, for a
+//     background child the session closed before delivering (§3.11),
+//     SubagentUndelivered.
 //
 // Every field is a plain value that survives a JSON round trip, so a
 // journal can record exactly what the sink was handed (plan 019 §3.5);
@@ -220,9 +222,17 @@ const (
 // opened in, its parent's then (§3.5). The three texts from the call are
 // redacted of every provider key; the rest are the model table's and craze's
 // own words. At is the parent's clock (Options.Now).
+//
+// Background says the child runs in the background (plan 026 §3.11): its call
+// returns once it has started, and its own events, its SubagentFinished and,
+// should the session close before its result is delivered, a
+// SubagentUndelivered go to the session's sink (Options.Sink), not the turn's.
+// This event itself is the call's, and reaches the turn's sink before the call
+// returns.
 type SubagentStarted struct {
 	ID, CallID, Type, Description, Prompt, Model, Effort, Mode string
 	At                                                         time.Time
+	Background                                                 bool
 }
 
 // SubagentEvent is one of the child ID's own events, exactly as the child's
@@ -236,7 +246,9 @@ type SubagentEvent struct {
 
 // SubagentFinished reports that the child ID has ended and been closed. It
 // comes after every SubagentEvent of that child and before the parent's
-// ToolFinished for the call that started it (plan 026 §3.9).
+// ToolFinished for the call that started it (plan 026 §3.9) — except for a
+// background child (§3.11), whose call returned when it started: its
+// SubagentFinished goes to Options.Sink when it ends, whenever that is.
 //
 // Status is SubagentCompleted, SubagentFailed or SubagentCancelled; Error is
 // what failed, "" otherwise. Text is the child's final message — its last
@@ -255,6 +267,21 @@ type SubagentFinished struct {
 	At                         time.Time
 }
 
+// SubagentUndelivered reports, as the session closes, a background child
+// whose result was never delivered to the parent's model (plan 026 §3.11):
+// still running when Close began, finished and waiting, or set aside after a
+// wake failed. Nothing persists a result that was not delivered, so this is
+// the one record of what that child spent: Usage is its observed usage, one
+// row per model as a delivering entry's subagent_usage would have carried it
+// (nil when it spent nothing). Close reports each such child once, through
+// Options.Sink, before the transcript closes, and no result is ever delivered
+// after it, so nothing counts twice. A child whose result was delivered is
+// never reported. Type is the child's agent type, redacted.
+type SubagentUndelivered struct {
+	ID, Type string
+	Usage    []ModelUsage
+}
+
 // The statuses a SubagentFinished reports. A child that finished its turn —
 // cut off, refused and stopped by a limit included, which its result
 // explains — completed; one whose turn failed, or that could not run, failed;
@@ -265,20 +292,21 @@ const (
 	SubagentCancelled = "cancelled"
 )
 
-func (TextDelta) isEvent()        {}
-func (ThoughtDelta) isEvent()     {}
-func (ToolStarted) isEvent()      {}
-func (ToolCalled) isEvent()       {}
-func (ToolProgress) isEvent()     {}
-func (ToolFinished) isEvent()     {}
-func (StepDone) isEvent()         {}
-func (Steered) isEvent()          {}
-func (Retrying) isEvent()         {}
-func (Diag) isEvent()             {}
-func (Todos) isEvent()            {}
-func (SubagentStarted) isEvent()  {}
-func (SubagentEvent) isEvent()    {}
-func (SubagentFinished) isEvent() {}
+func (TextDelta) isEvent()           {}
+func (ThoughtDelta) isEvent()        {}
+func (ToolStarted) isEvent()         {}
+func (ToolCalled) isEvent()          {}
+func (ToolProgress) isEvent()        {}
+func (ToolFinished) isEvent()        {}
+func (StepDone) isEvent()            {}
+func (Steered) isEvent()             {}
+func (Retrying) isEvent()            {}
+func (Diag) isEvent()                {}
+func (Todos) isEvent()               {}
+func (SubagentStarted) isEvent()     {}
+func (SubagentEvent) isEvent()       {}
+func (SubagentFinished) isEvent()    {}
+func (SubagentUndelivered) isEvent() {}
 
 // Usage is a step's or a turn's token counts: input, output, reasoning, and
 // the prompt-cache reads and writes, which show whether a provider's prefix

@@ -342,7 +342,9 @@ func (s *Store) holdChange(e Entry) error {
 
 // AppendStep writes a finished step in one append: any held changes, the
 // held user entries, steers (user messages interjected mid-turn that the
-// model first saw at this step), the assistant message, and tool — the tool
+// model first saw at this step, and the entries of background sub-agents'
+// results it first saw there, plan 026 §3.11), the assistant message, and
+// tool — the tool
 // message holding the results of the assistant message's tool calls — when
 // the model called tools. The first append also carries the header and
 // creates the file. It returns the ids of the entries it wrote, in file
@@ -409,14 +411,25 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 // short. A message with no non-blank text is ErrNoOutput and changes
 // nothing.
 func (s *Store) AppendAssistant(e MessageEntry) error {
+	_, err := s.AppendAnswer(nil, e)
+	return err
+}
+
+// AppendAnswer is AppendAssistant led by leading, user entries written ahead
+// of the answer as a step's steers are (AppendStep), and it returns the ids
+// AppendStep does. The runner saves a step a cancel or a failure cut short
+// with it, led by the results of background sub-agents that step's request
+// carried (plan 026 §3.11). The answer must have non-blank text, as
+// AppendAssistant's must, or it is ErrNoOutput and nothing is written — the
+// leading entries neither.
+func (s *Store) AppendAnswer(leading []MessageEntry, e MessageEntry) ([]string, error) {
 	if err := checkMessage("AppendAssistant", e, fantasy.MessageRoleAssistant); err != nil {
-		return err
+		return nil, err
 	}
 	if !hasText(e.Message) {
-		return ErrNoOutput
+		return nil, ErrNoOutput
 	}
-	_, err := s.AppendStep(nil, e, nil)
-	return err
+	return s.AppendStep(leading, e, nil)
 }
 
 // write gives batch its ids and parents, as a chain from the leaf, and
@@ -582,6 +595,15 @@ func (s *Store) Context(current Model) []fantasy.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.t.Context(current)
+}
+
+// ContextWithResults is Context with each message's mark beside it: whether
+// it is an entry of background sub-agents' results (Transcript's
+// ContextWithResults). It works after Close.
+func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.t.ContextWithResults(current)
 }
 
 // Close releases the descriptor. Held entries are discarded: they belong to

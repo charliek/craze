@@ -1,0 +1,5 @@
+Get the result of a sub-agent you started in the background with the agent tool (`run_in_background`), by the id its call returned.
+
+- A background sub-agent's result is delivered to you on its own when it finishes. Call this tool only when you want to wait for that result before going on.
+- If the sub-agent has finished, its result is returned at once. If it is still running, the call waits for it up to `wait_ms` milliseconds (default 30000, at most 600000; 0 does not wait), and otherwise says it is still running.
+- A result is delivered once. If you already have it, or it is already part of your input, the call says so instead of repeating it.

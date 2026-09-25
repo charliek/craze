@@ -178,7 +178,7 @@ func TestUnknownToolIsAnErrorResult(t *testing.T) {
 	if err != nil || res.StopReason != StopEndTurn {
 		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
 	}
-	notFound := "tool not found: read_file. Available tools: bash, read, glob, grep, edit, write, agent, todo_write, ask_user_question, exit_plan_mode"
+	notFound := "tool not found: read_file. Available tools: bash, read, glob, grep, edit, write, agent, agent_output, todo_write, ask_user_question, exit_plan_mode"
 	equal(t, "events", plain(ev.list()), []Event{
 		TextDelta{Text: "let me look"},
 		ToolStarted{ID: "t1.1.1", Step: 1, Tool: "read_file"},

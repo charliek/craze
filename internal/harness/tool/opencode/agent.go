@@ -58,6 +58,16 @@ func newAgent() (tool.Tool, error) {
 				"type":        "string",
 				"description": "Optional. The sub-agent's reasoning effort: one of the efforts its model offers, as listed in this tool's description.",
 			},
+			// Claude Code's name for it (plan 026 §3.11). The text is true in a
+			// session that runs no background children as well, where the call
+			// runs in the foreground (harness.Options.Background).
+			"run_in_background": map[string]any{
+				"type": "boolean",
+				"description": "Optional. true starts the sub-agent in the background where this session supports it: the call " +
+					"returns at once with the sub-agent's id, and its result is delivered to you when it finishes (call " +
+					"agent_output to wait for it). Where background sub-agents are not supported the call runs in the " +
+					"foreground and returns the result.",
+			},
 		},
 		Required: []string{"description", "prompt"},
 		Kind:     tool.KindTask,
@@ -90,10 +100,11 @@ func (t *agentTool) Spec() tool.Spec { return t.spec }
 //
 // The three optional strings read an explicit null as an omission (grok-build's
 // Option semantics, args.strOrNull): a model that sends "model": null means it
-// has no preference. An unknown key is tolerated, as by every tool here
-// (parseArgs) — in particular Claude Code's run_in_background, which this
-// tool does not declare until background children exist (plan 026 PR 3): a
-// call that sends it runs in the foreground, like any other.
+// has no preference. run_in_background is a boolean, null or absent being
+// false, and anything else refused (plan 026 §3.11); what it comes to is the
+// runner's, which runs the call in the foreground in a session with no
+// background children. An unknown key is tolerated, as by every tool here
+// (parseArgs).
 func (t *agentTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
 	a, err := parseArgs(c.Input)
 	if err != nil {
@@ -117,6 +128,12 @@ func (t *agentTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
 		}
 		*f.into = strings.TrimSpace(*f.into)
 	}
+	var background bool
+	if raw, present := a["run_in_background"]; !present || jsonType(raw) != "null" {
+		if background, _, err = a.boolean("run_in_background"); err != nil {
+			return nil, err
+		}
+	}
 	// A blank description would leave the child's row without a label, and a
 	// blank prompt would start an agent with nothing to do.
 	switch desc = strings.TrimSpace(desc); {
@@ -130,7 +147,7 @@ func (t *agentTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
 	}
 	// The prompt is the child's first message exactly as the model wrote it.
 	return &agentCall{call: tool.SubagentCall{
-		ID: c.ID, Description: desc, Prompt: prompt, Type: typ, Model: model, Effort: effort,
+		ID: c.ID, Description: desc, Prompt: prompt, Type: typ, Model: model, Effort: effort, Background: background,
 	}}, nil
 }
 
@@ -142,7 +159,9 @@ func (c *agentCall) Request() tool.Request {
 
 // Run hands the call to the session's runner and returns what it answers:
 // the call blocks until the child has ended (owner decision 7), and a cancel
-// reaches the child through ctx.
+// reaches the child through ctx — or, for a call the runner starts in the
+// background (plan 026 §3.11), returns once the child has started, with an
+// acknowledgement naming it, and the child's life is the session's.
 //
 // The answer comes back as the runner cut it (plan 026 §3.7's one cap, on
 // both paths): a success and a failed child's error alike, which carries its
