@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.prompt.json",
+  "title": "session.prompt",
+  "description": "Sends a prompt. queue starts it now when the engine is admitting and queues it otherwise; send_now starts it now, or arms it against the running turn, which it cancels and replaces; interject folds the text into the running turn without cancelling it, where the provider can (session capability interject). fromRow names a queued row to start instead of text (queue and send_now): the row's own text is what goes. interject takes text alone: the host refuses interject with a fromRow (-32602, bad_request; plan 027 X6).",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "text": {"type": "string"},
+        "fromRow": {"type": "string"},
+        "mode": {"$ref": "#/$defs/mode"}
+      },
+      "required": ["sessionId", "commandId", "mode"],
+      "additionalProperties": false
+    },
+    "mode": {
+      "description": "How the prompt is admitted.",
+      "type": "string",
+      "enum": ["queue", "send_now", "interject"]
+    },
+    "result": {
+      "description": "For queue and send_now, exactly one of: the turn the prompt started, with the text it started with (a fromRow's text as the host read it, which another client may have edited); the row it became (or, for a fromRow that cannot start yet, that row unchanged); armed. For interject, {}.",
+      "type": "object",
+      "properties": {
+        "turn": {"type": "string", "minLength": 1},
+        "text": {"type": "string"},
+        "queued": {"$ref": "event.json#/$defs/queued"},
+        "armed": {"type": "boolean", "const": true}
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {"required": ["turn", "text"], "not": {"anyOf": [{"required": ["queued"]}, {"required": ["armed"]}]}},
+        {"required": ["queued"], "not": {"anyOf": [{"required": ["turn"]}, {"required": ["text"]}, {"required": ["armed"]}]}},
+        {"required": ["armed"], "not": {"anyOf": [{"required": ["turn"]}, {"required": ["text"]}, {"required": ["queued"]}]}},
+        {"maxProperties": 0}
+      ]
+    }
+  }
+}

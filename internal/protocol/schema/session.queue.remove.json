@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.queue.remove.json",
+  "title": "session.queue.remove",
+  "description": "Takes a row out of the queue. A row the queue no longer holds is unknown_row.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "rowId": {"type": "string"}
+      },
+      "required": ["sessionId", "commandId", "rowId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "row": {"$ref": "event.json#/$defs/queued", "description": "The row removed."}
+      },
+      "required": ["row"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.queue.edit.json",
+  "title": "session.queue.edit",
+  "description": "Rewrites a queued row in place. expectedVersion is the check-and-edit: absent is unconditional, and a version the row no longer has is stale_version, so two editors never overwrite each other. A row the queue no longer holds is unknown_row.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "rowId": {"type": "string"},
+        "text": {"type": "string"},
+        "expectedVersion": {"type": "integer", "minimum": 0}
+      },
+      "required": ["sessionId", "commandId", "rowId", "text"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

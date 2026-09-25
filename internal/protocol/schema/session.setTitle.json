@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.setTitle.json",
+  "title": "session.setTitle",
+  "description": "Renames the session. The title's delta, not the reply, is how a client learns it. index_write says the rename happened and only the session index could not be written (data.cause).",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "title": {"type": "string"}
+      },
+      "required": ["sessionId", "commandId", "title"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

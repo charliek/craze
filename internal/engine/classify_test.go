@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -17,11 +18,15 @@ import (
 )
 
 // classifyCase is one row of classify's table: an error, the code Code answers
-// for it, and whether gateRefusal forgets it.
+// for it, the reason Reason answers beside it, and whether gateRefusal forgets
+// it.
 type classifyCase struct {
 	name string
 	err  error
 	code string
+	// reason is Reason(err): the sentinel's own name on the wire (plan 027
+	// §3.2), a one-way door — these spellings are the wire's.
+	reason string
 	// forgot is gateRefusal(err): the answer is NOT stored, and the same id
 	// may be resent for a genuine first attempt.
 	forgot bool
@@ -32,10 +37,10 @@ type classifyCase struct {
 func classifyTable() []classifyCase {
 	boom := errors.New("boom")
 	return []classifyCase{
-		{"ErrIndexWrite", fmt.Errorf("%w: %w", ErrIndexWrite, boom), "index_write", false},
-		{"ErrNotAccepting", ErrNotAccepting, "not_accepting", true},
-		{"agent.ErrNotInTurn", agent.ErrNotInTurn, "not_accepting", true},
-		{"ErrCommandInProgress", ErrCommandInProgress, "in_progress", true},
+		{"ErrIndexWrite", fmt.Errorf("%w: %w", ErrIndexWrite, boom), "index_write", "index_write", false},
+		{"ErrNotAccepting", ErrNotAccepting, "not_accepting", "not_accepting", true},
+		{"agent.ErrNotInTurn", agent.ErrNotInTurn, "not_accepting", "not_in_turn", true},
+		{"ErrCommandInProgress", ErrCommandInProgress, "in_progress", "in_progress", true},
 		// A DUPLICATE of a blocking command whose own wait timed out against an
 		// owner that is still running (waitReceipt, r31 finding 2). It wraps the
 		// context's error too, so this row is also what pins the case ORDER:
@@ -44,26 +49,28 @@ func classifyTable() []classifyCase {
 		// already have happened, use a new id" — when nothing ran at all and the
 		// same id is exactly what to resend.
 		{"a duplicate's own timeout against an open reservation",
-			fmt.Errorf("%w: %w", ErrCommandInProgress, context.DeadlineExceeded), "in_progress", true},
-		{"ErrAlreadyPending", ErrAlreadyPending, "already_submitted", false},
-		{"ErrStaleTurn", ErrStaleTurn, "stale_turn", false},
-		{"ErrStaleVersion", ErrStaleVersion, "stale_version", false},
-		{"ErrUnknownRow", ErrUnknownRow, "unknown_row", false},
-		{"agent.ErrBadAnswer", agent.ErrBadAnswer, "bad_request", false},
-		{"agent.ErrAlreadyResolved", agent.ErrAlreadyResolved, "already_resolved", false},
-		{"agent.ErrUnknownAsk", agent.ErrUnknownAsk, "unknown_ask", false},
+			fmt.Errorf("%w: %w", ErrCommandInProgress, context.DeadlineExceeded), "in_progress", "in_progress", true},
+		{"ErrAlreadyPending", ErrAlreadyPending, "already_submitted", "already_submitted", false},
+		{"ErrStaleTurn", ErrStaleTurn, "stale_turn", "stale_turn", false},
+		{"ErrStaleVersion", ErrStaleVersion, "stale_version", "stale_version", false},
+		{"ErrUnknownRow", ErrUnknownRow, "unknown_row", "unknown_row", false},
+		{"agent.ErrBadAnswer", agent.ErrBadAnswer, "bad_request", "bad_answer", false},
+		{"agent.ErrAlreadyResolved", agent.ErrAlreadyResolved, "already_resolved", "already_resolved", false},
+		{"agent.ErrUnknownAsk", agent.ErrUnknownAsk, "unknown_ask", "unknown_ask", false},
 		// A stop of a sub-agent the session holds no running child for (plan 026
 		// §3.10): about the resource named, like unknown_ask, and stored.
-		{"agent.ErrNoSuchSubagent", agent.ErrNoSuchSubagent, "unknown_subagent", false},
-		{"ErrCommandAborted", ErrCommandAborted, "aborted", false},
-		{"ErrSetOutcomeUnknown", setOutcomeUnknown(context.Canceled), "aborted", false},
-		{"errNotRun (a Set that never ran)", notRun(context.Canceled), "unavailable", true},
+		{"agent.ErrNoSuchSubagent", agent.ErrNoSuchSubagent, "unknown_subagent", "unknown_subagent", false},
+		{"ErrCommandAborted", ErrCommandAborted, "aborted", "command_aborted", false},
+		// It wraps the context's own error, so this row also pins it ahead of
+		// the context case, whose reason is `context`.
+		{"ErrSetOutcomeUnknown", setOutcomeUnknown(context.Canceled), "aborted", "set_outcome_unknown", false},
+		{"errNotRun (a Set that never ran)", notRun(context.Canceled), "unavailable", "not_run", true},
 		// A config change bound to a model the session has left (plan 025
 		// design 3): refused before the claim, and forgotten, because nothing
 		// ran and the model can come back.
-		{"ErrStaleModel", ErrStaleModel, "stale_model", true},
+		{"ErrStaleModel", ErrStaleModel, "stale_model", "stale_model", true},
 		// A Set the agent took whose answer no longer lists the option: it ran.
-		{"agent.ErrOptionGone", agent.ErrOptionGone, "failed", false},
+		{"agent.ErrOptionGone", agent.ErrOptionGone, "failed", "option_gone", false},
 		// A Set whose answer could not be read (plan 025 design 1, "malformed
 		// is an error"): it ran — the agent answered, and may have made the
 		// change — and nothing of the answer was installed, so its outcome is
@@ -71,29 +78,58 @@ func classifyTable() []classifyCase {
 		// default's "failed", which reads as a definite failure (astra r5
 		// item 2). Wrapped as the live session returns it.
 		{"agent.ErrBadCatalog",
-			fmt.Errorf("session/set_config_option: %w: member 0 is not an option", agent.ErrBadCatalog), "aborted", false},
+			fmt.Errorf("session/set_config_option: %w: member 0 is not an option", agent.ErrBadCatalog),
+			"aborted", "bad_catalog", false},
 		// A command that RAN and gave up on its own context: the write may
 		// already have happened, so the answer is stored and the client re-reads
 		// state rather than resending the work under a new id (r30 finding 1).
-		{"a bare context.Canceled", context.Canceled, "aborted", false},
-		{"a bare context.DeadlineExceeded", context.DeadlineExceeded, "aborted", false},
+		{"a bare context.Canceled", context.Canceled, "aborted", "context", false},
+		{"a bare context.DeadlineExceeded", context.DeadlineExceeded, "aborted", "context", false},
 		{"a wrapped context.DeadlineExceeded",
-			fmt.Errorf("writing session/prompt: %w", context.DeadlineExceeded), "aborted", false},
-		{"agent.ErrAskUnavailable", agent.ErrAskUnavailable, "unavailable", true},
-		{"agent.ErrSetUnavailable", agent.ErrSetUnavailable, "unavailable", true},
-		{"ErrUnavailable", ErrUnavailable, "unavailable", true},
+			fmt.Errorf("writing session/prompt: %w", context.DeadlineExceeded), "aborted", "context", false},
+		{"agent.ErrAskUnavailable", agent.ErrAskUnavailable, "unavailable", "ask_unavailable", true},
+		{"agent.ErrSetUnavailable", agent.ErrSetUnavailable, "unavailable", "set_unavailable", true},
+		{"ErrUnavailable", ErrUnavailable, "unavailable", "log_backed_up", true},
 		// Attach outrun by the ring (attach.go): nothing registered, ask again.
-		{"ErrAttachRaced", fmt.Errorf("%w: 4 snapshots refused", ErrAttachRaced), "unavailable", true},
-		{"ErrBadRequest", ErrBadRequest, "bad_request", false},
-		{"ErrUnknownCommand", ErrUnknownCommand, "unknown_command", false},
-		{"agent.ErrQueueFull", agent.ErrQueueFull, "queue_full", false},
-		{"agent.ErrQueueTextTooLong", agent.ErrQueueTextTooLong, "text_too_long", false},
-		{"agent.ErrPromptInFlight", agent.ErrPromptInFlight, "prompt_in_flight", false},
-		{"agent.ErrForeignTurn", agent.ErrForeignTurn, "foreign_turn", false},
-		{"agent.ErrPromptCancelled", agent.ErrPromptCancelled, "prompt_cancelled", false},
-		{"agent.ErrUnsupported", agent.ErrUnsupported, "unsupported", false},
-		{"an unclassified provider/RPC error (classify's own default)", boom, "failed", false},
+		{"ErrAttachRaced", fmt.Errorf("%w: 4 snapshots refused", ErrAttachRaced), "unavailable", "attach_raced", true},
+		{"ErrBadRequest", ErrBadRequest, "bad_request", "bad_request", false},
+		// ClaimClient's answer, never a command's, and never on the wire (the
+		// server answers `resumed: false`): it adds no reason of its own.
+		{"ErrUnknownClient", ErrUnknownClient, "bad_request", "bad_request", false},
+		{"ErrUnknownCommand", ErrUnknownCommand, "unknown_command", "unknown_command", false},
+		{"agent.ErrQueueFull", agent.ErrQueueFull, "queue_full", "queue_full", false},
+		{"agent.ErrQueueTextTooLong", agent.ErrQueueTextTooLong, "text_too_long", "text_too_long", false},
+		{"agent.ErrPromptInFlight", agent.ErrPromptInFlight, "prompt_in_flight", "prompt_in_flight", false},
+		{"agent.ErrForeignTurn", agent.ErrForeignTurn, "foreign_turn", "foreign_turn", false},
+		{"agent.ErrPromptCancelled", agent.ErrPromptCancelled, "prompt_cancelled", "prompt_cancelled", false},
+		{"agent.ErrUnsupported", agent.ErrUnsupported, "unsupported", "unsupported", false},
+		{"an unclassified provider/RPC error (classify's own default)", boom, "failed", "failed", false},
 	}
+}
+
+// wireReasons is plan 027 §3.2's reason table, transcribed: for each code
+// several sentinels share, every reason a host may send beside it — the
+// engine's own and internal/protocol's alike, since a reason is only ever
+// checked against its code's row. A code not listed here has exactly one
+// reason, the code itself ("every other code | the code itself").
+var wireReasons = map[string][]string{
+	"not_accepting": {"not_accepting", "not_in_turn", "start_failed"},
+	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
+	"unavailable":   {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy"},
+	"failed":        {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
+	"bad_request": {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
+		"protocol_version", "bad_token", "already_attached"},
+	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only"},
+}
+
+// reasonBelongsToCode reports whether §3.2's table lets a host send reason
+// beside code.
+func reasonBelongsToCode(code, reason string) bool {
+	allowed, ok := wireReasons[code]
+	if !ok {
+		return reason == code
+	}
+	return slices.Contains(allowed, reason)
 }
 
 // TestClassifyIsTheOneTable is r28 finding 1: walks EVERY exported sentinel
@@ -113,6 +149,11 @@ func classifyTable() []classifyCase {
 // Set's dead ctx: Code already said not_accepting for ErrNotInTurn while
 // gateRefusal did not know it, and a command the docs promise is never stored
 // was stored anyway.
+//
+// Reason is the third column (plan 027 §3.2), derived from the same switch:
+// every row's reason is pinned, none is empty for a non-nil error, and each
+// belongs to its code's row of §3.2's table (wireReasons). The spellings are
+// the wire's, so a changed one fails here before it can ship.
 func TestClassifyIsTheOneTable(t *testing.T) {
 	cases := classifyTable()
 	t.Run("no sentinel escapes the table", func(t *testing.T) { guardSentinels(t, cases) })
@@ -120,6 +161,15 @@ func TestClassifyIsTheOneTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := Code(tc.err); got != tc.code {
 				t.Fatalf("Code(%v) = %q, want %q", tc.err, got, tc.code)
+			}
+			if got := Reason(tc.err); got != tc.reason {
+				t.Fatalf("Reason(%v) = %q, want %q", tc.err, got, tc.reason)
+			}
+			if tc.reason == "" {
+				t.Fatalf("%s: a non-nil error has no reason", tc.name)
+			}
+			if !reasonBelongsToCode(tc.code, tc.reason) {
+				t.Fatalf("%s: reason %q is not one §3.2's table lets a host send with code %q", tc.name, tc.reason, tc.code)
 			}
 			if got := gateRefusal(tc.err); got != tc.forgot {
 				t.Fatalf("gateRefusal(%v) = %v, want %v", tc.err, got, tc.forgot)
@@ -140,8 +190,40 @@ func TestClassifyIsTheOneTable(t *testing.T) {
 	if got := Code(nil); got != "" {
 		t.Fatalf("Code(nil) = %q, want \"\"", got)
 	}
+	if got := Reason(nil); got != "" {
+		t.Fatalf("Reason(nil) = %q, want \"\"", got)
+	}
 	if gateRefusal(nil) {
 		t.Fatal("gateRefusal(nil) must be false: nil never reaches finish as a refusal")
+	}
+}
+
+// TestEveryListedEngineReasonIsProduced holds the reverse direction against
+// §3.2: every reason of the engine's own that the table lists is one some
+// row of classify's table produces. A reason §3.2 promises and the engine
+// never sends would leave a client's reconstruction (plan 027 §3.14) with a
+// sentinel nothing maps to. The protocol-level reasons are internal/protocol's
+// and are named here only to be set aside.
+func TestEveryListedEngineReasonIsProduced(t *testing.T) {
+	protocolReasons := map[string]bool{
+		"start_failed": true, "not_ready": true, "busy": true, "response_too_large": true,
+		"snapshot_too_large": true, "hello_required": true, "unknown_field": true, "line_too_long": true,
+		"protocol_version": true, "bad_token": true, "already_attached": true, "unknown_method": true,
+		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true,
+	}
+	produced := map[string]bool{}
+	for _, tc := range classifyTable() {
+		produced[tc.reason] = true
+	}
+	for code, reasons := range wireReasons {
+		for _, reason := range reasons {
+			if protocolReasons[reason] {
+				continue
+			}
+			if !produced[reason] {
+				t.Errorf("§3.2 lists %q beside %q, and no row of classify's table produces it", reason, code)
+			}
+		}
 	}
 }
 
@@ -165,6 +247,7 @@ func engineSentinels() map[string]error {
 		"ErrIndexWrite":        ErrIndexWrite,
 		"ErrCommandAborted":    ErrCommandAborted,
 		"ErrAttachRaced":       ErrAttachRaced,
+		"ErrUnknownClient":     ErrUnknownClient,
 	}
 }
 
@@ -210,6 +293,9 @@ func agentSentinels() map[string]error {
 //     and Attach return ErrClosed on a closed log, and a subscription ends
 //     with it or ErrSlowConsumer, but neither takes a Command: no receipt is
 //     ever stored for them.
+//   - ErrNoRest and ErrRestUnavailable are Subscription.Rest's answers about
+//     a subscription's closing tail (plan 027 §3.7) — read by the socket
+//     server's forwarder after its log closed, never a command's answer.
 //   - ErrAgentExited is the transport's. A command that runs into it ran, and
 //     its failure is a real one: "failed" is exactly right for it, and it
 //     needs no row.
@@ -219,7 +305,9 @@ var agentSentinelsNotClassified = []string{
 	"ErrClosed",
 	"ErrFlushGaveUp",
 	"ErrLogClosing",
+	"ErrNoRest",
 	"ErrObserverSet",
+	"ErrRestUnavailable",
 	"ErrSlowConsumer",
 }
 

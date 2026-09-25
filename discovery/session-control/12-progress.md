@@ -1679,3 +1679,270 @@ What S2 inherits:
   comes from the event rather than a provider flag the TUI no longer reads.
   The `foreign_turn` fold row (§3.3) needs that field folded in when H6
   lands; nothing here anticipates it.
+
+## S2 — the control socket
+
+| | |
+|---|---|
+| Status | planned (Plan 027, FINAL after panel review 2026-09-24); executing PR 1 |
+| Plan | `027-session-control-s2-socket` (outside the repo, `~/.claude/plans/craze/`, raw panel reviews in its `panel/` folder) |
+| Baseline | `origin/main` `5901e4a`: H6 PR 2 (#53, sub-agent stop), merged on top of S1c PR 2 `79eb082` (#52, which completes S1) |
+| Branch / PRs | four sequential PRs, each branched from a freshly fetched `origin/main` after the previous one merges: `feature/plan-027-s2-wire`, `feature/plan-027-s2-host`, `feature/plan-027-s2-tui-async`, `feature/plan-027-s2-attach` |
+| Merged | — (filled in as each PR lands) |
+
+### The PR cut
+
+| PR | branch | content |
+|---|---|---|
+| 1 | `feature/plan-027-s2-wire` | the engine's owed seams (SF-10, SF-11, SF-13, SF-15, SF-16), `Subscription.Cutoff`/`Rest`, `SubmitResult.Text`; `internal/protocol` + the JSON Schema; `internal/control` (the server over any listener); `internal/remote` core; `internal/fakehost` + `cmd/craze-fake-host` + wire fixtures; `docs/reference/protocol.md` |
+| 2 | `feature/plan-027-s2-host` | `internal/rundir` (namespace, locks, identity-checked unlink, peer uid, registry); the TUI process serves its session; the SQ16 lock (refuse); `craze bridge`; a scripted smoke client |
+| 3 | `feature/plan-027-s2-tui-async` | the TUI holds a `Backend`; the command gate (SF-17) with operation chains; the mirror onto the fold (SF-02, SF-45, SF-43, SF-38); `maskDrops` through the gate; hidden answers and H6's stop fire-and-forget; two-client queue correctness |
+| 4 | `feature/plan-027-s2-attach` | `internal/remote` implements `Backend`; restores and resume; `craze attach`; SQ16 attaches; SF-18's marks (optional); every frame golden also runs over the socket; the exit smoke; S2 docs complete |
+
+**Why not the candidate order** (wire → attach → TUI async → bridge): attach
+as the full TUI needs the TUI's engine calls asynchronous and its mirror off
+`State()` first, so that move has to happen before attach exists at all.
+Doing it in process first (PR 3) also separates its golden risk from any
+transport risk — a golden that moves in PR 3 is the gate or the mirror, never
+the socket. The bridge moves forward into PR 2 because it is small, needs
+only the namespace, and is what makes PR 2's server exercisable by a script.
+The published spec lands with the wire (PR 1), per `07`'s own convention that
+a PR changing the wire updates the schema, fixtures, and spec together.
+
+### Owner decisions (2026-09-24, not for the panel to reopen)
+
+1. One plan, 3–4 PRs, in the shape of S1b/S1c; the kickoff's candidate cut was
+   a hypothesis discovery changed.
+2. **SD-33** (SQ12): session hosts are born detached from S4 on and the TUI is
+   a socket client for good — S2's exit adds "the full TUI runs unchanged
+   over it, goldens included".
+3. SQ7's default holds: `craze attach` is the full TUI over a socket-backed
+   session.
+4. Decide, don't ask: product calls and one-way doors go to the owner once,
+   together (§3.19), recapped here rather than asked mid-run.
+5. The four product calls, answered 2026-09-24:
+   - **SF-18** (how a client words another client's action): the recommended
+     mark, as one small optional commit (C28b, PR 4) — dropped for the status
+     quo if it grows past the note sites and a `Cause`-to-own-client
+     comparison, or if it moves any golden.
+   - **`craze attach` with no session in this directory**: exit 1 with the
+     list of sessions running elsewhere and the `--session` hint; several
+     sessions in this directory lists them and exits 2.
+   - **Keys in `craze attach`**: identical to the host TUI's; the first
+     Ctrl+C while a turn works acts on the shared session.
+   - **Auto-merge**: yes for all four PRs, under the gauntlet's rules.
+   - Scopes (SQ11) stand as stated and unobjected to: local same-uid only,
+     scopes arrive at S6.
+
+### The planner's decisions
+
+- The PR order is wire → host + bridge → TUI async → attach, not the
+  candidate's wire → attach → TUI async → bridge (§3.1, above).
+- The command gate (§3.12) keeps every golden byte-identical while every
+  synchronous engine call becomes a `tea.Cmd`: strict arrival order,
+  operation chains, continuations that show a command's effect from its
+  result — production semantics, not a test barrier, with a `gateSync`
+  baseline running every golden beside the async one.
+- Static session facts (provider, capabilities, the provider's session id,
+  model/mode catalogs) ride a session-info document; dynamic state stays on
+  the stream — nothing new is added to `agent.Event` or `StateDelta`.
+- The Stub publishes an install delta at `Start` as an opt-in option (on for
+  `internal/tui` and the fake host); `SetCommands`/`SetPlugins` publish their
+  deltas too — closes Plan 024's X34 exemption.
+- Wire errors carry a `reason` beside the `code`, so `errors.Is` works over
+  the socket.
+- Client ids are minted per connection and bound with generations, released
+  on disconnect, re-claimable within the engine's incarnation by a
+  resume-token holder, and retired only when released, aged out, and holding
+  no reservation; nothing is resent unless the host answers `resumed: true`.
+- `session.stop` is specified but unsupported on a TUI-hosted session
+  (capability `stop: false`) until S4's headless hosts.
+- Bounded history is `session.snapshot`, not a page API — a departure from
+  `06` (below); paging older entries waits for a client that needs it.
+- SQ16's default is adopted: the lock covers `--continue` and the resume
+  picker, and lives under `<HOME>/.cache/craze/locks/`, independent of the
+  runtime base and `CRAZE_HOME`.
+- The socket binds in a validated 0700 directory, then is chmod-ed to 0600,
+  rather than bound under a changed umask; Go's unlink-on-close is disabled.
+- `hello` is the one tolerant method, carrying a list of protocol versions.
+- The hub splice (`session.connect`) is pinned now: a host issues its own
+  credentials after the splice.
+
+### Plan review — 2026-09-24
+
+| reviewer | result |
+|---|---|
+| Codex, `gpt-6-astra`, high effort, 3 rounds | round 1: 31 findings, 6 blockers, plus 5 claims verified to hold; round 2: 1 blocker closed by a new route; round 3: 1 new blocker, 1 major, resolved by simplifying |
+| CodeRabbit | 31 findings, 1 blocker |
+| GLM 5.3 | 13 findings, plus 1 set of verified claims |
+| The H6 session's seam review | applied before the panel: the gate's reader (one outstanding, parked while draining), SQ16 covering the resume picker too, H6 PR 3's real file list, every `agent.Capabilities` field on the wire, the back-pressure change on primary-less hosts, the wake golden in V8/V6 |
+
+**Where they converged** (round 1): the draft's command gate was wrong in
+three ways, client-id release raced a resume, the barrier's 5 s timeout could
+reorder a reply, the settings chains had no read, and the SQ16 lock could be
+split — the reviewers found these independently, so the fixes are pinned
+rather than left to the executor.
+
+**What changed, condensed:**
+
+- **The gate keeps strict arrival order.** A reply applies the moment it
+  arrives, alone; every held message keeps its place; a continuation shows
+  its command's effect from its result. Round 2 found the fix still consumed
+  the working frame on a short turn; round 3 replaced that fix by going back
+  to today's `await` — a `frameSyncMsg` arriving while a gate is open is
+  acknowledged in the release Update, so the frame order around a token's
+  barrier is exactly today's.
+- **Operation chains**: everything after a gated call moves into its
+  continuation; hidden answers and the sub-agent stop become fire-and-forget
+  (no card, nothing drawn).
+- **`session.history` is replaced by `session.snapshot`**, a bounded snapshot
+  with its own cut — pages of mutable entries needed rules the draft lacked.
+- **`session.digest` was proposed, then withdrawn in round 3**: exactness is
+  proven in-process instead, where both sides are held.
+- **The reply barrier has no timeout escape**; a wedged connection is closed
+  and the receipt keeps the answer; **nothing is resent unless the host
+  answers `resumed: true`**.
+- **`Subscription.Rest`** delivers a session's closing records from the
+  subscription's own retained undelivered state, never the ring; round 3 also
+  gave it the record the owner was blocked sending and the rest of its local
+  batch, in order.
+- **Client ids**: a binding table with generations, compare-and-release;
+  retirement only when released, aged out, and holding no reservation; tokens
+  scoped to the engine incarnation.
+- **The registry, host locks, and session locks** all moved under
+  `<HOME>/.cache/craze/`, independent of the runtime base and `CRAZE_HOME`;
+  discovery no longer searches runtime bases.
+- **The overlay inventory** (mode, model, config, command-result overlays)
+  retires on the command's own event for that item — cause plus item, never
+  equality — closing SF-38 and SF-44 along the way.
+- The Stub's install-delta change was narrowed to an opt-in option, so the
+  wire fixtures never re-record.
+
+**Not adopted, with reasons:** CodeRabbit's message-replay alternative for
+the gate (the model shares pointers across copies); moving the Stub out of
+`internal/tui` for the fake host's sake (a test binary's size does not
+matter; SF-04 owns that cleanup); CodeRabbit's claim that `RunFrameScript`
+cannot host the socket matrix (it runs one TUI there fine; only the two-TUI
+tests move to a pump).
+
+No owner decision was reopened at any round.
+
+### Roadmap wording this plan departs from
+
+- `05` "Attach and resume": the snapshot travels in the attach reply, not as
+  a separate `snapshot` notification.
+- `05`'s `hello` gains `protocols`, `token`/`resume`, and `via`.
+- `05`'s `reset{reason}` list becomes §3.4's.
+- `05`'s "a session whose `session/load` failed never reaches `synchronized`"
+  becomes: `synchronized` is the stream's catch-up, and a failed start is
+  `ready{startFailed}` (or `not_accepting`, reason `start_failed`, for a
+  `when: "ready"` attach); mutating commands are refused either way.
+- **`06`'s `history(beforeSeq, limit)` becomes `session.snapshot`**: a bounded
+  snapshot with its own cut. Paging older entries waits for a client that
+  needs it, behind a new capability.
+- SD-27's "umask around bind" becomes chmod inside the 0700 directory.
+- `02`'s `h/<short-id>` becomes `<ns>/<hostId>.sock` in the runtime base, with
+  the registry, host locks, and session locks under `<HOME>/.cache/craze/` (a
+  fixed per-user path discovery can rely on) rather than in the runtime
+  namespace.
+
+### Deviations from the plan
+
+PR 1's execution amendments X1–X26, one paragraph each except the H6 seam
+group, mirrored here as `12`'s own record; the full text and every failing
+schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.md`,
+"Execution amendments"). None reopens a pinned decision.
+
+**PR 1** (C1–C9):
+
+1. **Plan 027 X1, X7, X9, X11, X14 (the H6 PR 3 seam)** — H6 PR 3 (native
+   sub-agent wakes, merged as `017417c` before PR 1) changes nothing on the
+   wire, but PR 1 rebases onto it: `foreignTurn.reason` (an open string, `""`
+   or `subagent_wake`) and `Capabilities.SubagentBackground` (wire
+   `subagentBackground`) both exist and are documented; a wake has no
+   `EventDone`/`EventError`, only `running: false`; a native prompt that
+   claims a wake's owed drain always flushes the wake's ending first, so
+   `foreignTurn{running: false}` precedes the next turn's output; H6 PR 3
+   also takes SF-47 and SF-48, so any row `13` adds for S2 starts at SF-49
+   (none was needed — see X13 below).
+2. **Plan 027 X2 (C2, SF-13)** — the gate table (§3.5) is corrected against
+   `TestTheGateTableIsTheEngines`, never the engine: `set` in the refused
+   rows is `not_accepting` (not "the worker's answer"), `answer` on a
+   closing/closed engine splits into `allowed` (closing — the session's own
+   close has not run yet) and `already_resolved` (closed), `cancel` naming a
+   stale turn is `stale_turn` in every row but closed, `interject` is
+   `unsupported` when the provider cannot before it is `not_in_turn`, and a
+   `waiting` row (`craze prompt`'s own foreign-turn retry policy) is added.
+   The published table in `docs/reference/protocol.md` is rendered
+   mechanically from this same test's table (`gateTableMarkdown()`,
+   `TestPublishedGateTableIsTheTested`).
+3. **Plan 027 X3 (C2)** — client lifecycle details: a client retires at `≥
+   receiptAge` released with no table entry (an entry itself evicts at `>
+   receiptAge`); a retired client's commands are `bad_request`, never
+   reaching the wire (a failed resume answers `resumed: false` instead); a
+   second release keeps the first release time.
+4. **Plan 027 X4 (C3)** — SF-15/16: "any goroutine" includes the index
+   worker's own inline seed. A quit while that seed is parked, owing
+   nothing else, now waits up to the existing 500 ms bound instead of giving
+   up at once.
+5. **Plan 027 X5, X6 (C4, flagged in the report)** — two contradictions the
+   draft left in the wire, resolved in the executor's favour: `hello`'s
+   result shape is disambiguated by `endpoint.kind` (`"host"` carries
+   `clientId`/`token`/`resumed`/`retryHorizon`, always, `resumed: false`
+   included; `"hub"` carries none — no protocol change needed at S4), and
+   `session.create` on a host answers like `session.connect`
+   (`unsupported`, reason `hub_only`). C4's other open calls: schema `$id`s
+   under `https://charliek.github.io/craze/reference/protocol/schema/`;
+   lists always `[]`, never `null`; `settings.config` is `{}` when empty.
+6. **Plan 027 X8, X11 (the TUI's Esc ladder, for PR 3's kickoff)** — Esc now
+   cancels a running foreign turn when nothing of craze's own is working,
+   already asynchronous on `main` as of H6 PR 3's own fix round
+   (`cancelForeignTurn`, a `tea.Cmd`). Its residual is a small window where a
+   turnless `session.cancel` can land on a drain that just claimed a queued
+   row instead of the foreign turn it meant — tracked as **SF-48** and
+   documented on the wire (`session.cancel`'s "no turn" text); the eventual
+   fix is additive (`session.cancel{expect: "foreign"}`), not in protocol 1.
+7. **Plan 027 X10 (C4)** — the frame reader tolerates a final line with no
+   trailing `\n` at EOF (and strips a lone trailing `\r`): a peer that
+   half-closes right after an unterminated object still gets its answer.
+   Every line a host writes still ends in `\n`.
+8. **Plan 027 X12, X13, X15 (C6, C6a, C6b)** — the server's binding table:
+   the resume token is stable across resumes (never rotated, so two
+   simultaneous resumes can still be serialised and a client that crashed
+   between the reply and saving a new token does not lose its identity); a
+   token is valid only on the host that issued it; a binding with no
+   connection for 2× the receipts table's age bound (20 min) is dropped
+   lazily, which replaced X12's proposed follow-up row (none was needed); a
+   command whose binding has since moved on (a transfer, an eviction,
+   another engine) is refused rather than run.
+9. **Plan 027 X16, X19, X22, X25 (C7, C7a, C7b, C7e)** — attach's open calls
+   and three successive review rounds converge on one rule: a replaced
+   connection is **terminal-only** (superseding the earlier piecemeal
+   rules). Its outbox admits exactly one terminal line —
+   `reset{session_replaced}` for a live/closing attachment nobody has
+   claimed the end of, or a claimed detach's own `{}` — seals on it, and
+   drops every ordinary line, queued or not, giving back its slot: a client
+   learns outcomes by resending after a fresh `hello` (`resumed: false` →
+   outcome unknown). A barrier also waits for an attach not yet answered on
+   its connection, so a reply can never precede an event the new attachment
+   will forward.
+10. **Plan 027 X17, X18, X20, X21, X23, X24 (C8, C8a, C8b, C8c)** — the Go
+    client's (`internal/remote`) resume and resend mechanics, arrived at over
+    four review rounds: one attempt of a command on the wire at a time;
+    "may have run" clears only from the latest attempt's answer; resends go
+    in wire order, after the re-attach is answered, never before; `resumed:
+    true` is trusted only for the same client id **and the same host**;
+    `busy` on a resend is waited out and resent, exactly like
+    `in_progress`; the reconnect episode's clock pauses only while the
+    adoption waits for the re-attach's *reply* (a write during that wait
+    restarts it with the time left); the socket reader never writes, so a
+    local slow consumer's re-attach or detach goes through the connection's
+    one writer goroutine.
+11. **Plan 027 X26 (C9)** — the fixtures live in
+    `internal/fakehost/testdata/wire/` (not `internal/protocol/testdata/wire/`
+    as §3.11 first said), each line `{conn, dir, msg}` plus `op` lines that
+    script the host directly and an `"invalid": true` flag on fixture 10's
+    deliberately malformed line. The host's incarnation crosses as a
+    placeholder (`INCARNATION-1`, …), substituted both ways by the runner —
+    a Stub option to pin it was rejected as a hard stop. `craze-fake-host`
+    joins `make build`.

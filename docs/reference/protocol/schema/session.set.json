@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.set.json",
+  "title": "session.set",
+  "description": "Changes one setting, in the engine's order, answered with the confirmed value (what the session is now at, never an echo of the request) and its revision, the seq of the state delta that carried the change. rev is 0 when no committed revision could be learned: the change was made, and a client must not wait for a matching event.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "setting": {"$ref": "#/$defs/setting"}
+      },
+      "required": ["sessionId", "commandId", "setting"],
+      "additionalProperties": false
+    },
+    "setting": {
+      "description": "One settings change. kind config names its option by id; forModel binds a config change to the model it was chosen for, refused stale_model when the session has left it. model and mode take neither.",
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string", "enum": ["model", "mode", "config"]},
+        "id": {"type": "string"},
+        "value": {"type": "string"},
+        "forModel": {"type": "string"}
+      },
+      "required": ["kind", "value"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "value": {"type": "string"},
+        "rev": {"type": "integer", "minimum": 0}
+      },
+      "required": ["value", "rev"],
+      "additionalProperties": false
+    }
+  }
+}

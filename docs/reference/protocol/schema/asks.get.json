@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/asks.get.json",
+  "title": "asks.get",
+  "description": "One ask's record, open or ended: what was asked, each body string capped at 256 KiB with truncated set when one was cut, and what became of it. An id this incarnation never issued is unknown_ask.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "askId": {"type": "string"}
+      },
+      "required": ["sessionId", "askId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "ask": {"$ref": "#/$defs/record"}
+      },
+      "required": ["ask"],
+      "additionalProperties": false
+    },
+    "record": {
+      "description": "The ask: kind is permission, question or plan; status open or resolved. outcome (answered, cancelled, turn_ended, closing, automatic), by (whose doing), answer and resolvedAt are absent while it is open, and answer too when it ended with none. body is the opening exactly as offered.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "status": {"type": "string", "enum": ["open", "resolved"]},
+        "outcome": {"type": "string"},
+        "by": {"type": "string"},
+        "answer": {"$ref": "asks.answer.json#/$defs/answer"},
+        "body": {"$ref": "event.json#/$defs/askBody"},
+        "openedAt": {"$ref": "event.json#/$defs/time"},
+        "resolvedAt": {"$ref": "event.json#/$defs/time"},
+        "truncated": {"type": "boolean"}
+      },
+      "required": ["id", "kind", "status", "body", "openedAt", "truncated"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -50,6 +50,13 @@ type Options struct {
 	// which is what a new session and a row written before crazeId existed both
 	// want.
 	CrazeSessionID string
+	// ReceiptClock is the command-id table's clock (receipts.go): how long a
+	// result is answerable and how long a released client waits before it can
+	// be retired are measured on it. nil is time.Now, which is what every host
+	// runs on. It is the seam a test outside this package moves past the
+	// table's age bound with, instead of waiting ten minutes — the socket
+	// server's client-lifecycle tests (plan 027 §3.6, A12).
+	ReceiptClock func() time.Time
 }
 
 // foreignRetryTick is how often a turn held by ChainPolicy.RetryForeignTurn
@@ -285,6 +292,11 @@ type Engine struct {
 	closeOnce sync.Once
 	closeErr  error
 
+	// ready is Ready's channel, closed once, by readyOnce, from Started or Close
+	// — whichever comes first.
+	ready     chan struct{}
+	readyOnce sync.Once
+
 	// hooks are test seams; nil in production.
 	hooks *hooks
 }
@@ -323,6 +335,13 @@ type hooks struct {
 	// schedule r31 finding 1 is about. It is named the turn so a test can hold
 	// one submit and let the others through.
 	beforeInlineSeed func(turn string)
+	// beforeSessionClose runs on Close's own goroutine, after e.mu is released
+	// (and Ready closed) and before Session.Close is called: the window in
+	// which the engine has refused every later command and the ask registry is
+	// still open, because closing it is Session.Close's own doing (tui.Stub's
+	// Close, as the live session's does). It is nil in production and never
+	// takes an argument: Close runs at most once (closeOnce).
+	beforeSessionClose func()
 	// receipts are the command-id table's own seams (receipts.go): its clock,
 	// and the barriers a duplicate's schedule turns on. Like the rest of these
 	// they are in place before the table exists and never assigned afterwards.
@@ -372,6 +391,7 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 		rearm:    make(chan struct{}, 1),
 		setWake:  make(chan struct{}, 1),
 		done:     make(chan struct{}),
+		ready:    make(chan struct{}),
 		hooks:    h,
 	}
 	// Optional, like the Clocked below: a session that never starts a turn of
@@ -394,6 +414,14 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	var rh *receiptHooks
 	if h != nil {
 		rh = h.receipts
+	}
+	if opts.ReceiptClock != nil && (rh == nil || rh.now == nil) {
+		withClock := receiptHooks{}
+		if rh != nil {
+			withClock = *rh
+		}
+		withClock.now = opts.ReceiptClock
+		rh = &withClock
 	}
 	e.receipts = newReceiptTable(rh)
 	// Before the observer is installed, which is what folds it: every committed
@@ -470,7 +498,13 @@ func (e *Engine) Start(ctx context.Context) error {
 //     is the caller's to get right — the TUI names the engine on the message its
 //     start command reports with, and ignores one for an engine it no longer
 //     holds (app.go's startedMsg and staleFor).
+//
+// Every call closes Ready, whatever the start came to and whichever way this
+// returns — the second call and a call on a closed engine included — after the
+// state is written and e.mu released, so a waiter that wakes on Ready reads
+// the start's outcome in State.
 func (e *Engine) Started(err error) {
+	defer e.markReady()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Starting → idle is an activity the fence reads (a queue can only be owed a
@@ -504,8 +538,72 @@ func (e *Engine) Subscribe(o agent.SubscribeOptions) (*agent.Subscription, error
 // "Identity"). It waits on nothing — the table's mutex is a leaf.
 func (e *Engine) NewClientID() string { return e.receipts.newClient() }
 
+// ReleaseClient says a minted client's connection has gone (plan 027 §3.6): the
+// client stays answerable — its receipts, its mark, a resume's ClaimClient — and
+// becomes retirable once it has been released for the table's age bound and
+// holds no entry, open or completed (receipts.go's "Clients: released, claimed
+// and retired"). It is idempotent, an id the table does not know is a no-op, and
+// it waits on nothing.
+func (e *Engine) ReleaseClient(id string) { e.receipts.release(id) }
+
+// ClaimClient takes a released client back, for a connection that resumed it
+// (plan 027 §3.6): it is live again, and never retired while it stays so. It is
+// ErrUnknownClient for an id this engine never minted or has retired, and a
+// no-op for a client that was never released. It waits on nothing.
+func (e *Engine) ClaimClient(id string) error { return e.receipts.claim(id) }
+
 // Sync returns once every event enqueued before the call has been delivered.
 func (e *Engine) Sync(ctx context.Context) error { return e.log.Flush(ctx, nil) }
+
+// SyncSeq is Sync with the seq it reached: the log's committed head once
+// everything enqueued before the call is committed (agent.EventLog.FlushSeq),
+// and so ≥ every event any command that returned before it caused. It is the
+// socket server's reply barrier (plan 027 §3.6): a handler that ran a command
+// waits for its client's subscription to deliver up to this seq before it
+// queues the reply. It blocks as Sync does, under the same rule.
+func (e *Engine) SyncSeq(ctx context.Context) (uint64, error) { return e.log.FlushSeq(ctx, nil) }
+
+// Ready is closed once the session's start has run — Started, whatever it came
+// to — or once the engine has closed, whichever is first, and never again. It
+// is what an attach that waits for readiness (`when: "ready"`) and the `ready`
+// notification wait on (plan 027 §3.4, §3.6); State then says what the start
+// came to, and a closed engine is ready at once, so no waiter waits on one. It
+// waits on nothing.
+func (e *Engine) Ready() <-chan struct{} { return e.ready }
+
+// markReady closes Ready, once.
+func (e *Engine) markReady() { e.readyOnce.Do(func() { close(e.ready) }) }
+
+// Done is closed once Close has closed the session — and with it the log, so
+// every subscription has ended — and never before: the engine has ended. It is
+// the socket server's signal to close the connections of a session that is
+// over (plan 027 §3.7). It waits on nothing.
+func (e *Engine) Done() <-chan struct{} { return e.done }
+
+// Note writes a journal-only note into the session's journal — the socket
+// server's per-connection diag notes (plan 027 §3.7) — through the log, so it
+// is refused after the log's Close exactly as the log's own notes are
+// (agent.EventLog.Note). It waits on nothing, takes no lock of the engine's, and
+// writes nothing without a journal.
+func (e *Engine) Note(n journal.Note) { e.log.Note(n) }
+
+// TranscriptSnapshot is one bounded snapshot of the engine's transcript model,
+// with no subscription: session.snapshot (plan 027 §3.4, bounded history). With
+// agentID "" it is the snapshot an attach cuts (transcript.Model.Snapshot);
+// with a child's id, that child's window is filled right after the main
+// transcript's newest entry (transcript.Model.SnapshotFor), and an id the model
+// names no child or roster row by is an error wrapping agent.ErrNoSuchSubagent
+// (unknown_subagent). budget <= 0 is transcript.DefaultSnapshotBytes; a budget
+// the mandatory sections do not fit is transcript.ErrSnapshotTooLarge, wrapped.
+//
+// It is a read and changes nothing. It takes the model's mutex for the cut
+// alone — held for at most one fold or one cut, never a context wait — and
+// builds the snapshot after releasing it, so it waits on nothing a client could
+// be holding; it may not be called from inside the log's publishing boundary
+// (the observer), which nothing but the engine's own fold runs in.
+func (e *Engine) TranscriptSnapshot(agentID string, budget int) (*transcript.Snapshot, error) {
+	return e.model.SnapshotFor(agentID, budget)
+}
 
 // Asks is every ask the session is holding, in the order they were opened. It
 // waits on nothing and takes no lock of the engine's: the registry is its own
@@ -608,6 +706,12 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 // synchronous writes ever did. That final write is bounded, at 500 ms, and
 // abandoned when the bound runs out. A plain touch on its own is still dropped:
 // its only effect is an UpdatedAt the next run's first write bumps anyway.
+//
+// The same 500 ms bound is also owed to a lone first-prompt seed attempt in
+// flight on ANY goroutine — a server handler's own Submit, or the worker's
+// (plan 027 §3.7, SF-15) — with nothing else pending behind it: without this a
+// quit mid-seed left a session missing from --continue entirely, where the
+// slot alone could not show the attempt was still in flight.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
@@ -636,6 +740,12 @@ func (e *Engine) Close() error {
 		}
 		e.log.Enqueue(batch...)
 		e.mu.Unlock()
+		// Closed admits nothing from here, so a start this engine never had
+		// can no longer come: nobody waits for one (Ready).
+		e.markReady()
+		if h := e.hooks; h != nil && h.beforeSessionClose != nil {
+			h.beforeSessionClose()
+		}
 		e.closeErr = e.sess.Close()
 		close(e.done)
 		e.wg.Wait()
@@ -990,7 +1100,10 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 			// refusal by the agent's own turn puts it back (restoreLocked).
 			l.t.row = from
 			started = append(started, l)
-			return SubmitResult{Turn: l.t.id}, nil
+			// The text the turn started with, read in this section: a row's
+			// own text when the prompt came from one, which another client may
+			// have edited since this one looked (SubmitResult.Text).
+			return SubmitResult{Turn: l.t.id, Text: l.t.text}, nil
 		}
 		if mode == SubmitSendNow {
 			res, turn, err := e.armLocked(c, text, fromRow)

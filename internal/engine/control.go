@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/journal"
 )
 
 // Command names one mutating command: the client that issued it and that
@@ -28,7 +29,8 @@ import (
 // run, answers a matching resend with exactly what the first call returned —
 // a refusal included — never a second execution. A mismatched resend (the
 // same id, a different payload) is ErrBadRequest, and so is a Client this
-// engine never minted. An id at or below its client's evicted high-water mark
+// engine never minted or has retired (ReleaseClient). An id at or below its
+// client's evicted high-water mark
 // is ErrUnknownCommand: recognisably expired, never a fresh (and very
 // different) command running under a number that used to mean something else.
 //
@@ -139,8 +141,8 @@ const (
 	SubmitSendNow SubmitMode = "send_now"
 )
 
-// SubmitResult is what became of a submitted prompt: exactly one of its
-// fields is set.
+// SubmitResult is what became of a submitted prompt: exactly one of Turn,
+// Queued and Armed is set, and Text travels with Turn.
 type SubmitResult struct {
 	// Turn is the id of the turn the prompt started, in this call. It is the
 	// one turn id a client is handed synchronously, and therefore the one
@@ -148,6 +150,13 @@ type SubmitResult struct {
 	// skip: every other started — a drained row, its own included, or an armed
 	// send firing — arrives only as an event.
 	Turn string
+	// Text is the text Turn started with, set exactly when Turn is: the
+	// submitted text, or — for a submit that named a row (fromRow) — that
+	// row's text as the section that took it read it, which another client
+	// may have edited since this one looked (plan 027 §3.13, astra 19). It is
+	// what a client draws the sent row from; a queued or armed result has no
+	// started text, and leaves it empty.
+	Text string
 	// Queued is the row the prompt became, or — for a submit that named a row
 	// which cannot start yet — that row, unchanged and still waiting.
 	Queued *agent.QueuedPrompt
@@ -243,6 +252,14 @@ var (
 	ErrBadRequest = errors.New("engine: bad request")
 	// ErrUnknownCommand answers a command id outside the retry horizon.
 	ErrUnknownCommand = errors.New("engine: that command id has expired")
+	// ErrUnknownClient answers ClaimClient for a client id this engine never
+	// minted, or has retired (receipts.go's "Clients: released, claimed and
+	// retired"): there is nothing left to claim, and a client that wants to go
+	// on starts again as a new one. It is never a command's answer — a command
+	// naming such a client is ErrBadRequest — and it never reaches the wire:
+	// the socket server turns a failed claim into `resumed: false` (plan 027
+	// §3.6). Its code and reason are bad_request.
+	ErrUnknownClient = errors.New("engine: no such client")
 	// ErrCommandInProgress refuses a resend of a SYNCHRONOUS command (Command's
 	// own doc says which) that found its reservation still open: the first
 	// call has not returned, this attempt ran nothing and changed nothing, and
@@ -301,12 +318,13 @@ var (
 )
 
 // classification is one error's place in the closed set: the protocol code a
-// client matches on (05-protocol.md), and whether the receipts table STORES
-// the answer. classify is the ONE table Code and gateRefusal (receipts.go)
-// both consult — neither decides either question on its own — so they cannot
-// drift apart again the way r28 finding 1 found them: Code said not_accepting
-// for agent.ErrNotInTurn while gateRefusal did not know it, and a command
-// whose docs promise "never stored" was stored anyway.
+// client matches on (05-protocol.md), whether the receipts table STORES the
+// answer, and the reason that names the exact sentinel beside the code (plan
+// 027 §3.2). classify is the ONE table Code, Reason and gateRefusal
+// (receipts.go) all consult — none of them decides anything on its own — so
+// they cannot drift apart again the way r28 finding 1 found two of them: Code
+// said not_accepting for agent.ErrNotInTurn while gateRefusal did not know it,
+// and a command whose docs promise "never stored" was stored anyway.
 //
 // The invariant this exists to hold, over the WHOLE set: stored is false if
 // and only if code is one of unavailable, not_accepting, in_progress or
@@ -314,80 +332,104 @@ var (
 // Nothing here decides that per case; it falls out of which four codes appear
 // with stored: false below, and classify_test.go asserts it holds for every
 // sentinel this switch names.
+//
+// # Reasons
+//
+// A reason is a second closed set, finer than the code: the sentinel's own
+// name in snake case, so a client that has only the wire can say which refusal
+// it got, and a craze client can reconstruct the Go sentinel for errors.Is
+// (plan 027 §3.2). It is for wording and reconstruction, NEVER for retry: a
+// client decides what to do from the code alone. Every case below sets one. A
+// code several sentinels share (not_accepting, aborted, unavailable, failed,
+// bad_request, unsupported) has a reason per sentinel; every other code's one
+// reason is the code itself. classify_test.go pins every row's reason and
+// holds the whole set against §3.2's code → reasons table.
+//
+// The reasons are the wire's, a one-way door: a spelling here is one every
+// client of every later version has to keep reading. The protocol-level
+// reasons (start_failed, not_ready, busy, hello_required, …) are not the
+// engine's; they live in internal/protocol.
 type classification struct {
 	code   string
 	stored bool
+	reason string
 }
 
 func classify(err error) classification {
 	switch {
 	case err == nil:
-		return classification{code: ""}
+		return classification{}
 	case errors.Is(err, ErrIndexWrite):
 		// First among the sentinels, because this one WRAPS a failure from
 		// outside craze — a file error, whatever the filesystem said — and
 		// nothing below may be allowed to answer for it. STORED: the rename
 		// happened, and a resend must replay that fact rather than attempt a
 		// second rename (ErrIndexWrite's own doc, C12).
-		return classification{code: "index_write", stored: true}
-	case errors.Is(err, ErrNotAccepting), errors.Is(err, agent.ErrNotInTurn):
-		// agent.ErrNotInTurn is an Interject with no turn: a GATE refusal
-		// exactly like ErrNotAccepting's — the engine has nothing to act on
-		// right now, whatever this command's own arguments are — so it is
-		// NEVER STORED (r28 finding 1).
-		return classification{code: "not_accepting"}
+		return classification{code: "index_write", stored: true, reason: "index_write"}
+	case errors.Is(err, ErrNotAccepting):
+		return classification{code: "not_accepting", reason: "not_accepting"}
+	case errors.Is(err, agent.ErrNotInTurn):
+		// An Interject with no turn: a GATE refusal exactly like
+		// ErrNotAccepting's — the engine has nothing to act on right now,
+		// whatever this command's own arguments are — so it is NEVER STORED
+		// (r28 finding 1). Its reason says which seam refused.
+		return classification{code: "not_accepting", reason: "not_in_turn"}
 	case errors.Is(err, ErrCommandInProgress):
 		// Never stored, but by a different mechanism: a duplicate that finds
 		// this reservation open is answered before finish is ever called, so
 		// gateRefusal is never actually consulted for it in production — it is
 		// classified false here anyway, for the one table's sake.
-		return classification{code: "in_progress"}
+		return classification{code: "in_progress", reason: "in_progress"}
 	case errors.Is(err, ErrAlreadyPending):
-		return classification{code: "already_submitted", stored: true}
+		return classification{code: "already_submitted", stored: true, reason: "already_submitted"}
 	case errors.Is(err, ErrStaleTurn):
-		return classification{code: "stale_turn", stored: true}
+		return classification{code: "stale_turn", stored: true, reason: "stale_turn"}
 	case errors.Is(err, ErrStaleVersion):
-		return classification{code: "stale_version", stored: true}
+		return classification{code: "stale_version", stored: true, reason: "stale_version"}
 	case errors.Is(err, ErrUnknownRow):
-		return classification{code: "unknown_row", stored: true}
+		return classification{code: "unknown_row", stored: true, reason: "unknown_row"}
 	case errors.Is(err, agent.ErrBadAnswer):
-		return classification{code: "bad_request", stored: true}
+		return classification{code: "bad_request", stored: true, reason: "bad_answer"}
 	case errors.Is(err, agent.ErrAlreadyResolved):
-		return classification{code: "already_resolved", stored: true}
+		return classification{code: "already_resolved", stored: true, reason: "already_resolved"}
 	case errors.Is(err, agent.ErrUnknownAsk):
-		return classification{code: "unknown_ask", stored: true}
+		return classification{code: "unknown_ask", stored: true, reason: "unknown_ask"}
 	case errors.Is(err, agent.ErrNoSuchSubagent):
 		// A stop of a sub-agent the session holds no running child for (plan
 		// 026 §3.10): a refusal about the resource the command named, like
 		// unknown_ask and unknown_row — STORED, since the child that has ended
 		// never runs again; the client re-reads the roster.
-		return classification{code: "unknown_subagent", stored: true}
-	case errors.Is(err, ErrCommandAborted), errors.Is(err, ErrSetOutcomeUnknown):
-		// Both are STORED answers whose outcome the engine cannot itself vouch
-		// for — a panic's, or a Set the worker had already claimed when its
-		// caller's context ended — spelled out rather than left to the
-		// default so a client can tell them from an ordinary "unavailable, try
-		// again" without matching text: see Command's own doc for the policy.
-		return classification{code: "aborted", stored: true}
+		return classification{code: "unknown_subagent", stored: true, reason: "unknown_subagent"}
+	case errors.Is(err, ErrCommandAborted):
+		// A STORED answer whose outcome the engine cannot itself vouch for — a
+		// panic's — spelled out rather than left to the default so a client can
+		// tell it from an ordinary "unavailable, try again" without matching
+		// text: see Command's own doc for the policy.
+		return classification{code: "aborted", stored: true, reason: "command_aborted"}
+	case errors.Is(err, ErrSetOutcomeUnknown):
+		// The same, for a Set the worker had already claimed when its caller's
+		// context ended. Matched ahead of the context case below, whose error it
+		// always wraps.
+		return classification{code: "aborted", stored: true, reason: "set_outcome_unknown"}
 	case errors.Is(err, errNotRun):
 		// A Set answered WITHOUT running because its ctx was already dead when
 		// takeSet or runSet looked (settings.go): nothing happened, so — like
 		// every other gate refusal — it is NEVER STORED, and unavailable is
 		// its code because a client can only retry it (r28 finding 1).
-		return classification{code: "unavailable"}
+		return classification{code: "unavailable", reason: "not_run"}
 	case errors.Is(err, ErrStaleModel):
 		// Refused with nothing asked of the provider — by the worker before its
 		// claim, or by the session just before the write (runSet) — about a
 		// condition that can clear: so NEVER STORED, like the gate refusals, but
 		// with a code of its own: a client needs to say "not applied, the model
 		// changed", which "unavailable" cannot.
-		return classification{code: "stale_model"}
+		return classification{code: "stale_model", reason: "stale_model"}
 	case errors.Is(err, agent.ErrOptionGone):
 		// A Set that RAN: the agent took it and answered with a catalog that
 		// no longer lists the option, and that catalog is installed and
 		// announced. A plain, definite failure of this request — STORED, the
 		// code every other failed provider answer gets.
-		return classification{code: "failed", stored: true}
+		return classification{code: "failed", stored: true, reason: "option_gone"}
 	case errors.Is(err, agent.ErrBadCatalog):
 		// A Set that RAN and whose answer could not be read (plan 025 design
 		// 1, "malformed is an error"): the agent answered, so the write may
@@ -397,7 +439,7 @@ func classify(err error) classification {
 		// without looking — but an outcome the engine cannot vouch for:
 		// aborted, STORED, and the client re-reads state (astra r5 item 2,
 		// closing plan 025 X14's follow-up).
-		return classification{code: "aborted", stored: true}
+		return classification{code: "aborted", stored: true, reason: "bad_catalog"}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A command that RAN and then gave up on its own context: Cancel's or
 		// Stop's session/cancel, an Interject whose deadline passed. Such a
@@ -417,31 +459,41 @@ func classify(err error) classification {
 		// the context's own error too, and both are matched first, so the order
 		// of these cases is what keeps "not run" and "ran, outcome unknown"
 		// apart.
-		return classification{code: "aborted", stored: true}
-	case errors.Is(err, agent.ErrAskUnavailable), errors.Is(err, agent.ErrSetUnavailable), errors.Is(err, ErrUnavailable):
-		return classification{code: "unavailable"}
+		return classification{code: "aborted", stored: true, reason: "context"}
+	case errors.Is(err, agent.ErrAskUnavailable):
+		// The log's outbox has no room, spelled once per seam — the ask
+		// registry's, the session's and the engine's own: one code, a reason
+		// each.
+		return classification{code: "unavailable", reason: "ask_unavailable"}
+	case errors.Is(err, agent.ErrSetUnavailable):
+		return classification{code: "unavailable", reason: "set_unavailable"}
+	case errors.Is(err, ErrUnavailable):
+		return classification{code: "unavailable", reason: "log_backed_up"}
 	case errors.Is(err, ErrAttachRaced):
 		// An attach the log outran: every fresh snapshot's cursor refused
 		// because the ring moved past it. Nothing was registered and nothing
 		// ran, and asking again is the answer — ErrUnavailable's case exactly,
 		// a log under a burst, so its code and never stored.
-		return classification{code: "unavailable"}
-	case errors.Is(err, ErrBadRequest):
-		return classification{code: "bad_request", stored: true}
+		return classification{code: "unavailable", reason: "attach_raced"}
+	case errors.Is(err, ErrBadRequest), errors.Is(err, ErrUnknownClient):
+		// ErrUnknownClient is ClaimClient's answer and never a command's. It
+		// never reaches the wire — the socket server turns a failed claim into
+		// `resumed: false` (plan 027 §3.6) — so it adds no reason of its own.
+		return classification{code: "bad_request", stored: true, reason: "bad_request"}
 	case errors.Is(err, ErrUnknownCommand):
-		return classification{code: "unknown_command", stored: true}
+		return classification{code: "unknown_command", stored: true, reason: "unknown_command"}
 	case errors.Is(err, agent.ErrQueueFull):
-		return classification{code: "queue_full", stored: true}
+		return classification{code: "queue_full", stored: true, reason: "queue_full"}
 	case errors.Is(err, agent.ErrQueueTextTooLong):
-		return classification{code: "text_too_long", stored: true}
+		return classification{code: "text_too_long", stored: true, reason: "text_too_long"}
 	case errors.Is(err, agent.ErrPromptInFlight):
-		return classification{code: "prompt_in_flight", stored: true}
+		return classification{code: "prompt_in_flight", stored: true, reason: "prompt_in_flight"}
 	case errors.Is(err, agent.ErrForeignTurn):
-		return classification{code: "foreign_turn", stored: true}
+		return classification{code: "foreign_turn", stored: true, reason: "foreign_turn"}
 	case errors.Is(err, agent.ErrPromptCancelled):
-		return classification{code: "prompt_cancelled", stored: true}
+		return classification{code: "prompt_cancelled", stored: true, reason: "prompt_cancelled"}
 	case errors.Is(err, agent.ErrUnsupported):
-		return classification{code: "unsupported", stored: true}
+		return classification{code: "unsupported", stored: true, reason: "unsupported"}
 	default:
 		// Every error the switch above does not name is a command that RAN
 		// and failed — a provider/RPC refusal of a Set, an Interject the
@@ -449,7 +501,7 @@ func classify(err error) classification {
 		// finding 1). "failed" says so: STORED, because the command already
 		// ran, and never "unavailable", which the docs promise a client is
 		// never told about a command that actually happened.
-		return classification{code: "failed", stored: true}
+		return classification{code: "failed", stored: true, reason: "failed"}
 	}
 }
 
@@ -458,6 +510,13 @@ func classify(err error) classification {
 // and this is its stored, stable answer, never a reason to retry the same id.
 func Code(err error) string { return classify(err).code }
 
+// Reason is err's reason beside its code (plan 027 §3.2): the exact sentinel,
+// in snake case, read from the same table Code reads, and "" for nil. It is
+// for a client's wording and for reconstructing the sentinel across the
+// socket, never for deciding a retry — that is Code's alone. An error the
+// engine does not know is "failed", its code's own reason.
+func Reason(err error) string { return classify(err).reason }
+
 // Control is the surface a client drives a session through: the TUI and
 // `craze prompt` hold one now, and the socket server and its clients will
 // (session control S2). It grows with the engine; this is the driver's part.
@@ -465,10 +524,13 @@ func Code(err error) string { return classify(err).code }
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
-// Ask, Answer, CancelSubagent, SetTitle, State, NewClientID and Events wait on
-// nothing: no channel, no provider call, no Publish. Start, Subscribe, Attach,
-// Interject, Cancel, Stop, Set, Sync and Close block and belong on a goroutine that is
-// not the primary's reader — a tea.Cmd. Subscribe is among
+// Ask, Answer, CancelSubagent, SetTitle, State, NewClientID, ReleaseClient,
+// ClaimClient, Events, Ready and Note wait on nothing: no channel, no provider
+// call, no Publish (Ready hands out a channel and never waits on it). Start,
+// Subscribe, Attach, Interject,
+// Cancel, Stop, Set, Sync, SyncSeq and Close block and belong on a goroutine
+// that is not the primary's reader — a tea.Cmd; Sync and SyncSeq wait for the
+// outbox's drainer, which waits for that reader. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
 // primary's own reader with the primary full, it would wait for a slot only it
@@ -508,6 +570,19 @@ type Control interface {
 	Attach(ctx context.Context, o AttachOptions) (*Attachment, error)
 	State() State
 	NewClientID() string
+	// ReleaseClient and ClaimClient are a minted client's lifecycle, for a
+	// host that mints one per connection (plan 027 §3.6; receipts.go's
+	// "Clients: released, claimed and retired"). ReleaseClient says the
+	// client's connection has gone: it is idempotent, and an unknown or
+	// retired id is a no-op. ClaimClient takes a released client back — a
+	// resume — and is ErrUnknownClient for an id this engine never minted or
+	// has retired; claiming a client that was never released is a no-op. A
+	// released client is retired only once it has been released for the
+	// table's age bound AND holds no entry, open or completed; a client that is
+	// never released, the in-process TUI's, is never retired. Neither waits on
+	// anything: the table's mutex is a leaf.
+	ReleaseClient(id string)
+	ClaimClient(id string) error
 
 	Submit(c Command, text string, mode SubmitMode, fromRow string) (SubmitResult, error)
 	// Disarm takes back an armed send-now, leaving its text where it was.
@@ -580,13 +655,27 @@ type Control interface {
 	// has is ErrStaleVersion.
 	EditQueued(c Command, id, text string, expectedVersion *int) error
 	Unqueue(c Command, id string) (agent.QueuedPrompt, error)
-	ClearQueue(c Command) (int, error)
+	// ClearQueue empties the queue and answers with the rows it removed, in
+	// queue order, each the caller's own copy.
+	ClearQueue(c Command) ([]agent.QueuedPrompt, error)
 
 	// Sync returns once every event enqueued before the call has been
 	// delivered: it is in the primary's buffer, or committed when there is no
 	// primary. It must not be called from the primary's reader unless another
 	// goroutine is reading.
 	Sync(ctx context.Context) error
+	// SyncSeq is Sync that also answers with the log's committed head at that
+	// moment, ≥ the seq of every event enqueued before the call: the socket
+	// server's reply barrier (plan 027 §3.6). It blocks as Sync does, under the
+	// same rule about the primary's reader, and fails as Sync does, with seq 0.
+	SyncSeq(ctx context.Context) (uint64, error)
+	// Ready is closed once the start has run, whatever it came to, or once the
+	// engine has closed, whichever is first (plan 027 §3.6). It waits on
+	// nothing: State says what the start came to.
+	Ready() <-chan struct{}
+	// Note writes a journal-only note into the session's journal — the socket
+	// server's connection diags (plan 027 §3.7) — and waits on nothing.
+	Note(n journal.Note)
 	Close() error
 }
 

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.subscribe.json",
+  "title": "sessions.subscribe",
+  "description": "A roster subscription: defined for the hub (S4). A host answers unsupported, reason roster_unsupported (connection capability rosterSubscribe: false).",
+  "$defs": {
+    "params": {"$ref": "envelope.json#/$defs/empty"},
+    "result": {
+      "description": "Not specified in protocol 1: no host ever answers with a result. The hub defines it (S4).",
+      "not": {}
+    }
+  }
+}

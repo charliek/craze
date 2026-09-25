@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.cancel.json",
+  "title": "session.cancel",
+  "description": "Cancels the current turn, or turnId's while it is still the current one (a named turn that is not is stale_turn). Accepted with nothing to cancel only while an ask is pending or a foreign turn runs; otherwise not_accepting. A failure the cancel ran into comes back as the error, with this method's errorResult as data.result.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "turnId": {"type": "string"}
+      },
+      "required": ["sessionId", "commandId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "outcome": {"type": "string", "enum": ["requested", "settled", "unknown"], "description": "requested: the cancel reached the agent and the turn had not yet ended; settled: it had ended, or there was no turn of craze's own; unknown: the call gave up where a cancel may already have been written."},
+        "turn": {"type": "string", "description": "The turn the cancel was held against, \"\" with no turn of craze's own running."},
+        "reported": {"type": "boolean", "description": "The failure beside this result was also published, as a send-now delta: a client that words failures from deltas must not word it again."}
+      },
+      "required": ["outcome", "turn", "reported"],
+      "additionalProperties": false
+    },
+    "errorResult": {
+      "description": "data.result beside a cancel's error: the cancel's result.",
+      "$ref": "#/$defs/result"
+    }
+  }
+}

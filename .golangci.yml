@@ -62,6 +62,20 @@ linters:
             - "**/internal/harness/redact/**"
           allow:
             - $gostd
+        # The control-socket wire (plan 027 §3.2–§3.4, §3.11): a leaf under
+        # everything that speaks it, the standard library only, so the server,
+        # the client, the fake host and the codecs' own schema tests can all
+        # import it and it can import none of them. Its non-test files only:
+        # depguard ORs positive file patterns, and "!$test" is the negative
+        # that leaves the package's tests free to import the JSON Schema
+        # validator (github.com/kaptinlin/jsonschema), as engine's rule does.
+        protocol:
+          list-mode: strict
+          files:
+            - "**/internal/protocol/**"
+            - "!$test"
+          allow:
+            - $gostd
         # The engine's own import boundary (plan 021 §3.1): it sits above the
         # provider seam (agent.Session) and knows nothing of any one client or
         # provider transport, so a non-test file here may import neither
@@ -130,6 +144,95 @@ linters:
               desc: "the engine speaks to agent.Session alone; the wire protocol below that seam is not its concern, in a test either (plan 021 §3.1)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the engine speaks to agent.Session alone; a provider transport below that seam is not its concern, in a test either (plan 021 §3.1)"
+        # The control socket's server (plan 027 §3.7): it serves the engine
+        # over internal/protocol and knows no client package and no provider
+        # transport, exactly as the engine it wraps does. Split in two for the
+        # same reason engine's rule is: its tests run a real engine over
+        # tui.Stub, so $test files answer to control-test, which allows
+        # internal/tui and still denies the rest. (internal/control/wiretest,
+        # a helper only tests import, answers to this rule too.)
+        control:
+          list-mode: lax
+          files:
+            - "**/internal/control/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the control server serves every client uniformly; a client package is exactly what it must not know about (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the control server serves every client uniformly; a client package is exactly what it must not know about (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the control server speaks to engine.Control alone; the ACP wire below the session seam is not its concern (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the control server speaks to engine.Control alone; a provider transport below the session seam is not its concern (plan 027 §3.7)"
+        control-test:
+          list-mode: lax
+          files:
+            # One glob that is already both — under internal/control and named
+            # _test.go — because depguard ORs positive patterns (engine-test
+            # above says why a bare $test would reach every test file).
+            - "**/internal/control/**_test.go"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the control server's tests drive it over tui.Stub and a raw socket client, never a CLI client (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the control server speaks to engine.Control alone; the ACP wire is not its concern, in a test either (plan 027 §3.7)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the control server speaks to engine.Control alone; a provider transport is not its concern, in a test either (plan 027 §3.7)"
+        # The control socket's Go client (plan 027 §3.14): it speaks
+        # internal/protocol to a host over a socket and needs nothing else of
+        # craze — above all not the server it talks to (internal/control), and
+        # no client package (tui, cli: PR 4's remote.Session is what a client
+        # builds on it) or provider transport. Split in two as control's rule
+        # is: its tests run the real server in front of an engine over
+        # tui.Stub, so $test files answer to remote-test, which allows
+        # internal/control and internal/tui and still denies the rest.
+        remote:
+          list-mode: lax
+          files:
+            - "**/internal/remote/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/charliek/craze/internal/control
+              desc: "the client must not import the server it talks to: it speaks internal/protocol over a socket (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the protocol client serves every client uniformly; a client package builds on it, never the reverse (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the protocol client serves every client uniformly; a client package builds on it, never the reverse (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern (plan 027 §3.14)"
+        remote-test:
+          list-mode: lax
+          files:
+            # One glob that is already both — under internal/remote and named
+            # _test.go — because depguard ORs positive patterns (engine-test
+            # above says why a bare $test would reach every test file).
+            - "**/internal/remote/**_test.go"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the protocol client's tests drive a real server over tui.Stub, never a CLI client (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the protocol client speaks the control socket's wire alone; the ACP wire is not its concern, in a test either (plan 027 §3.14)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the protocol client speaks the control socket's wire alone; a provider transport is not its concern, in a test either (plan 027 §3.14)"
+        # The fake host (plan 027 §3.11): the in-process twin of
+        # cmd/craze-fake-host, wrapping the real control server (internal/control)
+        # around an engine over tui.Stub, for the executable wire fixtures. It
+        # is allowed the two packages it wraps and denied the client and
+        # transport packages the fixtures must stay agnostic of.
+        fakehost:
+          list-mode: lax
+          files:
+            - "**/internal/fakehost/**"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the fake host is a test double for the wire fixtures, not a CLI client (plan 027 §3.11)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the fake host speaks the control socket's wire over a Stub; the ACP wire below the session seam is not its concern (plan 027 §3.11)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the fake host speaks the control socket's wire over a Stub; a provider transport below the session seam is not its concern (plan 027 §3.11)"
   exclusions:
     presets:
       - std-error-handling

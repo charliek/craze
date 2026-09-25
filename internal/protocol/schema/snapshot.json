@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/snapshot.json",
+  "title": "snapshot",
+  "description": "One transcript snapshot in the snapshot codec (internal/transcript/codec.go, version 1): the attach reply's snapshot and session.snapshot's, embedded raw. It is the model at its seq, bounded to a byte budget: the header (the version, the cut and the mandatory sections, each string capped at 256 KiB with its truncation mark), then the main transcript and the children's. Every key but version and main is omitted at its zero value; leaf payloads have exactly the event codec's shapes (event.json). A client restores it and folds every event after seq.",
+  "type": "object",
+  "properties": {
+    "version": {"type": "integer", "const": 1},
+    "incarnation": {"type": "string", "description": "The event log's incarnation the model was folded from."},
+    "seq": {"type": "integer", "minimum": 0, "description": "The last event the model folded: the cut."},
+    "local": {"type": "integer", "minimum": 0},
+    "finishSeq": {"type": "integer", "minimum": 0},
+    "agents": {"type": "array", "items": {"$ref": "#/$defs/agentRow"}, "description": "The roster, in the order its rows first appeared."},
+    "todos": {"type": "array", "items": {"$ref": "event.json#/$defs/todo"}},
+    "todosTruncated": {"type": "boolean"},
+    "asks": {"type": "array", "items": {"$ref": "#/$defs/ask"}, "description": "The open asks, in the order they opened."},
+    "ended": {"type": "array", "items": {"$ref": "#/$defs/askEnding"}, "description": "The last-ended asks."},
+    "turn": {"$ref": "#/$defs/turn"},
+    "replaying": {"type": "boolean"},
+    "settings": {"$ref": "#/$defs/settings"},
+    "queue": {"type": "array", "items": {"$ref": "event.json#/$defs/queued"}},
+    "truncatedQueue": {"type": "array", "items": {"type": "string"}, "description": "The ids of the queue rows whose text was cut."},
+    "main": {"$ref": "#/$defs/transcript"},
+    "subs": {"type": "array", "items": {"$ref": "#/$defs/sub"}, "description": "The children's transcripts, in the order the model created them."}
+  },
+  "required": ["version", "main"],
+  "additionalProperties": false,
+  "$defs": {
+    "agentRow": {
+      "description": "One roster row: the row, its place in finish order (absent while it has not finished), and whether its prompt or output was cut.",
+      "type": "object",
+      "properties": {
+        "info": {"$ref": "event.json#/$defs/subagent"},
+        "finish": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      },
+      "required": ["info"],
+      "additionalProperties": false
+    },
+    "ask": {
+      "description": "One open ask: its body in the event codec's ask body shape, truncated when a string of it was cut.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "body": {"$ref": "event.json#/$defs/askBody"},
+        "at": {"$ref": "event.json#/$defs/time"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "askEnding": {
+      "description": "One last-ended ask: how and by whom it ended.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "outcome": {"type": "string"},
+        "by": {"type": "string"},
+        "at": {"$ref": "event.json#/$defs/time"}
+      },
+      "additionalProperties": false
+    },
+    "turn": {
+      "description": "The current turn, and the foreign turn beside it; truncated when its text was cut.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "origin": {"type": "string"},
+        "at": {"$ref": "event.json#/$defs/time"},
+        "foreign": {"$ref": "event.json#/$defs/foreignTurn"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "settings": {
+      "description": "The settings, each list section in the event codec's own section shape, absent when empty.",
+      "type": "object",
+      "properties": {
+        "title": {"type": "string"},
+        "mode": {"type": "string"},
+        "model": {"type": "string"},
+        "config": {"$ref": "event.json#/$defs/config"},
+        "commands": {"$ref": "event.json#/$defs/commands"},
+        "plugins": {"$ref": "event.json#/$defs/plugins"},
+        "sendNow": {"$ref": "event.json#/$defs/sendNow"},
+        "truncated": {"$ref": "#/$defs/settingsTruncated"}
+      },
+      "additionalProperties": false
+    },
+    "settingsTruncated": {
+      "description": "The settings sections a string of which was cut.",
+      "type": "object",
+      "properties": {
+        "title": {"type": "boolean"},
+        "mode": {"type": "boolean"},
+        "model": {"type": "boolean"},
+        "config": {"type": "boolean"},
+        "commands": {"type": "boolean"},
+        "plugins": {"type": "boolean"},
+        "sendNow": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "transcriptFields": {
+      "description": "A transcript's members: its continuation (trimmed, streamOpen, tailCut, todoPlanned, todoDone), its window (windowed, dropped, the omitted-entry ledger, omittedRun) and its entries, oldest first. Written member by member by the codec; a zero member is absent.",
+      "type": "object",
+      "properties": {
+        "trimmed": {"type": "boolean"},
+        "windowed": {"type": "boolean"},
+        "dropped": {"type": "integer", "minimum": 0},
+        "streamOpen": {"type": "boolean"},
+        "tailCut": {"type": "boolean"},
+        "todoPlanned": {"type": "integer"},
+        "todoDone": {"type": "boolean"},
+        "omittedRun": {"$ref": "#/$defs/entryKind"},
+        "omitted": {"type": "array", "items": {"$ref": "#/$defs/omitted"}},
+        "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
+      }
+    },
+    "transcript": {
+      "description": "The main transcript.",
+      "$ref": "#/$defs/transcriptFields",
+      "unevaluatedProperties": false
+    },
+    "sub": {
+      "description": "A child's transcript: its id, then its members.",
+      "$ref": "#/$defs/transcriptFields",
+      "properties": {
+        "id": {"type": "string"}
+      },
+      "required": ["id"],
+      "unevaluatedProperties": false
+    },
+    "omitted": {
+      "description": "One entry the window omitted: [bytes] or [bytes, \"tool id\"] for a tool entry, oldest first.",
+      "type": "array",
+      "prefixItems": [
+        {"type": "integer", "minimum": 0},
+        {"type": "string"}
+      ],
+      "items": false,
+      "minItems": 1,
+      "maxItems": 2
+    },
+    "entry": {
+      "description": "One transcript entry: id is \"seq.n\"; an error entry's text is its message and err its class and code.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+        "kind": {"$ref": "#/$defs/entryKind"},
+        "text": {"type": "string"},
+        "tool": {"$ref": "event.json#/$defs/tool"},
+        "plan": {"$ref": "event.json#/$defs/plan"},
+        "err": {"$ref": "#/$defs/entryErr"},
+        "at": {"$ref": "event.json#/$defs/time"},
+        "end": {"$ref": "event.json#/$defs/time"},
+        "open": {"type": "boolean"},
+        "interject": {"type": "boolean"},
+        "streaming": {"type": "boolean"},
+        "cut": {"type": "boolean"}
+      },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "entryErr": {
+      "description": "An error entry's class and code, in the event codec's vocabulary; both always present.",
+      "type": "object",
+      "properties": {
+        "class": {"type": "string"},
+        "code": {"type": "integer"}
+      },
+      "required": ["class", "code"],
+      "additionalProperties": false
+    },
+    "entryKind": {
+      "description": "An entry's kind.",
+      "type": "string",
+      "enum": ["user", "assistant", "thought", "tool", "note", "plan", "error"]
+    }
+  }
+}

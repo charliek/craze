@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.stop.json",
+  "title": "session.stop",
+  "description": "Ends the session and its host: distinct from closing a connection or a view, neither of which ever stops a session. A TUI-hosted session's host answers unsupported, reason stop_unsupported (session capability stop: false); S4's headless host implements it.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"}
+      },
+      "required": ["sessionId", "commandId"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -717,10 +716,11 @@ func TestChildCrashStart(t *testing.T) {
 // finishRun relies on. The agent is killed directly, by pid, rather than
 // through any craze API, so the death is genuinely the agent's own.
 //
-// kill(pid, 0) reporting ESRCH is deterministic proof the reaper's own
-// cmd.Wait has already reaped the zombie: nothing else in this process calls
-// wait4 on this child, so the pid cannot disappear from the process table
-// any earlier than that — the same fact Close's own waitCh probe rests on.
+// The wait is for the client's Exited, the very channel Close's probe
+// samples, and not for the OS: kill(pid, 0) reporting ESRCH only proves
+// cmd.Wait's own wait has reaped the child, and the reaper closes waitCh after
+// cmd.Wait returns — a window a loaded, raced run stretches enough for Close
+// to sample waitCh still open and, as it is documented to, report nil.
 func TestSessionCloseReportsAgentExitedRepeatedly(t *testing.T) {
 	s := startScript(t, "echo", true)
 	pid := s.client.PID()
@@ -734,9 +734,11 @@ func TestSessionCloseReportsAgentExitedRepeatedly(t *testing.T) {
 	if err := proc.Kill(); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
-	waitUntil(t, "the agent to be reaped", func() bool {
-		return proc.Signal(syscall.Signal(0)) != nil
-	})
+	select {
+	case <-s.client.Exited():
+	case <-time.After(60 * time.Second):
+		t.Fatal("timed out waiting for the reaper to record the agent's exit")
+	}
 	first := s.Close()
 	if !errors.Is(first, ErrAgentExited) {
 		t.Fatalf("Close() = %v, want an error wrapping ErrAgentExited", first)

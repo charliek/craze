@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.ready.json",
+  "title": "ready",
+  "description": "The session's start has completed (startFailed false) or failed (startFailed true, err its text): sent once, on an attachment made before readiness (when: now). session is the final info document, its catalogs and provider session id now set.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string"},
+        "session": {"$ref": "info.json#/$defs/sessionInfo"},
+        "startFailed": {"type": "boolean"},
+        "err": {"type": "string"}
+      },
+      "required": ["subscription", "session", "startFailed"],
+      "additionalProperties": false
+    }
+  }
+}

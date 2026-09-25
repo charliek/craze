@@ -35,6 +35,7 @@ nav = [
     { "CLI" = "reference/cli.md" },
     { "TUI" = "reference/tui.md" },
     { "Configuration" = "reference/configuration.md" },
+    { "Protocol" = "reference/protocol.md" },
   ] },
   { "Development" = [
     { "Setup" = "development/setup.md" },

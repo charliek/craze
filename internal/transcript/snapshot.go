@@ -200,6 +200,42 @@ func (m *Model) Snapshot(budget int) (*Snapshot, error) {
 	return s, err
 }
 
+// SnapshotFor is Snapshot with one child's transcript given the room first:
+// session.snapshot's agentId (plan 027 §3.4, "a snapshot of the main
+// transcript or of a child's"). It is the same cut, codec, ledger and per-item
+// caps as Snapshot, and differs only in the order the window is filled:
+//
+//  1. the mandatory sections, every transcript at its continuation fields;
+//  2. the main transcript's NEWEST entry — still required, so a snapshot of a
+//     child restores exactly as any other (Restore is unchanged), and it is
+//     refused ErrSnapshotTooLarge exactly when Snapshot would be;
+//  3. the child's entries, newest first, until the next would not fit;
+//  4. the rest of the main transcript's, newest first, with what remains;
+//  5. every other child's, in the order they were created.
+//
+// A child the roster names that has no transcript of its own (a cursor task)
+// has nothing to put first, and its snapshot is Snapshot's. An id that neither
+// a child transcript nor a roster row of the model names is refused with an
+// error wrapping agent.ErrNoSuchSubagent — the engine's unknown_subagent. An
+// empty agentID is Snapshot.
+func (m *Model) SnapshotFor(agentID string, budget int) (*Snapshot, error) {
+	if budget <= 0 {
+		budget = DefaultSnapshotBytes
+	}
+	c := m.snapshotCut()
+	if agentID != "" && !c.names(agentID) {
+		return nil, fmt.Errorf("transcript: no sub-agent %q in the model: %w", agentID, agent.ErrNoSuchSubagent)
+	}
+	s, _, err := c.snapshot(budget, agentID)
+	return s, err
+}
+
+// names reports whether a child transcript or a roster row of the cut is id's.
+func (c *cut) names(id string) bool {
+	return slices.ContainsFunc(c.subs, func(s subCut) bool { return s.id == id }) ||
+		slices.ContainsFunc(c.agents, func(r rosterRow) bool { return r.info.ID == id })
+}
+
 // snapshotSized is Snapshot with the encoded size its window counted, which a
 // test holds against the encoding's real length.
 func (m *Model) snapshotSized(budget int) (*Snapshot, int, error) {
@@ -207,11 +243,13 @@ func (m *Model) snapshotSized(budget int) (*Snapshot, int, error) {
 		budget = DefaultSnapshotBytes
 	}
 	c := m.snapshotCut()
-	return c.snapshot(budget)
+	return c.snapshot(budget, "")
 }
 
 // snapshot builds the snapshot from a cut, after the lock (see Snapshot).
-func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
+// focus is the child whose transcript is filled right after the main
+// transcript's newest entry (SnapshotFor), and "" for Snapshot's order.
+func (c *cut) snapshot(budget int, focus string) (*Snapshot, int, error) {
 	s := &Snapshot{
 		Version:     SnapshotVersion,
 		Incarnation: c.incarnation,
@@ -270,7 +308,21 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 	// whenever the snapshot is within the budget with it, whatever it was
 	// before.
 	main := wins[0]
-	if total, err = main.fill(total, budget); err != nil {
+	// A focused snapshot weighs only main's newest entry here — the one that
+	// is required — and comes back for the rest after the child (SnapshotFor).
+	var first *window
+	if focus != "" {
+		for _, w := range wins[1:] {
+			if w.id == focus {
+				first = w
+			}
+		}
+	}
+	upTo := main.n
+	if first != nil {
+		upTo = min(main.n, 1)
+	}
+	if total, err = main.fillTo(total, budget, upTo); err != nil {
 		return nil, 0, err
 	}
 	switch {
@@ -282,8 +334,20 @@ func (c *cut) snapshot(budget int) (*Snapshot, int, error) {
 	default:
 		return nil, 0, fmt.Errorf("%w: the main transcript's newest entry does not fit beside %d bytes of mandatory state in a budget of %d", ErrSnapshotTooLarge, total, budget)
 	}
+	// (2b) A focused snapshot: the child's tail, then the rest of main's.
+	if first != nil {
+		if total, err = first.fill(total, budget); err != nil {
+			return nil, 0, err
+		}
+		if total, err = main.fill(total, budget); err != nil {
+			return nil, 0, err
+		}
+	}
 	// (3) Each child in the order it was created, with what remains.
 	for _, w := range wins[1:] {
+		if w == first {
+			continue
+		}
 		if total, err = w.fill(total, budget); err != nil {
 			return nil, 0, err
 		}
@@ -415,7 +479,12 @@ func (w *window) size(k, entLen, recs, recsLen int) int {
 // the budget, which its newest entry may bring within it (Snapshot) — and the
 // result what it becomes.
 func (w *window) fill(total, budget int) (int, error) {
-	for w.k < w.n {
+	return w.fillTo(total, budget, w.n)
+}
+
+// fillTo is fill that stops once upTo of the window's entries are in.
+func (w *window) fillTo(total, budget, upTo int) (int, error) {
+	for w.k < upTo {
 		i := w.n - 1 - w.k
 		e := snapEntry(w.tc.entries[i])
 		b, err := encodeEntry(w.jw, &e)
@@ -578,6 +647,16 @@ func capAsk(a Ask) Ask {
 	}
 	a.Truncated = a.Truncated || c.cut
 	return a
+}
+
+// CapAskBody is an ask's body with every string capped at ItemCap exactly as a
+// snapshot caps an open ask's (capAsk, its ID aside), and whether any was cut:
+// asks.get's record (plan 027 §3.2 — "body strings capped at the snapshot's
+// ItemCap, truncated set"), so the socket and the snapshot hold one rule. The
+// payload is copied only where something is cut; body's own is never written.
+func CapAskBody(body agent.AskBody) (agent.AskBody, bool) {
+	a := capAsk(Ask{Body: body})
+	return a.Body, a.Truncated
 }
 
 // capPtr is *p capped by f: p itself when nothing was cut, else a pointer to

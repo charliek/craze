@@ -10,6 +10,7 @@ build:
 	mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/craze ./cmd/craze
 	go build -o bin/craze-fake-agent ./cmd/craze-fake-agent
+	go build -o bin/craze-fake-host ./cmd/craze-fake-host
 
 # The go list check below is one half of craze's import boundary: internal/tui
 # and internal/cli must not import internal/acp. The other half is the
@@ -33,14 +34,19 @@ test:
 # named, so each harness package is raced as it lands), the session
 # journal (one writer goroutine owns the file while Append, Note, Close and
 # live readers arrive from others, and its tests stall that writer on
-# purpose), and the transcript model (the engine folds it inside the log's
-# boundary while snapshots are cut from other goroutines; plan 024 §3.4).
+# purpose), the transcript model (the engine folds it inside the log's
+# boundary while snapshots are cut from other goroutines; plan 024 §3.4), and
+# the control-socket wire (plan 027 §5: each package the plan adds joins in
+# the commit that creates it, ahead of the server and client that run its
+# framing on every connection's goroutines), and the control-socket server
+# (a reader, a writer and a handler per request on every connection, the
+# binding table's transfers racing its releases, and Close racing all of it).
 # Packages run concurrently, so the wall clock is about the slowest
 # of them. CI runs this same target, so a local pass and a CI pass mean the
 # same thing; the two flakes that reached main in 2026-09 only ever showed
 # under -race.
 test-race:
-	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/...
+	go test -timeout 5m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

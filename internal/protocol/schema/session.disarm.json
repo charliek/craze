@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.disarm.json",
+  "title": "session.disarm",
+  "description": "Takes back an armed send-now, leaving its text where it was. Nothing armed is not_accepting.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"}
+      },
+      "required": ["sessionId", "commandId"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

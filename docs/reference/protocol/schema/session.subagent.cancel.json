@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.subagent.cancel.json",
+  "title": "session.subagent.cancel",
+  "description": "Stops one running sub-agent, the rest of the turn going on (session capability subagentCancel; otherwise unsupported). Its outcome is event-only: the child's finished roster row. unknown_subagent is an id the session holds no running child for, which after a client's own stop means the child's own end won the race.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "agentId": {"type": "string"}
+      },
+      "required": ["sessionId", "commandId", "agentId"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

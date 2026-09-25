@@ -412,11 +412,18 @@ func TestEventCodecCompletenessFillerReachesEveryField(t *testing.T) {
 // codecTestTime is a time with nanoseconds, in a zone that is not UTC.
 var codecTestTime = time.Date(2026, 9, 19, 12, 30, 45, 123456789, time.FixedZone("CEST", 2*3600))
 
-// TestEventCodecRoundTripsWhatTheEmitSitesBuild covers, per EventType, an
-// event shaped the way its emit site builds it (live.go, native.go,
-// subagents.go, live_queue.go, queue.go), plus the collection, pointer and
-// time corners the equivalence rules are about.
-func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
+// emitSiteEvent is one case of the codec's round-trip corpus.
+type emitSiteEvent struct {
+	name string
+	ev   Event
+}
+
+// emitSiteEvents is the codec's round-trip corpus: per EventType, an event
+// shaped the way its emit site builds it (live.go, native.go, subagents.go,
+// live_queue.go, queue.go), plus the collection, pointer and time corners the
+// equivalence rules are about. TestEventSchemaCoversTheCodec validates every
+// one of them against the protocol's event.json too.
+func emitSiteEvents() []emitSiteEvent {
 	at := codecTestTime
 	shell := &ToolEvent{
 		ID: "call-7", Name: "Run make test", Title: "Run make test", Kind: "execute", Status: "completed",
@@ -429,10 +436,7 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 		Diffs: []ToolDiff{{Path: "/work/a.go", OldText: "a\n", NewText: "b\nc\n", Added: 2, Removed: 1}},
 		At:    at,
 	}
-	cases := []struct {
-		name string
-		ev   Event
-	}{
+	return []emitSiteEvent{
 		{"a text delta", Event{Type: EventText, Text: "hello, <world> & \"friends\"\n", At: at}},
 		{"a sub-agent's thought", Event{Type: EventThought, Agent: "child-1", Text: "thinking…", At: at}},
 		{"the user's echo", Event{Type: EventUser, Text: "fix the tests", At: at}},
@@ -571,6 +575,12 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 		}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
+}
+
+// TestEventCodecRoundTripsWhatTheEmitSitesBuild round-trips the corpus
+// (emitSiteEvents) and says the corners it is about out loud.
+func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
+	cases := emitSiteEvents()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertRoundTrips(t, tc.name, tc.ev)
@@ -622,16 +632,17 @@ func TestEventCodecRoundTripsWhatTheEmitSitesBuild(t *testing.T) {
 	})
 }
 
-// TestEventCodecPinsTheWireShape pins a few bodies byte for byte: the keys are
-// camelCase, "type" comes first, zero values are absent, a time is UTC with
-// nanoseconds, HTML is not escaped, the plugin command is a nested object, and
-// an answer list keeps null apart from []. A change here is a change to what
-// is on disk, and EventCodecVersion says whether it is compatible.
-func TestEventCodecPinsTheWireShape(t *testing.T) {
-	for _, tc := range []struct {
-		ev   Event
-		want string
-	}{
+// pinnedWireShape is one event and the body the codec writes for it, byte
+// for byte.
+type pinnedWireShape struct {
+	ev   Event
+	want string
+}
+
+// pinnedWireShapes is TestEventCodecPinsTheWireShape's table, which
+// TestEventSchemaCoversTheCodec also validates against event.json.
+func pinnedWireShapes() []pinnedWireShape {
+	return []pinnedWireShape{
 		{Event{Type: EventText, Text: "a && b <c>", At: codecTestTime},
 			`{"type":"text","text":"a && b <c>","at":"2026-09-19T10:30:45.123456789Z"}`},
 		{Event{Type: EventMeta}, `{"type":"meta"}`},
@@ -718,7 +729,16 @@ func TestEventCodecPinsTheWireShape(t *testing.T) {
 			Title: ptr(""), Config: &ConfigState{}, Commands: &CommandsState{}, Plugins: &PluginsState{},
 		}},
 			`{"type":"meta","state":{"title":"","config":{},"commands":{},"plugins":{}}}`},
-	} {
+	}
+}
+
+// TestEventCodecPinsTheWireShape pins a few bodies byte for byte: the keys are
+// camelCase, "type" comes first, zero values are absent, a time is UTC with
+// nanoseconds, HTML is not escaped, the plugin command is a nested object, and
+// an answer list keeps null apart from []. A change here is a change to what
+// is on disk, and EventCodecVersion says whether it is compatible.
+func TestEventCodecPinsTheWireShape(t *testing.T) {
+	for _, tc := range pinnedWireShapes() {
 		got, err := EncodeEvent(tc.ev)
 		if err != nil {
 			t.Fatalf("EncodeEvent(%+v): %v", tc.ev, err)

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.queue.clear.json",
+  "title": "session.queue.clear",
+  "description": "Empties the queue, answering with the rows it removed, in queue order: [] for a queue that was empty.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"}
+      },
+      "required": ["sessionId", "commandId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "removed": {"type": "array", "items": {"$ref": "event.json#/$defs/queued"}}
+      },
+      "required": ["removed"],
+      "additionalProperties": false
+    }
+  }
+}

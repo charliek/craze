@@ -40,8 +40,9 @@ import (
 // alias two different causes onto one entry. Bad requests do not mutate.
 //
 // The client half is minted HERE, by newClient (Engine.NewClientID), and a
-// command naming a client this table never minted is ErrBadRequest for the
-// same reason: the per-client high-water marks below are what make "never a
+// command naming a client this table never minted — or has retired ("Clients:
+// released, claimed and retired", below) — is ErrBadRequest for the same
+// reason: the per-client high-water marks below are what make "never a
 // re-execution" true past the table's bound, and a mark can only be kept for a
 // client the table knows about. An invented client id would have no mark, so
 // every id it ever used would look unseen and run again.
@@ -136,24 +137,55 @@ import (
 // client's old ids executable again, which is the one thing this table exists
 // to prevent.
 //
-// No CLIENT is ever retired: a minted client's mark lives as long as the
-// engine, however many clients are minted after it. Retiring a live identity
-// would refuse a client's OWN commands while it is still attached — the
-// TUI's, in particular, since it mints exactly one client for its own life
-// and would have every Submit answered ErrUnknownCommand for good the moment
-// enough other clients existed, whatever their own ids or whether the table
-// ever saw them. The cost is one counter per minted client, and in this
-// in-process phase nothing comes near a size where that cost matters — the
-// TUI mints one client for its own life and craze prompt mints none, every
-// call it makes carrying the zero Command.
+// No LIVE client is ever retired: a minted client's mark lives as long as the
+// engine for as long as that client has not been released, however many
+// clients are minted after it and however long it sits idle. Retiring a live
+// identity would refuse a client's OWN commands while it is still attached —
+// the TUI's, in particular, since it mints exactly one client for its own
+// life, never releases it, and would have every Submit answered
+// ErrUnknownCommand for good the moment enough other clients existed, whatever
+// their own ids or whether the table ever saw them. The cost is one counter
+// per live client: the TUI mints one for its own life and craze prompt mints
+// none, every call it makes carrying the zero Command.
 //
-// S2, which will mint a client PER CONNECTION rather than once per engine,
-// must add its own lifecycle on top of this rather than reuse it unchanged:
-// an explicit release when a connection disconnects, and retirement — if S2
-// wants one at all — only of a RELEASED client, never one merely idle, and it
-// must bind a server-minted client id to its own connection rather than trust
-// a client-supplied "c-N", which is predictable and would let one connection
-// claim another's identity (r26 finding 2).
+// # Clients: released, claimed and retired
+//
+// A socket host mints a client PER CONNECTION (plan 027 §3.6, SF-11), and
+// binds the server-minted id to its connection rather than trusting a
+// client-supplied "c-N", which is predictable and would let one connection
+// claim another's identity (r26 finding 2). Live clients alone would then grow
+// without bound over a long session's reconnects, so the table keeps a
+// lifecycle for each client on top of its mark:
+//
+//   - RELEASE (Control.ReleaseClient) is the server saying the client's
+//     connection has gone — only when its binding still names that connection,
+//     which is the server's compare-and-release. The client is kept exactly as
+//     it was: its receipts, its mark, any reservation still open, and every
+//     command that names it still runs. It only becomes RETIRABLE, from a
+//     release time read on the table's own clock. A second release keeps the
+//     first time, and an id the table does not know is a no-op.
+//   - CLAIM (Control.ClaimClient) is a resume: the holder of the client's
+//     token has taken it back on a new connection, and it is live again, no
+//     longer retirable however long it was released. An id the table never
+//     minted or has retired is ErrUnknownClient, which the server answers with
+//     `resumed: false` and a fresh client: nothing is resent unless a claim
+//     succeeded. Claiming a client that was never released is a no-op.
+//   - RETIREMENT happens inside evictAgedLocked, the age pass that admit,
+//     release and claim each run first, and only to a client that has been
+//     released for at least receiptAge AND holds no entry in the table, open
+//     or completed (GLM 8). The pass walks only completed entries (order),
+//     and an open reservation lives only in byKey, so each client counts its
+//     entries in byKey — kept where an entry is added and wherever one is
+//     removed — and the predicate reads that count rather than scanning. A
+//     command still running when its connection dropped therefore keeps its
+//     client alive until the command finishes and its answer ages out, so a
+//     resend after a resume can always find the answer. A retired client is
+//     removed and its mark dropped with it: no command can name it again —
+//     clientLocked answers ErrBadRequest for it, exactly as for an id never
+//     minted — so none of its old ids can ever run a second time.
+//
+// The in-process TUI's client is never released, so none of this reaches it:
+// it stays live, and is never retired, for the engine's whole life.
 //
 // # What is stored, and what is left retryable
 //
@@ -199,17 +231,19 @@ import (
 // the fixed attempt rather than a stale ErrBadRequest.
 //
 // A stored result never shares memory with engine state or with another
-// caller's copy of the same result: cloneReceiptResult gives SubmitResult's
-// one pointer field (Queued *agent.QueuedPrompt — the only pointer among the
-// fifteen methods' results) a fresh copy on the way in and on every way back
-// out, so the queue's own row and every caller's view of it stay
-// independent.
+// caller's copy of the same result: cloneReceiptResult gives the two results
+// that hold memory of their own — SubmitResult's pointer field (Queued
+// *agent.QueuedPrompt) and ClearQueue's slice of removed rows — a fresh copy
+// on the way in and on every way back out, so the queue's own rows and every
+// caller's view of them stay independent.
 
 // receiptCap and receiptAge are the table's bound: the last 1024 results or
 // 10 minutes, whichever is less (plan 021 §3.8) — whichever bound an entry
 // crosses first evicts it. RetryHorizon reports both. No bound applies to the
-// CLIENTS the table keeps marks for; see the package doc above ("Bound and
-// eviction") for why (r26 finding 2).
+// LIVE clients the table keeps marks for (r26 finding 2); receiptAge is also
+// how long a RELEASED client must wait, holding no entry, before it is
+// retired. See the package doc above ("Bound and eviction", and "Clients:
+// released, claimed and retired").
 const (
 	receiptCap = 1024
 	receiptAge = 10 * time.Minute
@@ -261,12 +295,25 @@ type receipt struct {
 }
 
 // receiptClient is one minted client: the highest id of its the table has
-// evicted. No client is ever retired (r26 finding 2), so this is the entirety
-// of what a live client costs the table to keep.
+// evicted, and where it stands in its lifecycle (the package doc's "Clients:
+// released, claimed and retired"). No live client is ever retired (r26
+// finding 2); a released one is, once it has waited out receiptAge holding no
+// entry.
 type receiptClient struct {
 	// mark is the highest id of this client's the table has evicted — 0 until
-	// one is. Everything at or below it is unknowable, for good.
+	// one is. Everything at or below it is unknowable, for as long as the
+	// client exists.
 	mark uint64
+	// released says the client's connection has gone and nothing has claimed
+	// it since; releasedAt is when, on the table's own clock. Only a released
+	// client can be retired.
+	released   bool
+	releasedAt time.Time
+	// entries is how many entries of this client's byKey holds, OPEN or
+	// completed: raised where admit adds a reservation and lowered wherever one
+	// is removed (dropEntryLocked). It is what lets retirement see an open
+	// reservation — which is in byKey and never in order — without a scan.
+	entries int
 }
 
 // receiptHooks are the table's seams, nil in every build but a test's. They
@@ -296,10 +343,14 @@ type receiptTable struct {
 	order []receiptKey // COMPLETED entries, in completion order (oldest first)
 	byKey map[receiptKey]*receipt
 
-	// clients holds one entry for every client newClient has ever minted, for
-	// as long as the engine lives: no client is ever retired (r26 finding 2).
-	// clientSeq is the mint counter clientName spells.
+	// clients holds one entry for every client newClient has minted and the
+	// table has not retired: no live client is ever retired (r26 finding 2),
+	// and a released one only once it has waited out the age bound holding no
+	// entry. released is the subset that is released now, which is all the
+	// retirement pass has to look at. clientSeq is the mint counter clientName
+	// spells; it never goes back, so a retired name is never minted again.
 	clients   map[string]*receiptClient
+	released  map[string]*receiptClient
 	clientSeq uint64
 
 	cap int
@@ -311,10 +362,11 @@ type receiptTable struct {
 // never the session's event clock (which a test freezes and a golden pins).
 func newReceiptTable(h *receiptHooks) *receiptTable {
 	rt := &receiptTable{
-		byKey:   map[receiptKey]*receipt{},
-		clients: map[string]*receiptClient{},
-		cap:     receiptCap,
-		age:     receiptAge,
+		byKey:    map[receiptKey]*receipt{},
+		clients:  map[string]*receiptClient{},
+		released: map[string]*receiptClient{},
+		cap:      receiptCap,
+		age:      receiptAge,
 	}
 	if h != nil {
 		rt.hooks = *h
@@ -334,9 +386,10 @@ func (rt *receiptTable) horizon() RetryHorizon {
 }
 
 // newClient mints a client id unique in this table's life (Engine.NewClientID)
-// and starts keeping a mark for it, for as long as the engine lives: minting
-// never fails and no client is ever retired (the package doc's "Bound and
-// eviction", r26 finding 2).
+// and starts keeping a mark for it, for as long as the client is live: minting
+// never fails, and a client is retired only once it has been released and has
+// waited out the age bound holding no entry (the package doc's "Clients:
+// released, claimed and retired", r26 finding 2).
 func (rt *receiptTable) newClient() string {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -350,14 +403,53 @@ func (rt *receiptTable) newClient() string {
 // the only place a client id is built.
 func clientName(seq uint64) string { return "c-" + strconv.FormatUint(seq, 10) }
 
-// clientLocked is the client half of a command's identity: the live client's
-// own record, or ErrBadRequest for one this table never minted. No client is
-// ever retired, so a name this table did mint always has one.
+// clientLocked is the client half of a command's identity: the client's own
+// record, released or not, or ErrBadRequest for one this table never minted or
+// has retired — the table keeps nothing of a retired client, so it cannot tell
+// the two apart, and neither may run.
 func (rt *receiptTable) clientLocked(name string) (*receiptClient, error) {
 	if st, ok := rt.clients[name]; ok {
 		return st, nil
 	}
-	return nil, fmt.Errorf("%w: client %q was not minted by this engine", ErrBadRequest, name)
+	return nil, fmt.Errorf("%w: client %q is not a client of this engine", ErrBadRequest, name)
+}
+
+// release marks a client released (Control.ReleaseClient): retirable from now,
+// on the table's own clock, and otherwise exactly as it was. It is idempotent —
+// a second release keeps the first time, so releasing again never postpones a
+// retirement — and an id the table never minted or has retired is a no-op.
+// The age pass runs first, as it does for every other operation that looks a
+// client up.
+func (rt *receiptTable) release(name string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	now := rt.now()
+	rt.evictAgedLocked(now)
+	st, ok := rt.clients[name]
+	if !ok || st.released {
+		return
+	}
+	st.released, st.releasedAt = true, now
+	rt.released[name] = st
+}
+
+// claim takes a client back (Control.ClaimClient): released or not, it is live
+// from here and never retired while it stays so. The age pass runs FIRST, so a
+// client that has already met the retirement predicate is retired rather than
+// revived — whether or not any command happened to run the pass since — and
+// the answer is then ErrUnknownClient, as it is for an id this table never
+// minted.
+func (rt *receiptTable) claim(name string) error {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.evictAgedLocked(rt.now())
+	st, ok := rt.clients[name]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownClient, name)
+	}
+	st.released, st.releasedAt = false, time.Time{}
+	delete(rt.released, name)
+	return nil
 }
 
 // parseCommand is c's identity in the table, or the ErrBadRequest a malformed
@@ -397,6 +489,7 @@ func (rt *receiptTable) admit(key receiptKey, hash string) (found *receipt, mine
 	}
 	r := &receipt{hash: hash, done: make(chan struct{})}
 	rt.byKey[key] = r
+	st.entries++
 	return r, true, false, nil
 }
 
@@ -459,7 +552,23 @@ func (rt *receiptTable) publishLocked(key receiptKey, r *receipt, result any, er
 // eviction order, so the entry is all there is to remove.
 func (rt *receiptTable) forgetLocked(key receiptKey, r *receipt) {
 	if rt.byKey[key] == r {
-		delete(rt.byKey, key)
+		rt.dropEntryLocked(key)
+	}
+}
+
+// dropEntryLocked removes key's entry from byKey and lowers its client's count
+// of entries: the ONE place an entry leaves the table, so the count the
+// retirement predicate reads is always byKey's own. The client is always there
+// to lower — admit adds an entry only for a client it found, and a client is
+// retired only once its count is zero — so a missing one is a table that has
+// lost track, and nothing is guessed for it.
+func (rt *receiptTable) dropEntryLocked(key receiptKey) {
+	if _, ok := rt.byKey[key]; !ok {
+		return
+	}
+	delete(rt.byKey, key)
+	if st, ok := rt.clients[key.client]; ok {
+		st.entries--
 	}
 }
 
@@ -478,6 +587,13 @@ func (rt *receiptTable) pruneCountLocked() {
 // insertion order is completion order, and a clock that went backwards — only
 // a test's can — would otherwise leave a future-dated entry in front of
 // entries that really have expired (r24 finding 6).
+//
+// Then it retires every released client that has waited out the bound
+// holding no entry at all, open or completed — AFTER the entries, so a client
+// whose last answer ages out in this pass goes in this pass too (the package
+// doc's "Clients: released, claimed and retired"). It looks at the released
+// clients alone, so its cost is the number of connections that have gone and
+// not yet been retired, never the number ever minted.
 func (rt *receiptTable) evictAgedLocked(now time.Time) {
 	kept := rt.order[:0]
 	for _, key := range rt.order {
@@ -486,13 +602,19 @@ func (rt *receiptTable) evictAgedLocked(now time.Time) {
 			continue
 		}
 		if now.Sub(r.at) > rt.age {
-			delete(rt.byKey, key)
+			rt.dropEntryLocked(key)
 			rt.markEvictedLocked(key)
 			continue
 		}
 		kept = append(kept, key)
 	}
 	rt.order = kept
+	for name, st := range rt.released {
+		if st.entries == 0 && now.Sub(st.releasedAt) >= rt.age {
+			delete(rt.released, name)
+			delete(rt.clients, name)
+		}
+	}
 }
 
 // evictOldestLocked drops the table's oldest completed entry and remembers it
@@ -500,14 +622,15 @@ func (rt *receiptTable) evictAgedLocked(now time.Time) {
 func (rt *receiptTable) evictOldestLocked() {
 	key := rt.order[0]
 	rt.order = rt.order[1:]
-	delete(rt.byKey, key)
+	rt.dropEntryLocked(key)
 	rt.markEvictedLocked(key)
 }
 
 // markEvictedLocked records that key.id (and everything at or below it, by
 // construction: a client's ids are evicted in the order it minted them) is
-// now unknowable for key.client. A client that has been retired has no mark to
-// keep — every id of its is already ErrUnknownCommand.
+// now unknowable for key.client. A client the table no longer keeps has no mark
+// to keep, and nothing can name it (clientLocked); it cannot hold an entry to
+// evict in any case, since a client is retired only once it holds none.
 func (rt *receiptTable) markEvictedLocked(key receiptKey) {
 	st, ok := rt.clients[key.client]
 	if !ok {
@@ -525,8 +648,8 @@ func (rt *receiptTable) markEvictedLocked(key receiptKey) {
 // already dead — rather than an answer about the specific command: see the
 // package doc's "What is stored, and what is left retryable".
 //
-// It is DERIVED from classify (control.go), the one table Code is also built
-// from, so the two can never again disagree about one error the way r28
+// It is DERIVED from classify (control.go), the one table Code and Reason are
+// also built from, so they can never again disagree about one error the way r28
 // finding 1 found them disagreeing over agent.ErrNotInTurn and a Set's dead
 // ctx: a gate refusal is exactly the errors classify marks !stored.
 func gateRefusal(err error) bool {
@@ -621,11 +744,14 @@ func answerSpelling(a agent.AskAnswer) string {
 }
 
 // cloneReceiptResult gives v its own copy of anything a stored result would
-// otherwise share with the call that produced it or with another resend:
-// SubmitResult.Queued is the one pointer field among the fifteen commands'
-// results, so it is the one case handled here. Called once on the way into
-// the table and once on every way back out, so the table's own copy and
-// every caller's copy are all independent.
+// otherwise share with the call that produced it or with another resend. Two
+// of the fifteen commands' results hold memory of their own, and they are the
+// two cases here: SubmitResult.Queued, a pointer, and ClearQueue's slice of
+// removed rows, whose backing array a caller could write through (a
+// QueuedPrompt is a plain value, so copying the elements copies the row). Called
+// once on the way into the table and once on every way back out, so the
+// table's own copy and every caller's copy are all independent. A nil slice
+// stays nil and an empty one empty.
 func cloneReceiptResult[T any](v T) T {
 	switch r := any(v).(type) {
 	case SubmitResult:
@@ -634,6 +760,13 @@ func cloneReceiptResult[T any](v T) T {
 			r.Queued = &q
 		}
 		return any(r).(T)
+	case []agent.QueuedPrompt:
+		if r == nil {
+			return v
+		}
+		out := make([]agent.QueuedPrompt, len(r))
+		copy(out, r)
+		return any(out).(T)
 	default:
 		return v
 	}

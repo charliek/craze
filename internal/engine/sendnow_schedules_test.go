@@ -94,8 +94,8 @@ func TestAnArmedRowGoesExactlyOnce(t *testing.T) {
 		if _, err := r.e.Unqueue(Command{}, row.ID); !errors.Is(err, ErrUnknownRow) {
 			t.Fatalf("unqueue of a row the send took: %v", err)
 		}
-		if n, err := r.e.ClearQueue(Command{}); err != nil || n != 0 {
-			t.Fatalf("clear after the send took the row: %d, %v", n, err)
+		if rows, err := r.e.ClearQueue(Command{}); err != nil || len(rows) != 0 {
+			t.Fatalf("clear after the send took the row: %+v, %v", rows, err)
 		}
 		if _, err := r.e.Submit(Command{}, row.Text, SubmitQueue, row.ID); !errors.Is(err, ErrUnknownRow) {
 			t.Fatalf("a submit naming the row the send took: %v", err)
@@ -108,7 +108,7 @@ func TestAnArmedRowGoesExactlyOnce(t *testing.T) {
 		take func(*rig, agent.QueuedPrompt) error
 	}{
 		{"unqueue", func(r *rig, row agent.QueuedPrompt) error { return errRow(r.e.Unqueue(Command{}, row.ID)) }},
-		{"clear", func(r *rig, _ agent.QueuedPrompt) error { return errCount(r.e.ClearQueue(Command{})) }},
+		{"clear", func(r *rig, _ agent.QueuedPrompt) error { return errRows(r.e.ClearQueue(Command{})) }},
 	} {
 		t.Run("racing a "+tc.name, func(t *testing.T) {
 			// Both orders are legal; the invariant is not. Each round releases the

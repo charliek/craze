@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.detach.json",
+  "title": "session.detach",
+  "description": "Ends this connection's attachment. The reply is the attachment's terminal acknowledgement: nothing of it follows. Closing the connection ends it too; neither ever stops the session.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "subscription": {"type": "string"}
+      },
+      "required": ["sessionId", "subscription"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

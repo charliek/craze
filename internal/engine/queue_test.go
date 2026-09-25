@@ -51,12 +51,13 @@ func TestTheQueueVerbs(t *testing.T) {
 		t.Fatalf("unqueue answered %+v, want the row that went", gone)
 	}
 	r.wantRows("two, edited", "three")
-	n, err := r.e.ClearQueue(cmd(6))
+	rows, err := r.e.ClearQueue(cmd(6))
 	if err != nil {
 		t.Fatalf("clear: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("clear removed %d rows, want 2", n)
+	if len(rows) != 2 || rows[0].ID != two.ID || rows[0].Text != "two, edited" || rows[0].Version != 1 ||
+		rows[1].ID != three.ID || rows[1].Text != "three" {
+		t.Fatalf("clear answered %+v, want the two rows it removed, in queue order, as they stood", rows)
 	}
 	r.wantRows()
 
@@ -154,11 +155,11 @@ func TestTheQueueVerbsRefuseAnUnknownRow(t *testing.T) {
 	}
 }
 
-// errOf, errRow and errCount are the error half of a two-result verb, so a
+// errOf, errRow and errRows are the error half of a two-result verb, so a
 // table can hold one call per line.
-func errOf(_ SubmitResult, err error) error        { return err }
-func errRow(_ agent.QueuedPrompt, err error) error { return err }
-func errCount(_ int, err error) error              { return err }
+func errOf(_ SubmitResult, err error) error           { return err }
+func errRow(_ agent.QueuedPrompt, err error) error    { return err }
+func errRows(_ []agent.QueuedPrompt, err error) error { return err }
 
 // TestEditQueuedChecksTheVersion is A11's pair of first edits. Two clients read
 // the same new row — version 0, which is why nil and not zero is the wildcard —
@@ -251,7 +252,7 @@ func TestTheQueueVerbsRefuseAStoppedOrClosedEngine(t *testing.T) {
 				"queue":   errRow(r.e.Queue(Command{}, "after")),
 				"edit":    r.e.EditQueued(Command{}, row.ID, "after", nil),
 				"unqueue": errRow(r.e.Unqueue(Command{}, row.ID)),
-				"clear":   errCount(r.e.ClearQueue(Command{})),
+				"clear":   errRows(r.e.ClearQueue(Command{})),
 				"disarm":  r.e.Disarm(Command{}),
 			} {
 				if !errors.Is(err, ErrNotAccepting) || Code(err) != "not_accepting" {
@@ -359,7 +360,7 @@ func TestASaturatedOutboxRefusesTheQueueVerbsAndStillRequeuesSteers(t *testing.T
 		"queue":   errRow(e.Queue(Command{}, "two")),
 		"edit":    e.EditQueued(Command{}, row.ID, "rewritten", nil),
 		"unqueue": errRow(e.Unqueue(Command{}, row.ID)),
-		"clear":   errCount(e.ClearQueue(Command{})),
+		"clear":   errRows(e.ClearQueue(Command{})),
 		"sendNow": errOf(e.Submit(Command{}, "now", SubmitSendNow, "")),
 	} {
 		if !errors.Is(err, ErrUnavailable) || Code(err) != "unavailable" {

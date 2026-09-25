@@ -189,6 +189,46 @@ plan's §3.3: H6's children are depth 1; H7's native replay emits
 of this plan branches only after H5 PR 2 is on `main` (it is) — for
 `app.go`'s sake too, not only C8's `native.go`.
 
+## Plan 027 (S2) / harness H6 PR 3 and H7 — parallel run (2026-09-24)
+
+Plan 027 (S2: the control socket) runs in `../craze-plan027` while harness H6
+PR 3 (the admission fence, `ForeignTurnInfo.Reason`) finishes and H7 (native
+resume, no plan yet) follows. H6 PR 3 branches from `5901e4a` (H6 PR 2, #53,
+already on `main`) and will very likely land before S2 PR 1, which then
+rebases onto it. Where the two meet (plan
+`027-session-control-s2-socket.md` §2.11 and R6):
+
+| surface | this plan (S2) | harness | rule |
+|---|---|---|---|
+| `internal/agent/eventlog.go` | S2 PR 1 (C1: `committed`, `FlushSeq`, `Subscription.Cutoff`, `Subscription.Rest`) | untouched (H6 PR 3 edits neither `eventlog.go`, `receipts.go`, nor `classify`) | no conflict |
+| `internal/engine/{control,engine,receipts,index}.go` | S2 PR 1 | H6 PR 3 edits `engine.go` (the admission fence, SF-21) and `cancel.go`, in different hunks | second lander rebases (textual) |
+| `internal/engine/queue.go` | S2 PR 1's C2 makes `ClearQueue` return the removed rows | H6 PR 3 (X31) reconciles the admission fence in every engine queue verb — same functions | second lander rebases (textual); keep the fence reconcile **after** the removal |
+| `internal/agent/{session,eventcodec}.go` | S2 PR 1's C4 schema needs `foreignTurn.reason` (an open string, known values `""` and `subagent_wake`) | H6 PR 3 (`ForeignTurnInfo.Reason`, the `wireForeignTurn` twin) | added by whichever lands second; `Capabilities.SubagentBackground` → wire name `subagentBackground` (every `agent.Capabilities` field maps to a wire capability, enforced by C6's reflection test) |
+| `internal/engine/subagent.go`, `internal/harness/**`, `native.go`, `internal/tui/subcancel.go` | S2 maps `Control.CancelSubagent` to `session.subagent.cancel` (C6) and moves the TUI's stop to a fire-and-forget `tea.Cmd` in PR 3 (C23) | harness (H6) owns these | no conflict |
+| `internal/tui/**` | S2 PR 1 touches only `stub.go` (C9's `InstallOnStart` option, default off); PR 3 is broad (the command gate, the mirror) | untouched by H6 PR 3 | second lander rebases on PR 3 |
+| `internal/cli/tui.go` | S2 PR 2 (the SQ16 claim) and PR 4 | H7, if it touches `--continue` (no H7 plan yet; §3.9's claim covers a native `--continue` for free) | second lander rebases, once H7 has a plan |
+| new packages `internal/{protocol,control,remote,fakehost,rundir,backend}` | S2 only | untouched | no conflict |
+| `discovery/session-control/13-follow-ups.md` | C0 marks rows "taken by Plan 027" | H6 PR 3 adds a new row, SF-47 (undelivered background usage journalled at `Close` as a `subagent_usage` DiagNote) | textual; second lander rebases |
+
+**H6 PR 3's consequences for S2** (reviewed by session control 2026-09-24,
+approved): the engine calls a third thing on the session under `e.mu` — the
+fence, leaf-on-`s.mu` and non-blocking; during a native wake the engine's
+activity reads idle, so the session row and `session.state` carry
+`foreignTurn` (§3.3). The fence is also called from every queue verb, still
+leaf-on-`s.mu` and non-blocking under `e.mu`. And (X32) a drained row refused
+with `ErrForeignTurn` is restored at the head of the queue with its own id,
+version, and time (`PromptQueue.Restore`), as `queued` at position 0 after its
+`sent`, in one batch — so a `sent` row is no longer final for a client, and
+each restoration arms a paced recheck (the driver's retry tick). X31's
+accepted residual: rows added by a queue verb before a wake started don't
+raise the fence, so a back-to-back wake can race their drain; it heals itself
+(refusal → restore → paced recheck), and S2 makes it reachable from a second
+client's `session.queue.add` — two-client queue tests and V8's wake golden
+wait for the drain rather than assert its order across back-to-back wakes.
+
+**Rule:** second lander rebases; both sessions announce opens and merges;
+each S2 PR branches from a freshly fetched `origin/main`.
+
 ## Practical notes
 
 - This folder is on `main` from `f943472` (2026-09-19); a harness worktree

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.state.json",
+  "title": "session.state",
+  "description": "The engine's state projection and the host's live settings. A read, not a cut through the stream: a client folds events for order and reads this for where things stand.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "activity": {"$ref": "info.json#/$defs/activity"},
+        "foreignTurn": {"type": "boolean", "description": "The agent is running a turn of its own."},
+        "turn": {"type": "string", "description": "The current turn's id, \"\" when none is."},
+        "waiting": {"type": "boolean", "description": "The current turn's claim was refused by a foreign turn and waits to be claimed again; false does not mean running."},
+        "sendNow": {"$ref": "#/$defs/armedSend"},
+        "queue": {"type": "array", "items": {"$ref": "event.json#/$defs/queued"}, "description": "The message queue, in send order."},
+        "pendingAsks": {"type": "integer", "minimum": 0},
+        "headAsk": {"$ref": "info.json#/$defs/headAsk"},
+        "err": {"type": "string", "description": "The failure an activity of error stands on, \"\" when none."},
+        "startFailed": {"type": "boolean"},
+        "prompted": {"type": "boolean", "description": "A turn has been started at all."},
+        "cancelled": {"type": "boolean", "description": "The last turn to settle ended cancelled."},
+        "settings": {"$ref": "#/$defs/settings"}
+      },
+      "required": ["activity", "foreignTurn", "turn", "waiting", "queue", "pendingAsks", "err", "startFailed", "prompted", "cancelled", "settings"],
+      "additionalProperties": false
+    },
+    "armedSend": {
+      "description": "The armed send-now, absent when nothing is armed: its text, the queued row it re-takes (\"\" for text the client holds itself), the turn it replaces, and the command that armed it (clientId/commandId).",
+      "type": "object",
+      "properties": {
+        "text": {"type": "string"},
+        "fromRow": {"type": "string"},
+        "turn": {"type": "string"},
+        "cause": {"type": "string"}
+      },
+      "required": ["text", "fromRow", "turn", "cause"],
+      "additionalProperties": false
+    },
+    "settings": {
+      "description": "The session's live settings: the current model and mode (\"\" when none), and the config options as the event codec's config section.",
+      "type": "object",
+      "properties": {
+        "model": {"type": "string"},
+        "mode": {"type": "string"},
+        "config": {"$ref": "event.json#/$defs/config"}
+      },
+      "required": ["model", "mode", "config"],
+      "additionalProperties": false
+    }
+  }
+}
