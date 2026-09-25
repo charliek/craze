@@ -852,6 +852,19 @@ func (c *Client) PID() int {
 	return c.child.PID()
 }
 
+// Exited is closed once the reaper has recorded the agent's exit: the point
+// from which Close's probe reports ErrAgentExited. The OS losing the process
+// is not that point — cmd.Wait's own wait reaps it, and the reaper closes this
+// only after cmd.Wait has returned and the goroutine has run again, so
+// kill(pid, 0) failing proves nothing about it. nil, never closed, for an
+// in-process test client with no child.
+func (c *Client) Exited() <-chan struct{} {
+	if c.child == nil {
+		return nil
+	}
+	return c.child.waitCh
+}
+
 // onRequest and onNotify route the cursor extension methods identically; the
 // only difference is that a request gets a reply and a notification does not.
 //
