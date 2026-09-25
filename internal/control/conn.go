@@ -59,8 +59,8 @@ type conn struct {
 	// no more requests, and the connection closes once nothing admitted is
 	// unwritten and no attachment is open. endReason is the close's reason.
 	// replaced says its engine was replaced (replace): it closes as soon as
-	// its attachment's final reset is written, whatever is still in flight — a
-	// handler's reply then goes nowhere (§3.6).
+	// its attachment's terminal acknowledgement is written, whatever is still
+	// in flight — a handler's reply then goes nowhere (§3.6).
 	ended     bool
 	endReason string
 	replaced  bool
@@ -69,8 +69,9 @@ type conn struct {
 	// (SQ14). nextSub numbers them: s-1, s-2, …
 	att     *attachment
 	nextSub int
-	// unwritten is how many of an attachment's final resets are queued and not
-	// yet on the socket: the connection stays open for them (idleLocked).
+	// unwritten is how many terminal acknowledgements of attachments — a final
+	// reset, a detach's reply — are queued and not yet on the socket: the
+	// connection stays open for them (idleLocked, replacedDoneLocked).
 	unwritten int
 }
 
@@ -230,11 +231,13 @@ func (c *conn) endLocked(reason string) {
 // connection admits nothing more; an attachment still open ends with
 // reset{session_replaced} (its subscription is closed here, and its forwarder
 // sends the reset — whatever reset it was about to send: replaced is read in
-// the same conn.mu section that queues it, forward.go's queueReset); and the
-// connection closes as soon as that reset is on the socket — at once when
-// there is none. A handler still running keeps the engine it captured, and its
-// reply goes nowhere: once the reset is queued the outbox is sealed, and every
-// later line is dropped at its push (astra r8 7).
+// the same conn.mu section that queues it, forward.go's queueReset) — unless a
+// detach has claimed the attachment's end, whose reply is its acknowledgement
+// instead; and the connection closes as soon as that acknowledgement is on the
+// socket (astra r10 8) — at once when there is none. A handler still running
+// keeps the engine it captured, and its reply goes nowhere: once the reset is
+// queued the outbox is sealed, and every later line is dropped at its push
+// (astra r8 7).
 func (c *conn) replace() {
 	c.ending.Store(true)
 	c.mu.Lock()
@@ -257,7 +260,7 @@ func (c *conn) replace() {
 }
 
 // settle closes the connection if nothing is left of it: replaced, with its
-// attachment's final reset written (replacedDoneLocked), or idle
+// attachment's terminal acknowledgement written (replacedDoneLocked), or idle
 // (idleLocked). Every change either predicate reads is followed by a settle.
 func (c *conn) settle() {
 	c.mu.Lock()
@@ -295,14 +298,15 @@ func (c *conn) idleLocked() bool {
 
 // subscriptionLiveLocked reports a live subscription on the connection: an
 // attachment that is not yet closed — pending (its attach not yet answered),
-// live, or closing (§3.7's lifecycle) — or the final reset of one still
-// queued for the socket.
+// live, or closing (§3.7's lifecycle) — or the terminal acknowledgement of one
+// (its final reset, a detach's reply) still queued for the socket.
 func (c *conn) subscriptionLiveLocked() bool {
 	return (c.att != nil && c.att.state != attClosed) || c.unwritten > 0
 }
 
 // replacedDoneLocked reports a replaced connection with nothing left to send:
-// no attachment open, and no final reset still queued.
+// no attachment open, and no terminal acknowledgement — a final reset, a
+// detach's reply — still queued (astra r10 8).
 func (c *conn) replacedDoneLocked() bool {
 	return c.replaced && (c.att == nil || c.att.state == attClosed) && c.unwritten == 0
 }
@@ -316,8 +320,8 @@ func (c *conn) replacedDoneLocked() bool {
 // reply barrier sees a position only once its event is queued. admit, checked
 // first in the same section, may refuse the line: its error is returned. Room
 // is never waited for under conn.mu: without it enqueue waits outside it
-// (outbox.await) until room is made, ctx ends, or stop closes (errStopped),
-// then tries again, admit included.
+// (outbox.await) until room is made, ctx ends, or stop closes (errStopped,
+// which wins over room), then tries again, admit included.
 func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, done func(), admit func() error, commit func()) error {
 	for {
 		var room <-chan struct{}
@@ -362,6 +366,9 @@ func (c *conn) write() {
 		ln, ok := c.out.next()
 		if !ok {
 			return
+		}
+		if h := c.srv.hooks.beforeWrite; h != nil {
+			h(ln.b)
 		}
 		err := c.writeLine(ln.b)
 		c.out.written(len(ln.b))
@@ -584,23 +591,38 @@ func (o *outbox) push(ctx context.Context, b []byte, done func()) error {
 
 // await waits, after an offer that found no room, until room is made (and the
 // caller offers again), ctx ends, or stop closes (errStopped). A stop already
-// closed never waits; a nil one never ends the wait. It holds no lock.
+// closed never waits; a nil one never ends the wait. Stop wins over room: a
+// wait that finds room made and stop closed — both ready at once, of which
+// select picks either — is errStopped, so a line whose stop has closed by the
+// time its wait ends is not offered again (a forwarder's blocked event once
+// its subscription has ended, astra r10 4). It holds no lock.
 func (o *outbox) await(ctx context.Context, stop, room <-chan struct{}) error {
-	select {
-	case <-stop:
+	if isClosed(stop) {
 		return errStopped
-	default:
 	}
 	if o.full != nil {
 		o.full()
 	}
 	select {
 	case <-room:
+		if isClosed(stop) {
+			return errStopped
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-stop:
 		return errStopped
+	}
+}
+
+// isClosed reports whether ch has closed, without waiting; never for nil.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -469,10 +469,15 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	line, _ := c.responseLine(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: req.id, Result: empty})
 	// The reply is queued and the attachment closed in one conn.mu section
 	// (conn.enqueue): an attach sent the instant the reply is read finds the
-	// place free.
-	if line == nil || c.enqueue(c.ctx, nil, line, c.release, nil, func() {
+	// place free. The attachment's terminal acknowledgement, it counts as a
+	// final reset does (unwritten) until it is on the socket (detachWritten):
+	// an engine replaced while this detach held the attachment's end — its
+	// forwarder, stopped by the detach, queues no reset — closes the connection
+	// only once this reply is written (astra r10 8).
+	if line == nil || c.enqueue(c.ctx, nil, line, c.detachWritten, nil, func() {
 		a.state = attClosed
 		a.changedLocked()
+		c.unwritten++
 	}) != nil {
 		c.markClosed(a)
 		return outcome{}
@@ -482,6 +487,16 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	}
 	c.settle()
 	return replied()
+}
+
+// detachWritten is a detach's reply on the socket, or a write that failed: its
+// request's slot is given back, and the connection may close now if nothing
+// else is left of it (release settles).
+func (c *conn) detachWritten() {
+	c.mu.Lock()
+	c.unwritten--
+	c.mu.Unlock()
+	c.release()
 }
 
 // awaitClosed waits until a is closed; false if the connection closes first.

@@ -213,6 +213,9 @@ type hooks struct {
 	// resetWritten runs on the writer once a final reset is on the socket,
 	// before the connection may close for it.
 	resetWritten func()
+	// beforeWrite runs on the writer once it has taken line from the queue,
+	// just before it writes it.
+	beforeWrite func(line []byte)
 	// beforeReply runs on a handler just before it queues its reply (not
 	// attach's or detach's, which queue their own), with the method.
 	beforeReply func(method string)
@@ -301,7 +304,8 @@ func (s *Server) newToken() (string, error) {
 // engine's tokens stay in the index as the PREVIOUS generation, and anything
 // older is dropped (bind.go, "The token index"). Every connection admits
 // nothing more from that moment; an attached one is sent
-// reset{session_replaced} first and closed once the reset is on the socket
+// reset{session_replaced} first — or the reply of a detach that had already
+// claimed its attachment's end — and closed once that is on the socket
 // (conn.replace), every other one at once. A handler already running keeps
 // the engine it captured at dispatch, and its reply goes nowhere.
 //

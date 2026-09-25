@@ -3,6 +3,7 @@ package control_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -183,7 +184,10 @@ func TestAReplyFollowsItsEvents(t *testing.T) {
 // stall is a host whose client never reads, attached with a budget of 4
 // records, and whose forwarder is blocked waiting for room in a full writer
 // queue: 1 MiB records were published, each taken by the forwarder before the
-// next, until the forwarder was seen waiting for room.
+// next, until the forwarder was seen waiting for room. With a hold, the first
+// push that finds no room — the forwarder's — is held in its wait
+// (control.TestHooks.OutboxFull: past its first look at its stop channel, and
+// before the select on room and stop) until the hold is released.
 type stall struct {
 	h *host
 	a *client
@@ -195,20 +199,29 @@ type stall struct {
 	n      int
 }
 
-func newStall(t *testing.T) *stall {
+func newStall(t *testing.T, held *hold) *stall {
 	t.Helper()
 	var full atomic.Int32
 	var taken atomic.Uint64
 	s := &stall{resets: newSignal()}
-	s.h = newHost(t, withHooks(control.TestHooks{
-		OutboxFull:    func() { full.Add(1) },
+	var opts []hostOpt
+	if held != nil {
+		opts = append(opts, withOnClose(held.release))
+	}
+	s.h = newHost(t, append(opts, withHooks(control.TestHooks{
+		OutboxFull: func() {
+			full.Add(1)
+			if held != nil {
+				held.wait()
+			}
+		},
 		BeforeForward: func(_ string, seq uint64) { taken.Store(seq) },
 		AckQueued: func(_, method string) {
 			if method == protocol.NotifyReset {
 				s.resets.fire(0)
 			}
 		},
-	}))
+	}))...)
 	s.a = s.h.dial()
 	s.a.sayHello(nil)
 	p := attachParams(s.h)
@@ -281,7 +294,7 @@ func (s *stall) events(t *testing.T) (protocol.ResetParams, uint64) {
 // and then the reset; the connection goes on. Latency is V7's, never an
 // assertion here.
 func TestAStalledClientIsResetWithoutDelayingTheAgent(t *testing.T) {
-	s := newStall(t)
+	s := newStall(t, nil)
 	for stuck := 0; s.h.dropped() == 0; stuck++ {
 		if stuck == 16 {
 			t.Fatal("the stalled subscription was never dropped")
@@ -313,7 +326,7 @@ func TestAStalledClientIsResetWithoutDelayingTheAgent(t *testing.T) {
 // the close left undelivered still go out, waiting for room as the client
 // reads, then reset{session_closed}, and the host closes the connection.
 func TestAStalledClientStillGetsTheClosingRecords(t *testing.T) {
-	s := newStall(t)
+	s := newStall(t, nil)
 	s.publish(t)
 	s.publish(t)
 	head := s.h.head()
@@ -328,6 +341,45 @@ func TestAStalledClientStillGetsTheClosingRecords(t *testing.T) {
 		t.Fatalf("the events end at %d, before the head %d at the close (blocked on %d)", last, head, s.blocked)
 	}
 	s.a.expectClosed()
+}
+
+// TestAnEndedSubscriptionsBlockedEventStaysUnsent (§3.7, astra r10 4): the
+// forwarder blocked for room is held inside its wait — past its first look at
+// the subscription's Done, before the select on room and Done — while the
+// subscription is dropped slow_consumer (Done closes) and the client reads the
+// whole queue (room is made). Let go, the forwarder finds both ready, and the
+// end wins: the event it was blocked on is not sent — reset{slow_consumer}
+// follows the last event queued before it — and the connection goes on.
+func TestAnEndedSubscriptionsBlockedEventStaysUnsent(t *testing.T) {
+	held := newHold()
+	s := newStall(t, held)
+	await(t, held.entered, "the forwarder to be held in its wait for room")
+	for stuck := 0; s.h.dropped() == 0; stuck++ {
+		if stuck == 16 {
+			t.Fatal("the stalled subscription was never dropped")
+		}
+		s.publish(t)
+	}
+	// Every event queued before the blocked one is read, so the writer has
+	// written them — each 1 MiB, of a 32 MiB queue — and made room.
+	for next := s.r.After.Seq + 1; next < s.blocked; next++ {
+		if seq, _ := eventOf(t, s.a.anyNote()); seq != next {
+			t.Fatalf("event %d, want %d: a gap", seq, next)
+		}
+	}
+	held.release()
+	switch n := s.a.anyNote(); n.Method {
+	case protocol.NotifyReset:
+		if rp := paramsOf[protocol.ResetParams](t, n); rp != (protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSlowConsumer}) {
+			t.Fatalf("the reset: %+v", rp)
+		}
+	case protocol.NotifyEvent:
+		seq, _ := eventOf(t, n)
+		t.Fatalf("event %d sent after its subscription ended (the forwarder was blocked on %d)", seq, s.blocked)
+	default:
+		t.Fatalf("want reset{slow_consumer}; got %s %s", n.Method, n.Params)
+	}
+	ok[protocol.StateResult](t, s.a.call(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(s.h)}))
 }
 
 // TestABarrierAwaitsAClosingAttachment (A12; §3.7, astra r2 15, r3 15): a
@@ -1013,6 +1065,54 @@ func TestNothingIsWrittenAfterSessionReplaced(t *testing.T) {
 			a.expectClosed()
 		})
 	}
+}
+
+// TestAReplacementDuringADetachStillAnswersIt (§3.6, §3.7; astra r10 8): a
+// detach claims the attachment's end, and the engine is replaced before the
+// detach queues its reply. The forwarder, stopped by the detach, queues no
+// reset, so the detach's reply — the attachment's terminal acknowledgement —
+// is the last line the replaced connection owes, and it closes only once that
+// reply is on the socket: with the writer held off the reply until the
+// detach's handler has returned (and settled), the client still reads {} and
+// then the close, and no reset{session_replaced}, which a client that
+// detached is not owed.
+func TestAReplacementDuringADetachStillAnswersIt(t *testing.T) {
+	detaching, writer := newHold(), newHold()
+	var detach atomic.Value // the detach's request id, once sent
+	h := newHost(t, withOnClose(detaching.release), withOnClose(writer.release), withHooks(control.TestHooks{
+		Detaching: func(string) { detaching.wait() },
+		BeforeWrite: func(line []byte) {
+			var r struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			if id, _ := detach.Load().(string); id != "" && json.Unmarshal(line, &r) == nil && r.Method == "" && string(r.ID) == id {
+				writer.wait()
+			}
+		},
+	}))
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+	id, line := a.encode(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
+	detach.Store(id)
+	a.write(line)
+	await(t, detaching.entered, "the detach to claim the attachment's end")
+	h.srv.SetEngine(startedEngine(t))
+	detaching.release()
+	// The writer cannot put the reply on the socket before the handler that
+	// queued it has returned: whatever that handler's settle decided about the
+	// connection, it decided with the reply unwritten.
+	waitFor(t, "the detach's handler to return", func() bool { return h.srv.Handlers() == 0 })
+	writer.release()
+	ok[protocol.Empty](t, a.reply(id))
+	select {
+	case <-writer.entered:
+	default:
+		t.Fatal("the premise: the writer was never held on the detach's reply")
+	}
+	a.expectClosed()
 }
 
 // TestADetachBeforeTheCommandOwesItNothing (§3.6, §3.7; astra r8 3): the other

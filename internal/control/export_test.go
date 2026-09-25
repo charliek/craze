@@ -58,6 +58,10 @@ type TestHooks struct {
 	// before the connection may close for it: a test that blocks in it holds
 	// the connection open with the reset written.
 	ResetWritten func()
+	// BeforeWrite runs on the writer once it has taken line from the queue,
+	// just before it writes it: a test that blocks in it holds the line off
+	// the socket, and the writer with it.
+	BeforeWrite func(line []byte)
 	// BeforeReply runs on a handler just before it queues its reply (not
 	// attach's or detach's), with the method.
 	BeforeReply func(method string)
@@ -86,6 +90,7 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		beforeReset:    h.BeforeReset,
 		ackQueued:      h.AckQueued,
 		resetWritten:   h.ResetWritten,
+		beforeWrite:    h.BeforeWrite,
 		beforeReply:    h.BeforeReply,
 		detaching:      h.Detaching,
 	}

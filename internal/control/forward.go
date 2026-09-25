@@ -29,9 +29,10 @@ import (
 // socket backs the subscription up in the log, and the log drops it
 // slow_consumer without ever waiting: a publish only offers a record to a
 // subscription's buffer (agent.EventLog). A wait for room also ends when the
-// subscription does (Subscription.Done, astra r8 6): a full queue never hides
-// the end from the forwarder, which then drains Records to its close and reads
-// why it ended. The final reset uses the queue's 1 KiB reserve (queueReset),
+// subscription does (Subscription.Done, astra r8 6), and the end wins over
+// room made by then (outbox.await, astra r10 4): a full queue never hides the
+// end from the forwarder, which then drains Records to its close and reads why
+// it ended. The final reset uses the queue's 1 KiB reserve (queueReset),
 // so it is always queued at once.
 //
 // How a subscription ended decides its reset (§3.4's table):

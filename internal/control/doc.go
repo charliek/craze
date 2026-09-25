@@ -45,10 +45,11 @@
 // reset{session_closed}, the connection admits nothing more and closes once
 // what it owes is written. Replacing the engine (Server.SetEngine) is not: an
 // attached connection is sent reset{session_replaced} — whatever reset its
-// forwarder was about to send — and closed as soon as that is written, every
-// other one at once, and a handler still running then replies to nobody: the
-// replacement's reset seals the outbox, which admits no line after it
-// (conn.replace).
+// forwarder was about to send; a detach's reply instead when that detach had
+// already claimed the attachment's end — and closed as soon as that is
+// written, every other one at once, and a handler still running then replies
+// to nobody: the replacement's reset seals the outbox, which admits no line
+// after it (conn.replace).
 //
 // # Client ids and the binding table (bind.go)
 //
