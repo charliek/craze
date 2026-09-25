@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/journal"
 )
@@ -579,4 +580,108 @@ func TestRestIsACopyEveryTime(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestDoneClosesWithTheTerminalCause: Done is open while the subscription runs
+// and closes the moment its terminal cause is set, whatever its reader does —
+// here there is none, and the owner is held at its start, so Records is still
+// open and Err still nil when Done has closed — for each way a subscription
+// ends: the publish that overflowed it, a detach, the log's Close. Once the
+// owner goes on, Records closes and Err is the cause.
+func TestDoneClosesWithTheTerminalCause(t *testing.T) {
+	// held is a log whose owners wait at their start until the test lets them
+	// go, or ends.
+	held := func(t *testing.T) (*EventLog, func()) {
+		t.Helper()
+		l := newTestLog(t, EventLogOptions{})
+		resume := make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		t.Cleanup(release) // before the log's Close, which waits for the owner
+		l.hooks = &logHooks{ownerStarts: func(<-chan struct{}) { <-resume }}
+		keepDrained(t, l)
+		return l, release
+	}
+	isDone := func(s *Subscription) bool {
+		select {
+		case <-s.Done():
+			return true
+		default:
+			return false
+		}
+	}
+	// endedUnread fails unless s is Done with its owner still held: Err nil,
+	// and Records open with nothing on it.
+	endedUnread := func(t *testing.T, s *Subscription) {
+		t.Helper()
+		if !isDone(s) {
+			t.Fatal("Done is open after the subscription's terminal cause was set")
+		}
+		if err := s.Err(); err != nil {
+			t.Fatalf("Err is %v with the owner held: the premise is broken", err)
+		}
+		select {
+		case r, ok := <-s.Records():
+			t.Fatalf("Records handed over seq %d (open %v) with the owner held", r.Seq, ok)
+		default:
+		}
+	}
+	finished := func(t *testing.T, s *Subscription, release func(), want error) {
+		t.Helper()
+		release()
+		readAll(t, s)
+		if err := s.Err(); !errors.Is(err, want) {
+			t.Fatalf("the subscription ended with %v, want %v", err, want)
+		}
+	}
+
+	t.Run("the publish that overflowed it", func(t *testing.T) {
+		l, release := held(t)
+		s := mustSubscribe(t, l, SubscribeOptions{MaxItems: 2})
+		for i := 1; l.Health().SubscribersDropped == 0; i++ {
+			if i > 8 {
+				t.Fatal("the subscription was never dropped")
+			}
+			if isDone(s) {
+				t.Fatalf("Done closed before the publish that overflowed it (%d)", i)
+			}
+			publishWithin(t, l, textEvent(fmt.Sprint(i)))
+		}
+		endedUnread(t, s)
+		finished(t, s, release, ErrSlowConsumer)
+	})
+
+	t.Run("a detach", func(t *testing.T) {
+		l, release := held(t)
+		s := mustSubscribe(t, l, SubscribeOptions{})
+		publishRun(t, l, 1, 2)
+		if isDone(s) {
+			t.Fatal("Done is closed on a running subscription")
+		}
+		s.Close()
+		endedUnread(t, s)
+		finished(t, s, release, ErrClosed)
+	})
+
+	t.Run("the log's Close", func(t *testing.T) {
+		l, release := held(t)
+		s := mustSubscribe(t, l, SubscribeOptions{})
+		publishRun(t, l, 1, 2)
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			l.Close(context.Background())
+		}()
+		select {
+		case <-s.Done():
+		case <-time.After(logWatchdog):
+			t.Fatal("Done did not close with the log's Close")
+		}
+		endedUnread(t, s)
+		finished(t, s, release, ErrClosed)
+		select {
+		case <-closed:
+		case <-time.After(logWatchdog):
+			t.Fatal("the log's Close did not return")
+		}
+	})
 }

@@ -22,9 +22,14 @@ func (c *conn) handle(b *bound, info protocol.MethodInfo, req *request) {
 		// the request's admission slot.
 	case !o.ok:
 		c.drop()
-	case o.perr != nil:
-		c.replyErr(req.id, o.perr)
 	default:
+		if h := c.srv.hooks.beforeReply; h != nil {
+			h(req.method)
+		}
+		if o.perr != nil {
+			c.replyErr(req.id, o.perr)
+			return
+		}
 		c.reply(req.id, o.res)
 	}
 }

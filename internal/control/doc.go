@@ -44,9 +44,11 @@
 // (Server.watchEngine), or an attachment has delivered its final records and
 // reset{session_closed}, the connection admits nothing more and closes once
 // what it owes is written. Replacing the engine (Server.SetEngine) is not: an
-// attached connection is sent reset{session_replaced} and closed as soon as
-// that is written, every other one at once, and a handler still running then
-// replies to nobody (conn.replace).
+// attached connection is sent reset{session_replaced} — whatever reset its
+// forwarder was about to send — and closed as soon as that is written, every
+// other one at once, and a handler still running then replies to nobody: the
+// replacement's reset seals the outbox, which admits no line after it
+// (conn.replace).
 //
 // # Client ids and the binding table (bind.go)
 //
@@ -75,8 +77,15 @@
 //     flag; it is never held with bindMu, across I/O, or across a close.
 //   - conn.mu guards a connection's admission count, half-close and end
 //     state, and its attachment's lifecycle and position; the outbox has its
-//     own mutex. Neither is held across a socket call, and neither is held
-//     while taking any other lock (a subscription is closed outside it).
+//     own mutex. conn.mu → outbox.mu is the one edge between them: a line
+//     that makes a lifecycle step visible — an attach reply, a detach reply,
+//     a final reset, an event and the position it moves — is offered to the
+//     outbox under conn.mu, in the same section as its step (conn.enqueue), so
+//     no reader of that state is ever behind the wire (astra r8). An offer
+//     never waits: room is waited for with neither lock held. Neither is held
+//     across a socket call, the outbox's never while taking another lock, and
+//     conn.mu while taking none but the outbox's (a subscription is closed
+//     outside it).
 //
 // No lock is ever held across socket I/O or a blocking engine call.
 //

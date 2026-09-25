@@ -229,9 +229,12 @@ func (c *conn) endLocked(reason string) {
 // replace is its engine being replaced (§3.6, astra 14; Server.SetEngine): the
 // connection admits nothing more; an attachment still open ends with
 // reset{session_replaced} (its subscription is closed here, and its forwarder
-// sends the reset); and the connection closes as soon as that reset is on the
-// socket — at once when there is none. A handler still running keeps the
-// engine it captured, and its reply goes nowhere.
+// sends the reset — whatever reset it was about to send: replaced is read in
+// the same conn.mu section that queues it, forward.go's queueReset); and the
+// connection closes as soon as that reset is on the socket — at once when
+// there is none. A handler still running keeps the engine it captured, and its
+// reply goes nowhere: once the reset is queued the outbox is sealed, and every
+// later line is dropped at its push (astra r8 7).
 func (c *conn) replace() {
 	c.ending.Store(true)
 	c.mu.Lock()
@@ -302,6 +305,41 @@ func (c *conn) subscriptionLiveLocked() bool {
 // no attachment open, and no final reset still queued.
 func (c *conn) replacedDoneLocked() bool {
 	return c.replaced && (c.att == nil || c.att.state == attClosed) && c.unwritten == 0
+}
+
+// enqueue queues line for the writer in ONE conn.mu section with commit — the
+// lifecycle step the line makes visible (an attachment made live by its attach
+// reply, closed by its detach reply; a forwarder's position moved by an event)
+// — so no holder of conn.mu ever sees the line queued without its step, or the
+// step without its line (astra r8): a client that acts on a line the instant
+// it reads it — detaches, re-attaches — finds the step already taken, and a
+// reply barrier sees a position only once its event is queued. admit, checked
+// first in the same section, may refuse the line: its error is returned. Room
+// is never waited for under conn.mu: without it enqueue waits outside it
+// (outbox.await) until room is made, ctx ends, or stop closes (errStopped),
+// then tries again, admit included.
+func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, done func(), admit func() error, commit func()) error {
+	for {
+		var room <-chan struct{}
+		var err error
+		c.mu.Lock()
+		if admit != nil {
+			err = admit()
+		}
+		if err == nil {
+			room, err = c.out.offer(line, done, ordinaryLimit, false)
+			if err == nil && commit != nil {
+				commit()
+			}
+		}
+		c.mu.Unlock()
+		if !errors.Is(err, errNoRoom) {
+			return err
+		}
+		if err := c.out.await(ctx, stop, room); err != nil {
+			return err
+		}
+	}
 }
 
 // ------------------------------------------------------------------ writer
@@ -448,17 +486,26 @@ type outLine struct {
 
 // outbox is a connection's byte-counted FIFO (§3.7, astra 10). Every line
 // queued counts against WriterQueueBytes until the writer has written it;
-// ResetReserveBytes of that is held back for a final reset (pushReserved,
-// forward.go), so a reset always fits; a line that fits an empty queue always gets
-// in; and every wait ends when the connection closes.
+// ResetReserveBytes of that is held back for a final reset (offer with the
+// whole budget, forward.go's queueReset), so a reset always fits; a line that
+// fits an empty queue always gets in; and every wait ends when the connection
+// closes.
+//
+// A SEALED outbox has queued its connection's last line — the
+// reset{session_replaced} of an engine's replacement (plan 027 §3.6, astra r8
+// 7) — and admits nothing more: every later line, a handler's reply included,
+// is dropped at the push, whoever pushes it. What it already holds is still
+// written.
 type outbox struct {
 	mu     sync.Mutex
 	q      []outLine
 	bytes  int
 	high   int
 	closed bool
+	sealed bool
 	// ready wakes the writer (one slot); room is closed and replaced whenever
-	// bytes go down or the outbox closes, waking everyone waiting for room.
+	// bytes go down or the outbox closes or seals, waking everyone waiting for
+	// room.
 	ready chan struct{}
 	room  chan struct{}
 	// full is a test's barrier (hooks.outboxFull), nil in production.
@@ -469,53 +516,98 @@ func newOutbox(full func()) *outbox {
 	return &outbox{ready: make(chan struct{}, 1), room: make(chan struct{}), full: full}
 }
 
-// errOutboxClosed is a push to a closed connection: the line is dropped.
-var errOutboxClosed = errors.New("control: the connection is closed")
+var (
+	// errOutboxClosed is a push to a closed connection: the line is dropped.
+	errOutboxClosed = errors.New("control: the connection is closed")
+	// errOutboxSealed is a push after the connection's last line is queued:
+	// the line is dropped.
+	errOutboxSealed = errors.New("control: the connection's last line is queued")
+	// errNoRoom is an offer the budget cannot take yet (offer).
+	errNoRoom = errors.New("control: no room in the writer queue")
+	// errStopped is a wait for room given up because its stop channel closed
+	// (await).
+	errStopped = errors.New("control: the wait for room was stopped")
+	// errGone is a line an attachment may no longer queue (conn.enqueue's
+	// admit): its connection is closing or replaced, or it was detached.
+	errGone = errors.New("control: the attachment queues nothing more")
+)
 
-// push queues b, waiting for room within the budget less the reset reserve.
-// It fails, having queued nothing, once ctx ends or the outbox closes.
+// ordinaryLimit is the budget every line but a final reset is held to: the
+// whole of it less the reset reserve.
+const ordinaryLimit = protocol.WriterQueueBytes - protocol.ResetReserveBytes
+
+// offer queues b if it fits within limit, and NEVER WAITS, so it may be called
+// under conn.mu (conn.enqueue, forward.go's queueReset: conn.mu → outbox.mu is
+// the one lock edge). It is nil once b is queued; errNoRoom, with the channel
+// closed when room is next made, when b does not fit; errOutboxClosed or
+// errOutboxSealed when nothing more is admitted. seal makes b the last line
+// the outbox admits.
+func (o *outbox) offer(b []byte, done func(), limit int, seal bool) (<-chan struct{}, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	switch {
+	case o.closed:
+		return nil, errOutboxClosed
+	case o.sealed:
+		return nil, errOutboxSealed
+	case o.bytes != 0 && o.bytes+len(b) > limit:
+		return o.room, errNoRoom
+	}
+	o.q = append(o.q, outLine{b: b, done: done})
+	o.bytes += len(b)
+	o.high = max(o.high, o.bytes)
+	if seal {
+		o.sealed = true
+		o.wakeLocked()
+	}
+	select {
+	case o.ready <- struct{}{}:
+	default:
+	}
+	return nil, nil
+}
+
+// push queues b within the ordinary budget, waiting — under no lock — for
+// room. It fails, having queued nothing, once ctx ends or the outbox closes or
+// seals.
 func (o *outbox) push(ctx context.Context, b []byte, done func()) error {
-	return o.pushWithin(ctx, b, done, protocol.WriterQueueBytes-protocol.ResetReserveBytes)
-}
-
-// pushReserved queues b within the whole budget, the reset reserve included:
-// a subscription's final reset (forward.go), which is at most
-// ResetReserveBytes and so always fits beside everything push lets in. Only
-// one is ever owed at a time: a connection has at most one attachment open,
-// and an attachment ends once.
-func (o *outbox) pushReserved(ctx context.Context, b []byte, done func()) error {
-	return o.pushWithin(ctx, b, done, protocol.WriterQueueBytes)
-}
-
-func (o *outbox) pushWithin(ctx context.Context, b []byte, done func(), limit int) error {
 	for {
-		o.mu.Lock()
-		if o.closed {
-			o.mu.Unlock()
-			return errOutboxClosed
+		room, err := o.offer(b, done, ordinaryLimit, false)
+		if !errors.Is(err, errNoRoom) {
+			return err
 		}
-		if o.bytes == 0 || o.bytes+len(b) <= limit {
-			o.q = append(o.q, outLine{b: b, done: done})
-			o.bytes += len(b)
-			o.high = max(o.high, o.bytes)
-			o.mu.Unlock()
-			select {
-			case o.ready <- struct{}{}:
-			default:
-			}
-			return nil
-		}
-		room := o.room
-		o.mu.Unlock()
-		if o.full != nil {
-			o.full()
-		}
-		select {
-		case <-room:
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := o.await(ctx, nil, room); err != nil {
+			return err
 		}
 	}
+}
+
+// await waits, after an offer that found no room, until room is made (and the
+// caller offers again), ctx ends, or stop closes (errStopped). A stop already
+// closed never waits; a nil one never ends the wait. It holds no lock.
+func (o *outbox) await(ctx context.Context, stop, room <-chan struct{}) error {
+	select {
+	case <-stop:
+		return errStopped
+	default:
+	}
+	if o.full != nil {
+		o.full()
+	}
+	select {
+	case <-room:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stop:
+		return errStopped
+	}
+}
+
+// wakeLocked wakes every wait for room; o.mu is held.
+func (o *outbox) wakeLocked() {
+	close(o.room)
+	o.room = make(chan struct{})
 }
 
 // next is the line at the head, waiting for one; false once closed.
@@ -543,8 +635,7 @@ func (o *outbox) next() (outLine, bool) {
 func (o *outbox) written(n int) {
 	o.mu.Lock()
 	o.bytes -= n
-	close(o.room)
-	o.room = make(chan struct{})
+	o.wakeLocked()
 	o.mu.Unlock()
 }
 
@@ -557,8 +648,7 @@ func (o *outbox) close() {
 	}
 	o.closed = true
 	o.q = nil
-	close(o.room)
-	o.room = make(chan struct{})
+	o.wakeLocked()
 	select {
 	case o.ready <- struct{}{}:
 	default:

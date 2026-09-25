@@ -419,6 +419,34 @@ func (g *forwardGate) awaitHeld(t *testing.T) uint64 {
 	}
 }
 
+// hold is a hook's barrier: the first call to wait reports on entered and
+// waits until release; later calls pass. release is idempotent, and the host
+// runs it before its server closes (withOnClose), so a failing test never
+// leaves a goroutine the server's Close would join for ever.
+type hold struct {
+	entered chan struct{}
+	gate    chan struct{}
+	once    sync.Once
+	release func()
+}
+
+func newHold() *hold {
+	gate := make(chan struct{})
+	return &hold{entered: make(chan struct{}), gate: gate, release: sync.OnceFunc(func() { close(gate) })}
+}
+
+// wait is the hook's body.
+func (h *hold) wait() {
+	first := false
+	h.once.Do(func() {
+		first = true
+		close(h.entered)
+	})
+	if first {
+		<-h.gate
+	}
+}
+
 // signal is a hook's report, buffered so the hook never waits on the test.
 type signal chan uint64
 

@@ -197,6 +197,29 @@ type hooks struct {
 	// readyOwed runs on a ready watcher once it has handed its attachment's
 	// forwarder the ready notification, with the seq it waits behind.
 	readyOwed func(sub string, seq uint64)
+	// readyDecided runs on a ready watcher once it has decided its attachment
+	// is owed a ready at seq — the seq and the final info document read — just
+	// before it hands the notification over.
+	readyDecided func(sub string, seq uint64)
+	// beforeReset runs on a forwarder once its final records are queued, just
+	// before it decides its reset's reason and queues the reset (queueReset),
+	// with the subscription's id and the reason it has so far.
+	beforeReset func(sub string, reason protocol.ResetReason)
+	// ackQueued runs once an attachment's acknowledgement is queued together
+	// with the lifecycle step it makes visible — its attach reply (live), its
+	// detach reply or its final reset (closed) — on the goroutine that queued
+	// it, with the subscription's id and the reply's method, or reset.
+	ackQueued func(sub, method string)
+	// resetWritten runs on the writer once a final reset is on the socket,
+	// before the connection may close for it.
+	resetWritten func()
+	// beforeReply runs on a handler just before it queues its reply (not
+	// attach's or detach's, which queue their own), with the method.
+	beforeReply func(method string)
+	// detaching runs on a detach once it has claimed the attachment's end and
+	// stopped its forwarder's pushes, before it waits for the forwarder to
+	// return, with the subscription's id.
+	detaching func(sub string)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.

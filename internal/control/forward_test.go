@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
@@ -179,86 +180,154 @@ func TestAReplyFollowsItsEvents(t *testing.T) {
 	}
 }
 
-// TestAStalledClientIsResetWithoutDelayingTheAgent (A5; §3.7, astra 10, 31):
-// a client that never reads fills its connection's writer queue — each record
-// is taken by the forwarder before the next is published, until the forwarder
-// is seen waiting for room — and from then on its forwarder can make no
-// progress at all: its subscription backs up in the log, and the log drops it
-// slow_consumer. Every publish is made under a watchdog while the forwarder is
-// stuck — one that waited on the stalled subscription would wait for ever — so
-// no publish ever waited on it. When the client reads again it gets every
-// event it was sent, contiguous, and then reset{slow_consumer}; the connection
-// goes on. Latency is V7's, never an assertion here.
-func TestAStalledClientIsResetWithoutDelayingTheAgent(t *testing.T) {
+// stall is a host whose client never reads, attached with a budget of 4
+// records, and whose forwarder is blocked waiting for room in a full writer
+// queue: 1 MiB records were published, each taken by the forwarder before the
+// next, until the forwarder was seen waiting for room.
+type stall struct {
+	h *host
+	a *client
+	r protocol.AttachResult
+	// blocked is the seq of the record the forwarder is blocked on.
+	blocked uint64
+	// resets reports each final reset queued (control.TestHooks.AckQueued).
+	resets signal
+	n      int
+}
+
+func newStall(t *testing.T) *stall {
+	t.Helper()
 	var full atomic.Int32
 	var taken atomic.Uint64
-	h := newHost(t, withHooks(control.TestHooks{
+	s := &stall{resets: newSignal()}
+	s.h = newHost(t, withHooks(control.TestHooks{
 		OutboxFull:    func() { full.Add(1) },
 		BeforeForward: func(_ string, seq uint64) { taken.Store(seq) },
+		AckQueued: func(_, method string) {
+			if method == protocol.NotifyReset {
+				s.resets.fire(0)
+			}
+		},
 	}))
-	a := h.dial()
-	a.sayHello(nil)
-	p := attachParams(h)
+	s.a = s.h.dial()
+	s.a.sayHello(nil)
+	p := attachParams(s.h)
 	p.Budget = &protocol.AttachBudget{MaxItems: 4}
-	r := a.attach(p)
-	a.note(protocol.NotifySynchronized)
-
-	payload := strings.Repeat("x", 1<<20)
-	publish := func(i int) {
-		typ := agent.EventText
-		if i%2 == 1 {
-			typ = agent.EventThought
-		}
-		published := make(chan struct{})
-		go func() {
-			h.publish(agent.Event{Type: typ, Text: payload})
-			close(published)
-		}()
-		await(t, published, fmt.Sprintf("publish %d beside a stalled client", i))
-	}
-	i := 0
-	for ; full.Load() == 0; i++ {
-		if i == 128 {
+	s.r = s.a.attach(p)
+	s.a.note(protocol.NotifySynchronized)
+	for full.Load() == 0 {
+		if s.n == 128 {
 			t.Fatal("128 MiB queued and the writer queue is not full")
 		}
-		publish(i)
-		seq := h.head()
+		s.publish(t)
+		seq := s.h.head()
 		waitFor(t, "the forwarder to take the record, or find no room for it", func() bool {
 			return taken.Load() >= seq || full.Load() > 0
 		})
 	}
-	if h.dropped() != 0 {
+	// BeforeForward runs only before an event's push: the forwarder is blocked
+	// on the last record it took.
+	s.blocked = taken.Load()
+	if s.h.dropped() != 0 {
 		t.Fatal("the subscription was dropped before its forwarder was stuck")
 	}
-	for stuck := 0; h.dropped() == 0; stuck++ {
-		if stuck == 16 {
-			t.Fatal("the stalled subscription was never dropped")
-		}
-		publish(i)
-		i++
-	}
+	return s
+}
 
-	next := r.After.Seq + 1
+// publish publishes one more 1 MiB record, under a watchdog: a publish that
+// waited on the stalled subscription would wait for ever.
+func (s *stall) publish(t *testing.T) {
+	t.Helper()
+	typ := agent.EventText
+	if s.n%2 == 1 {
+		typ = agent.EventThought
+	}
+	s.n++
+	published := make(chan struct{})
+	go func() {
+		s.h.publish(agent.Event{Type: typ, Text: strings.Repeat("x", 1<<20)})
+		close(published)
+	}()
+	await(t, published, fmt.Sprintf("publish %d beside a stalled client", s.n))
+}
+
+// events reads the client's events, which must run on from after + 1 with no
+// gap, up to the reset, and returns the reset and the last event's seq.
+func (s *stall) events(t *testing.T) (protocol.ResetParams, uint64) {
+	t.Helper()
+	next := s.r.After.Seq + 1
 	for {
-		n := a.anyNote()
+		n := s.a.anyNote()
 		if n.Method == protocol.NotifyReset {
-			if rp := paramsOf[protocol.ResetParams](t, n); rp != (protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSlowConsumer}) {
-				t.Fatalf("the reset: %+v", rp)
-			}
-			break
+			return paramsOf[protocol.ResetParams](t, n), next - 1
 		}
 		if seq, _ := eventOf(t, n); seq != next {
 			t.Fatalf("event %d, want %d: a gap", seq, next)
 		}
 		next++
 	}
-	if next == r.After.Seq+1 {
-		t.Fatal("the reset came before any event")
+}
+
+// TestAStalledClientIsResetWithoutDelayingTheAgent (A5; §3.7, astra 10, 31;
+// astra r8 6): a client that never reads fills its connection's writer queue,
+// and from then on its forwarder can make no progress at all: its
+// subscription backs up in the log, and the log drops it slow_consumer. No
+// publish ever waited on it. A full queue does not hide the drop from the
+// forwarder blocked for room: it sees the subscription end and queues
+// reset{slow_consumer} in the queue's reserve AT ONCE — while the queue is
+// still full, before the client has read a byte. When the client reads again
+// it gets every event queued before the one the forwarder was blocked on,
+// contiguous — that one is not sent: the client's cursor re-attach replays it —
+// and then the reset; the connection goes on. Latency is V7's, never an
+// assertion here.
+func TestAStalledClientIsResetWithoutDelayingTheAgent(t *testing.T) {
+	s := newStall(t)
+	for stuck := 0; s.h.dropped() == 0; stuck++ {
+		if stuck == 16 {
+			t.Fatal("the stalled subscription was never dropped")
+		}
+		s.publish(t)
 	}
-	ok[protocol.StateResult](t, a.call(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)}))
-	if re := a.attach(attachParams(h)); re.Subscription != "s-2" {
+	s.resets.await(t, "reset{slow_consumer} to be queued while the client reads nothing")
+
+	rp, last := s.events(t)
+	if rp != (protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSlowConsumer}) {
+		t.Fatalf("the reset: %+v", rp)
+	}
+	switch {
+	case last == s.r.After.Seq:
+		t.Fatal("the reset came before any event")
+	case last != s.blocked-1:
+		t.Fatalf("the events end at %d; the forwarder was blocked on %d, which is not sent", last, s.blocked)
+	}
+	ok[protocol.StateResult](t, s.a.call(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(s.h)}))
+	if re := s.a.attach(attachParams(s.h)); re.Subscription != "s-2" {
 		t.Fatalf("the re-attach: %+v", re)
 	}
+}
+
+// TestAStalledClientStillGetsTheClosingRecords (§3.7, astra r8 6): the
+// engine's close ends a subscription whose forwarder is blocked for room in a
+// full writer queue, and the forwarder sees it end as it would a drop — but a
+// log's close is not abandoned: the record it was blocked on and every record
+// the close left undelivered still go out, waiting for room as the client
+// reads, then reset{session_closed}, and the host closes the connection.
+func TestAStalledClientStillGetsTheClosingRecords(t *testing.T) {
+	s := newStall(t)
+	s.publish(t)
+	s.publish(t)
+	head := s.h.head()
+	if err := s.h.eng.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rp, last := s.events(t)
+	if rp != (protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSessionClosed}) {
+		t.Fatalf("the reset: %+v", rp)
+	}
+	if last < head {
+		t.Fatalf("the events end at %d, before the head %d at the close (blocked on %d)", last, head, s.blocked)
+	}
+	s.a.expectClosed()
 }
 
 // TestABarrierAwaitsAClosingAttachment (A12; §3.7, astra r2 15, r3 15): a
@@ -696,4 +765,286 @@ func TestAHalfClosedConnectionKeepsDelivering(t *testing.T) {
 		t.Fatalf("the reset: %+v", rp)
 	}
 	a.expectClosed()
+}
+
+// TestAnOwedReadyIsNotLostToTheClose (§3.4, astra r8 5): a when: "now" attach
+// made before the start is owed a ready at N, the log's committed head once
+// the start ran, and its forwarder is held below N, so N is among the records
+// the engine's close leaves in the subscription's Rest. The closing tail still
+// queues the ready as soon as its position reaches N: the wire shows the
+// records up to N, then ready, then the rest, then reset{session_closed}. The
+// same holds when the watcher has decided the note but not yet handed it over
+// when the forwarder reaches its tail: the tail waits for its decision.
+func TestAnOwedReadyIsNotLostToTheClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// inFlight holds the watcher between deciding the note and handing it
+		// over until the forwarder has begun its terminal acknowledgement.
+		inFlight bool
+	}{
+		{name: "the note handed over"},
+		{name: "the note still being handed over", inFlight: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newForwardGate()
+			owed := newSignal()
+			watcher := newHold()
+			hooks := control.TestHooks{
+				BeforeForward: gate.hook,
+				ReadyOwed:     func(_ string, seq uint64) { owed.fire(seq) },
+			}
+			if tc.inFlight {
+				hooks.ReadyDecided = func(_ string, seq uint64) {
+					owed.fire(seq)
+					watcher.wait()
+				}
+				// The forwarder has read Records closed, polled for a note and
+				// found none: only now may the watcher hand it over.
+				hooks.BeforeTerminal = func(string, protocol.ResetReason) { watcher.release() }
+			}
+			h := newHost(t, withoutStart(), withOnClose(gate.open), withOnClose(watcher.release), withHooks(hooks))
+			a := h.dial()
+			a.sayHello(nil)
+			p := attachParams(h)
+			p.When = protocol.WhenNow
+			r := a.attach(p)
+			if r.Ready {
+				t.Fatalf("the premise: %+v", r)
+			}
+			a.note(protocol.NotifySynchronized)
+
+			gate.arm(r.After.Seq)
+			h.publish(agent.Event{Type: agent.EventText, Text: "held"}, agent.Event{Type: agent.EventText, Text: "before the start"})
+			if held := gate.awaitHeld(t); held != r.After.Seq+1 {
+				t.Fatalf("the forwarder is held at %d, want %d", held, r.After.Seq+1)
+			}
+			if err := h.eng.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			n := owed.await(t, "the ready to be owed")
+			if n <= r.After.Seq+1 {
+				t.Fatalf("the ready is owed at %d, not past the held record %d: the premise", n, r.After.Seq+1)
+			}
+			h.publish(agent.Event{Type: agent.EventText, Text: "after the start"}, agent.Event{Type: agent.EventText, Text: "the last"})
+			if err := h.eng.Close(); err != nil {
+				t.Fatal(err)
+			}
+			gate.open()
+
+			next, readyAfter := r.After.Seq+1, uint64(0)
+			for {
+				m := a.anyNote()
+				switch m.Method {
+				case protocol.NotifyReady:
+					if readyAfter != 0 {
+						t.Fatal("a second ready")
+					}
+					if rp := paramsOf[protocol.ReadyParams](t, m); rp.Subscription != r.Subscription || rp.StartFailed {
+						t.Fatalf("the ready: %+v", rp)
+					}
+					readyAfter = next - 1
+					continue
+				case protocol.NotifyReset:
+					if rp := paramsOf[protocol.ResetParams](t, m); rp.Reason != protocol.ResetSessionClosed {
+						t.Fatalf("the reset: %+v", rp)
+					}
+				default:
+					if seq, _ := eventOf(t, m); seq != next {
+						t.Fatalf("event %d, want %d", seq, next)
+					}
+					next++
+					continue
+				}
+				break
+			}
+			switch {
+			case readyAfter == 0:
+				t.Fatalf("no ready before reset{session_closed}; it was owed at %d, and the events ran to %d", n, next-1)
+			case readyAfter != n:
+				t.Fatalf("the ready came after event %d, want right after %d", readyAfter, n)
+			case next-1 <= n:
+				t.Fatalf("the events end at %d: none after the ready's %d", next-1, n)
+			}
+			a.expectClosed()
+		})
+	}
+}
+
+// TestReplacementWinsTheTerminalReset (§3.6, §3.7; astra r8): a forwarder
+// that has queued its closed log's final records and is about to queue
+// reset{session_closed} is held there while the engine is replaced. The reset
+// it then queues is session_replaced — its reason is decided in the section
+// that queues it, under the flag the replacement sets — and the connection
+// closes after it.
+func TestReplacementWinsTheTerminalReset(t *testing.T) {
+	gate := newForwardGate()
+	atReset := make(chan protocol.ResetReason, 1)
+	reset := newHold()
+	h := newHost(t, withOnClose(gate.open), withOnClose(reset.release), withHooks(control.TestHooks{
+		BeforeForward: gate.hook,
+		BeforeReset: func(_ string, reason protocol.ResetReason) {
+			atReset <- reason
+			reset.wait()
+		},
+	}))
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+	gate.arm(r.After.Seq)
+	h.publish(agent.Event{Type: agent.EventText, Text: "held"}, agent.Event{Type: agent.EventText, Text: "in the rest"})
+	gate.awaitHeld(t)
+	if err := h.eng.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gate.open()
+	select {
+	case reason := <-atReset:
+		if reason != protocol.ResetSessionClosed {
+			t.Fatalf("the premise: the forwarder was about to send %s", reason)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("the forwarder never reached its reset")
+	}
+	h.srv.SetEngine(startedEngine(t))
+	reset.release()
+
+	events := 0
+	for {
+		n := a.anyNote()
+		if n.Method == protocol.NotifyReset {
+			if rp := paramsOf[protocol.ResetParams](t, n); rp != (protocol.ResetParams{Subscription: r.Subscription, Reason: protocol.ResetSessionReplaced}) {
+				t.Fatalf("the reset after the replacement: %+v", rp)
+			}
+			break
+		}
+		eventOf(t, n)
+		events++
+	}
+	if events < 2 {
+		t.Fatalf("%d events before the reset: the final records were not queued first", events)
+	}
+	a.expectClosed()
+}
+
+// TestNothingIsWrittenAfterSessionReplaced (§3.6, astra r8 7): once a
+// replacement's reset{session_replaced} is queued, the connection admits no
+// further line. A handler still running — a read held across the replacement
+// and let go only once the reset is on the socket, or a command whose reply
+// barrier the reset releases — has its reply dropped at the push, not queued:
+// with the writer held right after writing the reset, nothing is in the
+// queue behind it, and the client reads the reset and then the close.
+func TestNothingIsWrittenAfterSessionReplaced(t *testing.T) {
+	type schedule struct {
+		hooks control.TestHooks
+		// before runs once the client is attached (synchronized read): it puts
+		// a handler where the replacement will find it.
+		before func(t *testing.T, h *host, a *client)
+		// replaced runs right after the replacement.
+		replaced func()
+		// written runs once the reset is on the socket and the writer held.
+		written func()
+		// release lets go of whatever the schedule holds, before the server's
+		// close.
+		release func()
+	}
+	for _, tc := range []struct {
+		name string
+		make func() schedule
+	}{
+		{name: "a read held across the replacement", make: func() schedule {
+			reply := newHold()
+			return schedule{
+				hooks: control.TestHooks{BeforeReply: func(method string) {
+					if method == protocol.MethodSessionState {
+						reply.wait()
+					}
+				}},
+				before: func(t *testing.T, h *host, a *client) {
+					a.send(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)})
+					await(t, reply.entered, "the read to hold its reply")
+				},
+				replaced: func() {},
+				written:  reply.release,
+				release:  reply.release,
+			}
+		}},
+		{name: "a command waiting on its barrier", make: func() schedule {
+			gate := newForwardGate()
+			parked := newSignal()
+			return schedule{
+				hooks: control.TestHooks{BeforeForward: gate.hook, BarrierWaits: parked.fire},
+				before: func(t *testing.T, h *host, a *client) {
+					gate.arm(h.head())
+					a.send(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: a.cmd(), Text: "N"})
+					gate.awaitHeld(t)
+					parked.await(t, "the barrier to wait for N")
+				},
+				// The forwarder's push of N is refused now, and it queues the
+				// reset, which releases the barrier.
+				replaced: gate.open,
+				written:  func() {},
+				release:  gate.open,
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.make()
+			writer := newHold()
+			s.hooks.ResetWritten = writer.wait
+			h := newHost(t, withOnClose(writer.release), withOnClose(s.release), withHooks(s.hooks))
+			a := h.dial()
+			a.sayHello(nil)
+			r := a.attach(attachParams(h))
+			a.note(protocol.NotifySynchronized)
+			s.before(t, h, a)
+			h.srv.SetEngine(startedEngine(t))
+			s.replaced()
+			await(t, writer.entered, "reset{session_replaced} to be written")
+			s.written()
+			waitFor(t, "the held handler to return", func() bool { return h.srv.Handlers() == 0 })
+			if q := h.srv.Queued(); q != 0 {
+				t.Fatalf("%d lines queued behind reset{session_replaced}", q)
+			}
+			writer.release()
+			if rp := paramsOf[protocol.ResetParams](t, a.note(protocol.NotifyReset)); rp != (protocol.ResetParams{Subscription: r.Subscription, Reason: protocol.ResetSessionReplaced}) {
+				t.Fatalf("the reset: %+v", rp)
+			}
+			a.expectClosed()
+		})
+	}
+}
+
+// TestADetachBeforeTheCommandOwesItNothing (§3.6, §3.7; astra r8 3): the other
+// order of TestABarrierAwaitsAClosingAttachment. The detach is answered
+// before the command commits, so the command's barrier finds the attachment
+// closed — owed no events, since its client asked for none — and waits for
+// nothing: the command's reply is the next line after the detach's, with no
+// event of the command's before it.
+func TestADetachBeforeTheCommandOwesItNothing(t *testing.T) {
+	command := newHold()
+	parked := newSignal()
+	h := newHost(t, withOnClose(command.release), withHooks(control.TestHooks{
+		BeforeCommand: func(method string) {
+			if method == protocol.MethodQueueAdd {
+				command.wait()
+			}
+		},
+		BarrierWaits: parked.fire,
+	}))
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+	add := a.send(protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: sid(h), CommandID: a.cmd(), Text: "N"})
+	await(t, command.entered, "the command to reach its engine call")
+	ok[protocol.Empty](t, a.detach(h, r.Subscription))
+	command.release()
+	row := ok[protocol.QueueAddResult](t, a.reply(add))
+	if q, err := agent.DecodeQueuedPrompt(row.Row); err != nil || q.Text != "N" {
+		t.Fatalf("the row: %+v, %v", q, err)
+	}
+	if len(parked) != 0 {
+		t.Fatalf("the barrier waited on a closed attachment, for %d", <-parked)
+	}
 }

@@ -33,9 +33,10 @@ func TestTheOutboxHoldsItsBudgetAndItsReserve(t *testing.T) {
 		t.Fatalf("a line past the budget was queued: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
-	// A final reset uses the reserve, and is queued at once.
+	// A final reset uses the reserve, and is queued at once: offered the whole
+	// budget, it never waits.
 	reset := make([]byte, protocol.ResetReserveBytes)
-	if err := pushWithDeadline(t, func(ctx context.Context) error { return o.pushReserved(ctx, reset, nil) }); err != nil {
+	if _, err := o.offer(reset, nil, protocol.WriterQueueBytes, false); err != nil {
 		t.Fatalf("the reset did not fit the reserve: %v", err)
 	}
 	if o.highWater() != protocol.WriterQueueBytes {
@@ -71,9 +72,51 @@ func TestTheOutboxHoldsItsBudgetAndItsReserve(t *testing.T) {
 	}
 }
 
-func pushWithDeadline(t *testing.T, push func(context.Context) error) error {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	return push(ctx)
+// TestASealedOutboxAdmitsNothingMore (§3.6, astra r8 7): the line that seals
+// the outbox — a replacement's reset — is the last it admits. Every later
+// push or offer is refused, errOutboxSealed, whoever makes it; a push already
+// waiting for room is woken and refused; and what was queued before the seal,
+// the sealing line last, is still handed to the writer in order.
+func TestASealedOutboxAdmitsNothingMore(t *testing.T) {
+	ctx := context.Background()
+	o := newOutbox(nil)
+	if err := o.push(ctx, make([]byte, ordinaryLimit), nil); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	entered := make(chan struct{})
+	o.full = func() { close(entered) }
+	go func() { waited <- o.push(ctx, []byte("a reply waiting for room"), nil) }()
+	<-entered
+	if _, err := o.offer([]byte("reset"), nil, protocol.WriterQueueBytes, true); err != nil {
+		t.Fatalf("the sealing reset: %v", err)
+	}
+	select {
+	case err := <-waited:
+		if !errors.Is(err, errOutboxSealed) {
+			t.Fatalf("a push waiting across the seal: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a push waiting for room outlived the seal")
+	}
+	o.full = nil
+	if err := o.push(ctx, []byte("a later reply"), nil); !errors.Is(err, errOutboxSealed) {
+		t.Fatalf("a push after the seal: %v", err)
+	}
+	if _, err := o.offer([]byte("another reset"), nil, protocol.WriterQueueBytes, false); !errors.Is(err, errOutboxSealed) {
+		t.Fatalf("an offer after the seal: %v", err)
+	}
+	for _, want := range []int{ordinaryLimit, len("reset")} {
+		ln, ok := o.next()
+		if !ok || len(ln.b) != want {
+			t.Fatalf("the writer was handed %d bytes (%v), want %d", len(ln.b), ok, want)
+		}
+		o.written(len(ln.b))
+	}
+	o.mu.Lock()
+	queued := len(o.q)
+	o.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("%d lines queued after the sealing one", queued)
+	}
 }

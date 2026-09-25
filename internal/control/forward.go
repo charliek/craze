@@ -15,10 +15,11 @@ import (
 //   - event{subscription, seq, event} per record, event being Record.Body
 //     VERBATIM (raw JSON, never re-encoded). Its position — the seq of the last
 //     event it has queued — starts at the reply's after, and a reply barrier
-//     reads it (awaitAttachment);
-//   - synchronized{subscription, seq} once it has queued the record whose Seq
-//     is the subscription's Cutoff — at once, before any event, when the cutoff
-//     is the reply's after (nothing to replay) (§3.4);
+//     reads it (awaitAttachment): it moves in the same conn.mu section that
+//     queues the event (conn.enqueue);
+//   - synchronized{subscription, seq} once its position has reached the
+//     subscription's Cutoff — at once, before any event, when the cutoff is
+//     the reply's after (nothing to replay) (§3.4);
 //   - ready, when one is owed, once its position has reached the seq the
 //     ready watcher read after the start (attach.go, watchReady);
 //   - and, when the subscription ends, its terminal acknowledgement: the final
@@ -27,22 +28,30 @@ import (
 // It waits for room in the writer queue (the outbox's budget), so a stuck
 // socket backs the subscription up in the log, and the log drops it
 // slow_consumer without ever waiting: a publish only offers a record to a
-// subscription's buffer (agent.EventLog). The final reset uses the queue's 1
-// KiB reserve (pushReserved), so it is always queued.
+// subscription's buffer (agent.EventLog). A wait for room also ends when the
+// subscription does (Subscription.Done, astra r8 6): a full queue never hides
+// the end from the forwarder, which then drains Records to its close and reads
+// why it ended. The final reset uses the queue's 1 KiB reserve (queueReset),
+// so it is always queued at once.
 //
 // How a subscription ended decides its reset (§3.4's table):
 //
 //   - a record with Omitted set (one no client can fold): reset{omitted}, and
 //     the subscription is closed — the client re-attaches with no cursor;
-//   - ErrSlowConsumer: reset{slow_consumer};
+//   - ErrSlowConsumer: reset{slow_consumer}, AT ONCE — a record the forwarder
+//     was blocked on, and any it drains after, is not sent (the client's
+//     re-attach with its cursor replays them);
 //   - an ErrCursorUnresolvable from the journal leg of a cursor replay (the
 //     asynchronous one; the synchronous refusals are the attach reply's reset):
-//     reset{replay_failed};
-//   - ErrClosed with Rest answering — the log closed: Rest's records, the
-//     session's closing records, as events, then reset{session_closed}; and the
-//     connection ends (conn.end), closing once all of it is written.
-//     ErrRestUnavailable (a journal leg outstanding at the close):
-//     reset{session_closed} without them — never a suffix posing as the tail;
+//     reset{replay_failed}, at once;
+//   - ErrClosed with Rest answering — the log closed: NOTHING IS ABANDONED. The
+//     record the forwarder was blocked on, any it drained after, then Rest's
+//     records — the session's closing records — go out as events, waiting for
+//     room, with synchronized and an owed ready where the position reaches
+//     them, then reset{session_closed}; and the connection ends (conn.end),
+//     closing once all of it is written. ErrRestUnavailable (a journal leg
+//     outstanding at the close): the same without Rest — never a suffix
+//     posing as the tail;
 //   - ErrClosed with ErrNoRest: the subscription was closed by this side — a
 //     detach, whose reply is the terminal acknowledgement; the engine's
 //     replacement, whose reset is session_replaced; or the connection's close,
@@ -51,77 +60,105 @@ import (
 //     is not whole — is a bug: it is logged, and the client is sent the reset
 //     that makes it start again with nothing it folded trusted (replay_failed;
 //     session_closed at a log's close). Never a partial tail.
+//
+// A connection whose engine has been replaced queues nothing more of the
+// forwarder's but reset{session_replaced}, WHATEVER reset the forwarder had
+// chosen: every push is refused once replaced is set (forwarder.push), and the
+// reset's reason is decided in the conn.mu section that queues it (queueReset).
 
-// forwarded is what became of one record the forwarder tried to queue.
+// forwarded is what became of one line the forwarder tried to queue.
 type forwarded uint8
 
 const (
 	forwardedOK forwarded = iota
 	// forwardedStopped: nothing more can be queued — the connection has gone,
-	// or the attachment's context was cancelled (a detach, the engine's
-	// replacement).
+	// its engine was replaced, or the attachment's context was cancelled (a
+	// detach).
 	forwardedStopped
+	// forwardedEnded: the subscription ended while the push waited for room
+	// (its Done); the line was not queued.
+	forwardedEnded
 	// forwardedUnfoldable: the record is one no client can fold — Omitted — or
 	// one that could not be put on a line.
 	forwardedUnfoldable
 )
+
+// noWait is a stop channel already closed: a push handed it takes room that
+// is there and never waits for more (outbox.await).
+var noWait = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
+// forwarder is one attachment's forwarder: the state its goroutine alone
+// keeps.
+type forwarder struct {
+	c *conn
+	a *attachment
+	// pos is the seq of the last event queued (a.queued's own copy: only this
+	// goroutine moves it).
+	pos uint64
+	// synced says synchronized has been queued.
+	synced bool
+	// ready is the ready notification the watcher handed over, not yet
+	// queued.
+	ready *readyNote
+}
 
 // forward is the attachment's forwarder.
 func (c *conn) forward(a *attachment) {
 	defer close(a.stopped)
 	// The ready watcher's wait ends with the forwarder.
 	defer a.cancel()
-	pos := a.after
-	var ready *readyNote
-	if a.cutoff == pos {
-		// Nothing to replay: the stream is synchronized at once, right after
-		// the reply.
-		if !c.notify(a, protocol.NotifySynchronized, protocol.SynchronizedParams{Subscription: a.id, Seq: pos}) {
-			c.halt(a, &pos)
+	f := &forwarder{c: c, a: a, pos: a.after}
+	done, records := a.sub.Done(), a.sub.Records()
+	for {
+		// What the position owes first: synchronized at once when there is
+		// nothing to replay, and after each record or ready note.
+		switch f.catchUp(done) {
+		case forwardedStopped:
+			f.halt()
+			return
+		case forwardedEnded:
+			f.ended(nil)
 			return
 		}
-	}
-	records := a.sub.Records()
-	for {
 		select {
 		case rec, open := <-records:
 			if !open {
-				c.subscriptionEnded(a, &pos, ready)
+				f.ended(nil)
 				return
 			}
-			switch c.forwardRecord(a, rec, &pos) {
+			switch f.record(rec, done) {
 			case forwardedStopped:
-				c.halt(a, &pos)
+				f.halt()
+				return
+			case forwardedEnded:
+				f.ended([]agent.Record{rec})
 				return
 			case forwardedUnfoldable:
 				a.sub.Close()
-				c.terminal(a, protocol.ResetOmitted, nil, false, &pos)
+				f.terminal(protocol.ResetOmitted, nil, false)
 				return
 			}
 		case r := <-a.readyCh:
-			ready = &r
-		}
-		if ready != nil && pos >= ready.seq {
-			if !c.notify(a, protocol.NotifyReady, ready.params) {
-				c.halt(a, &pos)
-				return
-			}
-			ready = nil
+			f.ready = &r
 		}
 	}
 }
 
-// forwardRecord queues rec as an event notification, moves the position a
-// barrier reads to it, and queues synchronized when rec is at the cutoff.
-func (c *conn) forwardRecord(a *attachment, rec agent.Record, pos *uint64) forwarded {
+// record queues rec as an event notification and moves the position a
+// barrier reads to it, in one conn.mu section (push). stop ends a wait for
+// room: the subscription's Done while it runs, nil for the final records of a
+// closed log, which wait for room.
+func (f *forwarder) record(rec agent.Record, stop <-chan struct{}) forwarded {
+	c, a := f.c, f.a
 	if rec.Omitted != nil {
 		return forwardedUnfoldable
 	}
 	if h := c.srv.hooks.beforeForward; h != nil {
 		h(a.id, rec.Seq)
-	}
-	if a.ctx.Err() != nil {
-		return forwardedStopped
 	}
 	line, err := notificationLine(protocol.NotifyEvent,
 		protocol.EventParams{Subscription: a.id, Seq: rec.Seq, Event: json.RawMessage(rec.Body)})
@@ -132,42 +169,76 @@ func (c *conn) forwardRecord(a *attachment, rec agent.Record, pos *uint64) forwa
 		c.srv.logf("control: conn %d %s: event %d cannot be put on a line: %v", c.id, a.id, rec.Seq, err)
 		return forwardedUnfoldable
 	}
-	if c.out.push(a.ctx, line, nil) != nil {
-		return forwardedStopped
+	r := f.push(line, stop, func() {
+		a.queued = rec.Seq
+		a.changedLocked()
+	})
+	if r == forwardedOK {
+		f.pos = rec.Seq
 	}
-	c.mu.Lock()
-	a.queued = rec.Seq
-	a.changedLocked()
-	c.mu.Unlock()
-	*pos = rec.Seq
-	if rec.Seq == a.cutoff &&
-		!c.notify(a, protocol.NotifySynchronized, protocol.SynchronizedParams{Subscription: a.id, Seq: rec.Seq}) {
-		return forwardedStopped
+	return r
+}
+
+// catchUp queues what the position now owes: synchronized once it has reached
+// the cutoff, then the ready note once it has reached the note's seq. stop is
+// as record's.
+func (f *forwarder) catchUp(stop <-chan struct{}) forwarded {
+	a := f.a
+	if !f.synced && f.pos >= a.cutoff {
+		if r := f.notify(protocol.NotifySynchronized, protocol.SynchronizedParams{Subscription: a.id, Seq: a.cutoff}, stop); r != forwardedOK {
+			return r
+		}
+		f.synced = true
+	}
+	if f.ready != nil && f.pos >= f.ready.seq {
+		if r := f.notify(protocol.NotifyReady, f.ready.params, stop); r != forwardedOK {
+			return r
+		}
+		f.ready = nil
 	}
 	return forwardedOK
 }
 
-// notify queues one notification of a's; false once nothing more can be
-// queued.
-func (c *conn) notify(a *attachment, method string, params any) bool {
-	if a.ctx.Err() != nil {
-		return false
-	}
+// notify queues one notification of the attachment's.
+func (f *forwarder) notify(method string, params any, stop <-chan struct{}) forwarded {
 	line, err := notificationLine(method, params)
 	if err != nil {
 		// Only the server's own documents are in these; one that cannot be
 		// encoded is a bug, logged, and the notification is left out.
-		c.srv.logf("control: conn %d %s: %s cannot be put on a line: %v", c.id, a.id, method, err)
-		return true
+		f.c.srv.logf("control: conn %d %s: %s cannot be put on a line: %v", f.c.id, f.a.id, method, err)
+		return forwardedOK
 	}
-	return c.out.push(a.ctx, line, nil) == nil
+	return f.push(line, stop, nil)
+}
+
+// push queues one line of the attachment's with commit (conn.enqueue). It is
+// refused once the attachment's context has ended (a detach, the connection's
+// close) or the connection's engine has been replaced — read under conn.mu,
+// where replace sets it, so nothing of the forwarder's is queued after the
+// replacement but its reset — and a wait for room ends when stop closes.
+func (f *forwarder) push(line []byte, stop <-chan struct{}, commit func()) forwarded {
+	c, a := f.c, f.a
+	err := c.enqueue(a.ctx, stop, line, nil, func() error {
+		if c.replaced || a.ctx.Err() != nil {
+			return errGone
+		}
+		return nil
+	}, commit)
+	switch {
+	case err == nil:
+		return forwardedOK
+	case errors.Is(err, errStopped):
+		return forwardedEnded
+	}
+	return forwardedStopped
 }
 
 // halt is a forwarder that can queue nothing more before its subscription
 // ended: a detach (whose reply is the terminal acknowledgement), the engine's
 // replacement (reset{session_replaced}), or the connection's close (nothing is
 // owed).
-func (c *conn) halt(a *attachment, pos *uint64) {
+func (f *forwarder) halt() {
+	c, a := f.c, f.a
 	c.mu.Lock()
 	detach, replaced := a.detach, c.replaced
 	c.mu.Unlock()
@@ -175,18 +246,24 @@ func (c *conn) halt(a *attachment, pos *uint64) {
 	case detach:
 	case c.ctx.Err() == nil && replaced:
 		a.sub.Close()
-		c.terminal(a, protocol.ResetSessionReplaced, nil, false, pos)
+		f.terminal(protocol.ResetSessionReplaced, nil, false)
 	default:
 		a.sub.Close()
 		c.markClosed(a)
 	}
 }
 
-// subscriptionEnded is a's subscription ending — Records closed — and the
-// reset its end is owed (the package's table above). ready is a ready
-// notification the forwarder holds and has not queued: one already due is
-// queued first, since the subscription did deliver through its seq.
-func (c *conn) subscriptionEnded(a *attachment, pos *uint64, ready *readyNote) {
+// ended is a's subscription over — Records closed, or its Done seen while a
+// push waited for room, when pending holds the record that push was for — and
+// the terminal acknowledgement its end is owed (the package's table above).
+// Records is drained to its close first: a record the owner handed over
+// meanwhile is kept, in order, after pending, and Err and Rest are final once
+// it has closed.
+func (f *forwarder) ended(pending []agent.Record) {
+	c, a := f.c, f.a
+	for rec := range a.sub.Records() {
+		pending = append(pending, rec)
+	}
 	err := a.sub.Err()
 	c.mu.Lock()
 	detach, replaced := a.detach, c.replaced
@@ -202,55 +279,52 @@ func (c *conn) subscriptionEnded(a *attachment, pos *uint64, ready *readyNote) {
 		c.markClosed(a)
 		return
 	case replaced:
-		c.terminal(a, protocol.ResetSessionReplaced, nil, false, pos)
+		f.terminal(protocol.ResetSessionReplaced, nil, false)
 		return
 	}
-	if ready == nil {
+	if f.ready == nil {
 		select {
 		case r := <-a.readyCh:
-			ready = &r
+			f.ready = &r
 		default:
 		}
-	}
-	if ready != nil && *pos >= ready.seq {
-		_ = c.notify(a, protocol.NotifyReady, ready.params)
 	}
 	var unresolvable agent.ErrCursorUnresolvable
 	switch {
 	case errors.Is(err, agent.ErrSlowConsumer):
-		c.terminal(a, protocol.ResetSlowConsumer, nil, false, pos)
+		f.terminal(protocol.ResetSlowConsumer, nil, false)
 	case errors.As(err, &unresolvable):
-		c.terminal(a, protocol.ResetReplayFailed, nil, false, pos)
+		f.terminal(protocol.ResetReplayFailed, nil, false)
 	case errors.Is(err, agent.ErrClosed):
 		rest, rerr := a.sub.Rest()
 		switch {
 		case rerr == nil:
-			c.terminal(a, protocol.ResetSessionClosed, rest, true, pos)
+			f.terminal(protocol.ResetSessionClosed, append(pending, rest...), true)
 		case errors.Is(rerr, agent.ErrRestUnavailable):
-			c.terminal(a, protocol.ResetSessionClosed, nil, true, pos)
+			// What Records handed over is contiguous from the position, a
+			// prefix of the tail; the rest of it is unknown.
+			f.terminal(protocol.ResetSessionClosed, pending, true)
 		case errors.Is(rerr, agent.ErrNoRest):
 			// Closed by this side, and every such close is one of those
 			// handled above; nothing is owed.
 			c.markClosed(a)
 		default:
 			c.srv.logf("control: conn %d %s: a bug: the closing tail is not whole: %v", c.id, a.id, rerr)
-			c.terminal(a, protocol.ResetSessionClosed, nil, true, pos)
+			f.terminal(protocol.ResetSessionClosed, nil, true)
 		}
 	default:
 		c.srv.logf("control: conn %d %s: a bug: the subscription ended with %v", c.id, a.id, err)
-		c.terminal(a, protocol.ResetReplayFailed, nil, false, pos)
+		f.terminal(protocol.ResetReplayFailed, nil, false)
 	}
 }
 
-// terminal queues a's terminal acknowledgement — final, the closing records,
-// as events, then reset{reason} in the queue's reserve — unless a detach has
-// claimed it first, and closes a once it is queued. endsSession says the log
-// has closed: the connection then ends (conn.end), closing once everything is
-// written. A final record no client can fold makes the reset omitted, and one
-// that cannot be queued because the engine was replaced meanwhile makes it
-// session_replaced: a reset never claims records were delivered that were
-// not.
-func (c *conn) terminal(a *attachment, reason protocol.ResetReason, final []agent.Record, endsSession bool, pos *uint64) {
+// terminal queues a's terminal acknowledgement, unless a detach has claimed it
+// first: for a closed log (endsSession), final — the closing records — and
+// then the reset, the connection ending with it (conn.end); for any other end,
+// the reset at once. A final record no client can fold makes the reset
+// omitted.
+func (f *forwarder) terminal(reason protocol.ResetReason, final []agent.Record, endsSession bool) {
+	c, a := f.c, f.a
 	if h := c.srv.hooks.beforeTerminal; h != nil {
 		h(a.id, reason)
 	}
@@ -266,39 +340,124 @@ func (c *conn) terminal(a *attachment, reason protocol.ResetReason, final []agen
 	}
 	c.unwritten++
 	c.mu.Unlock()
-final:
+	if endsSession {
+		reason = f.tail(reason, final)
+	} else {
+		// Nothing holds this reset back: a synchronized or ready already due
+		// goes before it only if it fits without waiting (a client
+		// re-attaching learns readiness from the reply, plan 027 X17 6).
+		f.catchUp(noWait)
+	}
+	if h := c.srv.hooks.beforeReset; h != nil {
+		h(a.id, reason)
+	}
+	f.queueReset(reason, endsSession)
+}
+
+// tail queues a closed log's final records as events, waiting for room, with
+// synchronized and the ready note where the position reaches them (astra r8
+// 5: the note is never lost to the close once its seq is reached), and
+// returns the reason the reset keeps: omitted after a record no client can
+// fold. A push refused because the connection closed or its engine was
+// replaced ends the tail; queueReset decides what that makes the reset.
+func (f *forwarder) tail(reason protocol.ResetReason, final []agent.Record) protocol.ResetReason {
+	f.awaitReadyNote()
+	if f.catchUp(nil) != forwardedOK {
+		return reason
+	}
 	for _, rec := range final {
-		switch c.forwardRecord(a, rec, pos) {
+		switch f.record(rec, nil) {
 		case forwardedUnfoldable:
-			reason = protocol.ResetOmitted
-			break final
+			return protocol.ResetOmitted
 		case forwardedStopped:
-			c.mu.Lock()
-			if c.replaced {
-				reason = protocol.ResetSessionReplaced
-			}
-			c.mu.Unlock()
-			break final
+			return reason
+		}
+		if f.catchUp(nil) != forwardedOK {
+			return reason
 		}
 	}
-	line, err := notificationLine(protocol.NotifyReset, protocol.ResetParams{Subscription: a.id, Reason: reason})
-	pushed := err == nil && c.out.pushReserved(c.ctx, line, c.resetWritten) == nil
+	return reason
+}
+
+// awaitReadyNote settles, before a closed log's tail, whether a ready is owed
+// and at what seq: a watcher (watchReady) still deciding is waited for. It
+// decides promptly — its SyncSeq finds the log closing, or has already
+// answered — once Ready has closed, which the engine's Close does before it
+// closes the log; with Ready still open the session never started, and from
+// the log's close on no ready can be owed. The wait also ends with the
+// attachment's context (a detach, the replacement, the connection's close).
+func (f *forwarder) awaitReadyNote() {
+	a := f.a
+	if f.ready != nil || a.watched == nil {
+		return
+	}
+	select {
+	case <-a.eng.Ready():
+	default:
+		return
+	}
+	select {
+	case <-a.watched:
+	case <-a.ctx.Done():
+		return
+	}
+	select {
+	case r := <-a.readyCh:
+		f.ready = &r
+	default:
+	}
+}
+
+// queueReset queues a's reset and closes a in ONE conn.mu section — the
+// terminal acknowledgement and the step it makes visible are one to reserve, a
+// detach and a barrier (astra r8): a client that re-attaches the instant it
+// reads the reset finds the place free, and a barrier sees the attachment
+// closed only once its reset is queued. The reason is decided in that section
+// too, under the flag replace sets there: a connection whose engine has been
+// replaced gets reset{session_replaced}, whatever reason the forwarder had,
+// and that reset seals the outbox — nothing is written after it but the
+// connection's close (astra r8 7). The reset takes the queue's reserve, which
+// every other push leaves free, so the offer never waits under conn.mu.
+func (f *forwarder) queueReset(reason protocol.ResetReason, endsSession bool) {
+	c, a := f.c, f.a
 	c.mu.Lock()
+	if c.replaced {
+		reason = protocol.ResetSessionReplaced
+	}
+	replaced := reason == protocol.ResetSessionReplaced
+	line, err := notificationLine(protocol.NotifyReset, protocol.ResetParams{Subscription: a.id, Reason: reason})
+	if err == nil {
+		_, err = c.out.offer(line, c.resetWritten, protocol.WriterQueueBytes, replaced)
+	}
+	pushed := err == nil
 	if !pushed {
 		c.unwritten--
 	}
 	a.state = attClosed
 	a.changedLocked()
-	if endsSession && reason != protocol.ResetSessionReplaced {
+	if endsSession && !replaced {
 		c.endLocked("session ended")
 	}
 	c.mu.Unlock()
+	if errors.Is(err, errNoRoom) {
+		// The reserve is what every other line leaves free, and one reset is
+		// owed at a time: a bug. The client is not left waiting for a reset
+		// that never comes; it re-dials.
+		c.srv.logf("control: conn %d %s: a bug: the final reset found no room", c.id, a.id)
+		c.close("a final reset found no room")
+	}
+	if h := c.srv.hooks.ackQueued; h != nil && pushed {
+		h(a.id, protocol.NotifyReset)
+	}
 	c.settle()
 }
 
 // resetWritten is a final reset on the socket: the connection may close now
 // if nothing else is left of it.
 func (c *conn) resetWritten() {
+	if h := c.srv.hooks.resetWritten; h != nil {
+		h()
+	}
 	c.mu.Lock()
 	c.unwritten--
 	c.mu.Unlock()

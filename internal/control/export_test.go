@@ -40,6 +40,30 @@ type TestHooks struct {
 	// ReadyOwed runs on a ready watcher once it has handed the forwarder its
 	// ready notification, with the seq it waits behind.
 	ReadyOwed func(sub string, seq uint64)
+	// ReadyDecided runs on a ready watcher once it has decided its attachment
+	// is owed a ready at seq, just before it hands the notification over: a
+	// test that blocks in it holds the note back from the forwarder.
+	ReadyDecided func(sub string, seq uint64)
+	// BeforeReset runs on a forwarder once its final records are queued, just
+	// before it decides its reset's reason and queues it.
+	BeforeReset func(sub string, reason protocol.ResetReason)
+	// AckQueued runs once an attachment's acknowledgement is queued with the
+	// lifecycle step it makes visible — its attach reply
+	// (protocol.MethodSessionAttach), its detach reply
+	// (protocol.MethodSessionDetach), its final reset (protocol.NotifyReset) —
+	// on the goroutine that queued it: a test that blocks in it holds that
+	// goroutine right after the step.
+	AckQueued func(sub, method string)
+	// ResetWritten runs on the writer once a final reset is on the socket,
+	// before the connection may close for it: a test that blocks in it holds
+	// the connection open with the reset written.
+	ResetWritten func()
+	// BeforeReply runs on a handler just before it queues its reply (not
+	// attach's or detach's), with the method.
+	BeforeReply func(method string)
+	// Detaching runs on a detach once it has claimed the attachment's end and
+	// stopped its forwarder's pushes, before it waits for the forwarder.
+	Detaching func(sub string)
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -58,6 +82,12 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		beforeTerminal: h.BeforeTerminal,
 		barrierWaits:   h.BarrierWaits,
 		readyOwed:      h.ReadyOwed,
+		readyDecided:   h.ReadyDecided,
+		beforeReset:    h.BeforeReset,
+		ackQueued:      h.AckQueued,
+		resetWritten:   h.ResetWritten,
+		beforeReply:    h.BeforeReply,
+		detaching:      h.Detaching,
 	}
 	if stall > 0 {
 		s.stall = stall
@@ -91,6 +121,18 @@ func (s *Server) OutboxHighWater() int {
 		high = max(high, c.out.highWater())
 	}
 	return high
+}
+
+// Queued is how many lines the live connections' outboxes hold that their
+// writers have not yet taken.
+func (s *Server) Queued() int {
+	n := 0
+	for _, c := range s.liveConns() {
+		c.out.mu.Lock()
+		n += len(c.out.q)
+		c.out.mu.Unlock()
+	}
+	return n
 }
 
 // Admitted is, per live connection, how many requests are admitted and their

@@ -35,6 +35,15 @@ import (
 //     ended subscription, its final records and its reset; for a detach, the
 //     detach's own reply. A pending attach that fails is closed at once.
 //
+// Each step a wire-visible acknowledgement announces is taken in the SAME
+// conn.mu section that queues it (conn.enqueue; the reset's queueReset): the
+// attach reply and LIVE, the detach reply or the reset and CLOSED (astra r8).
+// So nothing the client can read is ever ahead of the step its next request
+// depends on — a detach sent the instant the attach reply is read finds the
+// attachment live, an attach sent the instant a reset or a detach reply is read
+// finds the place free — and a barrier still sees CLOSED only once the
+// acknowledgement is queued.
+//
 // Exactly one side queues the terminal acknowledgement: the forwarder claims
 // it (attachment.ending) or a detach does (attachment.detach), each under
 // conn.mu, and whichever claims second queues nothing of it. A new attach is
@@ -42,7 +51,9 @@ import (
 // stream's tail before the new reply (TestAReattachWaitsForTheOldReset). A
 // reply barrier waits for a closing attachment exactly as for a live one, so a
 // detach racing a command releases that command's barrier with its own reply
-// (TestABarrierAwaitsAClosingAttachment).
+// (TestABarrierAwaitsAClosingAttachment); a detach answered before the command
+// commits leaves it an attachment already closed, owed no events, and its
+// reply is queued without waiting (TestADetachBeforeTheCommandOwesItNothing).
 //
 // # Readiness
 //
@@ -83,6 +94,11 @@ type attachment struct {
 	// readyCh carries the one ready notification owed to an attachment made
 	// before readiness, and the seq it waits behind (watchReady).
 	readyCh chan readyNote
+	// watched is closed once the ready watcher has returned — having handed
+	// over its note or decided none is owed — for an attachment made before
+	// readiness; nil for one that has no watcher. Set before the forwarder
+	// starts.
+	watched chan struct{}
 
 	// sub, after and cutoff are set under conn.mu before the reply is queued,
 	// and never written again: the forwarder reads them after it starts.
@@ -276,11 +292,12 @@ func (c *conn) awaitReady(a *attachment, eng *engine.Engine) (outcome, bool) {
 	}
 }
 
-// answerAttach queues the attach reply and, once it is queued, makes the
-// attachment live and starts its forwarder (and, for an attach made before
-// readiness, the watcher that owes it its ready notification). A reply that
-// cannot go out whole — over the outbound limit — closes the subscription and
-// answers the error instead; one whose connection has gone goes nowhere.
+// answerAttach queues the attach reply and makes the attachment live in one
+// conn.mu section (conn.enqueue), and then starts its forwarder (and, for an
+// attach made before readiness, the watcher that owes it its ready
+// notification). A reply that cannot go out whole — over the outbound limit —
+// closes the subscription and answers the error instead; one whose connection
+// has gone, or whose engine has been replaced, goes nowhere.
 func (c *conn) answerAttach(a *attachment, att *engine.Attachment, res protocol.AttachResult, req *request) outcome {
 	raw, err := rawJSON(res)
 	if err != nil {
@@ -297,31 +314,38 @@ func (c *conn) answerAttach(a *attachment, att *engine.Attachment, res protocol.
 	}
 	c.mu.Lock()
 	a.sub, a.after, a.cutoff = att.Sub, res.After.Seq, att.Sub.Cutoff()
-	// close reads a.sub after it sets closing, and replace cancels a.ctx
-	// after it sets replaced: reading both after setting a.sub, under c.mu,
-	// means one side or the other closes the subscription.
-	gone := c.closing.Load() || a.ctx.Err() != nil
 	c.mu.Unlock()
-	if gone {
+	if !res.Ready {
+		a.watched = make(chan struct{})
+	}
+	// close reads a.sub after it sets closing, and replace reads it after it
+	// sets replaced: the admit below reads both under c.mu after a.sub is set,
+	// so one side or the other closes the subscription. The reply queued,
+	// every notification of the attachment follows it; and it is live by then,
+	// so a detach sent the instant the reply is read finds it so.
+	err = c.enqueue(a.ctx, nil, line, c.release, func() error {
+		if c.closing.Load() || c.replaced || a.ctx.Err() != nil {
+			return errGone
+		}
+		return nil
+	}, func() {
+		a.state, a.queued = attLive, a.after
+		a.changedLocked()
+	})
+	if err != nil {
 		c.abandon(a, att.Sub)
 		return outcome{}
 	}
-	if c.out.push(c.ctx, line, c.release) != nil {
-		c.abandon(a, att.Sub)
-		return outcome{}
+	if h := c.srv.hooks.ackQueued; h != nil {
+		h(a.id, protocol.MethodSessionAttach)
 	}
-	// The reply is queued: every notification of the attachment follows it.
-	c.mu.Lock()
-	a.state, a.queued = attLive, a.after
-	a.changedLocked()
-	c.mu.Unlock()
+	if w := a.watched; w != nil && !c.srv.goTransport(func() { defer close(w); c.watchReady(a) }) {
+		close(w)
+	}
 	if !c.srv.goTransport(func() { c.forward(a) }) {
 		// The server has closed, and with it the connection.
 		c.abandon(a, att.Sub)
 		return replied()
-	}
-	if !res.Ready {
-		c.srv.goTransport(func() { c.watchReady(a) })
 	}
 	return replied()
 }
@@ -348,9 +372,11 @@ func (c *conn) abandon(a *attachment, sub *agent.Subscription) {
 // block on the log — and hands the forwarder the notification and S; the
 // forwarder queues it once its position has reached S, so it follows every
 // record committed before the start completed (an install delta still in the
-// outbox included: Ready is not an outbox barrier), or drops it if the
-// subscription's terminal acknowledgement comes first. session is the FINAL
-// info document, read after Ready.
+// outbox included: Ready is not an outbox barrier) — among a closed log's final
+// records too, where the forwarder waits for this watcher's decision before
+// its tail (forward.go, awaitReadyNote) — or drops it if the subscription's
+// reset comes before S is reached. session is the FINAL info document, read
+// after Ready.
 //
 // A session that closed rather than started (Ready closes on Close too) owes
 // no ready: its attachment ends reset{session_closed} (forward.go), and a
@@ -375,6 +401,9 @@ func (c *conn) watchReady(a *attachment) {
 	p := protocol.ReadyParams{Subscription: a.id, Session: info, StartFailed: st.StartFailed}
 	if st.StartFailed {
 		p.Err = st.Err
+	}
+	if h := c.srv.hooks.readyDecided; h != nil {
+		h(a.id, seq)
 	}
 	a.readyCh <- readyNote{seq: seq, params: p}
 	if h := c.srv.hooks.readyOwed; h != nil {
@@ -423,6 +452,9 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	// so what the subscription had not delivered is dropped with it.
 	a.cancel()
 	a.sub.Close()
+	if h := c.srv.hooks.detaching; h != nil {
+		h(a.id)
+	}
 	select {
 	case <-a.stopped:
 	case <-c.ctx.Done():
@@ -435,11 +467,20 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 		return refusal(failed(err))
 	}
 	line, _ := c.responseLine(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: req.id, Result: empty})
-	queued := line != nil && c.out.push(c.ctx, line, c.release) == nil
-	c.markClosed(a)
-	if !queued {
+	// The reply is queued and the attachment closed in one conn.mu section
+	// (conn.enqueue): an attach sent the instant the reply is read finds the
+	// place free.
+	if line == nil || c.enqueue(c.ctx, nil, line, c.release, nil, func() {
+		a.state = attClosed
+		a.changedLocked()
+	}) != nil {
+		c.markClosed(a)
 		return outcome{}
 	}
+	if h := c.srv.hooks.ackQueued; h != nil {
+		h(a.id, protocol.MethodSessionDetach)
+	}
+	c.settle()
 	return replied()
 }
 

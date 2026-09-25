@@ -2177,6 +2177,15 @@ func (s *Subscription) Err() error {
 // (plan 027 §3.4). It never changes, and reading it takes no lock.
 func (s *Subscription) Cutoff() uint64 { return s.cutoff }
 
+// Done is closed the moment the subscription's terminal cause is set — a
+// detach (Close), an overflow (ErrSlowConsumer), a replay that could not be
+// served, the log's Close — whether or not anyone is reading, and before its
+// owner has stopped and closed Records. A reader blocked on something other
+// than Records selects on it to learn that the subscription is over, then
+// drains Records to its close to read Err (and Rest) (plan 027 §3.7: a socket
+// forwarder waiting for room in its writer queue). It never reopens.
+func (s *Subscription) Done() <-chan struct{} { return s.kill }
+
 // Rest is what the subscription had accepted and not yet delivered when its
 // log's Close ended it (plan 027 §3.7): exactly the undelivered tail, in order —
 // contiguous after the last record Records delivered, or after the start

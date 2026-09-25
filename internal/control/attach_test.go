@@ -133,6 +133,85 @@ func TestASecondAttachIsAlreadyAttached(t *testing.T) {
 	}
 }
 
+// TestAnAcknowledgementIsReadOnlyAfterItsStep (§3.7, astra r8): each
+// wire-visible acknowledgement is queued in the same step as the lifecycle
+// change the client's next request depends on, so a client acting on it the
+// instant it reads it — here the goroutine that queued it is held right after
+// the queueing, before anything else it does — is never refused for a state
+// the server has not caught up with: a detach sent on reading the attach reply
+// is answered {}, never bad_request; an attach sent on reading a reset, or a
+// detach's reply, is attached, never already_attached.
+func TestAnAcknowledgementIsReadOnlyAfterItsStep(t *testing.T) {
+	t.Run("a detach on reading the attach reply", func(t *testing.T) {
+		held := newHold()
+		h := newHost(t, withOnClose(held.release), withHooks(control.TestHooks{
+			AckQueued: func(_, method string) {
+				if method == protocol.MethodSessionAttach {
+					held.wait()
+				}
+			},
+			// The detach has read the attachment's state and claimed its end:
+			// only now may the attach go on, starting the forwarder the detach
+			// waits to stop.
+			Detaching: func(string) { held.release() },
+		}))
+		a := h.dial()
+		a.sayHello(nil)
+		id := a.send(protocol.MethodSessionAttach, attachParams(h))
+		await(t, held.entered, "the attach reply to be queued")
+		r := ok[protocol.AttachResult](t, a.reply(id))
+		ok[protocol.Empty](t, a.detach(h, r.Subscription))
+		if notes, _ := a.sync(h); len(notes) != 0 {
+			t.Fatalf("after the detach: %s %s", notes[0].Method, notes[0].Params)
+		}
+	})
+
+	t.Run("an attach on reading a reset", func(t *testing.T) {
+		held := newHold()
+		h := newHost(t, withLog(agent.EventLogOptions{MaxRecordBytes: 4 << 10}), withOnClose(held.release),
+			withHooks(control.TestHooks{AckQueued: func(sub, method string) {
+				if method == protocol.NotifyReset && sub == "s-1" {
+					held.wait()
+				}
+			}}))
+		a := h.dial()
+		a.sayHello(nil)
+		a.attach(attachParams(h))
+		a.note(protocol.NotifySynchronized)
+		h.publish(agent.Event{Type: agent.EventText, Text: strings.Repeat("o", 8<<10)})
+		await(t, held.entered, "the reset to be queued")
+		if rp := paramsOf[protocol.ResetParams](t, a.note(protocol.NotifyReset)); rp.Reason != protocol.ResetOmitted {
+			t.Fatalf("the reset: %+v", rp)
+		}
+		if re := a.attach(attachParams(h)); re.Subscription != "s-2" {
+			t.Fatalf("the attach on reading the reset: %+v", re)
+		}
+		held.release()
+		a.note(protocol.NotifySynchronized)
+	})
+
+	t.Run("an attach on reading the detach reply", func(t *testing.T) {
+		held := newHold()
+		h := newHost(t, withOnClose(held.release), withHooks(control.TestHooks{AckQueued: func(_, method string) {
+			if method == protocol.MethodSessionDetach {
+				held.wait()
+			}
+		}}))
+		a := h.dial()
+		a.sayHello(nil)
+		r := a.attach(attachParams(h))
+		a.note(protocol.NotifySynchronized)
+		id := a.send(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
+		await(t, held.entered, "the detach reply to be queued")
+		ok[protocol.Empty](t, a.reply(id))
+		if re := a.attach(attachParams(h)); re.Subscription != "s-2" {
+			t.Fatalf("the attach on reading the detach reply: %+v", re)
+		}
+		held.release()
+		a.note(protocol.NotifySynchronized)
+	})
+}
+
 // TestAttachParamsAreChecked (§3.2, §3.4): when is ready or now; a budget's
 // members are positive; a snapshot the budget cannot hold is failed, reason
 // snapshot_too_large, and frees the connection's attachment for the next
