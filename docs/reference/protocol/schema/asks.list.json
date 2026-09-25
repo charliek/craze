@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/asks.list.json",
+  "title": "asks.list",
+  "description": "The session's open asks as summaries, in opening order. The body is asks.get's, so a list stays small whatever an ask carries.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "asks": {"type": "array", "items": {"$ref": "#/$defs/summary"}}
+      },
+      "required": ["asks"],
+      "additionalProperties": false
+    },
+    "summary": {
+      "description": "One open ask: its id, kind (permission, question or plan), the label a card draws, and when it opened.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "label": {"type": "string"},
+        "openedAt": {"$ref": "event.json#/$defs/time"}
+      },
+      "required": ["id", "kind", "label", "openedAt"],
+      "additionalProperties": false
+    }
+  }
+}

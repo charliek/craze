@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.queue.add.json",
+  "title": "session.queue.add",
+  "description": "Queues a prompt without starting anything. A full queue is queue_full; a text over the queue's 32 KiB limit is text_too_long.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "text": {"type": "string"}
+      },
+      "required": ["sessionId", "commandId", "text"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "row": {"$ref": "event.json#/$defs/queued", "description": "The row the text became."}
+      },
+      "required": ["row"],
+      "additionalProperties": false
+    }
+  }
+}

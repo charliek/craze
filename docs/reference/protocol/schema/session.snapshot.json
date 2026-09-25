@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.snapshot.json",
+  "title": "session.snapshot",
+  "description": "One bounded snapshot with no subscription (plan 027 §3.4): of the main transcript, or of the child agentId names, with its own cut inside it and the same windowing and truncation marks as an attach. Bounded history is this, not a page API. A snapshot the budget cannot hold is failed, reason snapshot_too_large.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "agentId": {"type": "string"},
+        "budget": {"$ref": "#/$defs/budget"}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "budget": {
+      "description": "The snapshot's byte budget: absent for the default (4 MiB), capped at 8 MiB.",
+      "type": "object",
+      "properties": {
+        "snapshotBytes": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "snapshot": {"$ref": "snapshot.json"}
+      },
+      "required": ["snapshot"],
+      "additionalProperties": false
+    }
+  }
+}

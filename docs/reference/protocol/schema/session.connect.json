@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.connect.json",
+  "title": "session.connect",
+  "description": "The hub splice (plan 027 §3.3): the hub dials the session's host, answers {}, and from the next byte on splices the two connections; the client then speaks to the host itself, starting with its own hello, so client ids, tokens and receipts are always the host's. A per-session host answers unsupported, reason hub_only: the client is already there.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

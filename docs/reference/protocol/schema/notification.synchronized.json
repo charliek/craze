@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.synchronized.json",
+  "title": "synchronized",
+  "description": "The stream has delivered through the attach's cutoff, seq: what was there when the client attached has all arrived. Sent once per attachment, at once when there was nothing to replay. It is the stream's readiness; ready is the session's.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string"},
+        "seq": {"type": "integer", "minimum": 0}
+      },
+      "required": ["subscription", "seq"],
+      "additionalProperties": false
+    }
+  }
+}

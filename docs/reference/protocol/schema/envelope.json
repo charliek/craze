@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/envelope.json",
+  "title": "envelope",
+  "description": "One protocol line (plan 027 §3.2): a JSON-RPC 2.0 request (client to host), response or notification (host to client), one object per line, \"\\n\"-terminated. No batch arrays. A method's params and result are described in <method>.json, a notification's params in notification.<name>.json.",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/response"},
+    {"$ref": "#/$defs/notification"}
+  ],
+  "$defs": {
+    "id": {
+      "description": "A request id: the client's own, a number or a string, echoed back verbatim. It is not a commandId.",
+      "type": ["number", "string"]
+    },
+    "request": {
+      "description": "A client's call. params is always an object; a method that takes nothing may send {} or leave it out.",
+      "type": "object",
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"$ref": "#/$defs/id"},
+        "method": {"type": "string"},
+        "params": {"type": "object"}
+      },
+      "required": ["jsonrpc", "id", "method"],
+      "additionalProperties": false
+    },
+    "response": {
+      "description": "The host's answer to one request: exactly one of result and error. id is the request's, and null only when it could not be read (a line that is not JSON, or one over the inbound limit).",
+      "type": "object",
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"type": ["number", "string", "null"]},
+        "result": {"type": "object"},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "required": ["jsonrpc", "id"],
+      "oneOf": [
+        {"required": ["result"]},
+        {"required": ["error"]}
+      ],
+      "additionalProperties": false
+    },
+    "notification": {
+      "description": "A host's notification: event, synchronized, ready or reset. A client ignores a method it does not know.",
+      "type": "object",
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "method": {"type": "string"},
+        "params": {"type": "object"}
+      },
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false
+    },
+    "error": {
+      "description": "The error object: JSON-RPC's integer (-32700 parse, -32600 invalid request, -32601 method not found, -32602 invalid params, -32000 every craze-level refusal), a message for people, and data, which a client decides from.",
+      "type": "object",
+      "properties": {
+        "code": {"type": "integer", "enum": [-32700, -32600, -32601, -32602, -32000]},
+        "message": {"type": "string"},
+        "data": {"$ref": "#/$defs/errorData"}
+      },
+      "required": ["code", "message", "data"],
+      "additionalProperties": false
+    },
+    "errorData": {
+      "description": "The craze half of an error. A client decides from code alone; reason names the exact sentinel under that code, for wording and reconstruction, never for retry. result is a result returned beside the error (session.cancel's, hello's on protocol_version: see each method's errorResult); cause is a wrapped failure's text.",
+      "type": "object",
+      "properties": {
+        "code": {"$ref": "#/$defs/code"},
+        "reason": {"$ref": "#/$defs/reason"},
+        "result": {"type": "object"},
+        "cause": {"type": "string"}
+      },
+      "required": ["code", "reason"],
+      "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"code": {"const": "not_accepting"}}}, "then": {"properties": {"reason": {"enum": ["not_accepting", "not_in_turn", "start_failed"]}}}},
+        {"if": {"properties": {"code": {"const": "aborted"}}}, "then": {"properties": {"reason": {"enum": ["command_aborted", "set_outcome_unknown", "bad_catalog", "context"]}}}},
+        {"if": {"properties": {"code": {"const": "unavailable"}}}, "then": {"properties": {"reason": {"enum": ["log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy"]}}}},
+        {"if": {"properties": {"code": {"const": "failed"}}}, "then": {"properties": {"reason": {"enum": ["option_gone", "failed", "response_too_large", "snapshot_too_large"]}}}},
+        {"if": {"properties": {"code": {"const": "bad_request"}}}, "then": {"properties": {"reason": {"enum": ["bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long", "protocol_version", "bad_token", "already_attached"]}}}},
+        {"if": {"properties": {"code": {"const": "unsupported"}}}, "then": {"properties": {"reason": {"enum": ["unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only"]}}}},
+        {"if": {"properties": {"code": {"const": "unknown_session"}}}, "then": {"properties": {"reason": {"enum": ["unknown_session"]}}}},
+        {"if": {"properties": {"code": {"const": "unknown_ask"}}}, "then": {"properties": {"reason": {"enum": ["unknown_ask"]}}}},
+        {"if": {"properties": {"code": {"const": "already_submitted"}}}, "then": {"properties": {"reason": {"enum": ["already_submitted"]}}}},
+        {"if": {"properties": {"code": {"const": "already_resolved"}}}, "then": {"properties": {"reason": {"enum": ["already_resolved"]}}}},
+        {"if": {"properties": {"code": {"const": "queue_full"}}}, "then": {"properties": {"reason": {"enum": ["queue_full"]}}}},
+        {"if": {"properties": {"code": {"const": "text_too_long"}}}, "then": {"properties": {"reason": {"enum": ["text_too_long"]}}}},
+        {"if": {"properties": {"code": {"const": "prompt_in_flight"}}}, "then": {"properties": {"reason": {"enum": ["prompt_in_flight"]}}}},
+        {"if": {"properties": {"code": {"const": "foreign_turn"}}}, "then": {"properties": {"reason": {"enum": ["foreign_turn"]}}}},
+        {"if": {"properties": {"code": {"const": "prompt_cancelled"}}}, "then": {"properties": {"reason": {"enum": ["prompt_cancelled"]}}}},
+        {"if": {"properties": {"code": {"const": "stale_version"}}}, "then": {"properties": {"reason": {"enum": ["stale_version"]}}}},
+        {"if": {"properties": {"code": {"const": "stale_turn"}}}, "then": {"properties": {"reason": {"enum": ["stale_turn"]}}}},
+        {"if": {"properties": {"code": {"const": "unknown_row"}}}, "then": {"properties": {"reason": {"enum": ["unknown_row"]}}}},
+        {"if": {"properties": {"code": {"const": "unknown_command"}}}, "then": {"properties": {"reason": {"enum": ["unknown_command"]}}}},
+        {"if": {"properties": {"code": {"const": "in_progress"}}}, "then": {"properties": {"reason": {"enum": ["in_progress"]}}}},
+        {"if": {"properties": {"code": {"const": "stale_model"}}}, "then": {"properties": {"reason": {"enum": ["stale_model"]}}}},
+        {"if": {"properties": {"code": {"const": "index_write"}}}, "then": {"properties": {"reason": {"enum": ["index_write"]}}}},
+        {"if": {"properties": {"code": {"const": "unknown_subagent"}}}, "then": {"properties": {"reason": {"enum": ["unknown_subagent"]}}}}
+      ]
+    },
+    "code": {
+      "description": "The closed code set a client decides from. Resend the SAME commandId on unavailable, not_accepting, in_progress and stale_model (nothing ran); every other code is the command's stored answer, replayed on a resend.",
+      "type": "string",
+      "enum": ["bad_request", "unknown_session", "unknown_ask", "already_submitted", "already_resolved", "not_accepting", "unsupported", "unavailable", "queue_full", "text_too_long", "prompt_in_flight", "foreign_turn", "prompt_cancelled", "stale_version", "stale_turn", "unknown_row", "unknown_command", "in_progress", "stale_model", "aborted", "failed", "index_write", "unknown_subagent"]
+    },
+    "reason": {
+      "description": "Every reason a host sends, each under one code (errorData's allOf). resume_lost, disconnected and no_answer are client-side reasons no host ever sends, and are not here.",
+      "type": "string",
+      "enum": ["not_accepting", "not_in_turn", "start_failed", "command_aborted", "set_outcome_unknown", "bad_catalog", "context", "log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "option_gone", "failed", "response_too_large", "snapshot_too_large", "bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long", "protocol_version", "bad_token", "already_attached", "unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "unknown_session", "unknown_ask", "already_submitted", "already_resolved", "queue_full", "text_too_long", "prompt_in_flight", "foreign_turn", "prompt_cancelled", "stale_version", "stale_turn", "unknown_row", "unknown_command", "in_progress", "stale_model", "index_write", "unknown_subagent"]
+    },
+    "sessionId": {
+      "description": "The durable craze session id, at params.sessionId in every session-scoped method, so a hub can route a method it does not know.",
+      "type": "string",
+      "minLength": 1
+    },
+    "commandId": {
+      "description": "A mutating method's command id: a canonical positive decimal string (no sign, no leading zero), per client, counted from 1. Resending the same id asks \"did it happen?\" and never runs the command twice.",
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$",
+      "maxLength": 20
+    },
+    "empty": {
+      "description": "An object with nothing in it: the params of a method that takes nothing, the result of one that answers nothing but success.",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

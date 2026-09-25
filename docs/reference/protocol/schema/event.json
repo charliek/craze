@@ -1,0 +1,415 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/event.json",
+  "title": "event",
+  "description": "One event in the lossless event codec (internal/agent/eventcodec.go, codec version 1): an event notification's event, verbatim, and the shape every leaf payload of the protocol has. Every key but type is omitted at its zero value, so absent means zero; a pointer's presence is kept (an object that is present and empty is not an absent one); times are RFC 3339 with nanoseconds, in UTC. A client ignores keys and event types it does not know.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "The event's kind. A client ignores a kind it does not know.",
+      "type": "string",
+      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask"]
+    },
+    "text": {"type": "string", "description": "A text, thought or user chunk; a title (meta)."},
+    "mode": {"type": "string", "description": "The mode an agent-initiated meta reports."},
+    "agent": {"type": "string", "description": "The sub-agent the event belongs to; absent for the main transcript."},
+    "tool": {"$ref": "#/$defs/tool"},
+    "todos": {"type": "array", "items": {"$ref": "#/$defs/todo"}},
+    "permission": {"$ref": "#/$defs/permission"},
+    "question": {"$ref": "#/$defs/question"},
+    "plan": {"$ref": "#/$defs/plan"},
+    "subagent": {"$ref": "#/$defs/subagent"},
+    "subagentChange": {"type": "string", "description": "spawned, progress or finished."},
+    "queue": {"$ref": "#/$defs/queued"},
+    "queueChange": {"type": "string", "description": "queued, edited, removed or sent."},
+    "queuePos": {"type": "integer", "minimum": 0},
+    "command": {"$ref": "#/$defs/command"},
+    "interjection": {"type": "boolean"},
+    "foreignTurn": {"$ref": "#/$defs/foreignTurn"},
+    "turn": {"$ref": "#/$defs/turn"},
+    "ask": {"$ref": "#/$defs/ask"},
+    "state": {"$ref": "#/$defs/state"},
+    "replay": {"$ref": "#/$defs/replay"},
+    "replayed": {"type": "boolean", "description": "The event came from a session/load replay."},
+    "cause": {"type": "string", "description": "The command that caused it, \"clientId/commandId\"."},
+    "err": {"$ref": "#/$defs/error"},
+    "stopReason": {"type": "string"},
+    "at": {"$ref": "#/$defs/time"}
+  },
+  "required": ["type"],
+  "additionalProperties": false,
+  "$defs": {
+    "time": {
+      "description": "A time: RFC 3339 with nanoseconds, in UTC.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "tool": {
+      "description": "A tool call's state (ToolEvent).",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "status": {"type": "string"},
+        "kind": {"type": "string"},
+        "title": {"type": "string"},
+        "toolName": {"type": "string"},
+        "rawInput": {"type": "string"},
+        "contentText": {"type": "string"},
+        "locations": {"type": "array", "items": {"type": "string"}},
+        "output": {"$ref": "#/$defs/toolOutput"},
+        "diffs": {"type": "array", "items": {"$ref": "#/$defs/diff"}},
+        "task": {"$ref": "#/$defs/task"},
+        "at": {"$ref": "#/$defs/time"}
+      },
+      "additionalProperties": false
+    },
+    "toolOutput": {
+      "description": "A tool's output. exitCode is present, 0 included, whenever the tool reported one.",
+      "type": "object",
+      "properties": {
+        "exitCode": {"type": "integer"},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "content": {"type": "string"},
+        "stdoutHead": {"type": "string"},
+        "stderrHead": {"type": "string"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "diff": {
+      "description": "One file a tool changed.",
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "oldText": {"type": "string"},
+        "newText": {"type": "string"},
+        "added": {"type": "integer"},
+        "removed": {"type": "integer"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "task": {
+      "description": "A task tool's sub-agent details; its presence, even empty, marks the tool a task.",
+      "type": "object",
+      "properties": {
+        "description": {"type": "string"},
+        "prompt": {"type": "string"},
+        "model": {"type": "string"},
+        "agentId": {"type": "string"},
+        "subagentType": {"type": "string"},
+        "durationMs": {"type": "integer"},
+        "receipt": {"type": "boolean"},
+        "status": {"type": "string"},
+        "background": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "todo": {
+      "description": "One todo: status is pending, in_progress, completed or cancelled.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "content": {"type": "string"},
+        "status": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "permission": {
+      "description": "A permission request: every offered option verbatim, duplicate kinds included. Answer with the exact optionId.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "tool": {"type": "string"},
+        "options": {"type": "array", "items": {"$ref": "#/$defs/permissionOption"}}
+      },
+      "additionalProperties": false
+    },
+    "permissionOption": {
+      "description": "One offered option: kind is ACP's (allow_once, allow_always, reject_once, reject_always).",
+      "type": "object",
+      "properties": {
+        "optionId": {"type": "string"},
+        "name": {"type": "string"},
+        "kind": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "question": {
+      "description": "A question request (QuestionEvent).",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "questions": {"type": "array", "items": {"$ref": "#/$defs/questionItem"}},
+        "auto": {"type": "boolean"},
+        "answers": {"$ref": "#/$defs/answers"}
+      },
+      "additionalProperties": false
+    },
+    "questionItem": {
+      "description": "One question of a question request.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "prompt": {"type": "string"},
+        "options": {"type": "array", "items": {"$ref": "#/$defs/option"}},
+        "allowMultiple": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "option": {
+      "description": "One option of a question.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "answers": {
+      "description": "Each question's id to the option ids chosen. A null list is not an empty one: null is written for a nil list, [] for an empty one.",
+      "type": "object",
+      "additionalProperties": {"type": ["array", "null"], "items": {"type": "string"}}
+    },
+    "plan": {
+      "description": "A plan request (PlanEvent).",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "overview": {"type": "string"},
+        "plan": {"type": "string"},
+        "todos": {"type": "array", "items": {"$ref": "#/$defs/todo"}},
+        "auto": {"type": "boolean"},
+        "accepted": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "subagent": {
+      "description": "One sub-agent roster row (SubagentInfo): status is running, completed, failed or cancelled.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "attemptId": {"type": "string"},
+        "parentId": {"type": "string"},
+        "toolCallId": {"type": "string"},
+        "description": {"type": "string"},
+        "subagentType": {"type": "string"},
+        "model": {"type": "string"},
+        "status": {"type": "string"},
+        "error": {"type": "string"},
+        "prompt": {"type": "string"},
+        "output": {"type": "string"},
+        "activity": {"type": "string"},
+        "startedAt": {"$ref": "#/$defs/time"},
+        "endedAt": {"$ref": "#/$defs/time"},
+        "durationMs": {"type": "integer"},
+        "toolCalls": {"type": "integer"},
+        "turns": {"type": "integer"},
+        "tokensUsed": {"type": "integer"},
+        "toolsUsed": {"type": "array", "items": {"type": "string"}},
+        "transcript": {"type": "boolean"},
+        "background": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "queued": {
+      "description": "One queued prompt (QueuedPrompt): a queue event's row, and every queue row the protocol carries.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "queuedAt": {"$ref": "#/$defs/time"},
+        "version": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "command": {
+      "description": "A plugin command or skill craze expanded into the prompt it is about to send.",
+      "type": "object",
+      "properties": {
+        "pluginCommand": {"$ref": "#/$defs/pluginCommand"},
+        "path": {"type": "string"},
+        "text": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "pluginCommand": {
+      "description": "A plugin command or skill: kind is command, skill or agent.",
+      "type": "object",
+      "properties": {
+        "plugin": {"type": "string"},
+        "bare": {"type": "string"},
+        "display": {"type": "string"},
+        "qualified": {"type": "string"},
+        "description": {"type": "string"},
+        "kind": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "foreignTurn": {
+      "description": "One end of a turn the agent ran on its own: running on its start, absent on its end. reason is on both ends when the agent gave one.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "reason": {
+          "type": "string",
+          "description": "Why the agent started the turn: an open string, not an enum. Absent (\"\") is grok's interjection fallback; subagent_wake is the native session delivering a background sub-agent's result. A client reads a value it does not know as absent."
+        },
+        "running": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "turn": {
+      "description": "One end of an engine-driven turn (TurnInfo): phase started (with text and origin: submit, drain or send_now) or ended (with its stop reason, and errClass/err for a failure; synthetic for an ending the wire never produced; next, the successor turn this settlement started; pending, the rows still queued).",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "phase": {"type": "string"},
+        "text": {"type": "string"},
+        "origin": {"type": "string"},
+        "stopReason": {"type": "string"},
+        "errClass": {"type": "string"},
+        "err": {"type": "string"},
+        "synthetic": {"type": "boolean"},
+        "next": {"type": "string"},
+        "pending": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "ask": {
+      "description": "One ask's ending (AskUpdate): kind is permission, question or plan; outcome answered, cancelled, turn_ended, closing or automatic; by whose doing (client, call, cancel, turn, close, policy, provider, unavailable). body is set only when no opening was ever published.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "outcome": {"type": "string"},
+        "by": {"type": "string"},
+        "optionId": {"type": "string"},
+        "answers": {"$ref": "#/$defs/answers"},
+        "skip": {"type": "boolean"},
+        "accepted": {"type": "boolean"},
+        "label": {"type": "string"},
+        "body": {"$ref": "#/$defs/askBody"}
+      },
+      "additionalProperties": false
+    },
+    "askBody": {
+      "description": "An ask's opening exactly as offered: one of the three, in the shape its own opening event has.",
+      "type": "object",
+      "properties": {
+        "permission": {"$ref": "#/$defs/permission"},
+        "question": {"$ref": "#/$defs/question"},
+        "plan": {"$ref": "#/$defs/plan"}
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "description": "A state delta (StateDelta): the sections of the shared state one event changed, each in full. A section that is absent was not touched; one that is present was set, to \"\" or {} included. The delta's seq is the change's revision.",
+      "type": "object",
+      "properties": {
+        "title": {"type": "string"},
+        "mode": {"type": "string"},
+        "model": {"type": "string"},
+        "config": {"$ref": "#/$defs/config"},
+        "commands": {"$ref": "#/$defs/commands"},
+        "plugins": {"$ref": "#/$defs/plugins"},
+        "sendNow": {"$ref": "#/$defs/sendNow"},
+        "reason": {"type": "string"},
+        "detail": {"type": "string"},
+        "indexErr": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "config": {
+      "description": "The provider's config options, in full; {} for none.",
+      "type": "object",
+      "properties": {
+        "options": {"type": "array", "items": {"$ref": "#/$defs/configOption"}}
+      },
+      "additionalProperties": false
+    },
+    "commands": {
+      "description": "The agent's slash commands, in full; {} for none.",
+      "type": "object",
+      "properties": {
+        "commands": {"type": "array", "items": {"$ref": "#/$defs/commandInfo"}}
+      },
+      "additionalProperties": false
+    },
+    "plugins": {
+      "description": "The plugin commands and skills craze found, in full; {} for none.",
+      "type": "object",
+      "properties": {
+        "plugins": {"type": "array", "items": {"$ref": "#/$defs/pluginCommand"}}
+      },
+      "additionalProperties": false
+    },
+    "configOption": {
+      "description": "One config option and its current value.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "category": {"type": "string"},
+        "type": {"type": "string"},
+        "current": {"type": "string"},
+        "selectValues": {"type": "array", "items": {"$ref": "#/$defs/selectValue"}}
+      },
+      "additionalProperties": false
+    },
+    "selectValue": {
+      "description": "One value a select option offers.",
+      "type": "object",
+      "properties": {
+        "value": {"type": "string"},
+        "name": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "commandInfo": {
+      "description": "One slash command the agent advertises.",
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "sendNow": {
+      "description": "The send-now section: armed, its text, the row it re-takes and the turn it replaces; {} when nothing is armed.",
+      "type": "object",
+      "properties": {
+        "armed": {"type": "boolean"},
+        "text": {"type": "string"},
+        "fromRow": {"type": "string"},
+        "turn": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "replay": {
+      "description": "One end of a session/load replay: phase start or end.",
+      "type": "object",
+      "properties": {
+        "phase": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "description": "An event's error: its message, its class (rpc, closed, agent_exited, agent_exit_status, canceled, deadline_exceeded, auth, model_not_found, context_too_large, empty_step, empty_prompt, harness_closed, provider, other, prompt_cancelled, prompt_in_flight, foreign_turn; a class a later craze wrote is kept as it is) and its code (the JSON-RPC code, HTTP status or exit status, else 0). All three are always present.",
+      "type": "object",
+      "properties": {
+        "message": {"type": "string"},
+        "class": {"type": "string"},
+        "code": {"type": "integer"}
+      },
+      "required": ["message", "class", "code"],
+      "additionalProperties": false
+    }
+  }
+}

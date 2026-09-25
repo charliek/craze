@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.list.json",
+  "title": "sessions.list",
+  "description": "The roster, readable without attaching. On a host, epoch is its hostId (a new host process is a new epoch: reseed) and cursor the log's committed seq when the rows were read.",
+  "$defs": {
+    "params": {"$ref": "envelope.json#/$defs/empty"},
+    "result": {
+      "type": "object",
+      "properties": {
+        "epoch": {"type": "string"},
+        "cursor": {"type": "integer", "minimum": 0},
+        "sessions": {"type": "array", "items": {"$ref": "info.json#/$defs/sessionRow"}}
+      },
+      "required": ["epoch", "cursor", "sessions"],
+      "additionalProperties": false
+    }
+  }
+}

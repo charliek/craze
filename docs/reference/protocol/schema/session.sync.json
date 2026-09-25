@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.sync.json",
+  "title": "session.sync",
+  "description": "The reply barrier with no command (plan 027 §3.6): answered once every event committed before the call has been written to this connection's subscription, with the log's committed seq at the call.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "seq": {"type": "integer", "minimum": 0}
+      },
+      "required": ["seq"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/asks.answer.json",
+  "title": "asks.answer",
+  "description": "Answers one ask. The first valid answer wins; an invalid one is bad_request, reason bad_answer, and leaves the ask open; an ask already ended is already_resolved (an evicted one included), an id never issued unknown_ask.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "commandId": {"$ref": "envelope.json#/$defs/commandId"},
+        "askId": {"type": "string"},
+        "answer": {"$ref": "#/$defs/answer"}
+      },
+      "required": ["sessionId", "commandId", "askId", "answer"],
+      "additionalProperties": false
+    },
+    "answer": {
+      "description": "An answer, each kind reading its own members and refusing any other kind's. permission: optionId, the exact id of an offered option (never a kind), or cancel. question: answers (each question's id to the option ids chosen), or skip; a question that asks nothing takes {}. plan: exactly one of accept and reject.",
+      "type": "object",
+      "properties": {
+        "optionId": {"type": "string"},
+        "cancel": {"type": "boolean"},
+        "answers": {"$ref": "event.json#/$defs/answers"},
+        "skip": {"type": "boolean"},
+        "accept": {"type": "boolean"},
+        "reject": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "result": {"$ref": "envelope.json#/$defs/empty"}
+  }
+}

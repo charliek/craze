@@ -1848,5 +1848,101 @@ No owner decision was reopened at any round.
 
 ### Deviations from the plan
 
-Empty at C0. Each PR's docs commit mirrors this plan's execution amendments
-(X1…) here as they land.
+PR 1's execution amendments X1–X26, one paragraph each except the H6 seam
+group, mirrored here as `12`'s own record; the full text and every failing
+schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.md`,
+"Execution amendments"). None reopens a pinned decision.
+
+**PR 1** (C1–C9):
+
+1. **Plan 027 X1, X7, X9, X11, X14 (the H6 PR 3 seam)** — H6 PR 3 (native
+   sub-agent wakes, merged as `017417c` before PR 1) changes nothing on the
+   wire, but PR 1 rebases onto it: `foreignTurn.reason` (an open string, `""`
+   or `subagent_wake`) and `Capabilities.SubagentBackground` (wire
+   `subagentBackground`) both exist and are documented; a wake has no
+   `EventDone`/`EventError`, only `running: false`; a native prompt that
+   claims a wake's owed drain always flushes the wake's ending first, so
+   `foreignTurn{running: false}` precedes the next turn's output; H6 PR 3
+   also takes SF-47 and SF-48, so any row `13` adds for S2 starts at SF-49
+   (none was needed — see X13 below).
+2. **Plan 027 X2 (C2, SF-13)** — the gate table (§3.5) is corrected against
+   `TestTheGateTableIsTheEngines`, never the engine: `set` in the refused
+   rows is `not_accepting` (not "the worker's answer"), `answer` on a
+   closing/closed engine splits into `allowed` (closing — the session's own
+   close has not run yet) and `already_resolved` (closed), `cancel` naming a
+   stale turn is `stale_turn` in every row but closed, `interject` is
+   `unsupported` when the provider cannot before it is `not_in_turn`, and a
+   `waiting` row (`craze prompt`'s own foreign-turn retry policy) is added.
+   The published table in `docs/reference/protocol.md` is rendered
+   mechanically from this same test's table (`gateTableMarkdown()`,
+   `TestPublishedGateTableIsTheTested`).
+3. **Plan 027 X3 (C2)** — client lifecycle details: a client retires at `≥
+   receiptAge` released with no table entry (an entry itself evicts at `>
+   receiptAge`); a retired client's commands are `bad_request`, never
+   reaching the wire (a failed resume answers `resumed: false` instead); a
+   second release keeps the first release time.
+4. **Plan 027 X4 (C3)** — SF-15/16: "any goroutine" includes the index
+   worker's own inline seed. A quit while that seed is parked, owing
+   nothing else, now waits up to the existing 500 ms bound instead of giving
+   up at once.
+5. **Plan 027 X5, X6 (C4, flagged in the report)** — two contradictions the
+   draft left in the wire, resolved in the executor's favour: `hello`'s
+   result shape is disambiguated by `endpoint.kind` (`"host"` carries
+   `clientId`/`token`/`resumed`/`retryHorizon`, always, `resumed: false`
+   included; `"hub"` carries none — no protocol change needed at S4), and
+   `session.create` on a host answers like `session.connect`
+   (`unsupported`, reason `hub_only`). C4's other open calls: schema `$id`s
+   under `https://charliek.github.io/craze/reference/protocol/schema/`;
+   lists always `[]`, never `null`; `settings.config` is `{}` when empty.
+6. **Plan 027 X8, X11 (the TUI's Esc ladder, for PR 3's kickoff)** — Esc now
+   cancels a running foreign turn when nothing of craze's own is working,
+   already asynchronous on `main` as of H6 PR 3's own fix round
+   (`cancelForeignTurn`, a `tea.Cmd`). Its residual is a small window where a
+   turnless `session.cancel` can land on a drain that just claimed a queued
+   row instead of the foreign turn it meant — tracked as **SF-48** and
+   documented on the wire (`session.cancel`'s "no turn" text); the eventual
+   fix is additive (`session.cancel{expect: "foreign"}`), not in protocol 1.
+7. **Plan 027 X10 (C4)** — the frame reader tolerates a final line with no
+   trailing `\n` at EOF (and strips a lone trailing `\r`): a peer that
+   half-closes right after an unterminated object still gets its answer.
+   Every line a host writes still ends in `\n`.
+8. **Plan 027 X12, X13, X15 (C6, C6a, C6b)** — the server's binding table:
+   the resume token is stable across resumes (never rotated, so two
+   simultaneous resumes can still be serialised and a client that crashed
+   between the reply and saving a new token does not lose its identity); a
+   token is valid only on the host that issued it; a binding with no
+   connection for 2× the receipts table's age bound (20 min) is dropped
+   lazily, which replaced X12's proposed follow-up row (none was needed); a
+   command whose binding has since moved on (a transfer, an eviction,
+   another engine) is refused rather than run.
+9. **Plan 027 X16, X19, X22, X25 (C7, C7a, C7b, C7e)** — attach's open calls
+   and three successive review rounds converge on one rule: a replaced
+   connection is **terminal-only** (superseding the earlier piecemeal
+   rules). Its outbox admits exactly one terminal line —
+   `reset{session_replaced}` for a live/closing attachment nobody has
+   claimed the end of, or a claimed detach's own `{}` — seals on it, and
+   drops every ordinary line, queued or not, giving back its slot: a client
+   learns outcomes by resending after a fresh `hello` (`resumed: false` →
+   outcome unknown). A barrier also waits for an attach not yet answered on
+   its connection, so a reply can never precede an event the new attachment
+   will forward.
+10. **Plan 027 X17, X18, X20, X21, X23, X24 (C8, C8a, C8b, C8c)** — the Go
+    client's (`internal/remote`) resume and resend mechanics, arrived at over
+    four review rounds: one attempt of a command on the wire at a time;
+    "may have run" clears only from the latest attempt's answer; resends go
+    in wire order, after the re-attach is answered, never before; `resumed:
+    true` is trusted only for the same client id **and the same host**;
+    `busy` on a resend is waited out and resent, exactly like
+    `in_progress`; the reconnect episode's clock pauses only while the
+    adoption waits for the re-attach's *reply* (a write during that wait
+    restarts it with the time left); the socket reader never writes, so a
+    local slow consumer's re-attach or detach goes through the connection's
+    one writer goroutine.
+11. **Plan 027 X26 (C9)** — the fixtures live in
+    `internal/fakehost/testdata/wire/` (not `internal/protocol/testdata/wire/`
+    as §3.11 first said), each line `{conn, dir, msg}` plus `op` lines that
+    script the host directly and an `"invalid": true` flag on fixture 10's
+    deliberately malformed line. The host's incarnation crosses as a
+    placeholder (`INCARNATION-1`, …), substituted both ways by the runner —
+    a Stub option to pin it was rejected as a hard stop. `craze-fake-host`
+    joins `make build`.
