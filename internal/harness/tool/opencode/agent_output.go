@@ -81,8 +81,11 @@ func (t *agentOutputTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error
 
 type agentOutputCall struct{ call tool.OutputCall }
 
+// Request titles the call for the row a client draws: the TUI labels a row by
+// the tool's kind, so a bare id read `read <uuid>` (plan 026 X45); this says
+// what the read is of.
 func (c *agentOutputCall) Request() tool.Request {
-	return tool.Request{Title: c.call.ID}
+	return tool.Request{Title: "sub-agent result " + c.call.ID}
 }
 
 // Run hands the call to the session's runner, which answers from the result's

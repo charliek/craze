@@ -180,14 +180,29 @@ type nativeSession struct {
 	wakeSeq  uint64
 	wakeKick chan struct{}
 	wakeDone chan struct{}
+	// wakeEndingQueued says a wake's ending bracket is enqueued and not yet
+	// committed: set in the ending's section, cleared once its flush returns.
+	// A prompt that claims in between flushes the outbox before it says
+	// anything, so its output cannot overtake the ending (prompt; astra r19).
+	wakeEndingQueued bool
 	// wakeSeam runs on the worker's goroutine at a recheck that found a wake
 	// possible, between that reading and the claim, with no lock held: the
 	// window a Begin can win (native_wake.go). wakeDecided is told each
 	// recheck's outcome, claimed or stood down, once its section has released
-	// s.mu. **Both are test seams: nil in production**, set only by a test in
-	// this package and only under s.mu, before the first kick.
+	// s.mu. wakeEnded runs on the worker's goroutine right after the ending's
+	// section has released s.mu — the claim released, the ending enqueued —
+	// and before the flush: the instant an observer of the log can see the
+	// ending. **All three are test seams: nil in production**, set only by a
+	// test in this package and only under s.mu, before the first kick.
 	wakeSeam    func()
 	wakeDecided func(claimed bool)
+	wakeEnded   func()
+	// sinkSeam runs at the head of sink, on the goroutine that handed the
+	// event over — a turn's, a tool's, a background child's — before the
+	// adapter reads it: where a test holds a call's acknowledgement while the
+	// child finishes (F5's schedule), or panics inside a wake. **A test seam:
+	// nil in production**, set before Start and never written after.
+	sinkSeam func(harness.Event)
 	// cancelSeam runs inside Cancel's critical section, with s.mu held, the
 	// turn's context already cancelled and the registry call still to come.
 	// **It is a test seam: nil in production**, set only by a test in this
@@ -1175,7 +1190,22 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// could expand a body under a name the menu means something else by.
 	refs := s.refsLocked(text)
 	sessionID := s.snap.SessionID
+	behindAWake := s.wakeEndingQueued
 	s.mu.Unlock()
+
+	// A wake's ending still queued — enqueued in the section that released
+	// the claim this turn then took (native_wake.go) — is flushed before this
+	// turn says anything, as the engine's launch flushes before it runs a
+	// continuation (engine.go): the turn's own publishes never wait for
+	// queued events, so its text would otherwise overtake the ending, which
+	// would then close this turn's stream instead of the wake's (astra r19).
+	// Only then: with no wake ending in flight a turn asks its model whatever
+	// the outbox holds, as it always has. Bounded by s.done, as every barrier
+	// here is: a Close that has begun frees it, and the turn then finds the
+	// session closed.
+	if behindAWake {
+		_ = s.log.Flush(context.Background(), s.done)
+	}
 
 	// One string, not content blocks: the harness takes the whole user message
 	// at once (turn.go). Redacted with the session's own redactor, because Run
@@ -1381,6 +1411,9 @@ func nativeTitle(prompt string) string {
 // s.mu, when a case takes it, is taken alone: never under toolMu or rosterMu,
 // which Snapshot takes under s.mu, one after the other.
 func (s *nativeSession) sink(ev harness.Event) {
+	if seam := s.sinkSeam; seam != nil {
+		seam(ev)
+	}
 	switch e := ev.(type) {
 	case harness.TextDelta:
 		if t := sanitizeText(e.Text); t != "" {

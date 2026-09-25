@@ -186,13 +186,16 @@ func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context) (res 
 
 // endWake is the ending (the file's comment): the rows settled and the token
 // retired outside s.mu; the state cleared, the claim released and the ending
-// bracket enqueued in one section; the flush; the journal's note of what the
-// wake came to; and the recheck's kick, because a result that finished during
-// the wake's last step is pending now and this ending is what delivers it.
+// bracket enqueued in one section — marked queued until the flush that
+// follows has committed it, for a prompt claiming in between (native.go's
+// prompt); the flush; the journal's note of what the wake came to; and the
+// recheck's kick, because a result that finished during the wake's last step
+// is pending now and this ending is what delivers it.
 func (s *nativeSession) endWake(id string, tok TurnToken, rel chan struct{}, res harness.Result, err error) {
 	s.settleTools()
 	s.asks.EndTurn(tok)
 	s.mu.Lock()
+	ended := s.wakeEnded
 	s.wake, s.foreign, s.snap.ForeignTurn = false, false, false
 	s.claimed, s.inPrompt, s.cancelling = false, false, false
 	s.turnCancel, s.turnToken = nil, TurnToken{}
@@ -203,8 +206,15 @@ func (s *nativeSession) endWake(id string, tok TurnToken, rel chan struct{}, res
 	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
 		ID: id, Reason: ReasonSubagentWake,
 	}})
+	s.wakeEndingQueued = true
 	s.mu.Unlock()
+	if ended != nil {
+		ended()
+	}
 	_ = s.log.Flush(context.Background(), s.done)
+	s.mu.Lock()
+	s.wakeEndingQueued = false
+	s.mu.Unlock()
 	s.noteWake(id, res, err)
 	s.kickWake()
 }

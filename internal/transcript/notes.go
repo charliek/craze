@@ -39,7 +39,7 @@ const (
 // synthetic TurnEnded's.
 const stopCancelled = "cancelled"
 
-// foreignTurnNote is the note a foreign turn's start draws, by the reason the
+// noteForForeignTurn is the note a foreign turn's start draws, by the reason the
 // bracket carries (agent.ForeignTurnInfo.Reason): the native wake's own
 // wording for agent.ReasonSubagentWake, and today's for "" — and for any
 // reason this build does not know, which a newer session may publish: the

@@ -140,8 +140,14 @@ func TestAgentOutputPrepare(t *testing.T) {
 		{`{"id":"kid-1","wait_ms":9000000}`, 600 * time.Second},
 	} {
 		n := len(sub.seen())
-		if _, res := f.call(t, "agent_output", tc.input); ok(t, res) != "the result" {
+		req, res := f.call(t, "agent_output", tc.input)
+		if ok(t, res) != "the result" {
 			t.Fatalf("%s: result %q, want the runner's", tc.input, res.Text)
+		}
+		// The row's title says what the read is of (plan 026 X45): the TUI
+		// labels a row by the tool's kind, so a bare id read `read <uuid>`.
+		if req.Title != "sub-agent result kid-1" {
+			t.Fatalf("%s: the request's title is %q, want the child named", tc.input, req.Title)
 		}
 		got := sub.seen()[n]
 		if want := (tool.OutputCall{CallID: got.CallID, ID: "kid-1", Wait: tc.wait}); got != want || !strings.HasPrefix(got.CallID, "t1.1.") {

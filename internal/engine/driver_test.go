@@ -859,6 +859,11 @@ func TestARestorationBesideAStandingSend(t *testing.T) {
 	r.s.setForeignSilently(true)
 	turn.release()
 	awaitTurn(t, returned, "turn-1")
+	// The arm's cancel runs on a goroutine of the engine's (cancelArmed), and
+	// turn-1 settles only once that cancel's hold is released: its ending is
+	// the barrier, or the submit below could find turn-1 still current and
+	// queue the row instead of claiming it (seen 7 in 300 at -cpu=1).
+	r.until(ended("turn-1"))
 	if st := r.e.State(); st.SendNow == nil || st.SendNow.Turn != "turn-1" {
 		t.Fatalf("the send standing behind the agent's turn: %+v", st.SendNow)
 	}

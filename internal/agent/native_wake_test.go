@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"charm.land/fantasy"
 
+	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -29,33 +31,122 @@ import (
 // are routed under "go" too, in the order the requests are made.
 
 // wakeRig is a started interactive native session over routers, watched, with
-// its recheck outcomes on a channel.
+// its recheck outcomes on a channel, every OnPending call on another (pending:
+// a result's publication, which the roster's finished event precedes — astra
+// r19 #2), and two hooks around the sink — sinkBefore runs at the head of
+// the adapter's own sink, before it reads any event of a turn's or a child's
+// (the sinkSeam); sinkAfter once the adapter has handled an event of the
+// session-level sink, a background child's — for the schedules only the sink
+// can force: a call's acknowledgement held while its child finishes (F5), a
+// child paused between its finished event and its publication, a panic
+// inside a wake. Both are nil until a test sets them.
 type wakeRig struct {
-	t       *testing.T
-	f       *nativeFixture
-	a       *nativeRouter
-	s       *nativeSession
-	w       *nativeWatcher
-	decided chan bool
+	t          *testing.T
+	f          *nativeFixture
+	a          *nativeRouter
+	s          *nativeSession
+	w          *nativeWatcher
+	decided    chan bool
+	pending    chan struct{}
+	sinkBefore atomic.Pointer[func(harness.Event)]
+	sinkAfter  atomic.Pointer[func(harness.Event)]
+}
+
+// wakeSeams is what a test installs before the session starts: the worker's
+// two seams, the log's hooks and its observer (the engine's own hook,
+// log.Observe, which a session without an engine leaves to the test).
+type wakeSeams struct {
+	seam    func()
+	ended   func()
+	log     *logHooks
+	observe func(Event)
 }
 
 // newWakeRig starts the session; seam, when set, is the worker's wakeSeam.
 func newWakeRig(t *testing.T, opts Options, seam func()) *wakeRig {
 	t.Helper()
+	return newWakeRigWith(t, opts, wakeSeams{seam: seam})
+}
+
+// newWakeRigWith is newWakeRig with every seam.
+func newWakeRigWith(t *testing.T, opts Options, seams wakeSeams) *wakeRig {
+	t.Helper()
 	f, r := routedNative(t)
 	opts.Interactive = true
+	rig := &wakeRig{t: t, f: f, a: r["test/a"], decided: make(chan bool, 64), pending: make(chan struct{}, 64)}
+	models := f.edit
+	f.edit = func(o *harness.Options) {
+		models(o)
+		// The adapter's own wiring, wrapped: the kick first, as OnPending is
+		// the kick, then the test's signal; the sink with the hooks around it.
+		o.OnPending = func() {
+			rig.s.kickWake()
+			rig.pending <- struct{}{}
+		}
+		// The session-level sink, for the after hook: a background child's
+		// own events and its finish come this way, and nothing of a turn's.
+		o.Sink = func(ev harness.Event) {
+			rig.s.sink(ev)
+			if h := rig.sinkAfter.Load(); h != nil {
+				(*h)(ev)
+			}
+		}
+	}
 	s := f.session(opts)
-	rig := &wakeRig{t: t, f: f, a: r["test/a"], s: s, decided: make(chan bool, 64)}
+	rig.s = s
 	s.mu.Lock()
-	s.wakeSeam = seam
+	s.wakeSeam = seams.seam
+	s.wakeEnded = seams.ended
 	s.wakeDecided = func(claimed bool) { rig.decided <- claimed }
+	// The before hook sits at the head of the adapter's own sink, which every
+	// event reaches — a turn's through Run's sink, a child's through the one
+	// above — on the goroutine that handed it over.
+	s.sinkSeam = func(ev harness.Event) {
+		if h := rig.sinkBefore.Load(); h != nil {
+			(*h)(ev)
+		}
+	}
 	s.mu.Unlock()
+	// Before Start, as the engine installs its observer and the log's tests
+	// their hooks: nothing has been enqueued or published yet.
+	if seams.log != nil {
+		s.log.hooks = seams.log
+	}
+	if seams.observe != nil {
+		if err := s.log.Observe(seams.observe); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	takeStartDelta(t, s.log)
 	rig.w = newNativeWatcher(t, s)
 	return rig
+}
+
+// hookAfter sets the sink's after hook; nil clears it.
+func (rig *wakeRig) hookAfter(h func(harness.Event)) {
+	if h == nil {
+		rig.sinkAfter.Store(nil)
+		return
+	}
+	rig.sinkAfter.Store(&h)
+}
+
+// hookBefore sets the sink's before hook; nil clears it.
+func (rig *wakeRig) hookBefore(h func(harness.Event)) {
+	if h == nil {
+		rig.sinkBefore.Store(nil)
+		return
+	}
+	rig.sinkBefore.Store(&h)
+}
+
+// awaitPending waits for the next OnPending: a result published.
+func (rig *wakeRig) awaitPending(why string) {
+	rig.t.Helper()
+	await(rig.t, rig.pending, "a result's publication ("+why+")")
 }
 
 // bgCall is one agent call asking for the background.
@@ -185,12 +276,15 @@ func (rig *wakeRig) spawnOne(child *held, more ...step) string {
 	return spawnedWith(rig.t, rig.w.events(), "child work")
 }
 
-// finish lets the held child finish and waits for its roster row to end.
+// finish lets the held child finish and waits for its result to be published
+// — OnPending, which follows the roster's finished event: a test that waited
+// on the event alone could act before the result was pending (astra r19 #2).
 func (rig *wakeRig) finish(child *held, id string) {
 	rig.t.Helper()
 	await(rig.t, child.reached, "the child's step")
 	close(child.release)
 	rig.w.wait("the child's finished row", func(ev Event) bool { return isRoster(ev, id, SubagentChangeFinished) })
+	rig.awaitPending("child " + id)
 }
 
 // TestNativeWakeBrackets (A14): a background child's result finishing while
@@ -524,6 +618,8 @@ func TestPendingRecheckedOnEveryRelease(t *testing.T) {
 		await(t, wakeA.reached, "the first wake's step")
 		// B's kick lands while the worker itself is running the wake: it
 		// waits in the slot, and the ending's recheck is what takes it up.
+		// finish returns once B's result is published (OnPending), so the
+		// ending's recheck finds it pending by construction.
 		rig.finish(childB, idB)
 		rig.noRecheck("the worker is running the wake")
 		close(wakeA.release)
@@ -532,17 +628,72 @@ func TestPendingRecheckedOnEveryRelease(t *testing.T) {
 		rig.bracket(true, 2, "wake-2")
 		rig.bracket(false, 2, "wake-2")
 		rig.awaitDecided(false, "the second wake's ending")
-
-		reqs := rig.resultRequests()
-		if len(reqs) != 2 {
-			t.Fatalf("%d requests carried a result, want two wakes'", len(reqs))
-		}
-		first, second := lastUserTexts(t, reqs[0]), lastUserTexts(t, reqs[1])
-		if !strings.Contains(first, idA) || strings.Contains(first, idB) || !strings.Contains(second, idB) || strings.Contains(second, idA) {
-			t.Fatalf("the wakes carried\n %q\n %q", first, second)
-		}
-		rig.noTerminalAfterTheFirst(1)
+		wantTwoWakes(t, rig, idA, idB)
 	})
+
+	// astra r19 #2's schedule, forced: B's finished event is published but B
+	// pauses before its result is (the sink's after hook holds it), the first
+	// wake ends, and its recheck rightly finds nothing pending — a test that
+	// took the roster event for the publication would have expected a claim
+	// here. B's publication then kicks the worker, which delivers it.
+	t.Run("a child published after the wake's ending", func(t *testing.T) {
+		rig := newWakeRig(t, Options{}, nil)
+		a, w := rig.a, rig.w
+		childA, childB, wakeA := newHeld(t), newHeld(t), newHeld(t)
+		a.route("go", callsStep(bgCall(t, "a1", "A", "work A"), bgCall(t, "a2", "B", "work B")), answer("started"),
+			wakeA.step(openTextParts("got A"), closeTextParts()), answer("got B"))
+		a.route("work A", childA.step(openTextParts("A "), closeTextParts("done")))
+		a.route("work B", childB.step(openTextParts("B "), closeTextParts("done")))
+		if _, err := rig.s.Prompt(context.Background(), "go"); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+		w.waitType(EventDone)
+		rig.awaitDecided(false, "the turn's release")
+		idA, idB := spawnedWith(t, w.events(), "work A"), spawnedWith(t, w.events(), "work B")
+
+		rig.finish(childA, idA)
+		rig.awaitDecided(true, "A pending")
+		rig.bracket(true, 1, "wake-1")
+		await(t, wakeA.reached, "the first wake's step")
+
+		holdB := make(chan struct{})
+		rig.hookAfter(func(ev harness.Event) {
+			if fin, ok := ev.(harness.SubagentFinished); ok && fin.ID == idB {
+				<-holdB
+			}
+		})
+		await(t, childB.reached, "B's step")
+		close(childB.release)
+		w.wait("B's finished row", func(ev Event) bool { return isRoster(ev, idB, SubagentChangeFinished) })
+		close(wakeA.release)
+		rig.bracket(false, 1, "wake-1")
+		rig.awaitDecided(false, "the first wake's ending: B not yet published")
+		if rig.s.hs.HasPending() {
+			t.Fatal("B is pending before its publication")
+		}
+		close(holdB)
+		rig.awaitPending("B")
+		rig.awaitDecided(true, "B's publication")
+		rig.bracket(true, 2, "wake-2")
+		rig.bracket(false, 2, "wake-2")
+		rig.awaitDecided(false, "the second wake's ending")
+		wantTwoWakes(t, rig, idA, idB)
+	})
+}
+
+// wantTwoWakes checks two wakes ran, the first carrying A alone and the second
+// B alone, and no terminal event followed the user's turn.
+func wantTwoWakes(t *testing.T, rig *wakeRig, idA, idB string) {
+	t.Helper()
+	reqs := rig.resultRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("%d requests carried a result, want two wakes'", len(reqs))
+	}
+	first, second := lastUserTexts(t, reqs[0]), lastUserTexts(t, reqs[1])
+	if !strings.Contains(first, idA) || strings.Contains(first, idB) || !strings.Contains(second, idB) || strings.Contains(second, idA) {
+		t.Fatalf("the wakes carried\n %q\n %q", first, second)
+	}
+	rig.noTerminalAfterTheFirst(1)
 }
 
 // TestWakeFencedAtClaimAndValidation (§3.11), at native's level: while the
@@ -567,7 +718,7 @@ func TestWakeFencedAtClaimAndValidation(t *testing.T) {
 	idA, idB := spawnedWith(t, w.events(), "work A"), spawnedWith(t, w.events(), "work B")
 
 	s.FenceUp()
-	rig.finish(childA, idA)
+	rig.finish(childA, idA) // returns once A's result is published
 	rig.awaitDecided(false, "A pending under the fence")
 	if s.ForeignTurn() || w.count(EventForeignTurn) != 0 || !s.hs.HasPending() {
 		t.Fatal("a wake claimed under the fence")
@@ -581,7 +732,7 @@ func TestWakeFencedAtClaimAndValidation(t *testing.T) {
 	if !s.ForeignTurn() {
 		t.Fatal("the fence ended the running wake")
 	}
-	rig.finish(childB, idB)
+	rig.finish(childB, idB) // B's result published, not merely its row ended
 	rig.noRecheck("the worker is running the wake")
 	close(wakeA.release)
 	rig.bracket(false, 1, "wake-1")

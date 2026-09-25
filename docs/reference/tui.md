@@ -76,7 +76,9 @@ turn of its own that heads the transcript with "sub-agent finished — the
 agent continues" and delivers the result — with no working spinner, since
 the status row stays idle for it (the terminal tab title still marks it,
 as it does grok's own foreign-turn fallback). A prompt typed while the wake
-runs is queued, and sent once the wake ends. Headless `craze prompt` never
+runs is queued, and sent once the wake ends. `Esc` stops a running wake —
+any turn the agent runs on its own — when nothing of craze's own is
+working, leaving a `cancelled` note. Headless `craze prompt` never
 sees any of this: every `run_in_background` call there runs in the
 foreground, as if the flag had not been set.
 
