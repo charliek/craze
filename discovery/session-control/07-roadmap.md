@@ -9,7 +9,7 @@ non-test source lines, from the reference reviews (`09`).
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
 | S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #52, 2026-09-24)** |
-| S2 | not started | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
+| S2 | in progress (Plan 027, PR 1 of 4) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
 | S5 | not started | Agent view in the TUI |
