@@ -342,8 +342,44 @@ func (h *Host) Plan(id, name, overview, planText string, todos []agent.Todo) {
 // EndTurn ends whatever turn the Stub currently has open. The Stub's only way
 // to end a still-open turn without a real agent's completion is Cancel, so
 // this is what "end" means here: the ending is StopReason "cancelled".
+//
+// Cancel is fired and forgotten (tui.Stub.Cancel never blocks): it only
+// signals the turn's own goroutine (parked in HangNext's select, or running
+// its ordinary continuation) to wake, and that goroutine emits EventDone and
+// settles the turn — clearing the engine's current turn and enqueuing the
+// ending — on its own schedule, not this one. EndTurn itself stays a plain
+// mirror of Cancel; the "end" op (do, below) is what waits for that
+// settlement before the flush a caller of Do relies on.
 func (h *Host) EndTurn() {
 	_, _ = h.currentStub().Cancel(context.Background())
+}
+
+// turnSettleWait bounds the "end" op's wait for the cancelled turn's own
+// goroutine to settle: generous next to how long that wakeup and its
+// settlement actually take (microseconds — the same class of budget as
+// syncWait and dropConnectionsWait), so hitting it at all means something is
+// wedged, and it is reported as an error rather than a hang.
+const turnSettleWait = 10 * time.Second
+
+// waitForTurnSettled blocks until eng reports no turn current. EndTurn's
+// Cancel returns before the cancelled turn's goroutine wakes, emits its
+// EventDone and settles (engine.settleLocked clears the current turn and
+// enqueues the turn's ending — both under the lock State reads — before
+// returning), so a State read of Turn == "" is the first moment that ending
+// is guaranteed already enqueued, and the moment "end" (do, below) may flush
+// it. Bounded like every other host op's wait: an error at the deadline
+// instead of a hang.
+func waitForTurnSettled(eng *engine.Engine, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		if eng.State().Turn == "" {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("fakehost: end: turn still current after %s", wait)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // ForeignTurn brackets a foreign turn (agent.EventForeignTurn): running true
@@ -596,6 +632,7 @@ func (h *Host) do(p opParams) error {
 		h.Plan(p.ID, p.PlanName, p.Overview, p.Plan, p.Todos)
 	case "end":
 		h.EndTurn()
+		return waitForTurnSettled(h.currentEngine(), turnSettleWait)
 	case "hang_next":
 		h.HangNext()
 	case "foreign_turn":
