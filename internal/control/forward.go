@@ -66,6 +66,9 @@ import (
 // forwarder's but reset{session_replaced}, WHATEVER reset the forwarder had
 // chosen: every push is refused once replaced is set (forwarder.push), and the
 // reset's reason is decided in the conn.mu section that queues it (queueReset).
+// That reset is the connection's terminal line (plan 027 X25): what the
+// forwarder had queued and the writer had not yet taken was dropped by the
+// replacement (conn.replace).
 
 // forwarded is what became of one line the forwarder tried to queue.
 type forwarded uint8
@@ -224,7 +227,7 @@ func (f *forwarder) push(line []byte, stop <-chan struct{}, commit func()) forwa
 			return errGone
 		}
 		return nil
-	}, commit, false)
+	}, commit, ordinaryLine)
 	switch {
 	case err == nil:
 		return forwardedOK
@@ -416,19 +419,23 @@ func (f *forwarder) awaitReadyNote() {
 // closed only once its reset is queued. The reason is decided in that section
 // too, under the flag replace sets there: a connection whose engine has been
 // replaced gets reset{session_replaced}, whatever reason the forwarder had,
-// and that reset seals the outbox — nothing is written after it but the
-// connection's close (astra r8 7). The reset takes the queue's reserve, which
-// every other push leaves free, so the offer never waits under conn.mu.
+// and that reset is its TERMINAL line (plan 027 X25): the outbox, terminal-only
+// since the replacement, admits it, and it seals it — nothing is written after
+// it but the connection's close (astra r8 7). A reset queued before a
+// replacement is an ordinary line, which the replacement drops. The reset
+// takes the queue's reserve, which every other push leaves free, so the offer
+// never waits under conn.mu.
 func (f *forwarder) queueReset(reason protocol.ResetReason, endsSession bool) {
 	c, a := f.c, f.a
 	c.mu.Lock()
-	if c.replaced {
-		reason = protocol.ResetSessionReplaced
+	replaced := c.replaced
+	kind := ordinaryLine
+	if replaced {
+		reason, kind = protocol.ResetSessionReplaced, terminalLine
 	}
-	replaced := reason == protocol.ResetSessionReplaced
 	line, err := notificationLine(protocol.NotifyReset, protocol.ResetParams{Subscription: a.id, Reason: reason})
 	if err == nil {
-		_, err = c.out.offer(line, c.resetWritten, protocol.WriterQueueBytes, replaced)
+		_, err = c.out.offer(line, c.resetWritten, protocol.WriterQueueBytes, kind)
 	}
 	pushed := err == nil
 	if !pushed {
@@ -453,8 +460,9 @@ func (f *forwarder) queueReset(reason protocol.ResetReason, endsSession bool) {
 	c.settle()
 }
 
-// resetWritten is a final reset on the socket: the connection may close now
-// if nothing else is left of it.
+// resetWritten is a final reset on the socket — or given up: its write
+// failed, or a replacement dropped it (plan 027 X25) — so the connection may
+// close now if nothing else is left of it.
 func (c *conn) resetWritten() {
 	if h := c.srv.hooks.resetWritten; h != nil {
 		h()

@@ -210,8 +210,9 @@ type hooks struct {
 	// detach reply or its final reset (closed) — on the goroutine that queued
 	// it, with the subscription's id and the reply's method, or reset.
 	ackQueued func(sub, method string)
-	// resetWritten runs on the writer once a final reset is on the socket,
-	// before the connection may close for it.
+	// resetWritten runs on the writer once a final reset is on the socket (or
+	// its write failed), before the connection may close for it — or on a
+	// replacement that dropped the reset, queued before it, unwritten.
 	resetWritten func()
 	// beforeWrite runs on the writer once it has taken line from the queue,
 	// just before it writes it.
@@ -311,11 +312,12 @@ func (s *Server) newToken() (string, error) {
 // token of another incarnation is answered resumed: false. The replaced
 // engine's tokens stay in the index as the PREVIOUS generation, and anything
 // older is dropped (bind.go, "The token index"). Every connection admits
-// nothing more from that moment; an attached one is sent
-// reset{session_replaced} first — or the reply of a detach that had already
-// claimed its attachment's end — and closed once that is on the socket
-// (conn.replace), every other one at once. A handler already running keeps
-// the engine it captured at dispatch, and its reply goes nowhere.
+// nothing more from that moment and writes only its terminal line (plan 027
+// X25): an attached one is sent reset{session_replaced} — or the reply of a
+// detach that had already claimed its attachment's end — and closed once that
+// is on the socket (conn.replace), every other one at once. A handler already
+// running keeps the engine it captured at dispatch, and its reply goes
+// nowhere, as does every other line not yet written.
 //
 // The engine's end is watched (watchEngine): once it has closed, every
 // connection bound to it is closed as its session ends (conn.end).

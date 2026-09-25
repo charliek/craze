@@ -56,7 +56,9 @@ type TestHooks struct {
 	AckQueued func(sub, method string)
 	// ResetWritten runs on the writer once a final reset is on the socket,
 	// before the connection may close for it: a test that blocks in it holds
-	// the connection open with the reset written.
+	// an ending connection open with the reset written (a replaced one waits
+	// only for its terminal line's write, plan 027 X25). It runs too for a
+	// reset a replacement dropped unwritten, on the replacement.
 	ResetWritten func()
 	// BeforeWrite runs on the writer once it has taken line from the queue,
 	// just before it writes it: a test that blocks in it holds the line off

@@ -927,7 +927,8 @@ func TestAnOwedReadyIsNotLostToTheClose(t *testing.T) {
 // reset{session_closed} is held there while the engine is replaced. The reset
 // it then queues is session_replaced — its reason is decided in the section
 // that queues it, under the flag the replacement sets — and the connection
-// closes after it.
+// closes after it. The final records are all taken by the writer before the
+// replacement: one still queued then would be dropped by it (plan 027 X25).
 func TestReplacementWinsTheTerminalReset(t *testing.T) {
 	gate := newForwardGate()
 	atReset := make(chan protocol.ResetReason, 1)
@@ -958,6 +959,9 @@ func TestReplacementWinsTheTerminalReset(t *testing.T) {
 	case <-time.After(watchdog):
 		t.Fatal("the forwarder never reached its reset")
 	}
+	// A line the writer has taken is finished ahead of the terminal line; one
+	// still queued at the replacement is dropped.
+	waitFor(t, "the writer to take the final records", func() bool { return h.srv.Queued() == 0 })
 	h.srv.SetEngine(startedEngine(t))
 	reset.release()
 
@@ -1067,6 +1071,48 @@ func TestNothingIsWrittenAfterSessionReplaced(t *testing.T) {
 	}
 }
 
+// TestAReplacedConnectionWritesOnlyItsTerminalLine (§3.6, plan 027 X25; sol
+// r16 item 1): the replacement's reset is still to come — the forwarder of a
+// live attachment has seen its subscription closed by the replacement and is
+// held right before it queues reset{session_replaced} — when a read admitted
+// before the replacement lets go of its reply. The outbox has been
+// terminal-only since the replacement's own conn.mu section, not only since
+// the reset is queued, so the reply is refused at its push (its slot given
+// back) rather than written ahead of the reset: the client reads the reset
+// and then the close, nothing between.
+func TestAReplacedConnectionWritesOnlyItsTerminalLine(t *testing.T) {
+	reply, reset := newHold(), newHold()
+	h := newHost(t, withOnClose(reply.release), withOnClose(reset.release), withHooks(control.TestHooks{
+		BeforeReply: func(method string) {
+			if method == protocol.MethodSessionState {
+				reply.wait()
+			}
+		},
+		BeforeReset: func(_ string, reason protocol.ResetReason) {
+			if reason == protocol.ResetSessionReplaced {
+				reset.wait()
+			}
+		},
+	}))
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+	a.send(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)})
+	await(t, reply.entered, "the read to hold its reply")
+
+	h.srv.SetEngine(startedEngine(t))
+	await(t, reset.entered, "the forwarder to hold right before its reset{session_replaced}")
+	reply.release()
+	waitFor(t, "the read's handler to return", func() bool { return h.srv.Handlers() == 0 })
+	reset.release()
+
+	if rp := paramsOf[protocol.ResetParams](t, a.note(protocol.NotifyReset)); rp != (protocol.ResetParams{Subscription: r.Subscription, Reason: protocol.ResetSessionReplaced}) {
+		t.Fatalf("the reset: %+v", rp)
+	}
+	a.expectClosed()
+}
+
 // TestAReplacementDuringADetachStillAnswersIt (§3.6, §3.7; astra r10 8): a
 // detach claims the attachment's end, and the engine is replaced before the
 // detach queues its reply. The forwarder, stopped by the detach, queues no
@@ -1116,7 +1162,7 @@ func TestAReplacementDuringADetachStillAnswersIt(t *testing.T) {
 }
 
 // TestNothingFollowsAReplacedConnectionsDetachAcknowledgement (§3.6, §3.7;
-// plan 027 X22; r12-c7b finding 3): the review's exact schedule. Duplicate
+// plan 027 X22, X25; r12-c7b finding 3): the review's exact schedule. Duplicate
 // detaches D1 and D2 race a fresh attach A, all against the connection's one
 // closing attachment, right as the engine is replaced:
 //
@@ -1125,23 +1171,23 @@ func TestAReplacementDuringADetachStillAnswersIt(t *testing.T) {
 //   - D2, not claiming, reaches awaitClosed behind it.
 //   - A has passed its params and pauses right before reserve.
 //   - The engine is replaced.
-//   - D1 resumes and queues its {} — the connection's own terminal line, so
-//     the same conn.mu section seals the outbox (conn.enqueue's
-//     sealIfReplaced) — and the writer holds it there, off the socket
-//     (BeforeWrite): unwritten is still 1, so the connection cannot have
-//     closed yet, whatever A or D2 do next.
+//   - D1 resumes and queues its {} — the connection's terminal line, which
+//     the terminal-only outbox admits and is sealed by — and the writer holds
+//     it there, off the socket (BeforeWrite): the outbox still counts it
+//     (owesTerminal), so the connection cannot have closed yet, whatever A
+//     or D2 do next.
 //   - A resumes: reserve refuses with no reply at all (a nil attachment, a
 //     zero outcome) because the connection is already replaced — it never
 //     installs a new pending attachment to hold the connection open.
-//   - D2 wakes (a.state is attClosed) and tries to queue its own {} while
-//     the writer still holds D1's: the outbox is already sealed, so it is
-//     refused at the push. This is checked directly (Server.Queued, while
-//     the writer still holds D1's line dequeued): closing the connection
-//     right after D1's line is written would drop an unsealed D2 line from
-//     the queue too (outbox.close discards whatever is left), so the wire
-//     alone cannot tell a seal that refused the push from a close that beat
-//     an accepted one to the socket — only the outbox's count in between
-//     can.
+//   - D2 wakes (a.state is attClosed) and tries to queue its own {} — an
+//     ordinary reply, as it claimed nothing — while the writer still holds
+//     D1's: the outbox refuses it at the push. This is checked directly
+//     (Server.Queued, while the writer still holds D1's line dequeued):
+//     closing the connection right after D1's line is written would drop an
+//     admitted D2 line from the queue too (outbox.close discards whatever is
+//     left), so the wire alone cannot tell a refusal at the push from a close
+//     that beat an admitted line to the socket — only the outbox's count in
+//     between can.
 //   - Only once A and D2 have resolved does the writer let D1's {} go.
 //
 // The wire shows exactly D1's {}, then the connection closes: nothing of A's
@@ -1193,14 +1239,13 @@ func TestNothingFollowsAReplacedConnectionsDetachAcknowledgement(t *testing.T) {
 	reserving.release()
 	waitFor(t, "A and D2 to resolve while the writer still holds D1's {}", func() bool { return h.srv.Handlers() == 0 })
 
-	// D1's line is already dequeued (held in the writer, off o.q): if the
-	// outbox is sealed, D2's {} was refused at the push and never joined the
-	// queue. If it were not sealed, D2's {} would sit here, queued behind
-	// D1's held line, only to be dropped a moment later when D1's write
-	// closes the connection — a close the wire could never distinguish from
-	// a seal. This is the one place that can.
+	// D1's line is already dequeued (held in the writer, off o.q): D2's {}
+	// was refused at the push and never joined the queue. Were it admitted,
+	// it would sit here, queued behind D1's held line, only to be dropped a
+	// moment later when D1's write closes the connection — a close the wire
+	// could never distinguish from a refusal. This is the one place that can.
 	if q := h.srv.Queued(); q != 0 {
-		t.Fatalf("%d line(s) queued behind D1's held {}: the outbox was not sealed", q)
+		t.Fatalf("%d line(s) queued behind D1's held {}: the replaced outbox admitted an ordinary line", q)
 	}
 
 	writer.release()
@@ -1214,21 +1259,20 @@ func TestNothingFollowsAReplacedConnectionsDetachAcknowledgement(t *testing.T) {
 }
 
 // TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine (§3.6, §3.7; plan 027
-// X16 9, X19, X22; r14-c7c findings 1-2): the review's remaining schedule,
+// X16 9, X22, X25; r14-c7c findings 1-2): the review's remaining schedule,
 // the mirror image of TestNothingFollowsAReplacedConnectionsDetachAcknowledgement
 // above. D1 claims the connection's one attachment and queues its {} BEFORE
-// the replacement this time — unsealed, since the connection is not replaced
-// yet — and the writer holds it off the socket. Duplicate D2 wakes behind it
-// (D1's commit closed the old attachment in the same conn.mu section that
-// queued the {}) and pauses of its own before it would push its ordinary
-// reply. A then reserves the now-free attachment — old.state is attClosed,
-// so reserve allows it — installing a pending one, and pauses right after
-// (Reserved), before it does anything else. Only then is the engine
-// replaced: with nothing live or closing to send a reset for, and A's
+// the replacement this time — the connection is not replaced yet, so it
+// seals nothing — and the writer holds it off the socket. Duplicate D2 wakes
+// behind it (D1's commit closed the old attachment in the same conn.mu
+// section that queued the {}) and pauses of its own before it would push its
+// ordinary reply. A then reserves the now-free attachment — old.state is
+// attClosed, so reserve allows it — installing a pending one, and pauses
+// right after (Reserved), before it does anything else. Only then is the
+// engine replaced: with nothing live or closing to send a reset for, and A's
 // pending attachment owed no reply of its own, conn.replace must abandon A's
-// attachment and seal the outbox in that same conn.mu section — before D2 or
-// A resume — or D2's ordinary push (never routed through the seal-aware
-// conn.enqueue: it never claimed the attachment) joins the queue behind
+// attachment and make the outbox terminal-only in that same conn.mu section
+// — before D2 or A resume — or D2's ordinary push joins the queue behind
 // D1's held line. The wire must show exactly D1's {}, then EOF: nothing of
 // A's or D2's.
 func TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine(t *testing.T) {
@@ -1265,7 +1309,7 @@ func TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine(t *testing.T) {
 	id1, line1 := a.encode(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
 	detach.Store(id1)
 	a.write(line1)
-	await(t, writer.entered, "D1's {} to be queued, unsealed, and held off the socket")
+	await(t, writer.entered, "D1's {} to be queued, before any replacement, and held off the socket")
 
 	a.send(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
 	await(t, d2Reply.entered, "D2 to wake behind D1 and pause before its own ordinary reply")
@@ -1281,11 +1325,11 @@ func TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine(t *testing.T) {
 	waitFor(t, "D2 and A to resolve while the writer still holds D1's {}", func() bool { return h.srv.Handlers() == 0 })
 
 	// D1's line is already dequeued (held in the writer, off o.q): if
-	// conn.replace sealed the outbox at once, D2's ordinary push found it
-	// sealed and never joined the queue, and A's own attach reply — its
+	// conn.replace made the outbox terminal-only at once, D2's ordinary push
+	// was refused and never joined the queue, and A's own attach reply — its
 	// context already cancelled by the abandon — was never queued either.
 	if q := h.srv.Queued(); q != 0 {
-		t.Fatalf("%d line(s) queued behind D1's held {}: the outbox was not sealed at once", q)
+		t.Fatalf("%d line(s) queued behind D1's held {}: the outbox was not terminal-only at once", q)
 	}
 
 	writer.release()
@@ -1299,7 +1343,7 @@ func TestAReplacementSealsAtOnceWhenItOwesNoTerminalLine(t *testing.T) {
 }
 
 // TestAPendingAttachmentIsAbandonedByAReplacement is a negative control for
-// conn.replace's pending-attachment abandonment (plan 027 X16 9, X19, X22;
+// conn.replace's pending-attachment abandonment (plan 027 X16 9, X22, X25;
 // r14-c7c finding 2, item 1): an attach paused right after reserve, then
 // released with NO replacement, still attaches normally — the abandonment
 // fires only once the connection is actually replaced, never otherwise.
@@ -1339,9 +1383,10 @@ func TestReserveOnlyRefusesOnceReplaced(t *testing.T) {
 }
 
 // TestAClaimedDetachSealsOnlyWhenReplaced is a negative control for the
-// detach reply's new seal (plan 027 X22; r12-c7b finding 3, item 2): a
-// claimed detach on a connection that was never replaced does not seal the
-// outbox — the next attach still gets its own reply.
+// detach reply's terminal line (plan 027 X22, X25; r12-c7b finding 3, item
+// 2): a claimed detach's `{}` seals only a terminal-only (replaced) outbox,
+// so on a connection that was never replaced the next attach still gets its
+// own reply.
 func TestAClaimedDetachSealsOnlyWhenReplaced(t *testing.T) {
 	h := newHost(t)
 	a := h.dial()

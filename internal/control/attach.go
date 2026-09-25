@@ -175,7 +175,7 @@ func (c *conn) sessionAttach(b *bound, info protocol.MethodInfo, req *request) o
 // the connection is replaced it refuses too, but with no reply at all (a nil
 // attachment and a zero outcome): the attach is not run, so no new pending
 // attachment is installed to hold the replaced connection open behind the
-// replacement's own terminal line (plan 027 X16 9, X19, X22).
+// replacement's own terminal line (plan 027 X16 9, X22, X25).
 func (c *conn) reserve(eng *engine.Engine) (*attachment, outcome) {
 	// The context is made outside c.mu, which is held across no other lock.
 	ctx, cancel := context.WithCancel(c.ctx)
@@ -338,7 +338,7 @@ func (c *conn) answerAttach(a *attachment, att *engine.Attachment, res protocol.
 	}, func() {
 		a.state, a.queued = attLive, a.after
 		a.changedLocked()
-	}, false)
+	}, ordinaryLine)
 	if err != nil {
 		c.abandon(a, att.Sub)
 		return outcome{}
@@ -477,18 +477,20 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	// The reply is queued and the attachment closed in one conn.mu section
 	// (conn.enqueue): an attach sent the instant the reply is read finds the
 	// place free. The attachment's terminal acknowledgement, it counts as a
-	// final reset does (unwritten) until it is on the socket (detachWritten):
-	// an engine replaced while this detach held the attachment's end — its
-	// forwarder, stopped by the detach, queues no reset — closes the connection
-	// only once this reply is written (astra r10 8). On a connection already
-	// replaced this reply is the connection's own terminal line, so the same
-	// section seals the outbox (sealIfReplaced): no later reply — a duplicate
-	// detach's, any handler's — queues behind it (plan 027 X22, r12 finding 3).
+	// final reset does (unwritten) until it is on the socket (detachWritten).
+	// It is a TERMINAL line too (plan 027 X22, X25), which the outbox counts
+	// until it is written: an engine replaced while this detach held the
+	// attachment's end — its forwarder, stopped by the detach, queues no
+	// reset — closes the connection only once this reply is written (astra
+	// r10 8). A replaced connection's outbox admits it and is sealed by it, so
+	// nothing — a duplicate detach's reply, any handler's — queues behind it;
+	// and one queued before the replacement is kept by it, while every
+	// ordinary line is dropped.
 	if line == nil || c.enqueue(c.ctx, nil, line, c.detachWritten, nil, func() {
 		a.state = attClosed
 		a.changedLocked()
 		c.unwritten++
-	}, true) != nil {
+	}, terminalLine) != nil {
 		c.markClosed(a)
 		return outcome{}
 	}

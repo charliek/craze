@@ -43,13 +43,19 @@
 // the session in the peer's place (conn.end): once the engine has closed
 // (Server.watchEngine), or an attachment has delivered its final records and
 // reset{session_closed}, the connection admits nothing more and closes once
-// what it owes is written. Replacing the engine (Server.SetEngine) is not: an
-// attached connection is sent reset{session_replaced} — whatever reset its
-// forwarder was about to send; a detach's reply instead when that detach had
-// already claimed the attachment's end — and closed as soon as that is
-// written, every other one at once, and a handler still running then replies
-// to nobody: the replacement's reset seals the outbox, which admits no line
-// after it (conn.replace).
+// what it owes is written. Replacing the engine (Server.SetEngine) is not: the
+// connection is TERMINAL-ONLY from that moment (conn.replace, plan 027 X25).
+// Its outbox admits a terminal line and nothing else: an attached connection
+// is sent reset{session_replaced} — whatever reset its forwarder was about to
+// send — or, when a detach had already claimed the attachment's end, that
+// detach's reply `{}`; that one line seals the outbox, and the connection
+// closes as soon as it is written — at once when no such line is owed (no
+// attachment, or one already closed; a pending attach is abandoned). Every
+// ordinary line, queued or not — a handler's reply, an event, a reset queued
+// before the replacement — is dropped, a reply's admission slot given back: a
+// handler still running replies to nobody, and its client learns the outcome
+// by resending after a fresh hello (resumed: false). A line the writer has
+// already taken finishes ahead of the terminal line, or is cut by the close.
 //
 // # Client ids and the binding table (bind.go)
 //

@@ -58,9 +58,11 @@ type conn struct {
 	// ended says the session is over for this connection (end): like readEOF,
 	// no more requests, and the connection closes once nothing admitted is
 	// unwritten and no attachment is open. endReason is the close's reason.
-	// replaced says its engine was replaced (replace): it closes as soon as
-	// its attachment's terminal acknowledgement is written, whatever is still
-	// in flight — a handler's reply then goes nowhere (§3.6).
+	// replaced says its engine was replaced (replace): from the section that
+	// sets it the connection is terminal-only (plan 027 X25), and it closes as
+	// soon as the one terminal line it owes, if any, is written
+	// (replacedDoneLocked), whatever is still in flight — a handler's reply
+	// then goes nowhere (§3.6).
 	ended     bool
 	endReason string
 	replaced  bool
@@ -70,8 +72,10 @@ type conn struct {
 	att     *attachment
 	nextSub int
 	// unwritten is how many terminal acknowledgements of attachments — a final
-	// reset, a detach's reply — are queued and not yet on the socket: the
-	// connection stays open for them (idleLocked, replacedDoneLocked).
+	// reset, a detach's reply — are claimed or queued and not yet on the
+	// socket (nor given up): the connection stays open for them (idleLocked).
+	// A replaced connection waits only for its terminal line, which the
+	// outbox counts itself (outbox.owesTerminal).
 	unwritten int
 }
 
@@ -227,31 +231,36 @@ func (c *conn) endLocked(reason string) {
 	}
 }
 
-// replace is its engine being replaced (§3.6, astra 14; Server.SetEngine): the
-// connection admits nothing more; a live or closing attachment whose end
-// nobody has claimed ends with reset{session_replaced} (its subscription is
-// closed here, and its forwarder sends the reset — whatever reset it was
-// about to send: replaced is read in the same conn.mu section that queues it,
-// forward.go's queueReset) — unless a detach has already claimed the
-// attachment's end, whose reply is its acknowledgement instead. A PENDING
-// attachment (reserved, not yet answered: reserve installed it, but no
-// forwarder runs for it and no detach can claim it) is owed neither, so it is
-// abandoned outright, right here, and never keeps replacedDoneLocked false
-// (plan 027 X16 9, X19, X22). Either way, once nothing is left that owes this
-// connection a terminal line — no attachment at all, one already closed, or
-// one just abandoned as pending — the outbox is sealed AT ONCE, in the same
-// conn.mu section: what it already holds (a claimed detach's `{}` queued
-// before the replacement, earlier replies) is still written, but nothing
-// later is admitted. A handler still running keeps the engine it captured,
-// and its reply goes nowhere either way: once a terminal line is queued (or
-// this seals with none owed) the outbox is sealed, and every later line is
-// dropped at its push (astra r8 7). The connection closes as soon as that
-// terminal line, if any, is on the socket (astra r10 8) — at once when there
-// is none.
+// replace is its engine being replaced (§3.6, astra 14; Server.SetEngine). It
+// makes the connection TERMINAL-ONLY (plan 027 X25) in the one conn.mu section
+// that sets replaced: the connection admits no more requests, and from that
+// section on its outbox admits only a TERMINAL line —
+// reset{session_replaced}, or a claimed detach's `{}` — and that line seals
+// it. Every ordinary line is dropped: one offered later is refused at its
+// offer (the offerer gives its slot back), and every one still queued is
+// dropped here (outbox.replace), its callback run once conn.mu is let go so
+// its request's slot is given back too; a claimed detach's `{}` queued before
+// the replacement is terminal, and kept. A handler still running keeps the
+// engine it captured, and its reply goes nowhere (§3.6, astra r8 7): the
+// client learns what became of it by resending after a fresh hello (resumed:
+// false, the outcome unknown).
+//
+// What the connection owes is then at most ONE terminal line. A live or
+// closing attachment whose end nobody has claimed ends with its forwarder's
+// reset{session_replaced} — its subscription is closed here, and the reset's
+// reason is decided in the conn.mu section that queues it (forward.go's
+// queueReset), so a replacement always wins. One whose end a detach has
+// claimed ends with that detach's `{}` instead, queued already or still to
+// be (sessionDetach). A PENDING attachment (reserved, not yet answered:
+// reserve installed it, but no forwarder runs for it and no detach can claim
+// it) is owed neither, so it is abandoned outright, right here, and reserve
+// refuses every later attach. The connection closes once that terminal line
+// is written (replacedDoneLocked; astra r10 8), and at once when it owes none.
 func (c *conn) replace() {
 	c.ending.Store(true)
 	c.mu.Lock()
 	c.replaced = true
+	dropped := c.out.replace()
 	var sub *agent.Subscription
 	var cancel func()
 	if a := c.att; a != nil {
@@ -261,16 +270,11 @@ func (c *conn) replace() {
 			a.state = attClosed
 			a.changedLocked()
 		case attLive, attClosing:
-			// Its terminal line is still to come — the forwarder's own
+			// Its terminal line is still to come: the forwarder's
 			// reset{session_replaced} (queueReset), or, if a detach has
-			// already claimed its end, that detach's own `{}`
-			// (sessionDetach's sealIfReplaced enqueue) — and whichever one
-			// seals the outbox itself once it is queued.
+			// claimed its end, that detach's `{}`.
 			sub, cancel = a.sub, a.cancel
 		}
-	}
-	if c.att == nil || c.att.state == attClosed {
-		c.out.seal()
 	}
 	c.mu.Unlock()
 	if cancel != nil {
@@ -280,6 +284,11 @@ func (c *conn) replace() {
 	}
 	if sub != nil {
 		sub.Close()
+	}
+	for _, ln := range dropped {
+		if ln.done != nil {
+			ln.done()
+		}
 	}
 	c.settle()
 }
@@ -329,11 +338,16 @@ func (c *conn) subscriptionLiveLocked() bool {
 	return (c.att != nil && c.att.state != attClosed) || c.unwritten > 0
 }
 
-// replacedDoneLocked reports a replaced connection with nothing left to send:
-// no attachment open, and no terminal acknowledgement — a final reset, a
-// detach's reply — still queued (astra r10 8).
+// replacedDoneLocked reports a replaced connection that owes nothing more
+// (plan 027 X25; astra r10 8): no attachment whose terminal line is still to
+// be queued — a live or closing one, owed its forwarder's
+// reset{session_replaced} or its claimed detach's `{}` — and no terminal line
+// queued or being written (outbox.owesTerminal). No ordinary line holds it
+// open: the replacement dropped every one still queued, and one the writer
+// had already taken finishes ahead of the terminal line, or is cut by the
+// close when none is owed.
 func (c *conn) replacedDoneLocked() bool {
-	return c.replaced && (c.att == nil || c.att.state == attClosed) && c.unwritten == 0
+	return c.replaced && (c.att == nil || c.att.state == attClosed) && !c.out.owesTerminal()
 }
 
 // enqueue queues line for the writer in ONE conn.mu section with commit — the
@@ -346,12 +360,10 @@ func (c *conn) replacedDoneLocked() bool {
 // first in the same section, may refuse the line: its error is returned. Room
 // is never waited for under conn.mu: without it enqueue waits outside it
 // (outbox.await) until room is made, ctx ends, or stop closes (errStopped,
-// which wins over room), then tries again, admit included. sealIfReplaced
-// makes line the outbox's last line when the connection is replaced at the
-// moment it is offered — read in the same section, so a replaced connection's
-// terminal line (a claimed detach's own `{}`, here) always seals it, and no
-// later reply queues behind it (plan 027 X22).
-func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, done func(), admit func() error, commit func(), sealIfReplaced bool) error {
+// which wins over room), then tries again, admit included. kind is what line
+// is to a replaced connection (plan 027 X25; the outbox applies it): a
+// claimed detach's `{}` is terminalLine, every other line ordinaryLine.
+func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, done func(), admit func() error, commit func(), kind lineKind) error {
 	for {
 		var room <-chan struct{}
 		var err error
@@ -360,7 +372,7 @@ func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, d
 			err = admit()
 		}
 		if err == nil {
-			room, err = c.out.offer(line, done, ordinaryLimit, sealIfReplaced && c.replaced)
+			room, err = c.out.offer(line, done, ordinaryLimit, kind)
 			if err == nil && commit != nil {
 				commit()
 			}
@@ -400,7 +412,7 @@ func (c *conn) write() {
 			h(ln.b)
 		}
 		err := c.writeLine(ln.b)
-		c.out.written(len(ln.b))
+		c.out.written(ln)
 		if err != nil {
 			// Closed for the write's own reason before the line's slot is
 			// given back, which could otherwise close it as idle.
@@ -513,12 +525,27 @@ func (c *conn) close(reason string) {
 
 // ------------------------------------------------------------------ outbox
 
-// outLine is one line queued for the writer, and what to do once it is on
-// the socket (or never will be).
+// outLine is one line queued for the writer, what it is to a replaced
+// connection, and what to do once it is on the socket (or never will be).
 type outLine struct {
 	b    []byte
+	kind lineKind
 	done func()
 }
+
+// lineKind is what a queued line is to a replaced connection (plan 027 X25).
+type lineKind uint8
+
+const (
+	// ordinaryLine is every line but a terminal one — a reply, an event, a
+	// synchronized or a ready, a reset queued before the replacement: a
+	// replaced connection writes none of them.
+	ordinaryLine lineKind = iota
+	// terminalLine is an attachment's terminal line that a replaced connection
+	// still writes: its reset{session_replaced}, or a claimed detach's `{}`,
+	// queued before the replacement or after it.
+	terminalLine
+)
 
 // outbox is a connection's byte-counted FIFO (§3.7, astra 10). Every line
 // queued counts against WriterQueueBytes until the writer has written it;
@@ -527,21 +554,29 @@ type outLine struct {
 // fits an empty queue always gets in; and every wait ends when the connection
 // closes.
 //
-// A SEALED outbox has queued its connection's last line — the
-// reset{session_replaced} of an engine's replacement (plan 027 §3.6, astra r8
-// 7) — and admits nothing more: every later line, a handler's reply included,
-// is dropped at the push, whoever pushes it. What it already holds is still
-// written.
+// A REPLACED outbox (replace: its connection's engine was replaced, plan 027
+// §3.6, X25) is TERMINAL-ONLY. Every ordinary line it held was dropped then,
+// and every one offered since is refused (errOutboxReplaced), whoever offers
+// it — a handler's reply included (astra r8 7). It admits a terminal line —
+// the replacement's reset{session_replaced}, or a claimed detach's `{}` — and
+// that line SEALS it: nothing more is admitted (errOutboxSealed). A terminal
+// line it already held when it was replaced (a claimed detach's `{}`) is kept.
 type outbox struct {
 	mu     sync.Mutex
 	q      []outLine
 	bytes  int
 	high   int
 	closed bool
-	sealed bool
+	// terminalOnly says the outbox was replaced; sealed, that a terminal
+	// line has been admitted since.
+	terminalOnly bool
+	sealed       bool
+	// terminals is how many terminal lines are queued or being written: what
+	// a replaced connection still waits for (conn.replacedDoneLocked).
+	terminals int
 	// ready wakes the writer (one slot); room is closed and replaced whenever
-	// bytes go down or the outbox closes or seals, waking everyone waiting for
-	// room.
+	// bytes go down or the outbox closes, is replaced, or seals, waking
+	// everyone waiting for room.
 	ready chan struct{}
 	room  chan struct{}
 	// full is a test's barrier (hooks.outboxFull), nil in production.
@@ -555,8 +590,11 @@ func newOutbox(full func()) *outbox {
 var (
 	// errOutboxClosed is a push to a closed connection: the line is dropped.
 	errOutboxClosed = errors.New("control: the connection is closed")
-	// errOutboxSealed is a push after the connection's last line is queued:
-	// the line is dropped.
+	// errOutboxReplaced is an ordinary line offered to a replaced connection:
+	// the line is dropped (plan 027 X25).
+	errOutboxReplaced = errors.New("control: the connection was replaced: it writes only its terminal line")
+	// errOutboxSealed is a push after a replaced connection's terminal line is
+	// queued: the line is dropped.
 	errOutboxSealed = errors.New("control: the connection's last line is queued")
 	// errNoRoom is an offer the budget cannot take yet (offer).
 	errNoRoom = errors.New("control: no room in the writer queue")
@@ -575,10 +613,12 @@ const ordinaryLimit = protocol.WriterQueueBytes - protocol.ResetReserveBytes
 // offer queues b if it fits within limit, and NEVER WAITS, so it may be called
 // under conn.mu (conn.enqueue, forward.go's queueReset: conn.mu → outbox.mu is
 // the one lock edge). It is nil once b is queued; errNoRoom, with the channel
-// closed when room is next made, when b does not fit; errOutboxClosed or
-// errOutboxSealed when nothing more is admitted. seal makes b the last line
-// the outbox admits.
-func (o *outbox) offer(b []byte, done func(), limit int, seal bool) (<-chan struct{}, error) {
+// closed when room is next made, when b does not fit; and when b is refused —
+// the caller drops it, and gives back what it held for it — errOutboxClosed,
+// errOutboxSealed, or errOutboxReplaced for an ordinary line once the outbox
+// is terminal-only. A terminal line a terminal-only outbox admits seals it
+// (plan 027 X25).
+func (o *outbox) offer(b []byte, done func(), limit int, kind lineKind) (<-chan struct{}, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	switch {
@@ -586,15 +626,20 @@ func (o *outbox) offer(b []byte, done func(), limit int, seal bool) (<-chan stru
 		return nil, errOutboxClosed
 	case o.sealed:
 		return nil, errOutboxSealed
+	case o.terminalOnly && kind != terminalLine:
+		return nil, errOutboxReplaced
 	case o.bytes != 0 && o.bytes+len(b) > limit:
 		return o.room, errNoRoom
 	}
-	o.q = append(o.q, outLine{b: b, done: done})
+	o.q = append(o.q, outLine{b: b, kind: kind, done: done})
 	o.bytes += len(b)
 	o.high = max(o.high, o.bytes)
-	if seal {
-		o.sealed = true
-		o.wakeLocked()
+	if kind == terminalLine {
+		o.terminals++
+		if o.terminalOnly {
+			o.sealed = true
+			o.wakeLocked()
+		}
 	}
 	select {
 	case o.ready <- struct{}{}:
@@ -603,27 +648,51 @@ func (o *outbox) offer(b []byte, done func(), limit int, seal bool) (<-chan stru
 	return nil, nil
 }
 
-// seal makes the outbox admit nothing more, with no line of its own to queue
-// (conn.replace, for a replacement that owes no terminal line of its
-// own — no reset, no claimed detach's reply — to seal behind instead): a
-// no-op once already sealed or closed. It may be called under conn.mu, same
-// as offer.
-func (o *outbox) seal() {
+// replace makes the outbox terminal-only (plan 027 X25; conn.replace, under
+// conn.mu, as offer may be): from here it admits only a terminal line, which
+// seals it. Every ordinary line it holds is dropped and returned, in order,
+// for the caller to run their callbacks outside its locks — a reply's gives
+// its request's slot back — and a terminal one it holds (a claimed detach's
+// `{}` queued before the replacement) is kept where it is. A line the writer
+// has already taken is no longer the queue's: it finishes, ahead of any
+// terminal line, or is cut by the connection's close when none is owed. Every
+// wait for room is woken, to be refused or, for a terminal line, to find the
+// room the drop made. A no-op once closed or already replaced.
+func (o *outbox) replace() []outLine {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.sealed || o.closed {
-		return
+	if o.closed || o.terminalOnly {
+		return nil
 	}
-	o.sealed = true
+	o.terminalOnly = true
+	var kept, dropped []outLine
+	for _, ln := range o.q {
+		if ln.kind == terminalLine {
+			kept = append(kept, ln)
+			continue
+		}
+		dropped = append(dropped, ln)
+		o.bytes -= len(ln.b)
+	}
+	o.q = kept
 	o.wakeLocked()
+	return dropped
 }
 
-// push queues b within the ordinary budget, waiting — under no lock — for
-// room. It fails, having queued nothing, once ctx ends or the outbox closes or
-// seals.
+// owesTerminal reports a terminal line queued or being written. It may be
+// called under conn.mu, as offer may (conn.replacedDoneLocked).
+func (o *outbox) owesTerminal() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.terminals > 0
+}
+
+// push queues b, an ordinary line, within the ordinary budget, waiting —
+// under no lock — for room. It fails, having queued nothing, once ctx ends or
+// the outbox closes or is replaced.
 func (o *outbox) push(ctx context.Context, b []byte, done func()) error {
 	for {
-		room, err := o.offer(b, done, ordinaryLimit, false)
+		room, err := o.offer(b, done, ordinaryLimit, ordinaryLine)
 		if !errors.Is(err, errNoRoom) {
 			return err
 		}
@@ -696,11 +765,14 @@ func (o *outbox) next() (outLine, bool) {
 	}
 }
 
-// written gives n bytes back to the budget: a line is on the socket, or the
-// write failed.
-func (o *outbox) written(n int) {
+// written gives ln's bytes back to the budget: the line the writer took is on
+// the socket, or its write failed.
+func (o *outbox) written(ln outLine) {
 	o.mu.Lock()
-	o.bytes -= n
+	o.bytes -= len(ln.b)
+	if ln.kind == terminalLine {
+		o.terminals--
+	}
 	o.wakeLocked()
 	o.mu.Unlock()
 }
@@ -713,6 +785,11 @@ func (o *outbox) close() {
 		return
 	}
 	o.closed = true
+	for _, ln := range o.q {
+		if ln.kind == terminalLine {
+			o.terminals--
+		}
+	}
 	o.q = nil
 	o.wakeLocked()
 	select {
