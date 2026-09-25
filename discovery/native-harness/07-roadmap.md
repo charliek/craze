@@ -12,7 +12,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H3 | not started | approval, scheduled **after H8** (D-48): owner's direction is an auto-mode evaluator over the H2 gate, not ask-on-everything; scope decided when planned, after session-control S1 (D-39; Plan 019 §3.3) |
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
 | H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #48 (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
-| H6 | in progress | foreground complete (PR 1 #51, merged `f5c3cfd`: sub-agents end to end; PR 2 `feature/plan-026-h6-stop`: stop one sub-agent); background children are PR 3 |
+| H6 | complete | sub-agents shipped across three PRs: PR 1 (#51, `f5c3cfd`) end to end; PR 2 (#53, `5901e4a`) per-child stop; PR 3 (`feature/plan-026-h6-background`) background children — `run_in_background`, `agent_output`, the session-level wake, `bg` on the row |
 | H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
 | HL | unscheduled | own the turn loop — see D-40's triggers |
@@ -550,19 +550,22 @@ Follow-ups:
   (§4, §9; `10-open-questions.md` already lists these three);
 - `--json` has no field for a plan's body (X22.7).
 
-H6 (sub-agents) is in progress: PR 1 (#51, `f5c3cfd`) shipped the in-process
+H6 (sub-agents) is complete: PR 1 (#51, `f5c3cfd`) shipped the in-process
 `agent` tool, event tagging, and personas from workspace, user, and plugin
-sources; PR 2 (`feature/plan-026-h6-stop`) adds per-child cancel; background
-children are PR 3.
+sources; PR 2 (#53, `5901e4a`) added per-child cancel; PR 3
+(`feature/plan-026-h6-background`) adds background children —
+`run_in_background`, `agent_output`, and the session-level wake that
+delivers a result nobody typed for.
 
 ### H6 — sub-agents
 
-**FINAL after the S1c seam review and the panel (2026-09-24); foreground
-complete.** Three PRs, each auto-merged after `/git-commands:watch-pr` shows
-it green: PR 1 (`feature/plan-026-h6-subagents`, foreground sub-agents end to
-end) **merged as #51, `f5c3cfd`**; PR 2 (`feature/plan-026-h6-stop`,
-per-child cancel) ships the stop; PR 3 (`feature/plan-026-h6-background`,
-background children and the wake) is next. Decisions D-54..D-59.
+**FINAL after the S1c seam review and the panel (2026-09-24); shipped.**
+Three PRs, each auto-merged after `/git-commands:watch-pr` shows it green:
+PR 1 (`feature/plan-026-h6-subagents`, foreground sub-agents end to end)
+**merged as #51, `f5c3cfd`**; PR 2 (`feature/plan-026-h6-stop`, per-child
+cancel) **merged as #53, `5901e4a`**; PR 3 (`feature/plan-026-h6-background`,
+background children and the wake) as built, on
+`feature/plan-026-h6-background`. Decisions D-54..D-59.
 
 - **In-process** (D-54, supersedes D-10): a child is a second
   `harness.Session`, as grok-build, opencode, codex and crush all run their
@@ -587,15 +590,33 @@ background children and the wake) is next. Decisions D-54..D-59.
   resolved per call through an optional `[subagents]` tier map (D-58);
   per-child cancel in PR 2, and background children — a session-level wake
   through the existing foreign-turn machinery — in PR 3 (D-59).
+- **Background children (PR 3, D-59 as shipped).** `run_in_background`, off
+  by default, on only for an interactive session (`Options.Interactive`) —
+  headless `craze prompt` always runs a background call in the foreground.
+  A background call takes one of the same four slots but never waits: it
+  fails fast when none is free, where a foreground call still waits behind
+  another foreground holder. A finished result is redacted and capped like
+  a foreground answer, then delivered at the next step boundary, by the new
+  `agent_output {id, wait_ms}` tool, or by the session's own **wake**: one
+  worker per session that starts a turn of its own — bracketed as
+  `EventForeignTurn{Reason: "subagent_wake"}`, fenced by the new
+  `agent.AdmissionFence` so the engine never admits a craze prompt while it
+  runs — when nothing else holds the session's claim. The row band marks a
+  background child `bg` (`Capabilities.SubagentBackground`, native only). A
+  drained row refused by the wake is restored at the queue's head (SF-21,
+  widened to every row-sourced turn a foreign turn refuses).
 - **Exit**: a task fanned out to two children with both transcripts in the
   sub-agent view.
 
 **Exit result:** the criterion above was met live, on both Linux and the
-mac-mini (PR 1's V1). PR 2 adds per-child stop, verified live on both
-platforms; PR 3 (background children) is what remains.
+mac-mini (PR 1's V1). PR 2's per-child stop was verified live on both
+platforms (V9). PR 3's background children — `run_in_background`,
+`agent_output`, the wake — are built and gated (§3.11's re-verification,
+the literal moves, the new goldens) and verified live on both platforms
+(V10).
 
-Live smoke, both PRs (plan artifacts, outside the repo — see
-`026-native-harness-h6-subagents/smoke/pr{1,2}-*.md`):
+Live smoke, all three PRs (plan artifacts, outside the repo — see
+`026-native-harness-h6-subagents/smoke/pr{1,2,3}-*.md`):
 
 | # | what | platforms | result |
 |---|---|---|---|
@@ -603,6 +624,12 @@ Live smoke, both PRs (plan artifacts, outside the repo — see
 | V3 (PR 1) | Esc mid-fan-out kills both children's `sleep 30`, nothing left running | Linux, mac-mini | pass |
 | V7 (PR 1) | `craze prompt --json`: subagent and child-tagged lines, `done end_turn` | Linux, mac-mini | pass |
 | V9 (PR 2) | Delete/Backspace stops one running child, from its row and from its view, native only; grok's row and view fall through with no `del to stop` hint | native: Linux, mac-mini; grok fall-through: Linux | pass |
+| V10a (PR 3) | a background `agent` call returns at once; `bg` marks the row while it runs | Linux, mac-mini | pass |
+| V10b (PR 3) | a background child's finish during the parent's own turn is steered into its next step | Linux, mac-mini | pass |
+| V10c (PR 3) | a background child's finish while the session is idle wakes the parent once, heading the reply with "sub-agent finished — the agent continues" | Linux, mac-mini | pass |
+| V10d (PR 3) | a prompt typed while the wake runs queues, and sends once the wake ends | Linux, mac-mini | pass |
+| V10e (PR 3) | `agent_output` waits on a running background child and returns its result; no wake follows | Linux | pass |
+| V10f (PR 3) | Esc while idle leaves a background child running; Esc during a wake stops the wake | Linux | pass |
 
 ### H7 — resume and compaction
 

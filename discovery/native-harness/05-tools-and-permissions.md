@@ -272,9 +272,11 @@ it survives to the next boundary that does.
 
 ## Sub-agents (H6)
 
-**Status: planned (Plan 026, FINAL after the panel, 2026-09-24), not built.**
-Three PRs — foreground sub-agents end to end, per-child cancel, background
-children. See `07`'s H6 entry and `08`'s D-54..D-59.
+**Status: shipped (Plan 026, FINAL after the panel, 2026-09-24; PR 3
+2026-09-25).** Three PRs — foreground sub-agents end to end (#51,
+`f5c3cfd`), per-child cancel (#53, `5901e4a`), background children
+(`feature/plan-026-h6-background`). See `07`'s H6 entry and `08`'s
+D-54..D-59.
 
 **The shape.** The harness owns sub-agents; the adapter only maps them onto
 what already exists for grok's children. `internal/harness/tool/opencode/agent.go`
@@ -295,8 +297,12 @@ grok-build-id pattern, since "task" means the todo panel in craze's TUI).
 Kind **`task`**, a new `tool.Kind` (see the tool table above; this
 correction is D-55). Parameters: required `description` (3–5 words) and
 `prompt`; optional `subagent_type` (default `general-purpose`), `model`,
-`effort`; `run_in_background` is tolerated from PR 1 and runs in the
-foreground until PR 3 declares it. The description is a static `agent.txt`
+`effort`, and `run_in_background` (boolean, PR 3): a call that sets it true
+runs in the background on a session that supports it (native, interactive)
+and in the foreground otherwise — tolerated as a no-op from PR 1, it now
+takes a slot the same way, fails fast rather than waiting when the four are
+all held, and returns its acknowledgement at once with no usage. The
+description is a static `agent.txt`
 plus a per-session tail — one row per agent type (8 KiB) and one row per
 model plus the tier map (2 KiB), each folded to one line and redacted —
 rendered by a decorator over the static spec, so `specs.golden` still pins
@@ -367,15 +373,29 @@ focused running child row, or inside its view, stops just that child —
 gated on a new `SubagentCancel` capability, so the key falls through to the
 composer everywhere else, grok included.
 
-**Background children (PR 3).** `run_in_background: true`, off by default
-(`Options.Background`), on only for an interactive session — headless
-`craze prompt` always runs a background call in the foreground. A
-background child runs on a session-level worker outside the turn, counted
-under the same cap; a turn cancel (Esc) spares it, only a per-child stop or
-`Close` ends it. Its result is reserved, then committed at the next step
-boundary or delivered by `agent_output {id, wait_ms?}` — never through the
-steer box or `Result.Unanswered`, so it can never be requeued as a user
-prompt. A result that finishes while the session is idle wakes the parent
-once, bracketed by `EventForeignTurn` exactly as a live session's foreign
-turns are, with the note's wording carried on a new `ForeignTurnInfo.Reason`
-field — the one new `agent.Event` field this plan adds, PR 3 only.
+**Background children (PR 3, shipped).** `run_in_background: true`, off by
+default (`Options.Background`), on only for an interactive session —
+headless `craze prompt` always runs a background call in the foreground. A
+background child runs on a session-level worker outside the turn, taking
+one of the same four slots by occupancy: it never waits, and fails fast
+when none is free, where a foreground call still waits behind another
+foreground holder (`busyText`: "All 4 sub-agent slots are in use; wait for
+one with agent_output or stop one."). A turn cancel (Esc) spares it; only a
+per-child stop or `Close` ends it. Its result is redacted and capped like a
+foreground answer, then reserved and committed at the next step boundary,
+delivered by the new `agent_output {id, wait_ms}` tool (read-only,
+parallel, `wait_ms` default 30000 ms, capped at 600000, 0 does not wait; a
+result already delivered, or already part of the model's own input, says so
+instead of repeating it), or delivered by the session's own **wake** —
+never through the steer box or `Result.Unanswered`, so a background result
+can never be requeued as a user prompt. A result that finishes while the
+session is idle wakes the parent once: the session starts a turn of its own
+bracketed by `EventForeignTurn`, exactly as a live session's foreign turns
+are, and fenced by the new `agent.AdmissionFence` so the engine never
+admits a craze prompt while the wake runs; the note's wording is carried on
+the new `ForeignTurnInfo.Reason` field ("subagent_wake") — the one new
+`agent.Event` field this plan adds. The row band marks a background child
+`bg`, gated by `Capabilities.SubagentBackground` (native only; grok's own
+background flag does not move its goldens). A drained row refused by the
+wake is restored at the queue's head (SF-21, widened to every row-sourced
+turn a foreign turn refuses).

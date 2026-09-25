@@ -58,6 +58,27 @@ On a provider that can stop one child (native today), `Delete` or
 `Backspace` on the selected **running** row stops just that child; the turn
 goes on and the parent reads that the user stopped it. On any other row —
 grok, cursor, or a finished row — the key goes to the composer as before.
+This works the same on a background sub-agent's row (below).
+
+### Background sub-agents
+
+On native, a sub-agent the model started with `run_in_background` shows in
+the same band, marked `bg` first in its suffix — a running row reads `bg ·
+0s · 15 tok`, a finished one just `bg · <model>` with no duration, since its
+row went final at the call's own acknowledgement, before the child ever
+started. `Delete`/`Backspace` stops a running background row exactly like
+any other.
+
+A background child that finishes while its own turn is still running is
+steered into the agent's next step, as if it had answered in place. One
+that finishes after the agent has gone idle **wakes** it: craze starts a
+turn of its own that heads the transcript with "sub-agent finished — the
+agent continues" and delivers the result — with no working spinner, since
+the status row stays idle for it (the terminal tab title still marks it,
+as it does grok's own foreign-turn fallback). A prompt typed while the wake
+runs is queued, and sent once the wake ends. Headless `craze prompt` never
+sees any of this: every `run_in_background` call there runs in the
+foreground, as if the flag had not been set.
 
 ## Resuming a session
 
