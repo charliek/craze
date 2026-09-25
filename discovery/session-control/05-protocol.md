@@ -149,19 +149,27 @@ reconnect. The roster is ordered separately, by its own epoch and cursor.
 
 Published in the spec as a table, enforced by the engine (`03`):
 
-| activity | `queue` | `interject` | `send_now` | `cancel` | `session.set` |
-|---|---|---|---|---|---|
-| starting / replaying | refuse | refuse | refuse | refuse | refuse |
-| working | allow | allow if the provider can | allow | allow | allow |
-| blocked on an ask | allow | `not_accepting` | `not_accepting` | allow | allow |
-| foreign turn (the agent's own) | allow | `not_accepting` | `foreign_turn` | allow, written at once | allow |
-| idle | allow | `not_accepting` | allow | `not_accepting` | allow |
-| idle **with an ask pending** | allow | `not_accepting` | allow | **allow** | allow |
-| failed / cancelling / closing | to be specified in S2 | | | | refuse (after `session.stop`, or while closing) |
+| activity | `queue` | `interject` | `send_now` | `cancel` | `session.set` | `cancel_subagent` |
+|---|---|---|---|---|---|---|
+| starting / replaying | refuse | refuse | refuse | refuse | refuse | allow |
+| working | allow | allow if the provider can | allow | allow | allow | allow |
+| blocked on an ask | allow | `not_accepting` | `not_accepting` | allow | allow | allow |
+| foreign turn (the agent's own) | allow | `not_accepting` | `foreign_turn` | allow, written at once | allow | allow |
+| idle | allow | `not_accepting` | allow | `not_accepting` | allow | allow |
+| idle **with an ask pending** | allow | `not_accepting` | allow | **allow** | allow | allow |
+| failed / cancelling / closing | to be specified in S2 | | | | refuse (after `session.stop`, or while closing) | `not_accepting` once closed |
 
 Asks arrive between turns and during foreign turns too, so cancel is accepted
 whenever any ask is pending, whatever the activity. The table is a sketch; S2
 derives it from the code's actual states rather than from these three words.
+
+`cancel_subagent` (plan 026 PR 2, `Control.CancelSubagent`) stops one running
+sub-agent and leaves its turn going. The engine's only gate on it is a closed
+engine; in every other activity the session decides, because it is the one
+authority on which of its children are running, and it answers
+`unknown_subagent` for an id it holds no running child for. Only a session
+whose capabilities carry `SubagentCancel` (native) has the verb; any other
+answers `unsupported`.
 
 Provider limits come from the session's capabilities, so a client hides what
 a provider cannot do instead of discovering it by error.
@@ -187,12 +195,14 @@ payload is `bad_request`, never a re-execution.
 
 Session control S1b (`internal/engine`) adds six codes and the retry policy
 below; plan 025 adds a seventh, `stale_model`, on the settings worker it built
-on S1b's. All of it is `internal/engine/control.go`'s `Command` doc as built —
+on S1b's; plan 026 PR 2 an eighth, `unknown_subagent`, on the per-sub-agent
+stop. All of it is `internal/engine/control.go`'s `Command` doc as built —
 copied here, not invented:
 
 | code | one line |
 |---|---|
 | `unknown_row` | a queued row id the queue no longer holds — sent already, removed by another client, or never existed |
+| `unknown_subagent` (plan 026 PR 2) | a stop (`Control.CancelSubagent`) of a sub-agent the session holds no running child for — never issued, or already finished; after a client's own stop it is the race with the child's own end, which a client shows nothing for (at most "already finished"), never an error row. Stored, like `unknown_row` |
 | `unknown_command` | a command id at or below its client's evicted high-water mark: recognisably expired |
 | `in_progress` | a resend that found its id's command still running: at once for a synchronous command, or, for a blocking one (`Cancel`, `Stop`, `Set`, `Interject`), when a waiting duplicate gives up because its own context ended |
 | `stale_model` (plan 025) | a `Set` bound to a model (`Setting.ForModel`) the session has since left, refused before the provider was asked — about this command's own arguments, unlike the gate refusals, which is why it has a code of its own: "not applied, the model changed" |

@@ -32,6 +32,13 @@ var ErrPromptInFlight = acp.ErrPromptInFlight
 // written to the wire.
 var ErrUnsupported = acp.ErrUnsupported
 
+// ErrNoSuchSubagent is SubagentCanceller's refusal: the session has no
+// sub-agent by that id whose turn is still running — the id never existed, or
+// the child has already finished (plan 026 §3.10). Nothing was changed. After a
+// stop the caller itself sent, it means the child's own end won the race: its
+// finished roster row says how it ended, and there is nothing to report.
+var ErrNoSuchSubagent = errors.New("agent: no such sub-agent")
+
 // ErrForeignTurn refuses a prompt while the agent runs a turn of its own.
 var ErrForeignTurn = acp.ErrForeignTurn
 
@@ -983,4 +990,30 @@ type SetOutcome struct {
 // session without it is read as time.Now.
 type Clocked interface {
 	Now() time.Time
+}
+
+// SubagentCanceller is a session that can stop one of its sub-agents — the
+// row whose SubagentInfo.ID is id — and nothing else of the turn (plan 026
+// §3.10): the parent's turn goes on, and its model reads that the user stopped
+// that child. Like Clocked it is optional and found by a type assertion, so
+// Session itself does not change; Capabilities.SubagentCancel is what a client
+// reads to offer the stop at all. The native session implements it.
+//
+// The contract:
+//
+//   - It waits on nothing: no turn, no provider call, no Publish or Flush. A
+//     client may call it from the primary's own reader.
+//   - Its outcome is event-only. nil says the stop was delivered, not what it
+//     came to: the child's finished roster row does — cancelled, its Error
+//     "stopped by the user" — unless the child had already ended its turn on
+//     its own (it keeps that outcome) or the parent's own cancel or close
+//     outranked the stop (cancelled with no such Error).
+//   - It is idempotent: a second stop of a child still running returns nil and
+//     changes nothing.
+//   - ErrNoSuchSubagent, with nothing changed, for an id that never existed or
+//     a child whose turn has ended. After a stop the caller itself sent, that
+//     is the race with the child's own end: a client shows nothing for it (at
+//     most "already finished"), never an error row.
+type SubagentCanceller interface {
+	CancelSubagent(id string) error
 }

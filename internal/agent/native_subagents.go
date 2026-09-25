@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"time"
@@ -136,6 +137,37 @@ func (s *nativeSession) redactor() func(string) string {
 	}
 	return hs.Redactor()
 }
+
+// CancelSubagent is SubagentCanceller (plan 026 §3.10): the harness's stop of
+// one child, which cancels that child's context and waits for nothing; what it
+// comes to reaches the roster through the child's SubagentFinished like any
+// other ending (subagentFinished), cancelled with the Error "stopped by the
+// user" when the stop alone decided it. Nothing is published here.
+//
+// hs is read under s.mu, released before the harness is called, as redactor
+// does: s.mu is never held across anything that can wait — the one registry
+// call Cancel makes under it does not, and Close, SetModel and the prompt take
+// the harness only after releasing it — so a stop from the TUI's Update never
+// queues behind a turn. The harness's stop takes only its registry's and the
+// child's handle's leaf locks. Before Start there is no child to stop; after
+// Close there is none either, the harness's Close having retired them all.
+func (s *nativeSession) CancelSubagent(id string) error {
+	s.mu.Lock()
+	hs := s.hs
+	s.mu.Unlock()
+	if hs == nil {
+		return ErrNoSuchSubagent
+	}
+	if err := hs.CancelSubagent(id); err != nil {
+		if errors.Is(err, harness.ErrNoSuchSubagent) {
+			return ErrNoSuchSubagent
+		}
+		return err
+	}
+	return nil
+}
+
+var _ SubagentCanceller = (*nativeSession)(nil)
 
 // safeSubagent puts every text field of info through safe and then caps it
 // (the file's "Payloads"). ID and ToolCallID are craze's own — the runner's

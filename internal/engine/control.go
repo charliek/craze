@@ -198,8 +198,8 @@ type CancelResult struct {
 
 // The refusals the engine adds to the ones internal/agent defines (agent.ErrQueueFull,
 // agent.ErrQueueTextTooLong, agent.ErrPromptInFlight, agent.ErrForeignTurn,
-// agent.ErrNotInTurn, agent.ErrUnsupported). Each has a protocol code, which
-// is what a client matches on: never the message text.
+// agent.ErrNotInTurn, agent.ErrUnsupported, agent.ErrNoSuchSubagent). Each has a
+// protocol code, which is what a client matches on: never the message text.
 var (
 	// ErrNotAccepting refuses a command the engine's activity does not admit:
 	// anything before the session is up or while it restores, anything after
@@ -356,6 +356,12 @@ func classify(err error) classification {
 		return classification{code: "already_resolved", stored: true}
 	case errors.Is(err, agent.ErrUnknownAsk):
 		return classification{code: "unknown_ask", stored: true}
+	case errors.Is(err, agent.ErrNoSuchSubagent):
+		// A stop of a sub-agent the session holds no running child for (plan
+		// 026 §3.10): a refusal about the resource the command named, like
+		// unknown_ask and unknown_row — STORED, since the child that has ended
+		// never runs again; the client re-reads the roster.
+		return classification{code: "unknown_subagent", stored: true}
 	case errors.Is(err, ErrCommandAborted), errors.Is(err, ErrSetOutcomeUnknown):
 		// Both are STORED answers whose outcome the engine cannot itself vouch
 		// for — a panic's, or a Set the worker had already claimed when its
@@ -459,9 +465,9 @@ func Code(err error) string { return classify(err).code }
 // Which methods wait is part of the contract, because a bubbletea Update is
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
-// Ask, Answer, SetTitle, State, NewClientID and Events wait on nothing: no
-// channel, no provider call, no Publish. Start, Subscribe, Attach, Interject,
-// Cancel, Stop, Set, Sync and Close block and belong on a goroutine that is
+// Ask, Answer, CancelSubagent, SetTitle, State, NewClientID and Events wait on
+// nothing: no channel, no provider call, no Publish. Start, Subscribe, Attach,
+// Interject, Cancel, Stop, Set, Sync and Close block and belong on a goroutine that is
 // not the primary's reader — a tea.Cmd. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
 // publisher holds while it waits for room in the primary: called by the
@@ -537,6 +543,19 @@ type Control interface {
 	Asks() []agent.AskRecord
 	Ask(id string) (agent.AskRecord, bool)
 	Answer(c Command, id string, a agent.AskAnswer) error
+
+	// CancelSubagent stops one running sub-agent — the roster row whose id is
+	// id — and nothing else: the turn it belongs to goes on, and the parent's
+	// model reads that the user stopped that child (plan 026 §3.10). It waits
+	// on nothing: the session's side only cancels the child's context. Its
+	// outcome is event-only, the child's finished roster row; nil says the
+	// stop was delivered. agent.ErrNoSuchSubagent (unknown_subagent) is an id
+	// the session holds no running child for, which after a stop the client
+	// itself sent means the child's own end won the race: a client shows
+	// nothing for it, at most "already finished", never an error row.
+	// agent.ErrUnsupported is a session with no per-child stop, and
+	// ErrNotAccepting a closed engine; nothing else gates it (subagent.go).
+	CancelSubagent(c Command, id string) error
 
 	// The session's settings. Set blocks — one FIFO worker asks the provider,
 	// the session writes the change and its delta in one locked section, and

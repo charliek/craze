@@ -22,7 +22,7 @@ README.md is one heading
                                                                                                     
 ✳ README.md · 0s · 15 tok                                                                           
 ─────────────────────────────────────────────────────────────────────────── (two) Summarise README ─
-○ @general-purpose · read-only · esc to return · tab next agent                                     
+○ @general-purpose · read-only · esc to return · tab next agent · del to stop                       
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ native │ Echo │ 0m                                                                             
 ◆ agent · shift+tab · ▸▸ bypass permissions on · ← 2 agents                                         

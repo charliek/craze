@@ -49,7 +49,7 @@ import (
 // # The table
 //
 // receiptTable is one table for the whole engine, shared by every client and
-// every mutating Control method: the fourteen entry hooks below are its only
+// every mutating Control method: the fifteen entry hooks below are its only
 // callers. Its mutex is a LEAF — it is never held across a command's own work,
 // a hook, a provider call or anything else that can block, and it is never
 // taken while e.mu, s.mu or registry.mu is held (engine.go's struct comment
@@ -73,14 +73,14 @@ import (
 //     honouring its own ctx, and disturbs nothing if its ctx loses the race —
 //     the owner's entry is untouched and finishes exactly as it would have.
 //   - An OPEN reservation of a SYNCHRONOUS command (Submit, Disarm, GiveUp,
-//     GiveUpDrain, the queue verbs, Answer, SetTitle: the Control methods
-//     documented as "wait on nothing") is ErrCommandInProgress at once —
+//     GiveUpDrain, the queue verbs, Answer, CancelSubagent, SetTitle: the
+//     Control methods documented as "wait on nothing") is ErrCommandInProgress at once —
 //     "this id is reserved and its command is still running; resend the SAME
 //     id" — and never a wait, because "a duplicate of a synchronous command
 //     never waits" is kept literally. It stores nothing and changes nothing,
 //     so the id stays exactly as it was and the client may resend it.
 //     In-process this is unreachable for a single client — the TUI makes all
-//     fourteen calls from its one Update goroutine — and it exists for S2's
+//     fifteen calls from its one Update goroutine — and it exists for S2's
 //     socket, where two connections of one client can be in flight at once.
 //
 // Either way, a resend whose payload hash does not match the reservation's is
@@ -201,7 +201,7 @@ import (
 // A stored result never shares memory with engine state or with another
 // caller's copy of the same result: cloneReceiptResult gives SubmitResult's
 // one pointer field (Queued *agent.QueuedPrompt — the only pointer among the
-// fourteen methods' results) a fresh copy on the way in and on every way back
+// fifteen methods' results) a fresh copy on the way in and on every way back
 // out, so the queue's own row and every caller's view of it stay
 // independent.
 
@@ -622,7 +622,7 @@ func answerSpelling(a agent.AskAnswer) string {
 
 // cloneReceiptResult gives v its own copy of anything a stored result would
 // otherwise share with the call that produced it or with another resend:
-// SubmitResult.Queued is the one pointer field among the fourteen commands'
+// SubmitResult.Queued is the one pointer field among the fifteen commands'
 // results, so it is the one case handled here. Called once on the way into
 // the table and once on every way back out, so the table's own copy and
 // every caller's copy are all independent.

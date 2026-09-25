@@ -21,10 +21,10 @@ main.go is the entry point
                                                                                                     
                                                                                                     
                                                                                                     
-✳ main.go · 0s · 15 tok                                                                             
+                                                                                                    
 ───────────────────────────────────────────────────────────────────────────── (echo) Scan the repo ─
-○ @general-purpose · read-only · esc to return · del to stop                                        
+– @general-purpose · cancelled · stopped by the user · esc to return                                
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ws │ native │ Echo │ 0m                                                                             
-◆ agent · shift+tab · ▸▸ bypass permissions on · ← 1 agent                                          
-❯ ● general-purpose  Scan the repo  0s · 15 tok                                                     
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
+❯ ● general-purpose  Scan the repo  echo                                                            
