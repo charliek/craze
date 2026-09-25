@@ -79,12 +79,13 @@ func (l *stallListener) state() (time.Time, chan struct{}) {
 // The set is cleared first, so a later dropAll only touches what is live
 // then. It closes each through the stallConn wrapper (Close), not the raw
 // net.Conn, so a write of its own stalled on this listener wakes at once
-// (Write's closed case) instead of sleeping out whatever stall remains; the
-// count returned is how many it closed, for a caller (Host.DropConnections)
-// that waits for the server's own count of open connections to fall by that
-// many — proof its cleanup, unbind included, has actually run for each one,
-// not just that the socket is gone.
-func (l *stallListener) dropAll() int {
+// (Write's closed case) instead of sleeping out whatever stall remains.
+// Host.DropConnections waits on control.Server.OpenConns reaching zero
+// afterward — proof every dropped connection's cleanup, unbind included, has
+// actually run, not just that its socket is gone — rather than on any count
+// this returns, since a connection open when dropAll ran can finish closing
+// on its own and be mistaken for one of these (C9a review item 2).
+func (l *stallListener) dropAll() {
 	l.mu.Lock()
 	conns := make([]*stallConn, 0, len(l.conns))
 	for c := range l.conns {
@@ -95,7 +96,6 @@ func (l *stallListener) dropAll() int {
 	for _, c := range conns {
 		_ = c.Close()
 	}
-	return len(conns)
 }
 
 func (l *stallListener) forget(c *stallConn) {

@@ -90,3 +90,43 @@ func TestStallWritesWakesOnQuit(t *testing.T) {
 		t.Fatal("Serve did not return within 1s")
 	}
 }
+
+// TestDropConnectionsErrorsOnStuckConnection is C9a review item 2's
+// loud-failure half: if a connection never finishes closing, DropConnections
+// must return an error, not return silently once its deadline passes. A
+// negative control forcing the count-based bug this replaces — an unrelated
+// connection's own close satisfying a "before minus dropped" target while
+// the one DropConnections dropped is still mid-cleanup — needs two
+// connections closing on independently scheduled goroutines racing this
+// wait, a schedule the synchronous, single-threaded wire fixture runner (one
+// op at a time, run() in wire_test.go) cannot force; this test instead
+// exercises the wait DropConnections itself uses (waitForOpenConnsZero)
+// directly, with a stub openConns that never reports zero, standing in for
+// that stuck connection.
+func TestDropConnectionsErrorsOnStuckConnection(t *testing.T) {
+	err := waitForOpenConnsZero(20*time.Millisecond, func() int { return 1 })
+	if err == nil {
+		t.Fatal("waitForOpenConnsZero: expected an error, got nil")
+	}
+}
+
+// TestDropConnectionsWaitsForZero is the non-stuck half: once openConns
+// reports zero, the wait returns nil at once rather than sleeping out its
+// full deadline.
+func TestDropConnectionsWaitsForZero(t *testing.T) {
+	calls := 0
+	start := time.Now()
+	err := waitForOpenConnsZero(time.Hour, func() int {
+		calls++
+		if calls < 3 {
+			return 1
+		}
+		return 0
+	})
+	if err != nil {
+		t.Fatalf("waitForOpenConnsZero: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("waitForOpenConnsZero took %s to notice openConns reached zero", elapsed)
+	}
+}
