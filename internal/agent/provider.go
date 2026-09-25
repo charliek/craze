@@ -152,6 +152,14 @@ type Capabilities struct {
 	// and in a running child's view, with its banner hint and help line. Native
 	// has it; neither grok nor cursor has a per-child stop on the wire.
 	SubagentCancel bool
+	// SubagentBackground is a sub-agent running in the background (plan 026
+	// §3.11): its call returned at once, it runs on for the session's life
+	// and its result is delivered to the model later, by a wake of the
+	// session's own. The TUI marks such a row `bg`. Native alone has it; grok
+	// sets SubagentInfo.Background on its own children too, but the
+	// presentation is native's, so the marker is gated on this bit and not on
+	// the row's field alone (plan 026 X29).
+	SubagentBackground bool
 }
 
 // SkillScan is where a provider's on-disk skills come from: SKILL.md trees
@@ -348,6 +356,7 @@ func NativeProvider() Provider {
 			SubagentRows:       true,
 			SubagentTranscript: true,
 			SubagentCancel:     true,
+			SubagentBackground: true,
 		},
 	}
 }

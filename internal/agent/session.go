@@ -558,11 +558,24 @@ type ExpandedCommand struct {
 
 // ForeignTurnInfo is a turn the agent is running on craze's session without a
 // craze prompt. Running is true when it starts and false when it ends.
+//
+// Reason says why the agent started it, for a client that folds the stream to
+// word its note by (internal/transcript's foldForeignTurn): "" is grok's
+// interjection fallback, today's wording; ReasonSubagentWake is the native
+// session delivering a background sub-agent's result (plan 026 §3.11). An
+// open string, not an enum: a reason this build does not know renders as ""
+// does, so a newer session's reason never breaks an older client's fold.
 type ForeignTurnInfo struct {
 	ID      string
 	Text    string
+	Reason  string
 	Running bool
 }
+
+// ReasonSubagentWake is ForeignTurnInfo.Reason for the native session's wake:
+// a turn of its own, bracketed as foreign, that delivers a finished background
+// sub-agent's result to the model (plan 026 §3.11). Both brackets carry it.
+const ReasonSubagentWake = "subagent_wake"
 
 type ToolEvent struct {
 	ID          string
@@ -895,12 +908,15 @@ type Session interface {
 	// a component above the seam — the engine — can read this one flag from
 	// inside its own admission check, under its own lock (e.mu), without
 	// paying for a whole Snapshot's clones (Models, Modes, Commands, Config,
-	// Todos, Tools, Subagents) just to read one bool. This and Begin
-	// are the two calls the engine may make under e.mu, both taking s.mu
-	// briefly and waiting on nothing: the order is e.mu → s.mu, and it
-	// cannot cycle, because the session never calls back into the engine. A
-	// session with no notion of a foreign turn (native) always answers
-	// false.
+	// Todos, Tools, Subagents) just to read one bool. It is one of the three
+	// things the engine calls under e.mu — this, Begin, and the admission
+	// fence's FenceUp/FenceDown on a session that has one (AdmissionFence) —
+	// each taking s.mu briefly and waiting on nothing: the order is e.mu →
+	// s.mu, and it cannot cycle, because the session never calls back into
+	// the engine. The live session answers true while grok runs its
+	// interjection fallback; the native session answers true while it runs a
+	// wake, the turn of its own that delivers a background sub-agent's
+	// result (plan 026 §3.11), and false at every other time.
 	ForeignTurn() bool
 	// Interject merges text into the running turn without cancelling it.
 	// Only grok can: everything else returns ErrUnsupported before the wire.

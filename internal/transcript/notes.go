@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 // The wordings of the rows the fold draws from an event, with the TUI's
@@ -13,8 +15,14 @@ const (
 	// NoteCancelled is the row a cancelled turn leaves: EventDone with the
 	// stop reason "cancelled", or the engine's synthetic cancelled ending.
 	NoteCancelled = "cancelled"
-	// NoteForeignTurn heads the stream of a turn the agent started on its own.
+	// NoteForeignTurn heads the stream of a turn the agent started on its own:
+	// grok's interjection fallback, and every foreign turn whose reason this
+	// build does not know (noteForForeignTurn).
 	NoteForeignTurn = "agent continued on its own (interjection fallback)"
+	// NoteSubagentWake heads the stream of the native session's wake: a turn
+	// of its own delivering a background sub-agent's result (plan 026 §3.11,
+	// agent.ReasonSubagentWake).
+	NoteSubagentWake = "sub-agent finished — the agent continues"
 	// NoteRestored closes a session/load replay: everything above it is
 	// history the agent handed back, everything below is this session.
 	NoteRestored = "restored"
@@ -30,6 +38,19 @@ const (
 // stopCancelled is the one stop reason the fold reads: EventDone's, and a
 // synthetic TurnEnded's.
 const stopCancelled = "cancelled"
+
+// foreignTurnNote is the note a foreign turn's start draws, by the reason the
+// bracket carries (agent.ForeignTurnInfo.Reason): the native wake's own
+// wording for agent.ReasonSubagentWake, and today's for "" — and for any
+// reason this build does not know, which a newer session may publish: the
+// reason is an open string on the wire, and an unknown one is still a turn
+// the agent ran on its own.
+func noteForForeignTurn(reason string) string {
+	if reason == agent.ReasonSubagentWake {
+		return NoteSubagentWake
+	}
+	return NoteForeignTurn
+}
 
 // ellipsis leads a streamed entry's text once the stream cap dropped its
 // beginning (capText).

@@ -509,6 +509,52 @@ func TestViewedRowPushedPastTheCapStaysVisible(t *testing.T) {
 	}
 }
 
+// TestAgentRowMarksBackgroundOnlyForAProviderWithIt (plan 026 §3.11, X29): a
+// row whose SubagentInfo.Background is set carries `bg` at the head of its
+// suffix — running or finished — only when the provider's capabilities say it
+// has background children. grok sets the field on its own children and has no
+// such capability, so its rows read exactly as before; native has it.
+func TestAgentRowMarksBackgroundOnlyForAProviderWithIt(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	m := agentModel(t, &now)
+	tools := []agent.ToolEvent{taskTool("task-a", "job a", "in_progress")}
+	stub := stubOf(t, m)
+	stub.SetTools(tools)
+	running := subagentsFromTools(tools)[0]
+	running.Background = true
+	stub.SetSubagents([]agent.SubagentInfo{running})
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &running, SubagentChange: agent.SubagentChangeSpawned}})
+	m = tm.(Model)
+	finished := running
+	finished.Status = agent.SubagentCompleted
+	finished.DurationMs = 8010
+	finished.Model = "cursor-grok-4.6-high-fast"
+
+	if m.caps().SubagentBackground {
+		t.Fatal("the stub's provider must not have background children for this test")
+	}
+	if got := m.agentSuffix(running); got != "0s" {
+		t.Fatalf("a running background row on a provider without the capability reads %q, want 0s", got)
+	}
+	if got := m.agentSuffix(finished); got != "8.0s · grok-4.6-high-fast" {
+		t.Fatalf("a finished background row on a provider without the capability reads %q", got)
+	}
+	m.snap.Provider = agent.NativeProvider().Info()
+	if !m.caps().SubagentBackground {
+		t.Fatal("native has background children")
+	}
+	if got := m.agentSuffix(running); got != "bg · 0s" {
+		t.Fatalf("a running background row on native reads %q, want bg · 0s", got)
+	}
+	if got := m.agentSuffix(finished); got != "bg · 8.0s · grok-4.6-high-fast" {
+		t.Fatalf("a finished background row on native reads %q", got)
+	}
+	running.Background = false
+	if got := m.agentSuffix(running); got != "0s" {
+		t.Fatalf("a foreground row on native reads %q, want 0s", got)
+	}
+}
+
 func TestShortModelNameDropsRoutingPrefixes(t *testing.T) {
 	for in, want := range map[string]string{
 		"grok-4.6":                    "grok-4.6",

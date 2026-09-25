@@ -46,6 +46,8 @@ type nativeRouter struct {
 
 	mu     sync.Mutex
 	queues map[string][]step
+	// calls is every request the router was sent, in order (requests).
+	calls []fantasy.Call
 }
 
 // route queues steps for the turn whose prompt is prompt.
@@ -55,10 +57,18 @@ func (m *nativeRouter) route(prompt string, steps ...step) {
 	m.queues[prompt] = append(m.queues[prompt], steps...)
 }
 
+// requests is every request the router has been sent, cloned.
+func (m *nativeRouter) requests() []fantasy.Call {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]fantasy.Call(nil), m.calls...)
+}
+
 func (m *nativeRouter) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	key := firstUserPrompt(call)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.calls = append(m.calls, call)
 	q := m.queues[key]
 	if len(q) == 0 {
 		return nil, fmt.Errorf("router: no step queued for %q", key)

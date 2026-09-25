@@ -706,6 +706,36 @@ func TestSanitizeLineFastPathMatchesTheFullOne(t *testing.T) {
 	}
 }
 
+// TestForeignTurnReasonPicksNote (plan 026 §3.11): the note a foreign turn's
+// start draws is worded by the bracket's Reason — the native wake's own for
+// agent.ReasonSubagentWake, today's for "" — and a reason this build does not
+// know (the session-control session's condition: S2 publishes reason as an
+// open string) renders today's wording rather than nothing or a failure. The
+// ending carries no note whatever its reason.
+func TestForeignTurnReasonPicksNote(t *testing.T) {
+	for _, c := range []struct{ reason, want string }{
+		{agent.ReasonSubagentWake, NoteSubagentWake},
+		{"", NoteForeignTurn},
+		{"a_reason_from_a_newer_build", NoteForeignTurn},
+	} {
+		m := New(Options{})
+		foldAll(t, m, true,
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft", Reason: c.reason, Running: true}, At: at(1)},
+			agent.Event{Type: agent.EventText, Text: "b", At: at(2)},
+			agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "ft", Reason: c.reason}, At: at(3)},
+		)
+		if got := factTexts(m.Main, "note"); !slices.Equal(got, []string{c.want}) {
+			t.Fatalf("reason %q: notes %q, want [%q]", c.reason, got, c.want)
+		}
+		if f := m.State().Turn.Foreign; f == nil || f.Running || f.Reason != c.reason {
+			t.Fatalf("reason %q: the turn's Foreign is %+v", c.reason, f)
+		}
+	}
+	if NoteSubagentWake != "sub-agent finished — the agent continues" {
+		t.Fatalf("NoteSubagentWake = %q", NoteSubagentWake)
+	}
+}
+
 func TestForeignTurnsAndReplayBrackets(t *testing.T) {
 	m := New(Options{})
 	ft := &agent.ForeignTurnInfo{ID: "ft", Running: true}

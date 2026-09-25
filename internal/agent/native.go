@@ -164,6 +164,30 @@ type nativeSession struct {
 	turnCancel context.CancelFunc
 	turnToken  TurnToken
 	released   chan struct{}
+	// The wake (native_wake.go, plan 026 §3.11): a turn of the session's own
+	// that delivers a background sub-agent's result. wake says one holds the
+	// claim — claimed, inPrompt, turnCancel, turnToken and released are then
+	// the wake's, installed exactly as prompt installs a turn's, so Cancel and
+	// Close treat it as one. foreign is ForeignTurn()'s answer, and
+	// s.snap.ForeignTurn mirrors it in the same sections, so Snapshot() and
+	// the leaf agree. fenced is the engine's admission fence (AdmissionFence):
+	// while it is up the worker refuses to claim. wakeSeq numbers the wakes'
+	// bracket ids. wakeKick is the worker's one-slot kick and wakeDone closes
+	// when the worker has exited, which Close waits for.
+	wake     bool
+	foreign  bool
+	fenced   bool
+	wakeSeq  uint64
+	wakeKick chan struct{}
+	wakeDone chan struct{}
+	// wakeSeam runs on the worker's goroutine at a recheck that found a wake
+	// possible, between that reading and the claim, with no lock held: the
+	// window a Begin can win (native_wake.go). wakeDecided is told each
+	// recheck's outcome, claimed or stood down, once its section has released
+	// s.mu. **Both are test seams: nil in production**, set only by a test in
+	// this package and only under s.mu, before the first kick.
+	wakeSeam    func()
+	wakeDecided func(claimed bool)
 	// cancelSeam runs inside Cancel's critical section, with s.mu held, the
 	// turn's context already cancelled and the registry call still to come.
 	// **It is a test seam: nil in production**, set only by a test in this
@@ -302,6 +326,9 @@ func newNative(opts Options, tweak func(*harness.Options)) *nativeSession {
 		events:    log.Primary(),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
+		// One slot: the worker's rechecks are level-triggered, so two kicks
+		// collapsed into one lose nothing (native_wake.go).
+		wakeKick: make(chan struct{}, 1),
 	}
 	// Whatever provider the caller named, this session is the native one, and
 	// every snapshot — one taken before Start included — says so.
@@ -419,6 +446,12 @@ func (s *nativeSession) start(context.Context) error {
 	s.snap.Modes = nativeModes()
 	s.snap.CurrentMode = nativeCurrentMode(hs.Mode())
 	s.refreshCurrentLocked()
+	// The wake worker, in the section that installs the harness it wakes,
+	// so a Close that finds the harness finds the worker to join too
+	// (native_wake.go). It has nothing to do until a background child's
+	// result is pending, which the harness's OnPending kicks it for.
+	s.wakeDone = make(chan struct{})
+	go s.wakeWorker(s.wakeDone)
 	// The install says what it installed, in the section that installed it:
 	// the model the harness opened on, the effort option that model brings,
 	// the mode it opened in, and the plugin rows — which a native session
@@ -702,6 +735,22 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	if hopts.Warn == nil {
 		hopts.Warn = s.subagentWarn(red, &opened)
 	}
+	// Background children (plan 026 §3.11), each left to tweak's last word
+	// like the seams above: on only for an interactive session, which has a
+	// wake worker to deliver a result nobody typed for — headless `craze
+	// prompt` runs every agent call in the foreground, as before; the
+	// session-level sink is this session's own, the one every turn's events
+	// already go through; and a result becoming pending kicks the wake
+	// worker (native_wake.go), which returns at once as OnPending must.
+	if s.opts.Interactive {
+		hopts.Background = true
+	}
+	if hopts.Sink == nil {
+		hopts.Sink = s.sink
+	}
+	if hopts.OnPending == nil {
+		hopts.OnPending = s.kickWake
+	}
 
 	// The last look at closed before anything is opened. A Close racing Start
 	// finds no harness under s.mu and returns (Close), while everything above
@@ -962,6 +1011,17 @@ func (s *nativeSession) Begin(text string) func(context.Context) (Result, error)
 // clears a cancel asked before it, which was not for this prompt; and a
 // Cancel from here until the continuation opens the turn makes it withdraw.
 //
+// A Begin while a wake holds the slot (native_wake.go) claims nothing and its
+// continuation returns ErrForeignTurn, the live session's refusal for a turn
+// the agent is running on its own: nothing is sent, nothing is emitted, and
+// the wake's claim is untouched. The check is atomic with the wake's own
+// claim — both are one s.mu section — so whichever took s.mu first wins, and
+// the engine, which reads ForeignTurn under the same lock before it calls
+// Begin, never meets this refusal in practice (plan 026 X30): a wake that
+// claimed first makes ForeignTurn true and the engine queues instead. The
+// refusal is for a caller that bypasses it, and for the race pinned at this
+// level (TestNativeWakeRacesBegin).
+//
 // The continuation must be run exactly once, and is safe if it is not: a
 // second call, after the first or alongside it, returns ErrPromptInFlight and
 // touches nothing — the claim, its release and the turn all belong to the
@@ -970,6 +1030,9 @@ func (s *nativeSession) Begin(text string) func(context.Context) (Result, error)
 func (s *nativeSession) claim(text string) func(context.Context) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.wake {
+		return func(context.Context) (Result, error) { return Result{}, ErrForeignTurn }
+	}
 	if s.claimed || s.inPrompt {
 		return func(context.Context) (Result, error) { return Result{}, ErrPromptInFlight }
 	}
@@ -1020,6 +1083,12 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		}
 		close(rel)
 		s.mu.Unlock()
+		// Every release of the claim — this turn's success, its failure, a
+		// cancel, a withdrawal, a closed or unstarted session — rechecks for a
+		// background result the turn left pending (native_wake.go): one that
+		// finished after the turn's last step boundary would otherwise wait
+		// for the next thing to kick the worker, which may be nothing.
+		s.kickWake()
 	}()
 
 	s.mu.Lock()
@@ -1337,6 +1406,8 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.subagentEvent(e)
 	case harness.SubagentFinished:
 		s.subagentFinished(e)
+	case harness.SubagentUndelivered:
+		s.subagentUndelivered(e)
 	case harness.Retrying, harness.Diag:
 		// Dropped (the function's comment).
 	case harness.Todos:
@@ -1458,6 +1529,7 @@ func (s *nativeSession) Close() error {
 		s.closed = true
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
+		worker := s.wakeDone
 		s.mu.Unlock()
 		// The close order, in the one place it is decided (plan 023 §3.5, X10):
 		// the turn's context, then the registry, then the harness, then the
@@ -1490,6 +1562,14 @@ func (s *nativeSession) Close() error {
 		}
 		if live {
 			<-rel
+		}
+		// The wake worker is joined once the turn it may have been running
+		// has released — a wake is a turn to the two waits above, and its
+		// ending is what lets the worker see done (native_wake.go). It is
+		// started in the section that installs the harness, so a Close that
+		// found no harness finds no worker either.
+		if worker != nil {
+			<-worker
 		}
 		// The turn's own ending settled its rows; this settles the rows of
 		// a claim that never opened one. Nothing is published — done is
@@ -1766,14 +1846,39 @@ func (s *nativeSession) Snapshot() Snapshot {
 	return out
 }
 
-// ForeignTurn is the Session leaf accessor (plan 021 §3.3). Native drives no
-// ACP agent of its own, so nothing it runs is ever a turn craze did not ask
-// for: this always answers false, taking s.mu only for the same reason
-// Snapshot does — so a reader never observes a half-written s.snap.
+// ForeignTurn is the Session leaf accessor (plan 021 §3.3): true while a wake
+// runs — the one turn native starts without a craze prompt, delivering a
+// background sub-agent's result (native_wake.go, plan 026 §3.11) — and false
+// otherwise. It is set and cleared in the same s.mu sections that claim and
+// release the wake and enqueue its brackets, so the engine, which reads it
+// under e.mu → s.mu before every Begin, sees the wake exactly when Begin would
+// be refused for it; and s.snap.ForeignTurn moves with it, so Snapshot()
+// answers the same.
 func (s *nativeSession) ForeignTurn() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return false
+	return s.foreign
+}
+
+// FenceUp and FenceDown are agent.AdmissionFence (plan 026 §3.11): the engine
+// above this seam says it may be about to claim a turn, or has one, or owes a
+// drain — and, on FenceDown, that it is idle again. Each takes s.mu only to
+// record the state, under the engine's own lock (e.mu → s.mu, the order
+// ForeignTurn and Begin keep), and never calls back; FenceDown kicks the wake
+// worker without waiting, since a result that became pending while the fence
+// was up is the worker's to deliver now (native_wake.go). Idempotent: the
+// engine calls them on transitions, and a repeated call changes nothing.
+func (s *nativeSession) FenceUp() {
+	s.mu.Lock()
+	s.fenced = true
+	s.mu.Unlock()
+}
+
+func (s *nativeSession) FenceDown() {
+	s.mu.Lock()
+	s.fenced = false
+	s.mu.Unlock()
+	s.kickWake()
 }
 
 // Interject merges text into the running turn: the harness takes it up before
@@ -1784,7 +1889,12 @@ func (s *nativeSession) ForeignTurn() bool {
 // (live_queue.go) — no turn running, the turn's ending event already out, and
 // a cancel in progress — and on a closed session, which has no turn to merge
 // into and no consumer left to show the text to. Refusing keeps the text in
-// the caller's hands, which is where the user can see it.
+// the caller's hands, which is where the user can see it. A wake is refused
+// as no turn (ErrNotInTurn, native_wake.go): it is not a craze turn, and no
+// continuation of it hands what it could not answer back to the engine —
+// the prompt's does, through Result.Unanswered — so a steer taken into a
+// wake that ended before its next step would be neither answered nor
+// returned. The engine queues the text instead, behind the wake.
 //
 // The turn the text was typed into is named, not merely counted: the token is
 // read in the same locked section that judged that turn live and handed
@@ -1813,7 +1923,7 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 	s.mu.Lock()
 	supported := s.snap.Provider.Capabilities().Interject
 	hs, closed := s.hs, s.closed
-	live := s.inPrompt && !s.doneEmitted && !s.cancelling
+	live := s.inPrompt && !s.doneEmitted && !s.cancelling && !s.wake
 	var turn harness.SteerToken
 	if hs != nil && live {
 		// Read here, with the liveness it belongs to: a token read after the
@@ -2029,8 +2139,9 @@ func noKeyText(table *modeltable.Table, alias string) string {
 }
 
 var (
-	_ Session     = (*nativeSession)(nil)
-	_ EventSource = (*nativeSession)(nil)
-	_ LogOwner    = (*nativeSession)(nil)
-	_ Clocked     = (*nativeSession)(nil)
+	_ Session        = (*nativeSession)(nil)
+	_ EventSource    = (*nativeSession)(nil)
+	_ LogOwner       = (*nativeSession)(nil)
+	_ Clocked        = (*nativeSession)(nil)
+	_ AdmissionFence = (*nativeSession)(nil)
 )

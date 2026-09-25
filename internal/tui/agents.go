@@ -409,29 +409,35 @@ func (m Model) agentGlyph(s agent.SubagentInfo) (string, lipgloss.Style) {
 	}
 }
 
+// agentSuffix is the dim tail of a row: `bg` first for a background child of
+// a provider that has them (showSubagentBackground; plan 026 §3.11), then a
+// running child's elapsed time and tokens, or a finished one's duration and
+// model, each part joined by the row's " · ".
 func (m Model) agentSuffix(s agent.SubagentInfo) string {
+	var parts []string
+	if s.Background && m.showSubagentBackground() {
+		parts = append(parts, "bg")
+	}
 	if subagentRunning(s) {
-		start, ok := m.agentStart[s.ID]
-		if !ok {
-			return ""
+		if start, ok := m.agentStart[s.ID]; ok {
+			elapsed := formatElapsed(0)
+			if !m.frozen {
+				elapsed = formatElapsed(m.now().Sub(start))
+			}
+			parts = append(parts, elapsed)
+			if tok := formatTokens(s.TokensUsed); tok != "" {
+				parts = append(parts, tok)
+			}
 		}
-		out := formatElapsed(0)
-		if !m.frozen {
-			out = formatElapsed(m.now().Sub(start))
-		}
-		if tok := formatTokens(s.TokensUsed); tok != "" {
-			out += " · " + tok
-		}
-		return out
+		return strings.Join(parts, " · ")
 	}
-	out := formatMillis(s.DurationMs)
+	if d := formatMillis(s.DurationMs); d != "" {
+		parts = append(parts, d)
+	}
 	if name := shortModelName(s.Model); name != "" {
-		if out != "" {
-			out += " · "
-		}
-		out += name
+		parts = append(parts, name)
 	}
-	return out
+	return strings.Join(parts, " · ")
 }
 
 func formatTokens(n int) string {
