@@ -124,7 +124,7 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string
 	if turn != "" && turn != id {
 		return "", ErrStaleTurn
 	}
-	if !stop && id == "" && asks == 0 && !e.sess.ForeignTurn() {
+	if !stop && id == "" && asks == 0 && !e.foreignLocked() {
 		// Nothing of craze's own is running, the agent is holding no ask and is
 		// running no turn of its own: there is nothing to cancel, and a cancel
 		// written now could only reach whatever starts next.
@@ -144,6 +144,12 @@ func (e *Engine) holdCancelLocked(turn string, stop bool, asks int, cause string
 		// A mandatory completion: the rows are gone whether or not the outbox
 		// reports room.
 		e.log.Enqueue(batch...)
+	}
+	if e.cur != nil {
+		// The cancel is validated against the current turn (id is its id): if the
+		// agent's own turn refuses it, it ends as the cancel the user asked for and
+		// its row is not put back (cancelledRefusalLocked, the session-control R1).
+		e.cur.cancelAsked = true
 	}
 	e.cancelsInFlight++
 	return id, nil

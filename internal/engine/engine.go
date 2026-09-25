@@ -71,6 +71,11 @@ type turn struct {
 	// held itself. A refusal by the agent's own turn puts it back as it was
 	// (restoreLocked, SF-21).
 	row *agent.QueuedPrompt
+	// cancelAsked says a cancel was validated against this turn — Cancel, Stop,
+	// or the cancel an armed send-now asked for (holdCancelLocked). A row-sourced
+	// turn so marked that the agent's own turn refused ends as cancelled and does
+	// not put its row back: the user asked for it to stop (cancelledRefusalLocked).
+	cancelAsked bool
 	// returned says the continuation has come back with res and err. A turn
 	// settles once it has and no cancel is in flight.
 	returned bool
@@ -139,16 +144,21 @@ type launch struct {
 // "e.sess.ForeignTurn()" and "e.sess.Begin(" in this package lists every site,
 // and TestEveryForeignReadAndClaimIsFenced holds the code to the list:
 //
-//   - ForeignTurn: canStartLocked (from submit's canSubmitLocked and nextLocked),
-//     submit's send-now gate, retryLocked, holdCancelLocked's validation, and
-//     owedDrainLocked, which raises the fence itself before it reads.
+//   - ForeignTurn: foreignLocked, the one read, which notes a true answer for the
+//     section's sync (the owed-drain latch). It is called from canStartLocked
+//     (from submit's canSubmitLocked and nextLocked), submit's send-now gate,
+//     retryLocked, holdCancelLocked's validation, and owedDrainLocked, which
+//     raises the fence itself before it reads.
 //   - Begin: claimLocked (from submit's reserveLocked and nextLocked) and
 //     retryLocked.
 //   - The sections: submit's, holdCancel's (Cancel and Stop; the send-now arm is
 //     inside submit's), and every one that runs passLocked or settleLocked —
 //     runTurn's, drive's, releaseHold's, GiveUp's and GiveUpDrain's. Close raises
 //     it for good. Started and every queue verb only sync it: they read neither,
-//     but change what the fence should be.
+//     but change what the fence should be. The same test also holds, by parsing,
+//     that every method that changes an input of the fence — the queue, the
+//     activity, the current turn, the cancel count, stopped — syncs it or is
+//     reached only from a section that does.
 //
 // Under e.mu the engine also calls EventLog.Enqueue, whose mutex is a leaf.
 // That is the point of the outbox: every event the engine authors is enqueued
@@ -229,6 +239,11 @@ type Engine struct {
 	// assertion's nil makes both of them inert).
 	fence  agent.AdmissionFence
 	fenced bool
+	// drainOwed is the owed-drain latch and sawForeign the section's note that
+	// it read the agent's turn running (owedDrainLocked, X39). Both are only ever
+	// set with a fence, and sawForeign lives for one section: its sync consumes it.
+	drainOwed  bool
+	sawForeign bool
 	// recheck says a restoring settlement has put a refused row back and its
 	// paced recheck is owed: the driver's tick is armed for it (rearm), and the
 	// tick's pass is that recheck, whatever it finds. Only a tick clears it.
@@ -737,7 +752,19 @@ func (e *Engine) refusalLocked() error {
 // the session would otherwise land on the one started here — and the agent is
 // not running a turn of its own, as far as the session knows.
 func (e *Engine) canStartLocked() bool {
-	return e.cur == nil && e.cancelsInFlight == 0 && e.refusalLocked() == nil && !e.sess.ForeignTurn()
+	return e.cur == nil && e.cancelsInFlight == 0 && e.refusalLocked() == nil && !e.foreignLocked()
+}
+
+// foreignLocked is the session's ForeignTurn, the one place the engine reads it.
+// A true answer is noted for the section's fence sync (sawForeign): a row that
+// ends the section queued behind the agent's turn the section saw is a drain
+// owed, even if that turn ends before the sync reads the flag again (X39).
+func (e *Engine) foreignLocked() bool {
+	f := e.sess.ForeignTurn()
+	if f && e.fence != nil {
+		e.sawForeign = true
+	}
+	return f
 }
 
 // canSubmitLocked is canStartLocked for a prompt a client submitted directly,
@@ -802,35 +829,66 @@ func (e *Engine) syncFenceLocked() {
 // and nothing may start behind a client that has been told so. An error state,
 // starting and replaying keep it up for none of these reasons, and lower it: a
 // failed turn owes nothing (astra's round-4 pin).
+//
+// The owed drain is settled first and on every sync, whatever the other terms
+// say, because it is a latch: it has to be cleared by the sync that sees it
+// withdrawn, not merely outvoted while a turn is current.
 func (e *Engine) fenceWantLocked() bool {
-	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || e.owedDrainLocked()
+	owed := e.owedDrainLocked()
+	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || owed
 }
 
-// owedDrainLocked is a drain owed at the end of the turn the agent is running
-// now: the engine is idle with rows queued, nothing of its own is current or
-// being cancelled, it admits, and the agent holds the session — so the
-// observer's kick at that turn's end (Running:false) is what drains the head.
-// The fence stays up across it, so that the end of one turn the session started
-// itself is not followed by another before the user's queued row has run (plan
-// 026's F3).
+// owedDrainLocked settles the owed-drain latch (drainOwed) and reports it. A
+// drain is owed at the end of the turn the agent is running: the engine is idle
+// with rows queued, nothing of its own is current, it admits, and the agent holds
+// the session — so the observer's kick at that turn's end (Running:false) is what
+// drains the head. The fence stays up across it, so that the end of one turn the
+// session started itself is not followed by another before the user's queued row
+// has run (plan 026's F3).
 //
-// The foreign-turn term is what tells an owed drain from an idle queue. The
-// Queue verb adds rows while idle and never starts a turn (queue.go), and a
-// fence held over such a queue would hold off every turn the session could start
-// of its own, for good, with nothing on either side left to move (astra r14).
-// So an idle queue with the agent's session free keeps it down, and a queue left
-// behind a failed turn does too.
+// It is a latch (X39, astra r16), because the agent's turn can end while a
+// section holds e.mu: a Submit that queued its row behind that turn, or an edit
+// made after it, would otherwise read the flag clear at its sync and lower the
+// fence with the row still queued, and a second turn the session had pending
+// would take the session before the driver drained the row. So:
+//
+//   - It is set when the section saw the agent's turn (sawForeign, any read of
+//     the flag in the section — Submit's admission check among them), or, with
+//     no cancel in flight, when the flag reads true now.
+//   - It holds, without reading the flag again, while the engine stays idle with
+//     rows, nothing current and nothing refusing: until the drain it is owed is
+//     claimed (a turn is then current, and holds the fence up itself).
+//   - It is CLEARED — not merely outvoted — by every sync that finds the queue
+//     empty, the engine failed, starting, replaying, stopped or closed, or a turn
+//     current. A latch left standing over an emptied queue would come back up
+//     over the next row the Queue verb adds on an idle engine, which nothing
+//     would ever drain (astra r14's deadlock).
+//
+// The foreign-turn term is what tells an owed drain from an idle queue: the
+// Queue verb adds rows while idle and never starts a turn (queue.go), so rows
+// added with the agent's session free leave the fence down.
 //
 // The flag is read with the fence up, as every read of it is: the section's own
 // fence is raised first. In a section that had not raised it — a queue verb, on
 // an idle engine with rows — that is one FenceUp and one FenceDown in the same
 // section, which a session can only take as "look again".
 func (e *Engine) owedDrainLocked() bool {
-	if e.activity != ActivityIdle || e.queue.Len() == 0 || e.cur != nil || e.cancelsInFlight > 0 || e.refusalLocked() != nil {
+	saw := e.sawForeign
+	e.sawForeign = false
+	if e.cur != nil || e.activity != ActivityIdle || e.queue.Len() == 0 || e.refusalLocked() != nil {
+		e.drainOwed = false
 		return false
 	}
-	e.raiseFenceLocked()
-	return e.sess.ForeignTurn()
+	if !e.drainOwed {
+		if saw {
+			e.drainOwed = true
+		} else if e.cancelsInFlight == 0 {
+			e.raiseFenceLocked()
+			e.drainOwed = e.foreignLocked()
+			e.sawForeign = false
+		}
+	}
+	return e.drainOwed
 }
 
 // Submit admits a prompt: it starts a turn now, queues the text, or — in
@@ -898,7 +956,7 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 				// replaces this.
 				return SubmitResult{}, ErrAlreadyPending
 			}
-			if e.sess.ForeignTurn() {
+			if e.foreignLocked() {
 				// 05's gate table: a foreign turn overlays every activity and
 				// nothing can be sent into it, so there is no turn of craze's
 				// own for a send-now to take the place of.
@@ -1272,7 +1330,7 @@ func (e *Engine) retryLocked(t *turn) []launch {
 		}
 		return e.settleLocked(t)
 	}
-	if !t.retryDue || e.cancelsInFlight > 0 || e.sess.ForeignTurn() {
+	if !t.retryDue || e.cancelsInFlight > 0 || e.foreignLocked() {
 		return nil
 	}
 	t.retry, t.retryDue, t.returned = false, false, false
@@ -1558,10 +1616,12 @@ func (e *Engine) settleLocked(t *turn) []launch {
 	switch {
 	case t.err == nil:
 		info.StopReason = t.res.StopReason
-	case errors.Is(t.err, agent.ErrPromptCancelled):
+	case errors.Is(t.err, agent.ErrPromptCancelled), e.cancelledRefusalLocked(t):
 		// Cancelled before its turn opened: nothing ran, nothing failed, and
 		// no event of any kind is coming from the session. It is the ending a
-		// cancelled turn has.
+		// cancelled turn has — and the ending a row-sourced turn has that the
+		// user cancelled and the agent's own turn refused before the withdrawal
+		// could say so.
 		info.Synthetic = true
 		info.StopReason = stopCancelled
 	default:
@@ -1667,8 +1727,35 @@ func (e *Engine) settleLocked(t *turn) []launch {
 // a stopped engine runs nothing again, so there is nothing to put a row back
 // for. A refusal of text the client held itself, and ErrPromptInFlight, keep the
 // ordinary settlement: an error, with the queue left as it was.
+//
+// And never for a turn a cancel was validated against: the user asked for that
+// turn to stop, and a stop wins over a restore (cancelledRefusalLocked).
 func (e *Engine) restoresLocked(t *turn) bool {
-	return t.row != nil && errors.Is(t.err, agent.ErrForeignTurn) && !e.opts.Chain.RetryForeignTurn && !e.stopped
+	return e.rowRefusedLocked(t) && !t.cancelAsked && !e.stopped
+}
+
+// cancelledRefusalLocked says t's ending is the cancel-before-open one although
+// its continuation came back refused (the session-control R1): a row-sourced turn
+// that a cancel was validated against — Cancel, Stop, or an armed send-now's —
+// and that the agent's own turn refused. The cancel was for this turn, and it
+// would have withdrawn it had the refusal not come first, so the turn ends as
+// ErrPromptCancelled's does: synthetic, stopped `cancelled`, the engine idle; the
+// row is not put back and never runs; a send armed against it fires, as a
+// send-now does after the turn it cancelled; and the queue behind it follows the
+// ordinary rule after a cancel (the TUI's carries on, a stop's is cleared).
+//
+// Text the client held itself has no row, and keeps the refusal's settlement
+// even after a cancel: a residual, recorded with R1. So does a turn under
+// ChainPolicy.RetryForeignTurn, whose client reads a foreign-turn refusal as one.
+func (e *Engine) cancelledRefusalLocked(t *turn) bool {
+	return e.rowRefusedLocked(t) && t.cancelAsked
+}
+
+// rowRefusedLocked is what both of the above start from: a turn whose text came
+// from a queued row, refused because the agent was running a turn of its own,
+// under the TUI's policy.
+func (e *Engine) rowRefusedLocked(t *turn) bool {
+	return t.row != nil && errors.Is(t.err, agent.ErrForeignTurn) && !e.opts.Chain.RetryForeignTurn
 }
 
 // restoreLocked is the restoring settlement: t's row goes back to the head of
@@ -1685,9 +1772,10 @@ func (e *Engine) restoresLocked(t *turn) bool {
 // It claims no successor, neither the head nor an armed send: the session's
 // flag can lag its client's refusal (grok's client knows of the agent's turn
 // before the session does), so a claim now would be refused again, and put back
-// again, as fast as the two could go. A send armed against this turn stays armed
-// and fires on the next pass that can start one, ahead of the row, as it would
-// have from the settlement; one armed against another turn goes, as it does from
+// again, as fast as the two could go. No send can be armed against this turn:
+// arming validates a cancel against it, and a cancelled turn is not restored
+// (cancelledRefusalLocked). One armed against another turn — a send left standing
+// behind the agent's turn when a direct submit took a row — goes, as it does from
 // any settlement.
 //
 // And it asks for a paced recheck of its own (rearm → the driver's tick): the

@@ -709,6 +709,318 @@ func TestRefusedRowSourcedTurnRestoresItsRow(t *testing.T) {
 	})
 }
 
+// TestACancelledRowSourcedRefusalIsNotRestored is the session-control R1: a
+// cancel validated against a row-sourced turn wins over the restore. The cancel
+// is taken while the turn's claim is out — the session withdraws it, but the
+// agent's own turn refuses it first — so the continuation comes back refused,
+// and the turn ends exactly as a cancel before the turn opened does: synthetic,
+// stopped `cancelled`, the engine idle. Its row is not put back and never runs
+// again; the queue behind it follows the ordinary rule after a cancel (the TUI's
+// carries on); and a send armed against it — whose own cancel is the one
+// validated — fires, as a send-now does.
+func TestACancelledRowSourcedRefusalIsNotRestored(t *testing.T) {
+	// drainedAndRefusing is a drained row's turn (turn-2, "two") held at its
+	// refusal, with "three" queued behind it.
+	drainedAndRefusing := func(t *testing.T) (*rig, *script, <-chan string) {
+		t.Helper()
+		r, _, returned, _ := restoreRig(t)
+		first := r.s.script(held())
+		r.submit("one")
+		await(t, first.opened, "the first turn to open")
+		r.submit("two")
+		r.submit("three")
+		refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+		r.sync()
+		first.release()
+		await(t, refusal.refusing, "the drained claim to reach its refusal")
+		awaitTurn(t, returned, "turn-1")
+		return r, refusal, returned
+	}
+	wantCancelled := func(t *testing.T, got []agent.Event, turn string) {
+		t.Helper()
+		for _, ev := range got {
+			if ended(turn)(ev) {
+				if end := ev.Turn; !end.Synthetic || end.StopReason != stopCancelled || end.Err != "" || end.ErrClass != "" {
+					t.Fatalf("the cancelled refusal's ending: %+v", end)
+				}
+				return
+			}
+		}
+		t.Fatalf("no ending for %s in %s", turn, describe(got))
+	}
+
+	t.Run("a drained row", func(t *testing.T) {
+		r, refusal, _ := drainedAndRefusing(t)
+		if _, err := r.e.Cancel(context.Background(), Command{}, "turn-2"); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		close(refusal.gate)
+		got := r.until(ended("turn-2"))
+		wantCancelled(t, got, "turn-2")
+		r.until(lastEnding)
+		r.wantShapes(r.seen,
+			`started turn-1 submit "one"`,
+			`queue queued "two"`,
+			`queue queued "three"`,
+			`text "echo: one"`,
+			`done end_turn`,
+			`queue sent "two"`,
+			`ended turn-1 stop="end_turn" next="turn-2" pending=1`,
+			`started turn-2 drain "two"`,
+			`queue sent "three"`,
+			`ended turn-2 stop="cancelled" next="turn-3" pending=0 synthetic`,
+			`started turn-3 drain "three"`,
+			`text "echo: three"`,
+			`done end_turn`,
+			`ended turn-3 stop="end_turn" next="" pending=0`,
+		)
+		r.wantPrompts("one", "two", "three")
+	})
+
+	t.Run("a submit from a row", func(t *testing.T) {
+		r, _, returned, _ := restoreRig(t)
+		row := r.queue("the row")
+		r.queue("behind it")
+		refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+		c := Command{Client: r.e.NewClientID(), ID: "1"}
+		if res, err := r.e.Submit(c, "the row", SubmitQueue, row.ID); err != nil || res.Turn != "turn-1" {
+			t.Fatalf("the submit from a row answered %+v, %v", res, err)
+		}
+		await(t, refusal.refusing, "the claim to reach its refusal")
+		if _, err := r.e.Cancel(context.Background(), Command{}, "turn-1"); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		close(refusal.gate)
+		awaitTurn(t, returned, "turn-1")
+		wantCancelled(t, r.until(ended("turn-1")), "turn-1")
+		r.until(lastEnding)
+		r.wantShapes(r.seen,
+			`queue queued "the row"`,
+			`queue queued "behind it"`,
+			`queue sent "the row"`,
+			`started turn-1 submit "the row"`,
+			`queue sent "behind it"`,
+			`ended turn-1 stop="cancelled" next="turn-2" pending=0 synthetic`,
+			`started turn-2 drain "behind it"`,
+			`text "echo: behind it"`,
+			`done end_turn`,
+			`ended turn-2 stop="end_turn" next="" pending=0`,
+		)
+		r.wantPrompts("the row", "behind it")
+	})
+
+	t.Run("a send armed against it fires", func(t *testing.T) {
+		r, refusal, _ := drainedAndRefusing(t)
+		r.sendNow("instead", "")
+		r.until(armedNow)
+		close(refusal.gate)
+		got := r.until(ended("turn-2"))
+		wantCancelled(t, got, "turn-2")
+		got = append(got, r.until(lastEnding)...)
+		want := []string{
+			`ended turn-2 stop="cancelled" next="turn-3" pending=1 synthetic`,
+			`started turn-3 send_now "instead"`,
+			`text "echo: instead"`,
+			`done end_turn`,
+			`queue sent "three"`,
+			`ended turn-3 stop="end_turn" next="turn-4" pending=0`,
+			`started turn-4 drain "three"`,
+			`text "echo: three"`,
+			`done end_turn`,
+			`ended turn-4 stop="end_turn" next="" pending=0`,
+		}
+		r.wantShapes(got[len(got)-len(want):], want...)
+		r.wantPrompts("one", "two", "instead", "three")
+	})
+}
+
+// TestARestorationBesideAStandingSend is astra r16's retained-arm gap, as far
+// as R1 leaves it reachable. A send armed against the refused turn itself cannot
+// be standing at a restore: arming validates a cancel against the turn, and a
+// cancelled turn is not restored (TestACancelledRowSourcedRefusalIsNotRestored's
+// last case, where the arm fires first). A send armed against ANOTHER turn can
+// be: it was left standing when the turn it replaced settled behind the agent's
+// own turn, and the session's flag then cleared ahead of its client's refusal
+// while a submit took a row. The restore puts the row back and takes that send
+// with it, as any settlement does for a send armed against a turn that is not
+// the one ending.
+func TestARestorationBesideAStandingSend(t *testing.T) {
+	r, _, returned, _ := restoreRig(t)
+	// The send-now's cancel leaves turn-1 a clean stop, cancelled, and is not
+	// acted on: the order is the test's.
+	turn := r.s.script(stopping(held(), stopCancelled))
+	r.submit("one")
+	await(t, turn.opened, "the turn to open")
+	row := r.queue("the row")
+	r.ignoreCancels()
+	r.sendNow("instead", "")
+	r.until(armedNow)
+	// The agent's turn starts: the settlement cannot fire the send.
+	r.s.setForeignSilently(true)
+	turn.release()
+	awaitTurn(t, returned, "turn-1")
+	if st := r.e.State(); st.SendNow == nil || st.SendNow.Turn != "turn-1" {
+		t.Fatalf("the send standing behind the agent's turn: %+v", st.SendNow)
+	}
+	// The session's flag clears ahead of its client's refusal.
+	r.s.setForeignSilently(false)
+	r.s.script(&script{refuse: agent.ErrForeignTurn})
+	if res, err := r.e.Submit(Command{}, "the row", SubmitQueue, row.ID); err != nil || res.Turn != "turn-2" {
+		t.Fatalf("the submit from a row answered %+v, %v", res, err)
+	}
+	awaitTurn(t, returned, "turn-2")
+	r.sync()
+	r.wantRestored("turn-2", row)
+	got := r.until(func(ev agent.Event) bool { return disarmed(ev) })
+	r.wantShapes(got[len(got)-3:],
+		`queue queued "the row"`,
+		`ended turn-2 stop="" next="" pending=1 synthetic class=foreign_turn`,
+		`disarmed `+agent.SendNowOtherTurn,
+	)
+	r.wantPrompts("one", "the row")
+}
+
+// TestARestorationRacingStopOrClose is astra r16's shutdown gap: a restoration
+// against Stop and against Close, each before the refusal settles and after the
+// row is back with its recheck owed. Nothing drains after either, and nothing
+// leaks — the engine's goroutines are joined by Close, which returns.
+//
+//   - Stop before the settlement is a cancel validated against the turn: it ends
+//     cancelled (R1) and nothing is put back — the queue was cleared by the stop.
+//   - Stop after the restoration clears the restored row with the rest, and the
+//     recheck's tick drains nothing from a stopped engine.
+//   - Close before the settlement ends the turn `closing` and the refusal that
+//     comes back afterwards settles nothing: no row is put back.
+//   - Close after the restoration leaves the row where it is, and the recheck
+//     never runs: the driver is gone.
+func TestARestorationRacingStopOrClose(t *testing.T) {
+	// refusing is a drained row's turn (turn-2, "two") held at its refusal, with
+	// "three" behind it, on a rig with a primary — the one reader that survives a
+	// close (rig.committed).
+	type restoring struct {
+		r        *rig
+		refusal  *script
+		ticks    chan<- time.Time
+		returned <-chan string
+		passes   <-chan bool
+	}
+	refusing := func(t *testing.T) restoring {
+		t.Helper()
+		ticks := make(chan time.Time)
+		returned := make(chan string, 16)
+		passes := make(chan bool, 64)
+		r := newRigHooked(t, Options{}, agent.EventLogOptions{}, &hooks{
+			retryTick:    ticks,
+			turnReturned: func(id string) { returned <- id },
+			drivePassed: func(ticked bool) {
+				select {
+				case passes <- ticked:
+				default:
+				}
+			},
+		})
+		first := r.s.script(held())
+		r.submit("one")
+		await(t, first.opened, "the first turn to open")
+		r.submit("two")
+		r.submit("three")
+		refusal := r.s.script(refusedAtAGate(agent.ErrForeignTurn))
+		first.release()
+		await(t, refusal.refusing, "the drained claim to reach its refusal")
+		awaitTurn(t, returned, "turn-1")
+		return restoring{r: r, refusal: refusal, ticks: ticks, returned: returned, passes: passes}
+	}
+	// restored lets the refusal settle, and the row is back.
+	restored := func(t *testing.T, x restoring) {
+		t.Helper()
+		x.r.s.setForeignSilently(true)
+		close(x.refusal.gate)
+		awaitTurn(t, x.returned, "turn-2")
+		if rows := x.r.rows(); len(rows) != 2 || rows[0] != "two" {
+			t.Fatalf("the restored queue: %q", rows)
+		}
+	}
+	closes := func(t *testing.T, e *Engine) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- e.Close() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("close: %v", err)
+			}
+		case <-time.After(watchdog):
+			t.Fatal("Close did not return: something the engine owns is still running")
+		}
+	}
+	endings := func(t *testing.T, r *rig) []string {
+		t.Helper()
+		return turnRecord(r.committed())
+	}
+
+	t.Run("Stop before the settlement", func(t *testing.T) {
+		x := refusing(t)
+		if err := x.r.e.Stop(context.Background(), Command{}); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		close(x.refusal.gate)
+		awaitTurn(t, x.returned, "turn-2")
+		got := endings(t, x.r)
+		if last := got[len(got)-1]; last != `ended turn-2 stop="cancelled" next="" pending=0 synthetic` {
+			t.Fatalf("the stopped refusal ended %q\n%q", last, got)
+		}
+		if rows := x.r.rows(); len(rows) != 0 {
+			t.Fatalf("a row after the stop: %q", rows)
+		}
+		closes(t, x.r.e)
+		x.r.wantPrompts("one", "two")
+	})
+
+	t.Run("Stop after the restoration", func(t *testing.T) {
+		x := refusing(t)
+		restored(t, x)
+		if err := x.r.e.Stop(context.Background(), Command{}); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		if rows := x.r.rows(); len(rows) != 0 {
+			t.Fatalf("the stop left rows: %q", rows)
+		}
+		// The recheck the restoration owed is made, and drains nothing.
+		x.r.s.setForeignSilently(false)
+		tick(t, x.ticks, x.returned)
+		awaitPass(t, x.passes, true)
+		closes(t, x.r.e)
+		x.r.wantPrompts("one", "two")
+	})
+
+	t.Run("Close before the settlement", func(t *testing.T) {
+		x := refusing(t)
+		// Close ends the turn and closes the session, which lets the refusal come
+		// back; it settles nothing.
+		closes(t, x.r.e)
+		awaitTurn(t, x.returned, "turn-2")
+		got := endings(t, x.r)
+		if last := got[len(got)-1]; last != `ended turn-2 stop="closing" next="" pending=1 synthetic` {
+			t.Fatalf("the closed turn ended %q\n%q", last, got)
+		}
+		if rows := x.r.rows(); len(rows) != 1 || rows[0] != "three" {
+			t.Fatalf("the queue after the close: %q", rows)
+		}
+		x.r.wantPrompts("one", "two")
+	})
+
+	t.Run("Close after the restoration", func(t *testing.T) {
+		x := refusing(t)
+		restored(t, x)
+		x.r.s.setForeignSilently(false)
+		closes(t, x.r.e)
+		if rows := x.r.rows(); len(rows) != 2 || rows[0] != "two" {
+			t.Fatalf("the queue after the close: %q", rows)
+		}
+		x.r.wantPrompts("one", "two")
+	})
+}
+
 // TestADirectSubmitRefusedByAForeignTurnKeepsTheQueue is the TUI's row for a
 // foreign-turn refusal of text a client held itself: there is no row to put
 // back, so it is today's ending. The session emits nothing for it, so the engine

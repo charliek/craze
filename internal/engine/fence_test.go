@@ -35,6 +35,14 @@ type fencedSession struct {
 	up    bool
 	calls []string
 	bad   []string
+	// afterForeign, when set, runs once, after the next ForeignTurn read, with
+	// its answer, inside whatever section of the engine's made the read: the
+	// barrier a test ends the agent's turn at while the engine holds e.mu.
+	afterForeign func(running bool)
+	// wakePending is a turn the session is waiting to start of its own (a second
+	// background result): it starts the moment the fence comes down — the flag
+	// goes up and "wake" is recorded — as native's worker would.
+	wakePending bool
 }
 
 func (s *fencedSession) FenceUp() {
@@ -49,12 +57,35 @@ func (s *fencedSession) FenceUp() {
 
 func (s *fencedSession) FenceDown() {
 	s.fmu.Lock()
-	defer s.fmu.Unlock()
 	if !s.up {
 		s.bad = append(s.bad, "FenceDown while down")
 	}
 	s.up = false
 	s.calls = append(s.calls, "down")
+	wake := s.wakePending
+	if wake {
+		s.wakePending = false
+		s.calls = append(s.calls, "wake")
+	}
+	s.fmu.Unlock()
+	if wake {
+		// The fake's own lock after the leaf, never inside it.
+		s.setForeignSilently(true)
+	}
+}
+
+// pendWake makes a turn of the session's own wait for the fence to come down.
+func (s *fencedSession) pendWake() {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	s.wakePending = true
+}
+
+// onForeign sets afterForeign.
+func (s *fencedSession) onForeign(f func(running bool)) {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	s.afterForeign = f
 }
 
 // guard is the barrier: the call is recorded, and a fence found down is a wake
@@ -70,7 +101,15 @@ func (s *fencedSession) guard(call string) {
 
 func (s *fencedSession) ForeignTurn() bool {
 	s.guard("foreign")
-	return s.fakeSession.ForeignTurn()
+	running := s.fakeSession.ForeignTurn()
+	s.fmu.Lock()
+	after := s.afterForeign
+	s.afterForeign = nil
+	s.fmu.Unlock()
+	if after != nil {
+		after(running)
+	}
+	return running
 }
 
 func (s *fencedSession) Begin(text string) func(context.Context) (agent.Result, error) {
@@ -242,7 +281,9 @@ func TestWakeFencedAtClaimAndValidation(t *testing.T) {
 			t.Fatalf("a submit during the agent's turn answered %+v", res)
 		}
 		// F3: a drain is owed at the end of the agent's turn, so the fence stays up.
-		fr.want("queued behind the agent's turn", true, "up", "foreign", "foreign")
+		// The admission check saw the agent's turn, which latches it: the sync
+		// reads the flag no more (X39).
+		fr.want("queued behind the agent's turn", true, "up", "foreign")
 		turn := fr.s.script(held())
 		fr.s.setForeign(false)
 		awaitPass(t, fr.passes, false)
@@ -397,22 +438,23 @@ func TestWakeFencedAtClaimAndValidation(t *testing.T) {
 		fr.s.setForeign(true)
 		b := fr.queue("b")
 		fr.want("a row behind the agent's turn", true, "up", "foreign")
+		// Latched (X39): the rows stay owed without the flag being read again.
 		c := fr.queue("c")
 		if err := fr.e.EditQueued(Command{}, c.ID, "c'", nil); err != nil {
 			t.Fatal(err)
 		}
-		fr.want("more rows, and an edit", true, "foreign", "foreign")
+		fr.want("more rows, and an edit", true)
 		if _, err := fr.e.Unqueue(Command{}, b.ID); err != nil {
 			t.Fatal(err)
 		}
-		fr.want("a row removed with one left", true, "foreign")
+		fr.want("a row removed with one left", true)
 		if _, err := fr.e.Unqueue(Command{}, c.ID); err != nil {
 			t.Fatal(err)
 		}
 		fr.want("the last row removed", false, "down")
 		fr.queue("d")
 		fr.queue("e")
-		fr.want("rows again", true, "up", "foreign", "foreign")
+		fr.want("rows again", true, "up", "foreign")
 		if n, err := fr.e.ClearQueue(Command{}); err != nil || n != 2 {
 			t.Fatalf("clear: %d, %v", n, err)
 		}
@@ -423,32 +465,128 @@ func TestWakeFencedAtClaimAndValidation(t *testing.T) {
 	})
 }
 
-// TestEveryForeignReadAndClaimIsFenced holds the Engine doc's list of the
-// admission fence's sections to the code, so a new read of the flag or a new
-// claim cannot be added without the fence. It parses the package and finds:
+// foreignEnded is the event a session publishes when the agent's own turn is
+// over, with the flag already down: the observer's kick to the driver.
+func foreignEnded() agent.Event {
+	return agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{Running: false}}
+}
+
+// TestAnOwedDrainOutlivesTheAgentsTurn is astra r16's finding (X39): a row
+// queued behind a turn the session started itself (wake A) is a drain owed, and
+// it stays owed — the fence stays up — until the drain runs, even when A ends
+// while the engine holds e.mu and the section's sync would read the flag clear.
+// A second turn the session has pending (wake B) claims the moment the fence
+// comes down; it must come after the row, not before it.
 //
-//   - every method that calls e.sess.ForeignTurn() or e.sess.Begin — exactly
-//     the doc's sites;
-//   - every method that takes e.mu and reaches one of those, through methods
-//     that take no lock of their own (a method that does is its own section,
-//     checked on its own) and not through syncFenceLocked (owedDrainLocked
-//     raises the fence itself before it reads) — each must raise the fence and
-//     defer its sync;
-//   - and the sections that change what the fence reads without reaching a
-//     site — Started and the queue verbs — defer the sync, and Close raises it.
+// Both of astra's schedules are forced at the fenced session: A ends inside
+// Submit's own section, between the admission check that saw it and the
+// deferred sync (the hook runs in the read); and A ends after a Submit, with an
+// EditQueued taking e.mu before the driver hears. A's ending event is delivered
+// only afterwards, as a session flushes it outside its lock.
 //
-// The order inside a section — raised before the read — is what
-// TestWakeFencedAtClaimAndValidation's barriers show.
-func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
+// The latch is also cleared, not masked (the session-control session's pin 2):
+// latched, the queue emptied, A over, a row the Queue verb adds on the idle
+// engine leaves the fence down, and B can start.
+func TestAnOwedDrainOutlivesTheAgentsTurn(t *testing.T) {
+	// drains runs the owed row, which the fence has held for it: A's ending
+	// reaches the driver, the row's turn is claimed and runs, and only its
+	// settlement lets B start.
+	drains := func(t *testing.T, fr *fenceRig, text string) {
+		t.Helper()
+		turn := fr.s.script(held())
+		fr.s.emit(foreignEnded())
+		awaitPass(t, fr.passes, false)
+		await(t, turn.opened, "the owed row's turn to open")
+		fr.want("A's end: the driver drains the row, with the fence never down", true, "foreign", "begin")
+		turn.release()
+		awaitTurn(t, fr.returned, "turn-1")
+		fr.want("the row's settlement, and then B", false, "foreign", "down", "wake")
+		fr.wantPrompts(text)
+	}
+
+	t.Run("A ends between Submit's admission check and its sync", func(t *testing.T) {
+		fr := newFenceRig(t, ChainPolicy{})
+		fr.s.setForeign(true)
+		fr.fs.pendWake()
+		fr.fs.onForeign(func(running bool) {
+			if running {
+				fr.s.setForeignSilently(false)
+			}
+		})
+		if res := fr.submit("the row"); res.Queued == nil {
+			t.Fatalf("a submit behind wake A answered %+v, want a queued row", res)
+		}
+		fr.want("queued behind A, which ended inside the section", true, "up", "foreign")
+		drains(t, fr, "the row")
+	})
+
+	t.Run("A ends before an edit takes e.mu", func(t *testing.T) {
+		fr := newFenceRig(t, ChainPolicy{})
+		fr.s.setForeign(true)
+		row := fr.submit("the row").Queued
+		// Which reads the setup made is the first subtest's business; here only
+		// that the row is owed.
+		fr.fs.take()
+		fr.want("queued behind A", true)
+		fr.fs.pendWake()
+		fr.s.setForeignSilently(false)
+		if err := fr.e.EditQueued(Command{}, row.ID, "the row, edited", nil); err != nil {
+			t.Fatal(err)
+		}
+		fr.want("an edit after A ended, before the driver heard", true)
+		drains(t, fr, "the row, edited")
+	})
+
+	t.Run("a latch cleared by an emptied queue stays cleared", func(t *testing.T) {
+		fr := newFenceRig(t, ChainPolicy{})
+		fr.s.setForeign(true)
+		row := fr.queue("owed")
+		fr.want("a row behind A", true, "up", "foreign")
+		if _, err := fr.e.Unqueue(Command{}, row.ID); err != nil {
+			t.Fatal(err)
+		}
+		fr.want("the row withdrawn", false, "down")
+		fr.s.setForeign(false)
+		awaitPass(t, fr.passes, false)
+		fr.want("A's end, with nothing to drain", false, "up", "foreign", "down")
+		fr.fs.pendWake()
+		fr.queue("idle")
+		// Nothing is owed: the row was queued with the agent's session free, and
+		// nothing will ever kick a drain for it. B starts.
+		fr.want("a Queue-verb row on the idle engine", false, "up", "foreign", "down", "wake")
+		fr.wantPrompts()
+	})
+}
+
+// fenceMethod is one method of *Engine as TestEveryForeignReadAndClaimIsFenced
+// reads it.
+type fenceMethod struct {
+	// site: it reads the session's flag or claims (e.sess.ForeignTurn, Begin).
+	// mutates: it changes an input of the fence — calls a mutator of e.queue, or
+	// assigns e.activity, e.cur, e.cancelsInFlight or e.stopped.
+	// locks: it takes e.mu. raises, syncs: it calls raiseFenceLocked, and defers
+	// syncFenceLocked. closes: it sets e.closed.
+	site, mutates, locks, raises, syncs, closes bool
+	// calls is every method of the receiver it calls, closures and go and defer
+	// statements included.
+	calls []string
+}
+
+// fenceInputs are what the fence reads, as selector spells them.
+var (
+	fenceQueueMutators = []string{"queue.Add", "queue.Take", "queue.Pop", "queue.PushFront", "queue.Clear", "queue.Restore", "queue.Edit", "queue.Remove"}
+	fenceFields        = []string{"activity", "cur", "cancelsInFlight", "stopped"}
+)
+
+// parseEngineMethods parses the package's non-test files and returns every
+// method of *Engine, by name.
+func parseEngineMethods(t *testing.T) map[string]*fenceMethod {
+	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	type method struct {
-		site, locks, raises, syncs bool
-		calls                      []string
-	}
-	methods := map[string]*method{}
+	methods := map[string]*fenceMethod{}
 	fset := token.NewFileSet()
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -471,25 +609,39 @@ func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
 				continue
 			}
 			recv := fd.Recv.List[0].Names[0].Name
-			m := &method{}
+			m := &fenceMethod{}
 			methods[fd.Name.Name] = m
+			assigned := func(x ast.Expr) {
+				switch s := selector(x, recv); {
+				case s == "closed":
+					m.closes = true
+				case slices.Contains(fenceFields, s):
+					m.mutates = true
+				}
+			}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if d, ok := n.(*ast.DeferStmt); ok && selector(d.Call.Fun, recv) == "syncFenceLocked" {
-					m.syncs = true
-				}
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch s := selector(call.Fun, recv); s {
-				case "sess.ForeignTurn", "sess.Begin":
-					m.site = true
-				case "mu.Lock":
-					m.locks = true
-				case "raiseFenceLocked":
-					m.raises = true
-				default:
-					if s != "" && !strings.Contains(s, ".") {
+				switch n := n.(type) {
+				case *ast.DeferStmt:
+					if selector(n.Call.Fun, recv) == "syncFenceLocked" {
+						m.syncs = true
+					}
+				case *ast.AssignStmt:
+					for _, lhs := range n.Lhs {
+						assigned(lhs)
+					}
+				case *ast.IncDecStmt:
+					assigned(n.X)
+				case *ast.CallExpr:
+					switch s := selector(n.Fun, recv); {
+					case s == "sess.ForeignTurn", s == "sess.Begin":
+						m.site = true
+					case s == "mu.Lock":
+						m.locks = true
+					case s == "raiseFenceLocked":
+						m.raises = true
+					case slices.Contains(fenceQueueMutators, s):
+						m.mutates = true
+					case s != "" && !strings.Contains(s, "."):
 						m.calls = append(m.calls, s)
 					}
 				}
@@ -497,6 +649,34 @@ func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
 			})
 		}
 	}
+	return methods
+}
+
+// TestEveryForeignReadAndClaimIsFenced holds the admission fence's coverage to
+// the code, by parsing the package rather than from a list, so a new read of the
+// flag, a new claim or a new change to what the fence reads cannot be added
+// without the fence. It finds:
+//
+//   - every method that calls e.sess.ForeignTurn() or e.sess.Begin — exactly
+//     the Engine doc's sites;
+//   - every method that takes e.mu and reaches one of those, through methods
+//     that take no lock of their own (a method that does is its own section,
+//     checked on its own) and not through syncFenceLocked (owedDrainLocked
+//     raises the fence itself before it reads) — each must raise the fence and
+//     defer its sync, and they are exactly the doc's sections;
+//   - every method that takes e.mu and reaches a change to an input of the fence
+//     — a mutator of e.queue, or an assignment to e.activity, e.cur,
+//     e.cancelsInFlight or e.stopped — must defer the sync; Close alone may
+//     raise it instead, because it sets e.closed and the fence never comes down
+//     again;
+//   - and every method that changes such an input without taking e.mu is reached
+//     only from such sections: it has a caller in the package, and each caller
+//     is held to the same rules.
+//
+// The order inside a section — raised before the read — is what
+// TestWakeFencedAtClaimAndValidation's barriers show.
+func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
+	methods := parseEngineMethods(t)
 
 	var sites []string
 	for name, m := range methods {
@@ -505,49 +685,73 @@ func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
 		}
 	}
 	slices.Sort(sites)
-	if want := []string{"canStartLocked", "claimLocked", "holdCancelLocked", "owedDrainLocked", "retryLocked", "submit"}; !slices.Equal(sites, want) {
+	if want := []string{"claimLocked", "foreignLocked", "retryLocked"}; !slices.Equal(sites, want) {
 		t.Fatalf("the methods that read the flag or claim are %q, want the Engine doc's %q", sites, want)
 	}
 
-	var reach func(name string, seen map[string]bool) bool
-	reach = func(name string, seen map[string]bool) bool {
+	// reaches reports whether name, or a method it calls that takes no lock of
+	// its own, is hit — never through the sync, which is the fence itself.
+	var reaches func(name string, hit func(*fenceMethod) bool, seen map[string]bool) bool
+	reaches = func(name string, hit func(*fenceMethod) bool, seen map[string]bool) bool {
 		m := methods[name]
 		if m == nil || seen[name] {
 			return false
 		}
 		seen[name] = true
-		if m.site {
+		if hit(m) {
 			return true
 		}
 		for _, c := range m.calls {
 			if c == "syncFenceLocked" || methods[c] == nil || methods[c].locks {
 				continue
 			}
-			if reach(c, seen) {
+			if reaches(c, hit, seen) {
 				return true
 			}
 		}
 		return false
 	}
+	site := func(m *fenceMethod) bool { return m.site }
+	mutation := func(m *fenceMethod) bool { return m.mutates }
+
 	var sections []string
+	callers := map[string][]string{}
 	for name, m := range methods {
-		if m.locks && reach(name, map[string]bool{}) {
+		for _, c := range m.calls {
+			callers[c] = append(callers[c], name)
+		}
+		if !m.locks {
+			continue
+		}
+		if reaches(name, site, map[string]bool{}) {
 			sections = append(sections, name)
 			if !m.raises || !m.syncs {
 				t.Errorf("%s takes e.mu and reaches a read of the flag or a claim: raises the fence %v, defers its sync %v", name, m.raises, m.syncs)
 			}
+		}
+		// Close alone may raise instead of syncing: it sets closed, for good.
+		if reaches(name, mutation, map[string]bool{}) && !m.syncs && (!m.closes || !m.raises) {
+			t.Errorf("%s takes e.mu and changes what the fence reads, and does not defer its sync", name)
 		}
 	}
 	slices.Sort(sections)
 	if want := []string{"GiveUp", "GiveUpDrain", "drive", "holdCancel", "releaseHold", "runTurn", "submit"}; !slices.Equal(sections, want) {
 		t.Errorf("the fenced sections are %q, want the Engine doc's %q", sections, want)
 	}
-	for _, name := range []string{"Started", "Queue", "EditQueued", "Unqueue", "ClearQueue"} {
-		if m := methods[name]; m == nil || !m.syncs {
-			t.Errorf("%s changes what the fence reads and does not sync it", name)
+	var helpers []string
+	for name, m := range methods {
+		if m.locks || !reaches(name, mutation, map[string]bool{}) {
+			continue
+		}
+		helpers = append(helpers, name)
+		if len(callers[name]) == 0 {
+			t.Errorf("%s changes what the fence reads without e.mu, and nothing in the package calls it under a section", name)
 		}
 	}
-	if m := methods["Close"]; m == nil || !m.raises {
+	if len(helpers) == 0 {
+		t.Fatal("found no method that changes what the fence reads under a caller's e.mu: the parse is broken")
+	}
+	if m := methods["Close"]; m == nil || !m.raises || !m.closes {
 		t.Error("Close does not raise the fence for good")
 	}
 }

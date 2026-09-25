@@ -297,6 +297,14 @@ block every client's commands (PR 3's r24 finding). `e.mu` and `registry.mu`
 are never held across a blocking call — a provider call, `Session.Cancel`, a
 continuation, `Publish`, `Flush`, file I/O — and never nested in each other.
 
+**Reading a refusal's ending (Plan 026 PR 3, SF-21).** A synthetic
+`foreign_turn` ending with `next=""` and `pending>0` now means one of two
+things: the turn's queued row was restored and the engine is idle and will
+drain it, or the engine is stalled in its error state (a refusal of text a
+client held itself, or `prompt_in_flight`); a client tells them apart by the
+activity, or by the `queued` at position 0 carrying the ended turn's own cause
+just before the ending, which only a restoration emits.
+
 **The workers.** Three, each engine-owned and joined by `Close`:
 
 - **The driver**, one per engine: `for { <-kick; try to settle, else try to
