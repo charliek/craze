@@ -68,6 +68,9 @@ type TestHooks struct {
 	// Detaching runs on a detach once it has claimed the attachment's end and
 	// stopped its forwarder's pushes, before it waits for the forwarder.
 	Detaching func(sub string)
+	// BeforeReserve runs on an attach just before it calls reserve: a test
+	// that blocks in it holds the attach there, past a replacement.
+	BeforeReserve func()
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -93,6 +96,7 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		beforeWrite:    h.BeforeWrite,
 		beforeReply:    h.BeforeReply,
 		detaching:      h.Detaching,
+		beforeReserve:  h.BeforeReserve,
 	}
 	if stall > 0 {
 		s.stall = stall

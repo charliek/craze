@@ -321,8 +321,12 @@ func (c *conn) replacedDoneLocked() bool {
 // first in the same section, may refuse the line: its error is returned. Room
 // is never waited for under conn.mu: without it enqueue waits outside it
 // (outbox.await) until room is made, ctx ends, or stop closes (errStopped,
-// which wins over room), then tries again, admit included.
-func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, done func(), admit func() error, commit func()) error {
+// which wins over room), then tries again, admit included. sealIfReplaced
+// makes line the outbox's last line when the connection is replaced at the
+// moment it is offered — read in the same section, so a replaced connection's
+// terminal line (a claimed detach's own `{}`, here) always seals it, and no
+// later reply queues behind it (plan 027 X22).
+func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, done func(), admit func() error, commit func(), sealIfReplaced bool) error {
 	for {
 		var room <-chan struct{}
 		var err error
@@ -331,7 +335,7 @@ func (c *conn) enqueue(ctx context.Context, stop <-chan struct{}, line []byte, d
 			err = admit()
 		}
 		if err == nil {
-			room, err = c.out.offer(line, done, ordinaryLimit, false)
+			room, err = c.out.offer(line, done, ordinaryLimit, sealIfReplaced && c.replaced)
 			if err == nil && commit != nil {
 				commit()
 			}

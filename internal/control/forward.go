@@ -224,7 +224,7 @@ func (f *forwarder) push(line []byte, stop <-chan struct{}, commit func()) forwa
 			return errGone
 		}
 		return nil
-	}, commit)
+	}, commit, false)
 	switch {
 	case err == nil:
 		return forwardedOK

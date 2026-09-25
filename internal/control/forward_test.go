@@ -1115,6 +1115,141 @@ func TestAReplacementDuringADetachStillAnswersIt(t *testing.T) {
 	a.expectClosed()
 }
 
+// TestNothingFollowsAReplacedConnectionsDetachAcknowledgement (§3.6, §3.7;
+// plan 027 X22; r12-c7b finding 3): the review's exact schedule. Duplicate
+// detaches D1 and D2 race a fresh attach A, all against the connection's one
+// closing attachment, right as the engine is replaced:
+//
+//   - D1 claims the attachment's end and pauses (Detaching), having already
+//     set a.detach and cancelled the forwarder.
+//   - D2, not claiming, reaches awaitClosed behind it.
+//   - A has passed its params and pauses right before reserve.
+//   - The engine is replaced.
+//   - D1 resumes and queues its {} — the connection's own terminal line, so
+//     the same conn.mu section seals the outbox (conn.enqueue's
+//     sealIfReplaced) — and the writer holds it there, off the socket
+//     (BeforeWrite): unwritten is still 1, so the connection cannot have
+//     closed yet, whatever A or D2 do next.
+//   - A resumes: reserve refuses with no reply at all (a nil attachment, a
+//     zero outcome) because the connection is already replaced — it never
+//     installs a new pending attachment to hold the connection open.
+//   - D2 wakes (a.state is attClosed) and tries to queue its own {} while
+//     the writer still holds D1's: the outbox is already sealed, so it is
+//     refused at the push. This is checked directly (Server.Queued, while
+//     the writer still holds D1's line dequeued): closing the connection
+//     right after D1's line is written would drop an unsealed D2 line from
+//     the queue too (outbox.close discards whatever is left), so the wire
+//     alone cannot tell a seal that refused the push from a close that beat
+//     an accepted one to the socket — only the outbox's count in between
+//     can.
+//   - Only once A and D2 have resolved does the writer let D1's {} go.
+//
+// The wire shows exactly D1's {}, then the connection closes: nothing of A's
+// or D2's follows it.
+func TestNothingFollowsAReplacedConnectionsDetachAcknowledgement(t *testing.T) {
+	detaching, reserving, writer := newHold(), newHold(), newHold()
+	var pauseReserve atomic.Bool
+	var detach atomic.Value // D1's request id, once sent
+	h := newHost(t, withOnClose(detaching.release), withOnClose(reserving.release), withOnClose(writer.release),
+		withHooks(control.TestHooks{
+			Detaching: func(string) { detaching.wait() },
+			BeforeReserve: func() {
+				if pauseReserve.Load() {
+					reserving.wait()
+				}
+			},
+			BeforeWrite: func(line []byte) {
+				var resp struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				if id, _ := detach.Load().(string); id != "" && json.Unmarshal(line, &resp) == nil && resp.Method == "" && string(resp.ID) == id {
+					writer.wait()
+				}
+			},
+		}))
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+
+	id1, line1 := a.encode(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
+	detach.Store(id1)
+	a.write(line1)
+	await(t, detaching.entered, "D1 to claim the attachment's end")
+
+	a.send(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: r.Subscription})
+	waitFor(t, "D2 to wait in awaitClosed behind D1", func() bool { return h.srv.Handlers() == 2 })
+
+	pauseReserve.Store(true)
+	a.send(protocol.MethodSessionAttach, attachParams(h))
+	await(t, reserving.entered, "A to pause before reserve")
+
+	h.srv.SetEngine(startedEngine(t))
+
+	detaching.release()
+	await(t, writer.entered, "the writer to hold D1's {} off the socket")
+
+	reserving.release()
+	waitFor(t, "A and D2 to resolve while the writer still holds D1's {}", func() bool { return h.srv.Handlers() == 0 })
+
+	// D1's line is already dequeued (held in the writer, off o.q): if the
+	// outbox is sealed, D2's {} was refused at the push and never joined the
+	// queue. If it were not sealed, D2's {} would sit here, queued behind
+	// D1's held line, only to be dropped a moment later when D1's write
+	// closes the connection — a close the wire could never distinguish from
+	// a seal. This is the one place that can.
+	if q := h.srv.Queued(); q != 0 {
+		t.Fatalf("%d line(s) queued behind D1's held {}: the outbox was not sealed", q)
+	}
+
+	writer.release()
+	ok[protocol.Empty](t, a.reply(id1))
+	a.expectClosed()
+	select {
+	case <-writer.entered:
+	default:
+		t.Fatal("the premise: the writer was never held on D1's {}")
+	}
+}
+
+// TestReserveOnlyRefusesOnceReplaced is a negative control for reserve's new
+// guard (plan 027 X22; r12-c7b finding 3, item 1): an attach paused right
+// before reserve, then released with NO replacement, still attaches normally
+// — the guard fires only once the connection is actually replaced, never
+// otherwise.
+func TestReserveOnlyRefusesOnceReplaced(t *testing.T) {
+	reserving := newHold()
+	h := newHost(t, withOnClose(reserving.release), withHooks(control.TestHooks{BeforeReserve: reserving.wait}))
+	a := h.dial()
+	a.sayHello(nil)
+	id := a.send(protocol.MethodSessionAttach, attachParams(h))
+	await(t, reserving.entered, "the attach to pause before reserve")
+	reserving.release()
+	r := ok[protocol.AttachResult](t, a.reply(id))
+	if r.Subscription != "s-1" {
+		t.Fatalf("the attach paused before reserve, released without a replacement: %+v", r)
+	}
+	a.note(protocol.NotifySynchronized)
+}
+
+// TestAClaimedDetachSealsOnlyWhenReplaced is a negative control for the
+// detach reply's new seal (plan 027 X22; r12-c7b finding 3, item 2): a
+// claimed detach on a connection that was never replaced does not seal the
+// outbox — the next attach still gets its own reply.
+func TestAClaimedDetachSealsOnlyWhenReplaced(t *testing.T) {
+	h := newHost(t)
+	a := h.dial()
+	a.sayHello(nil)
+	r := a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+	ok[protocol.Empty](t, a.detach(h, r.Subscription))
+	if re := a.attach(attachParams(h)); re.Subscription != "s-2" {
+		t.Fatalf("the attach after an ordinary (unreplaced) detach: %+v", re)
+	}
+	a.note(protocol.NotifySynchronized)
+}
+
 // TestADetachBeforeTheCommandOwesItNothing (§3.6, §3.7; astra r8 3): the other
 // order of TestABarrierAwaitsAClosingAttachment. The detach is answered
 // before the command commits, so the command's barrier finds the attachment

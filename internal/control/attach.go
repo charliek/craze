@@ -152,9 +152,12 @@ func (c *conn) sessionAttach(b *bound, info protocol.MethodInfo, req *request) o
 	if perr := c.params(b, info, req, &p, check); perr != nil {
 		return refusal(perr)
 	}
-	a, perr := c.reserve(b.eng)
-	if perr != nil {
-		return refusal(perr)
+	if h := c.srv.hooks.beforeReserve; h != nil {
+		h()
+	}
+	a, o := c.reserve(b.eng)
+	if a == nil {
+		return o
 	}
 	res, att, o := c.attach(a, b.eng, p)
 	if att == nil {
@@ -165,8 +168,12 @@ func (c *conn) sessionAttach(b *bound, info protocol.MethodInfo, req *request) o
 }
 
 // reserve takes the connection's one attachment for a new attach, pending, or
-// refuses already_attached while the last one is not yet closed (§3.7).
-func (c *conn) reserve(eng *engine.Engine) (*attachment, *protocol.Error) {
+// refuses already_attached while the last one is not yet closed (§3.7). Once
+// the connection is replaced it refuses too, but with no reply at all (a nil
+// attachment and a zero outcome): the attach is not run, so no new pending
+// attachment is installed to hold the replaced connection open behind the
+// replacement's own terminal line (plan 027 X16 9, X19, X22).
+func (c *conn) reserve(eng *engine.Engine) (*attachment, outcome) {
 	// The context is made outside c.mu, which is held across no other lock.
 	ctx, cancel := context.WithCancel(c.ctx)
 	a := &attachment{
@@ -174,25 +181,22 @@ func (c *conn) reserve(eng *engine.Engine) (*attachment, *protocol.Error) {
 		stopped: make(chan struct{}), readyCh: make(chan readyNote, 1), changed: make(chan struct{}),
 	}
 	c.mu.Lock()
+	if c.replaced {
+		c.mu.Unlock()
+		cancel()
+		return nil, outcome{}
+	}
 	if old := c.att; old != nil && old.state != attClosed {
 		c.mu.Unlock()
 		cancel()
-		return nil, refused(protocol.CodeBadRequest, protocol.ReasonAlreadyAttached,
-			"this connection's attachment %s is not yet closed: detach it, or wait for its reset", old.id)
+		return nil, refusal(refused(protocol.CodeBadRequest, protocol.ReasonAlreadyAttached,
+			"this connection's attachment %s is not yet closed: detach it, or wait for its reset", old.id))
 	}
 	c.nextSub++
 	a.id = fmt.Sprintf("s-%d", c.nextSub)
 	c.att = a
-	replaced := c.replaced
 	c.mu.Unlock()
-	if replaced {
-		// An attach admitted before the engine's replacement attaches
-		// nothing: its reply goes nowhere, like any handler's then. (A
-		// replacement after this section finds the attachment and cancels
-		// it itself.)
-		cancel()
-	}
-	return a, nil
+	return a, outcome{}
 }
 
 // attach is the attach's work up to its reply (§3.4): the wait for readiness,
@@ -331,7 +335,7 @@ func (c *conn) answerAttach(a *attachment, att *engine.Attachment, res protocol.
 	}, func() {
 		a.state, a.queued = attLive, a.after
 		a.changedLocked()
-	})
+	}, false)
 	if err != nil {
 		c.abandon(a, att.Sub)
 		return outcome{}
@@ -473,12 +477,15 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	// final reset does (unwritten) until it is on the socket (detachWritten):
 	// an engine replaced while this detach held the attachment's end — its
 	// forwarder, stopped by the detach, queues no reset — closes the connection
-	// only once this reply is written (astra r10 8).
+	// only once this reply is written (astra r10 8). On a connection already
+	// replaced this reply is the connection's own terminal line, so the same
+	// section seals the outbox (sealIfReplaced): no later reply — a duplicate
+	// detach's, any handler's — queues behind it (plan 027 X22, r12 finding 3).
 	if line == nil || c.enqueue(c.ctx, nil, line, c.detachWritten, nil, func() {
 		a.state = attClosed
 		a.changedLocked()
 		c.unwritten++
-	}) != nil {
+	}, true) != nil {
 		c.markClosed(a)
 		return outcome{}
 	}

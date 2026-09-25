@@ -223,6 +223,9 @@ type hooks struct {
 	// stopped its forwarder's pushes, before it waits for the forwarder to
 	// return, with the subscription's id.
 	detaching func(sub string)
+	// beforeReserve runs on an attach just before it calls reserve: a test
+	// that blocks in it holds the attach there, past a replacement.
+	beforeReserve func()
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
