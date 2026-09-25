@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -33,9 +34,12 @@ type conn struct {
 
 	// closing is set first thing in close, before its cleanup takes bindMu
 	// (bind.go reads it there). superseded says a transfer moved this
-	// connection's client to another connection.
+	// connection's client to another connection. ending says the session is
+	// over for this connection — its engine ended (end) or was replaced
+	// (replace) — so it admits nothing more.
 	closing    atomic.Bool
 	superseded atomic.Bool
+	ending     atomic.Bool
 	closeOnce  sync.Once
 
 	// bound is the connection's hello, guarded by Server.bindMu: written once,
@@ -45,9 +49,29 @@ type conn struct {
 
 	mu sync.Mutex
 	// inflight is how many requests are admitted and their replies not yet
-	// written; readEOF says the peer has half-closed (no more requests).
+	// written — the reader's own slot, taken before it reads a line, included;
+	// reading says the reader holds that slot for a line not yet read.
+	// readEOF says the peer has half-closed (no more requests).
 	inflight int
+	reading  bool
 	readEOF  bool
+	// ended says the session is over for this connection (end): like readEOF,
+	// no more requests, and the connection closes once nothing admitted is
+	// unwritten and no attachment is open. endReason is the close's reason.
+	// replaced says its engine was replaced (replace): it closes as soon as
+	// its attachment's final reset is written, whatever is still in flight — a
+	// handler's reply then goes nowhere (§3.6).
+	ended     bool
+	endReason string
+	replaced  bool
+	// att is the connection's attachment (attach.go): the open one, or the
+	// last, closed; nil before the first attach. At most one is ever open
+	// (SQ14). nextSub numbers them: s-1, s-2, …
+	att     *attachment
+	nextSub int
+	// unwritten is how many of an attachment's final resets are queued and not
+	// yet on the socket: the connection stays open for them (idleLocked).
+	unwritten int
 }
 
 func newConn(s *Server, nc net.Conn) *conn {
@@ -74,7 +98,9 @@ func (c *conn) read() {
 		if !c.acquire() {
 			return
 		}
+		c.setReading(true)
 		line, err := lr.ReadLine()
+		c.setReading(false)
 		switch {
 		case err == nil && !c.admitting():
 			// Superseded or closing while the line was read: the line — one
@@ -133,27 +159,40 @@ func (c *conn) acquire() bool {
 }
 
 // admitting reports whether the connection may still admit a request: it is
-// neither closing nor superseded. A transfer marks a connection superseded
-// under bindMu before it is closed, so from that moment its reader admits
-// nothing more, whatever it had buffered. It stops NEW requests only: a
-// request already admitted is held back from the engine only if its binding
-// has moved on (conn.command), and one on a connection that merely closed
-// still runs.
+// neither closing, superseded, nor ending. A transfer marks a connection
+// superseded under bindMu before it is closed, so from that moment its reader
+// admits nothing more, whatever it had buffered; the end of its session (end,
+// replace) does the same. It stops NEW requests only: a request already
+// admitted is held back from the engine only if its binding has moved on
+// (conn.command), and one on a connection that merely closed still runs.
 func (c *conn) admitting() bool {
-	return !c.closing.Load() && !c.superseded.Load()
+	return !c.closing.Load() && !c.superseded.Load() && !c.ending.Load()
+}
+
+// setReading marks the reader as holding its slot for a line not yet read
+// (true), or as having read one (false). Taking its slot out of the count can
+// make the connection idle — an end decided while the reader was between its
+// admission check and here counted that slot — so it settles then.
+func (c *conn) setReading(on bool) {
+	c.mu.Lock()
+	c.reading = on
+	c.mu.Unlock()
+	// Only an ending connection can be made idle by it (readEOF is never set
+	// while the reader reads), and end/replace set ending before their own
+	// settle, which reads reading after it: one of the two settles sees both.
+	if on && c.ending.Load() {
+		c.settle()
+	}
 }
 
 // release gives a slot back: its reply is written, or will never be. The
-// connection closes here if the peer has half-closed and nothing is left.
+// connection closes here if nothing is left of it (settle).
 func (c *conn) release() {
 	<-c.slots
 	c.mu.Lock()
 	c.inflight--
-	idle := c.idleLocked()
 	c.mu.Unlock()
-	if idle {
-		c.close("closed by the peer")
-	}
+	c.settle()
 }
 
 // eof marks the read side done and closes the connection if nothing is in
@@ -161,23 +200,109 @@ func (c *conn) release() {
 func (c *conn) eof() {
 	c.mu.Lock()
 	c.readEOF = true
-	idle := c.idleLocked()
 	c.mu.Unlock()
-	if idle {
-		c.close("closed by the peer")
+	c.settle()
+}
+
+// end is the session ending for this connection (plan 027 §3.7, astra r5 13):
+// its engine has closed. It is the half-close's rule with the session in the
+// peer's place: the connection admits nothing more, every request already
+// admitted is answered, an attachment delivers its final records and
+// reset{session_closed} (forward.go), and the connection closes once all of
+// that is on the socket (idleLocked). Its client is released by the close, as
+// ever.
+func (c *conn) end(reason string) {
+	c.mu.Lock()
+	c.endLocked(reason)
+	c.mu.Unlock()
+	c.settle()
+}
+
+// endLocked marks the session over for this connection; c.mu is held.
+func (c *conn) endLocked(reason string) {
+	c.ending.Store(true)
+	if !c.ended {
+		c.ended, c.endReason = true, reason
+	}
+}
+
+// replace is its engine being replaced (§3.6, astra 14; Server.SetEngine): the
+// connection admits nothing more; an attachment still open ends with
+// reset{session_replaced} (its subscription is closed here, and its forwarder
+// sends the reset); and the connection closes as soon as that reset is on the
+// socket — at once when there is none. A handler still running keeps the
+// engine it captured, and its reply goes nowhere.
+func (c *conn) replace() {
+	c.ending.Store(true)
+	c.mu.Lock()
+	c.replaced = true
+	var sub *agent.Subscription
+	var cancel func()
+	if a := c.att; a != nil && a.state != attClosed {
+		sub, cancel = a.sub, a.cancel
+	}
+	c.mu.Unlock()
+	if cancel != nil {
+		// Ends a pending attach's wait, and a push its forwarder is blocked
+		// in, so neither holds the reset back.
+		cancel()
+	}
+	if sub != nil {
+		sub.Close()
+	}
+	c.settle()
+}
+
+// settle closes the connection if nothing is left of it: replaced, with its
+// attachment's final reset written (replacedDoneLocked), or idle
+// (idleLocked). Every change either predicate reads is followed by a settle.
+func (c *conn) settle() {
+	c.mu.Lock()
+	reason := ""
+	switch {
+	case c.replacedDoneLocked():
+		reason = "session replaced"
+	case c.idleLocked():
+		reason = "closed by the peer"
+		if c.ended {
+			reason = c.endReason
+		}
+	}
+	c.mu.Unlock()
+	if reason != "" {
+		c.close(reason)
 	}
 }
 
 // idleLocked is THE half-close predicate (§3.7, astra 11): the peer has
-// half-closed, nothing admitted is still unwritten, and no subscription is
-// live. C7 adds its attachment to the last clause, here and nowhere else.
+// half-closed — or the session has ended for this connection (end), which
+// closes it by the same rule — nothing admitted is still unwritten (the
+// reader's own slot aside, while it waits for a line nobody will admit), and
+// no subscription is live.
 func (c *conn) idleLocked() bool {
-	return c.readEOF && c.inflight == 0 && !c.subscriptionLiveLocked()
+	if !c.readEOF && !c.ended {
+		return false
+	}
+	pending := c.inflight
+	if c.reading {
+		pending--
+	}
+	return pending == 0 && !c.subscriptionLiveLocked()
 }
 
-// subscriptionLiveLocked reports a live subscription on the connection: none
-// before C7, which adds attach.
-func (c *conn) subscriptionLiveLocked() bool { return false }
+// subscriptionLiveLocked reports a live subscription on the connection: an
+// attachment that is not yet closed — pending (its attach not yet answered),
+// live, or closing (§3.7's lifecycle) — or the final reset of one still
+// queued for the socket.
+func (c *conn) subscriptionLiveLocked() bool {
+	return (c.att != nil && c.att.state != attClosed) || c.unwritten > 0
+}
+
+// replacedDoneLocked reports a replaced connection with nothing left to send:
+// no attachment open, and no final reset still queued.
+func (c *conn) replacedDoneLocked() bool {
+	return c.replaced && (c.att == nil || c.att.state == attClosed) && c.unwritten == 0
+}
 
 // ------------------------------------------------------------------ writer
 
@@ -269,9 +394,11 @@ func (c *conn) writeLine(b []byte) error {
 // ------------------------------------------------------------------- close
 
 // close closes the connection once: every wait of its ends, the outbox drops
-// what it holds, the socket closes (so the reader and writer return), and
-// then — on the goroutine that closed it, outside every lock — its client is
-// released if the binding still names it (bind.go) and the close is noted.
+// what it holds, the socket closes (so the reader and writer return), its
+// attachment's subscription is closed (so its forwarder returns: a transport
+// close ends the subscription, §3.9), and then — on the goroutine that closed
+// it, outside every lock — its client is released if the binding still names
+// it (bind.go) and the close is noted.
 func (c *conn) close(reason string) {
 	first := false
 	c.closeOnce.Do(func() {
@@ -283,6 +410,18 @@ func (c *conn) close(reason string) {
 	})
 	if !first {
 		return
+	}
+	// closing is set before this section, and an attach reads it after it
+	// sets its subscription under c.mu (attach.go), so one of the two closes
+	// the subscription.
+	c.mu.Lock()
+	var sub *agent.Subscription
+	if a := c.att; a != nil {
+		sub = a.sub
+	}
+	c.mu.Unlock()
+	if sub != nil {
+		sub.Close()
 	}
 	c.srv.unbind(c)
 	c.srv.forget(c)
@@ -310,7 +449,7 @@ type outLine struct {
 // outbox is a connection's byte-counted FIFO (§3.7, astra 10). Every line
 // queued counts against WriterQueueBytes until the writer has written it;
 // ResetReserveBytes of that is held back for a final reset (pushReserved,
-// C7), so a reset always fits; a line that fits an empty queue always gets
+// forward.go), so a reset always fits; a line that fits an empty queue always gets
 // in; and every wait ends when the connection closes.
 type outbox struct {
 	mu     sync.Mutex
@@ -340,8 +479,10 @@ func (o *outbox) push(ctx context.Context, b []byte, done func()) error {
 }
 
 // pushReserved queues b within the whole budget, the reset reserve included:
-// a subscription's final reset (C7), which is at most ResetReserveBytes and so
-// always fits beside everything push lets in.
+// a subscription's final reset (forward.go), which is at most
+// ResetReserveBytes and so always fits beside everything push lets in. Only
+// one is ever owed at a time: a connection has at most one attachment open,
+// and an attachment ends once.
 func (o *outbox) pushReserved(ctx context.Context, b []byte, done func()) error {
 	return o.pushWithin(ctx, b, done, protocol.WriterQueueBytes)
 }

@@ -198,6 +198,16 @@ func (c *conn) hello(req *request) {
 		Limits:       protocol.HostLimits(),
 		RetryHorizon: retryHorizon(st.RetryHorizon),
 	})
+	// A connection bound to an engine that has already ended ends as the
+	// engine's watcher ends the ones bound before it did (Server.watchEngine):
+	// its hello is answered, and it closes once that is written. The watcher
+	// reads the bindings after the engine's end, and this reads the end after
+	// the binding, so one of the two ends it.
+	select {
+	case <-b.eng.Done():
+		c.end("session ended")
+	default:
+	}
 }
 
 func isNull(raw json.RawMessage) bool {
@@ -226,25 +236,41 @@ func (c *conn) replyErr(id json.RawMessage, e *protocol.Error) {
 }
 
 func (c *conn) send(resp protocol.Response) {
+	line, _ := c.responseLine(resp)
+	if line == nil {
+		c.release()
+		return
+	}
+	if c.out.push(c.ctx, line, c.release) != nil {
+		c.release()
+	}
+}
+
+// responseLine is resp as the line the writer is handed, and whether it is
+// resp as given (false: replaced by an error). A response longer than the
+// outbound limit is replaced by failed, reason response_too_large, and one
+// that cannot be encoded by failed; nil when not even that can be.
+func (c *conn) responseLine(resp protocol.Response) ([]byte, bool) {
 	line, err := protocol.MarshalLine(resp)
 	if err == nil && len(line)-1 > c.srv.maxLine {
 		resp.Result = nil
 		resp.Error = refused(protocol.CodeFailed, protocol.ReasonResponseTooLarge,
 			"the response would be %d bytes, over the %d-byte line limit", len(line)-1, c.srv.maxLine)
 		line, err = protocol.MarshalLine(resp)
+		if err == nil {
+			return line, false
+		}
 	}
 	if err != nil {
 		resp.Result = nil
 		resp.Error = failed(err)
 		line, err = protocol.MarshalLine(resp)
 		if err != nil {
-			c.release()
-			return
+			return nil, false
 		}
+		return line, false
 	}
-	if c.out.push(c.ctx, line, c.release) != nil {
-		c.release()
-	}
+	return line, true
 }
 
 // drop gives up a request's reply: the connection is gone.

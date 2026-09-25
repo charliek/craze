@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/control/wiretest"
 	"github.com/charliek/craze/internal/engine"
@@ -129,6 +130,14 @@ type hostConfig struct {
 	engine  engine.Options
 	noSet   bool
 	noStart bool
+	// session wraps the host's Stub in the session the engine is built on
+	// (attach_test.go's logSession, lateIDSession); nil is the Stub itself.
+	session func(*tui.Stub) agent.Session
+	// readyWait is a when: "ready" attach's bound, 0 for production's.
+	readyWait time.Duration
+	// onClose runs before the server closes: what a test holds a server
+	// goroutine with is let go (stream_test.go's withOnClose).
+	onClose []func()
 }
 
 type hostOpt func(*hostConfig)
@@ -150,6 +159,7 @@ func withoutStart() hostOpt { return func(c *hostConfig) { c.noStart = true } }
 type host struct {
 	t     *testing.T
 	stub  *tui.Stub
+	sess  agent.Session
 	eng   *engine.Engine
 	srv   *control.Server
 	path  string
@@ -170,8 +180,12 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	h := &host{t: t, clock: &clock{}, logs: newLogSink(), path: filepath.Join(dir, "s")}
 	h.stub = tui.NewStubNoPrimary()
+	h.sess = h.stub
+	if cfg.session != nil {
+		h.sess = cfg.session(h.stub)
+	}
 	cfg.engine.ReceiptClock = h.clock.now
-	h.eng, err = engine.New(h.stub, cfg.engine)
+	h.eng, err = engine.New(h.sess, cfg.engine)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +199,9 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 	cfg.opts.Workspace = "/work"
 	cfg.opts.Clock = h.clock.now
 	h.srv = control.NewForTest(cfg.opts, cfg.hooks, cfg.stall, cfg.maxLine)
+	if cfg.readyWait > 0 {
+		h.srv.SetReadyWait(cfg.readyWait)
+	}
 	if !cfg.noSet {
 		h.srv.SetEngine(h.eng)
 	}
@@ -202,6 +219,12 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 		}
 		if err := <-served; err != nil {
 			t.Errorf("serve: %v", err)
+		}
+	})
+	// Registered after the server's close, so it runs before it.
+	t.Cleanup(func() {
+		for _, f := range cfg.onClose {
+			f()
 		}
 	})
 	return h

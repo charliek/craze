@@ -51,10 +51,19 @@ func retryHorizon(h engine.RetryHorizon) protocol.RetryHorizon {
 }
 
 // sessionInfo is the session info document (§3.3, §3.13) and the State it was
-// read with: the one builder the attach reply, the ready notification (C7)
-// and sessions.list share. Readiness is read BEFORE the state, so catalogs go
-// out only from a state read after the session was up: "empty until ready".
+// read with: the one builder the attach reply, the ready notification
+// (attach.go) and sessions.list share.
 func (s *Server) sessionInfo(eng *engine.Engine) (protocol.SessionInfo, engine.State) {
+	info, st, _ := s.sessionInfoReady(eng)
+	return info, st
+}
+
+// sessionInfoReady is sessionInfo and whether the session was ready when it
+// was read — the one reading of Ready the document's catalogs were decided by,
+// which the attach reply's ready says. Readiness is read BEFORE the state, so
+// catalogs go out only from a state read after the session was up: "empty
+// until ready".
+func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, engine.State, bool) {
 	ready := false
 	select {
 	case <-eng.Ready():
@@ -81,7 +90,7 @@ func (s *Server) sessionInfo(eng *engine.Engine) (protocol.SessionInfo, engine.S
 			info.Catalogs.Modes = append(info.Catalogs.Modes, protocol.CatalogMode{ID: m.ID, Name: m.Name, Description: m.Description})
 		}
 	}
-	return info, st
+	return info, st, ready
 }
 
 // headAsk is the head open ask, nil when none is open.

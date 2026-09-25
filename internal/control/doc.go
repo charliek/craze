@@ -20,7 +20,13 @@
 //     primary's reader — the server holds no primary (SF-14). A command runs
 //     on a server-owned context (never the connection's), then the reply
 //     barrier, then its reply is queued.
-//  3. (C7) one forwarder per live subscription.
+//  3. ONE FORWARDER per live attachment (forward.go), started once the
+//     attach reply is queued: it turns the subscription's records into event
+//     notifications (Record.Body verbatim), synchronized at the cutoff, the
+//     one ready an attachment made before readiness is owed, and — when the
+//     subscription ends — its final records and reset. An attachment is
+//     pending, live, closing, then closed (attach.go); a connection holds at
+//     most one that is not closed.
 //  4. ONE WRITER (conn.write) draining a byte-counted FIFO (outbox) to the
 //     socket. Every outbound byte counts against WriterQueueBytes (32 MiB),
 //     ResetReserveBytes (1 KiB) of which only a final reset may use; a line
@@ -30,9 +36,17 @@
 //     session is untouched.
 //
 // A read-side EOF is half-close (astra 11): no more requests. Admitted
-// requests complete and their replies are written, and the connection closes
-// once nothing is in flight and no subscription is live (conn.idleLocked, the
-// one predicate), when a write fails, or when the server closes it.
+// requests complete and their replies are written, a live subscription keeps
+// delivering, and the connection closes once nothing is in flight and no
+// subscription is live (conn.idleLocked, the one predicate), when a write
+// fails, or when the server closes it. The session's end is the same rule with
+// the session in the peer's place (conn.end): once the engine has closed
+// (Server.watchEngine), or an attachment has delivered its final records and
+// reset{session_closed}, the connection admits nothing more and closes once
+// what it owes is written. Replacing the engine (Server.SetEngine) is not: an
+// attached connection is sent reset{session_replaced} and closed as soon as
+// that is written, every other one at once, and a handler still running then
+// replies to nobody (conn.replace).
 //
 // # Client ids and the binding table (bind.go)
 //
@@ -59,17 +73,19 @@
 //     engine call that can block. bindMu → receipts.mu is the one edge.
 //   - Server.connMu guards the connection and listener sets and the closed
 //     flag; it is never held with bindMu, across I/O, or across a close.
-//   - conn.mu guards a connection's admission count and half-close state; the
-//     outbox has its own mutex. Neither is held across a socket call, and
-//     neither is held while taking any other lock.
+//   - conn.mu guards a connection's admission count, half-close and end
+//     state, and its attachment's lifecycle and position; the outbox has its
+//     own mutex. Neither is held across a socket call, and neither is held
+//     while taking any other lock (a subscription is closed outside it).
 //
 // No lock is ever held across socket I/O or a blocking engine call.
 //
 // # Close
 //
-// Server.Close closes the listeners and every connection, joins every
-// TRANSPORT goroutine (accept loops, readers, writers), and does not join the
-// handlers: a command can be parked where nothing interrupts it (a SetTitle in
+// Server.Close closes the listeners and every connection — and with each its
+// subscription — joins every TRANSPORT goroutine (accept loops, readers,
+// writers, forwarders, ready watchers, the engine's watcher), and does not
+// join the handlers: a command can be parked where nothing interrupts it (a SetTitle in
 // the index flock), so handlers are counted and Close returns at its ctx's
 // deadline with the count still running. Such a command still completes into
 // the engine's receipts table; its reply goes nowhere.

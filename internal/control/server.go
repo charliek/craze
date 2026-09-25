@@ -33,8 +33,9 @@ type Options struct {
 	// A connection that is not a *net.UnixConn fails a non-nil check.
 	PeerCheck func(*net.UnixConn) error
 	// MaxBudget is the largest subscription budget a client may ask an attach
-	// for (C7). The zero value is DefaultMaxBudget: four times the event
-	// log's subscription defaults.
+	// for: a larger member is held to it, and an absent one is the log's own
+	// default. The zero value is DefaultMaxBudget: four times the event log's
+	// subscription defaults.
 	MaxBudget Budget
 
 	// The host's identity, as hello's endpoint and the info document carry
@@ -88,6 +89,10 @@ const (
 	// net/http's accept loop does.
 	acceptBackoffMin = 5 * time.Millisecond
 	acceptBackoffMax = time.Second
+	// readyWait is the server's own bound on a when: "ready" attach's wait for
+	// the session's start (§3.4): past it the attach is unavailable, reason
+	// not_ready — a load can take minutes, so it is not a flat 30 s.
+	readyWait = 10 * time.Minute
 )
 
 // Server is the control socket's server: one session (SetEngine), any number
@@ -105,6 +110,7 @@ type Server struct {
 	maxLine    int
 	backoffMin time.Duration
 	backoffMax time.Duration
+	readyWait  time.Duration
 	hooks      hooks
 
 	// bindMu guards the engine, the binding table, the token index, the
@@ -120,6 +126,9 @@ type Server struct {
 	incarnation string
 	idle        time.Duration
 	binds       map[string]*binding
+	// engStop ends the current engine's watcher (watchEngine) when the engine
+	// is replaced.
+	engStop chan struct{}
 	// tokens indexes every resume token this server has issued and still
 	// remembers — the current engine's and the previous one's — by token, to
 	// the client id it names and the incarnation it was issued in (bind.go).
@@ -136,8 +145,10 @@ type Server struct {
 	done     chan struct{}
 	nextConn uint64
 
-	// transport counts the goroutines Close joins: accept loops, readers and
-	// writers. handlers counts the ones it does not (package doc, "Close").
+	// transport counts the goroutines Close joins: accept loops, readers,
+	// writers, forwarders, ready watchers and the engine's watcher (every one
+	// started by goTransport or under connMu). handlers counts the ones it
+	// does not (package doc, "Close").
 	transport sync.WaitGroup
 	handlers  counter
 	// commands is how many mutating commands are in their engine call across
@@ -171,6 +182,21 @@ type hooks struct {
 	// outboxFull runs on a push that found no room in the budget, just before
 	// it waits for some.
 	outboxFull func()
+	// beforeForward runs on a forwarder just before it queues the event with
+	// seq — a live record, or one of the final records — with the
+	// subscription's id.
+	beforeForward func(sub string, seq uint64)
+	// beforeTerminal runs on a forwarder whose subscription has ended, just
+	// before it claims and queues its final records and reset, with the
+	// subscription's id and the reset's reason.
+	beforeTerminal func(sub string, reason protocol.ResetReason)
+	// barrierWaits runs on a handler whose reply barrier is about to wait for
+	// the connection's attachment (awaitAttachment), with the seq it waits
+	// for; once per wait.
+	barrierWaits func(seq uint64)
+	// readyOwed runs on a ready watcher once it has handed its attachment's
+	// forwarder the ready notification, with the seq it waits behind.
+	readyOwed func(sub string, seq uint64)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
@@ -185,6 +211,7 @@ func New(o Options) *Server {
 		maxLine:    protocol.OutboundLineMax,
 		backoffMin: acceptBackoffMin,
 		backoffMax: acceptBackoffMax,
+		readyWait:  readyWait,
 		binds:      map[string]*binding{},
 		tokens:     map[string]tokenOwner{},
 		conns:      map[*conn]struct{}{},
@@ -249,9 +276,14 @@ func (s *Server) newToken() (string, error) {
 // client ids are scoped to one engine incarnation, and a resume presenting a
 // token of another incarnation is answered resumed: false. The replaced
 // engine's tokens stay in the index as the PREVIOUS generation, and anything
-// older is dropped (bind.go, "The token index"). A handler already running
-// keeps the engine it captured at dispatch, and its reply goes nowhere. (C7
-// sends every attached connection reset{session_replaced} first.)
+// older is dropped (bind.go, "The token index"). Every connection admits
+// nothing more from that moment; an attached one is sent
+// reset{session_replaced} first and closed once the reset is on the socket
+// (conn.replace), every other one at once. A handler already running keeps
+// the engine it captured at dispatch, and its reply goes nowhere.
+//
+// The engine's end is watched (watchEngine): once it has closed, every
+// connection bound to it is closed as its session ends (conn.end).
 func (s *Server) SetEngine(e *engine.Engine) {
 	var crazeID, incarnation string
 	var idle time.Duration
@@ -277,13 +309,70 @@ func (s *Server) SetEngine(e *engine.Engine) {
 			}
 		}
 	}
+	oldStop := s.engStop
+	s.engStop = nil
+	var stop chan struct{}
+	if e != nil {
+		stop = make(chan struct{})
+		s.engStop = stop
+	}
 	s.bindMu.Unlock()
-	if !replaced && e != nil {
+	if oldStop != nil {
+		close(oldStop)
+	}
+	if e != nil {
+		s.goTransport(func() { s.watchEngine(e, stop) })
+	}
+	if !replaced {
 		return
 	}
 	for _, c := range s.liveConns() {
-		c.close("session replaced")
+		c.replace()
 	}
+}
+
+// watchEngine is an engine's watcher (plan 027 §3.7, astra r5 13): once the
+// engine has closed (engine.Done), every connection bound to it ends
+// (conn.end) — it admits nothing more, answers what it admitted, an attached
+// one delivers its final records and reset{session_closed}, and it closes
+// once all of that is written, releasing its client. A connection that binds
+// to it afterwards ends at its hello (conn.hello). The watcher returns then,
+// or when the engine is replaced (stop), or when the server closes.
+func (s *Server) watchEngine(e *engine.Engine, stop <-chan struct{}) {
+	select {
+	case <-e.Done():
+	case <-stop:
+		return
+	case <-s.done:
+		return
+	}
+	for _, c := range s.liveConns() {
+		s.bindMu.Lock()
+		mine := c.bound != nil && c.bound.eng == e
+		s.bindMu.Unlock()
+		if mine {
+			c.end("session ended")
+		}
+	}
+}
+
+// goTransport runs f on a goroutine Close joins (transport), unless the
+// server has closed — then it runs nothing and reports false. The check and
+// the count are one connMu section, and Close sets closed in one before it
+// waits, so nothing is added to the count once Close is waiting on it.
+func (s *Server) goTransport(f func()) bool {
+	s.connMu.Lock()
+	if s.closed {
+		s.connMu.Unlock()
+		return false
+	}
+	s.transport.Add(1)
+	s.connMu.Unlock()
+	go func() {
+		defer s.transport.Done()
+		f()
+	}()
+	return true
 }
 
 // engine is the session the host serves now, and its durable id.
@@ -396,9 +485,10 @@ func (s *Server) liveConns() []*conn {
 	return out
 }
 
-// Close closes every listener and connection and joins every transport
-// goroutine, then waits for the handlers — which it does not join — until ctx
-// ends (package doc, "Close"). It returns nil once every handler has returned,
+// Close closes every listener and connection — and so every subscription —
+// and joins every transport goroutine, the forwarders included, then waits for
+// the handlers — which it does not join — until ctx ends (package doc,
+// "Close"). It returns nil once every handler has returned,
 // and otherwise, at ctx's end, an error naming how many are still running:
 // each still completes into the engine's receipts table, and its reply goes
 // nowhere. It is idempotent; a later call waits the same way.

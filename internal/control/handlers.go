@@ -15,30 +15,39 @@ import (
 // reply, which takes over the request's admission slot. A reply whose
 // connection has gone is dropped.
 func (c *conn) handle(b *bound, info protocol.MethodInfo, req *request) {
-	res, perr, ok := c.run(b, info, req)
+	o := c.run(b, info, req)
 	switch {
-	case !ok:
+	case o.sent:
+		// The handler queued its own reply (attach, detach), which took over
+		// the request's admission slot.
+	case !o.ok:
 		c.drop()
-	case perr != nil:
-		c.replyErr(req.id, perr)
+	case o.perr != nil:
+		c.replyErr(req.id, o.perr)
 	default:
-		c.reply(req.id, res)
+		c.reply(req.id, o.res)
 	}
 }
 
 // outcome is a handler's answer: a result, or an error, and whether a reply
-// is still owed at all (false: the connection closed while it waited).
+// is still owed at all (false: the connection closed while it waited). sent
+// says the handler has queued its reply itself — attach and detach, whose
+// reply's place in the stream is part of what they do.
 type outcome struct {
 	res  any
 	perr *protocol.Error
 	ok   bool
+	sent bool
 }
 
 func answer(res any) outcome               { return outcome{res: res, ok: true} }
 func refusal(perr *protocol.Error) outcome { return outcome{perr: perr, ok: true} }
 
+// replied is the outcome of a handler that queued its own reply.
+func replied() outcome { return outcome{ok: true, sent: true} }
+
 // run dispatches one method.
-func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) (any, *protocol.Error, bool) {
+func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) outcome {
 	var o outcome
 	switch req.method {
 	case protocol.MethodSessionsList:
@@ -53,10 +62,10 @@ func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) (any, *prot
 		o = c.asksList(b, info, req)
 	case protocol.MethodAsksGet:
 		o = c.asksGet(b, info, req)
-	case protocol.MethodSessionAttach, protocol.MethodSessionDetach:
-		// Attach, detach and the forwarder are C7's (plan 027 §5).
-		o = refusal(refused(protocol.CodeUnsupported, protocol.ReasonUnsupported,
-			"%s is not served by this build yet", req.method))
+	case protocol.MethodSessionAttach:
+		o = c.sessionAttach(b, info, req)
+	case protocol.MethodSessionDetach:
+		o = c.sessionDetach(b, info, req)
 	case protocol.MethodSessionPrompt:
 		o = c.sessionPrompt(b, info, req)
 	case protocol.MethodSessionCancel:
@@ -85,7 +94,7 @@ func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) (any, *prot
 		o = refusal(&protocol.Error{Code: protocol.RPCMethodNotFound, Message: "unknown method " + req.method,
 			Data: protocol.ErrorData{Code: protocol.CodeUnsupported, Reason: protocol.ReasonUnknownMethod}})
 	}
-	return o.res, o.perr, o.ok
+	return o
 }
 
 // params decodes req's params into p strictly and checks what every method of

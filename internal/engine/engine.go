@@ -574,6 +574,12 @@ func (e *Engine) Ready() <-chan struct{} { return e.ready }
 // markReady closes Ready, once.
 func (e *Engine) markReady() { e.readyOnce.Do(func() { close(e.ready) }) }
 
+// Done is closed once Close has closed the session — and with it the log, so
+// every subscription has ended — and never before: the engine has ended. It is
+// the socket server's signal to close the connections of a session that is
+// over (plan 027 §3.7). It waits on nothing.
+func (e *Engine) Done() <-chan struct{} { return e.done }
+
 // Note writes a journal-only note into the session's journal — the socket
 // server's per-connection diag notes (plan 027 §3.7) — through the log, so it
 // is refused after the log's Close exactly as the log's own notes are

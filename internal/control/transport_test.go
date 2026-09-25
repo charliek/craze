@@ -439,8 +439,10 @@ func TestTheCommandCapAnswersBusy(t *testing.T) {
 
 // TestALogClosingBarrierLeavesASuccessASuccess (§3.7, CodeRabbit 15): a
 // command that succeeded and then met a closing log at its reply barrier is
-// answered with its own result, never an error; session.sync, which has no
-// seq to answer with then, is not_accepting.
+// answered with its own result, never an error — and it is written even though
+// the engine's end closes the connection (astra r5 13): the end answers what it
+// admitted first. session.sync, which has no seq to answer with on a closing
+// log, is not_accepting.
 func TestALogClosingBarrierLeavesASuccessASuccess(t *testing.T) {
 	var h *host
 	var once sync.Once
@@ -455,7 +457,15 @@ func TestALogClosingBarrierLeavesASuccessASuccess(t *testing.T) {
 	if q, err := agent.DecodeQueuedPrompt(row.Row); err != nil || q.Text != "made it" {
 		t.Fatalf("the row: %+v, %v", q, err)
 	}
-	refusedWith(t, a.call(protocol.MethodSessionSync, protocol.SyncParams{SessionID: sid(h)}),
+	a.expectEOF()
+
+	// The log closing under a live engine — no engine end to close the
+	// connection — leaves session.sync nothing to vouch for.
+	h2 := newHost(t)
+	b := h2.dial()
+	b.sayHello(nil)
+	h2.stub.EventLog().Close(context.Background())
+	refusedWith(t, b.call(protocol.MethodSessionSync, protocol.SyncParams{SessionID: sid(h2)}),
 		protocol.RPCRefused, protocol.CodeNotAccepting, protocol.ReasonNotAccepting)
 }
 
