@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.event.json",
+  "title": "event",
+  "description": "One committed event of the attachment's session, in seq order with nothing skipped: its seq and its body, the lossless event codec's JSON verbatim. A command's reply follows every event its execution emitted.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string"},
+        "seq": {"type": "integer", "minimum": 1},
+        "event": {"$ref": "event.json"}
+      },
+      "required": ["subscription", "seq", "event"],
+      "additionalProperties": false
+    }
+  }
+}

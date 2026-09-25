@@ -470,12 +470,39 @@ const goldenAt = `"2026-09-22T10:30:45.123456789Z"`
 // as any string is. A change here is a change to what S2 sends, and
 // SnapshotVersion says whether it is compatible.
 func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
+	for _, tc := range pinnedSnapshots() {
+		tc.s.Version = SnapshotVersion
+		got, err := EncodeSnapshot(&tc.s)
+		if err != nil {
+			t.Fatalf("%s: EncodeSnapshot: %v", tc.name, err)
+		}
+		if string(got) != tc.want {
+			t.Fatalf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
+		}
+		back, err := DecodeSnapshot(got)
+		if err != nil {
+			t.Fatalf("%s: DecodeSnapshot: %v", tc.name, err)
+		}
+		if d := snapDiff(&tc.s, back); len(d) > 0 {
+			t.Fatalf("%s did not survive the codec:\n  %s", tc.name, strings.Join(d, "\n  "))
+		}
+	}
+}
+
+// pinnedSnapshot is one snapshot and the body the codec writes for it, byte
+// for byte.
+type pinnedSnapshot struct {
+	name string
+	s    Snapshot
+	want string
+}
+
+// pinnedSnapshots is TestSnapshotCodecPinsTheWireShape's table, which
+// TestSnapshotSchemaCoversTheCodec also validates against the protocol's
+// snapshot.json.
+func pinnedSnapshots() []pinnedSnapshot {
 	code := 0
-	for _, tc := range []struct {
-		name string
-		s    Snapshot
-		want string
-	}{
+	return []pinnedSnapshot{
 		{"an empty snapshot", Snapshot{},
 			`{"version":1,"main":{}}`},
 		{"the envelope", Snapshot{Incarnation: "inc-1", Seq: 42, Local: 3, FinishSeq: 7, Replaying: true},
@@ -569,21 +596,5 @@ func TestSnapshotCodecPinsTheWireShape(t *testing.T) {
 				`{"id":"sub-1","windowed":true,"dropped":12,"streamOpen":true,"omittedRun":"assistant","omitted":[[1234,"t-b"],[0],[7,"t \"<a>\""],[65536]]},` +
 				`{"id":"sub-2","windowed":true,"dropped":1,"omitted":[[9]],"entries":[{"id":"40.0","kind":"assistant","text":"done"}]},` +
 				`{"id":"sub-3"}]}`},
-	} {
-		tc.s.Version = SnapshotVersion
-		got, err := EncodeSnapshot(&tc.s)
-		if err != nil {
-			t.Fatalf("%s: EncodeSnapshot: %v", tc.name, err)
-		}
-		if string(got) != tc.want {
-			t.Fatalf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
-		}
-		back, err := DecodeSnapshot(got)
-		if err != nil {
-			t.Fatalf("%s: DecodeSnapshot: %v", tc.name, err)
-		}
-		if d := snapDiff(&tc.s, back); len(d) > 0 {
-			t.Fatalf("%s did not survive the codec:\n  %s", tc.name, strings.Join(d, "\n  "))
-		}
 	}
 }

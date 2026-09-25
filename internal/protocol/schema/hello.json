@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/hello.json",
+  "title": "hello",
+  "description": "Opens a connection: the protocol versions the client speaks, who it is, and optionally the client id it resumes. Every other method before hello is bad_request, reason hello_required. hello is the one tolerant method: a host ignores params fields it does not know, at every depth. Its result is a host's or a hub's, told apart by endpoint.kind (plan 027 X5): clientId, token, resumed and retryHorizon are a host's alone.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "protocols": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1, "description": "Every protocol version the client speaks; the host answers with the highest it shares."},
+        "client": {"$ref": "#/$defs/client"},
+        "resume": {"$ref": "#/$defs/resume"},
+        "auth": {"type": "null", "description": "Reserved for S6: absent or null."},
+        "via": {"type": "null", "description": "Reserved for a hub or relay that originates the host connection itself (S4/S7): absent or null."}
+      },
+      "required": ["protocols", "client"],
+      "additionalProperties": true
+    },
+    "client": {
+      "description": "Who is connecting.",
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "capabilities": {"$ref": "#/$defs/clientCapabilities"}
+      },
+      "required": ["kind"],
+      "additionalProperties": true
+    },
+    "clientCapabilities": {
+      "description": "The client's own capability set: empty in protocol 1.",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": true
+    },
+    "resume": {
+      "description": "The client id to take back and the token hello handed it. A matching token in the same engine incarnation resumes; a retired client or another incarnation gets a fresh id (resumed: false); a wrong token is bad_request, reason bad_token.",
+      "type": "object",
+      "properties": {
+        "clientId": {"type": "string"},
+        "token": {"type": "string"}
+      },
+      "required": ["clientId", "token"],
+      "additionalProperties": true
+    },
+    "result": {
+      "description": "A host's result or a hub's, told apart by endpoint.kind (plan 027 X5).",
+      "oneOf": [
+        {"$ref": "#/$defs/hostResult"},
+        {"$ref": "#/$defs/hubResult"}
+      ]
+    },
+    "resultFields": {
+      "description": "The members every hello result carries, host's and hub's alike.",
+      "type": "object",
+      "properties": {
+        "protocol": {"type": "integer", "minimum": 1, "description": "The highest version both sides speak."},
+        "capabilities": {"$ref": "info.json#/$defs/connectionCapabilities"},
+        "codecs": {"$ref": "#/$defs/codecs"},
+        "limits": {"$ref": "#/$defs/limits"}
+      },
+      "required": ["protocol", "capabilities", "codecs", "limits"]
+    },
+    "hostResult": {
+      "description": "A host's result (endpoint.kind host): the connection's client id and resume token, whether a resume took, and the command-id table's bound, all four always present (resumed: false included). They are a host's alone: client ids, tokens and receipts are always the host's.",
+      "$ref": "#/$defs/resultFields",
+      "properties": {
+        "endpoint": {"$ref": "#/$defs/hostEndpoint"},
+        "clientId": {"type": "string", "description": "The connection's client id, bound to it, never sent per call."},
+        "token": {"type": "string", "description": "Resumes clientId on a later connection to this host, within this engine incarnation."},
+        "resumed": {"type": "boolean", "description": "The resume took: only then does a client resend its in-flight commands under their own ids."},
+        "retryHorizon": {"$ref": "info.json#/$defs/retryHorizon"}
+      },
+      "required": ["endpoint", "clientId", "token", "resumed", "retryHorizon"],
+      "unevaluatedProperties": false
+    },
+    "hubResult": {
+      "description": "A hub's result (endpoint.kind hub, S4's hub mode): no client id, token, resumed or retry horizon — a hub mints no client ids and keeps no receipts — and carrying any of them is invalid. A client spliced to a host (session.connect) says hello to the host itself.",
+      "$ref": "#/$defs/resultFields",
+      "properties": {
+        "endpoint": {"$ref": "#/$defs/hubEndpoint"}
+      },
+      "required": ["endpoint"],
+      "unevaluatedProperties": false
+    },
+    "endpointFields": {
+      "description": "Who answered: its id (a host's is sessions.list's epoch), craze's version and its pid.",
+      "type": "object",
+      "properties": {
+        "hostId": {"type": "string"},
+        "crazeVersion": {"type": "string"},
+        "pid": {"type": "integer"}
+      },
+      "required": ["hostId", "crazeVersion", "pid"]
+    },
+    "hostEndpoint": {
+      "description": "A session host.",
+      "$ref": "#/$defs/endpointFields",
+      "properties": {
+        "kind": {"type": "string", "const": "host"}
+      },
+      "required": ["kind"],
+      "unevaluatedProperties": false
+    },
+    "hubEndpoint": {
+      "description": "The hub (S4).",
+      "$ref": "#/$defs/endpointFields",
+      "properties": {
+        "kind": {"type": "string", "const": "hub"}
+      },
+      "required": ["kind"],
+      "unevaluatedProperties": false
+    },
+    "codecs": {
+      "description": "The event and snapshot codecs' own versions. A client that does not know one must not fold that stream.",
+      "type": "object",
+      "properties": {
+        "event": {"type": "integer", "minimum": 1},
+        "snapshot": {"type": "integer", "minimum": 1}
+      },
+      "required": ["event", "snapshot"],
+      "additionalProperties": false
+    },
+    "limits": {
+      "description": "The line limits, in bytes: the longest line the host reads (4 MiB) and the longest it writes, which a client must accept (16 MiB).",
+      "type": "object",
+      "properties": {
+        "inboundLine": {"type": "integer", "minimum": 1},
+        "outboundLine": {"type": "integer", "minimum": 1}
+      },
+      "required": ["inboundLine", "outboundLine"],
+      "additionalProperties": false
+    },
+    "errorResult": {
+      "description": "data.result beside a protocol_version refusal: the versions the host speaks.",
+      "type": "object",
+      "properties": {
+        "supported": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      },
+      "required": ["supported"],
+      "additionalProperties": false
+    }
+  }
+}

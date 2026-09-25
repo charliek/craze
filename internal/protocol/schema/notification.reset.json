@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.reset.json",
+  "title": "reset",
+  "description": "The subscription is over; nothing was silently lost. slow_consumer: after readiness re-attach with the cursor, before it re-attach when: ready with none. omitted and replay_failed: re-attach with no cursor. session_replaced: the host closes the connection; reconnect, hello afresh (the token is void) and attach the new session. session_closed: the session is over, its final records delivered; the host closes the connection.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string"},
+        "reason": {"type": "string", "enum": ["slow_consumer", "omitted", "replay_failed", "session_replaced", "session_closed"]}
+      },
+      "required": ["subscription", "reason"],
+      "additionalProperties": false
+    }
+  }
+}

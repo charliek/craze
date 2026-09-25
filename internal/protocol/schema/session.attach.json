@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.attach.json",
+  "title": "session.attach",
+  "description": "Attaches this connection to the session (plan 027 §3.4): a snapshot, or the client's own cursor when the log can serve it, then every event after it as event notifications, synchronized at the cutoff, and a reset when the subscription ends. A connection holds at most one live attachment (a second is bad_request, reason already_attached). when: \"ready\" (the default) waits for the session's start; a start that failed is not_accepting, reason start_failed.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "cursor": {"$ref": "#/$defs/cursor"},
+        "when": {"type": "string", "enum": ["ready", "now"], "description": "ready (the default) answers once the session's start has run; now attaches at once and answers ready: false while it starts, then sends one ready notification."},
+        "budget": {"$ref": "#/$defs/budget"}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "cursor": {
+      "description": "A place in the session's stream: the log incarnation and the seq of the last event the client folded.",
+      "type": "object",
+      "properties": {
+        "incarnation": {"type": "string"},
+        "seq": {"type": "integer", "minimum": 0}
+      },
+      "required": ["incarnation", "seq"],
+      "additionalProperties": false
+    },
+    "budget": {
+      "description": "The attachment's budget, each member absent for the host's default: the subscription's maxItems and maxBytes (1,024 records and 8 MiB; lower, or higher up to the host's own bound), and the snapshot's byte budget (4 MiB by default, capped at 8 MiB).",
+      "type": "object",
+      "properties": {
+        "maxItems": {"type": "integer", "minimum": 1},
+        "maxBytes": {"type": "integer", "minimum": 1},
+        "snapshotBytes": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string", "description": "The server-assigned id (s-1, s-2, …) every notification of this attachment carries."},
+        "session": {"$ref": "info.json#/$defs/sessionInfo"},
+        "ready": {"type": "boolean", "description": "The session's start has run; false only for when: now while it is starting."},
+        "after": {"$ref": "#/$defs/cursor", "description": "Where the stream continues: the client's cursor when honoured, else the snapshot's cut."},
+        "snapshot": {"$ref": "snapshot.json", "description": "The snapshot, embedded raw; absent when the cursor was honoured."},
+        "reset": {"$ref": "#/$defs/cursorReason", "description": "Why the cursor given was refused (the first refusal's reason); absent when it was honoured or none was given."}
+      },
+      "required": ["subscription", "session", "ready", "after"],
+      "additionalProperties": false
+    },
+    "cursorReason": {
+      "description": "Why a cursor was not honoured.",
+      "type": "string",
+      "enum": ["foreign_incarnation", "future_seq", "backlog_too_large", "no_journal", "journal_gap", "journal_behind", "evicted"]
+    }
+  }
+}

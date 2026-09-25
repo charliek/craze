@@ -62,6 +62,20 @@ linters:
             - "**/internal/harness/redact/**"
           allow:
             - $gostd
+        # The control-socket wire (plan 027 §3.2–§3.4, §3.11): a leaf under
+        # everything that speaks it, the standard library only, so the server,
+        # the client, the fake host and the codecs' own schema tests can all
+        # import it and it can import none of them. Its non-test files only:
+        # depguard ORs positive file patterns, and "!$test" is the negative
+        # that leaves the package's tests free to import the JSON Schema
+        # validator (github.com/kaptinlin/jsonschema), as engine's rule does.
+        protocol:
+          list-mode: strict
+          files:
+            - "**/internal/protocol/**"
+            - "!$test"
+          allow:
+            - $gostd
         # The engine's own import boundary (plan 021 §3.1): it sits above the
         # provider seam (agent.Session) and knows nothing of any one client or
         # provider transport, so a non-test file here may import neither

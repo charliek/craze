@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/info.json",
+  "title": "info",
+  "description": "The shared documents (plan 027 §3.3): the session info document, the sessions.list row, both capability sets, and the pieces they share.",
+  "$defs": {
+    "sessionInfoFields": {
+      "description": "The session info document's members, shared by sessionInfo and sessionRow.",
+      "type": "object",
+      "properties": {
+        "sessionId": {"type": "string", "description": "The durable craze session id: what every session-scoped method names."},
+        "providerSessionId": {"type": "string", "description": "The agent's own id for the session; may be \"\" before the session is ready."},
+        "incarnation": {"type": "string", "description": "The event log's id: the scope of seqs, turn ids and ask ids."},
+        "hostId": {"type": "string"},
+        "workspace": {"type": "string", "description": "The session's working directory."},
+        "provider": {"$ref": "#/$defs/provider"},
+        "catalogs": {"$ref": "#/$defs/catalogs"},
+        "capabilities": {"$ref": "#/$defs/sessionCapabilities"},
+        "retryHorizon": {"$ref": "#/$defs/retryHorizon"}
+      },
+      "required": ["sessionId", "providerSessionId", "incarnation", "hostId", "workspace", "provider", "catalogs", "capabilities", "retryHorizon"]
+    },
+    "sessionInfo": {
+      "description": "The session info document: the session's static facts, final once the session is up (the attach reply's session, a ready notification's). Its catalogs are empty until then.",
+      "$ref": "#/$defs/sessionInfoFields",
+      "unevaluatedProperties": false
+    },
+    "sessionRow": {
+      "description": "One sessions.list row: the info document and the session's live roster facts. \"Is it running\" is activity == working or foreignTurn; \"is it blocked on me\" is pendingAsks > 0.",
+      "$ref": "#/$defs/sessionInfoFields",
+      "properties": {
+        "title": {"type": "string"},
+        "activity": {"$ref": "#/$defs/activity"},
+        "foreignTurn": {"type": "boolean", "description": "The agent is running a turn of its own; activity reads idle during one."},
+        "pendingAsks": {"type": "integer", "minimum": 0},
+        "headAsk": {"$ref": "#/$defs/headAsk"}
+      },
+      "required": ["title", "activity", "foreignTurn", "pendingAsks"],
+      "unevaluatedProperties": false
+    },
+    "provider": {
+      "description": "The session's provider: its id and the label a client shows.",
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "label": {"type": "string"}
+      },
+      "required": ["name", "label"],
+      "additionalProperties": false
+    },
+    "catalogs": {
+      "description": "The models and modes the session can be switched to; empty until the session is ready.",
+      "type": "object",
+      "properties": {
+        "models": {"type": "array", "items": {"$ref": "#/$defs/model"}},
+        "modes": {"type": "array", "items": {"$ref": "#/$defs/mode"}}
+      },
+      "required": ["models", "modes"],
+      "additionalProperties": false
+    },
+    "model": {
+      "description": "One model a session.set of kind model can name.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"}
+      },
+      "required": ["id", "name"],
+      "additionalProperties": false
+    },
+    "mode": {
+      "description": "One mode a session.set of kind mode can name.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "required": ["id", "name", "description"],
+      "additionalProperties": false
+    },
+    "sessionCapabilities": {
+      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host) and stop (false on a TUI-hosted session). A client hides what a capability says the session cannot do.",
+      "type": "object",
+      "properties": {
+        "interject": {"type": "boolean"},
+        "subagentCancel": {"type": "boolean"},
+        "modes": {"type": "boolean"},
+        "effort": {"type": "boolean"},
+        "fastToggle": {"type": "boolean"},
+        "subagentRows": {"type": "boolean"},
+        "subagentTranscript": {"type": "boolean"},
+        "todos": {"type": "boolean"},
+        "askCards": {"type": "boolean"},
+        "planCards": {"type": "boolean"},
+        "parameterizedPicker": {"type": "boolean"},
+        "cancel": {"type": "boolean"},
+        "approvals": {"type": "boolean"},
+        "historyCursor": {"type": "boolean"},
+        "stop": {"type": "boolean"}
+      },
+      "required": ["interject", "subagentCancel", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
+      "additionalProperties": false
+    },
+    "connectionCapabilities": {
+      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true.",
+      "type": "object",
+      "properties": {
+        "rosterSubscribe": {"type": "boolean"},
+        "sessionCreate": {"type": "boolean"},
+        "multiplex": {"type": "boolean"},
+        "connect": {"type": "boolean"},
+        "snapshot": {"type": "boolean"},
+        "attachWhenNow": {"type": "boolean"}
+      },
+      "required": ["rosterSubscribe", "sessionCreate", "multiplex", "connect", "snapshot", "attachWhenNow"],
+      "additionalProperties": false
+    },
+    "retryHorizon": {
+      "description": "The command-id table's bound: within it a resent commandId is answered from the table and never re-executes; past it, unknown_command.",
+      "type": "object",
+      "properties": {
+        "commands": {"type": "integer", "minimum": 0},
+        "ageMs": {"type": "integer", "minimum": 0}
+      },
+      "required": ["commands", "ageMs"],
+      "additionalProperties": false
+    },
+    "headAsk": {
+      "description": "The first open ask: its id, kind (permission, question or plan) and the label a card draws.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "label": {"type": "string"}
+      },
+      "required": ["id", "kind", "label"],
+      "additionalProperties": false
+    },
+    "activity": {
+      "description": "What the engine is doing. An open ask and a foreign turn overlay any of these.",
+      "type": "string",
+      "enum": ["starting", "replaying", "idle", "working", "error", "closing"]
+    }
+  }
+}
