@@ -328,6 +328,13 @@ type hooks struct {
 	// schedule r31 finding 1 is about. It is named the turn so a test can hold
 	// one submit and let the others through.
 	beforeInlineSeed func(turn string)
+	// beforeSessionClose runs on Close's own goroutine, after e.mu is released
+	// (and Ready closed) and before Session.Close is called: the window in
+	// which the engine has refused every later command and the ask registry is
+	// still open, because closing it is Session.Close's own doing (tui.Stub's
+	// Close, as the live session's does). It is nil in production and never
+	// takes an argument: Close runs at most once (closeOnce).
+	beforeSessionClose func()
 	// receipts are the command-id table's own seams (receipts.go): its clock,
 	// and the barriers a duplicate's schedule turns on. Like the rest of these
 	// they are in place before the table exists and never assigned afterwards.
@@ -660,6 +667,12 @@ func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 // synchronous writes ever did. That final write is bounded, at 500 ms, and
 // abandoned when the bound runs out. A plain touch on its own is still dropped:
 // its only effect is an UpdatedAt the next run's first write bumps anyway.
+//
+// The same 500 ms bound is also owed to a lone first-prompt seed attempt in
+// flight on ANY goroutine — a server handler's own Submit, or the worker's
+// (plan 027 §3.7, SF-15) — with nothing else pending behind it: without this a
+// quit mid-seed left a session missing from --continue entirely, where the
+// slot alone could not show the attempt was still in flight.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
@@ -691,6 +704,9 @@ func (e *Engine) Close() error {
 		// Closed admits nothing from here, so a start this engine never had
 		// can no longer come: nobody waits for one (Ready).
 		e.markReady()
+		if h := e.hooks; h != nil && h.beforeSessionClose != nil {
+			h.beforeSessionClose()
+		}
 		e.closeErr = e.sess.Close()
 		close(e.done)
 		e.wg.Wait()

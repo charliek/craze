@@ -895,7 +895,41 @@ func loneInlineSeed(t *testing.T, closeWait time.Duration) (r *rig, idx *fakeInd
 	if !seeding || retained {
 		t.Fatalf("the schedule is seeding=%v retained=%v, want a lone attempt in flight", seeding, retained)
 	}
+	// The worker's OWN pass over the turn-ending touch is a separate goroutine
+	// (indexWriter.begin), kicked by the same event that r.until(lastEnding)
+	// waited for but not joined by it. Returning before that pass has actually
+	// called touch() and retained it (touchAfterSeed) left the caller free to
+	// close the engine while the pass was still unscheduled: done could then
+	// fire first, serve() would hand the pass's own channel to finish as
+	// inFlight, and the pass would run AFTER the released seed's row landed —
+	// finding a row where SF-16 expects none, and writing a second, valid one
+	// (sol r3-c3, "Further finding"). Waiting for touchAfterSeed here is what
+	// TestCloseWaitsForALoneInlineSeed's schedule is described as: the pass has
+	// already retained the touch and the worker is back at its idle wait
+	// before Close is ever called.
+	waitTouchAfterSeed(t, r)
 	return r, idx, release, fin, submitted
+}
+
+// waitTouchAfterSeed blocks, with the watchdog, until the worker's own pass
+// over a pending touch has found no row yet behind an attempt in flight and
+// retained it (indexWriter.touchAfterSeed) — see loneInlineSeed.
+func waitTouchAfterSeed(t *testing.T, r *rig) {
+	t.Helper()
+	deadline := time.After(watchdog)
+	for {
+		r.e.idx.mu.Lock()
+		got := r.e.idx.touchAfterSeed
+		r.e.idx.mu.Unlock()
+		if got {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the worker's pass never retained the turn-ending touch behind the seed")
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 // TestCloseWaitsForALoneInlineSeed is SF-15 (plan 027 §3.7, A14). The worker's

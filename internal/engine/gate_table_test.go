@@ -77,6 +77,10 @@ type gateOpts struct {
 	armed bool
 	// staleTurn: the cancel names a turn that is not current.
 	staleTurn bool
+	// unknownAsk: answer names an id this incarnation never issued, instead of
+	// the one the cut opened — the closing row's "without an open ask" half
+	// (astra r2, plan 027 PR 1).
+	unknownAsk bool
 }
 
 // gateRig is one engine at one row's cut, over a fresh gateSession.
@@ -99,6 +103,15 @@ type gateRig struct {
 	returned chan string
 	// bg is the goroutines the cut started, joined before the engine closes.
 	bg sync.WaitGroup
+
+	// holdClose says the "closing" row's cut is holding Close at
+	// BeforeSessionClose: closeEntered hears it park there, and closeRelease
+	// lets it go, once (closeReleased) — the closing window astra r2 found
+	// untested (plan 027 PR 1, C2a).
+	holdClose     bool
+	closeEntered  chan struct{}
+	closeRelease  chan struct{}
+	closeReleased sync.Once
 }
 
 func (g *gateRig) cmd() engine.Command {
@@ -118,6 +131,17 @@ func (g *gateRig) beforeCancel(string) {
 	}
 	g.entered <- struct{}{}
 	<-g.release
+}
+
+// beforeSessionClose is BeforeSessionClose: it parks Close after e.mu is
+// released and before Session.Close, for the "closing" row's cut, and is a
+// no-op for every other row.
+func (g *gateRig) beforeSessionClose() {
+	if !g.holdClose {
+		return
+	}
+	g.closeEntered <- struct{}{}
+	<-g.closeRelease
 }
 
 // holdCancels parks the next n cancels before the session hears of them.
@@ -317,7 +341,13 @@ var gateColumns = []gateColumn{
 		return "allowed", g.e.SetTitle(g.cmd(), "gate")
 	}},
 	{name: "answer", needsAsk: true, run: func(g *gateRig) (string, error) {
-		return "allowed", g.e.Answer(g.cmd(), gateAsk, agent.AskAnswer{OptionID: "allow-once"})
+		id := gateAsk
+		if g.opts.unknownAsk {
+			// The cut still opened gateAsk (needsAsk forces opts.ask), so this
+			// names one this incarnation never issued instead.
+			id = gateAsk + "-unknown"
+		}
+		return "allowed", g.e.Answer(g.cmd(), id, agent.AskAnswer{OptionID: "allow-once"})
 	}},
 	{name: "subagent.cancel", run: func(g *gateRig) (string, error) {
 		return "allowed", g.e.CancelSubagent(g.cmd(), "child-1")
@@ -360,6 +390,7 @@ var (
 	ifNoInterj   = gateVariant{when: "if the provider cannot interject", opts: gateOpts{noInterject: true}, want: "unsupported"}
 	ifArmedSend  = gateVariant{when: "if one is armed", opts: gateOpts{armed: true}, want: "already_submitted"}
 	ifArmedDisar = gateVariant{when: "if a send-now is armed", opts: gateOpts{armed: true}, want: "allowed"}
+	ifUnknownAsk = gateVariant{when: "naming an ask never opened", opts: gateOpts{unknownAsk: true}, want: "unknown_ask"}
 )
 
 // refused is a row every verb of which the engine's own gate refuses, but for
@@ -375,6 +406,18 @@ func refused() []gateCell {
 	}
 }
 
+// closingCancelCell is the cancel cell the closing and closed rows share:
+// e.closed is checked before holdCancelLocked's own conditions (an ask
+// pending, a foreign turn, no turn at all), so nothing admits it despite any
+// of them (astra r2, plan 027 PR 1).
+func closingCancelCell() gateCell {
+	return gateCell{want: "not_accepting", note: "always, even with a foreign turn running or a turn named",
+		also: []gateVariant{
+			{when: "if a foreign turn runs", opts: gateOpts{foreign: true}, want: "not_accepting", said: true},
+			{when: "naming a turn", opts: gateOpts{staleTurn: true}, want: "not_accepting", said: true},
+		}}
+}
+
 // gateTable is the table: the engine's real states, then the two overlays.
 func gateTable() []gateRow {
 	allowed := gateCell{want: "allowed"}
@@ -387,8 +430,17 @@ func gateTable() []gateRow {
 			cells: refused(),
 		},
 		{
+			// Driven over a STARTED, idle engine (astra r2, plan 027 PR 1): the
+			// original fixture emitted this before Start, so State's replaying
+			// override (activity Starting || Idle, plus the flag) was masked by
+			// refusalLocked's own starting branch, which is checked first — every
+			// refusal came from THAT case, and the replay check below it
+			// (isReplaying) was never the one proven. Starting first means the
+			// engine is Idle when the flag goes up, so a verb's not_accepting can
+			// only be the replay gate.
 			name: "replaying",
 			cut: func(g *gateRig) {
+				g.start()
 				g.stub.Emit(agent.Event{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayStart}})
 				g.pending()
 			},
@@ -505,7 +557,48 @@ func gateTable() []gateRow {
 			cells: refused(),
 		},
 		{
-			name: "closing, closed",
+			// The window between the section that refuses admission (closed =
+			// true, ActivityClosing set, e.mu released) and the session's OWN
+			// close, which is what ends every open ask "closing" (tui.Stub.Close,
+			// as the live session's does): astra r2 found the combined row's
+			// answer cell wrong here, because the original fixture called Close
+			// synchronously and asserted only after it returned, never driving
+			// this window at all (plan 027 PR 1, C2a). BeforeSessionClose (the
+			// "closing" hold) parks Close right there; every other engine gate
+			// is closed already (closed is checked before anything else), so
+			// only answer, which the engine gates not at all, tells the two
+			// rows apart.
+			name: "closing",
+			cut: func(g *gateRig) {
+				g.start()
+				g.pending()
+				g.holdClose = true
+				g.bg.Add(1)
+				go func() {
+					defer g.bg.Done()
+					_ = g.e.Close()
+				}()
+				await(g.t, g.closeEntered, "Close to reach the session's own close")
+			},
+			state: func(st engine.State) bool { return st.Activity == engine.ActivityClosing },
+			cells: []gateCell{
+				{want: "not_accepting"},
+				{want: "not_accepting"},
+				{want: "not_accepting"},
+				closingCancelCell(),
+				{want: "not_accepting"},
+				{want: "not_accepting"},
+				{want: "not_accepting"},
+				{want: "not_accepting"},
+				{want: "allowed", note: "the registry is still open: the session's own close, not yet run, is what ends every ask",
+					also: []gateVariant{ifUnknownAsk}},
+				{want: "not_accepting"},
+			},
+		},
+		{
+			// After Session.Close has returned: every ask it was holding ended
+			// `closing`, so answer goes back to already_resolved.
+			name: "closed",
 			cut: func(g *gateRig) {
 				g.start()
 				g.pending()
@@ -518,11 +611,7 @@ func gateTable() []gateRow {
 				{want: "not_accepting"},
 				{want: "not_accepting"},
 				{want: "not_accepting"},
-				{want: "not_accepting", note: "always, even with a foreign turn running or a turn named",
-					also: []gateVariant{
-						{when: "if a foreign turn runs", opts: gateOpts{foreign: true}, want: "not_accepting", said: true},
-						{when: "naming a turn", opts: gateOpts{staleTurn: true}, want: "not_accepting", said: true},
-					}},
+				closingCancelCell(),
 				{want: "not_accepting"},
 				{want: "not_accepting"},
 				{want: "not_accepting"},
@@ -557,7 +646,7 @@ func gateTable() []gateRow {
 			overlay: true,
 			cells: []gateCell{
 				{want: asTheRow}, {want: asTheRow}, {want: asTheRow},
-				{want: "allowed", note: "in every row but closing, closed, whose close ended every ask"},
+				{want: "allowed", note: "in every row but closing or closed, where e.closed refuses it outright"},
 				{want: asTheRow}, {want: asTheRow}, {want: asTheRow}, {want: asTheRow}, {want: asTheRow}, {want: asTheRow},
 			},
 		},
@@ -575,12 +664,14 @@ func newGateRig(t *testing.T, row gateRow, opts gateOpts) *gateRig {
 		stub.SetProvider(agent.GrokProvider())
 	}
 	g := &gateRig{
-		t:        t,
-		stub:     &gateSession{Stub: stub, refuseForeign: row.retry},
-		opts:     opts,
-		entered:  make(chan struct{}, 8),
-		release:  make(chan struct{}),
-		returned: make(chan string, 16),
+		t:            t,
+		stub:         &gateSession{Stub: stub, refuseForeign: row.retry},
+		opts:         opts,
+		entered:      make(chan struct{}, 8),
+		release:      make(chan struct{}),
+		returned:     make(chan string, 16),
+		closeEntered: make(chan struct{}),
+		closeRelease: make(chan struct{}),
 	}
 	e, err := engine.NewForGateTable(g.stub, engine.Options{Chain: engine.ChainPolicy{RetryForeignTurn: row.retry}},
 		engine.GateTableHooks{
@@ -591,23 +682,25 @@ func newGateRig(t *testing.T, row gateRow, opts gateOpts) *gateRig {
 				default:
 				}
 			},
+			BeforeSessionClose: g.beforeSessionClose,
 		})
 	if err != nil {
 		t.Fatal(err)
 	}
 	g.e = e
-	// Last registered runs first: the held cancels go, then what the cut
-	// started is joined, then the engine closes.
+	// Last registered runs first: the close hold goes, then the held cancels,
+	// then what the cut started is joined, then the engine closes.
 	t.Cleanup(func() { _ = e.Close() })
 	t.Cleanup(g.bg.Wait)
 	t.Cleanup(func() { g.released.Do(func() { close(g.release) }) })
+	t.Cleanup(func() { g.closeReleased.Do(func() { close(g.closeRelease) }) })
 	g.client = e.NewClientID()
 	row.cut(g)
 	st := e.State()
 	if !row.state(st) {
 		t.Fatalf("the %s cut is not that state: %+v", row.name, st)
 	}
-	if opts.ask && row.name != "closing, closed" && st.PendingAsks != 1 {
+	if opts.ask && row.name != "closed" && st.PendingAsks != 1 {
 		t.Fatalf("the %s cut has %d asks pending, want the one it opened", row.name, st.PendingAsks)
 	}
 	return g
@@ -650,7 +743,7 @@ func TestTheGateTableIsTheEngines(t *testing.T) {
 		}
 	}
 	for _, row := range table {
-		if row.overlay || row.name == "closing, closed" {
+		if row.overlay || row.name == "closing" || row.name == "closed" {
 			continue
 		}
 		for i, col := range gateColumns {
