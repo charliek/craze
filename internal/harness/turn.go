@@ -218,22 +218,29 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	if err := s.record(m, changes); err != nil {
 		return Result{}, err
 	}
-	// The history the request replays, redacted with this turn's redactor: an
-	// entry written before the session knew a key can hold one — a switch
-	// resolves keys mid-session, and this turn may be the one that adopted
-	// them — and the replay would send it to the model, the newly switched
-	// one included. The same places are redacted as when a step is persisted
-	// (redactCalls, redactResults): a tool call's arguments and a tool
-	// result's text, never the model's own text or reasoning — and the text
-	// of an entry of background results, which a child wrote (plan 026
-	// §3.11), never a person's prompt.
+	// The history the request replays, redacted: an entry written before the
+	// session knew a key can hold one — a switch resolves keys mid-session,
+	// and this turn may be the one that adopted them — and the replay would
+	// send it to the model, the newly switched one included. The same places
+	// are redacted as when a step is persisted (redactCalls, redactResults): a
+	// tool call's arguments and a tool result's text, never the model's own
+	// text or reasoning — and the text of an entry of background results,
+	// which a child wrote (plan 026 §3.11), never a person's prompt.
+	//
+	// The replacer is the session's live union, the keys Session.Redact
+	// covers — the parent's, every registered child's, and every background
+	// child's whose result is not yet delivered — not the turn's own (astra
+	// r15, finding 1): a result committed before anyone knew a key, which a
+	// background child learned since and the parent never did, would
+	// otherwise go out whole while that child runs or its result waits. It is
+	// a superset of the turn's redactor, and redacting more is never a leak.
 	//
 	// It leaves the transcript on disk as it was written; and with no key in
 	// the history — every other turn of every other session — it changes
-	// nothing at all, so the request's bytes, and the provider's prefix
-	// cache, are what they would have been.
+	// nothing at all, however many keys it covers, so the request's bytes,
+	// and the provider's prefix cache, are what they would have been.
 	msgs, results := s.store.ContextWithResults(m.id())
-	history := redactHistory(s.tools.redactor(), msgs, results)
+	history := redactHistory(s.redactor(), msgs, results)
 	// A prompt still held is an earlier turn's that produced nothing. It is
 	// not in history, so this turn's request never sent it; written ahead of
 	// this turn's answer, it would put in the transcript what the model never
@@ -474,7 +481,8 @@ type turn struct {
 
 // redactor is the session's, as it is now — fixed for the whole turn, since
 // only a turn's start adopts a new one (toolset.adopt): everything the turn
-// replays, reports and writes down is redacted with the same one.
+// reports and writes down is redacted with the same one. The history it
+// replays is redacted with a superset of it, the session's live union (run).
 func (t *turn) redactor() *redact.Replacer { return t.tools.redactor() }
 
 // emit hands ev to the sink unless the turn has ended. mu is held.

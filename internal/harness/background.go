@@ -305,7 +305,13 @@ func (r *subagents) runToEnd(b *bgChild) (text string, usage *tool.ChildUsage, s
 		obs.observe(ev)
 		r.emit(SubagentEvent{ID: b.h.id, Event: ev})
 	})
+	if r.seams.returned != nil {
+		r.seams.returned(b.h.id)
+	}
 	b.h.end()
+	if r.seams.ended != nil {
+		r.seams.ended(b.h.id)
+	}
 	out := subagentOutcome{
 		res: res, err: runErr,
 		parentGone: b.h.isClosing() || isClosed(r.s.tools.closing),
@@ -556,7 +562,27 @@ func (r *subagents) restoreTurn(turn int) (gave bool) {
 //     child — for it to end, for call.Wait, for its own cancel or for the
 //     session's closing, and then judges again; a child still running when
 //     the wait runs out is not an error.
+//
+// Whatever it answers — the result, a fixed reply, a refusal or aborted — is
+// redacted last with a replacer built as it returns (union), over the keys
+// Session.Redact covers, every child's included, as settle prepares a
+// foreground call's aborted result (astra r15, finding 2): the dispatcher and
+// the tool entry redact with the parent's keys alone, and a fixed text a key
+// happens to equal, which only a background child knows, went out whole. The
+// model names on the usage are redacted with it.
 func (r *subagents) Output(ctx context.Context, call tool.OutputCall) tool.Result {
+	res := r.output(ctx, call)
+	red := r.union(nil)
+	res.Text = red.String(res.Text)
+	if u := res.Child; u != nil {
+		res.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
+			WireModel: red.String(u.WireModel), Usage: u.Usage}
+	}
+	return res
+}
+
+// output is Output's answer before its last redaction (Output).
+func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Result {
 	parent := r.s
 	switch {
 	case parent.child:
@@ -589,14 +615,9 @@ func (r *subagents) Output(ctx context.Context, call tool.OutputCall) tool.Resul
 		case resultPending, resultSuspended:
 			got := r.reserveLocked(res, own)
 			r.regMu.Unlock()
-			b := r.deliver([]taken{got})
-			out := tool.Result{Text: b.text}
-			if u := got.usage; u != nil {
-				red := r.union(nil)
-				out.Child = &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
-					WireModel: red.String(u.WireModel), Usage: u.Usage}
-			}
-			return out
+			// The usage's names are redacted with the text, by Output's last
+			// replacer; the copy it makes leaves the result's own alone.
+			return tool.Result{Text: r.deliver([]taken{got}).text, Child: got.usage}
 		}
 		done := res.done
 		r.regMu.Unlock()
@@ -680,6 +701,13 @@ func stepOfCall(id string) int {
 // SubagentUndelivered through the session's sink: the terminal owner of what
 // those children spent (astra r14, major 4), since nothing will deliver them
 // now. A nil runner has none.
+//
+// Each report is redacted as it is emitted, every string of it, with a
+// replacer built then (union), outside regMu (astra r15, finding 3): what the
+// result holds was redacted when it became deliverable, and a key the session
+// learned since — a switch's, whose provider's wire id a child's usage names —
+// must not go out in the one record that is never delivered, and so never
+// redacted again at a reservation.
 func (r *subagents) closeBackground() {
 	if r == nil {
 		return
@@ -687,21 +715,30 @@ func (r *subagents) closeBackground() {
 	r.bgCancel(errClosing)
 	r.workers.Wait()
 	r.regMu.Lock()
-	var out []SubagentUndelivered
+	var out []taken
 	for _, id := range r.order {
 		res := r.results[id]
 		if res.state == resultCommitted || res.reported {
 			continue
 		}
 		res.reported = true
-		var usages []*tool.ChildUsage
-		if res.usage != nil {
-			usages = append(usages, res.usage)
-		}
-		out = append(out, SubagentUndelivered{ID: res.id, Type: res.typ, Usage: mergeUsage(usages)})
+		out = append(out, taken{id: res.id, typ: res.typ, usage: res.usage})
 	}
 	r.regMu.Unlock()
-	for _, ev := range out {
-		r.emit(ev)
+	for _, t := range out {
+		r.emit(r.undelivered(t))
 	}
+}
+
+// undelivered is the report of a result Close found never committed
+// (closeBackground): its id, type and usage — a row per model, none when it
+// spent nothing — each string redacted with a replacer built here.
+func (r *subagents) undelivered(t taken) SubagentUndelivered {
+	red := r.union(nil)
+	var usages []*tool.ChildUsage
+	if u := t.usage; u != nil {
+		usages = append(usages, &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
+			WireModel: red.String(u.WireModel), Usage: u.Usage})
+	}
+	return SubagentUndelivered{ID: red.String(t.id), Type: red.String(t.typ), Usage: mergeUsage(usages)}
 }

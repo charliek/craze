@@ -223,7 +223,10 @@ type subagents struct {
 // the child's Open, to know a call is waiting for a slot or holds one, to see
 // the child session a call opened, to act the instant the child's Run has
 // returned and again once its end is latched, to hold a call in its
-// retirement, and to act as its last word begins.
+// retirement, and to act as its last word begins. returned and ended are a
+// background child's too, on its worker (runToEnd): there, returned holds the
+// worker before anything of its settlement — the outcome, the finish, the
+// result, its publication — so a test can hold a worker Close must join.
 type subagentSeams struct {
 	open     func(Options) (*Session, error) // opens a child; nil is Open
 	waiting  func(tool.SubagentCall)         // the call found no free slot and is about to wait for one

@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"charm.land/fantasy"
@@ -1542,4 +1544,602 @@ func TestResultBlockEscapes(t *testing.T) {
 	if got != want {
 		t.Fatalf("resultBlock = %q; want %q", got, want)
 	}
+}
+
+// waitingIn reports whether some goroutine is parked in state — its wait
+// reason as runtime.Stack prints it in the goroutine's header, such as
+// sync.WaitGroup.Wait — with every one of frames on its stack.
+func waitingIn(state string, frames ...string) bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
+		if strings.Contains(g, "["+state) && !slices.ContainsFunc(frames, func(f string) bool { return !strings.Contains(g, f) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// joining reports whether Close is parked joining the background workers.
+func joining() bool {
+	return waitingIn("sync.WaitGroup.Wait", "harness.(*subagents).closeBackground(", "harness.(*Session).Close(")
+}
+
+// TestReplayRedactsABackgroundChildsKey (astra r15, finding 1): a result
+// holding a string no session knows as a key is committed as it is. The
+// environment then gains it, and a background child opened after that learns
+// it, while the parent never does (no switch). The next turn's request
+// replays the committed result with the marker in the key's place — while
+// that child runs, and again while its result waits to be delivered: the
+// replay redacts with the session's live union, the keys Session.Redact
+// covers, not with the parent's own redactor, which lets it through.
+func TestReplayRedactsABackgroundChildsKey(t *testing.T) {
+	const late = "sk-only-a-later-background-child-knows-it"
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var mu sync.Mutex
+	b := openBG(t, withEnv(env, &mu))
+	a := b.routers["test/a"]
+	first, second := newWorker(), newWorker()
+	a.route("go", callStep(bgPart(t, "a1", "scan", "child one")), answerWith("started"), answerWith("got it"))
+	a.route("child one", first.step(openText("the value is "+late), finishText()))
+	run(t, b.s, "go")
+	b.finish(t, first)
+	run(t, b.s, "remember it")
+	tr := transcript(t, b.s)
+	if e := tr.Entries[len(tr.Entries)-2]; !e.SubagentResults || !strings.Contains(messageText(e.Message), late) {
+		t.Fatalf("the committed results entry = %q; want it holding the string, no key yet", messageText(e.Message))
+	}
+	mu.Lock()
+	env["NOKEY_API_KEY"] = late
+	mu.Unlock()
+	a.route("go", callStep(bgPart(t, "b1", "later", "child two")), answerWith("started two"))
+	a.route("child two", second.step(openText("did child two"), finishText()))
+	run(t, b.s, "start another")
+	if b.s.Redact(late) != redact.Marker || b.s.tools.redactor().String(late) != late || slices.Contains(b.s.tools.knownKeys(), late) {
+		t.Fatal("control: want the key covered through the second child alone, the parent never learning it")
+	}
+	replayed := func(when string) {
+		t.Helper()
+		a.route("go", answerWith("ok"))
+		run(t, b.s, when)
+		reqs := a.requests("go")
+		var results []string
+		for _, m := range reqs[len(reqs)-1].Prompt {
+			if text := messageText(m); strings.Contains(text, "the value is ") {
+				results = append(results, text)
+			}
+		}
+		if len(results) != 1 || strings.Contains(results[0], late) || !strings.Contains(results[0], "the value is "+redact.Marker) {
+			t.Fatalf("%s, the replayed results = %q; want the first child's, the marker in place of the key", when, results)
+		}
+	}
+	replayed("while the child that knows it runs")
+	b.finish(t, second)
+	if b.s.tools.redactor().String(late) != late || slices.Contains(b.s.tools.knownKeys(), late) {
+		t.Fatal("control: the parent learned the key")
+	}
+	replayed("while its result waits") // its turn's step 0 takes it up, after the replay was made
+}
+
+// withChildKey makes every background child of b learn, as it opens, a key
+// its parent never does: key of the child's id, put in the environment just
+// before the child's Open reads it, after the parent's own.
+func withChildKey(b *bg, env map[string]string, mu *sync.Mutex, key func(id string) string) {
+	b.s.subs.seams.open = func(o Options) (*Session, error) {
+		mu.Lock()
+		env["NOKEY_API_KEY"] = key(o.Child.ID)
+		mu.Unlock()
+		return Open(o)
+	}
+}
+
+// TestAgentOutputRepliesRedacted (astra r15, finding 2): whatever agent_output
+// answers is redacted last with the session's live union, a fixed reply as
+// much as a result, as settle prepares a foreground call's aborted result
+// (TestSubagentAbortTextRedacted). The parent opens; then, as a background
+// child opens — so the child learns it, and the parent never does — the
+// environment gains a key equal to one of agent_output's fixed answers:
+// already included, already delivered, still running, the refusal of an
+// unknown id, or aborted. The call that answers it answers the marker, and
+// the key reaches neither the parent's ToolFinished nor its transcript: the
+// dispatcher and the tool entry redact with the parent's keys alone.
+func TestAgentOutputRepliesRedacted(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		key   func(id string) string
+		class tool.ErrorClass
+		// drive runs the turn that makes the call, on a session whose child id
+		// is held by w, and returns the call's harness id and the turn's events.
+		drive func(t *testing.T, b *bg, w *worker, id string) (string, []Event)
+	}{
+		{
+			name: "already included",
+			key:  func(string) string { return outputIncluded },
+			drive: func(t *testing.T, b *bg, w *worker, id string) (string, []Event) {
+				b.finish(t, w)
+				b.routers["test/a"].route("go", callStep(outputPart(t, "o1", id, 0)), answerWith("ok"))
+				var ev events
+				if _, err := b.s.Run(context.Background(), "next", ev.sink); err != nil {
+					t.Fatal(err)
+				}
+				return "t2.1.1", ev.list()
+			},
+		},
+		{
+			name: "already delivered",
+			key:  func(string) string { return outputDelivered },
+			drive: func(t *testing.T, b *bg, w *worker, id string) (string, []Event) {
+				b.finish(t, w)
+				// Step 0 takes the result up and the first step's append commits
+				// it; the second step's call asks for it again.
+				b.routers["test/a"].route("go", callStep(globPart("g1")), callStep(outputPart(t, "o1", id, 0)), answerWith("ok"))
+				var ev events
+				if _, err := b.s.Run(context.Background(), "next", ev.sink); err != nil {
+					t.Fatal(err)
+				}
+				return "t2.2.1", ev.list()
+			},
+		},
+		{
+			name: "still running",
+			key:  func(id string) string { return fmt.Sprintf(outputStillRunning, id) },
+			drive: func(t *testing.T, b *bg, _ *worker, id string) (string, []Event) {
+				b.routers["test/a"].route("go", callStep(outputPart(t, "o1", id, 0)), answerWith("ok"))
+				var ev events
+				if _, err := b.s.Run(context.Background(), "next", ev.sink); err != nil {
+					t.Fatal(err)
+				}
+				return "t2.1.1", ev.list()
+			},
+		},
+		{
+			name: "an unknown id",
+			key: func(id string) string {
+				return "Unknown sub-agent id `nope`. The background sub-agents whose results are still to be delivered: `" + id + "`."
+			},
+			class: tool.ClassInvalidInput,
+			drive: func(t *testing.T, b *bg, _ *worker, _ string) (string, []Event) {
+				b.routers["test/a"].route("go", callStep(outputPart(t, "o1", "nope", 0)), answerWith("ok"))
+				var ev events
+				if _, err := b.s.Run(context.Background(), "next", ev.sink); err != nil {
+					t.Fatal(err)
+				}
+				return "t2.1.1", ev.list()
+			},
+		},
+		{
+			name:  "aborted",
+			key:   func(string) string { return tool.AbortedText },
+			class: tool.ClassAborted,
+			drive: func(t *testing.T, b *bg, _ *worker, id string) (string, []Event) {
+				waiting := make(chan string, 1)
+				b.s.subs.seams.outputWaiting = func(id string) { waiting <- id }
+				b.routers["test/a"].route("go", callStep(outputPart(t, "o1", id, 600000)), answerWith("never"))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var ev events
+				out := start(ctx, b.s, "next", ev.sink)
+				await(t, waiting, "the agent_output call waiting for the running child")
+				cancel()
+				if got := await(t, out, "the cancelled turn"); got.err != nil || got.res.StopReason != StopCancelled {
+					t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+				}
+				return "t2.1.1", ev.list()
+			},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+			var mu sync.Mutex
+			b := openBG(t, withEnv(env, &mu))
+			withChildKey(b, env, &mu, c.key)
+			ws, ids := b.spawn(t, "child one")
+			key := c.key(ids[0])
+			if b.s.Redact(key) != redact.Marker || b.s.tools.redactor().String(key) != key || slices.Contains(b.s.tools.knownKeys(), key) {
+				t.Fatal("control: want the key covered through the child alone, the parent never learning it")
+			}
+			callID, evs := c.drive(t, b, ws[0], ids[0])
+			res := callResult(t, evs, callID)
+			if res.Text != redact.Marker || res.IsError != (c.class != "") || res.Class != c.class {
+				t.Fatalf("the call = %+v; want the marker, class %q: its whole text is the child's key", res, c.class)
+			}
+			for _, f := range of[ToolFinished](evs) {
+				if found := leaks(f, key); len(found) != 0 {
+					t.Fatalf("the parent's ToolFinished for %s leaks the key at %v", f.ID, found)
+				}
+			}
+			if lines := entries(transcript(t, b.s)); strings.Contains(strings.Join(lines, "\n"), key) {
+				t.Fatalf("the parent's transcript holds the key:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+// TestUndeliveredReportRedacted (astra r15, finding 3): a background child on
+// a model whose wire id holds a string no session knows as a key finishes,
+// having spent a step, and its result waits. The environment then gains the
+// key and the parent's switch learns it. Close reports the result undelivered
+// with its usage row's wire id redacted by the keys the session knows as it
+// reports it: the one record of that result that is never redacted again at
+// a reservation.
+func TestUndeliveredReportRedacted(t *testing.T) {
+	const late = "sk-learned-before-close"
+	env := map[string]string{"TEST_API_KEY": canary, "OTHER_API_KEY": canaryOther}
+	var mu sync.Mutex
+	b := openBG(t, withEnv(env, &mu), func(o *Options) {
+		m := o.Table.Models["other/c"]
+		m.WireModel = "wire-" + late
+		o.Table.Models["other/c"] = m
+	})
+	w := newWorker()
+	b.routers["test/a"].route("go", callStep(bgPart(t, "b1", "bg", "on c", "model", "other/c")), answerWith("started"))
+	b.routers["other/c"].route("on c", w.step(openText("c done"), finishText()))
+	var ev events
+	if _, err := b.s.Run(context.Background(), "go", ev.sink); err != nil {
+		t.Fatal(err)
+	}
+	id := startedWith(t, ev.list(), "on c").ID
+	b.finish(t, w)
+	if r := resultOf(t, b.s, id); r.usage == nil || r.usage.WireModel != "wire-"+late {
+		t.Fatalf("control: the waiting result's usage = %+v; want the wire id as it is, no key yet", r.usage)
+	}
+	mu.Lock()
+	env["NOKEY_API_KEY"] = late
+	mu.Unlock()
+	if err := b.s.SetModel("nokey/d"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	if b.s.Redact(late) != redact.Marker {
+		t.Fatal("control: the parent's switch did not learn the key")
+	}
+	if err := b.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := of[SubagentUndelivered](b.own.list())
+	want := []SubagentUndelivered{{ID: id, Type: "general-purpose",
+		Usage: []ModelUsage{{Provider: "other", Model: "other/c", WireModel: "wire-" + redact.Marker, Usage: oneStep(1)}}}}
+	if !reflect.DeepEqual(got, want) || len(leaks(got, late)) != 0 {
+		t.Fatalf("SubagentUndelivered = %+v; want %+v, the key redacted", got, want)
+	}
+}
+
+// TestCloseJoinsASettlingWorker (astra r15, finding 4): a background child's
+// turn has returned and its worker is held there, before anything of its
+// settlement — its outcome, its finish, its result's publication. A Close
+// started then is parked joining the workers, and has not returned, while the
+// worker is held; once it is let go Close returns, after the worker
+// published: the child's finish comes first, and the report of its result
+// carries the usage the published result holds. A Close that joined nothing
+// would have returned at once, reporting a child still running, with none.
+func TestCloseJoinsASettlingWorker(t *testing.T) {
+	b := openBG(t)
+	held, release := make(chan string, 1), make(chan struct{})
+	b.s.subs.seams.returned = func(id string) {
+		held <- id
+		<-release
+	}
+	// A failure must not leave the worker, and the cleanup's Close, held.
+	letGo := sync.OnceFunc(func() { close(release) })
+	defer letGo()
+	ws, ids := b.spawn(t, "child one")
+	close(ws[0].release)
+	if id := await(t, held, "the worker, its child's turn returned"); id != ids[0] {
+		t.Fatalf("the worker of %s is held; want %s's", id, ids[0])
+	}
+	done := make(chan struct{})
+	var closeErr error
+	go func() {
+		closeErr = b.s.Close()
+		close(done)
+	}()
+	waitFor(t, func() bool { return isClosed(done) || joining() }, "Close joining the workers, or returning")
+	if isClosed(done) {
+		t.Fatalf("Close returned (%v) while a background worker was still settling its child", closeErr)
+	}
+	if r := resultOf(t, b.s, ids[0]); r.state != resultRunning || len(of[SubagentUndelivered](b.own.list())) != 0 {
+		t.Fatalf("control: with the worker held the result is %v; want running, nothing reported", r.state)
+	}
+	letGo()
+	await(t, done, "Close, the worker let go")
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	own := b.own.list()
+	fin := slices.IndexFunc(own, func(ev Event) bool { f, ok := ev.(SubagentFinished); return ok && f.ID == ids[0] })
+	rep := slices.IndexFunc(own, func(ev Event) bool { _, ok := ev.(SubagentUndelivered); return ok })
+	want := []SubagentUndelivered{{ID: ids[0], Type: "general-purpose", Usage: oneRow(1)}}
+	if got := of[SubagentUndelivered](own); fin < 0 || fin > rep || !reflect.DeepEqual(got, want) {
+		t.Fatalf("finished at %d, reported at %d: %+v; want the finish, then the published result's report %+v", fin, rep, got, want)
+	}
+	if kids := b.kids.all(); len(kids) != 1 || !storeClosed(kids[0].store) {
+		t.Fatal("the child's store is still open after Close returned")
+	}
+	settled(t, b.s)
+}
+
+// TestAppendBeatsALaterCancel (astra r15, finding 5; P42): a result taken up
+// at a turn's step 0 is written by its first step's append, and the turn is
+// cancelled from that step's StepDone — after the append committed it. It
+// stays committed: the turn's end gives nothing back and says nothing
+// (OnPending); no later turn or wake delivers it again; and its usage is on
+// the one entry that wrote it, on no StepDone, and in no report at Close.
+func TestAppendBeatsALaterCancel(t *testing.T) {
+	b := openBG(t)
+	a := b.routers["test/a"]
+	ws, ids := b.spawn(t, "child one")
+	b.finish(t, ws[0])
+	// One step: the turn is cancelled as it ends. A second request, made on
+	// the cancelled context, finds nothing queued — a step left queued would
+	// be the next turn's — and the turn reads cancelled either way.
+	a.route("go", callStep(globPart("g1")))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ev events
+	var saved StepDone
+	res, err := b.s.Run(ctx, "next", func(e Event) {
+		ev.sink(e)
+		if d, ok := e.(StepDone); ok && d.Step == 1 {
+			saved = d
+			cancel()
+		}
+	})
+	if err != nil || res.StopReason != StopCancelled {
+		t.Fatalf("Run = %+v, %v; want cancelled", res, err)
+	}
+	n := len(saved.Entries)
+	if !saved.Saved || n != 4 {
+		t.Fatalf("the first step's StepDone = %+v; want it saved: the prompt, the results, the call and its result", saved)
+	}
+	tr := transcript(t, b.s)
+	lead := tr.Entries[entryIndex(tr, saved.Entries[1])]
+	if r := resultOf(t, b.s, ids[0]); r.state != resultCommitted || r.entry != lead.ID || !lead.SubagentResults {
+		t.Fatalf("the result is %v by %q; want committed by the step's entry of results %s", r.state, r.entry, lead.ID)
+	}
+	b.noPending(t)
+	a.route("go", answerWith("ok"))
+	run(t, b.s, "again")
+	if _, err := b.s.Wake(context.Background(), nil); !errors.Is(err, ErrNothingPending) || b.s.HasPending() {
+		t.Fatalf("a wake after = %v; want ErrNothingPending", err)
+	}
+	reqs := a.requests("go")
+	if n := strings.Count(requestText(reqs[len(reqs)-1], false), `<subagent_result id="`+ids[0]+`"`); n != 1 {
+		t.Fatalf("the next turn's request carries the result %d times; want once, replayed from its entry", n)
+	}
+	tr = transcript(t, b.s)
+	var rows []ModelUsage
+	for _, e := range tr.Entries {
+		rows = append(rows, e.SubagentUsage...)
+	}
+	if delivered(tr, ids[0]) != 1 || !reflect.DeepEqual(rows, oneRow(1)) {
+		t.Fatalf("the result delivered %d times, the transcript's rows %+v; want once, one row", delivered(tr, ids[0]), rows)
+	}
+	for _, d := range of[StepDone](ev.list()) {
+		if d.SubagentUsage != nil {
+			t.Fatalf("StepDone %d carries %+v; want no rows: the entry that wrote the result carries them", d.Step, d.SubagentUsage)
+		}
+	}
+	if err := b.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if u := of[SubagentUndelivered](b.own.list()); len(u) != 0 {
+		t.Fatalf("SubagentUndelivered = %+v; want none: the result was committed", u)
+	}
+}
+
+// TestBackgroundWorkerPanicFailsTheChild (astra r15; §3.11's worker): a panic
+// on a background child's worker outside the child's own turn — here in the
+// session's sink, handed the child's SubagentFinished — is the worker's to
+// recover. The child is failed: its result is the runner's failure naming the
+// panic, with the child's last output and what it spent; its registration and
+// its slot are given back; and the session goes on, delivering the failure at
+// its next turn.
+func TestBackgroundWorkerPanicFailsTheChild(t *testing.T) {
+	var once atomic.Bool
+	b := openBG(t, func(o *Options) {
+		own := o.Sink
+		o.Sink = func(ev Event) {
+			if _, ok := ev.(SubagentFinished); ok && once.CompareAndSwap(false, true) {
+				panic("the session's sink exploded")
+			}
+			own(ev)
+		}
+	})
+	a := b.routers["test/a"]
+	ws, ids := b.spawn(t, "child one")
+	b.finish(t, ws[0])
+	want := "The sub-agent failed: it panicked: the session's sink exploded.\n\nIts last output was:\ndid child one"
+	if r := resultOf(t, b.s, ids[0]); r.state != resultPending || r.status != SubagentFailed || r.text != want ||
+		r.usage == nil || r.usage.Usage != (tool.Usage{Input: 10, Output: 5, CacheRead: 4}) {
+		t.Fatalf("the result = %+v (usage %+v); want pending, failed, naming the panic, with the child's usage", r, r.usage)
+	}
+	settled(t, b.s)
+	a.route("go", answerWith("noted"))
+	if res := run(t, b.s, "next"); res.StopReason != StopEndTurn {
+		t.Fatalf("the next turn = %+v; want end_turn", res)
+	}
+	reqs := a.requests("go")
+	if got := lastUser(t, reqs[len(reqs)-1]); got != block(ids[0], SubagentFailed, want) {
+		t.Fatalf("the next turn's request ends %q; want the failure delivered", got)
+	}
+	if r := resultOf(t, b.s, ids[0]); r.state != resultCommitted {
+		t.Fatalf("the result is %v; want committed", r.state)
+	}
+}
+
+// TestBackgroundRegistrationRacesClose (astra r15; §3.8's protocol, a
+// background call's): a Close that has sealed the registry before a
+// background call registers aborts the call — no child opens, no worker
+// starts, and nothing is left registered, held or to be reported — and one
+// that seals right after the call launched its worker joins it: Close returns
+// only once the worker has settled its child and published its result, which
+// it then reports.
+func TestBackgroundRegistrationRacesClose(t *testing.T) {
+	t.Run("sealed before the call registers", func(t *testing.T) {
+		b := openBG(t)
+		acquired, proceed := make(chan struct{}), make(chan struct{})
+		b.s.subs.seams.acquired = func(tool.SubagentCall) {
+			close(acquired)
+			<-proceed
+		}
+		// A failure must not leave the call, and so the turn and every Close
+		// waiting on it, held.
+		goOn := sync.OnceFunc(func() { close(proceed) })
+		defer goOn()
+		b.routers["test/a"].route("go", callStep(bgPart(t, "a1", "scan", "child one")), answerWith("never"))
+		finished := make(chan tool.Result, 1)
+		var ev events
+		out := start(context.Background(), b.s, "go", func(e Event) {
+			ev.sink(e)
+			if f, ok := e.(ToolFinished); ok && f.ID == "t1.1.1" {
+				finished <- f.Result
+			}
+		})
+		await(t, acquired, "the background call holding its slot, about to register")
+		// Close is held on the session's lock once it has sealed the registry
+		// and before it signals anything — the turn, the tools' closing — so
+		// the seal is the only thing that can refuse the call. A child that
+		// opened would wait on the same lock.
+		b.s.mu.Lock()
+		unlock := sync.OnceFunc(b.s.mu.Unlock)
+		defer unlock()
+		closed := make(chan error, 1)
+		go func() { closed <- b.s.Close() }()
+		waitFor(t, func() bool { return waitingOnMutexIn("harness.(*Session).signalClose(", "harness.(*Session).Close(") },
+			"Close, the registry sealed, waiting to signal")
+		goOn()
+		res := await(t, finished, "the call's result")
+		if res.Class != tool.ClassAborted || res.Text != tool.AbortedText {
+			t.Fatalf("the call = %+v; want aborted: the registry was sealed", res)
+		}
+		b.s.subs.regMu.Lock()
+		results := len(b.s.subs.results)
+		b.s.subs.regMu.Unlock()
+		if len(b.kids.all()) != 0 || results != 0 || len(of[SubagentStarted](ev.list())) != 0 {
+			t.Fatalf("%d children opened, %d results recorded; want none", len(b.kids.all()), results)
+		}
+		settled(t, b.s)
+		unlock()
+		if got := await(t, out, "the turn"); got.err != nil {
+			t.Fatalf("Run = %+v, %v", got.res, got.err)
+		}
+		if err := await(t, closed, "Close"); err != nil {
+			t.Fatal(err)
+		}
+		if own := b.own.list(); len(own) != 0 {
+			t.Fatalf("the session's sink had %v; want nothing: no child ran", own)
+		}
+	})
+	t.Run("sealed right after the worker launched", func(t *testing.T) {
+		b := openBG(t)
+		held, release := make(chan string, 1), make(chan struct{})
+		b.s.subs.seams.returned = func(id string) {
+			held <- id
+			<-release
+		}
+		letGo := sync.OnceFunc(func() { close(release) })
+		defer letGo()
+		b.routers["test/a"].route("go", callStep(bgPart(t, "a1", "scan", "child one")), answerWith("never"))
+		launched, proceed := make(chan string, 1), make(chan struct{})
+		goOn := sync.OnceFunc(func() { close(proceed) })
+		defer goOn()
+		var ev events
+		out := start(context.Background(), b.s, "go", func(e Event) {
+			ev.sink(e)
+			if st, ok := e.(SubagentStarted); ok && st.Background {
+				// The call counted its worker and started it before it
+				// reported the child started.
+				launched <- st.ID
+				<-proceed
+			}
+		})
+		id := await(t, launched, "the worker launched")
+		done := make(chan struct{})
+		var closeErr error
+		go func() {
+			closeErr = b.s.Close()
+			close(done)
+		}()
+		await(t, b.s.tools.closing, "Close, the registry sealed and the child signalled")
+		goOn()
+		if got := await(t, held, "the worker, its child's turn over"); got != id {
+			t.Fatalf("the worker of %s is held; want %s's", got, id)
+		}
+		waitFor(t, func() bool { return isClosed(done) || joining() }, "Close joining the workers, or returning")
+		if isClosed(done) {
+			t.Fatalf("Close returned (%v) while the worker it launched before the seal was still settling", closeErr)
+		}
+		letGo()
+		await(t, done, "Close, the worker let go")
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if got := await(t, out, "the turn"); got.err != nil {
+			t.Fatalf("Run = %+v, %v", got.res, got.err)
+		}
+		if ack := callResult(t, ev.list(), "t1.1.1"); ack.Text != ackText(id) || ack.IsError {
+			t.Fatalf("the spawning call = %+v; want its acknowledgement, final", ack)
+		}
+		own := b.own.list()
+		fin := slices.IndexFunc(own, func(ev Event) bool { f, ok := ev.(SubagentFinished); return ok && f.ID == id })
+		rep := slices.IndexFunc(own, func(ev Event) bool { _, ok := ev.(SubagentUndelivered); return ok })
+		want := []SubagentUndelivered{{ID: id, Type: "general-purpose"}}
+		if got := of[SubagentUndelivered](own); fin < 0 || fin > rep || own[fin].(SubagentFinished).Status != SubagentCancelled ||
+			!reflect.DeepEqual(got, want) {
+			t.Fatalf("finished at %d, reported at %d: %+v; want the child cancelled by the closing, then reported %+v", fin, rep, got, want)
+		}
+		if kids := b.kids.all(); len(kids) != 1 || !storeClosed(kids[0].store) {
+			t.Fatal("the child's store is still open after Close returned")
+		}
+		settled(t, b.s)
+	})
+}
+
+// TestBackgroundFailureRacesAStop (astra r15; X26, §3.10): a background child
+// whose provider fails, and the user's stop landing after its Run returned
+// and before its end is latched — taken, where the latch would refuse it. A
+// stop claims only a cancelled ending, so the child stays failed: its finish
+// and its result say its provider failed, never that the user stopped it,
+// and the failure is what the parent's model is delivered.
+func TestBackgroundFailureRacesAStop(t *testing.T) {
+	b := openBG(t)
+	a := b.routers["test/a"]
+	stops := make(chan error, 1)
+	b.s.subs.seams.returned = func(id string) { stops <- b.s.CancelSubagent(id) }
+	a.route("go", callStep(bgPart(t, "a1", "racing", "end on your own")), answerWith("started"))
+	a.route("end on your own", callStep(textParts("looking"), globPart("g1")),
+		reply(openText("half an answer"), errorPart(errors.New("the provider hung up"))))
+	var ev events
+	if res, err := b.s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
+	}
+	id := startedWith(t, ev.list(), "end on your own").ID
+	if err := await(t, stops, "the stop between the child's Run and its latch"); err != nil {
+		t.Fatalf("the stop = %v; want nil, taken before the latch", err)
+	}
+	if !await(t, b.pending, "the failed child's result") {
+		t.Fatal("OnPending's handler found nothing pending")
+	}
+	fin := finishedOf(t, b.own.list(), id)
+	if fin.Status != SubagentFailed || fin.Error == subagentStoppedLabel || !strings.Contains(fin.Error, "the provider hung up") {
+		t.Fatalf("SubagentFinished = %+v; want failed on the provider, not stopped", fin)
+	}
+	r := resultOf(t, b.s, id)
+	if r.status != SubagentFailed || !strings.HasPrefix(r.text, "The sub-agent failed: ") ||
+		!strings.Contains(r.text, "the provider hung up") || !strings.HasSuffix(r.text, "Its last output was:\nhalf an answer") {
+		t.Fatalf("the result = %s: %q; want the provider's failure with the child's last output", r.status, r.text)
+	}
+	a.route("go", answerWith("noted"))
+	run(t, b.s, "next")
+	reqs := a.requests("go")
+	if got := lastUser(t, reqs[len(reqs)-1]); got != block(id, SubagentFailed, r.text) {
+		t.Fatalf("the delivered result = %q; want the failure", got)
+	}
+	settled(t, b.s)
 }
