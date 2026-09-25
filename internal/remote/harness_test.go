@@ -400,7 +400,13 @@ type tap struct {
 	// having written nothing: a host that has stopped reading. The line is
 	// recorded as sent, and never reaches the host.
 	stallOut func(l wireLine) bool
-	changed  chan struct{}
+	// tearOut, when set, tears a line the client is writing for which it
+	// returns a channel: half of it is written, the connection is closed —
+	// a link failing mid-write — and the write returns what it wrote, with
+	// an error, only once the channel is closed: its writer is held inside
+	// the write, before it returns.
+	tearOut func(l wireLine) <-chan struct{}
+	changed chan struct{}
 }
 
 func newTap(t *testing.T) *tap {
@@ -539,6 +545,26 @@ func (tp *tap) setStallOut(f func(wireLine) bool) {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	tp.stallOut = f
+}
+
+func (tp *tap) setTearOut(f func(wireLine) <-chan struct{}) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.tearOut = f
+}
+
+// lineCount is how many lines the tap has recorded, either way.
+func (tp *tap) lineCount() int {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return len(tp.lines)
+}
+
+// linesFrom is every line recorded from index i on.
+func (tp *tap) linesFrom(i int) []wireLine {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return append([]wireLine(nil), tp.lines[i:]...)
 }
 
 // connCount is how many connections the tap has opened.
@@ -700,10 +726,22 @@ func (c *tapConn) Write(b []byte) (int, error) {
 	c.tp.mu.Lock()
 	c.tp.lines = append(c.tp.lines, l)
 	c.tp.changedLocked()
-	hold, rewrite, stall := c.tp.holdOut, c.tp.rewriteOut, c.tp.stallOut
+	hold, rewrite, stall, tear := c.tp.holdOut, c.tp.rewriteOut, c.tp.stallOut, c.tp.tearOut
 	c.tp.mu.Unlock()
 	if stall != nil && stall(l) {
 		return 0, c.stall()
+	}
+	if tear != nil {
+		if ch := tear(l); ch != nil {
+			n, _ := c.Conn.Write(b[:len(b)/2])
+			_ = c.Close()
+			select {
+			case <-ch:
+			case <-time.After(watchdog):
+				c.tp.fail("conn %d: the torn write's release: not in %s", c.idx, watchdog)
+			}
+			return n, net.ErrClosed
+		}
 	}
 	if hold != nil {
 		if ch := hold(l); ch != nil {

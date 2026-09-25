@@ -59,13 +59,17 @@
 // socket. A lost connection starts one reconnect goroutine, which opens the
 // next connection, re-attaches on it before its reader starts, sends every
 // command held, in wire order, and only then hands it over — every write of
-// it bounded by the episode, and the connection it adopts closed by Close
-// (reconnect.go). Client.mu guards the client's state (the connection, the
-// hello, the commands); Stream.mu the stream's, and the stream's queue has its
-// own lock, taken under Stream.mu and never the other way; Client.mu and
+// it bounded by the episode, even one made while the episode's clock is
+// stopped for the re-attach's reply, and the connection it adopts closed by
+// Close (reconnect.go). Client.mu guards the client's state (the connection,
+// the hello, the commands); Stream.mu the stream's, and the stream's queue has
+// its own lock, taken under Stream.mu and never the other way; Client.mu and
 // Stream.mu are never held together, nor any lock across I/O but a
-// connection's write lock, which takes no other. Close joins every goroutine
-// the client started.
+// connection's write lock. Under the write lock, as a write begins and ends,
+// only short sections run that wait on nothing: a command's wire-order key
+// (its own leaf lock), a stream's admission of its attach (Stream.mu), and the
+// reconnect episode's clock (its own lock); none of those locks is held while
+// a write lock is taken. Close joins every goroutine the client started.
 //
 // # Import boundary
 //

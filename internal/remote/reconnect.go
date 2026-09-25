@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -22,7 +23,10 @@ import (
 //     as a lost connection does), and at most Redials attempts are made within
 //     any RedialWindow across episodes. The one wait it does not bound is the
 //     adoption's for its re-attach's reply (X20: a when: "ready" attach may
-//     wait out a slow load): the episode's clock stops meanwhile. Past that
+//     wait out a slow load): the episode's clock stops meanwhile — unless it
+//     is spent already, when it never stops and the adoption ends — and runs
+//     again for any write made during that wait (a retried re-attach, a
+//     detach), so every write is bounded by it (C8c). Past that
 //     the client stops (ErrDisconnected): every command still waiting
 //     resolves ErrOutcomeUnknown, reason disconnected, and the stream hands up
 //     an Error item. A failed attempt waits Options.RedialBackoff, doubling,
@@ -84,18 +88,29 @@ func (c *Client) lost(w *wire) {
 }
 
 // episode is a reconnect episode's bound (step 1): RedialWindow from the
-// loss, its clock stopped while an adoption waits for its re-attach's reply
-// (X20, X21). ctx ends once it is spent, or with the client. It is the
-// reconnect goroutine's alone.
+// loss. Its clock stops while an adoption waits for its re-attach's reply
+// (X20, X23) and runs again for as long as a write on the connection being
+// adopted is in progress (C8c): only the wait for a reply is unbounded, never
+// a write. ctx ends once it is spent, or with the client. The reconnect
+// goroutine drives it; the adopted connection's writes (send) report to it.
 type episode struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	timer  *time.Timer
+
+	mu    sync.Mutex
+	timer *time.Timer
 	// end is when it is spent, while its clock runs; left is what was left
 	// of it when the clock stopped (halted).
 	end    time.Time
 	left   time.Duration
 	halted bool
+	// w is the connection being adopted, whose write deadline the episode
+	// keeps (its end while the clock runs, none while it is stopped); waiting
+	// says the adoption waits for its re-attach's reply, when the clock stops
+	// unless one of w's writes is in progress (inWrite).
+	w       *wire
+	waiting bool
+	inWrite bool
 }
 
 func (c *Client) newEpisode() *episode {
@@ -105,26 +120,122 @@ func (c *Client) newEpisode() *episode {
 }
 
 // spent says the episode is over: its time is up, or the client stopped.
-func (e *episode) spent() bool { return e.ctx.Err() != nil || !time.Now().Before(e.end) }
+func (e *episode) spent() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ctx.Err() != nil || (!e.halted && !time.Now().Before(e.end))
+}
 
-// halt stops the episode's clock, unless it is spent already; run starts it
-// again with what was left.
-func (e *episode) halt() {
-	if e.timer.Stop() {
-		e.left, e.halted = time.Until(e.end), true
+// deadline is when the episode is spent, its clock running.
+func (e *episode) deadline() time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.end
+}
+
+// adopt makes w the connection the episode bounds: every write on it from
+// here carries the episode's end, until release.
+func (e *episode) adopt(w *wire) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.w, e.waiting, e.inWrite = w, false, false
+	w.ep.Store(e)
+	_ = w.nc.SetWriteDeadline(e.end)
+}
+
+// release is w's adoption over (published, or given up): its writes no longer
+// report to the episode, and its clock runs.
+func (e *episode) release(w *wire) {
+	w.ep.Store(nil)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.w == w {
+		e.w, e.waiting, e.inWrite = nil, false, false
+		e.runLocked()
 	}
 }
 
-func (e *episode) run() {
+// wait is the adoption beginning its wait for the re-attach's reply: the
+// clock stops, unless a write is in progress (it stops when that ends) or
+// the episode is spent already (it never stops: the wait, which also watches
+// ctx, ends at once).
+func (e *episode) wait() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.waiting = true
+	if !e.inWrite {
+		e.haltLocked()
+	}
+}
+
+// resume is the adoption's wait over, however it ended: the clock runs again
+// with what was left, and the write deadline applies again — to a write
+// already blocked too.
+func (e *episode) resume() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.waiting = false
+	e.runLocked()
+}
+
+// writing is a write on w beginning (on) or ending: while the adoption waits
+// for its reply the clock runs for the write, bounding it with what is left,
+// and stops again after it. A nil episode, or another connection's write,
+// counts for nothing.
+func (e *episode) writing(w *wire, on bool) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.w != w {
+		return
+	}
+	e.inWrite = on
+	switch {
+	case !e.waiting:
+	case on:
+		e.runLocked()
+	default:
+		e.haltLocked()
+	}
+}
+
+// haltLocked stops the clock, and lifts the write deadline, only if the
+// timer is stopped before it fires with time still left: an episode that has
+// run out is spent (ctx ends), its deadline kept. e.mu is held.
+func (e *episode) haltLocked() {
+	if e.halted || !e.timer.Stop() {
+		return
+	}
+	left := time.Until(e.end)
+	if left <= 0 {
+		e.cancel()
+		return
+	}
+	e.left, e.halted = left, true
+	if e.w != nil {
+		_ = e.w.nc.SetWriteDeadline(time.Time{})
+	}
+}
+
+// runLocked starts the clock again with what was left, and applies its end
+// to the adopted connection's writes; e.mu is held.
+func (e *episode) runLocked() {
 	if e.halted {
 		e.halted = false
 		e.end = time.Now().Add(e.left)
 		e.timer.Reset(e.left)
 	}
+	if e.w != nil {
+		_ = e.w.nc.SetWriteDeadline(e.end)
+	}
 }
 
 func (e *episode) close() {
+	e.mu.Lock()
 	e.timer.Stop()
+	e.mu.Unlock()
 	e.cancel()
 }
 
@@ -159,7 +270,7 @@ func (c *Client) reconnect() {
 			resume = &protocol.Resume{ClientID: c.hello.ClientID, Token: c.hello.Token}
 		}
 		c.mu.Unlock()
-		w, h, err := c.open(ep.ctx, ep.end, resume)
+		w, h, err := c.open(ep.ctx, ep.deadline(), resume)
 		if err == nil && c.adopt(ep, w, h, resume) {
 			return
 		}
@@ -252,7 +363,7 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 		// A fresh client may be speaking to another session (a replaced
 		// engine): the host serves one, and says which.
 		var list protocol.SessionsListResult
-		err := c.exchange(ep.ctx, ep.end, w, func() error {
+		err := c.exchange(ep.ctx, ep.deadline(), w, func() error {
 			return c.syncCall(w, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list)
 		})
 		var e *Error
@@ -269,8 +380,9 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 	// Every write the adoption makes — the re-attach here, the resends at
 	// publication, and whatever the reader posts meanwhile — ends with the
 	// episode: a host that answers and then stops reading fails the
-	// attempt, and cannot keep a command waiting past the episode (X21).
-	_ = w.nc.SetWriteDeadline(ep.end)
+	// attempt, and cannot keep a command waiting past the episode (X21, C8c).
+	ep.adopt(w)
+	defer ep.release(w)
 	var reattached <-chan struct{}
 	if s != nil {
 		reattached = s.reconnected(w, !fresh, sid)
@@ -279,30 +391,40 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 	c.startReaderLocked(w)
 	c.mu.Unlock()
 	if reattached != nil {
+		if h := c.hooks.pausing; h != nil {
+			h(ep.ctx.Done())
+		}
 		// The re-attach's reply may take minutes (a when: "ready" attach
-		// during a slow load, X20): the episode's clock, and its bound on
-		// writes, stop until the wait ends — however it ends, so a redial
-		// after it has what was left — and then apply again, to a write
-		// already blocked too.
-		ep.halt()
-		_ = w.nc.SetWriteDeadline(time.Time{})
-		var gone, stopped bool
+		// during a slow load, X20): the episode's clock stops until the wait
+		// ends — however it ends, so a redial after it has what was left —
+		// except while a write is in progress, which the clock bounds; and
+		// an episode already spent never stops, and ends the wait (C8c).
+		ep.wait()
+		var gone, spent bool
 		select {
 		case <-reattached:
 		case <-w.gone:
 			gone = true
-		case <-c.ctx.Done():
-			stopped = true
+		case <-ep.ctx.Done():
+			select {
+			case <-reattached:
+			default:
+				spent = true
+			}
 		}
-		ep.run()
+		ep.resume()
 		switch {
-		case stopped:
+		case c.ctx.Err() != nil:
 			_ = w.nc.Close()
 			return true
 		case gone:
 			return false
+		case spent:
+			// Spent while it waited, or before it began: the reconnect,
+			// finding it so, gives up.
+			_ = w.nc.Close()
+			return false
 		}
-		_ = w.nc.SetWriteDeadline(ep.end)
 	}
 	// The stream has re-attached on the session the host serves now (or
 	// stopped, or owes a re-attach with no cursor once its caller drains).
@@ -353,7 +475,7 @@ func (c *Client) publish(w *wire) bool {
 		var held []heldCmd
 		for _, cmd := range c.cmds {
 			if cmd.want && !cmd.out && !cmd.waiting && !cmd.resolved && !cmd.gone {
-				held = append(held, heldCmd{cmd, cmd.seq.Load()})
+				held = append(held, heldCmd{cmd, cmd.key()})
 			}
 		}
 		if len(held) == 0 {
@@ -367,9 +489,11 @@ func (c *Client) publish(w *wire) bool {
 			return true
 		}
 		c.mu.Unlock()
-		// Wire order: the order of first writes; a command never written
-		// goes after every one that was, in the order it was issued (c.cmds
-		// is in mint order, and the sort is stable).
+		// Wire order: the order of first writes — each keyed as its write
+		// began, before its first byte, so one a writer is still inside (or
+		// has not yet returned from) is keyed already (C8c); a command never
+		// written goes after every one that was, in the order it was issued
+		// (c.cmds is in mint order, and the sort is stable).
 		slices.SortStableFunc(held, func(a, b heldCmd) int {
 			switch {
 			case a.seq == b.seq:

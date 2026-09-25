@@ -119,7 +119,7 @@ type Client struct {
 
 	// wireOrder numbers commands' first writes (command.seq): a reconnect
 	// resends in that order (X18 3). It is taken under a connection's write
-	// lock, when a command's first byte is written (X21).
+	// lock, as a command's write begins, before its first byte (X21, C8c).
 	wireOrder atomic.Uint64
 
 	mu sync.Mutex
@@ -195,6 +195,14 @@ type hooks struct {
 	// closing runs on Stream.Close once it has taken the subscription it
 	// detaches, before it sends anything.
 	closing func()
+	// pausing runs on a reconnect once its re-attach is written and the
+	// connection's reader started, before the episode's clock stops for the
+	// re-attach's reply; spent is closed once the episode is spent.
+	pausing func(spent <-chan struct{})
+	// posted runs on a connection's reader once it has handed a write to the
+	// connection's writer (post); postRan on the writer once it has run one.
+	posted  func()
+	postRan func()
 }
 
 // wire is one connection: its reader's framing, its writer's lock, and the
@@ -207,6 +215,11 @@ type wire struct {
 	// maxLine is the host's inbound line limit (hello's limits), which no
 	// request may exceed.
 	maxLine int
+	// ep is the reconnect episode adopting w, nil once it is adopted (or was
+	// never a reconnect's): each write on w tells it when it begins and ends,
+	// so a write made while the episode's clock is stopped runs the clock
+	// (reconnect.go, C8c).
+	ep atomic.Pointer[episode]
 
 	mu      sync.Mutex
 	pending map[string]replyFunc
@@ -467,15 +480,30 @@ func (c *Client) requestLine(method string, params json.RawMessage) (string, []b
 // that this attempt cannot have run.
 var errUnsent = fmt.Errorf("%w (nothing was sent)", ErrConnectionLost)
 
+// errWithdrawn is a send its begin hook withdrew once it held the write lock:
+// nothing was written (a closed stream's attach, C8c).
+var errWithdrawn = errors.New("remote: the request was withdrawn before a byte of it was written")
+
+// writeHooks run under a request's write lock, so the order they run in
+// across requests on a connection is the order those went on the wire: begin
+// just before the first byte could be written — false withdraws the request
+// (errWithdrawn), and nothing is written — and end once the write has
+// returned, with the bytes it wrote. Either may be nil. They take only leaf
+// locks (a command's key, a stream's state).
+type writeHooks struct {
+	begin func() bool
+	end   func(n int)
+}
+
 // send writes one request on w; fn, when not nil, receives its reply on w's
 // reader. It fails when w is gone (errUnsent), when the request is over the
-// host's inbound limit (ErrRequestTooLarge; nothing sent), or when the write
-// fails — ErrConnectionLost if some of it may have gone, errUnsent if not a
-// byte did — which closes w: its reader then exits, and the client
-// reconnects. wrote, when not nil, runs under w's write lock once a byte of
-// the request has been written, so the order it runs in across requests on w
-// is the order they went on the wire (a command's wire order, X21).
-func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFunc, wrote func()) (string, error) {
+// host's inbound limit (ErrRequestTooLarge; nothing sent), when hk.begin
+// withdraws it (errWithdrawn), or when the write fails — ErrConnectionLost if
+// some of it may have gone, errUnsent if not a byte did — which closes w: its
+// reader then exits, and the client reconnects. A write on a connection a
+// reconnect is adopting tells the episode it begins and ends, so it is bounded
+// by the episode even while the adoption's wait has stopped its clock (C8c).
+func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFunc, hk writeHooks) (string, error) {
 	id, line, err := c.requestLine(method, params)
 	if err != nil {
 		return "", err
@@ -493,9 +521,17 @@ func (c *Client) send(w *wire, method string, params json.RawMessage, fn replyFu
 	}
 	w.mu.Unlock()
 	w.wmu.Lock()
+	if hk.begin != nil && !hk.begin() {
+		w.wmu.Unlock()
+		w.take(id)
+		return "", errWithdrawn
+	}
+	ep := w.ep.Load()
+	ep.writing(w, true)
 	n, err := w.nc.Write(line)
-	if n > 0 && wrote != nil {
-		wrote()
+	ep.writing(w, false)
+	if hk.end != nil {
+		hk.end(n)
 	}
 	w.wmu.Unlock()
 	if err != nil {
@@ -568,6 +604,9 @@ func (c *Client) post(w *wire, fn func()) {
 		c.wg.Add(1)
 		go c.writePosted(w)
 	}
+	if h := c.hooks.posted; h != nil {
+		h()
+	}
 }
 
 // writePosted runs what is posted on w until nothing is left.
@@ -585,6 +624,9 @@ func (c *Client) writePosted(w *wire) {
 		w.posted = w.posted[1:]
 		w.mu.Unlock()
 		fn()
+		if h := c.hooks.postRan; h != nil {
+			h()
+		}
 	}
 }
 
@@ -816,7 +858,7 @@ func (c *Client) callOn(ctx context.Context, w *wire, method string, params, res
 		return err
 	}
 	ch := make(chan cmdResult, 1)
-	id, err := c.send(w, method, raw, func(resp *protocol.Response, err error) { ch <- cmdResult{resp: resp, err: err} }, nil)
+	id, err := c.send(w, method, raw, func(resp *protocol.Response, err error) { ch <- cmdResult{resp: resp, err: err} }, writeHooks{})
 	if err != nil {
 		return err
 	}

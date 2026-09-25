@@ -1,6 +1,7 @@
 package remote_test
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strconv"
@@ -214,6 +215,168 @@ func TestWireOrderIsTheOrderOfWrites(t *testing.T) {
 				t.Fatalf("the host's rows %q, want B, A", rows)
 			}
 		})
+	}
+}
+
+// lineCommandID is a command request's commandId, "" when it has none (it
+// runs on the client's goroutines, where t.Fatal is not allowed).
+func lineCommandID(l wireLine) string {
+	var p struct {
+		CommandID string `json:"commandId"`
+	}
+	_ = json.Unmarshal(l.params, &p)
+	return p.CommandID
+}
+
+// TestAPartlyWrittenCommandSortsBeforeANeverSentOne (C8c; astra r13, further
+// 1): A is registered first and pauses once it has claimed its first attempt,
+// before a byte of it is written (the Claimed hook). B is sent meanwhile, and
+// its write is torn — half of it written, then the connection fails — with B's
+// writer held inside the write, before it returns (the tap's tear): whatever
+// B's attempt does once its write returns has not run. The reader tears the
+// connection down, and the reconnect resumes and reaches publication. B's
+// place in wire order was taken as its write began, before its first byte, so
+// B — partly written, and so perhaps run — is resent before A, which was never
+// sent; each runs once. (Both go on the new connection back to back, and the
+// host runs each request on a goroutine of its own, so the order they run in
+// is the host's: the client's is the wire's.)
+func TestAPartlyWrittenCommandSortsBeforeANeverSentOne(t *testing.T) {
+	tp := newTap(t)
+	h := newHost(t)
+	claimed, resumeA, releaseB := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	published := make(chan struct{})
+	t.Cleanup(func() {
+		closeOnce(resumeA)
+		closeOnce(releaseB)
+	})
+	// Only A's first claim pauses (publication claims it again meanwhile).
+	var first atomic.Bool
+	c := dialHooked(t, h.path, tp, remote.Options{}, remote.TestHooks{
+		Claimed: func(id string) {
+			if id == "1" && first.CompareAndSwap(false, true) {
+				close(claimed)
+				hold(tp, resumeA, "A's write")
+			}
+		},
+		Published: func() { closeOnce(published) },
+	})
+	tp.setTearOut(func(l wireLine) <-chan struct{} {
+		if l.conn == 0 && l.method == protocol.MethodQueueAdd && lineCommandID(l) == "2" {
+			return releaseB
+		}
+		return nil
+	})
+	type answer struct {
+		text string
+		err  error
+	}
+	answers := make(chan answer, 2)
+	issue := func(text string) {
+		go func() {
+			_, err := c.Command(tctx(t), protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: h.sid(), Text: text},
+				nil, remote.CommandOptions{})
+			answers <- answer{text, err}
+		}()
+	}
+	issue("A")
+	await(t, claimed, "A to claim its first attempt")
+	issue("B")
+	// B's writer is still inside its torn write, and A has not written a
+	// byte, when the reconnect publishes the next connection.
+	await(t, published, "the reconnect's publication")
+	if got := len(tp.sentOn(0, protocol.MethodQueueAdd)); got != 1 {
+		t.Fatalf("the premise: %d writes on the first connection, want B's torn one", got)
+	}
+	closeOnce(releaseB)
+	closeOnce(resumeA)
+	for range 2 {
+		if a := recv(t, answers); a.err != nil {
+			t.Fatalf("%s: %v", a.text, a.err)
+		}
+	}
+	if hc := c.Hello(); !hc.Resumed {
+		t.Fatalf("the premise: the reconnect resumed: %+v", hc)
+	}
+	var sent []string
+	for _, l := range tp.sentOn(1, protocol.MethodQueueAdd) {
+		sent = append(sent, commandID(t, l))
+	}
+	if !slices.Equal(sent, []string{"2", "1"}) {
+		t.Fatalf("the second connection's sends %q, want B (2), partly written, then A (1), never sent", sent)
+	}
+	for _, text := range []string{"A", "B"} {
+		if n := queued(h, text); n != 1 {
+			t.Fatalf("the host ran %s %d times", text, n)
+		}
+	}
+}
+
+// TestAWriteThatSendsNothingTakesNoPlace (C8c; astra r13, further 1): the
+// first command is registered and pauses once it has claimed its attempt,
+// before a byte of it is written; the second's write begins — taking its place
+// in wire order — and stalls, and the connection goes under it: not a byte of
+// it was written, and its attempt returns (the Attempted hook) before the
+// reconnect may redial. The place it took is given back, so neither command
+// was sent: after the resume they go in the order they were issued, the first
+// first, and each runs once.
+func TestAWriteThatSendsNothingTakesNoPlace(t *testing.T) {
+	tp := newTap(t)
+	t.Cleanup(tp.releaseDials)
+	h := newHost(t)
+	claimed, resumeFirst, attempted := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { closeOnce(resumeFirst) })
+	var paused atomic.Bool
+	c := dialHooked(t, h.path, tp, remote.Options{}, remote.TestHooks{
+		Claimed: func(id string) {
+			if id == "1" && paused.CompareAndSwap(false, true) {
+				close(claimed)
+				hold(tp, resumeFirst, "the first command's write")
+			}
+		},
+		Attempted: func(id string) {
+			if id == "2" {
+				close(attempted)
+			}
+		},
+	})
+	tp.setStallOut(func(l wireLine) bool {
+		return l.conn == 0 && l.method == protocol.MethodQueueAdd && lineCommandID(l) == "2"
+	})
+	answers := make(chan error, 2)
+	issue := func(text string) {
+		go func() {
+			_, err := c.Command(tctx(t), protocol.MethodQueueAdd, protocol.QueueAddParams{SessionID: h.sid(), Text: text},
+				nil, remote.CommandOptions{})
+			answers <- err
+		}()
+	}
+	issue("first")
+	await(t, claimed, "the first command to claim its attempt")
+	issue("second")
+	tp.await(t, "the second's write", func() bool { return len(tp.sentOn(0, protocol.MethodQueueAdd)) == 1 })
+	redial := tp.holdDials()
+	tp.kill()
+	await(t, attempted, "the second's attempt to return, nothing written")
+	await(t, redial, "the redial")
+	tp.releaseDials()
+	waitFor(t, "the second's resend", func() bool { return len(tp.sentOn(1, protocol.MethodQueueAdd)) == 2 })
+	closeOnce(resumeFirst)
+	for range 2 {
+		if err := recv(t, answers); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var sent []string
+	for _, l := range tp.sentOn(1, protocol.MethodQueueAdd) {
+		sent = append(sent, commandID(t, l))
+	}
+	if !slices.Equal(sent, []string{"1", "2"}) {
+		t.Fatalf("the second connection's sends %q, want 1 then 2: neither was sent, so the order they were issued", sent)
+	}
+	for _, text := range []string{"first", "second"} {
+		if n := queued(h, text); n != 1 {
+			t.Fatalf("the host ran the %s command %d times", text, n)
+		}
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -55,13 +55,16 @@ import (
 // included — sends it while the backoff runs (X21), and only the caller's
 // context bounds how long it waits on a host that stays at its cap.
 //
-// WIRE ORDER (X18 3, X21). Each command is numbered when the first byte of its
-// first attempt is written, under the connection's write lock (command.seq):
-// the order of the numbers is the order on the wire, and an attempt that
-// wrote nothing numbers nothing. A reconnect resends in that order — a
-// command never written after every one that was, in the order it was issued
-// — and sends everything it holds before it publishes the connection, so no
-// new command, retry or wait-out overtakes a resend on it.
+// WIRE ORDER (X18 3, X21, C8c). Each command is numbered as the write of its
+// first attempt begins — under the connection's write lock, before its first
+// byte (command.key) — so the order of the numbers is the order on the wire,
+// and a command partly written is numbered even while its writer has not yet
+// returned from the write: it always sorts before one never sent. A write that
+// sends nothing gives its number back (unless another attempt has written
+// under it meanwhile). A reconnect resends in that order — a command never
+// written after every one that was, in the order it was issued — and sends
+// everything it holds before it publishes the connection, so no new command,
+// retry or wait-out overtakes a resend on it.
 //
 // A command is sized against the host it is sent to: one over the inbound
 // limit of the host a reconnect reached (its hello's) is never claimed, and
@@ -87,10 +90,15 @@ type command struct {
 	// without the newline: what a host's inbound limit is held against.
 	size int
 	done chan cmdResult // one answer at a time, to the caller
-	// seq is the command's place in wire order: numbered, under the write
-	// lock, when the first byte of its first attempt is written
-	// (Client.wireOrder); 0 until then.
-	seq atomic.Uint64
+
+	// kmu guards the command's place in wire order, a leaf lock (taken under
+	// a connection's write lock, and under Client.mu). seq is that place
+	// (Client.wireOrder), 0 while it has none; keyedBy is the attempt whose
+	// write took seq and has not written a byte of it — 0 once any write of
+	// the command's has written one, when seq is the command's for good.
+	kmu     sync.Mutex
+	seq     uint64
+	keyedBy int
 
 	// Guarded by Client.mu.
 	//
@@ -335,13 +343,9 @@ func (c *Client) attemptOn(cmd *command, via *wire) error {
 	// becomes of the attempt: it stays out, as one that may have reached the
 	// host — unless not a byte of it was written, when it is held for the
 	// next connection exactly as it stood before. Its place in wire order is
-	// taken when its first byte is (X21).
+	// taken as its write begins, and given back if it writes nothing (C8c).
 	_, err := c.send(w, cmd.method, cmd.params, func(resp *protocol.Response, err error) { c.commandReply(cmd, n, resp, err) },
-		func() {
-			if cmd.seq.Load() == 0 {
-				cmd.seq.Store(c.wireOrder.Add(1))
-			}
-		})
+		writeHooks{begin: func() bool { c.keyBegin(cmd, n); return true }, end: func(k int) { c.keyEnd(cmd, n, k) }})
 	if errors.Is(err, errUnsent) {
 		c.mu.Lock()
 		if cmd.attempt == n && cmd.out {
@@ -352,6 +356,42 @@ func (c *Client) attemptOn(cmd *command, via *wire) error {
 		c.mu.Unlock()
 	}
 	return err
+}
+
+// keyBegin is attempt n's write beginning, under its connection's write lock:
+// a command with no place in wire order takes the next, before a byte of it
+// is written.
+func (c *Client) keyBegin(cmd *command, n int) {
+	cmd.kmu.Lock()
+	defer cmd.kmu.Unlock()
+	if cmd.seq == 0 {
+		cmd.seq, cmd.keyedBy = c.wireOrder.Add(1), n
+	}
+}
+
+// keyEnd is attempt n's write having returned, k bytes written, under the
+// same lock: a write that wrote a byte fixes the command's place (taking one
+// if an attempt that wrote nothing gave it back meanwhile); one that wrote
+// nothing gives back the place it took, if no write has written under it.
+func (c *Client) keyEnd(cmd *command, n, k int) {
+	cmd.kmu.Lock()
+	defer cmd.kmu.Unlock()
+	switch {
+	case k > 0:
+		if cmd.seq == 0 {
+			cmd.seq = c.wireOrder.Add(1)
+		}
+		cmd.keyedBy = 0
+	case cmd.keyedBy == n:
+		cmd.seq, cmd.keyedBy = 0, 0
+	}
+}
+
+// key is cmd's place in wire order, 0 for none.
+func (cmd *command) key() uint64 {
+	cmd.kmu.Lock()
+	defer cmd.kmu.Unlock()
+	return cmd.seq
 }
 
 // resolveLocked settles cmd with the client's own answer — outcome unknown

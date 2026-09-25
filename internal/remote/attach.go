@@ -62,6 +62,15 @@ import (
 // that reads again gets every event, in order, from the re-attach. A Restore
 // and the Ready it brings are queued as one (X21): an owed Ready never
 // competes with its Restore for room.
+//
+// CLOSE (C8c). An attach is admitted as its write begins, under the
+// connection's write lock: one that is no longer the stream's latest, or whose
+// stream is over, is never written — so a re-attach posted before a Close and
+// still queued dies with the stream. Each request that may put or leave an
+// attachment of the stream's in the host's one place is held until answered
+// (hold): an attach once written, a detach of a subscription given up. Close
+// returns once none is left, so a replacement stream attaching after it finds
+// the place free.
 
 // Kind is what an Item is.
 type Kind int
@@ -247,6 +256,61 @@ type Stream struct {
 	delivered *protocol.Cursor
 	// behind is the re-attach a fallen-behind stream owes, nil when none.
 	behind *behind
+	// holds counts the stream's holds on the host (hold); idle, when set, is
+	// closed once it is 0 — a Close waiting for the host's place to be free.
+	holds int
+	idle  chan struct{}
+}
+
+// hold is one request of the stream's that may put, or leave, an attachment
+// of the stream's in the host's one place on its connection until it is
+// answered (C8c): an attach once it is written, and a detach of a
+// subscription the stream gave up (it fell behind, broke, or never wanted
+// it). A Close returns once none is left, so a closed stream holds nothing on
+// the host and a replacement's attach finds the place free. live says it
+// counts in Stream.holds; guarded by Stream.mu.
+type hold struct{ live bool }
+
+// newHoldLocked is a new hold, counted; s.mu is held.
+func (s *Stream) newHoldLocked() *hold {
+	s.holds++
+	return &hold{live: true}
+}
+
+// releaseLocked is h answered, or its connection gone: it counts no more.
+// Idempotent; s.mu is held.
+func (s *Stream) releaseLocked(h *hold) {
+	if h == nil || !h.live {
+		return
+	}
+	h.live = false
+	s.holds--
+	if s.holds == 0 && s.idle != nil {
+		close(s.idle)
+		s.idle = nil
+	}
+}
+
+func (s *Stream) release(h *hold) {
+	s.mu.Lock()
+	s.releaseLocked(h)
+	s.mu.Unlock()
+}
+
+// admit is the check an attach request passes as its write begins, under its
+// connection's write lock (writeHooks.begin): it is written only while it is
+// the stream's latest and the stream is not over — so an attach posted before
+// a Close, and not yet written, never reaches the host (C8c; astra r13 3) —
+// and, written, it is held (h) until it is answered.
+func (s *Stream) admit(tag int, h *hold) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.tag != tag {
+		return false
+	}
+	h.live = true
+	s.holds++
+	return true
 }
 
 // behind is a stream that fell behind its caller (a local slow consumer): the
@@ -348,19 +412,27 @@ func (s *Stream) prepareLocked(w *wire, p protocol.AttachParams) int {
 	return s.tag
 }
 
-// send writes attach request tag, of params p, on w. Its reply comes to reply,
-// on w's reader. A send that fails is a connection going: the reconnect
-// attaches again.
+// send writes attach request tag, of params p, on w — unless, as its write
+// begins, it is no longer the stream's latest or the stream is over (admit):
+// then nothing is written. Its reply comes to reply, on w's reader. A send
+// that fails is a connection going: the reconnect attaches again.
 func (s *Stream) send(w *wire, tag int, p protocol.AttachParams) {
 	raw, err := paramsJSON(p)
 	if err != nil {
 		s.fail(err)
 		return
 	}
-	if _, err := s.c.send(w, protocol.MethodSessionAttach, raw, func(resp *protocol.Response, err error) {
-		s.reply(w, tag, resp, err)
-	}, nil); errors.Is(err, ErrRequestTooLarge) {
+	h := &hold{}
+	_, err = s.c.send(w, protocol.MethodSessionAttach, raw, func(resp *protocol.Response, err error) {
+		s.reply(w, tag, h, resp, err)
+	}, writeHooks{begin: func() bool { return s.admit(tag, h) }})
+	switch {
+	case errors.Is(err, ErrRequestTooLarge):
 		s.fail(err)
+	case err != nil:
+		// Withdrawn, or its connection is going: no reply will come here, and
+		// whatever of it was written goes with the connection.
+		s.release(h)
 	}
 }
 
@@ -446,19 +518,30 @@ func (s *Stream) reconnected(w *wire, resumed bool, sid string) <-chan struct{} 
 	return ch
 }
 
-// reply is an attach reply (tag), on w's reader.
-func (s *Stream) reply(w *wire, tag int, resp *protocol.Response, err error) {
+// reply is an attach reply (tag, held by h), on w's reader — or, with err,
+// its connection gone.
+func (s *Stream) reply(w *wire, tag int, h *hold, resp *protocol.Response, err error) {
+	// Answered, or gone with its connection: the attach's hold ends as this
+	// does, once whatever the attach made — a live subscription, a detach of
+	// it — holds the place in its turn, so a Close never finds it free in
+	// between.
+	defer s.release(h)
 	if err != nil {
 		return
 	}
 	s.mu.Lock()
 	if s.tag != tag || s.done {
-		s.mu.Unlock()
+		var sh *hold
 		if resp.Error == nil {
+			sh = s.newHoldLocked()
+		}
+		sid := s.sessionID
+		s.mu.Unlock()
+		if sh != nil {
 			// An attachment nobody wants any more (the stream was closed or
 			// abandoned while its attach was out): detached at once, so the
 			// connection's one place is free.
-			s.detachStray(w, resp.Result)
+			s.detachStray(w, sid, resp.Result, sh)
 		}
 		return
 	}
@@ -506,6 +589,10 @@ func (s *Stream) reply(w *wire, tag int, resp *protocol.Response, err error) {
 		first := !s.started
 		s.stopLocked()
 		sid := s.sessionID
+		var dh *hold
+		if !first {
+			dh = s.newHoldLocked()
+		}
 		s.mu.Unlock()
 		if first {
 			// Attach is answered with it, and the connection dropped: its
@@ -514,7 +601,7 @@ func (s *Stream) reply(w *wire, tag int, resp *protocol.Response, err error) {
 			s.answerFirst(err)
 			return
 		}
-		s.detachThen(w, sid, res.Subscription, Item{Kind: KindError, Err: err})
+		s.detachThen(w, sid, res.Subscription, Item{Kind: KindError, Err: err}, dh)
 		return
 	}
 	switch {
@@ -730,8 +817,9 @@ func (s *Stream) brokenLocked(w *wire, err error) {
 	sub, sid := s.sub, s.sessionID
 	s.stopLocked()
 	s.sub, s.subW = "", nil
+	h := s.newHoldLocked()
 	s.mu.Unlock()
-	s.detachThen(w, sid, sub, Item{Kind: KindError, Err: err})
+	s.detachThen(w, sid, sub, Item{Kind: KindError, Err: err}, h)
 }
 
 // resetLocked is the live subscription's reset (§3.4's table, above); s.mu is
@@ -782,6 +870,12 @@ func (s *Stream) fellBehindLocked(cursor bool, need int) {
 	// A reconnect waiting on this re-attach goes on: the stream re-attaches
 	// once its caller has drained, not before.
 	s.settleReconnectLocked()
+	var h *hold
+	if b.detaching {
+		// The host holds the abandoned attachment until the detach is
+		// answered.
+		h = s.newHoldLocked()
+	}
 	s.mu.Unlock()
 	if !b.detaching {
 		return
@@ -790,6 +884,7 @@ func (s *Stream) fellBehindLocked(cursor bool, need int) {
 	// send failed); the re-attach it may make is written by the writer.
 	answered := func(ok bool) {
 		s.mu.Lock()
+		s.releaseLocked(h)
 		if s.behind == b {
 			b.detaching = false
 		}
@@ -804,7 +899,7 @@ func (s *Stream) fellBehindLocked(cursor bool, need int) {
 	s.c.post(sw, func() {
 		raw, err := paramsJSON(protocol.DetachParams{SessionID: sid, Subscription: sub})
 		if err == nil {
-			_, err = s.c.send(sw, protocol.MethodSessionDetach, raw, func(_ *protocol.Response, err error) { answered(err == nil) }, nil)
+			_, err = s.c.send(sw, protocol.MethodSessionDetach, raw, func(_ *protocol.Response, err error) { answered(err == nil) }, writeHooks{})
 		}
 		if err != nil {
 			answered(false)
@@ -847,33 +942,40 @@ func (s *Stream) kick() {
 // has answered the detach — its terminal acknowledgement (§3.7) — or the
 // connection has gone, so a caller that attaches again on learning of the stop
 // never races the detach for the connection's one place. It runs on w's
-// reader: the detach is posted (X21).
-func (s *Stream) detachThen(w *wire, sid, sub string, it Item) {
+// reader: the detach is posted (X21). h, the detach's hold, is released once
+// it is answered.
+func (s *Stream) detachThen(w *wire, sid, sub string, it Item, h *hold) {
+	ended := func() {
+		s.release(h)
+		s.finish(it)
+	}
 	s.c.post(w, func() {
 		raw, err := paramsJSON(protocol.DetachParams{SessionID: sid, Subscription: sub})
 		if err == nil {
-			_, err = s.c.send(w, protocol.MethodSessionDetach, raw, func(*protocol.Response, error) { s.finish(it) }, nil)
+			_, err = s.c.send(w, protocol.MethodSessionDetach, raw, func(*protocol.Response, error) { ended() }, writeHooks{})
 		}
 		if err != nil {
-			s.finish(it)
+			ended()
 		}
 	})
 }
 
-// detachStray detaches the attachment an unwanted reply made, best effort. It
-// runs on w's reader: the detach is posted (X21).
-func (s *Stream) detachStray(w *wire, result json.RawMessage) {
+// detachStray detaches the attachment an unwanted reply made, of session sid;
+// h is held until the detach is answered. It runs on w's reader: the detach
+// is posted (X21).
+func (s *Stream) detachStray(w *wire, sid string, result json.RawMessage, h *hold) {
 	var res protocol.AttachResult
 	if json.Unmarshal(result, &res) != nil || res.Subscription == "" {
+		s.release(h)
 		return
 	}
-	s.mu.Lock()
-	sid := s.sessionID
-	s.mu.Unlock()
 	s.c.post(w, func() {
 		raw, err := paramsJSON(protocol.DetachParams{SessionID: sid, Subscription: res.Subscription})
 		if err == nil {
-			_, _ = s.c.send(w, protocol.MethodSessionDetach, raw, nil, nil)
+			_, err = s.c.send(w, protocol.MethodSessionDetach, raw, func(*protocol.Response, error) { s.release(h) }, writeHooks{})
+		}
+		if err != nil {
+			s.release(h)
 		}
 	})
 }
@@ -961,30 +1063,53 @@ func (s *Stream) SessionID() string {
 // is sent — never on a later connection, whose subscription ids start again
 // and may name another stream's. A stream already over closes with nothing
 // sent.
+//
+// Close returns once the host holds nothing of the stream's (C8c; astra r13
+// 3): an attach it had posted and not yet written is never written (admit);
+// one already written is waited for, and the attachment it made detached; a
+// detach of a subscription it gave up is waited for. So a replacement's
+// attach, made once Close has returned, finds the connection's one place
+// free. That wait ends with ctx (ctx.Err(); the detaches are still made).
 func (s *Stream) Close(ctx context.Context) error {
 	s.mu.Lock()
-	if s.done {
-		s.mu.Unlock()
-		s.q.drop()
-		s.c.dropStream(s)
-		return nil
-	}
+	over := s.done
 	sub, sw, sid := s.sub, s.subW, s.sessionID
-	s.sub, s.subW = "", nil
-	s.stopLocked()
+	if !over {
+		s.sub, s.subW = "", nil
+		s.stopLocked()
+	}
+	var idle <-chan struct{}
+	if s.holds > 0 {
+		if s.idle == nil {
+			s.idle = make(chan struct{})
+		}
+		idle = s.idle
+	}
 	s.mu.Unlock()
 	s.q.drop()
 	s.c.dropStream(s)
-	if h := s.c.hooks.closing; h != nil {
-		h()
+	var err error
+	if !over {
+		if h := s.c.hooks.closing; h != nil {
+			h()
+		}
+		if sub != "" && sw != nil {
+			err = s.c.callOn(ctx, sw, protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid, Subscription: sub}, nil)
+			if errors.Is(err, ErrConnectionLost) {
+				// Gone with its connection, or going: nothing is left to
+				// detach.
+				err = nil
+			}
+		}
 	}
-	if sub == "" || sw == nil {
-		return nil
-	}
-	err := s.c.callOn(ctx, sw, protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid, Subscription: sub}, nil)
-	if errors.Is(err, ErrConnectionLost) {
-		// Gone with its connection, or going: nothing is left to detach.
-		return nil
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			if err == nil {
+				err = ctx.Err()
+			}
+		}
 	}
 	return err
 }

@@ -33,6 +33,14 @@ type TestHooks struct {
 	// Closing runs on Stream.Close once it has taken the subscription it
 	// detaches, before it sends anything.
 	Closing func()
+	// Pausing runs on a reconnect once its re-attach is written and the
+	// connection's reader started, before the episode's clock stops for the
+	// re-attach's reply; spent is closed once the episode is spent.
+	Pausing func(spent <-chan struct{})
+	// Posted runs on a connection's reader once it has handed a write to the
+	// connection's writer; PostRan on the writer once it has run one.
+	Posted  func()
+	PostRan func()
 }
 
 // DialForTest is Dial with h in place.
@@ -46,6 +54,9 @@ func DialForTest(ctx context.Context, path string, o Options, h TestHooks) (*Cli
 		resent:     h.Resent,
 		published:  h.Published,
 		closing:    h.Closing,
+		pausing:    h.Pausing,
+		posted:     h.Posted,
+		postRan:    h.PostRan,
 	})
 }
 
