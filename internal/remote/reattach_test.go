@@ -216,9 +216,19 @@ func TestASlowConsumerBeforeReadinessReattachesWhenReady(t *testing.T) {
 	}
 }
 
-// TestAnOmittedRecordReattachesWithNoCursor (§3.4): reset{omitted} — a record
-// no client can fold — is re-attached with no cursor, and the snapshot past it
-// is a Restore item.
+// TestAnOmittedRecordReattachesWithNoCursor (§3.4; plan 024 X22): reset{omitted}
+// — a record no client can fold — is re-attached with no cursor, and the
+// snapshot past it is a Restore item. The log offers a record to its
+// subscriptions before the engine's model folds it, and the client re-attaches
+// on its own reader while the publisher is still inside that commit: a
+// re-attach that reaches the host before the fold gets a snapshot cut just
+// before the omitted record, and a subscription that waited for the commit, so
+// hands the omission over once more — a second reset{omitted}, a second
+// re-attach, and its snapshot is past it. So one omission is one Restore at the
+// omitted seq, or two: the first at the seq before it (a loaded runner makes
+// that schedule), and never more (X22). Either way the stream is the small
+// event, the Restores, and synchronized at the omitted seq, and every reset is
+// omitted and answered by a re-attach with no cursor.
 func TestAnOmittedRecordReattachesWithNoCursor(t *testing.T) {
 	h := newHost(t, withLog(agent.EventLogOptions{MaxRecordBytes: 4 << 10}))
 	tp := newTap(t)
@@ -228,16 +238,42 @@ func TestAnOmittedRecordReattachesWithNoCursor(t *testing.T) {
 	nextKind(t, s, remote.KindSynchronized)
 	h.text("small")
 	h.text(big)
-	head := h.head()
-	items := until(t, s, ofKind(remote.KindRestore))
-	if r := items[len(items)-1].Reply; r.Snapshot == nil || r.After.Seq != head || r.Reset != "" {
-		t.Fatalf("the restore: %s", describe(items[len(items)-1]))
+	omitted := h.head()
+	items := until(t, s, ofKind(remote.KindSynchronized))
+	if !isText(t, "small")(items[0]) || items[0].Seq != after.Seq+1 {
+		t.Fatalf("the stream's first item: %s, want the small event at %d", describe(items[0]), after.Seq+1)
 	}
-	contiguous(t, after.Seq+1, items)
-	if p := attachParams(t, tp.sent(protocol.MethodSessionAttach)[1]); p.Cursor != nil {
-		t.Fatalf("the re-attach after omitted carried a cursor: %+v", p.Cursor)
+	restores := items[1 : len(items)-1]
+	if n := len(restores); n == 0 || n > 2 {
+		t.Fatalf("%d items between the small event and synchronized; want one Restore, or two (X22)", n)
 	}
-	nextKind(t, s, remote.KindSynchronized)
+	for i, it := range restores {
+		want := omitted
+		if i < len(restores)-1 {
+			// The first of two: cut before the omitted record's fold.
+			want = omitted - 1
+		}
+		if it.Kind != remote.KindRestore || it.Reply.Snapshot == nil || it.Reply.After.Seq != want || it.Reply.Reset != "" {
+			t.Fatalf("restore %d of %d: %s; want a snapshot at %d", i+1, len(restores), describe(it), want)
+		}
+	}
+	if last := contiguous(t, after.Seq+1, items); last != omitted || items[len(items)-1].Seq != omitted {
+		t.Fatalf("the stream reached %d, synchronized at %d; want %d", last, items[len(items)-1].Seq, omitted)
+	}
+	resets := tp.received(func(l wireLine) bool { return l.method == protocol.NotifyReset })
+	re := tp.sent(protocol.MethodSessionAttach)[1:]
+	if len(resets) != len(restores) || len(re) != len(restores) {
+		t.Fatalf("%d resets and %d re-attaches for %d restores", len(resets), len(re), len(restores))
+	}
+	for i := range re {
+		var rp protocol.ResetParams
+		if err := json.Unmarshal(resets[i].params, &rp); err != nil || rp.Reason != protocol.ResetOmitted {
+			t.Fatalf("reset %d: %+v (%v), want omitted", i+1, rp, err)
+		}
+		if p := attachParams(t, re[i]); p.Cursor != nil {
+			t.Fatalf("re-attach %d after omitted carried a cursor: %+v", i+1, p.Cursor)
+		}
+	}
 }
 
 // TestAFailedReplayReattachesWithNoCursor (§3.4): a cursor honoured from the
