@@ -56,6 +56,10 @@
 // handler still running replies to nobody, and its client learns the outcome
 // by resending after a fresh hello (resumed: false). A line the writer has
 // already taken finishes ahead of the terminal line, or is cut by the close.
+// A claimed detach's `{}` queued before the replacement, and a newly live
+// attachment's reset{session_replaced} queued after it, are both terminal
+// and so both may be written; the client accepts this by ignoring a reset
+// naming a subscription it never attached to.
 //
 // # Client ids and the binding table (bind.go)
 //

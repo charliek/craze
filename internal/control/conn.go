@@ -487,15 +487,26 @@ func (c *conn) writeLine(b []byte) error {
 // it (bind.go) and the close is noted.
 func (c *conn) close(reason string) {
 	first := false
+	var dropped []outLine
 	c.closeOnce.Do(func() {
 		first = true
 		c.closing.Store(true)
 		c.cancel()
-		c.out.close()
+		dropped = c.out.close()
 		_ = c.nc.Close()
 	})
 	if !first {
 		return
+	}
+	// Every line the outbox dropped runs its callback here, outside its lock
+	// and conn.mu, exactly once — a reply's gives its request's slot and
+	// inflight count back (c.release), as a replacement's drop list already
+	// does (conn.replace). A line the writer had already dequeued is not
+	// among them: it keeps its own callback path (written/push).
+	for _, ln := range dropped {
+		if ln.done != nil {
+			ln.done()
+		}
 	}
 	// closing is set before this section, and an attach reads it after it
 	// sets its subscription under c.mu (attach.go), so one of the two closes
@@ -777,15 +788,18 @@ func (o *outbox) written(ln outLine) {
 	o.mu.Unlock()
 }
 
-// close drops everything queued and ends every wait.
-func (o *outbox) close() {
+// close drops everything queued, hands it back for the caller to run its
+// callbacks outside this lock (conn.close, as replace's drop list already
+// does), and ends every wait. A no-op once already closed.
+func (o *outbox) close() []outLine {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed {
-		return
+		return nil
 	}
 	o.closed = true
-	for _, ln := range o.q {
+	dropped := o.q
+	for _, ln := range dropped {
 		if ln.kind == terminalLine {
 			o.terminals--
 		}
@@ -796,6 +810,7 @@ func (o *outbox) close() {
 	case o.ready <- struct{}{}:
 	default:
 	}
+	return dropped
 }
 
 // highWater is the most bytes the outbox has held at once.

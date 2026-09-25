@@ -252,3 +252,69 @@ func TestAReplacementOwingNothingClosesAtOnce(t *testing.T) {
 		t.Fatalf("%d slots held, %d admitted, after the writer let go of the held reply", got, inflight)
 	}
 }
+
+// TestAClosedOutboxReleasesWhatItDrops (§3.6; astra r18 item 3 on C7e
+// a3fd956, pre-existing): a plain close — Server.Close, a write failure, the
+// engine's end — must release what it drops, exactly as conn.replace's drop
+// list already does. A connection with no attachment has two replies
+// unwritten when it closes: the first taken by the writer and held there,
+// off the socket (beforeWrite), the second still queued. conn.close hands
+// that second reply back for its callback to run — giving back its
+// admission slot and inflight count — at once, without waiting for the
+// writer, which conn.close never joins.
+func TestAClosedOutboxReleasesWhatItDrops(t *testing.T) {
+	s := New(Options{})
+	held, release := make(chan struct{}), make(chan struct{})
+	var holding atomic.Bool
+	s.hooks.beforeWrite = func([]byte) {
+		if holding.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+	}
+	nc, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	c := newConn(s, nc)
+	s.transport.Add(1)
+	go c.write()
+	for i := range 2 {
+		if !c.acquire() {
+			t.Fatal("no admission slot")
+		}
+		c.reply(json.RawMessage(strconv.Itoa(i+1)), protocol.Empty{})
+	}
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer never took the first reply")
+	}
+	c.out.mu.Lock()
+	queued := len(c.out.q)
+	c.out.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("the premise: %d replies queued behind the held one, want 1", queued)
+	}
+
+	c.close("connection closed")
+	c.mu.Lock()
+	inflight := c.inflight
+	c.mu.Unlock()
+	if got := len(c.slots); got != 1 || inflight != 1 {
+		t.Fatalf("%d slots held, %d admitted, right after close: want the writer's held reply's alone (1, 1)", got, inflight)
+	}
+
+	close(release)
+	joined := make(chan struct{})
+	go func() { s.transport.Wait(); close(joined) }()
+	select {
+	case <-joined:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer did not return once let go")
+	}
+	c.mu.Lock()
+	inflight = c.inflight
+	c.mu.Unlock()
+	if got := len(c.slots); got != 0 || inflight != 0 {
+		t.Fatalf("%d slots held, %d admitted, after the writer let go of the held reply", got, inflight)
+	}
+}
