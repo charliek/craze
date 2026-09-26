@@ -143,8 +143,9 @@ whatever mode the transcript's own last `mode_change` recorded (see
 [Resuming a session](tui.md#resuming-a-session)).
 
 `--agent-bin`/`CRAZE_AGENT_BIN` refuse a native row exactly as they refuse a
-new native session — it has nothing to spawn — exit 2, before the index is
-touched or anything claimed:
+new native session — it has nothing to spawn — exit 2, before any index
+write, crazeId mint, or session claim (`--continue` still reads the index to
+find the row before the refusal is reached):
 
 ```text
 craze: --agent-bin cannot be used with provider native, which runs inside craze
@@ -163,7 +164,9 @@ above](#a-session-already-open-in-another-craze): a transcript another craze
 process already has open refuses the load the same way. A transcript left
 with a torn or cut-off tail by a crash is trimmed back to its last complete
 step on open, and the dropped bytes are kept beside it in a
-`<transcript>.torn-<UTC stamp>` file rather than discarded; a tail written by
+`<stem>.torn-<UTC stamp>` file — the transcript's name with its `.jsonl`
+suffix removed, e.g. `20260926T093537Z_<id>.jsonl`'s torn tail lands in
+`20260926T093537Z_<id>.torn-20260927T101500Z` — rather than discarded; a tail written by
 a newer craze build — one this version does not recognize — is never
 trimmed, and the load is refused instead, so nothing unrecognized is thrown
 away.

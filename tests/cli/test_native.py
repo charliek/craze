@@ -1698,7 +1698,11 @@ def test_native_resume_round_trip(
     ) as tui:
         tui.wait_contains("restored", timeout=30)
         restored = _ANSI.sub("", tui.screen())
-        assert "check it" in restored, restored[-3000:]
+        # The gutter mark proves the replayed USER ROW was drawn, not just the
+        # composer rule's title (which also reads "check it" -- the title is
+        # the first prompt's text, plan 028 §3.4): "❯ " is how craze draws a
+        # user row (TestFrameGoldenNativeResume100x30 in internal/tui).
+        assert "❯ check it" in restored, restored[-3000:]
         assert "✓ bash  echo hi" in restored, restored[-3000:]
         assert "  hi" in restored, restored[-3000:]
         assert "done checking" in restored, restored[-3000:]
