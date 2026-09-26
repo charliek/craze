@@ -211,6 +211,110 @@ func TestTwoLoadersOfALegacyRowShareOneClaim(t *testing.T) {
 	}
 }
 
+// changingIndex is the session index with something done to it first: the
+// moment between a loader's read of a row and its EnsureCrazeID.
+type changingIndex struct {
+	store  *sessions.Store
+	before func()
+}
+
+func (x changingIndex) EnsureCrazeID(row sessions.Row, within time.Duration) (string, error) {
+	x.before()
+	return x.store.EnsureCrazeID(row, within)
+}
+
+// evictRow takes sessionID's row out of the index, as another session's
+// Upsert evicts the oldest row under the 500-row cap — and a row EnsureCrazeID
+// gave an id is no younger for it: the mint leaves UpdatedAt alone.
+func evictRow(t *testing.T, sessionID string) {
+	t.Helper()
+	path := indexPath(t)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if !strings.Contains(line, `"sessionId":"`+sessionID+`"`) {
+			kept = append(kept, line)
+		}
+	}
+	body := strings.Join(kept, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestALegacyRowEvictedBetweenTwoLoadersRefuses (astra r30 4): two loaders
+// read one legacy row, the first gives it its id and claims it, and the row
+// then leaves the index before the second's EnsureCrazeID. The second has no
+// id to read back and nowhere durable to mint one; loading under an id of its
+// own would put two agents on one provider session under two locks. So it
+// refuses — exit 1, nothing built, no warning — and the first's claim stands.
+func TestALegacyRowEvictedBetweenTwoLoadersRefuses(t *testing.T) {
+	indexHome(t)
+	ws := t.TempDir()
+	row := sessions.Row{SessionID: "s-legacy", Provider: "grok", CWD: ws, TitleKind: sessions.TitleKindNone}
+	seedRow(t, row, time.Minute)
+	first := anotherCraze(t)
+	var firstID string
+	var diag lockedBuffer
+	second := testClaims(t, &diag)
+	second.index = changingIndex{store: &sessions.Store{KnownProvider: knownProvider}, before: func() {
+		// The second loader has read the row, with no id; the first loads it
+		// now, and then it is evicted.
+		id, _, err := first.claimRow(row)
+		if err != nil || id == "" {
+			t.Fatalf("the first loader's claim: %q, %v", id, err)
+		}
+		firstID = id
+		evictRow(t, row.SessionID)
+	}}
+	cfg, built, err := runResolveLoadWith(t, ws, second, "--continue")
+	code, msg := exitCode(t, err)
+	if code != 1 || msg != "craze: the session index changed — try again" {
+		t.Fatalf("exit %d %q, want 1 %q", code, msg, "craze: the session index changed — try again")
+	}
+	if len(built) != 0 || cfg.Session != nil || cfg.CrazeSessionID != "" {
+		t.Fatalf("a refused load built %d sessions (id %q)", len(built), cfg.CrazeSessionID)
+	}
+	if s := diag.String(); s != "" {
+		t.Fatalf("a refusal is not a warning; said %q", s)
+	}
+	var held *rundir.HeldError
+	if _, err := anotherCraze(t).claimSession(firstID); !errors.As(err, &held) {
+		t.Fatalf("the first loader's claim on %q: %v", firstID, err)
+	}
+}
+
+// TestThePickerRefusesARowThatLeftTheIndex: the picker's rows are read when it
+// opens, so the eviction schedule needs no seam there — another craze loads a
+// listed legacy row and it is evicted before Enter. The picker stays up with
+// the same refusal as its error row, and builds nothing.
+func TestThePickerRefusesARowThatLeftTheIndex(t *testing.T) {
+	indexHome(t)
+	ws := t.TempDir()
+	rows := []sessions.Row{{SessionID: "s-legacy", Provider: "grok", CWD: ws, Title: "legacy", UpdatedAt: time.Now()}}
+	seedRow(t, rows[0], 0)
+	claims := testClaims(t, io.Discard)
+	m, loaded := pickerModel(t, rows, claims.pickerClaim)
+	if id, _, err := anotherCraze(t).claimRow(rows[0]); err != nil || id == "" {
+		t.Fatalf("the other craze's claim: %q, %v", id, err)
+	}
+	evictRow(t, "s-legacy")
+	m, cmd := m.Update(enterKey)
+	m = feed(m, runCmd(t, cmd, 5*time.Second))
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "the session index changed — try again") {
+		t.Fatalf("the picker does not show the refusal:\n%s", view)
+	}
+	if len(*loaded) != 0 {
+		t.Fatalf("a row that left the index was built: %+v", *loaded)
+	}
+}
+
 // pickerModel is --resume's model with the run's picker claim, and a
 // LoadSession that records what it was asked to build.
 func pickerModel(t *testing.T, rows []sessions.Row, claim func(sessions.Row) (string, func(), error)) (tea.Model, *[]sessions.Row) {

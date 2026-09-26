@@ -143,6 +143,55 @@ func TestLockWithinTakesALockReleasedInsideTheBound(t *testing.T) {
 	<-released
 }
 
+// TestLockWithinNeverAcquiresPastItsBound (astra r30 7): every try after the
+// first is made inside the bound, so a lock held for the whole of it is
+// ErrLockBusy even when its holder lets go just past it. The clock is the
+// test's: each poll's sleep overshoots by a nanosecond, as a real one does by
+// scheduling, and the holder lets go the instant the clock passes the
+// deadline — during the last sleep, before any try could see it.
+func TestLockWithinNeverAcquiresPastItsBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.lock")
+	held, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			held()
+		}
+	}
+	defer release()
+	const bound = 5 * lockPoll / 2 // two whole polls, then half of one
+	clock := time.Unix(1_000_000, 0)
+	deadline := clock.Add(bound)
+	now = func() time.Time { return clock }
+	sleep = func(d time.Duration) {
+		clock = clock.Add(d + time.Nanosecond)
+		if clock.After(deadline) {
+			release()
+		}
+	}
+	t.Cleanup(func() { now, sleep = time.Now, time.Sleep })
+
+	unlock, err := LockWithin(path, bound)
+	if !errors.Is(err, ErrLockBusy) {
+		unlock()
+		t.Fatalf("LockWithin = %v, its holder gone only %s past the bound; want ErrLockBusy", err, clock.Sub(deadline))
+	}
+	if !released {
+		t.Fatal("the holder never let go: the poll never slept past its deadline")
+	}
+	unlock()
+	// The holder really did let go: the next try takes it.
+	again, err := LockWithin(path, 0)
+	if err != nil {
+		t.Fatalf("the released lock is still busy: %v", err)
+	}
+	again()
+}
+
 // TestLockWithinReturnsTheOpenError is Lock's contract: a lock file that
 // cannot be opened is its own error, not ErrLockBusy.
 func TestLockWithinReturnsTheOpenError(t *testing.T) {

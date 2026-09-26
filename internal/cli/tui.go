@@ -90,7 +90,8 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// with a control socket or without one (plan 027 §3.9). Its teardown is
 	// deferred from here, so every return after it releases what was claimed
 	// — a --continue refused below included — and, once a socket is bound,
-	// closes and unlinks it after tui.Run has closed the engine (serve.go).
+	// closes and unlinks it after tui.Run has closed the engine (serve.go); a
+	// run that reaches tui.Run tears down explicitly, before the flush.
 	hostID := rundir.NewHostID()
 	runEnv := rundir.ProcessEnv()
 	ws, err := resolveWorkspace(f.workspace)
@@ -202,6 +203,12 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// exit tail closes the hub before diag is flushed.
 	attachHost(&cfg, hosts, diag.craze())
 	failed, err := tui.Run(cfg)
+	// The teardown runs here, before the flush, and not only in the defer
+	// (which stays for the returns above, and is a no-op after this): the
+	// socket, the registry entry and the claims are released even when stderr
+	// is a pipe nobody reads and the flush blocks, and whatever the teardown
+	// says reaches the flush.
+	rh.close()
 	// err != nil is also folded into Run's own bool, but the craze lane
 	// prints either way and a p.Run error is what makes runTUI see err at
 	// all, so it stays explicit here too (§3.7.3).
@@ -256,9 +263,10 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 // --continue claims its row before anything is built (plan 027 §3.9, SQ16):
 // the row is given its durable craze id under the index's lock, bounded, and
 // that id is claimed (sessionClaims.claimRow). A session another craze holds
-// is exit 1, `craze: that session is open in another craze (pid N)`, and an
-// index held busy past the bound is exit 1 too — in both cases build is never
-// called, so no agent is spawned. --resume claims nothing here: its picker
+// is exit 1, `craze: that session is open in another craze (pid N)`; an index
+// held busy past the bound is exit 1 too, and so is a row with no craze id
+// that left the index since it was read (`craze: the session index changed —
+// try again`) — in every case build is never called, so no agent is spawned. --resume claims nothing here: its picker
 // claims the row it is given, through Config.ClaimSession.
 func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, build func(agent.Provider, sessions.Row) agent.Session, claims *sessionClaims) error {
 	if !f.cont && !f.resume {

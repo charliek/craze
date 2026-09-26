@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,9 +261,11 @@ func TestAFailureToBindIsAWarning(t *testing.T) {
 }
 
 // TestTheRegistryFollowsTheEngine: the entry is rewritten when the engine is
-// handed over (its craze id, incarnation and provider; not ready) and again
-// once it is ready (the provider's session id, ready) — §3.8's two rewrites.
-// The engine's new session is claimed on the way (§3.9).
+// handed over (its identity as it stands then — craze id, incarnation,
+// provider, and the provider's session id if it has one yet; not ready) and
+// again once it is ready (the same, ready) — §3.8's two rewrites, each of the
+// whole identity (astra r30 10). The engine's new session is claimed on the
+// way (§3.9).
 func TestTheRegistryFollowsTheEngine(t *testing.T) {
 	env := serveEnv(t)
 	var diag lockedBuffer
@@ -278,7 +281,7 @@ func TestTheRegistryFollowsTheEngine(t *testing.T) {
 	st := eng.State()
 	got := waitEntry(t, path, func(e rundir.Entry) bool { return e.CrazeSessionID != "" })
 	if got.CrazeSessionID != st.CrazeSessionID || got.Incarnation != st.Incarnation || got.Provider != "grok" ||
-		got.Ready || got.ProviderSessionID != "" {
+		got.Ready || got.ProviderSessionID != st.SessionID {
 		t.Fatalf("the entry for the engine: %+v, state %+v", got, st)
 	}
 	if got.Socket != first.Socket || got.PID != os.Getpid() || !got.StartedAt.Equal(first.StartedAt) {
@@ -301,6 +304,72 @@ func TestTheRegistryFollowsTheEngine(t *testing.T) {
 	}
 	if s := diag.String(); s != "" {
 		t.Fatalf("a healthy run said %q", s)
+	}
+}
+
+// TestAFailedRewriteIsMadeGoodByTheNext (astra r30 10): every rewrite writes
+// the engine's whole identity as it stands, so when the hand-over's rewrite
+// fails and Ready's succeeds, the entry is complete and consistent — never
+// ready under the empty identity Bind wrote, nor under the identity of the
+// engine this one replaced.
+func TestAFailedRewriteIsMadeGoodByTheNext(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		name := "the first engine"
+		if replace {
+			name = "a replacement"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := serveEnv(t)
+			var diag lockedBuffer
+			rh, hostID := servingHost(t, env, &diag)
+			path := entryPath(env, hostID)
+			var failNext atomic.Bool
+			rh.ctl.mu.Lock()
+			update := rh.ctl.update
+			rh.ctl.update = func(fn func(*rundir.Entry)) error {
+				if failNext.CompareAndSwap(true, false) {
+					return errors.New("injected: the registry write failed")
+				}
+				return update(fn)
+			}
+			rh.ctl.mu.Unlock()
+			if replace {
+				old := grokStubEngine(t)
+				rh.onEngine(old)
+				if err := old.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				oldID := old.State().CrazeSessionID
+				waitEntry(t, path, func(e rundir.Entry) bool { return e.Ready && e.CrazeSessionID == oldID })
+			}
+
+			s := tui.NewStubNoPrimary()
+			s.SetProvider(agent.CursorProvider())
+			eng, err := engine.New(s, engine.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = eng.Close() })
+			failNext.Store(true)
+			rh.onEngine(eng)
+			if err := eng.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got := waitEntry(t, path, func(e rundir.Entry) bool { return e.Ready && e.Provider == "cursor" })
+			if failNext.Load() {
+				t.Fatal("the hand-over's rewrite was never attempted")
+			}
+			st := eng.State()
+			if st.SessionID == "" || got.CrazeSessionID != st.CrazeSessionID || got.Incarnation != st.Incarnation ||
+				got.ProviderSessionID != st.SessionID {
+				t.Fatalf("ready under another identity: entry %+v, engine %s/%s/%s",
+					got, st.CrazeSessionID, st.Incarnation, st.SessionID)
+			}
+			lines := diagLines(diag.String())
+			if len(lines) != 1 || !strings.Contains(lines[0], "registry entry not updated: injected") {
+				t.Fatalf("said %q, want the one failed rewrite", lines)
+			}
+		})
 	}
 }
 

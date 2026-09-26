@@ -218,8 +218,8 @@ func (s *Store) Upsert(in Row) error {
 // before it is returned. The file is otherwise rewritten exactly as Upsert
 // rewrites it — every other row and every unknown key kept — and the row's
 // UpdatedAt is left alone: loading is not using. A row no longer in the file
-// answers its own id when it carries one, and is an error when it does not:
-// there is nowhere durable to mint one.
+// answers its own id when it carries one, and is an error wrapping
+// ErrNotInIndex when it does not: there is nowhere durable to mint one.
 //
 // The lock is taken with a bound (atomicfile.LockWithin): a caller that must
 // not block — the resume picker's claim, --continue — is answered an error
@@ -261,8 +261,16 @@ func (s *Store) EnsureCrazeID(row Row, within time.Duration) (string, error) {
 	if row.CrazeID != "" {
 		return row.CrazeID, nil
 	}
-	return "", fmt.Errorf("sessions: session %s (%s) is no longer in the index", row.SessionID, row.Provider)
+	return "", fmt.Errorf("sessions: session %s (%s) is %w", row.SessionID, row.Provider, ErrNotInIndex)
 }
+
+// ErrNotInIndex is EnsureCrazeID's answer for a row with no craze id that is
+// no longer in the index — evicted, or removed, since the caller read it.
+// There is nowhere durable to mint its id, and a caller that loaded it anyway
+// under an id of its own could load one provider session beside another craze
+// that loaded it under the id it was given before it left (plan 027 §3.9,
+// SQ16): the caller refuses, and reads the index again.
+var ErrNotInIndex = errors.New("no longer in the index")
 
 // applyTitle folds in's title into row according to in.TitleKind, per
 // Upsert's doc.

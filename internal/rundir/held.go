@@ -16,7 +16,8 @@ import (
 
 // The cache tree, <Home>/.cache/craze/{hosts,locks}, is held by descriptor.
 // Its canonical path is walked from "/" one component at a time, each
-// component opened O_NOFOLLOW relative to the one before and validated
+// component opened O_NOFOLLOW (O_PATH too on Linux, so that an ancestor needs
+// only search permission) relative to the one before and validated
 // through the descriptor that open returned (fstat), never by its path again;
 // and everything below a leaf — lock files, the registry's atomic write, the
 // identity-checked unlinks, the sweep's listing and its reads — is an *at
@@ -31,7 +32,9 @@ import (
 // dirFlags opens a directory to hold: read-only (fstat, the *at calls and
 // its entries need no more), never through a symlink at its own name,
 // O_NONBLOCK so that a FIFO planted at the name cannot stall the open, and
-// O_CLOEXEC so that no child craze spawns inherits it.
+// O_CLOEXEC (openat's) so that no child craze spawns inherits it. It is how
+// every leaf is opened; an ancestor on the walk is opened ancestorFlags
+// (held_linux.go, held_other.go), which on Linux needs no read permission.
 const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_NONBLOCK
 
 // dir is a directory held open: every operation below it is relative to fd.
@@ -69,11 +72,17 @@ func (d *dir) lstat(name string) (unix.Stat_t, error) {
 	return st, err
 }
 
-// openDir opens name in d as a directory (dirFlags: never through a link)
-// and returns it held, with the fstat of the descriptor it holds.
+// openDir opens name in d as a leaf directory (dirFlags: never through a
+// link) and returns it held, with the fstat of the descriptor it holds.
 func (d *dir) openDir(name string) (*dir, unix.Stat_t, error) {
+	return d.openDirWith(name, dirFlags)
+}
+
+// openDirWith is openDir with the open's flags given: dirFlags for a leaf,
+// ancestorFlags for an ancestor on the walk.
+func (d *dir) openDirWith(name string, flags int) (*dir, unix.Stat_t, error) {
 	var st unix.Stat_t
-	fd, err := openat(d.fd, name, dirFlags, 0)
+	fd, err := openat(d.fd, name, flags, 0)
 	if err != nil {
 		return nil, st, err
 	}
@@ -109,9 +118,11 @@ func (d *dir) openFault(name string, err error) string {
 // replaced by a symlink since p was canonicalised is refused here) and
 // validated as a cache-tree ancestor on its own descriptor's fstat
 // (ancestorFault, with the euid's own group-writable directories admitted).
-// It returns p held.
+// It returns p held. Every component, p included, is opened ancestorFlags:
+// on Linux O_PATH, so a search-only ancestor is walked; what is done relative
+// to p — the leaves opened and made in it — needs no more.
 func (env Env) walk(p string) (*dir, error) {
-	d, st, err := (&dir{fd: unix.AT_FDCWD}).openDir("/")
+	d, st, err := (&dir{fd: unix.AT_FDCWD}).openDirWith("/", ancestorFlags)
 	if err != nil {
 		return nil, fmt.Errorf("ancestor /: %w", err)
 	}
@@ -127,7 +138,7 @@ func (env Env) walk(p string) (*dir, error) {
 		}
 		var name string
 		name, rest, _ = strings.Cut(rest, "/")
-		next, nst, err := d.openDir(name)
+		next, nst, err := d.openDirWith(name, ancestorFlags)
 		if err != nil {
 			if what := d.openFault(name, err); what != "" {
 				err = fmt.Errorf("ancestor %s %s", d.join(name), what)

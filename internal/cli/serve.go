@@ -38,9 +38,12 @@ import (
 //     rewritten — again once the engine is ready.
 //  5. tui.Run returns after its exit tail has closed the engine, whose end
 //     closes each connection once what it admitted is written (X16 4). Then
-//     runHost.close, deferred so every return after step 1 runs it: the
-//     server gets flushWait to finish writing, is closed, the socket and
-//     registry entry are unlinked, and last every session claim is released.
+//     runHost.close, before craze's deferred stderr is flushed — so a flush
+//     that blocks cannot hold the socket or a claim, and the teardown's own
+//     warnings are flushed — and deferred too, so every return after step 1
+//     runs it: the server gets flushWait to finish writing, is closed, the
+//     socket and registry entry are unlinked, and last every session claim is
+//     released.
 
 // controlSocketEnv turns the control socket off for one run (plan 027 §4 item
 // 6).
@@ -65,6 +68,10 @@ const (
 // teardownStep is told each step of runHost.close as it happens: a seam for
 // the teardown order's test, a no-op in production.
 var teardownStep = func(string) {}
+
+// hostClose is controlHost.close's Host.Close: a seam for the test of a
+// teardown warning, (*rundir.Host).Close in production.
+var hostClose = (*rundir.Host).Close
 
 // controlSocketOn is whether this run serves a control socket (plan 027 §4
 // item 6). Either switch turns it off and neither can turn it on against the
@@ -145,6 +152,9 @@ type controlHost struct {
 	diag   io.Writer
 
 	mu sync.Mutex
+	// update is how the writer rewrites the entry: host.Update, or a test's
+	// stand-in that fails a rewrite. Read under mu.
+	update func(func(*rundir.Entry)) error
 	// eng is the engine last handed to track: a rewrite queued for any other
 	// is dropped when its turn comes.
 	eng *engine.Engine
@@ -188,6 +198,7 @@ func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *con
 			Workspace: workspace,
 		}),
 		diag:       diag,
+		update:     host.Update,
 		wake:       make(chan struct{}, 1),
 		stop:       make(chan struct{}),
 		writerDone: make(chan struct{}),
@@ -203,12 +214,14 @@ func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *con
 	return h
 }
 
-// track rewrites the registry entry for eng — its craze id, incarnation and
-// provider, and not ready — and, once eng.Ready() closes, again with the
-// provider's session id and whether the start succeeded. An engine that closed
-// rather than started gets no second rewrite, and neither does one replaced
-// first. It queues and returns: the writes happen on the writer goroutine, in
-// order.
+// track rewrites the registry entry for eng, not ready, and once eng.Ready()
+// closes again, ready when the start succeeded. An engine that closed rather
+// than started gets no second rewrite, and neither does one replaced first.
+// Each rewrite writes the engine's whole identity as it stands at that moment
+// (identity), never a part of it: a rewrite that failed is made good by the
+// next that succeeds, so the entry is never ready under a stale or empty
+// identity. It queues and returns: the writes happen on the writer goroutine,
+// in order.
 func (h *controlHost) track(eng *engine.Engine, st engine.State) {
 	stop := make(chan struct{})
 	h.mu.Lock()
@@ -217,13 +230,7 @@ func (h *controlHost) track(eng *engine.Engine, st engine.State) {
 	}
 	h.eng, h.engStop = eng, stop
 	h.mu.Unlock()
-	h.enqueue(eng, func(e *rundir.Entry) {
-		e.CrazeSessionID = st.CrazeSessionID
-		e.Incarnation = st.Incarnation
-		e.Provider = st.Provider.Name
-		e.ProviderSessionID = ""
-		e.Ready = false
-	})
+	h.enqueue(eng, identity(st, false))
 	go func() {
 		select {
 		case <-eng.Ready():
@@ -240,14 +247,21 @@ func (h *controlHost) track(eng *engine.Engine, st engine.State) {
 		if st.Activity == engine.ActivityClosing && !st.StartFailed {
 			return
 		}
-		h.enqueue(eng, func(e *rundir.Entry) {
-			if st.Provider.Name != "" {
-				e.Provider = st.Provider.Name
-			}
-			e.ProviderSessionID = st.SessionID
-			e.Ready = !st.StartFailed
-		})
+		h.enqueue(eng, identity(st, !st.StartFailed))
 	}()
+}
+
+// identity is a rewrite of the registry entry to st, one engine's state at one
+// moment: every member that describes the engine — its craze id, incarnation,
+// provider and the provider's session id — and whether it is ready.
+func identity(st engine.State, ready bool) func(*rundir.Entry) {
+	return func(e *rundir.Entry) {
+		e.CrazeSessionID = st.CrazeSessionID
+		e.Incarnation = st.Incarnation
+		e.Provider = st.Provider.Name
+		e.ProviderSessionID = st.SessionID
+		e.Ready = ready
+	}
 }
 
 // enqueue queues a rewrite for the writer, without blocking.
@@ -281,12 +295,12 @@ func (h *controlHost) writeLoop() {
 			}
 			r := h.queue[0]
 			h.queue = h.queue[1:]
-			current := r.eng == h.eng
+			current, update := r.eng == h.eng, h.update
 			h.mu.Unlock()
 			if !current {
 				continue
 			}
-			if err := h.host.Update(r.fn); err != nil {
+			if err := update(r.fn); err != nil {
 				if errors.Is(err, rundir.ErrClosed) {
 					return
 				}
@@ -315,7 +329,14 @@ func (h *controlHost) warnOnce(err error) {
 // bounded by closeWait (a handler parked in the index flock is not waited
 // past it, and there is nothing to tell the user about it); then Host.Close
 // unlinks the registry entry and the socket, identity-checked, and the host
-// lock under itself. The registry writer and the ready watcher stop last.
+// lock under itself — a failure there is one line on diag, since it can leave
+// a stale entry or socket behind. The registry writer and the ready watcher
+// stop last.
+//
+// Not bounded: a registry write stalled on a hung filesystem (an NFS hard
+// mount) holds Host.Update's lock, so Host.Close — and the claims released
+// after it — wait for it, which is accepted because such a filesystem stalls
+// the session index's own writes too.
 func (h *controlHost) close() {
 	teardownStep("flushing")
 	deadline := time.Now().Add(flushWait)
@@ -327,7 +348,9 @@ func (h *controlHost) close() {
 	_ = h.server.Close(ctx)
 	cancel()
 	teardownStep("server closed")
-	_ = h.host.Close()
+	if err := hostClose(h.host); err != nil {
+		fmt.Fprintf(h.diag, "craze: control socket not cleaned up: %v\n", err)
+	}
 	teardownStep("unlinked")
 	h.mu.Lock()
 	if h.engStop != nil {
@@ -348,7 +371,9 @@ type sessionClaims struct {
 	env    rundir.Env
 	hostID string
 	diag   io.Writer
-	index  *sessions.Store
+	// index gives a row its durable craze id: the session index
+	// (*sessions.Store), or a test's stand-in that changes the index first.
+	index crazeIDIndex
 	// indexWait bounds the index lock EnsureCrazeID takes; a test shortens it.
 	indexWait time.Duration
 
@@ -358,6 +383,11 @@ type sessionClaims struct {
 	// already been warned about: onEngine does not try it again.
 	skipped map[string]bool
 	closed  bool
+}
+
+// crazeIDIndex is the one method of the session index claimRow uses.
+type crazeIDIndex interface {
+	EnsureCrazeID(row sessions.Row, within time.Duration) (string, error)
 }
 
 func newSessionClaims(env rundir.Env, hostID string, diag io.Writer) *sessionClaims {
@@ -455,18 +485,22 @@ func (c *sessionClaims) skip(id string, err error) {
 // (EnsureCrazeID), and that id is claimed (claimSession). It answers the id
 // the engine is to be built with and a release for the claim it took.
 //
-// Only two answers refuse: an error wrapping atomicfile.ErrLockBusy (another
-// writer held the index for the whole bound) and a *rundir.HeldError (another
-// craze holds the session). Anything else — an index that cannot be written, a
-// lock tree that fails validation, an I/O error — is a claim that could not
-// even be attempted: it is a warning, and the load proceeds unclaimed with the
-// row's own id. The lock protects against a second craze; it must not lock
-// the user out of their own session because of their filesystem.
+// Three answers refuse: an error wrapping atomicfile.ErrLockBusy (another
+// writer held the index for the whole bound), one wrapping
+// sessions.ErrNotInIndex (a row with no id left the index — evicted — since it
+// was read: another loader may already hold it under the id it was given, and
+// an id minted here would load the same provider session beside it; the index
+// is read again by trying again), and a *rundir.HeldError (another craze holds
+// the session). Anything else — an index or a lock tree that cannot be read or
+// written at all, an I/O error — is a claim that could not even be attempted:
+// it is a warning, and the load proceeds unclaimed with the row's own id
+// (X30). The lock protects against a second craze; it must not lock the user
+// out of their own session because of their filesystem.
 func (c *sessionClaims) claimRow(row sessions.Row) (id string, release func(), err error) {
 	noop := func() {}
 	id, err = c.index.EnsureCrazeID(row, c.indexWait)
 	switch {
-	case errors.Is(err, atomicfile.ErrLockBusy):
+	case errors.Is(err, atomicfile.ErrLockBusy), errors.Is(err, sessions.ErrNotInIndex):
 		return "", nil, err
 	case err != nil && row.CrazeID == "":
 		// No durable id, and none can be written: nothing to claim. The engine
@@ -501,8 +535,8 @@ func (c *sessionClaims) pickerClaim(row sessions.Row) (string, func(), error) {
 }
 
 // refusal is claimRow's refusal as the user reads it: the session's holder,
-// or the busy index. PR 2 names no `craze attach` — it does not exist until
-// PR 4, which adds the hint.
+// the busy index, or the index that changed under the load. PR 2 names no
+// `craze attach` — it does not exist until PR 4, which adds the hint.
 func refusal(err error) string {
 	var held *rundir.HeldError
 	switch {
@@ -514,6 +548,8 @@ func refusal(err error) string {
 		return "that session is open in another craze (pid " + pid + ")"
 	case errors.Is(err, atomicfile.ErrLockBusy):
 		return "the session index is busy — try again"
+	case errors.Is(err, sessions.ErrNotInIndex):
+		return "the session index changed — try again"
 	}
 	return err.Error()
 }

@@ -121,8 +121,17 @@ func TestEnsureCrazeIDOfARowNoLongerInTheIndex(t *testing.T) {
 	if err != nil || id != "018f-own" {
 		t.Fatalf("EnsureCrazeID = %q, %v; want the row's own id", id, err)
 	}
-	if id, err := s.EnsureCrazeID(Row{SessionID: "gone", Provider: "cursor"}, time.Second); err == nil {
-		t.Fatalf("EnsureCrazeID of a vanished legacy row = %q, want an error", id)
+	if id, err := s.EnsureCrazeID(Row{SessionID: "gone", Provider: "cursor"}, time.Second); !errors.Is(err, ErrNotInIndex) {
+		t.Fatalf("EnsureCrazeID of a vanished legacy row = %q, %v; want ErrNotInIndex", id, err)
+	}
+	// An index that cannot be read at all is not the missing row: that is the
+	// caller's warning, not its refusal.
+	path := setIndex(t)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureCrazeID(Row{SessionID: "old", Provider: "cursor"}, time.Second); err == nil || errors.Is(err, ErrNotInIndex) {
+		t.Fatalf("EnsureCrazeID of an unreadable index = %v; want an error that is not ErrNotInIndex", err)
 	}
 }
 

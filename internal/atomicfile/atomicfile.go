@@ -20,6 +20,13 @@ var ErrLockBusy = errors.New("atomicfile: the lock is busy")
 // lockPoll is how often LockWithin tries a busy lock again.
 const lockPoll = 20 * time.Millisecond
 
+// now and sleep are LockWithin's clock: a seam for the test that releases a
+// holder just past the bound, time.Now and time.Sleep in production.
+var (
+	now   = time.Now
+	sleep = time.Sleep
+)
+
 // Lock takes an exclusive lock on path, creating it if it does not exist.
 // syscall.Flock exists on both Linux and Darwin (the two platforms this repo
 // pins), so this works unchanged on both.
@@ -49,8 +56,10 @@ func Lock(path string) (unlock func(), err error) {
 // lockPoll, until it holds the lock or d has passed, and then answers
 // ErrLockBusy. It never waits past d (a flock cannot be interrupted, so a
 // caller that must not block — a picker's claim, --continue — cannot use Lock),
-// and it tries at least once, so d <= 0 is a single attempt. Any other open or
-// flock error is returned as it is.
+// and it tries at least once, so d <= 0 is a single attempt. Every try after
+// the first is made only while d has not passed: a lock held for the whole
+// bound is ErrLockBusy even when its holder lets go an instant after it. Any
+// other open or flock error is returned as it is.
 //
 // The returned unlock is always non-nil, as Lock's is.
 func LockWithin(path string, d time.Duration) (unlock func(), err error) {
@@ -59,24 +68,31 @@ func LockWithin(path string, d time.Duration) (unlock func(), err error) {
 	if err != nil {
 		return noop, err
 	}
-	deadline := time.Now().Add(d)
-	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	deadline := now().Add(d)
+	for first := true; ; first = false {
+		if !first && !now().Before(deadline) {
+			_ = f.Close()
+			return noop, ErrLockBusy
+		}
+		err := flockNB(f)
 		switch {
 		case err == nil:
 			return unlocker(f), nil
-		case errors.Is(err, syscall.EINTR):
-			continue
 		case !errors.Is(err, syscall.EWOULDBLOCK):
 			_ = f.Close()
 			return noop, err
 		}
-		left := time.Until(deadline)
-		if left <= 0 {
-			_ = f.Close()
-			return noop, ErrLockBusy
+		sleep(min(lockPoll, max(deadline.Sub(now()), 0)))
+	}
+}
+
+// flockNB is one LOCK_EX|LOCK_NB try on f, retried on EINTR.
+func flockNB(f *os.File) error {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EINTR) {
+			return err
 		}
-		time.Sleep(min(lockPoll, left))
 	}
 }
 
