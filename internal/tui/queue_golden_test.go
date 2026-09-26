@@ -162,8 +162,12 @@ func TestFrameGoldenQueueDegrade40x12(t *testing.T) {
 
 // TestQueueCountSurvivesTheBand is the other half of the degradation: the band
 // is gone and the count is not, at a width where the count fits.
+//
+// Like queueTwoKeys, it waits for the tool row before it types: its frame
+// shows the agent's first two updates, which a script typing straight after
+// `working` raced — at -cpu=1 the typing often won (C17b).
 func TestQueueCountSurvivesTheBand(t *testing.T) {
-	keys := "<wait:idle>go the long way<enter><wait:working>" +
+	keys := "<wait:idle>go the long way<enter><wait:working><wait:text:Execute sleep && echo step1>" +
 		"one<enter>two<enter>three<enter>four<enter><wait:text:⧗ 4 queued>"
 	got := runQueueFrame(t, "long-turn", 80, 12, keys, agent.CursorProvider())
 	if strings.Contains(got, "#4 four") {

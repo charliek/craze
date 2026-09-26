@@ -3,9 +3,14 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -178,4 +183,161 @@ func TestTheRendezvousWaitsForItsBarrier(t *testing.T) {
 		t.Fatal("the rendezvous was not let go when the runner finished")
 	}
 	b2.meet(7) // a finished runner never holds a program again
+}
+
+// TestAKeyAndItsTokenAreOneMessage (C17b, astra r43 1): a key token and its
+// sync token reach the program as one message, so a runner that falls behind
+// right after handing the program its key cannot let the program reduce the
+// key's whole short turn before the token: the token is acknowledged on the
+// frame right after the key's own (or at the release of the gate the key
+// opened), and the program waits there. Here the runner falls behind right
+// after its Enter send (afterSend) until the engine has finished the turn and
+// published all of it; <wait:working> still finds the working frame, in both
+// gate modes. Every key the runner sent went as one message with its token.
+func TestAKeyAndItsTokenAreOneMessage(t *testing.T) {
+	isEnter := func(msg tea.Msg) bool {
+		if tok, ok := msg.(frameTokenMsg); ok {
+			msg = tok.msg
+		}
+		k, ok := msg.(tea.KeyMsg)
+		return ok && k.Type == tea.KeyEnter
+	}
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			isolateSkillsHome(t)
+			stub := NewStub()
+			var eng *engine.Engine
+			var bare []string
+			fellBehind := false
+			_, _, err := RunFrameScript(Config{
+				Session:   stub,
+				Theme:     "tokyo-night",
+				Workspace: frameWorkspace(t),
+				Model:     "grok",
+				Yolo:      true,
+				OnEngine:  func(e *engine.Engine) { eng = e },
+			}, 80, 24, "<wait:idle>hi<enter><wait:working>", FrameOpts{
+				Timeout:  3 * time.Second,
+				gateSync: mode.sync,
+				afterSend: func(msg tea.Msg) {
+					switch msg.(type) {
+					case frameTokenMsg, frameSyncMsg:
+					default:
+						bare = append(bare, fmt.Sprintf("%T", msg))
+					}
+					if !isEnter(msg) {
+						return
+					}
+					fellBehind = true
+					deadline := time.Now().Add(5 * time.Second)
+					for len(stub.Prompts()) == 0 || stub.InTurn() || eng.State().Turn != "" {
+						if time.Now().After(deadline) {
+							return
+						}
+						time.Sleep(time.Millisecond)
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = eng.Sync(ctx)
+					time.Sleep(150 * time.Millisecond)
+				},
+			})
+			if !fellBehind {
+				t.Fatal("the runner never fell behind after its Enter")
+			}
+			if len(bare) != 0 {
+				t.Fatalf("the runner sent %v without its sync token", bare)
+			}
+			if err != nil {
+				t.Fatalf("the script failed: %v — the program reduced the short turn before Enter's token", err)
+			}
+		})
+	}
+}
+
+// TestAPanickingHookStillEndsTheRun (C17b, astra r43 further): a runner that
+// panics — a test's hook, while the program waits at the rendezvous for it —
+// still lets the program go, quits it and closes the engine, before the panic
+// reaches the caller.
+func TestAPanickingHookStillEndsTheRun(t *testing.T) {
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			isolateSkillsHome(t)
+			sess := newCloseCounter()
+			out := make(chan any, 1)
+			go func() {
+				defer func() { out <- recover() }()
+				_, _, _ = RunFrameScript(Config{
+					Session:   sess,
+					Theme:     "tokyo-night",
+					Workspace: frameWorkspace(t),
+					Model:     "grok",
+					Yolo:      true,
+				}, 80, 24, "<wait:idle>hi<enter><wait:idle>", FrameOpts{
+					Timeout:  3 * time.Second,
+					gateSync: mode.sync,
+					beforeBarrier: func(tok string, n int, last func() frameState) error {
+						if tok != "<enter>" {
+							return nil
+						}
+						for last().sync < n {
+							time.Sleep(time.Millisecond)
+						}
+						panic("the hook panicked")
+					},
+				})
+			}()
+			select {
+			case v := <-out:
+				if v != "the hook panicked" {
+					t.Fatalf("RunFrameScript ended with %#v, want the hook's panic", v)
+				}
+			case <-time.After(pumpWatchdog):
+				t.Fatal("RunFrameScript hung after its hook panicked: the program was never let go")
+			}
+			if n := sess.closes.Load(); n != 1 {
+				t.Fatalf("the session was closed %d times after the hook's panic, want once", n)
+			}
+		})
+	}
+}
+
+// chattyStub is a Stub whose rename publishes lines lines of reply first: a
+// gated /rename whose call leaves the reader a long stream to hold or read.
+type chattyStub struct {
+	*Stub
+	lines int
+}
+
+func (s chattyStub) SetTitle(cause, title string) error {
+	for i := range s.lines {
+		s.Emit(agent.Event{Type: agent.EventText, Text: fmt.Sprintf("line %02d\n", i+1)})
+	}
+	return s.Stub.SetTitle(cause, title)
+}
+
+// TestTheCaptureWaitsForEverythingThatArrived (C17b): the script ends the
+// moment the rename's note is drawn, with the sixty events its call published
+// still to reduce — held behind the gate and drained one per Update
+// asynchronously, still on the stream for the reader in the baseline. The
+// runner captures only a settled model that has folded the stream as far as
+// it had gone: the last line is in the frame, in both modes. Quitting at once
+// raced the quit against the drain's own commands and the reader.
+func TestTheCaptureWaitsForEverythingThatArrived(t *testing.T) {
+	isolateSkillsHome(t)
+	got, _, err := runFrameModes(t, func() Config {
+		return Config{
+			Session:   chattyStub{Stub: NewStub(), lines: 60},
+			Theme:     "tokyo-night",
+			Workspace: frameWorkspace(t),
+			Model:     "grok",
+			Yolo:      true,
+		}
+	}, 100, 30, "<wait:idle>/rename chatty<enter><wait:text:renamed to chatty>", FrameOpts{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
+	if !strings.Contains(got, "line 60") {
+		t.Fatalf("the capture came before everything that had arrived was reduced:\n%s", got)
+	}
 }

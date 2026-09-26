@@ -655,6 +655,15 @@ type Model struct {
 	gateSync    bool
 }
 
+// foldedSeq is the seq of the last event the model folded into its shared
+// transcript, 0 before it has one.
+func (m Model) foldedSeq() uint64 {
+	if m.shared == nil {
+		return 0
+	}
+	return m.shared.Seq()
+}
+
 // now reads the clock through an indirection so tests can inject one.
 func (m Model) now() time.Time {
 	if m.clock != nil {
