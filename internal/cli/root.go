@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -124,7 +125,11 @@ func diagnose(ranCmd *cobra.Command, err error) (line string, code int) {
 // message — a stray removed config-file variable's "craze: ..." (usagef, exit 2) included,
 // its leading "craze: " stripped — or, for a raw cobra error (an unknown
 // flag, an extra argument), its own text; bridgePrefix is added once, never
-// twice, since bridge.go's own errors already carry it.
+// twice, since bridge.go's own errors already carry it. This is the one place
+// every bridge error is printed, so it is also where the one-line contract is
+// made structural (sanitizeLine): whatever a registry value (a workspace
+// path), an OS error, or anything else the message happens to embed contains,
+// the line this returns can never itself contain a newline.
 func bridgeLine(err error) string {
 	msg := err.Error()
 	var ee *exitError
@@ -132,8 +137,24 @@ func bridgeLine(err error) string {
 		msg = ee.msg
 	}
 	msg = strings.TrimPrefix(msg, "craze: ")
+	msg = sanitizeLine(msg)
 	if strings.HasPrefix(msg, bridgePrefix) {
 		return msg
 	}
 	return bridgePrefix + msg
+}
+
+// sanitizeLine replaces every control character in s (unicode.IsControl:
+// \r, \n, and the other C0/C1 controls included) with a space. It is what
+// keeps bridgeLine's "one line" guarantee structural rather than incidental:
+// a workspace path, a registry value, or an OS error's own text can carry a
+// newline (or a \r that a terminal would render as one), and this is the one
+// place that is stripped out before the line ever reaches stderr.
+func sanitizeLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
 }

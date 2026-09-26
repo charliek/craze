@@ -105,8 +105,28 @@ func TestResolveTargetEntryIDFallsBackToHostID(t *testing.T) {
 // answers with the invalid-token message, not that one.
 func TestBridgeSessionValidatedBeforeARegistryRead(t *testing.T) {
 	t.Setenv("HOME", "")
-	err := runBridge(&cobra.Command{}, "not a valid token!")
+	err := runBridge(&cobra.Command{}, "not a valid token!", true)
 	assertBridgeError(t, err, 1, `craze bridge: --session "not a valid token!" is not a valid session id`)
+}
+
+// TestBridgeExplicitEmptySessionIsInvalid: an explicitly empty --session is
+// still an explicit session id, not "no --session given" -- it must fail
+// ValidToken like any other invalid id, rather than silently falling through
+// to the no-flag resolution and picking the one running host (review items
+// 2+5).
+func TestBridgeExplicitEmptySessionIsInvalid(t *testing.T) {
+	t.Setenv("HOME", "")
+	err := runBridge(&cobra.Command{}, "", true)
+	assertBridgeError(t, err, 1, `craze bridge: --session "" is not a valid session id`)
+}
+
+// TestBridgeFlagNotGivenSkipsValidation: with no --session at all (explicit
+// false), the zero-value "" is "no --session", not an invalid one -- it
+// reaches resolveTarget's no-flag branch instead of being refused.
+func TestBridgeFlagNotGivenSkipsValidation(t *testing.T) {
+	t.Setenv("HOME", "")
+	err := runBridge(&cobra.Command{}, "", false)
+	assertBridgeError(t, err, 1, "craze bridge: rundir: no home directory for the craze cache tree")
 }
 
 func assertBridgeError(t *testing.T, err error, wantCode int, wantMsg string) {
@@ -120,6 +140,82 @@ func assertBridgeError(t *testing.T, err error, wantCode int, wantMsg string) {
 	}
 	if ee.code != wantCode || ee.msg != wantMsg {
 		t.Fatalf("got code %d msg %q, want code %d msg %q", ee.code, ee.msg, wantCode, wantMsg)
+	}
+}
+
+// -------------------------------------------------------- live registry
+
+// bridgeTestEnv is an isolated rundir.Env for a test that binds real hosts
+// with rundir.Bind and then drives runBridge (via executeErr) against them:
+// HOME and CRAZE_RUNTIME_DIR are set process-wide (t.Setenv), so
+// rundir.ProcessEnv() -- what runBridge itself calls -- resolves against the
+// same registry and socket base the test's own Bind calls used.
+func bridgeTestEnv(t *testing.T) rundir.Env {
+	t.Helper()
+	env := serveEnv(t)
+	t.Setenv("HOME", env.Home)
+	t.Setenv("CRAZE_RUNTIME_DIR", env.CrazeRuntimeDir)
+	return env
+}
+
+// bindLiveHost binds a real host under env (closed at cleanup): a live
+// registry entry runBridge's own rundir.Hosts(rundir.ProcessEnv()) call will
+// see.
+func bindLiveHost(t *testing.T, env rundir.Env, entry rundir.Entry) {
+	t.Helper()
+	h, err := rundir.Bind(env, rundir.NewHostID(), entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+}
+
+// TestBridgeControlCharsNeverBreakTheOneLineContract (review item 1, major):
+// a workspace path containing control characters must not turn "one craze
+// bridge: ... line" into several. Two live hosts with no --session forces
+// resolveTarget's several-sessions error, which names both on the one line
+// through formatEntries -- exactly the path a workspace value takes -- so
+// this proves bridgeLine's sanitizeLine runs on the real end-to-end path
+// (Execute's own diagnose), not just against a synthetic string.
+func TestBridgeControlCharsNeverBreakTheOneLineContract(t *testing.T) {
+	env := bridgeTestEnv(t)
+	bindLiveHost(t, env, rundir.Entry{Provider: "cursor", Workspace: "/ws/one", CrazeSessionID: "s-1"})
+	bindLiveHost(t, env, rundir.Entry{Provider: "grok", Workspace: "/ws/two\r\nrm -rf /", CrazeSessionID: "s-2"})
+
+	stdout, stderr, code := executeErr([]string{"bridge"})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if n := strings.Count(stderr, "\n"); n != 1 {
+		t.Fatalf("stderr = %q, want exactly one line, got %d newlines", stderr, n)
+	}
+	if !strings.HasPrefix(stderr, bridgePrefix) {
+		t.Fatalf("stderr = %q, want prefix %q", stderr, bridgePrefix)
+	}
+}
+
+// TestBridgeExplicitEmptySessionRejectedWithALiveHost (review items 2+5,
+// major): an explicitly empty --session must not be treated as "no
+// --session" and silently connect to the one running host -- it is refused
+// before rundir.Hosts is ever consulted, with a live host present to prove
+// the bypass really would have had something to connect to.
+func TestBridgeExplicitEmptySessionRejectedWithALiveHost(t *testing.T) {
+	env := bridgeTestEnv(t)
+	bindLiveHost(t, env, rundir.Entry{Provider: "cursor", Workspace: "/ws", CrazeSessionID: "s-1"})
+
+	stdout, stderr, code := executeErr([]string{"bridge", "--session", ""})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	want := `craze bridge: --session "" is not a valid session id` + "\n"
+	if stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
 	}
 }
 
@@ -170,17 +266,27 @@ func dialPump(t *testing.T, path string) *net.UnixConn {
 
 // recordingWriter is an io.Writer that keeps each Write call's bytes
 // separately, so a test can tell a chunk was flushed on its own from one
-// that was coalesced with another.
+// that was coalesced with another. onWrite, when set, is notified
+// (non-blocking) after each Write is recorded: a deterministic way for
+// another goroutine to wait until a chunk has actually reached this writer,
+// instead of a sleep and a hope that scheduling did not coalesce two reads.
 type recordingWriter struct {
-	mu     sync.Mutex
-	writes [][]byte
+	mu      sync.Mutex
+	writes  [][]byte
+	onWrite chan struct{}
 }
 
 func (w *recordingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	cp := append([]byte(nil), p...)
 	w.writes = append(w.writes, cp)
+	w.mu.Unlock()
+	if w.onWrite != nil {
+		select {
+		case w.onWrite <- struct{}{}:
+		default:
+		}
+	}
 	return len(p), nil
 }
 
@@ -203,9 +309,15 @@ func (w *recordingWriter) count() int {
 // TestPumpBothDirectionsVerbatim: bytes flow both ways unmodified, binary
 // bytes included, and a message the server writes in two separate Write
 // calls arrives at stdout as two separate Write calls too — the pump never
-// waits to coalesce reads before writing (§3.10).
+// waits to coalesce reads before writing (§3.10). This is proven
+// deterministically (review item 7): the server's second write happens only
+// once it has confirmation (stdout.onWrite) that the pump's stdout already
+// received the first — so the two chunks cannot possibly reach the socket
+// close enough together for one Read to collect both, on any schedule, with
+// no sleep involved.
 func TestPumpBothDirectionsVerbatim(t *testing.T) {
 	ln, path := pumpListener(t)
+	stdout := &recordingWriter{onWrite: make(chan struct{}, 1)}
 	serverGot := make(chan []byte, 1)
 	go func() {
 		nc, err := ln.Accept()
@@ -224,17 +336,17 @@ func TestPumpBothDirectionsVerbatim(t *testing.T) {
 			}
 		}
 		serverGot <- got
-		// Two separate writes, with a pause between them: a real socket read
-		// can hand the pump each one separately.
+		// Two separate writes; the second is sent only once the first is
+		// confirmed to have reached the pump's stdout, so it cannot exist on
+		// the wire before that point.
 		_, _ = nc.Write([]byte("HELLO "))
-		time.Sleep(20 * time.Millisecond)
+		<-stdout.onWrite
 		_, _ = nc.Write([]byte("WORLD\x00\x01\x02\n"))
 	}()
 
 	conn := dialPump(t, path)
 	clientInput := []byte("from the client\x00\x01\xff")
 	stdin := bytes.NewReader(clientInput)
-	stdout := &recordingWriter{}
 
 	done := make(chan error, 1)
 	go func() { done <- pump(stdin, stdout, conn) }()

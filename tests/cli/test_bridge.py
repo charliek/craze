@@ -13,6 +13,7 @@ import json
 import os
 import select
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,32 @@ def _recv_line(proc: subprocess.Popen, timeout: float = WAIT) -> bytes:
     return line
 
 
+def _read_until_eof(proc: subprocess.Popen, timeout: float = WAIT) -> bytes:
+    """Every byte proc's stdout still has, up to its EOF, with an overall
+    timeout (review item 7): a regression that keeps the bridge's socket open
+    -- never sees the host's own EOF, or never relays it -- must fail this
+    test, not hang the suite. A bare `.read()` blocks forever on exactly that
+    regression."""
+    assert proc.stdout is not None
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("craze bridge: timed out waiting for stdout EOF")
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            raise AssertionError("craze bridge: timed out waiting for stdout EOF")
+        # A raw read of whatever select just found readable -- never
+        # proc.stdout.read(n), which (BufferedReader) can block past a
+        # partial chunk hoping for more, even once select has already said
+        # there is something to read.
+        chunk = os.read(proc.stdout.fileno(), 4096)
+        if chunk == b"":
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
 def _wait_running_entry(cache: Path, timeout: float = WAIT) -> dict:
     (entry_path,) = _wait_glob(cache / "hosts", "*.json", timeout=timeout)
     return _wait_entry(entry_path, lambda e: e["ready"], timeout=timeout)
@@ -153,8 +180,9 @@ def test_bridge_half_close_still_reads_every_reply(
 
         quit_craze(tui)
         # The host's own close ends the connection; the bridge relays that
-        # EOF and exits 0.
-        assert bridge.stdout.read() == b""
+        # EOF and exits 0. Bounded: a regression that keeps the bridge open
+        # fails this, rather than hanging the suite.
+        assert _read_until_eof(bridge) == b""
         code = bridge.wait(timeout=WAIT)
         assert code == 0, (code, bridge.stderr.read())
     _wait_fake_gone(fake_agent_bin)
@@ -257,6 +285,11 @@ def test_bridge_stdout_write_failure_exits_one_not_a_signal(
         stderr = bridge.stderr.read()
         assert code == 1, (code, stderr)
         assert stderr.startswith(b"craze bridge: "), stderr
+        # Names the broken pipe specifically, so a different bridge error
+        # (a socket read failure, say) could not also satisfy this assertion
+        # (review item 7): Go's os.File.Write on a pipe with no reader left
+        # returns EPIPE, whose errno text is "broken pipe".
+        assert b"EPIPE" in stderr or b"broken pipe" in stderr, stderr
 
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -53,7 +54,7 @@ func newBridgeCmd() *cobra.Command {
 			"socket, and relays stdin/stdout to it verbatim. It speaks no protocol itself.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runBridge(cmd, session)
+			return runBridge(cmd, session, cmd.Flags().Changed("session"))
 		},
 	}
 	cmd.Flags().StringVar(&session, "session", "",
@@ -63,9 +64,14 @@ func newBridgeCmd() *cobra.Command {
 
 // runBridge is craze bridge's whole job: resolve the target session, dial its
 // socket, check its peer, and pump. Every error it returns is already
-// bridgeErrorf's shape.
-func runBridge(cmd *cobra.Command, session string) error {
-	if session != "" && !rundir.ValidToken(session) {
+// bridgeErrorf's shape. explicit is cmd.Flags().Changed("session"): whether
+// --session was passed at all, as distinct from session being its zero value
+// "" by default. An explicitly passed --session must pass ValidToken whatever
+// its value -- an explicitly empty --session included, which would
+// otherwise read as "not given" and silently resolve the one running host
+// instead of being refused (§3.10).
+func runBridge(cmd *cobra.Command, session string, explicit bool) error {
+	if explicit && !rundir.ValidToken(session) {
 		// Refused before any registry read builds a path (§3.10).
 		return bridgeErrorf("--session %q is not a valid session id", session)
 	}
@@ -137,15 +143,26 @@ func formatEntries(entries []rundir.Entry) string {
 	return strings.Join(parts, ", ")
 }
 
-// dialAndPump dials socket, checks its peer before a byte is written
-// (peerCheck; rundir.DialCheck(os.Geteuid()) in production, so a test can
-// inject one that refuses), and pumps stdin/stdout against it. id names the
-// session in an unreachable error: the socket gone is R10, a real risk once
-// logind or systemd-tmpfiles has cleared the runtime directory.
+// dialTimeout bounds the dial (item 6 of the C14 review): a connect the OS
+// leaves pending -- a listener whose backlog is full, so accept(2) never
+// runs -- must still end in a bridge error, not hang the process forever.
+const dialTimeout = 10 * time.Second
+
+// dialAndPump dials socket (bounded by dialTimeout), checks its peer before a
+// byte is written (peerCheck; rundir.DialCheck(os.Geteuid()) in production, so
+// a test can inject one that refuses), and pumps stdin/stdout against it. id
+// names the session in an unreachable error: the socket gone is R10, a real
+// risk once logind or systemd-tmpfiles has cleared the runtime directory.
 func dialAndPump(id, socket string, stdin io.Reader, stdout io.Writer, peerCheck func(*net.UnixConn) error) error {
-	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
+	dialer := net.Dialer{Timeout: dialTimeout}
+	c, err := dialer.Dial("unix", socket)
 	if err != nil {
 		return bridgeErrorf("session %s is unreachable: %v", id, err)
+	}
+	conn, ok := c.(*net.UnixConn)
+	if !ok {
+		_ = c.Close()
+		return bridgeErrorf("session %s is unreachable: dialed a %T, not a unix connection", id, c)
 	}
 	if err := peerCheck(conn); err != nil {
 		_ = conn.Close()
