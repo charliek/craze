@@ -85,7 +85,8 @@ func (s *Session) Replay(sink func(Event)) error {
 	}
 	if s.tools.todos != nil {
 		if items := s.tools.todos.snapshot(); len(items) > 0 {
-			sink(Todos{Items: items})
+			// The list as written can hold a key learned since (redactTodos).
+			sink(Todos{Items: redactTodos(r.red, items)})
 		}
 	}
 	return nil

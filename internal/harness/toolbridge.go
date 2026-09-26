@@ -479,13 +479,13 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 		SubagentUsage: subagentUsage(announced, writes)}
 	// A call that ran may have changed the todo list, which the tool entry
 	// carries as a finished step's does (plan 028 §3.2).
-	todoMark := t.todosOn(toolEntry)
+	todos := t.todosOn(toolEntry)
 	entries, err := t.store.AppendStep(leading,
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
 		toolEntry)
 	if err == nil {
 		t.wrote(entries, lead, true, outputCalls(answered))
-		t.todosWritten(todoMark)
+		t.todosWritten(todos)
 	}
 	return true, err
 }

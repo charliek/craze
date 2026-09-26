@@ -181,6 +181,11 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 			return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 		}
 	}
+	// The list comes back as it was written: redacted with the redactor of the
+	// turn that wrote it (redactTodos), so a key in an item is the marker from
+	// here on, in the list the model builds on and in the next list written.
+	// That is the transcript's own rule for everything it keeps; a key learned
+	// since is redacted where the list is shown (Replay).
 	if was.todos != nil {
 		s.tools.todos.restore(toolTodos(*was.todos))
 	}
@@ -269,7 +274,17 @@ const (
 // read takes the next entry on the path, and reports, for a user entry that
 // is not a results entry, whether it is a steer; results reports a results
 // entry (subagent_results), which is neither a prompt nor a steer.
+//
+// Every turn an entry records counts toward the largest, whatever the entry:
+// a prompt's, a wake's results entry — which opens the wake's turn (a
+// mid-turn results entry records none) — and, from plan 028's PR 2, a
+// compaction's. Numbering on from anything less would reuse a turn's number,
+// and its call ids and spill files, after a resume (§3.3 item 9).
 func (r *turnReader) read(e *store.Entry) (steer, results bool) {
+	if e.Turn > 0 {
+		r.aware = true
+		r.largest = max(r.largest, e.Turn)
+	}
 	switch {
 	case e.Type == store.TypeResume:
 		r.aware = true
@@ -287,9 +302,7 @@ func (r *turnReader) read(e *store.Entry) (steer, results bool) {
 		return false, true
 	}
 	switch {
-	case e.Turn > 0:
-		r.aware = true
-		r.largest = max(r.largest, e.Turn)
+	case e.Turn > 0: // opens its turn, counted above
 	case r.aware:
 		steer = true
 	case r.prev == prevTool || r.prev == prevSteer:

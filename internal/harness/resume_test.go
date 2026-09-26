@@ -167,6 +167,41 @@ func TestResumeContinuesTheSameTranscript(t *testing.T) {
 	}
 }
 
+// TestResumeNumbersOnFromAWake (P10, R2-4): a wake's turn is numbered on its
+// results entry, and a resume numbers on from it as from a prompt's. Turn 1
+// launches a background child; the wake that delivers its result is turn 2,
+// and calls a tool as t2.1.1; the first turn after a resume is turn 3, so its
+// call ids — and the spill files named after them — never repeat the wake's.
+func TestResumeNumbersOnFromAWake(t *testing.T) {
+	b := openBG(t)
+	a := b.routers["test/a"]
+	ws, _ := b.spawn(t, "child one")
+	b.finish(t, ws[0])
+	a.route("go", callStep(globPart("g1")), answerWith("reacted"))
+	var wake events
+	if res, err := b.s.Wake(context.Background(), wake.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Wake = %+v, %v; want end_turn", res, err)
+	}
+	if st := of[ToolStarted](wake.list()); len(st) != 1 || st[0].ID != "t2.1.1" {
+		t.Fatalf("the wake's calls: %+v; want t2.1.1", st)
+	}
+	id := b.s.ID()
+	if err := b.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := resumed(t, resumeOptions(b.options(), id))
+	a.route("go", callStep(globPart("g2")), answerWith("after"))
+	var ev events
+	if _, err := s.Run(context.Background(), "three", ev.sink); err != nil {
+		t.Fatal(err)
+	}
+	if st := of[ToolStarted](ev.list()); len(st) != 1 || st[0].ID != "t3.1.1" {
+		t.Fatalf("the resumed turn's calls: %+v; want t3.1.1, after the wake's turn 2", st)
+	}
+	equal(t, "the user entries' turns", userTurns(transcript(t, s)), []int{1, 2, 3})
+}
+
 // TestResumeRefusals: a session with no file is ErrNoTranscript, and opens
 // nothing; one another session holds is the store's ErrBusy, wrapped with
 // the session's id; a sub-agent is never resumed; and a damaged transcript
@@ -573,6 +608,109 @@ func TestResumeRestoresTheLastTodos(t *testing.T) {
 	}
 }
 
+// TestTodosAreStoredRedacted (P7; the stored call and result's own rule): a
+// fresh session's todo list is written to its tool entry through the
+// session's redactor, as the call's arguments and its result are, so the
+// transcript never holds a key the session knows. Two ids that redact alike
+// keep the first, so the list stays one the store accepts. A resume restores
+// the list as written: redacted.
+func TestTodosAreStoredRedacted(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s, err := Open(f.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.models["test/a"].push(
+		callStep(todoPart("w1", input(t, map[string]any{"todos": []map[string]any{
+			{"id": "k-" + canary, "content": "deploy with " + canary},
+			{"id": "k-" + canaryOther, "content": "and " + canaryOther},
+			{"id": "plain", "content": "nothing secret"},
+		}}))),
+		answerWith("listed"),
+	)
+	run(t, s, "plan")
+	if n := len(s.tools.todos.snapshot()); n != 3 {
+		t.Fatalf("the live list has %d items; want the three the model wrote", n)
+	}
+	raw, err := os.ReadFile(s.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), canary) {
+		t.Fatalf("the transcript holds the key:\n%s", raw)
+	}
+	var stored *[]store.Todo
+	for _, e := range transcript(t, s).Entries {
+		if e.Type == store.TypeMessage && e.Message.Role == fantasy.MessageRoleTool {
+			stored = e.Todos
+		}
+	}
+	want := []store.Todo{
+		{ID: "k-" + redact.Marker, Content: "deploy with " + redact.Marker, Status: "pending"},
+		{ID: "plain", Content: "nothing secret", Status: "pending"},
+	}
+	if stored == nil || !slices.Equal(*stored, want) {
+		t.Fatalf("the tool entry records %v; want %v", stored, want)
+	}
+	id := s.ID()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := resumed(t, resumeOptions(f.options(), id))
+	equal(t, "the restored list", s2.tools.todos.snapshot(), toolTodos(want))
+}
+
+// TestReplayRedactsTheTodos: a key the session learned only after the list
+// was written — so the transcript holds it — is not in the replay's Todos,
+// which goes through the replay's redactor as the calls and results do.
+func TestReplayRedactsTheTodos(t *testing.T) {
+	const later = "sk-learned-later-not-a-secret"
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	before := f.options()
+	before.Getenv = func(k string) string {
+		if k == "OTHER_API_KEY" {
+			return ""
+		}
+		return testEnv[k]
+	}
+	s, err := Open(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.models["test/a"].push(
+		callStep(todoPart("w1", input(t, map[string]any{"todos": []map[string]any{{"id": "a", "content": "ship " + later}}}))),
+		answerWith("listed"),
+	)
+	run(t, s, "plan")
+	if raw, err := os.ReadFile(s.store.Path()); err != nil || !strings.Contains(string(raw), `"todos":[{"id":"a","content":"ship `+later) {
+		t.Fatalf("the transcript should hold the not-yet-known key in the list (%v)", err)
+	}
+	id := s.ID()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after := resumeOptions(f.options(), id)
+	after.Getenv = func(k string) string {
+		if k == "OTHER_API_KEY" {
+			return later
+		}
+		return testEnv[k]
+	}
+	s2 := resumed(t, after)
+	var ev events
+	if err := s2.Replay(ev.sink); err != nil {
+		t.Fatal(err)
+	}
+	if found := leaks(ev.list(), later); len(found) != 0 {
+		t.Fatalf("the replay shows the key at %v", found)
+	}
+	if todos := of[Todos](ev.list()); len(todos) != 1 || len(todos[0].Items) != 1 || todos[0].Items[0].Content != "ship "+redact.Marker {
+		t.Fatalf("the replay's Todos: %+v; want the one item, the key redacted", todos)
+	}
+}
+
 // replayLine is one replayed event on one line.
 func replayLine(ev Event) string {
 	switch e := ev.(type) {
@@ -781,6 +919,23 @@ func TestReplayRefusals(t *testing.T) {
 	if err := s3.Replay(nil); !errors.Is(err, ErrClosed) {
 		t.Fatalf("a replay after Close = %v; want ErrClosed", err)
 	}
+}
+
+// TestAnEmptyWakeLeavesReplayInTime: a Wake with nothing waiting runs no turn
+// (ErrNothingPending), so a replay after it is still before the session's
+// first turn, and shows the stored conversation.
+func TestAnEmptyWakeLeavesReplayInTime(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	id := storedTurn(t, f, f.options(), nil)
+	s := resumed(t, resumeOptions(f.options(), id))
+	if _, err := s.Wake(context.Background(), nil); !errors.Is(err, ErrNothingPending) {
+		t.Fatalf("Wake = %v; want ErrNothingPending", err)
+	}
+	var ev events
+	if err := s.Replay(ev.sink); err != nil {
+		t.Fatalf("a replay after an empty wake = %v; want the stored conversation", err)
+	}
+	equal(t, "the prompts", of[Prompted](ev.list()), []Prompted{{Text: "hi"}})
 }
 
 // TestReplayRedactsWithTheLiveRedactor: a key the session learned only after

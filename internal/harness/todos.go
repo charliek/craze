@@ -6,6 +6,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -52,15 +53,17 @@ import (
 //
 // # The record, and resume
 //
-// The transcript keeps the list (plan 028 §3.2, P7): a step whose calls
-// changed it writes the list as it stood after the step on its tool entry,
-// and a resumed session restores the last one on its path (restore). The
-// step's append runs under t.mu, where b.mu may not be taken, so a Write that
-// changes the list also leaves a copy of it, and a count of such changes, in
-// rec — under recMu, a leaf lock that is held across nothing and taken under
-// b.mu by Write and under t.mu by the step (unrecorded, recordedAt). A step
-// attaches the list when a change is not yet recorded, whichever step made it,
-// so one whose append failed is carried to the next tool entry written.
+// The transcript keeps the list (plan 028 §3.2, P7): a step that left it
+// different writes the list as it stood after the step on its tool entry,
+// redacted (redactTodos), and a resumed session restores the last one on its
+// path (restore). The step's append runs under t.mu, where b.mu may not be
+// taken, so a Write that changes the list also leaves a copy of it in rec —
+// under recMu, a leaf lock that is held across nothing and taken under b.mu
+// by Write and under t.mu by the step (unrecorded, recordedAt). A step
+// attaches the list when it differs from the one the last written tool entry
+// carried — not from the list at the step's start — so calls that change an
+// item and change it back leave nothing to write, and a list whose append
+// failed is carried to the next tool entry written (X13).
 type sessionTodos struct {
 	mu    sync.Mutex
 	items []tool.Todo
@@ -71,16 +74,16 @@ type sessionTodos struct {
 }
 
 // todoRecord is what the transcript knows of the list: latest is the list as
-// the last changing Write left it, changes counts those Writes, and recorded
-// is the count a written tool entry last carried the list at.
+// the last Write left it, and written is the list the last tool entry written
+// carried, as the harness holds it (unredacted) — for a resumed session the
+// one it restored, and empty before either.
 type todoRecord struct {
-	latest            []tool.Todo
-	changes, recorded int
+	latest, written []tool.Todo
 }
 
 func newSessionTodos() *sessionTodos { return &sessionTodos{} }
 
-// restore makes items the list, recorded: a resumed session's, from the last
+// restore makes items the list, written: a resumed session's, from the last
 // tool entry on its transcript's path that carries one (plan 028 §3.3). Open
 // calls it before the session is handed out, so no Write or turn races it.
 func (b *sessionTodos) restore(items []tool.Todo) {
@@ -89,7 +92,7 @@ func (b *sessionTodos) restore(items []tool.Todo) {
 	b.items = cloneTodos(items)
 	b.recMu.Lock()
 	defer b.recMu.Unlock()
-	b.rec = todoRecord{latest: cloneTodos(items)}
+	b.rec = todoRecord{latest: cloneTodos(items), written: cloneTodos(items)}
 }
 
 // snapshot is a copy of the list as it is now.
@@ -99,25 +102,54 @@ func (b *sessionTodos) snapshot() []tool.Todo {
 	return cloneTodos(b.items)
 }
 
-// unrecorded is the list a step's tool entry should carry — the list after
-// the last change, in the store's shape — and the mark to hand recordedAt
-// once that entry is written; ok is false when every change is recorded
-// already. The caller may hold t.mu: recMu is a leaf.
-func (b *sessionTodos) unrecorded() (list []store.Todo, mark int, ok bool) {
+// unrecorded is the list a step's tool entry should carry — the list as the
+// last Write left it, a copy to hand recordedAt once that entry is written —
+// with ok false when it is the list the last written entry carried, however
+// many Writes changed it since. The caller may hold t.mu: recMu is a leaf.
+func (b *sessionTodos) unrecorded() (list []tool.Todo, ok bool) {
 	b.recMu.Lock()
 	defer b.recMu.Unlock()
-	if b.rec.changes == b.rec.recorded {
-		return nil, 0, false
+	if slices.Equal(b.rec.latest, b.rec.written) {
+		return nil, false
 	}
-	return storeTodos(b.rec.latest), b.rec.changes, true
+	return cloneTodos(b.rec.latest), true
 }
 
-// recordedAt says a written tool entry carries the list as it was at mark
-// (unrecorded).
-func (b *sessionTodos) recordedAt(mark int) {
+// recordedAt says a written tool entry carries list (unrecorded's).
+func (b *sessionTodos) recordedAt(list []tool.Todo) {
 	b.recMu.Lock()
 	defer b.recMu.Unlock()
-	b.rec.recorded = max(b.rec.recorded, mark)
+	b.rec.written = cloneTodos(list)
+}
+
+// todoMark is the list a step's tool entry was handed (turn.todosOn), as the
+// harness holds it, for turn.todosWritten to record once the entry is
+// written; the zero mark is none. It is a type of this file's so that
+// turn.go, which may not import the tool framework (TestSeamOne), can hold
+// one.
+type todoMark struct {
+	list []tool.Todo
+	set  bool
+}
+
+// redactTodos is items with every key red covers redacted from each item's id
+// and content: the list as a tool entry stores it and a replay shows it (plan
+// 028 §3.2, §3.4). The model wrote both, as it wrote the todo_write call's
+// arguments, which are redacted in the same places. Two ids that redact alike
+// would make a list the store refuses (a repeated id), so the later of the
+// two is dropped: a list with a key in two ids keeps the first.
+func redactTodos(red *redact.Replacer, items []tool.Todo) []tool.Todo {
+	out := make([]tool.Todo, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	for _, it := range items {
+		it.ID, it.Content = red.String(it.ID), red.String(it.Content)
+		if seen[it.ID] {
+			continue
+		}
+		seen[it.ID] = true
+		out = append(out, it)
+	}
+	return out
 }
 
 // storeTodos and toolTodos convert a list between the harness's shape and
@@ -196,7 +228,6 @@ func (b *sessionTodos) Write(ctx context.Context, merge *bool, updates []tool.To
 	if !slices.Equal(prev, b.items) {
 		b.recMu.Lock()
 		b.rec.latest = cloneTodos(b.items)
-		b.rec.changes++
 		b.recMu.Unlock()
 	}
 
