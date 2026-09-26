@@ -90,11 +90,16 @@ func TestAGroupWritableDirectoryOfTheUsersOwn(t *testing.T) {
 	}
 	_ = c.Release()
 
-	env.CrazeRuntimeDir = filepath.Join(env.Home, "rt")
-	home := mustCanonical(t, env.Home)
+	// The same kind of directory as the runtime base's parent. It is a short
+	// one under /tmp, not the home: macOS's t.TempDir() lives under a long
+	// $TMPDIR, and the socket path's length is refused before any ancestor.
+	parent := shortDir(t)
+	chmod(t, parent, 0o775)
+	env.CrazeRuntimeDir = filepath.Join(parent, "rt")
+	canon := mustCanonical(t, parent)
 	bindErr(t, env, "CRAZE_RUNTIME_DIR",
-		"ancestor "+home+" is group- or world-writable without the sticky bit (mode 0775)",
-		"run: chmod g-w "+home)
+		"ancestor "+canon+" is group- or world-writable without the sticky bit (mode 0775)",
+		"run: chmod g-w "+canon)
 	if exists(t, env.CrazeRuntimeDir) {
 		t.Fatal("the refused runtime directory was created")
 	}
