@@ -1165,14 +1165,25 @@ func TestClearPendingsCallJudgesEachVerbByItsDeadline(t *testing.T) {
 	}
 }
 
-// TestACtrlCOverASettlingTurnRunsNoQueuedRow (the coordinator's finding-2
-// decision): Ctrl+C over an armed send-now takes the send back and clears the
-// queue, and the turn the arm's own cancel is ending settles into nothing — no
-// queued row runs, however soon that settlement comes. Here it comes the
-// instant clearPending's call returns, before its reply is applied: the Disarm
-// and the ClearQueue ran back to back inside the call, so the settlement finds
-// nothing armed and nothing queued. Two gates, a reply apart, would let it
-// drain the head the user was clearing.
+// TestACtrlCOverASettlingTurnRunsNoQueuedRow (the finding-2 decision, X40):
+// Ctrl+C over an armed send-now with a row queued, where the turn the arm's own
+// cancel is ending settles the instant clearPending's gated call returns — on
+// the command's goroutine, before its reply reaches the model, which is the
+// window two gates would have put between the Disarm and the ClearQueue. The
+// settlement claims no successor: the engine's own record says so (the old
+// turn's ending names no Next, no started follows it, and the engine is idle
+// with nothing queued and nothing armed), and neither the row nor the
+// withdrawn send reaches the session.
+//
+// What it does not prove: a settlement BETWEEN the two engine calls inside
+// the one gated call. The engine lets go of its lock after the Disarm and
+// takes it again for the ClearQueue, and a settlement there can still drain
+// the head — the original microsecond window, X40 2's accepted residual. The
+// settlement here is pinned until the whole call has returned.
+//
+// A successor the engine did claim is held before its prompt reaches the
+// session (HoldNextBegin), so the check cannot pass on the Stub's prompts
+// alone while a claimed successor has yet to record its own.
 func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
 	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
 	for _, mode := range frameGateModes {
@@ -1181,12 +1192,21 @@ func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
 			queuedBehind(r, "ROW")
 			release := armedOver(r)
 			t.Cleanup(release)
+			_, releaseBegin := r.sess.HoldNextBegin()
+			t.Cleanup(releaseBegin)
+			var after []agent.Event
 			settled := false
 			// settle lets the arm's cancel end the turn, and waits for the
-			// engine to settle it — into whatever the engine holds then.
+			// engine to settle it — into whatever the engine holds then. The
+			// settlement enqueues the ending, and any successor's removal and
+			// started, as one batch: what the read after the ending brings back
+			// is all of it.
 			settle := func() {
 				release()
-				r.feedUntil(endings(1))
+				after = r.until(endings(1))
+				for _, ev := range after {
+					r.step(eventMsg{ev})
+				}
 				settled = true
 			}
 			r.step(ctrlC)
@@ -1211,12 +1231,43 @@ func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
 				}
 			}
 			r.cancels = nil
-			r.feed()
-			if got := r.stub.Prompts(); slices.Contains(got, "ROW") || slices.Contains(got, "NOW") {
-				t.Fatalf("a row the user cleared, or the send taken back, ran after Ctrl+C: prompts %q", got)
+			rest := r.pending()
+			for _, ev := range rest {
+				r.step(eventMsg{ev})
 			}
-			if st := r.eng.State(); len(st.Queue) != 0 || st.SendNow != nil || len(r.m().queue) != 0 {
-				t.Fatalf("after Ctrl+C: session queue %+v, armed %v, band %+v", st.Queue, st.SendNow != nil, r.m().queue)
+
+			// The engine's own record: the old turn's ending, and nothing
+			// started after it.
+			var ending *agent.TurnInfo
+			var successors []string
+			for _, ev := range append(after, rest...) {
+				if ev.Type != agent.EventTurn || ev.Turn == nil {
+					continue
+				}
+				switch ev.Turn.Phase {
+				case agent.TurnEnded:
+					if ending == nil {
+						ending = ev.Turn
+					}
+				case agent.TurnStarted:
+					if ending != nil {
+						successors = append(successors, fmt.Sprintf("%s %s %q", ev.Turn.ID, ev.Turn.Origin, ev.Turn.Text))
+					}
+				}
+			}
+			if ending == nil {
+				t.Fatal("the settlement published no ending")
+			}
+			st := r.eng.State()
+			if ending.Next != "" || len(successors) != 0 || st.Turn != "" {
+				t.Fatalf("the settlement claimed a successor: the ending names Next %q, started after it %q, the engine's turn %q (prompts %q)",
+					ending.Next, successors, st.Turn, r.stub.Prompts())
+			}
+			if st.Activity != engine.ActivityIdle || len(st.Queue) != 0 || st.SendNow != nil || len(r.m().queue) != 0 {
+				t.Fatalf("after Ctrl+C: activity %s, session queue %+v, armed %v, band %+v", st.Activity, st.Queue, st.SendNow != nil, r.m().queue)
+			}
+			if got := r.stub.Prompts(); slices.Contains(got, "ROW") || slices.Contains(got, "NOW") {
+				t.Fatalf("a row the user cleared, or the send taken back, reached the session: prompts %q", got)
 			}
 		})
 	}
