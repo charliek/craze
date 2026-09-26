@@ -119,10 +119,16 @@ under an id this one does not know about — trying again re-reads the index).
 on it: a refused row shows an error naming the holder's pid in place of
 loading it, and the picker keeps running.
 
-A lock tree or session index that cannot be used at all — not another craze
-holding it, just unreadable — is a warning on stderr, and the load proceeds
-unclaimed: the lock protects against a second craze, and must not lock you
-out of your own session over a filesystem fault.
+An unreadable lock tree or session index does not fail one way. The initial
+lookup — `--continue`'s `Latest`, or `--resume`'s scan for rows — still exits
+1 if it cannot be read, the same as no session found at all: there is no row
+yet to warn about. Once a row is in hand, only a failure while giving a
+**legacy row** (one with no durable `crazeId`) its id is a warning on
+stderr, with the load proceeding unclaimed — the lock protects against a
+second craze, and must not lock you out of your own session merely because
+an id could not be written. A row that already has an id is claimed
+normally regardless of that failure; a failure to *rewrite* the index while
+claiming an already-durable row goes unmentioned.
 
 ### The control socket
 
@@ -286,13 +292,15 @@ the client's job, not this command's.
 |------|-------------|
 | `--session` | A craze session id, a provider session id, or a host id (default: the one running session) |
 
-`--session`'s id is resolved against the registry under `$HOME`
-(`~/.cache/craze/hosts/*.json`; see
-[Protocol reference](protocol.md#reaching-a-host)) — a fixed per-user path,
-so neither `CRAZE_HOME` nor `$XDG_RUNTIME_DIR` in an SSH login's own
-environment can hide or misdirect it. With no `--session`, exactly one live
-host in total is the target; zero or several is an error listing them on one
-line.
+`--session`'s id is resolved against the registry under the bridge
+process's own `$HOME` (`~/.cache/craze/hosts/*.json`; see
+[Protocol reference](protocol.md#reaching-a-host)) — `HOME` wins over the
+account database, so neither `CRAZE_HOME` nor `$XDG_RUNTIME_DIR` in an SSH
+login's own environment can hide or misdirect it, but the SSH exec is
+**assumed** to run with the same `HOME` as the tab that started the host:
+true for an ordinary SSH login as the same user, not guaranteed in general.
+With no `--session`, exactly one live host in total is the target; zero or
+several is an error listing them on one line.
 
 **The pump** (roost's bridge rules):
 
@@ -301,10 +309,15 @@ line.
   reading the socket — the session may still have plenty left to send.
 - The socket's own EOF ends the pump and exits 0.
 
-**The error contract: every failure is one line on stderr, exit 1, nothing on
-stdout.** Flag parsing is included, so a stray removed config-file
-environment variable (see [Configuration](configuration.md#the-craze-directory))
-in an SSH environment still reads as a bridge error in this same shape:
+**The error contract: every failure is one line on stderr, exit 1.** That
+covers every failure *before* the pump starts — resolving the target,
+dialing, the peer check — and "nothing on stdout" is true only for those:
+flag parsing is included, so a stray removed config-file environment
+variable (see [Configuration](configuration.md#the-craze-directory)) in an
+SSH environment still reads as a bridge error in this same shape. Once the
+pump is running, stdout carries socket bytes only (see below); a failure
+mid-stream still exits 1 with the same one stderr line, but after whatever
+socket bytes were already relayed to stdout:
 
 ```text
 craze bridge: no session running

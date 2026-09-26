@@ -225,9 +225,13 @@ either way — it does not depend on the socket.
 
 **The opt-out fails closed**, [the journal's](#session-journal) own rule and
 for the same reason: this is an access switch, so anything craze cannot read
-as a plain `true` means *off* — a `config.toml` it cannot read or parse, a
-`control_socket` key that is not a bool, and a `CRAZE_CONTROL_SOCKET` it
-cannot read as a bool. Each prints one line saying so; an explicit `false` is
+as a plain `true` means *off*. `CRAZE_CONTROL_SOCKET`, when set, decides
+**alone**: an unreadable-as-bool value turns the socket off with its own one
+line on stderr, and `config.toml` is then not even read, so at most that one
+line prints. Only when `CRAZE_CONTROL_SOCKET` is unset (or reads as true)
+does `config.toml` get read at all, and there the same rule applies — a
+`config.toml` it cannot read or parse, or a `control_socket` key that is not
+a bool, prints its own one line. An explicit `false`, from either switch, is
 your own choice and is silent. The socket is served only when the config
 parsed and `control_socket` is absent or exactly `true`, *and*
 `CRAZE_CONTROL_SOCKET` (when set) reads as true — either switch turning it
@@ -236,7 +240,10 @@ off is final; neither can turn it back on against the other.
 A failure to *bind* at all — the runtime directory is unusable, or the
 socket's own path would be too long for `sun_path` — is not the opt-out and
 is not a privacy switch: it prints one line, `craze: control socket off:
-<why>`, and the run carries on exactly as it would with the opt-out set.
+<why>`, embedding the underlying error's own text as is — in the ordinary
+case that is one stderr line, but nothing here promises the error text
+itself is free of a line break (a runtime path containing one, say). The run
+carries on exactly as it would with the opt-out set.
 `CRAZE_RUNTIME_DIR` (below) is the fix when the reason is length.
 
 ## Terminal tab title

@@ -84,14 +84,36 @@ def _send(proc: subprocess.Popen, obj: dict[str, Any]) -> None:
 
 
 def _recv_line(proc: subprocess.Popen, timeout: float = WAIT) -> bytes:
+    """One newline-terminated reply line off proc.stdout, bounded end to
+    end (review item 4 of C14a's review): select() only proves *something*
+    is readable, and a buffered `readline()` past that point can still hang
+    forever on a partial line with no newline yet on the wire. This reads
+    raw chunks off the fd instead -- `_read_until_eof`'s technique -- against
+    one overall deadline, so a regression that writes a line without its
+    trailing newline fails the test rather than hanging the suite. Any bytes
+    read past the line's own newline are kept on proc for the next call (or
+    for `_read_until_eof`), so a reply queued right behind this one is never
+    dropped."""
     assert proc.stdout is not None
-    ready, _, _ = select.select([proc.stdout], [], [], timeout)
-    if not ready:
-        raise AssertionError("craze bridge: timed out waiting for a reply line")
-    line = proc.stdout.readline()
-    if not line:
-        raise AssertionError("craze bridge: EOF waiting for a reply line")
-    return line
+    buf = getattr(proc, "_recv_buf", b"")
+    deadline = time.monotonic() + timeout
+    while b"\n" not in buf:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc._recv_buf = buf
+            raise AssertionError("craze bridge: timed out waiting for a reply line")
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            proc._recv_buf = buf
+            raise AssertionError("craze bridge: timed out waiting for a reply line")
+        chunk = os.read(proc.stdout.fileno(), 4096)
+        if chunk == b"":
+            proc._recv_buf = buf
+            raise AssertionError("craze bridge: EOF waiting for a reply line")
+        buf += chunk
+    line, _, rest = buf.partition(b"\n")
+    proc._recv_buf = rest
+    return line + b"\n"
 
 
 def _read_until_eof(proc: subprocess.Popen, timeout: float = WAIT) -> bytes:
@@ -102,7 +124,8 @@ def _read_until_eof(proc: subprocess.Popen, timeout: float = WAIT) -> bytes:
     regression."""
     assert proc.stdout is not None
     deadline = time.monotonic() + timeout
-    chunks: list[bytes] = []
+    chunks: list[bytes] = [getattr(proc, "_recv_buf", b"")]
+    proc._recv_buf = b""
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:

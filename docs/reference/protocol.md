@@ -928,11 +928,13 @@ other file craze creates concurrently).
 ### The registry
 
 Everything a resolver must *find* — as opposed to the socket itself — lives
-under one fixed per-user path, `<HOME>/.cache/craze/` (real `$HOME`, **never**
-`CRAZE_HOME`, and never affected by `XDG_RUNTIME_DIR` or `CRAZE_RUNTIME_DIR`):
-an SSH login shares this `$HOME` with the tab that started the host, whatever
-those other variables held there, so discovery never depends on an
-environment variable at all.
+under one fixed per-user path, `<HOME>/.cache/craze/` — the process's own
+`$HOME` (`HOME` wins over the account database; **never** `CRAZE_HOME`, and
+never affected by `XDG_RUNTIME_DIR` or `CRAZE_RUNTIME_DIR`). An SSH exec is
+**assumed** to share this `$HOME` with the tab that started the host —
+true for an ordinary SSH login as the same user, not guaranteed in
+general — so discovery does not depend on `CRAZE_HOME`, `XDG_RUNTIME_DIR` or
+`CRAZE_RUNTIME_DIR`, whatever those held in the launching tab.
 
 ```
 <HOME>/.cache/craze/
@@ -965,13 +967,17 @@ The socket writes an initial entry at bind time, before any engine is
 attached (`crazeSessionId`, `provider` and the rest of the identity still
 empty). From there the entry is **rewritten whole**, each rewrite carrying
 the engine's complete identity as it stands at that moment, never a partial
-update: the moment an engine is attached to the socket — the one the TUI
-starts with, or the one its provider or resume picker builds, a fresh
-incarnation each time — and again once that engine becomes
-ready, when the provider session id is finally known. A rewrite that fails is
-made good by the next one that succeeds, so the entry
-is never `ready` under a stale or empty identity — a resolver never learns
-`ready` a moment early.
+update: **queued** the moment an engine is attached to the socket — the one
+the TUI starts with, or the one its provider or resume picker builds, a
+fresh incarnation each time — and again once that engine becomes ready, when
+the provider session id is finally known. Queuing is not landing: the
+rewrite is written by the registry's one writer, in the order queued, and
+until it lands — or, if it fails, until the next one for that engine
+succeeds — the entry can still describe the previous engine, or, before the
+first engine is attached, the empty bind-time entry. A resolver treats the
+entry as a pointer to a socket, not as the engine's live identity: `hello`
+and `sessions.list`, answered by the socket itself once dialed, are what
+actually says which engine is live.
 
 ### Liveness and the stale sweep
 
@@ -986,7 +992,10 @@ While holding that lock — the only authority to remove anything of that
 host's — a resolver's sweep removes the dead host's registry entry, its
 temporaries (writes that died mid-rename before the sweep ever got there) and
 last the lock file itself, then unlocks. Host lock files therefore never
-accumulate.
+accumulate **once a host has a registry entry to be found by**: the sweep
+only visits `hosts/<hostId>.lock` names paired with a `hosts/<hostId>.json`
+it walked to first, so a host that dies before that first entry exists
+leaves a lock nothing here ever opens or removes (SF-49).
 
 **The sweep never removes the socket.** A lock in the cache tree is authority
 over that tree's own entry and lock, never over a file in the separate
@@ -1022,8 +1031,9 @@ may — and may not — assume:
   interactive shell happened to have set plays no part in resolving anything.
 - **Nothing about the runtime base.** `craze bridge` never searches runtime
   bases itself: it reads the socket's absolute path out of [the
-  registry](#the-registry) under `$HOME`, which an SSH login shares with the
-  tab that started the host. A host started under any `XDG_RUNTIME_DIR` or
+  registry](#the-registry) under `$HOME` — **assumed** to be the same `$HOME`
+  as the tab that started the host, true for an ordinary SSH login as the
+  same user. A host started under any `XDG_RUNTIME_DIR` or
   `CRAZE_RUNTIME_DIR` is found all the same.
 - **How to find the binary at all: a fixed ladder**, modelled on roost's
   `exec_chain_command`
@@ -1049,11 +1059,40 @@ may — and may not — assume:
   9. `/run/current-system/sw/bin/craze`
   10. else: `printf 'craze: command not found\n' >&2; exit 127`
 
-  Every interpolated value — in particular the session id passed to `bridge
-  --session` — is shell-quoted before it goes into the script, the same way
-  roost quotes the whole chain in one pair of single quotes with no embedded
-  quote surviving into it (sshd hands the remote command to the user's
-  *login* shell, where `'\''` is not universally an escape).
+  **The quoting rule.** A craze session id (`--session`'s argument) is
+  `[A-Za-z0-9._-]` only, never empty, never `.` or `..` (`ValidToken`,
+  `internal/rundir/rundir.go`) — none of those characters can end a shell
+  single-quote early, so wrapping the id in one pair of single quotes with
+  no embedded quote to escape is always safe. That is a fact about the id,
+  not a license to skip quoting it: a client builds this from an id whose
+  provenance it does not control, so it must still quote every interpolated
+  value going in, the same way roost quotes its whole chain in one pair of
+  single quotes. The whole `<ladder>` is itself one more single-quoted
+  argument to `sh -c`, so each of those inner `'…'` pairs around the id has
+  to close and reopen the outer quoting to survive — written `'"'"'`
+  (close the outer single quote, a literal `'` inside a double-quoted pair,
+  reopen the outer single quote), not the `'\''` some shells treat as an
+  escape and sshd's *login* shell cannot be assumed to (roost's own reason
+  for preferring it).
+
+  Here is the exact, complete `sh -c '<ladder>'` argv a client runs, with a
+  session id (`01a0bbe5-69b4-79de-b75c-483a15b73d78`) interpolated and
+  quoted exactly as above — copy this verbatim and substitute the id:
+
+  ```sh
+  sh -c 'if [ -n "${HOME:-}" ]; then p="$HOME/.local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; p=$(command -v craze 2>/dev/null) || p=; case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"';; esac; p="/opt/homebrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/usr/local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/home/linuxbrew/.linuxbrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/usr/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; if [ -n "${HOME:-}" ]; then p="$HOME/.nix-profile/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; if [ -n "${USER:-}" ]; then p="/etc/profiles/per-user/$USER/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; p="/run/current-system/sw/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; printf '"'"'%s\n'"'"' '"'"'craze: command not found'"'"' >&2; exit 127'
+  ```
+
+  With no `--session` (the one-running-session default), every `bridge …`
+  above is plain `bridge`, and the same ladder is:
+
+  ```sh
+  sh -c 'if [ -n "${HOME:-}" ]; then p="$HOME/.local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; p=$(command -v craze 2>/dev/null) || p=; case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge;; esac; p="/opt/homebrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/usr/local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/home/linuxbrew/.linuxbrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/usr/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; if [ -n "${HOME:-}" ]; then p="$HOME/.nix-profile/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; if [ -n "${USER:-}" ]; then p="/etc/profiles/per-user/$USER/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; p="/run/current-system/sw/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; printf '"'"'%s\n'"'"' '"'"'craze: command not found'"'"' >&2; exit 127'
+  ```
+
+  Both forms were verified by running them with `sh -c` the way an SSH exec
+  would: a `craze` on any one rung is exec'd with the arguments above, and
+  with none the command prints the last line and exits 127.
 
   craze itself ships no remote-exec code; the ladder above is published here
   for shed (or anything else driving this over SSH) to copy verbatim, so
