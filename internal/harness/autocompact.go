@@ -132,12 +132,18 @@ func (s *Session) compacted(m model, res CompactResult) {
 
 // preTurnCompaction is the pre-turn check (plan 028 §3.6). run calls it once
 // the turn's steer box is open (P36), so a steer typed while it compacts is
-// accepted and goes in the first request (compactedBeforeFirst), and before
-// that first request, with prompt the turn's user message. It compacts —
-// reason auto, recorded as the turn it precedes — when automatic compaction
-// is on ([compaction] auto, and not suppressed), the turn's model's window is
-// known, and the context's size (contextTokens) plus the prompt's estimate
-// reaches that model's threshold.
+// accepted and goes in the first request, and before that first request,
+// with prompt the turn's user message. It compacts — reason auto, recorded
+// as the turn it precedes — when automatic compaction is on ([compaction]
+// auto, and not suppressed), the turn's model's window is known, and the
+// context's size (contextTokens) plus the prompt's estimate reaches that
+// model's threshold.
+//
+// It first switches a suppression back on when the turn's model is not the
+// one it was switched off on (autoSuppressed), whatever else the turn is:
+// a turn on a model with no window, or with auto off, is a model change as
+// much as any (review r1-c10 finding 2), so a suppression on A does not
+// outlive a turn on B and last into A's next.
 //
 // When the turn's model is not the one the frontier's usage was reported on
 // — a switch since (PD13) — the compaction runs on that previous model,
@@ -156,14 +162,22 @@ func (s *Session) compacted(m model, res CompactResult) {
 // compaction is switched off (PD14), and the turn goes on with the context it
 // had. Nothing to compact — a new session whose own prompt is over — is no
 // compaction and no error: the request goes out as it is.
+//
+// A compaction that ran and lets the turn go on — to a summary, or to a
+// summarizer failure its entry records — sets t.compactedBeforeFirst, so
+// the turn's first request takes up the steers accepted while it ran (R2-2,
+// review r1-c10 finding 1): the person typed them during it either way, and
+// a first request that skipped them would hand them back unanswered when it
+// ends the turn.
 func (s *Session) preTurnCompaction(t *turn, prompt fantasy.Message) (compacted bool, err error) {
 	m := t.model
+	suppressed := s.autoSuppressed(m) // the model-change reset: first, on every turn
 	cfg := s.compactionConfig()
 	if !cfg.Auto() {
 		return false, nil
 	}
 	threshold := compactionThreshold(m.r, cfg.ThresholdPercent())
-	if threshold == 0 || s.autoSuppressed(m) {
+	if threshold == 0 || suppressed {
 		return false, nil
 	}
 	tokens, frontier := s.contextTokens(m)
@@ -186,15 +200,17 @@ func (s *Session) preTurnCompaction(t *turn, prompt fantasy.Message) (compacted 
 	switch {
 	case err == nil:
 		s.compacted(m, res)
-		return true, nil
 	case errors.Is(err, store.ErrNothingToCompact):
 		return false, nil
 	case errors.As(err, &saveErr), t.ctx.Err() != nil:
 		return false, err
 	default:
 		s.suppressAuto(m)
-		return false, nil
 	}
+	t.mu.Lock()
+	t.compactedBeforeFirst = true
+	t.mu.Unlock()
+	return err == nil, nil
 }
 
 // sameModel reports whether a and b name one model: the same provider and

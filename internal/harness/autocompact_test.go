@@ -370,6 +370,46 @@ func TestAFailedAutoCompactionSuppressesUntilSuccess(t *testing.T) {
 	}
 }
 
+// TestATurnOnAnUnknownWindowIsAModelChange (A20, §3.6; review r1-c10 finding
+// 2): a turn on another model switches a suppression back on even when that
+// model's window is unknown — it has no threshold, so no check of its own —
+// and the model switched back to compacts again when its context is over.
+func TestATurnOnAnUnknownWindowIsAModelChange(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	windowed(f, "test/a", 100000, 0) // test/b has no context_window
+	s := f.open(f.options())
+	s.sleep = func(context.Context, time.Duration) {}
+	a, b := f.models["test/a"], f.models["test/b"]
+
+	a.push(answerSpending("one", 90000))
+	run(t, s, "turn one")
+	a.push(errorStep(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"}), answerSpending("two", 90000))
+	run(t, s, "turn two")
+	if got, want := compactions(t, s), []string{"auto test/a failed"}; !slices.Equal(got, want) {
+		t.Fatalf("control: compactions = %q, want %q: test/a is suppressed", got, want)
+	}
+
+	if err := s.SetModel("test/b"); err != nil {
+		t.Fatal(err)
+	}
+	b.push(answerSpending("three", 90000))
+	run(t, s, "turn three")
+	if err := s.SetModel("test/a"); err != nil {
+		t.Fatal(err)
+	}
+	// Over test/a's threshold, and on again: it compacts — on test/b, the
+	// model that holds the context (PD13).
+	b.push(summaryReply("turns one to three."))
+	a.push(answerWith("four"))
+	run(t, s, "turn four")
+	if got, want := compactions(t, s), []string{"auto test/a failed", "auto test/b ok"}; !slices.Equal(got, want) {
+		t.Fatalf("compactions = %q, want %q: the turn on test/b switched the suppression back on", got, want)
+	}
+	if reqs := a.requests(); !startsFromSummary(reqs[len(reqs)-1]) {
+		t.Fatalf("turn four's request = %q; want it from the summary", promptOf(reqs[len(reqs)-1]))
+	}
+}
+
 // TestSwitchToASmallerWindowCompactsWithThePreviousModel (A21, PD13): a
 // switch to a model whose window the context is over compacts before the
 // turn on the previous model — the one holding the context and its cache —
@@ -557,18 +597,34 @@ func TestAChildsCompactionIsInBothUsageFeeds(t *testing.T) {
 // steer box is open while a pre-turn compaction runs, and what it accepts
 // then is taken up by the turn's first request — after the prompt — and
 // written with its step, never left unanswered because the model answered in
-// one step.
+// one step. So it is when the summarizer fails and the turn goes on with the
+// context it had (review r1-c10 finding 1): the compaction ran all the same.
 func TestASteerDuringThePreTurnCompactionGoesInTheFirstRequest(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		name := "the summarizer succeeds"
+		if failed {
+			name = "the summarizer fails"
+		}
+		t.Run(name, func(t *testing.T) { testSteerDuringPreTurnCompaction(t, failed) })
+	}
+}
+
+func testSteerDuringPreTurnCompaction(t *testing.T, failed bool) {
 	f := newFixture(t, "http://unused")
 	windowed(f, "test/a", 100000, 0)
 	s := f.open(f.options())
+	s.sleep = func(context.Context, time.Duration) {}
 	a := f.models["test/a"]
 	a.push(answerSpending("one", 90000))
 	run(t, s, "turn one")
 
 	g := newGate()
-	a.push(g.hold(nil, cat(textParts(longSummary("1. Request and intent\nturn one.")), finish(fantasy.FinishReasonStop))),
-		answerWith("two"))
+	summarizer := cat(textParts(longSummary("1. Request and intent\nturn one.")), finish(fantasy.FinishReasonStop))
+	if failed {
+		// A 404 is fatal: one attempt, and the failure entry.
+		summarizer = errorPart(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"})
+	}
+	a.push(g.hold(nil, summarizer), answerWith("two"))
 	var ev events
 	out := start(context.Background(), s, "turn two", ev.sink)
 	await(t, g.reached, "the summarizer's request")
@@ -580,8 +636,20 @@ func TestASteerDuringThePreTurnCompactionGoesInTheFirstRequest(t *testing.T) {
 	if o.err != nil || o.res.StopReason != StopEndTurn || len(o.res.Unanswered) != 0 {
 		t.Fatalf("turn two = %+v, %v; want end_turn with the steer answered", o.res, o.err)
 	}
+	want := []string{"auto test/a ok"}
+	if failed {
+		want = []string{"auto test/a failed"}
+	}
+	if got := compactions(t, s); !slices.Equal(got, want) {
+		t.Fatalf("compactions = %q, want %q", got, want)
+	}
 	reqs := a.requests()
-	if got := promptOf(reqs[len(reqs)-1]); !slices.Equal(got[len(got)-2:], []string{"user: turn two", "user: and this"}) {
+	last := reqs[len(reqs)-1]
+	if len(reqs) != 3 || isSummarizer(last) || startsFromSummary(last) == failed {
+		t.Fatalf("%d requests, the last from a summary: %v; want turn one, the summarizer, then turn two's request "+
+			"(from the summary only if it succeeded)", len(reqs), startsFromSummary(last))
+	}
+	if got := promptOf(last); !slices.Equal(got[len(got)-2:], []string{"user: turn two", "user: and this"}) {
 		t.Fatalf("turn two's request = %q; want the prompt, then the steer", got)
 	}
 	if st := of[Steered](ev.list()); len(st) != 1 || st[0].Text != "and this" {

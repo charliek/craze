@@ -309,18 +309,16 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	t.steers.begin()
 	// The pre-turn check (plan 028 §3.6) runs with the box open (P36): a
 	// compaction can take a while, and what the person types meanwhile is
-	// the turn's to take up — in its first request, once one ran
-	// (compactedBeforeFirst). The compaction is written ahead of the held
-	// prompt, which goes out with the first step after it, and the history
-	// is the store's again, from the summary on.
+	// the turn's to take up — in its first request, once one ran, to a
+	// summary or to a summarizer failure (compactedBeforeFirst, which
+	// preTurnCompaction sets). The compaction is written ahead of the held
+	// prompt, which goes out with the first step after it, and after a
+	// summary the history is the store's again, from the summary on.
 	compacted, err := s.preTurnCompaction(t, user.Message)
 	if err != nil {
 		return t.stopBeforeRequest(err)
 	}
 	if compacted {
-		t.mu.Lock()
-		t.compactedBeforeFirst = true
-		t.mu.Unlock()
 		msgs, results = s.store.ContextWithResults(m.id())
 		history = redactHistory(s.redactor(), msgs, results)
 	}
@@ -473,8 +471,10 @@ type turn struct {
 	approvedAt   int // the asking call's place in its step (toolCall.order)
 
 	// compactedBeforeFirst says a pre-turn compaction ran (plan 028 §3.6,
-	// R2-2): the steers accepted while it did are taken up at the turn's
-	// first request, which otherwise takes none (prepareStep).
+	// R2-2) — to a summary or to a summarizer failure, the turn going on
+	// either way (preTurnCompaction): the steers accepted while it did are
+	// taken up at the turn's first request, which otherwise takes none
+	// (prepareStep).
 	compactedBeforeFirst bool
 
 	// Interject's steers, spliced into every step's messages from the one that
