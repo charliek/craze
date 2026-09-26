@@ -1,9 +1,10 @@
 # Protocol Reference
 
 Protocol 1 is craze's control socket: a per-session Unix socket that speaks
-JSON-RPC 2.0, one JSON object per line. It is what `craze bridge` exposes to
-SSH clients (shed's craze lane, coming in `craze bridge`) and what `craze
-attach` speaks to run a second full TUI on a session someone else started.
+JSON-RPC 2.0, one JSON object per line. It is what [`craze
+bridge`](cli.md#craze-bridge) exposes to SSH clients (shed's craze lane) and
+what `craze attach` speaks to run a second full TUI on a session someone else
+started.
 
 The socket is local, same-uid only: the server checks the connecting
 process's uid before it reads a byte, and refuses anyone else's. There is no
@@ -868,8 +869,239 @@ fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine.
 
-## What's next
+## Reaching a host
 
-An SSH exec (what `craze bridge` will expose the socket to) needs its own
-assumptions about environment and discovery — that lands with `craze bridge`
-itself, documented alongside it.
+A host's socket lives in a **runtime namespace**, and everything a resolver
+needs in order to *find* that socket lives in a separate, fixed place: the
+two are split because a Unix socket's path has to fit `sun_path` (about 100
+bytes, the way craze binds one — see below), while discovery must work the
+same way under an SSH exec as in the terminal tab that started the host,
+whatever environment variable either one happens to have set.
+
+### The socket base
+
+A host picks the first usable of four candidates, in this order, each
+canonicalised and deduplicated by canonical path (so `$XDG_RUNTIME_DIR`
+naming `/run/user/<uid>` makes the second and third candidates the same one):
+
+1. `CRAZE_RUNTIME_DIR`, when set: absolute and validated. Unlike the other
+   three, an unusable value here is an **error**, not a fall-through — it was
+   asked for by name.
+2. `$XDG_RUNTIME_DIR/craze`, when `XDG_RUNTIME_DIR` is set, non-empty and
+   absolute.
+3. Linux only: `/run/user/<uid>/craze`, when `/run/user/<uid>` exists, is
+   owned by the uid, and is `0700`.
+4. `/tmp/craze-<uid>` (`/private/tmp/craze-<uid>` on macOS, where `/tmp` is a
+   symlink) — never `$TMPDIR`, which on macOS is long enough on its own to
+   crowd out `sun_path`.
+
+Only a host searches these bases; a resolver never does; see
+[the registry](#the-registry) below.
+
+### The namespace and the socket path
+
+The socket lives at `<base>/<ns>/<hostId>.sock`, where:
+
+- `hostId` is 12 random lowercase hex digits, minted fresh at process start
+  and never reused (which is what lets a dead host's own lock file be
+  unlinked safely — [Liveness](#liveness-and-the-stale-sweep) below).
+- `ns` is the first 8 hex digits of `sha256` over the absolute, cleaned craze
+  directory (`CRAZE_HOME`, default `~/.craze`) — one namespace per user and
+  per `CRAZE_HOME`, so two craze homes on one machine never share a socket
+  directory. A relative `CRAZE_HOME` resolves to one absolute path at
+  resolution time; an empty one (no home directory, or the removed
+  config-file environment variable still set — see
+  [Configuration](configuration.md#the-craze-directory)) is refused before
+  anything is built.
+
+A typical path: `/run/user/1000/craze/3f2a9c1e/0190ab12cd34.sock`, about 48
+bytes. craze refuses to bind a socket path over 100 bytes — before creating
+anything under its base — with an actionable message asking for a shorter
+`CRAZE_RUNTIME_DIR`; `sun_path` itself is 104 bytes on Darwin and 108 on
+Linux, NUL included, so 100 leaves margin on both.
+
+Both the `<ns>` directory and its parent are `0700`; the socket file itself
+is `0600`, chmod-ed to that inside the already-`0700` directory (not bound
+under a changed process umask, which is process-wide and would leak to any
+other file craze creates concurrently).
+
+### The registry
+
+Everything a resolver must *find* — as opposed to the socket itself — lives
+under one fixed per-user path, `<HOME>/.cache/craze/` (real `$HOME`, **never**
+`CRAZE_HOME`, and never affected by `XDG_RUNTIME_DIR` or `CRAZE_RUNTIME_DIR`):
+an SSH login shares this `$HOME` with the tab that started the host, whatever
+those other variables held there, so discovery never depends on an
+environment variable at all.
+
+```
+<HOME>/.cache/craze/
+  hosts/<hostId>.json     the registry entry (see below)
+  hosts/<hostId>.lock     the host's lifetime flock; holds "<pid> <hostId>"
+  locks/<crazeSessionId>.lock   one lock per craze session (SQ16, below)
+```
+
+A registry entry, `hosts/<hostId>.json`, has exactly these members:
+
+| Member | Holds |
+|---|---|
+| `protocol` | The control protocol version this host speaks |
+| `hostId` | The host's id (the entry's own file name) |
+| `pid` | The host process's pid |
+| `startedAt` | When the host started |
+| `socket` | The control socket's absolute, canonical path |
+| `crazeSessionId` | craze's own id for the session |
+| `providerSessionId` | The provider's id for the session, `""` before the engine is ready |
+| `incarnation` | The engine's incarnation (the journal's own UUIDv7) |
+| `provider` | The provider's name |
+| `workspace` | The session's working directory |
+| `ready` | Whether the engine has started |
+
+This set is a one-way door: a resolver — `craze bridge`, a future `craze
+attach`, shed — reads these members and connects to nothing merely to find a
+session, so none of them is ever renamed or removed.
+
+The socket writes an initial entry at bind time, before any engine is
+attached (`crazeSessionId`, `provider` and the rest of the identity still
+empty). From there the entry is **rewritten whole**, each rewrite carrying
+the engine's complete identity as it stands at that moment, never a partial
+update: the moment an engine is attached to the socket — the one the TUI
+starts with, or the one its provider or resume picker builds, a fresh
+incarnation each time — and again once that engine becomes
+ready, when the provider session id is finally known. A rewrite that fails is
+made good by the next one that succeeds, so the entry
+is never `ready` under a stale or empty identity — a resolver never learns
+`ready` a moment early.
+
+### Liveness and the stale sweep
+
+A host's liveness is its own `hosts/<hostId>.lock` flock, not a connection: a
+resolver that finds `hosts/<hostId>.json` opens the matching `.lock` and
+tries to take it non-blocking. Held by another process, the host is live and
+the entry is read; taken cleanly, the holder is dead and the entry is stale —
+**"connect failure is not authority"**: nothing here ever dials the socket
+just to decide whether a host is alive.
+
+While holding that lock — the only authority to remove anything of that
+host's — a resolver's sweep removes the dead host's registry entry, its
+temporaries (writes that died mid-rename before the sweep ever got there) and
+last the lock file itself, then unlocks. Host lock files therefore never
+accumulate.
+
+**The sweep never removes the socket.** A lock in the cache tree is authority
+over that tree's own entry and lock, never over a file in the separate
+runtime tree the entry merely *names* — even a hostile copy of the registry,
+renamed into place by another writer sharing the same group, carries at most
+a copied lock over that copy's own entry, never over a socket somewhere else.
+So a crashed host's socket file is left behind in its runtime directory,
+under a name that is never reused, until whatever ages that directory clears
+it (`/run/user` is a tmpfs emptied at logout; `/tmp` is emptied at boot or by
+`systemd-tmpfiles`) — a host's own clean exit still removes its socket,
+identity-checked against what it bound. (The residuals this leaves — a
+crashed host's temporaries a sweep never visits, and similar edge cases — are
+tracked in the project's own follow-up backlog as SF-49.)
+
+### The session lock (SQ16)
+
+`locks/<crazeSessionId>.lock` is a second kind of lock, one per **craze
+session** rather than per host: the mechanism behind
+[`--continue`/`--resume` of a session already open elsewhere](cli.md#a-session-already-open-in-another-craze).
+It holds `"<pid> <hostId>"`, is taken for the life of the process that loaded
+or started that session, and does not depend on the control socket at all —
+it is taken even with `control_socket = false`.
+
+## SSH exec: what a client may assume
+
+`craze bridge` is the far side of an SSH transport: something on another
+device execs it once per accepted connection (shed's craze lane), and it
+resolves and dials the local session for that one connection. What that exec
+may — and may not — assume:
+
+- **Nothing from the launching tab's environment.** The exec is a fresh
+  process; whatever `XDG_RUNTIME_DIR`, `CRAZE_HOME` or `CRAZE_RUNTIME_DIR` an
+  interactive shell happened to have set plays no part in resolving anything.
+- **Nothing about the runtime base.** `craze bridge` never searches runtime
+  bases itself: it reads the socket's absolute path out of [the
+  registry](#the-registry) under `$HOME`, which an SSH login shares with the
+  tab that started the host. A host started under any `XDG_RUNTIME_DIR` or
+  `CRAZE_RUNTIME_DIR` is found all the same.
+- **How to find the binary at all: a fixed ladder**, modelled on roost's
+  `exec_chain_command`
+  (`roost-ipc/src/bootstrap.rs:276-453`). One argv element — the whole thing
+  is `sh -c '<script>'` — so the far end never has to source a login shell
+  just to find `craze`. Each rung is `[ -f "$p" ] && [ -x "$p" ] && exec "$p"
+  bridge …` (`[ -f ] && [ -x ]`, never `[ -x ]` alone, since an executable
+  *directory* would otherwise pass and then fail the `exec` at 126), tried in
+  this order:
+
+  1. `$HOME/.local/bin/craze`
+  2. `command -v craze`, accepted only when it resolves to an **absolute**
+     path (a builtin, function or alias answers with a bare word, which this
+     rung refuses — a non-interactive `PATH` essentially never carries a
+     relative entry, and exec-ing out of one is a security hazard, not a
+     convenience)
+  3. `/opt/homebrew/bin/craze`
+  4. `/usr/local/bin/craze`
+  5. `/home/linuxbrew/.linuxbrew/bin/craze`
+  6. `/usr/bin/craze`
+  7. `$HOME/.nix-profile/bin/craze`
+  8. `/etc/profiles/per-user/$USER/bin/craze`
+  9. `/run/current-system/sw/bin/craze`
+  10. else: `printf 'craze: command not found\n' >&2; exit 127`
+
+  Every interpolated value — in particular the session id passed to `bridge
+  --session` — is shell-quoted before it goes into the script, the same way
+  roost quotes the whole chain in one pair of single quotes with no embedded
+  quote surviving into it (sshd hands the remote command to the user's
+  *login* shell, where `'\''` is not universally an escape).
+
+  craze itself ships no remote-exec code; the ladder above is published here
+  for shed (or anything else driving this over SSH) to copy verbatim, so
+  "anything the probe can find, the transport can exec" stays a property of
+  one list, not two that can drift apart.
+
+- **A per-connection re-exec behind one stable local port is expected and
+  cheap**: shed-mobile's model is to `ssh` a fresh `craze bridge` for every
+  local connection rather than to multiplex one remote process, and nothing
+  about `craze bridge` discourages that.
+
+## Security
+
+The socket is **local, same-uid only**, with no authentication layer above
+that in protocol 1 (`hello`'s `auth` field is reserved for scopes, which
+arrive at S6) and no encryption, because nothing crosses the machine boundary
+here — `craze bridge` is the boundary, and SSH is what encrypts and
+authenticates getting to the machine at all.
+
+- **The directories are `0700` and the socket is `0600`.** That stops another
+  local user from *opening* the socket by path on this machine, and nothing
+  more: an SSH-forwarded Unix socket, for instance, is opened by `sshd`
+  itself, running as the forwarding user, so file mode alone says nothing
+  about who is really at the other end once a connection is reached some
+  other way.
+- **So each end also asks the kernel who the other runs as.** A host checks
+  every accepted connection's effective uid before reading a byte of it
+  (Linux `SO_PEERCRED`, macOS `LOCAL_PEERCRED`/`LOCAL_PEERPID`); `craze
+  bridge`, a future `craze attach`, and `internal/remote` check the uid of
+  the host they dialed before writing a byte to it. A lookup failure is
+  always a refusal, never an allow — a connection whose owner cannot be
+  named is exactly the one not to trust. Any OS other than Linux or macOS
+  refuses every connection outright, for lack of a way to ask.
+- **The cache tree — the registry, host locks, and session locks — is held
+  by file descriptor, not trusted by path.** It is walked from `/` one
+  component at a time with `openat(O_NOFOLLOW)`, and everything below its
+  leaves — a lock file, the registry's own rename, a stale entry's removal —
+  is done relative to the descriptor that walk returned, never by re-opening
+  a path. That is what makes a group-writable `~/.cache` (a user-private
+  group under a permissive umask, common enough on real machines) safe to
+  accept there without reading any system file to prove it exclusive: the
+  worst a member of that group can do is rename something into place after
+  validation, which — because everything from the leaf down runs against the
+  held descriptor — makes the *next* walk refuse, not this one misbehave.
+  The separate runtime tree (where the socket itself lives) has no such
+  exemption, because `bind(2)` takes a path and nothing holds it open between
+  the check and the call: a group-writable ancestor there is refused
+  whoever owns it.
+- **Scopes are S6's.** Protocol 1 has none: same-uid access is all-or-nothing
+  for now, and `hello`'s reserved `auth` field is where a future scope
+  narrows it.

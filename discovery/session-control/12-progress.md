@@ -1684,11 +1684,11 @@ What S2 inherits:
 
 | | |
 |---|---|
-| Status | planned (Plan 027, FINAL after panel review 2026-09-24); executing PR 1 |
+| Status | planned (Plan 027, FINAL after panel review 2026-09-24); PR 1 merged; PR 2 executing |
 | Plan | `027-session-control-s2-socket` (outside the repo, `~/.claude/plans/craze/`, raw panel reviews in its `panel/` folder) |
 | Baseline | `origin/main` `5901e4a`: H6 PR 2 (#53, sub-agent stop), merged on top of S1c PR 2 `79eb082` (#52, which completes S1) |
 | Branch / PRs | four sequential PRs, each branched from a freshly fetched `origin/main` after the previous one merges: `feature/plan-027-s2-wire`, `feature/plan-027-s2-host`, `feature/plan-027-s2-tui-async`, `feature/plan-027-s2-attach` |
-| Merged | — (filled in as each PR lands) |
+| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — — (filled in as it lands) |
 
 ### The PR cut
 
@@ -1946,3 +1946,90 @@ schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.m
     placeholder (`INCARNATION-1`, …), substituted both ways by the runner —
     a Stub option to pin it was rejected as a hard stop. `craze-fake-host`
     joins `make build`.
+
+**PR 2** (C11–C15):
+
+1. **Plan 027 X28 (C11 `b41dd5e`, C11a `339a28b`)** — the runtime namespace's
+   validation departs from §3.8's "roost's rules" in three ways, each for a
+   real box roost's own rules would refuse: the parent of each craze-owned
+   chain is canonicalised once (`EvalSymlinks`) rather than refusing any
+   symlink outright, since that would refuse Fedora Silverblue's `/home`,
+   macOS's `/tmp`, and a `~/.cache` symlinked to another disk — every
+   component of the canonical path is then an ancestor, a directory owned by
+   root or the euid, not group- or world-writable unless sticky; a
+   user-private-group exemption was tried next, for a `0775 ~/.cache` under
+   umask `0002` (this box's own shape), gated on `nsswitch.conf` resolving
+   `passwd`/`group` locally — and then **deleted, superseded by X30** below,
+   once three astra rounds broke every attempt to prove it safe from `/etc`
+   alone; every directory craze names (all four base candidates, `<ns>`,
+   `.cache/craze`, `hosts`, `locks`) is a leaf — `lstat`-ed, never followed,
+   created `0700` and never repaired. Also as built: the socket path's length
+   is checked before anything is created; lock files are `O_EXCL` +
+   `fchmod`-ed `0600`; a crashed predecessor's holder line reads as `pid ?`
+   (`kill 0`); `Release` truncates the holder line before `LOCK_UN`, never
+   unlinks.
+2. **Plan 027 X29 (C12 `51325a4`, C11a)** — peer credentials as built: the
+   §3.8 name `CheckPeer` becomes `rundir.PeerCred` (the raw lookup) plus
+   `PeerCheck(want)`/`PeerCheckWith` (the server's accept check) and
+   `DialCheck(want)`/`DialCheckWith` (the client's dial check), with an
+   `ErrPeerUID` sentinel; `control.Options.PeerCheck` widens to
+   `func(*net.UnixConn) (pid, uid int, err error)` so the connection-open
+   note (and a refused note whose lookup worked) can log the peer's pid and
+   uid, while the close note does not repeat them. Darwin refuses an
+   `xucred` whose version is not 0 or whose group count is outside 1–16 (`
+   x/sys` drops the length `getsockopt` wrote, so a zero-length answer would
+   otherwise read as uid 0 — sol r28); a darwin pid that cannot be read is 0,
+   not a refusal, since the uid alone decides.
+3. **Plan 027 X31 (C13 `e75d0a3`, C13a `92036d2`)** — the TUI process serving
+   its own session, as built: the host id is minted first in `runTUI`, so
+   every SQ16 claim writes it whether or not a socket ends up binding;
+   `resolveLoad` claims a `--continue`'s row before `build` is ever called,
+   so a refused continue spawns no agent and creates no socket; the teardown
+   lives in `internal/cli/serve.go` (not `finishRun`) and runs explicitly
+   right after `tui.Run` and before the deferred stderr flush, with the
+   `defer` only as the fallback for an early return — the server gets 500 ms
+   to flush what it owes once the engine has closed each connection, then
+   `Server.Close` is bounded at 1 s, then `Host.Close`'s identity-checked
+   unlinks run, then every session claim is released last. The opt-out
+   (`CRAZE_CONTROL_SOCKET`, `control_socket`) fails closed, the journal's own
+   rule, since it is an access switch a typo must not open.
+   `tui.Config.OnEngine` claims a new session's id (unless this process
+   already holds it) and rewrites the registry off the `Update` goroutine, in
+   order, each write carrying the engine's complete identity so a failed
+   rewrite is made good by the next. SQ16 itself is `atomicfile.LockWithin` (a
+   bounded, polled `LOCK_NB`) plus `sessions.Store.EnsureCrazeID` (mints a
+   legacy row's id once, under the index's own lock) — three refusals: a
+   **held** claim (`craze: that session is open in another craze (pid N)`), a
+   **busy index** (`the session index is busy — try again`), and an index
+   **that changed** under the load (`the session index changed — try again`,
+   astra r30: otherwise two loaders could mint two ids for one provider
+   session); a lock tree or index that cannot be used *at all* is a warning,
+   and the load proceeds unclaimed — the lock must not lock the user out of
+   their own session over a filesystem fault. The resume picker's error row
+   names the pid only, not `craze attach --session <id>`, which does not
+   exist until PR 4.
+4. **Plan 027 X30 (C11b `2e70c28`, C11c `75e3cf1`, C13a `92036d2`'s
+   `O_PATH`) — supersedes X28 item 2.** Three astra rounds (r27, r29) broke
+   every attempt to *prove* from `/etc` (passwd/group, then nsswitch) that a
+   group-writable `~/.cache` is writable only by its user, so a group
+   member's rename is made **harmless** instead: the cache tree
+   (`<HOME>/.cache/craze/{hosts,locks}`) is walked from `/` one component at
+   a time with `openat(O_NOFOLLOW|O_DIRECTORY)` (ancestors held `O_PATH` on
+   Linux, so a search-only `/home 0711` still walks; darwin's `x/sys` has no
+   `O_SEARCH`, so an execute-only ancestor there refuses — a residual), and
+   every operation below the leaves — lock files, the registry's
+   temp-then-`renameat` write, the sweep's own listing — is relative to the
+   held descriptor, never to a path walked again: a rename after validation
+   changes nothing craze touches. The runtime tree (the socket itself) stays
+   path-based under the strict rule with **no** exemption, since `bind(2)`
+   takes a path and nothing holds it open between the check and the call.
+   **The stale sweep never unlinks sockets any more** — only the stale
+   entry, that host's own temporaries, and its lock, all under that lock —
+   because a lock in the cache tree is not authority over a file in the
+   runtime tree: a crashed host's socket file stays in its runtime directory
+   under a name never reused, and only a host's own clean `Close` removes
+   its socket, identity-checked. Cache-tree directories are `mkdirat 0700`
+   and never chmod-ed (any step by name after `mkdirat`, in a group-writable
+   parent, could meet another of the user's own directories renamed into
+   place); a leaf may carry setgid (inherited, grants nothing without group
+   bits), while setuid and sticky are refused.
