@@ -2,9 +2,11 @@ package harness
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"unicode/utf8"
 
+	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -45,14 +47,98 @@ import (
 // The nesting (b.mu, then t.mu, inside it) is one-directional: nothing
 // elsewhere in the harness takes t.mu and then reaches for b.mu — turn.go's
 // callbacks that already hold t.mu (OnTextDelta and the rest) never call
-// into this file — so the two locks cannot deadlock on each other.
+// into this file for anything but the record below, which has a lock of its
+// own — so the two locks cannot deadlock on each other.
+//
+// # The record, and resume
+//
+// The transcript keeps the list (plan 028 §3.2, P7): a step whose calls
+// changed it writes the list as it stood after the step on its tool entry,
+// and a resumed session restores the last one on its path (restore). The
+// step's append runs under t.mu, where b.mu may not be taken, so a Write that
+// changes the list also leaves a copy of it, and a count of such changes, in
+// rec — under recMu, a leaf lock that is held across nothing and taken under
+// b.mu by Write and under t.mu by the step (unrecorded, recordedAt). A step
+// attaches the list when a change is not yet recorded, whichever step made it,
+// so one whose append failed is carried to the next tool entry written.
 type sessionTodos struct {
 	mu    sync.Mutex
 	items []tool.Todo
 	emit  func(Event) // the running turn's emitLocked; nil between turns
+
+	recMu sync.Mutex
+	rec   todoRecord
+}
+
+// todoRecord is what the transcript knows of the list: latest is the list as
+// the last changing Write left it, changes counts those Writes, and recorded
+// is the count a written tool entry last carried the list at.
+type todoRecord struct {
+	latest            []tool.Todo
+	changes, recorded int
 }
 
 func newSessionTodos() *sessionTodos { return &sessionTodos{} }
+
+// restore makes items the list, recorded: a resumed session's, from the last
+// tool entry on its transcript's path that carries one (plan 028 §3.3). Open
+// calls it before the session is handed out, so no Write or turn races it.
+func (b *sessionTodos) restore(items []tool.Todo) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.items = cloneTodos(items)
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	b.rec = todoRecord{latest: cloneTodos(items)}
+}
+
+// snapshot is a copy of the list as it is now.
+func (b *sessionTodos) snapshot() []tool.Todo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return cloneTodos(b.items)
+}
+
+// unrecorded is the list a step's tool entry should carry — the list after
+// the last change, in the store's shape — and the mark to hand recordedAt
+// once that entry is written; ok is false when every change is recorded
+// already. The caller may hold t.mu: recMu is a leaf.
+func (b *sessionTodos) unrecorded() (list []store.Todo, mark int, ok bool) {
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	if b.rec.changes == b.rec.recorded {
+		return nil, 0, false
+	}
+	return storeTodos(b.rec.latest), b.rec.changes, true
+}
+
+// recordedAt says a written tool entry carries the list as it was at mark
+// (unrecorded).
+func (b *sessionTodos) recordedAt(mark int) {
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	b.rec.recorded = max(b.rec.recorded, mark)
+}
+
+// storeTodos and toolTodos convert a list between the harness's shape and
+// the transcript's (store.Todo), which carries the status as a plain string.
+// storeTodos never returns nil, so an emptied list is written as [] — which a
+// resume tells from "never set".
+func storeTodos(items []tool.Todo) []store.Todo {
+	out := make([]store.Todo, len(items))
+	for i, it := range items {
+		out[i] = store.Todo{ID: it.ID, Content: it.Content, Status: string(it.Status)}
+	}
+	return out
+}
+
+func toolTodos(items []store.Todo) []tool.Todo {
+	out := make([]tool.Todo, len(items))
+	for i, it := range items {
+		out[i] = tool.Todo{ID: it.ID, Content: it.Content, Status: tool.TodoStatus(it.Status)}
+	}
+	return out
+}
 
 // attach makes emit the target of every Write while a turn runs, and returns
 // the func that detaches it once the turn ends. turn.go's Run calls it right
@@ -95,6 +181,9 @@ func (b *sessionTodos) Write(ctx context.Context, merge *bool, updates []tool.To
 	if !useMerge && autoUpgrade(b.items, updates) {
 		useMerge = true
 	}
+	// Both builders return a new slice, so prev is the list before this write
+	// whatever happens to b.items below.
+	prev := b.items
 	if useMerge {
 		b.items = applyMerge(b.items, updates)
 	} else {
@@ -103,6 +192,12 @@ func (b *sessionTodos) Write(ctx context.Context, merge *bool, updates []tool.To
 	if len(b.items) > tool.TodoCap {
 		dropped = len(b.items) - tool.TodoCap
 		b.items = b.items[:tool.TodoCap]
+	}
+	if !slices.Equal(prev, b.items) {
+		b.recMu.Lock()
+		b.rec.latest = cloneTodos(b.items)
+		b.rec.changes++
+		b.recMu.Unlock()
 	}
 
 	list = cloneTodos(b.items)

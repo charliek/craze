@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -474,12 +475,17 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	// before.
 	writes := func(c *toolCall) bool { return slices.Contains(answered, c) }
 	leading, lead := t.internalEntries()
+	toolEntry := &store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true,
+		SubagentUsage: subagentUsage(announced, writes)}
+	// A call that ran may have changed the todo list, which the tool entry
+	// carries as a finished step's does (plan 028 §3.2).
+	todoMark := t.todosOn(toolEntry)
 	entries, err := t.store.AppendStep(leading,
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
-		&store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true,
-			SubagentUsage: subagentUsage(announced, writes)})
+		toolEntry)
 	if err == nil {
 		t.wrote(entries, lead, true, outputCalls(answered))
+		t.todosWritten(todoMark)
 	}
 	return true, err
 }
@@ -671,6 +677,52 @@ func requestOf(r tool.Request) ToolRequest {
 		Workdir:  r.Workdir,
 		Input:    string(r.Input),
 	}
+}
+
+// kindOther is the kind a replayed call to a tool the session does not have
+// is shown with: the transcript holds its name and nothing the dispatcher can
+// describe (plan 028 §3.4).
+const kindOther tool.Kind = "other"
+
+// replayedCall is a stored call as the dispatcher describes a live one
+// (Prepare), for Session.Replay: prepared under its replayed id and released
+// at once (Discard) — Prepare only parses and resolves, so nothing runs. A
+// tool the session does not have is kind "other", titled by its name. Every
+// text is redacted with red, the replay's, over the dispatcher's own.
+func (s *Session) replayedCall(id string, c fantasy.ToolCallPart, red *redact.Replacer) ToolRequest {
+	name := red.String(c.ToolName)
+	spec, known := s.tools.byID[c.ToolName]
+	if !known {
+		return ToolRequest{Tool: name, Kind: kindOther, Title: name, Input: red.String(c.Input)}
+	}
+	req, _, _ := s.tools.d.Prepare(tool.Call{ID: id, CallID: c.ToolCallID, Tool: c.ToolName, Input: json.RawMessage(c.Input)})
+	s.tools.d.Discard(id)
+	out := requestOf(req)
+	out.Tool, out.Kind, out.ReadOnly = name, spec.Kind, spec.ReadOnly
+	out.Title, out.Command, out.Workdir = red.String(out.Title), red.String(out.Command), red.String(out.Workdir)
+	for i, p := range out.Paths {
+		out.Paths[i] = red.String(p)
+	}
+	out.Input = red.String(c.Input)
+	return out
+}
+
+// replayedResult is a stored result as a card shows it (ToolFinished.Replayed,
+// plan 028 P9): its text, redacted with red, as both what the model read and
+// the card's content; an error stays one, classed aborted when it is the text
+// a cancel leaves (tool.AbortedText) and a tool's error otherwise, since the
+// class itself is not stored.
+func replayedResult(red *redact.Replacer, out fantasy.ToolResultOutputContent) tool.Result {
+	text, isErr := outputText(out)
+	text = red.String(text)
+	res := tool.Result{Text: text, Content: text, IsError: isErr}
+	if isErr {
+		res.Class = tool.ClassToolError
+		if text == tool.AbortedText {
+			res.Class = tool.ClassAborted
+		}
+	}
+	return res
 }
 
 // agentTools are the session's tools as Fantasy takes them, in the
